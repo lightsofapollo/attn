@@ -7,12 +7,12 @@
 │     Rust CLI Binary      │◄──────────────────►│   wry Window         │
 │                          │                     │   (WKWebView)        │
 │  • CLI arg parsing       │  evaluate_script()  │                      │
-│  • File system access    │  ──────────────────► │  • Svelte UI         │
+│  • File system access    │  ──────────────────► │  • Svelte 5 UI       │
 │  • File watching         │                     │  • HTML injection    │
 │  • comrak: MD → HTML     │  ipc.postMessage()  │  • Mermaid (lazy)    │
-│  • syntect: code blocks  │  ◄────────────────── │  • Sidebar nav       │
-│  • Plan structure parse  │                     │  • Keyboard shortcuts│
-│  • Beads detection       │                     │  • Edit mode         │
+│  • syntect: code blocks  │  ◄────────────────── │  • CM6 edit mode     │
+│  • Plan structure parse  │                     │  • Sidebar nav       │
+│  • Beads detection       │                     │  • Keyboard shortcuts│
 │  • Theme CSS generation  │                     │  • Theme switching   │
 └──────────────────────────┘                     └──────────────────────┘
 ```
@@ -51,19 +51,45 @@ plan.md (on disk)
                       ▼
             ┌─────────────────┐
             │  HTML + metadata │
+            │  + raw markdown  │
             │  (pre-rendered)  │
             └────────┬────────┘
                      │ evaluate_script()
                      ▼
 ┌─────────────────────────────────────────────────────┐
 │  Svelte (in wry webview)                             │
-│  - Injects HTML into content area                   │
+│  - Injects HTML into content area (READ mode)       │
 │  - Applies theme via data-theme attribute on <html> │
 │  - Finds .mermaid-block divs, lazy-loads mermaid.js │
 │  - Renders mermaid with theme matching data-theme   │
 │  - All code highlighting is already done — just CSS  │
+│  - 'e' key → CodeMirror 6 with raw markdown (EDIT)  │
 └─────────────────────────────────────────────────────┘
 ```
+
+## Modes
+
+```
+┌─────────────────────────────────────────────────────┐
+│  READ MODE (default)                                 │
+│  Rust-rendered HTML. Beautiful typography.           │
+│  Checkboxes are clickable (writes back to file).    │
+│  Keyboard: j/k scroll, s skim, f focus, q quit     │
+│                                                      │
+│  Press 'e' ──►                                      │
+├─────────────────────────────────────────────────────┤
+│  EDIT MODE (CodeMirror 6)                            │
+│  Raw markdown source. Syntax highlighted.           │
+│  Nested language highlighting in code blocks.       │
+│  Heading folding. Find/replace. Multi-cursor.       │
+│                                                      │
+│  Press 'e' or Esc ──► Rust re-renders, back to READ │
+└─────────────────────────────────────────────────────┘
+```
+
+Read mode: Rust-fast rendered HTML. The primary experience.
+Edit mode: CodeMirror 6 with the markdown source. Full code editing inside fenced blocks.
+Checkbox toggling: Works in read mode directly — no editor needed.
 
 ### Code Highlighting: comrak + syntect
 
@@ -134,7 +160,7 @@ Comrak passes mermaid fenced blocks through as tagged divs:
 Svelte detects these after HTML injection and lazy-loads mermaid.js only when blocks exist:
 ```typescript
 const blocks = document.querySelectorAll('.mermaid-block');
-if (blocks.length === 0) return; // don't load mermaid at all
+if (blocks.length === 0) return;
 
 const mermaid = (await import('mermaid')).default;
 const isDark = document.documentElement.dataset.theme === 'dark';
@@ -152,7 +178,31 @@ for (const block of blocks) {
 }
 ```
 
-No IntersectionObserver, no async queue, no render cache — attn renders one document at a time, not a streaming chat. Keep it simple.
+### Checkbox Toggling (in read mode, no editor needed)
+
+```
+User clicks checkbox in rendered HTML
+  → Svelte intercepts click event on input[type="checkbox"]
+  → Sends { type: "checkbox_toggle", line: 14, checked: true } to Rust via IPC
+  → Rust flips `- [ ]` to `- [x]` (or vice versa) at that line in the source file
+  → File watcher detects change → re-renders → pushes updated HTML
+```
+
+### Edit Mode: CodeMirror 6
+
+Lazy-loaded only when user presses `e`. Key extensions:
+- `@codemirror/lang-markdown` — markdown syntax highlighting + structure
+- Nested language highlighting — code blocks get their own language mode (Rust, TS, Python, etc.)
+- `@codemirror/language` — heading folding, indent handling
+- `@codemirror/search` — find/replace
+- Line wrapping, bracket matching, multi-cursor
+
+On save (Cmd+S or exit edit mode):
+1. Get markdown string from CodeMirror
+2. Send `{ type: "edit_save", content: "..." }` to Rust via IPC
+3. Rust writes to disk
+4. File watcher triggers re-render
+5. Switch back to read mode with updated HTML
 
 ## Rust Side
 
@@ -182,13 +232,14 @@ No IntersectionObserver, no async queue, no render cache — attn renders one do
 
 Rust parses markdown and produces:
 1. **Rendered HTML** — complete HTML with syntax-highlighted code blocks (CSS classes, not inline styles), mermaid blocks as tagged divs
-2. **Plan structure** — extracted metadata:
+2. **Raw markdown** — the source text, sent alongside HTML for edit mode
+3. **Plan structure** — extracted metadata:
    - Tasks (checkbox items with line numbers)
    - Phases (top-level headers)
    - File references (detected paths like `src/foo/bar.ts`)
    - Progress (checked/total counts per phase)
 
-Both are sent to the frontend. The HTML goes into the content area. The structure drives the progress bar, skim mode, and beads overlay.
+All three are sent to the frontend. HTML goes into the content area. Raw markdown is held for edit mode. Structure drives the progress bar, skim mode, and beads overlay.
 
 ## Frontend (Svelte 5 + Vite)
 
@@ -200,17 +251,12 @@ Both are sent to the frontend. The HTML goes into the content area. The structur
 - Svelte 5 runes ($state, $derived, $effect) map perfectly to this UI
 - Smaller final bundle than any alternative for this complexity level
 
-### Responsibilities
+### Key Frontend Dependencies
 
-- **HTML injection** — display Rust-provided HTML in the content area
-- **Mermaid rendering** — lazy-load mermaid.js, render tagged blocks client-side
-- **Keyboard handling** — j/k scroll, q quit, e edit, s skim, f focus, / search, n/p navigate files
-- **Sidebar** — file tree for directory mode, collapsible, searchable
-- **Density modes** — skim (headers + first lines), read (full), focus (single section)
-- **Edit mode** — swap content area to CodeMirror, save writes back via IPC
-- **Checkbox toggling** — click a checkbox in rendered view, send line number + state to Rust
-- **Theme toggle** — flip data-theme attribute on `<html>`, respect system preference
-- **Transitions** — crossfade between files (built-in Svelte transitions), smooth scroll restoration
+- `mermaid` — diagram rendering (lazy loaded, ~200KB, only when blocks exist)
+- `@codemirror/view` + `@codemirror/state` — editor core (lazy loaded, ~80KB, only on 'e')
+- `@codemirror/lang-markdown` — markdown mode with nested language support
+- `@codemirror/lang-javascript`, `@codemirror/lang-rust`, etc. — per-language (lazy per block)
 
 ### Build
 
@@ -225,7 +271,8 @@ No runtime file serving — everything is in-memory.
 ```typescript
 // Initial content load
 window.__attn__.setContent({
-  html: "<rendered markdown with syn- classes and mermaid-block divs>",
+  html: "<rendered markdown>",
+  rawMarkdown: "# Original source...",
   structure: {
     phases: [{ title: "Phase 1", progress: { done: 3, total: 7 } }],
     tasks: [{ line: 14, text: "Implement auth", checked: false }],
@@ -236,7 +283,7 @@ window.__attn__.setContent({
 })
 
 // File changed (live reload)
-window.__attn__.updateContent({ html, structure })
+window.__attn__.updateContent({ html, rawMarkdown, structure })
 
 // Bead status overlay
 window.__attn__.setBeadStatus({
@@ -251,13 +298,13 @@ window.__attn__.setBeadStatus({
 ### Frontend → Rust (via ipc.postMessage)
 
 ```typescript
-// Checkbox toggled
+// Checkbox toggled (read mode)
 { type: "checkbox_toggle", line: 14, checked: true }
 
 // File navigation (directory mode)
 { type: "navigate", path: "planning/scope.md" }
 
-// Edit saved
+// Edit saved (edit mode)
 { type: "edit_save", content: "# Updated content..." }
 
 // Theme changed
@@ -275,23 +322,23 @@ attn/
 ├── Cargo.toml             # Rust project
 ├── build.rs               # generates syntect theme CSS, runs vite build, embeds output
 ├── src/                   # Rust source
-│   ├── main.rs            # CLI entry, arg parsing
-│   ├── window.rs          # wry window creation, IPC handling
+│   ├── main.rs            # CLI entry, arg parsing, wry window setup
 │   ├── markdown.rs        # comrak + syntect pipeline, plan structure extraction
 │   ├── watcher.rs         # file watching via notify
-│   └── beads.rs           # .beads/ detection, bd CLI integration
+│   └── ipc.rs             # IPC message handling (frontend ↔ rust)
 ├── web/                   # Frontend source (Svelte 5 + Vite)
 │   ├── index.html
 │   ├── src/
-│   │   ├── App.svelte     # root component
-│   │   ├── Viewer.svelte  # markdown content display + density modes
+│   │   ├── main.ts        # entry point, IPC bridge setup
+│   │   ├── App.svelte     # root component, mode switching
+│   │   ├── Viewer.svelte  # read mode: HTML display + density modes
 │   │   ├── Sidebar.svelte # file tree navigation
-│   │   ├── Editor.svelte  # CodeMirror edit mode (lazy loaded)
+│   │   ├── Editor.svelte  # edit mode: CodeMirror 6 (lazy loaded)
 │   │   ├── keyboard.ts    # keyboard shortcut handling
-│   │   ├── ipc.ts         # wry IPC bridge
-│   │   └── theme.ts       # data-theme management
+│   │   ├── ipc.ts         # window.__attn__ bridge + postMessage helpers
+│   │   └── theme.ts       # data-theme management, system preference detection
 │   ├── styles/
-│   │   ├── typography.css # reading experience styles
+│   │   ├── typography.css # the core reading experience
 │   │   └── themes/        # generated syntect CSS (light.css, dark.css)
 │   ├── vite.config.ts
 │   ├── svelte.config.js
@@ -302,19 +349,18 @@ attn/
 ## Build Pipeline
 
 ```bash
-# Development (frontend hot reload)
-cd web && npm run dev       # iterate on Svelte UI with vite dev server
-                            # mock IPC for development without Rust
+# Development (frontend only — mock IPC, iterate on UI)
+cd web && npm run dev
 
 # Development (full binary)
-cargo run -- plan.md        # build.rs runs vite build first, then embeds output
+cargo run -- plan.md        # build.rs runs vite build, embeds output
 
 # Release
-cargo build --release       # build.rs: vite build → include_dir! → single binary
-# Result: target/release/attn (~5-10MB binary with all assets embedded)
+cargo build --release       # single binary with all assets embedded
+                            # → target/release/attn (~5-10MB)
 
 # Install
-cargo install --path .      # installs attn to ~/.cargo/bin/
+cargo install --path .      # installs to ~/.cargo/bin/attn
 ```
 
 ## CLI Interface

@@ -1,3 +1,4 @@
+use base64::Engine;
 use comrak::plugins::syntect::SyntectAdapterBuilder;
 use comrak::{markdown_to_html_with_plugins, ExtensionOptions, Options, Plugins, RenderOptions};
 use serde::Serialize;
@@ -56,7 +57,8 @@ pub fn render(markdown: &str) -> RenderResult {
     let mut plugins = Plugins::default();
     plugins.render.codefence_syntax_highlighter = Some(&adapter);
 
-    let html = markdown_to_html_with_plugins(markdown, &options, &plugins);
+    let raw_html = markdown_to_html_with_plugins(markdown, &options, &plugins);
+    let html = rewrite_mermaid_blocks(&raw_html);
 
     // Extract plan structure from source
     let structure = extract_structure(markdown);
@@ -134,6 +136,53 @@ fn looks_like_file_path(s: &str) -> bool {
         ".sql", ".sh", ".bash", ".svelte", ".vue",
     ];
     extensions.iter().any(|ext| s.ends_with(ext))
+}
+
+/// Replace `<pre><code class="language-mermaid">…</code></pre>` blocks with
+/// `<div class="mermaid-block" data-content="BASE64">` so the frontend can
+/// render them with the Mermaid library.
+fn rewrite_mermaid_blocks(html: &str) -> String {
+    const OPEN_TAG: &str = "<pre><code class=\"language-mermaid\">";
+    const CLOSE_TAG: &str = "</code></pre>";
+
+    let mut result = String::with_capacity(html.len());
+    let mut remaining = html;
+
+    while let Some(start) = remaining.find(OPEN_TAG) {
+        // Push everything before this block verbatim
+        result.push_str(&remaining[..start]);
+
+        let after_open = &remaining[start + OPEN_TAG.len()..];
+        if let Some(end) = after_open.find(CLOSE_TAG) {
+            let code_content = &after_open[..end];
+            // Decode HTML entities back to raw text before base64-encoding
+            let decoded = html_entity_decode(code_content);
+            let b64 = base64::engine::general_purpose::STANDARD.encode(decoded.as_bytes());
+            result.push_str(&format!(
+                "<div class=\"mermaid-block\" data-content=\"{}\"></div>",
+                b64
+            ));
+            remaining = &after_open[end + CLOSE_TAG.len()..];
+        } else {
+            // Malformed — no closing tag; emit as-is and stop rewriting
+            result.push_str(&remaining[start..]);
+            remaining = "";
+            break;
+        }
+    }
+
+    result.push_str(remaining);
+    result
+}
+
+/// Minimal HTML entity decoding for the entities comrak might produce inside
+/// code blocks.
+fn html_entity_decode(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
 }
 
 pub fn render_directory_listing(dir: &Path) -> String {

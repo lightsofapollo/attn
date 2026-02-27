@@ -65,7 +65,13 @@ fn main() {
         let result = markdown::render(&content);
 
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&result.structure).unwrap());
+            match serde_json::to_string_pretty(&result.structure) {
+                Ok(json) => println!("{json}"),
+                Err(e) => {
+                    eprintln!("attn: failed to serialize: {e}");
+                    std::process::exit(1);
+                }
+            }
         } else if cli.status {
             let s = &result.structure;
             let total = s.tasks.len();
@@ -126,11 +132,17 @@ fn main() {
         None
     };
 
-    let window = WindowBuilder::new()
+    let window = match WindowBuilder::new()
         .with_title("attn")
         .with_inner_size(tao::dpi::LogicalSize::new(960.0, 720.0))
         .build(&event_loop)
-        .expect("failed to create window");
+    {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("attn: failed to create window: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Shared state for the IPC handler
     let app_state = Arc::new(Mutex::new(ipc::AppState {
@@ -138,22 +150,27 @@ fn main() {
     }));
     let ipc_state = Arc::clone(&app_state);
 
-    let webview = WebViewBuilder::new()
+    let webview = match WebViewBuilder::new()
         .with_html(&page_html)
         .with_ipc_handler(move |msg| {
             ipc::handle_message(msg.body(), &ipc_state);
         })
         .with_navigation_handler(|url| {
-            // Allow initial page load and data URIs, open everything else in default browser
             if url.starts_with("data:") || url.starts_with("about:") {
-                true // allow navigation within webview
+                true
             } else {
                 let _ = open::that(&url);
-                false // block navigation in webview
+                false
             }
         })
         .build(&window)
-        .expect("failed to create webview");
+    {
+        Ok(wv) => wv,
+        Err(e) => {
+            eprintln!("attn: failed to create webview: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Keep a clone of the path for the event loop closure
     let watched_path = path.clone();

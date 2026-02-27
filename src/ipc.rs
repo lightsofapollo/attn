@@ -39,7 +39,7 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>) {
                 eprintln!("navigate to: {}", path);
             }
             IpcMessage::EditSave { content } => {
-                let state = state.lock().unwrap();
+                let Ok(state) = state.lock() else { return };
                 if let Err(e) = std::fs::write(&state.file_path, &content) {
                     eprintln!("attn: failed to save: {}", e);
                 }
@@ -58,7 +58,7 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>) {
 /// Replaces `- [ ]` with `- [x]` or vice versa, then writes the file back.
 /// The file watcher will detect the write and trigger a re-render.
 fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
-    let state = state.lock().unwrap();
+    let Ok(state) = state.lock() else { return };
     let path = &state.file_path;
 
     let content = match std::fs::read_to_string(path) {

@@ -120,6 +120,15 @@ fn main() {
         .with_ipc_handler(move |msg| {
             ipc::handle_message(msg.body());
         })
+        .with_navigation_handler(|url| {
+            // Allow initial page load and data URIs, open everything else in default browser
+            if url.starts_with("data:") || url.starts_with("about:") {
+                true // allow navigation within webview
+            } else {
+                let _ = open::that(&url);
+                false // block navigation in webview
+            }
+        })
         .build(&window)
         .expect("failed to create webview");
 

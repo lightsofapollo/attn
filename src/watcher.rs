@@ -45,7 +45,7 @@ impl FileWatcher {
                 }
 
                 // Debounce: skip if last event was within the window
-                let mut last = last_event.lock().unwrap();
+                let Ok(mut last) = last_event.lock() else { return };
                 let now = Instant::now();
                 if now.duration_since(*last).as_millis() < DEBOUNCE_MS {
                     return;

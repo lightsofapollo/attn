@@ -4,9 +4,11 @@ mod watcher;
 
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tao::event::{Event, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoop};
+use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tao::window::WindowBuilder;
+use watcher::UserEvent;
 use wry::WebViewBuilder;
 
 #[derive(Parser, Debug)]
@@ -107,18 +109,39 @@ fn main() {
     // Build the initial page HTML with embedded assets
     let page_html = build_page_html(&initial_html, &initial_raw, &initial_structure, theme);
 
-    // Create window and webview
-    let event_loop = EventLoop::new();
+    // Create window and webview with typed event loop
+    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+
+    // Start file watcher if we are viewing a single file
+    let _file_watcher = if path.is_file() {
+        let proxy = event_loop.create_proxy();
+        match watcher::FileWatcher::new(&path, proxy) {
+            Ok(fw) => Some(fw),
+            Err(e) => {
+                eprintln!("attn: could not watch file: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let window = WindowBuilder::new()
         .with_title("attn")
         .with_inner_size(tao::dpi::LogicalSize::new(960.0, 720.0))
         .build(&event_loop)
         .expect("failed to create window");
 
-    let _webview = WebViewBuilder::new()
+    // Shared state for the IPC handler
+    let app_state = Arc::new(Mutex::new(ipc::AppState {
+        file_path: path.clone(),
+    }));
+    let ipc_state = Arc::clone(&app_state);
+
+    let webview = WebViewBuilder::new()
         .with_html(&page_html)
         .with_ipc_handler(move |msg| {
-            ipc::handle_message(msg.body());
+            ipc::handle_message(msg.body(), &ipc_state);
         })
         .with_navigation_handler(|url| {
             // Allow initial page load and data URIs, open everything else in default browser
@@ -132,16 +155,48 @@ fn main() {
         .build(&window)
         .expect("failed to create webview");
 
+    // Keep a clone of the path for the event loop closure
+    let watched_path = path.clone();
+
     // Run event loop
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
-        if let Event::WindowEvent {
-            event: WindowEvent::CloseRequested,
-            ..
-        } = event
-        {
-            *control_flow = ControlFlow::Exit;
+        match event {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                *control_flow = ControlFlow::Exit;
+            }
+            Event::UserEvent(UserEvent::FileChanged) => {
+                if watched_path.is_file() {
+                    if let Ok(content) = std::fs::read_to_string(&watched_path) {
+                        let result = markdown::render(&content);
+                        let structure_json =
+                            serde_json::to_string(&result.structure).unwrap_or_default();
+                        let escaped_html = result
+                            .html
+                            .replace('\\', "\\\\")
+                            .replace('\'', "\\'")
+                            .replace('\n', "\\n")
+                            .replace('\r', "");
+                        let escaped_raw = content
+                            .replace('\\', "\\\\")
+                            .replace('\'', "\\'")
+                            .replace('\n', "\\n")
+                            .replace('\r', "");
+
+                        let js = format!(
+                            "window.__attn__.updateContent({{ html: '{}', rawMarkdown: '{}', structure: {} }});",
+                            escaped_html, escaped_raw, structure_json
+                        );
+
+                        let _ = webview.evaluate_script(&js);
+                    }
+                }
+            }
+            _ => {}
         }
     });
 }
@@ -153,7 +208,6 @@ fn build_page_html(
     theme: &str,
 ) -> String {
     let structure_json = serde_json::to_string(structure).unwrap_or_default();
-    let escaped_html = rendered_html.replace('\\', "\\\\").replace('`', "\\`").replace("${", "\\${");
     let escaped_raw = raw_markdown.replace('\\', "\\\\").replace('`', "\\`").replace("${", "\\${");
 
     format!(
@@ -191,14 +245,17 @@ fn build_page_html(
             const checkbox = e.target.closest('input[type="checkbox"]');
             if (checkbox) {{
                 e.preventDefault();
-                const li = checkbox.closest('li');
-                const allItems = document.querySelectorAll('li');
-                const index = Array.from(allItems).indexOf(li);
-                window.ipc.postMessage(JSON.stringify({{
-                    type: 'checkbox_toggle',
-                    index: index,
-                    checked: !checkbox.checked,
-                }}));
+                // Find which task checkbox this is (index among all task checkboxes)
+                const allCheckboxes = document.querySelectorAll('input[type="checkbox"]');
+                const taskIndex = Array.from(allCheckboxes).indexOf(checkbox);
+                const tasks = window.__attn__.structure && window.__attn__.structure.tasks;
+                if (tasks && taskIndex >= 0 && taskIndex < tasks.length) {{
+                    window.ipc.postMessage(JSON.stringify({{
+                        type: 'checkbox_toggle',
+                        line: tasks[taskIndex].line,
+                        checked: !checkbox.checked,
+                    }}));
+                }}
             }}
         }});
 

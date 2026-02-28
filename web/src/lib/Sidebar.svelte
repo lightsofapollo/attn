@@ -4,6 +4,7 @@
   import { dragWindow } from './ipc';
   import FolderTree from '@lucide/svelte/icons/folder-tree';
   import TextQuote from '@lucide/svelte/icons/text-quote';
+  import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
   import {
     Sidebar,
     SidebarContent,
@@ -11,11 +12,20 @@
     SidebarRail,
   } from '$lib/components/ui/sidebar';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
+  import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuTrigger,
+  } from '$lib/components/ui/dropdown-menu';
+  import * as Command from '$lib/components/ui/command';
 
   interface Props {
     entries: TreeNode[];
     activePath?: string;
     rootPath?: string;
+    knownProjects?: string[];
+    activeProjectPath?: string;
+    onProjectSwitch?: (path: string) => void;
     onNavigate?: (path: string, newTab: boolean) => void;
     outline?: { id: string; text: string; level: number; line: number }[];
     activeOutlineId?: string;
@@ -26,6 +36,9 @@
     entries,
     activePath = '',
     rootPath = '',
+    knownProjects = [],
+    activeProjectPath = '',
+    onProjectSwitch,
     onNavigate,
     outline = [],
     activeOutlineId = '',
@@ -40,18 +53,18 @@
     return parts.at(-1) || path;
   }
 
-  function formatRootPath(path: string): string {
-    if (!path) return '';
-    return path.replace(/^\/Users\/[^/]+/, '~');
-  }
-
-  let rootLabel = $derived(formatRootLabel(rootPath));
-  let rootPathDisplay = $derived(formatRootPath(rootPath));
+  let projectOptions = $derived(
+    knownProjects.length > 0 ? knownProjects : rootPath ? [rootPath] : [],
+  );
+  let selectedProject = $derived(
+    activeProjectPath || rootPath || projectOptions[0] || '',
+  );
   let markdownFileCount = $derived(entries.length ? countMarkdownFiles(entries) : 0);
   let totalFileCount = $derived(entries.length ? countFiles(entries) : 0);
   let outlineCount = $derived(outline.length);
   let filteredEntries = $derived(filterTree(entries, query));
   let filteredOutline = $derived(filterOutline(outline, query));
+  let projectPickerOpen = $state(false);
 
   function countFiles(nodes: TreeNode[]): number {
     let count = 0;
@@ -110,7 +123,47 @@
   <div class="h-[46px] shrink-0" style="-webkit-user-select: none" onmousedown={dragWindow}></div>
 
   <div class="sidebar-header" style="-webkit-user-select: none">
-    <p class="sidebar-root-name" title={rootPath || rootLabel}>{rootLabel}</p>
+    <div class="sidebar-project-picker">
+      <DropdownMenu bind:open={projectPickerOpen}>
+        <DropdownMenuTrigger
+          class="sidebar-project-select"
+          aria-label="Project picker"
+          role="combobox"
+          aria-expanded={projectPickerOpen}
+        >
+          <span class="sidebar-project-select-label" title={selectedProject}>
+            {formatRootLabel(selectedProject)}
+          </span>
+          <ChevronsUpDown class="sidebar-project-switch-icon size-3.5" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" class="sidebar-project-menu p-0">
+          <Command.Root class="sidebar-project-command">
+            <Command.Input placeholder="Search projects..." />
+            <Command.List class="max-h-[240px]">
+              <Command.Empty class="px-3 py-5 text-xs text-muted-foreground">
+                No projects found.
+              </Command.Empty>
+              <Command.Group>
+                {#each projectOptions as projectPath (projectPath)}
+                  <Command.Item
+                    value={`${formatRootLabel(projectPath)} ${projectPath}`}
+                    class="sidebar-project-menu-item"
+                    onSelect={() => {
+                      projectPickerOpen = false;
+                      if (projectPath !== selectedProject) {
+                        onProjectSwitch?.(projectPath);
+                      }
+                    }}
+                  >
+                    {formatRootLabel(projectPath)}
+                  </Command.Item>
+                {/each}
+              </Command.Group>
+            </Command.List>
+          </Command.Root>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
     <div class="sidebar-mode-toggle" aria-label="Sidebar views">
       <button
         type="button"

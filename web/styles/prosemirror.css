@@ -75,7 +75,7 @@
 .ProseMirror {
   max-width: min(140ch, calc(100vw - 0.5rem));
   margin: 0 auto;
-  padding: 0.35rem clamp(0.5rem, 1.1vw, 1rem) 2rem;
+  padding: 0.35rem clamp(1rem, 2.5vw, 2.25rem) 2rem;
   outline: none;
   white-space: pre-wrap;
   word-wrap: break-word;

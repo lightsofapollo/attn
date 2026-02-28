@@ -450,7 +450,7 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
         match serde_json::from_str::<SocketMessage>(&line) {
             Ok(SocketMessage::Open { path }) => {
                 let path = PathBuf::from(path);
-                let _ = proxy.send_event(UserEvent::OpenPath(path));
+                let _ = proxy.send_event(UserEvent::SwitchProject(path));
                 let resp = SocketResponse::Ok;
                 let _ = writeln!(
                     stream,

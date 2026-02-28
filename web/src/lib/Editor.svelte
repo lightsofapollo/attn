@@ -25,15 +25,24 @@
     onSave?: () => void;
     onCancel?: () => void;
     onCheckboxToggle?: (md: string) => void;
+    onDirtyChange?: (dirty: boolean) => void;
   }
 
-  let { markdown, editable = false, onSave, onCancel, onCheckboxToggle }: Props = $props();
+  let {
+    markdown,
+    editable = false,
+    onSave,
+    onCancel,
+    onCheckboxToggle,
+    onDirtyChange,
+  }: Props = $props();
   let editorEl: HTMLElement | undefined = $state(undefined);
   let view: EditorView | undefined;
   let findOpen = $state(false);
   let findQuery = $state('');
   let findMatchCount = $state(0);
   let lastMarkdown = '';
+  let dirty = false;
   let findInputEl: HTMLInputElement | undefined = $state(undefined);
   let findBarEl: HTMLFormElement | undefined = $state(undefined);
 
@@ -41,6 +50,14 @@
   const PARSE_WARN_MS = 120;
   const LARGE_MARKDOWN_CHAR_LIMIT = 350_000;
   const SAFE_MODE_PREVIEW_CHAR_LIMIT = 50_000;
+
+  function setDirty(next: boolean): void {
+    if (dirty === next) return;
+    dirty = next;
+    if (onDirtyChange) {
+      onDirtyChange(next);
+    }
+  }
 
   function emptyDoc(): PmNode {
     return schema.topNodeType.createAndFill()!;
@@ -330,6 +347,27 @@
     return markdownSerializer.serialize(view.state.doc);
   }
 
+  export function hasUnsavedChanges(): boolean {
+    return dirty;
+  }
+
+  export function resetToMarkdown(nextMarkdown: string): void {
+    if (!view) return;
+    const updateStart = performance.now();
+    const updateDoc = parseMarkdownDoc(nextMarkdown, 'update');
+    const state = EditorState.create({
+      doc: updateDoc,
+      plugins: buildPlugins(nextMarkdown),
+    });
+    console.info(`[attn] pm update done in ${(performance.now() - updateStart).toFixed(1)}ms`);
+    view.updateState(state);
+    if (findOpen && findQuery) {
+      updateSearchQuery();
+    }
+    lastMarkdown = nextMarkdown;
+    setDirty(false);
+  }
+
   export function openFind(): void {
     void openFindPanel();
   }
@@ -341,10 +379,20 @@
     view = new EditorView(editorEl, {
       state,
       editable: () => editable,
+      dispatchTransaction(tr) {
+        if (!view) return;
+        const nextState = view.state.apply(tr);
+        view.updateState(nextState);
+        if (tr.docChanged && editable) {
+          setDirty(true);
+        }
+      },
       nodeViews: {
         task_list_item: taskListItemNodeView,
       },
     });
+    lastMarkdown = markdown;
+    setDirty(false);
 
     return () => {
       view?.destroy();
@@ -357,21 +405,7 @@
     if (!view) return;
     // Only update if the markdown actually changed from what we last set
     if (markdown === lastMarkdown) return;
-    const updateStart = performance.now();
-    const updateDoc = parseMarkdownDoc(markdown, 'update');
-    const state = EditorState.create({
-      doc: updateDoc,
-      plugins: buildPlugins(markdown),
-    });
-    console.info(`[attn] pm update done in ${(performance.now() - updateStart).toFixed(1)}ms`);
-    view.updateState(state);
-    if (findOpen && findQuery) {
-      updateSearchQuery();
-    }
-    // Keep lastMarkdown in sync even when markdown input was unchanged by editor interactions.
-    if (markdown !== lastMarkdown) {
-      lastMarkdown = markdown;
-    }
+    resetToMarkdown(markdown);
   });
 
   // React to editable changes

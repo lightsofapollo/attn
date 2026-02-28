@@ -69,7 +69,7 @@ h6 { font-style: italic; font-weight: 400; }
 h1:first-child { margin-top: 0; }
 
 p {
-    margin-bottom: 1.1rem;
+    margin-bottom: 1rem;
 }
 
 /* Links */
@@ -98,8 +98,7 @@ code {
     font-family: 'Source Code Pro', 'SF Mono', Consolas, monospace;
     font-size: 0.84em;
     background: var(--code-block);
-    border: 1px solid var(--border);
-    padding: 0.12em 0.4em;
+    padding: 0.15em 0.32em;
     border-radius: 3px;
 }
 
@@ -195,11 +194,14 @@ th {
 
 /* Blockquotes */
 blockquote {
-    margin-bottom: 1.1rem;
-    padding: 0.5rem 1.25rem;
-    border-left: 2px solid var(--blockquote-bar);
+    margin-bottom: 1rem;
+    padding: 0.4rem 1.25rem;
+    border-left: 2.5px solid var(--blockquote-bar);
     color: var(--muted-foreground);
-    font-style: italic;
+}
+
+blockquote p {
+    margin-bottom: 0.45rem;
 }
 
 blockquote p:last-child {

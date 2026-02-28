@@ -224,7 +224,6 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         find_first_previewable_path(&file_tree).unwrap_or_else(|| path.clone())
     };
 
-    // Startup payload does not inline markdown content; the web app fetches bytes on demand.
     let initial_structure = markdown::PlanStructure::default();
     let (initial_mtime_ms, initial_bytes) = content_metadata_for_path(&initial_ui_path);
 
@@ -336,7 +335,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 false
             }
         })
-        .with_custom_protocol("attn".to_string(), move |_webview_id, request| {
+            .with_custom_protocol("attn".to_string(), move |_webview_id, request| {
             let uri = request.uri().to_string();
             // URI format: attn://localhost/absolute/path/to/file
             let path = uri
@@ -493,10 +492,9 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     state.file_path = new_path.clone();
                 }
 
-                // Notify webview with path + metadata only; content is fetched via attn:// protocol.
                 let path_str = new_path.to_string_lossy().to_string();
                 let (content_mtime_ms, content_bytes) = content_metadata_for_path(&new_path);
-                let payload = serde_json::json!({
+                let mut payload = serde_json::json!({
                     "structure": { "phases": [], "tasks": [], "file_refs": [] },
                     "filePath": path_str,
                     "contentMtimeMs": content_mtime_ms,

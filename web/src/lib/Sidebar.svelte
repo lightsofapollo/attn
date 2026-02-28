@@ -1,55 +1,62 @@
 <script lang="ts">
-  import type { FileEntry } from './types';
-  import { navigate } from './ipc';
+  import type { TreeNode } from './types';
+  import FileTree from './FileTree.svelte';
+  import { dragWindow } from './ipc';
+  import {
+    Sidebar,
+    SidebarContent,
+    SidebarGroup,
+    SidebarGroupContent,
+    SidebarMenu,
+    SidebarRail,
+  } from '$lib/components/ui/sidebar';
+  import { ScrollArea } from '$lib/components/ui/scroll-area';
 
   interface Props {
-    entries: FileEntry[];
+    entries: TreeNode[];
+    activePath?: string;
+    rootPath?: string;
+    onNavigate?: (path: string, newTab: boolean) => void;
   }
 
-  let { entries }: Props = $props();
+  let { entries, activePath = '', rootPath = '', onNavigate }: Props = $props();
 
-  function handleNavigate(path: string): void {
-    navigate(path);
+  function formatRootLabel(path: string): string {
+    if (!path) return 'Workspace';
+    const parts = path.split('/').filter(Boolean);
+    return parts.at(-1) || path;
   }
 
-  function handleKeydown(e: KeyboardEvent, path: string): void {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      handleNavigate(path);
-    }
+  function formatRootPath(path: string): string {
+    if (!path) return '';
+    return path.replace(/^\/Users\/[^/]+/, '~');
   }
+
+  let rootLabel = $derived(formatRootLabel(rootPath));
+  let rootPathDisplay = $derived(formatRootPath(rootPath));
 </script>
 
-<nav class="sidebar">
-  <ul>
-    {#each entries as entry}
-      <li>
-        <span
-          class="dir-entry"
-          class:dir={entry.isDir}
-          role="button"
-          tabindex="0"
-          onclick={() => handleNavigate(entry.path)}
-          onkeydown={(e) => handleKeydown(e, entry.path)}
-        >
-          {entry.isDir ? `${entry.name}/` : entry.name}
-        </span>
-      </li>
-    {/each}
-  </ul>
-</nav>
+<Sidebar class="project-sidebar">
+  <!-- Drag strip: clears traffic lights -->
+  <div class="h-[46px] shrink-0" style="-webkit-user-select: none" onmousedown={dragWindow}></div>
 
-<style>
-  .sidebar {
-    padding: 1rem;
-  }
+  <div class="sidebar-header" style="-webkit-user-select: none">
+    <p class="sidebar-root-name" title={rootPath || rootLabel}>{rootLabel}</p>
+    {#if rootPathDisplay}
+      <p class="sidebar-root-path" title={rootPath}>{rootPathDisplay}</p>
+    {/if}
+  </div>
 
-  ul {
-    list-style: none;
-    padding: 0;
-  }
-
-  li {
-    margin: 0;
-  }
-</style>
+  <SidebarContent class="pt-0.5">
+    <ScrollArea class="min-h-0 flex-1" scrollbarYClasses="pr-1">
+      <SidebarGroup class="pb-1">
+        <SidebarGroupContent>
+          <SidebarMenu class="sidebar-tree-menu">
+            <FileTree nodes={entries} {activePath} {onNavigate} />
+          </SidebarMenu>
+        </SidebarGroupContent>
+      </SidebarGroup>
+    </ScrollArea>
+  </SidebarContent>
+  <SidebarRail />
+</Sidebar>

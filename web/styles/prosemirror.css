@@ -1,0 +1,397 @@
+/* ProseMirror editor styles */
+
+/* Editor wrapper for floating controls like find bar. */
+.editor-container {
+  position: relative;
+  min-height: 100%;
+}
+
+/* Inline find UI */
+.pm-find-bar {
+  position: sticky;
+  top: 0.5rem;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: min(32rem, calc(100% - 1.5rem));
+  margin: 0.5rem 0.75rem 0.35rem auto;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--background) 92%, white 8%);
+  box-shadow: 0 6px 20px oklch(0 0 0 / 10%);
+  font-family: 'Source Sans 3', -apple-system, system-ui, sans-serif;
+}
+
+.pm-find-input {
+  min-width: 0;
+  flex: 1;
+  height: 2rem;
+  border: 1px solid var(--input);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 0 0.6rem;
+  font-size: 0.875rem;
+}
+
+.pm-find-input:focus {
+  outline: 2px solid var(--ring);
+  outline-offset: 0;
+}
+
+.pm-find-count {
+  min-width: 5.25rem;
+  text-align: right;
+  font-size: 0.72rem;
+  color: var(--muted-foreground);
+  letter-spacing: 0.01em;
+}
+
+.pm-find-btn {
+  height: 2rem;
+  min-width: 2rem;
+  border: 1px solid var(--input);
+  border-radius: 6px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+
+.pm-find-btn:hover {
+  background: var(--accent);
+  border-color: var(--border);
+}
+
+.pm-find-btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+/* Editor container — same reading column as before */
+.ProseMirror {
+  max-width: min(105ch, calc(100vw - 2rem));
+  margin: 0 auto;
+  padding: 2.5rem clamp(1rem, 2.8vw, 2rem) 6rem;
+  outline: none;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-x: hidden;
+}
+
+/* Shared horizontal scroll treatment for wide prose blocks (code/tables). */
+.ProseMirror .prose-scroll-x {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.ProseMirror .prose-scroll-x > pre {
+  overflow: visible;
+  min-width: max-content;
+}
+
+.ProseMirror .prose-scroll-x > table {
+  width: max-content;
+  min-width: 100%;
+  margin-bottom: 0;
+}
+
+.ProseMirror .prose-scroll-x::-webkit-scrollbar {
+  height: 8px;
+}
+
+.ProseMirror .prose-scroll-x::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ProseMirror .prose-scroll-x::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+.ProseMirror .prose-scroll-x::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
+
+/* Style bits-ui horizontal scrollbars in code block scroll areas. */
+.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-scrollbar"][data-orientation="horizontal"] {
+  height: 12px;
+  padding: 0 2px 2px;
+}
+
+.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-viewport"] {
+  overflow-y: hidden;
+}
+
+.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-thumb"] {
+  background: var(--border);
+}
+
+.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-thumb"]:hover {
+  background: var(--muted-foreground);
+}
+
+/* Hide cursor in read-only mode */
+.ProseMirror:not([contenteditable="true"]) {
+  caret-color: transparent;
+  cursor: default;
+}
+
+/* Show cursor in edit mode */
+.ProseMirror[contenteditable="true"] {
+  caret-color: var(--foreground);
+  cursor: text;
+}
+
+/* Task list items */
+.task-list {
+  list-style: none;
+  padding-left: 0;
+}
+
+.task-list-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.task-checkbox {
+  flex-shrink: 0;
+  padding-top: 0.3em;
+}
+
+.task-checkbox input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: static;
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+  margin: 0;
+  border: 1.5px solid var(--muted-foreground);
+  border-radius: 3px;
+  background: transparent;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.task-checkbox input[type="checkbox"]:checked {
+  background: var(--primary);
+  border-color: var(--primary);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3E%3C/svg%3E");
+  background-size: 100% 100%;
+}
+
+.task-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-content p {
+  margin-bottom: 0;
+}
+
+/* Checked task items get muted, struck-through text */
+.task-list-item[data-checked="true"] .task-content {
+  color: var(--muted-foreground);
+  text-decoration: line-through;
+}
+
+/* Strikethrough */
+.ProseMirror del {
+  text-decoration: line-through;
+  color: var(--muted-foreground);
+}
+
+/* First heading should have no top margin */
+.ProseMirror > h1:first-child,
+.ProseMirror > h2:first-child,
+.ProseMirror > h3:first-child {
+  margin-top: 0;
+}
+
+/* Tables inside ProseMirror */
+.ProseMirror table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.ProseMirror th,
+.ProseMirror td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.ProseMirror th {
+  font-family: 'Source Sans 3', -apple-system, system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted-foreground);
+  border-bottom-width: 2px;
+}
+
+/* Code block language label */
+.ProseMirror pre[data-params]::before {
+  content: attr(data-params);
+  display: block;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.6;
+  color: var(--muted-foreground);
+  margin-bottom: 0.5rem;
+  font-family: 'Source Sans 3', -apple-system, system-ui, sans-serif;
+}
+
+.ProseMirror pre[data-params=""]::before {
+  display: none;
+}
+
+/* Editable indicator — subtle top accent when in edit mode */
+.ProseMirror[contenteditable="true"]::before {
+  content: '';
+  display: block;
+  height: 2px;
+  background: var(--primary);
+  margin: -3rem -2rem 3rem;
+  border-radius: 0 0 2px 2px;
+}
+
+/* ProseMirror selection */
+.ProseMirror .ProseMirror-selectednode {
+  outline: 2px solid var(--primary);
+  border-radius: 2px;
+}
+
+/* Search highlights from prosemirror-search plugin. */
+.ProseMirror-search-match {
+  background: var(--sidebar-accent);
+  border-radius: 2px;
+}
+
+.ProseMirror-active-search-match {
+  background: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--primary);
+  border-radius: 2px;
+}
+
+/* Gapcursor (between block nodes in edit mode) */
+.ProseMirror .ProseMirror-gapcursor {
+  display: none;
+  pointer-events: none;
+  position: relative;
+}
+
+.ProseMirror .ProseMirror-gapcursor::after {
+  content: '';
+  display: block;
+  position: absolute;
+  top: -2px;
+  width: 20px;
+  border-top: 1px solid var(--foreground);
+  animation: ProseMirror-cursor-blink 1.1s steps(2, start) infinite;
+}
+
+@keyframes ProseMirror-cursor-blink {
+  to { visibility: hidden; }
+}
+
+.ProseMirror-focused .ProseMirror-gapcursor {
+  display: block;
+}
+
+/* Mermaid diagrams */
+.mermaid-container {
+  margin: 1rem 0;
+  padding: 1rem;
+  background: var(--muted);
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.mermaid-container:hover {
+  outline: 1px solid var(--border);
+}
+
+.mermaid-render svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaid-source {
+  text-align: left;
+  margin: 0;
+}
+
+.mermaid-error {
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+
+/* Math / LaTeX */
+.math-container {
+  margin: 1rem 0;
+  padding: 1rem;
+  cursor: pointer;
+  text-align: center;
+}
+
+.math-container:hover {
+  background: var(--muted);
+  border-radius: 6px;
+}
+
+.math-source {
+  text-align: left;
+  margin: 0;
+}
+
+.math-error {
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+
+/* prosemirror-tables selection */
+.ProseMirror .selectedCell::after {
+  z-index: 2;
+  position: absolute;
+  content: '';
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(200, 200, 255, 0.4);
+  pointer-events: none;
+}
+
+.ProseMirror .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  z-index: 20;
+  background-color: var(--primary);
+  pointer-events: none;
+}
+
+/* Placeholder text when empty */
+.ProseMirror p.is-editor-empty:first-child::before {
+  color: var(--muted-foreground);
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}

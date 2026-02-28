@@ -1,0 +1,140 @@
+name: macOS Desktop Build Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Build mode
+        required: true
+        type: choice
+        options:
+          - release
+          - prod
+        default: prod
+      target:
+        description: Rust target
+        required: true
+        type: choice
+        options:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+        default: aarch64-apple-darwin
+      notarize:
+        description: Sign and notarize DMG
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.target }}
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --locked
+
+      - name: Install frontend dependencies
+        run: |
+          cd web
+          npm ci
+
+      - name: Import code signing certificate
+        if: inputs.notarize == true
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          if [ -z "$CERTIFICATE_BASE64" ] || [ -z "$CERTIFICATE_PASSWORD" ] || [ -z "$KEYCHAIN_PASSWORD" ]; then
+            echo "Missing required secrets: APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, KEYCHAIN_PASSWORD" >&2
+            exit 1
+          fi
+
+          echo -n "$CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH" || \
+            echo -n "$CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Build app bundle
+        run: |
+          scripts/macos-build-bundle.sh "${{ inputs.mode }}" "${{ inputs.target }}"
+
+          APP_PATH="$(find "target/${{ inputs.target }}" -path '*/bundle/osx/*.app' -maxdepth 6 | head -n1)"
+          if [ -z "$APP_PATH" ]; then
+            echo "No app bundle found" >&2
+            exit 1
+          fi
+
+          DMG_PATH="$(dirname "$APP_PATH")/attn.dmg"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
+
+      - name: Sign app bundle
+        if: inputs.notarize == true
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "Missing required secret: APPLE_SIGNING_IDENTITY" >&2
+            exit 1
+          fi
+          scripts/macos-sign-app.sh "$APP_PATH" "$APPLE_SIGNING_IDENTITY"
+
+      - name: Create DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          scripts/macos-create-dmg.sh "$APP_PATH" "$DMG_PATH"
+
+      - name: Notarize DMG
+        if: inputs.notarize == true
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          scripts/macos-notarize-dmg.sh "$DMG_PATH"
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: attn-app-${{ inputs.target }}-${{ inputs.mode }}
+          path: ${{ env.APP_PATH }}
+          retention-days: 7
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: attn-dmg-${{ inputs.target }}-${{ inputs.mode }}
+          path: ${{ env.DMG_PATH }}
+          retention-days: 7
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi

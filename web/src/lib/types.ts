@@ -20,24 +20,34 @@ export interface PlanStructure {
   file_refs: string[];
 }
 
-export interface FileEntry {
+export type FileType = 'markdown' | 'image' | 'video' | 'audio' | 'directory' | 'unsupported';
+
+export interface TreeNode {
   name: string;
   path: string;
   isDir: boolean;
+  children?: TreeNode[];
+  fileType: FileType;
 }
 
+/** @deprecated Use TreeNode instead */
+export type FileEntry = TreeNode;
+
 export interface ContentPayload {
-  html: string;
-  rawMarkdown: string;
-  structure: PlanStructure;
+  markdown?: string;
+  structure?: PlanStructure;
   filePath: string;
-  fileTree?: FileEntry[];
+  fileTree?: TreeNode[];
+  contentMtimeMs?: number;
+  contentBytes?: number;
 }
 
 export interface UpdatePayload {
-  html: string;
-  rawMarkdown: string;
-  structure: PlanStructure;
+  markdown?: string;
+  structure?: PlanStructure;
+  filePath?: string;
+  contentMtimeMs?: number;
+  contentBytes?: number;
 }
 
 export type IpcMessageType =
@@ -45,7 +55,11 @@ export type IpcMessageType =
   | 'checkbox_toggle'
   | 'navigate'
   | 'edit_save'
-  | 'theme_change';
+  | 'theme_change'
+  | 'open_devtools'
+  | 'drag_window'
+  | 'js_log'
+  | 'js_error';
 
 export interface QuitMessage {
   type: 'quit';
@@ -53,7 +67,7 @@ export interface QuitMessage {
 
 export interface CheckboxToggleMessage {
   type: 'checkbox_toggle';
-  index: number;
+  line: number;
   checked: boolean;
 }
 
@@ -72,13 +86,55 @@ export interface ThemeChangeMessage {
   theme: string;
 }
 
+export interface DragWindowMessage {
+  type: 'drag_window';
+}
+
+export interface OpenDevtoolsMessage {
+  type: 'open_devtools';
+}
+
+export interface JsLogMessage {
+  type: 'js_log';
+  level: string;
+  message: string;
+  source?: string;
+  stack?: string;
+}
+
+export interface JsErrorMessage {
+  type: 'js_error';
+  message: string;
+  source: string;
+  line?: number;
+  column?: number;
+  stack?: string;
+}
+
 export type IpcMessage =
   | QuitMessage
   | CheckboxToggleMessage
   | NavigateMessage
   | EditSaveMessage
-  | ThemeChangeMessage;
+  | ThemeChangeMessage
+  | OpenDevtoolsMessage
+  | DragWindowMessage
+  | JsLogMessage
+  | JsErrorMessage;
 
 export type AppMode = 'read' | 'edit';
 
-export type ThemeName = 'light' | 'dark' | 'system';
+export type ThemeName = 'light' | 'dark';
+export type DiagMode = 'full' | 'editor_only' | 'minimal';
+
+export interface InitPayload {
+  markdown?: string;
+  structure?: PlanStructure;
+  filePath?: string;
+  fileTree?: TreeNode[];
+  rootPath?: string;
+  theme: ThemeName;
+  diagMode?: DiagMode;
+  contentMtimeMs?: number;
+  contentBytes?: number;
+}

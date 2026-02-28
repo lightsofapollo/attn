@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>attn — Paper vs Ink</title>
+
+<!-- Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,500&family=Source+Sans+3:wght@300;400;500;600&family=Source+Code+Pro:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+
+<style>
+/* ============================================
+   COMPARISON SHELL
+   ============================================ */
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  background: #1a1a1a;
+  font-family: 'Source Sans 3', -apple-system, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+.comparison {
+  display: flex;
+  height: 100vh;
+  gap: 1px;
+  background: #000;
+}
+
+.comparison-pane {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.pane-label {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  z-index: 100;
+  font-family: 'Source Sans 3', system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 3px 10px;
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.pane-label.paper-label {
+  background: oklch(0.20 0.008 55 / 8%);
+  color: oklch(0.44 0.012 65);
+}
+
+.pane-label.ink-label {
+  background: oklch(1 0 0 / 6%);
+  color: oklch(0.55 0.008 250);
+}
+
+
+/* ============================================
+   SHARED STRUCTURE — .app container
+   ============================================ */
+
+.app {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+
+/* ============================================
+   PAPER THEME TOKENS
+   ============================================ */
+
+.theme-paper {
+  --bg:              oklch(0.92 0.010 78);
+  --bg-sidebar:      oklch(0.895 0.012 75);
+  --bg-surface:      oklch(0.905 0.012 76);
+  --fg:              oklch(0.20 0.008 55);
+  --fg-muted:        oklch(0.44 0.012 65);
+  --fg-faint:        oklch(0.58 0.010 70);
+  --accent:          oklch(0.48 0.14 28);
+  --accent-hover:    oklch(0.42 0.16 28);
+  --accent-faint:    oklch(0.48 0.14 28 / 8%);
+  --border:          oklch(0.20 0.008 55 / 10%);
+  --border-strong:   oklch(0.20 0.008 55 / 16%);
+  --code-bg:         oklch(0.885 0.012 73);
+  --code-border:     oklch(0.20 0.008 55 / 8%);
+  --sidebar-active:  oklch(0.48 0.14 28 / 7%);
+  --sidebar-hover:   oklch(0.20 0.008 55 / 4%);
+  --table-stripe:    oklch(0.20 0.008 55 / 3%);
+  --blockquote-bar:  oklch(0.48 0.14 28 / 45%);
+  --checkbox-border: oklch(0.20 0.008 55 / 28%);
+  --hr:              oklch(0.20 0.008 55 / 12%);
+  --shadow:          oklch(0.20 0.02 55 / 6%);
+  --pill:            oklch(0.20 0.008 55 / 12%);
+  --grain-opacity:   0.035;
+  --scrollbar-thumb: oklch(0.20 0.008 55 / 16%);
+  --scrollbar-hover: oklch(0.58 0.010 70);
+}
+
+
+/* ============================================
+   INK THEME TOKENS
+   ============================================ */
+
+.theme-ink {
+  --bg:              oklch(0.145 0.005 260);
+  --bg-sidebar:      oklch(0.12 0.006 258);
+  --bg-surface:      oklch(0.165 0.006 260);
+  --fg:              oklch(0.85 0.008 250);
+  --fg-muted:        oklch(0.55 0.008 250);
+  --fg-faint:        oklch(0.38 0.006 255);
+  --accent:          oklch(0.72 0.10 220);
+  --accent-hover:    oklch(0.78 0.12 220);
+  --accent-faint:    oklch(0.72 0.10 220 / 10%);
+  --border:          oklch(1 0 0 / 6%);
+  --border-strong:   oklch(1 0 0 / 10%);
+  --code-bg:         oklch(0.105 0.006 258);
+  --code-border:     oklch(1 0 0 / 5%);
+  --sidebar-active:  oklch(0.72 0.10 220 / 8%);
+  --sidebar-hover:   oklch(1 0 0 / 3%);
+  --table-stripe:    oklch(1 0 0 / 2%);
+  --blockquote-bar:  oklch(0.72 0.10 220 / 40%);
+  --checkbox-border: oklch(1 0 0 / 20%);
+  --hr:              oklch(1 0 0 / 8%);
+  --shadow:          oklch(0 0 0 / 20%);
+  --pill:            oklch(1 0 0 / 10%);
+  --grain-opacity:   0.02;
+  --scrollbar-thumb: oklch(1 0 0 / 10%);
+  --scrollbar-hover: oklch(0.38 0.006 255);
+}
+
+
+/* ============================================
+   APP ELEMENTS — shared between themes
+   ============================================ */
+
+.sidebar {
+  width: 200px;
+  min-width: 200px;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  font-family: 'Source Sans 3', -apple-system, system-ui, sans-serif;
+  font-size: 12.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  overflow-y: auto;
+  position: relative;
+}
+
+.sidebar-drag { height: 38px; flex-shrink: 0; }
+
+.sidebar-group { padding: 0.25rem 0.5rem 0.75rem; }
+
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--fg-muted);
+  transition: background 0.12s, color 0.12s;
+  user-select: none;
+}
+
+.sidebar-item:hover {
+  background: var(--sidebar-hover);
+  color: var(--fg);
+}
+
+.sidebar-item.active {
+  background: transparent;
+  color: var(--fg);
+  box-shadow: inset 2px 0 0 var(--accent);
+  font-weight: 500;
+}
+
+.sidebar-chevron {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  opacity: 0.4;
+  transition: transform 0.15s ease;
+}
+
+.sidebar-chevron.open { transform: rotate(90deg); }
+
+.sidebar-children {
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+  margin-left: 15px;
+  margin-top: 2px;
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'Source Serif 4', Georgia, serif;
+  font-size: 15.5px;
+  font-weight: 400;
+  line-height: 1.72;
+  letter-spacing: 0.003em;
+}
+
+/* Grain overlay per-pane */
+.main::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-size: 200px 200px;
+}
+
+.sidebar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise2'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise2)'/%3E%3C/svg%3E");
+  background-size: 200px 200px;
+}
+
+.topbar {
+  height: 38px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 1.25rem;
+  position: relative;
+}
+
+.drag-pill {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: 16px;
+  width: 40px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--pill);
+}
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'Source Sans 3', system-ui, sans-serif;
+  font-size: 12px;
+}
+
+.breadcrumb-segment {
+  color: var(--fg-faint);
+  text-decoration: none;
+  transition: opacity 0.15s;
+}
+
+.breadcrumb-segment:hover { color: var(--fg-muted); }
+.breadcrumb-separator { color: var(--fg-faint); opacity: 0.4; font-size: 10px; }
+.breadcrumb-current { color: var(--fg-muted); }
+
+.content-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+article {
+  max-width: 60ch;
+  margin: 0 auto;
+  padding: 2rem 2rem 6rem;
+}
+
+
+/* ============================================
+   TYPOGRAPHY
+   ============================================ */
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Source Serif 4', Georgia, serif;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+h1 { font-weight: 700; }
+
+h1 {
+  font-size: 2rem;
+  line-height: 1.18;
+  margin-top: 2.5rem;
+  margin-bottom: 0.75rem;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  font-size: 1.5rem;
+  line-height: 1.24;
+  margin-top: 2.25rem;
+  margin-bottom: 0.5rem;
+  letter-spacing: -0.015em;
+}
+
+h3 {
+  font-size: 1.25rem;
+  line-height: 1.3;
+  margin-top: 2rem;
+  margin-bottom: 0.4rem;
+  letter-spacing: -0.01em;
+}
+
+h4 {
+  font-size: 1.1rem;
+  line-height: 1.4;
+  margin-top: 1.75rem;
+  margin-bottom: 0.4rem;
+  letter-spacing: -0.005em;
+}
+
+h5, h6 {
+  font-size: 1rem;
+  line-height: 1.5;
+  margin-top: 1.5rem;
+  margin-bottom: 0.4rem;
+}
+
+h6 { font-style: italic; font-weight: 400; }
+h1:first-child { margin-top: 0; }
+p { margin-bottom: 1.1rem; }
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  text-underline-offset: 2px;
+  transition: color 0.12s;
+}
+
+a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+}
+
+
+/* ============================================
+   CODE
+   ============================================ */
+
+code {
+  font-family: 'Source Code Pro', 'SF Mono', Consolas, monospace;
+  font-size: 0.84em;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  padding: 0.12em 0.4em;
+  border-radius: 3px;
+  font-weight: 400;
+}
+
+pre {
+  position: relative;
+  margin-bottom: 1.25rem;
+  padding: 1rem 1.125rem;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  overflow-x: auto;
+  line-height: 1.55;
+  box-shadow: inset 0 1px 3px var(--shadow);
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.84rem;
+}
+
+.code-label {
+  display: block;
+  font-family: 'Source Sans 3', system-ui, sans-serif;
+  font-size: 0.6rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+  margin-bottom: 0.5rem;
+  user-select: none;
+}
+
+
+/* ============================================
+   LISTS
+   ============================================ */
+
+ul, ol { margin-bottom: 1.1rem; padding-left: 1.5rem; }
+li { margin-bottom: 0.3rem; }
+li > ul, li > ol { margin-bottom: 0; margin-top: 0.3rem; }
+
+
+/* ============================================
+   TASK LISTS / CHECKBOXES
+   ============================================ */
+
+.task-list { list-style: none; padding-left: 0; }
+
+.task-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin-bottom: 0.5rem;
+  padding: 0.15rem 0;
+}
+
+.task-item input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex-shrink: 0;
+  width: 1rem;
+  height: 1rem;
+  margin-top: 0.3em;
+  border: 1.5px solid var(--checkbox-border);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  position: relative;
+}
+
+.task-item input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3E%3C/svg%3E");
+  background-size: 100% 100%;
+}
+
+.task-item.checked .task-text {
+  text-decoration: line-through;
+  color: var(--fg-faint);
+}
+
+
+/* ============================================
+   TABLES
+   ============================================ */
+
+table { width: 100%; border-collapse: collapse; margin-bottom: 1.25rem; font-size: 0.9rem; }
+th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }
+
+th {
+  font-family: 'Source Sans 3', system-ui, sans-serif;
+  font-weight: 600;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+  border-bottom: 2px solid var(--border-strong);
+  padding-bottom: 0.6rem;
+}
+
+tr:nth-child(even) td { background: var(--table-stripe); }
+
+
+/* ============================================
+   BLOCKQUOTES
+   ============================================ */
+
+blockquote {
+  margin-bottom: 1.1rem;
+  padding: 0.5rem 1.25rem;
+  border-left: 2px solid var(--blockquote-bar);
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+blockquote p:last-child { margin-bottom: 0; }
+
+
+/* ============================================
+   HR
+   ============================================ */
+
+hr {
+  border: none;
+  height: 0;
+  border-top: 1px solid var(--hr);
+  margin: 2.5rem auto;
+  max-width: 8rem;
+}
+
+
+/* ============================================
+   SCROLLBAR
+   ============================================ */
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
+
+</style>
+</head>
+
+<body>
+
+<div class="comparison">
+
+  <!-- ==================== PAPER PANE ==================== -->
+  <div class="comparison-pane theme-paper">
+    <span class="pane-label paper-label">Paper</span>
+    <div class="app">
+      <div class="sidebar">
+        <div class="sidebar-drag"></div>
+        <div class="sidebar-group">
+          <div class="sidebar-item" onclick="this.querySelector('.sidebar-chevron')?.classList.toggle('open'); this.nextElementSibling?.classList.toggle('collapsed')">
+            <svg class="sidebar-chevron open" viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 4.22a.75.75 0 011.06 0l3.25 3.25a.75.75 0 010 1.06l-3.25 3.25a.75.75 0 01-1.06-1.06L8.94 8 6.22 5.28a.75.75 0 010-1.06z"/></svg>
+            <span>docs</span>
+          </div>
+          <div class="sidebar-children">
+            <div class="sidebar-item"><span>getting-started.md</span></div>
+            <div class="sidebar-item active"><span>typography.md</span></div>
+            <div class="sidebar-item"><span>api-reference.md</span></div>
+          </div>
+          <div class="sidebar-item" style="margin-top: 2px"><span>README.md</span></div>
+          <div class="sidebar-item"><span>CHANGELOG.md</span></div>
+          <div class="sidebar-item"><span>notes.md</span></div>
+        </div>
+      </div>
+
+      <div class="main">
+        <div class="topbar">
+          <div class="drag-pill"></div>
+          <nav class="breadcrumb">
+            <a href="#" class="breadcrumb-segment">docs</a>
+            <span class="breadcrumb-separator">&rsaquo;</span>
+            <span class="breadcrumb-current">typography.md</span>
+          </nav>
+        </div>
+        <div class="content-scroll" id="paper-scroll">
+          <article>
+            <h1>The Art of Typography</h1>
+            <p>Good typography is invisible. Great typography is a quiet pleasure that readers feel without consciously noticing. The goal is to create a reading experience that feels natural, warm, and unhurried &mdash; like words printed on fine paper.</p>
+            <p>This mockup demonstrates the <strong>paper theme</strong> for <a href="#">attn</a>, a native markdown viewer. Every element is designed to evoke the tactile quality of printed material.</p>
+
+            <h2>Heading Hierarchy</h2>
+            <p>A clear typographic hierarchy guides the reader through content without visual noise. Each heading level steps down with intention.</p>
+            <h3>Third-Level Heading</h3>
+            <p>Section separations use generous top margins that increase with heading importance, creating natural breathing room between ideas.</p>
+            <h4>Fourth-Level Heading</h4>
+            <p>At this level, headings feel more like emphasized paragraph leads than section titles.</p>
+
+            <hr>
+
+            <h2>Tasks</h2>
+            <ul class="task-list">
+              <li class="task-item checked"><input type="checkbox" checked><span class="task-text">Design the color system with warm, paper-inspired tones</span></li>
+              <li class="task-item checked"><input type="checkbox" checked><span class="task-text">Select serif typeface for body text</span></li>
+              <li class="task-item"><input type="checkbox"><span class="task-text">Add syntax highlighting with muted, ink-like colors</span></li>
+              <li class="task-item"><input type="checkbox"><span class="task-text">Test across all fixture files</span></li>
+            </ul>
+
+            <h2>Code Example</h2>
+            <p>Code blocks sit slightly recessed into the page, as if printed on a different stock.</p>
+            <pre><span class="code-label">rust</span><code>fn main() {
+    let greeting = "Hello from attn!";
+    println!("{greeting}");
+
+    let items = vec!["paper", "ink", "type"];
+    for item in &items {
+        println!("  &rarr; {item}");
+    }
+}</code></pre>
+            <p>Inline code like <code>let x = 42</code> or <code>Vec&lt;String&gt;</code> blends into the paragraph with minimal visual disruption.</p>
+
+            <h2>Data Table</h2>
+            <table>
+              <thead><tr><th>Element</th><th>Font</th><th>Weight</th><th>Size</th></tr></thead>
+              <tbody>
+                <tr><td>Body</td><td>Source Serif 4</td><td>400</td><td>15.5px</td></tr>
+                <tr><td>Headings</td><td>Source Serif 4</td><td>600&ndash;700</td><td>1&ndash;2rem</td></tr>
+                <tr><td>UI / Sidebar</td><td>Source Sans 3</td><td>400&ndash;500</td><td>12.5px</td></tr>
+                <tr><td>Code</td><td>Source Code Pro</td><td>400</td><td>0.84em</td></tr>
+              </tbody>
+            </table>
+
+            <h2>Blockquote</h2>
+            <blockquote>
+              <p>Typography is the craft of endowing human language with a durable visual form, and thus with an independent existence.</p>
+              <p>&mdash; Robert Bringhurst, <em>The Elements of Typographic Style</em></p>
+            </blockquote>
+
+            <h2>Lists</h2>
+            <ul>
+              <li>Warm background tones derived from natural paper</li>
+              <li>Ink-like text color &mdash; not pure black, but <code>oklch(0.22 0.008 60)</code></li>
+              <li>Terracotta accent for links and interactive elements
+                <ul>
+                  <li>Desaturates gracefully in dark mode</li>
+                  <li>Maintains WCAG AA contrast</li>
+                </ul>
+              </li>
+              <li>Subtle grain overlay simulates paper texture</li>
+            </ul>
+            <ol>
+              <li>Choose a warm, neutral base palette</li>
+              <li>Select a transitional serif for body text</li>
+              <li>Set generous line-height (1.72) for comfortable reading</li>
+              <li>Add micro-typography refinements
+                <ol>
+                  <li>Negative letter-spacing on headings</li>
+                  <li>Optical margin adjustments</li>
+                </ol>
+              </li>
+            </ol>
+
+            <hr>
+
+            <h2>Design Principles</h2>
+            <p><strong>Warmth over neutrality.</strong> Every gray has a slight warm bias. Pure blacks and whites are avoided entirely.</p>
+            <p><strong>Texture over flatness.</strong> The subtle grain overlay, inset code block shadows, and paper-toned backgrounds create a sense of physical depth.</p>
+            <p><strong>Restraint over decoration.</strong> The beauty comes from proportion, spacing, and typeface selection &mdash; not from ornament.</p>
+          </article>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ==================== INK PANE ==================== -->
+  <div class="comparison-pane theme-ink">
+    <span class="pane-label ink-label">Ink</span>
+    <div class="app">
+      <div class="sidebar">
+        <div class="sidebar-drag"></div>
+        <div class="sidebar-group">
+          <div class="sidebar-item" onclick="this.querySelector('.sidebar-chevron')?.classList.toggle('open'); this.nextElementSibling?.classList.toggle('collapsed')">
+            <svg class="sidebar-chevron open" viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 4.22a.75.75 0 011.06 0l3.25 3.25a.75.75 0 010 1.06l-3.25 3.25a.75.75 0 01-1.06-1.06L8.94 8 6.22 5.28a.75.75 0 010-1.06z"/></svg>
+            <span>docs</span>
+          </div>
+          <div class="sidebar-children">
+            <div class="sidebar-item"><span>getting-started.md</span></div>
+            <div class="sidebar-item active"><span>typography.md</span></div>
+            <div class="sidebar-item"><span>api-reference.md</span></div>
+          </div>
+          <div class="sidebar-item" style="margin-top: 2px"><span>README.md</span></div>
+          <div class="sidebar-item"><span>CHANGELOG.md</span></div>
+          <div class="sidebar-item"><span>notes.md</span></div>
+        </div>
+      </div>
+
+      <div class="main">
+        <div class="topbar">
+          <div class="drag-pill"></div>
+          <nav class="breadcrumb">
+            <a href="#" class="breadcrumb-segment">docs</a>
+            <span class="breadcrumb-separator">&rsaquo;</span>
+            <span class="breadcrumb-current">typography.md</span>
+          </nav>
+        </div>
+        <div class="content-scroll" id="ink-scroll">
+          <article>
+            <h1>The Art of Typography</h1>
+            <p>Good typography is invisible. Great typography is a quiet pleasure that readers feel without consciously noticing. The goal is to create a reading experience that feels natural, warm, and unhurried &mdash; like words printed on fine paper.</p>
+            <p>This mockup demonstrates the <strong>ink theme</strong> for <a href="#">attn</a>, a native markdown viewer. Every element is designed to feel like luminous text drawn with light on dark stock.</p>
+
+            <h2>Heading Hierarchy</h2>
+            <p>A clear typographic hierarchy guides the reader through content without visual noise. Each heading level steps down with intention.</p>
+            <h3>Third-Level Heading</h3>
+            <p>Section separations use generous top margins that increase with heading importance, creating natural breathing room between ideas.</p>
+            <h4>Fourth-Level Heading</h4>
+            <p>At this level, headings feel more like emphasized paragraph leads than section titles.</p>
+
+            <hr>
+
+            <h2>Tasks</h2>
+            <ul class="task-list">
+              <li class="task-item checked"><input type="checkbox" checked><span class="task-text">Design the color system with cool, ink-inspired tones</span></li>
+              <li class="task-item checked"><input type="checkbox" checked><span class="task-text">Select serif typeface for body text</span></li>
+              <li class="task-item"><input type="checkbox"><span class="task-text">Add syntax highlighting with muted, cool colors</span></li>
+              <li class="task-item"><input type="checkbox"><span class="task-text">Test across all fixture files</span></li>
+            </ul>
+
+            <h2>Code Example</h2>
+            <p>Code blocks recede into the dark background, creating a pooled-ink effect with subtle borders.</p>
+            <pre><span class="code-label">rust</span><code>fn main() {
+    let greeting = "Hello from attn!";
+    println!("{greeting}");
+
+    let items = vec!["paper", "ink", "type"];
+    for item in &items {
+        println!("  &rarr; {item}");
+    }
+}</code></pre>
+            <p>Inline code like <code>let x = 42</code> or <code>Vec&lt;String&gt;</code> blends into the paragraph with minimal visual disruption.</p>
+
+            <h2>Data Table</h2>
+            <table>
+              <thead><tr><th>Element</th><th>Font</th><th>Weight</th><th>Size</th></tr></thead>
+              <tbody>
+                <tr><td>Body</td><td>Source Serif 4</td><td>400</td><td>15.5px</td></tr>
+                <tr><td>Headings</td><td>Source Serif 4</td><td>600&ndash;700</td><td>1&ndash;2rem</td></tr>
+                <tr><td>UI / Sidebar</td><td>Source Sans 3</td><td>400&ndash;500</td><td>12.5px</td></tr>
+                <tr><td>Code</td><td>Source Code Pro</td><td>400</td><td>0.84em</td></tr>
+              </tbody>
+            </table>
+
+            <h2>Blockquote</h2>
+            <blockquote>
+              <p>Typography is the craft of endowing human language with a durable visual form, and thus with an independent existence.</p>
+              <p>&mdash; Robert Bringhurst, <em>The Elements of Typographic Style</em></p>
+            </blockquote>
+
+            <h2>Lists</h2>
+            <ul>
+              <li>Cool blue-gray backgrounds like deep ink pools</li>
+              <li>High-luminance text &mdash; not pure white, but <code>oklch(0.85 0.008 250)</code></li>
+              <li>Steel-blue accent for links and interactive elements
+                <ul>
+                  <li>Brightens gracefully on hover</li>
+                  <li>Maintains WCAG AA contrast</li>
+                </ul>
+              </li>
+              <li>Subtle grain overlay simulates paper texture in the dark</li>
+            </ul>
+            <ol>
+              <li>Choose a cool, blue-tinted dark base</li>
+              <li>Select a transitional serif for body text</li>
+              <li>Set generous line-height (1.72) for comfortable reading</li>
+              <li>Add micro-typography refinements
+                <ol>
+                  <li>Negative letter-spacing on headings</li>
+                  <li>Optical margin adjustments</li>
+                </ol>
+              </li>
+            </ol>
+
+            <hr>
+
+            <h2>Design Principles</h2>
+            <p><strong>Coolness over warmth.</strong> The palette shifts from paper's warm hue toward blue-gray steel. Every surface has a cool undertone.</p>
+            <p><strong>Depth over flatness.</strong> Dark backgrounds with subtle luminance steps create pools and layers, like ink at different dilutions.</p>
+            <p><strong>Restraint over decoration.</strong> The beauty comes from proportion, spacing, and typeface selection &mdash; not from ornament.</p>
+          </article>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+
+<script>
+// Collapsed toggle
+document.head.insertAdjacentHTML('beforeend', '<style>.collapsed { display: none; }</style>');
+
+// Sync scroll between panes
+const paperScroll = document.getElementById('paper-scroll');
+const inkScroll = document.getElementById('ink-scroll');
+let syncing = false;
+
+paperScroll.addEventListener('scroll', () => {
+  if (syncing) return;
+  syncing = true;
+  inkScroll.scrollTop = paperScroll.scrollTop;
+  syncing = false;
+});
+
+inkScroll.addEventListener('scroll', () => {
+  if (syncing) return;
+  syncing = true;
+  paperScroll.scrollTop = inkScroll.scrollTop;
+  syncing = false;
+});
+</script>
+
+</body>
+</html>

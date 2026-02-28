@@ -5,6 +5,13 @@ edition = "2024"
 description = "A beautiful markdown viewer that launches from the CLI"
 license = "MIT"
 
+[package.metadata.bundle]
+name = "attn"
+identifier = "dev.jameslal.attn"
+icon = ["icons/attn.icns"]
+category = "DeveloperTool"
+short_description = "A beautiful markdown viewer that launches from the CLI"
+
 [[bin]]
 name = "attn"
 path = "src/main.rs"
@@ -13,11 +20,21 @@ path = "src/main.rs"
 wry = "0.49"
 tao = "0.32"
 clap = { version = "4", features = ["derive"] }
-comrak = { version = "0.36", default-features = false, features = ["syntect"] }
-syntect = "5"
 notify = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-include_dir = "0.7"
-base64 = "0.22"
 open = "5"
+anyhow = "1"
+dirs = "6"
+nix = { version = "0.29", features = ["process", "signal", "fs"] }
+percent-encoding = "2.3.2"
+
+[features]
+production = []
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSImage", "NSImageRep", "NSBitmapImageRep"] }
+objc2-foundation = "0.3"
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2"] }
+block2 = "0.6"

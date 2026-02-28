@@ -7,10 +7,12 @@ use tao::event_loop::EventLoopProxy;
 /// Sent from background threads to wake the event loop.
 #[derive(Debug)]
 pub enum UserEvent {
-    /// The watched file was modified on disk.
-    FileChanged,
+    /// One or more watched files changed on disk.
+    FsChanged(Vec<PathBuf>),
     /// Another attn invocation wants to open a new path.
     OpenPath(PathBuf),
+    /// Switch to a project root and refresh sidebar content.
+    SwitchProject(PathBuf),
     /// Take a screenshot and send the path back through the channel.
     Screenshot(std::sync::mpsc::Sender<String>),
     /// Request daemon info (binary path, PID) and send back through the channel.
@@ -24,39 +26,33 @@ pub enum UserEvent {
 }
 
 pub struct FileWatcher {
-    _watcher: RecommendedWatcher,
+    watcher: RecommendedWatcher,
+    watched_root: Option<PathBuf>,
 }
 
 /// Debounce interval — ignore duplicate events within this window.
 const DEBOUNCE_MS: u128 = 100;
 
 impl FileWatcher {
-    /// Start watching `path` (or its parent directory if it's a file).
-    /// Sends `UserEvent::FileChanged` through the proxy when a relevant
-    /// change is detected, with basic debouncing.
+    /// Start watching `path` (directory-recursive, or parent directory for files).
+    /// Sends `UserEvent::FsChanged` through the proxy with changed paths,
+    /// with basic debouncing.
     pub fn new(path: &Path, proxy: EventLoopProxy<UserEvent>) -> Result<Self, notify::Error> {
-        let watched_file: Option<PathBuf> = if path.is_file() {
-            Some(path.to_path_buf())
-        } else {
-            None
-        };
-
         let last_event = Arc::new(Mutex::new(
             Instant::now() - std::time::Duration::from_secs(1),
         ));
 
-        let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+        let watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             if let Ok(event) = res {
-                if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                if !matches!(
+                    event.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) {
                     return;
                 }
 
-                // If we're watching a specific file, filter to only that file
-                if let Some(ref target) = watched_file {
-                    let dominated = event.paths.iter().any(|p| p == target);
-                    if !dominated {
-                        return;
-                    }
+                if event.paths.is_empty() {
+                    return;
                 }
 
                 // Debounce: skip if last event was within the window
@@ -69,18 +65,41 @@ impl FileWatcher {
                 }
                 *last = now;
 
-                let _ = proxy.send_event(UserEvent::FileChanged);
+                let _ = proxy.send_event(UserEvent::FsChanged(event.paths));
             }
         })?;
 
+        let mut this = Self {
+            watcher,
+            watched_root: None,
+        };
+        this.update_root(path)?;
+        Ok(this)
+    }
+
+    /// Retarget the watcher to a new project root.
+    pub fn update_root(&mut self, path: &Path) -> Result<(), notify::Error> {
         let watch_path = if path.is_file() {
             path.parent().unwrap_or(path)
         } else {
             path
         };
 
-        watcher.watch(watch_path, RecursiveMode::NonRecursive)?;
+        let next_root = watch_path.to_path_buf();
+        if self
+            .watched_root
+            .as_ref()
+            .is_some_and(|current| current == &next_root)
+        {
+            return Ok(());
+        }
 
-        Ok(Self { _watcher: watcher })
+        if let Some(current) = &self.watched_root {
+            let _ = self.watcher.unwatch(current);
+        }
+
+        self.watcher.watch(&next_root, RecursiveMode::Recursive)?;
+        self.watched_root = Some(next_root);
+        Ok(())
     }
 }

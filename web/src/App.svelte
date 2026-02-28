@@ -10,7 +10,7 @@
     UpdatePayload,
   } from './lib/types';
   import { initKeyboard } from './lib/keyboard';
-  import { dragWindow, editSave, navigate } from './lib/ipc';
+  import { dragWindow, editSave, navigate, switchProject } from './lib/ipc';
   import { initTheme } from './lib/theme';
   import { createTab, findTabByPath, type Tab } from './lib/tabs';
   import Editor from './lib/Editor.svelte';
@@ -40,6 +40,8 @@
   let structure: PlanStructure = $state({ phases: [], tasks: [], file_refs: [] });
   let fileTree: TreeNode[] = $state([]);
   let rootPath = $state('');
+  let knownProjects: string[] = $state([]);
+  let activeProjectPath = $state('');
   let diagMode: DiagMode = $state('full');
   let editorRef: ReturnType<typeof Editor> | undefined = $state(undefined);
 
@@ -61,6 +63,10 @@
   let showTabBar = $derived(tabs.length > 1);
   let markdownFetchSeq = 0;
   const loadedMtimeByPath = new Map<string, number>();
+  const markdownCacheByPath = new Map<string, string>();
+  const deferredReloadMtimeByPath = new Map<string, number | null>();
+  const deferredReloadNoticeByPath = new Set<string>();
+  let editorDirty = $state(false);
   type OutlineHeading = { id: string; text: string; level: number; line: number };
   let outlineHeadings: OutlineHeading[] = $state([]);
   let activeOutlineId = $state('');
@@ -268,11 +274,44 @@
     openPath(files[newIdx]);
   }
 
+  function handleEditorDirtyChange(dirty: boolean): void {
+    editorDirty = dirty;
+  }
+
+  function deferExternalReload(path: string, contentMtimeMs?: number): void {
+    if (!path) return;
+    deferredReloadMtimeByPath.set(path, typeof contentMtimeMs === 'number' ? contentMtimeMs : null);
+    if (deferredReloadNoticeByPath.has(path)) return;
+    deferredReloadNoticeByPath.add(path);
+    toast.info('File changed on disk. Reload will apply after save or cancel.');
+  }
+
+  async function flushDeferredReload(path: string): Promise<void> {
+    if (!path || !deferredReloadMtimeByPath.has(path)) return;
+    const pendingMtime = deferredReloadMtimeByPath.get(path);
+    deferredReloadMtimeByPath.delete(path);
+    deferredReloadNoticeByPath.delete(path);
+    await loadMarkdownForPath(path, typeof pendingMtime === 'number' ? pendingMtime : undefined);
+  }
+
+  function invalidatePathCaches(paths: string[]): void {
+    for (const path of paths) {
+      if (!path) continue;
+      markdownCacheByPath.delete(path);
+      loadedMtimeByPath.delete(path);
+    }
+  }
+
   async function loadMarkdownForPath(path: string, contentMtimeMs?: number): Promise<void> {
     if (!path || detectFileType(path) !== 'markdown') return;
+    const cachedMarkdown = markdownCacheByPath.get(path);
     if (typeof contentMtimeMs === 'number') {
       const lastMtime = loadedMtimeByPath.get(path);
-      if (lastMtime === contentMtimeMs) return;
+      if (lastMtime === contentMtimeMs && typeof cachedMarkdown === 'string') {
+        rawMarkdown = cachedMarkdown;
+        structure = extractStructureFromMarkdown(cachedMarkdown);
+        return;
+      }
     }
 
     const requestId = ++markdownFetchSeq;
@@ -284,6 +323,9 @@
 
       rawMarkdown = markdown;
       structure = extractStructureFromMarkdown(markdown);
+      markdownCacheByPath.set(path, markdown);
+      deferredReloadMtimeByPath.delete(path);
+      deferredReloadNoticeByPath.delete(path);
       if (typeof contentMtimeMs === 'number') {
         loadedMtimeByPath.set(path, contentMtimeMs);
       }
@@ -318,12 +360,26 @@
 
     rawMarkdown = init.markdown ?? '';
     structure = init.structure ?? emptyPlanStructure();
+    if (init.filePath && detectFileType(init.filePath) === 'markdown' && typeof init.markdown === 'string') {
+      markdownCacheByPath.set(init.filePath, init.markdown);
+      if (typeof init.contentMtimeMs === 'number') {
+        loadedMtimeByPath.set(init.filePath, init.contentMtimeMs);
+      }
+    }
     diagMode = init.diagMode ?? 'full';
     if (init.fileTree) {
       fileTree = init.fileTree;
     }
     if (init.rootPath) {
       rootPath = init.rootPath;
+    }
+    if (init.knownProjects) {
+      knownProjects = init.knownProjects;
+    }
+    if (init.activeProjectPath) {
+      activeProjectPath = init.activeProjectPath;
+    } else if (init.rootPath) {
+      activeProjectPath = init.rootPath;
     }
     if (init.filePath) {
       const ft = detectFileType(init.filePath);
@@ -359,6 +415,14 @@
     function applySetContent(data: ContentPayload): void {
       if (typeof data.markdown === 'string') {
         rawMarkdown = data.markdown;
+        if (detectFileType(data.filePath) === 'markdown') {
+          markdownCacheByPath.set(data.filePath, data.markdown);
+          deferredReloadMtimeByPath.delete(data.filePath);
+          deferredReloadNoticeByPath.delete(data.filePath);
+          if (typeof data.contentMtimeMs === 'number') {
+            loadedMtimeByPath.set(data.filePath, data.contentMtimeMs);
+          }
+        }
         if (data.structure) {
           structure = data.structure;
         } else {
@@ -403,15 +467,52 @@
       if (data.fileTree) {
         fileTree = data.fileTree;
       }
+      if (data.rootPath) {
+        rootPath = data.rootPath;
+      }
+      if (data.knownProjects) {
+        knownProjects = data.knownProjects;
+      }
+      if (data.activeProjectPath) {
+        activeProjectPath = data.activeProjectPath;
+      }
       if (detectFileType(data.filePath) === 'markdown' && typeof data.markdown !== 'string') {
-        rawMarkdown = '';
-        void loadMarkdownForPath(data.filePath, data.contentMtimeMs);
+        if (mode === 'edit' && editorDirty && data.filePath === activePath) {
+          deferExternalReload(data.filePath, data.contentMtimeMs);
+        } else {
+          void loadMarkdownForPath(data.filePath, data.contentMtimeMs);
+        }
       }
     }
 
     function applyUpdateContent(data: UpdatePayload): void {
+      if (data.fileTree) {
+        fileTree = data.fileTree;
+      }
+      if (data.rootPath) {
+        rootPath = data.rootPath;
+      }
+      if (data.knownProjects) {
+        knownProjects = data.knownProjects;
+      }
+      if (data.activeProjectPath) {
+        activeProjectPath = data.activeProjectPath;
+      }
+      if (data.changedPaths && data.changedPaths.length > 0) {
+        invalidatePathCaches(data.changedPaths);
+      }
+
       if (typeof data.markdown === 'string') {
         rawMarkdown = data.markdown;
+        const sourcePath = data.filePath ?? activePath;
+        if (sourcePath && detectFileType(sourcePath) === 'markdown') {
+          markdownCacheByPath.set(sourcePath, data.markdown);
+          deferredReloadMtimeByPath.delete(sourcePath);
+          deferredReloadNoticeByPath.delete(sourcePath);
+          if (typeof data.contentMtimeMs === 'number') {
+            loadedMtimeByPath.set(sourcePath, data.contentMtimeMs);
+          }
+        }
         if (data.structure) {
           structure = data.structure;
         } else {
@@ -423,9 +524,16 @@
       if (data.structure) {
         structure = data.structure;
       }
-      const targetPath = data.filePath ?? activePath;
+      let targetPath = data.filePath;
+      if (!targetPath && data.changedPaths?.includes(activePath)) {
+        targetPath = activePath;
+      }
       if (targetPath && targetPath === activePath && detectFileType(targetPath) === 'markdown') {
-        void loadMarkdownForPath(targetPath, data.contentMtimeMs);
+        if (mode === 'edit' && editorDirty) {
+          deferExternalReload(targetPath, data.contentMtimeMs);
+        } else {
+          void loadMarkdownForPath(targetPath, data.contentMtimeMs);
+        }
       }
     }
 
@@ -465,14 +573,30 @@
   function saveAndExitEdit(): void {
     if (editorRef) {
       const md = editorRef.getMarkdown();
+      if (activePath && detectFileType(activePath) === 'markdown') {
+        rawMarkdown = md;
+        markdownCacheByPath.set(activePath, md);
+      }
       structure = extractStructureFromMarkdown(md);
       editSave(md);
+      editorRef.resetToMarkdown(md);
+      editorDirty = false;
       toast.success('File saved');
+      if (activePath) {
+        void flushDeferredReload(activePath);
+      }
     }
     mode = 'read';
   }
 
   function cancelEdit(): void {
+    if (editorRef) {
+      editorRef.resetToMarkdown(rawMarkdown);
+    }
+    editorDirty = false;
+    if (activePath && detectFileType(activePath) === 'markdown') {
+      void flushDeferredReload(activePath);
+    }
     mode = 'read';
     toast.info('Edit cancelled');
   }
@@ -482,10 +606,16 @@
     openPath(path, undefined, newTab);
   }
 
+  function handleProjectSwitch(path: string): void {
+    if (!path || path === activeProjectPath) return;
+    switchProject(path);
+  }
+
   $effect(() => {
     if (activeFileType !== 'markdown') {
       outlineHeadings = [];
       activeOutlineId = '';
+      editorDirty = false;
       return;
     }
 
@@ -597,6 +727,7 @@
         editable={mode === 'edit'}
         onSave={saveAndExitEdit}
         onCancel={cancelEdit}
+        onDirtyChange={handleEditorDirtyChange}
       />
     {:else if activeFileType === 'image'}
       <ImageViewer src={markdownSourceUrl(activePath)} />
@@ -633,6 +764,7 @@
         editable={mode === 'edit'}
         onSave={saveAndExitEdit}
         onCancel={cancelEdit}
+        onDirtyChange={handleEditorDirtyChange}
       />
     {:else}
       <div class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
@@ -659,8 +791,11 @@
       entries={fileTree}
       {activePath}
       {rootPath}
+      {knownProjects}
+      {activeProjectPath}
       outline={outlineHeadings}
       {activeOutlineId}
+      onProjectSwitch={handleProjectSwitch}
       onNavigate={handleSidebarNavigate}
       onOutlineNavigate={handleOutlineNavigate}
     />

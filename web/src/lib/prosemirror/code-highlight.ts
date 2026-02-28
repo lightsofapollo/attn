@@ -1,18 +1,26 @@
 import { Plugin, PluginKey } from 'prosemirror-state';
 import type { EditorState } from 'prosemirror-state';
 import { Decoration, DecorationSet } from 'prosemirror-view';
-import type { EditorView } from 'prosemirror-view';
 import type { Node as PmNode } from 'prosemirror-model';
-import type { HLJSApi } from 'highlight.js';
+import hljs from 'highlight.js/lib/common';
 
 const highlightKey = new PluginKey('code-highlight');
 const MAX_CODE_BLOCK_CHARS = 20_000;
 const MAX_TOTAL_HIGHLIGHT_CHARS = 120_000;
 const MAX_AUTODETECT_CHARS = 4_000;
 
-let hljs: HLJSApi | null = null;
-let hljsLoading: Promise<HLJSApi> | null = null;
 let lastHighlightSkipSignature = '';
+
+hljs.registerAliases(['js', 'jsx'], { languageName: 'javascript' });
+hljs.registerAliases(['ts', 'tsx'], { languageName: 'typescript' });
+hljs.registerAliases(['py'], { languageName: 'python' });
+hljs.registerAliases(['cxx', 'cpp', 'c++', 'h', 'hpp'], { languageName: 'cpp' });
+hljs.registerAliases(['c#'], { languageName: 'csharp' });
+hljs.registerAliases(['sh', 'zsh', 'bashrc', 'shell'], { languageName: 'bash' });
+hljs.registerAliases(['yml'], { languageName: 'yaml' });
+hljs.registerAliases(['html', 'xhtml', 'xsl'], { languageName: 'xml' });
+hljs.registerAliases(['rs'], { languageName: 'rust' });
+hljs.registerAliases(['text', 'plain'], { languageName: 'plaintext' });
 
 function hasCodeBlocks(doc: PmNode): boolean {
   let hasCodeBlock = false;
@@ -24,29 +32,6 @@ function hasCodeBlocks(doc: PmNode): boolean {
     return true;
   });
   return hasCodeBlock;
-}
-
-function loadHljs(): Promise<HLJSApi> {
-  if (hljs) return Promise.resolve(hljs);
-  if (hljsLoading) return hljsLoading;
-  hljsLoading = import('highlight.js/lib/common').then(async (mod) => {
-    const core = mod.default;
-    // common includes a broad language set (far more than the previous manual subset)
-    // and keeps loading deferred until markdown with code blocks is shown.
-    core.registerAliases(['js', 'jsx'], { languageName: 'javascript' });
-    core.registerAliases(['ts', 'tsx'], { languageName: 'typescript' });
-    core.registerAliases(['py'], { languageName: 'python' });
-    core.registerAliases(['cxx', 'cpp', 'c++', 'h', 'hpp'], { languageName: 'cpp' });
-    core.registerAliases(['c#'], { languageName: 'csharp' });
-    core.registerAliases(['sh', 'zsh', 'bashrc', 'shell'], { languageName: 'bash' });
-    core.registerAliases(['yml'], { languageName: 'yaml' });
-    core.registerAliases(['html', 'xhtml', 'xsl'], { languageName: 'xml' });
-    core.registerAliases(['rs'], { languageName: 'rust' });
-    core.registerAliases(['text', 'plain'], { languageName: 'plaintext' });
-    hljs = core;
-    return core;
-  });
-  return hljsLoading;
 }
 
 /** Parse hljs HTML output into a flat list of {className, text} segments */
@@ -110,8 +95,6 @@ function parseHljsHtml(html: string): HljsSpan[] {
 }
 
 function getDecorations(doc: PmNode): DecorationSet {
-  if (!hljs) return DecorationSet.empty;
-
   const decorations: Decoration[] = [];
   let totalHighlightedChars = 0;
   let highlightedBlocks = 0;
@@ -139,10 +122,10 @@ function getDecorations(doc: PmNode): DecorationSet {
 
     let result;
     try {
-      if (lang && hljs!.getLanguage(lang)) {
-        result = hljs!.highlight(code, { language: lang, ignoreIllegals: true });
+      if (lang && hljs.getLanguage(lang)) {
+        result = hljs.highlight(code, { language: lang, ignoreIllegals: true });
       } else if (code.length <= MAX_AUTODETECT_CHARS) {
-        result = hljs!.highlightAuto(code);
+        result = hljs.highlightAuto(code);
       } else {
         skippedAutodetectBlocks++;
         return false;
@@ -192,21 +175,11 @@ export function codeHighlightPlugin(): Plugin {
     key: highlightKey,
     state: {
       init(_, state: EditorState) {
-        // Kick off lazy load if there are code blocks
-        if (hasCodeBlocks(state.doc)) {
-          loadHljs();
-        }
-        return DecorationSet.empty;
+        return hasCodeBlocks(state.doc) ? getDecorations(state.doc) : DecorationSet.empty;
       },
       apply(tr, old, _oldState, newState) {
-        if (!tr.docChanged && !tr.getMeta(highlightKey) && hljs) return old;
-        if (!hljs) {
-          // Check if we need to start loading
-          if (hasCodeBlocks(newState.doc) && !hljsLoading) {
-            loadHljs();
-          }
-          return DecorationSet.empty;
-        }
+        if (!tr.docChanged && !tr.getMeta(highlightKey)) return old;
+        if (!hasCodeBlocks(newState.doc)) return DecorationSet.empty;
         return getDecorations(newState.doc);
       },
     },
@@ -214,29 +187,6 @@ export function codeHighlightPlugin(): Plugin {
       decorations(state) {
         return this.getState(state);
       },
-    },
-    view(editorView) {
-      let waitingForLoad = false;
-      const requestLoad = (view: EditorView) => {
-        if (hljs || waitingForLoad || !hasCodeBlocks(view.state.doc)) return;
-        waitingForLoad = true;
-        loadHljs()
-          .then(() => {
-            const tr = view.state.tr.setMeta(highlightKey, 'loaded');
-            view.dispatch(tr);
-          })
-          .finally(() => {
-            waitingForLoad = false;
-          });
-      };
-
-      requestLoad(editorView);
-
-      return {
-        update(view) {
-          requestLoad(view);
-        },
-      };
     },
   });
 }

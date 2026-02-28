@@ -2,6 +2,7 @@ mod daemon;
 mod files;
 mod ipc;
 mod markdown;
+mod projects;
 #[cfg(all(not(feature = "production"), target_os = "macos"))]
 mod screenshot;
 mod watcher;
@@ -9,6 +10,7 @@ mod watcher;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use percent_encoding::percent_decode_str;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tao::event::{ElementState, Event, WindowEvent};
@@ -200,12 +202,7 @@ fn run() -> Result<()> {
 
 fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     // Read file tree for the sidebar
-    let tree_root = if path.is_file() {
-        path.parent().unwrap_or(&path).to_path_buf()
-    } else {
-        path.clone()
-    };
-    let file_tree = files::read_tree(&tree_root);
+    let (tree_root, file_tree, initial_ui_path) = project_view_for_path(&path);
     let file_tree_nodes = count_tree_nodes(&file_tree);
     let file_tree_json = serde_json::to_string(&file_tree).unwrap_or_default();
     eprintln!(
@@ -214,15 +211,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         file_tree_nodes,
         file_tree_json.len()
     );
-
-    // Choose the initial path shown in the UI:
-    // - file launch: that file
-    // - directory launch: first previewable file from the tree (if any)
-    let initial_ui_path = if path.is_file() {
-        path.clone()
-    } else {
-        find_first_previewable_path(&file_tree).unwrap_or_else(|| path.clone())
-    };
+    let project_registry = update_active_project_registry(&tree_root);
 
     let initial_structure = markdown::PlanStructure::default();
     let (initial_mtime_ms, initial_bytes) = content_metadata_for_path(&initial_ui_path);
@@ -243,6 +232,8 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         "filePath": initial_ui_path.to_string_lossy(),
         "rootPath": tree_root.to_string_lossy(),
         "fileTree": &file_tree,
+        "knownProjects": &project_registry.known_projects,
+        "activeProjectPath": project_registry.active_project,
         "theme": theme,
         "diagMode": diag_mode,
         "contentMtimeMs": initial_mtime_ms,
@@ -278,19 +269,17 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
 
     // Start the unix socket listener for incoming paths
     let _socket_cleanup = daemon::start_listener(event_loop.create_proxy())?;
+    let watcher_proxy = event_loop.create_proxy();
 
-    // Start file watcher if viewing a single file
-    let _file_watcher = if initial_ui_path.is_file() {
-        let proxy = event_loop.create_proxy();
-        match watcher::FileWatcher::new(&initial_ui_path, proxy) {
+    // Start recursive file watcher for the current project root.
+    let mut file_watcher = {
+        match watcher::FileWatcher::new(&tree_root, watcher_proxy.clone()) {
             Ok(fw) => Some(fw),
             Err(e) => {
-                eprintln!("attn: could not watch file: {e}");
+                eprintln!("attn: could not watch project tree: {e}");
                 None
             }
         }
-    } else {
-        None
     };
 
     let mut window_builder = WindowBuilder::new()
@@ -375,7 +364,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         .context("failed to create webview")?;
     eprintln!("attn: webview initialized");
 
-    let watched_path = initial_ui_path.clone();
+    let mut current_tree_root = tree_root.clone();
 
     let mut modifiers = ModifiersState::default();
     eprintln!("attn: event loop running");
@@ -415,18 +404,52 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     }
                 }
             }
-            Event::UserEvent(UserEvent::FileChanged) => {
-                if watched_path.is_file() {
-                    let path_str = watched_path.to_string_lossy().to_string();
-                    let (content_mtime_ms, content_bytes) = content_metadata_for_path(&watched_path);
-                    let payload = serde_json::json!({
-                        "filePath": path_str,
-                        "contentMtimeMs": content_mtime_ms,
-                        "contentBytes": content_bytes,
-                    });
-                    let js = format!("window.__attn__.updateContent({payload});");
-                    let _ = webview.evaluate_script(&js);
+            Event::UserEvent(UserEvent::FsChanged(changed_paths)) => {
+                if changed_paths.is_empty() {
+                    return;
                 }
+
+                let mut dedup = HashSet::new();
+                let changed_paths: Vec<String> = changed_paths
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .filter(|path| dedup.insert(path.clone()))
+                    .collect();
+
+                let active_path = app_state.lock().ok().map(|state| state.file_path.clone());
+                let active_path_str = active_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let active_changed = !active_path_str.is_empty()
+                    && changed_paths.iter().any(|path| path == &active_path_str);
+
+                let include_tree = changed_paths.iter().any(|path| path != &active_path_str);
+                let mut payload = serde_json::Map::new();
+                payload.insert("changedPaths".to_string(), serde_json::json!(changed_paths));
+
+                if include_tree {
+                    payload.insert(
+                        "fileTree".to_string(),
+                        serde_json::json!(files::read_tree(&current_tree_root)),
+                    );
+                }
+
+                if active_changed {
+                    let (content_mtime_ms, content_bytes) = active_path
+                        .as_ref()
+                        .map(|path| content_metadata_for_path(path))
+                        .unwrap_or((None, None));
+                    payload.insert("filePath".to_string(), serde_json::json!(active_path_str));
+                    payload.insert("contentMtimeMs".to_string(), serde_json::json!(content_mtime_ms));
+                    payload.insert("contentBytes".to_string(), serde_json::json!(content_bytes));
+                }
+
+                let js = format!(
+                    "window.__attn__.updateContent({});",
+                    serde_json::Value::Object(payload)
+                );
+                let _ = webview.evaluate_script(&js);
             }
             Event::UserEvent(UserEvent::Screenshot(tx)) => {
                 #[cfg(all(not(feature = "production"), target_os = "macos"))]
@@ -494,7 +517,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
 
                 let path_str = new_path.to_string_lossy().to_string();
                 let (content_mtime_ms, content_bytes) = content_metadata_for_path(&new_path);
-                let mut payload = serde_json::json!({
+                let payload = serde_json::json!({
                     "structure": { "phases": [], "tasks": [], "file_refs": [] },
                     "filePath": path_str,
                     "contentMtimeMs": content_mtime_ms,
@@ -506,9 +529,91 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 // Bring window to front
                 window.set_focus();
             }
+            Event::UserEvent(UserEvent::SwitchProject(project_path)) => {
+                let (tree_root, file_tree, initial_ui_path) = project_view_for_path(&project_path);
+                let project_registry = update_active_project_registry(&tree_root);
+                current_tree_root = tree_root.clone();
+
+                if let Some(watcher) = file_watcher.as_mut() {
+                    if let Err(e) = watcher.update_root(&current_tree_root) {
+                        eprintln!(
+                            "attn: could not retarget watcher to {}: {}",
+                            current_tree_root.display(),
+                            e
+                        );
+                    }
+                } else {
+                    match watcher::FileWatcher::new(&current_tree_root, watcher_proxy.clone()) {
+                        Ok(w) => {
+                            file_watcher = Some(w);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "attn: could not start watcher for {}: {}",
+                                current_tree_root.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+
+                if let Ok(mut state) = app_state.lock() {
+                    state.file_path = initial_ui_path.clone();
+                }
+
+                let path_str = initial_ui_path.to_string_lossy().to_string();
+                let (content_mtime_ms, content_bytes) = content_metadata_for_path(&initial_ui_path);
+                let payload = serde_json::json!({
+                    "structure": { "phases": [], "tasks": [], "file_refs": [] },
+                    "filePath": path_str,
+                    "rootPath": tree_root.to_string_lossy(),
+                    "fileTree": file_tree,
+                    "knownProjects": project_registry.known_projects,
+                    "activeProjectPath": project_registry.active_project,
+                    "contentMtimeMs": content_mtime_ms,
+                    "contentBytes": content_bytes,
+                });
+                let js = format!("window.__attn__.setContent({payload});");
+                let _ = webview.evaluate_script(&js);
+
+                window.set_focus();
+            }
             _ => {}
         }
     });
+}
+
+fn project_view_for_path(path: &Path) -> (PathBuf, Vec<files::TreeNode>, PathBuf) {
+    let requested = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let tree_root = projects::normalize_project_root(&requested);
+    let file_tree = files::read_tree(&tree_root);
+    let initial_ui_path = if requested.is_file() {
+        requested
+    } else {
+        find_first_previewable_path(&file_tree).unwrap_or_else(|| tree_root.clone())
+    };
+
+    (tree_root, file_tree, initial_ui_path)
+}
+
+fn update_active_project_registry(tree_root: &Path) -> projects::ProjectRegistry {
+    match projects::set_active_project(tree_root) {
+        Ok(registry) => registry,
+        Err(e) => {
+            eprintln!(
+                "attn: failed to persist project registry for {}: {}",
+                tree_root.display(),
+                e
+            );
+            let mut registry = projects::load_registry();
+            let root = tree_root.to_string_lossy().to_string();
+            if !registry.known_projects.iter().any(|entry| entry == &root) {
+                registry.known_projects.insert(0, root.clone());
+            }
+            registry.active_project = Some(root);
+            registry
+        }
+    }
 }
 
 fn find_first_previewable_path(nodes: &[files::TreeNode]) -> Option<PathBuf> {

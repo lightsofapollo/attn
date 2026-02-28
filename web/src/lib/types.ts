@@ -38,6 +38,9 @@ export interface ContentPayload {
   structure?: PlanStructure;
   filePath: string;
   fileTree?: TreeNode[];
+  rootPath?: string;
+  knownProjects?: string[];
+  activeProjectPath?: string;
   contentMtimeMs?: number;
   contentBytes?: number;
 }
@@ -46,6 +49,11 @@ export interface UpdatePayload {
   markdown?: string;
   structure?: PlanStructure;
   filePath?: string;
+  fileTree?: TreeNode[];
+  rootPath?: string;
+  knownProjects?: string[];
+  activeProjectPath?: string;
+  changedPaths?: string[];
   contentMtimeMs?: number;
   contentBytes?: number;
 }
@@ -54,6 +62,7 @@ export type IpcMessageType =
   | 'quit'
   | 'checkbox_toggle'
   | 'navigate'
+  | 'switch_project'
   | 'edit_save'
   | 'theme_change'
   | 'open_devtools'
@@ -73,6 +82,11 @@ export interface CheckboxToggleMessage {
 
 export interface NavigateMessage {
   type: 'navigate';
+  path: string;
+}
+
+export interface SwitchProjectMessage {
+  type: 'switch_project';
   path: string;
 }
 
@@ -115,6 +129,7 @@ export type IpcMessage =
   | QuitMessage
   | CheckboxToggleMessage
   | NavigateMessage
+  | SwitchProjectMessage
   | EditSaveMessage
   | ThemeChangeMessage
   | OpenDevtoolsMessage
@@ -133,6 +148,8 @@ export interface InitPayload {
   filePath?: string;
   fileTree?: TreeNode[];
   rootPath?: string;
+  knownProjects?: string[];
+  activeProjectPath?: string;
   theme: ThemeName;
   diagMode?: DiagMode;
   contentMtimeMs?: number;

@@ -13,6 +13,9 @@ pub enum IpcMessage {
     #[serde(rename = "navigate")]
     Navigate { path: String },
 
+    #[serde(rename = "switch_project")]
+    SwitchProject { path: String },
+
     #[serde(rename = "edit_save")]
     EditSave { content: String },
 
@@ -62,6 +65,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             }
             IpcMessage::Navigate { path } => {
                 let _ = proxy.send_event(UserEvent::OpenPath(PathBuf::from(path)));
+            }
+            IpcMessage::SwitchProject { path } => {
+                let _ = proxy.send_event(UserEvent::SwitchProject(PathBuf::from(path)));
             }
             IpcMessage::EditSave { content } => {
                 let Ok(state) = state.lock() else { return };

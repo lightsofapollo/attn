@@ -53,7 +53,7 @@
 
   /* Paper-specific */
   --grain-opacity: 0.035;
-  --blockquote-bar: oklch(0.44 0.012 65 / 35%);
+  --blockquote-bar: oklch(0.44 0.012 65 / 48%);
 }
 
 /* ============================================
@@ -103,7 +103,7 @@
 
   /* Ink-specific */
   --grain-opacity: 0.02;
-  --blockquote-bar: oklch(0.55 0.008 250 / 30%);
+  --blockquote-bar: oklch(0.55 0.008 250 / 40%);
 }
 
 @theme inline {
@@ -170,18 +170,81 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 10px;
     padding: 0 16px;
     margin-bottom: 8px;
   }
 
-  .sidebar-root-name {
-    font-size: 0.92rem;
-    line-height: 1.2;
-    font-weight: 700;
-    color: color-mix(in oklch, var(--foreground) 95%, transparent);
+  .sidebar-project-picker {
+    min-width: 0;
+    flex: 1;
+    display: grid;
+    gap: 3px;
+  }
+
+  .sidebar-project-select {
+    width: 100%;
+    min-width: 0;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: color-mix(in oklch, var(--foreground) 90%, transparent);
+    padding: 0 8px;
+    font-size: 0.95rem;
+    font-weight: 680;
+    text-align: left;
+    transition: background-color 120ms ease, border-color 120ms ease;
+  }
+
+  .sidebar-project-select:hover {
+    background: color-mix(in oklch, var(--foreground) 4%, transparent);
+  }
+
+  .sidebar-project-select:focus {
+    outline: none;
+  }
+
+  .sidebar-project-select:focus-visible {
+    background: color-mix(in oklch, var(--foreground) 6%, transparent);
+  }
+
+  .sidebar-project-select-label {
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .sidebar-project-menu {
+    min-width: 220px;
+    max-width: 320px;
+  }
+
+  .sidebar-project-command {
+    border-radius: 10px;
+    border: 0;
+    background: color-mix(in oklch, var(--background) 92%, white 8%);
+  }
+
+  .sidebar-project-command [data-slot="command-input-wrapper"] {
+    border-bottom-color: color-mix(in oklch, var(--foreground) 10%, transparent);
+  }
+
+  .sidebar-project-menu-item {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .sidebar-project-switch-icon {
+    opacity: 0.72;
+    color: color-mix(in oklch, var(--sidebar-foreground) 82%, transparent);
   }
 
   .project-sidebar [data-sidebar="content"] {
@@ -239,7 +302,7 @@
   }
 
   .sidebar-search-wrap {
-    padding: 8px 16px 16px;
+    padding: 0 16px 16px;
   }
 
   .sidebar-search {

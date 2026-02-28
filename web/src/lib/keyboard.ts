@@ -5,17 +5,79 @@ import { cycleTheme } from './theme';
 export interface KeyboardConfig {
   getMode: () => AppMode;
   onEditToggle: () => void;
+  onEditCancel?: () => void;
+  onEditSave?: () => void;
+  onFind?: () => void;
+  onTabClose?: () => void;
+  onTabPrev?: () => void;
+  onTabNext?: () => void;
+  onGalleryPrev?: () => void;
+  onGalleryNext?: () => void;
+  onCommandPalette?: () => void;
+  onShortcutsHelp?: () => void;
 }
 
 export function initKeyboard(config: KeyboardConfig): () => void {
   function handler(e: KeyboardEvent): void {
+    const meta = e.metaKey || e.ctrlKey;
+
+    // Cmd/Ctrl+P opens command palette globally (even in edit mode or from inputs)
+    if (e.key === 'p' && meta && config.onCommandPalette) {
+      e.preventDefault();
+      config.onCommandPalette();
+      return;
+    }
+
+    // Cmd+? opens keyboard shortcuts help globally
+    if (e.key === '?' && meta && config.onShortcutsHelp) {
+      e.preventDefault();
+      config.onShortcutsHelp();
+      return;
+    }
+
+    // Cmd/Ctrl+F opens editor find
+    if (e.key === 'f' && meta && config.onFind) {
+      e.preventDefault();
+      config.onFind();
+      return;
+    }
+
     // Skip if focused on an input element
     const tag = (e.target as HTMLElement).tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
       return;
     }
 
-    if (config.getMode() === 'edit') return;
+    // In edit mode, only handle Escape and Cmd/Ctrl+S
+    if (config.getMode() === 'edit') {
+      if (e.key === 'Escape' && config.onEditCancel) {
+        e.preventDefault();
+        config.onEditCancel();
+      } else if (e.key === 's' && meta && config.onEditSave) {
+        e.preventDefault();
+        config.onEditSave();
+      }
+      return;
+    }
+
+    // Tab shortcuts (Cmd+W, Cmd+[, Cmd+])
+    if (meta) {
+      if (e.key === 'w' && config.onTabClose) {
+        e.preventDefault();
+        config.onTabClose();
+        return;
+      }
+      if (e.key === '[' && config.onTabPrev) {
+        e.preventDefault();
+        config.onTabPrev();
+        return;
+      }
+      if (e.key === ']' && config.onTabNext) {
+        e.preventDefault();
+        config.onTabNext();
+        return;
+      }
+    }
 
     switch (e.key) {
       case 'q':
@@ -42,6 +104,12 @@ export function initKeyboard(config: KeyboardConfig): () => void {
         break;
       case 'e':
         config.onEditToggle();
+        break;
+      case 'ArrowLeft':
+        if (config.onGalleryPrev) config.onGalleryPrev();
+        break;
+      case 'ArrowRight':
+        if (config.onGalleryNext) config.onGalleryNext();
         break;
     }
   }

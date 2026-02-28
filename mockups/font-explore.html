@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>attn — Font Exploration (Paper Theme)</title>
+
+<!-- All candidate fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;0,6..72,700;1,6..72,400&family=Lora:ital,wght@0,400;0,600;0,700;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;0,7..72,700;1,7..72,400&family=Crimson+Pro:ital,wght@0,400;0,600;0,700;1,400&family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,700;1,9..144,400&family=Brygada+1918:ital,wght@0,400;0,600;0,700;1,400&family=Spectral:ital,wght@0,400;0,600;0,700;1,400&family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&family=Fira+Code:wght@400;500&family=Source+Code+Pro:ital,wght@0,400;0,500;1,400&family=DM+Mono:ital,wght@0,400;0,500;1,400&family=Commit+Mono&family=Geist+Mono:wght@400;500&family=Inconsolata:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+/* ============================================
+   TOKENS — Darker dark mode
+   ============================================ */
+
+:root {
+  /* Light — warm cream */
+  --bg:           oklch(0.965 0.008 85);
+  --bg-card:      oklch(0.975 0.006 85);
+  --fg:           oklch(0.22 0.008 60);
+  --fg-muted:     oklch(0.48 0.012 70);
+  --fg-faint:     oklch(0.62 0.010 75);
+  --accent:       oklch(0.52 0.14 28);
+  --border:       oklch(0.22 0.008 60 / 8%);
+  --code-bg:      oklch(0.938 0.010 80);
+  --code-border:  oklch(0.22 0.008 60 / 6%);
+  --shadow:       oklch(0.22 0.02 60 / 4%);
+  --grain-opacity: 0.03;
+  --label-bg:     oklch(0.52 0.14 28 / 6%);
+  --label-fg:     oklch(0.52 0.14 28);
+}
+
+.dark {
+  /* Darker night — near-black warm */
+  --bg:           oklch(0.115 0.006 55);
+  --bg-card:      oklch(0.135 0.008 55);
+  --fg:           oklch(0.82 0.010 75);
+  --fg-muted:     oklch(0.50 0.008 65);
+  --fg-faint:     oklch(0.38 0.006 60);
+  --accent:       oklch(0.68 0.12 35);
+  --border:       oklch(1 0 0 / 5%);
+  --code-bg:      oklch(0.095 0.005 50);
+  --code-border:  oklch(1 0 0 / 4%);
+  --shadow:       oklch(0 0 0 / 15%);
+  --grain-opacity: 0.02;
+  --label-bg:     oklch(0.68 0.12 35 / 8%);
+  --label-fg:     oklch(0.68 0.12 35);
+}
+
+
+/* ============================================
+   BASE
+   ============================================ */
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  transition: background 0.3s, color 0.3s;
+}
+
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 200px 200px;
+}
+
+body {
+  padding: 2rem 2.5rem 4rem;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+
+/* ============================================
+   HEADER / CONTROLS
+   ============================================ */
+
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2.5rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.controls h1 {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+}
+
+.controls .sub {
+  font-size: 0.8rem;
+  color: var(--fg-muted);
+  font-weight: 400;
+  margin-left: 0.5rem;
+}
+
+.theme-btn {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.theme-btn:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+
+/* ============================================
+   FONT CARD
+   ============================================ */
+
+.grid {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.75rem 2rem;
+  box-shadow: 0 1px 4px var(--shadow);
+  transition: background 0.3s, border-color 0.3s;
+}
+
+.card-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.card-num {
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+  min-width: 1rem;
+}
+
+.card-title {
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+}
+
+.card-meta {
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 0.7rem;
+  color: var(--fg-faint);
+  margin-left: auto;
+}
+
+.card-label {
+  display: inline-block;
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 0.58rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--label-fg);
+  background: var(--label-bg);
+  padding: 2px 8px;
+  border-radius: 3px;
+  margin-left: 0.5rem;
+}
+
+/* Prose sample */
+.sample-prose {
+  line-height: 1.72;
+  letter-spacing: 0.003em;
+  margin-bottom: 1.25rem;
+}
+
+.sample-prose h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.24;
+  margin-bottom: 0.5rem;
+}
+
+.sample-prose p {
+  margin-bottom: 0.75rem;
+}
+
+.sample-prose em {
+  font-style: italic;
+}
+
+.sample-prose strong {
+  font-weight: 600;
+}
+
+.sample-prose a {
+  color: var(--accent);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+
+.sample-prose a:hover {
+  text-decoration: underline;
+}
+
+.sample-prose .inline-code {
+  font-size: 0.84em;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+
+/* Code sample */
+.sample-code {
+  position: relative;
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  padding: 0.875rem 1rem;
+  box-shadow: inset 0 1px 3px var(--shadow);
+  overflow-x: auto;
+  line-height: 1.55;
+  font-size: 0.84rem;
+}
+
+.code-lang {
+  display: block;
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 0.58rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-faint);
+  margin-bottom: 0.4rem;
+  user-select: none;
+}
+
+.sample-code code {
+  white-space: pre;
+}
+
+.kw { color: var(--accent); }
+.cm { color: var(--fg-faint); font-style: italic; }
+.st { color: oklch(0.55 0.12 150); }
+.dark .st { color: oklch(0.70 0.12 155); }
+
+
+/* ============================================
+   SCROLLBAR
+   ============================================ */
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+
+<body>
+
+<div class="controls">
+  <h1>attn<span class="sub">Font Exploration — Paper Theme</span></h1>
+  <button class="theme-btn" onclick="document.documentElement.classList.toggle('dark'); this.textContent = document.documentElement.classList.contains('dark') ? '☀ Light' : '● Dark'">● Dark</button>
+</div>
+
+<div class="grid" id="grid"></div>
+
+<script>
+const pairings = [
+  {
+    num: 1,
+    prose: "'Newsreader', Georgia, serif",
+    code: "'JetBrains Mono', monospace",
+    proseName: "Newsreader",
+    codeName: "JetBrains Mono",
+    note: "Transitional serif + geometric mono — the original pairing. Warm, bookish, excellent italics."
+  },
+  {
+    num: 2,
+    prose: "'Lora', Georgia, serif",
+    code: "'Fira Code', monospace",
+    proseName: "Lora",
+    codeName: "Fira Code",
+    note: "Calligraphic brushed serif + ligature-rich mono. Lora has personality without being fussy."
+  },
+  {
+    num: 3,
+    prose: "'Source Serif 4', Georgia, serif",
+    code: "'Source Code Pro', monospace",
+    proseName: "Source Serif 4",
+    codeName: "Source Code Pro",
+    note: "Same type family — serif + mono by Adobe. Maximum cohesion. Clean, utilitarian, legible."
+  },
+  {
+    num: 4,
+    prose: "'Literata', Georgia, serif",
+    code: "'IBM Plex Mono', monospace",
+    proseName: "Literata",
+    codeName: "IBM Plex Mono",
+    note: "Designed for Google Play Books. Variable optical sizing. Pairs with IBM's precise, industrial mono."
+  },
+  {
+    num: 5,
+    prose: "'Crimson Pro', Georgia, serif",
+    code: "'DM Mono', monospace",
+    proseName: "Crimson Pro",
+    codeName: "DM Mono",
+    note: "Garamond-inspired, light and airy. DM Mono is compact and friendly — a quieter code voice."
+  },
+  {
+    num: 6,
+    prose: "'Libre Baskerville', Georgia, serif",
+    code: "'JetBrains Mono', monospace",
+    proseName: "Libre Baskerville",
+    codeName: "JetBrains Mono",
+    note: "18th-century Baskerville revival optimized for screen. Authoritative, high contrast. Classic meets modern."
+  },
+  {
+    num: 7,
+    prose: "'Fraunces', Georgia, serif",
+    code: "'Commit Mono', monospace",
+    proseName: "Fraunces",
+    codeName: "Commit Mono",
+    note: "Soft, wonky old-style serif with variable WONK axis. Commit Mono is neutral and new. Bold contrast."
+  },
+  {
+    num: 8,
+    prose: "'Brygada 1918', Georgia, serif",
+    code: "'Inconsolata', monospace",
+    proseName: "Brygada 1918",
+    codeName: "Inconsolata",
+    note: "Polish national typeface revival — sharp, confident. Inconsolata is the quiet classic mono."
+  },
+  {
+    num: 9,
+    prose: "'Spectral', Georgia, serif",
+    code: "'IBM Plex Mono', monospace",
+    proseName: "Spectral",
+    codeName: "IBM Plex Mono",
+    note: "First Google Fonts serif designed for screen. Crisp, modern transitional with good weight range."
+  },
+  {
+    num: 10,
+    prose: "'Cormorant Garamond', Garamond, serif",
+    code: "'DM Mono', monospace",
+    proseName: "Cormorant Garamond",
+    codeName: "DM Mono",
+    note: "Display Garamond — high contrast, elegant, slightly theatrical. Best at larger sizes. A statement."
+  }
+];
+
+const proseHTML = (font) => `
+  <h2 style="font-family: ${font}">Reading on Paper</h2>
+  <p>Good typography is invisible. Great typography is a quiet pleasure that readers feel without consciously noticing — like <strong>words printed on fine paper</strong>. The goal is to create a reading experience that feels <em>natural, warm, and unhurried</em>.</p>
+  <p>Inline code like <span class="inline-code" style="CODEFONT">let x = 42</span> and <span class="inline-code" style="CODEFONT">Vec&lt;String&gt;</span> should blend into the paragraph rhythm without jarring.</p>
+`;
+
+const codeHTML = (font) => `
+<span class="code-lang">rust</span><code style="font-family: ${font}"><span class="kw">fn</span> main() {
+    <span class="kw">let</span> greeting = <span class="st">"Hello from attn!"</span>;
+    println!(<span class="st">"{greeting}"</span>);
+
+    <span class="kw">let</span> items = <span class="kw">vec!</span>[<span class="st">"paper"</span>, <span class="st">"ink"</span>, <span class="st">"type"</span>];
+    <span class="kw">for</span> item <span class="kw">in</span> &amp;items {
+        println!(<span class="st">"  → {item}"</span>); <span class="cm">// warm terracotta</span>
+    }
+}</code>`;
+
+const grid = document.getElementById('grid');
+
+for (const p of pairings) {
+  const card = document.createElement('div');
+  card.className = 'card';
+
+  const prose = proseHTML(p.prose).replace(/CODEFONT/g, `font-family: ${p.code}`);
+  const code = codeHTML(p.code);
+
+  card.innerHTML = `
+    <div class="card-header">
+      <span class="card-num">${String(p.num).padStart(2, '0')}</span>
+      <span class="card-title">${p.proseName} + ${p.codeName}</span>
+      <span class="card-meta">${p.note}</span>
+    </div>
+    <div class="sample-prose" style="font-family: ${p.prose}">
+      ${prose}
+    </div>
+    <div class="sample-code">
+      ${code}
+    </div>
+  `;
+
+  grid.appendChild(card);
+}
+</script>
+
+</body>
+</html>

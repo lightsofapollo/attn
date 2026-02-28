@@ -1,11 +1,13 @@
 <script lang="ts">
+  import type { PlanStructure } from './types';
   import { checkboxToggle } from './ipc';
 
   interface Props {
     html: string;
+    structure: PlanStructure;
   }
 
-  let { html }: Props = $props();
+  let { html, structure }: Props = $props();
 
   let articleEl: HTMLElement | undefined = $state(undefined);
 
@@ -15,13 +17,12 @@
     if (!checkbox) return;
 
     e.preventDefault();
-    const li = checkbox.closest('li');
-    if (!li || !articleEl) return;
+    if (!articleEl) return;
 
-    const allItems = articleEl.querySelectorAll('li');
-    const index = Array.from(allItems).indexOf(li);
-    if (index >= 0) {
-      checkboxToggle(index, !checkbox.checked);
+    const allCheckboxes = articleEl.querySelectorAll('input[type="checkbox"]');
+    const taskIndex = Array.from(allCheckboxes).indexOf(checkbox);
+    if (structure.tasks && taskIndex >= 0 && taskIndex < structure.tasks.length) {
+      checkboxToggle(structure.tasks[taskIndex].line, !checkbox.checked);
     }
   }
 </script>

@@ -20,8 +20,8 @@ export function quit(): void {
   send({ type: 'quit' });
 }
 
-export function checkboxToggle(index: number, checked: boolean): void {
-  send({ type: 'checkbox_toggle', index, checked });
+export function checkboxToggle(line: number, checked: boolean): void {
+  send({ type: 'checkbox_toggle', line, checked });
 }
 
 export function navigate(path: string): void {
@@ -34,4 +34,15 @@ export function editSave(content: string): void {
 
 export function themeChange(theme: string): void {
   send({ type: 'theme_change', theme });
+}
+
+export function openDevtools(): void {
+  send({ type: 'open_devtools' });
+}
+
+/** Mousedown handler for drag regions — skips interactive child elements. */
+export function dragWindow(e: MouseEvent): void {
+  const target = e.target as HTMLElement;
+  if (target.closest('a, button, input, select, textarea')) return;
+  send({ type: 'drag_window' });
 }

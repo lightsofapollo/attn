@@ -1,0 +1,47 @@
+version: "3"
+
+tasks:
+  dev:
+    desc: Run Vite with HMR and launch attn against the dev server
+    vars:
+      DEV_HOST_VALUE: '{{default "127.0.0.1" .DEV_HOST}}'
+      DEV_PORT_VALUE: '{{default "5173" .DEV_PORT}}'
+      ATTN_PATH_VALUE: '{{default "." .ATTN_PATH}}'
+    cmds:
+      - |
+        bash -lc '
+        set -euo pipefail
+
+        DEV_HOST="{{.DEV_HOST_VALUE}}"
+        DEV_PORT="{{.DEV_PORT_VALUE}}"
+        ATTN_PATH="{{.ATTN_PATH_VALUE}}"
+        ATTN_DEV_SERVER_URL="http://${DEV_HOST}:${DEV_PORT}"
+
+        cleanup() {
+          if [ -n "${VITE_PID:-}" ] && kill -0 "${VITE_PID}" 2>/dev/null; then
+            kill "${VITE_PID}" 2>/dev/null || true
+            wait "${VITE_PID}" 2>/dev/null || true
+          fi
+        }
+        trap cleanup EXIT INT TERM
+
+        echo "Starting Vite dev server on ${ATTN_DEV_SERVER_URL}"
+        (
+          cd web
+          npm run dev -- --host "${DEV_HOST}" --port "${DEV_PORT}" --strictPort
+        ) &
+        VITE_PID=$!
+
+        echo "Waiting for Vite to be ready..."
+        until curl -fsS "${ATTN_DEV_SERVER_URL}" >/dev/null 2>&1; do
+          if ! kill -0 "${VITE_PID}" 2>/dev/null; then
+            echo "Vite failed to start on ${ATTN_DEV_SERVER_URL}. Try: task dev DEV_PORT=5174" >&2
+            wait "${VITE_PID}" || true
+            exit 1
+          fi
+          sleep 0.2
+        done
+
+        echo "Launching attn with HMR enabled (path: ${ATTN_PATH})"
+        ATTN_DEV_SERVER_URL="${ATTN_DEV_SERVER_URL}" cargo run -- --no-fork "${ATTN_PATH}"
+        '

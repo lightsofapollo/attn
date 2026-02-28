@@ -1,18 +1,24 @@
 import type { ThemeName } from './types';
 import { themeChange } from './ipc';
 
-const VALID_THEMES: readonly ThemeName[] = ['light', 'dark', 'system'] as const;
+const VALID_THEMES: readonly ThemeName[] = ['light', 'dark'] as const;
+
+/** Apply the effective dark/light class on <html> for shadcn. */
+function applyDarkClass(theme: ThemeName): void {
+  document.documentElement.classList.toggle('dark', theme === 'dark');
+}
 
 export function getTheme(): ThemeName {
   const current = document.documentElement.dataset.theme;
   if (current && VALID_THEMES.includes(current as ThemeName)) {
     return current as ThemeName;
   }
-  return 'system';
+  return 'light';
 }
 
 export function setTheme(theme: ThemeName): void {
   document.documentElement.dataset.theme = theme;
+  applyDarkClass(theme);
   themeChange(theme);
 }
 
@@ -24,9 +30,11 @@ export function cycleTheme(): void {
 }
 
 export function getEffectiveTheme(): 'light' | 'dark' {
+  return getTheme();
+}
+
+/** Initialize theme from data-theme attribute (set by Rust). */
+export function initTheme(): void {
   const theme = getTheme();
-  if (theme === 'system') {
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-  }
-  return theme;
+  applyDarkClass(theme);
 }

@@ -4,10 +4,23 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tao::event_loop::EventLoopProxy;
 
-/// Sent from the file watcher thread to wake the event loop.
+/// Sent from background threads to wake the event loop.
 #[derive(Debug)]
 pub enum UserEvent {
+    /// The watched file was modified on disk.
     FileChanged,
+    /// Another attn invocation wants to open a new path.
+    OpenPath(PathBuf),
+    /// Take a screenshot and send the path back through the channel.
+    Screenshot(std::sync::mpsc::Sender<String>),
+    /// Request daemon info (binary path, PID) and send back through the channel.
+    Info(std::sync::mpsc::Sender<String>),
+    /// Evaluate JavaScript and send the result back through the channel.
+    Eval(String, std::sync::mpsc::Sender<String>),
+    /// Open webview devtools (debug builds only).
+    OpenDevtools,
+    /// The user started dragging a custom title bar region.
+    DragWindow,
 }
 
 pub struct FileWatcher {
@@ -28,7 +41,9 @@ impl FileWatcher {
             None
         };
 
-        let last_event = Arc::new(Mutex::new(Instant::now() - std::time::Duration::from_secs(1)));
+        let last_event = Arc::new(Mutex::new(
+            Instant::now() - std::time::Duration::from_secs(1),
+        ));
 
         let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             if let Ok(event) = res {
@@ -45,7 +60,9 @@ impl FileWatcher {
                 }
 
                 // Debounce: skip if last event was within the window
-                let Ok(mut last) = last_event.lock() else { return };
+                let Ok(mut last) = last_event.lock() else {
+                    return;
+                };
                 let now = Instant::now();
                 if now.duration_since(*last).as_millis() < DEBOUNCE_MS {
                     return;
@@ -64,8 +81,6 @@ impl FileWatcher {
 
         watcher.watch(watch_path, RecursiveMode::NonRecursive)?;
 
-        Ok(Self {
-            _watcher: watcher,
-        })
+        Ok(Self { _watcher: watcher })
     }
 }

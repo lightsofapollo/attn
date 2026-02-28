@@ -1,6 +1,8 @@
+use crate::watcher::UserEvent;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tao::event_loop::EventLoopProxy;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -17,6 +19,29 @@ pub enum IpcMessage {
     #[serde(rename = "theme_change")]
     ThemeChange { theme: String },
 
+    #[serde(rename = "drag_window")]
+    DragWindow,
+
+    #[serde(rename = "open_devtools")]
+    OpenDevtools,
+
+    #[serde(rename = "js_log")]
+    JsLog {
+        level: String,
+        message: String,
+        source: Option<String>,
+        stack: Option<String>,
+    },
+
+    #[serde(rename = "js_error")]
+    JsError {
+        message: String,
+        source: String,
+        line: Option<u32>,
+        column: Option<u32>,
+        stack: Option<String>,
+    },
+
     #[serde(rename = "quit")]
     Quit,
 }
@@ -26,7 +51,7 @@ pub struct AppState {
     pub file_path: PathBuf,
 }
 
-pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>) {
+pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoopProxy<UserEvent>) {
     match serde_json::from_str::<IpcMessage>(body) {
         Ok(msg) => match msg {
             IpcMessage::Quit => {
@@ -36,7 +61,7 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>) {
                 toggle_checkbox(state, line, checked);
             }
             IpcMessage::Navigate { path } => {
-                eprintln!("navigate to: {}", path);
+                let _ = proxy.send_event(UserEvent::OpenPath(PathBuf::from(path)));
             }
             IpcMessage::EditSave { content } => {
                 let Ok(state) = state.lock() else { return };
@@ -46,6 +71,45 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>) {
             }
             IpcMessage::ThemeChange { theme } => {
                 eprintln!("theme change: {}", theme);
+            }
+            IpcMessage::DragWindow => {
+                let _ = proxy.send_event(UserEvent::DragWindow);
+            }
+            IpcMessage::OpenDevtools => {
+                let _ = proxy.send_event(UserEvent::OpenDevtools);
+            }
+            IpcMessage::JsLog {
+                level,
+                message,
+                source,
+                stack,
+            } => {
+                let level = level.to_ascii_lowercase();
+                match source {
+                    Some(source) if !source.is_empty() => {
+                        eprintln!("attn: js {level}: {message} ({source})");
+                    }
+                    _ => {
+                        eprintln!("attn: js {level}: {message}");
+                    }
+                }
+                if let Some(stack) = stack && !stack.is_empty() {
+                    eprintln!("attn: js {level} stack:\n{stack}");
+                }
+            }
+            IpcMessage::JsError {
+                message,
+                source,
+                line,
+                column,
+                stack,
+            } => {
+                let line = line.unwrap_or(0);
+                let column = column.unwrap_or(0);
+                eprintln!("attn: js error: {message} ({source}:{line}:{column})");
+                if let Some(stack) = stack && !stack.is_empty() {
+                    eprintln!("attn: js error stack:\n{stack}");
+                }
             }
         },
         Err(e) => {

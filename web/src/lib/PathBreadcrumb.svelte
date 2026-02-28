@@ -13,9 +13,19 @@
     path: string;
     rootPath?: string;
     onNavigate?: (path: string) => void;
+    avoidWindowControls?: boolean;
+    fixed?: boolean;
+    topOffsetPx?: number;
   }
 
-  let { path, rootPath = '', onNavigate }: Props = $props();
+  let {
+    path,
+    rootPath = '',
+    onNavigate,
+    avoidWindowControls = false,
+    fixed = false,
+    topOffsetPx = 0,
+  }: Props = $props();
 
   interface Segment {
     name: string;
@@ -55,7 +65,11 @@
   }
 </script>
 
-<div class="flex shrink-0 items-center justify-between h-[46px] px-4 pt-1.5" style="-webkit-user-select: none" onmousedown={dragWindow}>
+<div
+  class={`flex shrink-0 items-center justify-between h-[40px] pr-4 pt-1 pb-0 bg-background/95 backdrop-blur-[1px] ${fixed ? 'fixed inset-x-0 z-30' : ''}`}
+  style={`-webkit-user-select: none; padding-left: ${avoidWindowControls ? '6.5rem' : '1rem'}; ${fixed ? `top: ${topOffsetPx}px;` : ''}`}
+  onmousedown={dragWindow}
+>
   {#if segments.length > 1}
     <Breadcrumb>
       <BreadcrumbList>

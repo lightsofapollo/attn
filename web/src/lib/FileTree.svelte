@@ -4,9 +4,6 @@
   import {
     SidebarMenuItem,
     SidebarMenuButton,
-    SidebarMenuSub,
-    SidebarMenuSubItem,
-    SidebarMenuSubButton,
   } from '$lib/components/ui/sidebar';
   import {
     Collapsible,
@@ -14,6 +11,11 @@
     CollapsibleTrigger,
   } from '$lib/components/ui/collapsible';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import File from '@lucide/svelte/icons/file';
+  import Image from '@lucide/svelte/icons/image';
+  import Film from '@lucide/svelte/icons/film';
+  import Music from '@lucide/svelte/icons/music';
 
   interface Props {
     nodes: TreeNode[];
@@ -51,96 +53,62 @@
       }
     }
   }
+
+  function getFileIcon(node: TreeNode) {
+    if (node.fileType === 'markdown') return FileText;
+    if (node.fileType === 'image') return Image;
+    if (node.fileType === 'video') return Film;
+    if (node.fileType === 'audio') return Music;
+    return File;
+  }
 </script>
 
-{#if depth === 0}
-  {#each nodes as node (node.path)}
-    {#if node.isDir}
-      {@const exp = isExpanded(node.path)}
-      <Collapsible
-        open={exp}
-        onOpenChange={(v) => setExpanded(node.path, v)}
-        class="group/collapsible"
-      >
-        <SidebarMenuItem>
-          <CollapsibleTrigger>
-            {#snippet child({ props: triggerProps })}
-              <SidebarMenuButton
-                {...triggerProps}
-                size="sm"
-                class="sidebar-tree-row sidebar-tree-row--dir"
-              >
-                <ChevronRight class="sidebar-tree-chevron size-3 transition-transform duration-150 group-data-[state=open]/collapsible:rotate-90" />
-                <span class="truncate">{node.name}</span>
-              </SidebarMenuButton>
-            {/snippet}
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-            {#if node.children}
-              <SidebarMenuSub class="sidebar-tree-sub">
-                <FileTree nodes={node.children} {activePath} depth={depth + 1} {onNavigate} />
-              </SidebarMenuSub>
-            {/if}
-          </CollapsibleContent>
-        </SidebarMenuItem>
-      </Collapsible>
-    {:else}
+{#each nodes as node (node.path)}
+  {#if node.isDir}
+    {@const exp = isExpanded(node.path)}
+    <Collapsible
+      open={exp}
+      onOpenChange={(v) => setExpanded(node.path, v)}
+      class="group/collapsible"
+    >
       <SidebarMenuItem>
-        <SidebarMenuButton
-          size="sm"
-          isActive={node.path === activePath}
-          class="sidebar-tree-row sidebar-tree-row--file"
-          onclick={(e: MouseEvent) => handleFileClick(e, node)}
-          onauxclick={(e: MouseEvent) => handleFileClick(e, node)}
-          onkeydown={(e: KeyboardEvent) => handleFileKeydown(e, node)}
-        >
-          <span class="truncate">{node.name}</span>
-        </SidebarMenuButton>
+        <CollapsibleTrigger>
+          {#snippet child({ props: triggerProps })}
+            <SidebarMenuButton
+              {...triggerProps}
+              size="sm"
+              class="sidebar-tree-row sidebar-tree-row--dir"
+              style={`--tree-depth: ${depth};`}
+            >
+              <ChevronRight class="sidebar-tree-chevron size-3.5 shrink-0 transition-transform duration-150 group-data-[state=open]/collapsible:rotate-90" />
+              <span class="sidebar-tree-name truncate">{node.name}</span>
+            </SidebarMenuButton>
+          {/snippet}
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          {#if node.children}
+            <div class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
+              <FileTree nodes={node.children} {activePath} depth={depth + 1} {onNavigate} />
+            </div>
+          {/if}
+        </CollapsibleContent>
       </SidebarMenuItem>
-    {/if}
-  {/each}
-{:else}
-  {#each nodes as node (node.path)}
-    {#if node.isDir}
-      {@const exp = isExpanded(node.path)}
-      <Collapsible
-        open={exp}
-        onOpenChange={(v) => setExpanded(node.path, v)}
-        class="group/collapsible"
+    </Collapsible>
+  {:else}
+    {@const Icon = getFileIcon(node)}
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        size="sm"
+        isActive={node.path === activePath}
+        class="sidebar-tree-row sidebar-tree-row--file"
+        onclick={(e: MouseEvent) => handleFileClick(e, node)}
+        onauxclick={(e: MouseEvent) => handleFileClick(e, node)}
+        onkeydown={(e: KeyboardEvent) => handleFileKeydown(e, node)}
+        style={`--tree-depth: ${depth};`}
       >
-        <SidebarMenuSubItem>
-          <CollapsibleTrigger>
-            {#snippet child({ props: triggerProps })}
-              <SidebarMenuSubButton
-                {...triggerProps}
-                class="sidebar-tree-row sidebar-tree-row--dir sidebar-tree-row--nested cursor-pointer"
-              >
-                <ChevronRight class="sidebar-tree-chevron size-3 shrink-0 transition-transform duration-150 group-data-[state=open]/collapsible:rotate-90" />
-                <span class="truncate">{node.name}</span>
-              </SidebarMenuSubButton>
-            {/snippet}
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-            {#if node.children}
-              <SidebarMenuSub class="sidebar-tree-sub">
-                <FileTree nodes={node.children} {activePath} depth={depth + 1} {onNavigate} />
-              </SidebarMenuSub>
-            {/if}
-          </CollapsibleContent>
-        </SidebarMenuSubItem>
-      </Collapsible>
-    {:else}
-      <SidebarMenuSubItem>
-        <SidebarMenuSubButton
-          isActive={node.path === activePath}
-          class="sidebar-tree-row sidebar-tree-row--file sidebar-tree-row--nested cursor-pointer"
-          onclick={(e: MouseEvent) => handleFileClick(e, node)}
-          onauxclick={(e: MouseEvent) => handleFileClick(e, node)}
-          onkeydown={(e: KeyboardEvent) => handleFileKeydown(e, node)}
-        >
-          <span class="truncate">{node.name}</span>
-        </SidebarMenuSubButton>
-      </SidebarMenuSubItem>
-    {/if}
-  {/each}
-{/if}
+        <Icon class="size-3.5 shrink-0 sidebar-tree-icon" />
+        <span class="sidebar-tree-name truncate">{node.name}</span>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
+  {/if}
+{/each}

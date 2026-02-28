@@ -1,11 +1,7 @@
 <script lang="ts">
-  import { EditorState, type Transaction } from 'prosemirror-state';
+  import { EditorState } from 'prosemirror-state';
   import { EditorView, type NodeView } from 'prosemirror-view';
-  import type { Node as PmNode } from 'prosemirror-model';
-  import { markdownParser, markdownSerializer, schema } from './schema';
-  import { keymap } from 'prosemirror-keymap';
-  import { baseKeymap } from 'prosemirror-commands';
-  import { history, undo, redo } from 'prosemirror-history';
+  import { Node as PmNode } from 'prosemirror-model';
   import {
     SearchQuery,
     findNext as searchFindNext,
@@ -16,8 +12,12 @@
     setSearchState,
   } from 'prosemirror-search';
   import { tick } from 'svelte';
+  import { keymap } from 'prosemirror-keymap';
+  import { baseKeymap } from 'prosemirror-commands';
+  import { history, redo, undo } from 'prosemirror-history';
   import { codeHighlightPlugin } from './prosemirror/code-highlight';
   import { editSave } from './ipc';
+  import { markdownParser, markdownSerializer, schema } from './schema';
 
   interface Props {
     markdown: string;
@@ -33,11 +33,10 @@
   let findOpen = $state(false);
   let findQuery = $state('');
   let findMatchCount = $state(0);
+  let lastMarkdown = '';
   let findInputEl: HTMLInputElement | undefined = $state(undefined);
   let findBarEl: HTMLFormElement | undefined = $state(undefined);
 
-  // Track the last markdown we set, to avoid re-parsing when we already have it
-  let lastMarkdown = '';
   let lastSafeModeLength = -1;
   const PARSE_WARN_MS = 120;
   const LARGE_MARKDOWN_CHAR_LIMIT = 350_000;
@@ -137,11 +136,11 @@
           }
           return true;
         },
-        'Mod-s': (_state: EditorState, _dispatch?: (tr: Transaction) => void) => {
+        'Mod-s': () => {
           if (onSave) onSave();
           return true;
         },
-        'Escape': (_state: EditorState, _dispatch?: (tr: Transaction) => void) => {
+        'Escape': () => {
           if (onCancel) onCancel();
           return true;
         },
@@ -149,6 +148,68 @@
       keymap(baseKeymap),
     );
     return plugins;
+  }
+
+  // Custom NodeView for task_list_item — makes checkbox clickable
+  function taskListItemNodeView(
+    node: PmNode,
+    editorView: EditorView,
+    getPos: () => number | undefined,
+  ): NodeView {
+    const li = document.createElement('li');
+    li.className = 'task-list-item';
+    li.dataset.checked = node.attrs.checked ? 'true' : 'false';
+
+    const checkboxWrap = document.createElement('span');
+    checkboxWrap.className = 'task-checkbox';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = node.attrs.checked;
+    // Checkbox is always clickable (both read-only and edit mode)
+    checkbox.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const pos = getPos();
+      if (pos === undefined) return;
+      const tr = editorView.state.tr.setNodeMarkup(pos, undefined, {
+        ...node.attrs,
+        checked: !node.attrs.checked,
+      });
+      editorView.dispatch(tr);
+      // Serialize and send via IPC after checkbox toggle
+      const md = markdownSerializer.serialize(editorView.state.doc);
+      editSave(md);
+      if (onCheckboxToggle) {
+        onCheckboxToggle(md);
+      }
+    });
+
+    checkboxWrap.appendChild(checkbox);
+    li.appendChild(checkboxWrap);
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'task-content';
+    li.appendChild(contentDiv);
+
+    return {
+      dom: li,
+      contentDOM: contentDiv,
+      update(updatedNode: PmNode) {
+        if (updatedNode.type !== node.type) return false;
+        node = updatedNode;
+        checkbox.checked = node.attrs.checked;
+        li.dataset.checked = node.attrs.checked ? 'true' : 'false';
+        return true;
+      },
+    };
+  }
+
+  function createState(md: string): EditorState {
+    const doc = parseMarkdownDoc(md, 'initial');
+    return EditorState.create({
+      doc,
+      plugins: buildPlugins(md),
+    });
   }
 
   function refreshMatchCount(): void {
@@ -169,8 +230,6 @@
   function ensureSelectionVisible(): void {
     if (!view) return;
 
-    // ProseMirror's scrollIntoView depends on DOM selection being in the editor.
-    // When focus is in the find input, we still want matches to jump in our viewport.
     const viewport = (
       view.dom.closest('[data-slot="scroll-area-viewport"]')
       ?? view.dom.closest('.attn-content-viewport')
@@ -213,13 +272,11 @@
 
     findOpen = true;
 
-    // Prefer current search query from plugin state if available.
     const searchState = getSearchState(view.state);
     if (searchState) {
       findQuery = searchState.query.search;
     }
 
-    // Seed from selection on first open.
     if (!findQuery && !view.state.selection.empty) {
       const selected = view.state.doc.textBetween(
         view.state.selection.from,
@@ -268,72 +325,18 @@
     }
   }
 
-  // Custom NodeView for task_list_item — makes checkbox clickable
-  function taskListItemNodeView(
-    node: PmNode,
-    editorView: EditorView,
-    getPos: () => number | undefined,
-  ): NodeView {
-    const li = document.createElement('li');
-    li.className = 'task-list-item';
-    li.dataset.checked = node.attrs.checked ? 'true' : 'false';
-
-    const checkboxWrap = document.createElement('span');
-    checkboxWrap.className = 'task-checkbox';
-
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = node.attrs.checked;
-    // Checkbox is always clickable (both read-only and edit mode)
-    checkbox.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      const pos = getPos();
-      if (pos === undefined) return;
-      const tr = editorView.state.tr.setNodeMarkup(pos, undefined, {
-        ...node.attrs,
-        checked: !node.attrs.checked,
-      });
-      editorView.dispatch(tr);
-      // Serialize and send via IPC after checkbox toggle
-      const md = markdownSerializer.serialize(editorView.state.doc);
-      editSave(md);
-      if (onCheckboxToggle) onCheckboxToggle(md);
-    });
-
-    checkboxWrap.appendChild(checkbox);
-    li.appendChild(checkboxWrap);
-
-    const contentDiv = document.createElement('div');
-    contentDiv.className = 'task-content';
-    li.appendChild(contentDiv);
-
-    return {
-      dom: li,
-      contentDOM: contentDiv,
-      update(updatedNode: PmNode) {
-        if (updatedNode.type !== node.type) return false;
-        node = updatedNode;
-        checkbox.checked = node.attrs.checked;
-        li.dataset.checked = node.attrs.checked ? 'true' : 'false';
-        return true;
-      },
-    };
+  export function getMarkdown(): string {
+    if (!view) return markdown;
+    return markdownSerializer.serialize(view.state.doc);
   }
 
-  function createState(md: string): EditorState {
-    const doc = parseMarkdownDoc(md, 'initial');
-    return EditorState.create({
-      doc,
-      plugins: buildPlugins(md),
-    });
+  export function openFind(): void {
+    void openFindPanel();
   }
 
   // Create EditorView on mount
   $effect(() => {
     if (!editorEl) return;
-    const mountStart = performance.now();
-    console.info(`[attn] pm mount start chars=${markdown.length}`);
-    lastMarkdown = markdown;
     const state = createState(markdown);
     view = new EditorView(editorEl, {
       state,
@@ -342,7 +345,7 @@
         task_list_item: taskListItemNodeView,
       },
     });
-    console.info(`[attn] pm mount done in ${(performance.now() - mountStart).toFixed(1)}ms`);
+
     return () => {
       view?.destroy();
       view = undefined;
@@ -355,17 +358,19 @@
     // Only update if the markdown actually changed from what we last set
     if (markdown === lastMarkdown) return;
     const updateStart = performance.now();
-    console.info(`[attn] pm update start chars=${markdown.length}`);
-    lastMarkdown = markdown;
-    const doc = parseMarkdownDoc(markdown, 'update');
+    const updateDoc = parseMarkdownDoc(markdown, 'update');
     const state = EditorState.create({
-      doc,
+      doc: updateDoc,
       plugins: buildPlugins(markdown),
     });
-    view.updateState(state);
     console.info(`[attn] pm update done in ${(performance.now() - updateStart).toFixed(1)}ms`);
+    view.updateState(state);
     if (findOpen && findQuery) {
       updateSearchQuery();
+    }
+    // Keep lastMarkdown in sync even when markdown input was unchanged by editor interactions.
+    if (markdown !== lastMarkdown) {
+      lastMarkdown = markdown;
     }
   });
 
@@ -375,15 +380,6 @@
       view.setProps({ editable: () => editable });
     }
   });
-
-  export function getMarkdown(): string {
-    if (!view) return markdown;
-    return markdownSerializer.serialize(view.state.doc);
-  }
-
-  export function openFind(): void {
-    void openFindPanel();
-  }
 </script>
 
 <div class="editor-container">

@@ -21,6 +21,12 @@
   import { toast } from 'svelte-sonner';
   import { SidebarProvider, SidebarInset } from '$lib/components/ui/sidebar';
   import PathBreadcrumb from './lib/PathBreadcrumb.svelte';
+  import {
+    detectFileType,
+    extractStructureFromMarkdown,
+    loadMarkdownFromPath,
+    markdownSourceUrl,
+  } from './lib/markdown-layer';
   import './app.css';
   import '../styles/base.css';
   import '../styles/prosemirror.css';
@@ -57,17 +63,6 @@
 
   function emptyPlanStructure(): PlanStructure {
     return { phases: [], tasks: [], file_refs: [] };
-  }
-
-  function detectFileType(path: string): FileType {
-    const ext = path.split('.').pop()?.toLowerCase();
-    switch (ext) {
-      case 'md': case 'markdown': return 'markdown';
-      case 'png': case 'jpg': case 'jpeg': case 'gif': case 'svg': case 'webp': case 'bmp': case 'ico': return 'image';
-      case 'mp4': case 'webm': case 'mov': case 'avi': return 'video';
-      case 'mp3': case 'wav': case 'ogg': case 'm4a': case 'flac': case 'aac': return 'audio';
-      default: return 'unsupported';
-    }
   }
 
   function openPath(path: string, fileType?: FileType, newTab = false): void {
@@ -165,64 +160,6 @@
     openPath(files[newIdx]);
   }
 
-  function attnUrl(path: string): string {
-    return `attn://localhost${encodeURI(path)}`;
-  }
-
-  function looksLikeFilePath(token: string): boolean {
-    if (token.length < 4 || !token.includes('/')) return false;
-    const extensions = [
-      '.rs', '.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.java', '.md', '.css', '.html',
-      '.json', '.toml', '.yaml', '.yml', '.sql', '.sh', '.bash', '.svelte', '.vue',
-    ];
-    return extensions.some((ext) => token.endsWith(ext));
-  }
-
-  function extractStructureFromMarkdown(markdown: string): PlanStructure {
-    const phases: PlanStructure['phases'] = [];
-    const tasks: PlanStructure['tasks'] = [];
-    const fileRefs: string[] = [];
-    const lines = markdown.split('\n');
-
-    for (let i = 0; i < lines.length; i += 1) {
-      const trimmed = lines[i].trim();
-
-      if (trimmed.startsWith('## ')) {
-        phases.push({
-          title: trimmed.replace(/^#+\s*/, ''),
-          progress: { done: 0, total: 0 },
-        });
-      }
-
-      if (trimmed.startsWith('- [x] ') || trimmed.startsWith('- [X] ')) {
-        const text = trimmed.slice(6);
-        tasks.push({ line: i + 1, text, checked: true });
-        const phase = phases.at(-1);
-        if (phase) {
-          phase.progress.total += 1;
-          phase.progress.done += 1;
-        }
-      } else if (trimmed.startsWith('- [ ] ')) {
-        const text = trimmed.slice(6);
-        tasks.push({ line: i + 1, text, checked: false });
-        const phase = phases.at(-1);
-        if (phase) {
-          phase.progress.total += 1;
-        }
-      }
-
-      const words = trimmed.split(/\s+/);
-      for (const word of words) {
-        const cleaned = word.replace(/^[`"'()]+|[`"'()]+$/g, '');
-        if (looksLikeFilePath(cleaned)) {
-          fileRefs.push(cleaned);
-        }
-      }
-    }
-
-    return { phases, tasks, file_refs: fileRefs };
-  }
-
   async function loadMarkdownForPath(path: string, contentMtimeMs?: number): Promise<void> {
     if (!path || detectFileType(path) !== 'markdown') return;
     if (typeof contentMtimeMs === 'number') {
@@ -232,11 +169,7 @@
 
     const requestId = ++markdownFetchSeq;
     try {
-      const response = await fetch(attnUrl(path), { cache: 'no-store' });
-      if (!response.ok) {
-        throw new Error(`failed to fetch markdown: ${response.status}`);
-      }
-      const markdown = await response.text();
+      const markdown = await loadMarkdownFromPath(path);
       if (requestId !== markdownFetchSeq) return;
       const currentPath = tabs.find((t) => t.id === activeTabId)?.path;
       if (currentPath && currentPath !== path) return;
@@ -424,6 +357,7 @@
   function saveAndExitEdit(): void {
     if (editorRef) {
       const md = editorRef.getMarkdown();
+      structure = extractStructureFromMarkdown(md);
       editSave(md);
       toast.success('File saved');
     }
@@ -508,9 +442,9 @@
         onCancel={cancelEdit}
       />
     {:else if activeFileType === 'image'}
-      <ImageViewer src={attnUrl(activePath)} />
+      <ImageViewer src={markdownSourceUrl(activePath)} />
     {:else if activeFileType === 'video' || activeFileType === 'audio'}
-      <MediaPlayer src={attnUrl(activePath)} fileType={activeFileType} />
+      <MediaPlayer src={markdownSourceUrl(activePath)} fileType={activeFileType} />
     {:else}
       <div class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
         <p>This file type is not supported for preview.</p>

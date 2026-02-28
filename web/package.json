@@ -9,6 +9,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
+    "@panzoom/panzoom": "^4.6.1",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.33",
     "mermaid": "^11.12.3",

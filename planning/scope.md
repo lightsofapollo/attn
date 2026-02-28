@@ -6,7 +6,7 @@ The minimum viable tool — open a markdown file and see it rendered beautifully
 
   - [x] CLI accepts a file path argument
 
-  - [ ] Starts local HTTP server with embedded web assets
+  - [x] Starts local HTTP server with embedded web assets
 
   - [ ] Opens default browser to rendered view
 

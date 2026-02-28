@@ -20,6 +20,7 @@
   import MediaPlayer from './lib/MediaPlayer.svelte';
   import { toast } from 'svelte-sonner';
   import { SidebarProvider, SidebarInset } from '$lib/components/ui/sidebar';
+  import { ScrollArea } from '$lib/components/ui/scroll-area';
   import PathBreadcrumb from './lib/PathBreadcrumb.svelte';
   import {
     detectFileType,
@@ -60,9 +61,116 @@
   let showTabBar = $derived(tabs.length > 1);
   let markdownFetchSeq = 0;
   const loadedMtimeByPath = new Map<string, number>();
+  type OutlineHeading = { id: string; text: string; level: number; line: number };
+  let outlineHeadings: OutlineHeading[] = $state([]);
+  let activeOutlineId = $state('');
 
   function emptyPlanStructure(): PlanStructure {
     return { phases: [], tasks: [], file_refs: [] };
+  }
+
+  function slugifyHeading(text: string): string {
+    return text
+      .toLowerCase()
+      .trim()
+      .replace(/[^\w\s-]/g, '')
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+  }
+
+  function extractOutlineHeadings(markdown: string): OutlineHeading[] {
+    if (!markdown) return [];
+    const lines = markdown.split(/\r?\n/);
+    const slugCounts = new Map<string, number>();
+    const result: OutlineHeading[] = [];
+
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      const match = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line);
+      if (!match) continue;
+      const level = match[1].length;
+      const text = match[2].trim();
+      if (!text) continue;
+      const base = slugifyHeading(text) || `section-${i + 1}`;
+      const count = (slugCounts.get(base) ?? 0) + 1;
+      slugCounts.set(base, count);
+      const id = count > 1 ? `${base}-${count}` : base;
+      result.push({ id, text, level, line: i + 1 });
+    }
+
+    return result;
+  }
+
+  function normalizedHeadingKey(text: string, level: number): string {
+    return `${level}:${text.toLowerCase().replace(/\s+/g, ' ').trim()}`;
+  }
+
+  function buildOutlineDomIndex(headings: OutlineHeading[], domHeadings: HTMLElement[]): string[] {
+    const outlineBuckets = new Map<string, string[]>();
+    for (const heading of headings) {
+      const key = normalizedHeadingKey(heading.text, heading.level);
+      const bucket = outlineBuckets.get(key) ?? [];
+      bucket.push(heading.id);
+      outlineBuckets.set(key, bucket);
+    }
+
+    const consumed = new Map<string, number>();
+    return domHeadings.map((el) => {
+      const level = Number(el.tagName.slice(1));
+      const key = normalizedHeadingKey(el.textContent ?? '', level);
+      const bucket = outlineBuckets.get(key);
+      if (!bucket || bucket.length === 0) return '';
+      const used = consumed.get(key) ?? 0;
+      consumed.set(key, used + 1);
+      return bucket[used] ?? '';
+    });
+  }
+
+  function syncActiveOutlineFromViewport(): void {
+    if (!contentViewport || outlineHeadings.length === 0) {
+      activeOutlineId = '';
+      return;
+    }
+    const domHeadings = Array.from(
+      contentViewport.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'),
+    );
+    if (domHeadings.length === 0) {
+      activeOutlineId = outlineHeadings[0]?.id ?? '';
+      return;
+    }
+
+    const idsByDomOrder = buildOutlineDomIndex(outlineHeadings, domHeadings);
+    const viewportTop = contentViewport.getBoundingClientRect().top + 72;
+    let current = idsByDomOrder[0] || outlineHeadings[0]?.id || '';
+
+    for (let i = 0; i < domHeadings.length; i += 1) {
+      const id = idsByDomOrder[i];
+      if (!id) continue;
+      if (domHeadings[i].getBoundingClientRect().top <= viewportTop) {
+        current = id;
+      } else {
+        break;
+      }
+    }
+
+    activeOutlineId = current;
+  }
+
+  function handleOutlineNavigate(id: string): void {
+    activeOutlineId = id;
+    if (!contentViewport) return;
+    requestAnimationFrame(() => {
+      if (!contentViewport) return;
+      const domHeadings = Array.from(
+        contentViewport.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'),
+      );
+      if (domHeadings.length === 0) return;
+      const idsByDomOrder = buildOutlineDomIndex(outlineHeadings, domHeadings);
+      const idx = idsByDomOrder.findIndex((entry) => entry === id);
+      if (idx === -1) return;
+      domHeadings[idx].scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   }
 
   function openPath(path: string, fileType?: FileType, newTab = false): void {
@@ -375,6 +483,42 @@
   }
 
   $effect(() => {
+    if (activeFileType !== 'markdown') {
+      outlineHeadings = [];
+      activeOutlineId = '';
+      return;
+    }
+
+    const headings = extractOutlineHeadings(rawMarkdown);
+    outlineHeadings = headings;
+    activeOutlineId = headings[0]?.id ?? '';
+    requestAnimationFrame(() => {
+      syncActiveOutlineFromViewport();
+    });
+  });
+
+  $effect(() => {
+    if (!contentViewport) return;
+    const viewport = contentViewport;
+    let raf = 0;
+    const onScroll = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        syncActiveOutlineFromViewport();
+      });
+    };
+    viewport.addEventListener('scroll', onScroll, { passive: true });
+    requestAnimationFrame(() => {
+      syncActiveOutlineFromViewport();
+    });
+    return () => {
+      viewport.removeEventListener('scroll', onScroll);
+      if (raf) cancelAnimationFrame(raf);
+    };
+  });
+
+  $effect(() => {
     loadInitPayload();
     registerIpcHandlers();
     // Handle deferred auto-navigation (directory opened, first file selected)
@@ -419,11 +563,24 @@
   {#if showTabBar}
     <TabBar {tabs} {activeTabId} onSwitch={switchTab} onClose={closeTab} />
   {/if}
-  {#if hasSidebar}
-    <PathBreadcrumb path={activePath} {rootPath} onNavigate={(dir) => openPath(dir)} />
+  <PathBreadcrumb
+    path={activePath}
+    {rootPath}
+    avoidWindowControls={!hasSidebar}
+    fixed={!hasSidebar}
+    topOffsetPx={34}
+    onNavigate={(dir) => openPath(dir)}
+  />
+  {#if !hasSidebar}
+    <div class="h-[40px] shrink-0"></div>
   {/if}
 
-  <div class="attn-content-viewport min-h-0 flex-1 overflow-auto" bind:this={contentViewport}>
+  <ScrollArea
+    class="attn-content-viewport min-h-0 flex-1"
+    orientation="vertical"
+    bind:viewportRef={contentViewport}
+  >
+
     {#if !hasActiveTab}
       <div class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
         <p class="text-sm font-medium text-foreground">No file selected</p>
@@ -451,7 +608,7 @@
         <p class="text-sm opacity-60">{activePath}</p>
       </div>
     {/if}
-  </div>
+  </ScrollArea>
 {/snippet}
 
 {#snippet minimalDiagnosticContent()}
@@ -498,14 +655,22 @@
   </main>
 {:else if hasSidebar}
   <SidebarProvider class="h-svh overflow-hidden">
-    <Sidebar entries={fileTree} {activePath} {rootPath} onNavigate={handleSidebarNavigate} />
+    <Sidebar
+      entries={fileTree}
+      {activePath}
+      {rootPath}
+      outline={outlineHeadings}
+      {activeOutlineId}
+      onNavigate={handleSidebarNavigate}
+      onOutlineNavigate={handleOutlineNavigate}
+    />
     <SidebarInset class="flex flex-col overflow-hidden">
       {@render mainContent()}
     </SidebarInset>
   </SidebarProvider>
 {:else}
   <main class="flex h-screen flex-col overflow-hidden">
-    <div class="h-[46px] shrink-0" style="-webkit-user-select: none" onmousedown={dragWindow}></div>
+    <div class="h-[34px] shrink-0" style="-webkit-user-select: none" onmousedown={dragWindow}></div>
     {@render mainContent()}
   </main>
 {/if}

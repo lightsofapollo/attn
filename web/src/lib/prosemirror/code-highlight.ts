@@ -29,43 +29,20 @@ function hasCodeBlocks(doc: PmNode): boolean {
 function loadHljs(): Promise<HLJSApi> {
   if (hljs) return Promise.resolve(hljs);
   if (hljsLoading) return hljsLoading;
-  hljsLoading = import('highlight.js/lib/core').then(async (mod) => {
+  hljsLoading = import('highlight.js/lib/common').then(async (mod) => {
     const core = mod.default;
-    // Keep initial language set tight to avoid large startup stalls.
-    const langs = await Promise.all([
-      import('highlight.js/lib/languages/javascript'),
-      import('highlight.js/lib/languages/typescript'),
-      import('highlight.js/lib/languages/python'),
-      import('highlight.js/lib/languages/rust'),
-      import('highlight.js/lib/languages/go'),
-      import('highlight.js/lib/languages/bash'),
-      import('highlight.js/lib/languages/json'),
-      import('highlight.js/lib/languages/plaintext'),
-      import('highlight.js/lib/languages/markdown'),
-      import('highlight.js/lib/languages/yaml'),
-      import('highlight.js/lib/languages/css'),
-      import('highlight.js/lib/languages/xml'),
-      import('highlight.js/lib/languages/diff'),
-      import('highlight.js/lib/languages/dockerfile'),
-      import('highlight.js/lib/languages/makefile'),
-    ]);
-    const names = [
-      'javascript', 'typescript', 'python', 'rust', 'go', 'bash', 'json',
-      'plaintext', 'markdown', 'yaml', 'css', 'xml', 'diff', 'dockerfile',
-      'makefile',
-    ];
-    for (let i = 0; i < langs.length; i++) {
-      core.registerLanguage(names[i], langs[i].default);
-    }
-    // Common aliases
+    // common includes a broad language set (far more than the previous manual subset)
+    // and keeps loading deferred until markdown with code blocks is shown.
     core.registerAliases(['js', 'jsx'], { languageName: 'javascript' });
     core.registerAliases(['ts', 'tsx'], { languageName: 'typescript' });
     core.registerAliases(['py'], { languageName: 'python' });
-    core.registerAliases(['sh', 'zsh'], { languageName: 'bash' });
+    core.registerAliases(['cxx', 'cpp', 'c++', 'h', 'hpp'], { languageName: 'cpp' });
+    core.registerAliases(['c#'], { languageName: 'csharp' });
+    core.registerAliases(['sh', 'zsh', 'bashrc', 'shell'], { languageName: 'bash' });
     core.registerAliases(['yml'], { languageName: 'yaml' });
-    core.registerAliases(['html'], { languageName: 'xml' });
+    core.registerAliases(['html', 'xhtml', 'xsl'], { languageName: 'xml' });
     core.registerAliases(['rs'], { languageName: 'rust' });
-    core.registerAliases(['text'], { languageName: 'plaintext' });
+    core.registerAliases(['text', 'plain'], { languageName: 'plaintext' });
     hljs = core;
     return core;
   });

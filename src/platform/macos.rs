@@ -3,8 +3,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength,
+    NSApplication, NSImage, NSMenu, NSMenuItem,
 };
 use objc2_foundation::{NSData, NSObject, NSObjectProtocol, NSString};
 use std::sync::{Mutex, OnceLock};
@@ -13,8 +12,6 @@ use tao::event_loop::{EventLoop, EventLoopProxy};
 pub struct SystemUiHandles {
     _main_menu: Retained<NSMenu>,
     _app_menu: Retained<NSMenu>,
-    _status_item: Retained<NSStatusItem>,
-    _status_menu: Retained<NSMenu>,
     _menu_target: Retained<MenuActionTarget>,
 }
 
@@ -151,39 +148,9 @@ pub fn install_system_ui(proxy: EventLoopProxy<UserEvent>) -> Option<SystemUiHan
     ));
     app.setMainMenu(Some(&main_menu));
 
-    let status_bar = NSStatusBar::systemStatusBar();
-    let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
-    status_item.setTitle(Some(&NSString::from_str("attn")));
-    let status_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("attn"));
-    status_menu.addItem(&new_action_item(
-        mtm,
-        "Open",
-        Some(sel!(openWindow:)),
-        "",
-        &menu_target,
-    ));
-    status_menu.addItem(&new_action_item(
-        mtm,
-        "Hide",
-        Some(sel!(hideWindow:)),
-        "",
-        &menu_target,
-    ));
-    status_menu.addItem(&NSMenuItem::separatorItem(mtm));
-    status_menu.addItem(&new_action_item(
-        mtm,
-        "Quit",
-        Some(sel!(quitApp:)),
-        "",
-        &menu_target,
-    ));
-    status_item.setMenu(Some(&status_menu));
-
     Some(SystemUiHandles {
         _main_menu: main_menu,
         _app_menu: app_menu,
-        _status_item: status_item,
-        _status_menu: status_menu,
         _menu_target: menu_target,
     })
 }

@@ -123,6 +123,7 @@ pre {
     box-shadow: inset 0 1px 3px oklch(0 0 0 / 4%);
 }
 
+
 pre code {
     display: block;
     background: none;
@@ -254,4 +255,31 @@ img {
     font-weight: 600;
 }
 
+}
+
+/* Scrollbar styles — intentionally unlayered so they override native scrollbars in WebKit. */
+pre::-webkit-scrollbar {
+  height: 6px;
+  background: transparent;
+}
+
+pre::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+pre::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 999px;
+}
+
+pre::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.dark pre::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.dark pre::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.35);
 }

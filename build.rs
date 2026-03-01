@@ -32,10 +32,10 @@ fn watch_dir(dir: &str) {
         };
         let path = entry.path();
         println!("cargo:rerun-if-changed={}", path.display());
-        if path.is_dir() {
-            if let Some(s) = path.to_str() {
-                watch_dir(s);
-            }
+        if path.is_dir()
+            && let Some(s) = path.to_str()
+        {
+            watch_dir(s);
         }
     }
 }

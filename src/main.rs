@@ -221,13 +221,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let (initial_mtime_ms, initial_bytes) = content_metadata_for_path(&initial_ui_path);
 
     // Determine theme
-    let theme = if cli.dark {
-        "dark"
-    } else if cli.light {
-        "light"
-    } else {
-        "light"
-    };
+    let theme = if cli.dark { "dark" } else { "light" };
     let diag_mode = diag_mode_from_env();
 
     let init_payload_json = serde_json::json!({
@@ -311,9 +305,11 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             let is_dev_server_url = dev_server_origin
                 .as_deref()
                 .is_some_and(|origin| url.starts_with(origin));
-            if url.starts_with("data:") || url.starts_with("about:") || url.starts_with("attn:") {
-                true
-            } else if is_dev_server_url {
+            if url.starts_with("data:")
+                || url.starts_with("about:")
+                || url.starts_with("attn:")
+                || is_dev_server_url
+            {
                 true
             } else {
                 let _ = open::that(&url);

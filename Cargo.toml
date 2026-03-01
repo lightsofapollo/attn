@@ -8,7 +8,7 @@ license = "MIT"
 [package.metadata.bundle]
 name = "attn"
 identifier = "dev.jameslal.attn"
-icon = ["icons/attn.icns"]
+icon = ["icons/attn.icns", "icons/attn.png"]
 category = "DeveloperTool"
 short_description = "A beautiful markdown viewer that launches from the CLI"
 

@@ -8,11 +8,22 @@ use tao::event_loop::EventLoopProxy;
 #[derive(Debug)]
 pub enum UserEvent {
     /// One or more watched files changed on disk.
-    FsChanged(Vec<PathBuf>),
+    FsChanged {
+        kind: FsChangeKind,
+        paths: Vec<PathBuf>,
+    },
     /// Another attn invocation wants to open a new path.
     OpenPath(PathBuf),
     /// Switch to a project root and refresh sidebar content.
     SwitchProject(PathBuf),
+    /// Request lazy loading of a folder's direct children.
+    LoadChildren(PathBuf),
+    /// A background scan for one directory's direct children completed.
+    ChildrenLoaded {
+        root: PathBuf,
+        parent: PathBuf,
+        children: Vec<crate::files::TreeNode>,
+    },
     /// Take a screenshot and send the path back through the channel.
     Screenshot(std::sync::mpsc::Sender<String>),
     /// Request daemon info (binary path, PID) and send back through the channel.
@@ -37,6 +48,14 @@ pub enum UserEvent {
     Quit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsChangeKind {
+    Create,
+    Remove,
+    Modify,
+    Rename,
+}
+
 pub struct FileWatcher {
     watcher: RecommendedWatcher,
     watched_root: Option<PathBuf>,
@@ -44,6 +63,25 @@ pub struct FileWatcher {
 
 /// Debounce interval — ignore duplicate events within this window.
 const DEBOUNCE_MS: u128 = 100;
+
+fn should_ignore_component(component: &str) -> bool {
+    if component.starts_with('.') {
+        return true;
+    }
+    matches!(
+        component,
+        "node_modules" | "target" | "dist" | "build" | "out" | "coverage" | "__pycache__" | "venv"
+    )
+}
+
+fn should_ignore_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(should_ignore_component)
+    })
+}
 
 impl FileWatcher {
     /// Start watching `path` (directory-recursive, or parent directory for files).
@@ -56,6 +94,16 @@ impl FileWatcher {
 
         let watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             if let Ok(event) = res {
+                let change_kind = match &event.kind {
+                    EventKind::Create(_) => FsChangeKind::Create,
+                    EventKind::Remove(_) => FsChangeKind::Remove,
+                    EventKind::Modify(notify::event::ModifyKind::Name(_)) => FsChangeKind::Rename,
+                    EventKind::Modify(_) => FsChangeKind::Modify,
+                    _ => {
+                        return;
+                    }
+                };
+
                 if !matches!(
                     event.kind,
                     EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
@@ -64,6 +112,14 @@ impl FileWatcher {
                 }
 
                 if event.paths.is_empty() {
+                    return;
+                }
+                let filtered_paths: Vec<PathBuf> = event
+                    .paths
+                    .into_iter()
+                    .filter(|path| !should_ignore_path(path))
+                    .collect();
+                if filtered_paths.is_empty() {
                     return;
                 }
 
@@ -77,7 +133,10 @@ impl FileWatcher {
                 }
                 *last = now;
 
-                let _ = proxy.send_event(UserEvent::FsChanged(event.paths));
+                let _ = proxy.send_event(UserEvent::FsChanged {
+                    kind: change_kind,
+                    paths: filtered_paths,
+                });
             }
         })?;
 

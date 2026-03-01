@@ -4,13 +4,15 @@
     ContentPayload,
     DiagMode,
     FileType,
+    TreeOp,
+    TreePatch,
     TreeNode,
     InitPayload,
     PlanStructure,
     UpdatePayload,
   } from './lib/types';
   import { initKeyboard } from './lib/keyboard';
-  import { dragWindow, editSave, navigate, switchProject } from './lib/ipc';
+  import { dragWindow, editSave, loadChildren, navigate, switchProject } from './lib/ipc';
   import {
     decreaseFontScale as decreaseGlobalFontScale,
     increaseFontScale as increaseGlobalFontScale,
@@ -72,6 +74,7 @@
   const markdownCacheByPath = new Map<string, string>();
   const deferredReloadMtimeByPath = new Map<string, number | null>();
   const deferredReloadNoticeByPath = new Set<string>();
+  const loadedDirPaths = new Set<string>();
   let editorDirty = $state(false);
   type OutlineHeading = { id: string; text: string; level: number; line: number };
   let outlineHeadings: OutlineHeading[] = $state([]);
@@ -79,6 +82,139 @@
 
   function emptyPlanStructure(): PlanStructure {
     return { phases: [], tasks: [], file_refs: [] };
+  }
+
+  function normalizeFsPath(path: string): string {
+    return path.replace(/\\/g, '/').replace(/\/+$/, '');
+  }
+
+  function patchTreeChildren(
+    nodes: TreeNode[],
+    parentPath: string,
+    children: TreeNode[],
+  ): { next: TreeNode[]; applied: boolean } {
+    let applied = false;
+    const parentKey = normalizeFsPath(parentPath);
+    const next = nodes.map((node) => {
+      const nodePath = normalizeFsPath(node.path);
+      if (nodePath === parentKey) {
+        applied = true;
+        return { ...node, children };
+      }
+      if (!node.children?.length) {
+        return node;
+      }
+      const patched = patchTreeChildren(node.children, parentPath, children);
+      if (!patched.applied) return node;
+      applied = true;
+      return { ...node, children: patched.next };
+    });
+    return { next, applied };
+  }
+
+  function applyTreePatch(patch: TreePatch): void {
+    const parentKey = normalizeFsPath(patch.parentPath);
+    const rootKey = normalizeFsPath(rootPath);
+    if (parentKey === rootKey) {
+      fileTree = patch.children;
+      return;
+    }
+    const patched = patchTreeChildren(fileTree, patch.parentPath, patch.children);
+    if (patched.applied) {
+      fileTree = patched.next;
+    }
+  }
+
+  function sortTreeNodes(nodes: TreeNode[]): TreeNode[] {
+    return [...nodes].sort((a, b) => {
+      if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+    });
+  }
+
+  function upsertNodeIntoChildren(children: TreeNode[], node: TreeNode): TreeNode[] {
+    const idx = children.findIndex((entry) => normalizeFsPath(entry.path) === normalizeFsPath(node.path));
+    if (idx >= 0) {
+      const next = [...children];
+      next[idx] = node;
+      return sortTreeNodes(next);
+    }
+    return sortTreeNodes([...children, node]);
+  }
+
+  function upsertTreeNode(
+    nodes: TreeNode[],
+    parentPath: string,
+    node: TreeNode,
+  ): { next: TreeNode[]; applied: boolean } {
+    const parentKey = normalizeFsPath(parentPath);
+    const next = nodes.map((entry) => {
+      if (normalizeFsPath(entry.path) === parentKey) {
+        const currentChildren = entry.children ?? [];
+        return { ...entry, children: upsertNodeIntoChildren(currentChildren, node) };
+      }
+      if (!entry.children?.length) return entry;
+      const patched = upsertTreeNode(entry.children, parentPath, node);
+      if (!patched.applied) return entry;
+      return { ...entry, children: patched.next };
+    });
+    const applied = next.some((entry, idx) => entry !== nodes[idx]);
+    return { next, applied };
+  }
+
+  function removeTreeNode(nodes: TreeNode[], path: string): { next: TreeNode[]; removed: boolean } {
+    const target = normalizeFsPath(path);
+    let removed = false;
+    const filtered: TreeNode[] = [];
+    for (const node of nodes) {
+      if (normalizeFsPath(node.path) === target) {
+        removed = true;
+        continue;
+      }
+      if (!node.children?.length) {
+        filtered.push(node);
+        continue;
+      }
+      const patched = removeTreeNode(node.children, path);
+      if (patched.removed) {
+        removed = true;
+        filtered.push({ ...node, children: patched.next });
+      } else {
+        filtered.push(node);
+      }
+    }
+    return { next: filtered, removed };
+  }
+
+  function applyTreeOps(ops: TreeOp[]): void {
+    if (ops.length === 0) return;
+    let next = fileTree;
+    const rootKey = normalizeFsPath(rootPath);
+
+    for (const op of ops) {
+      if (op.op === 'remove') {
+        const removed = removeTreeNode(next, op.path);
+        if (removed.removed) {
+          next = removed.next;
+        }
+        loadedDirPaths.delete(normalizeFsPath(op.path));
+        continue;
+      }
+
+      const parentKey = normalizeFsPath(op.parentPath);
+      if (parentKey === rootKey) {
+        next = upsertNodeIntoChildren(next, op.node);
+      } else {
+        const patched = upsertTreeNode(next, op.parentPath, op.node);
+        if (patched.applied) {
+          next = patched.next;
+        }
+      }
+    }
+
+    if (next !== fileTree) {
+      fileTree = next;
+    }
   }
 
   function getProjectScopeKey(
@@ -431,6 +567,7 @@
     diagMode = init.diagMode ?? 'full';
     if (init.fileTree) {
       fileTree = init.fileTree;
+      loadedDirPaths.clear();
     }
     if (init.rootPath) {
       rootPath = init.rootPath;
@@ -543,6 +680,14 @@
       }
       if (data.fileTree) {
         fileTree = data.fileTree;
+        loadedDirPaths.clear();
+      }
+      if (data.treePatch) {
+        applyTreePatch(data.treePatch);
+        loadedDirPaths.add(normalizeFsPath(data.treePatch.parentPath));
+      }
+      if (data.treeOps) {
+        applyTreeOps(data.treeOps);
       }
       if (detectFileType(data.filePath) === 'markdown' && typeof data.markdown !== 'string') {
         if (mode === 'edit' && editorDirty && data.filePath === activePath) {
@@ -566,6 +711,14 @@
       applyTabScopeForProject(activeProjectPath, rootPath);
       if (data.fileTree) {
         fileTree = data.fileTree;
+        loadedDirPaths.clear();
+      }
+      if (data.treePatch) {
+        applyTreePatch(data.treePatch);
+        loadedDirPaths.add(normalizeFsPath(data.treePatch.parentPath));
+      }
+      if (data.treeOps) {
+        applyTreeOps(data.treeOps);
       }
       if (data.changedPaths && data.changedPaths.length > 0) {
         invalidatePathCaches(data.changedPaths);
@@ -731,6 +884,14 @@
   function handleProjectSwitch(path: string): void {
     if (!path || path === activeProjectPath) return;
     switchProject(path);
+  }
+
+  function handleTreeExpand(path: string): void {
+    if (!path) return;
+    const normalized = normalizeFsPath(path);
+    if (loadedDirPaths.has(normalized)) return;
+    loadedDirPaths.add(normalized);
+    loadChildren(path);
   }
 
   $effect(() => {
@@ -914,6 +1075,7 @@
       {activeOutlineId}
       onProjectSwitch={handleProjectSwitch}
       onNavigate={handleSidebarNavigate}
+      onExpand={handleTreeExpand}
       onOutlineNavigate={handleOutlineNavigate}
     />
     <SidebarInset class="flex flex-col overflow-hidden">

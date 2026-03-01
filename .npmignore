@@ -1,5 +1,4 @@
 *
-!bin/
-!scripts/
+!bin/attn.js
+!scripts/postinstall.mjs
 !package.json
-!LICENSE

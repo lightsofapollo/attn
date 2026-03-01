@@ -183,14 +183,16 @@ pub fn activate_app() {
 }
 
 fn set_macos_app_icon() {
-    static ICON_BYTES: &[u8] = include_bytes!("../../icons/attn.icns");
+    static ICON_ICNS_BYTES: &[u8] = include_bytes!("../../icons/attn.icns");
+    static ICON_PNG_BYTES: &[u8] = include_bytes!("../../icons/attn.png");
 
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
 
-    let icon_data = NSData::with_bytes(ICON_BYTES);
-    let Some(icon_image) = NSImage::initWithData(NSImage::alloc(), &icon_data) else {
+    let Some(icon_image) =
+        icon_image_from_bytes(ICON_ICNS_BYTES).or_else(|| icon_image_from_bytes(ICON_PNG_BYTES))
+    else {
         return;
     };
 
@@ -198,4 +200,9 @@ fn set_macos_app_icon() {
     unsafe {
         app.setApplicationIconImage(Some(&icon_image));
     }
+}
+
+fn icon_image_from_bytes(bytes: &[u8]) -> Option<Retained<NSImage>> {
+    let icon_data = NSData::with_bytes(bytes);
+    NSImage::initWithData(NSImage::alloc(), &icon_data)
 }

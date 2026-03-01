@@ -68,6 +68,9 @@
 <div
   class={`flex shrink-0 items-center justify-between h-[40px] min-w-0 pr-4 pt-3 pb-0 bg-background/95 backdrop-blur-[1px] ${fixed ? 'fixed inset-x-0 z-30' : ''}`}
   style={`-webkit-user-select: none; padding-left: ${avoidWindowControls ? '6.5rem' : '1rem'}; ${fixed ? `top: ${topOffsetPx}px;` : ''}`}
+  role="button"
+  aria-label="Drag window"
+  tabindex="-1"
   onmousedown={dragWindow}
 >
   {#if segments.length > 1}

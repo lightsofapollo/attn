@@ -131,7 +131,14 @@
 
 <Sidebar class="project-sidebar">
   <!-- Drag strip: clears traffic lights -->
-  <div class="h-[46px] shrink-0" style="-webkit-user-select: none" onmousedown={dragWindow}></div>
+  <div
+    class="h-[46px] shrink-0"
+    style="-webkit-user-select: none"
+    role="button"
+    aria-label="Drag window"
+    tabindex="-1"
+    onmousedown={dragWindow}
+  ></div>
 
   <div
     class="sidebar-controls"

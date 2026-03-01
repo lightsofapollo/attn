@@ -278,7 +278,8 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
 
     let mut window_builder = WindowBuilder::new()
         .with_title("attn")
-        .with_inner_size(tao::dpi::LogicalSize::new(960.0, 720.0));
+        .with_inner_size(tao::dpi::LogicalSize::new(960.0, 720.0))
+        .with_window_icon(load_window_icon());
 
     #[cfg(target_os = "macos")]
     {
@@ -675,6 +676,16 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     });
 }
 
+fn load_window_icon() -> Option<tao::window::Icon> {
+    static ICON_PNG_BYTES: &[u8] = include_bytes!("../icons/attn.png");
+
+    let image =
+        image::load_from_memory_with_format(ICON_PNG_BYTES, image::ImageFormat::Png).ok()?;
+    let rgba = image.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    tao::window::Icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
 fn queue_children_refresh(proxy: &EventLoopProxy<UserEvent>, root: PathBuf, parent: PathBuf) {
     let proxy = proxy.clone();
     std::thread::spawn(move || {
@@ -707,11 +718,28 @@ fn build_tree_ops(
             }
         }
         FsChangeKind::Rename => {
-            for path in changed_paths {
-                push_remove_op(&mut ops, &mut dedup, root, Path::new(path));
-            }
-            for path in changed_paths {
-                push_upsert_op(&mut ops, &mut dedup, root, Path::new(path));
+            if changed_paths.len() == 2 {
+                let first = Path::new(&changed_paths[0]);
+                let second = Path::new(&changed_paths[1]);
+                let first_exists = first.exists();
+                let second_exists = second.exists();
+                let (old_path, new_path) = if !first_exists && second_exists {
+                    (first, second)
+                } else if first_exists && !second_exists {
+                    (second, first)
+                } else {
+                    // notify typically reports [old, new]
+                    (first, second)
+                };
+                push_remove_op(&mut ops, &mut dedup, root, old_path);
+                push_upsert_op(&mut ops, &mut dedup, root, new_path);
+            } else {
+                for path in changed_paths {
+                    push_remove_op(&mut ops, &mut dedup, root, Path::new(path));
+                }
+                for path in changed_paths {
+                    push_upsert_op(&mut ops, &mut dedup, root, Path::new(path));
+                }
             }
         }
         FsChangeKind::Modify => {

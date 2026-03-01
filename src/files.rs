@@ -216,7 +216,10 @@ mod tests {
         std::fs::write(nested.join("readme.md"), "# hello").expect("write markdown file");
 
         let found = find_first_previewable_path(&root).expect("should find previewable file");
-        assert_eq!(found.file_name().and_then(|n| n.to_str()), Some("readme.md"));
+        assert_eq!(
+            found.file_name().and_then(|n| n.to_str()),
+            Some("readme.md")
+        );
 
         std::fs::remove_dir_all(&root).expect("cleanup temp root");
     }

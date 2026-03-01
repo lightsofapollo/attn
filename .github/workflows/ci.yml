@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  rust-tests:
-    name: Rust Tests (macOS)
+  rust-quality:
+    name: Rust Quality (macOS)
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -31,6 +31,12 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run Rust tests
         run: cargo test --locked

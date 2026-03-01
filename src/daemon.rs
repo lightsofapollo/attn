@@ -110,6 +110,7 @@ fn runtime_dir() -> Result<PathBuf> {
     }
 }
 
+#[cfg(not(feature = "production"))]
 fn short_exe_namespace(path: &std::path::Path) -> String {
     // 64-bit FNV-1a over the executable path; short and deterministic.
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -227,6 +228,7 @@ pub fn try_send_to_existing(path: &str) -> Result<bool> {
 
 /// Send a screenshot command to the running daemon.
 /// Returns the path to the saved screenshot.
+#[cfg(not(feature = "production"))]
 pub fn send_screenshot() -> Result<String> {
     match send_command(&SocketMessage::Screenshot)? {
         Some(resp) => match resp {
@@ -658,10 +660,10 @@ fn parse_interact_result(raw: &str) -> InteractResult {
         return result;
     }
     // wry returns the result as a JSON string (double-encoded)
-    if let Ok(inner) = serde_json::from_str::<String>(raw) {
-        if let Ok(result) = serde_json::from_str::<InteractResult>(&inner) {
-            return result;
-        }
+    if let Ok(inner) = serde_json::from_str::<String>(raw)
+        && let Ok(result) = serde_json::from_str::<InteractResult>(&inner)
+    {
+        return result;
     }
     InteractResult::Error {
         message: format!("failed to parse interact result: {raw}"),
@@ -680,14 +682,11 @@ fn execute_interact(action: &InteractAction, proxy: &EventLoopProxy<UserEvent>) 
             loop {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let _ = proxy.send_event(UserEvent::Eval(check_js.clone(), tx));
-                match rx.recv_timeout(Duration::from_secs(2)) {
-                    Result::Ok(result) => {
-                        let parsed = parse_interact_result(&result);
-                        if matches!(parsed, InteractResult::Ok) {
-                            return InteractResult::Ok;
-                        }
+                if let Result::Ok(result) = rx.recv_timeout(Duration::from_secs(2)) {
+                    let parsed = parse_interact_result(&result);
+                    if matches!(parsed, InteractResult::Ok) {
+                        return InteractResult::Ok;
                     }
-                    Err(_) => {} // eval timed out, keep trying
                 }
                 if Instant::now() >= deadline {
                     return InteractResult::Timeout {

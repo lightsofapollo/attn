@@ -52,22 +52,23 @@ fn extract_structure(markdown: &str) -> PlanStructure {
         }
 
         // Detect task list items
-        if trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ") {
-            let text = trimmed[6..].to_string();
+        if let Some(text) = trimmed
+            .strip_prefix("- [x] ")
+            .or_else(|| trimmed.strip_prefix("- [X] "))
+        {
             tasks.push(Task {
                 line: line_num + 1,
-                text,
+                text: text.to_string(),
                 checked: true,
             });
             if let Some(phase) = phases.last_mut() {
                 phase.progress.total += 1;
                 phase.progress.done += 1;
             }
-        } else if trimmed.starts_with("- [ ] ") {
-            let text = trimmed[6..].to_string();
+        } else if let Some(text) = trimmed.strip_prefix("- [ ] ") {
             tasks.push(Task {
                 line: line_num + 1,
-                text,
+                text: text.to_string(),
                 checked: false,
             });
             if let Some(phase) = phases.last_mut() {
@@ -127,16 +128,20 @@ See `src/main.rs` and web/src/App.svelte for details.
         assert_eq!(result.structure.phases[0].progress.done, 1);
         assert_eq!(result.structure.phases[0].progress.total, 2);
         assert_eq!(result.structure.tasks.len(), 2);
-        assert!(result
-            .structure
-            .file_refs
-            .iter()
-            .any(|p| p == "src/main.rs"));
-        assert!(result
-            .structure
-            .file_refs
-            .iter()
-            .any(|p| p == "web/src/App.svelte"));
+        assert!(
+            result
+                .structure
+                .file_refs
+                .iter()
+                .any(|p| p == "src/main.rs")
+        );
+        assert!(
+            result
+                .structure
+                .file_refs
+                .iter()
+                .any(|p| p == "web/src/App.svelte")
+        );
     }
 
     #[test]

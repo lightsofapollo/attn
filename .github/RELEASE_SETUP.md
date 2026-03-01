@@ -3,7 +3,7 @@
 This project ships:
 - signed macOS `.app` and `.dmg` (manual test workflow)
 - tag-based GitHub Releases with `attn` CLI binaries
-- npm package publishing for `npx attn`
+- npm package publishing for `npx attnmd`
 
 ## What is included
 
@@ -27,7 +27,7 @@ Set these in `Settings -> Secrets and variables -> Actions`:
 - `APPLE_ID`: Apple developer account email (for notarization)
 - `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for `notarytool`
 - `APPLE_TEAM_ID`: Apple team ID
-- `NPM_TOKEN`: npm automation token with publish rights for package `attn`
+- `NPM_TOKEN`: npm automation token with publish rights for package `attnmd`
 
 ## Local prerequisites (macOS)
 
@@ -83,7 +83,7 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
    - matching `.sha256` files
 4. A GitHub Release for the tag is created/updated with those assets.
 
-## npm publish flow (`npx attn`)
+## npm publish flow (`npx attnmd`)
 
 1. Publish is triggered when a GitHub Release is marked `published`.
 2. `Publish npm` workflow checks out the tag, sets `package.json` version from tag, and runs:
@@ -91,7 +91,12 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
    npm publish --access public --provenance
    ```
 3. npm package `postinstall` downloads the matching binary from GitHub Releases.
-4. `npx attn` then executes the downloaded runtime binary.
+4. `npx attnmd` then executes the downloaded runtime binary.
+5. Global installs still expose `attn` as the command:
+   ```bash
+   npm i -g attnmd
+   attn --help
+   ```
 
 ## Icon notes
 

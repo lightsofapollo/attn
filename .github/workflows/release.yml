@@ -33,6 +33,9 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
       - name: Build production binary
         run: cargo build --release --target aarch64-apple-darwin --locked
 

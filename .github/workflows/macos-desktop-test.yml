@@ -43,6 +43,9 @@ jobs:
         with:
           targets: ${{ inputs.target }}
 
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
       - name: Install cargo-bundle
         uses: taiki-e/cache-cargo-install-action@v2
         with:

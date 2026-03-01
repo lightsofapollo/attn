@@ -10,8 +10,8 @@ permissions:
   id-token: write
 
 jobs:
-  build:
-    name: Build, sign & notarize
+  build-binary:
+    name: Build darwin-arm64
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -37,74 +37,8 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-bundle
-        uses: taiki-e/cache-cargo-install-action@v2
-        with:
-          tool: cargo-bundle
-
-      - name: Import code signing certificate
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
-
-          if [ -z "$CERTIFICATE_BASE64" ] || [ -z "$CERTIFICATE_PASSWORD" ] || [ -z "$KEYCHAIN_PASSWORD" ]; then
-            echo "Missing required secrets: APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, KEYCHAIN_PASSWORD" >&2
-            exit 1
-          fi
-
-          echo -n "$CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH" || \
-            echo -n "$CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERTIFICATE_PATH" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-
-          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
-
-      - name: Build app bundle
-        run: |
-          scripts/macos-build-bundle.sh prod aarch64-apple-darwin
-
-          APP_PATH="$(find target/aarch64-apple-darwin -path '*/bundle/osx/*.app' -maxdepth 6 | head -n1)"
-          if [ -z "$APP_PATH" ]; then
-            echo "No app bundle found" >&2
-            exit 1
-          fi
-
-          DMG_PATH="$(dirname "$APP_PATH")/attn.dmg"
-          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
-          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
-
-      - name: Sign app bundle
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
-            echo "Missing required secret: APPLE_SIGNING_IDENTITY" >&2
-            exit 1
-          fi
-          scripts/macos-sign-app.sh "$APP_PATH" "$APPLE_SIGNING_IDENTITY"
-
-      - name: Create DMG
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          scripts/macos-create-dmg.sh "$APP_PATH" "$DMG_PATH"
-
-      - name: Notarize DMG
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          scripts/macos-notarize-dmg.sh "$DMG_PATH"
+      - name: Build production binary
+        run: cargo build --release --features production --target aarch64-apple-darwin --locked
 
       - name: Prepare release assets
         env:
@@ -112,13 +46,9 @@ jobs:
         run: |
           VERSION="${TAG#v}"
           mkdir -p dist
-          # Raw binary
           cp "target/aarch64-apple-darwin/release/attn" "dist/attn-v${VERSION}-darwin-arm64"
           chmod +x "dist/attn-v${VERSION}-darwin-arm64"
           shasum -a 256 "dist/attn-v${VERSION}-darwin-arm64" > "dist/attn-v${VERSION}-darwin-arm64.sha256"
-          # Signed DMG
-          cp "$DMG_PATH" "dist/attn-v${VERSION}-darwin-arm64.dmg"
-          shasum -a 256 "dist/attn-v${VERSION}-darwin-arm64.dmg" > "dist/attn-v${VERSION}-darwin-arm64.dmg.sha256"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -127,17 +57,10 @@ jobs:
           path: dist/*
           retention-days: 7
 
-      - name: Cleanup keychain
-        if: always()
-        run: |
-          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
-            security delete-keychain "$KEYCHAIN_PATH"
-          fi
-
   publish-release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: build
+    needs: build-binary
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -170,7 +93,7 @@ jobs:
 
   publish-crates:
     name: Publish crates.io
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     needs: publish-release
     steps:
       - name: Checkout

@@ -15,6 +15,7 @@ This project ships:
 - `.github/workflows/test-signing.yml`: signing smoke test
 - `.github/workflows/macos-desktop-test.yml`: build/sign/notarize artifact test
 - `.github/workflows/release.yml`: build release binaries on tag push (`v*`), publish crate, and publish npm
+  (signing/notarization remains in dedicated macOS workflows)
 - `.github/workflows/npm-publish.yml`: manual fallback publisher (workflow_dispatch or release events)
 
 ## Required GitHub Secrets

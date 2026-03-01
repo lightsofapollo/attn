@@ -66,13 +66,13 @@
 </script>
 
 <div
-  class={`flex shrink-0 items-center justify-between h-[40px] pr-4 pt-3 pb-0 bg-background/95 backdrop-blur-[1px] ${fixed ? 'fixed inset-x-0 z-30' : ''}`}
+  class={`flex shrink-0 items-center justify-between h-[40px] min-w-0 pr-4 pt-3 pb-0 bg-background/95 backdrop-blur-[1px] ${fixed ? 'fixed inset-x-0 z-30' : ''}`}
   style={`-webkit-user-select: none; padding-left: ${avoidWindowControls ? '6.5rem' : '1rem'}; ${fixed ? `top: ${topOffsetPx}px;` : ''}`}
   onmousedown={dragWindow}
 >
   {#if segments.length > 1}
-    <Breadcrumb class="mt-1.5">
-      <BreadcrumbList>
+    <Breadcrumb class="mt-1.5 min-w-0 max-w-full overflow-x-auto overflow-y-hidden [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+      <BreadcrumbList class="w-max min-w-full flex-nowrap whitespace-nowrap break-normal">
         {#each segments as segment, i (segment.fullPath)}
           {#if i > 0}
             <BreadcrumbSeparator />

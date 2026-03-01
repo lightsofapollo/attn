@@ -28,6 +28,10 @@ export function switchProject(path: string): void {
   send({ type: 'switch_project', path });
 }
 
+export function loadChildren(path: string): void {
+  send({ type: 'load_children', path });
+}
+
 export function editSave(content: string): void {
   send({ type: 'edit_save', content });
 }

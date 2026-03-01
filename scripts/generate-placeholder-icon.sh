@@ -5,84 +5,40 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 ICON_DIR="$PROJECT_DIR/icons"
+RAW_SOURCE="${1:-$ICON_DIR/attn-source-original.png}"
 BASE_PNG="$ICON_DIR/attn-placeholder-source.png"
+LINUX_PNG="$ICON_DIR/attn.png"
 ICONSET_DIR="$ICON_DIR/attn.iconset"
 ICNS_PATH="$ICON_DIR/attn.icns"
 
 mkdir -p "$ICON_DIR"
 
-echo "==> Generating placeholder base PNG with Swift/AppKit..."
-cat > /tmp/attn-generate-icon.swift <<'SWIFT'
-import AppKit
-import Foundation
+if ! command -v magick >/dev/null 2>&1; then
+  echo "error: ImageMagick ('magick') is required to build icons." >&2
+  exit 1
+fi
 
-let outputPath = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "attn-placeholder-1024.png"
-let size = NSSize(width: 1024, height: 1024)
-let image = NSImage(size: size)
+if [ ! -f "$RAW_SOURCE" ]; then
+  echo "error: icon source not found: $RAW_SOURCE" >&2
+  echo "usage: $0 [path-to-source-png]" >&2
+  exit 1
+fi
 
-image.lockFocus()
+echo "==> Preparing base PNG from source: $RAW_SOURCE"
+# Keep original colors and glyph; only remove outer flat canvas/background.
+# This preserves the brand look while avoiding the extra light frame in Dock.
+magick "$RAW_SOURCE" \
+  -alpha on \
+  -fuzz 3% -trim +repage \
+  -fuzz 5% -transparent "srgb(251,245,238)" \
+  -resize 1860x1860 \
+  -gravity center -background none -extent 2048x2048 \
+  -colorspace sRGB \
+  -unsharp 0x0.5+0.5+0.01 \
+  "$BASE_PNG"
 
-let canvas = NSRect(origin: .zero, size: size)
-NSColor(calibratedRed: 0.98, green: 0.35, blue: 0.10, alpha: 1.0).setFill()
-canvas.fill()
-
-let cardRect = canvas.insetBy(dx: 96, dy: 96)
-let cardPath = NSBezierPath(roundedRect: cardRect, xRadius: 180, yRadius: 180)
-let gradient = NSGradient(colors: [
-  NSColor(calibratedRed: 0.99, green: 0.70, blue: 0.08, alpha: 1.0),
-  NSColor(calibratedRed: 0.98, green: 0.35, blue: 0.10, alpha: 1.0)
-])!
-gradient.draw(in: cardPath, angle: -35)
-
-let letter = "A" as NSString
-let letterAttrs: [NSAttributedString.Key: Any] = [
-  .font: NSFont.systemFont(ofSize: 520, weight: .bold),
-  .foregroundColor: NSColor(calibratedRed: 0.10, green: 0.10, blue: 0.10, alpha: 1.0)
-]
-let letterSize = letter.size(withAttributes: letterAttrs)
-let letterRect = NSRect(
-  x: (size.width - letterSize.width) / 2,
-  y: (size.height - letterSize.height) / 2 + 40,
-  width: letterSize.width,
-  height: letterSize.height
-)
-letter.draw(in: letterRect, withAttributes: letterAttrs)
-
-let tag = "attn" as NSString
-let tagAttrs: [NSAttributedString.Key: Any] = [
-  .font: NSFont.systemFont(ofSize: 110, weight: .semibold),
-  .foregroundColor: NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.12, alpha: 1.0)
-]
-let tagSize = tag.size(withAttributes: tagAttrs)
-let tagRect = NSRect(
-  x: (size.width - tagSize.width) / 2,
-  y: 190,
-  width: tagSize.width,
-  height: tagSize.height
-)
-tag.draw(in: tagRect, withAttributes: tagAttrs)
-
-image.unlockFocus()
-
-guard
-  let tiffData = image.tiffRepresentation,
-  let bitmap = NSBitmapImageRep(data: tiffData),
-  let pngData = bitmap.representation(using: .png, properties: [:])
-else {
-  fputs("failed to generate PNG data\n", stderr)
-  exit(1)
-}
-
-do {
-  try pngData.write(to: URL(fileURLWithPath: outputPath))
-} catch {
-  fputs("failed to write PNG: \(error)\n", stderr)
-  exit(1)
-}
-SWIFT
-
-swift /tmp/attn-generate-icon.swift "$BASE_PNG"
-rm -f /tmp/attn-generate-icon.swift
+echo "==> Creating Linux/portable PNG icon..."
+magick "$BASE_PNG" -resize 1024x1024 "$LINUX_PNG"
 
 rm -rf "$ICONSET_DIR"
 mkdir -p "$ICONSET_DIR"
@@ -100,3 +56,4 @@ iconutil -c icns "$ICONSET_DIR" -o "$ICNS_PATH"
 rm -rf "$ICONSET_DIR"
 
 echo "Generated: $ICNS_PATH"
+echo "Generated: $LINUX_PNG"

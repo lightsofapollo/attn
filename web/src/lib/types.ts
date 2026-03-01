@@ -30,6 +30,15 @@ export interface TreeNode {
   fileType: FileType;
 }
 
+export interface TreePatch {
+  parentPath: string;
+  children: TreeNode[];
+}
+
+export type TreeOp =
+  | { op: 'remove'; path: string }
+  | { op: 'upsert'; parentPath: string; node: TreeNode };
+
 /** @deprecated Use TreeNode instead */
 export type FileEntry = TreeNode;
 
@@ -43,6 +52,8 @@ export interface ContentPayload {
   activeProjectPath?: string;
   contentMtimeMs?: number;
   contentBytes?: number;
+  treePatch?: TreePatch;
+  treeOps?: TreeOp[];
 }
 
 export interface UpdatePayload {
@@ -56,12 +67,15 @@ export interface UpdatePayload {
   changedPaths?: string[];
   contentMtimeMs?: number;
   contentBytes?: number;
+  treePatch?: TreePatch;
+  treeOps?: TreeOp[];
 }
 
 export type IpcMessageType =
   | 'checkbox_toggle'
   | 'navigate'
   | 'switch_project'
+  | 'load_children'
   | 'edit_save'
   | 'theme_change'
   | 'open_external'
@@ -83,6 +97,11 @@ export interface NavigateMessage {
 
 export interface SwitchProjectMessage {
   type: 'switch_project';
+  path: string;
+}
+
+export interface LoadChildrenMessage {
+  type: 'load_children';
   path: string;
 }
 
@@ -130,6 +149,7 @@ export type IpcMessage =
   | CheckboxToggleMessage
   | NavigateMessage
   | SwitchProjectMessage
+  | LoadChildrenMessage
   | EditSaveMessage
   | ThemeChangeMessage
   | OpenExternalMessage

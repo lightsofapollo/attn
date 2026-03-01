@@ -16,6 +16,9 @@ pub enum IpcMessage {
     #[serde(rename = "switch_project")]
     SwitchProject { path: String },
 
+    #[serde(rename = "load_children")]
+    LoadChildren { path: String },
+
     #[serde(rename = "edit_save")]
     EditSave { content: String },
 
@@ -71,6 +74,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             }
             IpcMessage::SwitchProject { path } => {
                 let _ = proxy.send_event(UserEvent::SwitchProject(PathBuf::from(path)));
+            }
+            IpcMessage::LoadChildren { path } => {
+                let _ = proxy.send_event(UserEvent::LoadChildren(PathBuf::from(path)));
             }
             IpcMessage::EditSave { content } => {
                 let Ok(state) = state.lock() else { return };

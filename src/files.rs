@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TreeNode {
@@ -32,6 +32,7 @@ fn should_skip_dir(name: &str) -> bool {
 }
 
 const MAX_TREE_NODES: usize = 5_000;
+const MAX_ROOT_SNAPSHOT_NODES: usize = 256;
 
 pub fn detect_file_type(path: &Path) -> FileType {
     if path.is_dir() {
@@ -51,38 +52,59 @@ pub fn detect_file_type(path: &Path) -> FileType {
     }
 }
 
-/// Read a directory tree recursively. Skip hidden files/dirs (starting with .).
-/// Skip bulky build/dependency dirs and symlinks.
-/// Include only directories and previewable file types.
-/// Sort: directories first, then alphabetical.
-pub fn read_tree(root: &Path) -> Vec<TreeNode> {
-    let mut remaining = MAX_TREE_NODES;
-    read_tree_limited(root, &mut remaining)
+/// Read only one level of the tree for fast first paint.
+/// Directories are included with empty children placeholders.
+pub fn read_tree_root_snapshot(root: &Path) -> Vec<TreeNode> {
+    let mut remaining = MAX_ROOT_SNAPSHOT_NODES;
+    read_tree_shallow(root, &mut remaining)
 }
 
-fn read_tree_limited(root: &Path, remaining: &mut usize) -> Vec<TreeNode> {
+/// Find the first previewable file quickly without building a full sidebar tree.
+pub fn find_first_previewable_path(root: &Path) -> Option<PathBuf> {
+    let mut remaining = MAX_TREE_NODES;
+    find_first_previewable_path_limited(root, &mut remaining)
+}
+
+fn is_previewable(file_type: &FileType) -> bool {
+    matches!(
+        file_type,
+        FileType::Markdown | FileType::Image | FileType::Video | FileType::Audio
+    )
+}
+
+fn sorted_entries(root: &Path) -> Vec<(String, std::fs::DirEntry)> {
+    let Ok(read_dir) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+
+    let mut entries: Vec<(String, std::fs::DirEntry)> = read_dir
+        .flatten()
+        .map(|entry| (entry.file_name().to_string_lossy().to_string(), entry))
+        .filter(|(name, _)| !name.starts_with('.') && !should_skip_dir(name))
+        .collect();
+
+    entries.sort_by(|(a_name, a_entry), (b_name, b_entry)| {
+        let a_is_dir = a_entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let b_is_dir = b_entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        b_is_dir
+            .cmp(&a_is_dir)
+            .then_with(|| a_name.to_lowercase().cmp(&b_name.to_lowercase()))
+    });
+
+    entries
+}
+
+fn read_tree_shallow(root: &Path, remaining: &mut usize) -> Vec<TreeNode> {
     let mut entries = Vec::new();
     if *remaining == 0 {
         return entries;
     }
 
-    let Ok(read_dir) = std::fs::read_dir(root) else {
-        return entries;
-    };
-
-    for entry in read_dir.flatten() {
+    for (name, entry) in sorted_entries(root) {
         if *remaining == 0 {
             break;
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-
-        // Skip hidden files/dirs
-        if name.starts_with('.') {
-            continue;
-        }
-        if should_skip_dir(&name) {
-            continue;
-        }
+        *remaining = remaining.saturating_sub(1);
 
         let path = entry.path();
         let Ok(ft) = entry.file_type() else {
@@ -91,20 +113,11 @@ fn read_tree_limited(root: &Path, remaining: &mut usize) -> Vec<TreeNode> {
         if ft.is_symlink() {
             continue;
         }
-        let is_dir = path.is_dir();
-        let file_type = detect_file_type(&path);
-        let children = if is_dir {
-            Some(read_tree_limited(&path, remaining))
-        } else {
-            None
-        };
 
-        // Keep only directories with visible children and previewable file types.
-        if is_dir {
-            if children.as_ref().is_none_or(Vec::is_empty) {
-                continue;
-            }
-        } else if matches!(file_type, FileType::Unsupported) {
+        let is_dir = ft.is_dir();
+        let file_type = detect_file_type(&path);
+
+        if !is_dir && !is_previewable(&file_type) {
             continue;
         }
 
@@ -112,18 +125,45 @@ fn read_tree_limited(root: &Path, remaining: &mut usize) -> Vec<TreeNode> {
             name,
             path: path.to_string_lossy().to_string(),
             is_dir,
-            children,
+            children: if is_dir { Some(Vec::new()) } else { None },
             file_type,
         });
-        *remaining = remaining.saturating_sub(1);
     }
 
-    // Sort: directories first, then alphabetical (case-insensitive)
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-
     entries
+}
+
+fn find_first_previewable_path_limited(root: &Path, remaining: &mut usize) -> Option<PathBuf> {
+    if *remaining == 0 {
+        return None;
+    }
+
+    for (_name, entry) in sorted_entries(root) {
+        if *remaining == 0 {
+            break;
+        }
+        *remaining = remaining.saturating_sub(1);
+
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_file() {
+            let file_type = detect_file_type(&path);
+            if is_previewable(&file_type) {
+                return Some(path);
+            }
+            continue;
+        }
+        if ft.is_dir()
+            && let Some(found) = find_first_previewable_path_limited(&path, remaining)
+        {
+            return Some(found);
+        }
+    }
+
+    None
 }

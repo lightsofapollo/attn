@@ -2,9 +2,7 @@ use crate::watcher::UserEvent;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{
-    NSApplication, NSImage, NSMenu, NSMenuItem,
-};
+use objc2_app_kit::{NSApplication, NSImage, NSMenu, NSMenuItem};
 use objc2_foundation::{NSData, NSObject, NSObjectProtocol, NSString};
 use std::sync::{Mutex, OnceLock};
 use tao::event_loop::{EventLoop, EventLoopProxy};

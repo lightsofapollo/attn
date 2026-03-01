@@ -15,10 +15,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tao::event::{ElementState, Event, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoopBuilder};
+use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::keyboard::{KeyCode, ModifiersState};
 use tao::window::WindowBuilder;
-use watcher::UserEvent;
+use watcher::{FsChangeKind, UserEvent};
 use wry::WebViewBuilder;
 
 #[derive(Parser, Debug)]
@@ -198,8 +198,15 @@ fn run() -> Result<()> {
 }
 
 fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
-    // Read file tree for the sidebar
-    let (tree_root, file_tree, initial_ui_path) = project_view_for_path(&path);
+    let requested = path.canonicalize().unwrap_or(path);
+    let tree_root = projects::normalize_project_root(&requested);
+    let initial_ui_path = if requested.is_file() {
+        requested
+    } else {
+        files::find_first_previewable_path(&tree_root).unwrap_or_else(|| tree_root.clone())
+    };
+    // Fast first paint: send only a shallow root snapshot; folders hydrate on demand.
+    let file_tree = files::read_tree_root_snapshot(&tree_root);
     let file_tree_nodes = count_tree_nodes(&file_tree);
     let file_tree_json = serde_json::to_string(&file_tree).unwrap_or_default();
     eprintln!(
@@ -425,13 +432,13 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     }
                 }
             }
-            Event::UserEvent(UserEvent::FsChanged(changed_paths)) => {
-                if changed_paths.is_empty() {
+            Event::UserEvent(UserEvent::FsChanged { kind, paths }) => {
+                if paths.is_empty() {
                     return;
                 }
 
                 let mut dedup = HashSet::new();
-                let changed_paths: Vec<String> = changed_paths
+                let changed_paths: Vec<String> = paths
                     .into_iter()
                     .map(|path| path.to_string_lossy().to_string())
                     .filter(|path| dedup.insert(path.clone()))
@@ -445,15 +452,12 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 let active_changed = !active_path_str.is_empty()
                     && changed_paths.iter().any(|path| path == &active_path_str);
 
-                let include_tree = changed_paths.iter().any(|path| path != &active_path_str);
                 let mut payload = serde_json::Map::new();
                 payload.insert("changedPaths".to_string(), serde_json::json!(changed_paths));
 
-                if include_tree {
-                    payload.insert(
-                        "fileTree".to_string(),
-                        serde_json::json!(files::read_tree(&current_tree_root)),
-                    );
+                let tree_ops = build_tree_ops(kind, &changed_paths, &current_tree_root);
+                if !tree_ops.is_empty() {
+                    payload.insert("treeOps".to_string(), serde_json::json!(tree_ops));
                 }
 
                 if active_changed {
@@ -473,6 +477,35 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     "window.__attn__.updateContent({});",
                     serde_json::Value::Object(payload)
                 );
+                let _ = webview.evaluate_script(&js);
+            }
+            Event::UserEvent(UserEvent::LoadChildren(path)) => {
+                let requested = path.canonicalize().unwrap_or(path);
+                let parent = if requested.is_file() {
+                    requested.parent().unwrap_or(&requested).to_path_buf()
+                } else {
+                    requested
+                };
+                if !parent.starts_with(&current_tree_root) {
+                    return;
+                }
+                queue_children_refresh(&watcher_proxy, current_tree_root.clone(), parent);
+            }
+            Event::UserEvent(UserEvent::ChildrenLoaded {
+                root,
+                parent,
+                children,
+            }) => {
+                if root != current_tree_root {
+                    return;
+                }
+                let payload = serde_json::json!({
+                    "treePatch": {
+                        "parentPath": parent.to_string_lossy(),
+                        "children": children,
+                    }
+                });
+                let js = format!("window.__attn__.updateContent({payload});");
                 let _ = webview.evaluate_script(&js);
             }
             Event::UserEvent(UserEvent::Screenshot(tx)) => {
@@ -580,7 +613,16 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 window.set_focus();
             }
             Event::UserEvent(UserEvent::SwitchProject(project_path)) => {
-                let (tree_root, file_tree, initial_ui_path) = project_view_for_path(&project_path);
+                let requested = project_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| project_path.clone());
+                let tree_root = projects::normalize_project_root(&requested);
+                let file_tree = files::read_tree_root_snapshot(&tree_root);
+                let initial_ui_path = if requested.is_file() {
+                    requested
+                } else {
+                    files::find_first_previewable_path(&tree_root).unwrap_or_else(|| tree_root.clone())
+                };
                 let project_registry = update_active_project_registry(&tree_root);
                 current_tree_root = tree_root.clone();
 
@@ -633,17 +675,125 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     });
 }
 
-fn project_view_for_path(path: &Path) -> (PathBuf, Vec<files::TreeNode>, PathBuf) {
-    let requested = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let tree_root = projects::normalize_project_root(&requested);
-    let file_tree = files::read_tree(&tree_root);
-    let initial_ui_path = if requested.is_file() {
-        requested
-    } else {
-        find_first_previewable_path(&file_tree).unwrap_or_else(|| tree_root.clone())
-    };
+fn queue_children_refresh(proxy: &EventLoopProxy<UserEvent>, root: PathBuf, parent: PathBuf) {
+    let proxy = proxy.clone();
+    std::thread::spawn(move || {
+        let children = files::read_tree_root_snapshot(&parent);
+        let _ = proxy.send_event(UserEvent::ChildrenLoaded {
+            root,
+            parent,
+            children,
+        });
+    });
+}
 
-    (tree_root, file_tree, initial_ui_path)
+fn build_tree_ops(
+    kind: FsChangeKind,
+    changed_paths: &[String],
+    root: &Path,
+) -> Vec<serde_json::Value> {
+    let mut ops = Vec::new();
+    let mut dedup = HashSet::new();
+
+    match kind {
+        FsChangeKind::Create => {
+            for path in changed_paths {
+                push_upsert_op(&mut ops, &mut dedup, root, Path::new(path));
+            }
+        }
+        FsChangeKind::Remove => {
+            for path in changed_paths {
+                push_remove_op(&mut ops, &mut dedup, root, Path::new(path));
+            }
+        }
+        FsChangeKind::Rename => {
+            for path in changed_paths {
+                push_remove_op(&mut ops, &mut dedup, root, Path::new(path));
+            }
+            for path in changed_paths {
+                push_upsert_op(&mut ops, &mut dedup, root, Path::new(path));
+            }
+        }
+        FsChangeKind::Modify => {
+            for path in changed_paths {
+                let path = Path::new(path);
+                if path.is_file() {
+                    push_upsert_op(&mut ops, &mut dedup, root, path);
+                }
+            }
+        }
+    }
+
+    ops
+}
+
+fn push_remove_op(
+    ops: &mut Vec<serde_json::Value>,
+    dedup: &mut HashSet<String>,
+    root: &Path,
+    path: &Path,
+) {
+    if !path.starts_with(root) {
+        return;
+    }
+    let key = format!("remove:{}", path.display());
+    if dedup.insert(key) {
+        ops.push(serde_json::json!({
+            "op": "remove",
+            "path": path.to_string_lossy(),
+        }));
+    }
+}
+
+fn push_upsert_op(
+    ops: &mut Vec<serde_json::Value>,
+    dedup: &mut HashSet<String>,
+    root: &Path,
+    path: &Path,
+) {
+    if !path.starts_with(root) {
+        return;
+    }
+    let Some(node) = tree_node_for_path(path) else {
+        return;
+    };
+    let parent = path.parent().unwrap_or(root);
+    if !parent.starts_with(root) {
+        return;
+    }
+    let key = format!("upsert:{}", path.display());
+    if dedup.insert(key) {
+        ops.push(serde_json::json!({
+            "op": "upsert",
+            "parentPath": parent.to_string_lossy(),
+            "node": node,
+        }));
+    }
+}
+
+fn tree_node_for_path(path: &Path) -> Option<files::TreeNode> {
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let file_type = files::detect_file_type(path);
+    let is_dir = path.is_dir();
+    if !is_dir
+        && !matches!(
+            file_type,
+            files::FileType::Markdown
+                | files::FileType::Image
+                | files::FileType::Video
+                | files::FileType::Audio
+        )
+    {
+        return None;
+    }
+
+    Some(files::TreeNode {
+        name,
+        path: path.to_string_lossy().to_string(),
+        is_dir,
+        children: if is_dir { Some(Vec::new()) } else { None },
+        file_type,
+    })
 }
 
 fn update_active_project_registry(tree_root: &Path) -> projects::ProjectRegistry {
@@ -664,27 +814,6 @@ fn update_active_project_registry(tree_root: &Path) -> projects::ProjectRegistry
             registry
         }
     }
-}
-
-fn find_first_previewable_path(nodes: &[files::TreeNode]) -> Option<PathBuf> {
-    for node in nodes {
-        if node.is_dir {
-            if let Some(children) = &node.children
-                && let Some(path) = find_first_previewable_path(children)
-            {
-                return Some(path);
-            }
-        } else if matches!(
-            node.file_type,
-            files::FileType::Markdown
-                | files::FileType::Image
-                | files::FileType::Video
-                | files::FileType::Audio
-        ) {
-            return Some(PathBuf::from(&node.path));
-        }
-    }
-    None
 }
 
 fn count_tree_nodes(nodes: &[files::TreeNode]) -> usize {

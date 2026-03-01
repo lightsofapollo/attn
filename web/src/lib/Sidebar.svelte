@@ -28,6 +28,7 @@
     activeProjectPath?: string;
     onProjectSwitch?: (path: string) => void;
     onNavigate?: (path: string, newTab: boolean) => void;
+    onExpand?: (path: string) => void;
     outline?: { id: string; text: string; level: number; line: number }[];
     activeOutlineId?: string;
     onOutlineNavigate?: (id: string) => void;
@@ -41,6 +42,7 @@
     activeProjectPath = '',
     onProjectSwitch,
     onNavigate,
+    onExpand,
     outline = [],
     activeOutlineId = '',
     onOutlineNavigate,
@@ -230,7 +232,7 @@
           {#if sidebarView === 'files'}
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
-                <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} />
+                <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} />
               </SidebarMenu>
             {:else}
               <div class="sidebar-outline-empty">

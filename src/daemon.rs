@@ -92,21 +92,32 @@ pub enum SocketResponse {
 
 /// Runtime directory for daemon state (socket, fingerprint, log).
 ///
-/// Non-production: next to the binary (e.g. `target/debug/`), so each build
-/// target gets its own daemon instance.
+/// Non-production: in `/tmp` with a short, deterministic per-binary namespace.
+/// This keeps the unix socket path under `SUN_LEN` even when launching from
+/// deep app bundle paths.
 /// Production: `~/.attn/`.
 fn runtime_dir() -> Result<PathBuf> {
     #[cfg(not(feature = "production"))]
     {
         let exe = std::env::current_exe().context("could not determine executable path")?;
-        let dir = exe.parent().context("executable has no parent directory")?;
-        Ok(dir.to_path_buf())
+        let namespace = short_exe_namespace(&exe);
+        Ok(PathBuf::from("/tmp").join(format!("attn-{namespace}")))
     }
     #[cfg(feature = "production")]
     {
         let home = dirs::home_dir().context("could not determine home directory")?;
         Ok(home.join(".attn"))
     }
+}
+
+fn short_exe_namespace(path: &std::path::Path) -> String {
+    // 64-bit FNV-1a over the executable path; short and deterministic.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in path.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// Return the socket path.

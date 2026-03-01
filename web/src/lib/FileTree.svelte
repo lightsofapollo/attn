@@ -27,11 +27,13 @@
     depth?: number;
     rootPath?: string;
     onNavigate?: (path: string, newTab: boolean) => void;
+    onExpand?: (path: string) => void;
   }
 
-  let { nodes, activePath = '', depth = 0, rootPath = '', onNavigate }: Props = $props();
+  let { nodes, activePath = '', depth = 0, rootPath = '', onNavigate, onExpand }: Props = $props();
 
   let expanded: Record<string, boolean> = $state({});
+  let autoLoadRequested: Record<string, boolean> = $state({});
 
   function isExpanded(path: string): boolean {
     if (expanded[path] !== undefined) return expanded[path];
@@ -41,6 +43,23 @@
   function setExpanded(path: string, value: boolean): void {
     expanded[path] = value;
   }
+
+  function handleDirOpenChange(path: string, value: boolean): void {
+    setExpanded(path, value);
+    if (value) {
+      onExpand?.(path);
+    }
+  }
+
+  $effect(() => {
+    for (const node of nodes) {
+      if (!node.isDir) continue;
+      if (!isExpanded(node.path)) continue;
+      if (autoLoadRequested[node.path]) continue;
+      autoLoadRequested[node.path] = true;
+      onExpand?.(node.path);
+    }
+  });
 
   function handleFileClick(e: MouseEvent, node: TreeNode): void {
     if (node.isDir) return;
@@ -139,7 +158,7 @@
     {@const exp = isExpanded(node.path)}
     <Collapsible
       open={exp}
-      onOpenChange={(v) => setExpanded(node.path, v)}
+      onOpenChange={(v) => handleDirOpenChange(node.path, v)}
       class="group/collapsible"
     >
       <SidebarMenuItem>
@@ -160,7 +179,7 @@
         <CollapsibleContent>
           {#if node.children}
             <div class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
-              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} />
+              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} />
             </div>
           {/if}
         </CollapsibleContent>

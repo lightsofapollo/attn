@@ -33,7 +33,6 @@
   let { nodes, activePath = '', depth = 0, rootPath = '', onNavigate, onExpand }: Props = $props();
 
   let expanded: Record<string, boolean> = $state({});
-  let autoLoadRequested: Record<string, boolean> = $state({});
 
   function isExpanded(path: string): boolean {
     if (expanded[path] !== undefined) return expanded[path];
@@ -55,8 +54,6 @@
     for (const node of nodes) {
       if (!node.isDir) continue;
       if (!isExpanded(node.path)) continue;
-      if (autoLoadRequested[node.path]) continue;
-      autoLoadRequested[node.path] = true;
       onExpand?.(node.path);
     }
   });

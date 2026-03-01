@@ -44,7 +44,9 @@ jobs:
           targets: ${{ inputs.target }}
 
       - name: Install cargo-bundle
-        run: cargo install cargo-bundle --locked
+        uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-bundle
 
       - name: Install frontend dependencies
         run: |

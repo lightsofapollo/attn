@@ -87,3 +87,41 @@ fn storage_dir() -> PathBuf {
 
     PathBuf::from(".attn")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_project_root;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir() -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("attn-project-tests-{nanos}"))
+    }
+
+    #[test]
+    fn normalize_project_root_uses_parent_for_files() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let file_path = root.join("plan.md");
+        std::fs::write(&file_path, "# plan").expect("write temp file");
+
+        let normalized = normalize_project_root(&file_path);
+        assert_eq!(normalized, root.canonicalize().expect("canonicalize root"));
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn normalize_project_root_handles_directories() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("create temp root");
+
+        let normalized = normalize_project_root(&root);
+        assert_eq!(normalized, root.canonicalize().expect("canonicalize root"));
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp root");
+    }
+}

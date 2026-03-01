@@ -106,3 +106,43 @@ fn looks_like_file_path(s: &str) -> bool {
     ];
     extensions.iter().any(|ext| s.ends_with(ext))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{looks_like_file_path, render};
+
+    #[test]
+    fn render_extracts_phases_tasks_and_file_refs() {
+        let markdown = r#"
+## Phase 1
+- [x] shipped parser
+- [ ] add docs
+
+See `src/main.rs` and web/src/App.svelte for details.
+"#;
+
+        let result = render(markdown);
+        assert_eq!(result.structure.phases.len(), 1);
+        assert_eq!(result.structure.phases[0].title, "Phase 1");
+        assert_eq!(result.structure.phases[0].progress.done, 1);
+        assert_eq!(result.structure.phases[0].progress.total, 2);
+        assert_eq!(result.structure.tasks.len(), 2);
+        assert!(result
+            .structure
+            .file_refs
+            .iter()
+            .any(|p| p == "src/main.rs"));
+        assert!(result
+            .structure
+            .file_refs
+            .iter()
+            .any(|p| p == "web/src/App.svelte"));
+    }
+
+    #[test]
+    fn file_path_heuristic_requires_slash_and_known_extension() {
+        assert!(looks_like_file_path("src/lib.rs"));
+        assert!(!looks_like_file_path("README.md"));
+        assert!(!looks_like_file_path("src/lib.unknown"));
+    }
+}

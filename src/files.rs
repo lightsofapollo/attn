@@ -167,3 +167,57 @@ fn find_first_previewable_path_limited(root: &Path, remaining: &mut usize) -> Op
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{FileType, detect_file_type, find_first_previewable_path};
+    use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_dir() -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("attn-tests-{nanos}"))
+    }
+
+    #[test]
+    fn detect_file_type_handles_supported_extensions() {
+        assert!(matches!(
+            detect_file_type(Path::new("doc.md")),
+            FileType::Markdown
+        ));
+        assert!(matches!(
+            detect_file_type(Path::new("image.png")),
+            FileType::Image
+        ));
+        assert!(matches!(
+            detect_file_type(Path::new("video.mp4")),
+            FileType::Video
+        ));
+        assert!(matches!(
+            detect_file_type(Path::new("audio.mp3")),
+            FileType::Audio
+        ));
+        assert!(matches!(
+            detect_file_type(Path::new("archive.zip")),
+            FileType::Unsupported
+        ));
+    }
+
+    #[test]
+    fn first_previewable_path_prefers_previewable_files() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let nested = root.join("docs");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        std::fs::write(root.join("notes.txt"), "not previewable").expect("write text file");
+        std::fs::write(nested.join("readme.md"), "# hello").expect("write markdown file");
+
+        let found = find_first_previewable_path(&root).expect("should find previewable file");
+        assert_eq!(found.file_name().and_then(|n| n.to_str()), Some("readme.md"));
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp root");
+    }
+}

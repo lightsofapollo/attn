@@ -58,30 +58,37 @@ struct Cli {
     screenshot: bool,
 
     /// Print daemon info (binary path, PID)
+    #[cfg(not(feature = "production"))]
     #[arg(long)]
     info: bool,
 
     /// Evaluate JavaScript in the daemon webview and print the result
+    #[cfg(not(feature = "production"))]
     #[arg(long)]
     eval: Option<String>,
 
     /// Click an element by CSS selector or text= prefix
+    #[cfg(not(feature = "production"))]
     #[arg(long)]
     click: Option<String>,
 
     /// Wait for an element to appear by CSS selector or text= prefix
+    #[cfg(not(feature = "production"))]
     #[arg(long)]
     wait_for: Option<String>,
 
     /// Query elements by CSS selector or text= prefix (returns JSON)
+    #[cfg(not(feature = "production"))]
     #[arg(long)]
     query: Option<String>,
 
     /// Fill a form field: --fill <SELECTOR> <VALUE>
+    #[cfg(not(feature = "production"))]
     #[arg(long, num_args = 2, value_names = ["SELECTOR", "VALUE"])]
     fill: Option<Vec<String>>,
 
     /// Timeout in milliseconds for --wait-for (default: 5000)
+    #[cfg(not(feature = "production"))]
     #[arg(long, default_value_t = 5000)]
     timeout: u64,
 }
@@ -107,45 +114,48 @@ fn run() -> Result<()> {
         println!("{path}");
         return Ok(());
     }
-    if let Some(js) = &cli.eval {
-        let result = daemon::send_eval(js)?;
-        println!("{result}");
-        return Ok(());
-    }
-    if let Some(selector) = &cli.click {
-        let result = daemon::send_interact(daemon::InteractAction::Click {
-            selector: selector.clone(),
-        })?;
-        return print_interact_result(&result);
-    }
-    if let Some(selector) = &cli.wait_for {
-        let result = daemon::send_interact(daemon::InteractAction::WaitFor {
-            selector: selector.clone(),
-            timeout_ms: cli.timeout,
-        })?;
-        return print_interact_result(&result);
-    }
-    if let Some(selector) = &cli.query {
-        let result = daemon::send_interact(daemon::InteractAction::Query {
-            selector: selector.clone(),
-        })?;
-        return print_interact_result(&result);
-    }
-    if let Some(args) = &cli.fill {
-        let result = daemon::send_interact(daemon::InteractAction::Fill {
-            selector: args[0].clone(),
-            value: args[1].clone(),
-        })?;
-        return print_interact_result(&result);
-    }
-    if cli.info {
-        let info = daemon::send_info()?;
-        println!("{}", info.binary);
-        println!("pid: {}", info.pid);
-        if let Some(wid) = info.window_id {
-            println!("window_id: {wid}");
+    #[cfg(not(feature = "production"))]
+    {
+        if let Some(js) = &cli.eval {
+            let result = daemon::send_eval(js)?;
+            println!("{result}");
+            return Ok(());
         }
-        return Ok(());
+        if let Some(selector) = &cli.click {
+            let result = daemon::send_interact(daemon::InteractAction::Click {
+                selector: selector.clone(),
+            })?;
+            return print_interact_result(&result);
+        }
+        if let Some(selector) = &cli.wait_for {
+            let result = daemon::send_interact(daemon::InteractAction::WaitFor {
+                selector: selector.clone(),
+                timeout_ms: cli.timeout,
+            })?;
+            return print_interact_result(&result);
+        }
+        if let Some(selector) = &cli.query {
+            let result = daemon::send_interact(daemon::InteractAction::Query {
+                selector: selector.clone(),
+            })?;
+            return print_interact_result(&result);
+        }
+        if let Some(args) = &cli.fill {
+            let result = daemon::send_interact(daemon::InteractAction::Fill {
+                selector: args[0].clone(),
+                value: args[1].clone(),
+            })?;
+            return print_interact_result(&result);
+        }
+        if cli.info {
+            let info = daemon::send_info()?;
+            println!("{}", info.binary);
+            println!("pid: {}", info.pid);
+            if let Some(wid) = info.window_id {
+                println!("window_id: {wid}");
+            }
+            return Ok(());
+        }
     }
 
     // Headless modes — stdout only, no window
@@ -505,8 +515,9 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 let js = format!("window.__attn__.updateContent({payload});");
                 let _ = webview.evaluate_script(&js);
             }
+            #[cfg(not(feature = "production"))]
             Event::UserEvent(UserEvent::Screenshot(tx)) => {
-                #[cfg(all(not(feature = "production"), target_os = "macos"))]
+                #[cfg(target_os = "macos")]
                 {
                     use wry::WebViewExtMacOS;
                     let wk_webview = webview.webview();
@@ -518,7 +529,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
 
                     crate::screenshot::take_snapshot(&wk_webview, &screenshot_path, tx);
                 }
-                #[cfg(not(all(not(feature = "production"), target_os = "macos")))]
+                #[cfg(not(target_os = "macos"))]
                 {
                     let _ = tx.send(String::new());
                 }
@@ -549,6 +560,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 };
                 let _ = tx.send(serde_json::to_string(&resp).unwrap_or_default());
             }
+            #[cfg(not(feature = "production"))]
             Event::UserEvent(UserEvent::Eval(js, tx)) => {
                 let _ = webview.evaluate_script_with_callback(&js, move |result| {
                     let _ = tx.send(result);
@@ -851,6 +863,7 @@ fn count_tree_nodes(nodes: &[files::TreeNode]) -> usize {
     total
 }
 
+#[cfg(not(feature = "production"))]
 fn print_interact_result(result: &daemon::InteractResult) -> Result<()> {
     match result {
         daemon::InteractResult::Ok => {

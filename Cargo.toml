@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "A beautiful markdown viewer that launches from the CLI"
 license = "MIT"
+repository = "https://github.com/lightsofapollo/attn"
+homepage = "https://github.com/lightsofapollo/attn"
 
 [package.metadata.bundle]
 name = "attn"

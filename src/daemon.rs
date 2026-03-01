@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+#[cfg(not(feature = "production"))]
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -10,7 +11,8 @@ use tao::event_loop::EventLoopProxy;
 
 use crate::watcher::UserEvent;
 
-/// Structured interaction actions for E2E testing.
+/// Structured interaction actions for E2E testing (non-production only).
+#[cfg(not(feature = "production"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action")]
 pub enum InteractAction {
@@ -25,6 +27,7 @@ pub enum InteractAction {
 }
 
 /// Information about a matched DOM element.
+#[cfg(not(feature = "production"))]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ElementInfo {
     pub tag: String,
@@ -34,6 +37,7 @@ pub struct ElementInfo {
 }
 
 /// Result of an interaction action.
+#[cfg(not(feature = "production"))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status")]
 pub enum InteractResult {
@@ -58,12 +62,15 @@ pub enum InteractResult {
 pub enum SocketMessage {
     #[serde(rename = "open")]
     Open { path: String },
+    #[cfg(not(feature = "production"))]
     #[serde(rename = "screenshot")]
     Screenshot,
     #[serde(rename = "info")]
     Info,
+    #[cfg(not(feature = "production"))]
     #[serde(rename = "eval")]
     Eval { js: String },
+    #[cfg(not(feature = "production"))]
     #[serde(rename = "interact")]
     Interact(InteractAction),
 }
@@ -74,6 +81,7 @@ pub enum SocketMessage {
 pub enum SocketResponse {
     #[serde(rename = "ok")]
     Ok,
+    #[cfg(not(feature = "production"))]
     #[serde(rename = "screenshot")]
     Screenshot { path: String },
     #[serde(rename = "info")]
@@ -82,8 +90,10 @@ pub enum SocketResponse {
         pid: u32,
         window_id: Option<i64>,
     },
+    #[cfg(not(feature = "production"))]
     #[serde(rename = "eval")]
     Eval { result: String },
+    #[cfg(not(feature = "production"))]
     #[serde(rename = "interact")]
     Interact(InteractResult),
     #[serde(rename = "error")]
@@ -241,6 +251,7 @@ pub fn send_screenshot() -> Result<String> {
 }
 
 /// Daemon info returned by `send_info`.
+#[allow(dead_code)]
 pub struct DaemonInfo {
     pub binary: String,
     pub pid: u32,
@@ -268,6 +279,7 @@ pub fn send_info() -> Result<DaemonInfo> {
 }
 
 /// Evaluate JavaScript in the daemon's webview and return the result.
+#[cfg(not(feature = "production"))]
 pub fn send_eval(js: &str) -> Result<String> {
     match send_command(&SocketMessage::Eval { js: js.to_string() })? {
         Some(resp) => match resp {
@@ -280,6 +292,7 @@ pub fn send_eval(js: &str) -> Result<String> {
 }
 
 /// Send an interaction command to the daemon.
+#[cfg(not(feature = "production"))]
 pub fn send_interact(action: InteractAction) -> Result<InteractResult> {
     match send_command(&SocketMessage::Interact(action))? {
         Some(resp) => match resp {
@@ -471,6 +484,7 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                     serde_json::to_string(&resp).unwrap_or_default()
                 );
             }
+            #[cfg(not(feature = "production"))]
             Ok(SocketMessage::Screenshot) => {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let _ = proxy.send_event(UserEvent::Screenshot(tx));
@@ -515,6 +529,7 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                     }
                 }
             }
+            #[cfg(not(feature = "production"))]
             Ok(SocketMessage::Eval { js }) => {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let _ = proxy.send_event(UserEvent::Eval(js, tx));
@@ -539,6 +554,7 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                     }
                 }
             }
+            #[cfg(not(feature = "production"))]
             Ok(SocketMessage::Interact(action)) => {
                 let result = execute_interact(&action, proxy);
                 let resp = SocketResponse::Interact(result);
@@ -565,6 +581,7 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
 
 /// Generate JavaScript for an interaction action.
 /// All scripts are synchronous (no Promises) and return a JSON string.
+#[cfg(not(feature = "production"))]
 fn interaction_js(action: &InteractAction) -> String {
     // The __resolve helper finds elements by CSS selector or `text=` prefix.
     let resolve_fn = r#"
@@ -653,6 +670,7 @@ return JSON.stringify({{status:'not_found',selector:{sel_json}}});
 }
 
 /// Parse a JSON string returned from interaction JS into an InteractResult.
+#[cfg(not(feature = "production"))]
 fn parse_interact_result(raw: &str) -> InteractResult {
     // The JS returns a JSON-encoded string, which wry wraps in quotes.
     // Try parsing directly first, then try unescaping.
@@ -671,6 +689,7 @@ fn parse_interact_result(raw: &str) -> InteractResult {
 }
 
 /// Execute an interact action via eval, handling WaitFor polling on the socket handler thread.
+#[cfg(not(feature = "production"))]
 fn execute_interact(action: &InteractAction, proxy: &EventLoopProxy<UserEvent>) -> InteractResult {
     match action {
         InteractAction::WaitFor {

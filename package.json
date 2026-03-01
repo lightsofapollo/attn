@@ -15,8 +15,8 @@
     "attn": "bin/attn.js"
   },
   "files": [
-    "bin",
-    "scripts"
+    "bin/attn.js",
+    "scripts/postinstall.mjs"
   ],
   "scripts": {
     "postinstall": "node scripts/postinstall.mjs"

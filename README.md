@@ -14,7 +14,9 @@
 
 ---
 
-<!-- TODO: Add a GIF/screenshot here showing attn in action -->
+<p align="center">
+  <img src="assets/hero.png" alt="attn showing markdown with checkboxes, code, and a file tree" width="720">
+</p>
 
 ```bash
 attn .

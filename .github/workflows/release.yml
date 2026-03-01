@@ -38,7 +38,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build production binary
-        run: cargo build --release --features production --target aarch64-apple-darwin --locked
+        run: cargo build --release --target aarch64-apple-darwin --locked
 
       - name: Prepare release assets
         env:

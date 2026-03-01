@@ -99,8 +99,6 @@
   outline: 1px solid color-mix(in oklch, var(--ring) 45%, transparent);
   box-shadow: 0 0 0 1px color-mix(in oklch, var(--ring) 10%, transparent);
   transition: color 0.18s ease, box-shadow 0.18s ease, outline-color 0.18s ease;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
 }
 
 .ProseMirror .prose-scroll-x:focus-within {
@@ -108,11 +106,6 @@
   box-shadow:
     0 0 0 1px color-mix(in oklch, var(--ring) 40%, transparent),
     0 0 0 4px color-mix(in oklch, var(--ring) 22%, transparent);
-}
-
-.ProseMirror .prose-scroll-x:hover,
-.ProseMirror .prose-scroll-x:focus-within {
-  scrollbar-color: var(--border) transparent;
 }
 
 .ProseMirror .prose-scroll-x > pre {
@@ -126,30 +119,6 @@
   margin-bottom: 0;
 }
 
-.ProseMirror .prose-scroll-x::-webkit-scrollbar {
-  height: 10px;
-}
-
-.ProseMirror .prose-scroll-x::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.ProseMirror .prose-scroll-x::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: 999px;
-  border: 2px solid transparent;
-  background-clip: content-box;
-  transition: background-color 0.18s ease;
-}
-
-.ProseMirror .prose-scroll-x:hover::-webkit-scrollbar-thumb,
-.ProseMirror .prose-scroll-x:focus-within::-webkit-scrollbar-thumb {
-  background: var(--border);
-}
-
-.ProseMirror .prose-scroll-x::-webkit-scrollbar-thumb:hover {
-  background: var(--muted-foreground);
-}
 
 /* Style bits-ui horizontal scrollbars in code block scroll areas. */
 .ProseMirror .prose-scroll-area-x [data-slot="scroll-area-scrollbar"][data-orientation="horizontal"] {
@@ -575,4 +544,31 @@
   pointer-events: none;
 }
 
+}
+
+/* Scrollbar styles — intentionally unlayered so they override native scrollbars in WebKit. */
+.prose-scroll-x::-webkit-scrollbar {
+  height: 6px;
+  background: transparent;
+}
+
+.prose-scroll-x::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.prose-scroll-x::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 999px;
+}
+
+.prose-scroll-x::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.dark .prose-scroll-x::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.dark .prose-scroll-x::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.35);
 }

@@ -45,7 +45,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build production binary
-        run: cargo build --release --features production --target ${{ matrix.target }} --locked
+        run: cargo build --release --target ${{ matrix.target }} --locked
 
       - name: Prepare release asset
         env:

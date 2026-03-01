@@ -37,7 +37,7 @@ case "$MODE" in
     ;;
   prod|production)
     echo "==> Building production app bundle for $TARGET"
-    cargo bundle --release --features production --target "$TARGET"
+    cargo bundle --release --target "$TARGET"
     ARTIFACT_DIR="target/$TARGET/release/bundle/osx"
     ;;
   *)

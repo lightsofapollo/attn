@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -11,8 +11,8 @@ use tao::event_loop::EventLoopProxy;
 
 use crate::watcher::UserEvent;
 
-/// Structured interaction actions for E2E testing (non-production only).
-#[cfg(not(feature = "production"))]
+/// Structured interaction actions for E2E testing (debug builds only).
+#[cfg(debug_assertions)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action")]
 pub enum InteractAction {
@@ -27,7 +27,7 @@ pub enum InteractAction {
 }
 
 /// Information about a matched DOM element.
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ElementInfo {
     pub tag: String,
@@ -37,7 +37,7 @@ pub struct ElementInfo {
 }
 
 /// Result of an interaction action.
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status")]
 pub enum InteractResult {
@@ -62,15 +62,15 @@ pub enum InteractResult {
 pub enum SocketMessage {
     #[serde(rename = "open")]
     Open { path: String },
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[serde(rename = "screenshot")]
     Screenshot,
     #[serde(rename = "info")]
     Info,
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[serde(rename = "eval")]
     Eval { js: String },
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[serde(rename = "interact")]
     Interact(InteractAction),
 }
@@ -81,7 +81,7 @@ pub enum SocketMessage {
 pub enum SocketResponse {
     #[serde(rename = "ok")]
     Ok,
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[serde(rename = "screenshot")]
     Screenshot { path: String },
     #[serde(rename = "info")]
@@ -90,10 +90,10 @@ pub enum SocketResponse {
         pid: u32,
         window_id: Option<i64>,
     },
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[serde(rename = "eval")]
     Eval { result: String },
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[serde(rename = "interact")]
     Interact(InteractResult),
     #[serde(rename = "error")]
@@ -102,25 +102,25 @@ pub enum SocketResponse {
 
 /// Runtime directory for daemon state (socket, fingerprint, log).
 ///
-/// Non-production: in `/tmp` with a short, deterministic per-binary namespace.
+/// Debug: in `/tmp` with a short, deterministic per-binary namespace.
 /// This keeps the unix socket path under `SUN_LEN` even when launching from
 /// deep app bundle paths.
-/// Production: `~/.attn/`.
+/// Release: `~/.attn/`.
 fn runtime_dir() -> Result<PathBuf> {
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     {
         let exe = std::env::current_exe().context("could not determine executable path")?;
         let namespace = short_exe_namespace(&exe);
         Ok(PathBuf::from("/tmp").join(format!("attn-{namespace}")))
     }
-    #[cfg(feature = "production")]
+    #[cfg(not(debug_assertions))]
     {
         let home = dirs::home_dir().context("could not determine home directory")?;
         Ok(home.join(".attn"))
     }
 }
 
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 fn short_exe_namespace(path: &std::path::Path) -> String {
     // 64-bit FNV-1a over the executable path; short and deterministic.
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -238,7 +238,7 @@ pub fn try_send_to_existing(path: &str) -> Result<bool> {
 
 /// Send a screenshot command to the running daemon.
 /// Returns the path to the saved screenshot.
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 pub fn send_screenshot() -> Result<String> {
     match send_command(&SocketMessage::Screenshot)? {
         Some(resp) => match resp {
@@ -279,7 +279,7 @@ pub fn send_info() -> Result<DaemonInfo> {
 }
 
 /// Evaluate JavaScript in the daemon's webview and return the result.
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 pub fn send_eval(js: &str) -> Result<String> {
     match send_command(&SocketMessage::Eval { js: js.to_string() })? {
         Some(resp) => match resp {
@@ -292,7 +292,7 @@ pub fn send_eval(js: &str) -> Result<String> {
 }
 
 /// Send an interaction command to the daemon.
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 pub fn send_interact(action: InteractAction) -> Result<InteractResult> {
     match send_command(&SocketMessage::Interact(action))? {
         Some(resp) => match resp {
@@ -484,7 +484,7 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                     serde_json::to_string(&resp).unwrap_or_default()
                 );
             }
-            #[cfg(not(feature = "production"))]
+            #[cfg(debug_assertions)]
             Ok(SocketMessage::Screenshot) => {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let _ = proxy.send_event(UserEvent::Screenshot(tx));
@@ -529,7 +529,7 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                     }
                 }
             }
-            #[cfg(not(feature = "production"))]
+            #[cfg(debug_assertions)]
             Ok(SocketMessage::Eval { js }) => {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let _ = proxy.send_event(UserEvent::Eval(js, tx));
@@ -554,7 +554,7 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                     }
                 }
             }
-            #[cfg(not(feature = "production"))]
+            #[cfg(debug_assertions)]
             Ok(SocketMessage::Interact(action)) => {
                 let result = execute_interact(&action, proxy);
                 let resp = SocketResponse::Interact(result);
@@ -581,7 +581,7 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
 
 /// Generate JavaScript for an interaction action.
 /// All scripts are synchronous (no Promises) and return a JSON string.
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 fn interaction_js(action: &InteractAction) -> String {
     // The __resolve helper finds elements by CSS selector or `text=` prefix.
     let resolve_fn = r#"
@@ -670,7 +670,7 @@ return JSON.stringify({{status:'not_found',selector:{sel_json}}});
 }
 
 /// Parse a JSON string returned from interaction JS into an InteractResult.
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 fn parse_interact_result(raw: &str) -> InteractResult {
     // The JS returns a JSON-encoded string, which wry wraps in quotes.
     // Try parsing directly first, then try unescaping.
@@ -689,7 +689,7 @@ fn parse_interact_result(raw: &str) -> InteractResult {
 }
 
 /// Execute an interact action via eval, handling WaitFor polling on the socket handler thread.
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 fn execute_interact(action: &InteractAction, proxy: &EventLoopProxy<UserEvent>) -> InteractResult {
     match action {
         InteractAction::WaitFor {

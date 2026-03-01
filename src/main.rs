@@ -4,7 +4,7 @@ mod ipc;
 mod markdown;
 mod platform;
 mod projects;
-#[cfg(all(not(feature = "production"), target_os = "macos"))]
+#[cfg(all(debug_assertions, target_os = "macos"))]
 mod screenshot;
 mod watcher;
 
@@ -53,42 +53,42 @@ struct Cli {
     no_fork: bool,
 
     /// Take a screenshot of the daemon window and print the path
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[arg(long)]
     screenshot: bool,
 
     /// Print daemon info (binary path, PID)
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[arg(long)]
     info: bool,
 
     /// Evaluate JavaScript in the daemon webview and print the result
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[arg(long)]
     eval: Option<String>,
 
     /// Click an element by CSS selector or text= prefix
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[arg(long)]
     click: Option<String>,
 
     /// Wait for an element to appear by CSS selector or text= prefix
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[arg(long)]
     wait_for: Option<String>,
 
     /// Query elements by CSS selector or text= prefix (returns JSON)
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[arg(long)]
     query: Option<String>,
 
     /// Fill a form field: --fill <SELECTOR> <VALUE>
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[arg(long, num_args = 2, value_names = ["SELECTOR", "VALUE"])]
     fill: Option<Vec<String>>,
 
     /// Timeout in milliseconds for --wait-for (default: 5000)
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     #[arg(long, default_value_t = 5000)]
     timeout: u64,
 }
@@ -108,13 +108,13 @@ fn run() -> Result<()> {
         .with_context(|| format!("cannot open '{}'", cli.path.display()))?;
 
     // Daemon command modes — talk to running daemon
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     if cli.screenshot {
         let path = daemon::send_screenshot()?;
         println!("{path}");
         return Ok(());
     }
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     {
         if let Some(js) = &cli.eval {
             let result = daemon::send_eval(js)?;
@@ -353,7 +353,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     .unwrap(),
             }
         })
-        .with_devtools(cfg!(not(feature = "production")));
+        .with_devtools(cfg!(any(debug_assertions, feature = "devtools")));
 
     if let Some(url) = dev_server_url.as_deref() {
         webview_builder = webview_builder.with_url(url);
@@ -515,7 +515,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 let js = format!("window.__attn__.updateContent({payload});");
                 let _ = webview.evaluate_script(&js);
             }
-            #[cfg(not(feature = "production"))]
+            #[cfg(debug_assertions)]
             Event::UserEvent(UserEvent::Screenshot(tx)) => {
                 #[cfg(target_os = "macos")]
                 {
@@ -560,14 +560,14 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 };
                 let _ = tx.send(serde_json::to_string(&resp).unwrap_or_default());
             }
-            #[cfg(not(feature = "production"))]
+            #[cfg(debug_assertions)]
             Event::UserEvent(UserEvent::Eval(js, tx)) => {
                 let _ = webview.evaluate_script_with_callback(&js, move |result| {
                     let _ = tx.send(result);
                 });
             }
             Event::UserEvent(UserEvent::OpenDevtools) => {
-                #[cfg(not(feature = "production"))]
+                #[cfg(any(debug_assertions, feature = "devtools"))]
                 {
                     webview.open_devtools();
                 }
@@ -863,7 +863,7 @@ fn count_tree_nodes(nodes: &[files::TreeNode]) -> usize {
     total
 }
 
-#[cfg(not(feature = "production"))]
+#[cfg(debug_assertions)]
 fn print_interact_result(result: &daemon::InteractResult) -> Result<()> {
     match result {
         daemon::InteractResult::Ok => {
@@ -894,11 +894,11 @@ fn print_interact_result(result: &daemon::InteractResult) -> Result<()> {
 }
 
 fn dev_server_url_from_env() -> Option<String> {
-    #[cfg(feature = "production")]
+    #[cfg(not(debug_assertions))]
     {
         None
     }
-    #[cfg(not(feature = "production"))]
+    #[cfg(debug_assertions)]
     {
         std::env::var("ATTN_DEV_SERVER_URL")
             .ok()

@@ -26,20 +26,19 @@ task dev DEV_HOST=0.0.0.0
 ## Build
 
 ```bash
-scripts/build.sh           # debug (default) — devtools + screenshots enabled
-scripts/build.sh release   # release — devtools + screenshots enabled
-scripts/build.sh prod      # production release — devtools + screenshots stripped
+scripts/build.sh           # debug (default) — automation + devtools enabled
+scripts/build.sh release   # release — automation + devtools stripped
+scripts/build.sh prod      # alias for release
 ```
 
 Or directly with cargo:
 
 ```bash
-cargo build                              # debug
-cargo build --release                    # release (with devtools/screenshots)
-cargo build --release --features production  # production (stripped)
+cargo build                # debug (automation, devtools, screenshots, dev server)
+cargo build --release      # release (stripped — clean for distribution)
 ```
 
-The `production` feature flag strips devtools and `--screenshot` support. By default, ALL builds (debug + release) include them.
+Debug builds (`debug_assertions` on) include automation CLI flags (`--screenshot`, `--eval`, `--click`, `--wait-for`, `--query`, `--fill`), devtools, and dev server support. Release builds strip all of these automatically — no feature flags needed.
 
 ## macOS Packaging
 
@@ -69,7 +68,7 @@ GitHub Action setup is documented in `.github/RELEASE_SETUP.md`.
 - `src/watcher.rs` — File change detection via notify
 - `src/markdown.rs` — Markdown rendering (comrak + syntect)
 - `src/ipc.rs` — Webview IPC message handling
-- `src/screenshot.rs` — Native WKWebView screenshot (all non-production builds, macOS)
+- `src/screenshot.rs` — Native WKWebView screenshot (debug builds, macOS)
 - `web/` — Svelte 5 frontend, built by Vite into `web/dist/index.html` (embedded at compile time). In dev, `task dev` serves Vite directly for HMR.
 - `build.rs` — Runs Vite build, recursively watches `web/src/` and `web/styles/` for changes
 - `scripts/build.sh` — Unified build script (web + Rust)
@@ -111,7 +110,7 @@ attn --eval "window.__attn__"  # access the Svelte app bridge
 # Get daemon info (binary path, PID, window ID)
 attn --info
 
-# Take a screenshot (macOS, non-production builds)
+# Take a screenshot (macOS, debug builds only)
 attn --screenshot
 ```
 

@@ -30,8 +30,8 @@ case "$MODE" in
         echo "==> Built: target/release/attn"
         ;;
     prod|production)
-        echo "==> Building Rust (production, devtools+screenshots stripped)..."
-        cargo build --release --features production
+        echo "==> Building Rust (production release)..."
+        cargo build --release
         echo "==> Built: target/release/attn"
         ;;
     *)

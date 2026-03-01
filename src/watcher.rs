@@ -25,10 +25,12 @@ pub enum UserEvent {
         children: Vec<crate::files::TreeNode>,
     },
     /// Take a screenshot and send the path back through the channel.
+    #[cfg(not(feature = "production"))]
     Screenshot(std::sync::mpsc::Sender<String>),
     /// Request daemon info (binary path, PID) and send back through the channel.
     Info(std::sync::mpsc::Sender<String>),
     /// Evaluate JavaScript and send the result back through the channel.
+    #[cfg(not(feature = "production"))]
     Eval(String, std::sync::mpsc::Sender<String>),
     /// Open webview devtools (debug builds only).
     OpenDevtools,

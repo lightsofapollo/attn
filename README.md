@@ -36,7 +36,7 @@ attn is a **single ~8MB binary**. It forks to background as a daemon, opens a na
 - **File tree + fuzzy search** — browse your project with `Cmd+P`. Lazy-loads folders so it's fast on huge repos.
 - **Tabs + projects** — open multiple files, switch between projects with `Cmd+;`. attn remembers your workspaces.
 - **Media support** — images (with zoom/pan), video, and audio play natively.
-- **Dark/light mode** — follows your OS, or force with `--dark` / `--light`.
+- **Paper & ink themes** — warm parchment light theme by default, cool dark theme with `--dark`.
 - **Single instance** — run `attn` from ten terminals. One daemon, one window, new tab each time.
 
 ## Install

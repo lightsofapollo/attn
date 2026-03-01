@@ -38,8 +38,8 @@ jobs:
       - name: Run clippy (dev)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Run clippy (production)
-        run: cargo clippy --all-targets --features production -- -D warnings
+      - name: Run clippy (release)
+        run: cargo clippy --all-targets --release -- -D warnings
 
       - name: Run Rust tests
         run: cargo test --locked

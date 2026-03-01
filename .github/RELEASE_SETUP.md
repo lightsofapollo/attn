@@ -14,8 +14,8 @@ This project ships:
 - `scripts/macos-notarize-dmg.sh`: notarizes and staples DMG
 - `.github/workflows/test-signing.yml`: signing smoke test
 - `.github/workflows/macos-desktop-test.yml`: build/sign/notarize artifact test
-- `.github/workflows/release.yml`: build release binaries on tag push (`v*`) and publish crate
-- `.github/workflows/npm-publish.yml`: publish npm package from GitHub release events
+- `.github/workflows/release.yml`: build release binaries on tag push (`v*`), publish crate, and publish npm
+- `.github/workflows/npm-publish.yml`: manual fallback publisher (workflow_dispatch or release events)
 
 ## Required GitHub Secrets
 
@@ -84,6 +84,7 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
    - matching `.sha256` files
 4. A GitHub Release for the tag is created/updated with those assets.
 5. The same workflow publishes crate `attn` to crates.io.
+6. The same workflow publishes npm package `attnmd`.
 
 ## npm publish flow (`npx attnmd`)
 

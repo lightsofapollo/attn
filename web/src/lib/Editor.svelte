@@ -27,6 +27,7 @@
     editable?: boolean;
     onSave?: () => void;
     onCancel?: () => void;
+    onLinkNavigate?: (href: string) => void;
     onCheckboxToggle?: (md: string) => void;
     onDirtyChange?: (dirty: boolean) => void;
   }
@@ -36,6 +37,7 @@
     editable = false,
     onSave,
     onCancel,
+    onLinkNavigate,
     onCheckboxToggle,
     onDirtyChange,
   }: Props = $props();
@@ -345,6 +347,26 @@
     }
   }
 
+  function handleEditorClick(event: MouseEvent): boolean {
+    const target = event.target as HTMLElement | null;
+    const anchor = target?.closest('a[href]') as HTMLAnchorElement | null;
+    if (!anchor) return false;
+
+    // In edit mode, require Cmd/Ctrl+click so cursor placement still works.
+    if (editable && !(event.metaKey || event.ctrlKey)) {
+      return false;
+    }
+
+    const href = anchor.getAttribute('href')?.trim();
+    if (!href) return false;
+    event.preventDefault();
+    if (onLinkNavigate) {
+      onLinkNavigate(href);
+      return true;
+    }
+    return false;
+  }
+
   export function getMarkdown(): string {
     if (!view) return markdown;
     return markdownSerializer.serialize(view.state.doc);
@@ -382,6 +404,9 @@
     view = new EditorView(editorEl, {
       state,
       editable: () => editable,
+      handleDOMEvents: {
+        click: (_view, event) => handleEditorClick(event as MouseEvent),
+      },
       dispatchTransaction(tr) {
         if (!view) return;
         const nextState = view.state.apply(tr);

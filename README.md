@@ -43,10 +43,18 @@ attn is a **single ~8MB binary**. It forks to background as a daemon, opens a na
 
 ## Install
 
-### npm (macOS)
+### Primary: crates.io
 
 ```bash
-npm install -g attnmd
+cargo install attn
+```
+
+### Alternative: npm package (testing path)
+
+```bash
+npx attnmd
+# or
+npm install -g attnmd && attn
 ```
 
 ### From source
@@ -56,7 +64,8 @@ git clone https://github.com/lightsofapollo/attn.git
 cd attn && cargo install --path .
 ```
 
-Requires Rust 1.85+ and Node 18+.
+Requires Rust 1.85+.
+For npm installs, Node 18+ is required.
 
 ## Usage
 

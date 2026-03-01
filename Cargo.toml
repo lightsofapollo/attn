@@ -16,7 +16,11 @@ include = [
     "/src/**",
     "/icons/attn.icns",
     "/icons/attn.png",
-    "/web/dist/index.html",
+    "/web/**",
+    "!/web/dist/**",
+    "!/web/node_modules/**",
+    "!/web/src/lib/icons/vscode-generated/**",
+    "!/web/src/lib/vscode-icon-map.generated.ts",
 ]
 
 [package.metadata.bundle]

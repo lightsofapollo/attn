@@ -1064,8 +1064,8 @@ fn mime_from_extension(path: &std::path::Path) -> &'static str {
 }
 
 /// The Svelte app, built by Vite into a single self-contained HTML file.
-/// Embedded at compile time via `include_str!`.
-const APP_HTML: &str = include_str!("../web/dist/index.html");
+/// Embedded at compile time from build output in OUT_DIR.
+const APP_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/attn-index.html"));
 
 fn build_page_html(init_payload_json: &str, theme: &str) -> String {
     let init_script = format!(

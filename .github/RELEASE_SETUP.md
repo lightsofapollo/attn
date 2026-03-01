@@ -3,6 +3,7 @@
 This project ships:
 - signed macOS `.app` and `.dmg` (manual test workflow)
 - tag-based GitHub Releases with `attn` CLI binaries
+- crates.io publishing for `cargo install attn`
 - npm package publishing for `npx attnmd`
 
 ## What is included
@@ -13,7 +14,7 @@ This project ships:
 - `scripts/macos-notarize-dmg.sh`: notarizes and staples DMG
 - `.github/workflows/test-signing.yml`: signing smoke test
 - `.github/workflows/macos-desktop-test.yml`: build/sign/notarize artifact test
-- `.github/workflows/release.yml`: build release binaries on tag push (`v*`)
+- `.github/workflows/release.yml`: build release binaries on tag push (`v*`) and publish crate
 - `.github/workflows/npm-publish.yml`: publish npm package from GitHub release events
 
 ## Required GitHub Secrets
@@ -27,7 +28,7 @@ Set these in `Settings -> Secrets and variables -> Actions`:
 - `APPLE_ID`: Apple developer account email (for notarization)
 - `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for `notarytool`
 - `APPLE_TEAM_ID`: Apple team ID
-- `NPM_TOKEN`: npm automation token with publish rights for package `attnmd`
+- `CARGO_REGISTRY_TOKEN`: crates.io API token with publish rights for crate `attn`
 
 ## Local prerequisites (macOS)
 
@@ -82,6 +83,7 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
    - `attn-v<VERSION>-darwin-x64`
    - matching `.sha256` files
 4. A GitHub Release for the tag is created/updated with those assets.
+5. The same workflow publishes crate `attn` to crates.io.
 
 ## npm publish flow (`npx attnmd`)
 
@@ -90,6 +92,7 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
    ```bash
    npm publish --access public --provenance
    ```
+   via npm trusted publishing (OIDC).
 3. npm package `postinstall` downloads the matching binary from GitHub Releases.
 4. `npx attnmd` then executes the downloaded runtime binary.
 5. Global installs still expose `attn` as the command:

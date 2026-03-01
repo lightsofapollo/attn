@@ -44,16 +44,21 @@ See [the docs](https://example.com) for more info.
 
 type SetContentFn = (data: ContentPayload) => void;
 type UpdateContentFn = (data: UpdatePayload) => void;
+type FontScaleFn = () => void;
 
 interface AttnBridge {
   setContent: SetContentFn;
   updateContent: UpdateContentFn;
+  increaseFontScale?: FontScaleFn;
+  decreaseFontScale?: FontScaleFn;
+  resetFontScale?: FontScaleFn;
 }
 
 declare global {
   interface Window {
     __attn__?: AttnBridge;
     __attn_init__?: InitPayload;
+    __attn_native_shortcuts__?: boolean;
   }
 }
 
@@ -90,9 +95,6 @@ export function installMockIpc(): void {
       const parsed = JSON.parse(message) as { type: string };
       console.log('[attn] IPC out:', parsed);
 
-      if (parsed.type === 'quit') {
-        console.log('[attn] Quit requested (ignored in dev mode)');
-      }
     },
   };
 }

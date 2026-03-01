@@ -12,6 +12,7 @@
   let lastY = 0;
 
   function handleWheel(e: WheelEvent): void {
+    if (!(e.metaKey || e.ctrlKey)) return;
     e.preventDefault();
     const delta = e.deltaY > 0 ? 0.9 : 1.1;
     scale = Math.max(0.1, Math.min(10, scale * delta));

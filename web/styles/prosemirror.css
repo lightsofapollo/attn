@@ -1,3 +1,4 @@
+@layer components {
 /* ProseMirror editor styles */
 
 /* Editor wrapper for floating controls like find bar. */
@@ -94,7 +95,23 @@
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
+  border-radius: 0.6rem;
+  outline: 1px solid color-mix(in oklch, var(--ring) 45%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--ring) 10%, transparent);
+  transition: color 0.18s ease, box-shadow 0.18s ease, outline-color 0.18s ease;
   scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.ProseMirror .prose-scroll-x:focus-within {
+  outline-color: color-mix(in oklch, var(--ring) 55%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in oklch, var(--ring) 40%, transparent),
+    0 0 0 4px color-mix(in oklch, var(--ring) 22%, transparent);
+}
+
+.ProseMirror .prose-scroll-x:hover,
+.ProseMirror .prose-scroll-x:focus-within {
   scrollbar-color: var(--border) transparent;
 }
 
@@ -110,7 +127,7 @@
 }
 
 .ProseMirror .prose-scroll-x::-webkit-scrollbar {
-  height: 8px;
+  height: 10px;
 }
 
 .ProseMirror .prose-scroll-x::-webkit-scrollbar-track {
@@ -118,8 +135,16 @@
 }
 
 .ProseMirror .prose-scroll-x::-webkit-scrollbar-thumb {
-  background: var(--border);
+  background: transparent;
   border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  transition: background-color 0.18s ease;
+}
+
+.ProseMirror .prose-scroll-x:hover::-webkit-scrollbar-thumb,
+.ProseMirror .prose-scroll-x:focus-within::-webkit-scrollbar-thumb {
+  background: var(--border);
 }
 
 .ProseMirror .prose-scroll-x::-webkit-scrollbar-thumb:hover {
@@ -130,6 +155,13 @@
 .ProseMirror .prose-scroll-area-x [data-slot="scroll-area-scrollbar"][data-orientation="horizontal"] {
   height: 12px;
   padding: 0 2px 2px;
+  opacity: 1;
+  transition: opacity 0.18s ease;
+}
+
+.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-scrollbar"][data-state="hidden"] {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .ProseMirror .prose-scroll-area-x [data-slot="scroll-area-viewport"] {
@@ -138,6 +170,7 @@
 
 .ProseMirror .prose-scroll-area-x [data-slot="scroll-area-thumb"] {
   background: var(--border);
+  transition: background-color 0.14s ease;
 }
 
 .ProseMirror .prose-scroll-area-x [data-slot="scroll-area-thumb"]:hover {
@@ -540,4 +573,6 @@
   float: left;
   height: 0;
   pointer-events: none;
+}
+
 }

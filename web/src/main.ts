@@ -1,5 +1,14 @@
 import { mount } from 'svelte';
+import App from './App.svelte';
 import { installMockIpc } from './lib/mock-ipc';
+import '@fontsource-variable/source-serif-4';
+import '@fontsource-variable/source-serif-4/opsz-italic.css';
+import '@fontsource-variable/source-sans-3';
+import '@fontsource-variable/source-code-pro';
+import './app.css';
+import '../styles/base.css';
+import '../styles/prosemirror.css';
+import '../styles/syntax.css';
 
 type ConsoleLevel = 'debug' | 'log' | 'info' | 'warn' | 'error';
 
@@ -135,7 +144,4 @@ installJsBridge();
 
 // In dev mode (no native wry IPC), install mock handlers
 installMockIpc();
-
-void import('./App.svelte').then(({ default: App }) => {
-  mount(App, { target });
-});
+mount(App, { target });

@@ -59,8 +59,7 @@ pub fn set_active_project(path: &Path) -> Result<ProjectRegistry> {
 
 fn save_registry(registry: &ProjectRegistry) -> Result<()> {
     let dir = storage_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("could not create {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
     let path = registry_path();
     let payload = serde_json::to_string_pretty(registry).context("could not serialize registry")?;
     std::fs::write(&path, payload).with_context(|| format!("could not write {}", path.display()))

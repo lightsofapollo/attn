@@ -11,6 +11,12 @@
   } from './lib/types';
   import { initKeyboard } from './lib/keyboard';
   import { dragWindow, editSave, navigate, switchProject } from './lib/ipc';
+  import {
+    decreaseFontScale as decreaseGlobalFontScale,
+    increaseFontScale as increaseGlobalFontScale,
+    initFontScale,
+    resetFontScale as resetGlobalFontScale,
+  } from './lib/font-scale';
   import { initTheme } from './lib/theme';
   import { createTab, findTabByPath, type Tab } from './lib/tabs';
   import Editor from './lib/Editor.svelte';
@@ -18,6 +24,8 @@
   import TabBar from './lib/TabBar.svelte';
   import ImageViewer from './lib/ImageViewer.svelte';
   import MediaPlayer from './lib/MediaPlayer.svelte';
+  import CommandPalette from './lib/CommandPalette.svelte';
+  import KeyboardShortcutsDialog from './lib/KeyboardShortcutsDialog.svelte';
   import { toast } from 'svelte-sonner';
   import { SidebarProvider, SidebarInset } from '$lib/components/ui/sidebar';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
@@ -28,10 +36,6 @@
     loadMarkdownFromPath,
     markdownSourceUrl,
   } from './lib/markdown-layer';
-  import './app.css';
-  import '../styles/base.css';
-  import '../styles/prosemirror.css';
-  import '../styles/syntax.css';
 
   let mode: AppMode = $state('edit');
   let commandPaletteOpen = $state(false);
@@ -48,6 +52,8 @@
   // Tab state
   let tabs: Tab[] = $state([]);
   let activeTabId = $state('');
+  const scopedTabsByProject = new Map<string, { tabs: Tab[]; activeTabId: string }>();
+  let activeTabScopeKey = $state('__default__');
 
   // Track if a navigation was initiated from the frontend (sidebar click)
   let pendingFrontendNav = false;
@@ -73,6 +79,56 @@
 
   function emptyPlanStructure(): PlanStructure {
     return { phases: [], tasks: [], file_refs: [] };
+  }
+
+  function getProjectScopeKey(
+    projectPath: string | undefined = activeProjectPath,
+    root: string | undefined = rootPath,
+  ): string {
+    const key = (projectPath ?? '').trim() || (root ?? '').trim();
+    return key || '__default__';
+  }
+
+  function cloneTabsForScope(input: Tab[]): Tab[] {
+    return input.map((tab) => ({ ...tab }));
+  }
+
+  function persistCurrentTabScope(): void {
+    scopedTabsByProject.set(activeTabScopeKey, {
+      tabs: cloneTabsForScope(tabs),
+      activeTabId,
+    });
+  }
+
+  function applyTabScopeForProject(
+    projectPath: string | undefined = activeProjectPath,
+    root: string | undefined = rootPath,
+  ): void {
+    const nextScopeKey = getProjectScopeKey(projectPath, root);
+    if (nextScopeKey === activeTabScopeKey) return;
+
+    persistCurrentTabScope();
+    activeTabScopeKey = nextScopeKey;
+
+    const scoped = scopedTabsByProject.get(nextScopeKey);
+    if (scoped) {
+      tabs = cloneTabsForScope(scoped.tabs);
+      activeTabId = scoped.activeTabId;
+      const restoredTab = tabs.find((tab) => tab.id === activeTabId);
+      if (restoredTab?.fileType === 'markdown') {
+        pendingFrontendNav = false;
+        navigate(restoredTab.path);
+      } else if (!restoredTab) {
+        rawMarkdown = '';
+        structure = emptyPlanStructure();
+      }
+      return;
+    }
+
+    tabs = [];
+    activeTabId = '';
+    rawMarkdown = '';
+    structure = emptyPlanStructure();
   }
 
   function slugifyHeading(text: string): string {
@@ -196,6 +252,9 @@
       const tab = createTab(path, ft);
       tabs = [...tabs, tab];
       activeTabId = tab.id;
+      requestAnimationFrame(() => {
+        if (contentViewport) contentViewport.scrollTop = 0;
+      });
     } else {
       // Navigate current tab
       saveScrollPosition();
@@ -207,6 +266,9 @@
         tab.scrollY = 0;
         tabs = [...tabs]; // trigger reactivity
       }
+      requestAnimationFrame(() => {
+        if (contentViewport) contentViewport.scrollTop = 0;
+      });
     }
 
     // For markdown files, tell Rust backend to load content
@@ -381,6 +443,7 @@
     } else if (init.rootPath) {
       activeProjectPath = init.rootPath;
     }
+    activeTabScopeKey = getProjectScopeKey(activeProjectPath, rootPath);
     if (init.filePath) {
       const ft = detectFileType(init.filePath);
       const openedDirectory = ft === 'unsupported' && init.rootPath === init.filePath;
@@ -413,6 +476,17 @@
 
   function registerIpcHandlers(): void {
     function applySetContent(data: ContentPayload): void {
+      if (data.rootPath) {
+        rootPath = data.rootPath;
+      }
+      if (data.knownProjects) {
+        knownProjects = data.knownProjects;
+      }
+      if (data.activeProjectPath) {
+        activeProjectPath = data.activeProjectPath;
+      }
+      applyTabScopeForProject(activeProjectPath, rootPath);
+
       if (typeof data.markdown === 'string') {
         rawMarkdown = data.markdown;
         if (detectFileType(data.filePath) === 'markdown') {
@@ -451,6 +525,9 @@
             tab.label = data.filePath.split('/').pop() ?? data.filePath;
             tab.scrollY = 0;
             tabs = [...tabs];
+            requestAnimationFrame(() => {
+              if (contentViewport) contentViewport.scrollTop = 0;
+            });
           }
         } else {
           // Daemon socket: add a new tab (or focus existing)
@@ -467,15 +544,6 @@
       if (data.fileTree) {
         fileTree = data.fileTree;
       }
-      if (data.rootPath) {
-        rootPath = data.rootPath;
-      }
-      if (data.knownProjects) {
-        knownProjects = data.knownProjects;
-      }
-      if (data.activeProjectPath) {
-        activeProjectPath = data.activeProjectPath;
-      }
       if (detectFileType(data.filePath) === 'markdown' && typeof data.markdown !== 'string') {
         if (mode === 'edit' && editorDirty && data.filePath === activePath) {
           deferExternalReload(data.filePath, data.contentMtimeMs);
@@ -486,9 +554,6 @@
     }
 
     function applyUpdateContent(data: UpdatePayload): void {
-      if (data.fileTree) {
-        fileTree = data.fileTree;
-      }
       if (data.rootPath) {
         rootPath = data.rootPath;
       }
@@ -497,6 +562,10 @@
       }
       if (data.activeProjectPath) {
         activeProjectPath = data.activeProjectPath;
+      }
+      applyTabScopeForProject(activeProjectPath, rootPath);
+      if (data.fileTree) {
+        fileTree = data.fileTree;
       }
       if (data.changedPaths && data.changedPaths.length > 0) {
         invalidatePathCaches(data.changedPaths);
@@ -543,6 +612,15 @@
       },
       updateContent(data: UpdatePayload) {
         applyUpdateContent(data);
+      },
+      increaseFontScale() {
+        increaseGlobalFontScale();
+      },
+      decreaseFontScale() {
+        decreaseGlobalFontScale();
+      },
+      resetFontScale() {
+        resetGlobalFontScale();
       },
     };
 
@@ -601,6 +679,50 @@
     toast.info('Edit cancelled');
   }
 
+  function isShortcutsHelpHotkey(e: KeyboardEvent): boolean {
+    if (e.repeat) return false;
+    const meta = e.metaKey || e.ctrlKey;
+    if (!meta) return false;
+    return (
+      e.code === 'Slash'
+      || e.code === 'NumpadDivide'
+      || e.code === 'IntlRo'
+      || e.code === 'IntlYen'
+      || e.key === '/'
+      || e.key === '?'
+      || e.key === '÷'
+    );
+  }
+
+  function isEditableShortcutElement(el: HTMLElement | null): boolean {
+    if (!el) return false;
+    const tag = el.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (el.isContentEditable) return true;
+    return Boolean(
+      el.closest('[contenteditable="true"]')
+      || el.closest('[role="textbox"]')
+      || el.closest('.cm-editor')
+      || el.closest('.monaco-editor')
+      || el.closest('.ProseMirror'),
+    );
+  }
+
+  function isEditableShortcutTarget(target: EventTarget | null): boolean {
+    const targetEl = target as HTMLElement | null;
+    if (isEditableShortcutElement(targetEl)) return true;
+    const activeEl = document.activeElement as HTMLElement | null;
+    return isEditableShortcutElement(activeEl);
+  }
+
+  function handleGlobalShortcutsHelpHotkey(e: KeyboardEvent): void {
+    if (!isShortcutsHelpHotkey(e)) return;
+    if (isEditableShortcutTarget(e.target)) return;
+    e.preventDefault();
+    shortcutsOpen = !shortcutsOpen;
+    if (shortcutsOpen) commandPaletteOpen = false;
+  }
+
   // Handle sidebar navigation events
   function handleSidebarNavigate(path: string, newTab: boolean): void {
     openPath(path, undefined, newTab);
@@ -649,6 +771,7 @@
   });
 
   $effect(() => {
+    initFontScale();
     loadInitPayload();
     registerIpcHandlers();
     // Handle deferred auto-navigation (directory opened, first file selected)
@@ -660,10 +783,7 @@
       return;
     }
     const cleanup = initKeyboard({
-      getMode: () => (activeFileType === 'markdown' ? mode : 'read'),
       onEditToggle: toggleEdit,
-      onEditCancel: cancelEdit,
-      onEditSave: saveAndExitEdit,
       onTabClose: () => { if (activeTabId) closeTab(activeTabId); },
       onTabPrev: () => {
         const idx = tabs.findIndex((t) => t.id === activeTabId);
@@ -675,13 +795,10 @@
       },
       onGalleryPrev: () => navigateGallery(-1),
       onGalleryNext: () => navigateGallery(1),
-      onFind: () => {
-        if (activeFileType === 'markdown') {
-          editorRef?.openFind();
-        }
+      onCommandPalette: () => {
+        commandPaletteOpen = !commandPaletteOpen;
+        if (commandPaletteOpen) shortcutsOpen = false;
       },
-      onCommandPalette: () => { commandPaletteOpen = !commandPaletteOpen; },
-      onShortcutsHelp: () => { shortcutsOpen = true; },
     });
     return () => {
       cleanup();
@@ -809,3 +926,11 @@
     {@render mainContent()}
   </main>
 {/if}
+
+<svelte:window onkeydown={handleGlobalShortcutsHelpHotkey} />
+<KeyboardShortcutsDialog bind:open={shortcutsOpen} />
+<CommandPalette
+  bind:open={commandPaletteOpen}
+  {fileTree}
+  onSelect={(path) => openPath(path, detectFileType(path))}
+/>

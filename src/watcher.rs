@@ -23,6 +23,18 @@ pub enum UserEvent {
     OpenDevtools,
     /// The user started dragging a custom title bar region.
     DragWindow,
+    /// Show and focus the main window.
+    ShowWindow,
+    /// Hide the main window.
+    HideWindow,
+    /// Increase global font scale (browser-style zoom in).
+    FontScaleIncrease,
+    /// Decrease global font scale (browser-style zoom out).
+    FontScaleDecrease,
+    /// Reset global font scale to default.
+    FontScaleReset,
+    /// Exit the app event loop.
+    Quit,
 }
 
 pub struct FileWatcher {

@@ -23,7 +23,7 @@ task dev ATTN_PATH=tests/fixtures/basic.md
 
 Optional overrides:
 - `DEV_HOST` (default `127.0.0.1`)
-- `DEV_PORT` (default `5173`)
+- `DEV_PORT` (default `auto`, set explicit port like `5173` to force one)
 - `ATTN_PATH` (default `.`)
 
 ## Landing the Plane (Session Completion)

@@ -8,6 +8,7 @@
   import {
     Sidebar,
     SidebarContent,
+    SidebarInput,
     SidebarMenu,
     SidebarRail,
   } from '$lib/components/ui/sidebar';
@@ -116,95 +117,120 @@
     if (!q) return headings;
     return headings.filter((heading) => heading.text.toLowerCase().includes(q));
   }
+
+  function handleSearchKeydown(e: KeyboardEvent): void {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+      // Keep native select-all behavior in the search field and prevent
+      // global/editor key handlers from intercepting the event.
+      e.stopPropagation();
+    }
+  }
 </script>
 
 <Sidebar class="project-sidebar">
   <!-- Drag strip: clears traffic lights -->
   <div class="h-[46px] shrink-0" style="-webkit-user-select: none" onmousedown={dragWindow}></div>
 
-  <div class="sidebar-header" style="-webkit-user-select: none">
-    <div class="sidebar-project-picker">
-      <DropdownMenu bind:open={projectPickerOpen}>
-        <DropdownMenuTrigger
-          class="sidebar-project-select"
-          aria-label="Project picker"
-          role="combobox"
-          aria-expanded={projectPickerOpen}
+  <div
+    class="sidebar-controls"
+    data-sidebar-controls="true"
+    style="
+      display: grid;
+      gap: 12px;
+      margin: 2px 12px 14px;
+      padding: 12px;
+      border-radius: 14px;
+      border: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent);
+      background: color-mix(in oklch, var(--background) 80%, white 20%);
+      box-shadow:
+        inset 0 1px 0 color-mix(in oklch, white 48%, transparent),
+        0 1px 2px color-mix(in oklch, black 4%, transparent);
+    "
+  >
+    <div class="sidebar-header flex items-center justify-between gap-3" style="-webkit-user-select: none">
+      <div class="sidebar-project-picker min-w-0 flex-1">
+        <DropdownMenu bind:open={projectPickerOpen}>
+          <DropdownMenuTrigger
+            class="sidebar-project-select"
+            aria-label="Project picker"
+            role="combobox"
+            aria-expanded={projectPickerOpen}
+          >
+            <span class="sidebar-project-select-label" title={selectedProject}>
+              {formatRootLabel(selectedProject)}
+            </span>
+            <ChevronsUpDown class="sidebar-project-switch-icon size-3.5" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" class="sidebar-project-menu p-0">
+            <Command.Root class="sidebar-project-command">
+              <Command.Input placeholder="Search projects..." />
+              <Command.List class="max-h-[240px]">
+                <Command.Empty class="px-3 py-5 text-xs text-muted-foreground">
+                  No projects found.
+                </Command.Empty>
+                <Command.Group>
+                  {#each projectOptions as projectPath (projectPath)}
+                    <Command.Item
+                      value={`${formatRootLabel(projectPath)} ${projectPath}`}
+                      class="sidebar-project-menu-item"
+                      onSelect={() => {
+                        projectPickerOpen = false;
+                        if (projectPath !== selectedProject) {
+                          onProjectSwitch?.(projectPath);
+                        }
+                      }}
+                    >
+                      {formatRootLabel(projectPath)}
+                    </Command.Item>
+                  {/each}
+                </Command.Group>
+              </Command.List>
+            </Command.Root>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      <div class="sidebar-mode-toggle" aria-label="Sidebar views">
+        <button
+          type="button"
+          class="sidebar-mode-button"
+          class:sidebar-mode-button--active={sidebarView === 'files'}
+          aria-label="Files"
+          title="Files"
+          onclick={() => { sidebarView = 'files'; }}
         >
-          <span class="sidebar-project-select-label" title={selectedProject}>
-            {formatRootLabel(selectedProject)}
-          </span>
-          <ChevronsUpDown class="sidebar-project-switch-icon size-3.5" />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" class="sidebar-project-menu p-0">
-          <Command.Root class="sidebar-project-command">
-            <Command.Input placeholder="Search projects..." />
-            <Command.List class="max-h-[240px]">
-              <Command.Empty class="px-3 py-5 text-xs text-muted-foreground">
-                No projects found.
-              </Command.Empty>
-              <Command.Group>
-                {#each projectOptions as projectPath (projectPath)}
-                  <Command.Item
-                    value={`${formatRootLabel(projectPath)} ${projectPath}`}
-                    class="sidebar-project-menu-item"
-                    onSelect={() => {
-                      projectPickerOpen = false;
-                      if (projectPath !== selectedProject) {
-                        onProjectSwitch?.(projectPath);
-                      }
-                    }}
-                  >
-                    {formatRootLabel(projectPath)}
-                  </Command.Item>
-                {/each}
-              </Command.Group>
-            </Command.List>
-          </Command.Root>
-        </DropdownMenuContent>
-      </DropdownMenu>
+          <FolderTree class="size-3.5" />
+        </button>
+        <button
+          type="button"
+          class="sidebar-mode-button"
+          class:sidebar-mode-button--active={sidebarView === 'outline'}
+          aria-label="Outline"
+          title="Outline"
+          onclick={() => { sidebarView = 'outline'; }}
+        >
+          <TextQuote class="size-3.5" />
+        </button>
+      </div>
     </div>
-    <div class="sidebar-mode-toggle" aria-label="Sidebar views">
-      <button
-        type="button"
-        class="sidebar-mode-button"
-        class:sidebar-mode-button--active={sidebarView === 'files'}
-        aria-label="Files"
-        title="Files"
-        onclick={() => { sidebarView = 'files'; }}
-      >
-        <FolderTree class="size-3.5" />
-      </button>
-      <button
-        type="button"
-        class="sidebar-mode-button"
-        class:sidebar-mode-button--active={sidebarView === 'outline'}
-        aria-label="Outline"
-        title="Outline"
-        onclick={() => { sidebarView = 'outline'; }}
-      >
-        <TextQuote class="size-3.5" />
-      </button>
+    <div class="sidebar-search-wrap p-0">
+      <SidebarInput
+        class="sidebar-search !h-8 !px-3 !py-1.5 !text-[0.82rem] !leading-tight"
+        bind:value={query}
+        placeholder={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}
+        aria-label={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}
+        onkeydown={handleSearchKeydown}
+      />
     </div>
   </div>
 
   <SidebarContent class="p-0">
     <div class="sidebar-shell">
       <section class="sidebar-pane">
-        <div class="sidebar-search-wrap">
-          <input
-            type="text"
-            class="sidebar-search"
-            bind:value={query}
-            placeholder={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}
-          />
-        </div>
-
         <ScrollArea class="min-h-0 flex-1" scrollbarYClasses="pr-1">
           {#if sidebarView === 'files'}
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
-                <FileTree nodes={filteredEntries} {activePath} {onNavigate} />
+                <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} />
               </SidebarMenu>
             {:else}
               <div class="sidebar-outline-empty">
@@ -213,24 +239,28 @@
               </div>
             {/if}
           {:else if filteredOutline.length > 0}
-            <nav class="sidebar-outline-list" aria-label="Markdown sections">
-              {#each filteredOutline as heading (heading.id)}
-                <button
-                  type="button"
-                  class="sidebar-outline-item"
-                  class:sidebar-outline-item--active={heading.id === activeOutlineId}
-                  style={`--outline-level:${heading.level};`}
-                  onclick={() => onOutlineNavigate?.(heading.id)}
-                >
-                  <span class="sidebar-outline-title">{heading.text}</span>
-                  <span class="sidebar-outline-line">L{heading.line}</span>
-                </button>
-              {/each}
-            </nav>
+            <div class="sidebar-outline-wrap">
+              <nav class="sidebar-outline-list" aria-label="Markdown sections">
+                {#each filteredOutline as heading (heading.id)}
+                  <button
+                    type="button"
+                    class="sidebar-outline-item"
+                    class:sidebar-outline-item--active={heading.id === activeOutlineId}
+                    style={`--outline-level:${heading.level};`}
+                    onclick={() => onOutlineNavigate?.(heading.id)}
+                  >
+                    <span class="sidebar-outline-title">{heading.text}</span>
+                    <span class="sidebar-outline-line">L{heading.line}</span>
+                  </button>
+                {/each}
+              </nav>
+            </div>
           {:else}
-            <div class="sidebar-outline-empty">
-              <p class="sidebar-outline-empty-title">No sections found</p>
-              <p class="sidebar-outline-empty-copy">Open a markdown file with headings or clear the filter.</p>
+            <div class="sidebar-outline-wrap">
+              <div class="sidebar-outline-empty">
+                <p class="sidebar-outline-empty-title">No sections found</p>
+                <p class="sidebar-outline-empty-copy">Open a markdown file with headings or clear the filter.</p>
+              </div>
             </div>
           {/if}
         </ScrollArea>

@@ -12,7 +12,7 @@
     UpdatePayload,
   } from './lib/types';
   import { initKeyboard } from './lib/keyboard';
-  import { dragWindow, editSave, loadChildren, navigate, switchProject } from './lib/ipc';
+  import { dragWindow, editSave, loadChildren, navigate, openExternal, switchProject } from './lib/ipc';
   import {
     decreaseFontScale as decreaseGlobalFontScale,
     increaseFontScale as increaseGlobalFontScale,
@@ -76,6 +76,7 @@
   const deferredReloadNoticeByPath = new Set<string>();
   const loadedDirPaths = new Set<string>();
   let editorDirty = $state(false);
+  let pendingLinkAnchor: { path: string; fragment: string } | null = $state(null);
   type OutlineHeading = { id: string; text: string; level: number; line: number };
   let outlineHeadings: OutlineHeading[] = $state([]);
   let activeOutlineId = $state('');
@@ -142,77 +143,95 @@
     return sortTreeNodes([...children, node]);
   }
 
-  function upsertTreeNode(
-    nodes: TreeNode[],
-    parentPath: string,
-    node: TreeNode,
-  ): { next: TreeNode[]; applied: boolean } {
-    const parentKey = normalizeFsPath(parentPath);
-    const next = nodes.map((entry) => {
-      if (normalizeFsPath(entry.path) === parentKey) {
-        const currentChildren = entry.children ?? [];
-        return { ...entry, children: upsertNodeIntoChildren(currentChildren, node) };
-      }
-      if (!entry.children?.length) return entry;
-      const patched = upsertTreeNode(entry.children, parentPath, node);
-      if (!patched.applied) return entry;
-      return { ...entry, children: patched.next };
-    });
-    const applied = next.some((entry, idx) => entry !== nodes[idx]);
-    return { next, applied };
-  }
-
-  function removeTreeNode(nodes: TreeNode[], path: string): { next: TreeNode[]; removed: boolean } {
-    const target = normalizeFsPath(path);
-    let removed = false;
-    const filtered: TreeNode[] = [];
-    for (const node of nodes) {
-      if (normalizeFsPath(node.path) === target) {
-        removed = true;
-        continue;
-      }
-      if (!node.children?.length) {
-        filtered.push(node);
-        continue;
-      }
-      const patched = removeTreeNode(node.children, path);
-      if (patched.removed) {
-        removed = true;
-        filtered.push({ ...node, children: patched.next });
-      } else {
-        filtered.push(node);
-      }
-    }
-    return { next: filtered, removed };
-  }
-
   function applyTreeOps(ops: TreeOp[]): void {
     if (ops.length === 0) return;
     let next = fileTree;
     const rootKey = normalizeFsPath(rootPath);
+    const removeSet = new Set<string>();
+    const upsertsByParent = new Map<string, Map<string, TreeNode>>();
 
     for (const op of ops) {
       if (op.op === 'remove') {
-        const removed = removeTreeNode(next, op.path);
-        if (removed.removed) {
-          next = removed.next;
-        }
-        loadedDirPaths.delete(normalizeFsPath(op.path));
+        removeSet.add(normalizeFsPath(op.path));
         continue;
       }
+      const parent = normalizeFsPath(op.parentPath);
+      const path = normalizeFsPath(op.node.path);
+      const bucket = upsertsByParent.get(parent) ?? new Map<string, TreeNode>();
+      bucket.set(path, op.node);
+      upsertsByParent.set(parent, bucket);
+    }
 
-      const parentKey = normalizeFsPath(op.parentPath);
-      if (parentKey === rootKey) {
-        next = upsertNodeIntoChildren(next, op.node);
-      } else {
-        const patched = upsertTreeNode(next, op.parentPath, op.node);
-        if (patched.applied) {
-          next = patched.next;
+    for (const removedPath of removeSet) {
+      loadedDirPaths.delete(removedPath);
+    }
+
+    function visit(nodes: TreeNode[]): { nodes: TreeNode[]; changed: boolean } {
+      let changed = false;
+      const out: TreeNode[] = [];
+
+      for (const node of nodes) {
+        const nodePath = normalizeFsPath(node.path);
+        if (removeSet.has(nodePath)) {
+          changed = true;
+          continue;
         }
+
+        let nextNode = node;
+        if (node.children) {
+          const childResult = visit(node.children);
+          if (childResult.changed) {
+            changed = true;
+            nextNode = { ...nextNode, children: childResult.nodes };
+          }
+        }
+
+        const pending = upsertsByParent.get(nodePath);
+        if (pending && pending.size > 0) {
+          const currentChildren = nextNode.children ?? [];
+          const merged = new Map<string, TreeNode>();
+          for (const child of currentChildren) {
+            merged.set(normalizeFsPath(child.path), child);
+          }
+          for (const [path, upsertNode] of pending.entries()) {
+            merged.set(path, upsertNode);
+          }
+          const nextChildren = sortTreeNodes(Array.from(merged.values()));
+          nextNode = { ...nextNode, children: nextChildren };
+          changed = true;
+          upsertsByParent.delete(nodePath);
+        }
+
+        out.push(nextNode);
+      }
+
+      return { nodes: changed ? out : nodes, changed };
+    }
+
+    const rootVisited = visit(next);
+    next = rootVisited.nodes;
+    let rootChanged = rootVisited.changed;
+
+    const rootUpserts = upsertsByParent.get(rootKey);
+    if (rootUpserts && rootUpserts.size > 0) {
+      const merged = new Map<string, TreeNode>();
+      for (const node of next) {
+        merged.set(normalizeFsPath(node.path), node);
+      }
+      for (const [path, upsertNode] of rootUpserts.entries()) {
+        merged.set(path, upsertNode);
+      }
+      next = sortTreeNodes(Array.from(merged.values()));
+      rootChanged = true;
+    } else if (removeSet.size > 0) {
+      const filtered = next.filter((node) => !removeSet.has(normalizeFsPath(node.path)));
+      if (filtered.length !== next.length) {
+        next = filtered;
+        rootChanged = true;
       }
     }
 
-    if (next !== fileTree) {
+    if (rootChanged) {
       fileTree = next;
     }
   }
@@ -275,6 +294,115 @@
       .replace(/\s+/g, '-')
       .replace(/-+/g, '-')
       .replace(/^-|-$/g, '');
+  }
+
+  function isExternalLinkHref(href: string): boolean {
+    if (!href) return false;
+    if (href.startsWith('//')) return true;
+    return /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(href);
+  }
+
+  function normalizePath(path: string): string {
+    return path.replace(/\\/g, '/');
+  }
+
+  function dirname(path: string): string {
+    const normalized = normalizePath(path);
+    const idx = normalized.lastIndexOf('/');
+    if (idx < 0) return '';
+    return normalized.slice(0, idx);
+  }
+
+  function resolvePath(baseFilePath: string, hrefPath: string): string {
+    const normalizedHref = normalizePath(hrefPath);
+    if (normalizedHref.startsWith('/')) {
+      // Treat `/foo.md` as project-root-relative (common in markdown docs),
+      // not filesystem-root absolute.
+      const normalizedRoot = normalizePath(rootPath);
+      if (normalizedRoot) {
+        const trimmedRoot = normalizedRoot.replace(/\/+$/, '');
+        return `${trimmedRoot}${normalizedHref}`;
+      }
+      return normalizedHref;
+    }
+    if (/^[a-zA-Z]:\//.test(normalizedHref)) return normalizedHref;
+    const baseDir = dirname(baseFilePath);
+    const joined = baseDir ? `${baseDir}/${normalizedHref}` : normalizedHref;
+    const parts = joined.split('/');
+    const stack: string[] = [];
+    const hasLeadingSlash = joined.startsWith('/');
+    const driveMatch = parts[0]?.match(/^[a-zA-Z]:$/);
+    const drivePrefix = driveMatch ? parts.shift()! : '';
+    for (const part of parts) {
+      if (!part || part === '.') continue;
+      if (part === '..') {
+        if (stack.length > 0 && stack[stack.length - 1] !== '..') {
+          stack.pop();
+        } else if (!hasLeadingSlash) {
+          stack.push(part);
+        }
+      } else {
+        stack.push(part);
+      }
+    }
+    if (drivePrefix) {
+      return `${drivePrefix}/${stack.join('/')}`;
+    }
+    return `${hasLeadingSlash ? '/' : ''}${stack.join('/')}`;
+  }
+
+  function splitLinkTarget(href: string): { path: string; fragment: string } {
+    const hashIdx = href.indexOf('#');
+    if (hashIdx < 0) return { path: href, fragment: '' };
+    return {
+      path: href.slice(0, hashIdx),
+      fragment: href.slice(hashIdx + 1),
+    };
+  }
+
+  function scrollToHeadingFragment(fragment: string): boolean {
+    if (!contentViewport) return false;
+    const normalized = decodeURIComponent(fragment).trim().toLowerCase();
+    if (!normalized) {
+      contentViewport.scrollTo({ top: 0, behavior: 'smooth' });
+      return true;
+    }
+    const domHeadings = Array.from(
+      contentViewport.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'),
+    );
+    if (domHeadings.length === 0) return false;
+    const idsByDomOrder = buildOutlineDomIndex(outlineHeadings, domHeadings);
+    const idx = idsByDomOrder.findIndex((id) => id === normalized);
+    if (idx < 0) return false;
+    activeOutlineId = normalized;
+    domHeadings[idx].scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return true;
+  }
+
+  function handleEditorLinkNavigate(href: string): void {
+    const trimmed = href.trim();
+    if (!trimmed) return;
+
+    if (isExternalLinkHref(trimmed)) {
+      openExternal(trimmed);
+      return;
+    }
+
+    const { path: rawPath, fragment } = splitLinkTarget(trimmed);
+    if (!rawPath) {
+      requestAnimationFrame(() => {
+        scrollToHeadingFragment(fragment);
+      });
+      return;
+    }
+
+    const resolvedPath = resolvePath(activePath, decodeURIComponent(rawPath));
+    if (!resolvedPath) return;
+
+    if (fragment) {
+      pendingLinkAnchor = { path: resolvedPath, fragment };
+    }
+    openPath(resolvedPath, detectFileType(resolvedPath));
   }
 
   function extractOutlineHeadings(markdown: string): OutlineHeading[] {
@@ -911,6 +1039,22 @@
   });
 
   $effect(() => {
+    const pending = pendingLinkAnchor;
+    if (!pending) return;
+    if (activePath !== pending.path) return;
+    if (activeFileType !== 'markdown') {
+      pendingLinkAnchor = null;
+      return;
+    }
+    requestAnimationFrame(() => {
+      scrollToHeadingFragment(pending.fragment);
+      if (pendingLinkAnchor?.path === pending.path && pendingLinkAnchor?.fragment === pending.fragment) {
+        pendingLinkAnchor = null;
+      }
+    });
+  });
+
+  $effect(() => {
     if (!contentViewport) return;
     const viewport = contentViewport;
     let raf = 0;
@@ -1003,6 +1147,7 @@
         bind:this={editorRef}
         markdown={rawMarkdown}
         editable={mode === 'edit'}
+        onLinkNavigate={handleEditorLinkNavigate}
         onSave={saveAndExitEdit}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
@@ -1040,6 +1185,7 @@
         bind:this={editorRef}
         markdown={rawMarkdown}
         editable={mode === 'edit'}
+        onLinkNavigate={handleEditorLinkNavigate}
         onSave={saveAndExitEdit}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
@@ -1055,12 +1201,26 @@
 
 {#if diagMode === 'minimal'}
   <main class="flex h-screen flex-col overflow-hidden">
-    <div class="h-[46px] shrink-0" style="-webkit-user-select: none" onmousedown={dragWindow}></div>
+    <div
+      class="h-[46px] shrink-0"
+      style="-webkit-user-select: none"
+      role="button"
+      aria-label="Drag window"
+      tabindex="-1"
+      onmousedown={dragWindow}
+    ></div>
     {@render minimalDiagnosticContent()}
   </main>
 {:else if diagMode === 'editor_only'}
   <main class="flex h-screen flex-col overflow-hidden">
-    <div class="h-[46px] shrink-0" style="-webkit-user-select: none" onmousedown={dragWindow}></div>
+    <div
+      class="h-[46px] shrink-0"
+      style="-webkit-user-select: none"
+      role="button"
+      aria-label="Drag window"
+      tabindex="-1"
+      onmousedown={dragWindow}
+    ></div>
     {@render editorOnlyContent()}
   </main>
 {:else if hasSidebar}
@@ -1084,7 +1244,14 @@
   </SidebarProvider>
 {:else}
   <main class="flex h-screen flex-col overflow-hidden">
-    <div class="h-[34px] shrink-0" style="-webkit-user-select: none" onmousedown={dragWindow}></div>
+    <div
+      class="h-[34px] shrink-0"
+      style="-webkit-user-select: none"
+      role="button"
+      aria-label="Drag window"
+      tabindex="-1"
+      onmousedown={dragWindow}
+    ></div>
     {@render mainContent()}
   </main>
 {/if}

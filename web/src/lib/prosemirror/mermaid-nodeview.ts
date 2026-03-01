@@ -63,6 +63,7 @@ function openMermaidFullscreen(
   sourceSvg: SVGElement,
   title = 'Mermaid Diagram',
 ): () => void {
+  const zoomModLabel = navigator.platform.includes('Mac') ? 'Cmd' : 'Ctrl';
   const modal = document.createElement('div');
   modal.className = 'mermaid-fullscreen-modal';
   modal.setAttribute('role', 'dialog');
@@ -107,7 +108,7 @@ function openMermaidFullscreen(
 
   const footer = document.createElement('div');
   footer.className = 'mermaid-fullscreen-footer';
-  footer.textContent = 'Drag to pan • Scroll to zoom';
+  footer.textContent = `Drag to pan • Hold ${zoomModLabel} + scroll to zoom`;
 
   content.appendChild(header);
   content.appendChild(viewport);
@@ -126,6 +127,7 @@ function openMermaidFullscreen(
   });
 
   const onWheel = (e: WheelEvent) => {
+    if (!(e.metaKey || e.ctrlKey)) return;
     e.preventDefault();
     panzoom.zoomWithWheel(e, { step: 0.05 });
   };

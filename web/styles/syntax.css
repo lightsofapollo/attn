@@ -1,221 +1,227 @@
+@layer components {
 /* Syntax highlighting for highlight.js tokens via ProseMirror decorations.
  * hljs emits spans with classes like hljs-keyword, hljs-string, etc.
- * Colors use One Light / One Dark palette.
+ * Colors use OKLCH to match the Paper (light) and Ink (dark) themes.
  * Theme switching uses .dark class on <html> (shadcn convention).
+ *
+ * Paper (light): warm hues centered around 55-78
+ * Ink (dark): cool hues centered around 220-260
  */
 
-/* ---------- Light theme (default) ---------- */
+/* ---------- Light theme (Paper) ---------- */
 pre code {
-    color: #383a42;
+    color: oklch(0.25 0.012 55);
 }
 
 .hljs-keyword {
-    color: #a626a4;
+    color: oklch(0.45 0.16 350);
 }
 
 .hljs-built_in {
-    color: #c18401;
+    color: oklch(0.52 0.12 55);
 }
 
 .hljs-type {
-    color: #c18401;
+    color: oklch(0.52 0.12 55);
 }
 
 .hljs-literal {
-    color: #986801;
+    color: oklch(0.50 0.11 65);
 }
 
 .hljs-number {
-    color: #986801;
+    color: oklch(0.50 0.11 65);
 }
 
 .hljs-string {
-    color: #50a14f;
+    color: oklch(0.48 0.12 155);
 }
 
 .hljs-regexp {
-    color: #50a14f;
+    color: oklch(0.48 0.12 155);
 }
 
 .hljs-comment {
-    color: #a0a1a7;
+    color: oklch(0.55 0.01 65);
     font-style: italic;
 }
 
 .hljs-doctag {
-    color: #a0a1a7;
+    color: oklch(0.55 0.01 65);
     font-style: italic;
 }
 
 .hljs-title {
-    color: #4078f2;
+    color: oklch(0.48 0.14 28);
 }
 
 .hljs-title.function_ {
-    color: #4078f2;
+    color: oklch(0.48 0.14 28);
 }
 
 .hljs-title.class_ {
-    color: #c18401;
+    color: oklch(0.52 0.12 55);
 }
 
 .hljs-variable {
-    color: #e45649;
+    color: oklch(0.50 0.14 25);
 }
 
 .hljs-property {
-    color: #e45649;
+    color: oklch(0.50 0.14 25);
 }
 
 .hljs-attr {
-    color: #c18401;
+    color: oklch(0.52 0.12 55);
 }
 
 .hljs-params {
-    color: #383a42;
+    color: oklch(0.25 0.012 55);
 }
 
 .hljs-operator {
-    color: #0184bc;
+    color: oklch(0.48 0.10 200);
 }
 
 .hljs-punctuation {
-    color: #383a42;
+    color: oklch(0.40 0.008 55);
 }
 
 .hljs-meta {
-    color: #4078f2;
+    color: oklch(0.48 0.14 28);
 }
 
 .hljs-symbol {
-    color: #986801;
+    color: oklch(0.50 0.11 65);
 }
 
 .hljs-selector-tag,
 .hljs-selector-class,
 .hljs-selector-id {
-    color: #e45649;
+    color: oklch(0.50 0.14 25);
 }
 
 .hljs-addition {
-    color: #50a14f;
-    background-color: rgba(80, 161, 79, 0.1);
+    color: oklch(0.48 0.12 155);
+    background-color: oklch(0.48 0.12 155 / 8%);
 }
 
 .hljs-deletion {
-    color: #e45649;
-    background-color: rgba(228, 86, 73, 0.1);
+    color: oklch(0.50 0.14 25);
+    background-color: oklch(0.50 0.14 25 / 8%);
 }
 
 .hljs-section {
-    color: #4078f2;
+    color: oklch(0.48 0.14 28);
     font-weight: bold;
 }
 
-/* ---------- Dark theme ---------- */
+/* ---------- Dark theme (Ink) ---------- */
 .dark pre code {
-    color: #abb2bf;
+    color: oklch(0.78 0.01 250);
 }
 
 .dark .hljs-keyword {
-    color: #c678dd;
+    color: oklch(0.72 0.14 310);
 }
 
 .dark .hljs-built_in {
-    color: #e5c07b;
+    color: oklch(0.76 0.10 80);
 }
 
 .dark .hljs-type {
-    color: #e5c07b;
+    color: oklch(0.76 0.10 80);
 }
 
 .dark .hljs-literal {
-    color: #d19a66;
+    color: oklch(0.72 0.10 60);
 }
 
 .dark .hljs-number {
-    color: #d19a66;
+    color: oklch(0.72 0.10 60);
 }
 
 .dark .hljs-string {
-    color: #98c379;
+    color: oklch(0.72 0.10 155);
 }
 
 .dark .hljs-regexp {
-    color: #98c379;
+    color: oklch(0.72 0.10 155);
 }
 
 .dark .hljs-comment {
-    color: #5c6370;
+    color: oklch(0.45 0.01 250);
     font-style: italic;
 }
 
 .dark .hljs-doctag {
-    color: #5c6370;
+    color: oklch(0.45 0.01 250);
     font-style: italic;
 }
 
 .dark .hljs-title {
-    color: #61afef;
+    color: oklch(0.72 0.10 220);
 }
 
 .dark .hljs-title.function_ {
-    color: #61afef;
+    color: oklch(0.72 0.10 220);
 }
 
 .dark .hljs-title.class_ {
-    color: #e5c07b;
+    color: oklch(0.76 0.10 80);
 }
 
 .dark .hljs-variable {
-    color: #e06c75;
+    color: oklch(0.72 0.12 15);
 }
 
 .dark .hljs-property {
-    color: #e06c75;
+    color: oklch(0.72 0.12 15);
 }
 
 .dark .hljs-attr {
-    color: #e5c07b;
+    color: oklch(0.76 0.10 80);
 }
 
 .dark .hljs-params {
-    color: #abb2bf;
+    color: oklch(0.78 0.01 250);
 }
 
 .dark .hljs-operator {
-    color: #56b6c2;
+    color: oklch(0.72 0.08 195);
 }
 
 .dark .hljs-punctuation {
-    color: #abb2bf;
+    color: oklch(0.60 0.008 250);
 }
 
 .dark .hljs-meta {
-    color: #61afef;
+    color: oklch(0.72 0.10 220);
 }
 
 .dark .hljs-symbol {
-    color: #d19a66;
+    color: oklch(0.72 0.10 60);
 }
 
 .dark .hljs-selector-tag,
 .dark .hljs-selector-class,
 .dark .hljs-selector-id {
-    color: #e06c75;
+    color: oklch(0.72 0.12 15);
 }
 
 .dark .hljs-addition {
-    color: #98c379;
-    background-color: rgba(152, 195, 121, 0.1);
+    color: oklch(0.72 0.10 155);
+    background-color: oklch(0.72 0.10 155 / 8%);
 }
 
 .dark .hljs-deletion {
-    color: #e06c75;
-    background-color: rgba(224, 108, 117, 0.1);
+    color: oklch(0.72 0.12 15);
+    background-color: oklch(0.72 0.12 15 / 8%);
 }
 
 .dark .hljs-section {
-    color: #61afef;
+    color: oklch(0.72 0.10 220);
     font-weight: bold;
+}
+
 }

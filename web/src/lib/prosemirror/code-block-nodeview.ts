@@ -1,7 +1,5 @@
-import { mount, unmount } from 'svelte';
 import type { EditorView, NodeView } from 'prosemirror-view';
 import type { Node as PmNode } from 'prosemirror-model';
-import CodeBlockScrollArea from '$lib/CodeBlockScrollArea.svelte';
 
 function codeBlockLanguage(node: PmNode): string {
   return ((node.attrs.params as string) || '').split(/\s+/)[0].toLowerCase();
@@ -15,17 +13,14 @@ export function codeBlockNodeView(
   node: PmNode,
   _view: EditorView,
   _getPos: () => number | undefined,
-): NodeView | undefined {
-  const lang = codeBlockLanguage(node);
-  if (lang === 'mermaid' || lang === 'math' || lang === 'latex') return undefined;
-
+): NodeView {
   const dom = document.createElement('div');
-  const contentHost = document.createElement('div');
+  dom.className = 'prose-scroll-x';
   const pre = document.createElement('pre');
   const code = document.createElement('code');
   pre.style.margin = '0';
   pre.appendChild(code);
-  contentHost.appendChild(pre);
+  dom.appendChild(pre);
 
   const updateParams = (params: string): void => {
     if (params) {
@@ -35,11 +30,6 @@ export function codeBlockNodeView(
     }
   };
   updateParams((node.attrs.params as string) || '');
-
-  const app = mount(CodeBlockScrollArea, {
-    target: dom,
-    props: { contentHost },
-  });
 
   return {
     dom,
@@ -53,9 +43,6 @@ export function codeBlockNodeView(
       node = updatedNode;
       updateParams((updatedNode.attrs.params as string) || '');
       return true;
-    },
-    destroy() {
-      unmount(app);
     },
   };
 }

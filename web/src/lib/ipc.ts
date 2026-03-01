@@ -16,10 +16,6 @@ function send(message: IpcMessage): void {
   }
 }
 
-export function quit(): void {
-  send({ type: 'quit' });
-}
-
 export function checkboxToggle(line: number, checked: boolean): void {
   send({ type: 'checkbox_toggle', line, checked });
 }
@@ -38,6 +34,10 @@ export function editSave(content: string): void {
 
 export function themeChange(theme: string): void {
   send({ type: 'theme_change', theme });
+}
+
+export function openExternal(path: string): void {
+  send({ type: 'open_external', path });
 }
 
 export function openDevtools(): void {

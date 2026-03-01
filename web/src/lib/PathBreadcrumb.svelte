@@ -66,12 +66,12 @@
 </script>
 
 <div
-  class={`flex shrink-0 items-center justify-between h-[40px] pr-4 pt-1 pb-0 bg-background/95 backdrop-blur-[1px] ${fixed ? 'fixed inset-x-0 z-30' : ''}`}
+  class={`flex shrink-0 items-center justify-between h-[40px] pr-4 pt-3 pb-0 bg-background/95 backdrop-blur-[1px] ${fixed ? 'fixed inset-x-0 z-30' : ''}`}
   style={`-webkit-user-select: none; padding-left: ${avoidWindowControls ? '6.5rem' : '1rem'}; ${fixed ? `top: ${topOffsetPx}px;` : ''}`}
   onmousedown={dragWindow}
 >
   {#if segments.length > 1}
-    <Breadcrumb>
+    <Breadcrumb class="mt-1.5">
       <BreadcrumbList>
         {#each segments as segment, i (segment.fullPath)}
           {#if i > 0}
@@ -79,11 +79,11 @@
           {/if}
           <BreadcrumbItem>
             {#if segment.isLast}
-              <BreadcrumbPage class="text-xs text-foreground/80 font-medium px-1 py-0.5 -mx-1">{segment.name}</BreadcrumbPage>
+              <BreadcrumbPage class="text-foreground/80 font-medium px-1 py-0.5 -mx-1">{segment.name}</BreadcrumbPage>
             {:else}
               <BreadcrumbLink
                 href={segment.fullPath}
-                class="text-xs text-muted-foreground/70 hover:text-foreground hover:bg-foreground/[0.05] rounded px-1 py-0.5 -mx-1 transition-colors"
+                class="text-muted-foreground/70 hover:text-foreground hover:bg-foreground/[0.05] rounded px-1 py-0.5 -mx-1 transition-colors"
                 style="-webkit-app-region: no-drag"
                 onclick={(e: MouseEvent) => handleClick(e, segment.fullPath)}
               >{segment.name}</BreadcrumbLink>

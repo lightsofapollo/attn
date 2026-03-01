@@ -1,3 +1,5 @@
 target/
 web/node_modules/
 web/dist/
+web/src/lib/icons/vscode-generated/
+web/src/lib/vscode-icon-map.generated.ts

@@ -30,13 +30,13 @@
 </script>
 
 <Tabs.Root value={activeTabId} onValueChange={handleValueChange}>
-  <div class="border-b border-border bg-background">
+  <div class="h-10 bg-background px-1 pt-0.5">
     <ScrollArea class="w-full" orientation="horizontal">
-      <Tabs.List class="h-auto min-w-full w-max justify-start rounded-none border-none bg-transparent p-0">
+      <Tabs.List class="h-9 min-w-full w-max justify-start rounded-none border-none bg-transparent p-0">
         {#each tabs as tab (tab.id)}
           <Tabs.Trigger
             value={tab.id}
-            class="relative rounded-none border-b border-transparent px-3 py-1.5 text-xs text-muted-foreground shadow-none transition-none data-[state=active]:border-b-foreground/30 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none hover:bg-accent group gap-1"
+            class="tab-trigger relative h-full items-center rounded-md px-3 py-0 text-xs text-muted-foreground shadow-none transition-none data-[state=active]:text-foreground hover:bg-accent group gap-1"
             onauxclick={(e: MouseEvent) => handleMiddleClick(e, tab.id)}
           >
             <span class="whitespace-nowrap">{tab.label}</span>
@@ -55,6 +55,15 @@
 </Tabs.Root>
 
 <style>
+  :global(.tab-trigger) {
+    background: color-mix(in oklch, var(--accent) 70%, var(--background) 30%);
+  }
+
+  :global(.tab-trigger[data-state="active"]) {
+    background: color-mix(in oklch, white 92%, var(--background) 8%);
+    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--foreground) 12%, transparent);
+  }
+
   /* Close button visibility follows parent trigger state */
   :global([data-state="active"] .tab-close) {
     opacity: 0.5;

@@ -10,6 +10,8 @@ Use the Taskfile dev command for frontend/native UI development:
 task dev
 ```
 
+By default, `task dev` auto-selects a free port (equivalent to `DEV_PORT=auto`).
+
 This command starts Vite in `web/`, waits for it to be ready, then runs Rust with `ATTN_DEV_SERVER_URL` so the wry webview uses the Vite dev server with HMR.
 
 Useful overrides:
@@ -17,6 +19,7 @@ Useful overrides:
 ```bash
 task dev ATTN_PATH=tests/fixtures/basic.md
 task dev DEV_PORT=5174
+task dev DEV_PORT=auto
 task dev DEV_HOST=0.0.0.0
 ```
 

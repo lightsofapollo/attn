@@ -16,6 +16,7 @@
   import { baseKeymap } from 'prosemirror-commands';
   import { history, redo, undo } from 'prosemirror-history';
   import { codeHighlightPlugin } from './prosemirror/code-highlight';
+  import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
   import { mathNodeView } from './prosemirror/math';
   import { mermaidNodeView } from './prosemirror/mermaid-nodeview';
   import { editSave } from './ipc';
@@ -231,35 +232,6 @@
     });
   }
 
-  function plainCodeBlockNodeView(
-    node: PmNode,
-    _editorView: EditorView,
-    _getPos: () => number | undefined,
-  ): NodeView {
-    const wrap = document.createElement('div');
-    wrap.className = 'prose-scroll-x';
-    const pre = document.createElement('pre');
-    const code = document.createElement('code');
-    pre.style.margin = '0';
-    const params = (node.attrs.params as string) || '';
-    if (params) pre.setAttribute('data-params', params);
-    pre.appendChild(code);
-    wrap.appendChild(pre);
-
-    return {
-      dom: wrap,
-      contentDOM: code,
-      update(updatedNode: PmNode) {
-        if (updatedNode.type !== node.type) return false;
-        node = updatedNode;
-        const nextParams = (updatedNode.attrs.params as string) || '';
-        if (nextParams) pre.setAttribute('data-params', nextParams);
-        else pre.removeAttribute('data-params');
-        return true;
-      },
-    };
-  }
-
   function refreshMatchCount(): void {
     if (!view) {
       findMatchCount = 0;
@@ -425,7 +397,7 @@
           if (mermaid) return mermaid;
           const math = mathNodeView(node, editorView, getPos);
           if (math) return math;
-          return plainCodeBlockNodeView(node, editorView, getPos);
+          return codeBlockNodeView(node, editorView, getPos);
         },
       },
     });

@@ -1,3 +1,4 @@
+@layer base {
 /* attn — base styles
  * Theme variables live in src/app.css (shadcn/Tailwind system).
  * This file provides typography, layout, and element styles.
@@ -10,13 +11,22 @@
     box-sizing: border-box;
 }
 
+/* Global font scaling (Cmd/Ctrl + / - / 0) */
+:root {
+    --attn-base-font-size: 15.5px;
+    --attn-font-scale: 1;
+}
+
+html {
+    font-size: calc(var(--attn-base-font-size) * var(--attn-font-scale));
+}
+
 /* Base */
 html, body {
     height: 100%;
     background: var(--background);
     color: var(--foreground);
     font-family: 'Source Serif 4', Georgia, 'Times New Roman', serif;
-    font-size: 15.5px;
     font-weight: 400;
     line-height: 1.72;
     -webkit-font-smoothing: antialiased;
@@ -242,4 +252,6 @@ img {
 
 .dir-entry.dir {
     font-weight: 600;
+}
+
 }

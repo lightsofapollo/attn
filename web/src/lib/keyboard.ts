@@ -1,13 +1,8 @@
-import type { AppMode } from './types';
-import { quit } from './ipc';
+import { decreaseFontScale, increaseFontScale, resetFontScale } from './font-scale';
 import { cycleTheme } from './theme';
 
 export interface KeyboardConfig {
-  getMode: () => AppMode;
   onEditToggle: () => void;
-  onEditCancel?: () => void;
-  onEditSave?: () => void;
-  onFind?: () => void;
   onTabClose?: () => void;
   onTabPrev?: () => void;
   onTabNext?: () => void;
@@ -17,46 +12,93 @@ export interface KeyboardConfig {
   onShortcutsHelp?: () => void;
 }
 
+function isEditableElement(el: HTMLElement | null): boolean {
+  if (!el) return false;
+  const tag = el.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (el.isContentEditable) return true;
+
+  // Respect embedded editor surfaces (CodeMirror/Monaco/ProseMirror/etc.)
+  if (
+    el.closest('[contenteditable="true"]')
+    || el.closest('[role="textbox"]')
+    || el.closest('.cm-editor')
+    || el.closest('.monaco-editor')
+    || el.closest('.ProseMirror')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  const targetEl = target as HTMLElement | null;
+  if (isEditableElement(targetEl)) return true;
+  const activeEl = document.activeElement as HTMLElement | null;
+  return isEditableElement(activeEl);
+}
+
 export function initKeyboard(config: KeyboardConfig): () => void {
   function handler(e: KeyboardEvent): void {
-    const meta = e.metaKey || e.ctrlKey;
+    if (e.repeat || e.defaultPrevented || e.isComposing) return;
 
-    // Cmd/Ctrl+P opens command palette globally (even in edit mode or from inputs)
-    if (e.key === 'p' && meta && config.onCommandPalette) {
+    const meta = e.metaKey || e.ctrlKey;
+    const key = e.key;
+    const code = e.code;
+    const nativeHostShortcuts = Boolean(
+      (window as Window & { __attn_native_shortcuts__?: boolean }).__attn_native_shortcuts__,
+    );
+    const mermaidFullscreenOpen = Boolean(document.querySelector('.mermaid-fullscreen-modal'));
+    const editingTarget = isEditableTarget(e.target);
+
+    // Browser-like font size controls (Cmd/Ctrl +, -, 0)
+    if (meta && !nativeHostShortcuts && !mermaidFullscreenOpen) {
+      if (key === '=' || key === '+' || code === 'Equal' || code === 'NumpadAdd') {
+        e.preventDefault();
+        increaseFontScale();
+        return;
+      }
+      if (key === '-' || key === '_' || code === 'Minus' || code === 'NumpadSubtract') {
+        e.preventDefault();
+        decreaseFontScale();
+        return;
+      }
+      if (key === '0' || code === 'Digit0' || code === 'Numpad0') {
+        e.preventDefault();
+        resetFontScale();
+        return;
+      }
+    }
+
+    // App-level shortcuts should never steal focus from text-editing surfaces.
+    if (editingTarget) {
+      return;
+    }
+
+    // Cmd/Ctrl+P opens command palette globally
+    if (key === 'p' && meta && config.onCommandPalette) {
       e.preventDefault();
       config.onCommandPalette();
       return;
     }
 
-    // Cmd+? opens keyboard shortcuts help globally
-    if (e.key === '?' && meta && config.onShortcutsHelp) {
+    // Cmd/Ctrl+/ (or Cmd/Ctrl+?) opens keyboard shortcuts help globally
+    if (
+      meta
+      && config.onShortcutsHelp
+      && (
+        code === 'Slash'
+        || code === 'NumpadDivide'
+        || code === 'IntlRo'
+        || code === 'IntlYen'
+        || key === '/'
+        || key === '?'
+        || key === '÷'
+      )
+    ) {
       e.preventDefault();
       config.onShortcutsHelp();
-      return;
-    }
-
-    // Cmd/Ctrl+F opens editor find
-    if (e.key === 'f' && meta && config.onFind) {
-      e.preventDefault();
-      config.onFind();
-      return;
-    }
-
-    // Skip if focused on an input element
-    const tag = (e.target as HTMLElement).tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
-      return;
-    }
-
-    // In edit mode, only handle Escape and Cmd/Ctrl+S
-    if (config.getMode() === 'edit') {
-      if (e.key === 'Escape' && config.onEditCancel) {
-        e.preventDefault();
-        config.onEditCancel();
-      } else if (e.key === 's' && meta && config.onEditSave) {
-        e.preventDefault();
-        config.onEditSave();
-      }
       return;
     }
 
@@ -80,25 +122,6 @@ export function initKeyboard(config: KeyboardConfig): () => void {
     }
 
     switch (e.key) {
-      case 'q':
-        quit();
-        break;
-      case 'j':
-        window.scrollBy(0, 60);
-        break;
-      case 'k':
-        window.scrollBy(0, -60);
-        break;
-      case ' ':
-        e.preventDefault();
-        window.scrollBy(0, window.innerHeight * 0.8);
-        break;
-      case 'g':
-        window.scrollTo(0, 0);
-        break;
-      case 'G':
-        window.scrollTo(0, document.body.scrollHeight);
-        break;
       case 't':
         cycleTheme();
         break;
@@ -114,6 +137,6 @@ export function initKeyboard(config: KeyboardConfig): () => void {
     }
   }
 
-  document.addEventListener('keydown', handler);
-  return () => document.removeEventListener('keydown', handler);
+  window.addEventListener('keydown', handler);
+  return () => window.removeEventListener('keydown', handler);
 }

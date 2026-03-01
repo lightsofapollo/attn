@@ -11,6 +11,11 @@
       "sourceType": "github",
       "computedHash": "5ba584d6d86128782ca8735eb724c18a6956b161f1acdd8c1de2b17a6a9739ec"
     },
+    "svelte5-best-practices": {
+      "source": "ejirocodes/agent-skills",
+      "sourceType": "github",
+      "computedHash": "bfcbba3d355aede6f6be9720f195206d4dcaa7c152787ea00c06cb4a1ac44ba4"
+    },
     "vercel-react-best-practices": {
       "source": "vercel-labs/agent-skills",
       "sourceType": "github",

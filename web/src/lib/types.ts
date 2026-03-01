@@ -59,20 +59,16 @@ export interface UpdatePayload {
 }
 
 export type IpcMessageType =
-  | 'quit'
   | 'checkbox_toggle'
   | 'navigate'
   | 'switch_project'
   | 'edit_save'
   | 'theme_change'
+  | 'open_external'
   | 'open_devtools'
   | 'drag_window'
   | 'js_log'
   | 'js_error';
-
-export interface QuitMessage {
-  type: 'quit';
-}
 
 export interface CheckboxToggleMessage {
   type: 'checkbox_toggle';
@@ -98,6 +94,11 @@ export interface EditSaveMessage {
 export interface ThemeChangeMessage {
   type: 'theme_change';
   theme: string;
+}
+
+export interface OpenExternalMessage {
+  type: 'open_external';
+  path: string;
 }
 
 export interface DragWindowMessage {
@@ -126,12 +127,12 @@ export interface JsErrorMessage {
 }
 
 export type IpcMessage =
-  | QuitMessage
   | CheckboxToggleMessage
   | NavigateMessage
   | SwitchProjectMessage
   | EditSaveMessage
   | ThemeChangeMessage
+  | OpenExternalMessage
   | OpenDevtoolsMessage
   | DragWindowMessage
   | JsLogMessage

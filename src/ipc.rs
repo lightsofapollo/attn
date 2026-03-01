@@ -22,6 +22,9 @@ pub enum IpcMessage {
     #[serde(rename = "theme_change")]
     ThemeChange { theme: String },
 
+    #[serde(rename = "open_external")]
+    OpenExternal { path: String },
+
     #[serde(rename = "drag_window")]
     DragWindow,
 
@@ -78,6 +81,13 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             IpcMessage::ThemeChange { theme } => {
                 eprintln!("theme change: {}", theme);
             }
+            IpcMessage::OpenExternal { path } => {
+                if !path.is_empty()
+                    && let Err(err) = open::that(&path)
+                {
+                    eprintln!("attn: failed to open external path '{}': {}", path, err);
+                }
+            }
             IpcMessage::DragWindow => {
                 let _ = proxy.send_event(UserEvent::DragWindow);
             }
@@ -99,7 +109,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                         eprintln!("attn: js {level}: {message}");
                     }
                 }
-                if let Some(stack) = stack && !stack.is_empty() {
+                if let Some(stack) = stack
+                    && !stack.is_empty()
+                {
                     eprintln!("attn: js {level} stack:\n{stack}");
                 }
             }
@@ -113,7 +125,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 let line = line.unwrap_or(0);
                 let column = column.unwrap_or(0);
                 eprintln!("attn: js error: {message} ({source}:{line}:{column})");
-                if let Some(stack) = stack && !stack.is_empty() {
+                if let Some(stack) = stack
+                    && !stack.is_empty()
+                {
                     eprintln!("attn: js error stack:\n{stack}");
                 }
             }

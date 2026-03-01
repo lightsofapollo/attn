@@ -2,6 +2,7 @@ mod daemon;
 mod files;
 mod ipc;
 mod markdown;
+mod platform;
 mod projects;
 #[cfg(all(not(feature = "production"), target_os = "macos"))]
 mod screenshot;
@@ -26,10 +27,6 @@ struct Cli {
     /// File or directory to view
     #[arg(default_value = ".")]
     path: PathBuf,
-
-    /// Open in skim mode (headers + first lines only)
-    #[arg(long)]
-    skim: bool,
 
     /// Force dark mode
     #[arg(long)]
@@ -255,17 +252,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
 
     // Create window and webview with typed event loop
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-
-    // Decide Dock behavior on macOS:
-    // - default is Regular (shows Dock icon)
-    // - env override:
-    //   - ATTN_NO_DOCK_ICON=1|true|yes|on forces Accessory
-    #[cfg(target_os = "macos")]
-    {
-        use tao::platform::macos::EventLoopExtMacOS;
-        event_loop.set_activation_policy(macos_activation_policy());
-        set_macos_app_icon();
-    }
+    platform::configure_event_loop(&mut event_loop);
 
     // Start the unix socket listener for incoming paths
     let _socket_cleanup = daemon::start_listener(event_loop.create_proxy())?;
@@ -298,6 +285,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let window = window_builder
         .build(&event_loop)
         .context("failed to create window")?;
+    let _platform_ui = platform::install_system_ui(event_loop.create_proxy());
 
     // Shared state for the IPC handler
     let app_state = Arc::new(Mutex::new(ipc::AppState {
@@ -324,7 +312,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 false
             }
         })
-            .with_custom_protocol("attn".to_string(), move |_webview_id, request| {
+        .with_custom_protocol("attn".to_string(), move |_webview_id, request| {
             let uri = request.uri().to_string();
             // URI format: attn://localhost/absolute/path/to/file
             let path = uri
@@ -391,9 +379,42 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 event: WindowEvent::KeyboardInput { event, .. },
                 ..
             } => {
-                #[cfg(debug_assertions)]
-                {
-                    if event.state == ElementState::Pressed && !event.repeat {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    let mod_pressed = if cfg!(target_os = "macos") {
+                        modifiers.super_key()
+                    } else {
+                        modifiers.control_key()
+                    };
+
+                    if mod_pressed {
+                        let zoom_script = if event.physical_key == KeyCode::Equal
+                            || event.physical_key == KeyCode::NumpadAdd
+                        {
+                            Some(
+                                "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.increaseFontScale?.(); }",
+                            )
+                        } else if event.physical_key == KeyCode::Minus
+                            || event.physical_key == KeyCode::NumpadSubtract
+                        {
+                            Some(
+                                "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.decreaseFontScale?.(); }",
+                            )
+                        } else if event.physical_key == KeyCode::Digit0
+                            || event.physical_key == KeyCode::Numpad0
+                        {
+                            Some(
+                                "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.resetFontScale?.(); }",
+                            )
+                        } else {
+                            None
+                        };
+                        if let Some(script) = zoom_script {
+                            let _ = webview.evaluate_script(script);
+                        }
+                    }
+
+                    #[cfg(debug_assertions)]
+                    {
                         let open_shortcut = event.physical_key == KeyCode::F12
                             || (event.physical_key == KeyCode::KeyI
                                 && modifiers.super_key()
@@ -441,7 +462,10 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                         .map(|path| content_metadata_for_path(path))
                         .unwrap_or((None, None));
                     payload.insert("filePath".to_string(), serde_json::json!(active_path_str));
-                    payload.insert("contentMtimeMs".to_string(), serde_json::json!(content_mtime_ms));
+                    payload.insert(
+                        "contentMtimeMs".to_string(),
+                        serde_json::json!(content_mtime_ms),
+                    );
                     payload.insert("contentBytes".to_string(), serde_json::json!(content_bytes));
                 }
 
@@ -508,6 +532,32 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             }
             Event::UserEvent(UserEvent::DragWindow) => {
                 let _ = window.drag_window();
+            }
+            Event::UserEvent(UserEvent::ShowWindow) => {
+                platform::activate_app();
+                window.set_visible(true);
+                window.set_focus();
+            }
+            Event::UserEvent(UserEvent::HideWindow) => {
+                window.set_visible(false);
+            }
+            Event::UserEvent(UserEvent::FontScaleIncrease) => {
+                let _ = webview.evaluate_script(
+                    "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.increaseFontScale?.(); }",
+                );
+            }
+            Event::UserEvent(UserEvent::FontScaleDecrease) => {
+                let _ = webview.evaluate_script(
+                    "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.decreaseFontScale?.(); }",
+                );
+            }
+            Event::UserEvent(UserEvent::FontScaleReset) => {
+                let _ = webview.evaluate_script(
+                    "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.resetFontScale?.(); }",
+                );
+            }
+            Event::UserEvent(UserEvent::Quit) => {
+                *control_flow = ControlFlow::Exit;
             }
             Event::UserEvent(UserEvent::OpenPath(new_path)) => {
                 // Update the shared state to point to the new file
@@ -677,51 +727,6 @@ fn print_interact_result(result: &daemon::InteractResult) -> Result<()> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn macos_activation_policy() -> tao::platform::macos::ActivationPolicy {
-    use tao::platform::macos::ActivationPolicy;
-
-    if env_truthy("ATTN_NO_DOCK_ICON") {
-        return ActivationPolicy::Accessory;
-    }
-
-    ActivationPolicy::Regular
-}
-
-#[cfg(target_os = "macos")]
-fn set_macos_app_icon() {
-    use objc2::{AnyThread, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSImage};
-    use objc2_foundation::NSData;
-
-    static ICON_BYTES: &[u8] = include_bytes!("../icons/attn.icns");
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-
-    let icon_data = NSData::with_bytes(ICON_BYTES);
-    let Some(icon_image) = NSImage::initWithData(NSImage::alloc(), &icon_data) else {
-        return;
-    };
-
-    let app = NSApplication::sharedApplication(mtm);
-    unsafe {
-        app.setApplicationIconImage(Some(&icon_image));
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn env_truthy(name: &str) -> bool {
-    match std::env::var(name) {
-        Ok(value) => {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        }
-        Err(_) => false,
-    }
-}
-
 fn dev_server_url_from_env() -> Option<String> {
     #[cfg(feature = "production")]
     {
@@ -787,11 +792,15 @@ fn content_metadata_for_path(path: &Path) -> (Option<u64>, Option<u64>) {
 }
 
 fn build_initialization_script(include_init_payload: bool, init_payload_json: &str) -> String {
-    let base = r#"window.__attn_queue__ = window.__attn_queue__ || [];
+    let base = r#"window.__attn_native_shortcuts__ = true;
+window.__attn_queue__ = window.__attn_queue__ || [];
 if (!window.__attn__) {
     window.__attn__ = {
         setContent: data => window.__attn_queue__.push({ kind: 'set', data }),
         updateContent: data => window.__attn_queue__.push({ kind: 'update', data }),
+        increaseFontScale: () => {},
+        decreaseFontScale: () => {},
+        resetFontScale: () => {},
     };
 }
 
@@ -892,10 +901,7 @@ fn mime_from_extension(path: &std::path::Path) -> &'static str {
 /// Embedded at compile time via `include_str!`.
 const APP_HTML: &str = include_str!("../web/dist/index.html");
 
-fn build_page_html(
-    init_payload_json: &str,
-    theme: &str,
-) -> String {
+fn build_page_html(init_payload_json: &str, theme: &str) -> String {
     let init_script = format!(
         r#"<script>window.__attn_init__ = {init_payload_json};</script>"#,
         init_payload_json = init_payload_json,

@@ -1,6 +1,9 @@
-# macOS Release Setup
+# Release Setup
 
-This project ships a signed macOS `.app` and `.dmg` without using Tauri.
+This project ships:
+- signed macOS `.app` and `.dmg` (manual test workflow)
+- tag-based GitHub Releases with `attn` CLI binaries
+- npm package publishing for `npx attn`
 
 ## What is included
 
@@ -10,6 +13,8 @@ This project ships a signed macOS `.app` and `.dmg` without using Tauri.
 - `scripts/macos-notarize-dmg.sh`: notarizes and staples DMG
 - `.github/workflows/test-signing.yml`: signing smoke test
 - `.github/workflows/macos-desktop-test.yml`: build/sign/notarize artifact test
+- `.github/workflows/release.yml`: build release binaries on tag push (`v*`)
+- `.github/workflows/npm-publish.yml`: publish npm package from GitHub release events
 
 ## Required GitHub Secrets
 
@@ -22,6 +27,7 @@ Set these in `Settings -> Secrets and variables -> Actions`:
 - `APPLE_ID`: Apple developer account email (for notarization)
 - `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for `notarytool`
 - `APPLE_TEAM_ID`: Apple team ID
+- `NPM_TOKEN`: npm automation token with publish rights for package `attn`
 
 ## Local prerequisites (macOS)
 
@@ -62,6 +68,30 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
    - `mode=prod`
    - `target=aarch64-apple-darwin`
    - `notarize=true`
+
+## GitHub release flow (tag-based)
+
+1. Bump versions in source (`Cargo.toml` and root `package.json`) as needed.
+2. Create and push a version tag:
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+3. `Release` workflow runs automatically and uploads:
+   - `attn-v<VERSION>-darwin-arm64`
+   - `attn-v<VERSION>-darwin-x64`
+   - matching `.sha256` files
+4. A GitHub Release for the tag is created/updated with those assets.
+
+## npm publish flow (`npx attn`)
+
+1. Publish is triggered when a GitHub Release is marked `published`.
+2. `Publish npm` workflow checks out the tag, sets `package.json` version from tag, and runs:
+   ```bash
+   npm publish --access public --provenance
+   ```
+3. npm package `postinstall` downloads the matching binary from GitHub Releases.
+4. `npx attn` then executes the downloaded runtime binary.
 
 ## Icon notes
 

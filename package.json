@@ -1,0 +1,33 @@
+{
+  "name": "attn",
+  "version": "0.1.0",
+  "description": "A beautiful markdown viewer that launches from the CLI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lightsofapollo/attn.git"
+  },
+  "homepage": "https://github.com/lightsofapollo/attn",
+  "bugs": {
+    "url": "https://github.com/lightsofapollo/attn/issues"
+  },
+  "bin": {
+    "attn": "bin/attn.js"
+  },
+  "files": [
+    "bin",
+    "scripts"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "markdown",
+    "viewer",
+    "cli",
+    "desktop"
+  ]
+}

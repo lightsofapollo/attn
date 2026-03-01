@@ -1,0 +1,5 @@
+*
+!bin/
+!scripts/
+!package.json
+!LICENSE

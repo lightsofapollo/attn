@@ -98,9 +98,9 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
 1. Publish is triggered when a GitHub Release is marked `published`.
 2. `Publish npm` workflow checks out the tag, sets `package.json` version from tag, and runs:
    ```bash
-   npm publish --access public --provenance
+   npm publish --access public
    ```
-   via npm trusted publishing (OIDC).
+   via npm trusted publishing (OIDC). Re-enable `--provenance` after the repository is public.
 3. npm package `postinstall` downloads the matching binary from GitHub Releases.
 4. `npx attnmd` then executes the downloaded runtime binary.
 5. Global installs still expose `attn` as the command:

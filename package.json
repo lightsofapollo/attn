@@ -12,7 +12,8 @@
     "url": "https://github.com/lightsofapollo/attn/issues"
   },
   "bin": {
-    "attn": "bin/attn.js"
+    "attn": "bin/attn.js",
+    "attnmd": "bin/attn.js"
   },
   "files": [
     "bin/attn.js",

@@ -10,9 +10,38 @@ permissions:
   id-token: write
 
 jobs:
+  validate-release-version:
+    name: Validate Tag and Cargo Version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Verify Cargo.lock is tracked
+        run: git ls-files --error-unmatch Cargo.lock >/dev/null
+
+      - name: Ensure tag matches Cargo.toml version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          TAG_VERSION="${TAG#v}"
+          CARGO_VERSION="$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "Could not read package version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)." >&2
+            echo "Bump Cargo.toml, run cargo check, commit Cargo.lock, then retag." >&2
+            exit 1
+          fi
+
   build-binaries:
     name: Build ${{ matrix.asset_suffix }}
     runs-on: ${{ matrix.runner }}
+    needs: validate-release-version
     strategy:
       fail-fast: false
       matrix:
@@ -69,6 +98,7 @@ jobs:
   build-signed-dmg:
     name: Build, sign & notarize DMG
     runs-on: macos-14
+    needs: validate-release-version
     if: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.KEYCHAIN_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
     steps:
       - name: Checkout
@@ -232,6 +262,9 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify crate builds with locked dependencies
+        run: cargo check --locked
 
       - name: Publish crate
         env:

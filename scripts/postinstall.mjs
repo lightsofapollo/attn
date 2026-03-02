@@ -20,7 +20,7 @@ const assetSuffix = resolveAssetSuffix(process.platform, process.arch);
 if (!assetSuffix) {
   console.warn(
     `attn: unsupported platform ${process.platform}/${process.arch}. ` +
-      "Currently supported: darwin-arm64, darwin-x64."
+      "Currently supported: darwin-arm64."
   );
   process.exit(0);
 }
@@ -46,9 +46,6 @@ download(url, tempPath)
 function resolveAssetSuffix(platform, arch) {
   if (platform === "darwin" && arch === "arm64") {
     return "darwin-arm64";
-  }
-  if (platform === "darwin" && arch === "x64") {
-    return "darwin-x64";
   }
   return null;
 }

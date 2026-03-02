@@ -39,8 +39,9 @@ download(url, tempPath)
   })
   .catch((error) => {
     safeRemove(tempPath);
-    console.error(`attn: failed to download release binary: ${error.message}`);
-    process.exit(1);
+    console.warn(`attn: runtime prefetch failed: ${error.message}`);
+    console.warn("attn: continuing; runtime will be installed on first launch.");
+    process.exit(0);
   });
 
 function resolveAssetSuffix(platform, arch) {

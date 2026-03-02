@@ -2,7 +2,6 @@
 
 const {
   chmodSync,
-  copyFileSync,
   createWriteStream,
   existsSync,
   mkdirSync,
@@ -58,9 +57,28 @@ async function main() {
   const args = process.argv.slice(2);
   const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
   const version = packageJson.version;
-
-  const appPath = await resolveAppPath(version);
   const headless = isHeadlessInvocation(args);
+
+  let appPath = null;
+  try {
+    appPath = await resolveAppPath(version);
+  } catch (error) {
+    console.error(`attn: app install unavailable (${error.message}); falling back to binary.`);
+  }
+
+  if (!appPath) {
+    if (!existsSync(runtimeBinaryPath)) {
+      await ensureRuntimeBinary(version);
+    }
+    if (!existsSync(runtimeBinaryPath)) {
+      throw new Error("runtime binary is missing after fallback download attempt.");
+    }
+    if (isNpxInvocation) {
+      await maybePromptInstallAlias();
+    }
+    run(runtimeBinaryPath, args);
+    return;
+  }
 
   if (isNpxInvocation) {
     await maybePromptInstallAlias();
@@ -98,6 +116,23 @@ async function resolveAppPath(version) {
   ensureCurrentAppLink(managedVersionApp);
   pruneOldManagedApps(version);
   return managedVersionApp;
+}
+
+async function ensureRuntimeBinary(version) {
+  const assetSuffix = resolveAssetSuffix(process.platform, process.arch);
+  if (!assetSuffix) {
+    throw new Error(
+      `unsupported platform ${process.platform}/${process.arch}. Currently supported: darwin-arm64.`
+    );
+  }
+
+  const url = `https://github.com/lightsofapollo/attn/releases/download/v${version}/attn-v${version}-${assetSuffix}`;
+  const tempPath = `${runtimeBinaryPath}.tmp`;
+  mkdirSync(runtimeDir, { recursive: true });
+  await download(url, tempPath);
+  chmodSync(tempPath, 0o755);
+  renameSync(tempPath, runtimeBinaryPath);
+  console.error(`attn: installed runtime binary ${runtimeBinaryPath}`);
 }
 
 function findGlobalAppInstall() {
@@ -303,4 +338,3 @@ function download(url, destination) {
     request.on("error", reject);
   });
 }
-

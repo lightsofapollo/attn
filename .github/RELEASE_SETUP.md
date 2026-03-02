@@ -76,7 +76,6 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
    ```
 3. `Release` workflow runs automatically and uploads:
    - `attn-v<VERSION>-darwin-arm64`
-   - `attn-v<VERSION>-darwin-x64`
    - matching `.sha256` files
    - `attn-v<VERSION>-darwin-arm64.dmg` and checksum when notarization secrets are configured
 4. A GitHub Release for the tag is created/updated with those assets.

@@ -8,8 +8,10 @@ const {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   symlinkSync,
   unlinkSync,
+  writeFileSync,
 } = require("node:fs");
 const { dirname, join } = require("node:path");
 const { spawnSync } = require("node:child_process");
@@ -19,14 +21,33 @@ const https = require("node:https");
 
 const packageDir = join(__dirname, "..");
 const runtimeDir = join(packageDir, "bin-runtime");
-const binaryPath = join(runtimeDir, "attn");
+const runtimeBinaryPath = join(runtimeDir, "attn");
 const packageJsonPath = join(packageDir, "package.json");
-const installRoot = join(homedir(), ".local", "share", "attn");
-const installBinaryPath = join(installRoot, "bin", "attn");
-const installLinkDir = join(homedir(), ".local", "bin");
+const userHome = homedir();
+
+const managedRoot = join(userHome, ".local", "share", "attn");
+const managedAppsRoot = join(managedRoot, "apps");
+const managedCurrentAppLink = join(managedRoot, "current-app");
+
+const installLinkDir = join(userHome, ".local", "bin");
 const installLinkPath = join(installLinkDir, "attn");
+const installLauncherPath = join(managedRoot, "bin", "attn-launcher.sh");
+
 const isInteractive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-const isNpxInvocation = process.env.npm_execpath?.includes("npx") || process.argv[1]?.includes("attnmd");
+const isNpxInvocation =
+  process.env.npm_execpath?.includes("npx") || process.argv[1]?.includes("attnmd");
+
+const HEADLESS_FLAGS = new Set([
+  "--status",
+  "--json",
+  "--check",
+  "--info",
+  "--eval",
+  "--click",
+  "--wait-for",
+  "--query",
+  "--fill",
+]);
 
 main().catch((error) => {
   console.error(`attn: ${error.message}`);
@@ -34,40 +55,139 @@ main().catch((error) => {
 });
 
 async function main() {
-  if (!existsSync(binaryPath)) {
-    await ensureRuntimeBinary();
-  }
-
-  if (!existsSync(binaryPath)) {
-    throw new Error("runtime binary is missing after download attempt.");
-  }
-
-  await maybePromptInstallAlias();
-  run(binaryPath, process.argv.slice(2));
-}
-
-async function ensureRuntimeBinary() {
+  const args = process.argv.slice(2);
   const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
   const version = packageJson.version;
-  const assetSuffix = resolveAssetSuffix(process.platform, process.arch);
 
+  const appPath = await resolveAppPath(version);
+  const headless = isHeadlessInvocation(args);
+
+  if (isNpxInvocation) {
+    await maybePromptInstallAlias();
+  }
+
+  if (headless) {
+    const binaryPath = join(appPath, "Contents", "MacOS", "attn");
+    if (!existsSync(binaryPath)) {
+      throw new Error(`managed app binary is missing at ${binaryPath}`);
+    }
+    run(binaryPath, args);
+    return;
+  }
+
+  run("/usr/bin/open", [appPath, "--args", ...args]);
+}
+
+async function resolveAppPath(version) {
+  const globalApp = findGlobalAppInstall();
+  if (globalApp) {
+    return globalApp;
+  }
+
+  const managedVersionApp = join(managedAppsRoot, version, "attn.app");
+  if (existsSync(managedVersionApp)) {
+    ensureCurrentAppLink(managedVersionApp);
+    return managedVersionApp;
+  }
+
+  await installManagedApp(version);
+  if (!existsSync(managedVersionApp)) {
+    throw new Error(`managed app install failed: ${managedVersionApp} not found`);
+  }
+
+  ensureCurrentAppLink(managedVersionApp);
+  pruneOldManagedApps(version);
+  return managedVersionApp;
+}
+
+function findGlobalAppInstall() {
+  const candidates = [
+    "/Applications/attn.app",
+    join(userHome, "Applications", "attn.app"),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function ensureCurrentAppLink(appPath) {
+  mkdirSync(managedRoot, { recursive: true });
+  try {
+    if (existsSync(managedCurrentAppLink)) {
+      unlinkSync(managedCurrentAppLink);
+    }
+  } catch {
+    rmSync(managedCurrentAppLink, { recursive: true, force: true });
+  }
+  symlinkSync(appPath, managedCurrentAppLink);
+}
+
+async function installManagedApp(version) {
+  const assetSuffix = resolveAssetSuffix(process.platform, process.arch);
   if (!assetSuffix) {
     throw new Error(
       `unsupported platform ${process.platform}/${process.arch}. Currently supported: darwin-arm64.`
     );
   }
 
-  const url = `https://github.com/lightsofapollo/attn/releases/download/v${version}/attn-v${version}-${assetSuffix}`;
-  const tempPath = `${binaryPath}.tmp`;
-  mkdirSync(runtimeDir, { recursive: true });
-  await download(url, tempPath);
-  chmodSync(tempPath, 0o755);
-  renameSync(tempPath, binaryPath);
-  console.error(`attn: installed runtime ${binaryPath}`);
+  const appZipName = `attn-v${version}-${assetSuffix}.app.zip`;
+  const appZipUrl = `https://github.com/lightsofapollo/attn/releases/download/v${version}/${appZipName}`;
+
+  const versionDir = join(managedAppsRoot, version);
+  const tempZip = join(versionDir, `${appZipName}.tmp`);
+  const finalZip = join(versionDir, appZipName);
+  const appPath = join(versionDir, "attn.app");
+
+  mkdirSync(versionDir, { recursive: true });
+  await download(appZipUrl, tempZip);
+  renameSync(tempZip, finalZip);
+  unzipApp(finalZip, versionDir);
+  chmodSync(join(appPath, "Contents", "MacOS", "attn"), 0o755);
+}
+
+function unzipApp(zipPath, outDir) {
+  const result = spawnSync(
+    "/usr/bin/ditto",
+    ["-x", "-k", zipPath, outDir],
+    { stdio: "inherit" }
+  );
+  if (result.error) {
+    throw new Error(`failed to extract app zip: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`failed to extract app zip: ditto exited ${result.status}`);
+  }
+}
+
+function pruneOldManagedApps(currentVersion) {
+  try {
+    const keep = new Set([currentVersion]);
+    const listResult = spawnSync("ls", ["-1", managedAppsRoot], {
+      encoding: "utf8",
+    });
+    if (listResult.status !== 0 || !listResult.stdout) {
+      return;
+    }
+    const versions = listResult.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .sort();
+
+    for (const version of versions) {
+      if (keep.has(version)) continue;
+      rmSync(join(managedAppsRoot, version), { recursive: true, force: true });
+    }
+  } catch {
+    // Best effort cleanup only.
+  }
 }
 
 async function maybePromptInstallAlias() {
-  if (!isInteractive || !isNpxInvocation) {
+  if (!isInteractive) {
     return;
   }
   if (existsSync(installLinkPath)) {
@@ -80,12 +200,14 @@ async function maybePromptInstallAlias() {
   });
 
   try {
-    const answer = await rl.question("Install `attn` command to ~/.local/bin for future runs? [Y/n] ");
+    const answer = await rl.question(
+      "Install persistent `attn` command to ~/.local/bin for future runs? [Y/n] "
+    );
     const normalized = answer.trim().toLowerCase();
     if (normalized === "n" || normalized === "no") {
       return;
     }
-    installAlias();
+    installAliasLauncher();
     console.error("attn: installed ~/.local/bin/attn");
   } catch (error) {
     console.error(`attn: failed to install alias: ${error.message}`);
@@ -94,26 +216,51 @@ async function maybePromptInstallAlias() {
   }
 }
 
-function installAlias() {
-  mkdirSync(dirname(installBinaryPath), { recursive: true });
+function installAliasLauncher() {
+  mkdirSync(dirname(installLauncherPath), { recursive: true });
   mkdirSync(installLinkDir, { recursive: true });
-  copyFileSync(binaryPath, installBinaryPath);
-  chmodSync(installBinaryPath, 0o755);
+
+  const launcher = `#!/usr/bin/env bash
+set -euo pipefail
+APP_LINK="${managedCurrentAppLink}"
+if [ ! -e "$APP_LINK" ]; then
+  echo "attn: managed app is missing; run 'npx attnmd .' once to install." >&2
+  exit 1
+fi
+BINARY="$APP_LINK/Contents/MacOS/attn"
+HEADLESS=0
+for arg in "$@"; do
+  case "$arg" in
+    --status|--json|--check|--info|--eval|--click|--wait-for|--query|--fill)
+      HEADLESS=1
+      ;;
+  esac
+done
+if [ "$HEADLESS" -eq 1 ]; then
+  exec "$BINARY" "$@"
+fi
+exec /usr/bin/open "$APP_LINK" --args "$@"
+`;
+
+  writeFileSync(installLauncherPath, launcher, { mode: 0o755 });
+  chmodSync(installLauncherPath, 0o755);
 
   if (existsSync(installLinkPath)) {
     unlinkSync(installLinkPath);
   }
-  symlinkSync(installBinaryPath, installLinkPath);
+  symlinkSync(installLauncherPath, installLinkPath);
+}
+
+function isHeadlessInvocation(args) {
+  return args.some((arg) => HEADLESS_FLAGS.has(arg));
 }
 
 function run(cmd, args) {
   const child = spawnSync(cmd, args, {
     stdio: "inherit",
   });
-
   if (child.error) {
-    console.error(`attn: failed to launch binary: ${child.error.message}`);
-    process.exit(1);
+    throw new Error(`failed to launch ${cmd}: ${child.error.message}`);
   }
   process.exit(typeof child.status === "number" ? child.status : 1);
 }
@@ -156,3 +303,4 @@ function download(url, destination) {
     request.on("error", reject);
   });
 }
+

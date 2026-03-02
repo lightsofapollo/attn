@@ -97,7 +97,6 @@ jobs:
 
       - name: Import code signing certificate
         id: signing
-        continue-on-error: true
         env:
           CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -107,7 +106,7 @@ jobs:
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
 
           if [ -z "$CERTIFICATE_BASE64" ] || [ -z "$CERTIFICATE_PASSWORD" ] || [ -z "$KEYCHAIN_PASSWORD" ]; then
-            echo "Missing signing secrets; skipping DMG signing." >&2
+            echo "Missing required signing secrets." >&2
             exit 1
           fi
 
@@ -124,22 +123,16 @@ jobs:
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       - name: Sign app bundle
-        if: steps.signing.outcome == 'success'
-        continue-on-error: true
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: scripts/macos-sign-app.sh "$APP_PATH" "$APPLE_SIGNING_IDENTITY"
 
       - name: Create DMG
-        if: steps.signing.outcome == 'success'
-        continue-on-error: true
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: scripts/macos-create-dmg.sh "$APP_PATH" "$DMG_PATH"
 
       - name: Notarize DMG
-        if: steps.signing.outcome == 'success'
-        continue-on-error: true
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -147,7 +140,6 @@ jobs:
         run: scripts/macos-notarize-dmg.sh "$DMG_PATH"
 
       - name: Prepare DMG assets
-        if: steps.signing.outcome == 'success'
         env:
           TAG: ${{ github.ref_name }}
         run: |

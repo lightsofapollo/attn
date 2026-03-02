@@ -24,6 +24,13 @@ pub enum FileType {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResult {
+    pub path: String,
+    #[serde(rename = "fileType")]
+    pub file_type: FileType,
+}
+
 fn should_skip_dir(name: &str) -> bool {
     matches!(
         name,
@@ -56,7 +63,8 @@ pub fn detect_file_type(path: &Path) -> FileType {
 /// Directories are included with empty children placeholders.
 pub fn read_tree_root_snapshot(root: &Path) -> Vec<TreeNode> {
     let mut remaining = MAX_ROOT_SNAPSHOT_NODES;
-    read_tree_shallow(root, &mut remaining)
+    let mut scan_budget = MAX_TREE_NODES;
+    read_tree_shallow(root, &mut remaining, &mut scan_budget)
 }
 
 /// Find the first previewable file quickly without building a full sidebar tree.
@@ -65,11 +73,27 @@ pub fn find_first_previewable_path(root: &Path) -> Option<PathBuf> {
     find_first_previewable_path_limited(root, &mut remaining)
 }
 
+pub fn search_previewable_files(root: &Path, query: &str, max_results: usize) -> Vec<SearchResult> {
+    let normalized = query.trim().to_lowercase();
+    if normalized.is_empty() || max_results == 0 {
+        return Vec::new();
+    }
+    let mut remaining = MAX_TREE_NODES;
+    let mut results = Vec::new();
+    search_previewable_files_limited(root, &normalized, max_results, &mut remaining, &mut results);
+    results
+}
+
 fn is_previewable(file_type: &FileType) -> bool {
     matches!(
         file_type,
         FileType::Markdown | FileType::Image | FileType::Video | FileType::Audio
     )
+}
+
+pub fn directory_has_previewable_descendant(path: &Path) -> bool {
+    let mut remaining = MAX_TREE_NODES;
+    directory_has_previewable_descendant_limited(path, &mut remaining)
 }
 
 fn sorted_entries(root: &Path) -> Vec<(String, std::fs::DirEntry)> {
@@ -94,7 +118,7 @@ fn sorted_entries(root: &Path) -> Vec<(String, std::fs::DirEntry)> {
     entries
 }
 
-fn read_tree_shallow(root: &Path, remaining: &mut usize) -> Vec<TreeNode> {
+fn read_tree_shallow(root: &Path, remaining: &mut usize, scan_budget: &mut usize) -> Vec<TreeNode> {
     let mut entries = Vec::new();
     if *remaining == 0 {
         return entries;
@@ -117,6 +141,10 @@ fn read_tree_shallow(root: &Path, remaining: &mut usize) -> Vec<TreeNode> {
         let is_dir = ft.is_dir();
         let file_type = detect_file_type(&path);
 
+        if is_dir && !directory_has_previewable_descendant_limited(&path, scan_budget) {
+            continue;
+        }
+
         if !is_dir && !is_previewable(&file_type) {
             continue;
         }
@@ -131,6 +159,38 @@ fn read_tree_shallow(root: &Path, remaining: &mut usize) -> Vec<TreeNode> {
     }
 
     entries
+}
+
+fn directory_has_previewable_descendant_limited(root: &Path, remaining: &mut usize) -> bool {
+    if *remaining == 0 {
+        return false;
+    }
+
+    for (_name, entry) in sorted_entries(root) {
+        if *remaining == 0 {
+            break;
+        }
+        *remaining = remaining.saturating_sub(1);
+
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+        if ft.is_file() {
+            if is_previewable(&detect_file_type(&path)) {
+                return true;
+            }
+            continue;
+        }
+        if ft.is_dir() && directory_has_previewable_descendant_limited(&path, remaining) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn find_first_previewable_path_limited(root: &Path, remaining: &mut usize) -> Option<PathBuf> {
@@ -168,9 +228,60 @@ fn find_first_previewable_path_limited(root: &Path, remaining: &mut usize) -> Op
     None
 }
 
+fn search_previewable_files_limited(
+    root: &Path,
+    query: &str,
+    max_results: usize,
+    remaining: &mut usize,
+    results: &mut Vec<SearchResult>,
+) {
+    if *remaining == 0 || results.len() >= max_results {
+        return;
+    }
+
+    for (name, entry) in sorted_entries(root) {
+        if *remaining == 0 || results.len() >= max_results {
+            break;
+        }
+        *remaining = remaining.saturating_sub(1);
+
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
+            continue;
+        }
+
+        if ft.is_dir() {
+            search_previewable_files_limited(&path, query, max_results, remaining, results);
+            continue;
+        }
+
+        let file_type = detect_file_type(&path);
+        if !is_previewable(&file_type) {
+            continue;
+        }
+
+        let full_path = path.to_string_lossy().to_string();
+        let name_matches = name.to_lowercase().contains(query);
+        let path_matches = full_path.to_lowercase().contains(query);
+        if !(name_matches || path_matches) {
+            continue;
+        }
+
+        results.push(SearchResult {
+            path: full_path,
+            file_type,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FileType, detect_file_type, find_first_previewable_path};
+    use super::{
+        FileType, detect_file_type, find_first_previewable_path, read_tree_root_snapshot,
+    };
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -220,6 +331,35 @@ mod tests {
             found.file_name().and_then(|n| n.to_str()),
             Some("readme.md")
         );
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn tree_snapshot_hides_empty_directories() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("create temp root");
+        std::fs::create_dir_all(root.join("empty/sub")).expect("create empty nested dir");
+        std::fs::write(root.join("notes.txt"), "not previewable").expect("write text file");
+
+        let snapshot = read_tree_root_snapshot(&root);
+        assert!(snapshot.is_empty());
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn tree_snapshot_keeps_directories_with_previewable_descendants() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(&docs).expect("create docs dir");
+        std::fs::write(docs.join("readme.md"), "# hi").expect("write markdown");
+
+        let snapshot = read_tree_root_snapshot(&root);
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot[0].is_dir);
+        assert_eq!(snapshot[0].name, "docs");
 
         std::fs::remove_dir_all(&root).expect("cleanup temp root");
     }

@@ -457,6 +457,16 @@
     filter: saturate(0.92) contrast(1.1);
   }
 
+  :root:not(.dark) .sidebar-tree-icon-image {
+    border-radius: 4px;
+    background: color-mix(in oklch, var(--sidebar) 82%, var(--foreground) 18%);
+    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--foreground) 16%, transparent);
+    filter:
+      saturate(0.92)
+      contrast(1.08)
+      drop-shadow(0 0 0.35px color-mix(in oklch, var(--foreground) 55%, transparent));
+  }
+
   .sidebar-tree-icon-placeholder {
     display: block;
   }

@@ -18,11 +18,19 @@ pub enum UserEvent {
     SwitchProject(PathBuf),
     /// Request lazy loading of a folder's direct children.
     LoadChildren(PathBuf),
+    /// Request a project-wide file search for previewable files.
+    SearchFiles(String),
     /// A background scan for one directory's direct children completed.
     ChildrenLoaded {
         root: PathBuf,
         parent: PathBuf,
         children: Vec<crate::files::TreeNode>,
+    },
+    /// Background search results are ready for the current root.
+    SearchResults {
+        root: PathBuf,
+        query: String,
+        items: Vec<crate::files::SearchResult>,
     },
     /// Take a screenshot and send the path back through the channel.
     #[cfg(debug_assertions)]

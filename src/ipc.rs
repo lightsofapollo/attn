@@ -19,6 +19,9 @@ pub enum IpcMessage {
     #[serde(rename = "load_children")]
     LoadChildren { path: String },
 
+    #[serde(rename = "search_files")]
+    SearchFiles { query: String },
+
     #[serde(rename = "edit_save")]
     EditSave { content: String },
 
@@ -77,6 +80,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             }
             IpcMessage::LoadChildren { path } => {
                 let _ = proxy.send_event(UserEvent::LoadChildren(PathBuf::from(path)));
+            }
+            IpcMessage::SearchFiles { query } => {
+                let _ = proxy.send_event(UserEvent::SearchFiles(query));
             }
             IpcMessage::EditSave { content } => {
                 let Ok(state) = state.lock() else { return };

@@ -32,6 +32,10 @@ export function loadChildren(path: string): void {
   send({ type: 'load_children', path });
 }
 
+export function searchFiles(query: string): void {
+  send({ type: 'search_files', query });
+}
+
 export function editSave(content: string): void {
   send({ type: 'edit_save', content });
 }

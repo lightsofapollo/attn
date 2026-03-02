@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { TreeNode } from './types';
+  import type { SearchResultItem, TreeNode } from './types';
   import FileTree from './FileTree.svelte';
   import { dragWindow } from './ipc';
   import FolderTree from '@lucide/svelte/icons/folder-tree';
@@ -26,9 +26,12 @@
     rootPath?: string;
     knownProjects?: string[];
     activeProjectPath?: string;
+    remoteSearchQuery?: string;
+    remoteSearchItems?: SearchResultItem[];
     onProjectSwitch?: (path: string) => void;
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
+    onSearchQuery?: (query: string) => void;
     outline?: { id: string; text: string; level: number; line: number }[];
     activeOutlineId?: string;
     onOutlineNavigate?: (id: string) => void;
@@ -40,9 +43,12 @@
     rootPath = '',
     knownProjects = [],
     activeProjectPath = '',
+    remoteSearchQuery = '',
+    remoteSearchItems = [],
     onProjectSwitch,
     onNavigate,
     onExpand,
+    onSearchQuery,
     outline = [],
     activeOutlineId = '',
     onOutlineNavigate,
@@ -69,6 +75,11 @@
   let filteredOutline = $derived(filterOutline(outline, query));
   let projectPickerOpen = $state(false);
   let treeRenderKey = $state('');
+  let normalizedQuery = $derived(query.trim().toLowerCase());
+  let backendQueryAligned = $derived(remoteSearchQuery.trim().toLowerCase() === normalizedQuery);
+  let showBackendMatches = $derived(
+    sidebarView === 'files' && normalizedQuery.length > 0 && backendQueryAligned,
+  );
 
   function countFiles(nodes: TreeNode[]): number {
     let count = 0;
@@ -130,6 +141,24 @@
     }
     treeRenderKey = nextKey;
   });
+
+  $effect(() => {
+    if (!onSearchQuery) return;
+    if (sidebarView !== 'files') {
+      onSearchQuery('');
+      return;
+    }
+    const handle = setTimeout(() => {
+      onSearchQuery(query.trim());
+    }, 150);
+    return () => clearTimeout(handle);
+  });
+
+  function basename(path: string): string {
+    const normalized = path.replace(/\\/g, '/');
+    const parts = normalized.split('/').filter(Boolean);
+    return parts.at(-1) ?? path;
+  }
 </script>
 
 <Sidebar class="project-sidebar">
@@ -249,6 +278,35 @@
               <div class="sidebar-outline-empty">
                 <p class="sidebar-outline-empty-title">No files found</p>
                 <p class="sidebar-outline-empty-copy">Try a different filter term.</p>
+              </div>
+            {/if}
+            {#if showBackendMatches}
+              <div class="sidebar-outline-wrap pt-2">
+                {#if remoteSearchItems.length > 0}
+                  <p class="sidebar-outline-empty-copy pb-1">Project-wide matches</p>
+                  <nav class="sidebar-outline-list" aria-label="Project search results">
+                    {#each remoteSearchItems as item (item.path)}
+                      <button
+                        type="button"
+                        class="sidebar-outline-item"
+                        class:sidebar-outline-item--active={item.path === activePath}
+                        onclick={() => onNavigate?.(item.path, false)}
+                      >
+                        <span class="sidebar-outline-title">{basename(item.path)}</span>
+                        <span class="sidebar-outline-line">{item.path}</span>
+                      </button>
+                    {/each}
+                  </nav>
+                {:else}
+                  <div class="sidebar-outline-empty">
+                    <p class="sidebar-outline-empty-title">No project-wide matches</p>
+                    <p class="sidebar-outline-empty-copy">No results in unopened folders for “{query.trim()}”.</p>
+                  </div>
+                {/if}
+              </div>
+            {:else if sidebarView === 'files' && normalizedQuery.length > 0}
+              <div class="sidebar-outline-empty">
+                <p class="sidebar-outline-empty-copy">Searching full project...</p>
               </div>
             {/if}
           {:else if filteredOutline.length > 0}

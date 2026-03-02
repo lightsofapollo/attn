@@ -129,6 +129,21 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: scripts/macos-sign-app.sh "$APP_PATH" "$APPLE_SIGNING_IDENTITY"
 
+      - name: Prepare app zip assets
+        env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('vdev-{0}', github.run_number) }}
+        run: |
+          VERSION="${TAG#v}"
+          APP_DIR="$(dirname "$APP_PATH")"
+          APP_NAME="$(basename "$APP_PATH")"
+          ZIP_NAME="attn-v${VERSION}-darwin-arm64.app.zip"
+
+          cd "$APP_DIR"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_NAME" "$ZIP_NAME"
+          mv "$ZIP_NAME" "$GITHUB_WORKSPACE/dist/$ZIP_NAME"
+
+          shasum -a 256 "$GITHUB_WORKSPACE/dist/$ZIP_NAME" > "$GITHUB_WORKSPACE/dist/$ZIP_NAME.sha256"
+
       - name: Create DMG
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}

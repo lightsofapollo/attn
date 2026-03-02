@@ -235,6 +235,41 @@
     }
   }
 
+  function pruneTabsForRemovedPaths(paths: string[]): void {
+    if (paths.length === 0 || tabs.length === 0) return;
+
+    const removed = new Set(paths.map((path) => normalizeFsPath(path)));
+    const prevTabs = tabs;
+    const nextTabs = prevTabs.filter((tab) => !removed.has(normalizeFsPath(tab.path)));
+    if (nextTabs.length === prevTabs.length) return;
+
+    tabs = nextTabs;
+
+    if (nextTabs.length === 0) {
+      activeTabId = '';
+      pendingFrontendNav = false;
+      rawMarkdown = '';
+      structure = emptyPlanStructure();
+      return;
+    }
+
+    const activeStillExists = nextTabs.some((tab) => tab.id === activeTabId);
+    if (activeStillExists) {
+      return;
+    }
+
+    const nextActive = nextTabs[0];
+    activeTabId = nextActive.id;
+
+    if (nextActive.fileType === 'markdown') {
+      pendingFrontendNav = false;
+      navigate(nextActive.path);
+    } else {
+      rawMarkdown = '';
+      structure = emptyPlanStructure();
+    }
+  }
+
   function getProjectScopeKey(
     projectPath: string | undefined = activeProjectPath,
     root: string | undefined = rootPath,
@@ -819,6 +854,10 @@
       }
       if (data.treeOps) {
         applyTreeOps(data.treeOps);
+        const removedPaths = data.treeOps
+          .filter((op): op is Extract<TreeOp, { op: 'remove' }> => op.op === 'remove')
+          .map((op) => op.path);
+        pruneTabsForRemovedPaths(removedPaths);
       }
       if (detectFileType(data.filePath) === 'markdown' && typeof data.markdown !== 'string') {
         if (mode === 'edit' && editorDirty && data.filePath === activePath) {
@@ -850,6 +889,10 @@
       }
       if (data.treeOps) {
         applyTreeOps(data.treeOps);
+        const removedPaths = data.treeOps
+          .filter((op): op is Extract<TreeOp, { op: 'remove' }> => op.op === 'remove')
+          .map((op) => op.path);
+        pruneTabsForRemovedPaths(removedPaths);
       }
       if (data.changedPaths && data.changedPaths.length > 0) {
         invalidatePathCaches(data.changedPaths);

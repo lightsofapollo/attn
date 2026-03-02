@@ -113,16 +113,6 @@ web/src/        Svelte 5 frontend
 web/styles/     Tailwind CSS
 ```
 
-## WSL2 (Windows Subsystem for Linux)
-
-The webview requires X11. WSLg advertises both Wayland and X11, but wry only supports Xlib window handles on Linux. Force the X11 backend:
-
-```bash
-export GDK_BACKEND=x11
-```
-
-Add this to your `~/.bashrc` or `~/.zshrc` to make it permanent.
-
 ## Contributing
 
 ```bash

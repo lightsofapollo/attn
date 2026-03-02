@@ -22,11 +22,6 @@
     {
       label: 'Navigation',
       shortcuts: [
-        { keys: ['j'], description: 'Scroll down' },
-        { keys: ['k'], description: 'Scroll up' },
-        { keys: ['Space'], description: 'Page down' },
-        { keys: ['g'], description: 'Scroll to top' },
-        { keys: ['G'], description: 'Scroll to bottom' },
         { keys: ['\u2190'], description: 'Previous file' },
         { keys: ['\u2192'], description: 'Next file' },
         { keys: [mod, 'F'], description: 'Find in document' },
@@ -36,7 +31,6 @@
     {
       label: 'Editing',
       shortcuts: [
-        { keys: ['e'], description: 'Toggle edit mode' },
         { keys: [mod, 'S'], description: 'Save' },
         { keys: ['Esc'], description: 'Cancel edit' },
       ],

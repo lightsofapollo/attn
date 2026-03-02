@@ -68,6 +68,7 @@
   let filteredEntries = $derived(filterTree(entries, query));
   let filteredOutline = $derived(filterOutline(outline, query));
   let projectPickerOpen = $state(false);
+  let treeRenderKey = $state('');
 
   function countFiles(nodes: TreeNode[]): number {
     let count = 0;
@@ -127,6 +128,16 @@
       e.stopPropagation();
     }
   }
+
+  $effect(() => {
+    const nextKey = selectedProject || rootPath || '';
+    if (!nextKey) return;
+    if (treeRenderKey && treeRenderKey !== nextKey) {
+      query = '';
+      sidebarView = 'files';
+    }
+    treeRenderKey = nextKey;
+  });
 </script>
 
 <Sidebar class="project-sidebar">
@@ -239,7 +250,9 @@
           {#if sidebarView === 'files'}
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
-                <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} />
+                {#key treeRenderKey}
+                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} />
+                {/key}
               </SidebarMenu>
             {:else}
               <div class="sidebar-outline-empty">

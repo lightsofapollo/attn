@@ -771,10 +771,13 @@
         structure = data.structure;
       }
 
+      const wasFrontendNav = pendingFrontendNav;
+      if (data.filePath) {
+        pendingFrontendNav = false;
+      }
+
       if (data.filePath && data.filePath !== activePath) {
         const ft = detectFileType(data.filePath);
-        const wasFrontendNav = pendingFrontendNav;
-        pendingFrontendNav = false;
 
         if (tabs.length === 0) {
           // First tab
@@ -1011,6 +1014,7 @@
 
   function handleProjectSwitch(path: string): void {
     if (!path || path === activeProjectPath) return;
+    pendingFrontendNav = false;
     switchProject(path);
   }
 

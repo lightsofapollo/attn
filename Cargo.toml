@@ -51,6 +51,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [features]
 devtools = ["wry/devtools"]
 
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2.0"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusItem", "objc2-core-foundation"] }

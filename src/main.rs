@@ -395,9 +395,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         use wry::WebViewExtUnix;
         let gtk_webview = webview.webview();
         if let Some(settings) = WebViewExt::settings(&gtk_webview) {
-            settings.set_hardware_acceleration_policy(
-                HardwareAccelerationPolicy::Never,
-            );
+            settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
         }
     }
 

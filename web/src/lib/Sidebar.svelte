@@ -121,14 +121,6 @@
     return headings.filter((heading) => heading.text.toLowerCase().includes(q));
   }
 
-  function handleSearchKeydown(e: KeyboardEvent): void {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
-      // Keep native select-all behavior in the search field and prevent
-      // global/editor key handlers from intercepting the event.
-      e.stopPropagation();
-    }
-  }
-
   $effect(() => {
     const nextKey = selectedProject || rootPath || '';
     if (!nextKey) return;
@@ -238,7 +230,6 @@
         bind:value={query}
         placeholder={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}
         aria-label={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}
-        onkeydown={handleSearchKeydown}
       />
     </div>
   </div>

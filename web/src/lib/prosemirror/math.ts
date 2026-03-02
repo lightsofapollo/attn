@@ -83,8 +83,10 @@ export function mathNodeView(
       renderMath(updatedNode.textContent);
       return true;
     },
-    stopEvent() {
-      return true;
+    stopEvent(event) {
+      // Allow ProseMirror/browser keyboard + clipboard shortcuts to propagate.
+      // Only keep our local dblclick toggle isolated.
+      return event.type === 'dblclick';
     },
   };
 }

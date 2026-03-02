@@ -686,8 +686,11 @@
 
     rawMarkdown = init.markdown ?? '';
     structure = init.structure ?? emptyPlanStructure();
-    if (init.filePath && detectFileType(init.filePath) === 'markdown' && typeof init.markdown === 'string') {
-      markdownCacheByPath.set(init.filePath, init.markdown);
+    const initialMarkdown = typeof init.markdown === 'string' && init.markdown.length > 0
+      ? init.markdown
+      : null;
+    if (init.filePath && detectFileType(init.filePath) === 'markdown' && initialMarkdown !== null) {
+      markdownCacheByPath.set(init.filePath, initialMarkdown);
       if (typeof init.contentMtimeMs === 'number') {
         loadedMtimeByPath.set(init.filePath, init.contentMtimeMs);
       }

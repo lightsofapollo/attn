@@ -69,7 +69,6 @@
   let activeFileType = $derived<FileType>(activeTab?.fileType ?? 'unsupported');
   let hasSidebar = $derived(fileTree.length > 0);
   let showTabBar = $derived(tabs.length > 1);
-  let markdownFetchSeq = 0;
   const loadedMtimeByPath = new Map<string, number>();
   const markdownCacheByPath = new Map<string, string>();
   const deferredReloadMtimeByPath = new Map<string, number | null>();
@@ -640,10 +639,8 @@
       }
     }
 
-    const requestId = ++markdownFetchSeq;
     try {
       const markdown = await loadMarkdownFromPath(path);
-      if (requestId !== markdownFetchSeq) return;
       const currentPath = tabs.find((t) => t.id === activeTabId)?.path;
       if (currentPath && currentPath !== path) return;
 

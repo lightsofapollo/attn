@@ -281,7 +281,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         }
     };
 
-    let mut window_builder = WindowBuilder::new()
+    let window_builder = WindowBuilder::new()
         .with_title("attn")
         .with_inner_size(tao::dpi::LogicalSize::new(960.0, 720.0))
         .with_window_icon(load_window_icon());
@@ -362,9 +362,43 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         webview_builder = webview_builder.with_html(&page_html);
     }
 
+    // On WSL, disable hardware acceleration before building the webview so
+    // WebKit/Mesa never attempt EGL/GPU init (which fails without a real GPU).
+    #[cfg(target_os = "linux")]
+    let wsl = is_wsl();
+    #[cfg(target_os = "linux")]
+    if wsl {
+        eprintln!("attn: WSL detected, disabling hardware acceleration");
+        // SAFETY: called before spawning any threads; single-threaded at this point.
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
+
+    #[cfg(target_os = "linux")]
+    let webview = {
+        use tao::platform::unix::WindowExtUnix;
+        use wry::WebViewBuilderExtUnix;
+        let vbox = window.default_vbox().expect("tao default vbox");
+        webview_builder
+            .build_gtk(vbox)
+            .context("failed to create webview")?
+    };
+
+    #[cfg(not(target_os = "linux"))]
     let webview = webview_builder
         .build(&window)
         .context("failed to create webview")?;
+
+    // Also set the WebKit-level policy after creation as a fallback.
+    #[cfg(target_os = "linux")]
+    if wsl {
+        use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebViewExt};
+        use wry::WebViewExtUnix;
+        let gtk_webview = webview.webview();
+        if let Some(settings) = WebViewExt::settings(&gtk_webview) {
+            settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+        }
+    }
+
     eprintln!("attn: webview initialized");
 
     let mut current_tree_root = tree_root.clone();
@@ -705,6 +739,14 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             _ => {}
         }
     });
+}
+
+/// Detect if running inside Windows Subsystem for Linux.
+#[cfg(target_os = "linux")]
+fn is_wsl() -> bool {
+    std::fs::read_to_string("/proc/version")
+        .map(|v| v.contains("microsoft") || v.contains("Microsoft"))
+        .unwrap_or(false)
 }
 
 fn load_window_icon() -> Option<tao::window::Icon> {

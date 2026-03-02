@@ -47,6 +47,12 @@ tasks:
         }
         trap cleanup EXIT INT TERM
 
+        # Install npm deps if missing
+        if [ ! -d "web/node_modules" ]; then
+          echo "==> Installing npm dependencies..."
+          (cd web && npm ci)
+        fi
+
         echo "Starting Vite dev server on ${ATTN_DEV_SERVER_URL}"
         (
           cd web

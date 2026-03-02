@@ -60,10 +60,12 @@ async function main() {
   const headless = isHeadlessInvocation(args);
 
   let appPath = null;
-  try {
-    appPath = await resolveAppPath(version);
-  } catch (error) {
-    console.error(`attn: app install unavailable (${error.message}); falling back to binary.`);
+  if (process.platform === "darwin") {
+    try {
+      appPath = await resolveAppPath(version);
+    } catch (error) {
+      console.error(`attn: app install unavailable (${error.message}); falling back to binary.`);
+    }
   }
 
   if (!appPath) {
@@ -122,7 +124,7 @@ async function ensureRuntimeBinary(version) {
   const assetSuffix = resolveAssetSuffix(process.platform, process.arch);
   if (!assetSuffix) {
     throw new Error(
-      `unsupported platform ${process.platform}/${process.arch}. Currently supported: darwin-arm64.`
+      `unsupported platform ${process.platform}/${process.arch}. Currently supported: darwin-arm64, linux-x64.`
     );
   }
 
@@ -164,7 +166,7 @@ async function installManagedApp(version) {
   const assetSuffix = resolveAssetSuffix(process.platform, process.arch);
   if (!assetSuffix) {
     throw new Error(
-      `unsupported platform ${process.platform}/${process.arch}. Currently supported: darwin-arm64.`
+      `unsupported platform ${process.platform}/${process.arch}. Currently supported: darwin-arm64, linux-x64.`
     );
   }
 
@@ -255,7 +257,8 @@ function installAliasLauncher() {
   mkdirSync(dirname(installLauncherPath), { recursive: true });
   mkdirSync(installLinkDir, { recursive: true });
 
-  const launcher = `#!/usr/bin/env bash
+  const launcher = process.platform === "darwin"
+    ? `#!/usr/bin/env bash
 set -euo pipefail
 APP_LINK="${managedCurrentAppLink}"
 if [ ! -e "$APP_LINK" ]; then
@@ -275,6 +278,15 @@ if [ "$HEADLESS" -eq 1 ]; then
   exec "$BINARY" "$@"
 fi
 exec /usr/bin/open "$APP_LINK" --args "$@"
+`
+    : `#!/usr/bin/env bash
+set -euo pipefail
+BINARY="${runtimeBinaryPath}"
+if [ ! -x "$BINARY" ]; then
+  echo "attn: runtime binary is missing; run 'npx attnmd .' once to install." >&2
+  exit 1
+fi
+exec "$BINARY" "$@"
 `;
 
   writeFileSync(installLauncherPath, launcher, { mode: 0o755 });
@@ -303,6 +315,9 @@ function run(cmd, args) {
 function resolveAssetSuffix(platform, arch) {
   if (platform === "darwin" && arch === "arm64") {
     return "darwin-arm64";
+  }
+  if (platform === "linux" && arch === "x64") {
+    return "linux-x64";
   }
   return null;
 }

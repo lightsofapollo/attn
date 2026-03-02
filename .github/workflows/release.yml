@@ -99,6 +99,7 @@ jobs:
     name: Build, sign & notarize DMG
     runs-on: macos-14
     needs: validate-release-version
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -209,7 +210,7 @@ jobs:
     needs:
       - build-binaries
       - build-signed-dmg
-    if: ${{ always() && needs.build-binaries.result == 'success' && (needs.build-signed-dmg.result == 'success' || needs.build-signed-dmg.result == 'skipped') }}
+    if: ${{ always() && needs.build-binaries.result == 'success' && (needs.build-signed-dmg.result == 'success' || needs.build-signed-dmg.result == 'skipped' || needs.build-signed-dmg.result == 'failure') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -37,6 +37,7 @@ attn is a **single ~8MB binary**. It forks to background as a daemon, opens a na
 - **Built-in editor** — hit `Cmd+E` to toggle a full ProseMirror editor with syntax highlighting, math, and mermaid diagrams.
 - **File tree + fuzzy search** — browse your project with `Cmd+P`. Lazy-loads folders so it's fast on huge repos.
 - **Tabs + projects** — open multiple files, switch between projects with `Cmd+;`. attn remembers your workspaces.
+- **Mermaid diagrams** — flowcharts, sequence diagrams, and more render inline from fenced code blocks.
 - **Media support** — images (with zoom/pan), video, and audio play natively.
 - **Paper & ink themes** — warm parchment light theme by default, cool dark theme with `--dark`.
 - **Single instance** — run `attn` from ten terminals. One daemon, one window, new tab each time.

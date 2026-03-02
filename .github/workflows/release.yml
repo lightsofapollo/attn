@@ -27,7 +27,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           TAG_VERSION="${TAG#v}"
-          CARGO_VERSION="$(awk -F '\"' '/^version = / {print $2; exit}' Cargo.toml)"
+          CARGO_VERSION="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
           if [ -z "$CARGO_VERSION" ]; then
             echo "Could not read package version from Cargo.toml" >&2
             exit 1
@@ -38,17 +38,10 @@ jobs:
             exit 1
           fi
 
-  build-binaries:
-    name: Build ${{ matrix.asset_suffix }}
-    runs-on: ${{ matrix.runner }}
+  build-release-macos:
+    name: Build release assets (darwin-arm64)
+    runs-on: macos-14
     needs: validate-release-version
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            asset_suffix: darwin-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -68,52 +61,6 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --locked
-
-      - name: Prepare binary assets
-        env:
-          TAG: ${{ github.ref_name }}
-          TARGET: ${{ matrix.target }}
-          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
-        run: |
-          VERSION="${TAG#v}"
-          mkdir -p dist
-          cp "target/${TARGET}/release/attn" "dist/attn-v${VERSION}-${ASSET_SUFFIX}"
-          chmod +x "dist/attn-v${VERSION}-${ASSET_SUFFIX}"
-          shasum -a 256 "dist/attn-v${VERSION}-${ASSET_SUFFIX}" > "dist/attn-v${VERSION}-${ASSET_SUFFIX}.sha256"
-
-      - name: Upload binary artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.asset_suffix }}
-          path: dist/*
-          retention-days: 7
-
-  build-signed-dmg:
-    name: Build, sign & notarize DMG
-    runs-on: macos-14
-    needs: validate-release-version
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
           targets: aarch64-apple-darwin
 
       - name: Cache Rust
@@ -123,32 +70,6 @@ jobs:
         uses: taiki-e/cache-cargo-install-action@v2
         with:
           tool: cargo-bundle
-
-      - name: Install frontend dependencies
-        run: |
-          cd web
-          npm ci
-
-      - name: Import code signing certificate
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
-          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: |
-          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
-          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
-
-          echo -n "$CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH" || \
-            echo -n "$CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERTIFICATE_PATH" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-
-          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       - name: Build app bundle
         run: |
@@ -164,17 +85,61 @@ jobs:
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
 
+      - name: Prepare binary assets
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          mkdir -p dist
+          cp "target/aarch64-apple-darwin/release/attn" "dist/attn-v${VERSION}-darwin-arm64"
+          chmod +x "dist/attn-v${VERSION}-darwin-arm64"
+          shasum -a 256 "dist/attn-v${VERSION}-darwin-arm64" > "dist/attn-v${VERSION}-darwin-arm64.sha256"
+
+      - name: Import code signing certificate
+        id: signing
+        continue-on-error: true
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          if [ -z "$CERTIFICATE_BASE64" ] || [ -z "$CERTIFICATE_PASSWORD" ] || [ -z "$KEYCHAIN_PASSWORD" ]; then
+            echo "Missing signing secrets; skipping DMG signing." >&2
+            exit 1
+          fi
+
+          echo -n "$CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH" || \
+            echo -n "$CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
       - name: Sign app bundle
+        if: steps.signing.outcome == 'success'
+        continue-on-error: true
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: scripts/macos-sign-app.sh "$APP_PATH" "$APPLE_SIGNING_IDENTITY"
 
       - name: Create DMG
+        if: steps.signing.outcome == 'success'
+        continue-on-error: true
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: scripts/macos-create-dmg.sh "$APP_PATH" "$DMG_PATH"
 
       - name: Notarize DMG
+        if: steps.signing.outcome == 'success'
+        continue-on-error: true
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -182,18 +147,18 @@ jobs:
         run: scripts/macos-notarize-dmg.sh "$DMG_PATH"
 
       - name: Prepare DMG assets
+        if: steps.signing.outcome == 'success'
         env:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION="${TAG#v}"
-          mkdir -p dist
           cp "$DMG_PATH" "dist/attn-v${VERSION}-darwin-arm64.dmg"
           shasum -a 256 "dist/attn-v${VERSION}-darwin-arm64.dmg" > "dist/attn-v${VERSION}-darwin-arm64.dmg.sha256"
 
-      - name: Upload DMG artifacts
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-dmg-darwin-arm64
+          name: release-darwin-arm64
           path: dist/*
           retention-days: 7
 
@@ -207,10 +172,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs:
-      - build-binaries
-      - build-signed-dmg
-    if: ${{ always() && needs.build-binaries.result == 'success' && (needs.build-signed-dmg.result == 'success' || needs.build-signed-dmg.result == 'skipped' || needs.build-signed-dmg.result == 'failure') }}
+    needs: build-release-macos
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -221,8 +183,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: release-*
-          merge-multiple: true
+          name: release-darwin-arm64
 
       - name: Create or update release
         env:

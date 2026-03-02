@@ -248,4 +248,4 @@ jobs:
         run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
 
       - name: Publish package
-        run: npm publish --access public --provenance
+        run: npm publish --access public

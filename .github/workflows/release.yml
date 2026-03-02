@@ -27,7 +27,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           TAG_VERSION="${TAG#v}"
-          CARGO_VERSION="$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -n1)"
+          CARGO_VERSION="$(awk -F '\"' '/^version = / {print $2; exit}' Cargo.toml)"
           if [ -z "$CARGO_VERSION" ]; then
             echo "Could not read package version from Cargo.toml" >&2
             exit 1

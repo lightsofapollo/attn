@@ -1,7 +1,7 @@
 # Release Setup
 
 This project ships:
-- signed/notarized macOS `.dmg` on tag release (when Apple secrets are present)
+- signed/notarized macOS `.dmg` on every tag release
 - tag-based GitHub Releases with `attn` CLI binaries
 - crates.io publishing for `cargo install attn`
 - npm package publishing for `npx attnmd`
@@ -13,7 +13,7 @@ This project ships:
 - `scripts/macos-create-dmg.sh`: packages and optionally signs DMG
 - `scripts/macos-notarize-dmg.sh`: notarizes and staples DMG
 - `.github/workflows/test-signing.yml`: signing smoke test
-- `.github/workflows/release.yml`: build release binaries on tag push (`v*`), optionally sign/notarize DMG, publish crate, and publish npm
+- `.github/workflows/release.yml`: build release binaries on tag push (`v*`), sign/notarize DMG, publish crate, and publish npm
 - `.github/workflows/npm-publish.yml`: manual fallback publisher (workflow_dispatch or release events)
 
 ## Required GitHub Secrets
@@ -54,7 +54,7 @@ scripts/macos-sign-app.sh target/aarch64-apple-darwin/release/bundle/osx/attn.ap
 # 3) Create DMG (signed if APPLE_SIGNING_IDENTITY is set)
 scripts/macos-create-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/attn.app
 
-# 4) Optional notarize + staple
+# 4) Notarize + staple
 export APPLE_ID="you@example.com"
 export APPLE_APP_SPECIFIC_PASSWORD="xxxx-xxxx-xxxx-xxxx"
 export APPLE_TEAM_ID="ABCDEFGHIJ"
@@ -83,7 +83,7 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
 4. `Release` workflow runs automatically and uploads:
    - `attn-v<VERSION>-darwin-arm64`
    - matching `.sha256` files
-   - `attn-v<VERSION>-darwin-arm64.dmg` and checksum when notarization secrets are configured
+   - `attn-v<VERSION>-darwin-arm64.dmg` and checksum
 5. A GitHub Release for the tag is created/updated with those assets.
 6. The same workflow publishes crate `attn` to crates.io.
 7. The same workflow publishes npm package `attnmd`.

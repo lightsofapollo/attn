@@ -64,7 +64,12 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
 ## CI test run
 
 1. Run `Test Code Signing` workflow to validate cert/keychain/signing.
-2. Push a version tag (`v*`) and verify `Release` workflow completes.
+2. Run a full macOS build/sign/notarize test without publishing:
+   ```bash
+   gh workflow run release.yml --ref main
+   ```
+   This `workflow_dispatch` path builds and notarizes artifacts, but skips GitHub Release, crates.io, and npm publishing.
+3. Push a version tag (`v*`) and verify `Release` workflow completes.
 
 ## GitHub release flow (tag-based)
 

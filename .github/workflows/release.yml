@@ -10,9 +10,19 @@ permissions:
   id-token: write
 
 jobs:
-  build-binary:
-    name: Build darwin-arm64
-    runs-on: macos-14
+  build-binaries:
+    name: Build ${{ matrix.asset_suffix }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            asset_suffix: darwin-arm64
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            asset_suffix: darwin-x64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,35 +42,148 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: Prepare binary assets
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+        run: |
+          VERSION="${TAG#v}"
+          mkdir -p dist
+          cp "target/${TARGET}/release/attn" "dist/attn-v${VERSION}-${ASSET_SUFFIX}"
+          chmod +x "dist/attn-v${VERSION}-${ASSET_SUFFIX}"
+          shasum -a 256 "dist/attn-v${VERSION}-${ASSET_SUFFIX}" > "dist/attn-v${VERSION}-${ASSET_SUFFIX}.sha256"
+
+      - name: Upload binary artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.asset_suffix }}
+          path: dist/*
+          retention-days: 7
+
+  build-signed-dmg:
+    name: Build, sign & notarize DMG
+    runs-on: macos-14
+    if: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.KEYCHAIN_PASSWORD != '' && secrets.APPLE_SIGNING_IDENTITY != '' && secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
           targets: aarch64-apple-darwin
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Build production binary
-        run: cargo build --release --target aarch64-apple-darwin --locked
+      - name: Install cargo-bundle
+        uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-bundle
 
-      - name: Prepare release assets
+      - name: Install frontend dependencies
+        run: |
+          cd web
+          npm ci
+
+      - name: Import code signing certificate
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo -n "$CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH" || \
+            echo -n "$CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Build app bundle
+        run: |
+          scripts/macos-build-bundle.sh prod aarch64-apple-darwin
+
+          APP_PATH="$(find target/aarch64-apple-darwin -path '*/bundle/osx/*.app' -maxdepth 6 | head -n1)"
+          if [ -z "$APP_PATH" ]; then
+            echo "No app bundle found" >&2
+            exit 1
+          fi
+
+          DMG_PATH="$(dirname "$APP_PATH")/attn.dmg"
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
+
+      - name: Sign app bundle
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: scripts/macos-sign-app.sh "$APP_PATH" "$APPLE_SIGNING_IDENTITY"
+
+      - name: Create DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: scripts/macos-create-dmg.sh "$APP_PATH" "$DMG_PATH"
+
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: scripts/macos-notarize-dmg.sh "$DMG_PATH"
+
+      - name: Prepare DMG assets
         env:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION="${TAG#v}"
           mkdir -p dist
-          cp "target/aarch64-apple-darwin/release/attn" "dist/attn-v${VERSION}-darwin-arm64"
-          chmod +x "dist/attn-v${VERSION}-darwin-arm64"
-          shasum -a 256 "dist/attn-v${VERSION}-darwin-arm64" > "dist/attn-v${VERSION}-darwin-arm64.sha256"
+          cp "$DMG_PATH" "dist/attn-v${VERSION}-darwin-arm64.dmg"
+          shasum -a 256 "dist/attn-v${VERSION}-darwin-arm64.dmg" > "dist/attn-v${VERSION}-darwin-arm64.dmg.sha256"
 
-      - name: Upload build artifacts
+      - name: Upload DMG artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: release-darwin-arm64
+          name: release-dmg-darwin-arm64
           path: dist/*
           retention-days: 7
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi
 
   publish-release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: build-binary
+    needs:
+      - build-binaries
+      - build-signed-dmg
+    if: ${{ always() && needs.build-binaries.result == 'success' && (needs.build-signed-dmg.result == 'success' || needs.build-signed-dmg.result == 'skipped') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,11 +194,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-
-      - name: Flatten artifact directories
-        run: |
-          mkdir -p release-assets
-          find dist -type f -maxdepth 3 -exec cp {} release-assets/ \;
+          pattern: release-*
+          merge-multiple: true
 
       - name: Create or update release
         env:
@@ -89,7 +209,7 @@ jobs:
               --title "$TAG" \
               --notes "Automated release for $TAG."
           fi
-          gh release upload "$TAG" release-assets/* --clobber
+          gh release upload "$TAG" dist/* --clobber
 
   publish-crates:
     name: Publish crates.io

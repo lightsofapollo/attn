@@ -13,7 +13,7 @@
   } from 'prosemirror-search';
   import { tick } from 'svelte';
   import { keymap } from 'prosemirror-keymap';
-  import { baseKeymap } from 'prosemirror-commands';
+  import { baseKeymap, selectAll } from 'prosemirror-commands';
   import { history, redo, undo } from 'prosemirror-history';
   import { codeHighlightPlugin } from './prosemirror/code-highlight';
   import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
@@ -367,6 +367,25 @@
     return false;
   }
 
+  function handleEditorKeydown(editorView: EditorView, event: KeyboardEvent): boolean {
+    const meta = event.metaKey || event.ctrlKey;
+    if (!meta || event.altKey) return false;
+
+    const key = event.key.toLowerCase();
+
+    // Keep native clipboard operations unhandled by app-level logic.
+    if (key === 'c' || key === 'v' || key === 'x') {
+      return false;
+    }
+
+    // Ensure select-all is always available inside the editor surface.
+    if (key === 'a' && !event.shiftKey) {
+      return selectAll(editorView.state, editorView.dispatch, editorView);
+    }
+
+    return false;
+  }
+
   export function getMarkdown(): string {
     if (!view) return markdown;
     return markdownSerializer.serialize(view.state.doc);
@@ -406,6 +425,7 @@
       editable: () => editable,
       handleDOMEvents: {
         click: (_view, event) => handleEditorClick(event as MouseEvent),
+        keydown: (editorView, event) => handleEditorKeydown(editorView, event as KeyboardEvent),
       },
       dispatchTransaction(tr) {
         if (!view) return;

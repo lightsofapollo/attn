@@ -69,18 +69,24 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
 ## GitHub release flow (tag-based)
 
 1. Bump versions in source (`Cargo.toml` and root `package.json`) as needed.
-2. Create and push a version tag:
+2. Run and commit lock-safe checks:
+   ```bash
+   cargo check --locked
+   git add Cargo.toml Cargo.lock package.json
+   git commit -m "Bump release versions"
+   ```
+3. Create and push a version tag:
    ```bash
    git tag v0.1.0
    git push origin v0.1.0
    ```
-3. `Release` workflow runs automatically and uploads:
+4. `Release` workflow runs automatically and uploads:
    - `attn-v<VERSION>-darwin-arm64`
    - matching `.sha256` files
    - `attn-v<VERSION>-darwin-arm64.dmg` and checksum when notarization secrets are configured
-4. A GitHub Release for the tag is created/updated with those assets.
-5. The same workflow publishes crate `attn` to crates.io.
-6. The same workflow publishes npm package `attnmd`.
+5. A GitHub Release for the tag is created/updated with those assets.
+6. The same workflow publishes crate `attn` to crates.io.
+7. The same workflow publishes npm package `attnmd`.
 
 ## npm publish flow (`npx attnmd`)
 

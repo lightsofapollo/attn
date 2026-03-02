@@ -36,12 +36,12 @@
         {#each tabs as tab (tab.id)}
           <Tabs.Trigger
             value={tab.id}
-            class="tab-trigger relative h-full items-center rounded-md px-3 py-0 text-xs text-muted-foreground shadow-none transition-none data-[state=active]:text-foreground hover:bg-accent group gap-1"
+            class="tab-trigger relative h-full items-center rounded-md pl-3 pr-7 py-0 text-xs text-muted-foreground shadow-none transition-none data-[state=active]:text-foreground hover:bg-accent group"
             onauxclick={(e: MouseEvent) => handleMiddleClick(e, tab.id)}
           >
             <span class="whitespace-nowrap">{tab.label}</span>
             <span
-              class="tab-close opacity-0 group-hover:opacity-50 data-[state=active]:opacity-50 text-base leading-none px-0.5 rounded-sm hover:!opacity-100 hover:bg-accent"
+              class="tab-close absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-50 data-[state=active]:opacity-50 text-base leading-none h-4 w-4 text-center rounded-sm hover:!opacity-100 hover:bg-accent"
               role="button"
               tabindex={-1}
               onclick={(e: MouseEvent) => handleCloseClick(e, tab.id)}

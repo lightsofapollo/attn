@@ -9,10 +9,19 @@
     TreeNode,
     InitPayload,
     PlanStructure,
+    SearchResultItem,
     UpdatePayload,
   } from './lib/types';
   import { initKeyboard } from './lib/keyboard';
-  import { dragWindow, editSave, loadChildren, navigate, openExternal, switchProject } from './lib/ipc';
+  import {
+    dragWindow,
+    editSave,
+    loadChildren,
+    navigate,
+    openExternal,
+    searchFiles,
+    switchProject,
+  } from './lib/ipc';
   import {
     decreaseFontScale as decreaseGlobalFontScale,
     increaseFontScale as increaseGlobalFontScale,
@@ -26,6 +35,7 @@
   import TabBar from './lib/TabBar.svelte';
   import ImageViewer from './lib/ImageViewer.svelte';
   import MediaPlayer from './lib/MediaPlayer.svelte';
+  import DirectoryOverview from './lib/DirectoryOverview.svelte';
   import CommandPalette from './lib/CommandPalette.svelte';
   import KeyboardShortcutsDialog from './lib/KeyboardShortcutsDialog.svelte';
   import { toast } from 'svelte-sonner';
@@ -79,6 +89,8 @@
   type OutlineHeading = { id: string; text: string; level: number; line: number };
   let outlineHeadings: OutlineHeading[] = $state([]);
   let activeOutlineId = $state('');
+  let sidebarSearchQuery = $state('');
+  let sidebarSearchResults: SearchResultItem[] = $state([]);
 
   function emptyPlanStructure(): PlanStructure {
     return { phases: [], tasks: [], file_refs: [] };
@@ -705,6 +717,28 @@
     return undefined;
   }
 
+  function findTreeNodeByPath(nodes: TreeNode[], path: string): TreeNode | undefined {
+    const normalizedTarget = normalizeFsPath(path);
+    for (const node of nodes) {
+      if (normalizeFsPath(node.path) === normalizedTarget) {
+        return node;
+      }
+      if (node.children && node.children.length > 0) {
+        const found = findTreeNodeByPath(node.children, path);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  }
+
+  function inferFileTypeFromTree(path: string): FileType | undefined {
+    if (!path) return undefined;
+    if (normalizeFsPath(path) === normalizeFsPath(rootPath)) {
+      return 'directory';
+    }
+    return findTreeNodeByPath(fileTree, path)?.fileType;
+  }
+
   function loadInitPayload(): void {
     const init = (window as { __attn_init__?: InitPayload }).__attn_init__;
     if (!init) {
@@ -784,6 +818,10 @@
       }
       if (data.activeProjectPath) {
         activeProjectPath = data.activeProjectPath;
+      }
+      if (data.searchResults) {
+        sidebarSearchQuery = data.searchResults.query ?? '';
+        sidebarSearchResults = data.searchResults.items ?? [];
       }
       applyTabScopeForProject(activeProjectPath, rootPath);
 
@@ -877,6 +915,10 @@
       }
       if (data.activeProjectPath) {
         activeProjectPath = data.activeProjectPath;
+      }
+      if (data.searchResults) {
+        sidebarSearchQuery = data.searchResults.query ?? '';
+        sidebarSearchResults = data.searchResults.items ?? [];
       }
       applyTabScopeForProject(activeProjectPath, rootPath);
       if (data.fileTree) {
@@ -1069,6 +1111,10 @@
     loadChildren(path);
   }
 
+  function handleSidebarSearchQuery(query: string): void {
+    searchFiles(query);
+  }
+
   $effect(() => {
     if (activeFileType !== 'markdown') {
       outlineHeadings = [];
@@ -1168,7 +1214,7 @@
     avoidWindowControls={!hasSidebar}
     fixed={!hasSidebar}
     topOffsetPx={34}
-    onNavigate={(dir) => openPath(dir)}
+    onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
   />
   {#if !hasSidebar}
     <div class="h-[40px] shrink-0"></div>
@@ -1203,6 +1249,13 @@
       <ImageViewer src={markdownSourceUrl(activePath)} />
     {:else if activeFileType === 'video' || activeFileType === 'audio'}
       <MediaPlayer src={markdownSourceUrl(activePath)} fileType={activeFileType} />
+    {:else if activeFileType === 'directory'}
+      <DirectoryOverview
+        path={activePath}
+        {rootPath}
+        entries={fileTree}
+        onOpen={(path) => openPath(path, detectFileType(path))}
+      />
     {:else}
       <div class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
         <p>This file type is not supported for preview.</p>
@@ -1278,11 +1331,14 @@
       {rootPath}
       {knownProjects}
       {activeProjectPath}
+      remoteSearchQuery={sidebarSearchQuery}
+      remoteSearchItems={sidebarSearchResults}
       outline={outlineHeadings}
       {activeOutlineId}
       onProjectSwitch={handleProjectSwitch}
       onNavigate={handleSidebarNavigate}
       onExpand={handleTreeExpand}
+      onSearchQuery={handleSidebarSearchQuery}
       onOutlineNavigate={handleOutlineNavigate}
     />
     <SidebarInset class="flex flex-col overflow-hidden">

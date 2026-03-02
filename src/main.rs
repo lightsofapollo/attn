@@ -281,7 +281,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         }
     };
 
-    let window_builder = WindowBuilder::new()
+    let mut window_builder = WindowBuilder::new()
         .with_title("attn")
         .with_inner_size(tao::dpi::LogicalSize::new(960.0, 720.0))
         .with_window_icon(load_window_icon());
@@ -533,6 +533,9 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 }
                 queue_children_refresh(&watcher_proxy, current_tree_root.clone(), parent);
             }
+            Event::UserEvent(UserEvent::SearchFiles(query)) => {
+                queue_search_refresh(&watcher_proxy, current_tree_root.clone(), query);
+            }
             Event::UserEvent(UserEvent::ChildrenLoaded {
                 root,
                 parent,
@@ -545,6 +548,19 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     "treePatch": {
                         "parentPath": parent.to_string_lossy(),
                         "children": children,
+                    }
+                });
+                let js = format!("window.__attn__.updateContent({payload});");
+                let _ = webview.evaluate_script(&js);
+            }
+            Event::UserEvent(UserEvent::SearchResults { root, query, items }) => {
+                if root != current_tree_root {
+                    return;
+                }
+                let payload = serde_json::json!({
+                    "searchResults": {
+                        "query": query,
+                        "items": items,
                     }
                 });
                 let js = format!("window.__attn__.updateContent({payload});");
@@ -771,6 +787,14 @@ fn queue_children_refresh(proxy: &EventLoopProxy<UserEvent>, root: PathBuf, pare
     });
 }
 
+fn queue_search_refresh(proxy: &EventLoopProxy<UserEvent>, root: PathBuf, query: String) {
+    let proxy = proxy.clone();
+    std::thread::spawn(move || {
+        let items = files::search_previewable_files(&root, &query, 200);
+        let _ = proxy.send_event(UserEvent::SearchResults { root, query, items });
+    });
+}
+
 fn build_tree_ops(
     kind: FsChangeKind,
     changed_paths: &[String],
@@ -876,6 +900,9 @@ fn tree_node_for_path(path: &Path) -> Option<files::TreeNode> {
     let name = path.file_name()?.to_string_lossy().to_string();
     let file_type = files::detect_file_type(path);
     let is_dir = path.is_dir();
+    if is_dir && !files::directory_has_previewable_descendant(path) {
+        return None;
+    }
     if !is_dir
         && !matches!(
             file_type,

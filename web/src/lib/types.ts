@@ -39,6 +39,16 @@ export type TreeOp =
   | { op: 'remove'; path: string }
   | { op: 'upsert'; parentPath: string; node: TreeNode };
 
+export interface SearchResultItem {
+  path: string;
+  fileType: FileType;
+}
+
+export interface SearchResultsPayload {
+  query: string;
+  items: SearchResultItem[];
+}
+
 /** @deprecated Use TreeNode instead */
 export type FileEntry = TreeNode;
 
@@ -54,6 +64,7 @@ export interface ContentPayload {
   contentBytes?: number;
   treePatch?: TreePatch;
   treeOps?: TreeOp[];
+  searchResults?: SearchResultsPayload;
 }
 
 export interface UpdatePayload {
@@ -69,6 +80,7 @@ export interface UpdatePayload {
   contentBytes?: number;
   treePatch?: TreePatch;
   treeOps?: TreeOp[];
+  searchResults?: SearchResultsPayload;
 }
 
 export type IpcMessageType =
@@ -76,6 +88,7 @@ export type IpcMessageType =
   | 'navigate'
   | 'switch_project'
   | 'load_children'
+  | 'search_files'
   | 'edit_save'
   | 'theme_change'
   | 'open_external'
@@ -103,6 +116,11 @@ export interface SwitchProjectMessage {
 export interface LoadChildrenMessage {
   type: 'load_children';
   path: string;
+}
+
+export interface SearchFilesMessage {
+  type: 'search_files';
+  query: string;
 }
 
 export interface EditSaveMessage {
@@ -150,6 +168,7 @@ export type IpcMessage =
   | NavigateMessage
   | SwitchProjectMessage
   | LoadChildrenMessage
+  | SearchFilesMessage
   | EditSaveMessage
   | ThemeChangeMessage
   | OpenExternalMessage

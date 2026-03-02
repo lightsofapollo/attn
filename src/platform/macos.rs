@@ -65,6 +65,11 @@ define_class!(
             send_user_event(UserEvent::FontScaleReset);
         }
 
+        #[unsafe(method(installCliAlias:))]
+        fn install_cli_alias(&self, _sender: Option<&AnyObject>) {
+            send_user_event(UserEvent::InstallCliAlias);
+        }
+
         #[unsafe(method(quitApp:))]
         fn quit_app(&self, _sender: Option<&AnyObject>) {
             send_user_event(UserEvent::Quit);
@@ -136,6 +141,16 @@ pub fn install_system_ui(proxy: EventLoopProxy<UserEvent>) -> Option<SystemUiHan
         "0",
         &menu_target,
     ));
+    if !crate::cli_alias::has_attn_on_path() {
+        app_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        app_menu.addItem(&new_action_item(
+            mtm,
+            "Install attn CLI Alias",
+            Some(sel!(installCliAlias:)),
+            "",
+            &menu_target,
+        ));
+    }
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     app_menu.addItem(&new_action_item(
         mtm,

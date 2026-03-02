@@ -1,3 +1,4 @@
+mod cli_alias;
 mod daemon;
 mod files;
 mod ipc;
@@ -598,6 +599,28 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.resetFontScale?.(); }",
                 );
             }
+            Event::UserEvent(UserEvent::InstallCliAlias) => match cli_alias::install_attn_cli_alias()
+            {
+                Ok(cli_alias::InstallCliAliasResult::AlreadyInstalled(path)) => {
+                    eprintln!("attn: CLI alias already installed at {}", path.display());
+                }
+                Ok(cli_alias::InstallCliAliasResult::Installed { path, dir_on_path }) => {
+                    eprintln!("attn: installed CLI alias at {}", path.display());
+                    if !dir_on_path {
+                        let message = format!(
+                            "Installed attn at {}.\nThat directory is not on PATH for this app session.\nAdd it to your shell PATH to run `attn` from terminal.",
+                            path.display()
+                        );
+                        if let Ok(message_json) = serde_json::to_string(&message) {
+                            let js = format!("window.alert({message_json});");
+                            let _ = webview.evaluate_script(&js);
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("attn: failed to install CLI alias: {err:#}");
+                }
+            },
             Event::UserEvent(UserEvent::Quit) => {
                 *control_flow = ControlFlow::Exit;
             }

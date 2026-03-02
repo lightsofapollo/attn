@@ -46,6 +46,8 @@ pub enum UserEvent {
     FontScaleDecrease,
     /// Reset global font scale to default.
     FontScaleReset,
+    /// Install a CLI alias to the running app binary.
+    InstallCliAlias,
     /// Exit the app event loop.
     Quit,
 }

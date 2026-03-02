@@ -1,7 +1,7 @@
 # Release Setup
 
 This project ships:
-- signed macOS `.app` and `.dmg` (manual test workflow)
+- signed/notarized macOS `.dmg` on tag release (when Apple secrets are present)
 - tag-based GitHub Releases with `attn` CLI binaries
 - crates.io publishing for `cargo install attn`
 - npm package publishing for `npx attnmd`
@@ -13,9 +13,7 @@ This project ships:
 - `scripts/macos-create-dmg.sh`: packages and optionally signs DMG
 - `scripts/macos-notarize-dmg.sh`: notarizes and staples DMG
 - `.github/workflows/test-signing.yml`: signing smoke test
-- `.github/workflows/macos-desktop-test.yml`: build/sign/notarize artifact test
-- `.github/workflows/release.yml`: build release binaries on tag push (`v*`), publish crate, and publish npm
-  (signing/notarization remains in dedicated macOS workflows)
+- `.github/workflows/release.yml`: build release binaries on tag push (`v*`), optionally sign/notarize DMG, publish crate, and publish npm
 - `.github/workflows/npm-publish.yml`: manual fallback publisher (workflow_dispatch or release events)
 
 ## Required GitHub Secrets
@@ -66,10 +64,7 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
 ## CI test run
 
 1. Run `Test Code Signing` workflow to validate cert/keychain/signing.
-2. Run `macOS Desktop Build Test` workflow:
-   - `mode=prod`
-   - `target=aarch64-apple-darwin`
-   - `notarize=true`
+2. Push a version tag (`v*`) and verify `Release` workflow completes.
 
 ## GitHub release flow (tag-based)
 
@@ -83,6 +78,7 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
    - `attn-v<VERSION>-darwin-arm64`
    - `attn-v<VERSION>-darwin-x64`
    - matching `.sha256` files
+   - `attn-v<VERSION>-darwin-arm64.dmg` and checksum when notarization secrets are configured
 4. A GitHub Release for the tag is created/updated with those assets.
 5. The same workflow publishes crate `attn` to crates.io.
 6. The same workflow publishes npm package `attnmd`.

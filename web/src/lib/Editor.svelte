@@ -19,6 +19,7 @@
   import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
   import { mathNodeView } from './prosemirror/math';
   import { mermaidNodeView } from './prosemirror/mermaid-nodeview';
+  import { tablePlugins } from './prosemirror/tables';
   import { editSave } from './ipc';
   import { markdownParser, markdownSerializer, schema } from './schema';
 
@@ -55,6 +56,14 @@
   const PARSE_WARN_MS = 120;
   const LARGE_MARKDOWN_CHAR_LIMIT = 350_000;
   const SAFE_MODE_PREVIEW_CHAR_LIMIT = 50_000;
+  let pendingLocalSaveNormalized: string | null = null;
+
+  function normalizeMarkdownForCompare(md: string): string {
+    return md
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .replace(/\n$/, '');
+  }
 
   function setDirty(next: boolean): void {
     if (dirty === next) return;
@@ -133,6 +142,7 @@
     if (md.length <= LARGE_MARKDOWN_CHAR_LIMIT) {
       plugins.push(codeHighlightPlugin());
     }
+    plugins.push(...tablePlugins());
     plugins.push(
       keymap({
         'Mod-z': undo,
@@ -159,6 +169,10 @@
           return true;
         },
         'Mod-s': () => {
+          if (view) {
+            const current = markdownSerializer.serialize(view.state.doc);
+            pendingLocalSaveNormalized = normalizeMarkdownForCompare(current);
+          }
           if (onSave) onSave();
           return true;
         },
@@ -398,11 +412,18 @@
   export function resetToMarkdown(nextMarkdown: string): void {
     if (!view) return;
     const updateStart = performance.now();
+    const bookmark = view.state.selection.getBookmark();
     const updateDoc = parseMarkdownDoc(nextMarkdown, 'update');
-    const state = EditorState.create({
+    let state = EditorState.create({
       doc: updateDoc,
       plugins: buildPlugins(nextMarkdown),
     });
+    try {
+      const selection = bookmark.resolve(state.doc);
+      state = state.apply(state.tr.setSelection(selection));
+    } catch {
+      // If previous selection can't be restored, keep default selection.
+    }
     console.info(`[attn] pm update done in ${(performance.now() - updateStart).toFixed(1)}ms`);
     view.updateState(state);
     if (findOpen && findQuery) {
@@ -410,6 +431,22 @@
     }
     lastMarkdown = nextMarkdown;
     setDirty(false);
+  }
+
+  export function commitSaved(): void {
+    if (!view) return;
+    lastMarkdown = markdownSerializer.serialize(view.state.doc);
+    setDirty(false);
+  }
+
+  export function undoStep(): void {
+    if (!view) return;
+    undo(view.state, view.dispatch, view);
+  }
+
+  export function redoStep(): void {
+    if (!view) return;
+    redo(view.state, view.dispatch, view);
   }
 
   export function openFind(): void {
@@ -460,6 +497,21 @@
     if (!view) return;
     // Only update if the markdown actually changed from what we last set
     if (markdown === lastMarkdown) return;
+    const normalizedIncoming = normalizeMarkdownForCompare(markdown);
+    if (pendingLocalSaveNormalized && normalizedIncoming === pendingLocalSaveNormalized) {
+      pendingLocalSaveNormalized = null;
+      lastMarkdown = markdown;
+      setDirty(false);
+      return;
+    }
+    // Preserve undo history/cursor when incoming text is effectively the same
+    // content we already have in the editor (common after save/watcher round-trip).
+    const currentMarkdown = markdownSerializer.serialize(view.state.doc);
+    if (normalizeMarkdownForCompare(currentMarkdown) === normalizedIncoming) {
+      lastMarkdown = markdown;
+      setDirty(false);
+      return;
+    }
     resetToMarkdown(markdown);
   });
 

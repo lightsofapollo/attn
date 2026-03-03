@@ -4,7 +4,8 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "generate:icons": "node scripts/generate-vscode-icon-map.mjs",
+    "generate:icons": "node scripts/generate-vscode-icon-map.mjs --pack=material",
+    "generate:icons:light": "node scripts/generate-vscode-icon-map.mjs --pack=material-light",
     "dev": "npm run generate:icons && vite",
     "build": "npm run generate:icons && vite build",
     "check": "npm run generate:icons && svelte-check --tsconfig ./tsconfig.json"

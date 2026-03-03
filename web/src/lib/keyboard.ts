@@ -2,7 +2,6 @@ import { decreaseFontScale, increaseFontScale, resetFontScale } from './font-sca
 import { cycleTheme } from './theme';
 
 export interface KeyboardConfig {
-  onEditToggle: () => void;
   onTabClose?: () => void;
   onTabPrev?: () => void;
   onTabNext?: () => void;
@@ -10,6 +9,8 @@ export interface KeyboardConfig {
   onGalleryNext?: () => void;
   onCommandPalette?: () => void;
   onShortcutsHelp?: () => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
 function isEditableElement(el: HTMLElement | null): boolean {
@@ -104,6 +105,16 @@ export function initKeyboard(config: KeyboardConfig): () => void {
 
     // Tab shortcuts (Cmd+W, Cmd+[, Cmd+])
     if (meta) {
+      if (e.key === 'z' && !e.shiftKey && config.onUndo) {
+        e.preventDefault();
+        config.onUndo();
+        return;
+      }
+      if ((e.key === 'y' || (e.key === 'z' && e.shiftKey)) && config.onRedo) {
+        e.preventDefault();
+        config.onRedo();
+        return;
+      }
       if (e.key === 'w' && config.onTabClose) {
         e.preventDefault();
         config.onTabClose();
@@ -124,9 +135,6 @@ export function initKeyboard(config: KeyboardConfig): () => void {
     switch (e.key) {
       case 't':
         cycleTheme();
-        break;
-      case 'e':
-        config.onEditToggle();
         break;
       case 'ArrowLeft':
         if (config.onGalleryPrev) config.onGalleryPrev();

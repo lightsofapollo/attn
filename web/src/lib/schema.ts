@@ -195,31 +195,7 @@ function taskListPlugin(md: MarkdownIt): void {
     for (let i = 0; i < tokens.length; i++) {
       if (tokens[i].type !== 'bullet_list_open') continue;
 
-      // Scan items to see if this is a task list
-      let isTaskList = false;
-      let j = i + 1;
-      while (j < tokens.length && tokens[j].type !== 'bullet_list_close') {
-        if (tokens[j].type === 'list_item_open') {
-          // Look for the inline content of this item
-          const inlineIdx = findInlineToken(tokens, j);
-          if (inlineIdx >= 0) {
-            const content = tokens[inlineIdx].content;
-            if (/^\[[ xX]\]\s/.test(content)) {
-              isTaskList = true;
-              break;
-            }
-          }
-        }
-        j++;
-      }
-
-      if (!isTaskList) continue;
-
-      // Convert this bullet list to a task list
-      tokens[i].type = 'task_list_open';
-      tokens[i].tag = 'ul';
-
-      // Find the matching close
+      // Find the matching close of this list block.
       let depth = 1;
       let k = i + 1;
       while (k < tokens.length && depth > 0) {
@@ -234,44 +210,74 @@ function taskListPlugin(md: MarkdownIt): void {
         k++;
       }
 
-      // Convert list items
-      for (let m = i + 1; m < k; m++) {
-        if (tokens[m].type === 'list_item_open') {
-          const inlineIdx = findInlineToken(tokens, m);
-          if (inlineIdx >= 0) {
-            const content = tokens[inlineIdx].content;
-            const match = /^\[([ xX])\]\s/.exec(content);
-            if (match) {
-              const checked = match[1] !== ' ';
-              tokens[m].type = 'task_list_item_open';
-              tokens[m].tag = 'li';
-              tokens[m].attrSet('checked', checked ? 'true' : 'false');
+      const taskItems: Array<{ openIdx: number; inlineIdx: number; checked: boolean; prefixLen: number }> = [];
+      let allTopLevelItemsAreTasks = true;
+      let foundTopLevelItems = false;
 
-              // Strip the checkbox prefix from inline content
-              tokens[inlineIdx].content = content.slice(match[0].length);
-              if (tokens[inlineIdx].children && tokens[inlineIdx].children.length > 0) {
-                const firstChild = tokens[inlineIdx].children[0];
-                if (firstChild.type === 'text') {
-                  firstChild.content = firstChild.content.slice(match[0].length);
-                }
-              }
+      // Inspect only top-level list items for this specific bullet list.
+      let listDepth = 1;
+      for (let j = i + 1; j < k - 1; j++) {
+        const tok = tokens[j];
+        if (tok.type === 'bullet_list_open' || tok.type === 'ordered_list_open') {
+          listDepth++;
+          continue;
+        }
+        if (tok.type === 'bullet_list_close' || tok.type === 'ordered_list_close') {
+          listDepth--;
+          continue;
+        }
+        if (tok.type !== 'list_item_open' || listDepth !== 1) {
+          continue;
+        }
 
-              // Find matching close
-              let itemDepth = 1;
-              let n = m + 1;
-              while (n < tokens.length && itemDepth > 0) {
-                if (tokens[n].type === 'list_item_open' || tokens[n].type === 'task_list_item_open') itemDepth++;
-                else if (tokens[n].type === 'list_item_close' || tokens[n].type === 'task_list_item_close') {
-                  itemDepth--;
-                  if (itemDepth === 0) {
-                    tokens[n].type = 'task_list_item_close';
-                    tokens[n].tag = 'li';
-                  }
-                }
-                n++;
-              }
-            }
+        foundTopLevelItems = true;
+        const inlineIdx = findInlineToken(tokens, j);
+        if (inlineIdx < 0) {
+          allTopLevelItemsAreTasks = false;
+          break;
+        }
+        const content = tokens[inlineIdx].content;
+        const match = /^\[([ xX])\]\s/.exec(content);
+        if (!match) {
+          allTopLevelItemsAreTasks = false;
+          break;
+        }
+        taskItems.push({
+          openIdx: j,
+          inlineIdx,
+          checked: match[1] !== ' ',
+          prefixLen: match[0].length,
+        });
+      }
+
+      // Only convert when all top-level items are task items.
+      if (!foundTopLevelItems || !allTopLevelItemsAreTasks) continue;
+
+      // Convert this bullet list to a task list.
+      tokens[i].type = 'task_list_open';
+      tokens[i].tag = 'ul';
+      tokens[k - 1].type = 'task_list_close';
+      tokens[k - 1].tag = 'ul';
+
+      for (const item of taskItems) {
+        tokens[item.openIdx].type = 'task_list_item_open';
+        tokens[item.openIdx].tag = 'li';
+        tokens[item.openIdx].attrSet('checked', item.checked ? 'true' : 'false');
+
+        // Strip checkbox prefix from inline content.
+        const inline = tokens[item.inlineIdx];
+        inline.content = inline.content.slice(item.prefixLen);
+        if (inline.children && inline.children.length > 0) {
+          const firstChild = inline.children[0];
+          if (firstChild.type === 'text') {
+            firstChild.content = firstChild.content.slice(item.prefixLen);
           }
+        }
+
+        const closeIdx = findMatchingListItemClose(tokens, item.openIdx, k);
+        if (closeIdx >= 0) {
+          tokens[closeIdx].type = 'task_list_item_close';
+          tokens[closeIdx].tag = 'li';
         }
       }
     }
@@ -282,6 +288,18 @@ function findInlineToken(tokens: Token[], fromIndex: number): number {
   for (let i = fromIndex + 1; i < tokens.length; i++) {
     if (tokens[i].type === 'inline') return i;
     if (tokens[i].type === 'list_item_close') return -1;
+  }
+  return -1;
+}
+
+function findMatchingListItemClose(tokens: Token[], openIndex: number, endExclusive: number): number {
+  let itemDepth = 1;
+  for (let i = openIndex + 1; i < endExclusive; i++) {
+    if (tokens[i].type === 'list_item_open' || tokens[i].type === 'task_list_item_open') itemDepth++;
+    else if (tokens[i].type === 'list_item_close' || tokens[i].type === 'task_list_item_close') {
+      itemDepth--;
+      if (itemDepth === 0) return i;
+    }
   }
   return -1;
 }

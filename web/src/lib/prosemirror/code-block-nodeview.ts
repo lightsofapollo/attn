@@ -1,8 +1,31 @@
 import type { EditorView, NodeView } from 'prosemirror-view';
 import type { Node as PmNode } from 'prosemirror-model';
 
+/* Lucide icon SVG paths (24×24 viewBox) */
+const COPY_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+const CHECK_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
+
 function codeBlockLanguage(node: PmNode): string {
   return ((node.attrs.params as string) || '').split(/\s+/)[0].toLowerCase();
+}
+
+function createCopyButton(code: HTMLElement): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'code-copy-btn';
+  btn.setAttribute('aria-label', 'Copy code');
+  btn.innerHTML = COPY_ICON;
+
+  btn.addEventListener('click', () => {
+    const text = code.textContent ?? '';
+    navigator.clipboard.writeText(text);
+    btn.innerHTML = CHECK_ICON;
+    setTimeout(() => {
+      btn.innerHTML = COPY_ICON;
+    }, 1500);
+  });
+
+  return btn;
 }
 
 /**
@@ -21,6 +44,7 @@ export function codeBlockNodeView(
   pre.style.margin = '0';
   pre.appendChild(code);
   dom.appendChild(pre);
+  dom.appendChild(createCopyButton(code));
 
   const updateParams = (params: string): void => {
     if (params) {

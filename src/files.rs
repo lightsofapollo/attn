@@ -107,7 +107,12 @@ pub fn search_previewable_files(root: &Path, query: &str, max_results: usize) ->
     ranked.sort_by(|(score_a, candidate_a), (score_b, candidate_b)| {
         score_b
             .cmp(score_a)
-            .then_with(|| candidate_a.match_path.len().cmp(&candidate_b.match_path.len()))
+            .then_with(|| {
+                candidate_a
+                    .match_path
+                    .len()
+                    .cmp(&candidate_b.match_path.len())
+            })
             .then_with(|| candidate_a.path.cmp(&candidate_b.path))
     });
 

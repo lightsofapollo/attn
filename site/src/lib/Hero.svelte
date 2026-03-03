@@ -9,8 +9,7 @@
 		</h1>
 
 		<p class="font-sans text-xl text-muted-foreground mt-6 max-w-xl mx-auto leading-relaxed">
-			A markdown viewer for people who live in the terminal.
-			One command. Native window. No Electron.
+			Your markdown, rendered beautifully.
 		</p>
 
 		<div class="mt-8">

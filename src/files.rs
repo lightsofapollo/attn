@@ -1,3 +1,5 @@
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -74,14 +76,49 @@ pub fn find_first_previewable_path(root: &Path) -> Option<PathBuf> {
 }
 
 pub fn search_previewable_files(root: &Path, query: &str, max_results: usize) -> Vec<SearchResult> {
-    let normalized = query.trim().to_lowercase();
+    let normalized = query.trim();
     if normalized.is_empty() || max_results == 0 {
         return Vec::new();
     }
+
+    let pattern = Pattern::parse(normalized, CaseMatching::Ignore, Normalization::Smart);
+    if pattern.atoms.is_empty() {
+        return Vec::new();
+    }
+
     let mut remaining = MAX_TREE_NODES;
-    let mut results = Vec::new();
-    search_previewable_files_limited(root, &normalized, max_results, &mut remaining, &mut results);
-    results
+    let mut candidates = Vec::new();
+    collect_previewable_candidates_limited(root, root, &mut remaining, &mut candidates);
+
+    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let mut utf32_buf = Vec::new();
+    let mut ranked = Vec::new();
+
+    for candidate in candidates {
+        let Some(score) = pattern.score(
+            Utf32Str::new(candidate.match_path.as_str(), &mut utf32_buf),
+            &mut matcher,
+        ) else {
+            continue;
+        };
+        ranked.push((score, candidate));
+    }
+
+    ranked.sort_by(|(score_a, candidate_a), (score_b, candidate_b)| {
+        score_b
+            .cmp(score_a)
+            .then_with(|| candidate_a.match_path.len().cmp(&candidate_b.match_path.len()))
+            .then_with(|| candidate_a.path.cmp(&candidate_b.path))
+    });
+
+    ranked
+        .into_iter()
+        .take(max_results)
+        .map(|(_, candidate)| SearchResult {
+            path: candidate.path,
+            file_type: candidate.file_type,
+        })
+        .collect()
 }
 
 fn is_previewable(file_type: &FileType) -> bool {
@@ -228,19 +265,24 @@ fn find_first_previewable_path_limited(root: &Path, remaining: &mut usize) -> Op
     None
 }
 
-fn search_previewable_files_limited(
-    root: &Path,
-    query: &str,
-    max_results: usize,
+struct SearchCandidate {
+    path: String,
+    match_path: String,
+    file_type: FileType,
+}
+
+fn collect_previewable_candidates_limited(
+    project_root: &Path,
+    current_dir: &Path,
     remaining: &mut usize,
-    results: &mut Vec<SearchResult>,
+    candidates: &mut Vec<SearchCandidate>,
 ) {
-    if *remaining == 0 || results.len() >= max_results {
+    if *remaining == 0 {
         return;
     }
 
-    for (name, entry) in sorted_entries(root) {
-        if *remaining == 0 || results.len() >= max_results {
+    for (name, entry) in sorted_entries(current_dir) {
+        if *remaining == 0 {
             break;
         }
         *remaining = remaining.saturating_sub(1);
@@ -254,7 +296,7 @@ fn search_previewable_files_limited(
         }
 
         if ft.is_dir() {
-            search_previewable_files_limited(&path, query, max_results, remaining, results);
+            collect_previewable_candidates_limited(project_root, &path, remaining, candidates);
             continue;
         }
 
@@ -263,23 +305,28 @@ fn search_previewable_files_limited(
             continue;
         }
 
-        let full_path = path.to_string_lossy().to_string();
-        let name_matches = name.to_lowercase().contains(query);
-        let path_matches = full_path.to_lowercase().contains(query);
-        if !(name_matches || path_matches) {
-            continue;
-        }
-
-        results.push(SearchResult {
-            path: full_path,
+        candidates.push(SearchCandidate {
+            path: path.to_string_lossy().to_string(),
+            match_path: path_for_match(project_root, &path, &name),
             file_type,
         });
     }
 }
 
+fn path_for_match(root: &Path, path: &Path, name: &str) -> String {
+    path.strip_prefix(root)
+        .ok()
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .filter(|rel| !rel.is_empty())
+        .unwrap_or_else(|| name.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FileType, detect_file_type, find_first_previewable_path, read_tree_root_snapshot};
+    use super::{
+        FileType, detect_file_type, find_first_previewable_path, read_tree_root_snapshot,
+        search_previewable_files,
+    };
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -358,6 +405,45 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot[0].is_dir);
         assert_eq!(snapshot[0].name, "docs");
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn search_previewable_files_supports_non_contiguous_fuzzy_matches() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(&docs).expect("create docs dir");
+        std::fs::write(root.join("core-module.md"), "# top").expect("write top file");
+        std::fs::write(docs.join("module-guide.md"), "# guide").expect("write nested file");
+
+        let results = search_previewable_files(&root, "crmdl", 10);
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].path.ends_with("core-module.md"),
+            "expected fuzzy query to match non-contiguous filename characters, got {:?}",
+            results
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        std::fs::remove_dir_all(&root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn search_previewable_files_supports_multi_term_path_queries() {
+        let root = unique_temp_dir();
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let docs = root.join("docs").join("api");
+        std::fs::create_dir_all(&docs).expect("create nested docs dir");
+        std::fs::write(docs.join("reference.md"), "# ref").expect("write nested file");
+        std::fs::write(root.join("readme.md"), "# readme").expect("write root file");
+
+        let results = search_previewable_files(&root, "docs ref", 10);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].path.ends_with("docs/api/reference.md"));
 
         std::fs::remove_dir_all(&root).expect("cleanup temp root");
     }

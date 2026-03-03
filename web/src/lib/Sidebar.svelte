@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import type { SearchResultItem, TreeNode } from './types';
   import FileTree from './FileTree.svelte';
   import { dragWindow } from './ipc';
@@ -55,6 +56,7 @@
   }: Props = $props();
   let sidebarView: 'files' | 'outline' = $state('files');
   let query = $state('');
+  let sidebarRootEl: HTMLElement | null = $state(null);
 
   function formatRootLabel(path: string): string {
     if (!path) return 'Workspace';
@@ -160,9 +162,53 @@
     return parts.at(-1) ?? path;
   }
 
+  function escapeCssSelectorValue(value: string): string {
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+      return CSS.escape(value);
+    }
+    return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  function findSidebarItem(path: string): HTMLElement | null {
+    if (!sidebarRootEl || !path) return null;
+    const escaped = escapeCssSelectorValue(path);
+    return sidebarRootEl.querySelector<HTMLElement>(
+      `[data-sidebar="menu-button"][data-path="${escaped}"], [data-sidebar="menu-sub-button"][data-path="${escaped}"]`,
+    );
+  }
+
+  $effect(() => {
+    if (sidebarView !== 'files' || !activePath) return;
+
+    let cancelled = false;
+    let attempts = 0;
+
+    async function scrollActiveItemIntoView(): Promise<void> {
+      // Wait for reactive DOM updates and lazy child loads.
+      await tick();
+      if (cancelled) return;
+
+      const target = findSidebarItem(activePath);
+      if (target) {
+        target.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+
+      attempts += 1;
+      if (attempts < 12 && !cancelled) {
+        setTimeout(scrollActiveItemIntoView, 60);
+      }
+    }
+
+    void scrollActiveItemIntoView();
+    return () => {
+      cancelled = true;
+    };
+  });
+
 </script>
 
-<Sidebar class="project-sidebar">
+<Sidebar class="project-sidebar" bind:ref={sidebarRootEl}>
   <!-- Drag strip: clears traffic lights -->
   <div
     class="h-[46px] shrink-0"

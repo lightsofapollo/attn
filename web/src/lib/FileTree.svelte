@@ -67,6 +67,23 @@
     }
   });
 
+  // Keep the tree aligned with external navigation (e.g. Cmd/Ctrl+P).
+  // When activePath changes, expand all ancestor directories so the active file is visible.
+  $effect(() => {
+    const normalizedActive = normalizePath(activePath);
+    if (!normalizedActive) return;
+
+    for (const node of nodes) {
+      if (!node.isDir) continue;
+      const normalizedNode = normalizePath(node.path);
+      const isAncestor = normalizedActive === normalizedNode
+        || normalizedActive.startsWith(`${normalizedNode}/`);
+      if (!isAncestor || isExpanded(node.path)) continue;
+      setExpanded(node.path, true);
+      onExpand?.(node.path);
+    }
+  });
+
   function handleFileClick(e: MouseEvent, node: TreeNode): void {
     if (node.isDir) return;
     const newTab = e.metaKey || e.ctrlKey;
@@ -176,6 +193,7 @@
               {...triggerProps}
               size="sm"
               class="sidebar-tree-row sidebar-tree-row--dir"
+              data-path={node.path}
               style={`--tree-depth: ${depth};`}
             >
               <ChevronRight class="sidebar-tree-chevron size-3.5 shrink-0 transition-transform duration-150 group-data-[state=open]/collapsible:rotate-90" />
@@ -204,13 +222,19 @@
               size="sm"
               isActive={node.path === activePath}
               class={`sidebar-tree-row sidebar-tree-row--file${icon ? '' : ' sidebar-tree-row--file-no-icon'}`}
+              data-path={node.path}
               onclick={(e: MouseEvent) => handleFileClick(e, node)}
               onauxclick={(e: MouseEvent) => handleFileAuxClick(e, node)}
               onkeydown={(e: KeyboardEvent) => handleFileKeydown(e, node)}
               style={`--tree-depth: ${depth};`}
             >
               {#if icon}
-                <img src={icon} alt="" aria-hidden="true" class="sidebar-tree-icon-image size-3.5 shrink-0" />
+                <img
+                  src={icon}
+                  alt=""
+                  aria-hidden="true"
+                  class={`sidebar-tree-icon-image size-3.5 shrink-0${node.name.toLowerCase() === 'agents.md' ? ' sidebar-tree-icon-image--invert-paper' : ''}`}
+                />
               {:else}
                 <span aria-hidden="true" class="sidebar-tree-markdown-marker">·</span>
               {/if}

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { TreeNode, FileType } from './types';
+  import type { FileType, SearchResultItem } from './types';
   import * as Command from '$lib/components/ui/command/index.js';
   import { Kbd } from '$lib/components/ui/kbd';
   import FileIcon from '@lucide/svelte/icons/file';
@@ -10,11 +10,23 @@
 
   interface Props {
     open: boolean;
-    fileTree: TreeNode[];
+    rootPath?: string;
+    remoteSearchQuery?: string;
+    remoteSearchItems?: SearchResultItem[];
+    onSearchQuery?: (query: string) => void;
     onSelect: (path: string) => void;
   }
 
-  let { open = $bindable(false), fileTree, onSelect }: Props = $props();
+  let {
+    open = $bindable(false),
+    rootPath = '',
+    remoteSearchQuery = '',
+    remoteSearchItems = [],
+    onSearchQuery,
+    onSelect,
+  }: Props = $props();
+  let searchQuery = $state('');
+  let searchDebounceHandle: ReturnType<typeof setTimeout> | undefined;
 
   interface FlatFile {
     name: string;
@@ -23,32 +35,57 @@
     fileType: FileType;
   }
 
-  function flattenTree(nodes: TreeNode[], parentDir = ''): FlatFile[] {
-    const result: FlatFile[] = [];
-    for (const node of nodes) {
-      if (node.isDir && node.children) {
-        const nextParent = parentDir ? `${parentDir}/${node.name}` : node.name;
-        result.push(...flattenTree(node.children, nextParent));
-      } else if (!node.isDir) {
-        result.push({
-          name: node.name,
-          path: node.path,
-          dir: parentDir,
-          fileType: node.fileType,
-        });
-      }
-    }
-    return result;
-  }
-
-  let files = $derived(flattenTree(fileTree));
   const isMac = navigator.platform.includes('Mac');
   const mod = isMac ? '\u2318' : 'Ctrl';
+  let normalizedSearch = $derived(searchQuery.trim().toLowerCase());
+  let backendQueryAligned = $derived(remoteSearchQuery.trim().toLowerCase() === normalizedSearch);
 
-  // Group files by directory and sort for stable visual scan order.
+  function normalizePath(path: string): string {
+    return path.replace(/\\/g, '/');
+  }
+
+  function basename(path: string): string {
+    const normalized = normalizePath(path);
+    const parts = normalized.split('/').filter(Boolean);
+    return parts.at(-1) ?? normalized;
+  }
+
+  function dirname(path: string): string {
+    const normalized = normalizePath(path);
+    const parts = normalized.split('/').filter(Boolean);
+    if (parts.length <= 1) return '/';
+    return parts.slice(0, -1).join('/');
+  }
+
+  function relativePath(path: string, base: string): string {
+    const normalizedPath = normalizePath(path);
+    const normalizedBase = normalizePath(base).replace(/\/+$/, '');
+    if (!normalizedBase) return normalizedPath;
+    if (normalizedPath === normalizedBase) return '.';
+    const prefix = `${normalizedBase}/`;
+    if (normalizedPath.startsWith(prefix)) return normalizedPath.slice(prefix.length);
+    return normalizedPath;
+  }
+
+  let backendFiles = $derived.by(() =>
+    remoteSearchItems.map((item) => {
+      const rel = relativePath(item.path, rootPath);
+      return {
+        name: basename(rel),
+        path: item.path,
+        dir: dirname(rel),
+        fileType: item.fileType,
+      } satisfies FlatFile;
+    }),
+  );
+
+  let visibleFiles = $derived(
+    backendQueryAligned ? backendFiles : [],
+  );
+
   let grouped = $derived.by(() => {
     const groups: Record<string, FlatFile[]> = {};
-    for (const file of files) {
+    for (const file of visibleFiles) {
       const key = file.dir || '/';
       if (!groups[key]) groups[key] = [];
       groups[key].push(file);
@@ -60,6 +97,30 @@
         [...entries].sort((a, b) => a.name.localeCompare(b.name)),
       ] as const)
       .sort(([a], [b]) => a.localeCompare(b));
+  });
+
+  function queueSearch(query: string): void {
+    if (!onSearchQuery) return;
+    if (searchDebounceHandle) clearTimeout(searchDebounceHandle);
+    searchDebounceHandle = setTimeout(() => {
+      onSearchQuery(query.trim());
+    }, 120);
+  }
+
+  function handleInput(event: Event): void {
+    const next = (event.currentTarget as HTMLInputElement | null)?.value ?? '';
+    searchQuery = next;
+    queueSearch(next);
+  }
+
+  $effect(() => {
+    if (open) return;
+    searchQuery = '';
+    if (searchDebounceHandle) {
+      clearTimeout(searchDebounceHandle);
+      searchDebounceHandle = undefined;
+    }
+    onSearchQuery?.('');
   });
 
   function handleSelect(path: string): void {
@@ -82,8 +143,15 @@
   }
 </script>
 
-<Command.Dialog bind:open title="Open File" description="Search files to open">
+<Command.Dialog
+  bind:open
+  title="Open File"
+  description="Search files to open"
+  contentClass="top-[16vh] translate-y-0"
+>
   <Command.Input
+    bind:value={searchQuery}
+    oninput={handleInput}
     class="font-sans text-[0.97rem] tracking-[0.01em] placeholder:tracking-normal"
     placeholder="Search files..."
   />
@@ -118,6 +186,9 @@
         {/each}
       </Command.Group>
     {/each}
+    {#if normalizedSearch.length > 0 && !backendQueryAligned}
+      <div class="px-3 py-2 text-xs text-muted-foreground">Searching full project...</div>
+    {/if}
   </Command.List>
   <div class="border-border/70 text-muted-foreground bg-muted/25 flex items-center justify-between border-t px-3 py-2 font-sans text-xs">
     <span>Open files quickly</span>

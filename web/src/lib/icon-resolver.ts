@@ -2,7 +2,6 @@ import { ICON_PACKS } from './vscode-icon-map.generated';
 import { getIconPack } from './icon-pack';
 
 const MARKDOWN_NO_ICON = new Set(['md']);
-const SPECIAL_MARKDOWN_FILES = new Set(['agents.md', 'claude.md']);
 
 function extensionCandidates(fileName: string): string[] {
   const lower = fileName.toLowerCase();
@@ -23,17 +22,16 @@ function activePackIcons() {
 export function resolveFileIcon(fileName: string): string | null {
   const lower = fileName.toLowerCase();
   const extCandidates = extensionCandidates(lower);
-
-  const isMarkdown =
-    extCandidates.length > 0 && MARKDOWN_NO_ICON.has(extCandidates[extCandidates.length - 1]);
-  if (isMarkdown && !SPECIAL_MARKDOWN_FILES.has(lower)) {
-    return null;
-  }
-
   const icons = activePackIcons();
 
   const byName = icons.FILE_NAME_ICONS[lower];
   if (byName) return byName;
+
+  const isMarkdown =
+    extCandidates.length > 0 && MARKDOWN_NO_ICON.has(extCandidates[extCandidates.length - 1]);
+  if (isMarkdown) {
+    return null;
+  }
 
   for (const ext of extCandidates) {
     const byExt = icons.FILE_EXTENSION_ICONS[ext];

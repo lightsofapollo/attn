@@ -28,7 +28,7 @@ That's it. A native window opens with your project's markdown rendered beautiful
 
 Most markdown previewers are either browser tabs you have to manually refresh, or Electron apps that eat your RAM for breakfast.
 
-attn is a **single ~8MB binary**. It forks to background as a daemon, opens a native macOS window, and watches your files. Edit in Vim, VS Code, whatever — attn reloads instantly. Open another file? It joins the same window as a tab.
+attn is a **single <20MB binary**. It forks to background as a daemon, opens a native macOS window, and watches your files. Edit in Vim, VS Code, whatever — attn reloads instantly. Open another file? It joins the same window as a tab.
 
 **What you get:**
 

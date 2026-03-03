@@ -19,11 +19,15 @@ function applyPackToDom(pack: IconPack): void {
 function ensureInitialized(): void {
   if (initialized) return;
   initialized = true;
-  if (typeof window !== 'undefined') {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    if (isPack(stored)) {
-      currentPack = stored;
+  try {
+    if (typeof window !== 'undefined') {
+      const stored = window.localStorage.getItem(STORAGE_KEY);
+      if (isPack(stored)) {
+        currentPack = stored;
+      }
     }
+  } catch {
+    // Ignore storage errors (about:blank origin, private mode, etc.)
   }
   applyPackToDom(currentPack);
 }
@@ -43,8 +47,12 @@ export function setIconPack(pack: IconPack): void {
   ensureInitialized();
   if (currentPack === pack) return;
   currentPack = pack;
-  if (typeof window !== 'undefined') {
-    window.localStorage.setItem(STORAGE_KEY, pack);
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(STORAGE_KEY, pack);
+    }
+  } catch {
+    // Ignore storage errors (about:blank origin, private mode, etc.)
   }
   applyPackToDom(pack);
   emit();

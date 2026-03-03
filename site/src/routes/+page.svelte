@@ -16,7 +16,7 @@
 <!-- Pitch callout -->
 <section class="py-24 px-6 text-center">
 	<p class="font-serif text-3xl md:text-4xl leading-relaxed max-w-3xl mx-auto text-foreground">
-		~8 MB. One binary.<br />
+		&lt;20 MB. One binary.<br />
 		No Electron. No browser.<br />
 		Just your markdown, rendered beautifully.
 	</p>

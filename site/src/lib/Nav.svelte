@@ -4,7 +4,8 @@
 
 <nav class="sticky top-0 z-50 bg-background/80 backdrop-blur-md border-b border-border">
 	<div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-		<a href="/" class="font-serif font-bold text-xl text-foreground hover:text-foreground/80 transition-colors">
+		<a href="/" class="flex items-center gap-2 font-serif font-bold text-xl text-foreground hover:text-foreground/80 transition-colors">
+			<img src="/icon.png" alt="" class="w-7 h-7 rounded-lg invert dark:invert-0" />
 			attn
 		</a>
 

@@ -8,7 +8,23 @@ cd "$PROJECT_DIR"
 ATTN="target/debug/attn"
 FIXTURES="tests/fixtures"
 SCREENSHOT_DIR="/tmp/attn-e2e-screenshots"
-SOCKET="$(dirname "$ATTN")/attn.sock"
+
+# Compute socket path matching Rust daemon's FNV-1a hash of the executable path
+compute_socket_path() {
+    local exe_path
+    exe_path="$(cd "$PROJECT_DIR" && realpath "$ATTN")"
+    local hash
+    hash=$(python3 -c "
+path = b'$exe_path'
+h = 0xcbf29ce484222325
+for b in path:
+    h ^= b
+    h = (h * 0x100000001b3) & 0xffffffffffffffff
+print(f'{h:016x}')
+")
+    echo "/tmp/attn-${hash}/attn.sock"
+}
+SOCKET="$(compute_socket_path)"
 PASS=0
 FAIL=0
 

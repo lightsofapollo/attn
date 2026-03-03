@@ -252,6 +252,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     })
     .to_string();
     let page_html = build_page_html(&init_payload_json, theme);
+    let page_html_bytes = page_html.clone().into_bytes();
     eprintln!("attn: startup page_html_bytes={}", page_html.len());
     let dev_server_url = dev_server_url_from_env();
     let dev_server_origin = dev_server_url.as_deref().and_then(origin_from_url);
@@ -332,6 +333,16 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         })
         .with_custom_protocol("attn".to_string(), move |_webview_id, request| {
             let uri = request.uri().to_string();
+            if uri == "attn://app"
+                || uri == "attn://app/"
+                || uri.starts_with("attn://app/index.html")
+            {
+                return wry::http::Response::builder()
+                    .status(200)
+                    .header("Content-Type", "text/html; charset=utf-8")
+                    .body(page_html_bytes.clone().into())
+                    .unwrap();
+            }
             // URI format: attn://localhost/absolute/path/to/file
             let path = uri
                 .strip_prefix("attn://localhost")
@@ -362,7 +373,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     if let Some(url) = dev_server_url.as_deref() {
         webview_builder = webview_builder.with_url(url);
     } else {
-        webview_builder = webview_builder.with_html(&page_html);
+        webview_builder = webview_builder.with_url("attn://app/index.html");
     }
 
     // On WSL, disable hardware acceleration before building the webview so

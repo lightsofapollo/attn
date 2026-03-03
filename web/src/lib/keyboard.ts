@@ -13,8 +13,9 @@ export interface KeyboardConfig {
   onRedo?: () => void;
 }
 
-function isEditableElement(el: HTMLElement | null): boolean {
-  if (!el) return false;
+function isEditableElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const el = target;
   const tag = el.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
   if (el.isContentEditable) return true;
@@ -34,9 +35,8 @@ function isEditableElement(el: HTMLElement | null): boolean {
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {
-  const targetEl = target as HTMLElement | null;
-  if (isEditableElement(targetEl)) return true;
-  const activeEl = document.activeElement as HTMLElement | null;
+  if (isEditableElement(target)) return true;
+  const activeEl = document.activeElement;
   return isEditableElement(activeEl);
 }
 

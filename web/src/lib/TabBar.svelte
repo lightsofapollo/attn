@@ -57,11 +57,24 @@
 <style>
   :global(.tab-trigger) {
     background: color-mix(in oklch, var(--accent) 70%, var(--background) 30%);
+    color: color-mix(in oklch, var(--foreground) 72%, transparent);
   }
 
   :global(.tab-trigger[data-state="active"]) {
     background: color-mix(in oklch, white 92%, var(--background) 8%);
     box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--foreground) 12%, transparent);
+    color: color-mix(in oklch, var(--foreground) 94%, transparent);
+  }
+
+  :global(.dark .tab-trigger) {
+    background: color-mix(in oklch, var(--background) 88%, white 12%);
+    color: color-mix(in oklch, var(--foreground) 78%, transparent);
+  }
+
+  :global(.dark .tab-trigger[data-state="active"]) {
+    background: color-mix(in oklch, var(--background) 76%, white 24%);
+    box-shadow: inset 0 0 0 1px color-mix(in oklch, white 18%, transparent);
+    color: color-mix(in oklch, var(--foreground) 98%, transparent);
   }
 
   /* Close button visibility follows parent trigger state */

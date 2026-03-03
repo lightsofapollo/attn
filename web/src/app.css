@@ -496,8 +496,21 @@
 
   .sidebar-tree-icon-image {
     display: block;
-    opacity: 0.96;
-    filter: saturate(0.92) contrast(1.1);
+    opacity: 0.99;
+    filter:
+      saturate(1.06)
+      contrast(1.16)
+      drop-shadow(0 0.35px 0 color-mix(in oklch, var(--foreground) 24%, transparent))
+      drop-shadow(0 1px 1.2px color-mix(in oklch, black 16%, transparent));
+  }
+
+  :root:not(.dark) .sidebar-tree-icon-image--invert-paper {
+    filter:
+      brightness(0.08)
+      saturate(0.72)
+      contrast(1.08)
+      drop-shadow(0 0.35px 0 color-mix(in oklch, var(--foreground) 26%, transparent))
+      drop-shadow(0 1px 1.2px color-mix(in oklch, black 16%, transparent));
   }
 
   .sidebar-tree-icon-placeholder {
@@ -526,8 +539,22 @@
 
   .sidebar-tree-menu [data-sidebar="menu-button"][data-active="true"] .sidebar-tree-icon-image,
   .sidebar-tree-menu [data-sidebar="menu-sub-button"][data-active="true"] .sidebar-tree-icon-image {
-    opacity: 0.95;
-    filter: saturate(0.82) contrast(1.03);
+    opacity: 1;
+    filter:
+      saturate(1.04)
+      contrast(1.12)
+      drop-shadow(0 0.35px 0 color-mix(in oklch, var(--foreground) 26%, transparent))
+      drop-shadow(0 1.2px 1.4px color-mix(in oklch, black 19%, transparent));
+  }
+
+  :root:not(.dark) .sidebar-tree-menu [data-sidebar="menu-button"][data-active="true"] .sidebar-tree-icon-image--invert-paper,
+  :root:not(.dark) .sidebar-tree-menu [data-sidebar="menu-sub-button"][data-active="true"] .sidebar-tree-icon-image--invert-paper {
+    filter:
+      brightness(0.08)
+      saturate(0.72)
+      contrast(1.08)
+      drop-shadow(0 0.35px 0 color-mix(in oklch, var(--foreground) 26%, transparent))
+      drop-shadow(0 1.2px 1.4px color-mix(in oklch, black 19%, transparent));
   }
 
   .sidebar-tree-menu [data-sidebar="menu-button"][data-active="true"] .sidebar-tree-markdown-marker,

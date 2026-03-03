@@ -92,6 +92,8 @@
   let activeOutlineId = $state('');
   let sidebarSearchQuery = $state('');
   let sidebarSearchResults: SearchResultItem[] = $state([]);
+  let commandPaletteSearchQuery = $state('');
+  let commandPaletteSearchResults: SearchResultItem[] = $state([]);
 
   function emptyPlanStructure(): PlanStructure {
     return { phases: [], tasks: [], file_refs: [] };
@@ -821,8 +823,14 @@
         activeProjectPath = data.activeProjectPath;
       }
       if (data.searchResults) {
-        sidebarSearchQuery = data.searchResults.query ?? '';
-        sidebarSearchResults = data.searchResults.items ?? [];
+        const incomingQuery = data.searchResults.query ?? '';
+        const incomingItems = data.searchResults.items ?? [];
+        sidebarSearchQuery = incomingQuery;
+        sidebarSearchResults = incomingItems;
+        if (incomingQuery.trim().toLowerCase() === commandPaletteSearchQuery.trim().toLowerCase()) {
+          commandPaletteSearchQuery = incomingQuery;
+          commandPaletteSearchResults = incomingItems;
+        }
       }
       applyTabScopeForProject(activeProjectPath, rootPath);
 
@@ -918,8 +926,14 @@
         activeProjectPath = data.activeProjectPath;
       }
       if (data.searchResults) {
-        sidebarSearchQuery = data.searchResults.query ?? '';
-        sidebarSearchResults = data.searchResults.items ?? [];
+        const incomingQuery = data.searchResults.query ?? '';
+        const incomingItems = data.searchResults.items ?? [];
+        sidebarSearchQuery = incomingQuery;
+        sidebarSearchResults = incomingItems;
+        if (incomingQuery.trim().toLowerCase() === commandPaletteSearchQuery.trim().toLowerCase()) {
+          commandPaletteSearchQuery = incomingQuery;
+          commandPaletteSearchResults = incomingItems;
+        }
       }
       applyTabScopeForProject(activeProjectPath, rootPath);
       if (data.fileTree) {
@@ -1102,6 +1116,11 @@
   }
 
   function handleSidebarSearchQuery(query: string): void {
+    searchFiles(query);
+  }
+
+  function handleCommandPaletteSearchQuery(query: string): void {
+    commandPaletteSearchQuery = query;
     searchFiles(query);
   }
 
@@ -1360,7 +1379,10 @@
 <KeyboardShortcutsDialog bind:open={shortcutsOpen} />
 <CommandPalette
   bind:open={commandPaletteOpen}
-  {fileTree}
+  {rootPath}
+  remoteSearchQuery={commandPaletteSearchQuery}
+  remoteSearchItems={commandPaletteSearchResults}
+  onSearchQuery={handleCommandPaletteSearchQuery}
   onSelect={(path) => openPath(path, detectFileType(path))}
 />
 <Toaster />

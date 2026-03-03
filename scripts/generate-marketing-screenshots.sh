@@ -103,20 +103,25 @@ start_daemon() {
 capture_sequence() {
     local suffix="$1"
 
-    # Set window size
-    "$ATTN" --eval "window.resizeTo(960, 720)" 2>/dev/null || true
+    # Set window size larger for better screenshots
+    "$ATTN" --eval "window.resizeTo(1200, 900)" 2>/dev/null || true
 
     # --- Hero ---
     echo "==> Capturing hero-${suffix}..."
     "$ATTN" --click 'text=marketing.md'
     "$ATTN" --wait-for 'h1' --timeout 5000 >/dev/null 2>&1
+    # Scroll content area to top so heading is fully visible
+    "$ATTN" --eval "document.querySelector('.attn-content-viewport [data-slot=\"scroll-area-viewport\"]')?.scrollTo(0, 0)" 2>/dev/null || true
     sleep 0.5
     screenshot "hero-${suffix}"
 
     # --- Editor ---
     echo "==> Capturing editor-${suffix}..."
+    # Click the edit button to enter editor mode
     "$ATTN" --eval "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'e', metaKey: true, bubbles: true}))" >/dev/null 2>&1
     "$ATTN" --wait-for '.ProseMirror' --timeout 5000 >/dev/null 2>&1
+    # Scroll editor to top
+    "$ATTN" --eval "document.querySelector('.ProseMirror')?.scrollTo(0, 0)" 2>/dev/null || true
     sleep 0.5
     screenshot "editor-${suffix}"
 
@@ -134,7 +139,10 @@ capture_sequence() {
     # --- Search / Command Palette ---
     echo "==> Capturing search-${suffix}..."
     "$ATTN" --eval "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'p', metaKey: true, bubbles: true}))" >/dev/null 2>&1
-    "$ATTN" --wait-for '[data-command-input], [cmdk-input], input[placeholder]' --timeout 5000 >/dev/null 2>&1
+    "$ATTN" --wait-for '[data-slot="command-input"]' --timeout 5000 >/dev/null 2>&1
+    sleep 0.3
+    # Type a search term so results appear
+    "$ATTN" --fill '[data-slot="command-input"]' 'mark'
     sleep 0.5
     screenshot "search-${suffix}"
 

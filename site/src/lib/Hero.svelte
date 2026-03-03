@@ -36,17 +36,17 @@
 			</a>
 		</div>
 
-		<div class="relative mt-16 max-w-4xl mx-auto aspect-[16/10] rounded-xl shadow-2xl border border-border overflow-hidden bg-card">
+		<div class="relative mt-16 max-w-4xl mx-auto rounded-xl shadow-2xl border border-border overflow-hidden bg-card">
 			<img
 				src="/screenshots/hero-light.png"
 				alt="attn in light mode"
-				class="absolute inset-0 w-full h-full object-cover transition-opacity duration-500"
+				class="w-full transition-opacity duration-500"
 				class:opacity-0={getTheme() === 'dark'}
 			/>
 			<img
 				src="/screenshots/hero-dark.png"
 				alt="attn in dark mode"
-				class="absolute inset-0 w-full h-full object-cover transition-opacity duration-500"
+				class="absolute inset-0 w-full transition-opacity duration-500"
 				class:opacity-0={getTheme() !== 'dark'}
 			/>
 		</div>

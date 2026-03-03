@@ -19,17 +19,17 @@
 		<p class="font-sans text-lg text-muted-foreground mt-4 leading-relaxed">{description}</p>
 	</div>
 
-	<div class="relative aspect-[4/3] rounded-xl shadow-lg border border-border overflow-hidden bg-card">
+	<div class="relative rounded-xl shadow-lg border border-border overflow-hidden bg-card">
 		<img
 			src={lightSrc}
 			{alt}
-			class="absolute inset-0 w-full h-full object-cover transition-opacity duration-500"
+			class="w-full transition-opacity duration-500"
 			class:opacity-0={getTheme() === 'dark'}
 		/>
 		<img
 			src={darkSrc}
 			{alt}
-			class="absolute inset-0 w-full h-full object-cover transition-opacity duration-500"
+			class="absolute inset-0 w-full transition-opacity duration-500"
 			class:opacity-0={getTheme() !== 'dark'}
 		/>
 	</div>

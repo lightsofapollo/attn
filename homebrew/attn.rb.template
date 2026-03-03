@@ -20,7 +20,9 @@ class Attn < Formula
 
   def install
     if OS.mac?
-      prefix.install "attn.app"
+      # Homebrew strips the top-level attn.app/ dir from the zip,
+      # so buildpath contains Contents/ directly. Reconstruct the bundle.
+      (prefix/"attn.app").install Dir["*"]
       bin.install_symlink prefix/"attn.app/Contents/MacOS/attn"
     else
       downloaded = Dir["attn-v*"].first

@@ -14,6 +14,12 @@ if (process.env.ATTN_SKIP_DOWNLOAD === "1") {
   process.exit(0);
 }
 
+// On macOS, the .app bundle is managed at runtime in ~/.local/share/attn/apps/
+// and the raw binary is never used. Skip the download.
+if (process.platform === "darwin") {
+  process.exit(0);
+}
+
 const { version } = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
 const assetSuffix = resolveAssetSuffix(process.platform, process.arch);
 

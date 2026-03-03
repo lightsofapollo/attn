@@ -8,6 +8,8 @@ import {
   type HighlighterCore,
 } from 'shiki/core';
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript';
+import { bundledThemes } from 'shiki/themes';
+import { bundledLanguages } from 'shiki/langs';
 
 type ParserFn = (options: {
   content: string;
@@ -15,6 +17,12 @@ type ParserFn = (options: {
   language?: string;
   size: number;
 }) => Decoration[] | Promise<void>;
+
+const LANGS: (keyof typeof bundledLanguages)[] = [
+  'javascript', 'typescript', 'python', 'bash', 'rust', 'go',
+  'json', 'yaml', 'html', 'css', 'c', 'cpp', 'java', 'ruby',
+  'sql', 'xml', 'toml', 'diff', 'markdown', 'svelte',
+];
 
 let highlighterPromise: Promise<HighlighterCore> | undefined;
 let resolvedParser: ParserFn | undefined;
@@ -24,31 +32,10 @@ function getHighlighter(): Promise<HighlighterCore> {
     highlighterPromise = createHighlighterCore({
       engine: createJavaScriptRegexEngine(),
       themes: [
-        import('shiki/themes/github-light'),
-        import('shiki/themes/github-dark'),
+        bundledThemes['github-light'],
+        bundledThemes['github-dark'],
       ],
-      langs: [
-        import('shiki/langs/javascript'),
-        import('shiki/langs/typescript'),
-        import('shiki/langs/python'),
-        import('shiki/langs/bash'),
-        import('shiki/langs/rust'),
-        import('shiki/langs/go'),
-        import('shiki/langs/json'),
-        import('shiki/langs/yaml'),
-        import('shiki/langs/html'),
-        import('shiki/langs/css'),
-        import('shiki/langs/c'),
-        import('shiki/langs/cpp'),
-        import('shiki/langs/java'),
-        import('shiki/langs/ruby'),
-        import('shiki/langs/sql'),
-        import('shiki/langs/xml'),
-        import('shiki/langs/toml'),
-        import('shiki/langs/diff'),
-        import('shiki/langs/markdown'),
-        import('shiki/langs/svelte'),
-      ],
+      langs: LANGS.map((id) => bundledLanguages[id]),
     });
   }
   return highlighterPromise;

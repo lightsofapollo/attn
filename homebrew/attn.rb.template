@@ -6,8 +6,8 @@ class Attn < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/lightsofapollo/attn/releases/download/v#{version}/attn-v#{version}-darwin-arm64"
-      sha256 "%%SHA256_DARWIN_ARM64%%"
+      url "https://github.com/lightsofapollo/attn/releases/download/v#{version}/attn-v#{version}-darwin-arm64.app.zip"
+      sha256 "%%SHA256_DARWIN_ARM64_APP%%"
     end
   end
 
@@ -19,12 +19,17 @@ class Attn < Formula
   end
 
   def install
-    downloaded = Dir["attn-v*"].first
-    if downloaded
-      mv downloaded, "attn"
+    if OS.mac?
+      prefix.install "attn.app"
+      bin.install_symlink prefix/"attn.app/Contents/MacOS/attn"
+    else
+      downloaded = Dir["attn-v*"].first
+      if downloaded
+        mv downloaded, "attn"
+      end
+      chmod 0755, "attn"
+      bin.install "attn"
     end
-    chmod 0755, "attn"
-    bin.install "attn"
   end
 
   test do

@@ -31,14 +31,9 @@ fi
 
 echo "Fetching SHA256 checksums for ${TAG}..."
 
-SHA_DARWIN_ARM64="$(curl -sfL "https://github.com/${REPO}/releases/download/${TAG}/attn-${TAG}-darwin-arm64.sha256" | awk '{print $1}')"
 SHA_LINUX_X64="$(curl -sfL "https://github.com/${REPO}/releases/download/${TAG}/attn-${TAG}-linux-x64.sha256" | awk '{print $1}')"
 SHA_DARWIN_ARM64_APP="$(curl -sfL "https://github.com/${REPO}/releases/download/${TAG}/attn-${TAG}-darwin-arm64.app.zip.sha256" | awk '{print $1}')"
 
-if [ -z "$SHA_DARWIN_ARM64" ]; then
-  echo "Failed to fetch darwin-arm64 SHA256" >&2
-  exit 1
-fi
 if [ -z "$SHA_LINUX_X64" ]; then
   echo "Failed to fetch linux-x64 SHA256" >&2
   exit 1
@@ -48,7 +43,6 @@ if [ -z "$SHA_DARWIN_ARM64_APP" ]; then
   exit 1
 fi
 
-echo "  darwin-arm64:     ${SHA_DARWIN_ARM64}"
 echo "  linux-x64:        ${SHA_LINUX_X64}"
 echo "  darwin-arm64 app: ${SHA_DARWIN_ARM64_APP}"
 
@@ -56,7 +50,7 @@ echo "  darwin-arm64 app: ${SHA_DARWIN_ARM64_APP}"
 
 FORMULA="$(sed \
   -e "s/%%VERSION%%/${VERSION}/g" \
-  -e "s/%%SHA256_DARWIN_ARM64%%/${SHA_DARWIN_ARM64}/g" \
+  -e "s/%%SHA256_DARWIN_ARM64_APP%%/${SHA_DARWIN_ARM64_APP}/g" \
   -e "s/%%SHA256_LINUX_X64%%/${SHA_LINUX_X64}/g" \
   "$FORMULA_TEMPLATE")"
 

@@ -12,7 +12,7 @@ const {
   unlinkSync,
   writeFileSync,
 } = require("node:fs");
-const { dirname, join } = require("node:path");
+const { dirname, join, resolve } = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { homedir } = require("node:os");
 const { createInterface } = require("node:readline/promises");
@@ -95,7 +95,7 @@ async function main() {
     return;
   }
 
-  run("/usr/bin/open", [appPath, "--args", ...args]);
+  run("/usr/bin/open", [appPath, "--args", ...resolvePathArgs(args)]);
 }
 
 async function resolveAppPath(version) {
@@ -277,7 +277,35 @@ done
 if [ "$HEADLESS" -eq 1 ]; then
   exec "$BINARY" "$@"
 fi
-exec /usr/bin/open "$APP_LINK" --args "$@"
+# Resolve the first positional arg to an absolute path since open launches with cwd=/
+RESOLVED_ARGS=()
+PATH_RESOLVED=0
+SKIP_NEXT=0
+for arg in "$@"; do
+  if [ "$SKIP_NEXT" -eq 1 ]; then
+    RESOLVED_ARGS+=("$arg")
+    SKIP_NEXT=0
+    continue
+  fi
+  case "$arg" in
+    --eval|--click|--wait-for|--query|--fill|--timeout)
+      RESOLVED_ARGS+=("$arg")
+      SKIP_NEXT=1
+      ;;
+    --*)
+      RESOLVED_ARGS+=("$arg")
+      ;;
+    *)
+      if [ "$PATH_RESOLVED" -eq 0 ]; then
+        RESOLVED_ARGS+=("$(realpath "$arg" 2>/dev/null || echo "$arg")")
+        PATH_RESOLVED=1
+      else
+        RESOLVED_ARGS+=("$arg")
+      fi
+      ;;
+  esac
+done
+exec /usr/bin/open "$APP_LINK" --args "${RESOLVED_ARGS[@]}"
 `
     : `#!/usr/bin/env bash
 set -euo pipefail
@@ -296,6 +324,36 @@ exec "$BINARY" "$@"
     unlinkSync(installLinkPath);
   }
   symlinkSync(installLauncherPath, installLinkPath);
+}
+
+function resolvePathArgs(args) {
+  // `open` launches the app with cwd=/, so resolve relative paths to absolute
+  // before forwarding. The first positional arg (not a flag or flag value) is the path.
+  const flagsWithValue = new Set(["--eval", "--click", "--wait-for", "--query", "--fill", "--timeout"]);
+  const resolved = [];
+  let pathResolved = false;
+  let skipNext = false;
+  for (const arg of args) {
+    if (skipNext) {
+      resolved.push(arg);
+      skipNext = false;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      resolved.push(arg);
+      if (flagsWithValue.has(arg)) {
+        skipNext = true;
+      }
+      continue;
+    }
+    if (!pathResolved) {
+      resolved.push(resolve(arg));
+      pathResolved = true;
+    } else {
+      resolved.push(arg);
+    }
+  }
+  return resolved;
 }
 
 function isHeadlessInvocation(args) {

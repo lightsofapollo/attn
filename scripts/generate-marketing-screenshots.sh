@@ -129,12 +129,19 @@ capture_sequence() {
     "$ATTN" --eval "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'e', metaKey: true, bubbles: true}))" >/dev/null 2>&1
     sleep 0.3
 
-    # --- Checkboxes ---
-    echo "==> Capturing checkboxes-${suffix}..."
-    "$ATTN" --click 'text=basic.md'
-    "$ATTN" --wait-for 'input[type="checkbox"]' --timeout 5000 >/dev/null 2>&1
+    # --- Mermaid ---
+    echo "==> Capturing mermaid-${suffix}..."
+    # Already on marketing.md from editor step; enter editor mode to render mermaid
+    "$ATTN" --eval "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'e', metaKey: true, bubbles: true}))" >/dev/null 2>&1
+    "$ATTN" --wait-for '.mermaid-container' --timeout 10000 >/dev/null 2>&1
+    # Scroll to the mermaid diagram
+    "$ATTN" --eval "document.querySelector('.mermaid-container')?.scrollIntoView({block: 'center'})" 2>/dev/null || true
     sleep 0.5
-    screenshot "checkboxes-${suffix}"
+    screenshot "mermaid-${suffix}"
+
+    # Close editor
+    "$ATTN" --eval "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'e', metaKey: true, bubbles: true}))" >/dev/null 2>&1
+    sleep 0.3
 
     # --- Search / Command Palette ---
     echo "==> Capturing search-${suffix}..."

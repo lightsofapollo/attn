@@ -1,4 +1,4 @@
-# Iconss
+# Icons
 
 This directory contains app icons used for macOS bundling.
 

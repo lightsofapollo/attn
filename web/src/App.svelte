@@ -39,6 +39,7 @@
   import CommandPalette from './lib/CommandPalette.svelte';
   import KeyboardShortcutsDialog from './lib/KeyboardShortcutsDialog.svelte';
   import { toast } from 'svelte-sonner';
+  import { Toaster } from '$lib/components/ui/sonner';
   import { SidebarProvider, SidebarInset } from '$lib/components/ui/sidebar';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import PathBreadcrumb from './lib/PathBreadcrumb.svelte';
@@ -1362,3 +1363,4 @@
   {fileTree}
   onSelect={(path) => openPath(path, detectFileType(path))}
 />
+<Toaster />

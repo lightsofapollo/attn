@@ -159,6 +159,7 @@
     const parts = normalized.split('/').filter(Boolean);
     return parts.at(-1) ?? path;
   }
+
 </script>
 
 <Sidebar class="project-sidebar">

@@ -469,6 +469,7 @@
     width: 100%;
     align-items: center;
     gap: 6px;
+    position: relative;
   }
 
   .sidebar-tree-row--dir {
@@ -479,6 +480,10 @@
   .sidebar-tree-row--file {
     font-weight: 500;
     color: color-mix(in oklch, var(--foreground) 90%, transparent);
+  }
+
+  .sidebar-tree-row--file-no-icon {
+    gap: 0;
   }
 
   .sidebar-tree-chevron {
@@ -495,24 +500,40 @@
     filter: saturate(0.92) contrast(1.1);
   }
 
-  :root:not(.dark) .sidebar-tree-icon-image {
-    border-radius: 4px;
-    background: color-mix(in oklch, var(--sidebar) 82%, var(--foreground) 18%);
-    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--foreground) 16%, transparent);
-    filter:
-      saturate(0.92)
-      contrast(1.08)
-      drop-shadow(0 0 0.35px color-mix(in oklch, var(--foreground) 55%, transparent));
-  }
-
   .sidebar-tree-icon-placeholder {
     display: block;
+  }
+
+  .sidebar-tree-markdown-marker {
+    width: 0;
+    overflow: visible;
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 0;
+    opacity: 0;
+    pointer-events: none;
+    color: color-mix(in oklch, var(--sidebar-foreground) 46%, transparent);
+    transform: translateY(-0.5px);
+    transition: opacity 120ms ease, color 120ms ease;
+  }
+
+  .sidebar-tree-menu [data-sidebar="menu-button"]:hover .sidebar-tree-markdown-marker,
+  .sidebar-tree-menu [data-sidebar="menu-sub-button"]:hover .sidebar-tree-markdown-marker {
+    opacity: 0.55;
   }
 
   .sidebar-tree-menu [data-sidebar="menu-button"][data-active="true"] .sidebar-tree-icon-image,
   .sidebar-tree-menu [data-sidebar="menu-sub-button"][data-active="true"] .sidebar-tree-icon-image {
     opacity: 0.95;
     filter: saturate(0.82) contrast(1.03);
+  }
+
+  .sidebar-tree-menu [data-sidebar="menu-button"][data-active="true"] .sidebar-tree-markdown-marker,
+  .sidebar-tree-menu [data-sidebar="menu-sub-button"][data-active="true"] .sidebar-tree-markdown-marker {
+    opacity: 0.72;
+    color: color-mix(in oklch, var(--foreground) 75%, transparent);
   }
 
   .sidebar-tree-name {

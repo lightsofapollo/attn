@@ -45,18 +45,25 @@ pub enum UserEvent {
     /// The user started dragging a custom title bar region.
     DragWindow,
     /// Show and focus the main window.
+    #[cfg(target_os = "macos")]
     ShowWindow,
     /// Hide the main window.
+    #[cfg(target_os = "macos")]
     HideWindow,
     /// Increase global font scale (browser-style zoom in).
+    #[cfg(target_os = "macos")]
     FontScaleIncrease,
     /// Decrease global font scale (browser-style zoom out).
+    #[cfg(target_os = "macos")]
     FontScaleDecrease,
     /// Reset global font scale to default.
+    #[cfg(target_os = "macos")]
     FontScaleReset,
     /// Install a CLI alias to the running app binary.
+    #[cfg(target_os = "macos")]
     InstallCliAlias,
     /// Exit the app event loop.
+    #[cfg(target_os = "macos")]
     Quit,
 }
 

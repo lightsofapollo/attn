@@ -279,9 +279,7 @@ fn search_previewable_files_limited(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FileType, detect_file_type, find_first_previewable_path, read_tree_root_snapshot,
-    };
+    use super::{FileType, detect_file_type, find_first_previewable_path, read_tree_root_snapshot};
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 mod cli_alias;
 mod daemon;
 mod files;
@@ -281,6 +282,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         }
     };
 
+    #[allow(unused_mut)]
     let mut window_builder = WindowBuilder::new()
         .with_title("attn")
         .with_inner_size(tao::dpi::LogicalSize::new(960.0, 720.0))
@@ -626,29 +628,35 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             Event::UserEvent(UserEvent::DragWindow) => {
                 let _ = window.drag_window();
             }
+            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::ShowWindow) => {
                 platform::activate_app();
                 window.set_visible(true);
                 window.set_focus();
             }
+            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::HideWindow) => {
                 window.set_visible(false);
             }
+            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::FontScaleIncrease) => {
                 let _ = webview.evaluate_script(
                     "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.increaseFontScale?.(); }",
                 );
             }
+            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::FontScaleDecrease) => {
                 let _ = webview.evaluate_script(
                     "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.decreaseFontScale?.(); }",
                 );
             }
+            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::FontScaleReset) => {
                 let _ = webview.evaluate_script(
                     "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.resetFontScale?.(); }",
                 );
             }
+            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::InstallCliAlias) => match cli_alias::install_attn_cli_alias()
             {
                 Ok(cli_alias::InstallCliAliasResult::AlreadyInstalled(path)) => {
@@ -671,6 +679,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     eprintln!("attn: failed to install CLI alias: {err:#}");
                 }
             },
+            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::Quit) => {
                 *control_flow = ControlFlow::Exit;
             }

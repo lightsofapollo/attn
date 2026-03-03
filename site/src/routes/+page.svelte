@@ -40,11 +40,11 @@
 		reverse
 	/>
 	<FeatureSection
-		title="Click a checkbox"
-		description="Click a task in the UI. It writes back to the file. Your CLI tools see the change too."
-		lightSrc="/screenshots/checkboxes-light.png"
-		darkSrc="/screenshots/checkboxes-dark.png"
-		alt="Interactive task list"
+		title="Mermaid diagrams"
+		description="Flowcharts, sequence diagrams, and more — rendered inline from fenced code blocks."
+		lightSrc="/screenshots/mermaid-light.png"
+		darkSrc="/screenshots/mermaid-dark.png"
+		alt="Mermaid diagram rendered inline"
 	/>
 	<FeatureSection
 		title="Find anything"

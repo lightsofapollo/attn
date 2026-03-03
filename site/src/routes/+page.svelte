@@ -33,7 +33,7 @@
 	/>
 	<FeatureSection
 		title="Built-in editor"
-		description="Hit ⌘E. Full ProseMirror editor with syntax highlighting, math, and mermaid."
+		description="Full ProseMirror editor with syntax highlighting, math, and mermaid. Edit markdown right where you read it."
 		lightSrc="/screenshots/editor-light.png"
 		darkSrc="/screenshots/editor-dark.png"
 		alt="attn editor mode"

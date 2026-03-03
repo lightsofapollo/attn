@@ -305,7 +305,7 @@ for arg in "$@"; do
       ;;
   esac
 done
-exec /usr/bin/open "$APP_LINK" --args "${RESOLVED_ARGS[@]}"
+exec /usr/bin/open "$APP_LINK" --args "\${RESOLVED_ARGS[@]}"
 `
     : `#!/usr/bin/env bash
 set -euo pipefail

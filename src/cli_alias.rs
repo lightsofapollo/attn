@@ -9,6 +9,7 @@ pub enum InstallCliAliasResult {
     Installed { path: PathBuf, dir_on_path: bool },
 }
 
+#[cfg(target_os = "macos")]
 pub fn has_attn_on_path() -> bool {
     find_attn_on_path().is_some()
 }

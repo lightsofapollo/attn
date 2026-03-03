@@ -399,18 +399,17 @@ pub fn maybe_fork(no_fork: bool) -> Result<()> {
                 setsid().context("setsid failed")?;
 
                 // Redirect stderr to log file for debugging
-                if let Some(log_path) = runtime_dir().ok().map(|d| d.join("attn.log")) {
-                    if let Ok(log_file) = std::fs::OpenOptions::new()
+                if let Some(log_path) = runtime_dir().ok().map(|d| d.join("attn.log"))
+                    && let Ok(log_file) = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(&log_path)
-                    {
-                        let fd = log_file.into_raw_fd();
-                        let _ = dup2(fd, std::io::stderr().as_raw_fd());
-                        let _ = close(fd);
-                        // Close stdin
-                        let _ = close(std::io::stdin().as_raw_fd());
-                    }
+                {
+                    let fd = log_file.into_raw_fd();
+                    let _ = dup2(fd, std::io::stderr().as_raw_fd());
+                    let _ = close(fd);
+                    // Close stdin
+                    let _ = close(std::io::stdin().as_raw_fd());
                 }
 
                 Ok(())

@@ -8,7 +8,7 @@
 </script>
 
 <svelte:head>
-	<title>attn — a markdown viewer for the terminal</title>
+	<title>attn — your markdown, rendered beautifully</title>
 </svelte:head>
 
 <Hero />

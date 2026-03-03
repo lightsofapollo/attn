@@ -81,8 +81,8 @@
 <section id="install" class="py-24 px-6 max-w-2xl mx-auto">
 	<h2 class="font-serif text-3xl font-bold text-center mb-12">Install</h2>
 	<div class="space-y-4">
-		<CodeBlock label="Rust (recommended)" code="cargo install attn" />
-		<CodeBlock label="npm" code="npx attnmd" />
-		<CodeBlock label="From source" code="git clone https://github.com/lightsofapollo/attn && cd attn && cargo install --path ." />
+		<CodeBlock label="Homebrew (recommended)" code="brew install lightsofapollo/attn/attn" />
+		<CodeBlock label="npm (quick)" code="npx attnmd" />
+		<CodeBlock label="From source" code="cargo install attn" />
 	</div>
 </section>

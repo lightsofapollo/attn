@@ -23,7 +23,7 @@
 				href="#install"
 				class="bg-primary text-primary-foreground px-6 py-3 rounded-lg font-sans font-semibold hover:opacity-90 transition-opacity"
 			>
-				cargo install attn
+				brew install lightsofapollo/attn/attn
 			</a>
 			<a
 				href="https://github.com/lightsofapollo/attn"

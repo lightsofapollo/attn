@@ -92,6 +92,7 @@
 
 /* Shared horizontal scroll treatment for wide prose blocks (code/tables). */
 .ProseMirror .prose-scroll-x {
+  position: relative;
   max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
@@ -99,6 +100,44 @@
   outline: 1px solid color-mix(in oklch, var(--ring) 45%, transparent);
   box-shadow: 0 0 0 1px color-mix(in oklch, var(--ring) 10%, transparent);
   transition: color 0.18s ease, box-shadow 0.18s ease, outline-color 0.18s ease;
+}
+
+/* Copy button on code blocks */
+.code-copy-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid color-mix(in oklch, var(--border) 50%, transparent);
+  border-radius: 0.375rem;
+  background: color-mix(in oklch, var(--background) 80%, transparent);
+  backdrop-filter: blur(8px);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.14s ease, color 0.14s ease;
+}
+
+.prose-scroll-x:hover > .code-copy-btn {
+  opacity: 1;
+}
+
+.code-copy-btn:hover {
+  background: var(--accent);
+  color: var(--foreground);
+  border-color: var(--border);
+}
+
+.code-copy-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
 }
 
 .ProseMirror .prose-scroll-x:focus-within {

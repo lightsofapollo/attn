@@ -188,6 +188,14 @@
       0 1px 2px color-mix(in oklch, black 4%, transparent);
   }
 
+  .dark .project-sidebar .sidebar-controls[data-sidebar-controls="true"] {
+    border-color: color-mix(in oklch, white 10%, transparent);
+    background: color-mix(in oklch, var(--background) 90%, black 10%);
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklch, white 12%, transparent),
+      0 6px 16px color-mix(in oklch, black 36%, transparent);
+  }
+
   .project-sidebar .sidebar-project-picker {
     min-width: 0;
     flex: 1;
@@ -220,6 +228,10 @@
     background: color-mix(in oklch, var(--foreground) 4%, transparent);
   }
 
+  .dark .sidebar-project-select:hover {
+    background: color-mix(in oklch, white 9%, transparent);
+  }
+
   .sidebar-project-select:focus {
     outline: none;
   }
@@ -246,6 +258,10 @@
     border: 0;
     background: color-mix(in oklch, var(--background) 92%, white 8%);
     font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+  }
+
+  .dark .sidebar-project-command {
+    background: color-mix(in oklch, var(--background) 94%, white 6%);
   }
 
   .sidebar-project-command [data-slot="command-input-wrapper"] {
@@ -299,6 +315,10 @@
     border-radius: 10px;
   }
 
+  .dark .sidebar-mode-toggle {
+    background: color-mix(in oklch, white 8%, transparent);
+  }
+
   .sidebar-mode-button {
     display: inline-flex;
     align-items: center;
@@ -321,6 +341,12 @@
     background: var(--background);
     border-color: color-mix(in oklch, var(--foreground) 10%, transparent);
     box-shadow: 0 1px 2px color-mix(in oklch, black 4%, transparent);
+  }
+
+  .dark .sidebar-mode-button--active {
+    background: color-mix(in oklch, var(--background) 84%, white 16%);
+    border-color: color-mix(in oklch, white 12%, transparent);
+    box-shadow: 0 2px 6px color-mix(in oklch, black 32%, transparent);
   }
 
   .sidebar-pane {
@@ -353,10 +379,22 @@
     transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
   }
 
+  .dark .sidebar-search {
+    border-color: color-mix(in oklch, white 12%, transparent);
+    background: color-mix(in oklch, var(--background) 92%, black 8%);
+    color: color-mix(in oklch, var(--foreground) 90%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in oklch, white 12%, transparent);
+  }
+
   .sidebar-search:focus {
     outline: none;
     border-color: color-mix(in oklch, var(--foreground) 24%, transparent);
     box-shadow: inset 0 1px 0 color-mix(in oklch, white 45%, transparent);
+  }
+
+  .dark .sidebar-search:focus {
+    border-color: color-mix(in oklch, white 20%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in oklch, white 16%, transparent);
   }
 
   .sidebar-search:focus-visible {

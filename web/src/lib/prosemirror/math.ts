@@ -10,13 +10,6 @@ function loadKatex(): Promise<KatexApi> {
   if (katex) return Promise.resolve(katex);
   if (katexLoading) return katexLoading;
   katexLoading = import('katex').then((mod) => {
-    // Also inject KaTeX CSS
-    if (!document.querySelector('link[href*="katex"]')) {
-      const link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css';
-      document.head.appendChild(link);
-    }
     katex = mod.default as unknown as KatexApi;
     return katex;
   });

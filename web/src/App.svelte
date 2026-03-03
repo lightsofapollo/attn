@@ -898,11 +898,11 @@
         pruneTabsForRemovedPaths(removedPaths);
       }
       if (detectFileType(data.filePath) === 'markdown' && typeof data.markdown !== 'string') {
-        if (mode === 'edit' && editorDirty && data.filePath === activePath) {
+        if (mode === 'edit' && data.filePath === activePath && editorDirty) {
           deferExternalReload(data.filePath, data.contentMtimeMs);
-        } else {
-          void loadMarkdownForPath(data.filePath, data.contentMtimeMs);
+          return;
         }
+        void loadMarkdownForPath(data.filePath, data.contentMtimeMs);
       }
     }
 
@@ -969,9 +969,9 @@
       if (targetPath && targetPath === activePath && detectFileType(targetPath) === 'markdown') {
         if (mode === 'edit' && editorDirty) {
           deferExternalReload(targetPath, data.contentMtimeMs);
-        } else {
-          void loadMarkdownForPath(targetPath, data.contentMtimeMs);
+          return;
         }
+        void loadMarkdownForPath(targetPath, data.contentMtimeMs);
       }
     }
 
@@ -1008,16 +1008,7 @@
     w.__attn_queue__ = [];
   }
 
-  function toggleEdit(): void {
-    if (activeFileType !== 'markdown') return;
-    if (mode === 'read') {
-      mode = 'edit';
-    } else {
-      saveAndExitEdit();
-    }
-  }
-
-  function saveAndExitEdit(): void {
+  function saveEdits(): void {
     if (editorRef) {
       const md = editorRef.getMarkdown();
       if (activePath && detectFileType(activePath) === 'markdown') {
@@ -1026,14 +1017,13 @@
       }
       structure = extractStructureFromMarkdown(md);
       editSave(md);
-      editorRef.resetToMarkdown(md);
+      editorRef.commitSaved();
       editorDirty = false;
-      toast.success('File saved');
       if (activePath) {
-        void flushDeferredReload(activePath);
+        deferredReloadMtimeByPath.delete(activePath);
+        deferredReloadNoticeByPath.delete(activePath);
       }
     }
-    mode = 'read';
   }
 
   function cancelEdit(): void {
@@ -1044,8 +1034,7 @@
     if (activePath && detectFileType(activePath) === 'markdown') {
       void flushDeferredReload(activePath);
     }
-    mode = 'read';
-    toast.info('Edit cancelled');
+    toast.info('Edits reverted');
   }
 
   function isShortcutsHelpHotkey(e: KeyboardEvent): boolean {
@@ -1181,7 +1170,6 @@
       return;
     }
     const cleanup = initKeyboard({
-      onEditToggle: toggleEdit,
       onTabClose: () => { if (activeTabId) closeTab(activeTabId); },
       onTabPrev: () => {
         const idx = tabs.findIndex((t) => t.id === activeTabId);
@@ -1193,6 +1181,14 @@
       },
       onGalleryPrev: () => navigateGallery(-1),
       onGalleryNext: () => navigateGallery(1),
+      onUndo: () => {
+        if (mode !== 'edit' || activeFileType !== 'markdown') return;
+        editorRef?.undoStep();
+      },
+      onRedo: () => {
+        if (mode !== 'edit' || activeFileType !== 'markdown') return;
+        editorRef?.redoStep();
+      },
       onCommandPalette: () => {
         commandPaletteOpen = !commandPaletteOpen;
         if (commandPaletteOpen) shortcutsOpen = false;
@@ -1241,7 +1237,7 @@
         markdown={rawMarkdown}
         editable={mode === 'edit'}
         onLinkNavigate={handleEditorLinkNavigate}
-        onSave={saveAndExitEdit}
+        onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
       />
@@ -1286,7 +1282,7 @@
         markdown={rawMarkdown}
         editable={mode === 'edit'}
         onLinkNavigate={handleEditorLinkNavigate}
-        onSave={saveAndExitEdit}
+        onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
       />

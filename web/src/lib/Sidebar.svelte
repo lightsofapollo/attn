@@ -175,18 +175,6 @@
   <div
     class="sidebar-controls"
     data-sidebar-controls="true"
-    style="
-      display: grid;
-      gap: 12px;
-      margin: 2px 12px 14px;
-      padding: 12px;
-      border-radius: 14px;
-      border: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent);
-      background: color-mix(in oklch, var(--background) 80%, white 20%);
-      box-shadow:
-        inset 0 1px 0 color-mix(in oklch, white 48%, transparent),
-        0 1px 2px color-mix(in oklch, black 4%, transparent);
-    "
   >
     <div class="sidebar-header flex items-center justify-between gap-3" style="-webkit-user-select: none">
       <div class="sidebar-project-picker min-w-0 flex-1">

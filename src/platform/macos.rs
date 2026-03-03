@@ -10,6 +10,7 @@ use tao::event_loop::{EventLoop, EventLoopProxy};
 pub struct SystemUiHandles {
     _main_menu: Retained<NSMenu>,
     _app_menu: Retained<NSMenu>,
+    _edit_menu: Retained<NSMenu>,
     _menu_target: Retained<MenuActionTarget>,
 }
 
@@ -95,6 +96,7 @@ pub fn install_system_ui(proxy: EventLoopProxy<UserEvent>) -> Option<SystemUiHan
 
     let main_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Main"));
     let app_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("attn"));
+    let edit_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Edit"));
     let app_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -103,8 +105,18 @@ pub fn install_system_ui(proxy: EventLoopProxy<UserEvent>) -> Option<SystemUiHan
             &NSString::from_str(""),
         )
     };
+    let edit_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Edit"),
+            None,
+            &NSString::from_str(""),
+        )
+    };
     main_menu.addItem(&app_item);
     main_menu.setSubmenu_forItem(Some(&app_menu), &app_item);
+    main_menu.addItem(&edit_item);
+    main_menu.setSubmenu_forItem(Some(&edit_menu), &edit_item);
 
     app_menu.addItem(&new_action_item(
         mtm,
@@ -159,11 +171,47 @@ pub fn install_system_ui(proxy: EventLoopProxy<UserEvent>) -> Option<SystemUiHan
         "q",
         &menu_target,
     ));
+
+    // Native first-responder edit actions for WebView text surfaces.
+    edit_menu.addItem(&new_first_responder_item(
+        mtm,
+        "Undo",
+        Some(sel!(undo:)),
+        "z",
+    ));
+    edit_menu.addItem(&new_first_responder_item(
+        mtm,
+        "Redo",
+        Some(sel!(redo:)),
+        "Z",
+    ));
+    edit_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    edit_menu.addItem(&new_first_responder_item(mtm, "Cut", Some(sel!(cut:)), "x"));
+    edit_menu.addItem(&new_first_responder_item(
+        mtm,
+        "Copy",
+        Some(sel!(copy:)),
+        "c",
+    ));
+    edit_menu.addItem(&new_first_responder_item(
+        mtm,
+        "Paste",
+        Some(sel!(paste:)),
+        "v",
+    ));
+    edit_menu.addItem(&new_first_responder_item(
+        mtm,
+        "Select All",
+        Some(sel!(selectAll:)),
+        "a",
+    ));
+
     app.setMainMenu(Some(&main_menu));
 
     Some(SystemUiHandles {
         _main_menu: main_menu,
         _app_menu: app_menu,
+        _edit_menu: edit_menu,
         _menu_target: menu_target,
     })
 }
@@ -187,6 +235,22 @@ fn new_action_item(
         item.setTarget(Some(target.as_ref()));
     }
     item
+}
+
+fn new_first_responder_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    action: Option<objc2::runtime::Sel>,
+    key: &str,
+) -> Retained<NSMenuItem> {
+    unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(title),
+            action,
+            &NSString::from_str(key),
+        )
+    }
 }
 
 pub fn activate_app() {

@@ -10,8 +10,46 @@ type MermaidApi = {
 let mermaid: MermaidApi | null = null;
 let mermaidLoading: Promise<MermaidApi> | null = null;
 const renderCache = new Map<string, string>();
+const MAX_RENDER_CACHE_ENTRIES = 128;
 let lastMermaidTheme: 'default' | 'dark' | null = null;
 let mermaidRenderQueue: Promise<void> = Promise.resolve();
+let fullscreenLockCount = 0;
+
+function lockBodyScroll(): void {
+  fullscreenLockCount += 1;
+  if (fullscreenLockCount === 1) {
+    document.body.style.overflow = 'hidden';
+  }
+}
+
+function unlockBodyScroll(): void {
+  if (fullscreenLockCount === 0) return;
+  fullscreenLockCount -= 1;
+  if (fullscreenLockCount === 0) {
+    document.body.style.overflow = '';
+  }
+}
+
+function getCachedRender(key: string): string | null {
+  const value = renderCache.get(key);
+  if (!value) return null;
+  // LRU touch
+  renderCache.delete(key);
+  renderCache.set(key, value);
+  return value;
+}
+
+function setCachedRender(key: string, svg: string): void {
+  if (renderCache.has(key)) {
+    renderCache.delete(key);
+  }
+  renderCache.set(key, svg);
+  while (renderCache.size > MAX_RENDER_CACHE_ENTRIES) {
+    const oldest = renderCache.keys().next().value;
+    if (!oldest) break;
+    renderCache.delete(oldest);
+  }
+}
 
 function loadMermaid(): Promise<MermaidApi> {
   if (mermaid) return Promise.resolve(mermaid);
@@ -115,7 +153,7 @@ function openMermaidFullscreen(
   content.appendChild(footer);
   modal.appendChild(content);
   document.body.appendChild(modal);
-  document.body.style.overflow = 'hidden';
+  lockBodyScroll();
 
   const panzoom = Panzoom(panzoomHost, {
     maxScale: 10,
@@ -182,7 +220,7 @@ function openMermaidFullscreen(
     document.removeEventListener('keydown', onKeyDown);
     panzoom.destroy();
     modal.remove();
-    document.body.style.overflow = '';
+    unlockBodyScroll();
   };
 
   return close;
@@ -256,7 +294,7 @@ export function mermaidNodeView(
     codeEl.textContent = code;
     const theme = isDarkMode() ? 'dark' : 'default';
     const cacheKey = `${theme}::${code}`;
-    const cached = renderCache.get(cacheKey);
+    const cached = getCachedRender(cacheKey);
     if (cached) {
       svgWrap.innerHTML = cached;
       return Promise.resolve();
@@ -276,14 +314,14 @@ export function mermaidNodeView(
           lastMermaidTheme = theme;
         }
         return m.render(id, code).then(({ svg }) => {
-        renderCache.set(cacheKey, svg);
-        svgWrap.innerHTML = svg;
-        const renderedSvg = svgWrap.querySelector('svg') as SVGElement | null;
-        if (renderedSvg) {
-          renderedSvg.style.cursor = 'pointer';
-          renderedSvg.setAttribute('title', 'Open fullscreen');
-          renderedSvg.addEventListener('click', openFullscreen);
-        }
+          setCachedRender(cacheKey, svg);
+          svgWrap.innerHTML = svg;
+          const renderedSvg = svgWrap.querySelector('svg') as SVGElement | null;
+          if (renderedSvg) {
+            renderedSvg.style.cursor = 'pointer';
+            renderedSvg.setAttribute('title', 'Open fullscreen');
+            renderedSvg.addEventListener('click', openFullscreen);
+          }
         }).catch(() => {
           svgWrap.innerHTML = `<pre class="mermaid-error">Failed to render mermaid diagram</pre>`;
         });

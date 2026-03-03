@@ -5,6 +5,7 @@ import '@fontsource-variable/source-serif-4';
 import '@fontsource-variable/source-serif-4/opsz-italic.css';
 import '@fontsource-variable/source-sans-3';
 import '@fontsource-variable/source-code-pro';
+import 'katex/dist/katex.min.css';
 import './app.css';
 import '../styles/base.css';
 import '../styles/prosemirror.css';

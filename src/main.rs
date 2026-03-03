@@ -194,7 +194,8 @@ fn run() -> Result<()> {
     daemon::replace_stale_daemon()?;
 
     // Try to connect to an existing daemon — if successful, send path and exit
-    let path_str = path.to_string_lossy().to_string();
+    let requested_path = normalize_input_path(path.clone());
+    let path_str = requested_path.to_string_lossy().to_string();
     if daemon::try_send_to_existing(&path_str)? {
         return Ok(());
     }
@@ -206,11 +207,11 @@ fn run() -> Result<()> {
     daemon::write_fingerprint()?;
 
     // We are now the daemon process
-    run_daemon(cli, path)
+    run_daemon(cli, requested_path)
 }
 
 fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
-    let requested = path.canonicalize().unwrap_or(path);
+    let requested = normalize_input_path(path);
     let tree_root = projects::normalize_project_root(&requested);
     let initial_ui_path = if requested.is_file() {
         requested
@@ -524,7 +525,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 let _ = webview.evaluate_script(&js);
             }
             Event::UserEvent(UserEvent::LoadChildren(path)) => {
-                let requested = path.canonicalize().unwrap_or(path);
+                let requested = normalize_input_path(path);
                 let parent = if requested.is_file() {
                     requested.parent().unwrap_or(&requested).to_path_buf()
                 } else {
@@ -704,9 +705,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 window.set_focus();
             }
             Event::UserEvent(UserEvent::SwitchProject(project_path)) => {
-                let requested = project_path
-                    .canonicalize()
-                    .unwrap_or_else(|_| project_path.clone());
+                let requested = normalize_input_path(project_path);
                 let tree_root = projects::normalize_project_root(&requested);
                 let file_tree = files::read_tree_root_snapshot(&tree_root);
                 let initial_ui_path = if requested.is_file() {
@@ -1056,6 +1055,21 @@ fn content_metadata_for_path(path: &Path) -> (Option<u64>, Option<u64>) {
         .and_then(|duration| u64::try_from(duration.as_millis()).ok());
 
     (mtime_ms, bytes)
+}
+
+fn normalize_input_path(path: PathBuf) -> PathBuf {
+    let absolute = absolutize_path(&path);
+    absolute.canonicalize().unwrap_or(absolute)
+}
+
+fn absolutize_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 fn build_initialization_script(include_init_payload: bool, init_payload_json: &str) -> String {

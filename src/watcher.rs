@@ -1,7 +1,7 @@
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tao::event_loop::EventLoopProxy;
 
 /// Sent from background threads to wake the event loop.
@@ -82,6 +82,19 @@ pub struct FileWatcher {
 
 /// Debounce interval — ignore duplicate events within this window.
 const DEBOUNCE_MS: u128 = 100;
+const DEBOUNCE_WINDOW: Duration = Duration::from_millis(DEBOUNCE_MS as u64);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EventSignature {
+    kind: FsChangeKind,
+    paths: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+struct DebounceState {
+    last_emitted_at: Instant,
+    last_signature: Option<EventSignature>,
+}
 
 fn should_ignore_component(component: &str) -> bool {
     if component.starts_with('.') {
@@ -107,9 +120,10 @@ impl FileWatcher {
     /// Sends `UserEvent::FsChanged` through the proxy with changed paths,
     /// with basic debouncing.
     pub fn new(path: &Path, proxy: EventLoopProxy<UserEvent>) -> Result<Self, notify::Error> {
-        let last_event = Arc::new(Mutex::new(
-            Instant::now() - std::time::Duration::from_secs(1),
-        ));
+        let debounce_state = Arc::new(Mutex::new(DebounceState {
+            last_emitted_at: Instant::now() - DEBOUNCE_WINDOW,
+            last_signature: None,
+        }));
 
         let watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
             if let Ok(event) = res {
@@ -142,15 +156,19 @@ impl FileWatcher {
                     return;
                 }
 
-                // Debounce: skip if last event was within the window
-                let Ok(mut last) = last_event.lock() else {
+                let signature = EventSignature {
+                    kind: change_kind,
+                    paths: filtered_paths.clone(),
+                };
+
+                // Debounce only duplicate payloads; distinct events should still flow through.
+                let Ok(mut state) = debounce_state.lock() else {
                     return;
                 };
                 let now = Instant::now();
-                if now.duration_since(*last).as_millis() < DEBOUNCE_MS {
+                if !should_emit_event(&mut state, now, &signature) {
                     return;
                 }
-                *last = now;
 
                 let _ = proxy.send_event(UserEvent::FsChanged {
                     kind: change_kind,
@@ -191,5 +209,78 @@ impl FileWatcher {
         self.watcher.watch(&next_root, RecursiveMode::Recursive)?;
         self.watched_root = Some(next_root);
         Ok(())
+    }
+}
+
+fn should_emit_event(state: &mut DebounceState, now: Instant, next: &EventSignature) -> bool {
+    let within_window = now.duration_since(state.last_emitted_at) < DEBOUNCE_WINDOW;
+    let duplicate = state
+        .last_signature
+        .as_ref()
+        .is_some_and(|last| last == next);
+    if within_window && duplicate {
+        return false;
+    }
+    state.last_emitted_at = now;
+    state.last_signature = Some(next.clone());
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signature(kind: FsChangeKind, path: &str) -> EventSignature {
+        EventSignature {
+            kind,
+            paths: vec![PathBuf::from(path)],
+        }
+    }
+
+    #[test]
+    fn debounce_drops_only_duplicate_events_within_window() {
+        let start = Instant::now();
+        let mut state = DebounceState {
+            last_emitted_at: start - DEBOUNCE_WINDOW,
+            last_signature: None,
+        };
+
+        let create_docs = signature(FsChangeKind::Create, "/tmp/docs");
+        assert!(should_emit_event(&mut state, start, &create_docs));
+        assert!(!should_emit_event(
+            &mut state,
+            start + Duration::from_millis(50),
+            &create_docs
+        ));
+        assert!(should_emit_event(
+            &mut state,
+            start + Duration::from_millis(120),
+            &create_docs
+        ));
+    }
+
+    #[test]
+    fn debounce_allows_distinct_events_within_window() {
+        let start = Instant::now();
+        let mut state = DebounceState {
+            last_emitted_at: start - DEBOUNCE_WINDOW,
+            last_signature: None,
+        };
+
+        let create_docs = signature(FsChangeKind::Create, "/tmp/docs");
+        let create_file = signature(FsChangeKind::Create, "/tmp/docs/readme.md");
+        let modify_docs = signature(FsChangeKind::Modify, "/tmp/docs");
+
+        assert!(should_emit_event(&mut state, start, &create_docs));
+        assert!(should_emit_event(
+            &mut state,
+            start + Duration::from_millis(10),
+            &create_file
+        ));
+        assert!(should_emit_event(
+            &mut state,
+            start + Duration::from_millis(20),
+            &modify_docs
+        ));
     }
 }

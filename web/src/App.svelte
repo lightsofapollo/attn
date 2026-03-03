@@ -914,9 +914,12 @@
         pruneTabsForRemovedPaths(removedPaths);
       }
       if (detectFileType(data.filePath) === 'markdown' && typeof data.markdown !== 'string') {
-        if (mode === 'edit' && data.filePath === activePath && editorDirty) {
+        if (!wasFrontendNav && mode === 'edit' && data.filePath === activePath && editorDirty) {
           deferExternalReload(data.filePath, data.contentMtimeMs);
           return;
+        }
+        if (wasFrontendNav) {
+          editorDirty = false;
         }
         void loadMarkdownForPath(data.filePath, data.contentMtimeMs);
       }

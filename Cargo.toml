@@ -21,6 +21,7 @@ include = [
     "!/web/node_modules/**",
     "!/web/src/lib/icons/vscode-generated/**",
     "!/web/src/lib/vscode-icon-map.generated.ts",
+    "!/site/**",
 ]
 
 [package.metadata.bundle]

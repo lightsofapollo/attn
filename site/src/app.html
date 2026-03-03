@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<link rel="icon" href="%sveltekit.assets%/favicon.png" />
+	<title>attn — a markdown viewer for the terminal</title>
+	<meta name="description" content="A native markdown viewer that launches from the CLI. One command. Native window. No Electron." />
+	<script>
+		(function() {
+			var theme = localStorage.getItem('attn-theme');
+			if (theme === 'dark') {
+				document.documentElement.classList.add('dark');
+				document.documentElement.setAttribute('data-theme', 'dark');
+			}
+		})();
+	</script>
+	%sveltekit.head%
+</head>
+<body data-sveltekit-prerender="true">
+	<div style="display: contents">%sveltekit.body%</div>
+</body>
+</html>

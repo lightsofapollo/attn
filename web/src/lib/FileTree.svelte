@@ -20,6 +20,7 @@
   } from '$lib/components/ui/collapsible';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import { resolveFileIcon, resolveFolderIcon } from '$lib/icon-resolver';
+  import { getIconPack, subscribeIconPack } from '$lib/icon-pack';
 
   interface Props {
     nodes: TreeNode[];
@@ -33,6 +34,14 @@
   let { nodes, activePath = '', depth = 0, rootPath = '', onNavigate, onExpand }: Props = $props();
 
   let expanded: Record<string, boolean> = $state({});
+  let iconPack = $state(getIconPack());
+
+  $effect(() => {
+    const unsubscribe = subscribeIconPack((next) => {
+      iconPack = next;
+    });
+    return unsubscribe;
+  });
 
   function isExpanded(path: string): boolean {
     if (expanded[path] !== undefined) return expanded[path];
@@ -82,10 +91,12 @@
   }
 
   function getFileIcon(node: TreeNode): string | null {
+    iconPack;
     return resolveFileIcon(node.name);
   }
 
   function getFolderIcon(name: string, path: string): string {
+    iconPack;
     return resolveFolderIcon(name, isExpanded(path));
   }
 
@@ -192,7 +203,7 @@
               {...triggerProps}
               size="sm"
               isActive={node.path === activePath}
-              class="sidebar-tree-row sidebar-tree-row--file"
+              class={`sidebar-tree-row sidebar-tree-row--file${icon ? '' : ' sidebar-tree-row--file-no-icon'}`}
               onclick={(e: MouseEvent) => handleFileClick(e, node)}
               onauxclick={(e: MouseEvent) => handleFileAuxClick(e, node)}
               onkeydown={(e: KeyboardEvent) => handleFileKeydown(e, node)}
@@ -201,7 +212,7 @@
               {#if icon}
                 <img src={icon} alt="" aria-hidden="true" class="sidebar-tree-icon-image size-3.5 shrink-0" />
               {:else}
-                <span aria-hidden="true" class="sidebar-tree-icon-placeholder size-3.5 shrink-0"></span>
+                <span aria-hidden="true" class="sidebar-tree-markdown-marker">·</span>
               {/if}
               <span class="sidebar-tree-name truncate">{node.name}</span>
             </SidebarMenuButton>

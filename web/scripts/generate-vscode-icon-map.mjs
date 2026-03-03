@@ -10,10 +10,9 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const generatedIconsDir = path.join(projectRoot, 'src/lib/icons/vscode-generated');
 const generatedModulePath = path.join(projectRoot, 'src/lib/vscode-icon-map.generated.ts');
 const generatedReadmePath = path.join(generatedIconsDir, 'README.md');
-const SUPPORTED_PACKS = ['material', 'material-light'];
-const DEFAULT_PACK = process.env.ATTN_DEFAULT_ICON_PACK || 'material';
+const SUPPORTED_PACKS = ['material', 'eyecons', 'catppuccin', 'vscode-icons', 'seti'];
+const DEFAULT_PACK = process.env.ATTN_DEFAULT_ICON_PACK || 'eyecons';
 
-// Keep special app files distinct even when markdown icons are hidden.
 const APP_FILE_OVERRIDES = {
   'agents.md': 'file_type_agents.svg',
   'claude.md': 'file_type_claude.svg',
@@ -80,53 +79,61 @@ function parseDefaultPackArg(argv) {
   return DEFAULT_PACK;
 }
 
-function buildMappings(materialTheme, pack) {
-  const defs = materialTheme.iconDefinitions ?? {};
-  const light = materialTheme.light ?? {};
+function readTsObject(filePath, assignmentPattern, returnExpr) {
+  let source = fs.readFileSync(filePath, 'utf8');
+  source = source.replace(/^import[^\n]*\n/gm, '');
+  source = source.replace(assignmentPattern, 'const extensions =');
+  source = source.replace(/FileFormat\.\w+/g, "'svg'");
+  source = source.replace(/export\s+\{[^}]+\}\s*;?/g, '');
+  const fn = new Function(`const languages = {};\n${source}\nreturn ${returnExpr};`);
+  return fn();
+}
 
-  const useLightVariant = pack === 'material-light';
-  const fileNamesSource = useLightVariant
-    ? { ...(materialTheme.fileNames ?? {}), ...(light.fileNames ?? {}) }
-    : materialTheme.fileNames;
-  const fileExtensionsSource = useLightVariant
-    ? { ...(materialTheme.fileExtensions ?? {}), ...(light.fileExtensions ?? {}) }
-    : materialTheme.fileExtensions;
-  const folderNamesSource = useLightVariant
-    ? {
-        ...(materialTheme.folderNames ?? {}),
-        ...(materialTheme.rootFolderNames ?? {}),
-        ...(light.folderNames ?? {}),
-        ...(light.rootFolderNames ?? {}),
-      }
-    : {
-        ...(materialTheme.folderNames ?? {}),
-        ...(materialTheme.rootFolderNames ?? {}),
-      };
-  const folderNamesExpandedSource = useLightVariant
-    ? {
-        ...(materialTheme.folderNamesExpanded ?? {}),
-        ...(materialTheme.rootFolderNamesExpanded ?? {}),
-        ...(light.folderNamesExpanded ?? {}),
-        ...(light.rootFolderNamesExpanded ?? {}),
-      }
-    : {
-        ...(materialTheme.folderNamesExpanded ?? {}),
-        ...(materialTheme.rootFolderNamesExpanded ?? {}),
-      };
-
-  const fileNames = toIconMap(fileNamesSource, defs);
-  const fileExtensions = toIconMap(fileExtensionsSource, defs);
-  const folderNames = toIconMap(folderNamesSource, defs);
-  const folderNamesExpanded = toIconMap(folderNamesExpandedSource, defs);
-
-  for (const [name, iconFile] of Object.entries(APP_FILE_OVERRIDES)) {
-    fileNames[safeLower(name)] = iconFile;
+function loadEyeconsArray(filePath, exportName) {
+  const source = fs.readFileSync(filePath, 'utf8')
+    .replace(/^import[^\n]*\n/gm, '')
+    .replace(new RegExp(`export\\s+let\\s+${exportName}\\s*:[^=]+=`), `const ${exportName} =`);
+  const fn = new Function(`${source}\nreturn ${exportName};`);
+  const arr = fn();
+  if (!Array.isArray(arr)) {
+    throw new Error(`Expected array export ${exportName} in ${filePath}`);
   }
+  return arr;
+}
 
-  const defaultFile = iconFileFromDefinition(defs, materialTheme.file) ?? 'file.svg';
-  const defaultFolder = iconFileFromDefinition(defs, materialTheme.folder) ?? 'folder.svg';
+function loadCatppuccinFileMaps(filePath) {
+  let source = fs.readFileSync(filePath, 'utf8');
+  source = source.replace(/type FileIcons[\s\S]*?const fileIcons: FileIcons =/, 'const fileIcons =');
+  source = source.replace(/export\s+\{[^}]+\}\s*;?/g, '');
+  const fn = new Function(`${source}\nreturn { fileExtensions, fileNames };`);
+  return fn();
+}
+
+function loadCatppuccinFolderMaps(filePath) {
+  let source = fs.readFileSync(filePath, 'utf8');
+  source = source.replace(/type FolderIcons[\s\S]*?const folderIcons: FolderIcons =/, 'const folderIcons =');
+  source = source.replace(/export\s+\{[^}]+\}\s*;?/g, '');
+  const fn = new Function(`${source}\nreturn { folderNames };`);
+  return fn();
+}
+
+function buildMappingsFromVsCodeTheme(themeJson) {
+  const defs = themeJson.iconDefinitions ?? {};
+  const fileNames = toIconMap(themeJson.fileNames ?? {}, defs);
+  const fileExtensions = toIconMap(themeJson.fileExtensions ?? {}, defs);
+  const folderNames = toIconMap(
+    { ...(themeJson.folderNames ?? {}), ...(themeJson.rootFolderNames ?? {}) },
+    defs,
+  );
+  const folderNamesExpanded = toIconMap(
+    { ...(themeJson.folderNamesExpanded ?? {}), ...(themeJson.rootFolderNamesExpanded ?? {}) },
+    defs,
+  );
+
+  const defaultFile = iconFileFromDefinition(defs, themeJson.file) ?? 'file.svg';
+  const defaultFolder = iconFileFromDefinition(defs, themeJson.folder) ?? 'folder.svg';
   const defaultFolderExpanded =
-    iconFileFromDefinition(defs, materialTheme.folderExpanded) ?? 'folder-open.svg';
+    iconFileFromDefinition(defs, themeJson.folderExpanded) ?? 'folder-open.svg';
 
   return {
     defaultFile,
@@ -136,6 +143,189 @@ function buildMappings(materialTheme, pack) {
     fileExtensions,
     folderNames,
     folderNamesExpanded,
+  };
+}
+
+function withPrefix(prefix, iconFile) {
+  return `${prefix}__${iconFile}`;
+}
+
+function normalizeExt(ext) {
+  const lower = safeLower(ext);
+  return lower.startsWith('.') ? lower.slice(1) : lower;
+}
+
+function normalizeInlineSvg(svg) {
+  let out = String(svg ?? '').trim();
+  if (!out.startsWith('<svg')) return out;
+  if (!/xmlns=/.test(out)) {
+    out = out.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
+  }
+  return out;
+}
+
+function buildEyeconsMappings(eyeconsRoot) {
+  const fileIcons = loadEyeconsArray(path.join(eyeconsRoot, 'data/file-icons.ts'), 'fileIcons');
+  const baseIcons = loadEyeconsArray(path.join(eyeconsRoot, 'data/base-icons.ts'), 'baseIcons');
+
+  const fileNames = {};
+  const fileExtensions = {};
+
+  for (const item of fileIcons) {
+    const id = safeLower(item?.id);
+    if (!id) continue;
+    const iconFile = withPrefix('eyecons', `${id}.svg`);
+    for (const file of item?.files ?? []) {
+      fileNames[safeLower(file)] = iconFile;
+    }
+    for (const ext of item?.extensions ?? []) {
+      fileExtensions[normalizeExt(ext)] = iconFile;
+    }
+  }
+
+  const baseById = new Map(baseIcons.map((icon) => [safeLower(icon?.id), icon]));
+  const defaultFile = baseById.has('file')
+    ? withPrefix('eyecons', 'file.svg')
+    : withPrefix('eyecons', 'file.svg');
+  const defaultFolder = baseById.has('folder')
+    ? withPrefix('eyecons', 'folder.svg')
+    : withPrefix('eyecons', 'folder.svg');
+  const defaultFolderExpanded = baseById.has('folder-open')
+    ? withPrefix('eyecons', 'folder-open.svg')
+    : withPrefix('eyecons', 'folder-open.svg');
+
+  return {
+    defaultFile,
+    defaultFolder,
+    defaultFolderExpanded,
+    fileNames,
+    fileExtensions,
+    folderNames: {},
+    folderNamesExpanded: {},
+  };
+}
+
+function buildCatppuccinMappings(catppuccinRoot) {
+  const { fileExtensions, fileNames } = loadCatppuccinFileMaps(
+    path.join(catppuccinRoot, 'src/defaults/fileIcons.ts'),
+  );
+  const { folderNames } = loadCatppuccinFolderMaps(
+    path.join(catppuccinRoot, 'src/defaults/folderIcons.ts'),
+  );
+
+  const outFileNames = {};
+  const outFileExtensions = {};
+  const outFolderNames = {};
+  const outFolderNamesExpanded = {};
+
+  for (const [name, icon] of Object.entries(fileNames ?? {})) {
+    outFileNames[safeLower(name)] = withPrefix('catppuccin', `${icon}.svg`);
+  }
+  for (const [ext, icon] of Object.entries(fileExtensions ?? {})) {
+    outFileExtensions[normalizeExt(ext)] = withPrefix('catppuccin', `${icon}.svg`);
+  }
+  for (const [folder, icon] of Object.entries(folderNames ?? {})) {
+    const closed = withPrefix('catppuccin', `${icon}.svg`);
+    const opened = withPrefix('catppuccin', `${icon}_open.svg`);
+    outFolderNames[safeLower(folder)] = closed;
+    outFolderNamesExpanded[safeLower(folder)] = opened;
+  }
+
+  return {
+    defaultFile: withPrefix('catppuccin', '_file.svg'),
+    defaultFolder: withPrefix('catppuccin', '_folder.svg'),
+    defaultFolderExpanded: withPrefix('catppuccin', '_folder_open.svg'),
+    fileNames: outFileNames,
+    fileExtensions: outFileExtensions,
+    folderNames: outFolderNames,
+    folderNamesExpanded: outFolderNamesExpanded,
+  };
+}
+
+function buildVscodeIconsMappings(vscodeIconsRoot) {
+  const extManifest = readTsObject(
+    path.join(vscodeIconsRoot, 'src/iconsManifest/supportedExtensions.ts'),
+    /export const extensions: IFileCollection =/,
+    'extensions',
+  );
+  const folderManifest = readTsObject(
+    path.join(vscodeIconsRoot, 'src/iconsManifest/supportedFolders.ts'),
+    /export const extensions: IFolderCollection =/,
+    'extensions',
+  );
+
+  const fileNames = {};
+  const fileExtensions = {};
+  const folderNames = {};
+  const folderNamesExpanded = {};
+
+  for (const item of extManifest.supported ?? []) {
+    if (item?.disabled) continue;
+    const icon = safeLower(item?.icon);
+    if (!icon) continue;
+    const iconFile = withPrefix('vscode-icons', `file_type_${icon}.svg`);
+    for (const value of item.extensions ?? []) {
+      if (item.filename) {
+        fileNames[safeLower(value)] = iconFile;
+      } else {
+        fileExtensions[normalizeExt(value)] = iconFile;
+      }
+    }
+  }
+
+  for (const item of folderManifest.supported ?? []) {
+    if (item?.disabled) continue;
+    const icon = safeLower(item?.icon);
+    if (!icon) continue;
+    const closed = withPrefix('vscode-icons', `folder_type_${icon}.svg`);
+    const opened = withPrefix('vscode-icons', `folder_type_${icon}_opened.svg`);
+    for (const name of item.extensions ?? []) {
+      const key = safeLower(name);
+      folderNames[key] = closed;
+      folderNamesExpanded[key] = opened;
+    }
+  }
+
+  return {
+    defaultFile: withPrefix('vscode-icons', 'default_file.svg'),
+    defaultFolder: withPrefix('vscode-icons', 'default_folder.svg'),
+    defaultFolderExpanded: withPrefix('vscode-icons', 'default_folder_opened.svg'),
+    fileNames,
+    fileExtensions,
+    folderNames,
+    folderNamesExpanded,
+  };
+}
+
+function buildSetiMappings(setiPkgRoot, setiVirtualIcons) {
+  const defs = readJson(path.join(setiPkgRoot, 'lib/definitions.json'));
+  const svgs = readJson(path.join(setiPkgRoot, 'lib/icons.json'));
+
+  const fileNames = {};
+  const fileExtensions = {};
+
+  for (const [name, [iconName]] of Object.entries(defs.files ?? {})) {
+    fileNames[safeLower(name)] = withPrefix('seti', `${iconName}.svg`);
+  }
+  for (const [ext, [iconName]] of Object.entries(defs.extensions ?? {})) {
+    fileExtensions[normalizeExt(ext)] = withPrefix('seti', `${iconName}.svg`);
+  }
+  for (const [pattern, [iconName]] of defs.partials ?? []) {
+    fileNames[safeLower(pattern)] = withPrefix('seti', `${iconName}.svg`);
+  }
+
+  for (const [name, svg] of Object.entries(svgs)) {
+    setiVirtualIcons.set(withPrefix('seti', `${name}.svg`), normalizeInlineSvg(svg));
+  }
+
+  return {
+    defaultFile: withPrefix('seti', 'default.svg'),
+    defaultFolder: withPrefix('seti', 'folder.svg'),
+    defaultFolderExpanded: withPrefix('seti', 'folder.svg'),
+    fileNames,
+    fileExtensions,
+    folderNames: {},
+    folderNamesExpanded: {},
   };
 }
 
@@ -153,7 +343,7 @@ function writeGeneratedModule(packMappings, copiedIcons, defaultPack) {
   });
 
   lines.push('');
-  lines.push("export type IconPack = 'material' | 'material-light';");
+  lines.push(`export type IconPack = ${SUPPORTED_PACKS.map((pack) => JSON.stringify(pack)).join(' | ')};`);
   lines.push('');
 
   const emitMap = (name, mapObj) => {
@@ -218,8 +408,8 @@ function writeGeneratedModule(packMappings, copiedIcons, defaultPack) {
   return writeFileIfChanged(generatedModulePath, `${lines.join('\n')}\n`);
 }
 
-function writeReadme(materialVersion, vscodeIconsCommit, copiedIcons, defaultPack) {
-  const body = `# Material Icons (Generated Subset)\n\nThis directory is auto-generated by:\n- \`web/scripts/generate-vscode-icon-map.mjs\`\n\nIncluded runtime packs:\n- \`material\`\n- \`material-light\`\n\nDefault pack:\n- \`${defaultPack}\`\n\nBase source:\n- \`material-icon-theme@${materialVersion}\`\n\nOverlay source:\n- \`vscode-icons\` for app-specific filename overrides\n- upstream commit (informational): \`${vscodeIconsCommit}\`\n\nIncluded SVG files:\n${copiedIcons.map((f) => `- \`${f}\``).join('\n')}\n\nLicense:\n- Material Icon Theme: MIT\n- VSCode Icons: MIT\n`;
+function writeReadme(materialVersion, copiedIcons, defaultPack) {
+  const body = `# Generated Icon Packs\n\nThis directory is auto-generated by:\n- \`web/scripts/generate-vscode-icon-map.mjs\`\n\nIncluded runtime packs:\n${SUPPORTED_PACKS.map((pack) => `- \`${pack}\``).join('\n')}\n\nDefault pack:\n- \`${defaultPack}\`\n\nMaterial source:\n- \`material-icon-theme@${materialVersion}\`\n\nIncluded SVG files:\n${copiedIcons.map((f) => `- \`${f}\``).join('\n')}\n\nLicense:\n- Material Icon Theme: MIT\n- Eyecons: MIT\n- Catppuccin Icons: MIT\n- VSCode Icons: MIT\n- Seti Icons: MIT\n`;
   return writeFileIfChanged(generatedReadmePath, body);
 }
 
@@ -231,19 +421,31 @@ function main() {
 
   const materialEntryPath = require.resolve('material-icon-theme', { paths: [projectRoot] });
   const materialRoot = path.resolve(path.dirname(materialEntryPath), '..', '..');
-  const materialPkgPath = path.join(materialRoot, 'package.json');
-  const materialPkg = readJson(materialPkgPath);
-  const materialThemePath = path.join(materialRoot, 'dist/material-icons.json');
+  const materialPkg = readJson(path.join(materialRoot, 'package.json'));
+  const materialTheme = readJson(path.join(materialRoot, 'dist/material-icons.json'));
   const materialIconsDir = path.join(materialRoot, 'icons');
+
+  const eyeconsPkgPath = require.resolve('eyecons/package.json', { paths: [projectRoot] });
+  const eyeconsRoot = path.dirname(eyeconsPkgPath);
+
+  const catppuccinPkgPath = require.resolve('catppuccin-vsc-icons/package.json', { paths: [projectRoot] });
+  const catppuccinRoot = path.dirname(catppuccinPkgPath);
+  const catppuccinIconsDir = path.join(catppuccinRoot, 'icons/latte');
 
   const vscodeIconsPkgPath = require.resolve('vscode-icons/package.json', { paths: [projectRoot] });
   const vscodeIconsRoot = path.dirname(vscodeIconsPkgPath);
-  const vscodeIconsDir = path.join(vscodeIconsRoot, 'icons');
+  const vscodeIconsIconsDir = path.join(vscodeIconsRoot, 'icons');
 
-  const themeJson = readJson(materialThemePath);
+  const setiPkgPath = require.resolve('seti-file-icons/package.json', { paths: [projectRoot] });
+  const setiPkgRoot = path.dirname(setiPkgPath);
+  const setiVirtualIcons = new Map();
+
   const packMappings = {
-    material: buildMappings(themeJson, 'material'),
-    'material-light': buildMappings(themeJson, 'material-light'),
+    material: buildMappingsFromVsCodeTheme(materialTheme),
+    eyecons: buildEyeconsMappings(eyeconsRoot),
+    catppuccin: buildCatppuccinMappings(catppuccinRoot),
+    'vscode-icons': buildVscodeIconsMappings(vscodeIconsRoot),
+    seti: buildSetiMappings(setiPkgRoot, setiVirtualIcons),
   };
 
   const usedIcons = new Set();
@@ -258,27 +460,38 @@ function main() {
   }
 
   ensureDir(generatedIconsDir);
-
   const copied = [];
   let changedIconFiles = 0;
+
   for (const iconFile of Array.from(usedIcons).sort()) {
-    const fromMaterial = path.join(materialIconsDir, iconFile);
-    const fromVscodeIcons = path.join(vscodeIconsDir, iconFile);
     const target = path.join(generatedIconsDir, iconFile);
 
-    if (fs.existsSync(fromMaterial)) {
-      if (copyFileIfChanged(fromMaterial, target)) changedIconFiles += 1;
+    if (setiVirtualIcons.has(iconFile)) {
+      if (writeFileIfChanged(target, setiVirtualIcons.get(iconFile))) changedIconFiles += 1;
       copied.push(iconFile);
       continue;
     }
 
-    if (fs.existsSync(fromVscodeIcons)) {
-      if (copyFileIfChanged(fromVscodeIcons, target)) changedIconFiles += 1;
-      copied.push(iconFile);
-      continue;
+    let sourcePath = null;
+    if (iconFile.startsWith('eyecons__')) {
+      const file = iconFile.replace(/^eyecons__/, '');
+      const fromFile = path.join(eyeconsRoot, 'icons/files', file);
+      const fromBase = path.join(eyeconsRoot, 'icons/base', file);
+      sourcePath = fs.existsSync(fromFile) ? fromFile : (fs.existsSync(fromBase) ? fromBase : null);
+    } else if (iconFile.startsWith('catppuccin__')) {
+      sourcePath = path.join(catppuccinIconsDir, iconFile.replace(/^catppuccin__/, ''));
+    } else if (iconFile.startsWith('vscode-icons__')) {
+      sourcePath = path.join(vscodeIconsIconsDir, iconFile.replace(/^vscode-icons__/, ''));
+    } else {
+      sourcePath = path.join(materialIconsDir, iconFile);
     }
 
-    throw new Error(`Missing icon asset: ${iconFile}`);
+    if (!sourcePath || !fs.existsSync(sourcePath)) {
+      throw new Error(`Missing icon asset: ${iconFile}`);
+    }
+
+    if (copyFileIfChanged(sourcePath, target)) changedIconFiles += 1;
+    copied.push(iconFile);
   }
 
   const currentFiles = new Set(copied);
@@ -290,11 +503,9 @@ function main() {
   }
 
   const moduleChanged = writeGeneratedModule(packMappings, copied, defaultPack);
-
-  const vscodeCommit = process.env.VSCODE_ICONS_COMMIT ?? 'unknown';
-  const readmeChanged = writeReadme(materialPkg.version ?? 'unknown', vscodeCommit, copied, defaultPack);
-
+  const readmeChanged = writeReadme(materialPkg.version ?? 'unknown', copied, defaultPack);
   const changedFiles = changedIconFiles + (moduleChanged ? 1 : 0) + (readmeChanged ? 1 : 0);
+
   if (changedFiles === 0) {
     console.log(`Icon map already up to date (${copied.length} SVG assets across ${SUPPORTED_PACKS.length} packs).`);
   } else {

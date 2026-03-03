@@ -551,6 +551,13 @@
   function openPath(path: string, fileType?: FileType, newTab = false): void {
     const ft = fileType ?? detectFileType(path);
 
+    // For directories, always (re-)load children so DirectoryOverview shows the full listing.
+    // This must run before the early-return below (tab reuse) to ensure children are loaded
+    // even when navigating back to an already-open directory tab.
+    if (ft === 'directory') {
+      loadChildren(path);
+    }
+
     if (!newTab) {
       // Reuse existing tab for this path, or navigate the active tab
       const existing = findTabByPath(tabs, path);
@@ -1270,7 +1277,7 @@
         path={activePath}
         {rootPath}
         entries={fileTree}
-        onOpen={(path) => openPath(path, detectFileType(path))}
+        onOpen={(path, fileType) => openPath(path, fileType)}
       />
     {:else}
       <div class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">

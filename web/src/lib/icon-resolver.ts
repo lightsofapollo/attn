@@ -19,7 +19,7 @@ function activePackIcons() {
   return ICON_PACKS[getIconPack()];
 }
 
-export function resolveFileIcon(fileName: string): string | null {
+export function resolveFileIcon(fileName: string, opts?: { includeMarkdown?: boolean }): string | null {
   const lower = fileName.toLowerCase();
   const extCandidates = extensionCandidates(lower);
   const icons = activePackIcons();
@@ -29,7 +29,7 @@ export function resolveFileIcon(fileName: string): string | null {
 
   const isMarkdown =
     extCandidates.length > 0 && MARKDOWN_NO_ICON.has(extCandidates[extCandidates.length - 1]);
-  if (isMarkdown) {
+  if (isMarkdown && !opts?.includeMarkdown) {
     return null;
   }
 

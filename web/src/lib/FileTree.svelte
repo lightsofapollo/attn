@@ -69,9 +69,14 @@
 
   // Keep the tree aligned with external navigation (e.g. Cmd/Ctrl+P).
   // When activePath changes, expand all ancestor directories so the active file is visible.
+  // Only runs when activePath actually changes — not when expanded state changes — so
+  // users can manually collapse a folder even if it contains the active file.
+  let lastExpandedForPath = $state('');
+
   $effect(() => {
     const normalizedActive = normalizePath(activePath);
-    if (!normalizedActive) return;
+    if (!normalizedActive || normalizedActive === lastExpandedForPath) return;
+    lastExpandedForPath = normalizedActive;
 
     for (const node of nodes) {
       if (!node.isDir) continue;

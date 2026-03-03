@@ -54,15 +54,25 @@ function getHighlighter(): Promise<HighlighterCore> {
   return highlighterPromise;
 }
 
-/** Lazy parser: returns Promise<void> while highlighter loads, then delegates to shiki parser */
+/** Lazy parser: returns Promise<void> while highlighter loads, then delegates to shiki parser.
+ *  Skips blocks without a language tag and catches per-block errors so one
+ *  unrecognised language doesn't kill highlighting for the entire document. */
 function lazyParser(options: {
   content: string;
   pos: number;
   language?: string;
   size: number;
 }): Decoration[] | Promise<void> {
+  // No language tag → render as plain text (no highlighting)
+  if (!options.language) return [];
+
   if (resolvedParser) {
-    return resolvedParser(options);
+    try {
+      return resolvedParser(options);
+    } catch {
+      // Language not loaded or parse error — skip this block
+      return [];
+    }
   }
   return getHighlighter().then((highlighter) => {
     resolvedParser = createParser(highlighter, {

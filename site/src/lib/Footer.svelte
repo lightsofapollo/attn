@@ -1,7 +1,12 @@
 <footer class="border-t border-border mt-24">
 	<div class="max-w-6xl mx-auto px-6 py-12 flex flex-col md:flex-row items-center justify-between gap-4">
 		<p class="font-sans text-sm text-muted-foreground">
-			MIT License. Built with Rust + Svelte.
+			MIT License. Built with Rust + Svelte. Editor powered by <a
+				href="https://prosemirror.net"
+				target="_blank"
+				rel="noopener noreferrer"
+				class="text-muted-foreground hover:text-foreground transition-colors underline underline-offset-2"
+			>ProseMirror</a>.
 		</p>
 		<div class="flex items-center gap-6">
 			<a

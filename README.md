@@ -44,13 +44,13 @@ attn is a **single <20MB binary**. It forks to background as a daemon, opens a n
 
 ## Install
 
-### Primary: crates.io
+### Homebrew
 
 ```bash
-cargo install attn
+brew install lightsofapollo/attn/attn
 ```
 
-### Alternative: npm package (testing path)
+### npm
 
 ```bash
 npx attnmd
@@ -58,15 +58,20 @@ npx attnmd
 npm install -g attnmd && attn
 ```
 
-### From source
+### From source (crates.io)
+
+```bash
+cargo install attn
+```
+
+### From source (git)
 
 ```bash
 git clone https://github.com/lightsofapollo/attn.git
 cd attn && cargo install --path .
 ```
 
-Requires Rust 1.85+.
-For npm installs, Node 18+ is required.
+Requires Rust 1.85+. For npm installs, Node 18+ is required.
 
 ## Usage
 

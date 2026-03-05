@@ -305,6 +305,10 @@ for arg in "$@"; do
       ;;
   esac
 done
+# No path arg provided — default to cwd so the app doesn't open at /
+if [ "$PATH_RESOLVED" -eq 0 ]; then
+  RESOLVED_ARGS+=("$(pwd)")
+fi
 exec /usr/bin/open "$APP_LINK" --args "\${RESOLVED_ARGS[@]}"
 `
     : `#!/usr/bin/env bash
@@ -352,6 +356,10 @@ function resolvePathArgs(args) {
     } else {
       resolved.push(arg);
     }
+  }
+  // No path arg provided — default to cwd so the app doesn't open at /
+  if (!pathResolved) {
+    resolved.push(process.cwd());
   }
   return resolved;
 }

@@ -61,6 +61,16 @@ scripts/macos-notarize-dmg.sh target/aarch64-apple-darwin/release/bundle/osx/att
 
 GitHub Action setup is documented in `.github/RELEASE_SETUP.md`.
 
+## Release Process
+
+To bump the version (e.g., to 0.3.6):
+
+1. Update `version` in `Cargo.toml` and `package.json` (root)
+2. Run `cargo check` to update `Cargo.lock`
+3. Commit: `git commit -m "Bump version to 0.3.6"`
+4. Tag: `git tag v0.3.6`
+5. Push: `git push && git push origin v0.3.6`
+
 ## Architecture
 
 - `src/main.rs` — CLI entry, daemon event loop, webview setup

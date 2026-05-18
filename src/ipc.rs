@@ -1,3 +1,5 @@
+use crate::review::ids::{EventId, RoomId};
+use crate::review::model::{Anchor, PositionAnchor, SuggestionDraft};
 use crate::watcher::UserEvent;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -56,6 +58,49 @@ pub enum IpcMessage {
 
     #[serde(rename = "quit")]
     Quit,
+
+    // --- Review collaboration (additive, stub-handled until issue 2.8 lands
+    // the real ReviewManager wiring). Payload types come from
+    // `crate::review::model` so the wire shape matches what the TypeScript
+    // counterpart in `web/src/lib/types.ts` will send.
+    //
+    // Spec: `planning/collab/data-model.md` §Webview IPC Changes.
+    #[serde(rename = "review_share", rename_all = "camelCase")]
+    ReviewShare {
+        path: String,
+        mode: String,
+        #[serde(default)]
+        ttl: Option<String>,
+    },
+
+    #[serde(rename = "review_join")]
+    ReviewJoin { invite: String },
+
+    #[serde(rename = "review_create_comment", rename_all = "camelCase")]
+    ReviewCreateComment {
+        room_id: RoomId,
+        anchor: Anchor,
+        body: String,
+    },
+
+    #[serde(rename = "review_create_suggestion", rename_all = "camelCase")]
+    ReviewCreateSuggestion {
+        room_id: RoomId,
+        draft: SuggestionDraft,
+    },
+
+    #[serde(rename = "review_accept_suggestion", rename_all = "camelCase")]
+    ReviewAcceptSuggestion {
+        room_id: RoomId,
+        suggestion_id: EventId,
+    },
+
+    #[serde(rename = "review_resolve_anchor", rename_all = "camelCase")]
+    ReviewResolveAnchor {
+        room_id: RoomId,
+        event_id: EventId,
+        range: PositionAnchor,
+    },
 }
 
 /// Shared state accessible from the IPC handler.
@@ -143,6 +188,56 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                     eprintln!("attn: js error stack:\n{stack}");
                 }
             }
+            // Review collaboration stub handlers. Real wiring lives in
+            // `ReviewManager` (issue attn-nnj.2.8). For now we log the call
+            // so the frontend stubs (attn-nnj.12.5) can confirm messages
+            // round-trip through the webview IPC boundary.
+            IpcMessage::ReviewShare { path, mode, ttl } => {
+                eprintln!(
+                    "attn: review_share received (stub): path={path} mode={mode} ttl={:?}",
+                    ttl
+                );
+            }
+            IpcMessage::ReviewJoin { invite } => {
+                eprintln!("attn: review_join received (stub): invite={invite}");
+            }
+            IpcMessage::ReviewCreateComment {
+                room_id,
+                anchor,
+                body,
+            } => {
+                eprintln!(
+                    "attn: review_create_comment received (stub): room={:?} body_len={} anchor_v={}",
+                    room_id,
+                    body.len(),
+                    anchor.v
+                );
+            }
+            IpcMessage::ReviewCreateSuggestion { room_id, draft } => {
+                eprintln!(
+                    "attn: review_create_suggestion received (stub): room={:?} anchor_v={}",
+                    room_id, draft.anchor.v
+                );
+            }
+            IpcMessage::ReviewAcceptSuggestion {
+                room_id,
+                suggestion_id,
+            } => {
+                eprintln!(
+                    "attn: review_accept_suggestion received (stub): room={:?} suggestion={:?}",
+                    room_id, suggestion_id
+                );
+            }
+            IpcMessage::ReviewResolveAnchor {
+                room_id,
+                event_id,
+                range,
+            } => {
+                eprintln!(
+                    "attn: review_resolve_anchor received (stub): room={:?} event={:?} byte_range={:?}",
+                    room_id, event_id, range.byte_range
+                );
+            }
         },
         Err(e) => {
             eprintln!("attn: invalid IPC message: {}", e);
@@ -205,5 +300,38 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
 
     if let Err(e) = std::fs::write(path, &output) {
         eprintln!("attn: could not write file after checkbox toggle: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipc_message_review_share_parses_minimal() {
+        let raw = r#"{"type":"review_share","path":"/tmp/plan.md","mode":"async"}"#;
+        let msg: IpcMessage = serde_json::from_str(raw).expect("parse review_share");
+        match msg {
+            IpcMessage::ReviewShare { path, mode, ttl } => {
+                assert_eq!(path, "/tmp/plan.md");
+                assert_eq!(mode, "async");
+                assert!(ttl.is_none());
+            }
+            other => panic!("expected ReviewShare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ipc_message_review_resolve_anchor_parses_camel_case_payload() {
+        // Confirms the typed payload (RoomId, EventId, PositionAnchor) round-trips
+        // via the same camelCase wire shape that web/src/lib/types.ts will emit.
+        let raw = r#"{
+            "type":"review_resolve_anchor",
+            "roomId":"room-abc",
+            "eventId":"evt-1",
+            "range":{"byteRange":[0,5],"lineRange":[1,1]}
+        }"#;
+        let msg: IpcMessage = serde_json::from_str(raw).expect("parse review_resolve_anchor");
+        assert!(matches!(msg, IpcMessage::ReviewResolveAnchor { .. }));
     }
 }

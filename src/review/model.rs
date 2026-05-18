@@ -717,6 +717,20 @@ pub enum SuggestionOperation {
     },
 }
 
+/// IPC payload describing a suggestion the frontend wants to create. Wraps
+/// the anchor + operation + optional note so the manager can assemble a
+/// `ReviewEventBody::SuggestionCreated` after minting a fresh suggestion id.
+///
+/// Spec: `data-model.md` §Webview IPC Changes (`review_create_suggestion`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestionDraft {
+    pub anchor: Anchor,
+    pub operation: SuggestionOperation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Mailbox envelopes
 // ---------------------------------------------------------------------------

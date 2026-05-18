@@ -83,6 +83,47 @@ pub enum SocketMessage {
     /// (fragment included) in-process.
     #[serde(rename = "review_join")]
     ReviewJoin { invite: String },
+
+    /// Share the current path as a review room. CLI agents call this to
+    /// host a review without going through the UI. Real handling lives in
+    /// `ReviewManager` (issue attn-nnj.2.8); for now the daemon logs and
+    /// returns Ok.
+    ///
+    /// Spec: `data-model.md` §Daemon Socket Commands.
+    #[serde(rename = "review_share", rename_all = "camelCase")]
+    ReviewShare {
+        path: String,
+        mode: String,
+        #[serde(default)]
+        ttl: Option<String>,
+    },
+
+    /// Pull pending envelopes for one room (or every active room when
+    /// `room_id` is None). Stubbed until issue attn-nnj.2.8.
+    ///
+    /// Spec: `data-model.md` §Daemon Socket Commands.
+    #[serde(rename = "review_pull", rename_all = "camelCase")]
+    ReviewPull {
+        #[serde(default)]
+        room_id: Option<String>,
+    },
+
+    /// Stop hosting/participating in one room (or every room when
+    /// `room_id` is None). Stubbed until issue attn-nnj.2.8.
+    ///
+    /// Spec: `data-model.md` §Daemon Socket Commands.
+    #[serde(rename = "review_stop", rename_all = "camelCase")]
+    ReviewStop {
+        #[serde(default)]
+        room_id: Option<String>,
+    },
+
+    /// List inbound review notifications. Stubbed until issue
+    /// attn-nnj.2.8 — real implementation returns a typed inbox payload.
+    ///
+    /// Spec: `data-model.md` §Daemon Socket Commands.
+    #[serde(rename = "review_inbox")]
+    ReviewInbox,
 }
 
 /// Response sent from daemon back to client.
@@ -631,6 +672,54 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                 // in 3b-6). For now, log the invite so we can confirm routing
                 // works end-to-end (custom protocol -> socket -> daemon).
                 log_review_join_intent(&invite);
+                let resp = SocketResponse::Ok;
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            // Stubs for additional review socket commands. Real handling
+            // lands in `ReviewManager` (issue attn-nnj.2.8); these arms just
+            // log + Ok so CLI agents can begin wiring against the surface.
+            Ok(SocketMessage::ReviewShare { path, mode, ttl }) => {
+                eprintln!(
+                    "attn: review_share received (stub, manager wiring pending): path={path} mode={mode} ttl={:?}",
+                    ttl
+                );
+                let resp = SocketResponse::Ok;
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::ReviewPull { room_id }) => {
+                eprintln!(
+                    "attn: review_pull received (stub, manager wiring pending): room={:?}",
+                    room_id
+                );
+                let resp = SocketResponse::Ok;
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::ReviewStop { room_id }) => {
+                eprintln!(
+                    "attn: review_stop received (stub, manager wiring pending): room={:?}",
+                    room_id
+                );
+                let resp = SocketResponse::Ok;
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::ReviewInbox) => {
+                eprintln!("attn: review_inbox received (stub, manager wiring pending)");
                 let resp = SocketResponse::Ok;
                 let _ = writeln!(
                     stream,

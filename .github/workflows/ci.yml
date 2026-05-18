@@ -47,6 +47,16 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
 
+      # Binary-size gate — enforces the 25 MiB target from
+      # planning/collab/amendments.md §Decision #1 (webrtc-rs is the main risk).
+      # Emergency bypass via env: ATTN_SIZE_BUDGET_WAIVER=1 (also accepts
+      # BINARY_SIZE_WAIVER=1). See CLAUDE.md §"Binary-size gate".
+      - name: Build release for size check
+        run: cargo build --release --locked
+
+      - name: Check binary size (25 MiB budget)
+        run: scripts/check-binary-size.sh
+
   rust-build-linux:
     name: Rust Build (Linux)
     runs-on: ubuntu-latest

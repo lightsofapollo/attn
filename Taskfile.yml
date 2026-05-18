@@ -87,3 +87,9 @@ tasks:
     desc: Run the review-surface E2E test suite (shape assertions; isolated ATTN_HOME)
     cmds:
       - scripts/test-review-e2e.sh
+
+  check:size:
+    desc: Build release and verify the binary stays under the 25 MiB collab v2 budget (see planning/collab/amendments.md §Decision #1).
+    cmds:
+      - cargo build --release
+      - scripts/check-binary-size.sh

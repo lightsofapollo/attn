@@ -100,13 +100,25 @@ pub enum SocketResponse {
     Error { message: String },
 }
 
-/// Runtime directory for daemon state (socket, fingerprint, log).
+/// Runtime directory for daemon state (socket, fingerprint, log, future reviews/).
+///
+/// Override: `ATTN_HOME` env var, when set to a non-empty path, replaces the
+/// default in both debug and release builds. This is the entry point for
+/// multi-instance dev (e.g. running an "owner" and "reviewer" daemon side by
+/// side for local collab testing).
 ///
 /// Debug: in `/tmp` with a short, deterministic per-binary namespace.
 /// This keeps the unix socket path under `SUN_LEN` even when launching from
 /// deep app bundle paths.
 /// Release: `~/.attn/`.
 fn runtime_dir() -> Result<PathBuf> {
+    if let Ok(value) = std::env::var("ATTN_HOME") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+
     #[cfg(debug_assertions)]
     {
         let exe = std::env::current_exe().context("could not determine executable path")?;

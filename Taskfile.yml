@@ -2,7 +2,7 @@ version: "3"
 
 tasks:
   dev:
-    desc: Run Vite with HMR and launch attn against the dev server
+    desc: Run Vite with HMR and launch attn against the dev server (honors ATTN_HOME env override for multi-instance dev; optional)
     vars:
       DEV_HOST_VALUE: '{{default "127.0.0.1" .DEV_HOST}}'
       DEV_PORT_VALUE: '{{default "auto" .DEV_PORT}}'

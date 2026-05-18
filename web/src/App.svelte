@@ -54,6 +54,7 @@
     loadMarkdownFromPath,
     markdownSourceUrl,
   } from './lib/markdown-layer';
+  import { reviewStore } from './lib/review/store.svelte';
 
   interface Props {
     /**
@@ -114,7 +115,8 @@
   // Right-rail (Phase 2 ReviewPanel mount point). Default collapsed; no review
   // session is active yet, so the slot renders a neutral placeholder. Toggling
   // shortcut (Cmd+J) is wired here as a placeholder until 12.9 owns it.
-  let rightRailOpen = $state(false);
+  // State lives on `reviewStore.panelOpen` so the future keyboard hook /
+  // ReviewPanel can drive it via `reviewStore.togglePanel()`.
 
   function emptyPlanStructure(): PlanStructure {
     return { phases: [], tasks: [], file_refs: [] };
@@ -1037,21 +1039,26 @@
       resetFontScale() {
         resetGlobalFontScale();
       },
-      // Review callbacks — no-op stubs today. Real handlers land with the
-      // review store scaffold (attn-nnj.12.10) + Phase 2 wiring. Keeping
-      // these registered lets Rust call window.__attn__.reviewEvent(...)
-      // via evaluate_script without runtime errors.
+      // Review callbacks delegate to the global review store
+      // (attn-nnj.12.10). Phase 2 wiring (4.x) layers typed derived selectors
+      // and panel components on top of this state. Keeping a console.debug
+      // here makes it easy to verify wire-up during dev without opening
+      // devtools every time.
       reviewStatus(payload: ReviewStatus) {
-        console.debug('[review]', payload);
+        console.debug('[review:status]', payload);
+        reviewStore.applyStatus(payload);
       },
       reviewEvent(payload: ReviewEvent) {
-        console.debug('[review]', payload);
+        console.debug('[review:event]', payload);
+        reviewStore.applyEvent(payload);
       },
       reviewSnapshot(snapshot: ReviewSnapshot) {
-        console.debug('[review]', snapshot);
+        console.debug('[review:snapshot]', snapshot);
+        reviewStore.applySnapshot(snapshot);
       },
       reviewAnchorResolution(update: ReviewAnchorResolutionUpdate) {
-        console.debug('[review]', update);
+        console.debug('[review:anchor]', update);
+        reviewStore.applyAnchorResolution(update);
       },
     };
 
@@ -1157,7 +1164,7 @@
     if (!isRightRailHotkey(e)) return;
     if (isEditableShortcutTarget(e.target)) return;
     e.preventDefault();
-    rightRailOpen = !rightRailOpen;
+    reviewStore.togglePanel();
   }
 
   // Handle sidebar navigation events
@@ -1440,12 +1447,12 @@
       </div>
       <aside
         class="right-rail flex h-full shrink-0 flex-col overflow-hidden border-l border-border bg-background transition-[width] duration-200 ease-linear"
-        style="width: {rightRailOpen ? '360px' : '0px'};"
-        data-state={rightRailOpen ? 'open' : 'closed'}
+        style="width: {reviewStore.panelOpen ? '360px' : '0px'};"
+        data-state={reviewStore.panelOpen ? 'open' : 'closed'}
         data-slot="right-rail"
-        aria-hidden={!rightRailOpen}
+        aria-hidden={!reviewStore.panelOpen}
       >
-        {#if rightRailOpen}
+        {#if reviewStore.panelOpen}
           {#if rightRail}
             {@render rightRail()}
           {:else}

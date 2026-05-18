@@ -121,7 +121,7 @@ pub enum SocketResponse {
 /// This keeps the unix socket path under `SUN_LEN` even when launching from
 /// deep app bundle paths.
 /// Release: `~/.attn/`.
-fn runtime_dir() -> Result<PathBuf> {
+pub(crate) fn runtime_dir() -> Result<PathBuf> {
     if let Ok(value) = std::env::var("ATTN_HOME") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {

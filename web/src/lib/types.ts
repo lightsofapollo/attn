@@ -195,3 +195,587 @@ export interface InitPayload {
   contentMtimeMs?: number;
   contentBytes?: number;
 }
+
+// ---------------------------------------------------------------------------
+// Review domain types
+//
+// These mirror the Rust serde shapes (camelCase) defined in
+// planning/collab/data-model.md and amended by planning/collab/amendments.md.
+// They are pure type declarations — no runtime code, no `any`. Type aliases
+// for ID newtypes are intentional: the Rust side uses tuple-struct newtypes
+// that serde-serialize as bare strings.
+// ---------------------------------------------------------------------------
+
+/**
+ * Opaque participant identifier.
+ * @see planning/collab/data-model.md §Participant And Device
+ */
+export type ParticipantId = string;
+
+/**
+ * Opaque device identifier.
+ * @see planning/collab/data-model.md §Participant And Device
+ */
+export type DeviceId = string;
+
+/**
+ * Opaque room identifier.
+ * @see planning/collab/data-model.md §Review Room
+ */
+export type RoomId = string;
+
+/**
+ * Opaque shared-document identifier (not a path).
+ * @see planning/collab/data-model.md §Shared Document
+ */
+export type FileId = string;
+
+/**
+ * Opaque snapshot identifier.
+ * @see planning/collab/data-model.md §Snapshot Graph
+ */
+export type SnapshotId = string;
+
+/**
+ * Opaque event identifier.
+ * @see planning/collab/data-model.md §Review Events
+ */
+export type EventId = string;
+
+/**
+ * Canonical content hash of UTF-8 markdown bytes.
+ * @see planning/collab/data-model.md §Snapshot Graph
+ */
+export type ContentHash = string;
+
+/**
+ * Capability strings granted to a participant inside a room.
+ * @see planning/collab/data-model.md §Participant And Device
+ */
+export type Capability =
+  | 'room_admin'
+  | 'read_snapshot'
+  | 'write_comment'
+  | 'write_suggestion'
+  | 'resolve_comment'
+  | 'accept_suggestion'
+  | 'publish_snapshot';
+
+/**
+ * Person or agent participating in a review room.
+ * @see planning/collab/data-model.md §Participant And Device
+ */
+export interface Participant {
+  participantId: ParticipantId;
+  displayName: string;
+  kind: 'owner' | 'reviewer' | 'agent';
+  publicSigningKey: string;
+  capabilities: Capability[];
+}
+
+/**
+ * One installed client instance belonging to a participant.
+ * @see planning/collab/data-model.md §Participant And Device
+ */
+export interface Device {
+  deviceId: DeviceId;
+  participantId: ParticipantId;
+  publicEncryptionKey: string;
+  publicSigningKey: string;
+  client: 'attn-native' | 'attn-browser' | 'agent-cli';
+  createdAt: number;
+}
+
+/**
+ * Room-level capability and lifecycle policy enforced by the relay.
+ * @see planning/collab/data-model.md §Review Room
+ */
+export interface RoomPolicy {
+  mode: 'live' | 'async' | 'hybrid';
+  maxPeers: number;
+  maxSnapshotBytes: number;
+  maxEventBytes: number;
+  maxEvents: number;
+  expiresAt: number;
+  deleteEventsAfterOwnerAck: boolean;
+  allowBrowser: boolean;
+  allowRemoteAgents: boolean;
+}
+
+/**
+ * Reference to an encrypted blob stored inline, in the mailbox, or on R2.
+ * @see planning/collab/data-model.md §Snapshot Graph
+ */
+export interface BlobRef {
+  storage: 'inline' | 'mailbox' | 'r2';
+  blobId: string;
+  byteLength: number;
+  contentHash: ContentHash;
+}
+
+/**
+ * Reference to a heading at a specific level/ordinal for structural anchors.
+ * @see planning/collab/data-model.md §Anchor Index
+ */
+export interface AnchorHeadingRef {
+  level: number;
+  textHash: string;
+  ordinalAtLevel: number;
+}
+
+/**
+ * Heading entry produced by the canonical anchor indexer.
+ * @see planning/collab/data-model.md §Anchor Index
+ */
+export interface AnchorHeading {
+  level: number;
+  text: string;
+  textHash: string;
+  line: number;
+  byteRange: [number, number];
+  path: AnchorHeadingRef[];
+}
+
+/**
+ * Kinds of block recognized by the anchor index.
+ *
+ * The original eight variants from data-model.md plus `math` and `mermaid`
+ * per amendments.md Decision #16, plus `unknown` as a safety fallback.
+ * @see planning/collab/data-model.md §Anchor Index
+ * @see planning/collab/amendments.md Decision #16
+ */
+export type AnchorBlockKind =
+  | 'heading'
+  | 'paragraph'
+  | 'list_item'
+  | 'code_block'
+  | 'blockquote'
+  | 'table'
+  | 'thematic_break'
+  | 'html'
+  | 'math'
+  | 'mermaid'
+  | 'unknown';
+
+/**
+ * Block entry produced by the canonical anchor indexer.
+ * @see planning/collab/data-model.md §Anchor Index
+ */
+export interface AnchorBlock {
+  snapshotBlockId: string;
+  contentFingerprint: string;
+  kind: AnchorBlockKind;
+  byteRange: [number, number];
+  lineRange: [number, number];
+  pmRange?: [number, number];
+  headingPath: AnchorHeadingRef[];
+  ordinalInParent: number;
+  duplicateOrdinal: number;
+  textHash: string;
+  normalizedTextHash: string;
+  previousBlockHash?: string;
+  nextBlockHash?: string;
+}
+
+/**
+ * Snapshot-time index over a markdown document, used by the anchor resolver.
+ * @see planning/collab/data-model.md §Anchor Index
+ */
+export interface AnchorIndex {
+  docHash: ContentHash;
+  canonicalEncoding: 'utf8-bytes';
+  lineCount: number;
+  blocks: AnchorBlock[];
+  headings: AnchorHeading[];
+}
+
+/**
+ * Snapshot-local byte/line/pm coordinates for an anchor.
+ * @see planning/collab/data-model.md §Anchors
+ */
+export interface PositionAnchor {
+  byteRange: [number, number];
+  lineRange: [number, number];
+  pmRange?: [number, number];
+}
+
+/**
+ * Selected text with exact + normalized forms for quote-based remap.
+ * @see planning/collab/data-model.md §Anchors
+ */
+export interface QuoteAnchor {
+  exact: string;
+  exactHash: string;
+  normalized: string;
+  normalizedHash: string;
+}
+
+/**
+ * Block-scoped anchor, used for block-level comments or in-block selections.
+ * @see planning/collab/data-model.md §Anchors
+ */
+export interface BlockAnchor {
+  snapshotBlockId: string;
+  contentFingerprint: string;
+  kind: AnchorBlockKind;
+  offsetInBlockBytes: [number, number];
+  blockByteRange: [number, number];
+  blockLineRange: [number, number];
+}
+
+/**
+ * Surrounding context for an anchor (Hypothesis-style prefix/suffix).
+ * @see planning/collab/data-model.md §Anchors
+ */
+export interface ContextAnchor {
+  prefix: string;
+  suffix: string;
+  prefixHash: string;
+  suffixHash: string;
+  previousBlockHash?: string;
+  nextBlockHash?: string;
+}
+
+/**
+ * Heading-path structural anchor.
+ * @see planning/collab/data-model.md §Anchors
+ */
+export interface StructureAnchor {
+  headingPath: AnchorHeadingRef[];
+  ordinalInParent: number;
+}
+
+/**
+ * Layered anchor describing where a review event was authored.
+ *
+ * The resolver uses the strongest available layer and falls back with
+ * decreasing confidence.
+ * @see planning/collab/data-model.md §Anchors
+ */
+export interface Anchor {
+  v: 2;
+  fileId: FileId;
+  snapshotId: SnapshotId;
+  baseHash: ContentHash;
+  position: PositionAnchor;
+  quote?: QuoteAnchor;
+  block?: BlockAnchor;
+  context?: ContextAnchor;
+  structure?: StructureAnchor;
+}
+
+/**
+ * Single ranked candidate for an ambiguous anchor resolution.
+ * @see planning/collab/data-model.md §Anchor Resolution
+ */
+export interface ResolvedAnchorCandidate {
+  confidence: number;
+  currentRange: PositionAnchor;
+  reason: string;
+  preview: string;
+}
+
+/**
+ * Outcome of resolving an `Anchor` against a `DocumentReplica`.
+ * @see planning/collab/data-model.md §Anchor Resolution
+ */
+export type ResolvedAnchor =
+  | {
+      status: 'exact';
+      confidence: 1.0;
+      currentRange: PositionAnchor;
+      reason: 'base_hash_match' | 'mapped_through_local_steps';
+    }
+  | {
+      status: 'remapped';
+      confidence: number;
+      currentRange: PositionAnchor;
+      reason:
+        | 'quote_match'
+        | 'block_fingerprint_match'
+        | 'structure_quote_match'
+        | 'context_match'
+        | 'fuzzy_quote_match';
+    }
+  | {
+      status: 'ambiguous';
+      candidates: ResolvedAnchorCandidate[];
+      reason: string;
+    }
+  | {
+      status: 'stale';
+      reason: string;
+    };
+
+/**
+ * Conservative suggestion operation. Replace/delete carry `expectedText` so
+ * apply can detect drift and trigger the three-way UI.
+ * @see planning/collab/data-model.md §Suggestion Events
+ */
+export type SuggestionOperation =
+  | {
+      kind: 'replace';
+      expectedText: string;
+      replacement: string;
+    }
+  | {
+      kind: 'insert_before';
+      text: string;
+    }
+  | {
+      kind: 'insert_after';
+      text: string;
+    }
+  | {
+      kind: 'delete';
+      expectedText: string;
+    };
+
+/**
+ * Authoring metadata shared by every review event.
+ * @see planning/collab/data-model.md §Review Events
+ */
+export interface EventMeta {
+  v: 2;
+  eventId: EventId;
+  roomId: RoomId;
+  authorId: ParticipantId;
+  deviceId: DeviceId;
+  createdAt: number;
+  parentEventIds: EventId[];
+  snapshotId?: SnapshotId;
+}
+
+/**
+ * Cryptographic authentication trailer on every review event.
+ * @see planning/collab/data-model.md §Review Events
+ */
+export interface EventAuth {
+  signature: string;
+  signingKeyId: string;
+}
+
+/**
+ * Initial room-creation event. Emitted once per room by the owner.
+ * @see planning/collab/data-model.md §Review Events
+ */
+export interface RoomCreatedBody {
+  type: 'room_created';
+  roomId: RoomId;
+  policy: RoomPolicy;
+  createdBy: ParticipantId;
+}
+
+/**
+ * A participant has joined the room.
+ * @see planning/collab/data-model.md §Review Events
+ */
+export interface ParticipantJoinedBody {
+  type: 'participant_joined';
+  participant: Participant;
+  device: Device;
+}
+
+/**
+ * Owner published a new snapshot for a shared document.
+ * @see planning/collab/data-model.md §Snapshot Events
+ */
+export interface SnapshotCreatedBody {
+  type: 'snapshot_created';
+  fileId: FileId;
+  snapshotId: SnapshotId;
+  parentSnapshotId?: SnapshotId;
+  baseHash: ContentHash;
+  encryptedBlobRef?: BlobRef;
+  inlineSnapshot?: {
+    markdown: string;
+    anchorIndex: AnchorIndex;
+  };
+}
+
+/**
+ * A snapshot was superseded by a newer one in the graph.
+ * @see planning/collab/data-model.md §Snapshot Events
+ */
+export interface SnapshotSupersededBody {
+  type: 'snapshot_superseded';
+  fileId: FileId;
+  oldSnapshotId: SnapshotId;
+  newSnapshotId: SnapshotId;
+}
+
+/**
+ * Reviewer or owner created a comment anchored to a snapshot range.
+ * @see planning/collab/data-model.md §Comment Events
+ */
+export interface CommentCreatedBody {
+  type: 'comment_created';
+  threadId: string;
+  anchor: Anchor;
+  body: string;
+}
+
+/**
+ * A comment thread has been resolved.
+ * @see planning/collab/data-model.md §Comment Events
+ */
+export interface CommentResolvedBody {
+  type: 'comment_resolved';
+  threadId: string;
+  resolvedBy: ParticipantId;
+}
+
+/**
+ * Reviewer proposed an edit. Includes `expectedText` for apply-time safety.
+ * @see planning/collab/data-model.md §Suggestion Events
+ */
+export interface SuggestionCreatedBody {
+  type: 'suggestion_created';
+  suggestionId: string;
+  anchor: Anchor;
+  operation: SuggestionOperation;
+  note?: string;
+}
+
+/**
+ * Owner accepted a suggestion. Emitted after the local working copy write.
+ * @see planning/collab/data-model.md §Suggestion Events
+ */
+export interface SuggestionAcceptedBody {
+  type: 'suggestion_accepted';
+  suggestionId: string;
+  appliedRevisionId: string;
+  resultingHash: ContentHash;
+}
+
+/**
+ * Owner rejected a suggestion.
+ * @see planning/collab/data-model.md §Suggestion Events
+ */
+export interface SuggestionRejectedBody {
+  type: 'suggestion_rejected';
+  suggestionId: string;
+  reason?: string;
+}
+
+/**
+ * Owner manually resolved an ambiguous/stale anchor to a current range.
+ * @see planning/collab/data-model.md §Review Events
+ */
+export interface AnchorManuallyResolvedBody {
+  type: 'anchor_manually_resolved';
+  eventId: EventId;
+  range: PositionAnchor;
+  resolvedBy: ParticipantId;
+}
+
+/**
+ * Live-presence heartbeat for the peer strip.
+ * @see planning/collab/data-model.md §Review Events
+ */
+export interface PresenceUpdatedBody {
+  type: 'presence_updated';
+  participantId: ParticipantId;
+  deviceId: DeviceId;
+  online: boolean;
+  cursor?: PositionAnchor;
+}
+
+/**
+ * Live session ended (used to clear presence + close peer strip).
+ * @see planning/collab/data-model.md §Review Events
+ */
+export interface SessionEndedBody {
+  type: 'session_ended';
+  reason?: string;
+}
+
+/**
+ * Discriminated union of every review-event body variant.
+ * @see planning/collab/data-model.md §Review Events
+ */
+export type ReviewEventBody =
+  | RoomCreatedBody
+  | ParticipantJoinedBody
+  | SnapshotCreatedBody
+  | SnapshotSupersededBody
+  | CommentCreatedBody
+  | CommentResolvedBody
+  | SuggestionCreatedBody
+  | SuggestionAcceptedBody
+  | SuggestionRejectedBody
+  | AnchorManuallyResolvedBody
+  | PresenceUpdatedBody
+  | SessionEndedBody;
+
+/**
+ * An append-only review-log entry. Idempotent by `meta.eventId`, signed by
+ * `auth.signingKeyId`.
+ * @see planning/collab/data-model.md §Review Events
+ */
+export interface ReviewEvent {
+  meta: EventMeta;
+  body: ReviewEventBody;
+  auth: EventAuth;
+}
+
+/**
+ * Transport/connection status surfaced to the UI for one room.
+ *
+ * Pushed via `window.__attn__.reviewStatus(...)` from Rust (see
+ * `planning/collab/data-model.md` §Webview IPC Changes).
+ */
+export interface ReviewStatus {
+  roomId: RoomId;
+  mode: RoomPolicy['mode'];
+  connection: 'live_direct' | 'mailbox' | 'offline' | 'direct_failed';
+  peers: ReviewStatusPeer[];
+  outboxPending: number;
+  lastImportedSeq?: number;
+  expiresAt?: number;
+}
+
+/**
+ * Per-peer presence summary used inside `ReviewStatus.peers`.
+ */
+export interface ReviewStatusPeer {
+  participantId: ParticipantId;
+  deviceId: DeviceId;
+  displayName: string;
+  kind: Participant['kind'];
+  online: boolean;
+  onSnapshotId?: SnapshotId;
+}
+
+/**
+ * Snapshot payload pushed via `window.__attn__.reviewSnapshot(...)` when Rust
+ * imports a new snapshot (live DataChannel or mailbox).
+ * @see planning/collab/data-model.md §Snapshot Graph
+ */
+export interface ReviewSnapshot {
+  roomId: RoomId;
+  fileId: FileId;
+  snapshotId: SnapshotId;
+  parentSnapshotId?: SnapshotId;
+  supersedesSnapshotId?: SnapshotId;
+  createdAt: number;
+  createdBy: ParticipantId;
+  baseHash: ContentHash;
+  byteLength: number;
+  markdown?: string;
+  anchorIndex?: AnchorIndex;
+  encryptedBlobRef?: BlobRef;
+}
+
+/**
+ * Per-event anchor-resolution update pushed via
+ * `window.__attn__.reviewAnchorResolution(...)` whenever the local replica
+ * changes (edit, snapshot import, manual reanchor).
+ * @see planning/collab/data-model.md §Anchor Resolution
+ */
+export interface ReviewAnchorResolutionUpdate {
+  roomId: RoomId;
+  fileId: FileId;
+  eventId: EventId;
+  resolved: ResolvedAnchor;
+}

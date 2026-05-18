@@ -839,6 +839,303 @@ New frontend modules:
 - `web/src/lib/prosemirror/review.ts`
 - `web/src/lib/ReviewPanel.svelte`
 
+## Rust Architecture Changes
+
+The current Rust side assumes the app is a local viewer/editor:
+
+- `ipc::AppState` stores only one active `file_path`.
+- `EditSave` writes directly to that path.
+- checkbox toggles rewrite the file by line number.
+- file watcher events only tell the frontend to reload.
+- daemon socket messages are path-oriented.
+- Rust-to-frontend messages are ad hoc `setContent` / `updateContent` calls.
+
+That is workable for a single-user markdown viewer, but it makes collaboration hard because there is no backend concept of:
+
+- document identity separate from path
+- content hash
+- snapshot
+- local revision
+- review room
+- event import/export
+- pending outbox
+- suggestion apply safety
+
+The Rust side should become the owner of durable collaboration state and working-copy mutation. The frontend should own selection, rendering, ProseMirror decorations, and some anchor construction, but it should not be the only place that knows the session/event model.
+
+### New Rust Modules
+
+```text
+src/
+  review/
+    mod.rs
+    ids.rs
+    model.rs
+    crypto.rs
+    store.rs
+    working_copy.rs
+    manager.rs
+    transport.rs
+    apply.rs
+    ipc.rs
+```
+
+Responsibilities:
+
+- `model.rs`: serde types for rooms, participants, snapshots, events, envelopes, cursors.
+- `ids.rs`: typed wrappers for `RoomId`, `FileId`, `SnapshotId`, `EventId`, `DeviceId`.
+- `crypto.rs`: room key derivation, envelope encryption/decryption, signing/verification.
+- `store.rs`: persistent local room store under the attn runtime directory.
+- `working_copy.rs`: path binding, content hashing, snapshot creation, safe writes, local revision recording.
+- `manager.rs`: in-memory room runtime, event import/export, status updates, outbox processing.
+- `transport.rs`: mailbox/WebSocket client traits and implementations.
+- `apply.rs`: suggestion resolution and guarded write flow.
+- `ipc.rs`: typed frontend-facing review commands/events.
+
+### Typed IDs And Hashes
+
+Avoid passing raw strings everywhere in Rust. Use typed newtypes so path ids, snapshot ids, and event ids cannot be mixed accidentally.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RoomId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SnapshotId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EventId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ContentHash(String);
+```
+
+Every file write and snapshot creation should compute `ContentHash` from canonical UTF-8 bytes.
+
+### Working Copy Service
+
+Replace direct `std::fs::write` calls from IPC handlers with a working-copy service.
+
+Current pattern:
+
+```rust
+IpcMessage::EditSave { content } => {
+    std::fs::write(&state.file_path, &content)
+}
+```
+
+Target pattern:
+
+```rust
+WorkingCopyService::save(SaveRequest {
+    path,
+    content,
+    expected_hash,
+    source: SaveSource::UserEdit,
+})
+```
+
+```rust
+pub struct SaveRequest {
+    pub path: PathBuf,
+    pub content: String,
+    pub expected_hash: Option<ContentHash>,
+    pub source: SaveSource,
+}
+
+pub enum SaveSource {
+    UserEdit,
+    CheckboxToggle,
+    AcceptedSuggestion { room_id: RoomId, suggestion_id: EventId },
+}
+
+pub struct SaveResult {
+    pub previous_hash: ContentHash,
+    pub next_hash: ContentHash,
+    pub revision_id: String,
+}
+```
+
+Benefits:
+
+- all writes record a local revision
+- accepted suggestions can emit `SuggestionAccepted`
+- stale writes can be detected before overwriting a changed file
+- file watcher events can distinguish self-writes from external changes
+
+### File Watcher Integration
+
+The watcher should become collaboration-aware. When a watched markdown file changes:
+
+1. compute the new content hash
+2. check whether the change was a known self-write
+3. if self-write, attach it to the existing `LocalRevision`
+4. if external, record `LocalRevision { source: ExternalFileChange }`
+5. notify frontend with both normal content metadata and review replica status
+
+This avoids treating every save as an opaque reload. It gives anchor resolution a revision trail.
+
+### Local Review Store
+
+Rust should persist collaboration state even if the UI is closed.
+
+```text
+runtime_dir/reviews/
+  rooms/<roomId>/
+    room.json
+    participants.json
+    devices.json
+    bindings.json
+    snapshots/<snapshotId>.json
+    events.jsonl
+    outbox.jsonl
+    cursors.json
+    revisions/<fileId>.jsonl
+```
+
+Store rules:
+
+- append events atomically
+- dedupe imported events by `EventId`
+- dedupe uploaded envelopes by `EnvelopeId`
+- write temp file then rename for JSON state
+- keep schema version in every top-level file
+- tolerate missing/corrupt optional files by surfacing room repair UI
+
+This does not need SQLite for v2. JSON plus JSONL is easier to inspect, sync, and debug. Add SQLite only if query patterns demand it.
+
+### Review Manager
+
+`ReviewManager` should be the daemon-owned service that connects working copy, store, UI, and transport.
+
+```rust
+pub struct ReviewManager {
+    store: ReviewStore,
+    working_copy: WorkingCopyService,
+    rooms: HashMap<RoomId, RoomRuntime>,
+}
+
+pub enum ReviewCommand {
+    Share { path: PathBuf, mode: ShareMode, ttl: Option<Duration> },
+    Join { invite: String },
+    Pull { room_id: Option<RoomId> },
+    Stop { room_id: Option<RoomId> },
+    ImportEnvelope { envelope: MailboxEnvelope },
+    CreateComment { room_id: RoomId, anchor: Anchor, body: String },
+    CreateSuggestion { room_id: RoomId, suggestion: SuggestionDraft },
+    AcceptSuggestion { room_id: RoomId, suggestion_id: EventId },
+}
+
+pub enum ReviewUpdate {
+    RoomStatusChanged(RoomStatus),
+    EventImported(ReviewEvent),
+    SnapshotCreated(SnapshotNode),
+    AnchorResolutionChanged(ResolvedAnchorSummary),
+    OutboxChanged(OutboxSummary),
+}
+```
+
+The Tao event loop should receive `UserEvent::ReviewUpdate(...)` and forward it to the frontend through `window.__attn__.reviewEvent(...)` / `reviewStatus(...)`.
+
+### Daemon Socket Commands
+
+The local daemon socket should evolve from "open this path" to "send a typed command to the running daemon."
+
+```rust
+pub enum SocketMessage {
+    Open { path: String },
+    ReviewShare { path: String, mode: String, ttl: Option<String> },
+    ReviewJoin { invite: String },
+    ReviewPull { room_id: Option<String> },
+    ReviewStop { room_id: Option<String> },
+    ReviewInbox,
+    Info,
+}
+```
+
+This makes CLI agents first-class without forcing them through the UI:
+
+```bash
+attn review current --json
+attn review submit-comment comment.json
+attn review submit-suggestion suggestion.json
+attn review inbox --json
+```
+
+### Webview IPC Changes
+
+Frontend-to-Rust messages should be explicit review commands, not generic blobs:
+
+```ts
+{ type: "review_share", path: string, mode: "live" | "async" | "hybrid", ttl?: string }
+{ type: "review_join", invite: string }
+{ type: "review_create_comment", roomId: string, anchor: Anchor, body: string }
+{ type: "review_create_suggestion", roomId: string, draft: SuggestionDraft }
+{ type: "review_accept_suggestion", roomId: string, suggestionId: string }
+{ type: "review_resolve_anchor", roomId: string, eventId: string, range: PositionAnchor }
+```
+
+Rust-to-frontend callbacks:
+
+```ts
+window.__attn__.reviewStatus(status)
+window.__attn__.reviewEvent(event)
+window.__attn__.reviewSnapshot(snapshot)
+window.__attn__.reviewAnchorResolution(update)
+```
+
+### Transport Ownership
+
+The cleanest long-term split:
+
+- Rust owns encryption, event persistence, mailbox sync, snapshot storage, and safe file apply.
+- Frontend owns ProseMirror selection, decorations, and WebRTC capability spike.
+
+If WebRTC works reliably in Wry, the frontend can own the `RTCPeerConnection`, but DataChannel payloads should still be handed to Rust for persistence/import before the UI treats them as durable.
+
+```text
+DataChannel receives encrypted envelope
+  -> frontend forwards envelope to Rust
+  -> Rust decrypts/verifies/imports/dedupes
+  -> Rust emits ReviewUpdate
+  -> frontend renders imported event
+```
+
+If WebRTC does not work reliably in Wry, move transport into Rust later without changing the store/event/apply model.
+
+### App State Shape
+
+`ipc::AppState { file_path }` should become an application model that knows active tab/path plus review state.
+
+```rust
+pub struct AppState {
+    pub active_path: PathBuf,
+    pub active_project_root: PathBuf,
+    pub active_tab_id: Option<String>,
+    pub file_bindings: HashMap<FileId, PathBuf>,
+    pub review_rooms: Vec<RoomId>,
+}
+```
+
+The actual heavy state should live in `ReviewManager`, not in the UI mutex. `AppState` should be routing context.
+
+### Phasing The Rust Work
+
+1. Add typed review model and local store without network.
+2. Route `edit_save` and checkbox toggles through `WorkingCopyService`.
+3. Record local revisions for user edits and external file changes.
+4. Add daemon/socket and IPC review commands.
+5. Add snapshot creation and event import/export.
+6. Add frontend mock UI over Rust-local review state.
+7. Add mailbox transport.
+8. Add WebRTC transport.
+9. Add safe suggestion apply.
+
+This order prevents a common mistake: building networking first, then discovering the local app has nowhere coherent to put the events.
+
 ## CLI Shape
 
 ```bash

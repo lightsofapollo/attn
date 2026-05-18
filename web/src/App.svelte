@@ -10,6 +10,10 @@
     TreeNode,
     InitPayload,
     PlanStructure,
+    ReviewAnchorResolutionUpdate,
+    ReviewEvent,
+    ReviewSnapshot,
+    ReviewStatus,
     SearchResultItem,
     UpdatePayload,
   } from './lib/types';
@@ -1032,6 +1036,22 @@
       },
       resetFontScale() {
         resetGlobalFontScale();
+      },
+      // Review callbacks — no-op stubs today. Real handlers land with the
+      // review store scaffold (attn-nnj.12.10) + Phase 2 wiring. Keeping
+      // these registered lets Rust call window.__attn__.reviewEvent(...)
+      // via evaluate_script without runtime errors.
+      reviewStatus(payload: ReviewStatus) {
+        console.debug('[review]', payload);
+      },
+      reviewEvent(payload: ReviewEvent) {
+        console.debug('[review]', payload);
+      },
+      reviewSnapshot(snapshot: ReviewSnapshot) {
+        console.debug('[review]', snapshot);
+      },
+      reviewAnchorResolution(update: ReviewAnchorResolutionUpdate) {
+        console.debug('[review]', update);
       },
     };
 

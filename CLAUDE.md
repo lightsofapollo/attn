@@ -36,6 +36,21 @@ ATTN_HOME=/tmp/attn-reviewer attn ...
 Each instance gets its own socket, identity, log, and (future) review store.
 Default behavior is unchanged when `ATTN_HOME` is unset.
 
+For automated test scripts, source the dual-instance library:
+
+```bash
+source scripts/lib/dual-instance.sh
+trap stop_dual EXIT
+start_dual
+wait_for_dual 'h1'
+attn_owner    --click 'text=Suggest'
+attn_reviewer --fill '.composer textarea' 'fix the typo'
+count=$(attn_owner --query '.review-thread' | jq '.count')
+```
+
+Each helper prefixes the right `ATTN_HOME` automatically — instances stay isolated.
+Smoke-test via `task test:dual`.
+
 ## Build
 
 ```bash

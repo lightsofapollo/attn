@@ -21,7 +21,20 @@ task dev ATTN_PATH=tests/fixtures/basic.md
 task dev DEV_PORT=5174
 task dev DEV_PORT=auto
 task dev DEV_HOST=0.0.0.0
+ATTN_HOME=/tmp/attn-owner task dev    # honor ATTN_HOME for multi-instance dev (optional)
 ```
+
+## Local collab testing
+
+For running two attn daemons on one machine (owner + reviewer for collab testing):
+
+```bash
+ATTN_HOME=/tmp/attn-owner    task dev ATTN_PATH=plan.md
+ATTN_HOME=/tmp/attn-reviewer attn ...
+```
+
+Each instance gets its own socket, identity, log, and (future) review store.
+Default behavior is unchanged when `ATTN_HOME` is unset.
 
 ## Build
 

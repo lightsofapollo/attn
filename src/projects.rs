@@ -70,6 +70,15 @@ fn registry_path() -> PathBuf {
 }
 
 fn storage_dir() -> PathBuf {
+    // ATTN_HOME wins over XDG_STATE_HOME so the project registry shares the
+    // daemon's runtime namespace (see src/daemon.rs::runtime_dir).
+    if let Ok(value) = std::env::var("ATTN_HOME") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+
     if let Ok(value) = std::env::var("XDG_STATE_HOME") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {

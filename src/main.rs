@@ -6,6 +6,7 @@ mod ipc;
 mod markdown;
 mod platform;
 mod projects;
+mod review;
 #[cfg(all(debug_assertions, target_os = "macos"))]
 mod screenshot;
 mod watcher;

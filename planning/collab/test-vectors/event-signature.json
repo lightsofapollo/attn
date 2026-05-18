@@ -1,0 +1,47 @@
+{
+  "_schema": {
+    "spec": "planning/collab/crypto-spec.md#signatures",
+    "purpose": "Pin Ed25519 signing of canonical JSON over (eventMeta || eventBody). Auth is NEVER part of signed bytes.",
+    "format": {
+      "version": "Integer corpus version.",
+      "vectors[].name": "Human label.",
+      "vectors[].signingKey.private": "base64url-no-pad of the 32-byte Ed25519 seed (NOT expanded secret key).",
+      "vectors[].signingKey.public": "base64url-no-pad of the 32-byte Ed25519 public key derived from `private`.",
+      "vectors[].event.meta": "Object: { v, eventId?, roomId, authorId, deviceId, createdAt:int-ms, parentEventIds:[sorted], snapshotId? (omit if absent) }.",
+      "vectors[].event.body": "Object: ReviewEventBody. Shape is event-kind-specific; treat as opaque JSON for signing.",
+      "vectors[].expected.canonicalSignedBytes": "UTF-8 string: canonicalJSON({meta, body}). Useful to debug divergence before the signature step.",
+      "vectors[].expected.signature": "base64url-no-pad of the 64-byte Ed25519 signature.",
+      "vectors[].expected.signingKeyId": "base64url-no-pad of SHA-256(publicSigningKey). Lives in `auth.signingKeyId`."
+    },
+    "filledBy": "attn-nnj.1.6 (Ed25519 sign/verify wrapper)"
+  },
+  "version": 1,
+  "vectors": [
+    {
+      "name": "minimal comment event with no parents and no snapshot",
+      "signingKey": {
+        "private": "__PENDING__",
+        "public": "__PENDING__"
+      },
+      "event": {
+        "meta": {
+          "v": 2,
+          "roomId": "__PENDING_ROOM_ID__",
+          "authorId": "__PENDING_AUTHOR_ID__",
+          "deviceId": "__PENDING_DEVICE_ID__",
+          "createdAt": 1700000000000,
+          "parentEventIds": []
+        },
+        "body": {
+          "kind": "comment",
+          "text": "hello"
+        }
+      },
+      "expected": {
+        "canonicalSignedBytes": "__PENDING__",
+        "signature": "__PENDING__",
+        "signingKeyId": "__PENDING__"
+      }
+    }
+  ]
+}

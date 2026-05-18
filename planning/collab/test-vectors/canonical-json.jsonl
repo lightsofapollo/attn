@@ -1,0 +1,7 @@
+{"_schema":{"spec":"planning/collab/crypto-spec.md#canonical-json-rfc-8785-jcs","purpose":"Pin canonical JSON serialization across Rust and TS.","format":"Newline-delimited JSON. Each line is either this schema object (first line only) OR a vector object: {\"name\": str, \"input\": <any>, \"canonical\": <utf8 string>}. The `canonical` field is the EXACT byte sequence the implementation must produce when serializing `input`.","rules":["Object keys sorted ASCII-ascending","No insignificant whitespace","UTF-8 no BOM","Numbers per ECMA-404 + IEEE 754 round-trip; in signed payloads we restrict to integers","null is `null`; absent fields are OMITTED (never serialized as null)","String escapes minimal: only control chars, `\\\"`, and `\\\\`"],"filledBy":"attn-nnj.1.3 (Canonical JSON helper)"}}
+{"name":"nested object with sorted keys","input":{"b":2,"a":{"y":[3,2,1],"x":"hi"}},"canonical":"__PENDING__"}
+{"name":"unicode strings (BMP + surrogate-pair)","input":{"emoji":"😀","greek":"αβγ"},"canonical":"__PENDING__"}
+{"name":"integer numbers and arrays","input":{"counts":[0,1,9007199254740991,-1]},"canonical":"__PENDING__"}
+{"name":"omitted-null vs explicit-null (omitted field MUST disappear)","input":{"snapshotId":null,"present":"yes"},"canonical":"__PENDING__"}
+{"name":"empty containers","input":{"obj":{},"arr":[]},"canonical":"__PENDING__"}
+{"name":"string escaping (control chars + quote + backslash)","input":{"s":"line1\nline2\t\"quoted\"\\back"},"canonical":"__PENDING__"}

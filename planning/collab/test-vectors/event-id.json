@@ -1,0 +1,66 @@
+{
+  "_schema": {
+    "spec": "planning/collab/crypto-spec.md#eventid",
+    "purpose": "Pin EventId derivation: base64url(SHA-256(canonicalJSON({meta-without-eventId, body}))).",
+    "format": {
+      "version": "Integer corpus version.",
+      "vectors[].name": "Human label.",
+      "vectors[].event.meta": "Object WITHOUT `eventId` (the ID is computed FROM these bytes).",
+      "vectors[].event.body": "ReviewEventBody.",
+      "vectors[].expected.canonicalBytes": "UTF-8 string fed into SHA-256.",
+      "vectors[].expected.eventId": "base64url-no-pad of the full 32-byte SHA-256 digest (per spec, EventId uses the full digest, unlike EnvelopeId which truncates to 16 bytes)."
+    },
+    "rules": [
+      "`parentEventIds` MUST be sorted ASCII-ascending before hashing.",
+      "`snapshotId` is OMITTED entirely if absent (never serialized as null).",
+      "`meta.eventId` is NOT included in the bytes that produce eventId; it is added to meta AFTER computation for transmission."
+    ],
+    "filledBy": "attn-nnj.1.8 (ID helpers)"
+  },
+  "version": 1,
+  "vectors": [
+    {
+      "name": "root event (no parents, no snapshot)",
+      "event": {
+        "meta": {
+          "v": 2,
+          "roomId": "__PENDING_ROOM_ID__",
+          "authorId": "__PENDING_AUTHOR_ID__",
+          "deviceId": "__PENDING_DEVICE_ID__",
+          "createdAt": 1700000000000,
+          "parentEventIds": []
+        },
+        "body": {
+          "kind": "comment",
+          "text": "hello"
+        }
+      },
+      "expected": {
+        "canonicalBytes": "__PENDING__",
+        "eventId": "__PENDING__"
+      }
+    },
+    {
+      "name": "child event with unsorted parents (must be sorted before hashing)",
+      "event": {
+        "meta": {
+          "v": 2,
+          "roomId": "__PENDING_ROOM_ID__",
+          "authorId": "__PENDING_AUTHOR_ID__",
+          "deviceId": "__PENDING_DEVICE_ID__",
+          "createdAt": 1700000001000,
+          "parentEventIds": ["zzz_PENDING__", "aaa_PENDING__"],
+          "snapshotId": "__PENDING_SNAPSHOT_ID__"
+        },
+        "body": {
+          "kind": "comment",
+          "text": "child"
+        }
+      },
+      "expected": {
+        "canonicalBytes": "__PENDING__",
+        "eventId": "__PENDING__"
+      }
+    }
+  ]
+}

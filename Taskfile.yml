@@ -88,6 +88,11 @@ tasks:
     cmds:
       - scripts/test-review-e2e.sh
 
+  test:dual:
+    desc: Smoke-test the dual-instance E2E harness (owner + reviewer via ATTN_HOME)
+    cmds:
+      - scripts/test-dual-instance-smoke.sh
+
   check:size:
     desc: Build release and verify the binary stays under the 25 MiB collab v2 budget (see planning/collab/amendments.md §Decision #1).
     cmds:

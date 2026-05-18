@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { EditorState } from 'prosemirror-state';
-  import { EditorView, type NodeView } from 'prosemirror-view';
+  import { EditorState, type Plugin } from 'prosemirror-state';
+  import { EditorView, type NodeView, type NodeViewConstructor } from 'prosemirror-view';
   import { Node as PmNode } from 'prosemirror-model';
   import {
     SearchQuery,
@@ -31,6 +31,17 @@
     onLinkNavigate?: (href: string) => void;
     onCheckboxToggle?: (md: string) => void;
     onDirtyChange?: (dirty: boolean) => void;
+    /**
+     * Extra ProseMirror plugins appended AFTER the built-in plugins.
+     * Built-ins (history, search, code-highlight, tables, keymaps) load first
+     * so injected plugins can see their decorations and state.
+     */
+    plugins?: Plugin[];
+    /**
+     * Extra nodeViews merged on top of the built-in nodeViews. Injected
+     * entries win on key collision so callers can override built-ins.
+     */
+    nodeViews?: Record<string, NodeViewConstructor>;
   }
 
   let {
@@ -41,6 +52,8 @@
     onLinkNavigate,
     onCheckboxToggle,
     onDirtyChange,
+    plugins: extraPlugins,
+    nodeViews: extraNodeViews,
   }: Props = $props();
   let editorEl: HTMLElement | undefined = $state(undefined);
   let view: EditorView | undefined;
@@ -183,7 +196,27 @@
       }),
       keymap(baseKeymap),
     );
+    // Injected plugins from $props append AFTER built-ins so they observe
+    // built-in decorations (e.g. review-decorations layered over code-highlight).
+    if (extraPlugins && extraPlugins.length > 0) {
+      plugins.push(...extraPlugins);
+    }
     return plugins;
+  }
+
+  function buildNodeViews(): Record<string, NodeViewConstructor> {
+    const builtIn: Record<string, NodeViewConstructor> = {
+      task_list_item: taskListItemNodeView,
+      code_block(node, editorView, getPos) {
+        const mermaid = mermaidNodeView(node, editorView, getPos);
+        if (mermaid) return mermaid;
+        const math = mathNodeView(node, editorView, getPos);
+        if (math) return math;
+        return codeBlockNodeView(node, editorView, getPos);
+      },
+    };
+    // Injected nodeViews win on key collision — caller can override built-ins.
+    return extraNodeViews ? { ...builtIn, ...extraNodeViews } : builtIn;
   }
 
   // Custom NodeView for task_list_item — makes checkbox clickable
@@ -472,16 +505,7 @@
           setDirty(true);
         }
       },
-      nodeViews: {
-        task_list_item: taskListItemNodeView,
-        code_block(node, editorView, getPos) {
-          const mermaid = mermaidNodeView(node, editorView, getPos);
-          if (mermaid) return mermaid;
-          const math = mathNodeView(node, editorView, getPos);
-          if (math) return math;
-          return codeBlockNodeView(node, editorView, getPos);
-        },
-      },
+      nodeViews: buildNodeViews(),
     });
     lastMarkdown = markdown;
     setDirty(false);
@@ -520,6 +544,18 @@
     if (view) {
       view.setProps({ editable: () => editable });
     }
+  });
+
+  // React to injected plugins/nodeViews changing at runtime. Built-ins always
+  // load first via buildPlugins(); nodeViews via buildNodeViews().
+  $effect(() => {
+    // Touch the reactive props so Svelte tracks them.
+    void extraPlugins;
+    void extraNodeViews;
+    if (!view) return;
+    const nextState = view.state.reconfigure({ plugins: buildPlugins(lastMarkdown) });
+    view.updateState(nextState);
+    view.setProps({ nodeViews: buildNodeViews() });
   });
 </script>
 

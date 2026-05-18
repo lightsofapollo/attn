@@ -54,6 +54,36 @@
   /* Paper-specific */
   --grain-opacity: 0.035;
   --blockquote-bar: oklch(0.44 0.012 65 / 48%);
+
+  /* ----- Review surfaces (Phase 0c) -----
+     Inline decoration backgrounds, panel chrome, peer avatars,
+     and confidence/stale states for collaboration overlays. */
+
+  /* Inline anchor tints — sit behind running text, must stay subtle. */
+  --comment-highlight: oklch(0.82 0.12 85 / 22%);
+  --suggestion-bg: oklch(0.78 0.13 150 / 18%);
+  --suggestion-deletion: oklch(0.55 0.20 27 / 22%);
+
+  /* Confidence ramp — same warm-accent hue, descending presence. */
+  --confidence-high: oklch(0.62 0.16 35 / 42%);
+  --confidence-med: oklch(0.66 0.12 45 / 26%);
+  --confidence-low: oklch(0.70 0.06 55 / 14%);
+
+  /* "Moved" badge pill — muted neutral on warm background. */
+  --moved-badge-bg: oklch(0.78 0.04 65);
+  --moved-badge-fg: oklch(0.22 0.012 55);
+
+  /* Right-rail review panel chrome. */
+  --panel-surface: oklch(0.92 0.010 76);
+  --panel-border: oklch(0.14 0.008 55 / 14%);
+
+  /* Peer avatar accents — owner uses primary, reviewer cool, agent distinct violet. */
+  --peer-avatar-bg-owner: oklch(0.62 0.14 32);
+  --peer-avatar-bg-reviewer: oklch(0.58 0.11 235);
+  --peer-avatar-bg-agent: oklch(0.60 0.13 295);
+
+  /* Stale anchor — dimmed/desaturated foreground. */
+  --stale-anchor-fg: oklch(0.55 0.008 55 / 65%);
 }
 
 /* ============================================
@@ -104,6 +134,36 @@
   /* Ink-specific */
   --grain-opacity: 0.02;
   --blockquote-bar: oklch(0.55 0.008 250 / 40%);
+
+  /* ----- Review surfaces (Phase 0c) -----
+     Dark-mode counterparts: brighter chroma at lower alpha so tints
+     remain visible against the deep editor background. */
+
+  /* Inline anchor tints. */
+  --comment-highlight: oklch(0.78 0.14 88 / 18%);
+  --suggestion-bg: oklch(0.72 0.16 152 / 16%);
+  --suggestion-deletion: oklch(0.65 0.18 22 / 22%);
+
+  /* Confidence ramp — cool steel hue to match dark primary. */
+  --confidence-high: oklch(0.74 0.12 218 / 40%);
+  --confidence-med: oklch(0.70 0.08 225 / 24%);
+  --confidence-low: oklch(0.66 0.04 240 / 14%);
+
+  /* "Moved" badge pill. */
+  --moved-badge-bg: oklch(0.30 0.012 250);
+  --moved-badge-fg: oklch(0.88 0.008 250);
+
+  /* Right-rail review panel chrome. */
+  --panel-surface: oklch(0.175 0.006 260);
+  --panel-border: oklch(1 0 0 / 8%);
+
+  /* Peer avatar accents. */
+  --peer-avatar-bg-owner: oklch(0.62 0.12 32);
+  --peer-avatar-bg-reviewer: oklch(0.62 0.10 230);
+  --peer-avatar-bg-agent: oklch(0.62 0.12 295);
+
+  /* Stale anchor. */
+  --stale-anchor-fg: oklch(0.60 0.010 250 / 60%);
 }
 
 @theme inline {
@@ -662,6 +722,63 @@
     font-size: 0.63rem;
     line-height: 1.3;
     color: color-mix(in oklch, var(--sidebar-foreground) 74%, transparent);
+  }
+
+  /* ----- Review surface utility classes (Phase 0c) -----
+     Minimal hooks so Phase 2 decoration plugin + comment components
+     have stable selectors. Visual rules stay var-driven. */
+
+  .attn-review-comment {
+    background-color: var(--comment-highlight);
+    border-radius: 2px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+
+  .attn-review-suggestion {
+    background-color: var(--suggestion-bg);
+    border-radius: 2px;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+  }
+
+  .attn-review-suggestion--deletion {
+    background-color: var(--suggestion-deletion);
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
+  }
+
+  .attn-review-confidence--high {
+    background-color: var(--confidence-high);
+  }
+
+  .attn-review-confidence--med {
+    background-color: var(--confidence-med);
+  }
+
+  .attn-review-confidence--low {
+    background-color: var(--confidence-low);
+  }
+
+  .attn-review-stale {
+    color: var(--stale-anchor-fg);
+    text-decoration: underline dotted;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+  }
+
+  .attn-moved-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--moved-badge-bg);
+    color: var(--moved-badge-fg);
+    font-size: 0.68rem;
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: 0.02em;
   }
 
 }

@@ -153,6 +153,17 @@ Test fixtures are in `tests/fixtures/`:
 - `basic.md` — headings, checkboxes, code block, table, blockquote
 - `typography.md` — all heading levels, nested lists, text formatting
 - `nested/child.md` — subdirectory file for tree/breadcrumb testing
+- `review/scenario-comment-survives-edit.{md,json}` — canvas + scripted mock-IPC scenario consumed by the review E2E suite
+
+Run the review-surface E2E suite (shape-only assertions today; isolated `ATTN_HOME`):
+
+```bash
+task test:review
+# or directly:
+scripts/test-review-e2e.sh
+```
+
+This runs under `ATTN_HOME=/tmp/attn-review-e2e` so it does not touch the user's normal daemon state, loads a scripted scenario from `tests/fixtures/review/`, and asserts the shape of the review surfaces (right-rail slot, `window.__attn__` review callbacks). Assertions that depend on not-yet-merged Phase 0c work print `PEND` instead of `FAIL` and flip to hard asserts as those issues land.
 
 ### Manual testing workflow
 

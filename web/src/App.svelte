@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import type {
     AppMode,
     ContentPayload,
@@ -50,6 +51,17 @@
     markdownSourceUrl,
   } from './lib/markdown-layer';
 
+  interface Props {
+    /**
+     * Optional snippet rendered into the right-rail slot. When omitted the
+     * rail mounts a neutral placeholder (no review session is active).
+     * Phase 2 (attn-nnj.4.3) drops `<ReviewPanel>` in here.
+     */
+    rightRail?: Snippet;
+  }
+
+  let { rightRail }: Props = $props();
+
   let mode: AppMode = $state('edit');
   let commandPaletteOpen = $state(false);
   let shortcutsOpen = $state(false);
@@ -94,6 +106,11 @@
   let sidebarSearchResults: SearchResultItem[] = $state([]);
   let commandPaletteSearchQuery = $state('');
   let commandPaletteSearchResults: SearchResultItem[] = $state([]);
+
+  // Right-rail (Phase 2 ReviewPanel mount point). Default collapsed; no review
+  // session is active yet, so the slot renders a neutral placeholder. Toggling
+  // shortcut (Cmd+J) is wired here as a placeholder until 12.9 owns it.
+  let rightRailOpen = $state(false);
 
   function emptyPlanStructure(): PlanStructure {
     return { phases: [], tasks: [], file_refs: [] };
@@ -1106,6 +1123,23 @@
     if (shortcutsOpen) commandPaletteOpen = false;
   }
 
+  function isRightRailHotkey(e: KeyboardEvent): boolean {
+    if (e.repeat) return false;
+    const meta = e.metaKey || e.ctrlKey;
+    if (!meta) return false;
+    if (e.altKey || e.shiftKey) return false;
+    return e.key === 'j' || e.key === 'J' || e.code === 'KeyJ';
+  }
+
+  // Placeholder shortcut for the right-rail toggle. Real wiring (with proper
+  // help text, focus management, and review-mode gating) lands in 12.9.
+  function handleGlobalRightRailHotkey(e: KeyboardEvent): void {
+    if (!isRightRailHotkey(e)) return;
+    if (isEditableShortcutTarget(e.target)) return;
+    e.preventDefault();
+    rightRailOpen = !rightRailOpen;
+  }
+
   // Handle sidebar navigation events
   function handleSidebarNavigate(path: string, newTab: boolean): void {
     openPath(path, undefined, newTab);
@@ -1291,6 +1325,19 @@
   </ScrollArea>
 {/snippet}
 
+{#snippet rightRailPlaceholder()}
+  <!--
+    Placeholder content for the right-rail slot. Phase 2 (attn-nnj.4.3) will
+    swap this for `<ReviewPanel>`. Keeping this neutral lets us validate the
+    layout (width, transitions, no chrome shift) before the review domain
+    lands.
+  -->
+  <div class="right-rail-placeholder flex h-full flex-col gap-2 p-3 text-xs text-muted-foreground">
+    <p class="text-sm font-medium text-foreground">Right rail</p>
+    <p>No review session active.</p>
+  </div>
+{/snippet}
+
 {#snippet minimalDiagnosticContent()}
   <div class="flex-1 overflow-auto px-4 py-3 font-mono text-xs leading-5 text-foreground">
     <p class="mb-2 font-semibold">Diagnostic mode: minimal</p>
@@ -1367,8 +1414,25 @@
       onSearchQuery={handleSidebarSearchQuery}
       onOutlineNavigate={handleOutlineNavigate}
     />
-    <SidebarInset class="flex flex-col overflow-hidden">
-      {@render mainContent()}
+    <SidebarInset class="!flex-row overflow-hidden">
+      <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {@render mainContent()}
+      </div>
+      <aside
+        class="right-rail flex h-full shrink-0 flex-col overflow-hidden border-l border-border bg-background transition-[width] duration-200 ease-linear"
+        style="width: {rightRailOpen ? '360px' : '0px'};"
+        data-state={rightRailOpen ? 'open' : 'closed'}
+        data-slot="right-rail"
+        aria-hidden={!rightRailOpen}
+      >
+        {#if rightRailOpen}
+          {#if rightRail}
+            {@render rightRail()}
+          {:else}
+            {@render rightRailPlaceholder()}
+          {/if}
+        {/if}
+      </aside>
     </SidebarInset>
   </SidebarProvider>
 {:else}
@@ -1385,7 +1449,7 @@
   </main>
 {/if}
 
-<svelte:window onkeydown={handleGlobalShortcutsHelpHotkey} />
+<svelte:window onkeydown={(e) => { handleGlobalShortcutsHelpHotkey(e); handleGlobalRightRailHotkey(e); }} />
 <KeyboardShortcutsDialog bind:open={shortcutsOpen} />
 <CommandPalette
   bind:open={commandPaletteOpen}

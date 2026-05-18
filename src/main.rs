@@ -344,6 +344,42 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     .body(page_html_bytes.clone().into())
                     .unwrap();
             }
+
+            // Route `attn://review/<roomId>...` (optionally with `#key=...`)
+            // BEFORE the file-serving fallthrough — per
+            // planning/collab/amendments.md §Custom `attn://` scheme handler.
+            // The fragment is preserved end-to-end because the future crypto
+            // layer (issue 2.8) derives the room key from it. Fragments never
+            // cross the network — wry delivers the full URL in-process.
+            if let Some(invite) = parse_review_invite(&uri) {
+                daemon::dispatch_review_join(&invite);
+                let body = REVIEW_JOIN_ACK_HTML.as_bytes().to_vec();
+                return wry::http::Response::builder()
+                    .status(200)
+                    .header("Content-Type", "text/html; charset=utf-8")
+                    .body(body.into())
+                    .unwrap();
+            }
+
+            // `attn://localhost/review/...` is reserved (collides with the
+            // invite path-prefix convention). Refuse explicitly so a
+            // misconfigured client cannot smuggle a file-serve request that
+            // looks like an invite or vice versa.
+            if is_reserved_localhost_review(&uri) {
+                eprintln!(
+                    "attn: refusing reserved attn://localhost/review/... path: {uri}"
+                );
+                return wry::http::Response::builder()
+                    .status(404)
+                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .body(
+                        b"attn://localhost/review/... is reserved; use attn://review/..."
+                            .to_vec()
+                            .into(),
+                    )
+                    .unwrap();
+            }
+
             // URI format: attn://localhost/absolute/path/to/file
             let path = uri
                 .strip_prefix("attn://localhost")
@@ -1167,6 +1203,46 @@ if (!window.__attn_js_bridge_installed__) {
     }
 }
 
+/// Minimal HTML response body returned after a successful `attn://review/...`
+/// match. The user normally never sees this — the wry webview consumes it
+/// silently while the daemon kicks off the join — but a tiny human-readable
+/// page makes the route easy to confirm via `--eval` or devtools during
+/// development.
+const REVIEW_JOIN_ACK_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>Joining review</title><p>Joining review room…</p>";
+
+/// Parse an `attn://review/...` invite URI.
+///
+/// Returns the full original URI (including any `#key=...` fragment) when
+/// the input is a review invite, otherwise `None`. We return the *original*
+/// string rather than a parsed struct because the crypto layer (issue 2.8)
+/// is the authoritative parser — here we only need to detect the route and
+/// hand the full invite payload off intact.
+///
+/// Matches:
+/// - `attn://review/<roomId>`
+/// - `attn://review/<roomId>/...`
+/// - `attn://review/<roomId>#key=...`
+/// - `attn://review` (empty room id — let the join layer reject it)
+fn parse_review_invite(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("attn://review")?;
+    // The next character (if any) must be a path or fragment separator.
+    // This guards against false positives like `attn://reviewable/...`.
+    match rest.chars().next() {
+        None | Some('/') | Some('#') | Some('?') => Some(uri.to_string()),
+        _ => None,
+    }
+}
+
+/// True if the URI targets the reserved `attn://localhost/review/...` path
+/// prefix. We refuse these explicitly to prevent the file-serving fallthrough
+/// from accidentally serving paths that look like invite URLs.
+fn is_reserved_localhost_review(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("attn://localhost/review") else {
+        return false;
+    };
+    matches!(rest.chars().next(), None | Some('/') | Some('#') | Some('?'))
+}
+
 fn mime_from_extension(path: &std::path::Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
         Some("png") => "image/png",
@@ -1205,4 +1281,74 @@ fn build_page_html(init_payload_json: &str, theme: &str) -> String {
         .replace("<!-- INIT_SCRIPT -->", &init_script)
         .replace("data-theme=\"system\"", &format!("data-theme=\"{theme}\""))
         .replace("data-theme=\"light\"", &format!("data-theme=\"{theme}\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_review_invite_matches_basic_room() {
+        let uri = "attn://review/abc123";
+        assert_eq!(parse_review_invite(uri), Some(uri.to_string()));
+    }
+
+    #[test]
+    fn parse_review_invite_matches_with_path_and_fragment() {
+        let uri = "attn://review/abc123/extra#key=xyz";
+        assert_eq!(parse_review_invite(uri), Some(uri.to_string()));
+    }
+
+    #[test]
+    fn parse_review_invite_matches_bare_review() {
+        // Empty room id is left to the join layer to reject; the router
+        // still recognizes the prefix.
+        let uri = "attn://review";
+        assert_eq!(parse_review_invite(uri), Some(uri.to_string()));
+        let uri = "attn://review/";
+        assert_eq!(parse_review_invite(uri), Some(uri.to_string()));
+    }
+
+    #[test]
+    fn parse_review_invite_preserves_fragment_for_crypto_layer() {
+        // The fragment must round-trip verbatim — it carries the room key
+        // that issue 2.8's crypto layer derives from.
+        let uri = "attn://review/room42#key=AAAA-BBBB-CCCC";
+        let invite = parse_review_invite(uri).expect("invite recognized");
+        assert!(invite.contains("#key=AAAA-BBBB-CCCC"));
+    }
+
+    #[test]
+    fn parse_review_invite_rejects_lookalike_hosts() {
+        // Must not match attn://reviewable/..., attn://review-foo/..., etc.
+        assert_eq!(parse_review_invite("attn://reviewable/abc"), None);
+        assert_eq!(parse_review_invite("attn://review-foo/abc"), None);
+        assert_eq!(parse_review_invite("attn://reviews/abc"), None);
+    }
+
+    #[test]
+    fn parse_review_invite_rejects_non_review_uris() {
+        assert_eq!(parse_review_invite("attn://app/"), None);
+        assert_eq!(parse_review_invite("attn://localhost/foo.png"), None);
+        assert_eq!(parse_review_invite("https://review/abc"), None);
+    }
+
+    #[test]
+    fn reserved_localhost_review_detects_collision() {
+        assert!(is_reserved_localhost_review("attn://localhost/review"));
+        assert!(is_reserved_localhost_review("attn://localhost/review/"));
+        assert!(is_reserved_localhost_review(
+            "attn://localhost/review/abc#key=xyz"
+        ));
+    }
+
+    #[test]
+    fn reserved_localhost_review_ignores_unrelated_paths() {
+        assert!(!is_reserved_localhost_review("attn://localhost/foo.png"));
+        assert!(!is_reserved_localhost_review("attn://localhost/reviews"));
+        assert!(!is_reserved_localhost_review(
+            "attn://localhost/reviewable/abc"
+        ));
+        assert!(!is_reserved_localhost_review("attn://review/abc"));
+    }
 }

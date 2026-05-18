@@ -73,6 +73,16 @@ pub enum SocketMessage {
     #[cfg(debug_assertions)]
     #[serde(rename = "interact")]
     Interact(InteractAction),
+    /// Join a review room via an `attn://review/<roomId>#key=...` invite URL.
+    ///
+    /// The `invite` string is the full invite URI including any `#key=...`
+    /// fragment. The fragment is intentionally preserved because the future
+    /// crypto layer (issue 2.8 / Phase 6) derives the room key from it.
+    /// The fragment never crosses the network — this socket is local to the
+    /// machine, and the wry custom-scheme handler delivers the full URL
+    /// (fragment included) in-process.
+    #[serde(rename = "review_join")]
+    ReviewJoin { invite: String },
 }
 
 /// Response sent from daemon back to client.
@@ -316,6 +326,24 @@ pub fn send_interact(action: InteractAction) -> Result<InteractResult> {
     }
 }
 
+/// Send a `ReviewJoin` command to the running daemon.
+///
+/// Used by future CLI entry points (e.g. a macOS URL handler that re-execs
+/// `attn` with the invite URI). Returns Ok(()) if the daemon accepted the
+/// invite or an error otherwise. Real join behavior is wired in issue 2.8.
+#[allow(dead_code)]
+pub fn send_review_join(invite: &str) -> Result<()> {
+    let msg = SocketMessage::ReviewJoin {
+        invite: invite.to_string(),
+    };
+    match send_command(&msg)? {
+        Some(SocketResponse::Ok) => Ok(()),
+        Some(SocketResponse::Error { message }) => bail!("review_join failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
 /// Send a command to the daemon and read the response.
 /// Returns None if no daemon is running.
 fn send_command(msg: &SocketMessage) -> Result<Option<SocketResponse>> {
@@ -432,6 +460,29 @@ pub fn maybe_fork(no_fork: bool) -> Result<()> {
             }
         }
     }
+}
+
+/// Log a `ReviewJoin` invite for the stub join handler.
+///
+/// Shared by both the socket-message dispatch in `handle_client` and the
+/// in-process custom-protocol handler in `main.rs`, so the routing surface
+/// behaves identically regardless of whether the invite arrives via the
+/// `attn://review/...` URL scheme (clicked in the OS) or a future
+/// `SocketMessage::ReviewJoin` from another process.
+///
+/// Real `ReviewManager` wiring lands in issue 2.8.
+pub fn log_review_join_intent(invite: &str) {
+    eprintln!("attn: review_join invite received (stub, manager wiring pending): {invite}");
+}
+
+/// Dispatch a `ReviewJoin` from the in-process custom-protocol handler.
+///
+/// Equivalent to receiving a `SocketMessage::ReviewJoin` over the unix
+/// socket, but avoids a socket round-trip when the handler is already
+/// running inside the daemon process. The `invite` must be the full
+/// invite URI including any `#key=...` fragment.
+pub fn dispatch_review_join(invite: &str) {
+    log_review_join_intent(invite);
 }
 
 /// Start listening on the unix socket. Spawns a thread that accepts connections
@@ -569,6 +620,18 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
             Ok(SocketMessage::Interact(action)) => {
                 let result = execute_interact(&action, proxy);
                 let resp = SocketResponse::Interact(result);
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::ReviewJoin { invite }) => {
+                // Stub: real ReviewManager wiring lands in issue 2.8 (bootstrap
+                // in 3b-6). For now, log the invite so we can confirm routing
+                // works end-to-end (custom protocol -> socket -> daemon).
+                log_review_join_intent(&invite);
+                let resp = SocketResponse::Ok;
                 let _ = writeln!(
                     stream,
                     "{}",

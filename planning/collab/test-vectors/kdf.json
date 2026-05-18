@@ -1,0 +1,46 @@
+{
+  "_schema": {
+    "spec": "planning/collab/crypto-spec.md#key-derivation",
+    "purpose": "Pin the room-key derivation (roomSecret -> roomId + 5 subkeys) so Rust and TS implementations agree byte-for-byte.",
+    "format": {
+      "version": "Integer, current corpus version. Bump on breaking layout changes.",
+      "vectors": "Array of independent KDF derivations. Each entry is self-contained.",
+      "vectors[].name": "Human-readable label for the case.",
+      "vectors[].roomSecret": "Input: base64url-no-pad encoding of the 32-byte room secret (CSPRNG output).",
+      "vectors[].expected.roomId": "base64url-no-pad of first 16 bytes of SHA-256(\"attn room v2\" || roomSecret).",
+      "vectors[].expected.rootKey": "base64url-no-pad of HKDF-SHA-256(IKM=roomSecret, salt=empty, info=\"attn room root v2\", L=32).",
+      "vectors[].expected.eventKey": "base64url-no-pad of HKDF-SHA-256(IKM=rootKey, salt=empty, info=\"attn event encryption v2\", L=32).",
+      "vectors[].expected.snapshotKey": "base64url-no-pad of HKDF-SHA-256(IKM=rootKey, salt=empty, info=\"attn snapshot encryption v2\", L=32).",
+      "vectors[].expected.signalingKey": "base64url-no-pad of HKDF-SHA-256(IKM=rootKey, salt=empty, info=\"attn signaling encryption v2\", L=32).",
+      "vectors[].expected.admissionKey": "base64url-no-pad of HKDF-SHA-256(IKM=rootKey, salt=empty, info=\"attn relay admission v2\", L=32)."
+    },
+    "filledBy": "attn-nnj.1.4 (HKDF wrapper + room key derivation)"
+  },
+  "version": 1,
+  "vectors": [
+    {
+      "name": "all-zero roomSecret",
+      "roomSecret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "expected": {
+        "roomId": "__PENDING__",
+        "rootKey": "__PENDING__",
+        "eventKey": "__PENDING__",
+        "snapshotKey": "__PENDING__",
+        "signalingKey": "__PENDING__",
+        "admissionKey": "__PENDING__"
+      }
+    },
+    {
+      "name": "random fixed roomSecret #1",
+      "roomSecret": "__PENDING__",
+      "expected": {
+        "roomId": "__PENDING__",
+        "rootKey": "__PENDING__",
+        "eventKey": "__PENDING__",
+        "snapshotKey": "__PENDING__",
+        "signalingKey": "__PENDING__",
+        "admissionKey": "__PENDING__"
+      }
+    }
+  ]
+}

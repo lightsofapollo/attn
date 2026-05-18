@@ -1,0 +1,45 @@
+{
+  "_schema": {
+    "spec": "planning/collab/crypto-spec.md#envelope-encryption-aead",
+    "purpose": "Pin XChaCha20-Poly1305 seal/open with explicit AAD so two implementations interoperate.",
+    "format": {
+      "version": "Integer corpus version.",
+      "vectors[].name": "Human label.",
+      "vectors[].key": "base64url-no-pad of the 32-byte AEAD key (either eventKey or snapshotKey, see `keyKind`).",
+      "vectors[].keyKind": "Which logical key this represents: \"eventKey\" | \"snapshotKey\" | \"signalingKey\".",
+      "vectors[].nonce": "base64url-no-pad of the 24-byte XChaCha20 nonce.",
+      "vectors[].plaintext": "base64url-no-pad of the plaintext bytes (typically canonical JSON of a ReviewEvent or snapshot bytes).",
+      "vectors[].aad": "base64url-no-pad of the associated-data bytes (canonical JSON of envelope metadata block — see spec).",
+      "vectors[].expected.ciphertext": "base64url-no-pad of the AEAD output (ciphertext || 16-byte Poly1305 tag, per RustCrypto convention).",
+      "vectors[].expected.aadAsJson": "Optional convenience: the UTF-8 JSON view of `aad` for human inspection."
+    },
+    "filledBy": "attn-nnj.1.5 (AEAD wrapper)"
+  },
+  "version": 1,
+  "vectors": [
+    {
+      "name": "tiny event encrypted with eventKey",
+      "keyKind": "eventKey",
+      "key": "__PENDING__",
+      "nonce": "__PENDING__",
+      "plaintext": "__PENDING__",
+      "aad": "__PENDING__",
+      "expected": {
+        "ciphertext": "__PENDING__",
+        "aadAsJson": "__PENDING__"
+      }
+    },
+    {
+      "name": "snapshot blob encrypted with snapshotKey",
+      "keyKind": "snapshotKey",
+      "key": "__PENDING__",
+      "nonce": "__PENDING__",
+      "plaintext": "__PENDING__",
+      "aad": "__PENDING__",
+      "expected": {
+        "ciphertext": "__PENDING__",
+        "aadAsJson": "__PENDING__"
+      }
+    }
+  ]
+}

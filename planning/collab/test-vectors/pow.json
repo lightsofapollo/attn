@@ -1,0 +1,48 @@
+{
+  "_schema": {
+    "spec": "planning/collab/crypto-spec.md#hashcash-proof-of-work",
+    "purpose": "Pin the hashcash token format and SHA-256 mining loop. One vector per (method, path) pair the relay accepts so `requestPathHash` derivation is locked.",
+    "tokenFormat": "attn-pow:v2:<difficulty>:<expiresAt>:<resource>:<rand>:<counter>  (colon-separated, no internal colons)",
+    "format": {
+      "version": "Integer corpus version.",
+      "vectors[].name": "Human label.",
+      "vectors[].inputs.method": "HTTP method, uppercase.",
+      "vectors[].inputs.path": "URL path; uses :roomId style placeholders before substitution. The hash is over (method || ' ' || path) of the ACTUAL request path (substituted), see `inputs.pathSubstituted`.",
+      "vectors[].inputs.pathSubstituted": "Path with parameters filled in — this is what gets fed to SHA-256.",
+      "vectors[].inputs.roomId": "Room ID string used in the `resource` field.",
+      "vectors[].inputs.deviceId": "Device ID string used in the `resource` field.",
+      "vectors[].inputs.rand": "base64url-no-pad of 16 random bytes; the per-token nonce.",
+      "vectors[].inputs.expiresAt": "Integer ms timestamp.",
+      "vectors[].inputs.difficulty": "Integer leading-zero-bit count required (default 16).",
+      "vectors[].expected.requestPathHash": "base64url-no-pad of first 8 bytes of SHA-256(method || ' ' || pathSubstituted).",
+      "vectors[].expected.resource": "Concatenated `<roomId>:<deviceId>:<requestPathHash>` exactly as it appears in the token.",
+      "vectors[].expected.counter": "Decimal integer (as a string for >2^53 safety) — the smallest non-negative counter producing a valid hash.",
+      "vectors[].expected.tokenHashHex": "lowercase hex of SHA-256(token) — convenient for debugging leading-zero-bit checks.",
+      "vectors[].expected.token": "The full token string `attn-pow:v2:...:<counter>` that meets the difficulty."
+    },
+    "filledBy": "attn-nnj.1.7 (Hashcash PoW mint + verify)"
+  },
+  "version": 1,
+  "vectors": [
+    {
+      "name": "POST /v2/rooms/:roomId/envelopes — minimal vector",
+      "inputs": {
+        "method": "POST",
+        "path": "/v2/rooms/:roomId/envelopes",
+        "pathSubstituted": "/v2/rooms/__PENDING_ROOM_ID__/envelopes",
+        "roomId": "__PENDING_ROOM_ID__",
+        "deviceId": "__PENDING_DEVICE_ID__",
+        "rand": "__PENDING__",
+        "expiresAt": 1700000300000,
+        "difficulty": 16
+      },
+      "expected": {
+        "requestPathHash": "__PENDING__",
+        "resource": "__PENDING__",
+        "counter": "__PENDING__",
+        "tokenHashHex": "__PENDING__",
+        "token": "__PENDING__"
+      }
+    }
+  ]
+}

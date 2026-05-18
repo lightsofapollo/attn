@@ -114,6 +114,88 @@ On the wire, the envelope stores `nonce`, `ciphertext`, and the AAD fields in cl
   - DO envelope ciphertext = AEAD-encrypt of the canonical-JSON BlobRef under `eventKey`.
   - The relay sees neither.
 
+## Hashcash Proof-of-Work
+
+Every write to the relay carries an `Attn-PoW` header containing a hashcash token. PoW raises the cost of casual abuse (URL scraping, mailbox flooding) without making legitimate writes painful.
+
+Applies to: `POST /devices`, `POST /envelopes`, `POST /acks` (with or without delete), `DELETE /v2/rooms/:roomId`. Does **not** apply to GETs or WebSocket frames (rate limits handle those).
+
+No exemption for any client kind — native daemon, browser, agent CLI, local or remote all mint PoW.
+
+### Token Format
+
+```text
+attn-pow:v2:<difficulty>:<expiresAt>:<resource>:<rand>:<counter>
+```
+
+Field encoding (colon-separated, no internal colons allowed in any field):
+
+- `v2` — literal protocol version.
+- `difficulty` — decimal integer leading-zero-bit count required (default 16).
+- `expiresAt` — unix milliseconds when the token stops being valid (at most `now + 5 minutes` at creation).
+- `resource` — `<roomId>:<deviceId>:<requestPathHash>` where `requestPathHash = base64url(first 8 bytes of SHA-256(HTTP-METHOD || " " || URL-PATH))`. Binds the token to a single request shape.
+- `rand` — `base64url(16 random bytes)`. Per-token nonce that the relay tracks for replay protection.
+- `counter` — decimal counter the client increments until `SHA-256(token)` meets the difficulty.
+
+### Hash Function
+
+```text
+hash = SHA-256(utf8(token-string))
+```
+
+The token is valid iff `hash` has at least `difficulty` leading zero bits (counted from the high bit of byte 0).
+
+### Difficulty
+
+Pinned at **16 bits** (median ~65k SHA-256 attempts; ~50ms on a modern x86 core, ~250ms on a Raspberry Pi 4, ~150ms in a browser Web Worker). Per-room override via `policy.powBits` at room creation (server-clamped to `[12, 24]`).
+
+### Server Validation
+
+The relay verifies, in order:
+
+1. Token parses; all six fields present; no extra colons inside any field.
+2. `v` equals `v2`.
+3. `difficulty >= max(policy.powBits, 12)`.
+4. `expiresAt > now` and `expiresAt <= now + 10 minutes` (clock skew tolerance).
+5. `resource` matches the actual `(roomId, deviceId, requestPathHash)` derived from the request.
+6. `SHA-256(token)` has `difficulty` leading zero bits.
+7. Token not present in the per-room recently-seen set (replay protection, see below).
+
+Any failure → `400 ATTN_POW_INVALID`. No retry hint — the client must mint a new token.
+
+### Replay Protection
+
+The DO stores accepted tokens under `meta:pow_seen:<expiresAt>:<sha256(token)>` so a hibernated DO doesn't forget across naps. A periodic alarm prunes entries 10 minutes after `expiresAt`.
+
+### Client Implementation
+
+```text
+mint(roomId, deviceId, method, path, difficulty):
+  resource = roomId + ":" + deviceId + ":" + base64url(sha256(method + " " + path)[:8])
+  rand = base64url(random 16 bytes)
+  expiresAt = now + 5 minutes
+  counter = 0
+  loop:
+    token = "attn-pow:v2:" + difficulty + ":" + expiresAt + ":" + resource + ":" + rand + ":" + counter
+    if leading_zero_bits(sha256(token)) >= difficulty:
+      return token
+    counter += 1
+```
+
+Both Rust and TS implementations:
+
+- Mint PoW off the UI thread (Rust: `tokio::task::spawn_blocking`; TS browser: Web Worker).
+- Maintain a small pool of fresh tokens per `(method, path)` so a burst of writes (e.g., an agent submitting 20 findings) doesn't pay the 50ms cost serially. Pre-mint while idle.
+- Discard tokens that are within 30 seconds of `expiresAt` to avoid request-time-of-flight expiry.
+- Tokens are non-interchangeable: a PoW for `POST /envelopes` is rejected on `POST /acks`.
+
+### Test Vectors
+
+Add to `planning/collab/test-vectors/pow.json`:
+
+- Fixed `resource`, fixed `rand`, fixed `expiresAt`, fixed difficulty (16) → expected `counter` that meets difficulty, expected SHA-256 hash, expected full token string.
+- One vector per (method, path) pair the relay accepts, to lock the `requestPathHash` derivation.
+
 ## Signatures
 
 Every `ReviewEvent` is signed by the device that authored it.
@@ -346,6 +428,7 @@ For paranoid users, the UI exposes a "verify owner key" affordance: display `SHA
 4. `event-id.json` — fixed event meta+body → expected EventId.
 5. `aead.json` — fixed key, fixed plaintext, fixed nonce → expected ciphertext. (Decryption side runs with these to confirm interop.)
 6. `envelope.json` — full round-trip: event → canonical → sign → AEAD-encrypt → envelope JSON.
+7. `pow.json` — fixed resource+rand+expiresAt → expected counter, hash, full token string. One vector per `(method, path)` the relay accepts.
 
 Both the Rust and TS test suites must pass against this corpus.
 
@@ -355,8 +438,9 @@ Both the Rust and TS test suites must pass against this corpus.
 2. Implement KDF wrapper; test against `kdf.json`.
 3. Implement AEAD wrapper; test against `aead.json`.
 4. Implement Ed25519 sign/verify wrapper; test against `event-signature.json`.
-5. Implement EventId/EnvelopeId/SnapshotId/FileId helpers; test against `*-id.json`.
-6. Implement the envelope assemble/disassemble path end-to-end; test against `envelope.json`.
-7. Only then start using the primitives from `manager.rs` and the frontend store.
+5. Implement hashcash mint + verify; test against `pow.json`. Make the miner cancellable and Web-Worker-able (TS) / `spawn_blocking`-able (Rust) from day one.
+6. Implement EventId/EnvelopeId/SnapshotId/FileId helpers; test against `*-id.json`.
+7. Implement the envelope assemble/disassemble path end-to-end; test against `envelope.json`.
+8. Only then start using the primitives from `manager.rs` and the frontend store.
 
 The corpus must exist before the implementation, not after. Otherwise the two clients will diverge subtly and signature verification will mystery-fail in production.

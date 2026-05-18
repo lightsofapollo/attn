@@ -1,5 +1,7 @@
 # attn — Collaboration v2 Data Model And Sync
 
+> **Status (2026-05-18)**: this document is the v2 design baseline. Several decisions described below have been finalized in [`amendments.md`](./amendments.md), which **overrides** this document where they conflict. Companion specs: [`relay-spec.md`](./relay-spec.md) (server contract), [`crypto-spec.md`](./crypto-spec.md) (cipher suite, key derivation, hashcash). All 16 previously-open questions are answered in `amendments.md` §Decisions Locked — read that first before treating any "TBD" language below as still-open.
+
 ## Summary
 
 This plan replaces the earlier live-only relay design with a v2 collaboration model that supports:
@@ -199,7 +201,7 @@ type LocalFileBinding = {
 `fileId` should not be the absolute path:
 
 ```text
-fileId = base64url(truncate_128_bits(sha256("attn file" || roomSecret || displayPath || firstSnapshotHash)))
+fileId = base64url(truncate_128_bits(sha256("attn file v2" || roomSecret || displayPath || firstSnapshotHash)))
 ```
 
 ## Snapshot Graph
@@ -334,6 +336,8 @@ type AnchorBlock = {
     | "table"
     | "thematic_break"
     | "html"
+    | "math"
+    | "mermaid"
     | "unknown";
   byteRange: [number, number];
   lineRange: [number, number];

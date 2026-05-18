@@ -68,9 +68,23 @@ Note: `admissionKey` is per-room, derived from `roomSecret`, and the server only
 
 ### Owner Distinction
 
-`POST /v2/rooms/:roomId` (room creation) includes the owner's public signing key in the body. The DO stores this as `ownerSigningKeyId`. All privileged ops (`POST /acks`, `DELETE /v2/rooms/:roomId`) require an additional `Attn-Owner-Signature` header carrying an Ed25519 signature over the same `canonicalRequest`, verifiable against `ownerSigningKeyId`.
+`POST /v2/rooms/:roomId` (room creation) includes the owner's public signing key in the body. The DO stores this as `ownerSigningKeyId`. All privileged ops (`POST /acks` with delete, `DELETE /v2/rooms/:roomId`) require an additional `Attn-Owner-Signature` header carrying an Ed25519 signature over the same `canonicalRequest`, verifiable against `ownerSigningKeyId`.
 
 This is the **only** server-side distinction between owner and reviewer.
+
+### Proof of Work
+
+Every **write** request carries an `Attn-PoW` header containing a hashcash token:
+
+```http
+Attn-PoW: attn-pow:v2:<difficulty>:<expiresAt>:<roomId>:<deviceId>:<requestPathHash>:<rand>:<counter>
+```
+
+Applies to: `POST /devices`, `POST /envelopes`, `POST /acks`, `DELETE /v2/rooms/:roomId`. Does **not** apply to `GET` or to WebSocket frames.
+
+Default difficulty is 16 leading zero bits (~50ms client cost). Per-room override via `policy.powBits` at room creation (server-clamped to `[12, 24]`). No exemption for local, remote, browser, or agent clients — all writes mint PoW.
+
+Token format, hash algorithm, replay protection, and validation rules live in [`crypto-spec.md`](./crypto-spec.md) §Hashcash Proof-of-Work. Validation failures → `400 ATTN_POW_INVALID` (with no retry hint; the client mints a new token).
 
 ## Wire Conventions
 
@@ -81,7 +95,7 @@ This is the **only** server-side distinction between owner and reviewer.
   ```json
   { "error": { "code": "ATTN_ROOM_STORAGE_FULL", "message": "...", "retryAfterMs": 30000 } }
   ```
-- Status codes: `400` malformed, `401` admission failed, `403` owner sig required/wrong, `404` no room or stale cursor with no recoverable position, `410` cursor too old (resync required), `413` body too large, `429` rate limited, `507` room storage cap reached.
+- Status codes: `400` malformed (incl. `ATTN_POW_INVALID`, `ATTN_BATCH_TOO_LARGE`, `ATTN_DEVICE_UNREGISTERED`), `401` admission failed, `403` owner sig required/wrong, `404` no room, `410` WS resync required (cursor too old — surfaced as a WS `error` frame), `413` body too large, `429` rate limited, `507` room storage / event cap reached.
 
 ## HTTP API
 
@@ -112,8 +126,11 @@ Request:
     "maxSnapshotBytes": 5242880,
     "maxEventBytes": 262144,
     "maxEvents": 500,
-    "expiresAt": 1736617145678,
-    "deleteEventsAfterOwnerAck": true,
+    "expiresAt": 1736098745678,
+    "idleTimeoutMs": 3600000,
+    "longSession": false,
+    "powBits": 16,
+    "deleteEventsAfterOwnerAck": false,
     "allowBrowser": false,
     "allowRemoteAgents": false
   },
@@ -121,11 +138,20 @@ Request:
 }
 ```
 
+Policy fields:
+
+- `mode` — UI/intent hint only; the relay treats all modes identically post-decision-#1. Use `live` for real-time sessions, `async` for mailbox-only flows, `hybrid` for both. Frontend renders different connection-status badges per mode.
+- `expiresAt` — wall-clock TTL. Clamped to `createdAt + 24h` unless `longSession == true`, in which case clamped to `createdAt + 7d`. Default if omitted: `createdAt + 24h`.
+- `idleTimeoutMs` — room auto-closes this many ms after the last accepted envelope. Default 3600000 (1h). Min 60000 (1m), max equal to the wall-clock TTL.
+- `longSession` — explicit opt-in to the 7-day max TTL for human review sessions. Default `false` (agentic short rooms).
+- `powBits` — hashcash difficulty for writes against this room. Default 16. Server-clamped to `[12, 24]`. See `crypto-spec.md` §Hashcash.
+- `deleteEventsAfterOwnerAck` — whether owner ACKs may trigger envelope deletion. **Default `false`** (per decision #3, prevents multi-device owner data loss). Single-device owners can opt in via UI.
+
 Behavior:
 
-- If the room does not exist, create the DO, persist the policy and `ownerSigningKey`. Caps in the policy are clamped to the server's hard maxima (defined below). Return `201`.
+- If the room does not exist, create the DO, persist the policy and `ownerSigningKey`. Policy values are clamped to the server's hard maxima. Return `201`.
 - If the room exists, ignore the body and return the stored policy as `200`. **Do not** allow policy mutation after creation; that would let a stolen URL extend a room's TTL.
-- Requires admission HMAC.
+- Requires admission HMAC. (No PoW — room creation is the bootstrap step; PoW is required from `POST /devices` onward.)
 
 Response:
 
@@ -216,12 +242,14 @@ Request:
 
 Behavior:
 
-- Requires admission HMAC.
+- Requires admission HMAC + `Attn-PoW`.
+- **Batch size cap: 32 envelopes per request.** Larger batches → `400 ATTN_BATCH_TOO_LARGE`. Single PoW token covers the whole batch (one token = one HTTP request).
 - Per-envelope checks:
   - `ciphertextBytes` must equal `len(ciphertext bytes after base64url decode)`. Reject `400 ATTN_CIPHERTEXT_LENGTH_MISMATCH`.
   - `ciphertextBytes` must be ≤ `policy.maxEventBytes` for `kind == "event" | "signal"`, ≤ `policy.maxSnapshotBytes` for `kind == "snapshot_blob"`. Reject `413 ATTN_ENVELOPE_TOO_LARGE`.
   - `authorId` and `deviceId` must reference a published device record (call `POST /devices` first). Reject `400 ATTN_DEVICE_UNREGISTERED`.
 - Per-room running totals (envelope count, bytes) updated atomically.
+- Every accepted envelope resets `meta:last_event_at = now` and reschedules the idle alarm to `now + policy.idleTimeoutMs`.
 - If `running.envelopeCount + new > policy.maxEvents`, reject the *whole batch* `507 ATTN_ROOM_EVENT_CAP`.
 - If `running.bytes + sum > policy.maxRoomBytes`, reject the *whole batch* `507 ATTN_ROOM_STORAGE_FULL`. (Hard cap, not policy-overridable.)
 - Idempotency: if `envelopeId` already exists in the room, treat as success without storing a second copy. Response `serverSeq` for the duplicate is the previously assigned value.
@@ -240,30 +268,11 @@ Response:
 
 `serverSeq` is monotonically increasing across the *room* and assigned at insert time.
 
-### `GET /v2/rooms/:roomId/envelopes?after=<serverSeq>&limit=<n>`
+### ~~`GET /v2/rooms/:roomId/envelopes`~~ (removed)
 
-Long-poll for new envelopes after a cursor.
+Decision #5: WebSocket only. All envelope delivery — initial backfill and live push — flows through the WebSocket protocol (see below). The HTTP pull endpoint has been removed entirely; no long-poll, no polling fallback. Clients that cannot maintain a WebSocket connection cannot use the relay in v2.
 
-Behavior:
-
-- Requires admission HMAC.
-- `limit` defaults to 100, max 500.
-- If `after` is ≥ current `serverSeq`, the server holds the connection open for up to 25 seconds and returns when new envelopes arrive or on timeout.
-- If `after < oldestRetainedSeq` (the cursor refers to an envelope already TTL-deleted), respond `410 ATTN_CURSOR_TOO_OLD` with:
-  ```json
-  { "error": { "code": "ATTN_CURSOR_TOO_OLD", "resyncFromSeq": <oldestRetainedSeq> } }
-  ```
-  Clients respond by discarding their cursor and requesting a snapshot from a peer (or, in async mode, by re-pulling from `resyncFromSeq` and accepting that some history is gone forever).
-- Response:
-  ```json
-  {
-    "envelopes": [ /* same shape as upload */ ],
-    "nextCursor": 142,
-    "hasMore": false
-  }
-  ```
-
-Pulls do not filter by `kind`. Clients ignore envelopes they don't care about.
+Stale-cursor recovery (formerly `410 ATTN_CURSOR_TOO_OLD`) is now surfaced as a WebSocket `error` frame with `code: "ATTN_CURSOR_TOO_OLD"` and `resyncFromSeq` payload, followed by close `4005`. Clients respond by discarding their cursor and either requesting a snapshot from a peer (live) or re-subscribing from `resyncFromSeq` (async — accepts that pre-deleted history is gone).
 
 ### `POST /v2/rooms/:roomId/acks`
 
@@ -281,7 +290,8 @@ Request:
 Headers:
 
 - `Attn-Admission` required.
-- `Attn-Owner-Signature` required **if and only if** `policy.deleteEventsAfterOwnerAck == true` and the client wants envelopes deleted. Without it, ACK is recorded but envelopes are retained until TTL.
+- `Attn-PoW` required (write endpoint).
+- `Attn-Owner-Signature` required **if and only if** `policy.deleteEventsAfterOwnerAck == true` and the client wants envelopes deleted. Without it, ACK is recorded but envelopes are retained until TTL. (Default policy is `false`, so most rooms never need this.)
 
 Behavior:
 
@@ -296,13 +306,13 @@ Response: `204 No Content`.
 
 End the room immediately.
 
-- Requires admission HMAC + `Attn-Owner-Signature`.
-- Deletes the DO state, the WebSocket clients are disconnected with close code `4001`, R2 blobs for this room are scheduled for deletion (best-effort, may lag).
+- Requires admission HMAC + `Attn-PoW` + `Attn-Owner-Signature`.
+- Deletes the DO state; WebSocket clients are disconnected with close code `4001`; R2 blobs for this room are scheduled for deletion (best-effort, may lag).
 - Response `204`.
 
 ### `POST /v2/rooms/:roomId/blobs` (R2 spillover)
 
-Used when `kind == "snapshot_blob"` and `ciphertextBytes > 1 MiB`.
+Used when `kind == "snapshot_blob"` and `ciphertextBytes > 1 MiB`. Requires admission HMAC + `Attn-PoW`.
 
 Request:
 
@@ -415,15 +425,16 @@ type ClientFrame =
 - `1000` normal close
 - `4000` admission HMAC invalid
 - `4001` room deleted
-- `4002` room expired
+- `4002` room expired (hard-max or idle alarm)
 - `4003` rate limit on socket (too many frames/sec)
 - `4004` peer cap reached for kind (e.g., trying to connect a 9th peer when cap is 8)
+- `4005` cursor too old — preceded by an `error { code: "ATTN_CURSOR_TOO_OLD", resyncFromSeq }` frame
 
 ### Flow
 
 1. Client opens WS, sends `subscribe { after: lastSeenServerSeq }`.
-2. Server sends `hello`, then any backfill envelopes (still subject to `410` semantics — if `after` is too old, server sends `error { code: "ATTN_CURSOR_TOO_OLD" }` and closes `4001`-style).
-3. Server pushes `envelope` and `presence` frames as they happen.
+2. Server sends `hello { serverSeq, policy, devices, missedSignalEnvelopeIds }`. If `after < meta:oldest_retained_seq`, instead sends `error { code: "ATTN_CURSOR_TOO_OLD", resyncFromSeq: <oldest_retained_seq> }` and closes `4005`. Client responds by discarding its cursor and either requesting a snapshot from a peer or re-subscribing from `resyncFromSeq`.
+3. Server pushes `envelope` and `presence` frames as they happen. Each accepted envelope upload also resets the idle alarm.
 4. Server sends `ping` every 30s; if no `pong` within 60s, close `1001`.
 5. The DO uses WebSocket Hibernation: when no traffic for 60s, the DO hibernates, and frames are resumed transparently on the next event.
 
@@ -459,9 +470,12 @@ Keys (lexicographic ordering matters for range scans):
 meta:policy                     -> RoomPolicy JSON
 meta:owner_signing_key          -> base64url Ed25519 pubkey
 meta:created_at                 -> u64 ms
-meta:expires_at                 -> u64 ms
+meta:expires_at                 -> u64 ms (clamped at creation; see Alarms)
+meta:hard_max_at                -> u64 ms (createdAt + 24h or +7d if longSession)
+meta:last_event_at              -> u64 ms (reset on every accepted envelope; drives idle alarm)
 meta:server_seq                 -> u64 monotonic counter
 meta:bytes_used                 -> u64
+meta:bytes_used_r2              -> u64
 meta:envelope_count             -> u64
 meta:oldest_retained_seq        -> u64 (advances on TTL deletes)
 
@@ -474,6 +488,8 @@ env_by_target:<deviceId>:<paddedServerSeq>:<envelopeId> -> "" (signal routing ai
 
 ack:<deviceId>:<envelopeId>     -> u64 ackedAt
 ack_owner:<envelopeId>          -> "" (presence indicates owner-acked)
+
+pow_seen:<expiresAt>:<sha256(token)> -> "" (replay protection, alarm-cleaned)
 
 rate:<deviceId>:<windowStartMin> -> u32 count
 ```
@@ -497,9 +513,20 @@ The `put` is atomic across keys within a single DO event, so `server_seq` can ne
 
 ### Alarms (TTL + Idle Cleanup)
 
-- On room creation, set an alarm at `expiresAt`.
-- On each envelope insert, optionally also set a per-day "sweep" alarm to advance `oldest_retained_seq` and drop expired signal envelopes.
-- On alarm firing at `expiresAt`: send `4002 room expired` close to all WS clients, delete all storage, schedule R2 blob deletion via a queue or a simple `list + delete` against the `rooms/<roomId>/` prefix.
+Two alarms govern room lifetime. First to fire wins.
+
+- **Hard-max alarm** (set once at room creation): fires at `meta:hard_max_at = createdAt + (longSession ? 7d : 24h)`. Captures the absolute wall-clock cap from `expiresAt` (clamped).
+- **Idle alarm** (set on creation; reset on every accepted envelope): fires at `meta:last_event_at + policy.idleTimeoutMs` (default 1h). Captures abandoned rooms — e.g., the agent finished its review and nothing has happened for an hour.
+- **PoW-prune alarm** (periodic, ~5min): deletes `pow_seen:*` entries with `expiresAt + 10min < now`.
+
+On hard-max or idle alarm fire:
+
+1. Send `4002 room expired` close frame to all WS clients.
+2. Delete all storage keys under this DO.
+3. Schedule R2 blob deletion via `list + delete` against the `rooms/<roomId>/` prefix.
+4. The DO becomes dormant; subsequent requests to the same `roomId` see no policy and `404`.
+
+Cloudflare's DO API supports only one alarm at a time. The implementation maintains the two logical alarms by always scheduling the alarm to whichever target time is earlier (`min(hard_max_at, last_event_at + idleTimeoutMs)`), and re-evaluating on every envelope insert. The PoW-prune sweep runs as part of the same alarm handler when it fires, then re-schedules.
 
 ### Hibernation Tags
 
@@ -517,7 +544,11 @@ These clamp anything in `policy`:
 | `maxEvents` | 500 | Across all kinds in the room |
 | `maxRoomBytes` | 25 MiB | Sum of all envelope ciphertext bytes (DO+R2) |
 | `maxSignalEnvelopes` | 64 | Per `(authorId, targetDeviceId)` pair, FIFO-evicted |
-| `expiresAt - createdAt` | 7 days (`hybrid`/`async`), 4 hours (`live`) | Server clamps |
+| Envelopes per `POST /envelopes` | 32 | `400 ATTN_BATCH_TOO_LARGE` past this |
+| Wall-clock TTL (default) | 24 hours | Server clamps `expiresAt` |
+| Wall-clock TTL (`longSession=true`) | 7 days | For human review sessions; explicit opt-in |
+| Idle timeout (default) | 1 hour | Auto-close after last envelope; configurable via `policy.idleTimeoutMs` |
+| PoW difficulty | 16 leading zero bits (default) | `policy.powBits`, clamped `[12, 24]`. See crypto-spec.md. |
 | Per-device request rate | 120/min | Sliding 60s window, counted per HTTP and WS frame |
 | Per-IP request rate (Worker edge) | 600/min | Pre-DO, prevents enumeration of room URLs |
 
@@ -528,16 +559,16 @@ Rate limit responses: `429` with `retryAfterMs` header AND in the JSON error bod
 - Bucket: one bucket, prefix per room: `rooms/<roomId>/blobs/<envelopeId>`.
 - Upload via presigned PUT URL (15-minute TTL).
 - Read via presigned GET URL (5-minute TTL), fetched per access.
-- Lifecycle rule on the bucket: auto-delete objects older than 30 days as a safety net (in case the DO alarm deletion is missed). Should never fire in practice.
+- Lifecycle rule on the bucket: auto-delete objects older than **7 days** (matches the max wall-clock room TTL with `longSession=true`; ~7× headroom for default 24h rooms). Safety net only — DO alarm-driven deletion is primary. If the DO alarm slips by more than ~6 hours on a room near its TTL ceiling, blobs may disappear before the room itself; mitigation: every WS connect runs `if now > meta:expires_at - 1h: cleanup_check()` to belt-and-braces the alarm.
 - Byte accounting: the DO tracks total room bytes by counting *envelope* `ciphertextBytes`, which for R2-spilled envelopes is the small BlobRef wrapper. The *actual* R2 bytes are tracked separately in `meta:bytes_used_r2`. Both must stay under `maxRoomBytes` combined.
 
 ## Anti-Abuse
 
-- The URL is the bearer token. Anyone who learns the URL gets admission.
+- **The URL is the bearer token.** Anyone who learns the URL gets admission. PoW is a friction layer on top, not a substitute.
+- **Hashcash PoW on every write** — `POST /devices`, `POST /envelopes`, `POST /acks`, `POST /blobs`, `DELETE`. Default 16 leading zero bits (~50ms client cost; ~250ms on a Pi). Tokens bind `(roomId, deviceId, method, path)` and have 5-minute expiry. Per-room override via `policy.powBits` in `[12, 24]`. **No exemption** for local, daemon-driven, or browser clients — symmetric treatment defeats an attacker who can run the daemon binary. See [`crypto-spec.md`](./crypto-spec.md) §Hashcash Proof-of-Work for token format, verification, and replay protection.
 - Worker-edge rate limit on `roomId` enumeration: any caller hitting > 30 distinct unknown rooms in 5 minutes is `429`'d at the edge.
-- All `POST /envelopes` traffic counted toward per-device rate; the per-device key is `deviceId` from the request body (trusted only within a single room's blast radius).
-- Proof-of-work: **not in v2**. If abuse becomes real, add `Attn-PoW: <hashcash>` requirement to `POST /devices` and `POST /envelopes` keyed off `roomId`.
-- IP logging: source IPs are logged for 24h for abuse mitigation, then dropped. Document this publicly.
+- All `POST /envelopes` traffic counted toward per-device rate (120/min); the per-device key is `deviceId` from the request body (trusted only within a single room's blast radius).
+- IP logging: source IPs are logged for 24h for abuse mitigation, then dropped. Document this publicly in the privacy notice.
 
 ## Schema Versioning
 
@@ -608,6 +639,13 @@ HARD_MAX_ROOM_BYTES = "26214400"
 HARD_MAX_EVENT_BYTES = "262144"
 HARD_MAX_SNAPSHOT_BYTES = "5242880"
 HARD_MAX_EVENTS = "500"
+HARD_MAX_BATCH_ENVELOPES = "32"
+HARD_MAX_TTL_MS = "86400000"          # 24h default
+HARD_MAX_TTL_LONG_MS = "604800000"    # 7d for longSession rooms
+DEFAULT_IDLE_TIMEOUT_MS = "3600000"   # 1h
+DEFAULT_POW_BITS = "16"
+MIN_POW_BITS = "12"
+MAX_POW_BITS = "24"
 ALLOWED_BROWSER_ORIGINS = "https://attn.dev"
 
 [env.staging.vars]
@@ -650,20 +688,21 @@ relay/
 
 Minimum acceptance suite before any production deploy:
 
-1. **Room lifecycle** — create, register devices, upload, pull, ack, delete.
-2. **Cursor handling** — pull with `after=0`, pull with current `after`, pull after TTL deletion → `410`.
-3. **Caps** — fill to `maxEvents`, fill to `maxRoomBytes`, exceed `maxEventBytes` → correct error codes.
-4. **Owner auth** — non-owner ACK with delete-flag policy → `403`; owner ACK with delete → envelopes gone.
+1. **Room lifecycle** — create, register devices, upload, subscribe via WS, ack, delete.
+2. **WS backfill** — connect with `subscribe { after: 0 }` → receive all envelopes; connect with `after: lastSeen` → receive only newer; connect with `after: deletedSeq` → receive `error { code: ATTN_CURSOR_TOO_OLD, resyncFromSeq }` and close `4005`.
+3. **Caps** — fill to `maxEvents`, fill to `maxRoomBytes`, exceed `maxEventBytes`, exceed batch cap (33 envelopes) → correct error codes.
+4. **Owner auth** — non-owner ACK with delete-flag policy → `403`; owner ACK with delete → envelopes gone. Default policy (delete=false) → ACK accepted but envelopes retained.
 5. **Multi-device** — two devices for same participant, both ACK, deletion only fires per spec.
-6. **Signaling** — round-trip a signal envelope through two open WS clients; verify offline target gets it via mailbox on reconnect.
+6. **Signaling** — round-trip a signal envelope through two open WS clients; verify offline target gets it via stored mailbox on reconnect.
 7. **R2 spillover** — upload a 3 MiB encrypted snapshot via presigned URL, verify it's served back.
-8. **TTL** — set `expiresAt` 60s in future, verify alarm fires, WS closes `4002`, GETs return `404`.
-9. **Hibernation** — open WS, wait 90s, send frame from peer, verify delivery (DO transparently re-hydrates).
-10. **Rate limit** — 121 requests/min from one device → `429` on the 121st.
+8. **Hard-max TTL** — create room with `expiresAt = now + 60s`; verify alarm fires, WS closes `4002`, subsequent ops `404`.
+9. **Idle timeout** — create room with `idleTimeoutMs = 30s`, send one envelope, wait 35s without activity; verify alarm fires.
+10. **Hibernation** — open WS, wait 90s, send frame from peer, verify delivery (DO transparently re-hydrates).
+11. **Rate limit** — 121 writes/min from one device → `429` on the 121st.
+12. **PoW** — write without `Attn-PoW` → `400 ATTN_POW_INVALID`; write with expired token → `400`; write with token for different `(method, path)` → `400`; write with valid token → success; replay same token → `400`.
+13. **PoW difficulty override** — room created with `powBits: 20`; write with 16-bit token → `400`; write with 20-bit token → success.
+14. **longSession** — room created with `longSession: true, expiresAt: now + 5d` → accepted; `longSession: false, expiresAt: now + 2d` → clamped to `now + 24h`.
 
-## Open Questions for Spec Sign-Off
+## Decisions Reference
 
-- **Admission key vs URL-as-bearer**: keep current design (URL is the secret, HMAC is bookkeeping) or move to device-token issuance at room creation? Affects threat model documentation more than code.
-- **`POST /envelopes` batch size**: pin a max (suggest 32) so a single request can't dominate the DO event loop.
-- **Long-poll vs WS-only**: current design supports both. Drop long-poll for v2 to simplify, or keep for clients that can't hold WS?
-- **R2 lifecycle TTL**: 30-day safety net is generous. Tighten to 14d?
+All design decisions for this relay spec are tracked in [`amendments.md`](./amendments.md) §Decisions Locked. The values pinned here (PoW difficulty 16, batch cap 32, WS-only, 24h+idle-1h TTL model, R2 7-day safety net, `deleteEventsAfterOwnerAck` default false) come from there. No outstanding questions block implementation.

@@ -192,42 +192,33 @@ When a snapshot is large enough to need R2:
 
 This double-encryption is intentional: the BlobRef's existence is event-log content (signed, replicated, AAD-bound to author), while the bulk bytes are bulk storage.
 
-### Phase 4 WebRTC-in-wry must be a Phase 0.5 spike
+### Phase 4 WebRTC: Rust-owned (Decision #1)
 
-The plan puts WebRTC validation in Phase 4 ("Verify WebRTC and WebCrypto in `attn://`"). This is a research spike whose outcome determines the entire transport architecture:
+Originally this section called for a Phase 0.5 spike to validate WebRTC + WebCrypto in `wry`/WKWebView under `attn://`. **That approach was overridden.** Decision #1 commits to Rust `webrtc-rs` upfront — the frontend never owns an `RTCPeerConnection`. The spike, the `attn://` WebRTC path, and `planning/collab/webrtc-spike-result.md` are no longer needed.
 
-- If WebRTC + WebCrypto work in WKWebView under `wry` with a custom `attn://` scheme → frontend owns `RTCPeerConnection`.
-- If they don't → Rust must use `webrtc-rs` (a multi-week project of its own), and the frontend just renders.
+Tradeoffs accepted:
 
-This must happen **before** Phase 0 locks in any transport assumption.
-
-Spike deliverable (timeboxed to 3 days):
-
-- A standalone branch with a minimal `wry` window that loads a page from `attn://` and successfully:
-  1. Generates an Ed25519 keypair via `crypto.subtle`.
-  2. AES-GCM seals + opens a message via `crypto.subtle` (XChaCha20 is via npm package, not WebCrypto).
-  3. Establishes an `RTCPeerConnection` to a public STUN server, opens a DataChannel to a second instance (loopback or two-machine test).
-  4. Sends and receives a few KB across the DataChannel.
-- Result documented in `planning/collab/webrtc-spike-result.md`.
-- If any step fails on macOS or expected platforms, the failure becomes a blocker for the original plan's transport architecture and must be resolved (workaround, polyfill, or pivot to Rust transport) before Phase 0 starts.
+- `webrtc-rs` is a large crate (transitively brings tokio, rcgen, sctp, dtls, openssl-sys or rustls). Run `cargo tree -e features --no-default-features --no-dev-dependencies` before merging to confirm the binary stays under the 25 MiB target. If it doesn't, evaluate feature flags or revisit.
+- No exploration of the browser WebRTC path. Phase 6 browser client will need a separate WebRTC story (or skip WebRTC entirely and use mailbox-only for browser, which is consistent with the trust model).
+- Single language for transport (Rust) means one codepath for mailbox + DataChannel, one place for AEAD, one place for envelope import. Simpler.
 
 ## Phasing Override
 
 Original `data-model.md` "Implementation Phases" (lines 1166-1217) collapses too much into Phase 0 and underestimates Phase 3. The Rust-side phasing on lines 1126-1136 is more realistic. Use this combined sequence:
 
-### Phase 0.5: WebRTC + WebCrypto Spike
+### ~~Phase 0.5: WebRTC + WebCrypto Spike~~ (removed)
 
-(See above. Timeboxed. Gates everything else.)
+Decision #1 made this unnecessary. Skip to Phase 0a.
 
 ### Phase 0a: Crypto Foundations
 
-- Land `Cargo.toml` crypto crates.
+- Land `Cargo.toml` crypto crates (see Codebase Corrections above) plus `webrtc-rs` (per Decision #1) — checking the binary-size impact early avoids a Phase 4 surprise.
 - Build canonical JSON helpers (Rust + TS).
-- Write the `test-vectors/` corpus.
-- Implement KDF, AEAD, Ed25519, ID helpers in both languages and pass the corpus.
+- Write the `test-vectors/` corpus, including `pow.json` for hashcash.
+- Implement KDF, AEAD, Ed25519, hashcash mint+verify, ID helpers in both languages and pass the corpus.
 - No `ReviewManager` yet, no IPC yet.
 
-Deliverable: a Rust `attn-collab-crypto` mod + a TS `web/src/lib/review/crypto.ts` that interop on the corpus.
+Deliverable: a Rust `attn-collab-crypto` mod + a TS `web/src/lib/review/crypto.ts` that interop on the corpus. PoW miner runs off-thread (Rust: `spawn_blocking`; TS: Web Worker) from day one.
 
 ### Phase 0b: Local Data Model + Working Copy
 
@@ -270,12 +261,14 @@ No relay code yet.
 - Outbox processing.
 - Pull cursor / 410 recovery.
 
-### Phase 4: WebRTC Live Transport
+### Phase 4: Rust WebRTC Transport
 
-- Only after Phase 0.5 spike validated.
-- Encrypted signaling over the relay (or Rust if spike pivots).
-- DataChannel envelope round-trip identical to mailbox envelope format.
-- Surface direct-connection failures honestly in UI (no silent fallback unless `mode: "hybrid"`).
+- Add `webrtc-rs` to `Cargo.toml` and confirm binary size impact (target: stay under 25 MiB release).
+- Implement WebRTC arm of `src/review/transport.rs` alongside the mailbox arm from Phase 3b.
+- Encrypted signaling envelopes (`kind: "signal"`) flow via the relay WebSocket; decrypted SDP/ICE handled in Rust against `signalingKey`.
+- DataChannel envelope format is **identical** to mailbox envelopes — same AEAD under `eventKey`/`snapshotKey`, same routing semantics, same import path. Just a different wire.
+- In `policy.mode == "hybrid"`, mailbox is the always-on fallback; DataChannel is opportunistic. In `live` mode, surface direct-connection failure explicitly (no silent mailbox fallback).
+- Frontend never sees raw transport — only typed `ReviewUpdate` events emitted by `ReviewManager` after decrypt+signature-verify+import.
 
 ### Phase 5: Owner Apply Flow
 
@@ -291,18 +284,58 @@ No relay code yet.
 - Browser-specific docs in the trust model section.
 - Remote agent participant type.
 
-## Top 5 Decisions This Document Pins
+## Decisions Locked (2026-05-18)
 
-1. **Owner identity is cryptographically bound** to `ownerSigningKey` registered at room creation; relay enforces this on `POST /devices` with `kind: "owner"` and on every owner-only operation (ACK-with-delete, DELETE room). See `crypto-spec.md` §Signing-Key Publication.
-2. **Cipher suite is XChaCha20-Poly1305 + Ed25519 + HKDF-SHA-256**, canonical JSON per RFC 8785, IDs are deterministic and content-addressed. See `crypto-spec.md`.
-3. **Anchor resolver runs all steps and combines candidates** instead of falling through on first match. Ambiguity threshold: top two candidates within 0.10 of each other. See above.
-4. **Multi-device for owner is not solved at protocol level in v2**; `deleteEventsAfterOwnerAck` defaults to `false` to prevent silent data loss; UI calls this out.
-5. **WebRTC-in-wry validation is Phase 0.5**, not Phase 4. Outcome determines whether the frontend or Rust owns transport. Gate the rest of phasing on the spike result.
+All previously-open questions have been answered. The decisions below are the v2 baseline and supersede any earlier "TBD" or "open question" language in `data-model.md`, `relay-spec.md`, or `crypto-spec.md`. Each decision lists the rationale and the doc(s) it pins.
 
-## Open Questions Still Unresolved
+The product is reframed as **agentic collaboration** — primary use case is an agent (e.g., a coding assistant) reviewing a markdown plan, leaving comments and suggestions, and the owner accepting them locally. Most rooms last minutes to an hour. Human-to-human review is a supported secondary use case with a longer TTL via explicit opt-in.
 
-- Confidence calibration corpus (post Phase 1, low priority).
-- Browser secret persistence beyond memory — currently "no persistence." May need to revisit when the browser client lands in Phase 6.
-- Proof-of-work for relay abuse — currently "v2 ships without it." Revisit if abuse becomes real.
-- Snapshot version-cleanup policy on the relay — current spec keeps all snapshots until TTL; revisit if rooms run hot.
-- `prosemirror-tables`, math, and mermaid block kinds in `AnchorBlock.kind` — currently fall through to `"unknown"`. Add `"math"` and `"mermaid"` enum entries during Phase 1 to keep anchor fingerprints stable inside those nodes.
+### Architecture (decisions 1–4)
+
+**1. WebRTC transport lives in Rust.** No Phase 0.5 spike. Rust uses `webrtc-rs` for the DataChannel arm of `src/review/transport.rs`; the frontend never holds an `RTCPeerConnection`. Decrypted/verified events flow up through `ReviewUpdate` to Svelte. Tradeoff: `webrtc-rs` is a large crate — verify binary stays under 25 MiB before merging. Pins: `data-model.md` Transport Ownership, `relay-spec.md` Signaling, `amendments.md` Phase 4.
+
+**2. Relay admission is URL-as-bearer + HMAC.** No device-token issuance. `admissionKey = HKDF(rootKey, "attn relay admission v2")` HMACs every request. Threat model documents that URL possession = admission. Rationale: matches the E2E "client holds the only secret" framing; per-device tokens would require server state and asymmetric room-creator-vs-joiner flows. Pins: `relay-spec.md` Admission Key, `crypto-spec.md` Key Derivation.
+
+**3. Owner identity is cryptographically bound** to `ownerSigningKey` registered at `POST /v2/rooms/:roomId`. Privileged ops (`POST /acks` with delete, `DELETE /v2/rooms/:roomId`) require `Attn-Owner-Signature` (Ed25519 over `canonicalRequest`). Reviewers cannot impersonate the owner even with the URL. Pins: `relay-spec.md` Owner Distinction, `crypto-spec.md` Signing-Key Publication.
+
+**4. Cipher suite is locked.** XChaCha20-Poly1305 (AEAD, 24-byte random nonce, AAD-bound metadata) + Ed25519 (signatures) + HKDF-SHA-256 (key derivation, fixed `info` strings) + canonical JSON per RFC 8785 + base64url-no-pad. No agility in v2; v3 will re-derive distinct keys from the same `roomSecret` if the suite changes. Pins: `crypto-spec.md` Primitives.
+
+### Transport & Auth (decisions 5–7)
+
+**5. WebSocket only** for envelope delivery. `GET /v2/rooms/:roomId/envelopes` removed entirely; backfill flows through the WS `hello` + `envelope` frames. Stale-cursor recovery is signaled via `error` frame + close code `4005`. Rationale: dropping long-poll halves the relay endpoint surface area and matches reality (the Rust client is the only first-class client in v2). Pins: `relay-spec.md` removed `GET /envelopes`, added close code `4005`.
+
+**6. Hashcash proof-of-work on every write.** `POST /devices`, `POST /envelopes`, `POST /acks`, `POST /blobs`, `DELETE` all require `Attn-PoW`. Default difficulty 16 leading zero bits (~50ms client cost). Per-room override via `policy.powBits` in `[12, 24]`. **No exemption** for local, daemon-driven, browser, or agent clients — symmetric treatment defeats an attacker who can run the daemon binary. Tokens bind `(roomId, deviceId, method, path)` with 5-minute expiry, full replay protection. Pins: `crypto-spec.md` §Hashcash, `relay-spec.md` §Anti-Abuse + per-endpoint headers.
+
+**7. `POST /envelopes` batch cap = 32.** Larger batches → `400 ATTN_BATCH_TOO_LARGE`. Single PoW token covers the whole batch. Sized to bulk-catchup (200 events = 7 round trips) without monopolizing the DO event loop. Pins: `relay-spec.md` upload behavior.
+
+### Lifecycle (decisions 8–11)
+
+**8. Room TTL = 1h idle + 24h hard-max (default).** Two DO alarms; first to fire wins. `policy.expiresAt` clamped to `createdAt + 24h` unless `policy.longSession == true`, in which case clamped to `createdAt + 7d` (for human review). `policy.idleTimeoutMs` defaults to 1h, min 1m, max equal to wall-clock TTL. Tuned for agentic collab where most rooms last minutes. Pins: `relay-spec.md` Alarms + Caps table.
+
+**9. R2 lifecycle TTL = 7 days** (matches max wall-clock room TTL with `longSession`). Safety net only; DO alarm is primary cleanup. With default 24h rooms, ~7× headroom. Mitigation against alarm slippage near TTL: every WS connect runs `cleanup_check()` if the room is within 1h of `expiresAt`. Pins: `relay-spec.md` R2 Integration.
+
+**10. Snapshot eviction: keep all snapshots until room TTL.** Snapshots (and comments anchored to them) are preserved against `maxRoomBytes` (25 MiB accommodates 3-5 medium snapshots plus an event log). A wiped client rejoining can re-pull any snapshot a comment anchored to and replay events. Pins: `data-model.md` Snapshot Graph, `relay-spec.md` Caps.
+
+**11. Snapshot creation cadence: heuristic + explicit.** Cadence: on share, on save if `time-since-last-snapshot > 30s` AND `bytes-changed > 256` AND `at least one open thread`, on explicit `attn review snapshot`. Agents that want per-iteration checkpoints call the CLI explicitly. Per-keystroke snapshots would blow the 500-event cap immediately. Pins: above §Missing Design Decisions.
+
+### Trust & Data (decisions 12–14)
+
+**12. Multi-device owner is not solved at protocol level in v2.** `deleteEventsAfterOwnerAck` defaults to **false** to prevent silent data loss for multi-device owners. UI exposes an opt-in checkbox for single-device users who want auto-delete. Cross-device replication of a single participant's events is deferred to v3 (will use `publicEncryptionKey`). Pins: `relay-spec.md` POST /acks defaults, `data-model.md` RoomPolicy.
+
+**13. Browser secret persistence: memory-only.** URL fragment (`#key=`) parsed once on load, immediately stripped via `history.replaceState`, held only in JS heap. Reload requires re-paste. No `sessionStorage`, no `IndexedDB`, no cookies. Accepts a slightly worse UX in exchange for the tightest possible trust profile for a hosted-JS context. Pins: `crypto-spec.md` Invite URLs.
+
+**14. No plaintext over DataChannel.** All snapshot bytes always application-layer encrypted under `snapshotKey`, regardless of transport. `inlineSnapshot` carries AEAD ciphertext with snapshot AAD-binding; the data-model's plaintext-inline-snapshot pathway is rescinded. Makes the trust boundary identical across live, mailbox, and R2 paths. Pins: above §Missing Design Decisions, `data-model.md` Snapshot Events.
+
+### Resolver (decisions 15–16)
+
+**15. Anchor resolver disagreement policy: run-all + combine.** All 8 resolution steps that can produce a candidate run; candidates dedup by `currentRange`. Emit `ambiguous` when the top two candidates are within 0.10 confidence of each other. Confidence weights from `data-model.md` ship as starting values; calibrate post-Phase 1 against a real markdown-edit corpus. Pins: above §Missing Design Decisions.
+
+**16. `AnchorBlock.kind` gains `math` and `mermaid`** in addition to the original eight variants. Required for stable anchor fingerprints inside ProseMirror's math and mermaid nodeviews (currently fall through to `"unknown"` which breaks fingerprint stability). Pins: `data-model.md` AnchorBlock.
+
+### Inconsistencies Fixed
+
+- `data-model.md` line 202: `"attn file"` → `"attn file v2"` to match the v2-suffix convention used everywhere else in the key derivation tree (`crypto-spec.md` uses the v2 form).
+
+---
+
+**Total: 16 decisions, all previously-open questions closed.** Open implementation work is now bounded by the work itself, not by undecided design.

@@ -11,6 +11,9 @@ export interface KeyboardConfig {
   onShortcutsHelp?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
+  onCommentComposer?: () => void;
+  onSuggestionComposer?: () => void;
+  onToggleReviewPanel?: () => void;
 }
 
 function isEditableElement(target: EventTarget | null): boolean {
@@ -128,6 +131,27 @@ export function initKeyboard(config: KeyboardConfig): () => void {
       if (e.key === ']' && config.onTabNext) {
         e.preventDefault();
         config.onTabNext();
+        return;
+      }
+      // Cmd/Ctrl+. opens the comment composer; Cmd/Ctrl+Shift+. opens the
+      // suggestion composer. Match on physical key (`Period`) so the binding
+      // survives Shift altering the produced character (`.` → `>`).
+      if (code === 'Period' || key === '.' || key === '>') {
+        if (e.shiftKey && config.onSuggestionComposer) {
+          e.preventDefault();
+          config.onSuggestionComposer();
+          return;
+        }
+        if (!e.shiftKey && config.onCommentComposer) {
+          e.preventDefault();
+          config.onCommentComposer();
+          return;
+        }
+      }
+      // Cmd/Ctrl+J toggles the review panel.
+      if (!e.shiftKey && (key === 'j' || key === 'J') && config.onToggleReviewPanel) {
+        e.preventDefault();
+        config.onToggleReviewPanel();
         return;
       }
     }

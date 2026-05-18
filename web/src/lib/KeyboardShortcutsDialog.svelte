@@ -3,10 +3,23 @@
   import { Kbd, KbdGroup } from '$lib/components/ui/kbd';
   import KeyboardIcon from '@lucide/svelte/icons/keyboard';
 
-  let { open = $bindable(false) }: { open: boolean } = $props();
+  interface Props {
+    open: boolean;
+    hasCommentComposer?: boolean;
+    hasSuggestionComposer?: boolean;
+    hasToggleReviewPanel?: boolean;
+  }
+
+  let {
+    open = $bindable(false),
+    hasCommentComposer = false,
+    hasSuggestionComposer = false,
+    hasToggleReviewPanel = false,
+  }: Props = $props();
 
   const isMac = navigator.platform.includes('Mac');
   const mod = isMac ? '\u2318' : 'Ctrl';
+  const shift = '\u21e7';
 
   interface Shortcut {
     keys: string[];
@@ -18,7 +31,7 @@
     shortcuts: Shortcut[];
   }
 
-  const groups: ShortcutGroup[] = [
+  const baseGroups: ShortcutGroup[] = [
     {
       label: 'Navigation',
       shortcuts: [
@@ -54,6 +67,29 @@
       ],
     },
   ];
+
+  const groups = $derived.by<ShortcutGroup[]>(() => {
+    const reviewShortcuts: Shortcut[] = [];
+    if (hasCommentComposer) {
+      reviewShortcuts.push({ keys: [mod, '.'], description: 'Comment on selection' });
+    }
+    if (hasSuggestionComposer) {
+      reviewShortcuts.push({
+        keys: [mod, shift, '.'],
+        description: 'Suggest edit on selection',
+      });
+    }
+    if (hasToggleReviewPanel) {
+      reviewShortcuts.push({ keys: [mod, 'J'], description: 'Toggle review panel' });
+    }
+    if (reviewShortcuts.length === 0) {
+      return baseGroups;
+    }
+    return [
+      ...baseGroups,
+      { label: 'Review', shortcuts: reviewShortcuts },
+    ];
+  });
 </script>
 
 <Command.Dialog

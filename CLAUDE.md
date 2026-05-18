@@ -40,6 +40,20 @@ cargo build --release      # release (stripped — clean for distribution)
 
 Debug builds (`debug_assertions` on) include automation CLI flags (`--screenshot`, `--eval`, `--click`, `--wait-for`, `--query`, `--fill`), devtools, and dev server support. Release builds strip all of these automatically — no feature flags needed.
 
+## Binary-size gate
+
+The release binary must stay under **25 MiB** (locked by `planning/collab/amendments.md` §Decision #1 — the WebRTC transport is owned by Rust via `webrtc-rs`, which is the main risk to this budget).
+
+```bash
+task check:size              # builds release + runs the gate
+scripts/check-binary-size.sh # gate only (assumes target/release/attn exists)
+scripts/check-binary-size.sh 30  # override budget (positional MAX_MIB)
+```
+
+Run the gate locally before merging any PR that touches `Cargo.toml`, `src/**`, or adds a transitively-heavy dep (tokio features, rustls, etc.). The script also reports the `.app` bundle size for context, and warns if it sees a regression > 2 MiB above an optional `planning/collab/binary-size-baseline.md`.
+
+Emergency bypass: `BINARY_SIZE_WAIVER=1 scripts/check-binary-size.sh` (or the CI alias `ATTN_SIZE_BUDGET_WAIVER=1`). Bypasses must include a follow-up issue filed against `attn-nnj.11.3` linked in the PR — never commit the waiver as a default.
+
 ## macOS Packaging
 
 ```bash

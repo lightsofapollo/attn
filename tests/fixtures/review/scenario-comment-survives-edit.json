@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "_comment": "Placeholder scenario. Filled in by attn-nnj.4.1 (mock-IPC scenario loader). Each entry in `events` will describe a scripted review event (comment_created, snapshot_created, anchor_manually_resolved, etc.) that the mock-IPC layer replays into window.__attn__ to exercise review surfaces without a live relay.",
+  "events": []
+}

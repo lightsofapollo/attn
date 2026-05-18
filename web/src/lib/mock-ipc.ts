@@ -1,4 +1,12 @@
-import type { ContentPayload, InitPayload, UpdatePayload } from './types';
+import type {
+  ContentPayload,
+  InitPayload,
+  ReviewAnchorResolutionUpdate,
+  ReviewEvent,
+  ReviewSnapshot,
+  ReviewStatus,
+  UpdatePayload,
+} from './types';
 
 const SAMPLE_MARKDOWN = `# Project Plan
 
@@ -45,6 +53,10 @@ See [the docs](https://example.com) for more info.
 type SetContentFn = (data: ContentPayload) => void;
 type UpdateContentFn = (data: UpdatePayload) => void;
 type FontScaleFn = () => void;
+type ReviewStatusFn = (payload: ReviewStatus) => void;
+type ReviewEventFn = (payload: ReviewEvent) => void;
+type ReviewSnapshotFn = (snapshot: ReviewSnapshot) => void;
+type ReviewAnchorResolutionFn = (update: ReviewAnchorResolutionUpdate) => void;
 
 interface AttnBridge {
   setContent: SetContentFn;
@@ -52,6 +64,30 @@ interface AttnBridge {
   increaseFontScale?: FontScaleFn;
   decreaseFontScale?: FontScaleFn;
   resetFontScale?: FontScaleFn;
+  /**
+   * Push transport/connection status for one review room. No-op stub today —
+   * wired to the review store later (see attn-nnj.12.10 / Phase 2).
+   * @see planning/collab/data-model.md §Webview IPC Changes
+   */
+  reviewStatus: ReviewStatusFn;
+  /**
+   * Push an append-only review-log event into the webview. No-op stub today —
+   * wired to the review store later (see attn-nnj.12.10 / Phase 2).
+   * @see planning/collab/data-model.md §Review Events
+   */
+  reviewEvent: ReviewEventFn;
+  /**
+   * Push a newly imported snapshot payload to the webview. No-op stub today —
+   * wired to the review store later (see attn-nnj.12.10 / Phase 2).
+   * @see planning/collab/data-model.md §Snapshot Graph
+   */
+  reviewSnapshot: ReviewSnapshotFn;
+  /**
+   * Push a per-event anchor-resolution update to the webview. No-op stub
+   * today — wired to the review store later (see attn-nnj.12.10 / Phase 2).
+   * @see planning/collab/data-model.md §Anchor Resolution
+   */
+  reviewAnchorResolution: ReviewAnchorResolutionFn;
 }
 
 declare global {

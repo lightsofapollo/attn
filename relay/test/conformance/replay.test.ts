@@ -30,6 +30,10 @@ describe("relay conformance corpus", () => {
 
   for (const scenario of corpus.scenarios as Scenario[]) {
     const label = `${scenario.id} — ${scenario.name}`;
+    if (scenario.skip) {
+      it.skip(`${label} [SKIP: ${scenario.skipReason ?? "no reason"}]`, () => {});
+      continue;
+    }
     it(label, async () => {
       await runScenario(scenario);
     });

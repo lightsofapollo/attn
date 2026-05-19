@@ -1800,4 +1800,201 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     expect(createResponse.policy.longSession).toBe(false);
   });
 
+  // -------------------------------------------------------------------------
+  // Scenario 15 — Multi-party broadcast (3 participants, 1 author).
+  //
+  // The user-facing question: "can 3 people on 3 different daemons
+  // collaborate on the same doc from a single author?" The relay's contract
+  // for event-kind envelopes (no target) is that they fan out to every WS
+  // subscriber in the room. 6a only proves *targeted* (signal) routing
+  // works across 3 sockets; this scenario proves *broadcast* fanout does
+  // the same. Without this we'd be shipping a 3+ party feature with only
+  // 2-party empirical coverage.
+  // -------------------------------------------------------------------------
+  it("15a. Multi-party: 3 participants each see the other two's event envelopes", async () => {
+    const roomId = uniqueRoomId("s15a-multi-party-3");
+    const ownerKp = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerKp });
+
+    const ownerDev = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-mp-owner",
+      participantId: "author",
+      kind: "owner",
+      keypair: ownerKp,
+    });
+    const reviewerA = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-mp-a",
+      participantId: "reviewer-a",
+    });
+    const reviewerB = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-mp-b",
+      participantId: "reviewer-b",
+    });
+
+    const sockets = await Promise.all([
+      openSocket({ roomId, deviceId: ownerDev.deviceId, admissionKey }),
+      openSocket({ roomId, deviceId: reviewerA.deviceId, admissionKey }),
+      openSocket({ roomId, deviceId: reviewerB.deviceId, admissionKey }),
+    ]);
+    const [own, ra, rb] = sockets;
+    const qOwn = new FrameQueue(own.ws);
+    const qRa = new FrameQueue(ra.ws);
+    const qRb = new FrameQueue(rb.ws);
+    own.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    ra.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    rb.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    await drainHelloThroughPing(qOwn);
+    await drainHelloThroughPing(qRa);
+    await drainHelloThroughPing(qRb);
+
+    // Each participant uploads one envelope, in sequence so serverSeq is
+    // deterministic. The relay broadcasts to all subscribers including the
+    // sender (single source of truth — clients de-dupe locally via envelopeId).
+    const uploads: Array<{ envelopeId: string; from: string }> = [
+      { envelopeId: "mp-owner-1", from: ownerDev.deviceId },
+      { envelopeId: "mp-revA-1", from: reviewerA.deviceId },
+      { envelopeId: "mp-revB-1", from: reviewerB.deviceId },
+    ];
+    for (const u of uploads) {
+      const r = await postEnvelopes({
+        roomId,
+        admissionKey,
+        envelopes: [
+          buildEnvelope({
+            envelopeId: u.envelopeId,
+            authorId:
+              u.from === ownerDev.deviceId
+                ? ownerDev.participantId
+                : u.from === reviewerA.deviceId
+                  ? reviewerA.participantId
+                  : reviewerB.participantId,
+            deviceId: u.from,
+          }),
+        ],
+      });
+      expect(r.status, `upload ${u.envelopeId} from ${u.from}`).toBe(201);
+    }
+
+    // Each queue should now contain all 3 envelope frames. Drain up to 3
+    // frames per queue; tolerate intermixed presence frames (which the relay
+    // emits when peers join — already drained above) by filtering.
+    async function collectEnvelopeIds(q: FrameQueue, expected: number): Promise<string[]> {
+      const ids: string[] = [];
+      while (ids.length < expected) {
+        const frame = await q.next(2000);
+        if (frame === undefined) break;
+        if (isEnvelope(frame)) ids.push(frame.envelope.envelopeId);
+        // skip presence/ping/etc.
+      }
+      return ids;
+    }
+
+    const ownerSaw = await collectEnvelopeIds(qOwn, 3);
+    const raSaw = await collectEnvelopeIds(qRa, 3);
+    const rbSaw = await collectEnvelopeIds(qRb, 3);
+
+    const all = ["mp-owner-1", "mp-revA-1", "mp-revB-1"];
+    expect(new Set(ownerSaw)).toEqual(new Set(all));
+    expect(new Set(raSaw)).toEqual(new Set(all));
+    expect(new Set(rbSaw)).toEqual(new Set(all));
+
+    own.ws.close(1000);
+    ra.ws.close(1000);
+    rb.ws.close(1000);
+    await qOwn.waitClosed(1000);
+    await qRa.waitClosed(1000);
+    await qRb.waitClosed(1000);
+  });
+
+  it("15b. Multi-party: late-joining 4th reviewer backfills all 3 prior envelopes", async () => {
+    const roomId = uniqueRoomId("s15b-multi-party-late");
+    const ownerKp = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({
+      roomId,
+      ownerKp,
+      // bump maxPeers so adding a 4th device doesn't bump up against the cap
+      policy: { maxPeers: 8 },
+    });
+
+    const ownerDev = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-mpL-owner",
+      participantId: "author",
+      kind: "owner",
+      keypair: ownerKp,
+    });
+    const reviewerA = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-mpL-a",
+      participantId: "reviewer-a",
+    });
+    const reviewerB = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-mpL-b",
+      participantId: "reviewer-b",
+    });
+
+    // Three participants each upload one envelope BEFORE the 4th joins.
+    const ids = ["mpL-owner-1", "mpL-revA-1", "mpL-revB-1"];
+    const senders = [ownerDev, reviewerA, reviewerB] as const;
+    for (let i = 0; i < 3; i++) {
+      const s = senders[i];
+      const r = await postEnvelopes({
+        roomId,
+        admissionKey,
+        envelopes: [
+          buildEnvelope({
+            envelopeId: ids[i] as string,
+            authorId: s.participantId,
+            deviceId: s.deviceId,
+          }),
+        ],
+      });
+      expect(r.status).toBe(201);
+    }
+
+    // Now a 4th reviewer joins from scratch (no prior WS, no prior history).
+    const reviewerC = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-mpL-c",
+      participantId: "reviewer-c",
+    });
+    const { ws } = await openSocket({
+      roomId,
+      deviceId: reviewerC.deviceId,
+      admissionKey,
+    });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    const drained = await drainHelloThroughPing(q);
+
+    // hello.devices includes all 4 registered devices.
+    const deviceIds = drained.hello.devices.map((d) => d.deviceId);
+    expect(new Set(deviceIds)).toEqual(
+      new Set([
+        ownerDev.deviceId,
+        reviewerA.deviceId,
+        reviewerB.deviceId,
+        reviewerC.deviceId,
+      ]),
+    );
+
+    // Backfill carries all 3 prior envelopes in serverSeq order.
+    const backfillIds = drained.backfill.map((f) => f.envelope.envelopeId);
+    expect(backfillIds).toEqual(ids);
+
+    ws.close(1000);
+    await q.waitClosed(1000);
+  });
+
 });

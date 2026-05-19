@@ -180,5 +180,11 @@ for (const run of cases) {
 console.log(`\n${pass} passed, ${fail} failed (${cases.length} total)`);
 
 if (fail > 0) {
-  process.exitCode = 1;
+  // `process` exists at runtime under `tsx` but not in the ambient web
+  // tsconfig; same shim as selectors.test.ts.
+  interface NodeProcessShape {
+    exit?: (code: number) => void;
+  }
+  const nodeProcess = (globalThis as unknown as { process?: NodeProcessShape }).process;
+  nodeProcess?.exit?.(1);
 }

@@ -14,6 +14,7 @@
 // expand the body-shape unknowns into typed thread views here.
 
 import type {
+  RequiresThreeWayVerdict,
   ReviewAnchorResolutionUpdate,
   ReviewEvent,
   ReviewSnapshot,
@@ -67,6 +68,15 @@ export class ReviewStore {
   pendingOutbox = $state<unknown[]>([]);
 
   /**
+   * Active three-way-apply verdict, surfaced as the inline-expand card
+   * (`ReviewApplyExpand.svelte`, attn-nnj.8.3). Only one three-way can be
+   * open at a time — clicking `[accept]` on a different suggestion that
+   * also returns `RequiresThreeWay` replaces this. Per
+   * `planning/collab/ui/three-way-apply.md` §6.
+   */
+  activeThreeWayApply = $state<RequiresThreeWayVerdict | null>(null);
+
+  /**
    * Derived flag used as a tiny end-to-end reactivity probe. Phase 2 4.2
    * replaces this with rich selectors (comments-on-current-snapshot, etc.).
    */
@@ -112,6 +122,22 @@ export class ReviewStore {
   /** Toggle the right-rail review panel open/closed. */
   togglePanel(): void {
     this.panelOpen = !this.panelOpen;
+  }
+
+  /**
+   * Open the inline-expand three-way apply card for `verdict`. Replaces any
+   * previously-open three-way (invariant: one at a time, per 10.4 §6).
+   */
+  openThreeWayApply(verdict: RequiresThreeWayVerdict): void {
+    this.activeThreeWayApply = verdict;
+  }
+
+  /**
+   * Close the inline-expand three-way apply card. Called on accept / keep
+   * mine / Esc / click-outside / edit-confirm.
+   */
+  clearThreeWayApply(): void {
+    this.activeThreeWayApply = null;
   }
 }
 

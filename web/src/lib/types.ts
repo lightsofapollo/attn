@@ -851,3 +851,93 @@ export interface ReviewAnchorResolutionUpdate {
   eventId: EventId;
   resolved: ResolvedAnchor;
 }
+
+// ---------------------------------------------------------------------------
+// Apply verdict (mirrors `crate::review::apply::ApplyVerdict`)
+//
+// Produced by the Rust resolver when the owner clicks `[accept]` on a
+// suggestion card. The frontend only needs the `RequiresThreeWay` shape to
+// drive `ReviewApplyExpand.svelte` (attn-nnj.8.3); other variants are routed
+// elsewhere (Ready writes silently, Ambiguous → orphan tray, Stale → re-anchor
+// flow). See `src/review/apply.rs:174` for the canonical Rust definition.
+// ---------------------------------------------------------------------------
+
+/**
+ * How the snapshot's `expected_text` compared to what is currently at the
+ * target byte range, for the `Ready` verdict.
+ * @see src/review/apply.rs `TextMatchKind`
+ */
+export type TextMatchKind =
+  | 'exact'
+  | 'normalized_unicode'
+  | 'trailing_whitespace'
+  | 'mismatch';
+
+/**
+ * `Ready` verdict — the suggestion can apply silently. Frontend writes
+ * `replacement` at `targetByteRange`.
+ * @see src/review/apply.rs `ApplyVerdict::Ready`
+ */
+export interface ReadyVerdict {
+  kind: 'ready';
+  suggestionId: EventId;
+  targetByteRange: [number, number];
+  replacement: string;
+  confidence: number;
+  matchKind: TextMatchKind;
+  confidenceNote?: string;
+}
+
+/**
+ * `RequiresThreeWay` verdict — drift between snapshot's `expectedText` and
+ * current bytes. Drives `ReviewApplyExpand.svelte`.
+ * @see src/review/apply.rs `ApplyVerdict::RequiresThreeWay`
+ */
+export interface RequiresThreeWayVerdict {
+  kind: 'requires_three_way';
+  suggestionId: EventId;
+  roomId: RoomId;
+  targetByteRange: [number, number];
+  /** Text the suggestion expected to find when it was authored. */
+  snapshotExpected: string;
+  /** Text actually present at the target range right now. */
+  currentText: string;
+  /** Text the suggestion would write if accepted. */
+  proposedReplacement: string;
+  confidence: number;
+  /** Reviewer display name (optional — falls back to participant id). */
+  reviewerDisplayName?: string;
+  /** Reviewer event creation time (ms since epoch). */
+  createdAt?: number;
+}
+
+/**
+ * `Ambiguous` verdict — multiple candidate positions; user picks one.
+ * Routed to the orphan-tray candidate picker.
+ * @see src/review/apply.rs `ApplyVerdict::Ambiguous`
+ */
+export interface AmbiguousVerdict {
+  kind: 'ambiguous';
+  suggestionId: EventId;
+  candidates: ResolvedAnchorCandidate[];
+}
+
+/**
+ * `Stale` verdict — anchor cannot resolve; manual re-anchor required.
+ * @see src/review/apply.rs `ApplyVerdict::Stale`
+ */
+export interface StaleVerdict {
+  kind: 'stale';
+  suggestionId: EventId;
+  reason: string;
+}
+
+/**
+ * Discriminated union of every apply-verdict variant.
+ * @see src/review/apply.rs `ApplyVerdict`
+ */
+export type ApplyVerdict =
+  | ReadyVerdict
+  | RequiresThreeWayVerdict
+  | AmbiguousVerdict
+  | StaleVerdict;

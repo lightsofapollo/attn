@@ -28,6 +28,7 @@
 
 <script lang="ts">
   import Share2 from '@lucide/svelte/icons/share-2';
+  import ConnectionBadge from './ConnectionBadge.svelte';
   import { reviewStore } from './review/store.svelte';
 
   interface Props {
@@ -37,12 +38,19 @@
     isOwner?: boolean;
     /** Click handler for the Share pill — opens ShareDialog (parent owned). */
     onShareClick?: () => void;
+    /**
+     * Click handler for the connection badge's [retry direct] button. 4.13
+     * wires this into a `reviewReconnect` IPC; today the parent owns the
+     * side-effect so the chrome stays presentational.
+     */
+    onReconnect?: () => void;
   }
 
   let {
     shareOpen = false,
     isOwner = true,
     onShareClick,
+    onReconnect,
   }: Props = $props();
 
   // Visible whenever a room is bound OR a share is being initiated.
@@ -79,21 +87,15 @@
     {/if}
 
     <!--
-      Connection-badge slot (attn-nnj.4.11 fills this). Render an inert
-      placeholder so the layout matches the §8 mock once the badge ships.
+      Connection-badge slot (attn-nnj.4.11). Subscribes to
+      `reviewStore.status` and renders the 4-state chip + popover per
+      planning/collab/ui/connection-share.md §5.
     -->
     <div
-      class="review-bar-connection text-muted-foreground"
+      class="review-bar-connection"
       data-slot="review-bar-connection"
-      aria-hidden="true"
     >
-      <span class="inline-flex items-center gap-1.5">
-        <span
-          class="size-2 rounded-full bg-muted-foreground/50"
-          aria-hidden="true"
-        ></span>
-        <span class="text-[11px]">{reviewStore.status?.connection ?? 'pending'}</span>
-      </span>
+      <ConnectionBadge {onReconnect} />
     </div>
 
     <span class="text-muted-foreground/60" aria-hidden="true">·</span>

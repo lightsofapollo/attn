@@ -353,18 +353,57 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     // event loop via the proxy closure below, integrating with the existing
     // tao loop rather than spinning up a parallel one (per
     // `planning/collab/amendments.md` §Codebase Corrections).
-    let review_manager = review_store.as_ref().map(|store| {
+    let review_manager = review_store.as_ref().and_then(|store| {
         let proxy = event_loop.create_proxy();
         let update_tx: crate::review::manager::UpdateSink = Box::new(move |update| {
             let _ = proxy.send_event(UserEvent::Review(update));
         });
         let working_copy =
             Arc::new(crate::review::working_copy::WorkingCopyService::new());
-        Arc::new(ReviewManager::new(
-            Arc::clone(store),
-            working_copy,
-            update_tx,
-        ))
+        let base = ReviewManager::new(Arc::clone(store), working_copy, update_tx);
+
+        // Attach the bootstrap pipeline so Share/Join IPCs go through real
+        // create-room + register-device against the relay rather than the
+        // stub. Falling back to the stub when ATTN_RELAY_URL is unset would
+        // hide a misconfig — log and skip instead, but keep the manager so
+        // non-network review commands still dispatch.
+        let relay_url = std::env::var("ATTN_RELAY_URL").unwrap_or_default();
+        if relay_url.is_empty() {
+            eprintln!(
+                "attn: ATTN_RELAY_URL unset — Share/Join will use the scaffold stub"
+            );
+            return Some(Arc::new(base));
+        }
+        let verifying_keys: crate::review::transport::inbound::VerifyingKeyCache =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        match base.with_bootstrap(relay_url.clone(), None, verifying_keys) {
+            Ok(mgr) => {
+                eprintln!("attn: review bootstrap attached (relay={})", relay_url);
+                Some(Arc::new(mgr))
+            }
+            Err(err) => {
+                eprintln!(
+                    "attn: failed to attach review bootstrap (relay={}): {} — \
+                     falling back to stub",
+                    relay_url, err
+                );
+                // Rebuild a fresh manager because `with_bootstrap` consumed
+                // the previous one on error.
+                let proxy = event_loop.create_proxy();
+                let update_tx: crate::review::manager::UpdateSink =
+                    Box::new(move |update| {
+                        let _ = proxy.send_event(UserEvent::Review(update));
+                    });
+                let working_copy = Arc::new(
+                    crate::review::working_copy::WorkingCopyService::new(),
+                );
+                Some(Arc::new(ReviewManager::new(
+                    Arc::clone(store),
+                    working_copy,
+                    update_tx,
+                )))
+            }
+        }
     });
     if review_manager.is_none() {
         eprintln!("attn: review manager unavailable, review commands will be no-ops");

@@ -162,3 +162,27 @@ export function hasTextSelection(view: EditorView): boolean {
   if (selection.empty) return false;
   return selection.to > selection.from;
 }
+
+/**
+ * Get the top y-coordinate (in viewport space) for an arbitrary document
+ * position. Used by the review margin (attn-nnj.4.3) to align each margin
+ * card to its anchor's first line.
+ *
+ * Returns `null` when `pos` is out of bounds or when `coordsAtPos` throws
+ * (e.g. during a torn-down view). The caller treats `null` as "skip this
+ * anchor for the current layout pass."
+ *
+ * NOTE: This returns the *viewport-relative* top. The margin component
+ * subtracts the scroll-container's bounding box top to convert into the
+ * scroll-content coordinate space the absolute-positioned cards live in.
+ */
+export function anchorTopY(view: EditorView, pos: number): number | null {
+  try {
+    const docSize = view.state.doc.content.size;
+    if (pos < 0 || pos > docSize) return null;
+    const coords = view.coordsAtPos(pos);
+    return coords.top;
+  } catch {
+    return null;
+  }
+}

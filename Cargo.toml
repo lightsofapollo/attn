@@ -60,6 +60,12 @@ ed25519-dalek = "2"
 base64 = "0.22"
 getrandom = "0.2"
 zeroize = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+# Async runtime — narrowest possible feature set for now. PoW token pool
+# (attn-nnj.1.7) needs `sync` (Mutex) and `rt` (spawn_blocking). Phase 4
+# (attn-nnj.6.x/7.x) will widen these as transports / outbox land.
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 
 [dev-dependencies]
 tempfile = "3"

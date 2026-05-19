@@ -11,6 +11,7 @@
 pub mod aead;
 pub mod canonical;
 pub mod kdf;
+pub mod pow;
 
 // Re-export the canonical-JSON primitives at the `crypto::` level so future
 // signers / AEAD callers (attn-nnj.1.5+) can `use crate::review::crypto::*`.

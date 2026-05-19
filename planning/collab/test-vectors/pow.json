@@ -13,35 +13,116 @@
       "vectors[].inputs.deviceId": "Device ID string used in the `resource` field.",
       "vectors[].inputs.rand": "base64url-no-pad of 16 random bytes; the per-token nonce.",
       "vectors[].inputs.expiresAt": "Integer ms timestamp.",
-      "vectors[].inputs.difficulty": "Integer leading-zero-bit count required (default 16).",
+      "vectors[].inputs.difficulty": "Integer leading-zero-bit count required. Corpus uses 12 (vs production 16) so vectors are portable and tests run in <1s.",
       "vectors[].expected.requestPathHash": "base64url-no-pad of first 8 bytes of SHA-256(method || ' ' || pathSubstituted).",
       "vectors[].expected.resource": "Concatenated `<roomId>:<deviceId>:<requestPathHash>` exactly as it appears in the token.",
       "vectors[].expected.counter": "Decimal integer (as a string for >2^53 safety) — the smallest non-negative counter producing a valid hash.",
       "vectors[].expected.tokenHashHex": "lowercase hex of SHA-256(token) — convenient for debugging leading-zero-bit checks.",
       "vectors[].expected.token": "The full token string `attn-pow:v2:...:<counter>` that meets the difficulty."
     },
-    "filledBy": "attn-nnj.1.7 (Hashcash PoW mint + verify)"
+    "filledBy": "attn-nnj.1.7 (Hashcash PoW mint + verify)",
+    "generator": "src/review/crypto/pow.rs `tests::generate_corpus_vectors` (cargo test ... -- --ignored)."
   },
   "version": 1,
   "vectors": [
     {
-      "name": "POST /v2/rooms/:roomId/envelopes — minimal vector",
+      "name": "POST /v2/rooms/:roomId/devices — device join",
+      "inputs": {
+        "method": "POST",
+        "path": "/v2/rooms/:roomId/devices",
+        "pathSubstituted": "/v2/rooms/EXAMPLE_ROOM/devices",
+        "roomId": "EXAMPLE_ROOM",
+        "deviceId": "EXAMPLE_DEVICE",
+        "rand": "ELoREhMUFRYXGBkaGxwdHg",
+        "expiresAt": 1700000300000,
+        "difficulty": 12
+      },
+      "expected": {
+        "requestPathHash": "0KyHckSu3Cs",
+        "resource": "EXAMPLE_ROOM:EXAMPLE_DEVICE:0KyHckSu3Cs",
+        "counter": "3060",
+        "tokenHashHex": "00005a3d6ae4c32ee22533119a74eacf73cd1e2826f2ae44a7f31de4632ab47d",
+        "token": "attn-pow:v2:12:1700000300000:EXAMPLE_ROOM:EXAMPLE_DEVICE:0KyHckSu3Cs:ELoREhMUFRYXGBkaGxwdHg:3060"
+      }
+    },
+    {
+      "name": "POST /v2/rooms/:roomId/envelopes — write batch",
       "inputs": {
         "method": "POST",
         "path": "/v2/rooms/:roomId/envelopes",
-        "pathSubstituted": "/v2/rooms/__PENDING_ROOM_ID__/envelopes",
-        "roomId": "__PENDING_ROOM_ID__",
-        "deviceId": "__PENDING_DEVICE_ID__",
-        "rand": "__PENDING__",
+        "pathSubstituted": "/v2/rooms/EXAMPLE_ROOM/envelopes",
+        "roomId": "EXAMPLE_ROOM",
+        "deviceId": "EXAMPLE_DEVICE",
+        "rand": "IIohIiMkJSYnKCkqKywtLg",
         "expiresAt": 1700000300000,
-        "difficulty": 16
+        "difficulty": 12
       },
       "expected": {
-        "requestPathHash": "__PENDING__",
-        "resource": "__PENDING__",
-        "counter": "__PENDING__",
-        "tokenHashHex": "__PENDING__",
-        "token": "__PENDING__"
+        "requestPathHash": "2coG_TIJb8c",
+        "resource": "EXAMPLE_ROOM:EXAMPLE_DEVICE:2coG_TIJb8c",
+        "counter": "4075",
+        "tokenHashHex": "000e963938e15bd83440b21b3920559992f575925db511fcf953798023a1c3de",
+        "token": "attn-pow:v2:12:1700000300000:EXAMPLE_ROOM:EXAMPLE_DEVICE:2coG_TIJb8c:IIohIiMkJSYnKCkqKywtLg:4075"
+      }
+    },
+    {
+      "name": "POST /v2/rooms/:roomId/acks — ack-with-delete",
+      "inputs": {
+        "method": "POST",
+        "path": "/v2/rooms/:roomId/acks",
+        "pathSubstituted": "/v2/rooms/EXAMPLE_ROOM/acks",
+        "roomId": "EXAMPLE_ROOM",
+        "deviceId": "EXAMPLE_DEVICE",
+        "rand": "MJoxMjM0NTY3ODk6Ozw9Pg",
+        "expiresAt": 1700000300000,
+        "difficulty": 12
+      },
+      "expected": {
+        "requestPathHash": "r-ubBs670Ig",
+        "resource": "EXAMPLE_ROOM:EXAMPLE_DEVICE:r-ubBs670Ig",
+        "counter": "1553",
+        "tokenHashHex": "0004945686b190541814442af115cec09ba0d88310b8ced5febae10c33a5a541",
+        "token": "attn-pow:v2:12:1700000300000:EXAMPLE_ROOM:EXAMPLE_DEVICE:r-ubBs670Ig:MJoxMjM0NTY3ODk6Ozw9Pg:1553"
+      }
+    },
+    {
+      "name": "POST /v2/rooms/:roomId/blobs — large snapshot upload",
+      "inputs": {
+        "method": "POST",
+        "path": "/v2/rooms/:roomId/blobs",
+        "pathSubstituted": "/v2/rooms/EXAMPLE_ROOM/blobs",
+        "roomId": "EXAMPLE_ROOM",
+        "deviceId": "EXAMPLE_DEVICE",
+        "rand": "QOpBQkNERUZHSElKS0xNTg",
+        "expiresAt": 1700000300000,
+        "difficulty": 12
+      },
+      "expected": {
+        "requestPathHash": "CKSph50p_Qw",
+        "resource": "EXAMPLE_ROOM:EXAMPLE_DEVICE:CKSph50p_Qw",
+        "counter": "5918",
+        "tokenHashHex": "000c2a4885d2d4a749abd44f78001479c09647595ca9276311751c3a0163847c",
+        "token": "attn-pow:v2:12:1700000300000:EXAMPLE_ROOM:EXAMPLE_DEVICE:CKSph50p_Qw:QOpBQkNERUZHSElKS0xNTg:5918"
+      }
+    },
+    {
+      "name": "DELETE /v2/rooms/:roomId — owner-initiated room delete",
+      "inputs": {
+        "method": "DELETE",
+        "path": "/v2/rooms/:roomId",
+        "pathSubstituted": "/v2/rooms/EXAMPLE_ROOM",
+        "roomId": "EXAMPLE_ROOM",
+        "deviceId": "EXAMPLE_DEVICE",
+        "rand": "UPpRUlNUVVZXWFlaW1xdXg",
+        "expiresAt": 1700000300000,
+        "difficulty": 12
+      },
+      "expected": {
+        "requestPathHash": "R6K2doruI0w",
+        "resource": "EXAMPLE_ROOM:EXAMPLE_DEVICE:R6K2doruI0w",
+        "counter": "2922",
+        "tokenHashHex": "0003e34d9d6c314962c98e7c26387f3ecd49a962fec4baed36231c6ec541ec35",
+        "token": "attn-pow:v2:12:1700000300000:EXAMPLE_ROOM:EXAMPLE_DEVICE:R6K2doruI0w:UPpRUlNUVVZXWFlaW1xdXg:2922"
       }
     }
   ]

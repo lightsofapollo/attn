@@ -1988,3 +1988,516 @@ mod transport_selector_tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// RequestSnapshot live-recovery tests (attn-nnj.7.6)
+//
+// Pins the round-trip for the amendments.md §Recovery from local-store loss
+// path: client A → `request_snapshot` mints a SignalingPayload, owner B →
+// `handle_inbound_request_snapshot` resolves the latest snapshot, mints a
+// SnapshotCreated event, and routes it back over the DataChannel (or the
+// mailbox fallback when the WebRTC arm is down).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod request_snapshot_tests {
+    use super::*;
+    use crate::review::crypto::kdf::derive_room_keys;
+    use crate::review::ids::{ContentHash, ParticipantId, SnapshotId};
+    use crate::review::model::{AnchorIndex, CanonicalEncoding, SnapshotNode, SnapshotPlaintext};
+    use crate::review::transport::selector::test_support::{MockMailbox, MockWebRtc};
+    use crate::review::transport::selector::{MailboxSender, TransportConfig, TransportMode, WebRtcSender};
+    use serde::Deserialize;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::mpsc;
+    use tempfile::TempDir;
+
+    /// Pinned room secret — matches the corpus used across the rest of the
+    /// review tests so a stray cross-module derivation divergence is loud.
+    const TEST_ROOM_SECRET: [u8; 32] = [0x11u8; 32];
+    const TEST_SIGNING_SEED: [u8; 32] = [0x22u8; 32];
+
+    fn id<T: for<'de> Deserialize<'de>>(s: &str) -> T {
+        serde_json::from_value(serde_json::Value::String(s.to_string()))
+            .expect("typed id deserializes")
+    }
+
+    /// Build a `ReviewManager` + receiver + tempdir for a single recovery
+    /// scenario. The manager is `new`-only (no bootstrap) — recovery tests
+    /// drive the registry directly.
+    fn make_manager_with_store() -> (ReviewManager, mpsc::Receiver<ReviewUpdate>, TempDir, Arc<ReviewStore>) {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
+        );
+        let working_copy = Arc::new(WorkingCopyService::new());
+        let (tx, rx) = mpsc::channel::<ReviewUpdate>();
+        let tx = StdMutex::new(tx);
+        let sink: UpdateSink = Box::new(move |update| {
+            let _ = tx.lock().expect("sink mutex").send(update);
+        });
+        let mgr = ReviewManager::new(Arc::clone(&store), working_copy, sink);
+        (mgr, rx, tmp, store)
+    }
+
+    /// Mint a `RoomSignalContext` with the canonical pinned key material.
+    fn fixture_signal_context(
+        room_id: &RoomId,
+        target: Option<DeviceId>,
+    ) -> RoomSignalContext {
+        let keys = derive_room_keys(&TEST_ROOM_SECRET);
+        let signing_key = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED)
+            .expect("signing key from seed");
+        RoomSignalContext {
+            room_id: room_id.clone(),
+            author_id: id::<ParticipantId>("p-author-01"),
+            local_device_id: id::<DeviceId>("d-local-01"),
+            target_device_id: target,
+            signing_key,
+            event_key: *keys.event_key.as_bytes(),
+            snapshot_key: *keys.snapshot_key.as_bytes(),
+            signaling_key: *keys.signaling_key.as_bytes(),
+        }
+    }
+
+    fn dummy_snapshot(snapshot_id: &str, file_id: &str, created_at: u64) -> SnapshotNode {
+        SnapshotNode {
+            snapshot_id: id::<SnapshotId>(snapshot_id),
+            file_id: id::<FileId>(file_id),
+            parent_snapshot_id: None,
+            supersedes_snapshot_id: None,
+            created_at,
+            created_by: id::<ParticipantId>("p-author-01"),
+            base_hash: id::<ContentHash>("hash-1"),
+            byte_length: 5,
+            encrypted_blob_ref: None,
+            plaintext: Some(SnapshotPlaintext {
+                markdown: "# hi\n".to_string(),
+                anchor_index: AnchorIndex {
+                    doc_hash: id::<ContentHash>("hash-1"),
+                    canonical_encoding: CanonicalEncoding::Utf8Bytes,
+                    line_count: 1,
+                    blocks: vec![],
+                    headings: vec![],
+                },
+            }),
+        }
+    }
+
+    fn dummy_room() -> RoomId {
+        id::<RoomId>("hjCfgOvsatNOUedgxhZpyw")
+    }
+
+    // -----------------------------------------------------------------
+    // 1. request_snapshot prefers the WebRTC arm when connected and pushes
+    //    a SignalingPayload::RequestSnapshot through publish_signal.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn request_snapshot_uses_webrtc_publish_signal_when_connected() {
+        let (mgr, _rx, _tmp, _store) = make_manager_with_store();
+        let room = dummy_room();
+        let webrtc = Arc::new(MockWebRtc::new(true));
+
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Live,
+            TransportConfig::from_handles(None, Some(webrtc.clone() as Arc<dyn WebRtcSender>)),
+        )
+        .await
+        .expect("open live");
+        mgr.register_signal_context(fixture_signal_context(
+            &room,
+            Some(id::<DeviceId>("d-remote-01")),
+        ))
+        .await;
+
+        let file_id: FileId = id("f-file-01");
+        let since: SnapshotId = id("snap-since");
+        mgr.request_snapshot(&room, file_id.clone(), Some(since.clone()))
+            .await
+            .expect("request_snapshot ok via webrtc");
+
+        let signals = webrtc.published_signals();
+        assert_eq!(signals.len(), 1, "exactly one signal must be published");
+        match &signals[0] {
+            SignalingPayload::RequestSnapshot {
+                file_id: f,
+                since_snapshot_id: s,
+                from,
+            } => {
+                assert_eq!(f, &file_id);
+                assert_eq!(s.as_ref(), Some(&since));
+                assert_eq!(from, &id::<DeviceId>("d-local-01"));
+            }
+            other => panic!("expected RequestSnapshot, got {other:?}"),
+        }
+        // Mailbox was never wired in Live mode; nothing should hit it.
+        // (The selector invariant prevents a mailbox handle here, but we
+        // also assert the webrtc path didn't fan out a bonus envelope.)
+        assert_eq!(webrtc.total_sent(), 0, "request_snapshot must not call send_envelopes");
+    }
+
+    // -----------------------------------------------------------------
+    // 2. request_snapshot falls back to the mailbox arm when WebRTC is
+    //    not connected. The minted envelope round-trips through
+    //    disassemble_signal_envelope so we can also assert the wire shape.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn request_snapshot_falls_back_to_mailbox_when_webrtc_down() {
+        use crate::review::transport::signaling::disassemble_signal_envelope;
+
+        let (mgr, _rx, _tmp, _store) = make_manager_with_store();
+        let room = dummy_room();
+        let mailbox = Arc::new(MockMailbox::new());
+        let webrtc = Arc::new(MockWebRtc::new(false)); // disconnected
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Hybrid,
+            TransportConfig::from_handles(
+                Some(mailbox.clone() as Arc<dyn MailboxSender>),
+                Some(webrtc.clone() as Arc<dyn WebRtcSender>),
+            ),
+        )
+        .await
+        .expect("open hybrid");
+        let ctx = fixture_signal_context(&room, Some(id::<DeviceId>("d-remote-01")));
+        let signaling_key = ctx.signaling_key;
+        mgr.register_signal_context(ctx).await;
+
+        let file_id: FileId = id("f-file-02");
+        mgr.request_snapshot(&room, file_id.clone(), None)
+            .await
+            .expect("request_snapshot ok via mailbox");
+
+        // WebRTC saw nothing (it was down).
+        assert!(webrtc.published_signals().is_empty());
+        assert_eq!(webrtc.total_sent(), 0);
+
+        // Mailbox got exactly one batch of one envelope, kind=signal,
+        // targeted at the remote device.
+        let batches = mailbox.batches();
+        assert_eq!(batches.len(), 1);
+        let env = batches[0]
+            .first()
+            .cloned()
+            .expect("one envelope in the mailbox batch");
+        assert_eq!(env.kind, EnvelopeKind::Signal);
+        assert_eq!(
+            env.target.as_ref().map(|t| &t.device_id),
+            Some(&id::<DeviceId>("d-remote-01")),
+            "request_snapshot must target the remote device when ctx has one",
+        );
+
+        // Round-trip the envelope payload to prove the bytes are well-formed.
+        let payload = disassemble_signal_envelope(&env, &signaling_key)
+            .expect("disassemble mailbox-routed signal");
+        match payload {
+            SignalingPayload::RequestSnapshot {
+                file_id: f,
+                since_snapshot_id: s,
+                from,
+            } => {
+                assert_eq!(f, file_id);
+                assert!(s.is_none(), "None since must round-trip as omitted field");
+                assert_eq!(from, id::<DeviceId>("d-local-01"));
+            }
+            other => panic!("expected RequestSnapshot, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 3. request_snapshot without a registered signal context surfaces
+    //    a stable ATTN_NO_SIGNAL_CONTEXT error code.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn request_snapshot_without_signal_context_returns_stable_error_code() {
+        let (mgr, _rx, _tmp, _store) = make_manager_with_store();
+        let room = dummy_room();
+        let webrtc = Arc::new(MockWebRtc::new(true));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Live,
+            TransportConfig::from_handles(None, Some(webrtc as Arc<dyn WebRtcSender>)),
+        )
+        .await
+        .expect("open live");
+
+        let err = mgr
+            .request_snapshot(&room, id::<FileId>("f-file-x"), None)
+            .await
+            .expect_err("must error without ctx");
+        match err {
+            TransportError::Io(msg) => assert!(
+                msg.contains("ATTN_NO_SIGNAL_CONTEXT"),
+                "expected ATTN_NO_SIGNAL_CONTEXT in error, got: {msg}"
+            ),
+            other => panic!("expected Io(ATTN_NO_SIGNAL_CONTEXT), got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 4. request_snapshot for an unknown room returns RoomNotFound.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn request_snapshot_unknown_room_returns_room_not_found() {
+        let (mgr, _rx, _tmp, _store) = make_manager_with_store();
+        let room = dummy_room();
+        // Register a signal context but never open transports.
+        mgr.register_signal_context(fixture_signal_context(&room, None))
+            .await;
+        let err = mgr
+            .request_snapshot(&room, id::<FileId>("f-file-x"), None)
+            .await
+            .expect_err("unknown transports must error");
+        assert!(matches!(err, TransportError::RoomNotFound));
+    }
+
+    // -----------------------------------------------------------------
+    // 5. handle_inbound_request_snapshot returns the latest snapshot for
+    //    the file as a SnapshotCreated event envelope routed over WebRTC.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_inbound_request_snapshot_emits_snapshot_created_over_webrtc() {
+        let (mgr, _rx, _tmp, store) = make_manager_with_store();
+        let room = dummy_room();
+        let mailbox = Arc::new(MockMailbox::new());
+        let webrtc = Arc::new(MockWebRtc::new(true));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Hybrid,
+            TransportConfig::from_handles(
+                Some(mailbox.clone() as Arc<dyn MailboxSender>),
+                Some(webrtc.clone() as Arc<dyn WebRtcSender>),
+            ),
+        )
+        .await
+        .expect("open hybrid");
+        mgr.register_signal_context(fixture_signal_context(&room, None))
+            .await;
+
+        // Seed two snapshots for the same file — the newer one must win.
+        let older = dummy_snapshot("snap-old", "f-file-99", 1_700_000_000_000);
+        let newer = dummy_snapshot("snap-new", "f-file-99", 1_700_000_010_000);
+        store.save_snapshot(&room, &older).expect("save older");
+        store.save_snapshot(&room, &newer).expect("save newer");
+        // Plus a snapshot for a different file that must NOT be picked.
+        let other = dummy_snapshot("snap-other", "f-file-other", 1_700_000_020_000);
+        store.save_snapshot(&room, &other).expect("save other");
+
+        let payload = SignalingPayload::RequestSnapshot {
+            file_id: id::<FileId>("f-file-99"),
+            since_snapshot_id: None,
+            from: id::<DeviceId>("d-remote-01"),
+        };
+        let response = mgr
+            .handle_inbound_request_snapshot(&room, &payload)
+            .await
+            .expect("handler ok");
+        let env = response.expect("expected a response envelope");
+        assert_eq!(env.kind, EnvelopeKind::Event);
+
+        // WebRTC arm got the envelope; mailbox didn't (Hybrid w/ webrtc up
+        // prefers the DataChannel for the recovery response).
+        assert_eq!(webrtc.total_sent(), 1);
+        assert_eq!(mailbox.total_sent(), 0);
+
+        // The envelope was the freshly-minted one — id matches.
+        let webrtc_batch = webrtc.batches();
+        assert_eq!(webrtc_batch.len(), 1);
+        assert_eq!(webrtc_batch[0].len(), 1);
+        assert_eq!(webrtc_batch[0][0].envelope_id, env.envelope_id);
+    }
+
+    // -----------------------------------------------------------------
+    // 6. handle_inbound_request_snapshot honors since_snapshot_id:
+    //    if the requester's "since" is already the latest, return None
+    //    (no payload).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_inbound_request_snapshot_returns_none_when_requester_is_up_to_date() {
+        let (mgr, _rx, _tmp, store) = make_manager_with_store();
+        let room = dummy_room();
+        let webrtc = Arc::new(MockWebRtc::new(true));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Live,
+            TransportConfig::from_handles(None, Some(webrtc.clone() as Arc<dyn WebRtcSender>)),
+        )
+        .await
+        .expect("open live");
+        mgr.register_signal_context(fixture_signal_context(&room, None))
+            .await;
+
+        let latest = dummy_snapshot("snap-latest", "f-file-99", 1_700_000_000_000);
+        store.save_snapshot(&room, &latest).expect("save latest");
+
+        let payload = SignalingPayload::RequestSnapshot {
+            file_id: id::<FileId>("f-file-99"),
+            since_snapshot_id: Some(id::<SnapshotId>("snap-latest")),
+            from: id::<DeviceId>("d-remote-01"),
+        };
+        let response = mgr
+            .handle_inbound_request_snapshot(&room, &payload)
+            .await
+            .expect("handler ok");
+        assert!(response.is_none(), "requester is current — no resend");
+        assert_eq!(webrtc.total_sent(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // 7. handle_inbound_request_snapshot returns None when the room has no
+    //    snapshot for the requested file (caller surfaces as recovery
+    //    failure to the UI).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_inbound_request_snapshot_returns_none_when_file_has_no_snapshot() {
+        let (mgr, _rx, _tmp, _store) = make_manager_with_store();
+        let room = dummy_room();
+        let webrtc = Arc::new(MockWebRtc::new(true));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Live,
+            TransportConfig::from_handles(None, Some(webrtc.clone() as Arc<dyn WebRtcSender>)),
+        )
+        .await
+        .expect("open live");
+        mgr.register_signal_context(fixture_signal_context(&room, None))
+            .await;
+
+        let payload = SignalingPayload::RequestSnapshot {
+            file_id: id::<FileId>("f-file-empty"),
+            since_snapshot_id: None,
+            from: id::<DeviceId>("d-remote-01"),
+        };
+        let response = mgr
+            .handle_inbound_request_snapshot(&room, &payload)
+            .await
+            .expect("handler ok");
+        assert!(response.is_none());
+        assert_eq!(webrtc.total_sent(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // 8. handle_inbound_request_snapshot falls back to the mailbox when
+    //    the WebRTC arm is down (peer that asked may still reach us via
+    //    relay; receiver-side dedup collapses duplicates).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_inbound_request_snapshot_falls_back_to_mailbox_when_webrtc_down() {
+        let (mgr, _rx, _tmp, store) = make_manager_with_store();
+        let room = dummy_room();
+        let mailbox = Arc::new(MockMailbox::new());
+        let webrtc = Arc::new(MockWebRtc::new(false));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Hybrid,
+            TransportConfig::from_handles(
+                Some(mailbox.clone() as Arc<dyn MailboxSender>),
+                Some(webrtc.clone() as Arc<dyn WebRtcSender>),
+            ),
+        )
+        .await
+        .expect("open hybrid");
+        mgr.register_signal_context(fixture_signal_context(&room, None))
+            .await;
+        store
+            .save_snapshot(
+                &room,
+                &dummy_snapshot("snap-1", "f-file-7", 1_700_000_000_000),
+            )
+            .expect("save");
+
+        let payload = SignalingPayload::RequestSnapshot {
+            file_id: id::<FileId>("f-file-7"),
+            since_snapshot_id: None,
+            from: id::<DeviceId>("d-remote-01"),
+        };
+        let response = mgr
+            .handle_inbound_request_snapshot(&room, &payload)
+            .await
+            .expect("handler ok");
+        assert!(response.is_some());
+        assert_eq!(mailbox.total_sent(), 1, "mailbox must carry the fallback");
+        assert_eq!(webrtc.total_sent(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // 9. End-to-end round trip: client A requests, owner B's handler
+    //    responds, and the response envelope decrypts cleanly under the
+    //    same room keys A would use.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn round_trip_request_snapshot_decrypts_under_room_keys() {
+        use crate::review::crypto::signing::DeviceVerifyingKey;
+        use crate::review::envelope::{DisassembleInput, disassemble_event_envelope};
+        use std::collections::HashMap as StdHashMap;
+
+        let (mgr, _rx, _tmp, store) = make_manager_with_store();
+        let room = dummy_room();
+        let webrtc = Arc::new(MockWebRtc::new(true));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Live,
+            TransportConfig::from_handles(None, Some(webrtc.clone() as Arc<dyn WebRtcSender>)),
+        )
+        .await
+        .expect("open live");
+        mgr.register_signal_context(fixture_signal_context(&room, None))
+            .await;
+
+        // Save the snapshot the owner will pick up.
+        let snap = dummy_snapshot("snap-fresh", "f-file-rt", 1_700_000_001_000);
+        store.save_snapshot(&room, &snap).expect("save snap");
+
+        // Owner-side: receive the inbound request and let the handler
+        // produce a response envelope.
+        let request = SignalingPayload::RequestSnapshot {
+            file_id: id::<FileId>("f-file-rt"),
+            since_snapshot_id: None,
+            from: id::<DeviceId>("d-remote-01"),
+        };
+        let response = mgr
+            .handle_inbound_request_snapshot(&room, &request)
+            .await
+            .expect("handler")
+            .expect("response envelope");
+
+        // Client-side: pretend we're the recovering peer. Decrypt + verify
+        // the response under the same room keys + the owner's verifying
+        // key. The owner used `TEST_SIGNING_SEED`; recompute the matching
+        // public key so the verify lookup succeeds.
+        let keys = derive_room_keys(&TEST_ROOM_SECRET);
+        let signer = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
+        let signer_keyid = signer.verifying_key().signing_key_id_base64url();
+        let mut verifying_keys: StdHashMap<String, DeviceVerifyingKey> = StdHashMap::new();
+        verifying_keys.insert(signer_keyid, signer.verifying_key());
+
+        let event = disassemble_event_envelope(DisassembleInput {
+            envelope: &response,
+            event_key: *keys.event_key.as_bytes(),
+            verifying_keys: &verifying_keys,
+        })
+        .expect("decrypt + verify recovery event");
+
+        match event.body {
+            ReviewEventBody::SnapshotCreated {
+                file_id: f,
+                snapshot_id: s,
+                ..
+            } => {
+                assert_eq!(f, id::<FileId>("f-file-rt"));
+                assert_eq!(s, id::<SnapshotId>("snap-fresh"));
+            }
+            other => panic!("expected SnapshotCreated, got {other:?}"),
+        }
+    }
+}
+

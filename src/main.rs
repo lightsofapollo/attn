@@ -355,7 +355,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     // `planning/collab/amendments.md` §Codebase Corrections).
     let review_manager = review_store.as_ref().and_then(|store| {
         let proxy = event_loop.create_proxy();
-        let update_tx: crate::review::manager::UpdateSink = Box::new(move |update| {
+        let update_tx: crate::review::manager::UpdateSink = Arc::new(move |update| {
             let _ = proxy.send_event(UserEvent::Review(update));
         });
         let working_copy =
@@ -391,7 +391,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 // the previous one on error.
                 let proxy = event_loop.create_proxy();
                 let update_tx: crate::review::manager::UpdateSink =
-                    Box::new(move |update| {
+                    Arc::new(move |update| {
                         let _ = proxy.send_event(UserEvent::Review(update));
                     });
                 let working_copy = Arc::new(

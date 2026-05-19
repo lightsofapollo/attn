@@ -45,6 +45,12 @@ pub struct EventId(String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DeviceId(String);
 
+impl DeviceId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Identifier for a logical participant (one human/agent in a room).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ParticipantId(String);

@@ -88,6 +88,14 @@ pub enum TransportEvent {
         envelope: MailboxEnvelope,
         server_seq: u64,
     },
+    /// A `ReviewEvent` was just successfully decoded + appended to
+    /// `events.jsonl`. Carries the decoded event so downstream consumers
+    /// (the daemon's UI bridge, primarily) can render it without a
+    /// second filesystem read.
+    EventImported {
+        room_id: RoomId,
+        event: crate::review::model::ReviewEvent,
+    },
     /// Presence (join/leave) update for a remote device in the room.
     Presence {
         event: PresenceEvent,

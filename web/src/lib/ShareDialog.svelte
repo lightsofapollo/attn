@@ -94,13 +94,16 @@
 
   const inviteUrl = $derived(existingInviteUrl);
   /**
-   * One-liner the reviewer can paste into a terminal if their browser
-   * doesn't route `attn://` (no installed bundle, headless host, etc.).
-   * Single-quoted so the `#` fragment doesn't get eaten by the shell.
+   * Zero-install one-liner for reviewers without `attn` on their PATH.
+   * `npx attnmd` is the published npm package's bin entrypoint — the
+   * launcher (bin/attn.js) downloads the right binary for the platform
+   * on first run and then forwards args, so the reviewer doesn't need
+   * to install anything separately. Single-quoted so the `#` fragment
+   * isn't eaten by the shell.
    */
   const cliCommand = $derived(
     inviteUrl.length > 0
-      ? `attn review join '${inviteUrl}' --as-agent reviewer`
+      ? `npx attnmd review join '${inviteUrl}' --as-agent reviewer`
       : '',
   );
 
@@ -337,7 +340,8 @@
           {/if}
         </Button>
         <p class="text-xs text-muted-foreground">
-          For AI agents, automation, or anyone whose browser doesn't open <code>attn://</code> links.
+          Zero-install: <code>npx</code> downloads attn on first run. For AI agents,
+          automation, or anyone whose browser doesn't open <code>attn://</code> links.
         </p>
       </div>
     {/if}

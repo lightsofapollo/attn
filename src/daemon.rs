@@ -988,7 +988,7 @@ mod tests {
         let working_copy = Arc::new(WorkingCopyService::new());
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
         let tx = Mutex::new(tx);
-        let sink: UpdateSink = Box::new(move |update| {
+        let sink: UpdateSink = Arc::new(move |update| {
             let _ = tx.lock().expect("test sink mutex").send(update);
         });
         let mgr = Arc::new(ReviewManager::new(store, working_copy, sink));

@@ -692,7 +692,7 @@ mod tests {
     ) -> (Arc<ReviewManager>, mpsc::Receiver<ReviewUpdate>) {
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
         let tx = StdMutex::new(tx);
-        let sink: UpdateSink = Box::new(move |update| {
+        let sink: UpdateSink = Arc::new(move |update| {
             let _ = tx.lock().expect("test sink mutex").send(update);
         });
         let working_copy = Arc::new(WorkingCopyService::new());

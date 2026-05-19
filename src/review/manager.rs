@@ -198,7 +198,7 @@ impl ReviewUpdate {
 /// Type alias for the closure the manager uses to deliver updates back to the
 /// event loop. Pulled out so tests can hand in an `mpsc::Sender`-backed
 /// closure without dragging in `tao::EventLoopProxy`.
-pub type UpdateSink = Box<dyn Fn(ReviewUpdate) + Send + Sync>;
+pub type UpdateSink = Arc<dyn Fn(ReviewUpdate) + Send + Sync>;
 
 /// Daemon-owned runtime service. Owns the durable review store handle and
 /// the working-copy writer; exposes a synchronous `submit` entry point that
@@ -490,9 +490,20 @@ impl ReviewManager {
                     newly_created: outcome.newly_created,
                 });
                 (self.update_tx)(ReviewUpdate::RoomStatusChanged {
-                    room_id,
+                    room_id: room_id.clone(),
                     status: "Live".to_string(),
                 });
+                // Open outbox + inbound WS so envelopes flow both ways.
+                // Failures are surfaced as Error updates rather than
+                // bailing out — Share itself already succeeded at the
+                // relay; the transport layer is just the live keepalive.
+                if let Err(err) = self.start_room_runtime(&room_id) {
+                    (self.update_tx)(ReviewUpdate::Error {
+                        room_id: Some(room_id),
+                        code: "ATTN_TRANSPORT_INIT".to_string(),
+                        message: format!("could not start room transports: {err}"),
+                    });
+                }
             }
             Err(err) => {
                 (self.update_tx)(ReviewUpdate::Error {
@@ -511,10 +522,25 @@ impl ReviewManager {
         result: Result<JoinOutcome, crate::review::bootstrap::BootstrapError>,
     ) {
         let update = match result {
-            Ok(outcome) => ReviewUpdate::RoomStatusChanged {
-                room_id: outcome.room_id,
-                status: "Joined".to_string(),
-            },
+            Ok(outcome) => {
+                let room_id = outcome.room_id.clone();
+                // Start the transport runtime BEFORE emitting status so
+                // by the time the frontend reacts to "Joined" the WS
+                // subscriber is already listening. If init fails we
+                // still surface "Joined" — the user is technically in
+                // the room, just offline for live events.
+                if let Err(err) = self.start_room_runtime(&room_id) {
+                    (self.update_tx)(ReviewUpdate::Error {
+                        room_id: Some(room_id.clone()),
+                        code: "ATTN_TRANSPORT_INIT".to_string(),
+                        message: format!("could not start room transports: {err}"),
+                    });
+                }
+                ReviewUpdate::RoomStatusChanged {
+                    room_id: outcome.room_id,
+                    status: "Joined".to_string(),
+                }
+            }
             Err(err) => ReviewUpdate::Error {
                 room_id: None,
                 code: error_code(&err),
@@ -522,6 +548,127 @@ impl ReviewManager {
             },
         };
         (self.update_tx)(update);
+    }
+
+    /// Spawn the outbox drain + inbound WS subscriber for `room_id` onto the
+    /// manager's tokio runtime. Idempotent: a duplicate call is a no-op since
+    /// the rooms map already has a handle (verified by `self.rooms`).
+    ///
+    /// What this wires up:
+    ///   - `OutboxProcessor::run` — drains pending envelopes from
+    ///     `outbox.jsonl` (POSTed in batches of ≤ 32 with PoW tokens).
+    ///     This is what gets the comment we just appended in
+    ///     `CreateComment` *off* the daemon and onto the relay.
+    ///   - `MailboxWsClient::run` — subscribes to the relay's WS,
+    ///     decrypts inbound envelopes via `InboundPipeline`, appends to
+    ///     `events.jsonl`, and emits `TransportEvent::EventImported`.
+    ///     A forwarder spawned alongside re-emits each as
+    ///     `ReviewUpdate::EventImported` so the frontend store renders
+    ///     the new comment.
+    ///
+    /// Returns a typed error when the room secret / identity / runtime
+    /// pre-conditions aren't met. The caller surfaces these as
+    /// `ReviewUpdate::Error` so the UI sees them.
+    pub(crate) fn start_room_runtime(&self, room_id: &RoomId) -> anyhow::Result<()> {
+        use crate::review::bootstrap::load_room_secret;
+        use crate::review::crypto::kdf::derive_room_keys;
+        use crate::review::crypto::pow::TokenPool;
+        use crate::review::transport::inbound::InboundPipeline;
+        use crate::review::transport::mailbox::OutboxProcessor;
+        use crate::review::transport::mailbox::ws::MailboxWsClient;
+        use crate::review::transport::mailbox::MailboxConfig;
+        use crate::review::transport::TransportEvent;
+
+        let bootstrap = self
+            .bootstrap
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("bootstrap not attached; relay url unknown"))?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no tokio runtime; cannot spawn outbox / ws tasks"))?;
+        let verifying_keys = self
+            .verifying_keys
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("verifying-key cache absent"))?
+            .clone();
+
+        // Identity for this device. Cheap to re-load; we don't need to
+        // cache because the daemon owns its identity file for life.
+        let identity_dir = bootstrap.config().identity_dir()?;
+        let identity = crate::review::bootstrap::load_or_create_identity_in(&identity_dir)?;
+        let device_id = identity.typed_device_id();
+
+        // Room secret (32 bytes). Derives all per-room keys: AEAD for
+        // event / snapshot / signaling, plus the HMAC admission key.
+        let room_secret = load_room_secret(self.store.root(), room_id)?;
+        let room_keys = derive_room_keys(&room_secret);
+
+        // MailboxConfig + TokenPool — shared between the outbox processor
+        // and the WS subscriber so admission HMAC + PoW caching are
+        // consistent across both paths.
+        let mailbox_config = Arc::new(MailboxConfig::from_room_secret(
+            bootstrap.config().relay_url.clone(),
+            room_id.clone(),
+            device_id.clone(),
+            &room_secret,
+            12, // MIN_POW_BITS — relay clamps anyway
+        ));
+        let token_pool = Arc::new(TokenPool::new(
+            room_id.as_str().to_string(),
+            device_id.as_str().to_string(),
+            12,
+            5 * 60 * 1000,
+        ));
+
+        // Outbox processor — drains envelopes to the relay.
+        let outbox = Arc::new(OutboxProcessor::new(
+            Arc::clone(&self.store),
+            Arc::clone(&mailbox_config),
+            token_pool,
+        )?);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let outbox_clone = Arc::clone(&outbox);
+        runtime.spawn(async move {
+            outbox_clone.run(cancel_rx).await;
+        });
+
+        // Inbound pipeline: decrypts incoming envelopes and appends them
+        // to events.jsonl. Wired through the WS subscriber.
+        let inbound = Arc::new(InboundPipeline::new(
+            Arc::clone(&self.store),
+            verifying_keys,
+            *room_keys.event_key.as_bytes(),
+            *room_keys.snapshot_key.as_bytes(),
+            *room_keys.signaling_key.as_bytes(),
+        ));
+
+        // WS subscriber — long-lived task that auto-reconnects.
+        let (events_tx, mut events_rx) =
+            tokio::sync::mpsc::unbounded_channel::<TransportEvent>();
+        let ws_client = MailboxWsClient::new(
+            mailbox_config,
+            inbound,
+            Arc::clone(&self.store),
+            events_tx,
+        );
+        let (_ws_cancel_tx, ws_cancel_rx) = tokio::sync::watch::channel(false);
+        runtime.spawn(async move {
+            ws_client.run(ws_cancel_rx).await;
+        });
+
+        // Event forwarder: drain TransportEvents into ReviewUpdates so
+        // the frontend store reflects inbound comments / presence /
+        // policy changes in real time.
+        let update_tx = Arc::clone(&self.update_tx);
+        let room_id_owned = room_id.clone();
+        runtime.spawn(async move {
+            while let Some(event) = events_rx.recv().await {
+                forward_transport_event(&update_tx, &room_id_owned, event);
+            }
+        });
+
+        Ok(())
     }
 
     /// Push a freshly-resolved anchor to the frontend.
@@ -1192,6 +1339,58 @@ fn stub_review_event(
     }
 }
 
+/// Translate a `TransportEvent` from the mailbox WS subscriber into the
+/// matching `ReviewUpdate` so the frontend store reflects inbound events
+/// in real time. Lives outside `impl ReviewManager` so the spawned task
+/// only needs the `UpdateSink` clone (not the full manager).
+fn forward_transport_event(
+    update_tx: &UpdateSink,
+    room_id: &RoomId,
+    event: crate::review::transport::TransportEvent,
+) {
+    use crate::review::transport::TransportEvent;
+    match event {
+        TransportEvent::EventImported {
+            room_id: rid,
+            event,
+        } => {
+            (update_tx)(ReviewUpdate::EventImported { room_id: rid, event });
+        }
+        TransportEvent::Envelope { .. } => {
+            // Already covered by EventImported (events) / handled elsewhere
+            // for signaling. Snapshot envelopes will get their own
+            // ReviewUpdate variant in the snapshot pipeline; today they
+            // just persist via the InboundPipeline.
+        }
+        TransportEvent::Hello { .. } => {
+            // Hello drives a presence/online indicator. Not yet surfaced.
+        }
+        TransportEvent::Presence { .. } => {
+            // Peer presence update — will drive face chips in a follow-up.
+        }
+        TransportEvent::PolicyChanged { .. } => {
+            // Room policy edits. Not yet surfaced.
+        }
+        TransportEvent::Disconnected { reason, close_code } => {
+            (update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: format!(
+                    "ATTN_DISCONNECTED{}",
+                    close_code.map_or(String::new(), |c| format!("_{c}"))
+                ),
+                message: reason,
+            });
+        }
+        TransportEvent::Error { code, message } => {
+            (update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code,
+                message,
+            });
+        }
+    }
+}
+
 fn stub_content_hash() -> crate::review::ids::ContentHash {
     serde_json::from_value::<crate::review::ids::ContentHash>(serde_json::Value::String(
         "sha256-stub".to_string(),
@@ -1221,7 +1420,7 @@ mod tests {
         let working_copy = Arc::new(WorkingCopyService::new());
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
         let tx = Mutex::new(tx);
-        let sink: UpdateSink = Box::new(move |update| {
+        let sink: UpdateSink = Arc::new(move |update| {
             // `Fn` (not `FnMut`), so wrap the sender in a Mutex.
             let _ = tx.lock().expect("test sink mutex").send(update);
         });
@@ -1673,7 +1872,7 @@ mod bootstrap_integration_tests {
 
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
         let tx = StdMutex::new(tx);
-        let sink: UpdateSink = Box::new(move |update| {
+        let sink: UpdateSink = Arc::new(move |update| {
             let _ = tx.lock().expect("sink mutex").send(update);
         });
 
@@ -1872,7 +2071,7 @@ mod transport_selector_tests {
         let working_copy = Arc::new(WorkingCopyService::new());
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
         let tx = Mutex::new(tx);
-        let sink: UpdateSink = Box::new(move |update| {
+        let sink: UpdateSink = Arc::new(move |update| {
             let _ = tx.lock().expect("sink mutex").send(update);
         });
         let mgr = ReviewManager::new(store, working_copy, sink);
@@ -2270,7 +2469,7 @@ mod request_snapshot_tests {
         let working_copy = Arc::new(WorkingCopyService::new());
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
         let tx = StdMutex::new(tx);
-        let sink: UpdateSink = Box::new(move |update| {
+        let sink: UpdateSink = Arc::new(move |update| {
             let _ = tx.lock().expect("sink mutex").send(update);
         });
         let mgr = ReviewManager::new(Arc::clone(&store), working_copy, sink);

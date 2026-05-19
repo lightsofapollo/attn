@@ -70,7 +70,13 @@ pub const IDENTITY_FILENAME: &str = "identity.json";
 /// PoW difficulty surfaced to a fresh `TokenPool` for bootstrap device
 /// registration. The relay clamps to its own min/max; we pick the
 /// crypto-spec default so dev rooms still mint tokens quickly.
-const BOOTSTRAP_POW_DIFFICULTY: u32 = crate::review::crypto::pow::DEFAULT_DIFFICULTY;
+// Rooms minted by the daemon use the relay's *minimum* PoW difficulty
+// (12 bits) rather than its default (16). 12-bit search completes in
+// ~milliseconds vs 16-bit's ~hundreds; both are well above the
+// abuse-deterrence floor. Keeping rooms at MIN_POW_BITS also means the
+// outbox processor's `TokenPool` (which mints at the same difficulty)
+// doesn't need to know the per-room policy before the first POST.
+const BOOTSTRAP_POW_DIFFICULTY: u32 = 12;
 
 /// PoW token TTL for bootstrap device registration. Matches the crypto-spec
 /// default — tokens persist long enough for a single device-register retry
@@ -621,6 +627,14 @@ pub struct Bootstrapper {
 }
 
 impl Bootstrapper {
+    /// Borrow the active `BootstrapConfig`. Callers in `ReviewManager` use
+    /// this to read the relay URL + identity dir when spawning per-room
+    /// transports — there's no Bootstrapper method for those flows
+    /// (different cross-cutting concern) but they share configuration.
+    pub fn config(&self) -> &BootstrapConfig {
+        &self.config
+    }
+
     /// Construct a bootstrapper with a fresh `reqwest::Client`. Tests inject
     /// their own client via `with_http_client`.
     pub fn new(store: Arc<ReviewStore>, config: Arc<BootstrapConfig>) -> Result<Self> {

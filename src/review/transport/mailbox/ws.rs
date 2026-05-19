@@ -713,13 +713,20 @@ impl MailboxWsClient {
                 let room_id = envelope.room_id.clone();
                 let kind = envelope.kind;
                 use crate::review::model::EnvelopeKind;
+                let mut decoded_event: Option<crate::review::model::ReviewEvent> = None;
                 let import_res: Result<(), crate::review::transport::inbound::InboundError> =
                     match kind {
-                        EnvelopeKind::Event => self
+                        EnvelopeKind::Event => match self
                             .inbound
                             .import_event_envelope(&room_id, &envelope)
                             .await
-                            .map(|_| ()),
+                        {
+                            Ok(outcome) => {
+                                decoded_event = Some(outcome.event);
+                                Ok(())
+                            }
+                            Err(err) => Err(err),
+                        },
                         EnvelopeKind::SnapshotBlob => self
                             .inbound
                             .import_snapshot_envelope(&room_id, &envelope)
@@ -750,6 +757,16 @@ impl MailboxWsClient {
                             // Envelope event so a panic in a downstream
                             // consumer can't lose the import.
                             self.save_seq(server_seq);
+                        }
+                        // Emit the decoded event FIRST so the daemon's UI
+                        // bridge can render it immediately; then the raw
+                        // envelope frame for consumers that care about
+                        // serverSeq watermarking.
+                        if let Some(event) = decoded_event {
+                            let _ = self.events_tx.send(TransportEvent::EventImported {
+                                room_id: room_id.clone(),
+                                event,
+                            });
                         }
                         let _ = self.events_tx.send(TransportEvent::Envelope {
                             envelope,

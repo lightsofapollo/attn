@@ -128,6 +128,41 @@ export function anchorFromSelection(
   return anchor;
 }
 
+/**
+ * Construct a minimal `PositionAnchor` from a PM selection without an
+ * `AnchorIndex` in hand. Used by the manual re-anchor flow (attn-nnj.4.8),
+ * which sends a PositionAnchor over the `reviewResolveAnchor` IPC; the
+ * Rust resolver then reconciles against the current snapshot.
+ *
+ * The byte / line numbers are PM-derived (canonical-markdown-approximate)
+ * — the same fallback path `buildPositionLayer` takes when no block
+ * matches. That's sufficient for the resolver because the `pmRange`
+ * is the authoritative coordinate for in-process re-anchoring; bytes
+ * and lines are best-effort metadata.
+ */
+export function positionAnchorFromSelection(
+  view: EditorView,
+  from: number,
+  to: number,
+): PositionAnchor {
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  const leadText = view.state.doc.textBetween(0, lo, '\n', '');
+  const selectionText = view.state.doc.textBetween(lo, hi, '\n', '');
+  const startByte = utf8ByteLength(leadText);
+  const endByte = startByte + utf8ByteLength(selectionText);
+  // lineRange is 1-indexed in the canonical schema, matching how the
+  // Rust resolver expects it. PM is 0-indexed for nodes so we add 1
+  // here to be consistent with the rest of this module.
+  const startLine = countNewlines(leadText) + 1;
+  const endLine = startLine + countNewlines(selectionText);
+  return {
+    byteRange: [startByte, endByte],
+    lineRange: [startLine, endLine],
+    pmRange: [lo, hi],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Internal: PM-block alignment with the AnchorIndex
 // ---------------------------------------------------------------------------

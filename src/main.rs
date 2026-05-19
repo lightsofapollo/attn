@@ -306,12 +306,25 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let _platform_ui = platform::install_system_ui(event_loop.create_proxy());
 
     // Shared state for the IPC handler
+    //
+    // ReviewStore: opened best-effort at startup so the IPC handlers
+    // (attn-nnj.2.5: revision-journal persistence) have somewhere to write.
+    // If the home directory is unwritable we degrade gracefully — IPC
+    // saves still succeed, the revision journal just isn't persisted.
+    let review_store = match crate::review::store::ReviewStore::open() {
+        Ok(store) => Some(Arc::new(store)),
+        Err(err) => {
+            eprintln!("attn: review store unavailable, revisions will not persist: {err}");
+            None
+        }
+    };
     let app_state = Arc::new(Mutex::new(ipc::AppState {
         active_path: initial_ui_path.clone(),
         active_project_root: tree_root.clone(),
         active_tab_id: None,
         review_rooms: std::collections::HashMap::new(),
         file_to_room: std::collections::HashMap::new(),
+        review_store,
     }));
     let ipc_state = Arc::clone(&app_state);
     let ipc_proxy = event_loop.create_proxy();

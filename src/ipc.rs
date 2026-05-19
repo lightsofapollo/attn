@@ -1,10 +1,11 @@
-use crate::review::ids::{EventId, RoomId};
+use crate::review::ids::{EventId, FileId, RoomId};
 use crate::review::model::{Anchor, PositionAnchor, SuggestionDraft};
-use crate::review::working_copy::{SaveRequest, SaveSource, WorkingCopyService};
+use crate::review::store::ReviewStore;
+use crate::review::working_copy::{SaveRequest, SaveResult, SaveSource, WorkingCopyService};
 use crate::watcher::UserEvent;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tao::event_loop::EventLoopProxy;
 
@@ -125,11 +126,23 @@ pub struct AppState {
     /// `ReviewManager` (issue attn-nnj.2.8); initialized empty here.
     #[allow(dead_code)]
     pub review_rooms: HashMap<RoomId, RoomRuntimeHandle>,
-    /// Owner-side binding from a working-copy path to the room it belongs
-    /// to. Populated by `ReviewManager` on `ReviewShare`; consulted by file
-    /// watchers + IPC handlers to route events to the right room.
+    /// Owner-side binding from a working-copy path to the `(room, file)` it
+    /// belongs to. Populated by `ReviewManager` on `ReviewShare`; consulted
+    /// by file watchers + IPC handlers to route events to the right room and
+    /// persist `LocalRevision` journal entries (issue attn-nnj.2.5).
+    ///
+    /// Value is `(RoomId, FileId)` so the IPC handler can persist a
+    /// revision without a second lookup through `bindings.json`. A 2.8
+    /// `ReviewManager` will own population; today it's left empty by
+    /// startup and grows when share/join handlers (also 2.8) land.
     #[allow(dead_code)]
-    pub file_to_room: HashMap<PathBuf, RoomId>,
+    pub file_to_room: HashMap<PathBuf, (RoomId, FileId)>,
+    /// Persistent review store handle. `Some` once the daemon has opened it
+    /// at startup; the test harness in `mod tests` constructs an `AppState`
+    /// without one when it only needs the routing maps. IPC handlers that
+    /// need to persist (e.g. revision journal appends) check `is_some()`
+    /// before reaching in.
+    pub review_store: Option<Arc<ReviewStore>>,
 }
 
 /// Lightweight handle for a live review room. `ReviewManager` owns the heavy
@@ -177,13 +190,14 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                     state.active_path.clone()
                 };
                 let svc = WorkingCopyService::new();
-                if let Err(e) = svc.save(SaveRequest {
-                    path,
+                match svc.save(SaveRequest {
+                    path: path.clone(),
                     content,
                     expected_hash: None,
                     source: SaveSource::UserEdit,
                 }) {
-                    eprintln!("attn: failed to save: {}", e);
+                    Ok(result) => persist_revision_if_mapped(state, &path, &result),
+                    Err(e) => eprintln!("attn: failed to save: {}", e),
                 }
             }
             IpcMessage::ThemeChange { theme } => {
@@ -354,19 +368,197 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
     }
 
     let svc = WorkingCopyService::new();
-    if let Err(e) = svc.save(SaveRequest {
-        path,
+    match svc.save(SaveRequest {
+        path: path.clone(),
         content: output,
         expected_hash: None,
         source: SaveSource::CheckboxToggle,
     }) {
-        eprintln!("attn: could not write file after checkbox toggle: {}", e);
+        Ok(result) => persist_revision_if_mapped(state, &path, &result),
+        Err(e) => eprintln!("attn: could not write file after checkbox toggle: {}", e),
+    }
+}
+
+/// If `path` is mapped to a `(room, file)` AND the daemon has a
+/// `ReviewStore` open, append the `LocalRevision` returned by
+/// `WorkingCopyService::save` to the room's revision journal. Otherwise
+/// silently no-op — non-collab files still flow through `WorkingCopyService`
+/// for the atomic write + hashing but don't generate persistent journal
+/// entries.
+///
+/// Per attn-nnj.2.5 issue spec: this lives in IPC for now (Option A) and
+/// gets subsumed by `ReviewManager` (attn-nnj.2.8) once that exists.
+fn persist_revision_if_mapped(state: &Arc<Mutex<AppState>>, path: &Path, result: &SaveResult) {
+    let Ok(state) = state.lock() else { return };
+    let Some(store) = state.review_store.as_ref() else {
+        return;
+    };
+    let Some((room_id, file_id)) = state.file_to_room.get(path) else {
+        return;
+    };
+    if let Err(err) = store.append_revision(room_id, file_id, &result.revision) {
+        eprintln!(
+            "attn: failed to append local revision for {}: {}",
+            path.display(),
+            err
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::ids::ContentHash;
+    use crate::review::model::{LocalRevision, RevisionSource};
+    use crate::review::working_copy::{SaveSource, WorkingCopyService};
+    use serde_json::Value;
+    use tempfile::TempDir;
+
+    fn make_state(
+        active_path: PathBuf,
+        review_store: Option<Arc<ReviewStore>>,
+        file_to_room: HashMap<PathBuf, (RoomId, FileId)>,
+    ) -> Arc<Mutex<AppState>> {
+        Arc::new(Mutex::new(AppState {
+            active_path: active_path.clone(),
+            active_project_root: active_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default(),
+            active_tab_id: None,
+            review_rooms: HashMap::new(),
+            file_to_room,
+            review_store,
+        }))
+    }
+
+    fn dummy_id<T: for<'de> serde::Deserialize<'de>>(s: &str) -> T {
+        serde_json::from_value(Value::String(s.to_string())).expect("id deserializes")
+    }
+
+    fn dummy_revision() -> LocalRevision {
+        LocalRevision {
+            revision_id: "rev-1".to_string(),
+            parent_hash: dummy_id::<ContentHash>("h-prev"),
+            next_hash: dummy_id::<ContentHash>("h-next"),
+            created_at: 1_700_000_000_100,
+            source: RevisionSource::ProsemirrorEdit,
+            pm_steps: None,
+            patch_text: None,
+        }
+    }
+
+    fn dummy_save_result() -> SaveResult {
+        SaveResult {
+            previous_hash: dummy_id::<ContentHash>("h-prev"),
+            next_hash: dummy_id::<ContentHash>("h-next"),
+            revision: dummy_revision(),
+        }
+    }
+
+    #[test]
+    fn persist_revision_if_mapped_no_op_when_path_unmapped() {
+        // The classic EditSave path: file is not part of any room (no
+        // `ReviewShare` has happened). `WorkingCopyService::save` builds a
+        // `LocalRevision` and returns it, but the IPC handler must NOT try
+        // to call `append_revision` — nothing should hit disk or panic.
+        let tmp = TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
+        );
+        let active_path = tmp.path().join("doc.md");
+        std::fs::write(&active_path, b"# hi\n").expect("seed file");
+
+        let state = make_state(active_path.clone(), Some(store.clone()), HashMap::new());
+        // No-op: must not panic, must not write anything under reviews/.
+        persist_revision_if_mapped(&state, &active_path, &dummy_save_result());
+
+        // The reviews/rooms/ directory should not have been created — the
+        // helper short-circuited before touching the store.
+        let rooms_dir = tmp.path().join("reviews").join("rooms");
+        assert!(
+            !rooms_dir.exists(),
+            "expected no rooms dir, got {}",
+            rooms_dir.display()
+        );
+    }
+
+    #[test]
+    fn persist_revision_if_mapped_writes_when_path_is_in_a_room() {
+        // When the path IS bound to a (room, file), the helper must append
+        // the revision and the journal must be observable via iter_revisions.
+        let tmp = TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
+        );
+        let active_path = tmp.path().join("doc.md");
+        std::fs::write(&active_path, b"# hi\n").expect("seed file");
+
+        let room_id: RoomId = dummy_id("room-abc");
+        let file_id: FileId = dummy_id("file-1");
+        let mut map = HashMap::new();
+        map.insert(active_path.clone(), (room_id.clone(), file_id.clone()));
+
+        let state = make_state(active_path.clone(), Some(store.clone()), map);
+        persist_revision_if_mapped(&state, &active_path, &dummy_save_result());
+
+        let journal: Vec<LocalRevision> = store
+            .iter_revisions(&room_id, &file_id)
+            .expect("iter")
+            .collect::<Result<_, _>>()
+            .expect("decode");
+        assert_eq!(journal, vec![dummy_revision()]);
+    }
+
+    #[test]
+    fn persist_revision_if_mapped_no_op_when_store_missing() {
+        // Defensive: AppState may carry `review_store = None` if the daemon
+        // failed to open the store at startup. The helper must not panic.
+        let tmp = TempDir::new().expect("tempdir");
+        let active_path = tmp.path().join("doc.md");
+        let mut map = HashMap::new();
+        map.insert(
+            active_path.clone(),
+            (dummy_id::<RoomId>("room-x"), dummy_id::<FileId>("file-x")),
+        );
+
+        let state = make_state(active_path.clone(), None, map);
+        persist_revision_if_mapped(&state, &active_path, &dummy_save_result());
+        // No assertion needed beyond "did not panic / did not lock-poison".
+    }
+
+    #[test]
+    fn edit_save_unmapped_path_succeeds_without_persisting_revision() {
+        // End-to-end smoke for the EditSave path: WorkingCopyService writes
+        // the file, but with no room mapping the revision is built and
+        // discarded. The reviews/rooms/ tree stays empty.
+        let tmp = TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
+        );
+        let active_path = tmp.path().join("doc.md");
+        std::fs::write(&active_path, b"old\n").expect("seed file");
+
+        let state = make_state(active_path.clone(), Some(store.clone()), HashMap::new());
+
+        // Simulate what the EditSave arm does after WorkingCopyService::save.
+        let svc = WorkingCopyService::new();
+        let result = svc
+            .save(SaveRequest {
+                path: active_path.clone(),
+                content: "new\n".to_string(),
+                expected_hash: None,
+                source: SaveSource::UserEdit,
+            })
+            .expect("save");
+        persist_revision_if_mapped(&state, &active_path, &result);
+
+        // File on disk reflects the save.
+        assert_eq!(std::fs::read(&active_path).expect("read"), b"new\n");
+        // No room directories were created.
+        let rooms_dir = tmp.path().join("reviews").join("rooms");
+        assert!(!rooms_dir.exists());
+    }
 
     #[test]
     fn ipc_message_review_share_parses_minimal() {

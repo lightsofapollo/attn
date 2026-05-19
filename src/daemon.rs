@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tao::event_loop::EventLoopProxy;
 
+use crate::review::manager::{ReviewCommand, ReviewManager};
 use crate::watcher::UserEvent;
 
 /// Structured interaction actions for E2E testing (debug builds only).
@@ -503,6 +504,30 @@ pub fn maybe_fork(no_fork: bool) -> Result<()> {
     }
 }
 
+/// Forward a `ReviewCommand` received over the unix socket to the running
+/// `ReviewManager`. Mirrors `ipc::submit_review_command` — if the manager is
+/// absent (store unavailable at startup) the command is logged and dropped,
+/// keeping the daemon up even when collab persistence is broken.
+fn submit_review_socket_command(
+    review_manager: Option<&Arc<ReviewManager>>,
+    cmd: ReviewCommand,
+) {
+    match review_manager {
+        Some(manager) => manager.submit(cmd),
+        None => eprintln!(
+            "attn: socket review command dropped — ReviewManager unavailable: {cmd:?}"
+        ),
+    }
+}
+
+/// Parse a wire-format room id (`String`) into the typed `RoomId` newtype.
+/// The constructor on `RoomId` is crate-private, so we route through serde —
+/// same trick used in tests and stub helpers.
+fn parse_room_id(raw: String) -> crate::review::ids::RoomId {
+    serde_json::from_value::<crate::review::ids::RoomId>(serde_json::Value::String(raw))
+        .expect("RoomId is just a string newtype")
+}
+
 /// Log a `ReviewJoin` invite for the stub join handler.
 ///
 /// Shared by both the socket-message dispatch in `handle_client` and the
@@ -522,13 +547,31 @@ pub fn log_review_join_intent(invite: &str) {
 /// socket, but avoids a socket round-trip when the handler is already
 /// running inside the daemon process. The `invite` must be the full
 /// invite URI including any `#key=...` fragment.
-pub fn dispatch_review_join(invite: &str) {
+///
+/// `review_manager` is forwarded to `ReviewManager::submit` so the same stub
+/// `ReviewUpdate` flows back into the event loop regardless of whether the
+/// invite arrived via custom protocol, webview IPC, or unix socket.
+pub fn dispatch_review_join(invite: &str, review_manager: Option<&Arc<ReviewManager>>) {
     log_review_join_intent(invite);
+    submit_review_socket_command(
+        review_manager,
+        ReviewCommand::Join {
+            invite: invite.to_string(),
+        },
+    );
 }
 
 /// Start listening on the unix socket. Spawns a thread that accepts connections
 /// and sends events through the event loop proxy.
-pub fn start_listener(proxy: EventLoopProxy<UserEvent>) -> Result<SocketCleanup> {
+///
+/// `review_manager` is forwarded into the socket-side `Review*` handlers so
+/// CLI agents (e.g. `attn review share foo.md`) reach the same dispatch path
+/// the webview IPC handlers use. `None` is acceptable — those handlers log
+/// and continue rather than panic.
+pub fn start_listener(
+    proxy: EventLoopProxy<UserEvent>,
+    review_manager: Option<Arc<ReviewManager>>,
+) -> Result<SocketCleanup> {
     ensure_runtime_dir()?;
     let sock = socket_path()?;
 
@@ -548,7 +591,8 @@ pub fn start_listener(proxy: EventLoopProxy<UserEvent>) -> Result<SocketCleanup>
             match stream {
                 Ok(stream) => {
                     let proxy = proxy.clone();
-                    handle_client(stream, &proxy);
+                    let manager = review_manager.clone();
+                    handle_client(stream, &proxy, manager.as_ref());
                 }
                 Err(e) => {
                     eprintln!("attn: socket accept error: {e}");
@@ -561,7 +605,11 @@ pub fn start_listener(proxy: EventLoopProxy<UserEvent>) -> Result<SocketCleanup>
     Ok(SocketCleanup { path: cleanup_path })
 }
 
-fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
+fn handle_client(
+    mut stream: UnixStream,
+    proxy: &EventLoopProxy<UserEvent>,
+    review_manager: Option<&Arc<ReviewManager>>,
+) {
     let reader_stream = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
@@ -668,10 +716,14 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                 );
             }
             Ok(SocketMessage::ReviewJoin { invite }) => {
-                // Stub: real ReviewManager wiring lands in issue 2.8 (bootstrap
-                // in 3b-6). For now, log the invite so we can confirm routing
-                // works end-to-end (custom protocol -> socket -> daemon).
+                // Both: log via the shared intent helper (keeps custom-protocol
+                // + socket routes observably equivalent) and dispatch into the
+                // ReviewManager so the scaffold's stub Update flows through.
                 log_review_join_intent(&invite);
+                submit_review_socket_command(
+                    review_manager,
+                    ReviewCommand::Join { invite },
+                );
                 let resp = SocketResponse::Ok;
                 let _ = writeln!(
                     stream,
@@ -679,13 +731,18 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                     serde_json::to_string(&resp).unwrap_or_default()
                 );
             }
-            // Stubs for additional review socket commands. Real handling
-            // lands in `ReviewManager` (issue attn-nnj.2.8); these arms just
-            // log + Ok so CLI agents can begin wiring against the surface.
+            // Review socket commands routed through `ReviewManager` (issue
+            // attn-nnj.2.8). The manager logs each command, emits a stub
+            // `ReviewUpdate` back into the event loop, and we Ok the caller.
+            // Real handler bodies land in later issues.
             Ok(SocketMessage::ReviewShare { path, mode, ttl }) => {
-                eprintln!(
-                    "attn: review_share received (stub, manager wiring pending): path={path} mode={mode} ttl={:?}",
-                    ttl
+                submit_review_socket_command(
+                    review_manager,
+                    ReviewCommand::Share {
+                        path: PathBuf::from(path),
+                        mode,
+                        ttl,
+                    },
                 );
                 let resp = SocketResponse::Ok;
                 let _ = writeln!(
@@ -695,9 +752,11 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                 );
             }
             Ok(SocketMessage::ReviewPull { room_id }) => {
-                eprintln!(
-                    "attn: review_pull received (stub, manager wiring pending): room={:?}",
-                    room_id
+                submit_review_socket_command(
+                    review_manager,
+                    ReviewCommand::Pull {
+                        room_id: room_id.map(parse_room_id),
+                    },
                 );
                 let resp = SocketResponse::Ok;
                 let _ = writeln!(
@@ -707,9 +766,11 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                 );
             }
             Ok(SocketMessage::ReviewStop { room_id }) => {
-                eprintln!(
-                    "attn: review_stop received (stub, manager wiring pending): room={:?}",
-                    room_id
+                submit_review_socket_command(
+                    review_manager,
+                    ReviewCommand::Stop {
+                        room_id: room_id.map(parse_room_id),
+                    },
                 );
                 let resp = SocketResponse::Ok;
                 let _ = writeln!(
@@ -719,7 +780,7 @@ fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
                 );
             }
             Ok(SocketMessage::ReviewInbox) => {
-                eprintln!("attn: review_inbox received (stub, manager wiring pending)");
+                submit_review_socket_command(review_manager, ReviewCommand::Inbox);
                 let resp = SocketResponse::Ok;
                 let _ = writeln!(
                     stream,
@@ -907,5 +968,71 @@ impl SocketCleanup {
 impl Drop for SocketCleanup {
     fn drop(&mut self) {
         self.cleanup();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::review::manager::{ReviewUpdate, UpdateSink};
+    use crate::review::store::ReviewStore;
+    use crate::review::working_copy::WorkingCopyService;
+    use std::sync::Mutex;
+    use std::sync::mpsc;
+    use tempfile::TempDir;
+
+    fn make_test_manager() -> (Arc<ReviewManager>, mpsc::Receiver<ReviewUpdate>, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let store =
+            Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
+        let working_copy = Arc::new(WorkingCopyService::new());
+        let (tx, rx) = mpsc::channel::<ReviewUpdate>();
+        let tx = Mutex::new(tx);
+        let sink: UpdateSink = Box::new(move |update| {
+            let _ = tx.lock().expect("test sink mutex").send(update);
+        });
+        let mgr = Arc::new(ReviewManager::new(store, working_copy, sink));
+        (mgr, rx, tmp)
+    }
+
+    #[test]
+    fn submit_review_socket_command_routes_to_manager() {
+        // The daemon-socket side mirrors the webview-side IPC dispatch:
+        // each Review* SocketMessage variant lowers to a ReviewCommand and
+        // submit_review_socket_command hands it to the manager.
+        let (manager, rx, _tmp) = make_test_manager();
+        submit_review_socket_command(
+            Some(&manager),
+            ReviewCommand::Share {
+                path: PathBuf::from("/tmp/plan.md"),
+                mode: "async".to_string(),
+                ttl: None,
+            },
+        );
+        let update = rx.try_recv().expect("manager emitted one update");
+        assert!(
+            matches!(update, ReviewUpdate::RoomStatusChanged { .. }),
+            "expected RoomStatusChanged stub from Share, got {update:?}"
+        );
+    }
+
+    #[test]
+    fn submit_review_socket_command_no_op_when_manager_missing() {
+        // Defensive: a daemon that couldn't open the review store at startup
+        // hands `None` into `start_listener`. The socket handler must drop
+        // the command rather than panic.
+        submit_review_socket_command(
+            None,
+            ReviewCommand::Inbox,
+        );
+        // Pass = no panic.
+    }
+
+    #[test]
+    fn parse_room_id_round_trips_through_serde() {
+        // We construct typed RoomIds from the wire format on the socket-side;
+        // pin that the helper preserves the string exactly.
+        let id = parse_room_id("room-abc".to_string());
+        assert_eq!(id.as_str(), "room-abc");
     }
 }

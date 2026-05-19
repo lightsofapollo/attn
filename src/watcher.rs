@@ -32,6 +32,14 @@ pub enum UserEvent {
         query: String,
         items: Vec<crate::files::SearchResult>,
     },
+    /// A `ReviewManager` produced an update (room status, imported event,
+    /// snapshot, etc.) that must be forwarded into the webview via
+    /// `window.__attn__.review*` callbacks.
+    ///
+    /// Per `planning/collab/amendments.md` §Codebase Corrections: the
+    /// `ReviewManager` integrates into the *existing* event loop rather than
+    /// spinning up a separate runtime. See issue attn-nnj.2.8.
+    Review(crate::review::manager::ReviewUpdate),
     /// Take a screenshot and send the path back through the channel.
     #[cfg(debug_assertions)]
     Screenshot(std::sync::mpsc::Sender<String>),

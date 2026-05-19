@@ -475,9 +475,22 @@ export function __mockEmitReview(kind: MockReviewEmitKind, payload: unknown): vo
 type ScenarioModule = { default: MockScenario };
 type ScenarioGlobMap = Record<string, () => Promise<ScenarioModule>>;
 
-const scenarioLoaders = import.meta.glob<ScenarioModule>(
-  './mock-ipc-scenarios/*.json',
-) as ScenarioGlobMap;
+interface ImportMetaWithGlob {
+  glob?: (pattern: string) => Record<string, () => Promise<ScenarioModule>>;
+}
+
+// Vite injects `import.meta.glob` at build time. Under raw tsx (manual test
+// harness) it is undefined, so we fall back to an empty loader map and let
+// the test inject scenarios explicitly via `__registerScenarioForTesting`.
+function discoverScenarioLoaders(): ScenarioGlobMap {
+  const meta = import.meta as unknown as ImportMetaWithGlob;
+  if (typeof meta.glob === 'function') {
+    return meta.glob('./mock-ipc-scenarios/*.json') as ScenarioGlobMap;
+  }
+  return {};
+}
+
+const scenarioLoaders: ScenarioGlobMap = discoverScenarioLoaders();
 
 /**
  * Short-name → loader map. Short names strip the directory prefix and
@@ -494,6 +507,19 @@ const scenarioIndex: Map<string, () => Promise<ScenarioModule>> = (() => {
   }
   return m;
 })();
+
+/**
+ * Test-only escape hatch for environments without Vite's `import.meta.glob`
+ * (raw tsx harnesses). Production code paths use the glob result and never
+ * touch this. Re-registering an existing name overwrites the previous
+ * loader so a test can swap fixtures cheaply.
+ */
+export function __registerScenarioForTesting(
+  name: string,
+  scenario: MockScenario,
+): void {
+  scenarioIndex.set(name, () => Promise.resolve({ default: scenario }));
+}
 
 /**
  * Resolve a scenario JSON file by short name (e.g. `'comment-survives-edit'`).

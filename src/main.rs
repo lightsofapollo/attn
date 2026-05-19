@@ -307,7 +307,11 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
 
     // Shared state for the IPC handler
     let app_state = Arc::new(Mutex::new(ipc::AppState {
-        file_path: initial_ui_path.clone(),
+        active_path: initial_ui_path.clone(),
+        active_project_root: tree_root.clone(),
+        active_tab_id: None,
+        review_rooms: std::collections::HashMap::new(),
+        file_to_room: std::collections::HashMap::new(),
     }));
     let ipc_state = Arc::clone(&app_state);
     let ipc_proxy = event_loop.create_proxy();
@@ -537,7 +541,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     .filter(|path| dedup.insert(path.clone()))
                     .collect();
 
-                let active_path = app_state.lock().ok().map(|state| state.file_path.clone());
+                let active_path = app_state.lock().ok().map(|state| state.active_path.clone());
                 let active_path_str = active_path
                     .as_ref()
                     .map(|path| path.to_string_lossy().to_string())
@@ -735,7 +739,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             Event::UserEvent(UserEvent::OpenPath(new_path)) => {
                 // Update the shared state to point to the new file
                 if let Ok(mut state) = app_state.lock() {
-                    state.file_path = new_path.clone();
+                    state.active_path = new_path.clone();
                 }
 
                 let path_str = new_path.to_string_lossy().to_string();
@@ -788,7 +792,8 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 }
 
                 if let Ok(mut state) = app_state.lock() {
-                    state.file_path = initial_ui_path.clone();
+                    state.active_path = initial_ui_path.clone();
+                    state.active_project_root = tree_root.clone();
                 }
 
                 let path_str = initial_ui_path.to_string_lossy().to_string();

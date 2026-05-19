@@ -273,10 +273,16 @@ pub async fn wait_for_health(host: &str, port: u16) -> Result<()> {
             Ok(resp) if resp.status().is_success() => {
                 // Optional: sanity-check body has `status:"ok"` so we don't
                 // mistake a random 200 from a proxy for the real relay.
-                if let Ok(body) = resp.json::<Value>().await {
-                    if body.get("status").and_then(Value::as_str) == Some("ok") {
-                        return Ok(());
-                    }
+                // Production reqwest is built without the `json` feature
+                // (see Cargo.toml — every prod call site uses
+                // serde_json::to_vec/from_slice directly). Mirror that here so
+                // tests don't accidentally re-enable a feature we dropped to
+                // keep the release binary lean (attn-nnj.11.9).
+                if let Ok(bytes) = resp.bytes().await
+                    && let Ok(body) = serde_json::from_slice::<Value>(&bytes)
+                    && body.get("status").and_then(Value::as_str) == Some("ok")
+                {
+                    return Ok(());
                 }
                 // Any 200 from /health, even with a wonky body, indicates a
                 // server is up — but we treat the body check as authoritative
@@ -339,7 +345,14 @@ impl MailboxClient {
         if !resp.status().is_success() {
             return Err(anyhow!("GET {url} returned {}", resp.status()));
         }
-        resp.json::<Value>().await.with_context(|| format!("parse JSON from {url}"))
+        // serde_json::from_slice instead of reqwest's `.json()` — see comment
+        // in `wait_for_relay_health` (json feature dropped per attn-nnj.11.9).
+        let bytes = resp
+            .bytes()
+            .await
+            .with_context(|| format!("read body from {url}"))?;
+        serde_json::from_slice::<Value>(&bytes)
+            .with_context(|| format!("parse JSON from {url}"))
     }
 
     /// Drive a generic scenario step. Returns `(status, body_json_or_null)`.

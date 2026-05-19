@@ -22,14 +22,18 @@ import type { Env } from "./env";
 import { PowError, verifyPow } from "./pow";
 import {
   deviceRegistrationSchema,
+  envelopeBatchSchema,
   roomCreationSchema,
   type DeviceRecord,
   type DeviceRegistrationRequest,
+  type EnvelopeInput,
+  type EnvelopeRecord,
   type RoomPolicy,
 } from "./schema";
 
 const ROOM_PATH_RE = /^\/v2\/rooms\/([^/]+)\/?$/;
 const ROOM_DEVICES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/devices\/?$/;
+const ROOM_ENVELOPES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/envelopes\/?$/;
 
 const ED25519_PUB_BYTE_LEN = 32;
 const ED25519_SIG_BYTE_LEN = 64;
@@ -71,6 +75,8 @@ interface HardLimits {
   maxSnapshotBytes: number;
   maxEventBytes: number;
   maxEvents: number;
+  maxRoomBytes: number;
+  maxBatchEnvelopes: number;
   ttlMs: number;
   ttlLongMs: number;
   defaultIdleTimeoutMs: number;
@@ -84,6 +90,8 @@ function readHardLimits(env: Env): HardLimits {
     maxSnapshotBytes: parsePositiveInt(env.HARD_MAX_SNAPSHOT_BYTES, "HARD_MAX_SNAPSHOT_BYTES"),
     maxEventBytes: parsePositiveInt(env.HARD_MAX_EVENT_BYTES, "HARD_MAX_EVENT_BYTES"),
     maxEvents: parsePositiveInt(env.HARD_MAX_EVENTS, "HARD_MAX_EVENTS"),
+    maxRoomBytes: parsePositiveInt(env.HARD_MAX_ROOM_BYTES, "HARD_MAX_ROOM_BYTES"),
+    maxBatchEnvelopes: parsePositiveInt(env.HARD_MAX_BATCH_ENVELOPES, "HARD_MAX_BATCH_ENVELOPES"),
     ttlMs: parsePositiveInt(env.HARD_MAX_TTL_MS, "HARD_MAX_TTL_MS"),
     ttlLongMs: parsePositiveInt(env.HARD_MAX_TTL_LONG_MS, "HARD_MAX_TTL_LONG_MS"),
     defaultIdleTimeoutMs: parsePositiveInt(env.DEFAULT_IDLE_TIMEOUT_MS, "DEFAULT_IDLE_TIMEOUT_MS"),
@@ -135,7 +143,19 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /devices`);
     }
 
-    // Other endpoints land in 5.7-5.13.
+    const envelopesMatch = url.pathname.match(ROOM_ENVELOPES_PATH_RE);
+    if (envelopesMatch) {
+      const roomId = envelopesMatch[1];
+      if (roomId === undefined || roomId === "") {
+        return errorResponse(400, "ATTN_ROOM_ID_INVALID", "roomId required");
+      }
+      if (request.method === "POST") {
+        return this.handleEnvelopesIngest(request, roomId, url.pathname);
+      }
+      return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /envelopes`);
+    }
+
+    // Other endpoints land in 5.8-5.13.
     return errorResponse(404, "ATTN_NOT_FOUND", `no handler for ${request.method} ${url.pathname}`);
   }
 
@@ -519,6 +539,401 @@ export class RoomDO extends DurableObject<Env> {
     return Response.json({ devices }, { status: 200 });
   }
 
+  // -- POST /v2/rooms/:roomId/envelopes -----------------------------------
+
+  /**
+   * Batched envelope ingest per relay-spec.md §POST /v2/rooms/:roomId/envelopes
+   * and amendments.md #6 (PoW on every write) + #7 (batch cap 32).
+   *
+   * Flow:
+   *   1. Admission (HMAC) — single token for the whole batch.
+   *   2. PoW            — single token bound to (roomId, deviceId-of-first-envelope,
+   *                       POST, /v2/rooms/:roomId/envelopes). The spec requires
+   *                       one PoW per HTTP request; we tie it to the first
+   *                       envelope's deviceId so the spec's "deviceId" binding
+   *                       still maps onto a concrete value.
+   *   3. Batch cap      — > 32 envelopes → 400 ATTN_BATCH_TOO_LARGE.
+   *   4. Per-envelope:
+   *        - decoded ciphertext length == ciphertextBytes (400 LENGTH_MISMATCH)
+   *        - kind size cap (413 ENVELOPE_TOO_LARGE)
+   *        - (authorId, deviceId) registered (400 DEVICE_UNREGISTERED)
+   *   5. Running totals against policy.maxEvents + HARD_MAX_ROOM_BYTES
+   *      (whole batch rejected on overflow — 507 ROOM_EVENT_CAP / ROOM_STORAGE_FULL).
+   *   6. Atomic put-many: every accepted envelope writes
+   *        env:<seq>:<id>, env_idx:<id>, and (signal-only) env_by_target:<targetDeviceId>:<seq>:<id>
+   *      plus meta updates (server_seq, envelope_count, bytes_used, last_event_at).
+   *      Idempotency: env_idx:<id> hit → reuse prior serverSeq, skip storage write.
+   *   7. Signal sub-cap: per (authorId, target.deviceId), evict oldest entries
+   *      past maxSignalEnvelopes=64 (FIFO).
+   *   8. Alarm reschedule on accept.
+   *
+   * WS broadcast (5.11) is out of scope here — accepted envelopes are buffered
+   * by storage and re-delivered to subscribers on hibernation resume.
+   */
+  private async handleEnvelopesIngest(
+    request: Request,
+    roomId: string,
+    urlPath: string,
+  ): Promise<Response> {
+    const limits = readHardLimits(this.env);
+    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
+    if (storedAdmissionKey === undefined) {
+      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+    }
+
+    // Buffer the body up front — verifyAdmission, JSON.parse, and the bulk
+    // decode all need a non-streamed copy.
+    let bodyBytes: Uint8Array;
+    try {
+      bodyBytes = new Uint8Array(await request.arrayBuffer());
+    } catch (err) {
+      return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
+    }
+
+    // 1. Admission.
+    try {
+      const buffered = bufferedRequest(request, bodyBytes);
+      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
+    } catch (err) {
+      if (err instanceof AdmissionError) {
+        return errorResponse(401, err.code, err.message);
+      }
+      throw err;
+    }
+
+    // Parse + schema-validate so we have a deviceId for the PoW binding and the
+    // batch size for the cap check.
+    let parsed: unknown;
+    try {
+      const text = new TextDecoder().decode(bodyBytes);
+      parsed = JSON.parse(text);
+    } catch (err) {
+      return errorResponse(400, "ATTN_BODY_INVALID", `request body is not valid JSON: ${(err as Error).message}`);
+    }
+
+    // 3. Batch cap — checked BEFORE zod so we surface the spec error code
+    //    even when the body shape would also fail other checks.
+    if (typeof parsed === "object" && parsed !== null && "envelopes" in parsed) {
+      const envs = (parsed as { envelopes: unknown }).envelopes;
+      if (Array.isArray(envs) && envs.length > limits.maxBatchEnvelopes) {
+        return errorResponse(
+          400,
+          "ATTN_BATCH_TOO_LARGE",
+          `batch contains ${envs.length} envelopes, max ${limits.maxBatchEnvelopes}`,
+        );
+      }
+    }
+
+    const result = envelopeBatchSchema.safeParse(parsed);
+    if (!result.success) {
+      return errorResponse(400, "ATTN_BODY_INVALID", formatZodError(result.error));
+    }
+    const batch = result.data;
+    // Re-check cap post-zod (zod already enforces .max(32) but a future bump
+    // should still surface the canonical error code).
+    if (batch.envelopes.length > limits.maxBatchEnvelopes) {
+      return errorResponse(
+        400,
+        "ATTN_BATCH_TOO_LARGE",
+        `batch contains ${batch.envelopes.length} envelopes, max ${limits.maxBatchEnvelopes}`,
+      );
+    }
+
+    // 2. PoW — bound to (roomId, first envelope's deviceId, POST, urlPath).
+    //    Every envelope in a batch should share the author/device per the
+    //    crypto-spec usage pattern; we don't enforce that here (the spec is
+    //    silent on cross-device batching), we just pin PoW to the first
+    //    envelope so a single token works.
+    const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+    if (policy === undefined) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
+    }
+    const powToken = request.headers.get("Attn-PoW");
+    if (powToken === null || powToken === "") {
+      return errorResponse(400, "ATTN_POW_INVALID", "missing Attn-PoW header");
+    }
+    const first = batch.envelopes[0];
+    if (first === undefined) {
+      // zod's .min(1) makes this unreachable, but the type narrows for TS.
+      return errorResponse(400, "ATTN_BODY_INVALID", "empty envelope batch");
+    }
+    try {
+      await verifyPow(powToken, {
+        roomId,
+        deviceId: first.deviceId,
+        method: "POST",
+        urlPath,
+        policyPowBits: policy.powBits,
+        now: Date.now(),
+        isReplayed: (hash) => this.isPowSeen(hash),
+        markSeen: (hash, expiresAt) => this.markPowSeen(hash, expiresAt),
+      });
+    } catch (err) {
+      if (err instanceof PowError) {
+        return errorResponse(400, err.code, err.message);
+      }
+      throw err;
+    }
+
+    // 4. Per-envelope validation. We collect everything first and bail on the
+    //    first error so the whole batch is rejected atomically (spec wording
+    //    says "reject the *whole batch*" for cap overflow; per-envelope shape
+    //    errors mirror that for symmetry — partial accepts are footguns).
+    const decodedLengths = new Map<string, number>();
+    for (const env of batch.envelopes) {
+      let decodedLen: number;
+      try {
+        // We only need the length, not the bytes themselves.
+        decodedLen = base64UrlDecode(env.ciphertext).length;
+      } catch (err) {
+        return errorResponse(
+          400,
+          "ATTN_BODY_INVALID",
+          `envelope ${env.envelopeId} ciphertext base64url decode failed: ${(err as Error).message}`,
+        );
+      }
+      if (decodedLen !== env.ciphertextBytes) {
+        return errorResponse(
+          400,
+          "ATTN_CIPHERTEXT_LENGTH_MISMATCH",
+          `envelope ${env.envelopeId} ciphertextBytes=${env.ciphertextBytes} != decoded=${decodedLen}`,
+        );
+      }
+      decodedLengths.set(env.envelopeId, decodedLen);
+
+      const sizeCap =
+        env.kind === "snapshot_blob" ? policy.maxSnapshotBytes : policy.maxEventBytes;
+      if (env.ciphertextBytes > sizeCap) {
+        return errorResponse(
+          413,
+          "ATTN_ENVELOPE_TOO_LARGE",
+          `envelope ${env.envelopeId} kind=${env.kind} ciphertextBytes=${env.ciphertextBytes} > cap ${sizeCap}`,
+        );
+      }
+
+      // Device registration check. We look up by (authorId/participantId,
+      // deviceId) — `authorId` is the participantId on the wire per the spec.
+      const deviceKey = deviceStorageKey(env.authorId, env.deviceId);
+      const deviceRecord = await this.ctx.storage.get<DeviceRecord>(deviceKey);
+      if (deviceRecord === undefined) {
+        return errorResponse(
+          400,
+          "ATTN_DEVICE_UNREGISTERED",
+          `envelope ${env.envelopeId} (authorId=${env.authorId}, deviceId=${env.deviceId}) not registered`,
+        );
+      }
+    }
+
+    // 5. Idempotency + running-totals.
+    //    Split the batch into (a) duplicates (already in env_idx) and (b)
+    //    fresh envelopes that need a new serverSeq + storage write.
+    const accepted: Array<{ envelopeId: string; serverSeq: number }> = [];
+    const fresh: EnvelopeInput[] = [];
+
+    for (const env of batch.envelopes) {
+      const idx = await this.ctx.storage.get<string>(envIndexKey(env.envelopeId));
+      if (idx !== undefined) {
+        // `idx` is the padded serverSeq string. Parse to surface in the response.
+        const prevSeq = Number(idx);
+        if (!Number.isSafeInteger(prevSeq) || prevSeq <= 0) {
+          return errorResponse(
+            500,
+            "ATTN_ROOM_CORRUPT",
+            `env_idx for ${env.envelopeId} not a valid serverSeq: ${idx}`,
+          );
+        }
+        accepted.push({ envelopeId: env.envelopeId, serverSeq: prevSeq });
+      } else {
+        fresh.push(env);
+      }
+    }
+
+    // Cap checks operate on the fresh subset (duplicates don't change totals).
+    const [curCount, curBytes, curServerSeq] = await Promise.all([
+      this.ctx.storage.get<number>(META.envelopeCount),
+      this.ctx.storage.get<number>(META.bytesUsed),
+      this.ctx.storage.get<number>(META.serverSeq),
+    ]);
+    const runningCount = curCount ?? 0;
+    const runningBytes = curBytes ?? 0;
+    const runningSeq = curServerSeq ?? 0;
+
+    const addedCount = fresh.length;
+    let addedBytes = 0;
+    for (const env of fresh) addedBytes += env.ciphertextBytes;
+
+    if (runningCount + addedCount > policy.maxEvents) {
+      return errorResponse(
+        507,
+        "ATTN_ROOM_EVENT_CAP",
+        `room ${roomId} event cap reached (have ${runningCount}, +${addedCount} > ${policy.maxEvents})`,
+      );
+    }
+    if (runningBytes + addedBytes > limits.maxRoomBytes) {
+      return errorResponse(
+        507,
+        "ATTN_ROOM_STORAGE_FULL",
+        `room ${roomId} storage cap reached (have ${runningBytes}, +${addedBytes} > ${limits.maxRoomBytes})`,
+      );
+    }
+
+    // 6. Build the atomic write map. We compute the next serverSeq locally,
+    //    insert env: + env_idx: + (signal-only) env_by_target: keys, then commit
+    //    in a single put-many call. DO storage commits put-many atomically
+    //    within one event (see relay-spec.md §serverSeq Allocation).
+    const now = Date.now();
+    const writeMap: Record<string, unknown> = {};
+    let nextSeq = runningSeq;
+
+    // Signal evictions are computed up-front so the put-many includes the
+    // delete-equivalent (we'll handle deletes in a follow-up storage call;
+    // DO put-many doesn't support a `delete` set, so we batch the puts and
+    // then issue a delete-many for evicted keys).
+    interface PlannedSignal {
+      authorId: string;
+      targetDeviceId: string;
+      paddedSeq: string;
+      envelopeId: string;
+    }
+    const newSignals: PlannedSignal[] = [];
+
+    for (const env of fresh) {
+      nextSeq += 1;
+      const paddedSeq = padServerSeq(nextSeq);
+      const record: EnvelopeRecord = {
+        ...env,
+        target: env.target ?? null,
+        serverSeq: nextSeq,
+      };
+      writeMap[envStorageKey(paddedSeq, env.envelopeId)] = record;
+      writeMap[envIndexKey(env.envelopeId)] = paddedSeq;
+      if (env.kind === "signal" && env.target?.deviceId !== undefined) {
+        writeMap[envByTargetKey(env.target.deviceId, paddedSeq, env.envelopeId)] = "";
+        newSignals.push({
+          authorId: env.authorId,
+          targetDeviceId: env.target.deviceId,
+          paddedSeq,
+          envelopeId: env.envelopeId,
+        });
+      }
+      accepted.push({ envelopeId: env.envelopeId, serverSeq: nextSeq });
+    }
+
+    // Meta updates — only re-write the keys that actually changed when there
+    // are fresh envelopes. For an all-duplicates batch the response goes out
+    // without touching meta so caps remain authoritative.
+    if (fresh.length > 0) {
+      writeMap[META.serverSeq] = nextSeq;
+      writeMap[META.envelopeCount] = runningCount + addedCount;
+      writeMap[META.bytesUsed] = runningBytes + addedBytes;
+      writeMap[META.lastEventAt] = now;
+    }
+
+    if (Object.keys(writeMap).length > 0) {
+      await this.ctx.storage.put<unknown>(writeMap);
+    }
+
+    // 7. Signal sub-cap — per (authorId, targetDeviceId) pair, FIFO-evict
+    //    anything past maxSignalEnvelopes=64. We do this AFTER the atomic put
+    //    so the cap operates on the post-insert state. Evictions delete both
+    //    the env: payload and the env_by_target: index entry; we leave
+    //    env_idx: in place so idempotent retries still resolve (the prior
+    //    serverSeq is still useful to clients even if the payload is gone).
+    if (newSignals.length > 0) {
+      // Group by (authorId, targetDeviceId) so we only scan each bucket once.
+      const buckets = new Map<string, PlannedSignal[]>();
+      for (const s of newSignals) {
+        const bucketKey = `${s.authorId} ${s.targetDeviceId}`;
+        const arr = buckets.get(bucketKey) ?? [];
+        arr.push(s);
+        buckets.set(bucketKey, arr);
+      }
+      for (const bucketKey of buckets.keys()) {
+        const [authorId, targetDeviceId] = bucketKey.split(" ") as [string, string];
+        await this.evictExcessSignals(authorId, targetDeviceId, MAX_SIGNAL_ENVELOPES_PER_PAIR);
+      }
+    }
+
+    // 8. Reschedule alarm if anything was accepted (idle window advances).
+    if (fresh.length > 0) {
+      const [hardMaxAt, idleTimeoutMs] = await Promise.all([
+        this.ctx.storage.get<number>(META.hardMaxAt),
+        Promise.resolve(policy.idleTimeoutMs ?? limits.defaultIdleTimeoutMs),
+      ]);
+      if (hardMaxAt !== undefined) {
+        const alarmAt = Math.min(hardMaxAt, now + idleTimeoutMs);
+        await this.ctx.storage.setAlarm(alarmAt);
+      }
+    }
+
+    // WS broadcast (5.11) lives outside this handler; accepted envelopes are
+    // durable in storage and will be re-delivered on subscriber connect.
+    // TODO(5.11): notify hibernating WS sessions via state.getWebSockets()
+    // tagged by deviceId/participantId.
+
+    // Sort accepted by serverSeq so clients see a stable order matching
+    // request order for fresh envelopes (duplicates land at their prior seq,
+    // which may be lower; that's expected per the spec's idempotency note).
+    accepted.sort((a, b) => a.serverSeq - b.serverSeq);
+
+    return Response.json({ accepted }, { status: 201 });
+  }
+
+  /**
+   * Walk the `env_by_target:<targetDeviceId>:` index, find entries whose
+   * payload was authored by `authorId`, and FIFO-evict anything past `cap`.
+   *
+   * The env_by_target index doesn't carry authorId, so we have to load each
+   * payload to filter. For a 64-entry sub-cap this is bounded — at most ~65
+   * reads per insert that triggers eviction. Bigger sub-caps would need a
+   * dedicated `env_signal_by_pair:<authorId>:<targetDeviceId>:<seq>` index;
+   * we don't need that for v2.
+   */
+  private async evictExcessSignals(
+    authorId: string,
+    targetDeviceId: string,
+    cap: number,
+  ): Promise<void> {
+    const prefix = envByTargetPrefix(targetDeviceId);
+    const entries = await this.ctx.storage.list<string>({ prefix });
+    interface Found {
+      paddedSeq: string;
+      envelopeId: string;
+      byTargetKey: string;
+    }
+    const matches: Found[] = [];
+    for (const orderKey of entries.keys()) {
+      const parsed = parseEnvByTargetKey(orderKey);
+      if (parsed === undefined) continue;
+      // We need the payload to filter on authorId. The payload key contains
+      // the seq + envelopeId so we can reconstruct it directly.
+      const payloadKey = envStorageKey(parsed.paddedSeq, parsed.envelopeId);
+      const record = await this.ctx.storage.get<EnvelopeRecord>(payloadKey);
+      if (record === undefined || record.authorId !== authorId) continue;
+      matches.push({
+        paddedSeq: parsed.paddedSeq,
+        envelopeId: parsed.envelopeId,
+        byTargetKey: orderKey,
+      });
+    }
+    if (matches.length <= cap) return;
+    // entries.keys() iteration order is lex over the padded seq, which is
+    // chronological. Evict the oldest (lowest seq) entries first.
+    matches.sort((a, b) => (a.paddedSeq < b.paddedSeq ? -1 : a.paddedSeq > b.paddedSeq ? 1 : 0));
+    const toEvict = matches.slice(0, matches.length - cap);
+    const keysToDelete: string[] = [];
+    for (const ev of toEvict) {
+      keysToDelete.push(envStorageKey(ev.paddedSeq, ev.envelopeId));
+      keysToDelete.push(ev.byTargetKey);
+      // Leave env_idx alone so an idempotent re-upload still resolves to the
+      // (now-deleted) serverSeq. Clients can detect via list-style fetches if
+      // they care; for signal envelopes they normally don't re-fetch.
+    }
+    if (keysToDelete.length > 0) {
+      await this.ctx.storage.delete(keysToDelete);
+    }
+  }
+
   // -- helpers for PoW replay + device ordering ---------------------------
 
   private async isPowSeen(hash: string): Promise<boolean> {
@@ -633,6 +1048,68 @@ const DEVICE_ORDER_PREFIX = "device_order:";
 
 function deviceStorageKey(participantId: string, deviceId: string): string {
   return `${DEVICE_PREFIX}${participantId}:${deviceId}`;
+}
+
+// --- envelope storage keying ---------------------------------------------
+
+/** Padded width for serverSeq in lex keys. 20 digits matches the spec example
+ *  (`paddedServerSeq = serverSeq.toString().padStart(20, '0')`). */
+const SERVER_SEQ_PAD = 20;
+
+/** Per-(authorId, targetDeviceId) signal sub-cap from relay-spec.md §Caps. */
+const MAX_SIGNAL_ENVELOPES_PER_PAIR = 64;
+
+const ENV_PREFIX = "env:";
+const ENV_IDX_PREFIX = "env_idx:";
+const ENV_BY_TARGET_PREFIX = "env_by_target:";
+
+function padServerSeq(n: number): string {
+  return String(n).padStart(SERVER_SEQ_PAD, "0");
+}
+
+function envStorageKey(paddedSeq: string, envelopeId: string): string {
+  return `${ENV_PREFIX}${paddedSeq}:${envelopeId}`;
+}
+
+function envIndexKey(envelopeId: string): string {
+  return `${ENV_IDX_PREFIX}${envelopeId}`;
+}
+
+function envByTargetKey(
+  targetDeviceId: string,
+  paddedSeq: string,
+  envelopeId: string,
+): string {
+  return `${ENV_BY_TARGET_PREFIX}${targetDeviceId}:${paddedSeq}:${envelopeId}`;
+}
+
+function envByTargetPrefix(targetDeviceId: string): string {
+  return `${ENV_BY_TARGET_PREFIX}${targetDeviceId}:`;
+}
+
+/**
+ * Parse `env_by_target:<targetDeviceId>:<paddedSeq>:<envelopeId>`.
+ * Returns undefined if the key shape doesn't match (defensive — should never
+ * happen in production, but keeps the iterator robust to garbage).
+ */
+function parseEnvByTargetKey(
+  key: string,
+): { targetDeviceId: string; paddedSeq: string; envelopeId: string } | undefined {
+  if (!key.startsWith(ENV_BY_TARGET_PREFIX)) return undefined;
+  const rest = key.slice(ENV_BY_TARGET_PREFIX.length);
+  // targetDeviceId is the segment before the first colon; paddedSeq is the
+  // SERVER_SEQ_PAD-wide block after that; envelopeId is everything after the
+  // second colon (envelopeIds may contain colons, so we don't split-3).
+  const firstColon = rest.indexOf(":");
+  if (firstColon < 0) return undefined;
+  const targetDeviceId = rest.slice(0, firstColon);
+  const afterTarget = rest.slice(firstColon + 1);
+  if (afterTarget.length < SERVER_SEQ_PAD + 1) return undefined;
+  const paddedSeq = afterTarget.slice(0, SERVER_SEQ_PAD);
+  if (afterTarget.charCodeAt(SERVER_SEQ_PAD) !== ":".charCodeAt(0)) return undefined;
+  const envelopeId = afterTarget.slice(SERVER_SEQ_PAD + 1);
+  if (envelopeId.length === 0) return undefined;
+  return { targetDeviceId, paddedSeq, envelopeId };
 }
 
 /**

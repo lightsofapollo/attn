@@ -113,3 +113,65 @@ export type DeviceRegistrationRequest = z.infer<typeof deviceRegistrationSchema>
 export interface DeviceRecord extends DeviceRegistrationRequest {
   registeredAt: number;
 }
+
+// --- POST /v2/rooms/:roomId/envelopes ------------------------------------
+
+/**
+ * Per relay-spec.md §POST /v2/rooms/:roomId/envelopes and amendments.md #7
+ * (batch cap 32). The relay is content-agnostic past the routing tag: the
+ * payload (`ciphertext`) is opaque encrypted bytes; we only validate framing.
+ *
+ * - `envelopeId` is client-chosen, deterministic, and used for idempotency
+ *   (crypto-spec.md §Envelope IDs). We treat it as an opaque string for
+ *   storage keying.
+ * - `authorId` / `deviceId` must reference an existing device record; we
+ *   re-check at handler time against `device:<participantId>:<deviceId>`.
+ * - `kind == "signal"` may set `target.deviceId` so the relay can route the
+ *   envelope to the right peer over WebSocket (5.11) and prune via the
+ *   `maxSignalEnvelopes=64` sub-cap per (authorId, targetDeviceId) pair.
+ * - `ciphertextBytes` is asserted equal to the decoded `ciphertext` length so
+ *   we can enforce per-kind size caps without a second decode round.
+ * - `nonce` is opaque to the relay (per crypto-spec.md it's a 24-byte XChaCha
+ *   nonce, base64url-encoded). We don't enforce its length here so we can
+ *   round-trip future nonce schemes; the wire shape stays the same.
+ */
+export const envelopeTargetSchema = z.object({
+  deviceId: z.string().min(1).max(64),
+});
+
+export const envelopeKindSchema = z.enum(["event", "snapshot_blob", "signal"]);
+
+export const envelopeSchema = z.object({
+  envelopeId: z.string().min(1),
+  authorId: z.string().min(1).max(64),
+  deviceId: z.string().min(1).max(64),
+  kind: envelopeKindSchema,
+  // null is a valid wire value for "no target / broadcast". zod's optional()
+  // also covers the omitted case so clients can leave the key off entirely.
+  target: envelopeTargetSchema.nullable().optional(),
+  createdAt: unixMs,
+  expiresAt: unixMs,
+  nonce: b64url.min(1, "nonce required"),
+  ciphertext: b64url, // empty ciphertext is allowed at the schema layer; per-kind cap is enforced in handler
+  ciphertextBytes: z.number().int().positive(),
+});
+
+export const envelopeBatchSchema = z.object({
+  // Lower bound 1: an empty batch is wasted PoW and almost certainly a client
+  // bug. Upper bound 32 is amendments.md #7 (single PoW per HTTP request).
+  envelopes: z.array(envelopeSchema).min(1).max(32),
+});
+
+export type EnvelopeInput = z.infer<typeof envelopeSchema>;
+export type EnvelopeBatchInput = z.infer<typeof envelopeBatchSchema>;
+export type EnvelopeKind = z.infer<typeof envelopeKindSchema>;
+
+/**
+ * Stored shape — the wire envelope plus the server-assigned `serverSeq`.
+ * `target` is normalized to `null` when omitted on the wire so storage stays
+ * consistent across encoders.
+ */
+export interface EnvelopeRecord extends Omit<EnvelopeInput, "target"> {
+  target: { deviceId: string } | null;
+  serverSeq: number;
+}

@@ -1,0 +1,854 @@
+//! Inbound envelope pipeline: decrypt + verify + dedupe + import.
+//!
+//! Transport-agnostic crypto + persistence layer that turns a received
+//! `MailboxEnvelope` into a durable, verified `ReviewEvent` (for `kind=event`)
+//! or recovered plaintext bytes (for `kind=signal` / `kind=snapshot_blob`).
+//!
+//! Called by both:
+//!   - the mailbox WS client (attn-nnj.6.3) — each incoming `envelope` frame
+//!     hits `import_event_envelope` / `import_snapshot_envelope` / `import_signal_envelope`,
+//!   - the WebRTC DataChannel transport (Phase 4) — same entrypoints; the WS
+//!     and DC paths converge here so dedup/verify lives in exactly one place.
+//!
+//! Spec:
+//!   - `planning/collab/crypto-spec.md` §Envelope Encryption (AEAD) +
+//!     §Signatures (the round-trip this module closes the loop on),
+//!   - `planning/collab/data-model.md` §Sync Cursors And ACKs (dedup by
+//!     EventId — `ReviewStore::append_event` returns `false` for re-imports).
+//!
+//! Layering: this module does NOT know what `kind` an envelope is — the caller
+//! dispatches on `envelope.kind` and calls the matching method. That keeps the
+//! WS/DC layers thin (`match frame.kind { Event => import_event_envelope, .. }`)
+//! and keeps the AEAD key selection localized to the pipeline (which owns the
+//! three subkeys).
+//!
+//! What this module does NOT do:
+//!   - WebSocket reception itself (lives in 6.3),
+//!   - R2-spillover snapshot fetch — when ciphertext is a `BlobRef` instead of
+//!     inline bytes, the caller fetches from R2 and calls back with the
+//!     resolved blob (lives in 5.8),
+//!   - emitting `ReviewUpdate::EventImported` — `ReviewManager` does that after
+//!     calling `import_event_envelope` (keeps the manager-owned `update_tx`
+//!     out of this layer's API surface).
+
+#![allow(dead_code)]
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
+
+use crate::review::envelope::{
+    DisassembleInput, EnvelopeError, disassemble_event_envelope,
+};
+use crate::review::crypto::aead::{self, AeadError, AeadNonce, EnvelopeAad};
+use crate::review::crypto::signing::DeviceVerifyingKey;
+use crate::review::ids::RoomId;
+use crate::review::model::{EnvelopeKind, MailboxEnvelope, ReviewEvent};
+use crate::review::store::ReviewStore;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+/// Errors returned by the inbound pipeline.
+///
+/// `UnknownSigner` is a soft error: the caller (mailbox WS client or WebRTC
+/// transport) should refresh its device-key cache (via `GET /devices` for
+/// mailbox; via a `device_directory_update` envelope for WebRTC) and retry the
+/// import once before surfacing to the user. Persistent `UnknownSigner` after a
+/// refresh indicates a genuine key-distribution failure.
+///
+/// `Envelope` collapses every cryptographic failure (wrong key, AEAD MAC
+/// failure, signature failure, EventId mismatch) into the underlying
+/// `EnvelopeError`. That matches the spec's "the relay never needs to know
+/// which input was wrong" stance — distinguishing between, say, "wrong eventKey"
+/// and "tampered ciphertext" risks turning timing differences into a side
+/// channel for an attacker.
+#[derive(Debug, thiserror::Error)]
+pub enum InboundError {
+    /// AEAD-open, signature-verify, or EventId-recompute failed.
+    #[error("envelope decrypt/verify failed: {0}")]
+    Envelope(#[from] EnvelopeError),
+    /// `auth.signingKeyId` is not in the device-keys cache. Caller should
+    /// refresh the cache (mailbox: `GET /devices`; WebRTC: peer key exchange)
+    /// and retry the import once.
+    #[error("unknown signer: signingKeyId not in device cache")]
+    UnknownSigner { signing_key_id: String },
+    /// Snapshot or signal envelope decrypt failed (AEAD MAC or nonce/ciphertext
+    /// base64url decode). Snapshot/signal envelopes don't carry an Ed25519
+    /// signature inside the plaintext — they are confidentiality-only —
+    /// so failures route through this variant instead of `Envelope`.
+    #[error("blob decrypt failed: {0}")]
+    Aead(#[from] AeadError),
+    /// `nonce` field of the envelope failed base64url decoding or had wrong length.
+    #[error("envelope nonce decode failed: {0}")]
+    InvalidNonce(String),
+    /// `ciphertext` field of the envelope failed base64url decoding.
+    #[error("envelope ciphertext decode failed: {0}")]
+    InvalidCiphertext(String),
+    /// `store.append_event` failed (disk full, permission denied, corrupt JSONL).
+    /// Wrapped as a `String` because `anyhow::Error` does not implement `Error`
+    /// in a way that composes cleanly with `thiserror`.
+    #[error("store: {0}")]
+    Store(String),
+    /// Caller asked the pipeline to process an envelope whose `kind` does not
+    /// match the entrypoint (e.g. handed a `kind=event` envelope to
+    /// `import_snapshot_envelope`). Distinguishing this from a malformed AAD
+    /// gives much better diagnostics — a kind/method mismatch is a programmer
+    /// error in the caller, not a relay-side tampering attempt.
+    #[error("envelope kind mismatch: expected {expected:?}, got {actual:?}")]
+    KindMismatch { expected: EnvelopeKind, actual: EnvelopeKind },
+}
+
+// ---------------------------------------------------------------------------
+// Outcomes
+// ---------------------------------------------------------------------------
+
+/// Outcome of importing an event envelope.
+///
+/// `newly_imported` distinguishes the "imported now" path (caller emits
+/// `ReviewUpdate::EventImported`, advances the cursor, etc.) from the "already
+/// have it" dedup path (caller just advances the cursor; the event surfaces
+/// nothing new to the frontend). Both paths return the decoded event so the
+/// caller can recompute anchor resolutions or refresh derived state if it wants
+/// to — dedup is a sync-level optimization, not a logical "drop".
+#[derive(Debug, Clone)]
+pub struct ImportOutcome {
+    /// The verified, decrypted `ReviewEvent`.
+    pub event: ReviewEvent,
+    /// `true` if the event was newly appended to `events.jsonl`;
+    /// `false` if `store.append_event` returned `Ok(false)` (already present).
+    pub newly_imported: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline
+// ---------------------------------------------------------------------------
+
+/// Shared, async-friendly verifying-key cache. Keyed by `signingKeyId`
+/// (= `base64url(SHA-256(publicSigningKey))` per crypto-spec.md §Signatures).
+///
+/// Pulled out as a type alias so callers (notably `ReviewManager`) can hand
+/// the same `Arc<RwLock<...>>` to both the inbound pipeline and any code that
+/// adds keys from device-directory updates without juggling two clones.
+pub type VerifyingKeyCache = Arc<RwLock<HashMap<String, DeviceVerifyingKey>>>;
+
+/// Inbound envelope processing pipeline.
+///
+/// Owns:
+///   - `store` — durable event log. `append_event` does dedup-by-EventId.
+///   - `keys` — verifying-key cache used to validate `auth.signingKeyId`.
+///   - `event_key`, `snapshot_key`, `signaling_key` — the three per-room AEAD
+///     subkeys derived from `rootKey` (see `crypto::kdf::derive_room_keys`).
+///     One pipeline instance is bound to one room — these keys are room-scoped.
+///
+/// The pipeline does NOT spawn its own task and does NOT hold any transport
+/// state. Each method is an isolated `async fn` that does CPU-bound crypto
+/// (under `tokio::task::block_in_place` is the caller's choice — for our event
+/// sizes the work is sub-millisecond and we keep it inline) and a disk write.
+pub struct InboundPipeline {
+    store: Arc<ReviewStore>,
+    keys: VerifyingKeyCache,
+    /// AEAD key for `kind=event` envelopes. 32 bytes.
+    event_key: [u8; 32],
+    /// AEAD key for `kind=snapshot_blob` envelopes. 32 bytes.
+    snapshot_key: [u8; 32],
+    /// AEAD key for `kind=signal` envelopes. 32 bytes.
+    signaling_key: [u8; 32],
+}
+
+impl InboundPipeline {
+    /// Construct a new pipeline. The three AEAD keys must be derived from the
+    /// same `rootKey` via `crypto::kdf::derive_room_keys` so the kind/key
+    /// mapping (see crypto-spec.md data-classification table) is consistent.
+    pub fn new(
+        store: Arc<ReviewStore>,
+        keys: VerifyingKeyCache,
+        event_key: [u8; 32],
+        snapshot_key: [u8; 32],
+        signaling_key: [u8; 32],
+    ) -> Self {
+        Self {
+            store,
+            keys,
+            event_key,
+            snapshot_key,
+            signaling_key,
+        }
+    }
+
+    /// Register a verifying key for a `signingKeyId`. Called by `ReviewManager`
+    /// when:
+    ///   - `GET /devices` returns the room directory at admission time,
+    ///   - a `ParticipantJoined` event lands and the new device's key is in
+    ///     the event's body (lookup by device_id then store the key).
+    ///
+    /// Overwrites any existing entry — callers should re-MAC and rebuild the
+    /// cache after device-key rotation rather than relying on insert semantics.
+    pub async fn add_verifying_key(&self, signing_key_id: String, key: DeviceVerifyingKey) {
+        let mut guard = self.keys.write().await;
+        guard.insert(signing_key_id, key);
+    }
+
+    /// Process one inbound `kind=event` envelope.
+    ///
+    /// Pipeline:
+    ///   1. Snapshot the verifying-key cache (so we hold no read lock across
+    ///      the AEAD/signing work; the cache rarely changes mid-import but we
+    ///      want to keep contention zero).
+    ///   2. Call `disassemble_event_envelope` — AEAD-open + sig-verify +
+    ///      EventId recompute (each layer's failure mode is a typed variant).
+    ///   3. On `EnvelopeError::UnknownSigner` → surface as
+    ///      `InboundError::UnknownSigner` so the caller knows to refresh.
+    ///   4. `store.append_event` returns `Ok(true)` for newly written,
+    ///      `Ok(false)` for an already-seen EventId. Either way we return the
+    ///      decoded event in `ImportOutcome.event`.
+    pub async fn import_event_envelope(
+        &self,
+        room_id: &RoomId,
+        envelope: &MailboxEnvelope,
+    ) -> Result<ImportOutcome, InboundError> {
+        if envelope.kind != EnvelopeKind::Event {
+            return Err(InboundError::KindMismatch {
+                expected: EnvelopeKind::Event,
+                actual: envelope.kind,
+            });
+        }
+
+        // Snapshot the cache. Cloning DeviceVerifyingKey is cheap (it's a wrapper
+        // around ed25519_dalek::VerifyingKey, which is Copy under the hood).
+        // Holding the read guard across `disassemble_event_envelope` would block
+        // any concurrent `add_verifying_key` for the duration of the AEAD/sig
+        // work — bounded but pointless.
+        let keys_snapshot = self.keys.read().await.clone();
+
+        let event = match disassemble_event_envelope(DisassembleInput {
+            envelope,
+            event_key: self.event_key,
+            verifying_keys: &keys_snapshot,
+        }) {
+            Ok(ev) => ev,
+            Err(EnvelopeError::UnknownSigner(keyid)) => {
+                return Err(InboundError::UnknownSigner {
+                    signing_key_id: keyid,
+                });
+            }
+            Err(other) => return Err(InboundError::Envelope(other)),
+        };
+
+        let newly_imported = self
+            .store
+            .append_event(room_id, &event)
+            .map_err(|e| InboundError::Store(e.to_string()))?;
+
+        Ok(ImportOutcome {
+            event,
+            newly_imported,
+        })
+    }
+
+    /// Process one inbound `kind=snapshot_blob` envelope. Returns
+    /// `(envelopeId, plaintext_bytes)` — the caller correlates the
+    /// `envelopeId` with the corresponding `SnapshotCreated` event (which
+    /// carries the `snapshotId`/`fileId`) and persists the bytes to the
+    /// snapshot store.
+    ///
+    /// Why `envelopeId` instead of `snapshotId`: per crypto-spec.md, the
+    /// `snapshot_blob` envelope's plaintext is the snapshot bytes themselves
+    /// (or a `BlobRef` for R2 spillover) — there is no in-band metadata
+    /// carrying a `snapshotId`. The wire-level identity for the blob is the
+    /// envelope's `envelopeId`, which is what the `SnapshotCreated` event
+    /// references via `encryptedBlobRef.envelopeId` (or by being co-published
+    /// in the same batch with the same `clientNonce`).
+    ///
+    /// Returns the raw plaintext bytes — for inline snapshots these are the
+    /// snapshot bytes; for R2 spillover the plaintext is a canonical-JSON
+    /// `BlobRef` that the caller resolves separately (issue 5.8). This
+    /// pipeline does NOT distinguish — both shapes decrypt the same way.
+    pub async fn import_snapshot_envelope(
+        &self,
+        _room_id: &RoomId,
+        envelope: &MailboxEnvelope,
+    ) -> Result<(String, Vec<u8>), InboundError> {
+        if envelope.kind != EnvelopeKind::SnapshotBlob {
+            return Err(InboundError::KindMismatch {
+                expected: EnvelopeKind::SnapshotBlob,
+                actual: envelope.kind,
+            });
+        }
+        let plaintext = self.open_blob(envelope, &self.snapshot_key)?;
+        Ok((envelope.envelope_id.clone(), plaintext))
+    }
+
+    /// Process one inbound `kind=signal` envelope. Returns the recovered
+    /// plaintext — the WebRTC layer (Phase 4) decodes it as SDP/ICE/etc.
+    ///
+    /// Like snapshot blobs, signal envelopes are confidentiality-only at this
+    /// layer — there is no embedded Ed25519 signature to verify. The WebRTC
+    /// layer either trusts the relay's `authorId`/`deviceId` headers (which
+    /// are AAD-bound, so the relay cannot lie about them without invalidating
+    /// the MAC), or layers its own DTLS fingerprint check on top.
+    pub async fn import_signal_envelope(
+        &self,
+        _room_id: &RoomId,
+        envelope: &MailboxEnvelope,
+    ) -> Result<Vec<u8>, InboundError> {
+        if envelope.kind != EnvelopeKind::Signal {
+            return Err(InboundError::KindMismatch {
+                expected: EnvelopeKind::Signal,
+                actual: envelope.kind,
+            });
+        }
+        self.open_blob(envelope, &self.signaling_key)
+    }
+
+    /// Shared AEAD-open path for `snapshot_blob` and `signal` envelopes.
+    ///
+    /// Both envelope shapes are confidentiality-only: the plaintext is opaque
+    /// bytes (snapshot blob, SDP, ICE candidate, etc.) rather than a signed
+    /// `ReviewEvent`, so the pipeline stops at AEAD-open. The AAD is rebuilt
+    /// from the same cleartext envelope fields the relay sees — any tampering
+    /// with `envelopeId`, `kind`, `authorId`, `deviceId`, or `createdAt`
+    /// invalidates the MAC and surfaces as `AeadError::Decrypt`.
+    fn open_blob(&self, envelope: &MailboxEnvelope, key: &[u8; 32]) -> Result<Vec<u8>, InboundError> {
+        let aad = EnvelopeAad {
+            v: envelope.v,
+            room_id: envelope.room_id.as_str().to_string(),
+            envelope_id: envelope.envelope_id.clone(),
+            kind: envelope_kind_wire(&envelope.kind).to_string(),
+            author_id: id_to_string(&envelope.author_id),
+            device_id: id_to_string(&envelope.device_id),
+            created_at: envelope.created_at as i64,
+        };
+
+        let nonce_bytes = URL_SAFE_NO_PAD
+            .decode(envelope.nonce.as_bytes())
+            .map_err(|e| InboundError::InvalidNonce(e.to_string()))?;
+        let nonce: AeadNonce = nonce_bytes.as_slice().try_into().map_err(|_| {
+            InboundError::InvalidNonce(format!(
+                "expected 24 bytes, got {}",
+                nonce_bytes.len()
+            ))
+        })?;
+        let ciphertext = URL_SAFE_NO_PAD
+            .decode(envelope.ciphertext.as_bytes())
+            .map_err(|e| InboundError::InvalidCiphertext(e.to_string()))?;
+
+        let plaintext = aead::open(key, &nonce, &ciphertext, &aad)?;
+        Ok(plaintext)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers — mirror those in envelope.rs (kept private so the wire-string
+// representation stays in lock-step with the AAD construction there).
+// ---------------------------------------------------------------------------
+
+/// Wire string for an `EnvelopeKind` — must match `#[serde(rename_all = "snake_case")]`
+/// on `model::EnvelopeKind`. Duplicated from envelope.rs deliberately: AAD
+/// reconstruction is byte-sensitive and a stray rename in one place must not
+/// silently desync the other. The test `aad_kind_wire_strings_match_serde`
+/// guards against drift.
+fn envelope_kind_wire(kind: &EnvelopeKind) -> &'static str {
+    match kind {
+        EnvelopeKind::Event => "event",
+        EnvelopeKind::SnapshotBlob => "snapshot_blob",
+        EnvelopeKind::Signal => "signal",
+    }
+}
+
+/// Round-trip a typed id newtype to its inner string. Same helper as
+/// envelope.rs::id_string — kept private here so the inbound module is a
+/// self-contained translation unit.
+fn id_to_string<T: serde::Serialize>(id: &T) -> String {
+    match serde_json::to_value(id).expect("typed id serializes as JSON string") {
+        serde_json::Value::String(s) => s,
+        other => panic!("typed id must serialize as JSON string, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use serde_json::Value;
+    use tempfile::TempDir;
+
+    use crate::review::crypto::kdf::derive_room_keys;
+    use crate::review::crypto::signing::DeviceSigningKey;
+    use crate::review::envelope::{
+        AssembleInput, assemble_event_envelope,
+    };
+    use crate::review::ids::{ContentHash, DeviceId, FileId, ParticipantId, SnapshotId};
+    use crate::review::model::{
+        Anchor, EnvelopeKind, PositionAnchor, ReviewEventBody,
+    };
+
+    // -----------------------------------------------------------------
+    // Test fixtures — mirror envelope.rs so a future schema change
+    // doesn't have to be replayed across two test modules.
+    // -----------------------------------------------------------------
+
+    /// Pinned 32-byte room secret; matches envelope.rs and the
+    /// `envelope.json` corpus so a stray cross-test divergence is loud.
+    const TEST_ROOM_SECRET: [u8; 32] = [0x11u8; 32];
+    const TEST_SIGNING_SEED: [u8; 32] = [0x22u8; 32];
+
+    fn id<T: for<'de> Deserialize<'de>>(s: &str) -> T {
+        serde_json::from_value(Value::String(s.to_string())).expect("typed id deserializes")
+    }
+
+    fn fresh_store() -> (TempDir, Arc<ReviewStore>) {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
+        );
+        (tmp, store)
+    }
+
+    /// Build a pipeline + the verifying-keys cache pre-populated with the
+    /// signer's pubkey. Returns (pipeline, store, signing-seed, room_id, tmp).
+    fn fresh_pipeline_with_signer()
+    -> (InboundPipeline, Arc<ReviewStore>, DeviceSigningKey, RoomId, TempDir) {
+        let (tmp, store) = fresh_store();
+        let keys = derive_room_keys(&TEST_ROOM_SECRET);
+        let event_key = *keys.event_key.as_bytes();
+        let snapshot_key = *keys.snapshot_key.as_bytes();
+        let signaling_key = *keys.signaling_key.as_bytes();
+
+        let signer = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
+        let signer_keyid = signer.verifying_key().signing_key_id_base64url();
+        let mut map: HashMap<String, DeviceVerifyingKey> = HashMap::new();
+        map.insert(signer_keyid, signer.verifying_key());
+        let cache: VerifyingKeyCache = Arc::new(RwLock::new(map));
+
+        let room_id: RoomId = id("hjCfgOvsatNOUedgxhZpyw");
+        let pipeline = InboundPipeline::new(
+            store.clone(),
+            cache,
+            event_key,
+            snapshot_key,
+            signaling_key,
+        );
+        (pipeline, store, signer, room_id, tmp)
+    }
+
+    /// Mint a fresh kind=event envelope from the canonical fixture body.
+    /// The signing key is moved in (`DeviceSigningKey` is not Clone), so
+    /// callers that want to reuse the seed for vk lookup must re-derive
+    /// from `TEST_SIGNING_SEED`.
+    fn mint_event_envelope(
+        event_key: [u8; 32],
+        signing_key: DeviceSigningKey,
+        room_id: &RoomId,
+    ) -> MailboxEnvelope {
+        let input = AssembleInput {
+            event_key,
+            signing_key,
+            room_id: room_id.clone(),
+            author_id: id::<ParticipantId>("p-author-01"),
+            device_id: id::<DeviceId>("d-device-01"),
+            created_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_000_000_000 + 7 * 24 * 60 * 60 * 1000,
+            parent_event_ids: vec![],
+            snapshot_id: None,
+            body: ReviewEventBody::CommentCreated {
+                thread_id: "thread-1".to_string(),
+                anchor: Anchor {
+                    v: 2,
+                    file_id: id::<FileId>("f-file-01"),
+                    snapshot_id: id::<SnapshotId>("eQ7pDCC-mekpz-we7gDYag"),
+                    base_hash: id::<ContentHash>(
+                        "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+                    ),
+                    position: PositionAnchor {
+                        byte_range: [0, 9],
+                        line_range: [1, 1],
+                        pm_range: None,
+                    },
+                    quote: None,
+                    block: None,
+                    context: None,
+                    structure: None,
+                },
+                body: "hello".to_string(),
+            },
+            kind: EnvelopeKind::Event,
+            client_nonce: None,
+        };
+        assemble_event_envelope(input).expect("assemble envelope")
+    }
+
+    /// Mint a fresh blob envelope (snapshot_blob or signal) directly via the
+    /// AEAD layer — bypasses `assemble_event_envelope` because those envelopes
+    /// don't have a signed-event plaintext. Mirrors what the production
+    /// snapshot/signal assemblers will eventually do (issues 5.x / 7.x).
+    fn mint_blob_envelope(
+        key: &[u8; 32],
+        room_id: &RoomId,
+        kind: EnvelopeKind,
+        plaintext: &[u8],
+        client_nonce: [u8; 16],
+    ) -> MailboxEnvelope {
+        use crate::review::crypto::ids::derive_envelope_id_with_nonce;
+
+        let author_id: ParticipantId = id("p-author-01");
+        let device_id: DeviceId = id("d-device-01");
+        let created_at_ms: u64 = 1_700_000_000_000;
+        let envelope_id =
+            derive_envelope_id_with_nonce(room_id, id_to_string(&device_id).as_str(), &client_nonce);
+
+        let aad = EnvelopeAad {
+            v: 2,
+            room_id: room_id.as_str().to_string(),
+            envelope_id: envelope_id.clone(),
+            kind: envelope_kind_wire(&kind).to_string(),
+            author_id: id_to_string(&author_id),
+            device_id: id_to_string(&device_id),
+            created_at: created_at_ms as i64,
+        };
+
+        let (aead_nonce, ciphertext) = aead::seal(key, plaintext, &aad).expect("seal blob");
+        MailboxEnvelope {
+            v: 2,
+            room_id: room_id.clone(),
+            envelope_id,
+            server_seq: None,
+            author_id,
+            device_id,
+            created_at: created_at_ms,
+            expires_at: created_at_ms + 7 * 24 * 60 * 60 * 1000,
+            kind,
+            nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
+            ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
+            ciphertext_bytes: ciphertext.len() as u64,
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 1. Happy-path event import: assemble -> import -> newly_imported=true
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn import_event_envelope_happy_path_marks_newly_imported() {
+        let (pipeline, _store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let envelope = mint_event_envelope(pipeline.event_key, signer, &room_id);
+
+        let outcome = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect("import succeeds");
+
+        assert!(
+            outcome.newly_imported,
+            "first import of a fresh envelope must be newly_imported=true"
+        );
+        // The recovered event must carry the expected meta + body shape.
+        match &outcome.event.body {
+            ReviewEventBody::CommentCreated { thread_id, body, .. } => {
+                assert_eq!(thread_id, "thread-1");
+                assert_eq!(body, "hello");
+            }
+            other => panic!("expected CommentCreated, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 2. Dedup: re-importing the same envelope -> newly_imported=false
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn import_event_envelope_dedups_by_event_id_on_reimport() {
+        let (pipeline, _store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let envelope = mint_event_envelope(pipeline.event_key, signer, &room_id);
+
+        let first = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect("first import");
+        assert!(first.newly_imported);
+
+        let second = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect("second import");
+        assert!(
+            !second.newly_imported,
+            "re-importing the same envelope must dedup via store.append_event"
+        );
+        // Body must still round-trip — dedup does not change the recovered event.
+        assert_eq!(first.event, second.event);
+    }
+
+    // -----------------------------------------------------------------
+    // 3. Tampered ciphertext -> InboundError::Envelope(AeadError::Decrypt)
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn import_event_envelope_tampered_ciphertext_fails() {
+        let (pipeline, _store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let mut envelope = mint_event_envelope(pipeline.event_key, signer, &room_id);
+        let mut bytes = URL_SAFE_NO_PAD.decode(envelope.ciphertext.as_bytes()).unwrap();
+        bytes[0] ^= 0x01;
+        envelope.ciphertext = URL_SAFE_NO_PAD.encode(&bytes);
+
+        let err = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect_err("tampered ciphertext must not import");
+
+        // Poly1305 detects the flipped byte; AeadError::Decrypt is opaque on
+        // purpose (see aead.rs). Surfaced as InboundError::Envelope so the
+        // caller distinguishes "bad signer" from "bad bytes".
+        match err {
+            InboundError::Envelope(EnvelopeError::Aead(AeadError::Decrypt)) => {}
+            other => panic!("expected Envelope(Aead(Decrypt)), got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 4. Unknown signer -> typed InboundError::UnknownSigner so the
+    //    caller knows to refresh the device cache and retry.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn import_event_envelope_with_unknown_signer_surfaces_unknown_signer() {
+        let (tmp, store) = fresh_store();
+        let keys = derive_room_keys(&TEST_ROOM_SECRET);
+        let event_key = *keys.event_key.as_bytes();
+        let snapshot_key = *keys.snapshot_key.as_bytes();
+        let signaling_key = *keys.signaling_key.as_bytes();
+
+        // Deliberately leave the verifying-keys cache empty so the assembler's
+        // signingKeyId is not in the map.
+        let empty: VerifyingKeyCache = Arc::new(RwLock::new(HashMap::new()));
+        let pipeline = InboundPipeline::new(
+            store,
+            empty,
+            event_key,
+            snapshot_key,
+            signaling_key,
+        );
+
+        let room_id: RoomId = id("hjCfgOvsatNOUedgxhZpyw");
+        let signer = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
+        let expected_keyid = signer.verifying_key().signing_key_id_base64url();
+        let envelope = mint_event_envelope(event_key, signer, &room_id);
+
+        let err = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect_err("unknown signer must short-circuit");
+        match err {
+            InboundError::UnknownSigner { signing_key_id } => {
+                assert_eq!(
+                    signing_key_id, expected_keyid,
+                    "UnknownSigner must carry the assembler's signingKeyId so the caller can refresh that exact entry"
+                );
+            }
+            other => panic!("expected UnknownSigner, got {other:?}"),
+        }
+        // Keep `tmp` alive until after the assertion so the store dir survives.
+        drop(tmp);
+    }
+
+    // -----------------------------------------------------------------
+    // 5. add_verifying_key resolves a prior UnknownSigner (the retry path).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn add_verifying_key_unblocks_a_previously_unknown_signer() {
+        let (tmp, store) = fresh_store();
+        let keys = derive_room_keys(&TEST_ROOM_SECRET);
+        let event_key = *keys.event_key.as_bytes();
+        let snapshot_key = *keys.snapshot_key.as_bytes();
+        let signaling_key = *keys.signaling_key.as_bytes();
+
+        let empty: VerifyingKeyCache = Arc::new(RwLock::new(HashMap::new()));
+        let pipeline = InboundPipeline::new(
+            store,
+            empty,
+            event_key,
+            snapshot_key,
+            signaling_key,
+        );
+
+        let room_id: RoomId = id("hjCfgOvsatNOUedgxhZpyw");
+        let signer = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
+        let vk = signer.verifying_key();
+        let keyid = vk.signing_key_id_base64url();
+        let envelope = mint_event_envelope(event_key, signer, &room_id);
+
+        // First try: empty cache -> UnknownSigner.
+        let err = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect_err("first import must fail");
+        assert!(matches!(err, InboundError::UnknownSigner { .. }));
+
+        // Caller refreshes its device cache and re-tries -> success.
+        pipeline.add_verifying_key(keyid, vk).await;
+        let outcome = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect("retry after add_verifying_key succeeds");
+        assert!(
+            outcome.newly_imported,
+            "retry must be the first successful import — store.append_event has not seen this EventId yet"
+        );
+        drop(tmp);
+    }
+
+    // -----------------------------------------------------------------
+    // 6. Snapshot blob round-trip — decrypts under snapshotKey.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn import_snapshot_envelope_decrypts_under_snapshot_key() {
+        let (pipeline, _store, _signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let snapshot_bytes = b"snapshot bytes: # hello world\n\nlorem ipsum...";
+        let envelope = mint_blob_envelope(
+            &pipeline.snapshot_key,
+            &room_id,
+            EnvelopeKind::SnapshotBlob,
+            snapshot_bytes,
+            [0x77u8; 16],
+        );
+
+        let (envelope_id, plaintext) = pipeline
+            .import_snapshot_envelope(&room_id, &envelope)
+            .await
+            .expect("snapshot decrypt");
+        assert_eq!(envelope_id, envelope.envelope_id);
+        assert_eq!(plaintext, snapshot_bytes);
+    }
+
+    // -----------------------------------------------------------------
+    // 7. Snapshot blob sealed under the WRONG key (event_key) must fail
+    //    — proves the kind/key dispatch table is actually enforced.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn import_snapshot_envelope_under_wrong_key_fails() {
+        let (pipeline, _store, _signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        // Seal a snapshot_blob envelope under EVENT_KEY (wrong!) — the AEAD
+        // open in import_snapshot_envelope uses SNAPSHOT_KEY, so MAC must fail.
+        let envelope = mint_blob_envelope(
+            &pipeline.event_key,
+            &room_id,
+            EnvelopeKind::SnapshotBlob,
+            b"will not decrypt",
+            [0x77u8; 16],
+        );
+
+        let err = pipeline
+            .import_snapshot_envelope(&room_id, &envelope)
+            .await
+            .expect_err("snapshot envelope sealed under wrong key must not open");
+        assert!(
+            matches!(err, InboundError::Aead(AeadError::Decrypt)),
+            "expected Aead(Decrypt), got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 8. Signal envelope round-trip — decrypts under signalingKey.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn import_signal_envelope_decrypts_under_signaling_key() {
+        let (pipeline, _store, _signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let sdp_offer = br#"{"type":"offer","sdp":"v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n"}"#;
+        let envelope = mint_blob_envelope(
+            &pipeline.signaling_key,
+            &room_id,
+            EnvelopeKind::Signal,
+            sdp_offer,
+            [0x88u8; 16],
+        );
+
+        let plaintext = pipeline
+            .import_signal_envelope(&room_id, &envelope)
+            .await
+            .expect("signal decrypt");
+        assert_eq!(plaintext, sdp_offer);
+    }
+
+    // -----------------------------------------------------------------
+    // 9. Kind dispatch: handing the wrong envelope kind to a method
+    //    must surface as `KindMismatch` — protects against a buggy
+    //    caller routing on a hand-rolled `if/else` instead of the
+    //    `envelope.kind` enum.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn import_methods_reject_kind_mismatch() {
+        let (pipeline, _store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let event_envelope = mint_event_envelope(pipeline.event_key, signer, &room_id);
+
+        // Event envelope handed to the snapshot path -> KindMismatch.
+        let err = pipeline
+            .import_snapshot_envelope(&room_id, &event_envelope)
+            .await
+            .expect_err("event envelope on snapshot path must reject");
+        match err {
+            InboundError::KindMismatch { expected, actual } => {
+                assert_eq!(expected, EnvelopeKind::SnapshotBlob);
+                assert_eq!(actual, EnvelopeKind::Event);
+            }
+            other => panic!("expected KindMismatch, got {other:?}"),
+        }
+
+        // Event envelope handed to the signal path -> KindMismatch.
+        let err = pipeline
+            .import_signal_envelope(&room_id, &event_envelope)
+            .await
+            .expect_err("event envelope on signal path must reject");
+        assert!(matches!(err, InboundError::KindMismatch { .. }));
+
+        // Snapshot envelope handed to the event path -> KindMismatch.
+        let snapshot_envelope = mint_blob_envelope(
+            &pipeline.snapshot_key,
+            &room_id,
+            EnvelopeKind::SnapshotBlob,
+            b"snap",
+            [0x99u8; 16],
+        );
+        let err = pipeline
+            .import_event_envelope(&room_id, &snapshot_envelope)
+            .await
+            .expect_err("snapshot envelope on event path must reject");
+        assert!(matches!(err, InboundError::KindMismatch { .. }));
+    }
+
+    // -----------------------------------------------------------------
+    // 10. Drift guard: wire-kind strings used in AAD reconstruction MUST
+    //     match serde's `rename_all = "snake_case"` for EnvelopeKind. If
+    //     the model adds a new kind or renames an existing one, this
+    //     fires loud — better than a silent decrypt failure in prod.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn aad_kind_wire_strings_match_serde() {
+        for kind in [
+            EnvelopeKind::Event,
+            EnvelopeKind::SnapshotBlob,
+            EnvelopeKind::Signal,
+        ] {
+            let via_serde = serde_json::to_value(kind).unwrap();
+            let via_local = serde_json::Value::String(envelope_kind_wire(&kind).to_string());
+            assert_eq!(
+                via_serde, via_local,
+                "envelope_kind_wire and serde diverge for {kind:?} — AAD reconstruction would fail to decrypt prod envelopes"
+            );
+        }
+    }
+}

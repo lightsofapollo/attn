@@ -657,6 +657,7 @@ mod tests {
             created_at: 1_700_000_000_010,
             expires_at: 1_700_000_086_400,
             kind: EnvelopeKind::Event,
+            target: None,
             nonce: "nonce".to_string(),
             ciphertext: "ct".to_string(),
             ciphertext_bytes: 16,

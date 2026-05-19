@@ -314,6 +314,11 @@ pub fn assemble_event_envelope_with_nonce(
         created_at: created_at_ms,
         expires_at: expires_at_ms,
         kind,
+        // Event/snapshot envelopes never set a target — the relay broadcasts
+        // them. Signaling envelopes go through
+        // `transport::signaling::assemble_signal_envelope`, which populates
+        // `target` directly.
+        target: None,
         nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
         ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
         ciphertext_bytes: ciphertext.len() as u64,

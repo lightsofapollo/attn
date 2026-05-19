@@ -783,6 +783,7 @@ mod tests {
             created_at: 1_700_000_000_000,
             expires_at: 1_700_000_086_400,
             kind: EnvelopeKind::Event,
+            target: None,
             nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
             ciphertext: "Y2lwaGVy".to_string(), // base64url("cipher")
             ciphertext_bytes: 6,

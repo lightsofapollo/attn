@@ -43,7 +43,7 @@ use crate::review::envelope::{
 };
 use crate::review::crypto::aead::{self, AeadError, AeadNonce, EnvelopeAad};
 use crate::review::crypto::signing::DeviceVerifyingKey;
-use crate::review::ids::RoomId;
+use crate::review::ids::{DeviceId, RoomId};
 use crate::review::model::{EnvelopeKind, MailboxEnvelope, ReviewEvent};
 use crate::review::store::ReviewStore;
 
@@ -102,6 +102,26 @@ pub enum InboundError {
     /// error in the caller, not a relay-side tampering attempt.
     #[error("envelope kind mismatch: expected {expected:?}, got {actual:?}")]
     KindMismatch { expected: EnvelopeKind, actual: EnvelopeKind },
+    /// Signal envelope's cleartext `target.deviceId` does not match the
+    /// receiver's local `deviceId`. Per `planning/collab/security-review.md`
+    /// §H2 (v2 mitigation): `target.deviceId` is not AAD-bound, so a malicious
+    /// relay could redirect a signal envelope to the wrong peer to leak room
+    /// topology or ICE candidates to non-target participants. The inbound
+    /// dispatcher enforces equality (or `target == None` for true broadcast)
+    /// before exposing the recovered plaintext upstream; rejection happens
+    /// AFTER AEAD-open (the MAC still proves room-membership of the sender),
+    /// but BEFORE the SDP/ICE bytes reach the WebRTC state machine.
+    ///
+    /// A v3 amendment may bind `target` directly into the AAD for
+    /// `kind="signal"`, which would convert this into a `AeadError::Decrypt`
+    /// at MAC time. Until then, this is the server-trust-style mitigation.
+    #[error(
+        "signal target deviceId mismatch: expected {expected}, got {actual:?} (anti-redirect)"
+    )]
+    TargetDeviceMismatch {
+        expected: String,
+        actual: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -292,10 +312,23 @@ impl InboundPipeline {
     /// layer either trusts the relay's `authorId`/`deviceId` headers (which
     /// are AAD-bound, so the relay cannot lie about them without invalidating
     /// the MAC), or layers its own DTLS fingerprint check on top.
+    ///
+    /// `expected_target_device_id`: the local device id. Per
+    /// `planning/collab/security-review.md` §H2 (v2 mitigation), this method
+    /// enforces `envelope.target.deviceId == expected_target_device_id` (or
+    /// `envelope.target == None` for a true broadcast). `target.deviceId` is
+    /// NOT bound into the AAD by spec, so a malicious relay can otherwise
+    /// redirect a signal envelope to a peer that wasn't supposed to receive
+    /// it — all room members hold `signalingKey` and can decrypt, but only
+    /// the intended target should consume the inner SDP/ICE. The check fires
+    /// AFTER `EnvelopeKind::Signal` dispatch and BEFORE AEAD-open, so an
+    /// attacker-redirected envelope is rejected without paying the AEAD cost
+    /// or surfacing plaintext upstream.
     pub async fn import_signal_envelope(
         &self,
         _room_id: &RoomId,
         envelope: &MailboxEnvelope,
+        expected_target_device_id: &DeviceId,
     ) -> Result<Vec<u8>, InboundError> {
         if envelope.kind != EnvelopeKind::Signal {
             return Err(InboundError::KindMismatch {
@@ -303,6 +336,25 @@ impl InboundPipeline {
                 actual: envelope.kind,
             });
         }
+
+        // H2 anti-redirect: only accept envelopes addressed to this device
+        // (or true broadcasts with target=None). Broadcasts remain allowed
+        // because the relay-spec wire format supports them and the WebRTC
+        // state machine handles "advertise presence" via target-less signals;
+        // anything with target=Some(other_device_id) is treated as a relay
+        // redirect attempt regardless of whether the inner payload would
+        // ultimately be rejected by the WebRTC layer's `from`-check.
+        match envelope.target.as_ref() {
+            None => { /* broadcast — allowed */ }
+            Some(t) if &t.device_id == expected_target_device_id => { /* ok */ }
+            Some(t) => {
+                return Err(InboundError::TargetDeviceMismatch {
+                    expected: id_to_string(expected_target_device_id),
+                    actual: Some(id_to_string(&t.device_id)),
+                });
+            }
+        }
+
         self.open_blob(envelope, &self.signaling_key)
     }
 

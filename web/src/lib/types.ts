@@ -206,6 +206,13 @@ export interface ReviewAcceptSuggestionMessage {
   type: 'review_accept_suggestion';
   roomId: RoomId;
   suggestionId: EventId;
+  /**
+   * Optional hand-edited replacement text. Set by the three-way apply UI's
+   * `[e] edit` path (attn-nnj.8.3) when the owner hand-merges the snapshot's
+   * proposed replacement with their own changes. When `undefined`, the Rust
+   * resolver applies the suggestion's stored `replacement` verbatim.
+   */
+  editedReplacement?: string;
 }
 
 export interface ReviewResolveAnchorMessage {

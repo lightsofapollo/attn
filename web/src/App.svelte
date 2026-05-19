@@ -47,6 +47,9 @@
   import ReviewApplyExpand from './lib/ReviewApplyExpand.svelte';
   import ReviewBar from './lib/ReviewBar.svelte';
   import ShareDialog from './lib/ShareDialog.svelte';
+  import SuggestionComposer from './lib/SuggestionComposer.svelte';
+  import { hasTextSelection } from './lib/review/popover-anchor';
+  import type { ConstructAnchorContext } from './lib/review/anchors';
   import { toast } from 'svelte-sonner';
   import { Toaster } from '$lib/components/ui/sonner';
   import { SidebarProvider, SidebarInset } from '$lib/components/ui/sidebar';
@@ -142,6 +145,75 @@
 
   function handleEditorReady(view: EditorView): void {
     pmViewForReview = view;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Suggestion composer (attn-nnj.4.5)
+  //
+  // Cmd+Shift+. opens a popover composer anchored to the current PM
+  // selection. The composer needs a snapshot-scoped ConstructAnchorContext
+  // (FileId + SnapshotId + AnchorIndex + baseHash) which we resolve at
+  // open-time from the review store. If no active review room / snapshot is
+  // bound, the binding is a no-op — there's nothing to suggest against.
+  // ---------------------------------------------------------------------------
+
+  interface SuggestionComposerState {
+    view: EditorView;
+    from: number;
+    to: number;
+    anchorContext: ConstructAnchorContext;
+    roomId: import('./lib/types').RoomId;
+  }
+
+  let suggestionComposer = $state<SuggestionComposerState | null>(null);
+
+  /**
+   * Resolve the snapshot the suggestion should be authored against. Prefers
+   * the explicitly-locked `currentSnapshotId`; otherwise the most recently
+   * imported snapshot for the current file.
+   */
+  function resolveActiveSnapshotForCompose(): import('./lib/types').ReviewSnapshot | null {
+    const fileId = reviewStore.currentFileId;
+    const roomId = reviewStore.currentRoomId;
+    if (!fileId || !roomId) return null;
+    const lockedId = reviewStore.currentSnapshotId;
+    const candidates = reviewStore.snapshots.filter(
+      (s) => s.roomId === roomId && s.fileId === fileId,
+    );
+    if (candidates.length === 0) return null;
+    if (lockedId) {
+      const locked = candidates.find((s) => s.snapshotId === lockedId);
+      if (locked) return locked;
+    }
+    // Fallback: latest by createdAt.
+    return [...candidates].sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+  }
+
+  function openSuggestionComposer(): void {
+    const view = pmViewForReview;
+    if (!view) return;
+    if (!hasTextSelection(view)) return;
+    const roomId = reviewStore.currentRoomId;
+    if (!roomId) return;
+    const snapshot = resolveActiveSnapshotForCompose();
+    if (!snapshot || !snapshot.anchorIndex) return;
+    const { from, to } = view.state.selection;
+    suggestionComposer = {
+      view,
+      from,
+      to,
+      roomId,
+      anchorContext: {
+        index: snapshot.anchorIndex,
+        fileId: snapshot.fileId,
+        snapshotId: snapshot.snapshotId,
+        baseHash: snapshot.baseHash,
+      },
+    };
+  }
+
+  function closeSuggestionComposer(): void {
+    suggestionComposer = null;
   }
 
   // Touch reactive store reads here so Svelte schedules a rebuild whenever
@@ -1344,6 +1416,9 @@
       onShareOpen: () => {
         openShareDialog();
       },
+      onSuggestionComposer: () => {
+        openSuggestionComposer();
+      },
       // Three-way apply hooks (attn-nnj.8.3). Read the verdict from the
       // store each time so we always operate on the currently-open card;
       // mirror the same accept/keep/edit-trigger/cancel semantics the
@@ -1579,12 +1654,26 @@
 {/if}
 
 <svelte:window onkeydown={(e) => { handleGlobalShortcutsHelpHotkey(e); handleGlobalRightRailHotkey(e); }} />
-<KeyboardShortcutsDialog bind:open={shortcutsOpen} />
+<KeyboardShortcutsDialog
+  bind:open={shortcutsOpen}
+  hasSuggestionComposer={true}
+  hasToggleReviewPanel={true}
+/>
 <ShareDialog
   bind:open={shareDialogOpen}
   filePath={activePath}
 />
 <ReviewApplyExpand />
+{#if suggestionComposer}
+  <SuggestionComposer
+    view={suggestionComposer.view}
+    from={suggestionComposer.from}
+    to={suggestionComposer.to}
+    anchorContext={suggestionComposer.anchorContext}
+    roomId={suggestionComposer.roomId}
+    onClose={closeSuggestionComposer}
+  />
+{/if}
 <CommandPalette
   bind:open={commandPaletteOpen}
   {rootPath}

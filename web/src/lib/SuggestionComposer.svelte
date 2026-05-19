@@ -230,6 +230,7 @@
   class="suggestion-composer fixed z-50 flex w-[360px] flex-col gap-3 rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-md"
   style="top: {top}px; left: {left}px;"
   role="dialog"
+  tabindex="-1"
   aria-label="Suggest edit on selection"
   data-slot="suggestion-composer"
   onkeydown={handleKeyDown}

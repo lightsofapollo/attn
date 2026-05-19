@@ -851,4 +851,157 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------
+    // 11. Corpus replay: every non-pending `kind=event` vector in
+    //     planning/collab/test-vectors/envelope.json must round-trip
+    //     through the inbound pipeline end-to-end. This proves the
+    //     pipeline interops with the canonical fixtures the TS/WASM
+    //     client also consumes — a divergence in either side fails
+    //     loudly without needing to wire a full integration test.
+    // -----------------------------------------------------------------
+
+    const ENVELOPE_CORPUS: &str =
+        include_str!("../../../planning/collab/test-vectors/envelope.json");
+
+    #[derive(Deserialize)]
+    struct CorpusFile {
+        #[allow(dead_code)]
+        version: u32,
+        vectors: Vec<CorpusVector>,
+    }
+
+    #[derive(Deserialize)]
+    struct CorpusVector {
+        name: String,
+        inputs: CorpusInputs,
+        expected: CorpusExpected,
+    }
+
+    #[derive(Deserialize)]
+    struct CorpusInputs {
+        #[serde(rename = "roomSecret")]
+        room_secret: String,
+        #[serde(rename = "signingKey")]
+        signing_key: CorpusSigningKey,
+    }
+
+    #[derive(Deserialize)]
+    struct CorpusSigningKey {
+        public: String,
+    }
+
+    #[derive(Deserialize)]
+    struct CorpusExpected {
+        envelope: Value,
+        ciphertext: String,
+    }
+
+    #[tokio::test]
+    async fn corpus_replay_event_vectors_round_trip_through_pipeline() {
+        let corpus: CorpusFile =
+            serde_json::from_str(ENVELOPE_CORPUS).expect("envelope.json parses");
+
+        let mut imported = 0usize;
+        for v in &corpus.vectors {
+            // Skip placeholder vectors emitted by sibling work-in-progress
+            // issues — the assertion at the end of the loop catches any
+            // future regression where every event vector ends up pending.
+            if v.expected.ciphertext.starts_with("__PENDING") {
+                continue;
+            }
+            // We only exercise event-kind envelopes here; the snapshot/signal
+            // sides of the corpus are covered by tests 6 + 8 above using
+            // hand-minted envelopes (the corpus does not pin a snapshot_blob
+            // vector today — that lands with issue 5.x).
+            let kind = v
+                .expected
+                .envelope
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if kind != "event" {
+                continue;
+            }
+
+            // Decode the secret + derive room keys. The vectors all share
+            // roomSecret = 0x11*32 (rule pinned in envelope.json _schema)
+            // but we re-derive per vector to stay honest if that ever changes.
+            let secret_bytes = URL_SAFE_NO_PAD
+                .decode(v.inputs.room_secret.as_bytes())
+                .unwrap_or_else(|e| panic!("[{}] roomSecret decode: {e}", v.name));
+            let secret: [u8; 32] = secret_bytes
+                .as_slice()
+                .try_into()
+                .unwrap_or_else(|_| panic!("[{}] roomSecret must be 32 bytes", v.name));
+            let room_keys = derive_room_keys(&secret);
+
+            // Build a fresh store + pipeline per vector — dedup is per-store,
+            // and we want the "newly imported" path to fire for every vector.
+            let tmp = TempDir::new().expect("tempdir");
+            let store = Arc::new(
+                ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
+            );
+            let vk_bytes: [u8; 32] = URL_SAFE_NO_PAD
+                .decode(v.inputs.signing_key.public.as_bytes())
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap_or_else(|_| panic!("[{}] signingKey.public must be 32 bytes", v.name));
+            let vk = DeviceVerifyingKey::from_bytes(&vk_bytes).unwrap();
+            let keyid = vk.signing_key_id_base64url();
+            let mut map: HashMap<String, DeviceVerifyingKey> = HashMap::new();
+            map.insert(keyid, vk);
+            let cache: VerifyingKeyCache = Arc::new(RwLock::new(map));
+            let pipeline = InboundPipeline::new(
+                store,
+                cache,
+                *room_keys.event_key.as_bytes(),
+                *room_keys.snapshot_key.as_bytes(),
+                *room_keys.signaling_key.as_bytes(),
+            );
+
+            // Decode the corpus envelope as a MailboxEnvelope (camelCase
+            // serde matches the JSON on disk).
+            let envelope: MailboxEnvelope =
+                serde_json::from_value(v.expected.envelope.clone())
+                    .unwrap_or_else(|e| panic!("[{}] envelope deserialize: {e}", v.name));
+            let room_id = envelope.room_id.clone();
+
+            // First import: must succeed and be newly_imported.
+            let first = pipeline
+                .import_event_envelope(&room_id, &envelope)
+                .await
+                .unwrap_or_else(|e| panic!("[{}] import failed: {e:?}", v.name));
+            assert!(
+                first.newly_imported,
+                "[{}] first import must be newly_imported",
+                v.name
+            );
+
+            // Second import of the same envelope: dedup -> newly_imported=false.
+            let second = pipeline
+                .import_event_envelope(&room_id, &envelope)
+                .await
+                .unwrap_or_else(|e| panic!("[{}] dedup import failed: {e:?}", v.name));
+            assert!(
+                !second.newly_imported,
+                "[{}] re-import must dedup via store.append_event",
+                v.name
+            );
+            assert_eq!(
+                first.event, second.event,
+                "[{}] dedup must still return the same recovered event",
+                v.name
+            );
+
+            imported += 1;
+            drop(tmp);
+        }
+
+        assert!(
+            imported >= 1,
+            "expected at least 1 non-pending event vector from envelope.json corpus, got {imported}"
+        );
+    }
 }

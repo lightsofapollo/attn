@@ -88,6 +88,11 @@ tasks:
     cmds:
       - scripts/test-review-e2e.sh
 
+  test:apply:
+    desc: Run the apply E2E test suite — Rust cargo tests + optional daemon flow (attn-nnj.8.6)
+    cmds:
+      - scripts/test-apply-e2e.sh
+
   test:dual:
     desc: Smoke-test the dual-instance E2E harness (owner + reviewer via ATTN_HOME)
     cmds:

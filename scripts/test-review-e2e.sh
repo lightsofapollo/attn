@@ -241,6 +241,87 @@ expect_eq_soft "window.__attn_review_store__ exposed" "$result" '"object"' "attn
 screenshot "02-shape-asserted"
 
 # ===================================================================
+# TEST SUITE: End-to-end apply flow (attn-nnj.8.6)
+# ===================================================================
+#
+# The Rust-side E2E pipeline (snapshot + UserEdit drift -> resolve_suggestion
+# REMAP -> apply_ready_verdict -> LocalRevision -> outbox envelope) is locked
+# down by `cargo test review::apply::tests::e2e_*` (also runnable via
+# `scripts/test-apply-e2e.sh`). The suite below exercises the *same* path
+# through the running daemon's IPC bridge so a regression in the wiring
+# surfaces before users see it.
+#
+# Every assertion here is PEND today — `ReviewManager::AcceptSuggestion` is
+# a stub at the time this suite lands (see src/review/manager.rs ~957). The
+# assertions flip to hard PASS/FAIL as attn-nnj.8.5 (manager wiring) +
+# 8.7 (frontend bridge) land. Set `ATTN_REVIEW_E2E_REQUIRE_APPLY=1` to force
+# hard FAIL on the apply assertions.
+
+echo ""
+echo "=== Review E2E: end-to-end apply flow (attn-nnj.8.6, PEND until 8.5+) ==="
+
+# Soft-assert helper for apply-path assertions. Same shape as
+# expect_eq_soft above but reads a distinct env var so CI can require the
+# apply path independently of the rest of the suite.
+expect_apply_eq_soft() {
+    local label="$1" actual="$2" expected="$3" tracking="$4"
+    if [ "$actual" = "$expected" ]; then
+        echo "  PASS: $label"
+        PASS=$((PASS + 1))
+    elif [ "${ATTN_REVIEW_E2E_REQUIRE_APPLY:-0}" = "1" ]; then
+        echo "  FAIL: $label (apply path required; tracking $tracking)"
+        echo "    expected: $expected"
+        echo "    actual:   $actual"
+        FAIL=$((FAIL + 1))
+    else
+        echo "  PEND: $label (waiting on $tracking)"
+        echo "    expected: $expected"
+        echo "    actual:   $actual"
+        PEND=$((PEND + 1))
+    fi
+}
+
+# Probe the IPC bridge for the apply-path entry points the frontend will
+# call once 8.7 ships them.
+for cb in acceptSuggestion rejectSuggestion; do
+    result=$("$ATTN" --eval "typeof window.__attn__?.${cb}")
+    expect_apply_eq_soft "window.__attn__.${cb} is function" "$result" '"function"' "attn-nnj.8.5/8.7"
+done
+
+# Probe the daemon's on-disk surfaces directly. Once 8.5+ wires
+# AcceptSuggestion end-to-end, accepting a suggestion through the bridge
+# above must produce: (a) one new LocalRevision with source=accepted_suggestion
+# in the room's revisions/<fileId>.jsonl, and (b) one new SuggestionAccepted
+# envelope in the room's outbox.jsonl. Today both directories are absent
+# because no room has been opened — the assertions are scaffolding that
+# describes the shape 8.5 will fill in.
+reviews_dir="$ATTN_HOME/reviews"
+if [ -d "$reviews_dir" ]; then
+    revision_count=$(find "$reviews_dir" -type d -name 'revisions' \
+        -exec find {} -name '*.jsonl' \; 2>/dev/null \
+        | xargs -I{} grep -l '"accepted_suggestion"' {} 2>/dev/null \
+        | wc -l | tr -d ' ')
+    expect_apply_eq_soft "accepted-suggestion revision present on disk" \
+        "$revision_count" "1" "attn-nnj.8.5/8.6"
+
+    outbox_count=$(find "$reviews_dir" -name 'outbox.jsonl' \
+        -exec wc -l {} \; 2>/dev/null \
+        | awk '{s+=$1} END {print s+0}')
+    expect_apply_eq_soft "owner outbox has at least one envelope" \
+        "$outbox_count" "1" "attn-nnj.8.5/8.6"
+else
+    expect_apply_eq_soft "reviews/ store directory present" "absent" "present" "attn-nnj.8.5"
+fi
+
+# Cross-link: the in-process Rust E2E suite is the source of truth for
+# what the daemon-layer flow MUST produce once wired. Print a hint so a
+# developer who lands 8.5/8.7 knows where the contract lives.
+echo "  NOTE: contract for the above lives in src/review/apply.rs ::e2e_* tests"
+echo "        (run scripts/test-apply-e2e.sh to verify the contract directly)"
+
+screenshot "03-apply-flow-pending"
+
+# ===================================================================
 # Summary
 # ===================================================================
 

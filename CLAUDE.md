@@ -194,6 +194,16 @@ scripts/test-review-e2e.sh
 
 This runs under `ATTN_HOME=/tmp/attn-review-e2e` so it does not touch the user's normal daemon state, loads a scripted scenario from `tests/fixtures/review/`, and asserts the shape of the review surfaces (right-rail slot, `window.__attn__` review callbacks). Assertions that depend on not-yet-merged Phase 0c work print `PEND` instead of `FAIL` and flip to hard asserts as those issues land.
 
+Run the apply-flow E2E suite (attn-nnj.8.6 — Rust cargo tests + optional daemon-layer probes):
+
+```bash
+task test:apply
+# or directly:
+scripts/test-apply-e2e.sh
+```
+
+Drives the full owner-side accept/reject pipeline end-to-end: snapshot + UserEdit drift forces the suggestion to REMAP, `apply_ready_verdict` writes the file, the `LocalRevision` journal lands UserEdit + AcceptedSuggestion in order, and a `SuggestionAccepted` (or `SuggestionRejected`) envelope round-trips through the outbox with `resulting_hash` matching the on-disk hash. The Rust E2E cases live in `src/review/apply.rs` as `e2e_*` tests; the bash wrapper also probes the running daemon for the same end-state via the `--eval` bridge (daemon-layer assertions print `PEND` until attn-nnj.8.5 wires the `AcceptSuggestion` command — flip via `ATTN_APPLY_E2E_REQUIRE_DAEMON=1`).
+
 ### Manual testing workflow
 
 1. Start the daemon with HMR: `task dev ATTN_PATH=some/file.md`

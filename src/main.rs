@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod cli_alias;
+mod cli_review;
 mod daemon;
 mod files;
 mod ipc;
@@ -12,7 +13,7 @@ mod screenshot;
 mod watcher;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use percent_encoding::percent_decode_str;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -29,6 +30,9 @@ use crate::review::manager::ReviewManager;
 #[derive(Parser, Debug)]
 #[command(name = "attn", about = "A beautiful markdown viewer")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<TopLevelSubcommand>,
+
     /// File or directory to view
     #[arg(default_value = ".")]
     path: PathBuf,
@@ -98,6 +102,16 @@ struct Cli {
     timeout: u64,
 }
 
+/// `attn …` subcommands. `review` owns the agent CLI surface (register,
+/// list, join-as-agent). Anything else stays on the legacy positional
+/// `path` flow so `attn some/file.md` still works without a subcommand.
+#[derive(Subcommand, Debug)]
+enum TopLevelSubcommand {
+    /// Manage review rooms and agent identities. Spec:
+    /// `planning/collab/amendments.md` §Agent CLI key handling.
+    Review(cli_review::ReviewArgs),
+}
+
 fn main() {
     if let Err(e) = run() {
         eprintln!("attn: {e:#}");
@@ -107,6 +121,16 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    // Subcommands short-circuit BEFORE we touch the filesystem with
+    // `canonicalize` — they don't need a path argument and shouldn't
+    // fail with "cannot open '.'" when none was passed.
+    if let Some(command) = cli.command {
+        match command {
+            TopLevelSubcommand::Review(args) => return cli_review::run(args),
+        }
+    }
+
     let path = cli
         .path
         .canonicalize()

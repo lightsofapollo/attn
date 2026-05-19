@@ -768,7 +768,6 @@ mod tests {
     use crate::review::model::EnvelopeKind;
     use crate::review::store::ReviewStore;
     use crate::review::transport::inbound::{InboundPipeline, VerifyingKeyCache};
-    use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use futures_util::{SinkExt, StreamExt};
     use serde::Deserialize;
@@ -882,11 +881,15 @@ mod tests {
     }
 
     /// Spin up a tokio-tungstenite server bound to 127.0.0.1:0. The handler
-    /// closure is called with the upgraded `(stream, request)` exactly once
-    /// per incoming connection. Returns `(http_base_url, accept_count_rx,
-    /// shutdown_tx)` — the test holds `shutdown_tx` and drops it to stop
-    /// accepting. `accept_count_rx` is a watch channel updated each time a
-    /// new connection is accepted.
+    /// closure is called with the upgraded WS stream and a 1-based connection
+    /// number once per incoming connection. Returns `(http_base_url, join)` —
+    /// the test calls `join.abort()` to stop accepting.
+    ///
+    /// The server negotiates the `attn.v2` subprotocol by echoing it back in
+    /// the upgrade response. Without this, tungstenite's client treats the
+    /// missing `Sec-WebSocket-Protocol` echo as a protocol violation and
+    /// closes the socket immediately — which is why we route through
+    /// `accept_hdr_async` instead of plain `accept_async`.
     async fn spawn_ws_server<F, Fut>(
         handler: F,
     ) -> (String, tokio::task::JoinHandle<()>)
@@ -900,6 +903,10 @@ mod tests {
             + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        use tokio_tungstenite::tungstenite::handshake::server::{
+            ErrorResponse, Request, Response,
+        };
+
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
         let http_url = format!("http://{}", addr);
@@ -916,10 +923,35 @@ mod tests {
                 let n = accept_count;
                 let handler = Arc::clone(&handler);
                 tokio::spawn(async move {
-                    let ws = match tokio_tungstenite::accept_async(stream).await {
-                        Ok(ws) => ws,
-                        Err(_) => return,
+                    let callback = |req: &Request, mut resp: Response| -> Result<
+                        Response,
+                        ErrorResponse,
+                    > {
+                        // Echo back the canonical `attn.v2` subprotocol if the
+                        // client offered it. Skipping the echo would have
+                        // tungstenite close on the client side.
+                        if let Some(proto_hdr) =
+                            req.headers().get("Sec-WebSocket-Protocol")
+                        {
+                            if let Ok(proto_str) = proto_hdr.to_str() {
+                                if proto_str
+                                    .split(',')
+                                    .any(|t| t.trim() == "attn.v2")
+                                {
+                                    resp.headers_mut().insert(
+                                        "Sec-WebSocket-Protocol",
+                                        "attn.v2".parse().unwrap(),
+                                    );
+                                }
+                            }
+                        }
+                        Ok(resp)
                     };
+                    let ws =
+                        match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+                            Ok(ws) => ws,
+                            Err(_) => return,
+                        };
                     handler(ws, n).await;
                 });
             }

@@ -27,15 +27,19 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::review::bootstrap::{
     BootstrapConfig, Bootstrapper, JoinOutcome, ShareOutcome,
 };
-use crate::review::ids::{EventId, FileId, RoomId};
+use crate::review::crypto::signing::DeviceSigningKey;
+use crate::review::envelope::{AssembleInput, assemble_event_envelope};
+use crate::review::ids::{DeviceId, EventId, FileId, ParticipantId, RoomId, SnapshotId};
 use crate::review::model::{
-    Anchor, MailboxEnvelope, PositionAnchor, ResolvedAnchor, RoomMode, SuggestionDraft,
+    Anchor, EnvelopeKind, MailboxEnvelope, PositionAnchor, ResolvedAnchor, ReviewEventBody,
+    RoomMode, SuggestionDraft,
 };
 use crate::review::store::ReviewStore;
 use crate::review::transport::inbound::VerifyingKeyCache;
 use crate::review::transport::selector::{
     self, RoomTransports, TransportConfig, TransportMode,
 };
+use crate::review::transport::signaling::{SignalingPayload, assemble_signal_envelope};
 use crate::review::transport::{EnvelopeAck, TransportError};
 use crate::review::working_copy::WorkingCopyService;
 
@@ -216,6 +220,61 @@ pub struct ReviewManager {
     /// One inner `AsyncMutex` per room so distinct rooms can send in parallel
     /// without blocking each other.
     rooms: Arc<AsyncMutex<HashMap<RoomId, Arc<AsyncMutex<RoomTransports>>>>>,
+
+    /// Per-room identity + AEAD key material the manager needs to mint
+    /// outbound signal / snapshot / event envelopes for the recovery path
+    /// (attn-nnj.7.6 `request_snapshot` + `handle_inbound_request_snapshot`).
+    ///
+    /// Populated by `register_signal_context` after the bootstrap pipeline
+    /// has run (it owns the key derivation + identity bytes). Kept in an
+    /// `Arc<RwLock<...>>` because reads dominate writes — every send takes
+    /// a read snapshot, registration is a one-shot per (room, device) pair.
+    signal_contexts: Arc<tokio::sync::RwLock<HashMap<RoomId, Arc<RoomSignalContext>>>>,
+}
+
+/// Identity + key material a room needs to mint outbound signal and
+/// snapshot envelopes for the live-recovery path.
+///
+/// One context per `(room_id, local_device_id)` pair — the manager registers
+/// it once when a room is opened and reads it for every
+/// `request_snapshot` / `handle_inbound_request_snapshot` call.
+///
+/// Fields mirror `WebRtcConfig` (which owns the same material on the WebRTC
+/// arm), but are stored here separately so the manager can drive the
+/// recovery path even when no `WebRtcTransport` is live (e.g. Hybrid mode
+/// where the DataChannel is down but the mailbox arm is up).
+pub struct RoomSignalContext {
+    pub room_id: RoomId,
+    pub author_id: ParticipantId,
+    pub local_device_id: DeviceId,
+    /// Optional peer to address the signal envelope to. When `None`, the
+    /// envelope is broadcast on the relay's signal channel (the spec
+    /// allows this for `request_snapshot` so any reachable peer can
+    /// respond — see `signaling.rs` module docs).
+    pub target_device_id: Option<DeviceId>,
+    /// Ed25519 signing key for `kind=event` envelopes the owner mints when
+    /// responding to a `request_snapshot`.
+    pub signing_key: DeviceSigningKey,
+    pub event_key: [u8; 32],
+    pub snapshot_key: [u8; 32],
+    pub signaling_key: [u8; 32],
+}
+
+impl std::fmt::Debug for RoomSignalContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // DeviceSigningKey + the AEAD keys must NOT leak through Debug — pin
+        // their absence so a stray `dbg!` in a test does not log secrets.
+        f.debug_struct("RoomSignalContext")
+            .field("room_id", &self.room_id)
+            .field("author_id", &self.author_id)
+            .field("local_device_id", &self.local_device_id)
+            .field("target_device_id", &self.target_device_id)
+            .field("signing_key", &"<redacted>")
+            .field("event_key", &"<redacted 32 bytes>")
+            .field("snapshot_key", &"<redacted 32 bytes>")
+            .field("signaling_key", &"<redacted 32 bytes>")
+            .finish()
+    }
 }
 
 impl ReviewManager {
@@ -236,6 +295,7 @@ impl ReviewManager {
             runtime: None,
             verifying_keys: None,
             rooms: Arc::new(AsyncMutex::new(HashMap::new())),
+            signal_contexts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -499,6 +559,309 @@ impl ReviewManager {
         let transports = shared.lock().await;
         Some(transports.mode)
     }
+
+    // -------------------------------------------------------------------
+    // RequestSnapshot live recovery (attn-nnj.7.6)
+    // -------------------------------------------------------------------
+
+    /// Register the identity + AEAD key material a room needs to mint
+    /// signal / event envelopes. Called by the bootstrap pipeline once
+    /// after `Share`/`Join` completes — the key derivation lives there;
+    /// the manager just holds the resulting bytes.
+    ///
+    /// Re-registering overwrites the previous context — used when the
+    /// owner rotates the targeted-peer device id between recovery rounds.
+    pub async fn register_signal_context(&self, ctx: RoomSignalContext) {
+        let mut guard = self.signal_contexts.write().await;
+        guard.insert(ctx.room_id.clone(), Arc::new(ctx));
+    }
+
+    /// Read the current signal context for `room_id`. Returns `None` if
+    /// no context has been registered (e.g. bootstrap has not yet run, or
+    /// the room is on a path that does not need the recovery primitive).
+    pub async fn signal_context(&self, room_id: &RoomId) -> Option<Arc<RoomSignalContext>> {
+        let guard = self.signal_contexts.read().await;
+        guard.get(room_id).cloned()
+    }
+
+    /// Ask a peer to re-send the latest snapshot for `file_id` over the
+    /// live recovery path (amendments.md §Recovery from local-store loss):
+    ///
+    ///   "a `kind: \"request_snapshot\"` signal envelope, content =
+    ///    `{ fileId, sinceSnapshotId? }`; owner responds with a fresh
+    ///    `SnapshotCreated` event over the DataChannel"
+    ///
+    /// Routing rules (in priority order):
+    ///   1. If a `WebRtcSender` is registered for the room AND it reports
+    ///      `is_connected()`, mint a `SignalingPayload::RequestSnapshot`
+    ///      and push it onto the transport's outbound signaling lane via
+    ///      `WebRtcSender::publish_signal`. The DataChannel path on the
+    ///      WebRTC arm forwards this envelope through the relay's
+    ///      `kind=signal` channel (see `webrtc.rs::publish_signal`).
+    ///   2. Otherwise (Async mode, or Hybrid with WebRTC down), mint the
+    ///      same envelope and post it via the room's `MailboxSender` as
+    ///      a `kind=signal` envelope. The relay's signal channel forwards
+    ///      it to the targeted device.
+    ///
+    /// Returns `TransportError::RoomNotFound` if the room has no
+    /// transports registered, and `TransportError::Io(...)` carrying a
+    /// stable error code (`ATTN_NO_SIGNAL_CONTEXT`) when the room has
+    /// transports but no registered signal context (i.e. the bootstrap
+    /// has not finished priming the key material yet).
+    pub async fn request_snapshot(
+        &self,
+        room_id: &RoomId,
+        file_id: FileId,
+        since_snapshot_id: Option<SnapshotId>,
+    ) -> Result<(), TransportError> {
+        // ---- 1. Look up the per-room signal context.
+        let ctx = self
+            .signal_context(room_id)
+            .await
+            .ok_or_else(|| TransportError::Io(NO_SIGNAL_CONTEXT_MESSAGE.into()))?;
+
+        // ---- 2. Look up the room's transports. We need the (mailbox,
+        //         webrtc) pair to decide which arm to publish onto.
+        let shared = {
+            let rooms = self.rooms.lock().await;
+            rooms
+                .get(room_id)
+                .cloned()
+                .ok_or(TransportError::RoomNotFound)?
+        };
+        let transports = shared.lock().await;
+
+        // ---- 3. Build the inner plaintext payload. `from` is pinned to
+        //         our `local_device_id` so the receiver can cross-check
+        //         against the AAD-bound envelope `deviceId`.
+        let payload = SignalingPayload::RequestSnapshot {
+            file_id,
+            since_snapshot_id,
+            from: ctx.local_device_id.clone(),
+        };
+
+        // ---- 4. Prefer the WebRTC arm when connected — its
+        //         `publish_signal` impl re-uses the existing
+        //         signaling_tx → mailbox-forward task so we don't
+        //         duplicate the assembly logic here.
+        if let Some(webrtc) = transports.webrtc.as_ref()
+            && webrtc.is_connected()
+        {
+            return webrtc.publish_signal(payload);
+        }
+
+        // ---- 5. Mailbox fallback. Mint the envelope locally and post
+        //         it via the mailbox `kind=signal` lane. `client_nonce`
+        //         is freshly random — we don't retry at this layer.
+        let mailbox = transports
+            .mailbox
+            .as_ref()
+            .ok_or_else(|| TransportError::Io(NO_SIGNAL_TRANSPORT_MESSAGE.into()))?;
+
+        let now_ms = current_ms();
+        let envelope = assemble_signal_envelope(
+            payload,
+            &ctx.signaling_key,
+            &ctx.room_id,
+            &ctx.author_id,
+            &ctx.local_device_id,
+            ctx.target_device_id.as_ref(),
+            &fresh_client_nonce_16(),
+            now_ms,
+            now_ms + SIGNAL_TTL_MS,
+        )
+        .map_err(|e| TransportError::Io(format!("assemble request_snapshot signal: {e}")))?;
+
+        mailbox.send_envelopes(vec![envelope]).await.map(|_| ())
+    }
+
+    /// Owner-side handler for an inbound `SignalingPayload::RequestSnapshot`.
+    ///
+    /// Per amendments.md §Recovery from local-store loss the owner
+    /// responds by re-emitting the latest `SnapshotCreated` event for
+    /// `file_id` over the DataChannel. We:
+    ///
+    ///   1. Resolve the latest `SnapshotNode` for `file_id` from the
+    ///      local `ReviewStore` (skipping snapshots with
+    ///      `created_at <= since_snapshot.created_at` if the requester
+    ///      supplied `since_snapshot_id` — delta recovery).
+    ///   2. Reconstruct a `ReviewEventBody::SnapshotCreated` referencing
+    ///      that snapshot (the wire form carries `encryptedBlobRef`
+    ///      only; the local plaintext stays off the wire per
+    ///      amendments.md decision #14).
+    ///   3. Assemble a fresh `kind=event` envelope under `event_key` +
+    ///      `signing_key` from the room's `RoomSignalContext`.
+    ///   4. Push it through the room's `WebRtcSender::send_envelopes`
+    ///      (the DataChannel path). If WebRTC is down or the room has
+    ///      no DataChannel, fall through to the mailbox arm — the
+    ///      receiver's `InboundPipeline` dedups by `EventId` either way.
+    ///
+    /// Returns the assembled envelope on success so callers can echo it
+    /// into their local replica + outbox without re-deriving (the
+    /// owner's local store stays consistent with what it just sent).
+    /// Returns `Ok(None)` when there is no snapshot newer than
+    /// `since_snapshot_id` for `file_id` — the requester is already
+    /// up to date and no response is owed.
+    pub async fn handle_inbound_request_snapshot(
+        &self,
+        room_id: &RoomId,
+        payload: &SignalingPayload,
+    ) -> Result<Option<MailboxEnvelope>, TransportError> {
+        let (file_id, since_snapshot_id) = match payload {
+            SignalingPayload::RequestSnapshot {
+                file_id,
+                since_snapshot_id,
+                ..
+            } => (file_id.clone(), since_snapshot_id.clone()),
+            other => {
+                return Err(TransportError::Io(format!(
+                    "handle_inbound_request_snapshot: expected RequestSnapshot, got {other:?}"
+                )));
+            }
+        };
+
+        let ctx = self
+            .signal_context(room_id)
+            .await
+            .ok_or_else(|| TransportError::Io(NO_SIGNAL_CONTEXT_MESSAGE.into()))?;
+
+        // ---- 1. Find the latest snapshot for the file.
+        let latest = self
+            .store
+            .latest_snapshot_for_file(room_id, &file_id)
+            .map_err(|e| TransportError::Io(format!("latest_snapshot_for_file: {e}")))?;
+        let latest = match latest {
+            Some(node) => node,
+            // No snapshot at all — nothing to send back. This matches the
+            // amendments.md "owner has been wiped too" branch — the caller
+            // (mailbox WS / WebRTC dispatch) surfaces it as a stale-room
+            // error rather than synthesizing a phantom event.
+            None => return Ok(None),
+        };
+
+        // ---- 2. If the requester is already at-or-ahead of the latest,
+        //         skip the response — they have nothing newer to learn.
+        if let Some(since_id) = since_snapshot_id.as_ref() {
+            if let Some(since_node) = self
+                .store
+                .load_snapshot(room_id, since_id)
+                .map_err(|e| TransportError::Io(format!("load_snapshot(since): {e}")))?
+            {
+                if since_node.created_at >= latest.created_at {
+                    return Ok(None);
+                }
+            }
+            // If the since_snapshot_id is unknown to us locally we still
+            // respond with the latest — the requester explicitly asked for
+            // a newer snapshot than one we don't have, which is the
+            // intended-recovery shape.
+        }
+
+        // ---- 3. Build the SnapshotCreated event body. Per amendments
+        //         decision #14 the wire form omits the local plaintext.
+        let body = ReviewEventBody::SnapshotCreated {
+            file_id: latest.file_id.clone(),
+            snapshot_id: latest.snapshot_id.clone(),
+            parent_snapshot_id: latest.parent_snapshot_id.clone(),
+            base_hash: latest.base_hash.clone(),
+            encrypted_blob_ref: latest.encrypted_blob_ref.clone(),
+            inline_snapshot: None,
+        };
+
+        // ---- 4. Mint a kind=event envelope under the room's event_key
+        //         + signing_key. The receiver's InboundPipeline will
+        //         verify + dedup by EventId — re-sends of the same
+        //         (latest) snapshot collapse to a single import.
+        let now_ms = current_ms();
+        // `DeviceSigningKey` is move-only by design — clone via the seed
+        // round-trip so we don't take ownership out of the registered
+        // context. `from_bytes` only fails on corrupted-seed inputs, and
+        // the seed bytes we just round-tripped through `to_bytes()` are
+        // by construction valid; treat any failure as a hard `Io`.
+        let signing_key = DeviceSigningKey::from_bytes(&ctx.signing_key.to_bytes())
+            .map_err(|e| TransportError::Io(format!("clone signing key: {e}")))?;
+        let envelope = assemble_event_envelope(AssembleInput {
+            event_key: ctx.event_key,
+            signing_key,
+            room_id: ctx.room_id.clone(),
+            author_id: ctx.author_id.clone(),
+            device_id: ctx.local_device_id.clone(),
+            created_at_ms: now_ms as u64,
+            expires_at_ms: (now_ms + SIGNAL_TTL_MS) as u64,
+            parent_event_ids: vec![],
+            snapshot_id: Some(latest.snapshot_id.clone()),
+            body,
+            kind: EnvelopeKind::Event,
+            client_nonce: None,
+        })
+        .map_err(|e| TransportError::Io(format!("assemble SnapshotCreated event: {e}")))?;
+
+        // ---- 5. Send via the room's transports. We send via WebRTC
+        //         (DataChannel) when connected — amendments.md pins this
+        //         as the response carrier — and fall back to mailbox
+        //         otherwise so a peer whose channel went down mid-recovery
+        //         still receives the event on the next online cycle.
+        let shared = {
+            let rooms = self.rooms.lock().await;
+            rooms
+                .get(room_id)
+                .cloned()
+                .ok_or(TransportError::RoomNotFound)?
+        };
+        let transports = shared.lock().await;
+
+        if let Some(webrtc) = transports.webrtc.as_ref()
+            && webrtc.is_connected()
+        {
+            webrtc.send_envelopes(vec![envelope.clone()]).await?;
+            return Ok(Some(envelope));
+        }
+
+        if let Some(mailbox) = transports.mailbox.as_ref() {
+            mailbox.send_envelopes(vec![envelope.clone()]).await?;
+            return Ok(Some(envelope));
+        }
+
+        Err(TransportError::Io(NO_SIGNAL_TRANSPORT_MESSAGE.into()))
+    }
+}
+
+/// Stable error-message text surfaced when `request_snapshot` is invoked
+/// before a `RoomSignalContext` has been registered. Includes the code
+/// `ATTN_NO_SIGNAL_CONTEXT` so the frontend's `ReviewUpdate::Error`
+/// branch can pattern-match on a stable token rather than the freeform
+/// message.
+pub const NO_SIGNAL_CONTEXT_MESSAGE: &str =
+    "ATTN_NO_SIGNAL_CONTEXT: no signal context registered for room";
+
+/// Stable error-message text surfaced when neither a WebRTC nor a mailbox
+/// transport is available for a recovery send.
+pub const NO_SIGNAL_TRANSPORT_MESSAGE: &str =
+    "ATTN_NO_SIGNAL_TRANSPORT: no live transport for room";
+
+/// TTL for signal/recovery envelopes — same 7-day window the WebRTC arm
+/// uses (see `webrtc.rs::SIGNAL_TTL_MS`). The relay applies its own
+/// shorter retention to signal envelopes but the wire field is uniform.
+const SIGNAL_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Wall-clock millis-since-epoch. Pulled out as a free function so the
+/// recovery path doesn't depend on the WebRTC arm's `Clock` trait — the
+/// recovery callers always use real wall-clock time.
+fn current_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Fresh 16-byte client nonce for signal-envelope id derivation. Matches
+/// `webrtc::fresh_client_nonce` byte-for-byte so a future merge of the
+/// two callers is trivial.
+fn fresh_client_nonce_16() -> [u8; 16] {
+    let mut nonce = [0u8; 16];
+    let _ = getrandom::getrandom(&mut nonce);
+    nonce
 }
 
 /// Translate a user-supplied mode string (`"live"`, `"async"`, `"hybrid"`)

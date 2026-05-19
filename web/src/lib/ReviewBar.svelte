@@ -29,6 +29,7 @@
 <script lang="ts">
   import Share2 from '@lucide/svelte/icons/share-2';
   import ConnectionBadge from './ConnectionBadge.svelte';
+  import OutboxIndicator from './OutboxIndicator.svelte';
   import PeerStrip from './PeerStrip.svelte';
   import SnapshotBadge from './SnapshotBadge.svelte';
   import { reviewStore } from './review/store.svelte';
@@ -48,6 +49,12 @@
      */
     onReconnect?: () => void;
     /**
+     * Click handler for the outbox indicator's `[Retry now]` button. Will be
+     * wired to a future `reviewPull` IPC; parent owns the side-effect today
+     * so this component stays presentational. See attn-nnj.4.13.
+     */
+    onOutboxRetry?: () => void;
+    /**
      * The local participant's id, surfaced from the daemon's identity
      * bootstrap. Passed through to PeerStrip so the matching chip carries
      * a `(you)` label. `null` until the bridge populates it.
@@ -60,6 +67,7 @@
     isOwner = true,
     onShareClick,
     onReconnect,
+    onOutboxRetry,
     localParticipantId = null,
   }: Props = $props();
 
@@ -139,6 +147,19 @@
       data-slot="review-bar-snapshot"
     >
       <SnapshotBadge {localKind} />
+    </div>
+
+    <!--
+      Outbox indicator (attn-nnj.4.13). Right-end pill that surfaces queued
+      outbound envelopes. Collapses to nothing when the outbox is empty so
+      the row reflows without a reserved gap. Reviewer-side gets the
+      "Owner offline" notice when applicable; owner-side never does.
+    -->
+    <div
+      class="review-bar-outbox shrink-0"
+      data-slot="review-bar-outbox"
+    >
+      <OutboxIndicator {isOwner} onRetry={onOutboxRetry} />
     </div>
   </div>
 {/if}

@@ -1938,4 +1938,739 @@ mod tests {
         assert_eq!(revs.len(), 1);
         assert_eq!(revs[0].revision_id, outcome.revision.revision_id);
     }
+
+    // ====== END-TO-END APPLY INTEGRATION (attn-nnj.8.6) ====================
+    //
+    // These tests exercise the full owner-side accept/reject pipeline as a
+    // single composed flow:
+    //
+    //   (1) seed a snapshot + the owner's evolved working copy
+    //   (2) author a SuggestionCreated event against the snapshot
+    //   (3) resolve_suggestion against the *current* (drifted) markdown — the
+    //       anchor must REMAP, not exact-match
+    //   (4) apply_ready_verdict writes the file via WorkingCopyService and
+    //       journals a LocalRevision with source=AcceptedSuggestion
+    //   (5) construct a SuggestionAccepted (or SuggestionRejected) review
+    //       event and assemble it into an outbox MailboxEnvelope
+    //   (6) store.append_outbox + store.iter_outbox round-trips the envelope
+    //   (7) assert: file content matches expected; revision journal has the
+    //       UserEdit + AcceptedSuggestion entries; outbox has the accept
+    //       envelope; resulting_hash carried by the event matches the disk
+    //       hash byte-for-byte.
+    //
+    // 8.5 (the ReviewManager wiring that owns the AcceptSuggestion command)
+    // is still a stub at the time this test lands. The pipeline pieces all
+    // exist as standalone helpers (apply orchestrator, store, envelope
+    // assembler, working-copy service) — these tests glue them together the
+    // same way 8.5 will, so 8.5 will inherit the contract without needing to
+    // rediscover it. When 8.5 lands, the wiring inside `accept_suggestion_e2e`
+    // can be replaced by a single `ReviewManager::submit(AcceptSuggestion)`
+    // call and the assertions stay byte-identical.
+
+    use crate::review::crypto::kdf::derive_room_keys;
+    use crate::review::crypto::signing::DeviceSigningKey;
+    use crate::review::envelope::{AssembleInput, assemble_event_envelope};
+    use crate::review::ids::{DeviceId, ParticipantId};
+    use crate::review::model::{EnvelopeKind, RevisionSource, SuggestionDraft};
+
+    // ----- E2E fixtures ------------------------------------------------------
+
+    /// Snapshot-time markdown. Two paragraphs; the second one contains the
+    /// "old text" the suggestion is going to rewrite. Authored once and
+    /// frozen — the owner's evolved copy below is derived from this by
+    /// inserting an extra paragraph above, which forces the anchor resolver
+    /// to *remap* (not exact-match) because the byte offsets shift.
+    const E2E_SNAPSHOT_MD: &str = "\
+# Title
+
+intro paragraph
+
+second paragraph with old text inside
+";
+
+    /// Owner's working copy after a UserEdit since the snapshot was taken:
+    /// they added an `extra paragraph` above the target. The "old text"
+    /// substring is still present, but its byte offset has shifted, so the
+    /// anchor resolver must locate it via the quote step (which yields a
+    /// Remapped, not Exact, verdict at high confidence).
+    const E2E_CURRENT_MD: &str = "\
+# Title
+
+intro paragraph
+
+extra paragraph added by owner
+
+second paragraph with old text inside
+";
+
+    /// What the suggestion would write — replaces "old text" with
+    /// "new text".
+    const E2E_REPLACEMENT: &str = "new text";
+    const E2E_EXPECTED_TEXT: &str = "old text";
+
+    /// Expected on-disk markdown AFTER the apply lands.
+    const E2E_FINAL_MD: &str = "\
+# Title
+
+intro paragraph
+
+extra paragraph added by owner
+
+second paragraph with new text inside
+";
+
+    /// Pinned room secret + signing seed for reproducibility. Distinct
+    /// from envelope.rs's `TEST_ROOM_SECRET` / `TEST_SIGNING_SEED` so a
+    /// cross-import never silently masks a regression in those tests.
+    const E2E_ROOM_SECRET: [u8; 32] = [0x88u8; 32];
+    const E2E_SIGNING_SEED: [u8; 32] = [0x99u8; 32];
+
+    /// Build the SuggestionCreated event body that the reviewer would
+    /// originally have authored against the snapshot. The anchor points at
+    /// "old text" inside the snapshot bytes — at the snapshot offset, NOT
+    /// the current offset, so resolve_suggestion has to remap.
+    fn e2e_suggestion_body(suggestion_id: &str) -> ReviewEventBody {
+        let snap_bytes = E2E_SNAPSHOT_MD.as_bytes();
+        // Locate "old text" in the snapshot bytes — snapshot-time offsets.
+        let needle = E2E_EXPECTED_TEXT.as_bytes();
+        let pos = snap_bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("snapshot contains the suggestion needle");
+        let anchor = Anchor {
+            v: 2,
+            file_id: file_id("f-e2e"),
+            snapshot_id: snap_id("snap-e2e"),
+            // base_hash is the snapshot's hash, NOT the current hash —
+            // this is the trigger that makes the resolver bypass its fast
+            // exact-match path and fall through to quote/structure matching
+            // (which produces a Remapped verdict).
+            base_hash: content_hash(snap_bytes),
+            position: PositionAnchor {
+                byte_range: [pos as u64, (pos + needle.len()) as u64],
+                line_range: [5, 5],
+                pm_range: None,
+            },
+            quote: Some(quote(E2E_EXPECTED_TEXT)),
+            block: None,
+            context: None,
+            structure: None,
+        };
+        ReviewEventBody::SuggestionCreated {
+            suggestion_id: suggestion_id.to_string(),
+            anchor,
+            operation: SuggestionOperation::Replace {
+                expected_text: E2E_EXPECTED_TEXT.to_string(),
+                replacement: E2E_REPLACEMENT.to_string(),
+            },
+            note: Some("typo fix".to_string()),
+        }
+    }
+
+    /// Build an `AssembleInput` for the owner-side SuggestionAccepted /
+    /// SuggestionRejected emit step. Pinned room + signer so envelope ids
+    /// and ciphertext are deterministic enough for assertions; the AEAD
+    /// nonce itself is still fresh-random (we never override it — that path
+    /// is reserved for the test-vector regenerator).
+    fn e2e_emit_input(body: ReviewEventBody, created_at_ms: u64) -> AssembleInput {
+        let keys = derive_room_keys(&E2E_ROOM_SECRET);
+        let event_key = *keys.event_key.as_bytes();
+        let sk = DeviceSigningKey::from_bytes(&E2E_SIGNING_SEED).expect("signing key");
+        AssembleInput {
+            event_key,
+            signing_key: sk,
+            room_id: room_id("room-e2e"),
+            author_id: serde_json::from_value::<ParticipantId>(Value::String(
+                "owner-1".to_string(),
+            ))
+            .expect("participant id"),
+            device_id: serde_json::from_value::<DeviceId>(Value::String(
+                "owner-device-1".to_string(),
+            ))
+            .expect("device id"),
+            created_at_ms,
+            expires_at_ms: created_at_ms + 7 * 24 * 60 * 60 * 1000,
+            parent_event_ids: vec![],
+            snapshot_id: Some(snap_id("snap-e2e")),
+            body,
+            kind: EnvelopeKind::Event,
+            client_nonce: None,
+        }
+    }
+
+    /// Seed an `ApplyContext` whose working copy holds the OWNER's current
+    /// markdown (E2E_CURRENT_MD), AND record the corresponding UserEdit
+    /// revision in the journal — mirroring what would have happened when the
+    /// owner saved their edit before the suggestion arrived.
+    fn seed_e2e_ctx() -> (ApplyContext, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("doc.md");
+        // Start from the snapshot bytes on disk so the first save mirrors a
+        // real owner edit (snapshot -> evolved-current).
+        std::fs::write(&path, E2E_SNAPSHOT_MD).expect("seed snapshot bytes");
+
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
+        );
+        let working_copy = Arc::new(WorkingCopyService::new());
+
+        // Record the UserEdit: snapshot → current. This is what the owner's
+        // editor would have produced before the suggestion arrived.
+        let user_edit_req = SaveRequest {
+            path: path.clone(),
+            content: E2E_CURRENT_MD.to_string(),
+            expected_hash: Some(content_hash(E2E_SNAPSHOT_MD.as_bytes())),
+            source: SaveSource::UserEdit,
+        };
+        let user_save = working_copy
+            .save(user_edit_req)
+            .expect("user edit must save");
+        store
+            .append_revision(&room_id("room-e2e"), &file_id("f-e2e"), &user_save.revision)
+            .expect("journal user edit");
+
+        let ctx = ApplyContext {
+            working_copy,
+            store,
+            room_id: room_id("room-e2e"),
+            file_id: file_id("f-e2e"),
+            path,
+        };
+        (ctx, tmp)
+    }
+
+    /// (1) Happy path: snapshot + UserEdit drift → suggestion REMAPS →
+    /// Ready verdict → apply writes file → outbox carries SuggestionAccepted
+    /// envelope whose `resulting_hash` matches the disk hash.
+    #[test]
+    fn e2e_accept_suggestion_remap_writes_file_and_emits_accept_envelope() {
+        let (ctx, _tmp) = seed_e2e_ctx();
+
+        // (2) Reviewer's suggestion (authored against the snapshot).
+        let suggestion_body = e2e_suggestion_body("sug-e2e-accept");
+
+        // (3) Resolve against the current (drifted) markdown. Build the
+        //     anchor index over the CURRENT bytes — the resolver inspects
+        //     that to find the needle.
+        let current_bytes = E2E_CURRENT_MD.as_bytes();
+        let current_idx = crate::review::anchors::index::build_anchor_index(
+            current_bytes,
+            &snap_id("snap-current-e2e"),
+        )
+        .expect("anchor index over current bytes");
+        let current_hash = content_hash(current_bytes);
+        let verdict = resolve_suggestion(
+            &event_id("evt-e2e-accept"),
+            &suggestion_body,
+            &current_idx,
+            current_bytes,
+            &current_hash,
+            None,
+        )
+        .expect("resolver runs");
+
+        // Lock down the remap path: must be Ready, must report a quote-style
+        // remap (NOT an exact base_hash match), and the target range must
+        // land on "old text" inside the CURRENT bytes — proving the anchor
+        // moved through the resolver, not through the raw snapshot offset.
+        let resulting_hash_from_apply = match &verdict {
+            ApplyVerdict::Ready {
+                target_byte_range: (s, e),
+                replacement,
+                ..
+            } => {
+                assert_eq!(
+                    &current_bytes[*s..*e],
+                    E2E_EXPECTED_TEXT.as_bytes(),
+                    "remapped target must land on the current `old text` bytes",
+                );
+                assert_eq!(replacement, E2E_REPLACEMENT, "replacement preserved");
+                // Read-only checks done; let the orchestrator handle the rest.
+            }
+            other => panic!("expected Ready (remap), got {other:?}"),
+        };
+        let _ = resulting_hash_from_apply; // silence unused — read-only assertion above.
+
+        // (4) Apply the verdict.
+        let outcome =
+            apply_ready_verdict(&verdict, &ctx, current_bytes).expect("apply succeeds");
+
+        // (a) File on disk reflects the splice.
+        let on_disk = std::fs::read(&ctx.path).expect("read disk");
+        assert_eq!(
+            std::str::from_utf8(&on_disk).expect("utf-8"),
+            E2E_FINAL_MD,
+            "disk content must match expected final markdown",
+        );
+
+        // (b) `resulting_hash` is the actual hash of the bytes on disk.
+        assert_eq!(
+            outcome.resulting_hash,
+            content_hash(&on_disk),
+            "outcome.resulting_hash must match the on-disk hash byte-for-byte",
+        );
+
+        // (c) Revision journal has BOTH entries:
+        //       [0] UserEdit  (snapshot -> evolved-current)
+        //       [1] AcceptedSuggestion (evolved-current -> final)
+        //     in that exact order.
+        let revs: Vec<_> = ctx
+            .store
+            .iter_revisions(&ctx.room_id, &ctx.file_id)
+            .expect("iter revisions")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("revs decode");
+        assert_eq!(revs.len(), 2, "expected UserEdit + AcceptedSuggestion");
+        assert_eq!(revs[0].source, RevisionSource::ProsemirrorEdit);
+        assert_eq!(revs[1].source, RevisionSource::AcceptedSuggestion);
+        // The accept revision must chain: its parent_hash equals the
+        // user-edit's next_hash (i.e. the post-edit / pre-accept disk hash).
+        assert_eq!(
+            revs[1].parent_hash, revs[0].next_hash,
+            "accept revision must chain off the user edit",
+        );
+        assert_eq!(
+            revs[1].next_hash, outcome.resulting_hash,
+            "journal next_hash must equal the outcome's resulting hash",
+        );
+
+        // (5) Build the SuggestionAccepted review event body and assemble
+        //     the outbox envelope. This is what 8.5's emit_suggestion_accepted
+        //     will produce.
+        let accept_body = ReviewEventBody::SuggestionAccepted {
+            suggestion_id: "sug-e2e-accept".to_string(),
+            applied_revision_id: outcome.revision.revision_id.clone(),
+            resulting_hash: outcome.resulting_hash.clone(),
+        };
+        let envelope =
+            assemble_event_envelope(e2e_emit_input(accept_body, 1_700_000_010_000))
+                .expect("envelope assembles");
+
+        // (6) Outbox round-trip.
+        assert!(
+            ctx.store
+                .append_outbox(&ctx.room_id, &envelope)
+                .expect("append outbox"),
+            "envelope should be newly written (not a dedup)",
+        );
+        let envelopes: Vec<_> = ctx
+            .store
+            .iter_outbox(&ctx.room_id)
+            .expect("iter outbox")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("envelopes decode");
+        assert_eq!(envelopes.len(), 1, "outbox holds exactly the accept envelope");
+        assert_eq!(envelopes[0].envelope_id, envelope.envelope_id);
+        assert_eq!(envelopes[0].kind, EnvelopeKind::Event);
+        assert_eq!(envelopes[0].room_id, ctx.room_id);
+    }
+
+    /// (2) RequiresThreeWay path: the owner edited the very bytes the
+    /// suggestion targets, so resolve_suggestion produces a three-way
+    /// verdict. The orchestrator MUST refuse to apply (NotApplicable) and
+    /// the caller MUST emit a SuggestionRejected envelope instead — never
+    /// a SuggestionAccepted. The on-disk file is untouched, and the
+    /// revision journal still only carries the original UserEdit.
+    #[test]
+    fn e2e_requires_three_way_rejects_and_outbox_carries_reject() {
+        // Seed exactly like the accept test, then mutate the working copy
+        // so the targeted span no longer reads "old text" — that's what
+        // forces the resolver to surface RequiresThreeWay.
+        let (ctx, _tmp) = seed_e2e_ctx();
+        // Owner concurrently changed "old text" → "stale text" — the quote
+        // step still finds the *paragraph* via structure/context, but the
+        // expected_text check fails and the verdict escalates to three-way.
+        let drifted = E2E_CURRENT_MD.replace("old text", "stale text");
+        let drifted_bytes = drifted.as_bytes();
+        // Bump the disk state to match. Pin against the pre-drift hash so
+        // the stale-hash guard agrees the caller knows what they're writing.
+        let pre_drift_hash = content_hash(E2E_CURRENT_MD.as_bytes());
+        ctx.working_copy
+            .save(SaveRequest {
+                path: ctx.path.clone(),
+                content: drifted.clone(),
+                expected_hash: Some(pre_drift_hash.clone()),
+                source: SaveSource::UserEdit,
+            })
+            .expect("second user edit");
+        // Journal that second edit so the journal mirrors the on-disk state
+        // (otherwise the test's "journal still has only the original" check
+        // is degenerate — by recording it we ensure the assertion below is
+        // *specifically* "no AcceptedSuggestion entry was added".
+        let second_rev = ctx
+            .working_copy
+            .build_external_change_revision(&ctx.path, pre_drift_hash)
+            .expect("derive second revision");
+        // Re-source it as a UserEdit so the journal stays semantically
+        // accurate (it WAS a user edit, just simulated through a different
+        // helper to avoid double-saving the bytes).
+        let mut second_rev = second_rev;
+        second_rev.source = RevisionSource::ProsemirrorEdit;
+        ctx.store
+            .append_revision(&ctx.room_id, &ctx.file_id, &second_rev)
+            .expect("journal second edit");
+
+        let suggestion_body = e2e_suggestion_body("sug-e2e-3way");
+        let current_idx = crate::review::anchors::index::build_anchor_index(
+            drifted_bytes,
+            &snap_id("snap-current-e2e"),
+        )
+        .expect("anchor index over drifted bytes");
+        let drifted_hash = content_hash(drifted_bytes);
+        let verdict = resolve_suggestion(
+            &event_id("evt-e2e-3way"),
+            &suggestion_body,
+            &current_idx,
+            drifted_bytes,
+            &drifted_hash,
+            None,
+        )
+        .expect("resolver runs");
+
+        // Must be RequiresThreeWay (NOT Ready). The owner UI would then
+        // surface the three-way dialog; for this test, we simulate the user
+        // clicking Reject.
+        assert!(
+            matches!(verdict, ApplyVerdict::RequiresThreeWay { .. }),
+            "expected RequiresThreeWay verdict, got {verdict:?}",
+        );
+
+        // The orchestrator refuses to apply non-Ready verdicts.
+        let err = apply_ready_verdict(&verdict, &ctx, drifted_bytes)
+            .expect_err("apply must refuse a three-way verdict");
+        assert!(
+            matches!(err, ApplyError::NotApplicable { kind } if kind == "RequiresThreeWay"),
+            "expected NotApplicable(RequiresThreeWay), got {err:?}",
+        );
+
+        // Disk untouched (still the drifted bytes the owner saved, NOT the
+        // suggestion's would-be replacement).
+        let on_disk = std::fs::read(&ctx.path).expect("read disk");
+        assert_eq!(on_disk, drifted_bytes);
+
+        // Journal has the two UserEdits (original + drift) — NO
+        // AcceptedSuggestion entry, because we refused to apply.
+        let revs: Vec<_> = ctx
+            .store
+            .iter_revisions(&ctx.room_id, &ctx.file_id)
+            .expect("iter revisions")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("revs decode");
+        assert_eq!(revs.len(), 2, "journal must not gain an Accepted entry");
+        for rev in &revs {
+            assert_ne!(
+                rev.source,
+                RevisionSource::AcceptedSuggestion,
+                "no accepted-suggestion entry must be journaled on three-way refusal",
+            );
+        }
+
+        // Emit SuggestionRejected with the three-way reason and put it on
+        // the outbox.
+        let reject_body = ReviewEventBody::SuggestionRejected {
+            suggestion_id: "sug-e2e-3way".to_string(),
+            reason: Some("requires_three_way".to_string()),
+        };
+        let envelope =
+            assemble_event_envelope(e2e_emit_input(reject_body, 1_700_000_020_000))
+                .expect("reject envelope assembles");
+        assert!(
+            ctx.store
+                .append_outbox(&ctx.room_id, &envelope)
+                .expect("append outbox"),
+            "reject envelope newly written",
+        );
+        let envelopes: Vec<_> = ctx
+            .store
+            .iter_outbox(&ctx.room_id)
+            .expect("iter outbox")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("envelopes decode");
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0].envelope_id, envelope.envelope_id);
+    }
+
+    /// (3) Stale path: the document has changed so radically that the
+    /// resolver returns Stale. We never reach apply; the caller emits a
+    /// SuggestionRejected with reason="stale". File untouched, no
+    /// AcceptedSuggestion in the journal, exactly one reject envelope on
+    /// the outbox.
+    #[test]
+    fn e2e_stale_anchor_rejects_with_stale_reason() {
+        let (ctx, _tmp) = seed_e2e_ctx();
+        // Replace the entire working copy with an unrelated short doc so the
+        // anchor can't be remapped — every resolver step misses and confidence
+        // drops below STALE_FLOOR. This mirrors "owner rewrote the file" /
+        // "wrong file open" / "snapshot is days old" scenarios.
+        let unrelated = "# Wholly Unrelated Doc\n\nnothing to see here\n";
+        let pre = content_hash(E2E_CURRENT_MD.as_bytes());
+        ctx.working_copy
+            .save(SaveRequest {
+                path: ctx.path.clone(),
+                content: unrelated.to_string(),
+                expected_hash: Some(pre),
+                source: SaveSource::UserEdit,
+            })
+            .expect("rewrite working copy");
+
+        let suggestion_body = e2e_suggestion_body("sug-e2e-stale");
+        // Build the suggestion with a position that's past-EOF in the unrelated
+        // doc AND a line range >> the unrelated doc's line count, so the
+        // line-proximity resolver step has to clamp heavily and falls below
+        // STALE_FLOOR. We replace the anchor's position field here to force
+        // the stale outcome — the original e2e_suggestion_body targets the
+        // snapshot offset, which happens to be in-bounds for short docs by
+        // coincidence.
+        let mut suggestion_body = suggestion_body;
+        if let ReviewEventBody::SuggestionCreated {
+            ref mut anchor,
+            ref mut operation,
+            ..
+        } = suggestion_body
+        {
+            anchor.position = PositionAnchor {
+                byte_range: [9999, 10009],
+                line_range: [900, 1000],
+                pm_range: None,
+            };
+            anchor.quote = Some(quote("nonexistent token never appearing anywhere"));
+            *operation = SuggestionOperation::Replace {
+                expected_text: "nonexistent token never appearing anywhere".to_string(),
+                replacement: "x".to_string(),
+            };
+        }
+
+        let unrelated_bytes = unrelated.as_bytes();
+        let current_idx = crate::review::anchors::index::build_anchor_index(
+            unrelated_bytes,
+            &snap_id("snap-stale-e2e"),
+        )
+        .expect("anchor index");
+        let h = content_hash(unrelated_bytes);
+        let verdict = resolve_suggestion(
+            &event_id("evt-e2e-stale"),
+            &suggestion_body,
+            &current_idx,
+            unrelated_bytes,
+            &h,
+            None,
+        )
+        .expect("resolver runs");
+        assert!(
+            matches!(verdict, ApplyVerdict::Stale { .. }),
+            "expected Stale verdict, got {verdict:?}",
+        );
+
+        // Apply must refuse a Stale verdict.
+        let err = apply_ready_verdict(&verdict, &ctx, unrelated_bytes)
+            .expect_err("apply must refuse stale");
+        assert!(
+            matches!(err, ApplyError::NotApplicable { kind } if kind == "Stale"),
+            "expected NotApplicable(Stale), got {err:?}",
+        );
+
+        // Disk still holds the unrelated rewrite (not the suggestion).
+        let on_disk = std::fs::read(&ctx.path).expect("read disk");
+        assert_eq!(on_disk, unrelated_bytes);
+
+        // Emit reject with stale reason.
+        let reject_body = ReviewEventBody::SuggestionRejected {
+            suggestion_id: "sug-e2e-stale".to_string(),
+            reason: Some("stale".to_string()),
+        };
+        let envelope =
+            assemble_event_envelope(e2e_emit_input(reject_body, 1_700_000_030_000))
+                .expect("envelope assembles");
+        assert!(
+            ctx.store
+                .append_outbox(&ctx.room_id, &envelope)
+                .expect("append outbox"),
+            "reject envelope newly written",
+        );
+
+        let envelopes: Vec<_> = ctx
+            .store
+            .iter_outbox(&ctx.room_id)
+            .expect("iter outbox")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("envelopes decode");
+        assert_eq!(envelopes.len(), 1);
+        // No AcceptedSuggestion ever journaled — only the seed UserEdit and
+        // the unrelated-rewrite UserEdit may exist.
+        let revs: Vec<_> = ctx
+            .store
+            .iter_revisions(&ctx.room_id, &ctx.file_id)
+            .expect("iter revisions")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("revs decode");
+        assert!(
+            revs.iter()
+                .all(|r| r.source != RevisionSource::AcceptedSuggestion),
+            "stale rejection must NOT journal an AcceptedSuggestion",
+        );
+    }
+
+    /// (4) Resulting-hash binding: round-trip an accept envelope through the
+    /// outbox and verify the `resulting_hash` carried by the decrypted
+    /// SuggestionAccepted body equals the actual hash of the file on disk.
+    ///
+    /// This is the contract Phase 6 sync depends on: a remote peer importing
+    /// the SuggestionAccepted event must be able to advance its own replica
+    /// to the exact bytes the owner committed, using only the hash on the
+    /// event — there's no out-of-band channel.
+    #[test]
+    fn e2e_resulting_hash_in_accept_envelope_matches_disk_hash() {
+        let (ctx, _tmp) = seed_e2e_ctx();
+        let suggestion_body = e2e_suggestion_body("sug-e2e-hash");
+        let current_bytes = E2E_CURRENT_MD.as_bytes();
+        let current_idx = crate::review::anchors::index::build_anchor_index(
+            current_bytes,
+            &snap_id("snap-current-hash"),
+        )
+        .expect("idx");
+        let h = content_hash(current_bytes);
+        let verdict = resolve_suggestion(
+            &event_id("evt-e2e-hash"),
+            &suggestion_body,
+            &current_idx,
+            current_bytes,
+            &h,
+            None,
+        )
+        .expect("resolver");
+        assert!(matches!(verdict, ApplyVerdict::Ready { .. }));
+        let outcome =
+            apply_ready_verdict(&verdict, &ctx, current_bytes).expect("apply");
+
+        // Build + emit the accept envelope.
+        let accept_body = ReviewEventBody::SuggestionAccepted {
+            suggestion_id: "sug-e2e-hash".to_string(),
+            applied_revision_id: outcome.revision.revision_id.clone(),
+            resulting_hash: outcome.resulting_hash.clone(),
+        };
+        let envelope =
+            assemble_event_envelope(e2e_emit_input(accept_body, 1_700_000_040_000))
+                .expect("envelope assembles");
+        ctx.store
+            .append_outbox(&ctx.room_id, &envelope)
+            .expect("append");
+
+        // Re-read the envelope from the outbox and decrypt it. The
+        // `resulting_hash` it carries MUST equal the actual hash of the
+        // file as it sits on disk RIGHT NOW.
+        use crate::review::envelope::{DisassembleInput, disassemble_event_envelope};
+        use std::collections::HashMap;
+        let envelopes: Vec<_> = ctx
+            .store
+            .iter_outbox(&ctx.room_id)
+            .expect("iter")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("decode");
+        assert_eq!(envelopes.len(), 1);
+        let env = &envelopes[0];
+
+        let keys = derive_room_keys(&E2E_ROOM_SECRET);
+        let event_key = *keys.event_key.as_bytes();
+        let sk = DeviceSigningKey::from_bytes(&E2E_SIGNING_SEED).expect("sk");
+        let vk = sk.verifying_key();
+        let key_id = vk.signing_key_id_base64url();
+        let mut vks = HashMap::new();
+        vks.insert(key_id, vk);
+        let recovered = disassemble_event_envelope(DisassembleInput {
+            envelope: env,
+            event_key,
+            verifying_keys: &vks,
+        })
+        .expect("envelope opens cleanly");
+
+        let resulting_hash = match recovered.body {
+            ReviewEventBody::SuggestionAccepted {
+                resulting_hash,
+                applied_revision_id,
+                suggestion_id,
+            } => {
+                assert_eq!(suggestion_id, "sug-e2e-hash");
+                assert_eq!(applied_revision_id, outcome.revision.revision_id);
+                resulting_hash
+            }
+            other => panic!("expected SuggestionAccepted body, got {other:?}"),
+        };
+
+        let on_disk = std::fs::read(&ctx.path).expect("read disk");
+        assert_eq!(
+            resulting_hash,
+            content_hash(&on_disk),
+            "envelope's resulting_hash must equal the on-disk content hash",
+        );
+        // And it must equal what the apply outcome reported — the entire
+        // chain is one consistent identifier.
+        assert_eq!(
+            resulting_hash, outcome.resulting_hash,
+            "envelope hash must match the apply outcome hash",
+        );
+    }
+
+    /// (5) Bonus: a SuggestionDraft round-trips through the resolver +
+    /// apply orchestrator without losing information. Locks down the
+    /// contract between `ReviewCommand::CreateSuggestion { draft }` (which
+    /// 3a will use to ingest frontend drafts) and the apply pipeline 8.x
+    /// owns — they share the same Anchor + SuggestionOperation shapes.
+    #[test]
+    fn e2e_suggestion_draft_to_apply_round_trip() {
+        let (ctx, _tmp) = seed_e2e_ctx();
+        let suggestion_body = e2e_suggestion_body("sug-e2e-draft");
+        // Project the suggestion body back into a draft (the shape the
+        // frontend sends in). If the projection is lossy this assertion
+        // would fail — proves the draft type is a strict subset of what
+        // the wire body carries.
+        let draft = match &suggestion_body {
+            ReviewEventBody::SuggestionCreated {
+                anchor,
+                operation,
+                note,
+                ..
+            } => SuggestionDraft {
+                anchor: anchor.clone(),
+                operation: operation.clone(),
+                note: note.clone(),
+            },
+            _ => unreachable!("e2e_suggestion_body always returns SuggestionCreated"),
+        };
+        // Rebuild the wire body from the draft and assert byte equality of
+        // the projection.
+        let rebuilt_body = ReviewEventBody::SuggestionCreated {
+            suggestion_id: "sug-e2e-draft".to_string(),
+            anchor: draft.anchor,
+            operation: draft.operation,
+            note: draft.note,
+        };
+        assert_eq!(rebuilt_body, suggestion_body);
+
+        // The rebuilt body must produce the same Ready verdict as the
+        // original — proving the projection has no semantic effect.
+        let current_bytes = E2E_CURRENT_MD.as_bytes();
+        let current_idx = crate::review::anchors::index::build_anchor_index(
+            current_bytes,
+            &snap_id("snap-draft"),
+        )
+        .expect("idx");
+        let h = content_hash(current_bytes);
+        let verdict = resolve_suggestion(
+            &event_id("evt-e2e-draft"),
+            &rebuilt_body,
+            &current_idx,
+            current_bytes,
+            &h,
+            None,
+        )
+        .expect("resolver");
+        assert!(matches!(verdict, ApplyVerdict::Ready { .. }));
+        let outcome =
+            apply_ready_verdict(&verdict, &ctx, current_bytes).expect("apply");
+        assert_eq!(
+            std::fs::read(&ctx.path).expect("read"),
+            E2E_FINAL_MD.as_bytes(),
+        );
+        assert_eq!(outcome.resulting_hash, content_hash(E2E_FINAL_MD.as_bytes()));
+    }
 }

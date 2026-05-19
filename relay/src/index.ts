@@ -5,8 +5,15 @@ import type { Env } from "./env";
 
 export { RoomDO };
 
+/**
+ * Route matcher for any path that targets a single room: matches
+ * `/v2/rooms/:roomId` and `/v2/rooms/:roomId/<subroute>`. The first capture
+ * is the `roomId` we hand to the DO namespace.
+ */
+const ROOM_ROUTE_RE = /^\/v2\/rooms\/([^/]+)(?:\/.*)?$/;
+
 export default {
-  async fetch(request: Request, _env: Env, _ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     // GET /health is the only unauthenticated route. Every other route below
@@ -58,14 +65,18 @@ export default {
       });
     }
 
-    // All other routes 404 until filled in by:
-    //   attn-nnj.5.5  POST /v2/rooms/:roomId
-    //   attn-nnj.5.6  POST /v2/rooms/:roomId/devices, GET .../devices
-    //   attn-nnj.5.7  POST /v2/rooms/:roomId/envelopes
-    //   attn-nnj.5.8  POST /v2/rooms/:roomId/acks
-    //   attn-nnj.5.9  DELETE /v2/rooms/:roomId
-    //   attn-nnj.5.10 POST /v2/rooms/:roomId/blobs (R2 presign)
-    //   attn-nnj.5.11 WebSocket upgrade + frames
+    // Any `/v2/rooms/:roomId[/...]` request is dispatched to the DO for that
+    // room. The DO is responsible for the per-method routing inside RoomDO.fetch
+    // (see room-do.ts). 5.5 owns POST /v2/rooms/:roomId; 5.6-5.11 wire the
+    // rest of the surface there.
+    const roomMatch = url.pathname.match(ROOM_ROUTE_RE);
+    if (roomMatch && roomMatch[1]) {
+      const roomId = roomMatch[1];
+      const id = env.RELAY_ROOMS.idFromName(roomId);
+      const stub = env.RELAY_ROOMS.get(id);
+      return stub.fetch(request);
+    }
+
     return new Response("not implemented yet", { status: 404 });
   },
 } satisfies ExportedHandler<Env>;

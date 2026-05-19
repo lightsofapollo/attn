@@ -529,9 +529,7 @@
           "socket": "sock",
           "code": 4005
         }
-      ],
-      "skip": true,
-      "skipReason": "follow-up: scenario fixture needs timing/state adjustment (filed as attn-nnj.5.16)"
+      ]
     },
     {
       "id": "caps-003a",

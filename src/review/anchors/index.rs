@@ -1060,6 +1060,54 @@ mod tests {
         assert_eq!(idx.blocks[0].kind, AnchorBlockKind::Math);
     }
 
+    // Per attn-nnj.3.2 acceptance: contentFingerprint for a ```math fence
+    // must be stable across rebuilds (and independent of snapshotId), so
+    // anchors authored inside ProseMirror's math nodeview survive a
+    // re-snapshot. Build the same markdown under two different snapshot
+    // ids and confirm fingerprint equality + snapshotBlockId divergence.
+    #[test]
+    fn fenced_math_content_fingerprint_is_stable_across_builds() {
+        let md = "```math\nE = mc^2\n```\n";
+        let a = build(md, "snap-math-a");
+        let b = build(md, "snap-math-b");
+        assert_eq!(a.blocks.len(), 1);
+        assert_eq!(b.blocks.len(), 1);
+        assert_eq!(a.blocks[0].kind, AnchorBlockKind::Math);
+        assert_eq!(b.blocks[0].kind, AnchorBlockKind::Math);
+        assert_eq!(
+            a.blocks[0].content_fingerprint, b.blocks[0].content_fingerprint,
+            "math contentFingerprint must be snapshot-id-independent"
+        );
+        assert_ne!(
+            a.blocks[0].snapshot_block_id, b.blocks[0].snapshot_block_id,
+            "math snapshotBlockId must vary with snapshotId"
+        );
+    }
+
+    // Mirror of the math test above for the ```mermaid fence. The frontend
+    // mermaid nodeview (web/src/lib/prosemirror/mermaid) renders these
+    // blocks as a single addressable node, so the anchor fingerprint must
+    // survive a re-snapshot without drifting through `unknown` (decision
+    // #16).
+    #[test]
+    fn fenced_mermaid_content_fingerprint_is_stable_across_builds() {
+        let md = "```mermaid\ngraph TD; A-->B;\n```\n";
+        let a = build(md, "snap-mermaid-a");
+        let b = build(md, "snap-mermaid-b");
+        assert_eq!(a.blocks.len(), 1);
+        assert_eq!(b.blocks.len(), 1);
+        assert_eq!(a.blocks[0].kind, AnchorBlockKind::Mermaid);
+        assert_eq!(b.blocks[0].kind, AnchorBlockKind::Mermaid);
+        assert_eq!(
+            a.blocks[0].content_fingerprint, b.blocks[0].content_fingerprint,
+            "mermaid contentFingerprint must be snapshot-id-independent"
+        );
+        assert_ne!(
+            a.blocks[0].snapshot_block_id, b.blocks[0].snapshot_block_id,
+            "mermaid snapshotBlockId must vary with snapshotId"
+        );
+    }
+
     #[test]
     fn invalid_utf8_returns_error() {
         // 0xFF on its own is invalid UTF-8.

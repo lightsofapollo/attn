@@ -332,6 +332,8 @@ The product is reframed as **agentic collaboration** — primary use case is an 
 
 **16. `AnchorBlock.kind` gains `math` and `mermaid`** in addition to the original eight variants. Required for stable anchor fingerprints inside ProseMirror's math and mermaid nodeviews (currently fall through to `"unknown"` which breaks fingerprint stability). Pins: `data-model.md` AnchorBlock.
 
+  - **Implementation note (Phase 1, attn-nnj.3.1 / 3.2):** the `math` kind is only emitted from `comrak` when math appears at the document AST's block level. In practice that means a ```` ```math ```` fenced code block. Comrak emits both inline math (`$x$`) and *display math* (`$$ ... $$`) as `NodeValue::Math` **inline** nodes nested inside a `Paragraph`, so a display-math run on its own line is currently absorbed into a `paragraph` block (its literal still flows through `extract_text` into the paragraph's normalized text, so the resolver still has something stable to fingerprint). Authors who need math addressable as its own anchorable block must use the ```` ```math ```` fence today. Promoting bare `$$ ... $$` into a first-class block kind would require either a comrak patch or a post-parse rewrite and is intentionally out of scope for v2.
+
 ### Inconsistencies Fixed
 
 - `data-model.md` line 202: `"attn file"` → `"attn file v2"` to match the v2-suffix convention used everywhere else in the key derivation tree (`crypto-spec.md` uses the v2 form).

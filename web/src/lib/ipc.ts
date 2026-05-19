@@ -115,8 +115,14 @@ export function reviewCreateSuggestion(
 export function reviewAcceptSuggestion(
   roomId: RoomId,
   suggestionId: EventId,
+  editedReplacement?: string,
 ): Promise<void> {
-  send({ type: 'review_accept_suggestion', roomId, suggestionId });
+  send({
+    type: 'review_accept_suggestion',
+    roomId,
+    suggestionId,
+    ...(editedReplacement !== undefined ? { editedReplacement } : {}),
+  });
   return Promise.resolve();
 }
 

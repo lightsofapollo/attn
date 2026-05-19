@@ -14,6 +14,22 @@ export interface KeyboardConfig {
   onCommentComposer?: () => void;
   onSuggestionComposer?: () => void;
   onToggleReviewPanel?: () => void;
+  /**
+   * Three-way apply hooks (attn-nnj.8.3 / planning/collab/ui/three-way-apply.md
+   * §6 keybindings). Fired only when `isApplyExpandOpen()` returns true, so
+   * `a` doesn't collide with the margin-card accept binding on a collapsed
+   * card. `Esc` is bound separately because cancel-only consumers don't need
+   * the other three.
+   */
+  onAcceptApply?: () => void;
+  onKeepMine?: () => void;
+  onEditApply?: () => void;
+  onCancelApply?: () => void;
+  /**
+   * Predicate that tells the keyboard handler whether the three-way apply
+   * expand card is currently open. Wire to `() => reviewStore.activeThreeWayApply !== null`.
+   */
+  isApplyExpandOpen?: () => boolean;
 }
 
 function isEditableElement(target: EventTarget | null): boolean {
@@ -78,6 +94,35 @@ export function initKeyboard(config: KeyboardConfig): () => void {
     // App-level shortcuts should never steal focus from text-editing surfaces.
     if (editingTarget) {
       return;
+    }
+
+    // Three-way apply expand bindings (attn-nnj.8.3) take precedence over the
+    // generic single-key shortcuts (`t` theme cycle, `j`/`k` cycling) while
+    // the expand is open, per `planning/collab/ui/three-way-apply.md` §6.
+    // The card itself also handles `onkeydown`; this global path covers the
+    // case where focus has wandered off the card (e.g. the user clicked the
+    // backdrop or focus landed on the body).
+    if (!meta && config.isApplyExpandOpen?.()) {
+      if ((key === 'a' || key === 'A') && config.onAcceptApply) {
+        e.preventDefault();
+        config.onAcceptApply();
+        return;
+      }
+      if ((key === 'k' || key === 'K') && config.onKeepMine) {
+        e.preventDefault();
+        config.onKeepMine();
+        return;
+      }
+      if ((key === 'e' || key === 'E') && config.onEditApply) {
+        e.preventDefault();
+        config.onEditApply();
+        return;
+      }
+      if (key === 'Escape' && config.onCancelApply) {
+        e.preventDefault();
+        config.onCancelApply();
+        return;
+      }
     }
 
     // Cmd/Ctrl+P opens command palette globally

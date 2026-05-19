@@ -206,6 +206,13 @@ export interface ReviewAcceptSuggestionMessage {
   type: 'review_accept_suggestion';
   roomId: RoomId;
   suggestionId: EventId;
+  /**
+   * Optional hand-edited replacement text. Set by the three-way apply UI's
+   * `[e] edit` path (attn-nnj.8.3) when the owner hand-merges the snapshot's
+   * proposed replacement with their own changes. When `undefined`, the Rust
+   * resolver applies the suggestion's stored `replacement` verbatim.
+   */
+  editedReplacement?: string;
 }
 
 export interface ReviewResolveAnchorMessage {
@@ -852,30 +859,92 @@ export interface ReviewAnchorResolutionUpdate {
   resolved: ResolvedAnchor;
 }
 
+// ---------------------------------------------------------------------------
+// Apply verdict (mirrors `crate::review::apply::ApplyVerdict`)
+//
+// Produced by the Rust resolver when the owner clicks `[accept]` on a
+// suggestion card. The frontend only needs the `RequiresThreeWay` shape to
+// drive `ReviewApplyExpand.svelte` (attn-nnj.8.3); other variants are routed
+// elsewhere (Ready writes silently, Ambiguous → orphan tray, Stale → re-anchor
+// flow). See `src/review/apply.rs:174` for the canonical Rust definition.
+// ---------------------------------------------------------------------------
+
 /**
- * A reconstructed comment thread: a root `CommentCreated` event plus any
- * replies (other `CommentCreated` events in the same `threadId`) and a
- * resolved flag flipped by a matching `CommentResolved` event.
- *
- * Threads are derived from the append-only review-event log by the selectors
- * in `web/src/lib/review/selectors.ts`. The root is the earliest comment in
- * the thread (by `meta.createdAt`); replies are ordered the same way. The
- * thread's `anchor` is taken from the root event so the panel/margin card
- * can position itself, and `resolvedAnchor` is the latest anchor-resolution
- * verdict (exact / remapped / ambiguous / stale) for that root event.
- * @see planning/collab/data-model.md §Comment Events
+ * How the snapshot's `expected_text` compared to what is currently at the
+ * target byte range, for the `Ready` verdict.
+ * @see src/review/apply.rs `TextMatchKind`
  */
-export interface Thread {
-  /** Thread id from `CommentCreatedBody.threadId`. */
-  id: string;
-  /** Earliest `CommentCreated` event sharing this `threadId`. */
-  rootEvent: ReviewEvent;
-  /** Later `CommentCreated` events in the same thread, ordered by createdAt. */
-  replies: ReviewEvent[];
-  /** Flipped to `true` by a `CommentResolved` event for this thread. */
-  resolved: boolean;
-  /** Anchor authored on the root comment (null only for malformed input). */
-  anchor: Anchor | null;
-  /** Latest resolver verdict against `rootEvent.meta.eventId`, if any. */
-  resolvedAnchor: ResolvedAnchor | null;
+export type TextMatchKind =
+  | 'exact'
+  | 'normalized_unicode'
+  | 'trailing_whitespace'
+  | 'mismatch';
+
+/**
+ * `Ready` verdict — the suggestion can apply silently. Frontend writes
+ * `replacement` at `targetByteRange`.
+ * @see src/review/apply.rs `ApplyVerdict::Ready`
+ */
+export interface ReadyVerdict {
+  kind: 'ready';
+  suggestionId: EventId;
+  targetByteRange: [number, number];
+  replacement: string;
+  confidence: number;
+  matchKind: TextMatchKind;
+  confidenceNote?: string;
 }
+
+/**
+ * `RequiresThreeWay` verdict — drift between snapshot's `expectedText` and
+ * current bytes. Drives `ReviewApplyExpand.svelte`.
+ * @see src/review/apply.rs `ApplyVerdict::RequiresThreeWay`
+ */
+export interface RequiresThreeWayVerdict {
+  kind: 'requires_three_way';
+  suggestionId: EventId;
+  roomId: RoomId;
+  targetByteRange: [number, number];
+  /** Text the suggestion expected to find when it was authored. */
+  snapshotExpected: string;
+  /** Text actually present at the target range right now. */
+  currentText: string;
+  /** Text the suggestion would write if accepted. */
+  proposedReplacement: string;
+  confidence: number;
+  /** Reviewer display name (optional — falls back to participant id). */
+  reviewerDisplayName?: string;
+  /** Reviewer event creation time (ms since epoch). */
+  createdAt?: number;
+}
+
+/**
+ * `Ambiguous` verdict — multiple candidate positions; user picks one.
+ * Routed to the orphan-tray candidate picker.
+ * @see src/review/apply.rs `ApplyVerdict::Ambiguous`
+ */
+export interface AmbiguousVerdict {
+  kind: 'ambiguous';
+  suggestionId: EventId;
+  candidates: ResolvedAnchorCandidate[];
+}
+
+/**
+ * `Stale` verdict — anchor cannot resolve; manual re-anchor required.
+ * @see src/review/apply.rs `ApplyVerdict::Stale`
+ */
+export interface StaleVerdict {
+  kind: 'stale';
+  suggestionId: EventId;
+  reason: string;
+}
+
+/**
+ * Discriminated union of every apply-verdict variant.
+ * @see src/review/apply.rs `ApplyVerdict`
+ */
+export type ApplyVerdict =
+  | ReadyVerdict
+  | RequiresThreeWayVerdict
+  | AmbiguousVerdict
+  | StaleVerdict;

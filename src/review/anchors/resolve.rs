@@ -56,6 +56,11 @@ pub type PmStepJournal = Value;
 
 /// Confidence numbers — starting values from `data-model.md` lines 491-505,
 /// pinned by amendments #15 as "ship as starting values, calibrate post-Phase 1".
+///
+/// These constants remain the source-of-truth defaults consumed by
+/// [`ResolverConfig::DEFAULT`]; the calibration sweep
+/// (`src/review/anchors/calibration.rs`) instantiates non-default configs to
+/// stress-test perturbations without mutating the shipped values.
 mod conf {
     pub const BASE_HASH: f64 = 1.00;
     pub const MAPPED_STEPS: f64 = 0.98;
@@ -77,6 +82,54 @@ mod conf {
     pub const STALE_FLOOR: f64 = 0.35;
     /// "Effectively 1.0" — guards against fp drift on the exact comparison.
     pub const EXACT_THRESHOLD: f64 = 0.999;
+}
+
+/// Tunable knobs for the resolver. The shipped default ([`ResolverConfig::DEFAULT`])
+/// reflects the spec weights and amendments #15 cutoffs. The calibration sweep
+/// (`calibration.rs`, `#[ignore]`d) uses non-default configs to measure how
+/// many corpus disagreements each perturbation would introduce — never mutated
+/// in production code.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolverConfig {
+    pub base_hash: f64,
+    pub mapped_steps: f64,
+    pub quote_unique: f64,
+    pub block_fp: f64,
+    pub structure_quote: f64,
+    pub context: f64,
+    pub fuzzy_min: f64,
+    pub fuzzy_max: f64,
+    pub line_prox_max: f64,
+    pub ambiguous_delta: f64,
+    pub ambiguous_include: f64,
+    pub high_confidence: f64,
+    pub stale_floor: f64,
+    pub exact_threshold: f64,
+}
+
+impl ResolverConfig {
+    pub const DEFAULT: ResolverConfig = ResolverConfig {
+        base_hash: conf::BASE_HASH,
+        mapped_steps: conf::MAPPED_STEPS,
+        quote_unique: conf::QUOTE_UNIQUE,
+        block_fp: conf::BLOCK_FP,
+        structure_quote: conf::STRUCTURE_QUOTE,
+        context: conf::CONTEXT,
+        fuzzy_min: conf::FUZZY_MIN,
+        fuzzy_max: conf::FUZZY_MAX,
+        line_prox_max: conf::LINE_PROX_MAX,
+        ambiguous_delta: conf::AMBIGUOUS_DELTA,
+        ambiguous_include: conf::AMBIGUOUS_INCLUDE,
+        high_confidence: conf::HIGH_CONFIDENCE,
+        stale_floor: conf::STALE_FLOOR,
+        exact_threshold: conf::EXACT_THRESHOLD,
+    };
+}
+
+impl Default for ResolverConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// Preview string max length. Bounded so the UI never receives unbounded text.
@@ -174,6 +227,30 @@ pub fn resolve_anchor(
     current_hash: &ContentHash,
     pm_steps: Option<&PmStepJournal>,
 ) -> Result<ResolvedAnchor, ResolveError> {
+    resolve_anchor_with_config(
+        anchor,
+        current_index,
+        current_markdown_bytes,
+        current_hash,
+        pm_steps,
+        &ResolverConfig::DEFAULT,
+    )
+}
+
+/// Same as [`resolve_anchor`] but with explicit tuning knobs. The shipped
+/// resolver uses [`ResolverConfig::DEFAULT`]; the calibration sweep
+/// (`calibration.rs`, `#[ignore]`d) calls this with perturbed configs to
+/// quantify how many corpus disagreements would result from each candidate
+/// adjustment. Production code paths should never construct a non-default
+/// config — they exist for measurement only.
+pub fn resolve_anchor_with_config(
+    anchor: &Anchor,
+    current_index: &AnchorIndex,
+    current_markdown_bytes: &[u8],
+    current_hash: &ContentHash,
+    pm_steps: Option<&PmStepJournal>,
+    cfg: &ResolverConfig,
+) -> Result<ResolvedAnchor, ResolveError> {
     // Tiny safety net — the manager is supposed to route, but a misrouted
     // anchor produces nonsense quote searches if we don't bail.
     if anchor.file_id != current_index_file_id_placeholder(anchor) {
@@ -189,7 +266,7 @@ pub fn resolve_anchor(
     // Step 1 — base_hash_match
     if hashes_equal(&anchor.base_hash, current_hash) {
         candidates.push(Candidate {
-            confidence: conf::BASE_HASH,
+            confidence: cfg.base_hash,
             current_range: anchor.position.clone(),
             reason: CandidateReason::BaseHashMatch,
             preview: preview_from_range(current_markdown_bytes, &anchor.position),
@@ -199,6 +276,7 @@ pub fn resolve_anchor(
     // Step 2 — mapped_through_local_steps. Stub: ignore pm_steps until the
     // wire format ships. Documented intentional no-op.
     let _ = pm_steps;
+    let _ = cfg.mapped_steps;
 
     // Step 3 — unique_exact_quote (multiple hits → emit each; the combine
     // policy in step 4 spec text decides ambiguity later).
@@ -206,7 +284,7 @@ pub fn resolve_anchor(
         for hit in find_all_byte_matches(current_markdown_bytes, quote.exact.as_bytes()) {
             let range = byte_range_to_position(current_markdown_bytes, hit, quote.exact.len());
             candidates.push(Candidate {
-                confidence: conf::QUOTE_UNIQUE,
+                confidence: cfg.quote_unique,
                 current_range: range,
                 reason: CandidateReason::QuoteMatch,
                 preview: clip_preview(&quote.exact),
@@ -220,7 +298,7 @@ pub fn resolve_anchor(
             if ix_block.content_fingerprint == block.content_fingerprint {
                 let range = anchor_block_to_position(ix_block);
                 candidates.push(Candidate {
-                    confidence: conf::BLOCK_FP,
+                    confidence: cfg.block_fp,
                     current_range: range,
                     reason: CandidateReason::BlockFingerprintMatch,
                     preview: block_preview(current_markdown_bytes, ix_block),
@@ -240,7 +318,7 @@ pub fn resolve_anchor(
                     let range =
                         byte_range_to_position(current_markdown_bytes, abs_start, quote.exact.len());
                     candidates.push(Candidate {
-                        confidence: conf::STRUCTURE_QUOTE,
+                        confidence: cfg.structure_quote,
                         current_range: range,
                         reason: CandidateReason::StructureQuoteMatch,
                         preview: clip_preview(&quote.exact),
@@ -277,7 +355,7 @@ pub fn resolve_anchor(
                             span_end - span_start,
                         );
                         candidates.push(Candidate {
-                            confidence: conf::CONTEXT,
+                            confidence: cfg.context,
                             current_range: range,
                             reason: CandidateReason::ContextMatch,
                             preview: clip_preview_bytes(
@@ -318,7 +396,8 @@ pub fn resolve_anchor(
                     // hit this same range with confidence 0.90 — but the
                     // dedup pass takes the MAX confidence anyway, so we
                     // can emit unconditionally.
-                    let confidence = fuzzy_confidence(target.len(), dist);
+                    let confidence =
+                        fuzzy_confidence_cfg(target.len(), dist, cfg.fuzzy_min, cfg.fuzzy_max);
                     let abs_start = ix_block.byte_range[0] as usize + rel_start;
                     let range = byte_range_to_position(current_markdown_bytes, abs_start, match_len);
                     let preview_end = (abs_start + match_len).min(current_markdown_bytes.len());
@@ -358,7 +437,7 @@ pub fn resolve_anchor(
         } else {
             actual_span as f64 / original_span as f64
         };
-        let confidence = (conf::LINE_PROX_MAX * clamp_ratio).clamp(0.0, conf::LINE_PROX_MAX);
+        let confidence = (cfg.line_prox_max * clamp_ratio).clamp(0.0, cfg.line_prox_max);
         let range = PositionAnchor {
             byte_range: [byte_start, byte_end_excl],
             line_range: [start_line, end_line],
@@ -372,7 +451,7 @@ pub fn resolve_anchor(
         });
     }
 
-    Ok(combine_and_decide(candidates))
+    Ok(combine_and_decide_with_config(candidates, cfg))
 }
 
 // Placeholder kept so the (currently unenforceable) WrongFile branch above
@@ -388,7 +467,10 @@ fn current_index_file_id_placeholder(
 // Combine + decide (amendments #15)
 // ---------------------------------------------------------------------------
 
-fn combine_and_decide(mut candidates: Vec<Candidate>) -> ResolvedAnchor {
+fn combine_and_decide_with_config(
+    mut candidates: Vec<Candidate>,
+    cfg: &ResolverConfig,
+) -> ResolvedAnchor {
     if candidates.is_empty() {
         return ResolvedAnchor::Stale {
             reason: "no candidate produced by any resolution step".to_string(),
@@ -412,7 +494,7 @@ fn combine_and_decide(mut candidates: Vec<Candidate>) -> ResolvedAnchor {
 
     // Exact: only base_hash_match qualifies (~1.00). The float guard avoids
     // a future tweak to MAPPED_STEPS pushing us past 1.0 accidentally.
-    if top.confidence >= conf::EXACT_THRESHOLD {
+    if top.confidence >= cfg.exact_threshold {
         if let Some(reason) = top.reason.as_exact_reason() {
             return ResolvedAnchor::Exact {
                 confidence: top.confidence,
@@ -425,7 +507,7 @@ fn combine_and_decide(mut candidates: Vec<Candidate>) -> ResolvedAnchor {
     // Count candidates ≥ HIGH_CONFIDENCE.
     let high: Vec<&Candidate> = candidates
         .iter()
-        .filter(|c| c.confidence >= conf::HIGH_CONFIDENCE)
+        .filter(|c| c.confidence >= cfg.high_confidence)
         .collect();
 
     // Ambiguous: two or more in the high band AND the top two are within
@@ -433,10 +515,10 @@ fn combine_and_decide(mut candidates: Vec<Candidate>) -> ResolvedAnchor {
     // returned candidate list — that matches the spec's "above 0.50" rule.
     if high.len() >= 2 {
         let gap = (high[0].confidence - high[1].confidence).abs();
-        if gap <= conf::AMBIGUOUS_DELTA {
+        if gap <= cfg.ambiguous_delta {
             let included: Vec<ResolvedAnchorCandidate> = candidates
                 .iter()
-                .filter(|c| c.confidence >= conf::AMBIGUOUS_INCLUDE)
+                .filter(|c| c.confidence >= cfg.ambiguous_include)
                 .map(to_wire_candidate)
                 .collect();
             return ResolvedAnchor::Ambiguous {
@@ -448,7 +530,7 @@ fn combine_and_decide(mut candidates: Vec<Candidate>) -> ResolvedAnchor {
 
     // Remapped: exactly one in the high band (or the top is a clear winner
     // with no peer within 0.10).
-    if top.confidence >= conf::HIGH_CONFIDENCE {
+    if top.confidence >= cfg.high_confidence {
         if let Some(reason) = top.reason.as_remapped_reason() {
             return ResolvedAnchor::Remapped {
                 confidence: top.confidence,
@@ -459,7 +541,7 @@ fn combine_and_decide(mut candidates: Vec<Candidate>) -> ResolvedAnchor {
     }
 
     // Mid-band: any candidate ≥ STALE_FLOOR → remap with the top one.
-    if top.confidence >= conf::STALE_FLOOR {
+    if top.confidence >= cfg.stale_floor {
         if let Some(reason) = top.reason.as_remapped_reason() {
             return ResolvedAnchor::Remapped {
                 confidence: top.confidence,
@@ -472,6 +554,11 @@ fn combine_and_decide(mut candidates: Vec<Candidate>) -> ResolvedAnchor {
     ResolvedAnchor::Stale {
         reason: "no candidate above proximity threshold".to_string(),
     }
+}
+
+#[cfg(test)]
+fn combine_and_decide(candidates: Vec<Candidate>) -> ResolvedAnchor {
+    combine_and_decide_with_config(candidates, &ResolverConfig::DEFAULT)
 }
 
 fn reason_priority(r: CandidateReason) -> u8 {
@@ -761,11 +848,16 @@ fn levenshtein_bounded(a: &[u8], b: &[u8], max_dist: usize) -> usize {
 
 /// Map a Levenshtein distance to a fuzzy confidence in [FUZZY_MIN, FUZZY_MAX].
 /// d=0 → FUZZY_MAX; d=max_allowed → FUZZY_MIN; linear in between.
+#[cfg(test)]
 fn fuzzy_confidence(target_len: usize, dist: usize) -> f64 {
+    fuzzy_confidence_cfg(target_len, dist, conf::FUZZY_MIN, conf::FUZZY_MAX)
+}
+
+fn fuzzy_confidence_cfg(target_len: usize, dist: usize, fuzzy_min: f64, fuzzy_max: f64) -> f64 {
     let max_allowed = (target_len / 5).max(1);
     let ratio = (dist as f64 / max_allowed as f64).clamp(0.0, 1.0);
-    let span = conf::FUZZY_MAX - conf::FUZZY_MIN;
-    conf::FUZZY_MAX - ratio * span
+    let span = fuzzy_max - fuzzy_min;
+    fuzzy_max - ratio * span
 }
 
 // ---------------------------------------------------------------------------

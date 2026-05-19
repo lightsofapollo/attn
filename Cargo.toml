@@ -77,8 +77,13 @@ thiserror = "2"
 
 # HTTP client for mailbox transport (attn-nnj.6.2). rustls-tls keeps the
 # binary self-contained without dragging in OpenSSL; default-features=false
-# strips the cookie/url-encoding-from-form bits we don't need.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# strips the cookie/url-encoding-from-form bits we don't need. We do NOT
+# enable the `json` feature because every call site serialises via
+# `serde_json::to_vec(&body)` + `.body(bytes)` directly — see
+# `src/review/bootstrap.rs` and `src/review/transport/mailbox/mod.rs`. Dropping
+# this feature saves ~70 KiB of `serde_json`-via-reqwest glue from the binary
+# (see planning/collab/binary-size-baseline.md §11.9 investigation).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 # Async runtime — narrowest possible feature set for now. PoW token pool
 # (attn-nnj.1.7) needs `sync` (Mutex) and `rt` (spawn_blocking). Phase 4

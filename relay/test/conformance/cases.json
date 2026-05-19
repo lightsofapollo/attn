@@ -657,9 +657,7 @@
             "errorCode": "ATTN_ROOM_STORAGE_FULL"
           }
         }
-      ],
-      "skip": true,
-      "skipReason": "follow-up: scenario fixture needs timing/state adjustment (filed as attn-nnj.5.16)"
+      ]
     },
     {
       "id": "caps-003c",

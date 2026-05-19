@@ -29,6 +29,7 @@ import { expect } from "vitest";
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
+import { presignBlobDownload } from "../../src/r2";
 import type {
   DeviceRecord,
   EnvelopeInput,
@@ -81,7 +82,13 @@ export type Step =
   | AdvanceMockClockStep
   | SeedR2BlobStep
   | ListR2Step
-  | ExpectStorageStateStep;
+  | ExpectStorageStateStep
+  | BumpStorageStep
+  | RewindStorageStep
+  | FireAlarmStep
+  | PresignBlobStep
+  | PutBlobStep
+  | GetBlobStep;
 
 interface BaseStep {
   /** Optional human-readable label that the runner echoes on failure. */
@@ -314,6 +321,67 @@ interface ExpectStorageStateStep extends BaseStep {
   };
 }
 
+interface BumpStorageStep extends BaseStep {
+  action: "bumpStorage";
+  in: string;
+  /** Full DO storage key (e.g. `meta:bytes_used`). */
+  key: string;
+  /** New value to write — replaces any existing value. */
+  value: number;
+}
+
+interface RewindStorageStep extends BaseStep {
+  action: "rewindStorage";
+  in: string;
+  /** Full DO storage key (e.g. `meta:hard_max_at`). */
+  key: string;
+  /** Subtract this many ms from the current value (must already exist). */
+  deltaMs: number;
+}
+
+interface FireAlarmStep extends BaseStep {
+  action: "fireAlarm";
+  in: string;
+}
+
+interface PresignBlobStep extends BaseStep {
+  action: "presignBlob";
+  in: string;
+  from: string;
+  /** Logical handle to bind the presign result to (defaults to envelopeId). */
+  as?: string;
+  params: {
+    envelopeId: string;
+    ciphertextBytes: number;
+    omitAdmission?: boolean;
+    omitPow?: boolean;
+  };
+  expect: ExpectResponse;
+}
+
+interface PutBlobStep extends BaseStep {
+  action: "putBlob";
+  /** Handle returned by a prior presignBlob step (its envelopeId by default). */
+  as: string;
+  params: {
+    bytes: number;
+    /** Send a body shorter/longer than `bytes` for negative paths. */
+    bodyBytes?: number;
+  };
+  expect: ExpectResponse;
+}
+
+interface GetBlobStep extends BaseStep {
+  action: "getBlob";
+  /** Handle bound by a prior presignBlob step. */
+  as: string;
+  params: {
+    /** When set, assert the GET body length matches. */
+    expectedBytes?: number;
+  };
+  expect: ExpectResponse;
+}
+
 interface ExpectResponse {
   status: number;
   errorCode?: string;
@@ -433,10 +501,20 @@ class FrameQueue {
   }
 }
 
+interface BlobCtx {
+  roomHandle: string;
+  envelopeId: string;
+  ciphertextBytes: number;
+  /** Worker-side cap URL returned from POST /blobs (relative path). */
+  uploadUrl: string;
+}
+
 interface ScenarioState {
   rooms: Map<string, RoomCtx>;
   devices: Map<string, DeviceCtx>;
   sockets: Map<string, SocketCtx>;
+  /** Presigned upload handles keyed by `as` (defaults to envelopeId). */
+  blobs: Map<string, BlobCtx>;
   /** Last-minted PoW token (for replay-attack scenarios). */
   lastPow: string | undefined;
 }
@@ -1330,6 +1408,170 @@ async function actExpectStorageState(
   });
 }
 
+async function actBumpStorage(
+  scenarioId: string,
+  state: ScenarioState,
+  step: BumpStorageStep,
+  stepIdx: number,
+): Promise<void> {
+  const label = describeStep(scenarioId, stepIdx, step);
+  const room = mustRoom(state, step.in, label);
+  const id = env.RELAY_ROOMS.idFromName(room.roomId);
+  const stub = env.RELAY_ROOMS.get(id);
+  await runInDurableObject(stub, async (_inst, ctxStorage) => {
+    await ctxStorage.storage.put<number>(step.key, step.value);
+  });
+}
+
+async function actRewindStorage(
+  scenarioId: string,
+  state: ScenarioState,
+  step: RewindStorageStep,
+  stepIdx: number,
+): Promise<void> {
+  const label = describeStep(scenarioId, stepIdx, step);
+  const room = mustRoom(state, step.in, label);
+  const id = env.RELAY_ROOMS.idFromName(room.roomId);
+  const stub = env.RELAY_ROOMS.get(id);
+  await runInDurableObject(stub, async (_inst, ctxStorage) => {
+    const cur = await ctxStorage.storage.get<number>(step.key);
+    if (cur === undefined) {
+      expect.fail(`${label}: storage key '${step.key}' missing — cannot rewind`);
+    }
+    await ctxStorage.storage.put<number>(step.key, (cur as number) - step.deltaMs);
+  });
+}
+
+async function actFireAlarm(
+  scenarioId: string,
+  state: ScenarioState,
+  step: FireAlarmStep,
+  stepIdx: number,
+): Promise<void> {
+  const label = describeStep(scenarioId, stepIdx, step);
+  const room = mustRoom(state, step.in, label);
+  const id = env.RELAY_ROOMS.idFromName(room.roomId);
+  const stub = env.RELAY_ROOMS.get(id);
+  await runInDurableObject(stub, async (inst, _ctxStorage) => {
+    type WithAlarm = { alarm?: () => Promise<void> };
+    const handler = (inst as unknown as WithAlarm).alarm;
+    if (typeof handler !== "function") {
+      expect.fail(`${label}: alarm() handler not defined on RoomDO`);
+    }
+    await (handler as () => Promise<void>).call(inst);
+  });
+}
+
+interface PresignedUploadResponse {
+  uploadUrl: string;
+  method: "PUT";
+  headers: Record<string, string>;
+  expiresAt: number;
+  blobKey: string;
+}
+
+async function actPresignBlob(
+  scenarioId: string,
+  state: ScenarioState,
+  step: PresignBlobStep,
+  stepIdx: number,
+): Promise<void> {
+  const label = describeStep(scenarioId, stepIdx, step);
+  const room = mustRoom(state, step.in, label);
+  const from = mustDevice(state, step.from, label);
+  const url = `${URL_BASE}/v2/rooms/${room.roomId}/blobs`;
+  const body = JSON.stringify({
+    envelopeId: step.params.envelopeId,
+    authorId: from.participantId,
+    deviceId: from.deviceId,
+    ciphertextBytes: step.params.ciphertextBytes,
+  });
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (!(step.params.omitAdmission === true)) {
+    headers["Attn-Admission"] = await admissionHeaderFor({
+      method: "POST",
+      url,
+      body,
+      admissionKey: room.admissionKey,
+    });
+  }
+  if (!(step.params.omitPow === true)) {
+    headers["Attn-PoW"] = await mintPowForTests({
+      roomId: room.roomId,
+      deviceId: from.deviceId,
+      method: "POST",
+      path: `/v2/rooms/${room.roomId}/blobs`,
+      difficulty: Math.max(12, room.policy.powBits),
+      expiresAt: nextPowExpiresAt(),
+      rand: FIXED_POW_RAND,
+    });
+  }
+  const res = await SELF.fetch(url, { method: "POST", headers, body });
+  const responseBody = await assertResponse(res, step.expect, label);
+  if (res.status === 200) {
+    const presigned = responseBody as PresignedUploadResponse;
+    const handle = step.as ?? step.params.envelopeId;
+    state.blobs.set(handle, {
+      roomHandle: step.in,
+      envelopeId: step.params.envelopeId,
+      ciphertextBytes: step.params.ciphertextBytes,
+      uploadUrl: presigned.uploadUrl,
+    });
+  }
+}
+
+function makeBlobBytes(byteLen: number, seed: number): Uint8Array {
+  const out = new Uint8Array(byteLen);
+  for (let i = 0; i < byteLen; i++) out[i] = (seed + i * 37) & 0xff;
+  return out;
+}
+
+async function actPutBlob(
+  scenarioId: string,
+  state: ScenarioState,
+  step: PutBlobStep,
+  stepIdx: number,
+): Promise<void> {
+  const label = describeStep(scenarioId, stepIdx, step);
+  const blob = state.blobs.get(step.as);
+  if (blob === undefined) {
+    expect.fail(`${label}: unknown blob handle '${step.as}' — call presignBlob first`);
+  }
+  const payloadLen = step.params.bodyBytes ?? step.params.bytes;
+  const payload = makeBlobBytes(payloadLen, 0x42);
+  const res = await SELF.fetch(`${URL_BASE}${blob.uploadUrl}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: payload,
+  });
+  await assertResponse(res, step.expect, label);
+}
+
+async function actGetBlob(
+  scenarioId: string,
+  state: ScenarioState,
+  step: GetBlobStep,
+  stepIdx: number,
+): Promise<void> {
+  const label = describeStep(scenarioId, stepIdx, step);
+  const blob = state.blobs.get(step.as);
+  if (blob === undefined) {
+    expect.fail(`${label}: unknown blob handle '${step.as}' — call presignBlob first`);
+  }
+  const room = mustRoom(state, blob.roomHandle, label);
+  const download = await presignBlobDownload(env, room.roomId, blob.envelopeId);
+  const res = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, { method: "GET" });
+  await assertResponse(res, step.expect, label);
+  if (step.params.expectedBytes !== undefined && res.status === 200) {
+    const got = new Uint8Array(await res.arrayBuffer());
+    if (got.byteLength !== step.params.expectedBytes) {
+      expect.fail(
+        `${label}: expected ${step.params.expectedBytes} bytes, got ${got.byteLength}`,
+      );
+    }
+  }
+}
+
 // --- top-level dispatcher -----------------------------------------------
 
 export async function runScenario(scenario: Scenario): Promise<void> {
@@ -1337,6 +1579,7 @@ export async function runScenario(scenario: Scenario): Promise<void> {
     rooms: new Map(),
     devices: new Map(),
     sockets: new Map(),
+    blobs: new Map(),
     lastPow: undefined,
   };
 
@@ -1395,6 +1638,24 @@ export async function runScenario(scenario: Scenario): Promise<void> {
           break;
         case "expectStorageState":
           await actExpectStorageState(scenario.id, state, step, i);
+          break;
+        case "bumpStorage":
+          await actBumpStorage(scenario.id, state, step, i);
+          break;
+        case "rewindStorage":
+          await actRewindStorage(scenario.id, state, step, i);
+          break;
+        case "fireAlarm":
+          await actFireAlarm(scenario.id, state, step, i);
+          break;
+        case "presignBlob":
+          await actPresignBlob(scenario.id, state, step, i);
+          break;
+        case "putBlob":
+          await actPutBlob(scenario.id, state, step, i);
+          break;
+        case "getBlob":
+          await actGetBlob(scenario.id, state, step, i);
           break;
         default: {
           const _exhaustive: never = step;

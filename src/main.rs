@@ -24,6 +24,8 @@ use tao::window::WindowBuilder;
 use watcher::{FsChangeKind, UserEvent};
 use wry::WebViewBuilder;
 
+use crate::review::manager::ReviewManager;
+
 #[derive(Parser, Debug)]
 #[command(name = "attn", about = "A beautiful markdown viewer")]
 struct Cli {
@@ -270,8 +272,6 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     platform::configure_event_loop(&mut event_loop);
 
-    // Start the unix socket listener for incoming paths
-    let _socket_cleanup = daemon::start_listener(event_loop.create_proxy())?;
     let watcher_proxy = event_loop.create_proxy();
 
     // Start recursive file watcher for the current project root.
@@ -323,6 +323,29 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     // call sites and the FsChanged handler both reach into AppState for this
     // Arc so they all refer to the same tracker instance.
     let self_write_tracker = Arc::new(crate::review::watcher_state::SelfWriteTracker::new());
+
+    // ReviewManager scaffold (issue attn-nnj.2.8): instantiate only when the
+    // store is available. The manager emits `ReviewUpdate`s back into this
+    // event loop via the proxy closure below, integrating with the existing
+    // tao loop rather than spinning up a parallel one (per
+    // `planning/collab/amendments.md` §Codebase Corrections).
+    let review_manager = review_store.as_ref().map(|store| {
+        let proxy = event_loop.create_proxy();
+        let update_tx: crate::review::manager::UpdateSink = Box::new(move |update| {
+            let _ = proxy.send_event(UserEvent::Review(update));
+        });
+        let working_copy =
+            Arc::new(crate::review::working_copy::WorkingCopyService::new());
+        Arc::new(ReviewManager::new(
+            Arc::clone(store),
+            working_copy,
+            update_tx,
+        ))
+    });
+    if review_manager.is_none() {
+        eprintln!("attn: review manager unavailable, review commands will be no-ops");
+    }
+
     let app_state = Arc::new(Mutex::new(ipc::AppState {
         active_path: initial_ui_path.clone(),
         active_project_root: tree_root.clone(),
@@ -331,6 +354,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         file_to_room: std::collections::HashMap::new(),
         review_store,
         self_write_tracker: Arc::clone(&self_write_tracker),
+        review_manager: review_manager.clone(),
     }));
 
     // Prune expired entries from the self-write tracker on a slow ticker.
@@ -354,6 +378,12 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let ipc_state = Arc::clone(&app_state);
     let ipc_proxy = event_loop.create_proxy();
 
+    // Start the unix socket listener (forwards review socket commands to the
+    // manager so CLI agents reach the same dispatch path as the webview IPC).
+    let _socket_cleanup =
+        daemon::start_listener(event_loop.create_proxy(), review_manager.clone())?;
+
+    let custom_protocol_review_manager = review_manager.clone();
     let mut webview_builder = WebViewBuilder::new()
         .with_initialization_script(&initialization_script)
         .with_ipc_handler(move |msg| {
@@ -394,7 +424,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             // layer (issue 2.8) derives the room key from it. Fragments never
             // cross the network — wry delivers the full URL in-process.
             if let Some(invite) = parse_review_invite(&uri) {
-                daemon::dispatch_review_join(&invite);
+                daemon::dispatch_review_join(&invite, custom_protocol_review_manager.as_ref());
                 let body = REVIEW_JOIN_ACK_HTML.as_bytes().to_vec();
                 return wry::http::Response::builder()
                     .status(200)
@@ -664,6 +694,25 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 });
                 let js = format!("window.__attn__.updateContent({payload});");
                 let _ = webview.evaluate_script(&js);
+            }
+            Event::UserEvent(UserEvent::Review(update)) => {
+                // Route a `ReviewUpdate` from the ReviewManager into the
+                // matching `window.__attn__.review*` callback (issue
+                // attn-nnj.2.8). The payload is the same camelCase JSON the
+                // TypeScript types in `web/src/lib/types.ts` expect.
+                let callback = update.callback_name();
+                match serde_json::to_string(&update) {
+                    Ok(json) => {
+                        let js =
+                            format!("window.__attn__ && window.__attn__.{callback}({json})");
+                        let _ = webview.evaluate_script(&js);
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "attn: failed to serialize ReviewUpdate for {callback}: {err}"
+                        );
+                    }
+                }
             }
             #[cfg(debug_assertions)]
             Event::UserEvent(UserEvent::Screenshot(tx)) => {

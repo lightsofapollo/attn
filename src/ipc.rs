@@ -1,4 +1,5 @@
 use crate::review::ids::{EventId, FileId, RoomId};
+use crate::review::manager::{ReviewCommand, ReviewManager};
 use crate::review::model::{Anchor, PositionAnchor, SuggestionDraft};
 use crate::review::store::ReviewStore;
 use crate::review::watcher_state::SelfWriteTracker;
@@ -150,6 +151,12 @@ pub struct AppState {
     /// service with `WorkingCopyService::with_tracker(self_write_tracker.clone())`
     /// so the watcher can drop the corresponding `FsChanged` event.
     pub self_write_tracker: Arc<SelfWriteTracker>,
+    /// `ReviewManager` runtime (issue attn-nnj.2.8). `Some` when the daemon
+    /// successfully opened the review store at startup; the manager owns the
+    /// command dispatch loop and emits `ReviewUpdate`s back into the tao
+    /// event loop. Review IPC handlers submit commands here instead of
+    /// performing inline work.
+    pub review_manager: Option<Arc<ReviewManager>>,
 }
 
 /// Lightweight handle for a live review room. `ReviewManager` owns the heavy
@@ -260,44 +267,54 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                     eprintln!("attn: js error stack:\n{stack}");
                 }
             }
-            // Review collaboration stub handlers. Real wiring lives in
-            // `ReviewManager` (issue attn-nnj.2.8). For now we log the call
-            // so the frontend stubs (attn-nnj.12.5) can confirm messages
-            // round-trip through the webview IPC boundary.
+            // Review collaboration handlers. Dispatch each message to
+            // `ReviewManager::submit` (issue attn-nnj.2.8). The manager logs
+            // the command and emits a stub `ReviewUpdate` back through the
+            // event loop → `window.__attn__.review*` callback round-trip;
+            // real handler bodies land in later issues.
             IpcMessage::ReviewShare { path, mode, ttl } => {
-                eprintln!(
-                    "attn: review_share received (stub): path={path} mode={mode} ttl={:?}",
-                    ttl
+                submit_review_command(
+                    state,
+                    ReviewCommand::Share {
+                        path: PathBuf::from(path),
+                        mode,
+                        ttl,
+                    },
                 );
             }
             IpcMessage::ReviewJoin { invite } => {
-                eprintln!("attn: review_join received (stub): invite={invite}");
+                submit_review_command(state, ReviewCommand::Join { invite });
             }
             IpcMessage::ReviewCreateComment {
                 room_id,
                 anchor,
                 body,
             } => {
-                eprintln!(
-                    "attn: review_create_comment received (stub): room={:?} body_len={} anchor_v={}",
-                    room_id,
-                    body.len(),
-                    anchor.v
+                submit_review_command(
+                    state,
+                    ReviewCommand::CreateComment {
+                        room_id,
+                        anchor,
+                        body,
+                    },
                 );
             }
             IpcMessage::ReviewCreateSuggestion { room_id, draft } => {
-                eprintln!(
-                    "attn: review_create_suggestion received (stub): room={:?} anchor_v={}",
-                    room_id, draft.anchor.v
+                submit_review_command(
+                    state,
+                    ReviewCommand::CreateSuggestion { room_id, draft },
                 );
             }
             IpcMessage::ReviewAcceptSuggestion {
                 room_id,
                 suggestion_id,
             } => {
-                eprintln!(
-                    "attn: review_accept_suggestion received (stub): room={:?} suggestion={:?}",
-                    room_id, suggestion_id
+                submit_review_command(
+                    state,
+                    ReviewCommand::AcceptSuggestion {
+                        room_id,
+                        suggestion_id,
+                    },
                 );
             }
             IpcMessage::ReviewResolveAnchor {
@@ -305,9 +322,13 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 event_id,
                 range,
             } => {
-                eprintln!(
-                    "attn: review_resolve_anchor received (stub): room={:?} event={:?} byte_range={:?}",
-                    room_id, event_id, range.byte_range
+                submit_review_command(
+                    state,
+                    ReviewCommand::ResolveAnchor {
+                        room_id,
+                        event_id,
+                        range,
+                    },
                 );
             }
         },
@@ -386,6 +407,29 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
     }
 }
 
+/// Forward a `ReviewCommand` to the `ReviewManager` if one is wired up.
+///
+/// When the daemon failed to open a review store at startup the manager is
+/// `None` — we log so the user can see the command was received but otherwise
+/// no-op. The manager itself logs every command and emits a `ReviewUpdate`
+/// back through the event loop, so a successful dispatch is observable in
+/// devtools without any work from this helper.
+fn submit_review_command(state: &Arc<Mutex<AppState>>, cmd: ReviewCommand) {
+    let manager = {
+        let Ok(state) = state.lock() else {
+            eprintln!("attn: review command dropped — AppState lock poisoned");
+            return;
+        };
+        state.review_manager.clone()
+    };
+    match manager {
+        Some(manager) => manager.submit(cmd),
+        None => eprintln!(
+            "attn: review command dropped — ReviewManager unavailable: {cmd:?}"
+        ),
+    }
+}
+
 /// If `path` is mapped to a `(room, file)` AND the daemon has a
 /// `ReviewStore` open, append the `LocalRevision` returned by
 /// `WorkingCopyService::save` to the room's revision journal. Otherwise
@@ -452,6 +496,15 @@ mod tests {
         review_store: Option<Arc<ReviewStore>>,
         file_to_room: HashMap<PathBuf, (RoomId, FileId)>,
     ) -> Arc<Mutex<AppState>> {
+        make_state_with_manager(active_path, review_store, file_to_room, None)
+    }
+
+    fn make_state_with_manager(
+        active_path: PathBuf,
+        review_store: Option<Arc<ReviewStore>>,
+        file_to_room: HashMap<PathBuf, (RoomId, FileId)>,
+        review_manager: Option<Arc<ReviewManager>>,
+    ) -> Arc<Mutex<AppState>> {
         Arc::new(Mutex::new(AppState {
             active_path: active_path.clone(),
             active_project_root: active_path
@@ -463,6 +516,7 @@ mod tests {
             file_to_room,
             review_store,
             self_write_tracker: Arc::new(SelfWriteTracker::new()),
+            review_manager,
         }))
     }
 
@@ -620,5 +674,182 @@ mod tests {
         }"#;
         let msg: IpcMessage = serde_json::from_str(raw).expect("parse review_resolve_anchor");
         assert!(matches!(msg, IpcMessage::ReviewResolveAnchor { .. }));
+    }
+
+    // -----------------------------------------------------------------
+    // ReviewManager dispatch round-trip (attn-nnj.2.8)
+    // -----------------------------------------------------------------
+
+    use crate::review::manager::{ReviewUpdate, UpdateSink};
+    use std::sync::Mutex as StdMutex;
+    use std::sync::mpsc;
+
+    /// Build a `ReviewManager` whose `update_tx` writes into an std::mpsc
+    /// channel so tests can assert which `ReviewUpdate`s fired without
+    /// pulling in the tao event loop.
+    fn make_test_manager(
+        store: Arc<ReviewStore>,
+    ) -> (Arc<ReviewManager>, mpsc::Receiver<ReviewUpdate>) {
+        let (tx, rx) = mpsc::channel::<ReviewUpdate>();
+        let tx = StdMutex::new(tx);
+        let sink: UpdateSink = Box::new(move |update| {
+            let _ = tx.lock().expect("test sink mutex").send(update);
+        });
+        let working_copy = Arc::new(WorkingCopyService::new());
+        (
+            Arc::new(ReviewManager::new(store, working_copy, sink)),
+            rx,
+        )
+    }
+
+    fn dummy_review_store(tmp: &TempDir) -> Arc<ReviewStore> {
+        Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"))
+    }
+
+    /// Helper: parse a raw IPC body to an `IpcMessage`, extract the review
+    /// command shape, and dispatch directly via `submit_review_command`.
+    ///
+    /// We can't call `handle_message` from tests on macOS because creating an
+    /// `EventLoopProxy` requires a tao `EventLoop`, which must be built on
+    /// the main thread. The Review IPC arms don't use the proxy anyway —
+    /// they only touch `submit_review_command` — so this helper exercises the
+    /// same code path without dragging in tao.
+    fn dispatch_review_ipc(body: &str, state: &Arc<Mutex<AppState>>) {
+        let msg: IpcMessage = serde_json::from_str(body).expect("parse IpcMessage");
+        let cmd = match msg {
+            IpcMessage::ReviewShare { path, mode, ttl } => ReviewCommand::Share {
+                path: PathBuf::from(path),
+                mode,
+                ttl,
+            },
+            IpcMessage::ReviewJoin { invite } => ReviewCommand::Join { invite },
+            IpcMessage::ReviewCreateComment {
+                room_id,
+                anchor,
+                body,
+            } => ReviewCommand::CreateComment {
+                room_id,
+                anchor,
+                body,
+            },
+            IpcMessage::ReviewCreateSuggestion { room_id, draft } => {
+                ReviewCommand::CreateSuggestion { room_id, draft }
+            }
+            IpcMessage::ReviewAcceptSuggestion {
+                room_id,
+                suggestion_id,
+            } => ReviewCommand::AcceptSuggestion {
+                room_id,
+                suggestion_id,
+            },
+            IpcMessage::ReviewResolveAnchor {
+                room_id,
+                event_id,
+                range,
+            } => ReviewCommand::ResolveAnchor {
+                room_id,
+                event_id,
+                range,
+            },
+            other => panic!("not a review IpcMessage: {other:?}"),
+        };
+        submit_review_command(state, cmd);
+    }
+
+    #[test]
+    fn ipc_review_share_routes_through_manager_and_emits_update() {
+        // Round-trip: an IPC ReviewShare message dispatched through
+        // submit_review_command must reach the ReviewManager (which emits
+        // exactly one stub RoomStatusChanged update). This is the test that
+        // proves the IPC -> Manager wiring works.
+        let tmp = TempDir::new().expect("tempdir");
+        let store = dummy_review_store(&tmp);
+        let (manager, rx) = make_test_manager(store.clone());
+
+        let active_path = tmp.path().join("doc.md");
+        std::fs::write(&active_path, b"# hi\n").expect("seed file");
+        let state = make_state_with_manager(
+            active_path,
+            Some(store),
+            HashMap::new(),
+            Some(manager),
+        );
+
+        let body = r#"{"type":"review_share","path":"/tmp/plan.md","mode":"live"}"#;
+        dispatch_review_ipc(body, &state);
+
+        let update = rx.try_recv().expect("manager should have received one update");
+        match update {
+            ReviewUpdate::RoomStatusChanged { status, .. } => {
+                assert!(
+                    status.contains("Pending share"),
+                    "expected pending-share stub, got: {status}"
+                );
+            }
+            other => panic!("expected RoomStatusChanged, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "ReviewManager should emit exactly one update per command"
+        );
+    }
+
+    #[test]
+    fn ipc_review_create_comment_routes_through_manager() {
+        // Same round-trip shape as the share test, but for the typed
+        // CreateComment payload — this is the path the comment composer in
+        // the frontend will use.
+        let tmp = TempDir::new().expect("tempdir");
+        let store = dummy_review_store(&tmp);
+        let (manager, rx) = make_test_manager(store.clone());
+
+        let active_path = tmp.path().join("doc.md");
+        std::fs::write(&active_path, b"# hi\n").expect("seed file");
+        let state = make_state_with_manager(
+            active_path,
+            Some(store),
+            HashMap::new(),
+            Some(manager),
+        );
+
+        let body = r#"{
+            "type":"review_create_comment",
+            "roomId":"room-abc",
+            "anchor":{
+                "v":2,
+                "fileId":"file-1",
+                "snapshotId":"snap-1",
+                "baseHash":"hash-1",
+                "position":{"byteRange":[0,5],"lineRange":[1,1]}
+            },
+            "body":"looks great"
+        }"#;
+        dispatch_review_ipc(body, &state);
+
+        let update = rx.try_recv().expect("manager should have received one update");
+        match update {
+            ReviewUpdate::EventImported { body_type, .. } => {
+                assert!(
+                    body_type.starts_with("comment_created_stub"),
+                    "expected comment_created_stub, got {body_type}"
+                );
+            }
+            other => panic!("expected EventImported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ipc_review_command_drops_silently_when_manager_unavailable() {
+        // Defensive: when the daemon couldn't open the review store at
+        // startup, `review_manager` is None. IPC handlers must not panic;
+        // they just log and continue.
+        let tmp = TempDir::new().expect("tempdir");
+        let active_path = tmp.path().join("doc.md");
+        std::fs::write(&active_path, b"# hi\n").expect("seed file");
+        let state = make_state_with_manager(active_path, None, HashMap::new(), None);
+
+        let body = r#"{"type":"review_share","path":"/tmp/plan.md","mode":"live"}"#;
+        dispatch_review_ipc(body, &state);
+        // No assertion — the test passes if we did not panic / poison locks.
     }
 }

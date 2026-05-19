@@ -17,9 +17,10 @@
 -->
 
 <script lang="ts">
+  import AmbiguousAnchorPicker from './AmbiguousAnchorPicker.svelte';
   import { reviewAcceptSuggestion } from './ipc';
   import { reviewStore } from './review/store.svelte';
-  import type { EventId, RoomId, Thread } from './types';
+  import type { EventId, ResolvedAnchorCandidate, RoomId, Thread } from './types';
 
   type CardKind = 'comment' | 'suggestion';
   type CardState =
@@ -55,6 +56,11 @@
     /** Locally-set marker — true after the user clicked reject/resolve and
      *  the IPC is not yet acknowledged (or doesn't exist yet). */
     pendingDismiss?: boolean;
+    /** Fires when the embedded AmbiguousAnchorPicker has dispatched a
+     *  reviewResolveAnchor IPC. The parent uses this for tests / for
+     *  any optimistic local marking until the store gets the
+     *  AnchorResolutionChanged update back. */
+    onCandidatePicked?: (candidate: ResolvedAnchorCandidate, index: number) => void;
   }
 
   let {
@@ -70,7 +76,34 @@
     onReject,
     onResolve,
     pendingDismiss = false,
+    onCandidatePicked,
   }: Props = $props();
+
+  // ---------------------------------------------------------------------------
+  // Ambiguous-picker integration (attn-nnj.4.7)
+  // ---------------------------------------------------------------------------
+  //
+  // When the resolver returns `status: 'ambiguous'`, the orphan-tray card
+  // hosts an inline AmbiguousAnchorPicker so the owner can pick which
+  // candidate becomes the new resolved anchor.
+
+  const ambiguousCandidates: ResolvedAnchorCandidate[] = $derived(
+    extractAmbiguousCandidates(thread),
+  );
+
+  const ambiguousReason: string | undefined = $derived(extractAmbiguousReason(thread));
+
+  function extractAmbiguousCandidates(t: Thread): ResolvedAnchorCandidate[] {
+    const r = t.resolvedAnchor;
+    if (!r || r.status !== 'ambiguous') return [];
+    return r.candidates;
+  }
+
+  function extractAmbiguousReason(t: Thread): string | undefined {
+    const r = t.resolvedAnchor;
+    if (!r || r.status !== 'ambiguous') return undefined;
+    return r.reason;
+  }
 
   // ---------------------------------------------------------------------------
   // Body extraction
@@ -239,6 +272,18 @@
 
   {#if thread.replies.length > 0}
     <p class="rmc-replies">{thread.replies.length} reply{thread.replies.length === 1 ? '' : 's'}</p>
+  {/if}
+
+  {#if state === 'ambiguous' && ambiguousCandidates.length > 0}
+    <AmbiguousAnchorPicker
+      roomId={thread.rootEvent.meta.roomId}
+      eventId={thread.rootEvent.meta.eventId}
+      candidates={ambiguousCandidates}
+      reason={ambiguousReason}
+      onPicked={(candidate, index) => {
+        if (onCandidatePicked) onCandidatePicked(candidate, index);
+      }}
+    />
   {/if}
 
   <footer class="rmc-actions">

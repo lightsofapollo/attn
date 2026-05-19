@@ -26,8 +26,10 @@ import {
 } from "./admission";
 import { canonicalize, type CanonicalValue } from "./canonical";
 import type { Env } from "./env";
+import { OwnerSigError, verifyOwnerSignature } from "./owner-sig";
 import { PowError, verifyPow } from "./pow";
 import {
+  acksRequestSchema,
   deviceRegistrationSchema,
   envelopeBatchSchema,
   roomCreationSchema,
@@ -41,6 +43,7 @@ import {
 const ROOM_PATH_RE = /^\/v2\/rooms\/([^/]+)\/?$/;
 const ROOM_DEVICES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/devices\/?$/;
 const ROOM_ENVELOPES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/envelopes\/?$/;
+const ROOM_ACKS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/acks\/?$/;
 const ROOM_SOCKET_PATH_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
 
 const ED25519_PUB_BYTE_LEN = 32;
@@ -161,6 +164,18 @@ export class RoomDO extends DurableObject<Env> {
         return this.handleEnvelopesIngest(request, roomId, url.pathname);
       }
       return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /envelopes`);
+    }
+
+    const acksMatch = url.pathname.match(ROOM_ACKS_PATH_RE);
+    if (acksMatch) {
+      const roomId = acksMatch[1];
+      if (roomId === undefined || roomId === "") {
+        return errorResponse(400, "ATTN_ROOM_ID_INVALID", "roomId required");
+      }
+      if (request.method === "POST") {
+        return this.handleAcks(request, roomId, url.pathname);
+      }
+      return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /acks`);
     }
 
     const socketMatch = url.pathname.match(ROOM_SOCKET_PATH_RE);
@@ -955,6 +970,260 @@ export class RoomDO extends DurableObject<Env> {
     }
   }
 
+  // -- POST /v2/rooms/:roomId/acks ----------------------------------------
+
+  /**
+   * Acknowledge envelopes per relay-spec.md §POST /v2/rooms/:roomId/acks and
+   * amendments.md #12 (deleteEventsAfterOwnerAck defaults to false).
+   *
+   * Per spec the request shape is `{ackedEnvelopeIds, deviceId}` plus headers:
+   *   - `Attn-Admission` always required.
+   *   - `Attn-PoW` always required (write endpoint).
+   *   - `Attn-Owner-Signature` required IF AND ONLY IF the caller wants
+   *     deletion AND `policy.deleteEventsAfterOwnerAck == true`. The presence
+   *     of the header is the caller's signal of delete-intent; without it, we
+   *     just record the ACK and keep the envelope until TTL.
+   *
+   * Deletion gating (defensive layering):
+   *   1. Owner-sig header present? If not → no-delete branch.
+   *   2. policy.deleteEventsAfterOwnerAck == true? If not → header is ignored
+   *      (no error). Lets clients always send the header without coordinating
+   *      on policy state.
+   *   3. The acking device's stored record has kind == "owner"? If not →
+   *      header ignored (per task pin: "ignore non-owner signatures silently
+   *      and don't delete — be conservative"). Reviewers can't unlock the
+   *      delete path even if they somehow produce a valid-looking header.
+   *   4. verifyOwnerSignature passes? If not → 403. (At this point the caller
+   *      claimed owner-intent on an owner device against a delete-enabled
+   *      policy; a signature mismatch is an attempted forgery.)
+   *
+   * Idempotency:
+   *   - Acking an envelope that no longer exists (already deleted) is 204.
+   *   - Re-acking an envelope only re-writes its `ack:<deviceId>:<envelopeId>`
+   *     slot with the current timestamp; counts/bytes aren't double-decremented
+   *     because deletion is gated on env_idx existence.
+   *   - Acking an unknown envelopeId is 204 (per spec: "Acking a non-existent
+   *     or already-deleted envelope is `204`").
+   *
+   * Response: 204 No Content.
+   */
+  private async handleAcks(
+    request: Request,
+    roomId: string,
+    urlPath: string,
+  ): Promise<Response> {
+    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
+    if (storedAdmissionKey === undefined) {
+      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+    }
+
+    // Buffer body so admission/owner-sig + JSON.parse can both read it.
+    let bodyBytes: Uint8Array;
+    try {
+      bodyBytes = new Uint8Array(await request.arrayBuffer());
+    } catch (err) {
+      return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
+    }
+
+    // 1. Admission — URL-as-bearer trust boundary.
+    try {
+      const buffered = bufferedRequest(request, bodyBytes);
+      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
+    } catch (err) {
+      if (err instanceof AdmissionError) {
+        return errorResponse(401, err.code, err.message);
+      }
+      throw err;
+    }
+
+    // 2. Parse body (need deviceId to bind PoW).
+    let parsed: unknown;
+    try {
+      const text = new TextDecoder().decode(bodyBytes);
+      parsed = JSON.parse(text);
+    } catch (err) {
+      return errorResponse(400, "ATTN_BODY_INVALID", `request body is not valid JSON: ${(err as Error).message}`);
+    }
+    const result = acksRequestSchema.safeParse(parsed);
+    if (!result.success) {
+      return errorResponse(400, "ATTN_BODY_INVALID", formatZodError(result.error));
+    }
+    const body = result.data;
+
+    // 3. PoW — bound to (roomId, body.deviceId, POST, urlPath).
+    const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+    if (policy === undefined) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
+    }
+    const powToken = request.headers.get("Attn-PoW");
+    if (powToken === null || powToken === "") {
+      return errorResponse(400, "ATTN_POW_INVALID", "missing Attn-PoW header");
+    }
+    try {
+      await verifyPow(powToken, {
+        roomId,
+        deviceId: body.deviceId,
+        method: "POST",
+        urlPath,
+        policyPowBits: policy.powBits,
+        now: Date.now(),
+        isReplayed: (hash) => this.isPowSeen(hash),
+        markSeen: (hash, expiresAt) => this.markPowSeen(hash, expiresAt),
+      });
+    } catch (err) {
+      if (err instanceof PowError) {
+        return errorResponse(400, err.code, err.message);
+      }
+      throw err;
+    }
+
+    // 4. Deletion gating — see method docstring for layering rationale.
+    //    `deleteIntent` is the caller asking for deletion (owner-sig header
+    //    present). `mayDelete` only flips true if every layer below also
+    //    holds (policy enabled, acking device is owner-kind, signature ok).
+    const ownerSigHeader = request.headers.get("Attn-Owner-Signature");
+    const deleteIntent = ownerSigHeader !== null && ownerSigHeader !== "";
+
+    // Look up the acking device's record. Used both for kind-gating the
+    // owner branch and for surfacing a clear 4xx if the device isn't known.
+    const ackingDevice = await this.findDeviceByDeviceId(body.deviceId);
+
+    let mayDelete = false;
+    if (
+      deleteIntent &&
+      policy.deleteEventsAfterOwnerAck === true &&
+      ackingDevice !== undefined &&
+      ackingDevice.kind === "owner"
+    ) {
+      // Layer 4: verify the signature. A failure here is an attempted forgery
+      // (caller signaled owner-intent against an owner device + delete-enabled
+      // policy) so we surface 403 rather than silently downgrading to ack-only.
+      const ownerKey = await this.ctx.storage.get<Uint8Array>(META.ownerSigningKey);
+      if (ownerKey === undefined) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing owner key`);
+      }
+      try {
+        // Owner-sig consumes the body via request.clone() inside canonicalRequest;
+        // wrap a fresh buffered Request so the body bytes stay readable.
+        const buffered = bufferedRequest(request, bodyBytes);
+        await verifyOwnerSignature(buffered, urlPath, ownerKey);
+        mayDelete = true;
+      } catch (err) {
+        if (err instanceof OwnerSigError) {
+          return errorResponse(403, err.code, err.message);
+        }
+        throw err;
+      }
+    }
+
+    // 5. Per-envelope: mark per-device ACK, optionally delete.
+    //    We collect writes and deletes and commit at the end so partial failures
+    //    leave the storage atomically advanced.
+    const writes: Record<string, unknown> = {};
+    const keysToDelete: string[] = [];
+    let bytesDelta = 0;
+    let countDelta = 0;
+    const ackedAt = Date.now();
+    // Track the lowest paddedSeq we deleted so we can advance
+    // meta:oldest_retained_seq when a leading run drops away.
+    let minDeletedPaddedSeq: string | undefined;
+
+    for (const envelopeId of body.ackedEnvelopeIds) {
+      // Per-device ACK slot. Always re-written with the latest timestamp so a
+      // re-ack noticeably updates the slot; idempotent in the count/bytes
+      // sense (we only debit storage when we actually delete the envelope).
+      writes[ackKey(body.deviceId, envelopeId)] = ackedAt;
+
+      if (!mayDelete) continue;
+
+      // Lookup the env_idx to find the padded seq of this envelope's payload.
+      // Missing entry = already deleted (or never existed) → idempotent no-op.
+      const paddedSeq = await this.ctx.storage.get<string>(envIndexKey(envelopeId));
+      if (paddedSeq === undefined) continue;
+      const payloadKey = envStorageKey(paddedSeq, envelopeId);
+      const record = await this.ctx.storage.get<EnvelopeRecord>(payloadKey);
+      if (record === undefined) {
+        // env_idx present but payload missing — corrupt state; drop the idx
+        // entry too so a retry doesn't re-trip this branch.
+        keysToDelete.push(envIndexKey(envelopeId));
+        continue;
+      }
+
+      // Track ack_owner so future scans (e.g., GET /envelopes filters) can
+      // tell that an owner ack happened even after the payload is gone.
+      writes[ackOwnerKey(envelopeId)] = "";
+
+      // Stage the storage deletes. We hold env_idx around for retries to keep
+      // landing as no-ops; deleting the payload + env_by_target entries is
+      // enough to free the bytes.
+      keysToDelete.push(payloadKey);
+      keysToDelete.push(envIndexKey(envelopeId));
+      if (record.kind === "signal" && record.target?.deviceId !== undefined) {
+        keysToDelete.push(envByTargetKey(record.target.deviceId, paddedSeq, envelopeId));
+      }
+      bytesDelta -= record.ciphertextBytes;
+      countDelta -= 1;
+
+      if (minDeletedPaddedSeq === undefined || paddedSeq < minDeletedPaddedSeq) {
+        minDeletedPaddedSeq = paddedSeq;
+      }
+    }
+
+    // 6. Meta updates on actual deletion. We re-read the current counters
+    //    inside the same DO event so the writes commit on a consistent base.
+    if (mayDelete && (countDelta !== 0 || bytesDelta !== 0)) {
+      const [curCount, curBytes, curOldestRetained] = await Promise.all([
+        this.ctx.storage.get<number>(META.envelopeCount),
+        this.ctx.storage.get<number>(META.bytesUsed),
+        this.ctx.storage.get<number>(META.oldestRetainedSeq),
+      ]);
+      const newCount = Math.max(0, (curCount ?? 0) + countDelta);
+      const newBytes = Math.max(0, (curBytes ?? 0) + bytesDelta);
+      writes[META.envelopeCount] = newCount;
+      writes[META.bytesUsed] = newBytes;
+
+      // Advance oldest_retained_seq if the lowest envelope still alive is
+      // beyond the previous mark. Scan env_idx forward from the prior mark to
+      // find the new floor; bounded by the number of deleted envelopes in this
+      // batch (worst case: 100).
+      if (minDeletedPaddedSeq !== undefined) {
+        const prevOldest = curOldestRetained ?? 0;
+        const newOldest = await this.findOldestRetainedSeq(prevOldest);
+        if (newOldest > prevOldest) {
+          writes[META.oldestRetainedSeq] = newOldest;
+        }
+      }
+    }
+
+    if (Object.keys(writes).length > 0) {
+      await this.ctx.storage.put<unknown>(writes);
+    }
+    if (keysToDelete.length > 0) {
+      await this.ctx.storage.delete(keysToDelete);
+    }
+
+    return new Response(null, { status: 204 });
+  }
+
+  /**
+   * Scan env:* forward from `prevOldest` (exclusive) and return the smallest
+   * remaining serverSeq. If no envelopes remain, returns the room's current
+   * meta:server_seq (so future replays still gate `after < oldest` correctly).
+   */
+  private async findOldestRetainedSeq(prevOldest: number): Promise<number> {
+    const entries = await this.ctx.storage.list<EnvelopeRecord>({
+      prefix: ENV_PREFIX,
+      limit: 1,
+    });
+    for (const record of entries.values()) {
+      return record.serverSeq;
+    }
+    // No envelopes left — pin to the highest seq we've ever issued so any
+    // subscriber with after=N (N <= max) still satisfies after >= oldest.
+    const serverSeq = await this.ctx.storage.get<number>(META.serverSeq);
+    return Math.max(prevOldest, serverSeq ?? 0);
+  }
+
   // -- WebSocket /v2/rooms/:roomId/socket --------------------------------
 
   /**
@@ -1499,6 +1768,8 @@ const MAX_SIGNAL_ENVELOPES_PER_PAIR = 64;
 const ENV_PREFIX = "env:";
 const ENV_IDX_PREFIX = "env_idx:";
 const ENV_BY_TARGET_PREFIX = "env_by_target:";
+const ACK_PREFIX = "ack:";
+const ACK_OWNER_PREFIX = "ack_owner:";
 
 function padServerSeq(n: number): string {
   return String(n).padStart(SERVER_SEQ_PAD, "0");
@@ -1522,6 +1793,16 @@ function envByTargetKey(
 
 function envByTargetPrefix(targetDeviceId: string): string {
   return `${ENV_BY_TARGET_PREFIX}${targetDeviceId}:`;
+}
+
+/** Per-device ACK slot: `ack:<deviceId>:<envelopeId>` → ms-epoch ack time. */
+function ackKey(deviceId: string, envelopeId: string): string {
+  return `${ACK_PREFIX}${deviceId}:${envelopeId}`;
+}
+
+/** Owner-ack marker: `ack_owner:<envelopeId>` → "" (presence-only). */
+function ackOwnerKey(envelopeId: string): string {
+  return `${ACK_OWNER_PREFIX}${envelopeId}`;
 }
 
 /**

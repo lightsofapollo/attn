@@ -1314,7 +1314,72 @@ mod tests {
             key_kind_label: "signalingKey",
         };
 
-        let inputs = [v1, v2];
+        // Vector 3: kind=snapshot_blob — exercises the third envelope kind
+        // (snapshotKey + clientNonce-form envelopeId, distinct from signal).
+        let seed_3 = [0x44u8; 32];
+        let aead_nonce_3 = [0x30u8; 24];
+        let client_nonce_snapshot = [0x55u8; 16];
+        let v3 = VectorInput {
+            name: "kind=snapshot_blob envelope (envelopeId uses clientNonce-form, snapshotKey)",
+            seed: seed_3,
+            event_meta: serde_json::json!({
+                "v": 2,
+                "roomId": "hjCfgOvsatNOUedgxhZpyw",
+                "authorId": "p-author-01",
+                "deviceId": "d-device-01",
+                "createdAt": 1700000003000u64,
+                "parentEventIds": [],
+            }),
+            event_body: serde_json::json!({
+                "type": "snapshot_created",
+                "fileId": "f-file-01",
+                "snapshotId": "eQ7pDCC-mekpz-we7gDYag",
+                "baseHash": "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+            }),
+            aead_nonce: aead_nonce_3,
+            client_nonce: Some(client_nonce_snapshot),
+            kind: EnvelopeKind::SnapshotBlob,
+            key_bytes: *keys.snapshot_key.as_bytes(),
+            created_at_ms: 1_700_000_003_000,
+            key_kind_label: "snapshotKey",
+        };
+
+        // Vector 4: second kind=signal with a distinct signing seed + nonce +
+        // body shape. Locks the signal path under two independent inputs so
+        // a stray cross-vector copy-paste in the signaling pipe fails loudly.
+        let seed_4 = [0x66u8; 32];
+        let aead_nonce_4 = [0x77u8; 24];
+        let client_nonce_signal_4 = [0x88u8; 16];
+        let v4 = VectorInput {
+            name: "kind=signal envelope (second signal vector, distinct seed + cursor in body)",
+            seed: seed_4,
+            event_meta: serde_json::json!({
+                "v": 2,
+                "roomId": "hjCfgOvsatNOUedgxhZpyw",
+                "authorId": "p-author-01",
+                "deviceId": "d-device-01",
+                "createdAt": 1700000004000u64,
+                "parentEventIds": [],
+            }),
+            event_body: serde_json::json!({
+                "type": "presence_updated",
+                "participantId": "p-author-01",
+                "deviceId": "d-device-01",
+                "online": true,
+                "cursor": {
+                    "byteRange": [42, 42],
+                    "lineRange": [3, 3]
+                }
+            }),
+            aead_nonce: aead_nonce_4,
+            client_nonce: Some(client_nonce_signal_4),
+            kind: EnvelopeKind::Signal,
+            key_bytes: *keys.signaling_key.as_bytes(),
+            created_at_ms: 1_700_000_004_000,
+            key_kind_label: "signalingKey",
+        };
+
+        let inputs = [v1, v2, v3, v4];
         let vectors: Vec<Value> = inputs
             .iter()
             .map(|v| {

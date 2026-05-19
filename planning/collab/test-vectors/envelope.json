@@ -147,6 +147,120 @@
         }
       },
       "name": "kind=signal envelope (envelopeId uses clientNonce-form, fixed 0x42*16 nonce)"
+    },
+    {
+      "expected": {
+        "aadJson": "{\"authorId\":\"p-author-01\",\"createdAt\":1700000003000,\"deviceId\":\"d-device-01\",\"envelopeId\":\"KuBHijK2xXNbz3o3Jwl5gw\",\"kind\":\"snapshot_blob\",\"roomId\":\"hjCfgOvsatNOUedgxhZpyw\",\"v\":2}",
+        "ciphertext": "LLnb-AMp4aQyqA_WkJLR_yCD2NtMw0jH6l0zrsQpXc4BSqM5ylxQj4AA14oMyGwMxb81ODBe55DSEXHVRnq5Oimr9EeZSsyDp4_Ezp02P_a6s65t4Q2Xu-95aZLEWVWh2ElgxkCKE2CgvyAt0YUekvRV9hQcmFT_rb0oT6_JovrM5OGqCE2EhwVZ6oop4YzefqIjKRfLpuAJ7zWPQyVmkESPOceupkz8wSM5dsHDkHs-Q-Y9ubPLH3ziHd2t3dolaxRNiNsDE9v5BBZh3I3Q_0GDbFRxpRcIhH1iCakSWBFldgJtXqJh-BSx6gEPCk4xK7nqzuDR2MCr8gnml5gnSd3Ez7-5oJLLFG7lkgOYj58qlCQWPQF47nyI4TjOTF6rAT4jrWN_xPo92fXgCNmqJWhwW0I3EIGv2qxmWEF9-O6696sx5p01SJ26k4R0W4hBL395ELf23hysSJSLiIBsg9d6u3CJ9vSGAGP0VOzxqhK3IQN_ea5-0ltyw9471kHurTVBwbFMEzXTNkCxSYJbOrIn_hfqvEnuGJxhnso8vIdonuighlV2F40n-kWeABxdC5re0AToxJN_468sGzik3STvJWSoKxhVWfVKXTz1vtFeggjYCbBwMN9c4BpIzUwSQ7YgNC21WnYEljyZ3ipFQofojrBjB5yFqkozAwpS4Kc03fwiqB0aXnRy_-D7bm28iFwG348TMyKoE_Ox",
+        "envelope": {
+          "authorId": "p-author-01",
+          "ciphertext": "LLnb-AMp4aQyqA_WkJLR_yCD2NtMw0jH6l0zrsQpXc4BSqM5ylxQj4AA14oMyGwMxb81ODBe55DSEXHVRnq5Oimr9EeZSsyDp4_Ezp02P_a6s65t4Q2Xu-95aZLEWVWh2ElgxkCKE2CgvyAt0YUekvRV9hQcmFT_rb0oT6_JovrM5OGqCE2EhwVZ6oop4YzefqIjKRfLpuAJ7zWPQyVmkESPOceupkz8wSM5dsHDkHs-Q-Y9ubPLH3ziHd2t3dolaxRNiNsDE9v5BBZh3I3Q_0GDbFRxpRcIhH1iCakSWBFldgJtXqJh-BSx6gEPCk4xK7nqzuDR2MCr8gnml5gnSd3Ez7-5oJLLFG7lkgOYj58qlCQWPQF47nyI4TjOTF6rAT4jrWN_xPo92fXgCNmqJWhwW0I3EIGv2qxmWEF9-O6696sx5p01SJ26k4R0W4hBL395ELf23hysSJSLiIBsg9d6u3CJ9vSGAGP0VOzxqhK3IQN_ea5-0ltyw9471kHurTVBwbFMEzXTNkCxSYJbOrIn_hfqvEnuGJxhnso8vIdonuighlV2F40n-kWeABxdC5re0AToxJN_468sGzik3STvJWSoKxhVWfVKXTz1vtFeggjYCbBwMN9c4BpIzUwSQ7YgNC21WnYEljyZ3ipFQofojrBjB5yFqkozAwpS4Kc03fwiqB0aXnRy_-D7bm28iFwG348TMyKoE_Ox",
+          "ciphertextBytes": 540,
+          "createdAt": 1700000003000,
+          "deviceId": "d-device-01",
+          "envelopeId": "KuBHijK2xXNbz3o3Jwl5gw",
+          "expiresAt": 1700604803000,
+          "kind": "snapshot_blob",
+          "nonce": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw",
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
+          "v": 2
+        },
+        "envelopeId": "KuBHijK2xXNbz3o3Jwl5gw",
+        "eventId": "09NYGoHlOgAkWNzhDEsdDaEjwwNSep2wVUEKnihMdk0",
+        "signature": "cGSvtVajzRnpFfDDyxwWMCDLgXqVzuSG2Krn2LtW-kWWm0ql_JsuAZ-8pJNTgx-WGoo1tg5VGzc2112Yq9C-Ag"
+      },
+      "inputs": {
+        "aeadNonce": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw",
+        "clientNonce": "VVVVVVVVVVVVVVVVVVVVVQ",
+        "createdAt": 1700000003000,
+        "event": {
+          "body": {
+            "baseHash": "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+            "fileId": "f-file-01",
+            "snapshotId": "eQ7pDCC-mekpz-we7gDYag",
+            "type": "snapshot_created"
+          },
+          "meta": {
+            "authorId": "p-author-01",
+            "createdAt": 1700000003000,
+            "deviceId": "d-device-01",
+            "parentEventIds": [],
+            "roomId": "hjCfgOvsatNOUedgxhZpyw",
+            "v": 2
+          }
+        },
+        "keys": {
+          "snapshotKey": "aZsc1l-woVHxcyWeVbPxmdRd97TQNs4M7yFYM27p-ys"
+        },
+        "roomSecret": "ERERERERERERERERERERERERERERERERERERERERERE",
+        "signingKey": {
+          "private": "REREREREREREREREREREREREREREREREREREREREREQ",
+          "public": "11l5O7wTooGagnx2rbb7qKSa7gB_SfLQmS2ZuCWtLEg"
+        }
+      },
+      "name": "kind=snapshot_blob envelope (envelopeId uses clientNonce-form, snapshotKey)"
+    },
+    {
+      "expected": {
+        "aadJson": "{\"authorId\":\"p-author-01\",\"createdAt\":1700000004000,\"deviceId\":\"d-device-01\",\"envelopeId\":\"ydgoit6GN9bov7ZgHCsWuA\",\"kind\":\"signal\",\"roomId\":\"hjCfgOvsatNOUedgxhZpyw\",\"v\":2}",
+        "ciphertext": "Ks7RAPIqxV1IC5YoEYFbEe9okwFdgPO7Jd3_og0MI6bMgDOo9uDinbR4nFUFNaPftiff-5sSRzPgtdjDSbU8fkz1jJAgbD5LNOBq69ideWq1tWWlF5zcss5-000-kNOAKzKvFGza84GB5lvchoBsR-cwO5SCXBRWTJX1l8NtYcR0n0FHHeuEKQhjT7V1rvuwcDifRlXA5O0youRHeht1fj6hv_gnn0NvbdVi3aVWo0C7bAS-r6EWsBzPTBA4htRbscT5r9qC_Qwo6AbVtOaezlAJqsyyimOzcOHcBxefJ_3XD4U-SJzd91gpFeN5aYSUmw8R1UvmYFDqsXds9kYTWAxdfPGySXkKqwrWDpJVdVNASJ5tfCnUU79kyY1PxmW8G3BQ7DqVQ8wxa5SIEvAUIhurseHntp9C541kNXArHAblTa2cBr52qt8_flmLgwvXhehEy7IwoT93pKw7JflH7L_3S-iHZO2PzpjbyUSe3h_xYxr6nWkWn4kw_7BnpPNRJONxEDMKHrm49c2cTUKzqJoIApu1VmznupLXlVUCdUKzLTfNQr-1-7jNI-qKi55ZPjzVnOSiZDTSZfzM8So_cBZk7f4uxpdupR__WeQcKNVPAmXAr9acPVVDiMiMeGQr81LaObzucroNIv0Qe98wGd79rob0lhr9fEIpuV-WgRpPsZxKliYC0BEoUZo0WZEAwDBpXkaCnkAfhnj2oHw",
+        "envelope": {
+          "authorId": "p-author-01",
+          "ciphertext": "Ks7RAPIqxV1IC5YoEYFbEe9okwFdgPO7Jd3_og0MI6bMgDOo9uDinbR4nFUFNaPftiff-5sSRzPgtdjDSbU8fkz1jJAgbD5LNOBq69ideWq1tWWlF5zcss5-000-kNOAKzKvFGza84GB5lvchoBsR-cwO5SCXBRWTJX1l8NtYcR0n0FHHeuEKQhjT7V1rvuwcDifRlXA5O0youRHeht1fj6hv_gnn0NvbdVi3aVWo0C7bAS-r6EWsBzPTBA4htRbscT5r9qC_Qwo6AbVtOaezlAJqsyyimOzcOHcBxefJ_3XD4U-SJzd91gpFeN5aYSUmw8R1UvmYFDqsXds9kYTWAxdfPGySXkKqwrWDpJVdVNASJ5tfCnUU79kyY1PxmW8G3BQ7DqVQ8wxa5SIEvAUIhurseHntp9C541kNXArHAblTa2cBr52qt8_flmLgwvXhehEy7IwoT93pKw7JflH7L_3S-iHZO2PzpjbyUSe3h_xYxr6nWkWn4kw_7BnpPNRJONxEDMKHrm49c2cTUKzqJoIApu1VmznupLXlVUCdUKzLTfNQr-1-7jNI-qKi55ZPjzVnOSiZDTSZfzM8So_cBZk7f4uxpdupR__WeQcKNVPAmXAr9acPVVDiMiMeGQr81LaObzucroNIv0Qe98wGd79rob0lhr9fEIpuV-WgRpPsZxKliYC0BEoUZo0WZEAwDBpXkaCnkAfhnj2oHw",
+          "ciphertextBytes": 542,
+          "createdAt": 1700000004000,
+          "deviceId": "d-device-01",
+          "envelopeId": "ydgoit6GN9bov7ZgHCsWuA",
+          "expiresAt": 1700604804000,
+          "kind": "signal",
+          "nonce": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
+          "v": 2
+        },
+        "envelopeId": "ydgoit6GN9bov7ZgHCsWuA",
+        "eventId": "dKBwEjl7TbUp7NGCQfO-jLf3J3OG_gdhq898bXuT-Do",
+        "signature": "a59I5AL1GhxpHUYPYQLO_qoMFVQhzMyyGDb9Ml_fVP8Nuh24PzeLlcCiuqxGX01fXoxKVjdbv9iFxd4llgCBCg"
+      },
+      "inputs": {
+        "aeadNonce": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
+        "clientNonce": "iIiIiIiIiIiIiIiIiIiIiA",
+        "createdAt": 1700000004000,
+        "event": {
+          "body": {
+            "cursor": {
+              "byteRange": [
+                42,
+                42
+              ],
+              "lineRange": [
+                3,
+                3
+              ]
+            },
+            "deviceId": "d-device-01",
+            "online": true,
+            "participantId": "p-author-01",
+            "type": "presence_updated"
+          },
+          "meta": {
+            "authorId": "p-author-01",
+            "createdAt": 1700000004000,
+            "deviceId": "d-device-01",
+            "parentEventIds": [],
+            "roomId": "hjCfgOvsatNOUedgxhZpyw",
+            "v": 2
+          }
+        },
+        "keys": {
+          "signalingKey": "94VRhB3X3lvE8lghYDKHDIc1cDx5H986IA16fHGvmEE"
+        },
+        "roomSecret": "ERERERERERERERERERERERERERERERERERERERERERE",
+        "signingKey": {
+          "private": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY",
+          "public": "NLTZBDFWy23PC-sKKUm3VZyUDSvLbb6MU6mzAnjjp0Y"
+        }
+      },
+      "name": "kind=signal envelope (second signal vector, distinct seed + cursor in body)"
     }
   ],
   "version": 1

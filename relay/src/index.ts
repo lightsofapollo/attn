@@ -83,8 +83,10 @@ const CORS_ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS";
  * `"https://attn.dev,https://staging.attn.dev"`). Empty / whitespace entries
  * are skipped so a stray trailing comma doesn't accidentally allow the empty
  * Origin.
+ *
+ * Exported so unit tests can exercise the parser without spinning up a Worker.
  */
-function parseAllowedOrigins(env: Env): Set<string> {
+export function parseAllowedOrigins(env: Env): Set<string> {
   const raw = env.ALLOWED_BROWSER_ORIGINS ?? "";
   const out = new Set<string>();
   for (const piece of raw.split(",")) {

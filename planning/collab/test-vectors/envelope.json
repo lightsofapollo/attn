@@ -1,142 +1,153 @@
 {
   "_schema": {
-    "spec": "planning/collab/crypto-spec.md#envelope-encryption-aead",
-    "purpose": "End-to-end round-trip: event -> canonicalJSON -> Ed25519 sign -> AEAD seal -> envelope JSON. Each vector pins every intermediate step so a divergence in any layer is caught by a single test. Until attn-nnj.1.9 lands, the signature/AEAD/ciphertext/full-envelope fields are __PENDING__; the EventId and EnvelopeId derivations are filled by attn-nnj.1.8.",
+    "filledBy": "attn-nnj.1.9 (full envelope round-trip)",
     "format": {
-      "version": "Integer corpus version.",
-      "vectors[].name": "Human label.",
-      "vectors[].inputs.roomSecret": "base64url-no-pad of the 32-byte room secret feeding KDF (or just supply derived keys directly via `inputs.keys`).",
-      "vectors[].inputs.keys": "Object with `eventKey` (base64url) — if `roomSecret` is null, use this directly.",
-      "vectors[].inputs.signingKey": "{private, public} both base64url-no-pad.",
-      "vectors[].inputs.event": "{meta (no eventId), body}.",
-      "vectors[].inputs.clientNonce": "base64url-no-pad of 16 random bytes used for EnvelopeId derivation (null for event-shaped envelopes that use the simpler `SHA-256(\"envelope v2\" || roomId || eventId)` form).",
+      "vectors[].expected.aadJson": "UTF-8 canonical JSON of the AAD object.",
+      "vectors[].expected.ciphertext": "base64url-no-pad of XChaCha20-Poly1305 output.",
+      "vectors[].expected.envelope": "Full envelope JSON as it would appear in the relay's DO storage AND in `POST /v2/rooms/:roomId/envelopes` request body.",
+      "vectors[].expected.envelopeId": "Per kind: event-kind uses simpler form; signal/snapshot use clientNonce form.",
+      "vectors[].expected.eventId": "Computed from canonical event bytes.",
+      "vectors[].expected.signature": "base64url-no-pad of the Ed25519 signature over canonical event bytes.",
       "vectors[].inputs.aeadNonce": "base64url-no-pad of the 24-byte XChaCha20 nonce. Pinned to keep ciphertext deterministic.",
+      "vectors[].inputs.clientNonce": "base64url-no-pad of 16 random bytes used for EnvelopeId derivation (null for event-shaped envelopes that use the simpler SHA-256(\"envelope v2\" || roomId || eventId) form).",
       "vectors[].inputs.createdAt": "Integer ms timestamp baked into both event meta and envelope AAD.",
-      "vectors[].expected.eventId": "Computed from canonical event bytes (filled in 1.8).",
-      "vectors[].expected.envelopeId": "Per kind: event-kind uses simpler form; signal/snapshot use clientNonce form (filled in 1.8).",
-      "vectors[].expected.signature": "base64url-no-pad of the Ed25519 signature over canonical event bytes (filled in 1.9).",
-      "vectors[].expected.aadJson": "UTF-8 canonical JSON of the AAD object (filled in 1.9).",
-      "vectors[].expected.ciphertext": "base64url-no-pad of XChaCha20-Poly1305 output (filled in 1.9).",
-      "vectors[].expected.envelope": "Full envelope JSON as it would appear in the relay's DO storage AND in `POST /v2/rooms/:roomId/envelopes` request body (kind/ids filled in 1.8; nonce/ciphertext filled in 1.9)."
+      "vectors[].inputs.event": "{meta (no eventId), body}.",
+      "vectors[].inputs.keys": "Object with one of eventKey/signalingKey/snapshotKey (base64url) — provided for cross-impl convenience; derived from roomSecret.",
+      "vectors[].inputs.roomSecret": "base64url-no-pad of the 32-byte room secret feeding KDF.",
+      "vectors[].inputs.signingKey": "{private, public} both base64url-no-pad.",
+      "vectors[].name": "Human label.",
+      "version": "Integer corpus version."
     },
+    "purpose": "End-to-end round-trip: event -> canonicalJSON -> Ed25519 sign -> AEAD seal -> envelope JSON. Each vector pins every intermediate step so a divergence in any layer is caught by a single test.",
     "rules": [
       "Vectors share the canonical roomSecret = 0x11*32 (roomId = hjCfgOvsatNOUedgxhZpyw) and authorId/deviceId labels with event-id.json so the cross-vector inputs match.",
       "EnvelopeId for kind=event uses `SHA-256(\"envelope v2\" || roomId || eventId)[:16]`.",
       "EnvelopeId for kind=signal/snapshot_blob uses `SHA-256(\"envelope v2\" || roomId || deviceId || clientNonce)[:16]`.",
-      "When a vector pins a clientNonce, retries MUST reuse the same nonce so the relay can dedup."
+      "When a vector pins a clientNonce, retries MUST reuse the same nonce so the relay can dedup.",
+      "AEAD key selection: kind=event uses eventKey, kind=signal uses signalingKey, kind=snapshot_blob uses snapshotKey."
     ],
-    "filledBy": "attn-nnj.1.8 (EventId + EnvelopeId); attn-nnj.1.9 (AEAD, signature, full envelope round-trip)"
+    "spec": "planning/collab/crypto-spec.md#envelope-encryption-aead"
   },
-  "version": 1,
   "vectors": [
     {
-      "name": "kind=event round-trip with simple comment_created body (envelopeId uses event-form)",
+      "expected": {
+        "aadJson": "{\"authorId\":\"p-author-01\",\"createdAt\":1700000000000,\"deviceId\":\"d-device-01\",\"envelopeId\":\"CAyIYGgblSXAJs-buK6IDA\",\"kind\":\"event\",\"roomId\":\"hjCfgOvsatNOUedgxhZpyw\",\"v\":2}",
+        "ciphertext": "MD4urHhryDpdd4or_RjNxQ9wYjv0lWg14RO4W9w28TIQO4gxB5Xs_jh2q48jAciWBFHsuh9ovepX4JssVzWCFYl1ZgoNovHafHR1F47R88-osKTvg2B5TMZZ_jcA5Oz_wijG7UacQP9lrlDKHav3q78YhvyA116Zvq4gxP6d-0Ai3UVimPdUaiO76rNHOvl8HC4X0SPiY0ys4bQM8FA_q1DEExKF0Z1sRGKYZ9LL27h1LRHTHAyUB1cptLnT0CSHM5gZ30eRf9mfrBsmLrjz-iMk7aPNVx6a3LpxHI5aSn3AKE1ziImybcyx-NrEIu4dA1kd6bwX_UrKUgTC-COdmYg-b1AM2pfzQxt41GsJWOQSJWQ4QddB6mfPh_iY2V2JpMcyUNOX4WfGmPwxZ9kTTQ8ojXTuFMzIpYh5jVFnyG_CMs6Ca5bkxSHFsNY7sYIXN_C0tsnyca1Q4GIyj_K76umLlkWl7XRQvo1XxuYvLZF8dVo7msqBKP3bhKi8gNuBgeJcSiSZA9dLjeRDfGAPlJQF8bWXxeHovbraL2Cj56aP0OVndhCoU2A1jrGKeGqwt8LBVQq2MVMCuTMlunKkgOdk1pK_0L9q1NTVZArR9ctzE0KwXiS72xMXskW7qS6TKclmuvM7zZCCW4uDWhGjZZw72frVq_M8uiHOiAoDsiun058Y_hrdu-_GLHO11ef9IKkaG21y3CVv_g7Dm0EA0lioGVeAVMEusdk9j_NXsdqMi92qOEngVEKpg-s4vbH3IJk-mMPvGgittj6QJ_6NaREXmpGwTGQPtktTwjTwO2PFYGm5xOGGsk3H-9F6BS7LoIJm1Bl_1rBNAu3edSIGRHKi",
+        "envelope": {
+          "authorId": "p-author-01",
+          "ciphertext": "MD4urHhryDpdd4or_RjNxQ9wYjv0lWg14RO4W9w28TIQO4gxB5Xs_jh2q48jAciWBFHsuh9ovepX4JssVzWCFYl1ZgoNovHafHR1F47R88-osKTvg2B5TMZZ_jcA5Oz_wijG7UacQP9lrlDKHav3q78YhvyA116Zvq4gxP6d-0Ai3UVimPdUaiO76rNHOvl8HC4X0SPiY0ys4bQM8FA_q1DEExKF0Z1sRGKYZ9LL27h1LRHTHAyUB1cptLnT0CSHM5gZ30eRf9mfrBsmLrjz-iMk7aPNVx6a3LpxHI5aSn3AKE1ziImybcyx-NrEIu4dA1kd6bwX_UrKUgTC-COdmYg-b1AM2pfzQxt41GsJWOQSJWQ4QddB6mfPh_iY2V2JpMcyUNOX4WfGmPwxZ9kTTQ8ojXTuFMzIpYh5jVFnyG_CMs6Ca5bkxSHFsNY7sYIXN_C0tsnyca1Q4GIyj_K76umLlkWl7XRQvo1XxuYvLZF8dVo7msqBKP3bhKi8gNuBgeJcSiSZA9dLjeRDfGAPlJQF8bWXxeHovbraL2Cj56aP0OVndhCoU2A1jrGKeGqwt8LBVQq2MVMCuTMlunKkgOdk1pK_0L9q1NTVZArR9ctzE0KwXiS72xMXskW7qS6TKclmuvM7zZCCW4uDWhGjZZw72frVq_M8uiHOiAoDsiun058Y_hrdu-_GLHO11ef9IKkaG21y3CVv_g7Dm0EA0lioGVeAVMEusdk9j_NXsdqMi92qOEngVEKpg-s4vbH3IJk-mMPvGgittj6QJ_6NaREXmpGwTGQPtktTwjTwO2PFYGm5xOGGsk3H-9F6BS7LoIJm1Bl_1rBNAu3edSIGRHKi",
+          "ciphertextBytes": 642,
+          "createdAt": 1700000000000,
+          "deviceId": "d-device-01",
+          "envelopeId": "CAyIYGgblSXAJs-buK6IDA",
+          "expiresAt": 1700604800000,
+          "kind": "event",
+          "nonce": "EBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ",
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
+          "v": 2
+        },
+        "envelopeId": "CAyIYGgblSXAJs-buK6IDA",
+        "eventId": "tkM6Sv6hKfUHM5Jm4G6NhqGwYaLFwinqHmaGI234upo",
+        "signature": "ataQ8pp_SDQ7YXn5pbDIXluU9_57jej5ZIcqrGIsvl783ARzYCJcswRdm8ieAxmrVSA2vMMu_3IJLya6aVzXDA"
+      },
       "inputs": {
-        "roomSecret": "ERERERERERERERERERERERERERERERERERERERERERE",
-        "keys": {
-          "eventKey": "__PENDING__"
-        },
-        "signingKey": {
-          "private": "__PENDING__",
-          "public": "__PENDING__"
-        },
+        "aeadNonce": "EBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ",
+        "clientNonce": null,
+        "createdAt": 1700000000000,
         "event": {
-          "meta": {
-            "v": 2,
-            "roomId": "hjCfgOvsatNOUedgxhZpyw",
-            "authorId": "p-author-01",
-            "deviceId": "d-device-01",
-            "createdAt": 1700000000000,
-            "parentEventIds": []
-          },
           "body": {
-            "type": "comment_created",
-            "threadId": "thread-1",
             "anchor": {
-              "v": 2,
-              "fileId": "f-file-01",
-              "snapshotId": "eQ7pDCC-mekpz-we7gDYag",
               "baseHash": "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+              "fileId": "f-file-01",
               "position": {
-                "byteRange": [0, 9],
-                "lineRange": [1, 1]
-              }
+                "byteRange": [
+                  0,
+                  9
+                ],
+                "lineRange": [
+                  1,
+                  1
+                ]
+              },
+              "snapshotId": "eQ7pDCC-mekpz-we7gDYag",
+              "v": 2
             },
-            "body": "hello"
+            "body": "hello",
+            "threadId": "thread-1",
+            "type": "comment_created"
+          },
+          "meta": {
+            "authorId": "p-author-01",
+            "createdAt": 1700000000000,
+            "deviceId": "d-device-01",
+            "parentEventIds": [],
+            "roomId": "hjCfgOvsatNOUedgxhZpyw",
+            "v": 2
           }
         },
-        "clientNonce": null,
-        "aeadNonce": "__PENDING__",
-        "createdAt": 1700000000000
-      },
-      "expected": {
-        "eventId": "tkM6Sv6hKfUHM5Jm4G6NhqGwYaLFwinqHmaGI234upo",
-        "envelopeId": "CAyIYGgblSXAJs-buK6IDA",
-        "signature": "__PENDING__",
-        "aadJson": "__PENDING__",
-        "ciphertext": "__PENDING__",
-        "envelope": {
-          "v": 2,
-          "envelopeId": "CAyIYGgblSXAJs-buK6IDA",
-          "roomId": "hjCfgOvsatNOUedgxhZpyw",
-          "kind": "event",
-          "authorId": "p-author-01",
-          "deviceId": "d-device-01",
-          "createdAt": 1700000000000,
-          "nonce": "__PENDING__",
-          "ciphertext": "__PENDING__"
+        "keys": {
+          "eventKey": "YR5DPGaqPF2d_3JVJRHTnht9pq0TnNSZzQKb6kIBH38"
+        },
+        "roomSecret": "ERERERERERERERERERERERERERERERERERERERERERE",
+        "signingKey": {
+          "private": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI",
+          "public": "oJql9HpnWYAv-VX43C0qFKXJnSO-l_hkEn_5ODRVpPA"
         }
-      }
+      },
+      "name": "kind=event round-trip with simple comment_created body (envelopeId uses event-form)"
     },
     {
-      "name": "kind=signal envelope (envelopeId uses clientNonce-form, fixed 0x42*16 nonce)",
+      "expected": {
+        "aadJson": "{\"authorId\":\"p-author-01\",\"createdAt\":1700000002000,\"deviceId\":\"d-device-01\",\"envelopeId\":\"kaaz9g9SvaE3rBF7jcWokg\",\"kind\":\"signal\",\"roomId\":\"hjCfgOvsatNOUedgxhZpyw\",\"v\":2}",
+        "ciphertext": "lSEtFM6VkGz4xID9tRGAtyV04DeNXY-uNu9pXbyw7tDcD4zQ8bVnpRP00veX0ceILqebNh2Ixzq39dncL5T55Bbd6FYQ7HhaqDGIYdnuUoR54zmr2fy9_uqLsSOvkFA67RQ-Tpzfzcq_Hv6DLtVOsNUAmxuFeko3VOSEczN74H9tHZF7pIbZ4hfPmVXOTEzKqUoAYvj70kk4SLeOa8mDqc2W-RhdkHZADdTgJeUJr2-WAUA__DtbajpNv0fcEi7eN5KbG1wudXwwiYfwOqda4uVnto0vs-kJSwn75nrnTjT573dNxjrrafsgWbSIbzsy_iYzP7EvIWYF9ThBy_LvNpd7fDS5E_YGMKdRfErIHx76zC0vB_I_SQj_Fwphs_LeYWDqLldGkpX-Z58VYhHDhsv9AZiltpTcgtAmqVWc_YtBWbNUA7s_96xIHvvKsAXI-LPg2yysNJZ4c_j49Hw87ighGlXjpHxvMremTs_wfqfB9RCGXdpGADYA-mIg_V4RoeA104KawQk5_2ZXfQmE7LrfWxXtVsHBFMUEq9BwEzUHjhlMrnvsPLHbnYrsQQxIpgq3o1eYJpdvxOC8xOKowLAsv3NdtrtgijBRxKD1VRrf3aomCka10ep_fdJvvN0eR3zcBcmIqySiMyjYyA",
+        "envelope": {
+          "authorId": "p-author-01",
+          "ciphertext": "lSEtFM6VkGz4xID9tRGAtyV04DeNXY-uNu9pXbyw7tDcD4zQ8bVnpRP00veX0ceILqebNh2Ixzq39dncL5T55Bbd6FYQ7HhaqDGIYdnuUoR54zmr2fy9_uqLsSOvkFA67RQ-Tpzfzcq_Hv6DLtVOsNUAmxuFeko3VOSEczN74H9tHZF7pIbZ4hfPmVXOTEzKqUoAYvj70kk4SLeOa8mDqc2W-RhdkHZADdTgJeUJr2-WAUA__DtbajpNv0fcEi7eN5KbG1wudXwwiYfwOqda4uVnto0vs-kJSwn75nrnTjT573dNxjrrafsgWbSIbzsy_iYzP7EvIWYF9ThBy_LvNpd7fDS5E_YGMKdRfErIHx76zC0vB_I_SQj_Fwphs_LeYWDqLldGkpX-Z58VYhHDhsv9AZiltpTcgtAmqVWc_YtBWbNUA7s_96xIHvvKsAXI-LPg2yysNJZ4c_j49Hw87ighGlXjpHxvMremTs_wfqfB9RCGXdpGADYA-mIg_V4RoeA104KawQk5_2ZXfQmE7LrfWxXtVsHBFMUEq9BwEzUHjhlMrnvsPLHbnYrsQQxIpgq3o1eYJpdvxOC8xOKowLAsv3NdtrtgijBRxKD1VRrf3aomCka10ep_fdJvvN0eR3zcBcmIqySiMyjYyA",
+          "ciphertextBytes": 493,
+          "createdAt": 1700000002000,
+          "deviceId": "d-device-01",
+          "envelopeId": "kaaz9g9SvaE3rBF7jcWokg",
+          "expiresAt": 1700604802000,
+          "kind": "signal",
+          "nonce": "ICAgICAgICAgICAgICAgICAgICAgICAg",
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
+          "v": 2
+        },
+        "envelopeId": "kaaz9g9SvaE3rBF7jcWokg",
+        "eventId": "9xTaZRO1KXMS7_mAKMU3MEFeOMX7slZyAVCfnfYC_mQ",
+        "signature": "lUgF1gVlym5OQnbGBCMP0JCjw7l2bEMb-HA23_FiprRmvCy_ERJj7I8KMzps4W19PcusLvgZMBp4GNnVG3NDDQ"
+      },
       "inputs": {
-        "roomSecret": "ERERERERERERERERERERERERERERERERERERERERERE",
-        "keys": {
-          "signalingKey": "__PENDING__"
-        },
-        "signingKey": {
-          "private": "__PENDING__",
-          "public": "__PENDING__"
-        },
+        "aeadNonce": "ICAgICAgICAgICAgICAgICAgICAgICAg",
+        "clientNonce": "QkJCQkJCQkJCQkJCQkJCQg",
+        "createdAt": 1700000002000,
         "event": {
-          "meta": {
-            "v": 2,
-            "roomId": "hjCfgOvsatNOUedgxhZpyw",
-            "authorId": "p-author-01",
-            "deviceId": "d-device-01",
-            "createdAt": 1700000002000,
-            "parentEventIds": []
-          },
           "body": {
-            "type": "presence_updated",
-            "participantId": "p-author-01",
             "deviceId": "d-device-01",
-            "online": true
+            "online": true,
+            "participantId": "p-author-01",
+            "type": "presence_updated"
+          },
+          "meta": {
+            "authorId": "p-author-01",
+            "createdAt": 1700000002000,
+            "deviceId": "d-device-01",
+            "parentEventIds": [],
+            "roomId": "hjCfgOvsatNOUedgxhZpyw",
+            "v": 2
           }
         },
-        "clientNonce": "QkJCQkJCQkJCQkJCQkJCQg",
-        "aeadNonce": "__PENDING__",
-        "createdAt": 1700000002000
-      },
-      "expected": {
-        "eventId": "9xTaZRO1KXMS7_mAKMU3MEFeOMX7slZyAVCfnfYC_mQ",
-        "envelopeId": "kaaz9g9SvaE3rBF7jcWokg",
-        "signature": "__PENDING__",
-        "aadJson": "__PENDING__",
-        "ciphertext": "__PENDING__",
-        "envelope": {
-          "v": 2,
-          "envelopeId": "kaaz9g9SvaE3rBF7jcWokg",
-          "roomId": "hjCfgOvsatNOUedgxhZpyw",
-          "kind": "signal",
-          "authorId": "p-author-01",
-          "deviceId": "d-device-01",
-          "createdAt": 1700000002000,
-          "nonce": "__PENDING__",
-          "ciphertext": "__PENDING__"
+        "keys": {
+          "signalingKey": "94VRhB3X3lvE8lghYDKHDIc1cDx5H986IA16fHGvmEE"
+        },
+        "roomSecret": "ERERERERERERERERERERERERERERERERERERERERERE",
+        "signingKey": {
+          "private": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+          "public": "F8t5-ytBIPKx7GXkGY1uCLKOgT_rAeSkAIObheGAgM4"
         }
-      }
+      },
+      "name": "kind=signal envelope (envelopeId uses clientNonce-form, fixed 0x42*16 nonce)"
     }
-  ]
+  ],
+  "version": 1
 }

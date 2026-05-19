@@ -47,6 +47,7 @@
   import ReviewApplyExpand from './lib/ReviewApplyExpand.svelte';
   import ReviewBar from './lib/ReviewBar.svelte';
   import ShareDialog from './lib/ShareDialog.svelte';
+  import Users from '@lucide/svelte/icons/users';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
   import { hasTextSelection } from './lib/review/popover-anchor';
@@ -1572,8 +1573,29 @@
     onShareClick={openShareDialog}
   />
 
+  {#if isReviewerViewingSnapshot}
+    <!--
+      Shared-document banner. Makes it unmistakable that the content below
+      is someone else's shared doc over an encrypted channel — NOT a local
+      file. Distinct violet accent (the rest of the app's chrome is neutral
+      / red-primary) so the "you're in someone else's document" state reads
+      at a glance. Per user feedback 2026-05-19.
+    -->
+    <div
+      class="shared-doc-banner flex h-8 shrink-0 items-center gap-2 border-b border-violet-500/30 bg-violet-500/10 px-4 text-xs font-medium text-violet-700 dark:text-violet-300"
+      data-slot="shared-doc-banner"
+    >
+      <Users class="size-3.5 shrink-0" aria-hidden="true" />
+      <span>Shared document</span>
+      <span class="text-violet-500/50" aria-hidden="true">·</span>
+      <span class="font-normal text-violet-600/80 dark:text-violet-400/80">
+        read-only · end-to-end encrypted
+      </span>
+    </div>
+  {/if}
+
   <ScrollArea
-    class="attn-content-viewport min-h-0 flex-1"
+    class="attn-content-viewport min-h-0 flex-1 {isReviewerViewingSnapshot ? 'shared-doc-viewport' : ''}"
     orientation="vertical"
     bind:viewportRef={contentViewport}
   >

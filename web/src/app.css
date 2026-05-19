@@ -884,3 +884,16 @@
 [data-slot="dialog-overlay"][data-state="open"] {
   opacity: 1;
 }
+
+/* ============================================
+ * Shared-document ambient accent (reviewer mode)
+ *
+ * When viewing someone else's shared snapshot (not a local file) the
+ * content viewport gets a subtle violet left-edge so the "you're in
+ * someone else's document" state reads even after the top banner
+ * scrolls out of view. Pairs with [data-slot="shared-doc-banner"].
+ * Per user feedback 2026-05-19.
+ * ============================================ */
+.shared-doc-viewport {
+  box-shadow: inset 3px 0 0 0 color-mix(in oklab, var(--color-violet-500, oklch(0.606 0.25 292.717)) 55%, transparent);
+}

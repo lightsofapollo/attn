@@ -26,7 +26,39 @@ ATTN_HOME=/tmp/attn-owner task dev    # honor ATTN_HOME for multi-instance dev (
 
 ## Local collab testing
 
-For running two attn daemons on one machine (owner + reviewer for collab testing):
+The fastest way to bring up the full local stack (Miniflare relay + owner +
+reviewer) in one terminal:
+
+```bash
+task dev:collab
+# or directly:
+scripts/dev-collab.sh
+```
+
+This boots three processes:
+
+1. Miniflare relay — `wrangler dev --local --port 8787` (waits for `/health`).
+2. Owner daemon — `ATTN_HOME=/tmp/attn-collab-owner` opening
+   `tests/fixtures/basic.md`.
+3. Reviewer daemon — `ATTN_HOME=/tmp/attn-collab-reviewer`, idle until the
+   user provides an invite.
+
+Interactive flow: click **[Share]** in the owner window, copy the invite URL,
+paste it at the script's prompt — it runs `attn review join <invite>
+--as-agent reviewer` against the reviewer daemon and the second window joins
+the room. Ctrl+C cleans up all three processes.
+
+Env overrides:
+
+```bash
+ATTN_RELAY_URL=http://localhost:8787   # default
+FIXTURE_PATH=tests/fixtures/basic.md   # default
+ATTN_BIN=target/debug/attn             # default; built on demand
+REVIEWER_AGENT=reviewer                # agent name passed to `review join`
+ATTN_COLLAB_NONINTERACTIVE=1           # skip the invite prompt (boot-only CI)
+```
+
+For manually running two daemons without the relay/join harness:
 
 ```bash
 ATTN_HOME=/tmp/attn-owner    task dev ATTN_PATH=plan.md

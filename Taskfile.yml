@@ -83,6 +83,11 @@ tasks:
         ATTN_DEV_SERVER_URL="${ATTN_DEV_SERVER_URL}" cargo run -- --no-fork "${ATTN_PATH}"
         '
 
+  dev:collab:
+    desc: One-command local collab harness — boots Miniflare relay + owner + reviewer attn daemons (attn-nnj.11.7). Ctrl+C cleans up.
+    cmds:
+      - scripts/dev-collab.sh
+
   test:review:
     desc: Run the review-surface E2E test suite (shape assertions; isolated ATTN_HOME)
     cmds:

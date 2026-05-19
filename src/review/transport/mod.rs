@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 pub mod inbound;
 pub mod mailbox;
+pub mod signaling;
 
 use crate::review::ids::{DeviceId, RoomId};
 use crate::review::model::{Device, MailboxEnvelope, RoomPolicy};

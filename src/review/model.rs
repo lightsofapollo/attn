@@ -738,7 +738,8 @@ pub struct SuggestionDraft {
 /// Server-routed encrypted envelope. The server stores and forwards these
 /// blobs but never sees `ReviewEvent` plaintext.
 ///
-/// Spec: `data-model.md` §Encrypted Envelopes.
+/// Spec: `data-model.md` §Encrypted Envelopes; `relay-spec.md`
+/// §`POST /v2/rooms/:roomId/envelopes` (`target` routing tag).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MailboxEnvelope {
@@ -752,9 +753,37 @@ pub struct MailboxEnvelope {
     pub created_at: u64,
     pub expires_at: u64,
     pub kind: EnvelopeKind,
+    /// Routing target for `kind: "signal"` envelopes. `Some` means deliver to
+    /// the named device only; `None` means broadcast to every subscribed device
+    /// in the room (or, for `kind: "event"` / `kind: "snapshot_blob"`, ignored
+    /// by the relay — those kinds always broadcast). Per `relay-spec.md`
+    /// §`POST /v2/rooms/:roomId/envelopes` the field is omitted (not `null`)
+    /// when broadcasting, matching the canonical-JSON "omit absent optionals"
+    /// rule in `crypto-spec.md` §Canonical JSON. Defaults to `None` on the
+    /// receive path so existing payloads (and non-signal envelopes that never
+    /// populate it) deserialize cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<EnvelopeTarget>,
     pub nonce: String,
     pub ciphertext: String,
     pub ciphertext_bytes: u64,
+}
+
+/// Routing tag carried on an envelope's cleartext header. Only `kind: "signal"`
+/// envelopes set this — the relay uses it to forward straight to the named
+/// device's open WebSocket (or store-and-forward if that device is offline).
+///
+/// Per `relay-spec.md` §Signaling, the relay never inspects the ciphertext;
+/// the target is the *only* routing information it can use to direct signal
+/// envelopes at a specific peer. The field is NOT bound into the AEAD AAD
+/// (which would force the sender to know who they're addressing for every
+/// retry); instead the signed signaling payload carries `from: deviceId`
+/// and the receiver decides whether it is the intended recipient by the
+/// content of the inner SDP/ICE/RequestSnapshot blob.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvelopeTarget {
+    pub device_id: DeviceId,
 }
 
 /// Kind of payload an envelope carries.
@@ -941,6 +970,7 @@ mod tests {
             created_at: 1_700_000_000_010,
             expires_at: 1_700_000_086_400,
             kind: EnvelopeKind::Event,
+            target: None,
             nonce: "nonce-base64url".to_string(),
             ciphertext: "ct-base64url".to_string(),
             ciphertext_bytes: 128,

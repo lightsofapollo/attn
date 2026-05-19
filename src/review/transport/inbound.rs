@@ -527,6 +527,7 @@ mod tests {
             created_at: created_at_ms,
             expires_at: created_at_ms + 7 * 24 * 60 * 60 * 1000,
             kind,
+            target: None,
             nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
             ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
             ciphertext_bytes: ciphertext.len() as u64,

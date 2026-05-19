@@ -19,6 +19,7 @@ use crate::review::model::{
     AnchorIndex, PositionAnchor, ResolvedAnchor, ResolvedAnchorCandidate, ReviewEventBody,
     SuggestionOperation,
 };
+use unicode_normalization::UnicodeNormalization;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -45,6 +46,39 @@ pub enum ApplyError {
 // Verdict
 // ---------------------------------------------------------------------------
 
+/// How the snapshot's `expected_text` compared to what is currently at the
+/// target byte range. Produced by [`classify_text_match`] and consumed by the
+/// resolver to choose between `Ready` (exact / safely-normalized) and
+/// `RequiresThreeWay` (real drift).
+///
+/// Variants are ordered from "no doubt" → "real difference". The resolver
+/// only treats `Mismatch` as a reason to escalate to three-way review;
+/// `TrailingWhitespace` becomes a soft warning attached to `Ready`, and
+/// `NormalizedUnicode` is accepted silently (NFC vs NFD render identically).
+///
+/// Intentionally NOT considered equivalent:
+/// - **CRLF vs LF**: `WorkingCopyService` LF-normalizes on write, so the
+///   on-disk current text is always LF. If a suggestion's `expected_text`
+///   contains CR bytes, that is a real authoring-time / wire-format issue and
+///   must surface as `Mismatch`.
+/// - **Case differences**: never folded. "Foo" vs "foo" is a real edit.
+/// - **BOM**: handled by upstream UTF-8 decoding; treated as a content byte
+///   here, so a stray BOM on one side is `Mismatch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextMatchKind {
+    /// Byte-identical.
+    Exact,
+    /// NFC and NFD differ between the two strings, but NFC-normalized forms
+    /// are equal. Safe to apply silently — visually identical to the user.
+    NormalizedUnicode,
+    /// One or more lines differ only in trailing horizontal whitespace
+    /// (`' '` / `'\t'`) or trailing newline characters. Apply is allowed but
+    /// the verdict carries a confidence note so the UI can surface it.
+    TrailingWhitespace,
+    /// Real semantic difference. Forces the three-way dialog.
+    Mismatch,
+}
+
 /// Outcome of resolving a suggestion against the owner's current document.
 ///
 /// The owner UI consumes this directly to decide whether to surface a single
@@ -66,6 +100,13 @@ pub enum ApplyVerdict {
         replacement: String,
         /// The anchor was exact OR remapped with confidence >= 0.90.
         confidence: f64,
+        /// How the expected text compared to current. `Exact` for insertions
+        /// (no expected text to compare).
+        match_kind: TextMatchKind,
+        /// Soft note when `match_kind` was not `Exact` — e.g. "trailing
+        /// whitespace differs from snapshot". `None` when `match_kind` is
+        /// `Exact`. The UI is free to render this as an inline hint.
+        confidence_note: Option<String>,
     },
     /// Anchor resolved, but the expected text DOESN'T match what's at the
     /// target range. The owner needs a three-way diff (their edits + the
@@ -241,12 +282,18 @@ fn decide_at_range(
             replacement,
         } => {
             let current_text = slice_to_string(current_markdown_bytes, start, end);
-            if !force_review && texts_equal(&current_text, expected_text) {
+            let kind = classify_text_match(expected_text, &current_text);
+            // `Mismatch` is the only verdict that forces three-way drift. The
+            // soft tiers (Exact / NormalizedUnicode / TrailingWhitespace) all
+            // become `Ready`; `confidence_note` carries the soft-match hint.
+            if !force_review && kind != TextMatchKind::Mismatch {
                 ApplyVerdict::Ready {
                     suggestion_id,
                     target_byte_range: (start, end),
                     replacement: replacement.clone(),
                     confidence,
+                    match_kind: kind,
+                    confidence_note: match_kind_note(kind),
                 }
             } else {
                 ApplyVerdict::RequiresThreeWay {
@@ -261,12 +308,15 @@ fn decide_at_range(
         }
         SuggestionOperation::Delete { expected_text } => {
             let current_text = slice_to_string(current_markdown_bytes, start, end);
-            if !force_review && texts_equal(&current_text, expected_text) {
+            let kind = classify_text_match(expected_text, &current_text);
+            if !force_review && kind != TextMatchKind::Mismatch {
                 ApplyVerdict::Ready {
                     suggestion_id,
                     target_byte_range: (start, end),
                     replacement: String::new(),
                     confidence,
+                    match_kind: kind,
+                    confidence_note: match_kind_note(kind),
                 }
             } else {
                 ApplyVerdict::RequiresThreeWay {
@@ -303,6 +353,10 @@ fn decide_at_range(
                     target_byte_range: (start, start),
                     replacement: text.clone(),
                     confidence,
+                    // Insertions have no expected text to compare; treat
+                    // them as `Exact` so the UI shows no soft warning.
+                    match_kind: TextMatchKind::Exact,
+                    confidence_note: None,
                 }
             }
         }
@@ -323,6 +377,8 @@ fn decide_at_range(
                     target_byte_range: (end, end),
                     replacement: text.clone(),
                     confidence,
+                    match_kind: TextMatchKind::Exact,
+                    confidence_note: None,
                 }
             }
         }
@@ -353,11 +409,130 @@ fn slice_to_string(bytes: &[u8], start: usize, end: usize) -> String {
         .unwrap_or_default()
 }
 
-/// Expected-text comparison. For 8.1 this is literal `String::eq`. Issue 8.2
-/// will tighten this with whitespace / line-ending / unicode normalization;
-/// keep this in one function so 8.2 only has to touch one site.
-fn texts_equal(current: &str, expected: &str) -> bool {
-    current == expected
+/// Classify how `current` (text actually at the target byte range right now)
+/// compares to `snapshot` (the suggestion's `expected_text` captured at
+/// authoring time). The returned [`TextMatchKind`] drives whether the apply
+/// resolver issues `Ready` or `RequiresThreeWay`.
+///
+/// Tier order (first match wins):
+/// 1. **Exact** — byte equality. Cheapest, hottest path; we exit before
+///    paying for any normalization.
+/// 2. **NormalizedUnicode** — equal after NFC normalization of both sides.
+///    This catches NFC↔NFD round-trips (e.g. precomposed `é` vs `e` + combining
+///    acute) that render identically. Case is NEVER folded. CR / LF differences
+///    are NOT folded — they go to `Mismatch` below.
+/// 3. **TrailingWhitespace** — line-by-line, both sides agree on the
+///    non-trailing content of every line; only `' '` / `'\t'` / trailing
+///    newlines differ. The on-disk text the resolver compares against has
+///    already gone through `WorkingCopyService`'s LF-normalization, so the
+///    only realistic source of this drift is the editor stripping trailing
+///    spaces between the author capturing `expected_text` and the owner
+///    receiving the suggestion. Surfaces a soft warning on the `Ready`
+///    verdict but does NOT block apply.
+/// 4. **Mismatch** — anything else, including CRLF↔LF, case differences, BOM
+///    on one side, internal whitespace differences, and structural edits.
+pub fn classify_text_match(snapshot: &str, current: &str) -> TextMatchKind {
+    // (1) Cheap exact path. This is the hottest branch in practice.
+    if snapshot == current {
+        return TextMatchKind::Exact;
+    }
+
+    // (2) Unicode normalization. NFC is the canonical form per Unicode 15 and
+    // matches what most macOS / Windows text editors produce; NFD shows up
+    // from HFS+ paths and some Asian IMEs. Both sides go through NFC so we
+    // catch the cross-form case symmetrically. We deliberately do NOT do
+    // case folding or compatibility normalization (NFKC/NFKD) — those would
+    // erase information the user might care about (e.g. wide vs narrow
+    // digits, ﬁ ligature vs `f` + `i`).
+    if needs_nfc_normalization(snapshot, current) {
+        let snap_nfc: String = snapshot.nfc().collect();
+        let cur_nfc: String = current.nfc().collect();
+        if snap_nfc == cur_nfc {
+            return TextMatchKind::NormalizedUnicode;
+        }
+    }
+
+    // (3) Trailing whitespace tolerance. Line-by-line: every pair of lines
+    // must agree once trailing `' '`/`'\t'` is stripped, AND the strings must
+    // have the same line count modulo a single trailing newline difference.
+    if trailing_whitespace_equal(snapshot, current) {
+        return TextMatchKind::TrailingWhitespace;
+    }
+
+    TextMatchKind::Mismatch
+}
+
+/// Fast path guard for NFC normalization: skip allocating the NFC strings
+/// when both inputs are pure ASCII (NFC is identity on ASCII). Returns true
+/// if either side contains a non-ASCII byte.
+#[inline]
+fn needs_nfc_normalization(a: &str, b: &str) -> bool {
+    !a.is_ascii() || !b.is_ascii()
+}
+
+/// Two strings are trailing-whitespace-equal when split-by-`'\n'` produces
+/// the same sequence of lines after stripping trailing spaces and tabs from
+/// each line. A single trailing newline difference (one ends with `\n`, the
+/// other doesn't) is folded in — `split('\n')` represents that as a single
+/// trailing empty element on the side with the newline.
+///
+/// `\r` is INTENTIONALLY not stripped: CRLF↔LF must surface as `Mismatch`
+/// because `WorkingCopyService` normalizes to LF on write and a stray CR on
+/// either side is a real wire-format or encoding bug.
+fn trailing_whitespace_equal(a: &str, b: &str) -> bool {
+    let mut ai = a.split('\n');
+    let mut bi = b.split('\n');
+    let mut saw_trailing_ws_diff = false;
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => break,
+            (Some(la), Some(lb)) => {
+                // Trim ONLY ASCII space + tab. We don't trim '\r' here —
+                // CRLF vs LF must be a real mismatch.
+                let la_t = la.trim_end_matches(|c: char| c == ' ' || c == '\t');
+                let lb_t = lb.trim_end_matches(|c: char| c == ' ' || c == '\t');
+                if la_t != lb_t {
+                    return false;
+                }
+                if la_t.len() != la.len() || lb_t.len() != lb.len() {
+                    saw_trailing_ws_diff = true;
+                }
+            }
+            // One side has more lines. The only allowable case is a single
+            // trailing-newline difference, which manifests as one empty extra
+            // element. Anything else is structural drift.
+            (Some(extra), None) | (None, Some(extra)) => {
+                if !extra.is_empty() || ai.next().is_some() || bi.next().is_some() {
+                    return false;
+                }
+                saw_trailing_ws_diff = true;
+            }
+        }
+    }
+    // We only reach here when every pair of lines matched once trimmed. To
+    // qualify as `TrailingWhitespace` (not `Exact`) we must have actually
+    // observed a difference somewhere — otherwise the caller already would
+    // have taken the `Exact` branch.
+    saw_trailing_ws_diff
+}
+
+/// Map a [`TextMatchKind`] to the human-readable note attached to a
+/// [`ApplyVerdict::Ready`]'s `confidence_note`. `None` when no annotation is
+/// warranted (the caller is expected to convert `Mismatch` into
+/// `RequiresThreeWay` before reaching here).
+fn match_kind_note(kind: TextMatchKind) -> Option<String> {
+    match kind {
+        TextMatchKind::Exact => None,
+        TextMatchKind::NormalizedUnicode => {
+            Some("text matched after Unicode NFC normalization".to_string())
+        }
+        TextMatchKind::TrailingWhitespace => {
+            Some("trailing whitespace differs from snapshot".to_string())
+        }
+        // The caller funnels Mismatch into the three-way path before this is
+        // ever consulted; surface a defensive note rather than panicking.
+        TextMatchKind::Mismatch => Some("text mismatch (forwarded to three-way)".to_string()),
+    }
 }
 
 // ---------------------------------------------------------------------------

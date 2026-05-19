@@ -56,6 +56,12 @@ nucleo-matcher = "0.3.1"
 # webview rendering pipeline lives in TypeScript.
 comrak = { version = "0.52", default-features = false }
 
+# NFC/NFD normalization for the suggestion apply flow (attn-nnj.8.2). Already
+# pulled in transitively via comrak → caseless; declaring it as a direct dep
+# adds zero binary size and lets us call .nfc() / .nfd() on iterators of chars
+# in `src/review/apply.rs`'s expected-text classifier.
+unicode-normalization = "0.1"
+
 # Crypto foundations (attn-nnj.1.1 — per planning/collab/crypto-spec.md §Rust crates
 # and planning/collab/amendments.md §Codebase Corrections). No code uses these yet;
 # wrappers land in attn-nnj.1.3-1.8.

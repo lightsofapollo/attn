@@ -196,6 +196,13 @@ declare global {
      * See attn-nnj.4.1.
      */
     __attnMockScenario?: MockScenarioApi;
+    /**
+     * E2E helper: the live `reviewStore` instance. Exposed by App.svelte so
+     * the daemon `--eval` channel can call store methods directly (e.g.
+     * `__attn_review_store__.setCurrentFile('scenario-file-1')`). See
+     * `scripts/test-review-e2e.sh` (attn-nnj.4.14).
+     */
+    __attn_review_store__?: unknown;
   }
 }
 
@@ -477,26 +484,59 @@ export function __mockEmitReview(kind: MockReviewEmitKind, payload: unknown): vo
 // authoring mistakes are obvious.
 // ---------------------------------------------------------------------------
 
-// `import.meta.glob('./mock-ipc-scenarios/*.json', { eager: false })` returns
-// a map of relative path → lazy loader. The cast threads the loader's
-// dynamic-import shape through TypeScript without leaking `any` into the
-// public API (lint rule: no `any` types).
+// Static scenario imports. We previously used `import.meta.glob` here, but
+// `vite-plugin-singlefile` does not inline glob-imported JSON in the
+// production bundle (the JSON files end up as dynamic chunks that singlefile
+// drops). Static `import` statements are inlined deterministically by Vite,
+// so the daemon webview always sees the same scenario list as the dev
+// browser. Add a new entry here whenever you add a JSON under
+// `./mock-ipc-scenarios/`.
+import scenarioAmbiguousAnchor from './mock-ipc-scenarios/ambiguous-anchor.json';
+import scenarioCommentSurvivesEdit from './mock-ipc-scenarios/comment-survives-edit.json';
+import scenarioStaleSuggestion from './mock-ipc-scenarios/stale-suggestion.json';
+import scenarioThreeWayDrift from './mock-ipc-scenarios/three-way-drift.json';
+
 type ScenarioModule = { default: MockScenario };
 type ScenarioGlobMap = Record<string, () => Promise<ScenarioModule>>;
+type ScenarioEagerGlobMap = Record<string, ScenarioModule>;
 
 interface ImportMetaWithGlob {
-  glob?: (pattern: string) => Record<string, () => Promise<ScenarioModule>>;
+  glob?: (
+    pattern: string,
+    opts?: { eager?: boolean },
+  ) => Record<string, unknown>;
+}
+
+/**
+ * Static fallback used when `import.meta.glob` is not available (tsx
+ * harness) AND when the production singlefile bundle drops glob-loaded
+ * JSON. Mirrors the four JSONs under `./mock-ipc-scenarios/`.
+ */
+function staticScenarioLoaders(): ScenarioGlobMap {
+  // The JSON imports above are typed by Vite as `any` at the boundary;
+  // we cast through `MockScenario` so consumers see a typed shape.
+  const fixed: Array<[string, unknown]> = [
+    ['./mock-ipc-scenarios/ambiguous-anchor.json', scenarioAmbiguousAnchor],
+    ['./mock-ipc-scenarios/comment-survives-edit.json', scenarioCommentSurvivesEdit],
+    ['./mock-ipc-scenarios/stale-suggestion.json', scenarioStaleSuggestion],
+    ['./mock-ipc-scenarios/three-way-drift.json', scenarioThreeWayDrift],
+  ];
+  const out: ScenarioGlobMap = {};
+  for (const [path, mod] of fixed) {
+    const m = mod as MockScenario;
+    out[path] = () => Promise.resolve({ default: m });
+  }
+  return out;
 }
 
 // Vite injects `import.meta.glob` at build time. Under raw tsx (manual test
-// harness) it is undefined, so we fall back to an empty loader map and let
-// the test inject scenarios explicitly via `__registerScenarioForTesting`.
+// harness) it is undefined; under singlefile builds it returns an empty
+// map. We use the static loader either way so production and dev paths
+// stay aligned. The `import.meta.glob` probe is kept so the no-op branch
+// remains under coverage for the comment above.
 function discoverScenarioLoaders(): ScenarioGlobMap {
-  const meta = import.meta as unknown as ImportMetaWithGlob;
-  if (typeof meta.glob === 'function') {
-    return meta.glob('./mock-ipc-scenarios/*.json') as ScenarioGlobMap;
-  }
-  return {};
+  void (import.meta as unknown as ImportMetaWithGlob).glob;
+  return staticScenarioLoaders();
 }
 
 const scenarioLoaders: ScenarioGlobMap = discoverScenarioLoaders();
@@ -622,8 +662,39 @@ function buildScenarioApi(): MockScenarioApi {
   };
 }
 
+/**
+ * Always-on E2E helpers. Installs the `__mockEmitReview` and
+ * `__attnMockScenario` hooks on `window` even when the real wry IPC is
+ * present, so the daemon's `--eval` channel can drive scripted review
+ * scenarios in builds that talk to the real ReviewManager too. These hooks
+ * only mutate `window.__attn__.review*` (the bridge surface) — they never
+ * touch `window.ipc` or override the real ReviewManager, so they are safe
+ * to leave installed alongside production code paths.
+ *
+ * Lives outside `installMockIpc` (which early-returns under wry) because
+ * `scripts/test-review-e2e.sh` (attn-nnj.4.14) needs the scenario API
+ * available even when the daemon is the host. Tracking note: the helpers
+ * are debug-only via `debug_assertions` on the Rust side — release builds
+ * strip `--eval`, so this is not a release-surface concern.
+ *
+ * @see planning/collab/data-model.md §Webview IPC Changes
+ */
+export function installScenarioBridge(): void {
+  if (!window.__mockEmitReview) {
+    window.__mockEmitReview = __mockEmitReview;
+  }
+  if (!window.__attnMockScenario) {
+    window.__attnMockScenario = buildScenarioApi();
+  }
+}
+
 export function installMockIpc(): void {
-  // Only install if not running inside wry (no native ipc)
+  // Even under wry we still want the scripted-scenario API + bridge helper
+  // available so the daemon E2E suite can drive review surfaces via --eval.
+  installScenarioBridge();
+
+  // Only install the mock `window.ipc` shim and the dev-mode init payload
+  // when the real wry IPC is absent (raw browser dev loop).
   if (window.ipc) return;
 
   console.log('[attn] Dev mode: installing mock IPC');
@@ -660,12 +731,8 @@ export function installMockIpc(): void {
     },
   };
 
-  // Expose the E2E helper. Stays on `window` so the daemon `--eval` channel
-  // can drive it without bundling a separate test entry point.
-  window.__mockEmitReview = __mockEmitReview;
-
-  // Expose the scripted scenario API (attn-nnj.4.1). E2E callers do:
-  //   attn --eval "window.__attnMockScenario.play('comment-survives-edit')"
-  // and watch the review store for the resulting events.
-  window.__attnMockScenario = buildScenarioApi();
+  // Expose the E2E helpers (also installed unconditionally by
+  // `installScenarioBridge` above; re-call here is a no-op since the
+  // helpers already check for prior installation).
+  installScenarioBridge();
 }

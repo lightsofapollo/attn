@@ -71,7 +71,8 @@
             "baseHash": "hash-snap-1",
             "position": {
               "byteRange": [20, 100],
-              "lineRange": [3, 3]
+              "lineRange": [3, 3],
+              "pmRange": [24, 45]
             },
             "quote": {
               "exact": "primary anchor target",
@@ -112,10 +113,11 @@
         "eventId": "evt-comment-1",
         "resolved": {
           "status": "remapped",
-          "confidence": 0.9,
+          "confidence": 0.85,
           "currentRange": {
             "byteRange": [82, 103],
-            "lineRange": [3, 3]
+            "lineRange": [3, 3],
+            "pmRange": [86, 107]
           },
           "reason": "quote_match"
         }

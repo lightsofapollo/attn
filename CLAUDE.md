@@ -194,6 +194,22 @@ scripts/test-review-e2e.sh
 
 This runs under `ATTN_HOME=/tmp/attn-review-e2e` so it does not touch the user's normal daemon state, loads a scripted scenario from `tests/fixtures/review/`, and asserts the shape of the review surfaces (right-rail slot, `window.__attn__` review callbacks). Assertions that depend on not-yet-merged Phase 0c work print `PEND` instead of `FAIL` and flip to hard asserts as those issues land.
 
+### WebRTC end-to-end test (attn-nnj.7.7)
+
+Two surfaces:
+
+```bash
+task test:webrtc            # runs both the Rust test and the bash harness
+# or directly:
+cargo test --test webrtc_e2e -- --nocapture
+scripts/test-webrtc-e2e.sh
+```
+
+- **Rust**: `tests/webrtc_e2e.rs` stands up two `WebRtcTransport` instances inside the same process, drives them through SDP offer/answer + trickle ICE via an in-process signaling relay, sends a comment envelope over the DataChannel, and verifies the owner's `InboundPipeline` persisted it to `events.jsonl`. Requires loopback UDP and (optionally) STUN reachability to `stun.l.google.com`.
+- **Bash**: `scripts/test-webrtc-e2e.sh` boots two daemons via `scripts/lib/dual-instance.sh` and exercises the WebRTC handshake from the outside. Today it's primarily a daemon-shape scaffold — hard assertions on "the owner saw the reviewer's comment" PEND until attn-nnj.7.8 wires the ReviewManager IPC into `window.__attn__.review`.
+
+Both surfaces honor `ATTN_SKIP_WEBRTC_E2E=1` as a CI escape hatch: WebRTC bring-up needs real UDP sockets and is flaky on some infrastructure (especially macOS GH Actions runners). Skip-on-CI is a clean exit, not a failure.
+
 ### Manual testing workflow
 
 1. Start the daemon with HMR: `task dev ATTN_PATH=some/file.md`

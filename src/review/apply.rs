@@ -1581,4 +1581,361 @@ mod tests {
             "expected RequiresThreeWay (CRLF mismatch), got {verdict:?}",
         );
     }
+
+    // ====== apply_ready_verdict (attn-nnj.8.4) =============================
+    //
+    // The orchestrator wires three subsystems together: byte splicing,
+    // WorkingCopyService::save (stale-hash guarded), and ReviewStore::
+    // append_revision. These tests pin down each link of the chain plus the
+    // UTF-8-boundary safety net so a future refactor that drops one of them
+    // is caught loudly.
+
+    use crate::review::ids::RoomId;
+    use crate::review::store::ReviewStore;
+    use crate::review::working_copy::WorkingCopyService;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn room_id(s: &str) -> RoomId {
+        serde_json::from_value(Value::String(s.to_string())).expect("room id")
+    }
+
+    /// Build an `ApplyContext` rooted in a fresh tempdir. Returns the
+    /// context plus the tempdir guard (so callers can keep it alive for the
+    /// duration of the test) and the working-copy `path` so the test can
+    /// seed the file or read it back after the apply.
+    fn make_ctx(initial_bytes: &[u8]) -> (ApplyContext, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("doc.md");
+        std::fs::write(&path, initial_bytes).expect("seed");
+        let store =
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store");
+        let ctx = ApplyContext {
+            working_copy: Arc::new(WorkingCopyService::new()),
+            store: Arc::new(store),
+            room_id: room_id("room-apply"),
+            file_id: file_id("f1"),
+            path,
+        };
+        (ctx, tmp)
+    }
+
+    /// Construct a `Ready` verdict directly without going through the
+    /// resolver. Lets each apply test pick its own splice target precisely
+    /// instead of fighting the resolver's quote-matching heuristics.
+    fn ready_verdict(
+        suggestion: &str,
+        range: (usize, usize),
+        replacement: &str,
+    ) -> ApplyVerdict {
+        ApplyVerdict::Ready {
+            suggestion_id: event_id(suggestion),
+            target_byte_range: range,
+            replacement: replacement.to_string(),
+            confidence: 1.0,
+            match_kind: TextMatchKind::Exact,
+            confidence_note: None,
+        }
+    }
+
+    /// Replace path: a `Ready` verdict that swaps "brown" → "auburn" lands
+    /// on disk and produces a `LocalRevision` in the room/file journal whose
+    /// next_hash matches what the working-copy service computed.
+    #[test]
+    fn apply_ready_replace_writes_file_and_journals_revision() {
+        let initial = b"the quick brown fox\n";
+        let (ctx, _tmp) = make_ctx(initial);
+        // "brown" sits at bytes 10..15.
+        let verdict = ready_verdict("sug-r1", (10, 15), "auburn");
+
+        let outcome =
+            apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+
+        // (a) Disk reflects the splice.
+        let on_disk = std::fs::read(&ctx.path).expect("read disk");
+        assert_eq!(on_disk, b"the quick auburn fox\n");
+
+        // (b) Outcome's resulting_hash matches the canonical hash of the
+        //     new bytes (LF-only here, so no normalization difference).
+        assert_eq!(outcome.resulting_hash, content_hash(&on_disk));
+        assert_eq!(outcome.resulting_hash, outcome.revision.next_hash);
+
+        // (c) Suggestion id round-trips into the outcome.
+        assert_eq!(outcome.suggestion_id, event_id("sug-r1"));
+
+        // (d) Revision journal has exactly one entry, equal to the
+        //     outcome's revision.
+        let revs: Vec<_> = ctx
+            .store
+            .iter_revisions(&ctx.room_id, &ctx.file_id)
+            .expect("iter")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("revs");
+        assert_eq!(revs.len(), 1, "expected one journaled revision");
+        assert_eq!(revs[0].revision_id, outcome.revision.revision_id);
+        assert_eq!(
+            revs[0].source,
+            crate::review::model::RevisionSource::AcceptedSuggestion,
+            "journaled source must reflect the apply path",
+        );
+    }
+
+    /// Delete path: a `Ready` verdict with replacement="" shrinks the file
+    /// by the byte-range width and removes exactly those bytes.
+    #[test]
+    fn apply_ready_delete_removes_bytes() {
+        let initial = b"the quick brown fox\n";
+        let (ctx, _tmp) = make_ctx(initial);
+        // Delete "brown " (bytes 10..16) — note the trailing space so the
+        // result reads cleanly: "the quick fox\n".
+        let verdict = ready_verdict("sug-del", (10, 16), "");
+
+        let outcome =
+            apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+
+        let on_disk = std::fs::read(&ctx.path).expect("read disk");
+        assert_eq!(on_disk, b"the quick fox\n");
+        assert_eq!(on_disk.len(), initial.len() - 6);
+        assert_eq!(outcome.resulting_hash, content_hash(&on_disk));
+    }
+
+    /// InsertBefore path: a `Ready` verdict with a zero-length range and
+    /// non-empty replacement splices text at exactly position N.
+    #[test]
+    fn apply_ready_insert_before_splices_at_byte_index() {
+        let initial = b"the quick brown fox\n";
+        let (ctx, _tmp) = make_ctx(initial);
+        // Insert "very " immediately before "brown" (byte 10).
+        let verdict = ready_verdict("sug-ib", (10, 10), "very ");
+
+        apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+
+        let on_disk = std::fs::read(&ctx.path).expect("read disk");
+        assert_eq!(on_disk, b"the quick very brown fox\n");
+    }
+
+    /// InsertAfter path: zero-length range at the END of "brown" splices
+    /// text at byte 15.
+    #[test]
+    fn apply_ready_insert_after_splices_at_end_of_range() {
+        let initial = b"the quick brown fox\n";
+        let (ctx, _tmp) = make_ctx(initial);
+        // Insert " (auburn)" immediately after "brown" (byte 15).
+        let verdict = ready_verdict("sug-ia", (15, 15), " (auburn)");
+
+        apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+
+        let on_disk = std::fs::read(&ctx.path).expect("read disk");
+        assert_eq!(on_disk, b"the quick brown (auburn) fox\n");
+    }
+
+    /// Stale-write guard: when the bytes on disk differ from the
+    /// `current_markdown_bytes` the verdict was resolved against, the
+    /// WorkingCopyService's stale-hash check fires and we surface a typed
+    /// `ApplyError::StaleHash`. File is left untouched.
+    #[test]
+    fn apply_ready_stale_write_returns_stale_hash() {
+        // Disk has one document, but we resolve the verdict against
+        // *different* bytes — simulating "owner accepted a suggestion based
+        // on a stale snapshot of the doc".
+        let on_disk_initial = b"the QUICK brown fox\n";
+        let resolved_against = b"the quick brown fox\n";
+        let (ctx, _tmp) = make_ctx(on_disk_initial);
+        let verdict = ready_verdict("sug-stale", (10, 15), "auburn");
+
+        let err = apply_ready_verdict(&verdict, &ctx, resolved_against)
+            .expect_err("stale apply must fail");
+
+        match err {
+            ApplyError::StaleHash { expected, actual } => {
+                // `expected` is what the caller pinned (hash of
+                // `resolved_against`), `actual` is what the file currently
+                // hashes to.
+                assert_eq!(expected, content_hash(resolved_against));
+                assert_eq!(actual, content_hash(on_disk_initial));
+            }
+            other => panic!("expected StaleHash, got {other:?}"),
+        }
+
+        // File untouched.
+        let on_disk = std::fs::read(&ctx.path).expect("read disk");
+        assert_eq!(on_disk, on_disk_initial);
+
+        // Journal still empty — no revision was recorded.
+        let revs: Vec<_> = ctx
+            .store
+            .iter_revisions(&ctx.room_id, &ctx.file_id)
+            .expect("iter")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("revs");
+        assert!(revs.is_empty(), "no revision on stale-hash refusal");
+    }
+
+    /// Non-`Ready` verdict (Ambiguous) → `ApplyError::NotApplicable`. The
+    /// orchestrator never silently rewrites a three-way / ambiguous / stale
+    /// verdict into a write.
+    #[test]
+    fn apply_non_ready_verdict_returns_not_applicable() {
+        let initial = b"the quick brown fox\n";
+        let (ctx, _tmp) = make_ctx(initial);
+        let verdict = ApplyVerdict::Ambiguous {
+            suggestion_id: event_id("sug-amb"),
+            candidates: vec![ResolvedAnchorCandidate {
+                confidence: 0.5,
+                current_range: PositionAnchor {
+                    byte_range: [0, 3],
+                    line_range: [1, 1],
+                    pm_range: None,
+                },
+                reason: "ambiguous quote".into(),
+                preview: "the".into(),
+            }],
+        };
+
+        let err = apply_ready_verdict(&verdict, &ctx, initial)
+            .expect_err("non-Ready apply must fail");
+        match err {
+            ApplyError::NotApplicable { kind } => assert_eq!(kind, "Ambiguous"),
+            other => panic!("expected NotApplicable, got {other:?}"),
+        }
+
+        // Also test RequiresThreeWay and Stale — each must surface a kind
+        // string that identifies the rejected variant.
+        let three_way = ApplyVerdict::RequiresThreeWay {
+            suggestion_id: event_id("sug-3w"),
+            target_byte_range: (10, 15),
+            snapshot_expected: "brown".into(),
+            current_text: "BROWN".into(),
+            proposed_replacement: "auburn".into(),
+            confidence: 0.9,
+        };
+        match apply_ready_verdict(&three_way, &ctx, initial).expect_err("3w") {
+            ApplyError::NotApplicable { kind } => assert_eq!(kind, "RequiresThreeWay"),
+            other => panic!("expected NotApplicable(RequiresThreeWay), got {other:?}"),
+        }
+        let stale = ApplyVerdict::Stale {
+            suggestion_id: event_id("sug-stale"),
+            reason: "anchor lost".into(),
+        };
+        match apply_ready_verdict(&stale, &ctx, initial).expect_err("stale") {
+            ApplyError::NotApplicable { kind } => assert_eq!(kind, "Stale"),
+            other => panic!("expected NotApplicable(Stale), got {other:?}"),
+        }
+
+        // File untouched throughout.
+        assert_eq!(std::fs::read(&ctx.path).expect("read disk"), initial);
+    }
+
+    /// Multi-byte UTF-8: a paragraph containing emoji has byte ranges that
+    /// straddle multi-byte codepoints. The splice MUST treat byte ranges
+    /// literally (the resolver promises codepoint-aligned boundaries) and
+    /// produce valid UTF-8 with the emoji intact on either side.
+    #[test]
+    fn apply_ready_replace_inside_paragraph_with_emoji_is_byte_accurate() {
+        // "ship 🚀 fast" — 🚀 (U+1F680) is 4 bytes (F0 9F 9A 80).
+        // Layout:                 s h i p _ 🚀(4) _ f a s t
+        // Byte indices:           0 1 2 3 4 5..9   9 10 11 12 13
+        // We replace "fast" (bytes 10..14) with "now". The rocket emoji
+        // sits before the splice; its bytes must be preserved unchanged.
+        let initial = "ship 🚀 fast".as_bytes();
+        let (ctx, _tmp) = make_ctx(initial);
+        // Find "fast" by scanning — keeps the test resilient if the emoji
+        // encoding helper changes.
+        let fast_start = initial
+            .windows(4)
+            .position(|w| w == b"fast")
+            .expect("fast in initial");
+        let fast_end = fast_start + 4;
+        let verdict = ready_verdict("sug-emoji", (fast_start, fast_end), "now");
+
+        apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+
+        let on_disk_bytes = std::fs::read(&ctx.path).expect("read");
+        // Round-trip via String to confirm valid UTF-8 — would panic on
+        // mangled bytes (e.g. if we'd sliced through the emoji).
+        let on_disk = String::from_utf8(on_disk_bytes).expect("valid UTF-8");
+        assert_eq!(on_disk, "ship 🚀 now");
+    }
+
+    /// Defensive: a verdict whose `target_byte_range` lands inside a
+    /// multi-byte codepoint surfaces as `ApplyError::BadByteRange`. The
+    /// resolver guarantees alignment, but the orchestrator's safety net
+    /// must catch upstream bugs before producing mangled UTF-8.
+    #[test]
+    fn apply_ready_misaligned_utf8_range_returns_bad_byte_range() {
+        // 🚀 occupies bytes 0..4. A range starting at byte 1 is INSIDE the
+        // emoji's continuation bytes.
+        let initial = "🚀ok".as_bytes();
+        let (ctx, _tmp) = make_ctx(initial);
+        let verdict = ready_verdict("sug-bad", (1, 4), "x");
+        let err = apply_ready_verdict(&verdict, &ctx, initial)
+            .expect_err("misaligned range must fail");
+        match err {
+            ApplyError::BadByteRange { start, end, .. } => {
+                assert_eq!(start, 1);
+                assert_eq!(end, 4);
+            }
+            other => panic!("expected BadByteRange, got {other:?}"),
+        }
+        // File untouched on rejection.
+        assert_eq!(std::fs::read(&ctx.path).expect("read"), initial);
+    }
+
+    /// Defensive: a verdict whose `target_byte_range` extends past the end
+    /// of `current_markdown_bytes` surfaces as `ApplyError::BadByteRange`.
+    /// Same rationale as the misaligned-UTF-8 test — catch upstream bugs
+    /// before they corrupt the file.
+    #[test]
+    fn apply_ready_out_of_bounds_range_returns_bad_byte_range() {
+        let initial = b"short\n";
+        let (ctx, _tmp) = make_ctx(initial);
+        // Range past the end (start within bounds, end > len).
+        let verdict = ready_verdict("sug-oob", (3, 100), "x");
+        let err = apply_ready_verdict(&verdict, &ctx, initial)
+            .expect_err("out-of-bounds range must fail");
+        assert!(
+            matches!(err, ApplyError::BadByteRange { start: 3, end: 100, len: 6 }),
+            "got {err:?}",
+        );
+    }
+
+    /// Through-the-resolver smoke: drive `resolve_suggestion` to produce a
+    /// `Ready` verdict and then immediately apply it via the orchestrator.
+    /// Locks down the two halves of attn-nnj.8 (8.1 resolver + 8.4 apply)
+    /// composing without per-test glue.
+    #[test]
+    fn resolve_then_apply_replace_full_pipeline() {
+        let initial = b"the quick brown fox\n";
+        let (ctx, _tmp) = make_ctx(initial);
+        let snap = "s-pipe";
+        let idx = build_anchor_index(initial, &snap_id(snap)).expect("idx");
+        let h = content_hash(initial);
+        let anchor = quote_anchor(initial, "brown", snap);
+        let op = SuggestionOperation::Replace {
+            expected_text: "brown".into(),
+            replacement: "tawny".into(),
+        };
+        let body = suggestion_event("sug-pipe", anchor, op);
+        let verdict =
+            resolve_suggestion(&event_id("evt-pipe"), &body, &idx, initial, &h, None)
+                .expect("verdict");
+        assert!(matches!(verdict, ApplyVerdict::Ready { .. }));
+
+        let outcome =
+            apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+
+        assert_eq!(
+            std::fs::read(&ctx.path).expect("read"),
+            b"the quick tawny fox\n"
+        );
+        // The pipeline-produced revision id must match the journaled one.
+        let revs: Vec<_> = ctx
+            .store
+            .iter_revisions(&ctx.room_id, &ctx.file_id)
+            .expect("iter")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("revs");
+        assert_eq!(revs.len(), 1);
+        assert_eq!(revs[0].revision_id, outcome.revision.revision_id);
+    }
 }

@@ -148,7 +148,15 @@
   // checks selection state so the test harness can drive the same path.
   // ---------------------------------------------------------------------------
 
-  let commentComposerRef: ReturnType<typeof CommentComposer> | undefined = $state(undefined);
+interface CommentComposerState {
+    view: import('prosemirror-view').EditorView;
+    from: number;
+    to: number;
+    anchorContext: import('./lib/review/anchors').ConstructAnchorContext;
+    roomId: import('./lib/types').RoomId;
+  }
+  let commentComposer = $state<CommentComposerState | null>(null);
+  function closeCommentComposer() { commentComposer = null; }
 
   function resolveActiveSnapshotForCompose() {
     const fileId = reviewStore.currentFileId;
@@ -174,16 +182,19 @@
     if (!roomId) return;
     const snapshot = resolveActiveSnapshotForCompose();
     if (!snapshot || !snapshot.anchorIndex) return;
-    commentComposerRef?.open({
+    const { from, to } = view.state.selection;
+    commentComposer = {
       view,
+      from,
+      to,
       roomId,
-      ctx: {
+      anchorContext: {
         index: snapshot.anchorIndex,
         fileId: snapshot.fileId,
         snapshotId: snapshot.snapshotId,
         baseHash: snapshot.baseHash,
       },
-    });
+    };
   }
 
   function handleGlobalKeydown(e: KeyboardEvent): void {
@@ -267,4 +278,13 @@
   {/if}
 </main>
 
-<CommentComposer bind:this={commentComposerRef} />
+{#if commentComposer}
+  <CommentComposer
+    view={commentComposer.view}
+    from={commentComposer.from}
+    to={commentComposer.to}
+    anchorContext={commentComposer.anchorContext}
+    roomId={commentComposer.roomId}
+    onClose={closeCommentComposer}
+  />
+{/if}

@@ -163,7 +163,7 @@
     from: number;
     to: number;
     anchorContext: ConstructAnchorContext;
-    roomId: RoomId;
+    roomId: import('./lib/types').RoomId;
   }
 
   interface SuggestionComposerState {

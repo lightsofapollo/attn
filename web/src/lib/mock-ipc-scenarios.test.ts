@@ -162,13 +162,9 @@ interface NodeUrl {
   fileURLToPath: (url: string) => string;
 }
 
-// @ts-expect-error — `node:*` types come from `@types/node`, which is not in
-// `web/tsconfig.json`. This file is a tsx-only manual harness and the import
-// resolves at runtime via Node's ESM loader.
+// node:* import resolves at runtime via Node's ESM loader; types narrowed via `as unknown as`
 const fs = (await import('node:fs')) as unknown as NodeFs;
-// @ts-expect-error — see fs comment above.
 const path = (await import('node:path')) as unknown as NodePath;
-// @ts-expect-error — see fs comment above.
 const url = (await import('node:url')) as unknown as NodeUrl;
 
 const __filename = url.fileURLToPath(import.meta.url);

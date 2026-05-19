@@ -13,11 +13,19 @@
 
 #![allow(dead_code)]
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use crate::review::anchors::resolve::{PmStepJournal, resolve_anchor};
-use crate::review::ids::{ContentHash, EventId};
+use crate::review::crypto::ids::content_hash;
+use crate::review::ids::{ContentHash, EventId, FileId, RoomId};
 use crate::review::model::{
-    AnchorIndex, PositionAnchor, ResolvedAnchor, ResolvedAnchorCandidate, ReviewEventBody,
-    SuggestionOperation,
+    AnchorIndex, LocalRevision, PositionAnchor, ResolvedAnchor, ResolvedAnchorCandidate,
+    ReviewEventBody, SuggestionOperation,
+};
+use crate::review::store::ReviewStore;
+use crate::review::working_copy::{
+    SaveRequest, SaveSource, WorkingCopyError, WorkingCopyService,
 };
 use unicode_normalization::UnicodeNormalization;
 
@@ -28,6 +36,11 @@ use unicode_normalization::UnicodeNormalization;
 /// Errors the resolver can raise before producing an `ApplyVerdict`. Anchor
 /// resolution failures do NOT live here — they are folded into the verdict
 /// (`Stale` / `Ambiguous`). Only structural caller mistakes surface as errors.
+///
+/// The `apply_ready_verdict` entry-point reuses this enum so the orchestrator
+/// has a single error type. Write-path failures (stale-hash drift, IO,
+/// non-`Ready` verdicts) get their own variants below; resolver-path failures
+/// keep the original variants.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
     /// The caller passed a `ReviewEventBody` that wasn't a `SuggestionCreated`.
@@ -35,11 +48,57 @@ pub enum ApplyError {
     /// caller.
     #[error("event is not a suggestion")]
     NotSuggestion,
+    /// `apply_ready_verdict` was called with a non-`Ready` verdict. Applying a
+    /// `RequiresThreeWay` / `Ambiguous` / `Stale` verdict without first
+    /// resolving it is a caller bug — the orchestrator never silently
+    /// converts those into writes.
+    #[error("verdict is not Ready and cannot be applied directly: {kind}")]
+    NotApplicable { kind: &'static str },
+    /// The verdict's target byte range falls outside the supplied current
+    /// markdown bytes, or lands inside a multi-byte UTF-8 codepoint. The
+    /// resolver guarantees codepoint-aligned ranges, so this is defensive —
+    /// surfaces a programmer error rather than producing mangled UTF-8.
+    #[error("target byte range {start}..{end} is not a valid UTF-8 boundary in {len}-byte content")]
+    BadByteRange {
+        start: usize,
+        end: usize,
+        len: usize,
+    },
+    /// Disk-side drift: the document on disk hashed to something different
+    /// than the bytes the caller resolved the verdict against. The
+    /// `WorkingCopyService` stale-hash guard refused to write, and the file
+    /// is left untouched. Caller should re-resolve the suggestion against
+    /// the fresh document.
+    #[error("file changed underneath us: expected hash {expected:?} but disk is {actual:?}")]
+    StaleHash {
+        expected: ContentHash,
+        actual: ContentHash,
+    },
+    /// Filesystem failure during the working-copy write or read.
+    #[error("io: {0}")]
+    Io(String),
+    /// Revision journal append failed. The file was written but the journal
+    /// could not record the transition — surfaces as a hard error because
+    /// the apply flow's promise to issue 8.5 (SuggestionAccepted emit) is
+    /// that the journal entry exists by the time the event is emitted.
+    #[error("revision journal: {0}")]
+    Journal(String),
     /// Catch-all for unexpected resolver errors (e.g. anchor was routed to
     /// the wrong file). Currently unused by the happy paths but exists so the
     /// signature stays forward-compatible.
     #[error("apply: {0}")]
     Other(String),
+}
+
+impl From<WorkingCopyError> for ApplyError {
+    fn from(err: WorkingCopyError) -> Self {
+        match err {
+            WorkingCopyError::StaleHash { expected, actual } => {
+                ApplyError::StaleHash { expected, actual }
+            }
+            WorkingCopyError::Io(e) => ApplyError::Io(e.to_string()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +259,204 @@ pub fn resolve_suggestion(
         resolved,
         current_markdown_bytes,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Apply orchestrator
+// ---------------------------------------------------------------------------
+
+/// Dependencies the apply orchestrator needs to write a `Ready` verdict to
+/// disk and record the resulting `LocalRevision`.
+///
+/// Held by `ReviewManager` (issue 8.5 onwards); for the apply pipeline itself
+/// the struct is a plain bundle so the function signature stays trivially
+/// callable from tests without a half-mocked manager.
+pub struct ApplyContext {
+    /// Shared working-copy service — the only path that may write the file.
+    /// We never call `std::fs::write` directly from the apply flow.
+    pub working_copy: Arc<WorkingCopyService>,
+    /// Shared review store. We use it solely to append the resulting
+    /// `LocalRevision` to the room's revision journal.
+    pub store: Arc<ReviewStore>,
+    /// Room the suggestion lives in. Recorded on the `SaveSource` and used to
+    /// pick the per-room revisions directory in the store.
+    pub room_id: RoomId,
+    /// File the suggestion targets. Used to pick the per-file JSONL inside
+    /// the room's revisions directory.
+    pub file_id: FileId,
+    /// On-disk path of the working copy. Passed straight to
+    /// `WorkingCopyService::save`.
+    pub path: PathBuf,
+}
+
+/// What the orchestrator produced when a `Ready` verdict was applied.
+///
+/// Returned to the caller (eventually `ReviewManager`) so it can emit a
+/// `SuggestionAccepted` event carrying the resulting `ContentHash` (issue
+/// 8.5).
+#[derive(Debug, Clone)]
+pub struct ApplyOutcome {
+    /// The suggestion id from the verdict — re-exposed so callers don't have
+    /// to plumb the original verdict through to the event emitter.
+    pub suggestion_id: EventId,
+    /// The revision recorded in the journal. Already persisted by the time
+    /// this outcome returns.
+    pub revision: LocalRevision,
+    /// Hash of the working copy after the apply landed. Equal to
+    /// `revision.next_hash` — duplicated for readability at the
+    /// call site that wants "the hash the event should advertise".
+    pub resulting_hash: ContentHash,
+}
+
+/// Apply a `Ready` verdict by:
+/// 1. Splicing the verdict's `replacement` into `current_markdown_bytes` at
+///    `target_byte_range`,
+/// 2. Saving the result through `ctx.working_copy` with
+///    `SaveSource::AcceptedSuggestion`,
+/// 3. Appending the returned `LocalRevision` to `ctx.store`.
+///
+/// Non-`Ready` verdicts return `ApplyError::NotApplicable` — the orchestrator
+/// never silently rewrites three-way/ambiguous/stale verdicts into writes.
+///
+/// The `current_markdown_bytes` MUST be the bytes the caller fed to
+/// `resolve_suggestion` (i.e. the bytes the verdict's `target_byte_range` is
+/// indexed against). The stale-hash guard on `WorkingCopyService::save`
+/// double-checks that this is still what is on disk; a mismatch surfaces as
+/// `ApplyError::StaleHash` and the file is left untouched.
+pub fn apply_ready_verdict(
+    verdict: &ApplyVerdict,
+    ctx: &ApplyContext,
+    current_markdown_bytes: &[u8],
+) -> Result<ApplyOutcome, ApplyError> {
+    // (1) Only Ready verdicts are applicable. Convert the other variants to
+    // an error tagged with a human-readable kind so the caller's logs say
+    // *which* non-Ready verdict slipped through.
+    let (suggestion_id, target_byte_range, replacement) = match verdict {
+        ApplyVerdict::Ready {
+            suggestion_id,
+            target_byte_range,
+            replacement,
+            ..
+        } => (suggestion_id.clone(), *target_byte_range, replacement.clone()),
+        ApplyVerdict::RequiresThreeWay { .. } => {
+            return Err(ApplyError::NotApplicable {
+                kind: "RequiresThreeWay",
+            });
+        }
+        ApplyVerdict::Ambiguous { .. } => {
+            return Err(ApplyError::NotApplicable { kind: "Ambiguous" });
+        }
+        ApplyVerdict::Stale { .. } => {
+            return Err(ApplyError::NotApplicable { kind: "Stale" });
+        }
+    };
+
+    let (start, end) = target_byte_range;
+
+    // (2) Defensive UTF-8-boundary check. The resolver guarantees codepoint
+    // alignment on the byte range, but we are about to splice raw bytes into
+    // a String — an off-by-one bug upstream would otherwise produce mangled
+    // UTF-8 and a `from_utf8` panic deep inside the save path. Surface it
+    // here with a precise error.
+    let len = current_markdown_bytes.len();
+    if start > end
+        || end > len
+        || !is_char_boundary(current_markdown_bytes, start)
+        || !is_char_boundary(current_markdown_bytes, end)
+    {
+        return Err(ApplyError::BadByteRange { start, end, len });
+    }
+
+    // (3) Splice. Replace, Delete, InsertBefore, InsertAfter all collapse to
+    // the same byte-level operation: `bytes[..start] + replacement +
+    // bytes[end..]`. Delete passes replacement="" and a non-zero range;
+    // insertions pass replacement=<text> and a zero-length range. No
+    // operation-specific branches needed.
+    let mut new_bytes: Vec<u8> = Vec::with_capacity(len + replacement.len());
+    new_bytes.extend_from_slice(&current_markdown_bytes[..start]);
+    new_bytes.extend_from_slice(replacement.as_bytes());
+    new_bytes.extend_from_slice(&current_markdown_bytes[end..]);
+    // The splice operates on UTF-8 boundaries (checked above) of UTF-8
+    // inputs, so the result is guaranteed valid UTF-8 by construction.
+    // `from_utf8` is still cheap (a scan) and gives us a defensive panic-
+    // free path if upstream invariants ever loosen.
+    let new_content = String::from_utf8(new_bytes)
+        .map_err(|e| ApplyError::Other(format!("spliced bytes are not UTF-8: {e}")))?;
+
+    // (4) Pin the stale-hash guard to the bytes the caller resolved against.
+    // If anything has changed on disk since `current_markdown_bytes` was
+    // read, `WorkingCopyService::save` refuses to write and we surface a
+    // typed StaleHash error.
+    let expected_hash = content_hash_canonical(current_markdown_bytes);
+
+    let req = SaveRequest {
+        path: ctx.path.clone(),
+        content: new_content,
+        expected_hash: Some(expected_hash),
+        source: SaveSource::AcceptedSuggestion {
+            room_id: ctx.room_id.clone(),
+            suggestion_id: suggestion_id.clone(),
+        },
+    };
+    let save_result = ctx.working_copy.save(req)?;
+
+    // (5) Persist the revision. The WorkingCopyService returns it un-
+    // persisted by design (a non-collab save would skip this step); the
+    // apply orchestrator always journals so issue 8.5's event emitter can
+    // rely on the entry existing.
+    ctx.store
+        .append_revision(&ctx.room_id, &ctx.file_id, &save_result.revision)
+        .map_err(|e| ApplyError::Journal(e.to_string()))?;
+
+    Ok(ApplyOutcome {
+        suggestion_id,
+        revision: save_result.revision,
+        resulting_hash: save_result.next_hash,
+    })
+}
+
+/// Canonical hash matches what `WorkingCopyService::save` computes for the
+/// previous-bytes guard: LF-normalize before hashing so the apply flow's
+/// expected_hash agrees with the service's view of the file. We re-derive
+/// rather than expose `working_copy::hash_canonical` so the apply module
+/// stays decoupled from working_copy's internal helpers.
+fn content_hash_canonical(bytes: &[u8]) -> ContentHash {
+    // Fast path: pure-LF input is hashed unchanged.
+    if !bytes.contains(&b'\r') {
+        return content_hash(bytes);
+    }
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            i += 1;
+            continue;
+        }
+        normalized.push(bytes[i]);
+        i += 1;
+    }
+    content_hash(&normalized)
+}
+
+/// `str::is_char_boundary` lifted onto a byte slice without paying for a
+/// `from_utf8` validation pass over the whole document. Returns `true` for
+/// positions that fall on a UTF-8 codepoint boundary (including 0 and len).
+///
+/// Implementation note: a byte is a codepoint boundary iff it is NOT a UTF-8
+/// continuation byte (top two bits != `10`). End-of-slice is trivially a
+/// boundary. We accept the loose definition (bytes that are not continuation
+/// bytes) because invalid UTF-8 cannot reach this function — the canonical
+/// markdown bytes the apply pipeline receives are guaranteed UTF-8 upstream
+/// by the snapshot/anchor index pipeline.
+fn is_char_boundary(bytes: &[u8], pos: usize) -> bool {
+    if pos == bytes.len() {
+        return true;
+    }
+    if pos > bytes.len() {
+        return false;
+    }
+    // Continuation byte iff (b & 0xC0) == 0x80.
+    bytes[pos] & 0xC0 != 0x80
 }
 
 // ---------------------------------------------------------------------------

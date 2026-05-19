@@ -1029,4 +1029,299 @@ mod tests {
             preview: String::new(),
         };
     }
+
+    // ====== classify_text_match coverage (attn-nnj.8.2) ====================
+    //
+    // These tests pin down the boundary between safe normalizations (which
+    // resolve to `Ready`) and real drift (which forces three-way review).
+    // Anything that flips one of these assertions silently is a correctness
+    // regression — the apply flow could either reject benign whitespace
+    // changes (annoying) or silently overwrite user edits (dangerous).
+
+    /// (1) Byte-identical inputs are `Exact` — the cheap path.
+    #[test]
+    fn classify_exact_equal_ascii() {
+        assert_eq!(
+            classify_text_match("hello world", "hello world"),
+            TextMatchKind::Exact,
+        );
+    }
+
+    /// (2) CRLF on one side, LF on the other → `Mismatch`. `WorkingCopyService`
+    /// always writes LF; a stray CR is a real wire-format issue and must
+    /// escalate to three-way review.
+    #[test]
+    fn classify_crlf_vs_lf_is_mismatch() {
+        assert_eq!(
+            classify_text_match("line a\r\nline b\r\n", "line a\nline b\n"),
+            TextMatchKind::Mismatch,
+        );
+    }
+
+    /// (3) NFC (precomposed) vs NFD (decomposed) of the same string →
+    /// `NormalizedUnicode`. "é" as U+00E9 vs "e" + U+0301 renders identically;
+    /// safe to apply.
+    #[test]
+    fn classify_nfc_vs_nfd_returns_normalized_unicode() {
+        // U+00E9 (LATIN SMALL LETTER E WITH ACUTE)
+        let nfc = "café";
+        // 'e' followed by U+0301 (COMBINING ACUTE ACCENT)
+        let nfd = "cafe\u{0301}";
+        assert_ne!(nfc, nfd, "test inputs must differ byte-wise");
+        assert_eq!(
+            classify_text_match(nfc, nfd),
+            TextMatchKind::NormalizedUnicode,
+        );
+        // Symmetric: snapshot=NFD, current=NFC.
+        assert_eq!(
+            classify_text_match(nfd, nfc),
+            TextMatchKind::NormalizedUnicode,
+        );
+    }
+
+    /// (4) Accented character authored once with a precomposed glyph and once
+    /// with combining marks (a slightly fancier NFC/NFD case using a string
+    /// with multiple combining marks) → `NormalizedUnicode`.
+    #[test]
+    fn classify_combining_marks_round_trip() {
+        // "ǻ" (U+01FB) NFC = "a" + U+030A + U+0301 NFD-decomposed form.
+        let precomposed = "\u{01FB}";
+        let decomposed = "a\u{030A}\u{0301}";
+        assert_ne!(precomposed, decomposed);
+        assert_eq!(
+            classify_text_match(precomposed, decomposed),
+            TextMatchKind::NormalizedUnicode,
+        );
+    }
+
+    /// (5) Case differences are never folded — case is meaningful in
+    /// markdown content. "Foo" vs "foo" is a real edit.
+    #[test]
+    fn classify_case_difference_is_mismatch() {
+        assert_eq!(
+            classify_text_match("Hello World", "hello world"),
+            TextMatchKind::Mismatch,
+        );
+    }
+
+    /// (6) Trailing space on one side, none on the other → `TrailingWhitespace`.
+    /// Editors that strip trailing spaces on save are a common drift source.
+    #[test]
+    fn classify_trailing_space_returns_trailing_whitespace() {
+        assert_eq!(
+            classify_text_match("a line   ", "a line"),
+            TextMatchKind::TrailingWhitespace,
+        );
+        // Symmetric.
+        assert_eq!(
+            classify_text_match("a line", "a line   "),
+            TextMatchKind::TrailingWhitespace,
+        );
+    }
+
+    /// (7) Trailing newline on one side, none on the other → `TrailingWhitespace`.
+    /// Common when a snippet was captured mid-line vs end-of-file.
+    #[test]
+    fn classify_trailing_newline_returns_trailing_whitespace() {
+        assert_eq!(
+            classify_text_match("line one\n", "line one"),
+            TextMatchKind::TrailingWhitespace,
+        );
+    }
+
+    /// (8) Same line count, internal whitespace difference (extra space INSIDE
+    /// a word, not at end of line) → `Mismatch`. Trailing-only tolerance must
+    /// not swallow content-shifting whitespace edits.
+    #[test]
+    fn classify_internal_whitespace_difference_is_mismatch() {
+        // "hello  world" (two spaces) vs "hello world" (one space) — the diff
+        // is in the middle of the line, not at the end.
+        assert_eq!(
+            classify_text_match("hello  world\nline two", "hello world\nline two"),
+            TextMatchKind::Mismatch,
+        );
+    }
+
+    /// (9) Empty strings on both sides are `Exact` — degenerate base case the
+    /// resolver hits when comparing a zero-length insertion target.
+    #[test]
+    fn classify_empty_strings_are_exact() {
+        assert_eq!(classify_text_match("", ""), TextMatchKind::Exact);
+    }
+
+    /// (10) Identical Unicode emoji strings (multi-byte UTF-8 with no
+    /// normalization difference) hit the `Exact` fast path — the NFC branch
+    /// is correctly skipped via the ASCII guard NOT firing but the byte-eq
+    /// check succeeding.
+    #[test]
+    fn classify_unicode_emoji_exact() {
+        let emoji = "ship it 🚀 done ✅";
+        assert_eq!(classify_text_match(emoji, emoji), TextMatchKind::Exact);
+    }
+
+    /// Bonus: NFD-equal strings that ALSO have a trailing-space difference
+    /// fall through to `Mismatch`. The two soft tiers are independent — we
+    /// don't NFC-normalize INSIDE the trailing-whitespace check, and the NFC
+    /// branch doesn't trim trailing whitespace before comparing. This is a
+    /// documented limitation: the two normalizations don't compose. A
+    /// suggestion with combined drift (Unicode form + trailing whitespace)
+    /// must go through three-way review. Locking this behavior with a test so
+    /// a future refactor that composes the two tiers is an explicit decision,
+    /// not an accident.
+    #[test]
+    fn classify_nfd_plus_trailing_space_is_mismatch() {
+        let nfc = "café";
+        let nfd_with_space = "cafe\u{0301}   ";
+        assert_eq!(
+            classify_text_match(nfc, nfd_with_space),
+            TextMatchKind::Mismatch,
+        );
+    }
+
+    /// Bonus: structural change — different line count beyond just a trailing
+    /// newline → `Mismatch`.
+    #[test]
+    fn classify_added_line_is_mismatch() {
+        assert_eq!(
+            classify_text_match("one\ntwo\n", "one\ntwo\nthree\n"),
+            TextMatchKind::Mismatch,
+        );
+    }
+
+    /// Bonus: BOM (U+FEFF) on one side only → `Mismatch`. BOM is a content
+    /// byte at this layer; upstream UTF-8 decoding already handled the
+    /// encoding-marker question.
+    #[test]
+    fn classify_bom_on_one_side_is_mismatch() {
+        assert_eq!(
+            classify_text_match("\u{FEFF}hello", "hello"),
+            TextMatchKind::Mismatch,
+        );
+    }
+
+    /// Bonus property-style: for any string s, classify(s, s) is Exact and
+    /// classify(s, s + "x") is Mismatch (the ContentHash spec's
+    /// strict-equality invariant on identical bytes, lifted into the
+    /// classifier).
+    #[test]
+    fn classify_property_self_and_append() {
+        for s in [
+            "",
+            "ascii",
+            "with\nnewlines",
+            "café",          // NFC
+            "cafe\u{0301}",  // NFD
+            "🚀 ship",
+        ] {
+            assert_eq!(classify_text_match(s, s), TextMatchKind::Exact, "self: {s:?}");
+            let appended = format!("{s}x");
+            assert_eq!(
+                classify_text_match(s, &appended),
+                TextMatchKind::Mismatch,
+                "appended: {s:?} vs {appended:?}",
+            );
+        }
+    }
+
+    // --- Integration: classify_text_match wired into resolve_suggestion ---
+
+    /// NFC vs NFD at the apply-flow level → `Ready` with
+    /// `match_kind = NormalizedUnicode` and a confidence note. Proves the
+    /// classifier is actually wired into the resolver's decision tree, not
+    /// just exported as a standalone helper.
+    #[test]
+    fn resolve_suggestion_nfd_current_text_returns_ready_normalized() {
+        // Current doc holds the NFD form of "café"; the suggestion's
+        // expected_text is the NFC form. The anchor's quote must also be NFD
+        // so the resolver's quote step finds the right byte range.
+        let md_str = "the quick cafe\u{0301} fox\n";
+        let md = md_str.as_bytes();
+        let snap = "s-nfd";
+        let idx = build_anchor_index(md, &snap_id(snap)).expect("idx");
+        let h = content_hash(md);
+        // Anchor needs to target "cafe\u{0301}" exactly so the quote step
+        // resolves to the NFD bytes in the current doc.
+        let anchor = quote_anchor(md, "cafe\u{0301}", snap);
+        let op = SuggestionOperation::Replace {
+            expected_text: "café".into(), // NFC form
+            replacement: "espresso".into(),
+        };
+        let body = suggestion_event("sug-nfd", anchor, op);
+        let verdict = resolve_suggestion(&event_id("evt-nfd"), &body, &idx, md, &h, None)
+            .expect("verdict");
+        match verdict {
+            ApplyVerdict::Ready {
+                match_kind,
+                confidence_note,
+                replacement,
+                ..
+            } => {
+                assert_eq!(match_kind, TextMatchKind::NormalizedUnicode);
+                assert!(confidence_note.is_some(), "expected a confidence note");
+                assert_eq!(replacement, "espresso");
+            }
+            other => panic!("expected Ready (NormalizedUnicode), got {other:?}"),
+        }
+    }
+
+    /// Trailing-space difference at the apply-flow level → `Ready` with
+    /// `match_kind = TrailingWhitespace` and a "trailing whitespace differs"
+    /// note. The resolver accepts the apply but surfaces the soft warning.
+    #[test]
+    fn resolve_suggestion_trailing_space_returns_ready_with_note() {
+        // Current doc has "fox   " (three trailing spaces); the suggestion's
+        // expected_text omits them. The anchor targets the "fox   " bytes so
+        // the quote step lands precisely on the trailing-whitespace region.
+        let md = b"the quick brown fox   \n";
+        let snap = "s-trail";
+        let idx = build_anchor_index(md, &snap_id(snap)).expect("idx");
+        let h = content_hash(md);
+        let anchor = quote_anchor(md, "fox   ", snap);
+        let op = SuggestionOperation::Replace {
+            expected_text: "fox".into(), // no trailing spaces
+            replacement: "wolf".into(),
+        };
+        let body = suggestion_event("sug-trail", anchor, op);
+        let verdict = resolve_suggestion(&event_id("evt-trail"), &body, &idx, md, &h, None)
+            .expect("verdict");
+        match verdict {
+            ApplyVerdict::Ready {
+                match_kind,
+                confidence_note,
+                replacement,
+                ..
+            } => {
+                assert_eq!(match_kind, TextMatchKind::TrailingWhitespace);
+                assert_eq!(
+                    confidence_note.as_deref(),
+                    Some("trailing whitespace differs from snapshot"),
+                );
+                assert_eq!(replacement, "wolf");
+            }
+            other => panic!("expected Ready (TrailingWhitespace), got {other:?}"),
+        }
+    }
+
+    /// CRLF vs LF at the apply-flow level → `RequiresThreeWay`. The current
+    /// doc is LF (post-WorkingCopyService normalization); the suggestion's
+    /// `expected_text` smuggled in CRLF, which is a real mismatch.
+    #[test]
+    fn resolve_suggestion_crlf_in_expected_text_forces_three_way() {
+        let md = b"line a\nline b\n";
+        let snap = "s-crlf";
+        let idx = build_anchor_index(md, &snap_id(snap)).expect("idx");
+        let h = content_hash(md);
+        let anchor = quote_anchor(md, "line a\nline b", snap);
+        let op = SuggestionOperation::Replace {
+            expected_text: "line a\r\nline b".into(), // CRLF — must NOT fold to LF
+            replacement: "line A\nline B".into(),
+        };
+        let body = suggestion_event("sug-crlf", anchor, op);
+        let verdict = resolve_suggestion(&event_id("evt-crlf"), &body, &idx, md, &h, None)
+            .expect("verdict");
+        assert!(
+            matches!(verdict, ApplyVerdict::RequiresThreeWay { .. }),
+            "expected RequiresThreeWay (CRLF mismatch), got {verdict:?}",
+        );
+    }
 }

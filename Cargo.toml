@@ -85,6 +85,14 @@ tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 # transports behind a `Box<dyn Transport>`. Drop once `dyn` support lands.
 async-trait = "0.1"
 
+# WebRTC transport (attn-nnj.7.x — per planning/collab/amendments.md §Decision #1).
+# Pulls in the full webrtc-rs sub-crate set (data channels, dtls, sctp, ice,
+# srtp, etc.) needed for a peer-to-peer DataChannel. This is the headline
+# binary-size risk to the 25 MiB target — measurement captured in
+# planning/collab/binary-size-baseline.md "After webrtc-rs". No code consumes
+# this yet; the Rust transport implementation lands in attn-nnj.7.2+.
+webrtc = "0.11"
+
 [dev-dependencies]
 tempfile = "3"
 # Mock HTTP for outbox processor tests (attn-nnj.6.2). wiremock spins up an

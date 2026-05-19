@@ -22,24 +22,24 @@
       "name": "all-zero roomSecret",
       "roomSecret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       "expected": {
-        "roomId": "__PENDING__",
-        "rootKey": "__PENDING__",
-        "eventKey": "__PENDING__",
-        "snapshotKey": "__PENDING__",
-        "signalingKey": "__PENDING__",
-        "admissionKey": "__PENDING__"
+        "roomId": "5Ow3qk07D4SvamUBfLrYuQ",
+        "rootKey": "CuyvxuusiDS8b3B1SrFgNFrLKQNm80Qb1yo_0OoPalo",
+        "eventKey": "qUDk0Dai7VDPJoTPdTlciQudWM46N63rDRMVe-Icqk8",
+        "snapshotKey": "2Gh2KNkDpiOZqscEQE0yi-0oLJP2h-ucrb1rtWLNiBw",
+        "signalingKey": "tcDfnQQ3AaYdaJFa8rK-oEl9BWhB3oVgKAOs6sD-0dg",
+        "admissionKey": "Nq_BjjgvAdbTtTrOVFWCbE0ZxwrMBIkKtXQcmf02Wlo"
       }
     },
     {
-      "name": "random fixed roomSecret #1",
-      "roomSecret": "__PENDING__",
+      "name": "counting-bytes roomSecret (0x00..0x1F)",
+      "roomSecret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
       "expected": {
-        "roomId": "__PENDING__",
-        "rootKey": "__PENDING__",
-        "eventKey": "__PENDING__",
-        "snapshotKey": "__PENDING__",
-        "signalingKey": "__PENDING__",
-        "admissionKey": "__PENDING__"
+        "roomId": "5mnM-h95Fwd6DJUnh5GrTQ",
+        "rootKey": "4YW7rwRSVHx4j3yURu6l9v_rHebb-ll17RsLjbZhEUk",
+        "eventKey": "b2bDOOBceBPuPOYzHOovjmvLJ7TosNoNLEDQaJyqxV4",
+        "snapshotKey": "TOc7O2LspJiQdhG2NNlum0nX6BKVsWMNhfQCVLmBKyI",
+        "signalingKey": "YflXiYRmAefa3GaOBHK7aBL2qNdsArNYcA0FmytNIP0",
+        "admissionKey": "QL-Tmh9JdtUcgIwICIvcl_Xguw2VK9mO4gDj0e6Utxc"
       }
     }
   ]

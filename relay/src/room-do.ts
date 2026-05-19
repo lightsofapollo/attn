@@ -27,7 +27,7 @@ import {
 import { canonicalize, type CanonicalValue } from "./canonical";
 import type { Env } from "./env";
 import { OwnerSigError, verifyOwnerSignature } from "./owner-sig";
-import { parsePow, PowError, verifyPow } from "./pow";
+import { parsePow, POW_MAX_LIFETIME_MS, PowError, verifyPow } from "./pow";
 import {
   acksRequestSchema,
   deviceRegistrationSchema,
@@ -62,6 +62,12 @@ const META = {
   ownerSigningKey: "meta:owner_signing_key",
   ownerSigningKeyId: "meta:owner_signing_key_id",
   admissionKey: "meta:admission_key",
+  /**
+   * Round-trip of the URL-path roomId. The DO has no built-in way to recover
+   * the name it was created with, but the alarm() path needs it to walk R2
+   * under `rooms/<roomId>/`. We persist it at create time and never mutate.
+   */
+  roomId: "meta:room_id",
   createdAt: "meta:created_at",
   expiresAt: "meta:expires_at",
   hardMaxAt: "meta:hard_max_at",
@@ -72,6 +78,27 @@ const META = {
   envelopeCount: "meta:envelope_count",
   oldestRetainedSeq: "meta:oldest_retained_seq",
 } as const;
+
+/** Storage prefix for the pow-replay set. Walked by the alarm to prune. */
+const POW_SEEN_PREFIX = "pow_seen:";
+
+function powSeenKey(hash: string): string {
+  return `${POW_SEEN_PREFIX}${hash}`;
+}
+
+/**
+ * Periodic interval the alarm uses to wake for the pow-prune sweep. The spec
+ * pins this at ~5 minutes (relay-spec.md §Alarms). We chose 5min so any token
+ * past expiresAt + POW_MAX_LIFETIME_MS (10min) gets cleaned within ~15min.
+ */
+const POW_PRUNE_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Window before `expires_at` during which a WS connect re-runs the expiry
+ * check as a belt-and-braces against alarm slippage. Pinned to 1h per
+ * amendments.md #9 (R2 7-day safety net rationale).
+ */
+const PRE_EXPIRY_CLEANUP_WINDOW_MS = 60 * 60 * 1000;
 
 interface ErrorBody {
   error: { code: string; message: string };
@@ -321,6 +348,7 @@ export class RoomDO extends DurableObject<Env> {
       [META.ownerSigningKey]: ownerKeyBytes,
       [META.ownerSigningKeyId]: ownerSigningKeyId,
       [META.admissionKey]: admissionKeyBytes,
+      [META.roomId]: roomId,
       [META.createdAt]: createdAt,
       [META.expiresAt]: clamped.policy.expiresAt,
       [META.hardMaxAt]: clamped.hardMaxAt,
@@ -332,11 +360,15 @@ export class RoomDO extends DurableObject<Env> {
       [META.oldestRetainedSeq]: 0,
     });
 
-    // Schedule the TTL/idle alarm. 5.12 owns the actual alarm() handler; here
-    // we just set the wake time to min(hard_max_at, last_event_at + idle).
-    const idleAt = createdAt + clamped.idleTimeoutMs;
-    const alarmAt = Math.min(clamped.hardMaxAt, idleAt);
-    await this.ctx.storage.setAlarm(alarmAt);
+    // Schedule the TTL/idle alarm. The alarm() handler owns the actual
+    // expire/prune logic; `rescheduleAlarm()` picks the earliest of
+    // (hard_max_at, last_event_at + idleTimeoutMs, next_pow_prune_at).
+    await this.rescheduleAlarm({
+      now: createdAt,
+      hardMaxAt: clamped.hardMaxAt,
+      lastEventAt: createdAt,
+      idleTimeoutMs: clamped.idleTimeoutMs,
+    });
 
     return Response.json(
       {
@@ -896,13 +928,14 @@ export class RoomDO extends DurableObject<Env> {
 
     // 8. Reschedule alarm if anything was accepted (idle window advances).
     if (fresh.length > 0) {
-      const [hardMaxAt, idleTimeoutMs] = await Promise.all([
-        this.ctx.storage.get<number>(META.hardMaxAt),
-        Promise.resolve(policy.idleTimeoutMs ?? limits.defaultIdleTimeoutMs),
-      ]);
+      const hardMaxAt = await this.ctx.storage.get<number>(META.hardMaxAt);
       if (hardMaxAt !== undefined) {
-        const alarmAt = Math.min(hardMaxAt, now + idleTimeoutMs);
-        await this.ctx.storage.setAlarm(alarmAt);
+        await this.rescheduleAlarm({
+          now,
+          hardMaxAt,
+          lastEventAt: now,
+          idleTimeoutMs: policy.idleTimeoutMs ?? limits.defaultIdleTimeoutMs,
+        });
       }
     }
 
@@ -1467,6 +1500,19 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
     }
 
+    // Pre-expiry cleanup check (amendments.md #9): if the room is within 1h of
+    // `meta:expires_at`, run alarm() immediately to belt-and-braces against
+    // alarm slippage near TTL. If the alarm wipes the room, the very next
+    // storage.get below returns undefined and we surface 404 — matching the
+    // post-expiry observable behaviour.
+    const cleanupRan = await this.maybeRunPreExpiryCleanup();
+    if (cleanupRan) {
+      const stillThere = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
+      if (stillThere === undefined) {
+        return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+      }
+    }
+
     // Parse Sec-WebSocket-Protocol → ["attn.v2", "hmac.<b64url>"].
     const protocolHeader = request.headers.get("Sec-WebSocket-Protocol");
     const parsedProtocol = parseAttnProtocol(protocolHeader);
@@ -1843,13 +1889,169 @@ export class RoomDO extends DurableObject<Env> {
   // -- helpers for PoW replay + device ordering ---------------------------
 
   private async isPowSeen(hash: string): Promise<boolean> {
-    return (await this.ctx.storage.get<number>(`pow_seen:${hash}`)) !== undefined;
+    return (await this.ctx.storage.get<number>(powSeenKey(hash))) !== undefined;
   }
 
   private async markPowSeen(hash: string, expiresAt: number): Promise<void> {
-    // 5.12 owns alarm-driven pruning. For now we just persist the expiresAt
-    // so a future alarm can scan + drop expired entries.
-    await this.ctx.storage.put<number>(`pow_seen:${hash}`, expiresAt);
+    // Stored value is the token's expiresAt so the periodic pow-prune alarm
+    // can walk `pow_seen:*` and drop anything past expiresAt + 10min.
+    await this.ctx.storage.put<number>(powSeenKey(hash), expiresAt);
+  }
+
+  // -- Alarms (TTL + Idle + PoW-prune) ------------------------------------
+
+  /**
+   * Cloudflare DO alarm handler per relay-spec.md §Alarms.
+   *
+   * Three logical alarms collapsed into one wake time (CF only supports one):
+   *   1. Hard-max     — fires at `meta:hard_max_at` (createdAt + 24h/7d).
+   *   2. Idle         — fires at `meta:last_event_at + policy.idleTimeoutMs`.
+   *   3. PoW-prune    — periodic (~5min), removes pow_seen entries whose
+   *                     stored expiresAt + 10min < now.
+   *
+   * On hard-max or idle expiry:
+   *   - Close every WS with 4002 (room expired).
+   *   - Schedule R2 deletion under `rooms/<roomId>/`.
+   *   - state.storage.deleteAll() — DO is observably gone.
+   *   - Do NOT re-schedule (DO is dormant).
+   *
+   * Otherwise the alarm just woke for the pow-prune sweep — prune expired
+   * entries and re-schedule for `min(hard_max_at, last_event_at + idle,
+   * next_pow_prune_at)`.
+   */
+  override async alarm(): Promise<void> {
+    const now = Date.now();
+    const [hardMaxAt, lastEventAt, policy] = await Promise.all([
+      this.ctx.storage.get<number>(META.hardMaxAt),
+      this.ctx.storage.get<number>(META.lastEventAt),
+      this.ctx.storage.get<RoomPolicy>(META.policy),
+    ]);
+
+    // Room state already wiped (e.g., raced with DELETE). Nothing to do.
+    if (hardMaxAt === undefined || lastEventAt === undefined || policy === undefined) {
+      return;
+    }
+
+    const limits = readHardLimits(this.env);
+    const idleTimeoutMs = policy.idleTimeoutMs ?? limits.defaultIdleTimeoutMs;
+    const idleDeadline = lastEventAt + idleTimeoutMs;
+
+    // Expiry check first — hard-max OR idle past due → wipe the room.
+    if (now >= hardMaxAt || now >= idleDeadline) {
+      await this.expireRoom();
+      return;
+    }
+
+    // Periodic pow-prune sweep.
+    await this.prunePowSeen(now);
+
+    // Re-schedule to the next earliest wake time.
+    await this.rescheduleAlarm({
+      now,
+      hardMaxAt,
+      lastEventAt,
+      idleTimeoutMs,
+    });
+  }
+
+  /**
+   * Shared helper to compute and set the next alarm wake time as
+   * `min(hard_max_at, last_event_at + idleTimeoutMs, now + POW_PRUNE_INTERVAL_MS)`.
+   * Called from handleRoomCreate, handleEnvelopesIngest, and alarm() itself.
+   */
+  private async rescheduleAlarm(opts: {
+    now: number;
+    hardMaxAt: number;
+    lastEventAt: number;
+    idleTimeoutMs: number;
+  }): Promise<void> {
+    const idleAt = opts.lastEventAt + opts.idleTimeoutMs;
+    const powPruneAt = opts.now + POW_PRUNE_INTERVAL_MS;
+    const alarmAt = Math.min(opts.hardMaxAt, idleAt, powPruneAt);
+    await this.ctx.storage.setAlarm(alarmAt);
+  }
+
+  /**
+   * Expire-and-wipe path for the hard-max/idle alarm. Mirrors handleRoomDelete
+   * structure (close 4002, deleteAll, schedule R2 cleanup) but does NOT require
+   * any of the admission/PoW/owner-sig layers — the alarm is server-internal.
+   */
+  private async expireRoom(): Promise<void> {
+    // Close every live WS with 4002 (room expired). Wrapped per-socket so one
+    // dead socket can't block the others.
+    for (const sock of this.ctx.getWebSockets()) {
+      try {
+        sock.close(CLOSE_ROOM_EXPIRED, "room expired");
+      } catch {
+        // socket likely already closed; runtime will clean up
+      }
+    }
+
+    // Schedule R2 cleanup. We do this BEFORE deleteAll() so we still have the
+    // room context available; the bucket lifecycle rule is the safety net.
+    // Derive the roomId by inspecting the env_by_target / device_order keys is
+    // overkill — we just walk the R2 prefix directly using the DO's own id.
+    // The DO has no direct handle on its roomId; we rely on the env_by_target
+    // prefix-walk pattern used by cleanupRoomBlobs by passing the roomId
+    // resolved from a stored helper key. For now we encode roomId implicitly
+    // by relying on the env_by_target index path being scoped per-DO.
+    // Simpler: persist the roomId at create time and read it here.
+    const roomId = await this.ctx.storage.get<string>(META.roomId);
+    if (roomId !== undefined) {
+      await this.cleanupRoomBlobs(roomId);
+    }
+
+    // Wipe every DO storage key + cancel any other alarm we might have set
+    // mid-flight. deleteAll also drops pow_seen:*, env:*, device:*, etc.
+    await this.ctx.storage.deleteAll();
+    try {
+      await this.ctx.storage.deleteAlarm();
+    } catch {
+      // deleteAlarm varies across workerd versions; swallow.
+    }
+  }
+
+  /**
+   * Belt-and-braces cleanup gate run from WS connect.
+   *
+   * If the room is within `PRE_EXPIRY_CLEANUP_WINDOW_MS` (1h) of its
+   * `meta:expires_at`, re-run the alarm logic synchronously so a slipped
+   * alarm can't keep an expired room limping along. Returns true if alarm()
+   * ran (caller re-checks META.admissionKey to decide whether to 404).
+   *
+   * Amendments.md #9: motivated by R2's 7-day lifecycle rule landing before
+   * the DO's TTL alarm in a worst-case slippage scenario.
+   */
+  private async maybeRunPreExpiryCleanup(): Promise<boolean> {
+    const expiresAt = await this.ctx.storage.get<number>(META.expiresAt);
+    if (expiresAt === undefined) return false;
+    const now = Date.now();
+    if (now <= expiresAt - PRE_EXPIRY_CLEANUP_WINDOW_MS) return false;
+    await this.alarm();
+    return true;
+  }
+
+  /**
+   * Walk `pow_seen:*` and delete entries whose stored expiresAt + 10min < now.
+   * The 10min skew matches POW_MAX_LIFETIME_MS so a freshly-minted token
+   * cannot be erroneously pruned mid-flight.
+   *
+   * Bounded by the volume of in-flight PoW tokens (default 16 bits → ~1 token
+   * per write, capped by per-room rate limit at 120/min). Worst case ~1200
+   * entries; the list+delete is cheap.
+   */
+  private async prunePowSeen(now: number): Promise<void> {
+    const entries = await this.ctx.storage.list<number>({ prefix: POW_SEEN_PREFIX });
+    const stale: string[] = [];
+    for (const [key, expiresAt] of entries.entries()) {
+      if (typeof expiresAt !== "number") continue;
+      if (expiresAt + POW_MAX_LIFETIME_MS < now) {
+        stale.push(key);
+      }
+    }
+    if (stale.length > 0) {
+      await this.ctx.storage.delete(stale);
+    }
   }
 
   private async nextDeviceSeq(): Promise<number> {

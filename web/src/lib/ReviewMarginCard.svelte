@@ -306,7 +306,18 @@
       <span class="rmc-kind rmc-kind-comment">comment</span>
     {/if}
     {#if state === 'remapped_moved'}
-      <span class="rmc-badge rmc-badge-moved" title="anchor was remapped">moved</span>
+      <!--
+        `attn-moved-badge` is the canonical selector per
+        planning/collab/ui/inline-decorations.md §3 (the panel-side moved
+        chip). `rmc-badge` + `rmc-badge-moved` are the local styling
+        hooks for layout inside this card; both stay so existing CSS keeps
+        working and E2E (attn-nnj.4.14) can target `.attn-moved-badge`.
+      -->
+      <span
+        class="rmc-badge rmc-badge-moved attn-moved-badge"
+        title="anchor was remapped"
+        data-testid="review-margin-card-moved-badge"
+      >moved</span>
     {:else if state === 'ambiguous'}
       <span class="rmc-badge rmc-badge-ambiguous" title="multiple anchor candidates">amb</span>
     {:else if state === 'stale'}

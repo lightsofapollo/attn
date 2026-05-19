@@ -1217,6 +1217,16 @@
       },
     };
 
+    // E2E helper: expose the global review store so daemon `--eval` channels
+    // (scripts/test-review-e2e.sh, attn-nnj.11.4 / 4.14) can drive the panel
+    // selection model directly — e.g. `reviewStore.setCurrentFile(...)`
+    // before playing a scripted scenario. The same store instance is in use
+    // by the rest of the app; no shadow copy.
+    //
+    // @see planning/collab/data-model.md §Review Store
+    (window as Window & { __attn_review_store__?: typeof reviewStore })
+      .__attn_review_store__ = reviewStore;
+
     type QueuedMessage =
       | { kind: 'set'; data: ContentPayload }
       | { kind: 'update'; data: UpdatePayload };

@@ -196,6 +196,13 @@ declare global {
      * See attn-nnj.4.1.
      */
     __attnMockScenario?: MockScenarioApi;
+    /**
+     * E2E helper: the live `reviewStore` instance. Exposed by App.svelte so
+     * the daemon `--eval` channel can call store methods directly (e.g.
+     * `__attn_review_store__.setCurrentFile('scenario-file-1')`). See
+     * `scripts/test-review-e2e.sh` (attn-nnj.4.14).
+     */
+    __attn_review_store__?: unknown;
   }
 }
 
@@ -622,8 +629,39 @@ function buildScenarioApi(): MockScenarioApi {
   };
 }
 
+/**
+ * Always-on E2E helpers. Installs the `__mockEmitReview` and
+ * `__attnMockScenario` hooks on `window` even when the real wry IPC is
+ * present, so the daemon's `--eval` channel can drive scripted review
+ * scenarios in builds that talk to the real ReviewManager too. These hooks
+ * only mutate `window.__attn__.review*` (the bridge surface) — they never
+ * touch `window.ipc` or override the real ReviewManager, so they are safe
+ * to leave installed alongside production code paths.
+ *
+ * Lives outside `installMockIpc` (which early-returns under wry) because
+ * `scripts/test-review-e2e.sh` (attn-nnj.4.14) needs the scenario API
+ * available even when the daemon is the host. Tracking note: the helpers
+ * are debug-only via `debug_assertions` on the Rust side — release builds
+ * strip `--eval`, so this is not a release-surface concern.
+ *
+ * @see planning/collab/data-model.md §Webview IPC Changes
+ */
+export function installScenarioBridge(): void {
+  if (!window.__mockEmitReview) {
+    window.__mockEmitReview = __mockEmitReview;
+  }
+  if (!window.__attnMockScenario) {
+    window.__attnMockScenario = buildScenarioApi();
+  }
+}
+
 export function installMockIpc(): void {
-  // Only install if not running inside wry (no native ipc)
+  // Even under wry we still want the scripted-scenario API + bridge helper
+  // available so the daemon E2E suite can drive review surfaces via --eval.
+  installScenarioBridge();
+
+  // Only install the mock `window.ipc` shim and the dev-mode init payload
+  // when the real wry IPC is absent (raw browser dev loop).
   if (window.ipc) return;
 
   console.log('[attn] Dev mode: installing mock IPC');
@@ -660,12 +698,8 @@ export function installMockIpc(): void {
     },
   };
 
-  // Expose the E2E helper. Stays on `window` so the daemon `--eval` channel
-  // can drive it without bundling a separate test entry point.
-  window.__mockEmitReview = __mockEmitReview;
-
-  // Expose the scripted scenario API (attn-nnj.4.1). E2E callers do:
-  //   attn --eval "window.__attnMockScenario.play('comment-survives-edit')"
-  // and watch the review store for the resulting events.
-  window.__attnMockScenario = buildScenarioApi();
+  // Expose the E2E helpers (also installed unconditionally by
+  // `installScenarioBridge` above; re-call here is a no-op since the
+  // helpers already check for prior installation).
+  installScenarioBridge();
 }

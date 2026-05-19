@@ -113,6 +113,19 @@ export class WorkerEdgeRateLimit {
    * `roomExists` so the limiter can update the anti-enum bucket
    * (unknown rooms count; existing rooms don't).
    *
+   * The Worker entry can't always tell up-front whether a room
+   * exists — that fact is owned by the DO. The typical call pattern
+   * is:
+   *
+   *   1. `check(ip, roomId, /*roomExists*\/ true)` BEFORE forwarding
+   *      (covers the per-IP cap; skips anti-enum so a single typo
+   *      doesn't get penalized as enumeration).
+   *   2. Forward to the DO.
+   *   3. If the DO replies 404 ATTN_ROOM_NOT_FOUND, call
+   *      {@link recordUnknownRoom} to update the anti-enum bucket.
+   *      That call returns a result the caller can use to upgrade
+   *      the 404 to a 429 when the cap is exceeded.
+   *
    * Returns `{ ok: true }` on success, or a `{ ok: false, code,
    * retryAfterMs }` payload the caller maps to a 429 response.
    *
@@ -132,6 +145,20 @@ export class WorkerEdgeRateLimit {
 
     // 2. Per-IP total request rate. Counted whether the room exists or not.
     return this.incrementIpBucket(ip, now);
+  }
+
+  /**
+   * Record a confirmed-unknown roomId hit and report whether the
+   * caller has now exceeded the anti-enum cap. Used by the Worker
+   * AFTER the DO returns 404 ATTN_ROOM_NOT_FOUND so the bucket
+   * tracks only verifiable misses (no false positives from typos
+   * that would have been caught downstream as 4xx anyway).
+   *
+   * Idempotent on repeated unknown probes of the same roomId — the
+   * cap is on distinct ids.
+   */
+  recordUnknownRoom(ip: string, roomId: string): RateLimitResult {
+    return this.trackUnknownRoom(ip, roomId, this.nowFn());
   }
 
   /**

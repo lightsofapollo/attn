@@ -9,6 +9,24 @@ export default {
   async fetch(request: Request, _env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    // GET /health is the only unauthenticated route. Every other route below
+    // (when filled in by 5.5–5.11) must verify admission via:
+    //
+    //   import { verifyAdmission, AdmissionError } from "./admission";
+    //   try {
+    //     await verifyAdmission(request, url.pathname, {
+    //       roomId,
+    //       admissionKey, // loaded from DO storage at meta:admission_key (5.5)
+    //     });
+    //   } catch (err) {
+    //     if (err instanceof AdmissionError) {
+    //       return Response.json({ error: { code: err.code, message: err.message } }, { status: 401 });
+    //     }
+    //     throw err;
+    //   }
+    //
+    // Owner-privileged routes additionally call verifyOwnerSignature (5.3); writes also call verifyPow (5.4).
+
     if (url.pathname === "/health" && request.method === "GET") {
       return Response.json({
         status: "ok",

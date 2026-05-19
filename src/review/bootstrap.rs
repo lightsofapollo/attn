@@ -1111,6 +1111,27 @@ impl Bootstrapper {
         path: &std::path::Path,
         now_ms: u64,
     ) -> Result<(FileId, SnapshotId), BootstrapError> {
+        self.publish_snapshot(room_id, path, None, now_ms)
+    }
+
+    /// Read the file off disk and publish a `SnapshotCreated` event for it.
+    ///
+    /// `existing_file_id` keeps document identity stable across edits: the
+    /// FileId is derived from the FIRST snapshot's content hash, so a
+    /// republish (owner edit) MUST reuse it rather than re-derive from the
+    /// new content (which would mint a different FileId and orphan all the
+    /// reviewer's anchored comments). On the very first publish it's `None`
+    /// and we derive + persist it via `record_share_file_id`.
+    ///
+    /// The new SnapshotId is always content-derived, so each edit produces a
+    /// distinct snapshot that supersedes the prior one for the same FileId.
+    pub fn publish_snapshot(
+        &self,
+        room_id: &RoomId,
+        path: &std::path::Path,
+        existing_file_id: Option<FileId>,
+        now_ms: u64,
+    ) -> Result<(FileId, SnapshotId), BootstrapError> {
         use crate::review::anchors::index::build_anchor_index;
         use crate::review::crypto::ids::{
             content_hash, derive_file_id, derive_snapshot_id,
@@ -1122,7 +1143,10 @@ impl Bootstrapper {
 
         let room_secret = load_room_secret(self.store.root(), room_id)?;
         let display_path = path.to_string_lossy().to_string();
-        let file_id = derive_file_id(&room_secret, &display_path, &base_hash);
+        let (file_id, is_first) = match existing_file_id {
+            Some(fid) => (fid, false),
+            None => (derive_file_id(&room_secret, &display_path, &base_hash), true),
+        };
         let snapshot_id = derive_snapshot_id(room_id, &file_id, &base_hash, now_ms as i64);
 
         let markdown = String::from_utf8(markdown_bytes)
@@ -1149,14 +1173,37 @@ impl Bootstrapper {
         };
 
         let outcome = self.send_event_sync(room_id, body, now_ms)?;
+        // Persist the stable file_id on the first publish so future edits
+        // reuse it (looked up via `find_room_for_path`).
+        if is_first {
+            record_share_file_id(self.store.root(), room_id, &file_id)?;
+        }
         eprintln!(
-            "review: published initial snapshot file={} snapshot={} bytes={} room={}",
+            "review: published snapshot file={} snapshot={} bytes={} first={} room={}",
             file_id.as_str(),
             snapshot_id.as_str(),
             outcome.envelope.ciphertext_bytes,
+            is_first,
             room_id.as_str(),
         );
         Ok((file_id, snapshot_id))
+    }
+
+    /// Republish a snapshot for a file the owner just edited. Looks up the
+    /// room + stable file_id for `path`; no-op (returns `Ok(None)`) when the
+    /// path isn't shared. Called from the `PublishSnapshot` IPC on save.
+    pub fn republish_snapshot_for_path(
+        &self,
+        path: &std::path::Path,
+        now_ms: u64,
+    ) -> Result<Option<(RoomId, FileId, SnapshotId)>, BootstrapError> {
+        let Some((room_id, file_id)) =
+            find_room_for_path(self.store.root(), path)?
+        else {
+            return Ok(None);
+        };
+        let (fid, sid) = self.publish_snapshot(&room_id, path, file_id, now_ms)?;
+        Ok(Some((room_id, fid, sid)))
     }
 
     // -----------------------------------------------------------------
@@ -1611,6 +1658,13 @@ fn unix_now_ms() -> u64 {
 struct LocalShareRecord {
     path: String,
     created_at: u64,
+    /// Stable document identity for `path` within this room. Set when the
+    /// initial snapshot is published; reused for every subsequent
+    /// republish so the FileId stays constant across edits (only the
+    /// SnapshotId changes). `None` for shares minted before this field
+    /// existed — `publish_snapshot` derives + persists it on first edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_id: Option<String>,
 }
 
 fn shares_dir(root: &std::path::Path) -> PathBuf {
@@ -1647,24 +1701,73 @@ fn record_local_share(
     path: &std::path::Path,
 ) -> Result<(), BootstrapError> {
     let mut all = load_local_shares(root)?;
+    // Preserve a previously-stored file_id if this room was already shared
+    // (re-share of the same path) so the document identity stays stable.
+    let prior_file_id = all.get(room_id.as_str()).and_then(|r| r.file_id.clone());
     all.insert(
         room_id.as_str().to_string(),
         LocalShareRecord {
             path: path.to_string_lossy().to_string(),
             created_at: unix_now_ms(),
+            file_id: prior_file_id,
         },
     );
+    write_local_shares(root, &all)
+}
+
+/// Persist the stable `file_id` for a room's shared document so subsequent
+/// snapshot republishes (on owner edit) reuse the same document identity.
+fn record_share_file_id(
+    root: &std::path::Path,
+    room_id: &RoomId,
+    file_id: &FileId,
+) -> Result<(), BootstrapError> {
+    let mut all = load_local_shares(root)?;
+    if let Some(record) = all.get_mut(room_id.as_str()) {
+        record.file_id = Some(file_id.as_str().to_string());
+        write_local_shares(root, &all)?;
+    }
+    Ok(())
+}
+
+fn write_local_shares(
+    root: &std::path::Path,
+    all: &std::collections::HashMap<String, LocalShareRecord>,
+) -> Result<(), BootstrapError> {
     let dir = shares_dir(root);
     std::fs::create_dir_all(&dir)
         .map_err(|e| BootstrapError::Store(format!("create {}: {e}", dir.display())))?;
     let tmp = local_shares_index_path(root).with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(&all)
+    let bytes = serde_json::to_vec_pretty(all)
         .map_err(|e| BootstrapError::Store(format!("serialize local shares: {e}")))?;
     std::fs::write(&tmp, &bytes)
         .map_err(|e| BootstrapError::Store(format!("write {}: {e}", tmp.display())))?;
     std::fs::rename(&tmp, local_shares_index_path(root))
         .map_err(|e| BootstrapError::Store(format!("rename shares index: {e}")))?;
     Ok(())
+}
+
+/// Look up the room a shared `path` belongs to, plus the stable file_id if
+/// one has been recorded. Returns `None` when the path isn't shared.
+fn find_room_for_path(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<Option<(RoomId, Option<FileId>)>, BootstrapError> {
+    let target = path.to_string_lossy();
+    let all = load_local_shares(root)?;
+    for (room_id_str, record) in all {
+        if record.path == target {
+            let room_id: RoomId =
+                serde_json::from_value(serde_json::Value::String(room_id_str))
+                    .expect("RoomId deserializes from any string");
+            let file_id = record.file_id.map(|s| {
+                serde_json::from_value::<FileId>(serde_json::Value::String(s))
+                    .expect("FileId deserializes from any string")
+            });
+            return Ok(Some((room_id, file_id)));
+        }
+    }
+    Ok(None)
 }
 
 fn save_room_secret(

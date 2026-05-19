@@ -127,10 +127,15 @@
     const roomId = reviewStore.currentRoomId;
     const fileId = reviewStore.currentFileId;
     if (!roomId || !fileId) return null;
-    const snap = reviewStore.snapshots.find(
+    // Pick the LATEST snapshot for this file — owner edits republish a new
+    // snapshot per save, so several may exist for one fileId. Newest
+    // createdAt wins so the reviewer always sees the freshest content.
+    const candidates = reviewStore.snapshots.filter(
       (s) => s.roomId === roomId && s.fileId === fileId && typeof s.markdown === 'string',
     );
-    return snap?.markdown ?? null;
+    if (candidates.length === 0) return null;
+    const latest = candidates.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
+    return latest.markdown ?? null;
   });
   // A pure reviewer = joined a room, received a snapshot, but has no local
   // file tab open. This is what flips the editor from the "No file

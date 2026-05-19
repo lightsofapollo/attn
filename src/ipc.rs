@@ -210,7 +210,20 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                     expected_hash: None,
                     source: SaveSource::UserEdit,
                 }) {
-                    Ok(result) => persist_revision_if_mapped(state, &path, &result),
+                    Ok(result) => {
+                        persist_revision_if_mapped(state, &path, &result);
+                        // If this file is shared, republish a fresh snapshot so
+                        // connected reviewers see the edit. The manager no-ops
+                        // when the path isn't part of any room, so this is safe
+                        // to fire on every save.
+                        let manager = {
+                            let Ok(s) = state.lock() else { return };
+                            s.review_manager.clone()
+                        };
+                        if let Some(manager) = manager {
+                            manager.submit(ReviewCommand::PublishSnapshot { path: path.clone() });
+                        }
+                    }
                     Err(e) => eprintln!("attn: failed to save: {}", e),
                 }
             }

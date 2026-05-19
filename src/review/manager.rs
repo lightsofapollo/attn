@@ -96,6 +96,9 @@ pub enum ReviewCommand {
         event_id: EventId,
         range: PositionAnchor,
     },
+    /// Owner edited a shared file — republish a fresh snapshot so connected
+    /// reviewers see the update. No-op when `path` isn't part of any share.
+    PublishSnapshot { path: PathBuf },
 }
 
 /// Updates the `ReviewManager` emits up to the tao event loop.
@@ -429,6 +432,29 @@ impl ReviewManager {
                     unix_now_ms_for_manager(),
                 );
                 self.emit_event_outcome(room_id.clone(), result);
+                return;
+            }
+            (ReviewCommand::PublishSnapshot { path }, Some(bootstrapper), Some(_runtime)) => {
+                match bootstrapper
+                    .republish_snapshot_for_path(path, unix_now_ms_for_manager())
+                {
+                    Ok(Some((room_id, _file_id, snapshot_id))) => {
+                        eprintln!(
+                            "review: republished snapshot {} for {} (room={})",
+                            snapshot_id.as_str(),
+                            path.display(),
+                            room_id.as_str()
+                        );
+                    }
+                    Ok(None) => { /* path isn't shared — nothing to do */ }
+                    Err(err) => {
+                        (self.update_tx)(ReviewUpdate::Error {
+                            room_id: None,
+                            code: "ATTN_SNAPSHOT_PUBLISH".to_string(),
+                            message: format!("republish snapshot for {}: {err}", path.display()),
+                        });
+                    }
+                }
                 return;
             }
             _ => {}
@@ -1347,6 +1373,14 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
                 current_range: range.clone(),
                 reason: crate::review::model::RemappedReason::QuoteMatch,
             },
+        },
+        // PublishSnapshot goes through the real bootstrap path in `submit`
+        // when one is attached. Without a bootstrapper (smoke tests) it's a
+        // no-op — surface a benign status so the dispatch contract stays
+        // total.
+        ReviewCommand::PublishSnapshot { .. } => ReviewUpdate::RoomStatusChanged {
+            room_id: stub_room_id(),
+            status: "Pending snapshot publish — no bootstrap attached".to_string(),
         },
     }
 }

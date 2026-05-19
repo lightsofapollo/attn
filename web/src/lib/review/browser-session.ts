@@ -40,7 +40,6 @@
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { hmac } from '@noble/hashes/hmac.js';
-import { reviewStore } from './store.svelte';
 import {
   base64UrlEncode,
   buildAdmissionSubprotocol,
@@ -125,7 +124,10 @@ export interface BrowserSessionError {
 export interface BrowserDeviceIdentity {
   deviceId: string;
   participantId: string;
-  /** Ed25519 secret key bytes (64). Held only in JS memory. */
+  /**
+   * Ed25519 secret seed (32 bytes — matches `ed25519.keygen().secretKey` from
+   * `@noble/curves`). Held only in JS memory.
+   */
   signingSecret: Uint8Array;
   /** Ed25519 public key bytes (32). */
   signingPublic: Uint8Array;
@@ -149,6 +151,20 @@ export interface BrowserSessionState {
   fileId: FileId | null;
   /** Tagged error, or null when status is healthy. */
   error: BrowserSessionError | null;
+}
+
+/**
+ * Narrow interface that the session writes into. The production wiring binds
+ * this to the global `reviewStore` runes singleton; tests pass a plain
+ * dictionary so the harness can run under `tsx` without the runes runtime.
+ */
+export interface ReviewStoreSink {
+  applyEvent(event: ReviewEvent): void;
+  applySnapshot(snapshot: ReviewSnapshot): void;
+  setCurrentFile(fileId: FileId | null): void;
+  setCurrentSnapshot(snapshotId: SnapshotId | null): void;
+  /** Plain field write — runes proxy intercepts this in production. */
+  currentRoomId: RoomId | null;
 }
 
 export interface BrowserSessionOptions {
@@ -177,6 +193,12 @@ export interface BrowserSessionOptions {
   identity?: BrowserDeviceIdentity;
   /** Optional state observer — called on every state mutation. */
   onState?: (state: BrowserSessionState) => void;
+  /**
+   * Sink for review-event / snapshot dispatch. Defaults to the global
+   * `reviewStore` runes singleton; tests pass a plain object so they can
+   * run under tsx without loading `.svelte.ts` modules.
+   */
+  store?: ReviewStoreSink;
 }
 
 /** Minimal fetch shape — avoids depending on lib.dom.d.ts in TS tests. */
@@ -331,9 +353,24 @@ export class BrowserSession {
   private identity: BrowserDeviceIdentity | null = null;
   private wsClient: BrowserWsClient | null = null;
   private keys: RoomKeys | null = null;
+  private store: ReviewStoreSink | null;
 
   constructor(opts: BrowserSessionOptions = {}) {
     this.opts = opts;
+    this.store = opts.store ?? null;
+  }
+
+  /**
+   * Lazily resolve the store. The runes singleton lives in `store.svelte.ts`
+   * which requires the Svelte 5 runtime at load time; we defer the import
+   * so tests can swap a plain object via `opts.store` without ever
+   * touching the runes module.
+   */
+  private async ensureStore(): Promise<ReviewStoreSink> {
+    if (this.store) return this.store;
+    const mod = await import('./store.svelte.js');
+    this.store = mod.reviewStore as unknown as ReviewStoreSink;
+    return this.store;
   }
 
   /** Current state snapshot — UI binds against this. */
@@ -395,7 +432,8 @@ export class BrowserSession {
     zero(invite.roomSecret);
     this.keys = roomKeys;
     this.setState({ roomId: invite.roomId });
-    reviewStore.currentRoomId = invite.roomId;
+    const store = await this.ensureStore();
+    store.currentRoomId = invite.roomId;
 
     // 3. Identity (injected or freshly generated).
     this.identity = this.opts.identity ?? generateBrowserIdentity();
@@ -514,6 +552,10 @@ export class BrowserSession {
   }
 
   private handleEnvelope(decoded: DecodedEnvelope): void {
+    void this.handleEnvelopeAsync(decoded);
+  }
+
+  private async handleEnvelopeAsync(decoded: DecodedEnvelope): Promise<void> {
     const { envelope, plaintext } = decoded;
     if (envelope.kind === 'event') {
       let parsed: { meta?: EventMeta; body?: ReviewEventBody };
@@ -534,12 +576,13 @@ export class BrowserSession {
         // store doesn't read it but TS does.
         auth: { signature: '', signingKeyId: '' },
       };
+      const store = await this.ensureStore();
       // Snapshot path — surface markdown for the editor + populate
       // reviewStore.snapshots so the existing UI can scope by snapshot.
       if (body.type === 'snapshot_created') {
-        this.absorbSnapshotCreated(meta as EventMeta, body);
+        this.absorbSnapshotCreated(store, meta as EventMeta, body);
       }
-      reviewStore.applyEvent(event);
+      store.applyEvent(event);
       return;
     }
     if (envelope.kind === 'snapshot_blob') {
@@ -552,6 +595,7 @@ export class BrowserSession {
   }
 
   private absorbSnapshotCreated(
+    store: ReviewStoreSink,
     meta: EventMeta,
     body: Extract<ReviewEventBody, { type: 'snapshot_created' }>,
   ): void {
@@ -580,9 +624,9 @@ export class BrowserSession {
       markdown: inline.markdown,
       anchorIndex: inline.anchorIndex,
     };
-    reviewStore.applySnapshot(snapshot);
-    reviewStore.setCurrentFile(body.fileId);
-    reviewStore.setCurrentSnapshot(body.snapshotId);
+    store.applySnapshot(snapshot);
+    store.setCurrentFile(body.fileId);
+    store.setCurrentSnapshot(body.snapshotId);
   }
 
   private handleTerminal(err: WsTerminalError): void {

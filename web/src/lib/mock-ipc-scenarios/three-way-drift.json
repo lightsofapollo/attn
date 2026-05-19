@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "name": "three-way-drift",
+  "description": "Reviewer suggestion's expectedText does not match the current snapshot bytes — the resolver remaps (anchor survives) but operation.expectedText drift should trip the three-way merge UI when the owner tries to accept.",
+  "defaultDelayMs": 80,
+  "steps": [
+    {
+      "delayMs": 0,
+      "kind": "status",
+      "payload": {
+        "roomId": "scenario-room-4",
+        "mode": "hybrid",
+        "connection": "live_direct",
+        "peers": [
+          {
+            "participantId": "owner-1",
+            "deviceId": "owner-device-1",
+            "displayName": "Owner",
+            "kind": "owner",
+            "online": true,
+            "onSnapshotId": "snap-drift-1"
+          },
+          {
+            "participantId": "reviewer-1",
+            "deviceId": "reviewer-device-1",
+            "displayName": "Reviewer",
+            "kind": "reviewer",
+            "online": true,
+            "onSnapshotId": "snap-drift-1"
+          }
+        ],
+        "outboxPending": 0
+      }
+    },
+    {
+      "delayMs": 50,
+      "kind": "snapshot",
+      "payload": {
+        "roomId": "scenario-room-4",
+        "fileId": "scenario-file-4",
+        "snapshotId": "snap-drift-1",
+        "createdAt": 1700000030000,
+        "createdBy": "owner-1",
+        "baseHash": "hash-drift-1",
+        "byteLength": 95,
+        "markdown": "## Drift\n\nThe API returns a JSON response with a status field.\n"
+      }
+    },
+    {
+      "delayMs": 80,
+      "kind": "event",
+      "payload": {
+        "meta": {
+          "v": 2,
+          "eventId": "evt-suggestion-drift-1",
+          "roomId": "scenario-room-4",
+          "authorId": "reviewer-1",
+          "deviceId": "reviewer-device-1",
+          "createdAt": 1700000031000,
+          "parentEventIds": [],
+          "snapshotId": "snap-drift-1"
+        },
+        "body": {
+          "type": "suggestion_created",
+          "suggestionId": "sugg-drift-1",
+          "anchor": {
+            "v": 2,
+            "fileId": "scenario-file-4",
+            "snapshotId": "snap-drift-1",
+            "baseHash": "hash-drift-1",
+            "position": {
+              "byteRange": [11, 67],
+              "lineRange": [3, 3]
+            },
+            "quote": {
+              "exact": "The API returns a JSON response with a status field.",
+              "exactHash": "qh-drift-original",
+              "normalized": "the api returns a json response with a status field",
+              "normalizedHash": "qhn-drift-original"
+            }
+          },
+          "operation": {
+            "kind": "replace",
+            "expectedText": "The API returns a JSON response with a status field.",
+            "replacement": "The API returns a JSON payload with a status field and a code field."
+          },
+          "note": "Add the code field; bump to JSON payload."
+        },
+        "auth": {
+          "signature": "scenario-sig",
+          "signingKeyId": "scenario-key-reviewer-1"
+        }
+      }
+    },
+    {
+      "delayMs": 120,
+      "kind": "snapshot",
+      "payload": {
+        "roomId": "scenario-room-4",
+        "fileId": "scenario-file-4",
+        "snapshotId": "snap-drift-2",
+        "parentSnapshotId": "snap-drift-1",
+        "createdAt": 1700000032000,
+        "createdBy": "owner-1",
+        "baseHash": "hash-drift-2",
+        "byteLength": 110,
+        "markdown": "## Drift\n\nThe API returns a JSON response with a status string and a flag bit.\n"
+      }
+    },
+    {
+      "delayMs": 60,
+      "kind": "anchor_resolution",
+      "payload": {
+        "roomId": "scenario-room-4",
+        "fileId": "scenario-file-4",
+        "eventId": "evt-suggestion-drift-1",
+        "resolved": {
+          "status": "remapped",
+          "confidence": 0.72,
+          "currentRange": {
+            "byteRange": [11, 78],
+            "lineRange": [3, 3]
+          },
+          "reason": "fuzzy_quote_match"
+        }
+      }
+    }
+  ]
+}

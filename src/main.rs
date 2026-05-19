@@ -409,6 +409,27 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         eprintln!("attn: review manager unavailable, review commands will be no-ops");
     }
 
+    // Auto-resume any rooms the user already joined / shared in a prior
+    // session. Without this, a reviewer's daemon boots with `room.json`
+    // on disk but no live WS — they'd see no traffic until they
+    // manually re-joined. We resume in a worker so the daemon can keep
+    // booting in parallel; failures are logged but non-fatal.
+    if let Some(ref mgr) = review_manager {
+        let mgr = Arc::clone(mgr);
+        std::thread::Builder::new()
+            .name("review-resume-known".to_string())
+            .spawn(move || {
+                let resumed = mgr.resume_known_rooms();
+                if !resumed.is_empty() {
+                    eprintln!(
+                        "review: resumed {} known room(s) on boot",
+                        resumed.len()
+                    );
+                }
+            })
+            .ok();
+    }
+
     let app_state = Arc::new(Mutex::new(ipc::AppState {
         active_path: initial_ui_path.clone(),
         active_project_root: tree_root.clone(),

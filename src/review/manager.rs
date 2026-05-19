@@ -668,7 +668,76 @@ impl ReviewManager {
             }
         });
 
+        eprintln!(
+            "review: started room runtime room={} outbox+ws subscribed",
+            room_id.as_str()
+        );
         Ok(())
+    }
+
+    /// On daemon boot, scan `rooms/` and start a runtime for every room
+    /// whose policy hasn't expired. This is what lets a reviewer daemon
+    /// (which joined via the `attn review join` CLI before launching the
+    /// GUI) reconnect to its rooms on next start — without this, joined
+    /// rooms sit cold on disk until the user manually re-joins.
+    ///
+    /// Returns the list of room ids that successfully started so the
+    /// daemon can hand them to the frontend bridge for auto-navigation.
+    pub fn resume_known_rooms(&self) -> Vec<RoomId> {
+        let room_ids = match self.store.list_rooms() {
+            Ok(ids) => ids,
+            Err(err) => {
+                eprintln!("review: list_rooms failed: {err}");
+                return vec![];
+            }
+        };
+        let mut resumed = Vec::new();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_default();
+        for room_id in room_ids {
+            // Skip expired rooms so the daemon doesn't pile up dead WS
+            // reconnect loops against rooms the relay will 4xx anyway.
+            match self.store.load_room(&room_id) {
+                Ok(Some(room)) if room.policy.expires_at <= now_ms => {
+                    eprintln!(
+                        "review: skipping expired room={} (expires_at={} now={})",
+                        room_id.as_str(),
+                        room.policy.expires_at,
+                        now_ms
+                    );
+                    continue;
+                }
+                Ok(None) => continue,
+                Err(err) => {
+                    eprintln!(
+                        "review: load_room failed for {}: {err}",
+                        room_id.as_str()
+                    );
+                    continue;
+                }
+                _ => {}
+            }
+            if let Err(err) = self.start_room_runtime(&room_id) {
+                eprintln!(
+                    "review: start_room_runtime failed for {}: {err}",
+                    room_id.as_str()
+                );
+                continue;
+            }
+            // Tell the frontend a known room is live so its review store
+            // hydrates `currentRoomId` and the ReviewBar / margin
+            // surfaces appear. Without this push the reviewer's UI shows
+            // only the local file tree even though the WS subscription
+            // is already streaming inbound envelopes.
+            (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                room_id: room_id.clone(),
+                status: "Resumed".to_string(),
+            });
+            resumed.push(room_id);
+        }
+        resumed
     }
 
     /// Push a freshly-resolved anchor to the frontend.

@@ -700,14 +700,15 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 // matching `window.__attn__.review*` callback (issue
                 // attn-nnj.2.8). The payload is the same camelCase JSON the
                 // TypeScript types in `web/src/lib/types.ts` expect.
-                let callback = update.callback_name();
-                match serde_json::to_string(&update) {
-                    Ok(json) => {
-                        let js =
-                            format!("window.__attn__ && window.__attn__.{callback}({json})");
+                // `AnchorResolutionChanged` rides this same path
+                // (attn-nnj.3.8) — callback_name() routes it to
+                // `reviewAnchorResolution`.
+                match build_review_dispatch_js(&update) {
+                    Ok(js) => {
                         let _ = webview.evaluate_script(&js);
                     }
                     Err(err) => {
+                        let callback = update.callback_name();
                         eprintln!(
                             "attn: failed to serialize ReviewUpdate for {callback}: {err}"
                         );
@@ -927,6 +928,20 @@ fn load_window_icon() -> Option<tao::window::Icon> {
     let rgba = image.into_rgba8();
     let (width, height) = rgba.dimensions();
     tao::window::Icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
+/// Build the JS snippet that forwards a `ReviewUpdate` into the matching
+/// `window.__attn__.review*` callback. Pulled into a free function so the
+/// dispatch contract is unit-testable without standing up a real webview
+/// (issue attn-nnj.3.8).
+fn build_review_dispatch_js(
+    update: &crate::review::manager::ReviewUpdate,
+) -> Result<String, serde_json::Error> {
+    let callback = update.callback_name();
+    let json = serde_json::to_string(update)?;
+    Ok(format!(
+        "window.__attn__ && window.__attn__.{callback}({json})"
+    ))
 }
 
 fn queue_children_refresh(proxy: &EventLoopProxy<UserEvent>, root: PathBuf, parent: PathBuf) {
@@ -1686,5 +1701,108 @@ mod tests {
             !rooms_dir.exists(),
             "expected no rooms dir created for unmapped path"
         );
+    }
+
+    // ----- attn-nnj.3.8 review-dispatch JS routing ----------------------
+    //
+    // Mirrors the `UserEvent::Review` arm in `run_event_loop`: any new
+    // `ReviewUpdate` variant must end up dispatched through the right
+    // `window.__attn__.review*` callback. We can't drive a real webview from
+    // a unit test, so we instead pin the JS string the handler would call
+    // `evaluate_script(...)` with — that string is what wry hands wkwebview.
+
+    use crate::review::manager::ReviewUpdate;
+    use crate::review::model::{ExactReason, PositionAnchor, ResolvedAnchor};
+
+    #[test]
+    fn review_dispatch_js_routes_anchor_resolution_to_callback() {
+        // The 3.8 acceptance criterion: AnchorResolutionChanged must produce
+        // a `window.__attn__.reviewAnchorResolution(...)` call carrying the
+        // full resolved-anchor payload as camelCase JSON.
+        let update = ReviewUpdate::AnchorResolutionChanged {
+            room_id: dummy_id::<RoomId>("room-abc"),
+            event_id: dummy_id::<crate::review::ids::EventId>("evt-7"),
+            file_id: dummy_id::<FileId>("file-3"),
+            resolved: ResolvedAnchor::Exact {
+                confidence: 1.0,
+                current_range: PositionAnchor {
+                    byte_range: [0, 11],
+                    line_range: [1, 1],
+                    pm_range: None,
+                },
+                reason: ExactReason::BaseHashMatch,
+            },
+        };
+
+        let js = build_review_dispatch_js(&update).expect("build dispatch js");
+
+        assert!(
+            js.starts_with("window.__attn__ && window.__attn__.reviewAnchorResolution("),
+            "expected reviewAnchorResolution callback dispatch, got: {js}"
+        );
+        // The JSON payload must include the camelCase keys the frontend type
+        // (ReviewAnchorResolutionUpdate) declares.
+        assert!(js.contains("\"roomId\":\"room-abc\""), "missing roomId: {js}");
+        assert!(js.contains("\"eventId\":\"evt-7\""), "missing eventId: {js}");
+        assert!(js.contains("\"fileId\":\"file-3\""), "missing fileId: {js}");
+        assert!(js.contains("\"status\":\"exact\""), "missing resolved.status: {js}");
+        assert!(
+            js.contains("\"reason\":\"base_hash_match\""),
+            "missing resolved.reason: {js}"
+        );
+    }
+
+    #[test]
+    fn review_dispatch_js_picks_correct_callback_per_variant() {
+        // Smoke-test the callback selection across the full variant set so a
+        // future variant rename doesn't silently mis-route.
+        let room: RoomId = dummy_id("room-abc");
+        let event: crate::review::ids::EventId = dummy_id("evt-1");
+
+        let cases = vec![
+            (
+                ReviewUpdate::RoomStatusChanged {
+                    room_id: room.clone(),
+                    status: "ok".to_string(),
+                },
+                "reviewStatus",
+            ),
+            (
+                ReviewUpdate::EventImported {
+                    room_id: room.clone(),
+                    event_id: event.clone(),
+                    body_type: "comment_created".to_string(),
+                },
+                "reviewEvent",
+            ),
+            (
+                ReviewUpdate::SnapshotCreated {
+                    room_id: room.clone(),
+                    snapshot_id: "snap-1".to_string(),
+                    file_id: "file-1".to_string(),
+                },
+                "reviewSnapshot",
+            ),
+            (
+                ReviewUpdate::AnchorResolutionChanged {
+                    room_id: room.clone(),
+                    event_id: event.clone(),
+                    file_id: dummy_id::<FileId>("file-1"),
+                    resolved: ResolvedAnchor::Stale {
+                        reason: "low_confidence".to_string(),
+                    },
+                },
+                "reviewAnchorResolution",
+            ),
+        ];
+
+        for (update, expected_callback) in cases {
+            let js = build_review_dispatch_js(&update).expect("build dispatch js");
+            let needle = format!("window.__attn__.{expected_callback}(");
+            assert!(
+                js.contains(&needle),
+                "expected callback {expected_callback} in js={js}"
+            );
+        }
     }
 }

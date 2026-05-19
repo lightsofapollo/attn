@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::review::ids::{EventId, RoomId};
-use crate::review::model::{Anchor, PositionAnchor, SuggestionDraft};
+use crate::review::ids::{EventId, FileId, RoomId};
+use crate::review::model::{Anchor, PositionAnchor, ResolvedAnchor, SuggestionDraft};
 use crate::review::store::ReviewStore;
 use crate::review::working_copy::WorkingCopyService;
 
@@ -116,11 +116,15 @@ pub enum ReviewUpdate {
         snapshot_id: String,
         file_id: String,
     },
-    /// An anchor resolved to a different range against the current replica.
+    /// An anchor was (re)resolved against the current replica. The payload
+    /// matches the frontend `ReviewAnchorResolutionUpdate` shape exactly so
+    /// it deserializes straight into the store via
+    /// `window.__attn__.reviewAnchorResolution(...)` (issue attn-nnj.3.8).
     AnchorResolutionChanged {
         room_id: RoomId,
         event_id: EventId,
-        status: String,
+        file_id: FileId,
+        resolved: ResolvedAnchor,
     },
     /// The outbox depth for a room changed (envelopes queued for send).
     OutboxChanged {
@@ -210,6 +214,28 @@ impl ReviewManager {
         let update = stub_update_for(&cmd);
         (self.update_tx)(update);
     }
+
+    /// Push a freshly-resolved anchor to the frontend.
+    ///
+    /// Issue attn-nnj.3.8: the callback path Rust → tao event loop →
+    /// `window.__attn__.reviewAnchorResolution` exists end-to-end. The actual
+    /// recompute-on-change scheduler (run resolver after doc edit, snapshot
+    /// import, or manual override) lands with the later anchor-engine
+    /// integration issue — this method is what that scheduler will call.
+    pub fn emit_anchor_resolution(
+        &self,
+        room_id: RoomId,
+        event_id: EventId,
+        file_id: FileId,
+        resolved: ResolvedAnchor,
+    ) {
+        (self.update_tx)(ReviewUpdate::AnchorResolutionChanged {
+            room_id,
+            event_id,
+            file_id,
+            resolved,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -282,16 +308,23 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
             event_id: suggestion_id.clone(),
             body_type: "suggestion_accepted_stub".to_string(),
         },
-        // TODO(attn-nnj.3.4): persist override in store, re-run resolver for
-        // the event, emit AnchorResolutionChanged with the chosen range.
+        // TODO(attn-nnj.3.4 integration): persist override in store, re-run
+        // resolver for the event, emit AnchorResolutionChanged with the chosen
+        // range. The scaffold echoes the caller's manual range as a confident
+        // `Remapped` verdict so the frontend store wiring is observable.
         ReviewCommand::ResolveAnchor {
             room_id,
             event_id,
-            ..
+            range,
         } => ReviewUpdate::AnchorResolutionChanged {
             room_id: room_id.clone(),
             event_id: event_id.clone(),
-            status: "manual_stub".to_string(),
+            file_id: stub_file_id(),
+            resolved: ResolvedAnchor::Remapped {
+                confidence: 1.0,
+                current_range: range.clone(),
+                reason: crate::review::model::RemappedReason::QuoteMatch,
+            },
         },
     }
 }
@@ -314,6 +347,15 @@ fn stub_event_id() -> EventId {
         "evt-stub-pending-implementation".to_string(),
     ))
     .expect("stub EventId deserializes")
+}
+
+/// Synthesize a placeholder `FileId` for stub anchor-resolution updates.
+/// Real handlers will look up the FileId from the room/event mapping.
+fn stub_file_id() -> FileId {
+    serde_json::from_value::<FileId>(serde_json::Value::String(
+        "file-stub-pending-implementation".to_string(),
+    ))
+    .expect("stub FileId deserializes")
 }
 
 // ---------------------------------------------------------------------------
@@ -498,25 +540,32 @@ mod tests {
         let (mgr, rx, _tmp) = make_manager();
         let room_id: RoomId = dummy_id("room-abc");
         let event_id: EventId = dummy_id("evt-1");
+        let range = PositionAnchor {
+            byte_range: [0, 10],
+            line_range: [1, 1],
+            pm_range: None,
+        };
         mgr.submit(ReviewCommand::ResolveAnchor {
             room_id: room_id.clone(),
             event_id: event_id.clone(),
-            range: PositionAnchor {
-                byte_range: [0, 10],
-                line_range: [1, 1],
-                pm_range: None,
-            },
+            range: range.clone(),
         });
         let update = rx.try_recv().expect("expected one update");
         match update {
             ReviewUpdate::AnchorResolutionChanged {
                 room_id: rid,
                 event_id: eid,
-                status,
+                file_id: _,
+                resolved,
             } => {
                 assert_eq!(rid, room_id);
                 assert_eq!(eid, event_id);
-                assert_eq!(status, "manual_stub");
+                match resolved {
+                    ResolvedAnchor::Remapped { current_range, .. } => {
+                        assert_eq!(current_range, range);
+                    }
+                    other => panic!("expected Remapped stub, got {other:?}"),
+                }
             }
             other => panic!("expected AnchorResolutionChanged, got {other:?}"),
         }
@@ -586,7 +635,10 @@ mod tests {
             ReviewUpdate::AnchorResolutionChanged {
                 room_id: room_id.clone(),
                 event_id,
-                status: "stale".to_string()
+                file_id: dummy_id::<FileId>("file-1"),
+                resolved: ResolvedAnchor::Stale {
+                    reason: "low_confidence".to_string()
+                },
             }
             .callback_name(),
             "reviewAnchorResolution"
@@ -624,5 +676,88 @@ mod tests {
         assert_eq!(json["roomId"], serde_json::json!("room-abc"));
         assert_eq!(json["eventId"], serde_json::json!("evt-1"));
         assert_eq!(json["bodyType"], serde_json::json!("comment_created_stub"));
+    }
+
+    // ----- attn-nnj.3.8 anchor-resolution emission -----------------------
+
+    #[test]
+    fn emit_anchor_resolution_fires_anchor_resolution_changed_update() {
+        // Issue attn-nnj.3.8: the public `emit_anchor_resolution` entrypoint
+        // is the seam the later anchor-engine scheduler will call. Verify it
+        // routes through `update_tx` as an `AnchorResolutionChanged` carrying
+        // the resolver's full `ResolvedAnchor` payload.
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-abc");
+        let event_id: EventId = dummy_id("evt-42");
+        let file_id: FileId = dummy_id("file-99");
+        let range = PositionAnchor {
+            byte_range: [10, 25],
+            line_range: [3, 4],
+            pm_range: None,
+        };
+        let resolved = ResolvedAnchor::Exact {
+            confidence: 1.0,
+            current_range: range.clone(),
+            reason: crate::review::model::ExactReason::BaseHashMatch,
+        };
+
+        mgr.emit_anchor_resolution(
+            room_id.clone(),
+            event_id.clone(),
+            file_id.clone(),
+            resolved.clone(),
+        );
+
+        let update = rx.try_recv().expect("expected one update");
+        match update {
+            ReviewUpdate::AnchorResolutionChanged {
+                room_id: rid,
+                event_id: eid,
+                file_id: fid,
+                resolved: got,
+            } => {
+                assert_eq!(rid, room_id);
+                assert_eq!(eid, event_id);
+                assert_eq!(fid, file_id);
+                assert_eq!(got, resolved);
+            }
+            other => panic!("expected AnchorResolutionChanged, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "emit_anchor_resolution must fire exactly one update"
+        );
+    }
+
+    #[test]
+    fn anchor_resolution_changed_serializes_to_frontend_shape() {
+        // Pin the wire envelope: the frontend `ReviewAnchorResolutionUpdate`
+        // in `web/src/lib/types.ts` expects roomId/eventId/fileId/resolved
+        // (camelCase) with `resolved.status` as the tag — this round-trip
+        // proves `evaluate_script(window.__attn__.reviewAnchorResolution(...))`
+        // hands the store a payload it can consume verbatim.
+        let update = ReviewUpdate::AnchorResolutionChanged {
+            room_id: dummy_id::<RoomId>("room-abc"),
+            event_id: dummy_id::<EventId>("evt-1"),
+            file_id: dummy_id::<FileId>("file-1"),
+            resolved: ResolvedAnchor::Remapped {
+                confidence: 0.85,
+                current_range: PositionAnchor {
+                    byte_range: [0, 5],
+                    line_range: [1, 1],
+                    pm_range: None,
+                },
+                reason: crate::review::model::RemappedReason::QuoteMatch,
+            },
+        };
+        let json = serde_json::to_value(&update).expect("serialize update");
+        assert_eq!(json["kind"], serde_json::json!("anchor_resolution_changed"));
+        assert_eq!(json["roomId"], serde_json::json!("room-abc"));
+        assert_eq!(json["eventId"], serde_json::json!("evt-1"));
+        assert_eq!(json["fileId"], serde_json::json!("file-1"));
+        assert_eq!(json["resolved"]["status"], serde_json::json!("remapped"));
+        assert_eq!(json["resolved"]["reason"], serde_json::json!("quote_match"));
+        assert_eq!(json["resolved"]["confidence"], serde_json::json!(0.85));
+        assert_eq!(update.callback_name(), "reviewAnchorResolution");
     }
 }

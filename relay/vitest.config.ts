@@ -2,6 +2,12 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
 export default defineWorkersConfig({
   test: {
+    // 15s per test — several integration cases ship 50-80 sequential SELF.fetch
+    // calls (rate-limit anti-enum, hibernation roundtrips, R2 blob putget) that
+    // creep past vitest's 5s default when the workerd isolate is shared with
+    // the full suite (singleWorker=true below). 15s gives comfortable headroom
+    // while still catching genuine hangs.
+    testTimeout: 15000,
     poolOptions: {
       workers: {
         wrangler: { configPath: "./wrangler.toml" },

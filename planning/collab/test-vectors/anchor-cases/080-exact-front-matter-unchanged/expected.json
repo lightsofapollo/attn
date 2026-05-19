@@ -1,0 +1,15 @@
+{
+  "status": "exact",
+  "confidence": 1.0,
+  "reason": "base_hash_match",
+  "currentRange": {
+    "byteRange": [
+      28,
+      49
+    ],
+    "lineRange": [
+      7,
+      7
+    ]
+  }
+}

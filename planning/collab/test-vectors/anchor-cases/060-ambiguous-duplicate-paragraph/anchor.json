@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-060",
+  "baseHash": "gePQbS8YxrDxhE2kFLwxf3R8KLIpAUsCae5udKwF47s",
+  "position": {
+    "byteRange": [
+      15,
+      31
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "Shared sentence.",
+    "exactHash": "9921f6467a078039aa6c4fc721542ed3bde341bf435ca9bc0ae42784f8c9d024",
+    "normalized": "shared sentence",
+    "normalizedHash": "9a44a142fb5972e7ab249520f478f3c968db09118250ffd20564111f1eff19ef"
+  },
+  "block": {
+    "snapshotBlockId": "5837430c0b9e558035ea87debaa220d9a42c73b071b47e92308d406615d1b876",
+    "contentFingerprint": "a13886b23f84018f22c1a934e2f58a5aa2482ffe820434f6cf49520b518a86a6",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      16
+    ],
+    "blockByteRange": [
+      15,
+      31
+    ],
+    "blockLineRange": [
+      5,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\nIntro.\n\n",
+    "suffix": "\n\nMiddle.\n\nShared sentence.\n\nOutro.\n",
+    "prefixHash": "3555d2d286b1db9412f22b141cbda503c8e3bbe725177556752cde319bbd5ddc",
+    "suffixHash": "89881e1ab859a55bf781b840ce185f02ba0fbaa81c4b81bcba3ef062a27e0fad"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

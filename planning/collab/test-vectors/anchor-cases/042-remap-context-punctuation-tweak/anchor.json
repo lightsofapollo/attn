@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-042",
+  "baseHash": "t9T-FCa4TCgNFgDl8LSyiHYLXnaFEK9LW4jLneLTsQU",
+  "position": {
+    "byteRange": [
+      20,
+      43
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "there are 3 cases here.",
+    "exactHash": "ef602c35ed267d226548776f8a8382ff50109418c0d4590b646f596980e53f2f",
+    "normalized": "there are 3 cases here",
+    "normalizedHash": "7d083474d4dd024b19dcfb23902c29604d7b79ba50de2d0821e6abe93aff95cc"
+  },
+  "block": {
+    "snapshotBlockId": "5ff871962e21ad01359046a792616610f3a9e6d4a147362e62e225fc90789aad",
+    "contentFingerprint": "a03cc49fc327c9994f1fa51a4cba525cab6f09fee5fc1f69b49799dd0addb217",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      13,
+      36
+    ],
+    "blockByteRange": [
+      7,
+      57
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\nLeading bit. ",
+    "suffix": " Trailing bit.\n",
+    "prefixHash": "7d763b1adb9bda8241d7626cbdafb0814f86e927c050ef302eedadc8477d82ec",
+    "suffixHash": "403cf477a6a7d0d41bea7bd7d3451400bd914a525bc9e0697dd8061667b95d02"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "status": "remapped",
+  "confidence": 0.55,
+  "reason": "fuzzy_quote_match",
+  "currentRange": {
+    "byteRange": [
+      7,
+      40
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  }
+}

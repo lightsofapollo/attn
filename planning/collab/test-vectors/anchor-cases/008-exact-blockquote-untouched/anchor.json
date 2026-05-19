@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-008",
+  "baseHash": "jpbtaJnZ1gZtqtxNM0H8s3_jfbzD24iJzmS5PJvA-xY",
+  "position": {
+    "byteRange": [
+      15,
+      30
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "quick brown fox",
+    "exactHash": "8700be3b2fe64bd5f36be0b194f838c3aa475cbee660601f5acf19c99498d264",
+    "normalized": "quick brown fox",
+    "normalizedHash": "8700be3b2fe64bd5f36be0b194f838c3aa475cbee660601f5acf19c99498d264"
+  },
+  "block": {
+    "snapshotBlockId": "0e39eaefab4c27a8d2db54a0c7e0de724d3c5218dd43357c2880ffb3a1232ef4",
+    "contentFingerprint": "d74bd13546f3cd8dfb0a729eea5f898605abf381621519878940a0bd3f89a5ce",
+    "kind": "blockquote",
+    "offsetInBlockBytes": [
+      6,
+      21
+    ],
+    "blockByteRange": [
+      9,
+      57
+    ],
+    "blockLineRange": [
+      3,
+      4
+    ]
+  },
+  "context": {
+    "prefix": "# Notes\n\n> The ",
+    "suffix": "\n> jumps over the lazy dog.\n\nFollow-up.\n",
+    "prefixHash": "8d25cd2eb55b23511f71c9d92a37c3794d5250dc423153c66e32502835529b38",
+    "suffixHash": "5051e4aebf0a6295b3f97297f2feb17feb4c657a569f2e2f6b3db20e48bb3f19"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "8a7525b1492fb84833f5c4a69b30f4bfbb134f9b666b61a2c1872d63d234c085",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

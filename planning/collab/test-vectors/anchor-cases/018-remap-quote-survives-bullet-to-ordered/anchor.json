@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-018",
+  "baseHash": "XadK0Ker-cmkn--Gqp6zEGKzFZxQWlHcFTjdV9gWdtU",
+  "position": {
+    "byteRange": [
+      23,
+      31
+    ],
+    "lineRange": [
+      4,
+      4
+    ]
+  },
+  "quote": {
+    "exact": "two beta",
+    "exactHash": "c2be914c3a512bfb923f39658bfbc64dc066a422c6446af995392ee872512d8a",
+    "normalized": "two beta",
+    "normalizedHash": "c2be914c3a512bfb923f39658bfbc64dc066a422c6446af995392ee872512d8a"
+  },
+  "block": {
+    "snapshotBlockId": "6aad24e352eeb0f33c44bbbe81ec965e5c1134ebefa7bbde1a07230ea290544c",
+    "contentFingerprint": "df615e1ffff5dfc46faf3935f76df1f9b8e7d462ed3b9adb2ab9cb21dae0ff24",
+    "kind": "list_item",
+    "offsetInBlockBytes": [
+      2,
+      10
+    ],
+    "blockByteRange": [
+      21,
+      31
+    ],
+    "blockLineRange": [
+      4,
+      4
+    ]
+  },
+  "context": {
+    "prefix": "# Tasks\n\n- one alpha\n- ",
+    "suffix": "\n- three gamma\n",
+    "prefixHash": "8b66adb7592dc2f28de964c70fdf14eed56621322593444cc51cbb6b546fb469",
+    "suffixHash": "04cd8572776f233a685d46f466d7e2c01c460e7958579b1e72dde9f8d3e3799c"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "b3a60e61a5233d0506ac737405a2a45280349683cac68722f18d0b73eb495ef4",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

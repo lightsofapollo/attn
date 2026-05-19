@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-040",
+  "baseHash": "uCIj-X8sHYOnrFhGd9YHcOV2uy2HiZDpqa4b9BILD5M",
+  "position": {
+    "byteRange": [
+      30,
+      44
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "quik brown fox",
+    "exactHash": "110aad0a0e6bd0970229e5f1eb10fecf2a42d4144428a2a20bd1698a09d564c4",
+    "normalized": "quik brown fox",
+    "normalizedHash": "110aad0a0e6bd0970229e5f1eb10fecf2a42d4144428a2a20bd1698a09d564c4"
+  },
+  "block": {
+    "snapshotBlockId": "6fb8cf511e9ebac1f33f631549eb13a1642d0313580ee58cc0fc6d2c00a0ca9e",
+    "contentFingerprint": "6107cfc57dbded49b5e1c2f5c983f555895d9c4a84d9babe0d5e8832145f4c7e",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      23,
+      37
+    ],
+    "blockByteRange": [
+      7,
+      68
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\nIntro text before. The ",
+    "suffix": " runs. Outro text after.\n",
+    "prefixHash": "07fb18b042ce37c8d4aaffbdc0d846b52686b8690b14d56f81bfa9c4ada2a9ca",
+    "suffixHash": "5b9056cdb018688f5f403e1dfb23adbe7ce0b3d4599eb206e881cb966a1acd6a"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

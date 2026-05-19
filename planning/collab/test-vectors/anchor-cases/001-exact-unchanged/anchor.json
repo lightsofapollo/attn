@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-001",
+  "baseHash": "_SzF4Yegao1hM3BAX9S1iqdvpGqtVzCVuC8aOf6_wv0",
+  "position": {
+    "byteRange": [
+      31,
+      50
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "Beta paragraph two.",
+    "exactHash": "847b873a6647c4fa55727d6b9b56b3a6a0184b5f057bd16d3299014da346b5c5",
+    "normalized": "beta paragraph two",
+    "normalizedHash": "f78929eccccebb50ed8f17c7c5f8ecb307092b1611cacae4e8ea35d0a950d7bc"
+  },
+  "block": {
+    "snapshotBlockId": "5c74dc68716a791eafc47d172f51d9d9bf53a68ca5e0fbd7717310543d96dea4",
+    "contentFingerprint": "0db5f806d2a0d7f41d2247f8ce67561df6975f42517100752a7d6f334d33663a",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      19
+    ],
+    "blockByteRange": [
+      31,
+      50
+    ],
+    "blockLineRange": [
+      5,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Title\n\nAlpha paragraph one.\n\n",
+    "suffix": "\n\nGamma paragraph three.\n",
+    "prefixHash": "c78f837d668cd94c1961bc08c02f44b550331684d506205fb8006bcd7949d5bc",
+    "suffixHash": "8f74686f3a53616e032161ed4abdfc71706cf2fda4fd727e9eb2da3dca7070db"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "7e8cd2056da73a7fefb6cd91f4e5d199d08d9058c517b9a2476b1b520324d674",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

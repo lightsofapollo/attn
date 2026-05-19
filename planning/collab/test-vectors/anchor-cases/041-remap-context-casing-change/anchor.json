@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-041",
+  "baseHash": "rbW77Y8oJBhkuMyJykhA8eHzT4TKNdnPSkDQZYznWFQ",
+  "position": {
+    "byteRange": [
+      24,
+      45
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "webcrypto api support",
+    "exactHash": "2d0f89deeecae4f86841ecded8c5847db12221249f76c2617a964a6f5574aead",
+    "normalized": "webcrypto api support",
+    "normalizedHash": "2d0f89deeecae4f86841ecded8c5847db12221249f76c2617a964a6f5574aead"
+  },
+  "block": {
+    "snapshotBlockId": "61501ed380324ae83fd7530bf46e0ce9c77fd541de7aee0ca98dbff410216c87",
+    "contentFingerprint": "a07bf05b29646d83fe59596e68233d9cc37863a432c15d386ecd0d4515f0fcbf",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      17,
+      38
+    ],
+    "blockByteRange": [
+      7,
+      63
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\nPrefix sentence. ",
+    "suffix": ". Suffix sentence.\n",
+    "prefixHash": "610b7f5e60a0cedb72c67900039542a62e48b1bdbd887d5a53a7e8fa7956ed27",
+    "suffixHash": "0dde299fab788157eb7a2cc79b253e38ec11d489c8e92bae73f5d5e711b664d0"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

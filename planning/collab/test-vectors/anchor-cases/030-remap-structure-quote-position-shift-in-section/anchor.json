@@ -1,0 +1,60 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-030",
+  "baseHash": "2y9puxqwYc6Gpp5q1j3t_a-T_wFDqoscP2DbckATDyo",
+  "position": {
+    "byteRange": [
+      44,
+      74
+    ],
+    "lineRange": [
+      7,
+      7
+    ]
+  },
+  "quote": {
+    "exact": "Target sentence inside stable.",
+    "exactHash": "86f7b7aaa28b3bdfb47f69fe87799971e0ef170c7a86ebc03ab0352fc6c61374",
+    "normalized": "target sentence inside stable",
+    "normalizedHash": "119a8e5743a51802b12e61de02d21bfb620274df9fb2e94f0e09089bc32f5284"
+  },
+  "block": {
+    "snapshotBlockId": "e32e3c61cb21d07554dcae6e4cc4f84e7544b4057618f5bcc221cd8b415a0304",
+    "contentFingerprint": "9ff3becbe77e6944610ee90ad985256693c6c7d78e262b22b3f81a6f1a5aa072",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      30
+    ],
+    "blockByteRange": [
+      44,
+      74
+    ],
+    "blockLineRange": [
+      7,
+      7
+    ]
+  },
+  "context": {
+    "prefix": "# Top\n\n## Stable\n\nIntro of stable section.\n\n",
+    "suffix": "\n\nClosing of stable.\n",
+    "prefixHash": "b768391f8364a0ac6522adc95eaffa73075fc94a99caccd91c0961509dd955ca",
+    "suffixHash": "e98a572fe1d05b380b405e1c2ebb5949240cc7e947e952a5183dc938915ccbc3"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "d5cdfcf7ff75338fa974145a13378ee35f7ea04cfabd74b8f5fb6df350cfbcca",
+        "ordinalAtLevel": 0
+      },
+      {
+        "level": 2,
+        "textHash": "90ee305714d7103317705bfffd734c654b78807e5a0f51fcc61bc1d81105ebd1",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

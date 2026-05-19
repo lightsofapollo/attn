@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-072",
+  "baseHash": "ZH4CIS3W2sdz4shQW3fl5uhweREe7F2TOrD2sfP_zv0",
+  "position": {
+    "byteRange": [
+      20,
+      56
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "The originally anchored phrase here.",
+    "exactHash": "c8d5f2d4cf9e33a0fc87e2b5c8f358c34eed56f94b38b7ee8be5a142f86c3c08",
+    "normalized": "the originally anchored phrase here",
+    "normalizedHash": "d97cdd0453912b2b95c29074e6a63640ef360d8c3e248f10483df45ed4ae631a"
+  },
+  "block": {
+    "snapshotBlockId": "694434691bfd88c2d7b256f2e4e1fffc983654bf20768463e9234363e8de6f7a",
+    "contentFingerprint": "d481901fb0d1b12ab04d509b93c07a165d5418a1c8583439ed33db2b958fd682",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      13,
+      49
+    ],
+    "blockByteRange": [
+      7,
+      68
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\nBefore part. ",
+    "suffix": " After part.\n",
+    "prefixHash": "d4eb4fa447c01650657f69e8828f22840c17318c8d8e85b1851a5f0210da817c",
+    "suffixHash": "fb5f9648c4f7a45e3e29b87a35023bbf5042c488badbf5f337e5d446b60b86ee"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

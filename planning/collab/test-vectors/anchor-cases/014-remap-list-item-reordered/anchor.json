@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-014",
+  "baseHash": "Q4wGkZHH93TAZ5_MqmT0YwXDCGsxJdX8vPALgr3-scA",
+  "position": {
+    "byteRange": [
+      22,
+      32
+    ],
+    "lineRange": [
+      4,
+      4
+    ]
+  },
+  "quote": {
+    "exact": "write docs",
+    "exactHash": "217a5052aefb14062ac9435db2fa732cde06176e9b88a10fd0478ae2ad722a70",
+    "normalized": "write docs",
+    "normalizedHash": "217a5052aefb14062ac9435db2fa732cde06176e9b88a10fd0478ae2ad722a70"
+  },
+  "block": {
+    "snapshotBlockId": "56ec1e22fb9e0d41eb7f8988302b0014edc597d38ff99aa0b046dd84b2c07fb6",
+    "contentFingerprint": "7ee558fb0da445938dbbb4e8ed2595dcae42f0c20a2c23d7d4761b1223c17d3d",
+    "kind": "list_item",
+    "offsetInBlockBytes": [
+      2,
+      12
+    ],
+    "blockByteRange": [
+      20,
+      32
+    ],
+    "blockLineRange": [
+      4,
+      4
+    ]
+  },
+  "context": {
+    "prefix": "# Tasks\n\n- buy milk\n- ",
+    "suffix": "\n- ship code\n",
+    "prefixHash": "be77fb5d8259078b746d7b40422eb26f1d8c39cdfa5c4417c881b5f33532e31a",
+    "suffixHash": "e8783efe3f1c5924b641bf663a629eb9be09df947095b581714b54f01eb05f3f"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "b3a60e61a5233d0506ac737405a2a45280349683cac68722f18d0b73eb495ef4",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

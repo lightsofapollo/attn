@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-012",
+  "baseHash": "68fSRX5ZViGuy0btQZzWU_f9Ez9-YP56lx31xlgwytw",
+  "position": {
+    "byteRange": [
+      22,
+      62
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "The golden ratio is approximately 1.618.",
+    "exactHash": "237ca1a43ae4b131eca256a9c6d21462e3fca6fdbcd4dd982b30523f45b2a0fd",
+    "normalized": "the golden ratio is approximately 1 618",
+    "normalizedHash": "2614e08c022ca0328de5b74955b8142ffc4dd79f0120c78b683a146e4658abed"
+  },
+  "block": {
+    "snapshotBlockId": "ba6c4f748c70ca45050ac2558f71edc8b7ee45f169283409f863ae984fb5d244",
+    "contentFingerprint": "0df0e515de9cddc626c4446a47c5195a5b9e10455f9c53675abd96c5228fa579",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      40
+    ],
+    "blockByteRange": [
+      22,
+      62
+    ],
+    "blockLineRange": [
+      5,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\nIntro line A.\n\n",
+    "suffix": "\n\nOutro line A.\n",
+    "prefixHash": "7b1c79f615efee0b3fa85cb9882305233c685e39cdf9d75dd7cb4696531763ea",
+    "suffixHash": "a0921b55d0a5fa2605f2853356e4375441f67d5777c9457aa66eb9b242437a5f"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

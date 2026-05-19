@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-084",
+  "baseHash": "u31CjMSs2Q9uC5LcCDvvrQu59mo2ErkhOBeC6JfVjGE",
+  "position": {
+    "byteRange": [
+      12,
+      20
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "the spec",
+    "exactHash": "688b9329eddb9906e3a69a6f19f534c57619ee19b01ad476763cdd1975b9892a",
+    "normalized": "the spec",
+    "normalizedHash": "688b9329eddb9906e3a69a6f19f534c57619ee19b01ad476763cdd1975b9892a"
+  },
+  "block": {
+    "snapshotBlockId": "c8282db0389578901e3e2de344c1b5c13117c0575bc3126313b535aab37af8f1",
+    "contentFingerprint": "f5d380da5e57fd23c483b492efe48b0beb17bc917fea84f0171089ddc9c0b26a",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      5,
+      13
+    ],
+    "blockByteRange": [
+      7,
+      43
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\nSee [",
+    "suffix": "](old-url) for details.\n",
+    "prefixHash": "301d467134f93a5ac77f063efdcdf258f185fc784dc36325226987a64a212a09",
+    "suffixHash": "865c485c088f7a182eedb56f960b1ab845a5a63de14d00fcaccb0360829c64bf"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

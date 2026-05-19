@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-004",
+  "baseHash": "FF2rj0ouCq79Dnj-sL1nUTv2zz2HhQVz64SJzNV_K3w",
+  "position": {
+    "byteRange": [
+      10,
+      29
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "Beta paragraph two.",
+    "exactHash": "847b873a6647c4fa55727d6b9b56b3a6a0184b5f057bd16d3299014da346b5c5",
+    "normalized": "beta paragraph two",
+    "normalizedHash": "f78929eccccebb50ed8f17c7c5f8ecb307092b1611cacae4e8ea35d0a950d7bc"
+  },
+  "block": {
+    "snapshotBlockId": "4beaef520641d942f8609ff99fb52369a5cb6c544bb86f5ebd46cff106d140d1",
+    "contentFingerprint": "b4983abd6cfc40496d3909f8242a7e45c9e0214eb503901aa17ac514f9dd05ae",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      19
+    ],
+    "blockByteRange": [
+      10,
+      29
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "## Notes\n\n",
+    "suffix": "\n\n## Code\n\n```rust\nfn old() {}\n```\n",
+    "prefixHash": "f25a4574032ca37ee3c3ad4fc7e378d4e6e326bc5df4bc1f4fae894f08abd315",
+    "suffixHash": "a356e3fa03f6be74d4ce23547c16c196b23c2d687b2636a5d5f2f9a2bf689bca"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 2,
+        "textHash": "8a7525b1492fb84833f5c4a69b30f4bfbb134f9b666b61a2c1872d63d234c085",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

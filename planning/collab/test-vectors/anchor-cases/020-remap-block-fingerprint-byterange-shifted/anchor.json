@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-020",
+  "baseHash": "FvsB9nF1toEdXEu5RilhQbKXAtm58ijJhIToKKfFXfQ",
+  "position": {
+    "byteRange": [
+      35,
+      69
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "Fingerprint target paragraph here.",
+    "exactHash": "b697df22afdde04ba94291b7ebea88ea41c084b3d55ae4f4dcf4a5dc4a3669eb",
+    "normalized": "fingerprint target paragraph here",
+    "normalizedHash": "039fd455c974466b1b4a88db925e887b9bd89488ec4eb37937f56ba52cf7a841"
+  },
+  "block": {
+    "snapshotBlockId": "ae34c8b3b60205283334fe58f5cc9eb989bd3dd2dd2edda6cf8b69f5efe3681c",
+    "contentFingerprint": "9dd3cc012cf58acbdeb8d22a5d717fbea159375e05f90a3d7b4243d3eb64c4fd",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      34
+    ],
+    "blockByteRange": [
+      35,
+      69
+    ],
+    "blockLineRange": [
+      5,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Title\n\nIntro paragraph (short).\n\n",
+    "suffix": "\n\nTrailing line.\n",
+    "prefixHash": "19e2834f38f5a982f774a8c77ed9e5f0a5bf87506e6cff057e5a2275d2053176",
+    "suffixHash": "e5fe46e83189232589690581ed9692581eb97e9534919e237f16fc746646a4f5"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "7e8cd2056da73a7fefb6cd91f4e5d199d08d9058c517b9a2476b1b520324d674",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

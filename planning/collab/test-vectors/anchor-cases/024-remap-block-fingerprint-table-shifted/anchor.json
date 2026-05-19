@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-024",
+  "baseHash": "lc28iSulWX5mYKX6Q_dSUfrtGm515mrgn991sHo4TWc",
+  "position": {
+    "byteRange": [
+      40,
+      51
+    ],
+    "lineRange": [
+      7,
+      7
+    ]
+  },
+  "quote": {
+    "exact": "| aa | bb |",
+    "exactHash": "a0bee8cfc4fc2e3d8d7cc281b5b875423a7eac48b8890d37cf9bf08615b6a6d7",
+    "normalized": "aa bb",
+    "normalizedHash": "dc7497ab2b33eeca84dd29607ed1c6784634c35573840628e92adf18e2d99575"
+  },
+  "block": {
+    "snapshotBlockId": "384513742fb51635540a6f809a537bcffc88999ea99290f3a92eaab34272d9bc",
+    "contentFingerprint": "e43ba456663da1404bdf90a0144c70b6e870e79a68272606470eb14b4c55227c",
+    "kind": "table",
+    "offsetInBlockBytes": [
+      24,
+      35
+    ],
+    "blockByteRange": [
+      16,
+      51
+    ],
+    "blockLineRange": [
+      5,
+      7
+    ]
+  },
+  "context": {
+    "prefix": "# Data\n\nIntro.\n\n| H1 | H2 |\n| -- | -- |\n",
+    "suffix": "\n",
+    "prefixHash": "be23e70dc2f4d5f656fd52fa2dcc40d7f2cc698a8f031c07b6a35243c034c938",
+    "suffixHash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "cec3a9b89b2e391393d0f68e4bc12a9fa6cf358b3cdf79496dc442d52b8dd528",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

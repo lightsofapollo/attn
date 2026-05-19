@@ -1,0 +1,60 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-071",
+  "baseHash": "dooHAyJqxYNLrRNYhr95BE-ywGvwUq1MXdFp7O5Uru0",
+  "position": {
+    "byteRange": [
+      43,
+      80
+    ],
+    "lineRange": [
+      9,
+      9
+    ]
+  },
+  "quote": {
+    "exact": "Anchored sentence in removed section.",
+    "exactHash": "c68e8e9959a69714bf7891aa7fd8d72b88ee887f4257957768e401c9d7132c87",
+    "normalized": "anchored sentence in removed section",
+    "normalizedHash": "00d4ae710d5cfbd014030ac8175165b7e399601f16a1bb8514124f91f9a752ec"
+  },
+  "block": {
+    "snapshotBlockId": "e9922c403452a229c77a7badd59dfb6311080ad3e6d8415fbf283f1c322a83cf",
+    "contentFingerprint": "71c2ca661a159d6c5d9403661e185adeafe502ae6b2112fb8f9379b39fc31bd3",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      37
+    ],
+    "blockByteRange": [
+      43,
+      80
+    ],
+    "blockLineRange": [
+      9,
+      9
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\n## KeepMe\n\nKept body.\n\n## RemoveMe\n\n",
+    "suffix": "\n",
+    "prefixHash": "bd177fedca2b035f97237f8f5a5f25afba3e673e7621e1b92f605ab6ec398018",
+    "suffixHash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      },
+      {
+        "level": 2,
+        "textHash": "b519c662266f133af09e562e509c6b3e06cc30e4b37fd2ecb561f9bcb1c2f978",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

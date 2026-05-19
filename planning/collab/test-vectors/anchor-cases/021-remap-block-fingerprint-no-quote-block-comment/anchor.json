@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-021",
+  "baseHash": "zdGfORXhL-RwVV2VCMqvRtJ3ZVO2MpIl2wj06sXVLWM",
+  "position": {
+    "byteRange": [
+      5,
+      33
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "Fingerprintable paragraph A.",
+    "exactHash": "a43f603924ba9355715acd9d1b15b968e6f56690a8af31fc1a0f9bf332b5dd77",
+    "normalized": "fingerprintable paragraph a",
+    "normalizedHash": "b5b2993cf87d2d3ad994f28ed803aaf9b85e5770b4dc5aa17b2a1607c84cad7b"
+  },
+  "block": {
+    "snapshotBlockId": "e865c1c293c36c9f87ed9c169d21f79203f4659703bb5140e875a9de5cafe17f",
+    "contentFingerprint": "634b5d2e182e781d8f22d507072d838a7dc6ed411ee9fc7b97ddada9c4086c2c",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      28
+    ],
+    "blockByteRange": [
+      5,
+      33
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# H\n\n",
+    "suffix": "\n\nLater paragraph B.\n",
+    "prefixHash": "0d6eec2f99144f6ffcde05e85eefac685b108d13aecd16467dcb137268919119",
+    "suffixHash": "32e13a4098cb93ebea6eccd36b8b9cba9070857eca779ec70aa2617af1781d7c"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "44bd7ae60f478fae1061e11a7739f4b94d1daf917982d33b6fc8a01a63f89c21",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

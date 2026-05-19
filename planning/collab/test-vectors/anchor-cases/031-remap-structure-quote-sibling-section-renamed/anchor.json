@@ -1,0 +1,60 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-031",
+  "baseHash": "zcgTNI4AvPUdMlvDRCjWy58ChzhOPyetTr6JraIWJAg",
+  "position": {
+    "byteRange": [
+      18,
+      43
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "Key idea in this section.",
+    "exactHash": "fc270f5bc88b472995af043d89a52f97f003e115e433dbaa82a35898101f45bd",
+    "normalized": "key idea in this section",
+    "normalizedHash": "f8e356bde6d0af3582b37a9292bc01661dd7f183f977f8d3345cfbcc7db33278"
+  },
+  "block": {
+    "snapshotBlockId": "e8a6e0a152bf8f5969ffd30db39836019672c3d58c93121deb26b7481fbb17d6",
+    "contentFingerprint": "1fd84e8a500e350473889471609ca01e5a7423cfc0a67ab0995495f6bbb18fb9",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      25
+    ],
+    "blockByteRange": [
+      18,
+      43
+    ],
+    "blockLineRange": [
+      5,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Top\n\n## Stable\n\n",
+    "suffix": "\n\n## Other\n\nUnrelated.\n",
+    "prefixHash": "56009d3387b5ef6e47c2a23241458d226906943a024f979118a60301cf5d41cb",
+    "suffixHash": "df863ef47ced5c1aba25487b3c74877e289860443dbb0a40723940373e2f97b2"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "d5cdfcf7ff75338fa974145a13378ee35f7ea04cfabd74b8f5fb6df350cfbcca",
+        "ordinalAtLevel": 0
+      },
+      {
+        "level": 2,
+        "textHash": "90ee305714d7103317705bfffd734c654b78807e5a0f51fcc61bc1d81105ebd1",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

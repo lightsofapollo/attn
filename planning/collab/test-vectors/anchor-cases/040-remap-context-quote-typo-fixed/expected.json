@@ -1,0 +1,15 @@
+{
+  "status": "remapped",
+  "confidence": 0.7,
+  "reason": "context_match",
+  "currentRange": {
+    "byteRange": [
+      30,
+      45
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  }
+}

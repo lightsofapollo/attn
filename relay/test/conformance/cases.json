@@ -529,9 +529,7 @@
           "socket": "sock",
           "code": 4005
         }
-      ],
-      "skip": true,
-      "skipReason": "follow-up: scenario fixture needs timing/state adjustment (filed as attn-nnj.5.16)"
+      ]
     },
     {
       "id": "caps-003a",
@@ -657,9 +655,7 @@
             "errorCode": "ATTN_ROOM_STORAGE_FULL"
           }
         }
-      ],
-      "skip": true,
-      "skipReason": "follow-up: scenario fixture needs timing/state adjustment (filed as attn-nnj.5.16)"
+      ]
     },
     {
       "id": "caps-003c",
@@ -1468,9 +1464,7 @@
             "status": 200
           }
         }
-      ],
-      "skip": true,
-      "skipReason": "follow-up: scenario fixture needs timing/state adjustment (filed as attn-nnj.5.16)"
+      ]
     },
     {
       "id": "hard-max-ttl-008",
@@ -1522,9 +1516,7 @@
             "errorCode": "ATTN_ROOM_NOT_FOUND"
           }
         }
-      ],
-      "skip": true,
-      "skipReason": "follow-up: scenario fixture needs timing/state adjustment (filed as attn-nnj.5.16)"
+      ]
     },
     {
       "id": "idle-timeout-009",
@@ -1576,9 +1568,7 @@
             "errorCode": "ATTN_ROOM_NOT_FOUND"
           }
         }
-      ],
-      "skip": true,
-      "skipReason": "follow-up: scenario fixture needs timing/state adjustment (filed as attn-nnj.5.16)"
+      ]
     },
     {
       "id": "hibernation-010",

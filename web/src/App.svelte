@@ -36,6 +36,7 @@
   } from './lib/font-scale';
   import { initTheme } from './lib/theme';
   import { createTab, findTabByPath, type Tab } from './lib/tabs';
+  import CommentComposer from './lib/CommentComposer.svelte';
   import Editor from './lib/Editor.svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import TabBar from './lib/TabBar.svelte';
@@ -139,9 +140,52 @@
   const reviewPlugin: PMPlugin = reviewDecorationsPlugin();
   const editorPlugins: PMPlugin[] = [reviewPlugin];
   let pmViewForReview: EditorView | undefined = $state(undefined);
+  let commentComposerRef: ReturnType<typeof CommentComposer> | undefined = $state(undefined);
 
   function handleEditorReady(view: EditorView): void {
     pmViewForReview = view;
+  }
+
+  /**
+   * Open the comment composer (Cmd/Ctrl+. keybinding, per attn-nnj.4.4).
+   * Bails out if no editor view is mounted, the selection is empty, or we
+   * don't have the snapshot context needed to build a 5-layer Anchor — the
+   * Anchor's `snapshotId` / `baseHash` / `index` are all required by the
+   * resolver, so opening a composer without them would yield events that
+   * can never be replayed.
+   */
+  function openCommentComposer(): void {
+    const view = pmViewForReview;
+    if (!view) return;
+    if (view.state.selection.empty) return;
+
+    const roomId = reviewStore.currentRoomId;
+    const fileId = reviewStore.currentFileId;
+    if (!roomId || !fileId) return;
+
+    // Choose the snapshot the comment is being authored against. Prefer the
+    // explicitly-pinned `currentSnapshotId`; otherwise fall back to the most
+    // recently imported snapshot for the current file that carries an inline
+    // `anchorIndex` (only those are usable by `anchorFromSelection`).
+    const targetSnapshotId = reviewStore.currentSnapshotId;
+    const candidates = reviewStore.snapshots.filter(
+      (s) => s.fileId === fileId && s.anchorIndex !== undefined,
+    );
+    const snapshot = targetSnapshotId
+      ? candidates.find((s) => s.snapshotId === targetSnapshotId)
+      : candidates[candidates.length - 1];
+    if (!snapshot || !snapshot.anchorIndex) return;
+
+    commentComposerRef?.open({
+      view,
+      roomId,
+      ctx: {
+        index: snapshot.anchorIndex,
+        fileId: snapshot.fileId,
+        snapshotId: snapshot.snapshotId,
+        baseHash: snapshot.baseHash,
+      },
+    });
   }
 
   // Touch reactive store reads here so Svelte schedules a rebuild whenever
@@ -1344,6 +1388,9 @@
       onShareOpen: () => {
         openShareDialog();
       },
+      onCommentComposer: () => {
+        openCommentComposer();
+      },
       // Three-way apply hooks (attn-nnj.8.3). Read the verdict from the
       // store each time so we always operate on the currently-open card;
       // mirror the same accept/keep/edit-trigger/cancel semantics the
@@ -1585,6 +1632,7 @@
   filePath={activePath}
 />
 <ReviewApplyExpand />
+<CommentComposer bind:this={commentComposerRef} />
 <CommandPalette
   bind:open={commandPaletteOpen}
   {rootPath}

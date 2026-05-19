@@ -2,6 +2,7 @@ use crate::review::ids::{EventId, RoomId};
 use crate::review::model::{Anchor, PositionAnchor, SuggestionDraft};
 use crate::watcher::UserEvent;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tao::event_loop::EventLoopProxy;
@@ -104,8 +105,42 @@ pub enum IpcMessage {
 }
 
 /// Shared state accessible from the IPC handler.
+///
+/// Routing/lookup context for the running daemon. The heavy review state
+/// (event logs, working copies, transport handles) lives in `ReviewManager`
+/// (issue attn-nnj.2.8); `AppState` only holds the maps the daemon needs to
+/// route file/path events to the right room.
+///
+/// Shape pinned by `planning/collab/amendments.md` §Codebase Corrections —
+/// `AppState` section.
 pub struct AppState {
-    pub file_path: PathBuf,
+    pub active_path: PathBuf,
+    pub active_project_root: PathBuf,
+    /// Frontend's notion of the currently focused tab. Wired up when
+    /// `ReviewManager` (2.8) needs to route per-tab events.
+    #[allow(dead_code)]
+    pub active_tab_id: Option<String>,
+    /// Live review rooms keyed by `RoomId`. Inserts/removes happen in
+    /// `ReviewManager` (issue attn-nnj.2.8); initialized empty here.
+    #[allow(dead_code)]
+    pub review_rooms: HashMap<RoomId, RoomRuntimeHandle>,
+    /// Owner-side binding from a working-copy path to the room it belongs
+    /// to. Populated by `ReviewManager` on `ReviewShare`; consulted by file
+    /// watchers + IPC handlers to route events to the right room.
+    #[allow(dead_code)]
+    pub file_to_room: HashMap<PathBuf, RoomId>,
+}
+
+/// Lightweight handle for a live review room. `ReviewManager` owns the heavy
+/// state (tokio task, command sender, transport handles, event log); this
+/// struct is just enough for `AppState` lookups today.
+///
+/// Issue attn-nnj.2.8 will expand this with the actual `ReviewManager`
+/// integration (e.g., tokio `JoinHandle`, command `mpsc::Sender`, etc.).
+#[derive(Debug, Clone)]
+pub struct RoomRuntimeHandle {
+    #[allow(dead_code)]
+    pub room_id: RoomId,
 }
 
 pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoopProxy<UserEvent>) {
@@ -131,7 +166,7 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             }
             IpcMessage::EditSave { content } => {
                 let Ok(state) = state.lock() else { return };
-                if let Err(e) = std::fs::write(&state.file_path, &content) {
+                if let Err(e) = std::fs::write(&state.active_path, &content) {
                     eprintln!("attn: failed to save: {}", e);
                 }
             }
@@ -250,7 +285,7 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
 /// The file watcher will detect the write and trigger a re-render.
 fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
     let Ok(state) = state.lock() else { return };
-    let path = &state.file_path;
+    let path = &state.active_path;
 
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,

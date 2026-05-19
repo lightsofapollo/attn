@@ -484,26 +484,59 @@ export function __mockEmitReview(kind: MockReviewEmitKind, payload: unknown): vo
 // authoring mistakes are obvious.
 // ---------------------------------------------------------------------------
 
-// `import.meta.glob('./mock-ipc-scenarios/*.json', { eager: false })` returns
-// a map of relative path → lazy loader. The cast threads the loader's
-// dynamic-import shape through TypeScript without leaking `any` into the
-// public API (lint rule: no `any` types).
+// Static scenario imports. We previously used `import.meta.glob` here, but
+// `vite-plugin-singlefile` does not inline glob-imported JSON in the
+// production bundle (the JSON files end up as dynamic chunks that singlefile
+// drops). Static `import` statements are inlined deterministically by Vite,
+// so the daemon webview always sees the same scenario list as the dev
+// browser. Add a new entry here whenever you add a JSON under
+// `./mock-ipc-scenarios/`.
+import scenarioAmbiguousAnchor from './mock-ipc-scenarios/ambiguous-anchor.json';
+import scenarioCommentSurvivesEdit from './mock-ipc-scenarios/comment-survives-edit.json';
+import scenarioStaleSuggestion from './mock-ipc-scenarios/stale-suggestion.json';
+import scenarioThreeWayDrift from './mock-ipc-scenarios/three-way-drift.json';
+
 type ScenarioModule = { default: MockScenario };
 type ScenarioGlobMap = Record<string, () => Promise<ScenarioModule>>;
+type ScenarioEagerGlobMap = Record<string, ScenarioModule>;
 
 interface ImportMetaWithGlob {
-  glob?: (pattern: string) => Record<string, () => Promise<ScenarioModule>>;
+  glob?: (
+    pattern: string,
+    opts?: { eager?: boolean },
+  ) => Record<string, unknown>;
+}
+
+/**
+ * Static fallback used when `import.meta.glob` is not available (tsx
+ * harness) AND when the production singlefile bundle drops glob-loaded
+ * JSON. Mirrors the four JSONs under `./mock-ipc-scenarios/`.
+ */
+function staticScenarioLoaders(): ScenarioGlobMap {
+  // The JSON imports above are typed by Vite as `any` at the boundary;
+  // we cast through `MockScenario` so consumers see a typed shape.
+  const fixed: Array<[string, unknown]> = [
+    ['./mock-ipc-scenarios/ambiguous-anchor.json', scenarioAmbiguousAnchor],
+    ['./mock-ipc-scenarios/comment-survives-edit.json', scenarioCommentSurvivesEdit],
+    ['./mock-ipc-scenarios/stale-suggestion.json', scenarioStaleSuggestion],
+    ['./mock-ipc-scenarios/three-way-drift.json', scenarioThreeWayDrift],
+  ];
+  const out: ScenarioGlobMap = {};
+  for (const [path, mod] of fixed) {
+    const m = mod as MockScenario;
+    out[path] = () => Promise.resolve({ default: m });
+  }
+  return out;
 }
 
 // Vite injects `import.meta.glob` at build time. Under raw tsx (manual test
-// harness) it is undefined, so we fall back to an empty loader map and let
-// the test inject scenarios explicitly via `__registerScenarioForTesting`.
+// harness) it is undefined; under singlefile builds it returns an empty
+// map. We use the static loader either way so production and dev paths
+// stay aligned. The `import.meta.glob` probe is kept so the no-op branch
+// remains under coverage for the comment above.
 function discoverScenarioLoaders(): ScenarioGlobMap {
-  const meta = import.meta as unknown as ImportMetaWithGlob;
-  if (typeof meta.glob === 'function') {
-    return meta.glob('./mock-ipc-scenarios/*.json') as ScenarioGlobMap;
-  }
-  return {};
+  void (import.meta as unknown as ImportMetaWithGlob).glob;
+  return staticScenarioLoaders();
 }
 
 const scenarioLoaders: ScenarioGlobMap = discoverScenarioLoaders();

@@ -851,3 +851,31 @@ export interface ReviewAnchorResolutionUpdate {
   eventId: EventId;
   resolved: ResolvedAnchor;
 }
+
+/**
+ * A reconstructed comment thread: a root `CommentCreated` event plus any
+ * replies (other `CommentCreated` events in the same `threadId`) and a
+ * resolved flag flipped by a matching `CommentResolved` event.
+ *
+ * Threads are derived from the append-only review-event log by the selectors
+ * in `web/src/lib/review/selectors.ts`. The root is the earliest comment in
+ * the thread (by `meta.createdAt`); replies are ordered the same way. The
+ * thread's `anchor` is taken from the root event so the panel/margin card
+ * can position itself, and `resolvedAnchor` is the latest anchor-resolution
+ * verdict (exact / remapped / ambiguous / stale) for that root event.
+ * @see planning/collab/data-model.md §Comment Events
+ */
+export interface Thread {
+  /** Thread id from `CommentCreatedBody.threadId`. */
+  id: string;
+  /** Earliest `CommentCreated` event sharing this `threadId`. */
+  rootEvent: ReviewEvent;
+  /** Later `CommentCreated` events in the same thread, ordered by createdAt. */
+  replies: ReviewEvent[];
+  /** Flipped to `true` by a `CommentResolved` event for this thread. */
+  resolved: boolean;
+  /** Anchor authored on the root comment (null only for malformed input). */
+  anchor: Anchor | null;
+  /** Latest resolver verdict against `rootEvent.meta.eventId`, if any. */
+  resolvedAnchor: ResolvedAnchor | null;
+}

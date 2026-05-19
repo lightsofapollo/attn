@@ -77,7 +77,17 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Async runtime — narrowest possible feature set for now. PoW token pool
 # (attn-nnj.1.7) needs `sync` (Mutex) and `rt` (spawn_blocking). Phase 4
 # (attn-nnj.6.x/7.x) will widen these as transports / outbox land.
-tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+# WebSocket client (attn-nnj.6.3) needs `net` (TCP) and `io-util` (split/AsyncReadExt).
+tokio = { version = "1", features = ["sync", "rt", "macros", "time", "net", "io-util"] }
+
+# WebSocket client used by the mailbox transport (attn-nnj.6.3). rustls-tls
+# keeps the binary self-contained without OpenSSL; webpki-roots provides the
+# Mozilla CA bundle baked into the binary so we don't depend on the OS trust
+# store at runtime. default-features=false drops the connect helpers we don't
+# need — the client builds its own Request to attach the admission subprotocol
+# (per relay-spec.md §WebSocket Protocol).
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
 # Async-fn-in-trait shim for the Transport trait (attn-nnj.6.1). Stable
 # Rust's native `async fn` in traits is gaining ground but still lacks

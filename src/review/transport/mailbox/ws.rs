@@ -35,11 +35,12 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
-use crate::review::model::{Device, MailboxEnvelope, RoomPolicy};
+use crate::review::model::{Device, MailboxEnvelope, RoomPolicy, SyncCursor};
+use crate::review::store::ReviewStore;
 use crate::review::transport::inbound::InboundPipeline;
 use crate::review::transport::{PresenceEvent, TransportError, TransportEvent};
 
-use super::MailboxConfig;
+use super::{CursorRecoveryPolicy, MailboxConfig};
 
 // ---------------------------------------------------------------------------
 // Reconnect tuning
@@ -66,6 +67,14 @@ pub const RECONNECT_MAX_MS: u64 = 60_000;
 ///     replaces both halves at once.
 ///   - `inbound` — shared `InboundPipeline` that decrypts + verifies +
 ///     dedupes envelopes. Routing on `envelope.kind` happens inside `run`.
+///   - `store` — durable review store; cursor persistence (attn-nnj.6.5)
+///     calls `store.save_cursor` after every successful import so a process
+///     restart resumes at the right `serverSeq`.
+///   - `recovery_policy` — how the client reacts to an
+///     `ATTN_CURSOR_TOO_OLD` (close 4005). Default is `ResyncFromOldest` —
+///     discard the cursor and reconnect from the relay's oldest retained
+///     `serverSeq`. The P2P snapshot path and a Manual override are also
+///     supported (see `CursorRecoveryPolicy`).
 ///   - `events_tx` — un-bounded sender the consumer (typically
 ///     `ReviewManager`) drains for `TransportEvent`s. Un-bounded because
 ///     dropping a presence or hello frame would desync the live device list;
@@ -73,26 +82,105 @@ pub const RECONNECT_MAX_MS: u64 = 60_000;
 pub struct MailboxWsClient {
     config: Arc<MailboxConfig>,
     inbound: Arc<InboundPipeline>,
+    store: Arc<ReviewStore>,
+    recovery_policy: CursorRecoveryPolicy,
     events_tx: mpsc::UnboundedSender<TransportEvent>,
 }
 
 impl MailboxWsClient {
     /// Construct a new client. Does not open a connection — call `run`.
+    ///
+    /// Uses the default `CursorRecoveryPolicy::ResyncFromOldest` recovery
+    /// policy. Use `with_recovery_policy` to override (e.g. for the P2P
+    /// path or for tests that want to inspect the Error event before
+    /// reconnecting).
     pub fn new(
         config: Arc<MailboxConfig>,
         inbound: Arc<InboundPipeline>,
+        store: Arc<ReviewStore>,
         events_tx: mpsc::UnboundedSender<TransportEvent>,
     ) -> Self {
         Self {
             config,
             inbound,
+            store,
+            recovery_policy: CursorRecoveryPolicy::default(),
             events_tx,
         }
+    }
+
+    /// Override the cursor-recovery policy. See `CursorRecoveryPolicy` for
+    /// the semantics of each variant.
+    pub fn with_recovery_policy(mut self, policy: CursorRecoveryPolicy) -> Self {
+        self.recovery_policy = policy;
+        self
     }
 
     /// Borrow the active config (matches `OutboxProcessor::config`).
     pub fn config(&self) -> &MailboxConfig {
         &self.config
+    }
+
+    /// Borrow the active store (used by orchestrators that want to inspect
+    /// the persisted cursor outside of the `run` loop).
+    pub fn store(&self) -> &Arc<ReviewStore> {
+        &self.store
+    }
+
+    /// Active cursor recovery policy.
+    pub fn recovery_policy(&self) -> CursorRecoveryPolicy {
+        self.recovery_policy
+    }
+
+    /// Load the persisted `last_pulled_seq` cursor for this client's room.
+    /// Returns `0` when no cursor is yet on disk (first connect) or when
+    /// the store read fails (treated as "start from beginning" — the
+    /// reconnect path will save a fresh cursor as envelopes arrive).
+    fn load_after_seq(&self) -> u64 {
+        match self.store.load_cursor(&self.config.room_id) {
+            Ok(Some(cursor)) => cursor.last_pulled_seq,
+            Ok(None) => 0,
+            Err(e) => {
+                let _ = self.events_tx.send(TransportEvent::Error {
+                    code: "ATTN_CURSOR_LOAD".to_string(),
+                    message: format!("load_cursor failed: {e}; resuming from seq 0"),
+                });
+                0
+            }
+        }
+    }
+
+    /// Persist a fresh cursor at `seq`. Preserves any existing
+    /// `imported_event_ids` / `pending_outbound_envelope_ids` lists — those
+    /// are owned by `ReviewManager` and would silently regress if we
+    /// overwrote with empty defaults from inside the WS layer.
+    fn save_seq(&self, seq: u64) {
+        let existing = self
+            .store
+            .load_cursor(&self.config.room_id)
+            .ok()
+            .flatten();
+        let cursor = match existing {
+            Some(mut c) => {
+                c.last_pulled_seq = seq;
+                c.device_id = self.config.device_id.clone();
+                c.room_id = self.config.room_id.clone();
+                c
+            }
+            None => SyncCursor {
+                room_id: self.config.room_id.clone(),
+                device_id: self.config.device_id.clone(),
+                last_pulled_seq: seq,
+                imported_event_ids: Vec::new(),
+                pending_outbound_envelope_ids: Vec::new(),
+            },
+        };
+        if let Err(e) = self.store.save_cursor(&self.config.room_id, &cursor) {
+            let _ = self.events_tx.send(TransportEvent::Error {
+                code: "ATTN_CURSOR_SAVE".to_string(),
+                message: format!("save_cursor failed: {e}"),
+            });
+        }
     }
 
     // `run` is implemented further below once the connect + routing helpers
@@ -330,19 +418,39 @@ impl MailboxWsClient {
     /// Drive the connection loop until `cancel` flips to `true` or the relay
     /// hands us a terminal close code.
     ///
-    /// `after_seq` is the consumer's last-seen `server_seq` (0 on first
-    /// connect). It's threaded through `subscribe { after }` on every
-    /// reconnect; the consumer is responsible for updating it as
-    /// `TransportEvent::Envelope` arrives and feeding the new value back on
-    /// the next call (cursor management lands in attn-nnj.6.5 — for now
-    /// `last_seen_seq` is tracked per-iteration inside `run` so a reconnect
-    /// within a single call honors progress).
+    /// The starting `after_seq` is loaded from the persisted `SyncCursor` on
+    /// disk (`ReviewStore::load_cursor`) — the caller does NOT pass it in.
+    /// The cursor is advanced + flushed to disk on every successful
+    /// `InboundPipeline.import_*_envelope`, so a process restart resumes at
+    /// the right server_seq without coordination.
+    ///
+    /// On `ATTN_CURSOR_TOO_OLD` (close 4005) the behavior is governed by
+    /// the `CursorRecoveryPolicy`:
+    ///   - `ResyncFromOldest` — reset the persisted cursor to `resyncFromSeq`
+    ///     and reconnect from there (NOT from 0 — accepts that pre-deleted
+    ///     history is gone).
+    ///   - `RequestSnapshot` — log "P2P recovery not yet wired" and return
+    ///     `TransportError::CursorTooOld`; the orchestrator initiates a
+    ///     WebRTC `RequestSnapshot` signal (Phase 4).
+    ///   - `Manual` — return `TransportError::CursorTooOld`; the caller
+    ///     decides what to do via the emitted `TransportEvent::Error`.
     pub async fn run(
         &self,
-        after_seq: u64,
         mut cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<(), TransportError> {
-        let mut last_seen_seq = after_seq;
+        let after_seq = self.load_after_seq();
+        self.run_with_after_seq(after_seq, &mut cancel).await
+    }
+
+    /// Internal: drive the loop starting from `after_seq`. Pulled out so
+    /// the 4005 → ResyncFromOldest branch can reset the cursor and re-enter
+    /// without re-loading from disk (which would just race the
+    /// `save_cursor` we just wrote).
+    async fn run_with_after_seq(
+        &self,
+        mut last_seen_seq: u64,
+        cancel: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), TransportError> {
         let mut backoff_ms = RECONNECT_INITIAL_MS;
 
         loop {
@@ -350,7 +458,7 @@ impl MailboxWsClient {
                 return Ok(());
             }
 
-            let outcome = self.connect_once(last_seen_seq, &mut cancel, &mut last_seen_seq).await;
+            let outcome = self.connect_once(last_seen_seq, cancel, &mut last_seen_seq).await;
 
             match outcome {
                 ConnectionOutcome::Cancelled => return Ok(()),
@@ -369,7 +477,39 @@ impl MailboxWsClient {
                         reason: format!("cursor too old; resync from {resync_from_seq}"),
                         close_code: Some(close_codes::CURSOR_TOO_OLD),
                     });
-                    return Err(TransportError::CursorTooOld(resync_from_seq));
+                    match self.recovery_policy {
+                        CursorRecoveryPolicy::ResyncFromOldest => {
+                            // Reset the on-disk cursor to the relay's oldest
+                            // retained seq and reconnect from there. We
+                            // accept that envelopes between the old cursor
+                            // and `resyncFromSeq` are permanently gone —
+                            // the relay deleted them (owner ACK or expiry).
+                            self.save_seq(resync_from_seq);
+                            last_seen_seq = resync_from_seq;
+                            backoff_ms = RECONNECT_INITIAL_MS;
+                            continue;
+                        }
+                        CursorRecoveryPolicy::RequestSnapshot => {
+                            // Phase 4 wires a WebRTC `RequestSnapshot`
+                            // signal here. Stub for now — surface the
+                            // typed error so the orchestrator can drive
+                            // the snapshot dance, then bail out of the
+                            // loop. Caller is responsible for calling
+                            // `run` again after the snapshot lands.
+                            eprintln!(
+                                "review: P2P cursor-too-old recovery not yet wired (resync_from_seq={resync_from_seq}); returning to caller"
+                            );
+                            return Err(TransportError::CursorTooOld(resync_from_seq));
+                        }
+                        CursorRecoveryPolicy::Manual => {
+                            // Caller owns the next step — they saw the
+                            // `TransportEvent::Error` (ATTN_CURSOR_TOO_OLD)
+                            // emitted by `handle_text_frame` and decide
+                            // whether to call `run` again, reset cursor,
+                            // or surface the error to the UI.
+                            return Err(TransportError::CursorTooOld(resync_from_seq));
+                        }
+                    }
                 }
                 ConnectionOutcome::Transient(reason) => {
                     // Emit a Disconnected event for telemetry, then back off
@@ -381,7 +521,7 @@ impl MailboxWsClient {
                         reason,
                         close_code: None,
                     });
-                    if wait_or_cancel(backoff_ms, &mut cancel).await {
+                    if wait_or_cancel(backoff_ms, cancel).await {
                         return Ok(());
                     }
                     backoff_ms = (backoff_ms * 2).min(RECONNECT_MAX_MS);
@@ -600,6 +740,12 @@ impl MailboxWsClient {
                         // the Envelope event.
                         if server_seq > *last_seen_seq {
                             *last_seen_seq = server_seq;
+                            // Persist the cursor immediately so a process
+                            // restart resumes here (attn-nnj.6.5). We
+                            // intentionally do this BEFORE emitting the
+                            // Envelope event so a panic in a downstream
+                            // consumer can't lose the import.
+                            self.save_seq(server_seq);
                         }
                         let _ = self.events_tx.send(TransportEvent::Envelope {
                             envelope,
@@ -962,6 +1108,7 @@ mod tests {
     fn build_client(
         relay_url: String,
         pipeline: Arc<InboundPipeline>,
+        store: Arc<ReviewStore>,
         events_tx: mpsc::UnboundedSender<TransportEvent>,
     ) -> MailboxWsClient {
         let cfg = Arc::new(MailboxConfig {
@@ -971,7 +1118,17 @@ mod tests {
             admission_key: [0x42u8; 32],
             pow_difficulty: 12,
         });
-        MailboxWsClient::new(cfg, pipeline, events_tx)
+        MailboxWsClient::new(cfg, pipeline, store, events_tx)
+    }
+
+    fn build_client_with_policy(
+        relay_url: String,
+        pipeline: Arc<InboundPipeline>,
+        store: Arc<ReviewStore>,
+        events_tx: mpsc::UnboundedSender<TransportEvent>,
+        policy: CursorRecoveryPolicy,
+    ) -> MailboxWsClient {
+        build_client(relay_url, pipeline, store, events_tx).with_recovery_policy(policy)
     }
 
     // ----------------------------------------------------------------
@@ -1100,11 +1257,11 @@ mod tests {
             .await;
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let client = build_client(relay_url, pipeline.clone(), events_tx);
+        let client = build_client(relay_url, pipeline.clone(), store.clone(), events_tx);
         let (cancel_tx, cancel_rx) = watch::channel(false);
 
         let run_handle = tokio::spawn(async move {
-            let _ = client.run(0, cancel_rx).await;
+            let _ = client.run(cancel_rx).await;
         });
 
         // Collect events with a timeout so a missing frame doesn't hang the
@@ -1152,7 +1309,22 @@ mod tests {
 
     #[tokio::test]
     async fn cursor_too_old_error_frame_surfaces_as_terminal_error() {
-        let (pipeline, _store, _vk, _tmp) = fresh_pipeline();
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
+        // Seed a cursor at 5 so the relay's response of "cursor too old,
+        // resync from 42" represents the realistic mid-life scenario.
+        let room_id: RoomId = id(TEST_ROOM);
+        store
+            .save_cursor(
+                &room_id,
+                &SyncCursor {
+                    room_id: room_id.clone(),
+                    device_id: id::<DeviceId>(TEST_DEVICE),
+                    last_pulled_seq: 5,
+                    imported_event_ids: vec![],
+                    pending_outbound_envelope_ids: vec![],
+                },
+            )
+            .expect("save_cursor");
 
         let (relay_url, server_handle) = spawn_ws_server(|mut ws, _n| async move {
             let _ = ws.next().await; // subscribe
@@ -1170,11 +1342,19 @@ mod tests {
         .await;
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let client = build_client(relay_url, pipeline, events_tx);
+        // Manual policy so we observe the terminal error path without the
+        // ResyncFromOldest auto-reconnect kicking in.
+        let client = build_client_with_policy(
+            relay_url,
+            pipeline,
+            store,
+            events_tx,
+            CursorRecoveryPolicy::Manual,
+        );
         let (_cancel_tx, cancel_rx) = watch::channel(false);
 
         let run_res =
-            tokio::time::timeout(Duration::from_secs(3), client.run(5, cancel_rx)).await;
+            tokio::time::timeout(Duration::from_secs(3), client.run(cancel_rx)).await;
         let err = match run_res {
             Ok(Err(e)) => e,
             Ok(Ok(())) => panic!("expected CursorTooOld error, got Ok"),
@@ -1216,7 +1396,7 @@ mod tests {
 
     #[tokio::test]
     async fn close_4000_surfaces_admission_rejected_without_reconnect() {
-        let (pipeline, _store, _vk, _tmp) = fresh_pipeline();
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
         let connect_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let count_for_server = Arc::clone(&connect_count);
@@ -1236,10 +1416,10 @@ mod tests {
         .await;
 
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
-        let client = build_client(relay_url, pipeline, events_tx);
+        let client = build_client(relay_url, pipeline, store, events_tx);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
 
-        let res = tokio::time::timeout(Duration::from_secs(3), client.run(0, cancel_rx)).await;
+        let res = tokio::time::timeout(Duration::from_secs(3), client.run(cancel_rx)).await;
         match res {
             Ok(Err(TransportError::AdmissionRejected)) => {}
             other => panic!("expected AdmissionRejected, got {other:?}"),
@@ -1259,7 +1439,7 @@ mod tests {
 
     #[tokio::test]
     async fn network_drop_triggers_reconnect_with_resumed_subscribe() {
-        let (pipeline, _store, _vk, _tmp) = fresh_pipeline();
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
         let connect_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let last_subscribe_after = Arc::new(tokio::sync::Mutex::new(Vec::<u64>::new()));
 
@@ -1302,14 +1482,14 @@ mod tests {
         .await;
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let client = build_client(relay_url, pipeline, events_tx);
+        let client = build_client(relay_url, pipeline, store, events_tx);
         let (cancel_tx, cancel_rx) = watch::channel(false);
 
         // Speed up the first reconnect by overriding the initial backoff via
         // a quick spawn: we rely on RECONNECT_INITIAL_MS = 1000 being short
         // enough that two hello frames arrive inside the 5s test window.
         let run_handle = tokio::spawn(async move {
-            let _ = client.run(0, cancel_rx).await;
+            let _ = client.run(cancel_rx).await;
         });
 
         let mut hello_count = 0;
@@ -1346,7 +1526,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_during_idle_closes_cleanly() {
-        let (pipeline, _store, _vk, _tmp) = fresh_pipeline();
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
 
         let (relay_url, server_handle) = spawn_ws_server(|mut ws, _n| async move {
             let _ = ws.next().await; // subscribe
@@ -1368,10 +1548,10 @@ mod tests {
         .await;
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let client = build_client(relay_url, pipeline, events_tx);
+        let client = build_client(relay_url, pipeline, store, events_tx);
         let (cancel_tx, cancel_rx) = watch::channel(false);
 
-        let run_handle = tokio::spawn(async move { client.run(0, cancel_rx).await });
+        let run_handle = tokio::spawn(async move { client.run(cancel_rx).await });
 
         // Wait for hello, then cancel.
         let mut got_hello = false;
@@ -1401,7 +1581,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_frame_is_answered_with_pong_carrying_same_ts() {
-        let (pipeline, _store, _vk, _tmp) = fresh_pipeline();
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
         let observed_pong_ts = Arc::new(tokio::sync::Mutex::new(None::<i64>));
 
         let observed_for_server = Arc::clone(&observed_pong_ts);
@@ -1443,10 +1623,10 @@ mod tests {
         .await;
 
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
-        let client = build_client(relay_url, pipeline, events_tx);
+        let client = build_client(relay_url, pipeline, store, events_tx);
         let (cancel_tx, cancel_rx) = watch::channel(false);
 
-        let run_handle = tokio::spawn(async move { client.run(0, cancel_rx).await });
+        let run_handle = tokio::spawn(async move { client.run(cancel_rx).await });
 
         // Poll the observed ts; the server captures it inside its handler.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1463,5 +1643,631 @@ mod tests {
         let _ = cancel_tx.send(true);
         let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
         server_handle.abort();
+    }
+
+    // ----------------------------------------------------------------
+    // attn-nnj.6.5 — cursor persistence + 4005 recovery
+    // ----------------------------------------------------------------
+
+    /// Mint `count` distinct event envelopes that the test pipeline can
+    /// successfully import (same signer / room_id as `fresh_pipeline`).
+    fn mint_event_envelopes(event_key: [u8; 32], room_id: &RoomId, count: usize) -> Vec<MailboxEnvelope> {
+        use crate::review::envelope::{AssembleInput, assemble_event_envelope};
+        use crate::review::ids::{ContentHash, FileId, ParticipantId, SnapshotId};
+        use crate::review::model::{Anchor, PositionAnchor, ReviewEventBody};
+        let mut envelopes = Vec::with_capacity(count);
+        for i in 0..count {
+            let signer = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
+            let env = assemble_event_envelope(AssembleInput {
+                event_key,
+                signing_key: signer,
+                room_id: room_id.clone(),
+                author_id: id::<ParticipantId>("p-author-01"),
+                device_id: id::<DeviceId>(TEST_DEVICE),
+                created_at_ms: 1_700_000_000_000 + i as u64,
+                expires_at_ms: 1_700_000_000_000 + 7 * 24 * 60 * 60 * 1000,
+                parent_event_ids: vec![],
+                snapshot_id: None,
+                body: ReviewEventBody::CommentCreated {
+                    thread_id: format!("cursor-thread-{i}"),
+                    anchor: Anchor {
+                        v: 2,
+                        file_id: id::<FileId>("f-file-01"),
+                        snapshot_id: id::<SnapshotId>("eQ7pDCC-mekpz-we7gDYag"),
+                        base_hash: id::<ContentHash>(
+                            "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+                        ),
+                        position: PositionAnchor {
+                            byte_range: [0, 9],
+                            line_range: [1, 1],
+                            pm_range: None,
+                        },
+                        quote: None,
+                        block: None,
+                        context: None,
+                        structure: None,
+                    },
+                    body: format!("cursor-body-{i}"),
+                },
+                kind: EnvelopeKind::Event,
+                client_nonce: None,
+            })
+            .expect("assemble envelope");
+            envelopes.push(env);
+        }
+        envelopes
+    }
+
+    /// Test 8: cursor persists after import — importing 3 envelopes leaves
+    /// the store at `last_pulled_seq = 3` (the highest serverSeq the relay
+    /// stamped on the run).
+    #[tokio::test]
+    async fn cursor_persists_after_each_successful_import() {
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
+        let event_key = {
+            let keys = derive_room_keys(&TEST_ROOM_SECRET);
+            *keys.event_key.as_bytes()
+        };
+        let room_id: RoomId = id(TEST_ROOM);
+        let envelopes = mint_event_envelopes(event_key, &room_id, 3);
+
+        let envelopes_for_server = envelopes.clone();
+        let (relay_url, server_handle) = spawn_ws_server(move |mut ws, _n| {
+            let envelopes_for_server = envelopes_for_server.clone();
+            async move {
+                let _ = ws.next().await; // subscribe
+                let hello = json!({
+                    "type": "hello",
+                    "serverSeq": 0u64,
+                    "policy": sample_policy(),
+                    "devices": [],
+                    "missedSignalEnvelopeIds": [],
+                });
+                ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                for (i, env) in envelopes_for_server.iter().enumerate() {
+                    let frame = json!({
+                        "type": "envelope",
+                        "envelope": env,
+                        // serverSeq starts at 1; after 3 imports the cursor
+                        // must land on 3 (the highest stamped seq).
+                        "serverSeq": 1 + i as u64,
+                    });
+                    ws.send(Message::Text(frame.to_string().into())).await.unwrap();
+                }
+                // Hold the socket; the test cancels.
+                let _ = ws.next().await;
+            }
+        })
+        .await;
+
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let client = build_client(relay_url, pipeline, store.clone(), events_tx);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+
+        let run_handle = tokio::spawn(async move { let _ = client.run(cancel_rx).await; });
+
+        // Drain envelopes until we've seen all 3.
+        let mut envelope_count = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline && envelope_count < 3 {
+            let timeout = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(timeout, events_rx.recv()).await {
+                Ok(Some(TransportEvent::Envelope { .. })) => envelope_count += 1,
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        assert_eq!(envelope_count, 3, "all 3 envelopes must be routed");
+
+        // Cursor must now be persisted at serverSeq=3.
+        let cursor = store
+            .load_cursor(&room_id)
+            .expect("load_cursor")
+            .expect("cursor must exist after imports");
+        assert_eq!(
+            cursor.last_pulled_seq, 3,
+            "last_pulled_seq must equal the highest imported serverSeq"
+        );
+        assert_eq!(cursor.room_id, room_id);
+        assert_eq!(cursor.device_id, id::<DeviceId>(TEST_DEVICE));
+
+        let _ = cancel_tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        server_handle.abort();
+    }
+
+    /// Test 9: cursor reloaded on reconnect — a second client built against
+    /// the same store + room starts its subscribe at `after=3` after the
+    /// first run persisted the cursor.
+    #[tokio::test]
+    async fn cursor_reloaded_on_reconnect_seeds_subscribe_after_seq() {
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
+        let room_id: RoomId = id(TEST_ROOM);
+        // Pre-seed the cursor at 3 to simulate a prior session.
+        store
+            .save_cursor(
+                &room_id,
+                &SyncCursor {
+                    room_id: room_id.clone(),
+                    device_id: id::<DeviceId>(TEST_DEVICE),
+                    last_pulled_seq: 3,
+                    imported_event_ids: vec![],
+                    pending_outbound_envelope_ids: vec![],
+                },
+            )
+            .expect("save_cursor");
+
+        let observed_after = Arc::new(tokio::sync::Mutex::new(None::<u64>));
+        let observed_for_server = Arc::clone(&observed_after);
+        let (relay_url, server_handle) = spawn_ws_server(move |mut ws, _n| {
+            let observed_for_server = Arc::clone(&observed_for_server);
+            async move {
+                if let Some(Ok(Message::Text(payload))) = ws.next().await {
+                    let v: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+                    if let Some(after) = v.get("after").and_then(Value::as_u64) {
+                        *observed_for_server.lock().await = Some(after);
+                    }
+                }
+                let hello = json!({
+                    "type": "hello",
+                    "serverSeq": 3u64,
+                    "policy": sample_policy(),
+                    "devices": [],
+                    "missedSignalEnvelopeIds": [],
+                });
+                ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                let _ = ws.next().await;
+            }
+        })
+        .await;
+
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let client = build_client(relay_url, pipeline, store, events_tx);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let run_handle = tokio::spawn(async move { let _ = client.run(cancel_rx).await; });
+
+        // Poll for the captured `after` value.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut got: Option<u64> = None;
+        while tokio::time::Instant::now() < deadline {
+            if let Some(after) = *observed_after.lock().await {
+                got = Some(after);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            got,
+            Some(3u64),
+            "client must subscribe with after=3 when store cursor is at 3"
+        );
+
+        let _ = cancel_tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        server_handle.abort();
+    }
+
+    /// Test 10: 4005 with ResyncFromOldest policy resets the cursor to
+    /// `resyncFromSeq` and reconnects from there (NOT from 0).
+    #[tokio::test]
+    async fn cursor_too_old_with_resync_policy_resets_and_reconnects() {
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
+        let room_id: RoomId = id(TEST_ROOM);
+
+        // Pre-seed cursor at 5 (will be rejected by relay as too old).
+        store
+            .save_cursor(
+                &room_id,
+                &SyncCursor {
+                    room_id: room_id.clone(),
+                    device_id: id::<DeviceId>(TEST_DEVICE),
+                    last_pulled_seq: 5,
+                    imported_event_ids: vec![],
+                    pending_outbound_envelope_ids: vec![],
+                },
+            )
+            .expect("save_cursor");
+
+        let captured_after = Arc::new(tokio::sync::Mutex::new(Vec::<u64>::new()));
+        let captured_for_server = Arc::clone(&captured_after);
+        let (relay_url, server_handle) = spawn_ws_server(move |mut ws, n| {
+            let captured_for_server = Arc::clone(&captured_for_server);
+            async move {
+                if let Some(Ok(Message::Text(payload))) = ws.next().await {
+                    let v: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+                    if let Some(after) = v.get("after").and_then(Value::as_u64) {
+                        captured_for_server.lock().await.push(after);
+                    }
+                }
+                if n == 1 {
+                    // First connect: reject with cursor-too-old, resync from 42.
+                    let err = json!({
+                        "type": "error",
+                        "code": "ATTN_CURSOR_TOO_OLD",
+                        "message": "cursor 5 < oldest 42",
+                        "resyncFromSeq": 42u64,
+                    });
+                    ws.send(Message::Text(err.to_string().into())).await.unwrap();
+                    let _ = ws.next().await; // wait for client close
+                } else {
+                    // Reconnect: send hello and hold.
+                    let hello = json!({
+                        "type": "hello",
+                        "serverSeq": 42u64,
+                        "policy": sample_policy(),
+                        "devices": [],
+                        "missedSignalEnvelopeIds": [],
+                    });
+                    ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                    let _ = ws.next().await;
+                }
+            }
+        })
+        .await;
+
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let client = build_client_with_policy(
+            relay_url,
+            pipeline,
+            store.clone(),
+            events_tx,
+            CursorRecoveryPolicy::ResyncFromOldest,
+        );
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let run_handle = tokio::spawn(async move { let _ = client.run(cancel_rx).await; });
+
+        // Wait for the second hello (proving the auto-reconnect happened).
+        let mut hello_count = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while tokio::time::Instant::now() < deadline && hello_count < 1 {
+            let timeout = deadline - tokio::time::Instant::now();
+            match tokio::time::timeout(timeout, events_rx.recv()).await {
+                Ok(Some(TransportEvent::Hello { server_seq: 42, .. })) => hello_count += 1,
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        assert_eq!(
+            hello_count, 1,
+            "ResyncFromOldest must reconnect and surface the post-resync hello"
+        );
+
+        // After the reset+reconnect, the persisted cursor must be at 42 (the
+        // relay's oldest retained), NOT 0.
+        let cursor = store
+            .load_cursor(&room_id)
+            .expect("load_cursor")
+            .expect("cursor must exist");
+        assert_eq!(
+            cursor.last_pulled_seq, 42,
+            "ResyncFromOldest must reset cursor to resyncFromSeq, not 0"
+        );
+
+        // The second subscribe MUST carry after=42.
+        let after_seqs = captured_after.lock().await.clone();
+        assert!(after_seqs.len() >= 2, "expected ≥2 subscribe frames, got {after_seqs:?}");
+        assert_eq!(after_seqs[0], 5, "first subscribe used the seeded cursor");
+        assert_eq!(after_seqs[1], 42, "second subscribe must use resyncFromSeq");
+
+        let _ = cancel_tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        server_handle.abort();
+    }
+
+    /// Test 11: 4005 with Manual policy emits Error event and bails out —
+    /// caller decides what to do, no auto-reconnect.
+    #[tokio::test]
+    async fn cursor_too_old_with_manual_policy_does_not_auto_reconnect() {
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
+        let room_id: RoomId = id(TEST_ROOM);
+
+        // Pre-seed cursor at 5.
+        store
+            .save_cursor(
+                &room_id,
+                &SyncCursor {
+                    room_id: room_id.clone(),
+                    device_id: id::<DeviceId>(TEST_DEVICE),
+                    last_pulled_seq: 5,
+                    imported_event_ids: vec![],
+                    pending_outbound_envelope_ids: vec![],
+                },
+            )
+            .expect("save_cursor");
+
+        let connect_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_for_server = Arc::clone(&connect_count);
+        let (relay_url, server_handle) = spawn_ws_server(move |mut ws, _n| {
+            let count_for_server = Arc::clone(&count_for_server);
+            async move {
+                count_for_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = ws.next().await; // subscribe
+                let err = json!({
+                    "type": "error",
+                    "code": "ATTN_CURSOR_TOO_OLD",
+                    "message": "cursor 5 < oldest 42",
+                    "resyncFromSeq": 42u64,
+                });
+                ws.send(Message::Text(err.to_string().into())).await.unwrap();
+                let _ = ws.next().await;
+            }
+        })
+        .await;
+
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let client = build_client_with_policy(
+            relay_url,
+            pipeline,
+            store.clone(),
+            events_tx,
+            CursorRecoveryPolicy::Manual,
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let run_res =
+            tokio::time::timeout(Duration::from_secs(3), client.run(cancel_rx)).await;
+        let err = match run_res {
+            Ok(Err(e)) => e,
+            other => panic!("expected CursorTooOld error, got {other:?}"),
+        };
+        match err {
+            TransportError::CursorTooOld(seq) => assert_eq!(seq, 42),
+            other => panic!("expected CursorTooOld(42), got {other:?}"),
+        }
+
+        // No auto-reconnect — exactly one accept on the server.
+        assert_eq!(
+            connect_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Manual policy must NOT auto-reconnect"
+        );
+
+        // The persisted cursor must be UNCHANGED — Manual hands the
+        // decision to the caller; the WS layer didn't touch the cursor.
+        let cursor = store
+            .load_cursor(&room_id)
+            .expect("load_cursor")
+            .expect("cursor exists");
+        assert_eq!(
+            cursor.last_pulled_seq, 5,
+            "Manual policy must NOT reset the persisted cursor"
+        );
+
+        // The Error event must have been emitted with the relay's code.
+        let mut saw_error = false;
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(Duration::from_millis(50), events_rx.recv()).await
+        {
+            if let TransportEvent::Error { code, .. } = ev {
+                if code == "ATTN_CURSOR_TOO_OLD" {
+                    saw_error = true;
+                }
+            }
+        }
+        assert!(saw_error, "Manual policy must still emit the Error event");
+        server_handle.abort();
+    }
+
+    /// Test 12: 4005 with RequestSnapshot policy logs + returns the typed
+    /// error so the P2P orchestrator can initiate a snapshot dance.
+    #[tokio::test]
+    async fn cursor_too_old_with_request_snapshot_policy_returns_typed_error() {
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
+        let room_id: RoomId = id(TEST_ROOM);
+        store
+            .save_cursor(
+                &room_id,
+                &SyncCursor {
+                    room_id: room_id.clone(),
+                    device_id: id::<DeviceId>(TEST_DEVICE),
+                    last_pulled_seq: 7,
+                    imported_event_ids: vec![],
+                    pending_outbound_envelope_ids: vec![],
+                },
+            )
+            .expect("save_cursor");
+
+        let connect_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_for_server = Arc::clone(&connect_count);
+        let (relay_url, server_handle) = spawn_ws_server(move |mut ws, _n| {
+            let count_for_server = Arc::clone(&count_for_server);
+            async move {
+                count_for_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = ws.next().await;
+                let err = json!({
+                    "type": "error",
+                    "code": "ATTN_CURSOR_TOO_OLD",
+                    "message": "too old",
+                    "resyncFromSeq": 99u64,
+                });
+                ws.send(Message::Text(err.to_string().into())).await.unwrap();
+                let _ = ws.next().await;
+            }
+        })
+        .await;
+
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let client = build_client_with_policy(
+            relay_url,
+            pipeline,
+            store.clone(),
+            events_tx,
+            CursorRecoveryPolicy::RequestSnapshot,
+        );
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let run_res =
+            tokio::time::timeout(Duration::from_secs(3), client.run(cancel_rx)).await;
+        match run_res {
+            Ok(Err(TransportError::CursorTooOld(99))) => {}
+            other => panic!("expected CursorTooOld(99), got {other:?}"),
+        }
+        assert_eq!(
+            connect_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "RequestSnapshot must NOT auto-reconnect"
+        );
+
+        // Cursor unchanged — the orchestrator decides what to do next.
+        let cursor = store.load_cursor(&room_id).expect("load_cursor").unwrap();
+        assert_eq!(cursor.last_pulled_seq, 7);
+        server_handle.abort();
+    }
+
+    /// Test 13: empty cursor on first connect → subscribe carries after=0.
+    /// Confirms the load fallback path when no cursor exists on disk.
+    #[tokio::test]
+    async fn empty_cursor_on_first_connect_uses_after_seq_zero() {
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
+        let room_id: RoomId = id(TEST_ROOM);
+        // Confirm no cursor on disk.
+        assert!(
+            store.load_cursor(&room_id).expect("load_cursor").is_none(),
+            "store should have no cursor pre-test"
+        );
+
+        let captured_after = Arc::new(tokio::sync::Mutex::new(None::<u64>));
+        let captured_for_server = Arc::clone(&captured_after);
+        let (relay_url, server_handle) = spawn_ws_server(move |mut ws, _n| {
+            let captured_for_server = Arc::clone(&captured_for_server);
+            async move {
+                if let Some(Ok(Message::Text(payload))) = ws.next().await {
+                    let v: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+                    if let Some(after) = v.get("after").and_then(Value::as_u64) {
+                        *captured_for_server.lock().await = Some(after);
+                    }
+                }
+                let hello = json!({
+                    "type": "hello",
+                    "serverSeq": 0u64,
+                    "policy": sample_policy(),
+                    "devices": [],
+                    "missedSignalEnvelopeIds": [],
+                });
+                ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                let _ = ws.next().await;
+            }
+        })
+        .await;
+
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let client = build_client(relay_url, pipeline, store, events_tx);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let run_handle = tokio::spawn(async move { let _ = client.run(cancel_rx).await; });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut got: Option<u64> = None;
+        while tokio::time::Instant::now() < deadline {
+            if let Some(after) = *captured_after.lock().await {
+                got = Some(after);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(got, Some(0u64), "first connect must subscribe with after=0");
+
+        let _ = cancel_tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        server_handle.abort();
+    }
+
+    /// Test 14: cursor save preserves existing `imported_event_ids` /
+    /// `pending_outbound_envelope_ids`. The WS layer is responsible for
+    /// `last_pulled_seq` only — overwriting the other lists would silently
+    /// regress state owned by `ReviewManager`.
+    #[tokio::test]
+    async fn cursor_save_preserves_existing_lists() {
+        let (pipeline, store, _vk, _tmp) = fresh_pipeline();
+        let event_key = {
+            let keys = derive_room_keys(&TEST_ROOM_SECRET);
+            *keys.event_key.as_bytes()
+        };
+        let room_id: RoomId = id(TEST_ROOM);
+        let prior_event_id: crate::review::ids::EventId = id("evt-prior-01");
+        // Seed cursor with a non-empty imported_event_ids list.
+        store
+            .save_cursor(
+                &room_id,
+                &SyncCursor {
+                    room_id: room_id.clone(),
+                    device_id: id::<DeviceId>(TEST_DEVICE),
+                    last_pulled_seq: 0,
+                    imported_event_ids: vec![prior_event_id.clone()],
+                    pending_outbound_envelope_ids: vec!["env-pending-01".to_string()],
+                },
+            )
+            .expect("save_cursor");
+
+        let envelopes = mint_event_envelopes(event_key, &room_id, 1);
+        let envelopes_for_server = envelopes.clone();
+        let (relay_url, server_handle) = spawn_ws_server(move |mut ws, _n| {
+            let envelopes_for_server = envelopes_for_server.clone();
+            async move {
+                let _ = ws.next().await;
+                let hello = json!({
+                    "type": "hello",
+                    "serverSeq": 0u64,
+                    "policy": sample_policy(),
+                    "devices": [],
+                    "missedSignalEnvelopeIds": [],
+                });
+                ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                for (i, env) in envelopes_for_server.iter().enumerate() {
+                    let frame = json!({
+                        "type": "envelope",
+                        "envelope": env,
+                        "serverSeq": 11 + i as u64,
+                    });
+                    ws.send(Message::Text(frame.to_string().into())).await.unwrap();
+                }
+                let _ = ws.next().await;
+            }
+        })
+        .await;
+
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let client = build_client(relay_url, pipeline, store.clone(), events_tx);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let run_handle = tokio::spawn(async move { let _ = client.run(cancel_rx).await; });
+
+        // Wait for the envelope.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut got = false;
+        while tokio::time::Instant::now() < deadline && !got {
+            let timeout = deadline - tokio::time::Instant::now();
+            if let Ok(Some(TransportEvent::Envelope { .. })) =
+                tokio::time::timeout(timeout, events_rx.recv()).await
+            {
+                got = true;
+            }
+        }
+        assert!(got, "envelope must be routed");
+
+        let cursor = store.load_cursor(&room_id).expect("load_cursor").unwrap();
+        assert_eq!(cursor.last_pulled_seq, 11, "last_pulled_seq must advance");
+        assert_eq!(
+            cursor.imported_event_ids,
+            vec![prior_event_id],
+            "imported_event_ids must be preserved across cursor saves"
+        );
+        assert_eq!(
+            cursor.pending_outbound_envelope_ids,
+            vec!["env-pending-01".to_string()],
+            "pending_outbound_envelope_ids must be preserved across cursor saves"
+        );
+
+        let _ = cancel_tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
+        server_handle.abort();
+    }
+
+    /// Test 15: default policy is ResyncFromOldest. Locks the cross-module
+    /// contract so changing the default forces a deliberate edit here.
+    #[test]
+    fn cursor_recovery_policy_default_is_resync_from_oldest() {
+        assert_eq!(
+            CursorRecoveryPolicy::default(),
+            CursorRecoveryPolicy::ResyncFromOldest
+        );
     }
 }

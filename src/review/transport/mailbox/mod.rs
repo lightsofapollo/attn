@@ -85,6 +85,68 @@ pub struct MailboxConfig {
     pub pow_difficulty: u32,
 }
 
+/// How the WS client reacts when the relay surfaces an
+/// `ATTN_CURSOR_TOO_OLD` error (close code 4005, see relay-spec.md §Close
+/// Codes and §Stale-cursor recovery).
+///
+/// The relay sends `error { code: "ATTN_CURSOR_TOO_OLD", resyncFromSeq }`
+/// followed by close `4005` when the client's `after` cursor is older than
+/// the relay's `meta:oldest_retained_seq`. The recovery decision is
+/// policy-dependent:
+///
+/// - `ResyncFromOldest` — async path: discard the local cursor, reset it to
+///   `resyncFromSeq` (the relay's oldest retained), and reconnect. This
+///   accepts that any envelopes between the old cursor and `resyncFromSeq`
+///   are permanently lost (deleted by owner ACK or expiry).
+/// - `RequestSnapshot` — live (P2P) path: emit an Error event and let the
+///   higher-level orchestrator initiate a `RequestSnapshot` over WebRTC
+///   (Phase 4). The client does NOT auto-reconnect — the caller must call
+///   `run` again after the snapshot lands.
+/// - `Manual` — the caller decides what to do via the emitted Error event;
+///   the client does not auto-reconnect. Used in tests and for owner-side
+///   UI flows where a human is in the loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorRecoveryPolicy {
+    /// Reset cursor to `resyncFromSeq` and reconnect. Default.
+    ResyncFromOldest,
+    /// Emit an error, do not reconnect — caller initiates a P2P snapshot.
+    RequestSnapshot,
+    /// Emit an error, do not reconnect — caller drives the next step.
+    Manual,
+}
+
+impl Default for CursorRecoveryPolicy {
+    fn default() -> Self {
+        CursorRecoveryPolicy::ResyncFromOldest
+    }
+}
+
+impl MailboxConfig {
+    /// Build a `MailboxConfig` from a room secret. Derives the per-room
+    /// admission key via `derive_room_keys` — the same KDF the relay and the
+    /// Bootstrapper use, so a Share/Join handoff produces matching HMAC keys.
+    ///
+    /// `pow_difficulty` is owned by room policy on the server; the caller
+    /// passes the value returned from `POST /v2/rooms/:roomId` (defaulting to
+    /// the spec-mandated 12 when no relay round-trip has happened yet).
+    pub fn from_room_secret(
+        relay_url: String,
+        room_id: RoomId,
+        device_id: DeviceId,
+        room_secret: &[u8; 32],
+        pow_difficulty: u32,
+    ) -> Self {
+        let keys = crate::review::crypto::kdf::derive_room_keys(room_secret);
+        Self {
+            relay_url,
+            room_id,
+            device_id,
+            admission_key: *keys.admission_key.as_bytes(),
+            pow_difficulty,
+        }
+    }
+}
+
 /// Drains the on-disk outbox and posts batches to the relay.
 ///
 /// Owns:
@@ -1110,5 +1172,27 @@ mod tests {
             ("a".to_string(), "0".to_string()),
         ]);
         assert_eq!(q, "a=0&a=one%20space&b=two");
+    }
+
+    // -- MailboxConfig::from_room_secret derives admission key matching KDF -
+
+    #[test]
+    fn config_from_room_secret_matches_derive_room_keys() {
+        let secret = [0x77u8; 32];
+        let cfg = MailboxConfig::from_room_secret(
+            "https://relay.example".to_string(),
+            id::<RoomId>(TEST_ROOM),
+            id::<DeviceId>(TEST_DEVICE),
+            &secret,
+            12,
+        );
+        let direct = crate::review::crypto::kdf::derive_room_keys(&secret);
+        assert_eq!(
+            cfg.admission_key,
+            *direct.admission_key.as_bytes(),
+            "from_room_secret must derive the same admission key as derive_room_keys"
+        );
+        assert_eq!(cfg.relay_url, "https://relay.example");
+        assert_eq!(cfg.pow_difficulty, 12);
     }
 }

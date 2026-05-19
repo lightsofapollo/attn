@@ -244,14 +244,19 @@ result=$("$ATTN" --query 'h1' | jq -r '.elements[0].text' 2>/dev/null || echo ""
 assert_contains "Navigate to basic.md" "$result" "Project Status"
 screenshot "05-navigate-basic"
 
-# Expand the nested folder if collapsed, then click child.md
+# Expand the `nested` folder if collapsed. All sidebar items currently
+# render via `SidebarMenuButton` (data-sidebar="menu-button"), so we
+# match the directory row by its data-path attribute and trigger it.
 "$ATTN" --eval "
-    const trigger = document.querySelector('[data-sidebar=\"menu-button\"][data-state=\"closed\"]');
-    if (trigger?.textContent?.trim() === 'nested') trigger.click();
+    const dir = Array.from(document.querySelectorAll('[data-sidebar=\"menu-button\"][data-path]'))
+      .find((el) => /\/nested\$/.test(el.getAttribute('data-path') || ''));
+    if (dir && dir.getAttribute('data-state') !== 'open') dir.click();
 " >/dev/null 2>&1
 sleep 0.3
 
-"$ATTN" --click '[data-sidebar="menu-sub-button"]' 2>/dev/null || true
+# Click the nested file by name. The sidebar renders one button per file,
+# and the row text contains the filename — `text=` matches text content.
+"$ATTN" --click 'text=child.md'
 
 # Wait for navigation to complete
 "$ATTN" --wait-for 'h1' --timeout 5000 >/dev/null 2>&1

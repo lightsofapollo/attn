@@ -1570,9 +1570,7 @@
             "errorCode": "ATTN_ROOM_NOT_FOUND"
           }
         }
-      ],
-      "skip": true,
-      "skipReason": "follow-up: scenario fixture needs timing/state adjustment (filed as attn-nnj.5.16)"
+      ]
     },
     {
       "id": "hibernation-010",

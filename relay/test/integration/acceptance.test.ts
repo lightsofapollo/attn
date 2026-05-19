@@ -580,13 +580,29 @@ class FrameQueue {
   }
 }
 
-// Drain hello + the immediate post-hello ping the server emits.
-async function drainHelloAndPing(q: FrameQueue): Promise<HelloFrame> {
+/**
+ * Drain `hello`, then any backfill `envelope` frames, then the immediate
+ * post-replay `ping` the server emits. Returns the hello frame and the list
+ * of envelope frames observed during backfill. Suitable for tests that want
+ * to assert on hello state and then start watching for live broadcasts
+ * post-ping.
+ */
+async function drainHelloThroughPing(
+  q: FrameQueue,
+): Promise<{ hello: HelloFrame; backfill: EnvelopeFrame[] }> {
   const hello = await q.next();
   if (!isHello(hello)) throw new Error("expected hello");
-  const ping = await q.next();
-  if (!isPing(ping)) throw new Error("expected post-hello ping");
-  return hello;
+  const backfill: EnvelopeFrame[] = [];
+  // Loop until we hit the ping that closes out the initial replay.
+  while (true) {
+    const frame = await q.next(3000);
+    if (isPing(frame)) return { hello, backfill };
+    if (isEnvelope(frame)) {
+      backfill.push(frame);
+      continue;
+    }
+    throw new Error(`unexpected frame while draining: ${JSON.stringify(frame)}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -654,12 +670,714 @@ void base64UrlDecode;
 // ---------------------------------------------------------------------------
 
 describe("Relay v2 release acceptance — spec §Test Plan", () => {
-  // Scenarios are appended in subsequent commits (1..14 + sub-cases).
   it("0. Scaffold guard — env binds and SELF.fetch reaches /health", async () => {
     const res = await SELF.fetch(`${URL_BASE}/health`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string; ts: number };
     expect(body.status).toBe("ok");
     expect(typeof body.ts).toBe("number");
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 1 — Room lifecycle (full happy path through every endpoint).
+  // -------------------------------------------------------------------------
+  it("1. Room lifecycle: create → register → upload → WS subscribe → ack → delete", async () => {
+    const roomId = uniqueRoomId("s01-lifecycle");
+    const ownerKp = await generateEd25519Keypair();
+
+    // Create the room.
+    const { admissionKey, createResponse } = await createRoom({
+      roomId,
+      ownerSigningKey: ownerKp.publicKeyBytes,
+    });
+    expect(createResponse.roomId).toBe(roomId);
+    expect(createResponse.serverSeq).toBe(0);
+
+    // Register the owner device (kind=owner requires matching ownerSigningKey).
+    const ownerDev = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-own",
+      participantId: "owner",
+      kind: "owner",
+      keypair: ownerKp,
+    });
+
+    // Upload one envelope.
+    const upload = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "lc-1",
+          authorId: ownerDev.participantId,
+          deviceId: ownerDev.deviceId,
+        }),
+      ],
+    });
+    expect(upload.status).toBe(201);
+    const uploadBody = (await upload.json()) as AcceptResponse;
+    expect(uploadBody.accepted[0]?.serverSeq).toBe(1);
+
+    // Open a WS and subscribe with after=0 → should backfill the envelope.
+    const { ws } = await openSocket({
+      roomId,
+      deviceId: ownerDev.deviceId,
+      admissionKey,
+    });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    const drained = await drainHelloThroughPing(q);
+    expect(drained.backfill.length).toBe(1);
+    expect(drained.backfill[0]?.envelope.envelopeId).toBe("lc-1");
+    expect(drained.backfill[0]?.serverSeq).toBe(1);
+
+    // ACK the envelope.
+    const ack = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: ["lc-1"], deviceId: ownerDev.deviceId },
+    });
+    expect(ack.status).toBe(204);
+    ws.close(1000, "ack done");
+    await q.waitClosed(1000);
+
+    // Delete the room. (Default policy retains envelopes; the DELETE is the
+    // owner's lifecycle wrap-up.)
+    const del = await deleteRoom({
+      roomId,
+      admissionKey,
+      ownerSig: { privateKey: ownerKp.privateKey },
+      powDeviceId: ownerDev.deviceId,
+    });
+    expect(del.status).toBe(204);
+    expect(await countStorageKeys(roomId)).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 2 — WS backfill (a/b/c sub-cases).
+  // -------------------------------------------------------------------------
+  it("2a. WS backfill: after=0 receives all envelopes", async () => {
+    const roomId = uniqueRoomId("s02a-backfill-zero");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-bk",
+      participantId: "kara",
+    });
+
+    for (let i = 0; i < 4; i++) {
+      const r = await postEnvelopes({
+        roomId,
+        admissionKey,
+        envelopes: [
+          buildEnvelope({ envelopeId: `bf-zero-${i}`, authorId: "kara", deviceId: "dev-bk" }),
+        ],
+      });
+      expect(r.status).toBe(201);
+    }
+
+    const { ws } = await openSocket({ roomId, deviceId: "dev-bk", admissionKey });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    const hello = await q.next();
+    expect(isHello(hello)).toBe(true);
+
+    const seqs: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      const frame = await q.next();
+      expect(isEnvelope(frame)).toBe(true);
+      if (isEnvelope(frame)) seqs.push(frame.serverSeq);
+    }
+    expect(seqs).toEqual([1, 2, 3, 4]);
+    ws.close(1000, "done");
+  });
+
+  it("2b. WS backfill: after=lastSeen receives only newer", async () => {
+    const roomId = uniqueRoomId("s02b-backfill-after");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-bk2",
+      participantId: "kara",
+    });
+
+    for (let i = 0; i < 5; i++) {
+      await postEnvelopes({
+        roomId,
+        admissionKey,
+        envelopes: [
+          buildEnvelope({ envelopeId: `bf-after-${i}`, authorId: "kara", deviceId: "dev-bk2" }),
+        ],
+      });
+    }
+
+    // Subscribe with after=3 — should only see envelopes with serverSeq > 3.
+    const { ws } = await openSocket({ roomId, deviceId: "dev-bk2", admissionKey });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 3 }));
+    const hello = await q.next();
+    expect(isHello(hello)).toBe(true);
+
+    const seqs: number[] = [];
+    for (let i = 0; i < 2; i++) {
+      const frame = await q.next();
+      expect(isEnvelope(frame)).toBe(true);
+      if (isEnvelope(frame)) seqs.push(frame.serverSeq);
+    }
+    expect(seqs).toEqual([4, 5]);
+    ws.close(1000, "done");
+  });
+
+  it("2c. WS backfill: after=deletedSeq closes 4005 with resyncFromSeq", async () => {
+    const roomId = uniqueRoomId("s02c-backfill-stale");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-co",
+      participantId: "owen",
+    });
+    await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({ envelopeId: "co-1", authorId: "owen", deviceId: "dev-co" }),
+      ],
+    });
+
+    // Advance oldest_retained_seq so the subscriber's cursor falls behind.
+    await runInDurableObject(getStub(roomId), async (_inst, state) => {
+      await state.storage.put<number>("meta:oldest_retained_seq", 10);
+    });
+
+    const { ws } = await openSocket({ roomId, deviceId: "dev-co", admissionKey });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 5 })); // < oldest_retained_seq
+    const errFrame = await q.next();
+    expect(isErrorFrame(errFrame)).toBe(true);
+    if (!isErrorFrame(errFrame)) throw new Error("unreachable");
+    expect(errFrame.code).toBe("ATTN_CURSOR_TOO_OLD");
+    expect(errFrame.resyncFromSeq).toBe(10);
+
+    await q.waitClosed();
+    expect(q.closed).toBe(true);
+    expect(q.closeCode).toBe(4005);
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 3 — Caps (a..d sub-cases).
+  // -------------------------------------------------------------------------
+  it("3a. Cap: maxEvents fills → 507 ATTN_ROOM_EVENT_CAP", async () => {
+    const roomId = uniqueRoomId("s03a-cap-events");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({
+      roomId,
+      ownerSigningKey: owner.publicKeyBytes,
+      policy: { maxEvents: 3 },
+    });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-ec",
+      participantId: "ivy",
+    });
+
+    // Fill to the cap (3/3).
+    const fill = [0, 1, 2].map((i) =>
+      buildEnvelope({ envelopeId: `cap-evt-${i}`, authorId: "ivy", deviceId: "dev-ec" }),
+    );
+    const r1 = await postEnvelopes({ roomId, admissionKey, envelopes: fill });
+    expect(r1.status).toBe(201);
+
+    // 4th envelope → 507.
+    const r2 = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({ envelopeId: "cap-evt-overflow", authorId: "ivy", deviceId: "dev-ec" }),
+      ],
+    });
+    expect(r2.status).toBe(507);
+    const err = (await r2.json()) as ErrorResponse;
+    expect(err.error.code).toBe("ATTN_ROOM_EVENT_CAP");
+  });
+
+  it("3b. Cap: maxRoomBytes fills → 507 ATTN_ROOM_STORAGE_FULL", async () => {
+    const roomId = uniqueRoomId("s03b-cap-bytes");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-bc",
+      participantId: "jack",
+    });
+
+    // Seed meta:bytes_used to one byte under HARD_MAX_ROOM_BYTES so a 2-byte
+    // envelope overflows the room cap.
+    const HARD_MAX_ROOM_BYTES = Number(env.HARD_MAX_ROOM_BYTES);
+    expect(HARD_MAX_ROOM_BYTES).toBeGreaterThan(0);
+    await runInDurableObject(getStub(roomId), async (_inst, state) => {
+      await state.storage.put<number>("meta:bytes_used", HARD_MAX_ROOM_BYTES - 1);
+    });
+
+    const res = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "cap-bytes-overflow",
+          authorId: "jack",
+          deviceId: "dev-bc",
+          ciphertextBytes: 2,
+        }),
+      ],
+    });
+    expect(res.status).toBe(507);
+    const err = (await res.json()) as ErrorResponse;
+    expect(err.error.code).toBe("ATTN_ROOM_STORAGE_FULL");
+  });
+
+  it("3c. Cap: exceed maxEventBytes → 413 ATTN_ENVELOPE_TOO_LARGE", async () => {
+    const roomId = uniqueRoomId("s03c-cap-eventbytes");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({
+      roomId,
+      ownerSigningKey: owner.publicKeyBytes,
+      policy: { maxEventBytes: 512 },
+    });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-be",
+      participantId: "frank",
+    });
+
+    const res = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "cap-ev-too-big",
+          authorId: "frank",
+          deviceId: "dev-be",
+          kind: "event",
+          ciphertextBytes: 2048,
+        }),
+      ],
+    });
+    expect(res.status).toBe(413);
+    const err = (await res.json()) as ErrorResponse;
+    expect(err.error.code).toBe("ATTN_ENVELOPE_TOO_LARGE");
+  });
+
+  it("3d. Cap: batch of 33 envelopes → 400 ATTN_BATCH_TOO_LARGE", async () => {
+    const roomId = uniqueRoomId("s03d-cap-batch");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-bt",
+      participantId: "dave",
+    });
+    const envelopes = Array.from({ length: 33 }, (_, i) =>
+      buildEnvelope({ envelopeId: `cap-batch-${i}`, authorId: "dave", deviceId: "dev-bt" }),
+    );
+    const res = await postEnvelopes({ roomId, admissionKey, envelopes });
+    expect(res.status).toBe(400);
+    const err = (await res.json()) as ErrorResponse;
+    expect(err.error.code).toBe("ATTN_BATCH_TOO_LARGE");
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 4 — Owner auth + delete policy (a/b/c sub-cases).
+  // -------------------------------------------------------------------------
+  it("4a. Owner auth: non-owner ACK with delete policy → 204 retained", async () => {
+    const roomId = uniqueRoomId("s04a-owner-nonowner");
+    const ownerKp = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({
+      roomId,
+      ownerSigningKey: ownerKp.publicKeyBytes,
+      policy: { deleteEventsAfterOwnerAck: true },
+    });
+    // Register owner + reviewer; the reviewer attempts the ACK.
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-own",
+      participantId: "owner",
+      kind: "owner",
+      keypair: ownerKp,
+    });
+    const reviewer = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-rev",
+      participantId: "reviewer",
+    });
+
+    const envelope = buildEnvelope({
+      envelopeId: "s4a-env-1",
+      authorId: "reviewer",
+      deviceId: "dev-rev",
+    });
+    await postEnvelopes({ roomId, admissionKey, envelopes: [envelope] });
+
+    // Reviewer signs with their own (non-owner) key — handler ignores the
+    // header silently because the acking device isn't kind=owner.
+    const res = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: ["s4a-env-1"], deviceId: reviewer.deviceId },
+      ownerSig: { privateKey: reviewer.privateKey },
+    });
+    expect(res.status).toBe(204);
+    expect(await hasEnvIdx(roomId, "s4a-env-1")).toBe(true);
+    expect(await hasOwnerAckMarker(roomId, "s4a-env-1")).toBe(false);
+  });
+
+  it("4b. Owner auth: owner ACK with delete policy + valid sig → envelope deleted", async () => {
+    const roomId = uniqueRoomId("s04b-owner-delete");
+    const ownerKp = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({
+      roomId,
+      ownerSigningKey: ownerKp.publicKeyBytes,
+      policy: { deleteEventsAfterOwnerAck: true },
+    });
+    const ownerDev = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-own",
+      participantId: "owner",
+      kind: "owner",
+      keypair: ownerKp,
+    });
+
+    const envelope = buildEnvelope({
+      envelopeId: "s4b-env-1",
+      authorId: "owner",
+      deviceId: "dev-own",
+      ciphertextBytes: 48,
+    });
+    await postEnvelopes({ roomId, admissionKey, envelopes: [envelope] });
+    expect(await getEnvelopeCount(roomId)).toBe(1);
+
+    const res = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: ["s4b-env-1"], deviceId: ownerDev.deviceId },
+      ownerSig: { privateKey: ownerKp.privateKey },
+    });
+    expect(res.status).toBe(204);
+    expect(await hasEnvIdx(roomId, "s4b-env-1")).toBe(false);
+    expect(await hasOwnerAckMarker(roomId, "s4b-env-1")).toBe(true);
+    expect(await getEnvelopeCount(roomId)).toBe(0);
+  });
+
+  it("4c. Owner auth: default policy (delete=false) → ACK accepted, envelopes retained", async () => {
+    const roomId = uniqueRoomId("s04c-owner-default");
+    const ownerKp = await generateEd25519Keypair();
+    // Default policy — deleteEventsAfterOwnerAck=false.
+    const { admissionKey, createResponse } = await createRoom({
+      roomId,
+      ownerSigningKey: ownerKp.publicKeyBytes,
+    });
+    expect(createResponse.policy.deleteEventsAfterOwnerAck).toBe(false);
+    const ownerDev = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-own",
+      participantId: "owner",
+      kind: "owner",
+      keypair: ownerKp,
+    });
+
+    await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "s4c-env-1",
+          authorId: "owner",
+          deviceId: "dev-own",
+        }),
+      ],
+    });
+
+    const res = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: ["s4c-env-1"], deviceId: ownerDev.deviceId },
+      ownerSig: { privateKey: ownerKp.privateKey },
+    });
+    expect(res.status).toBe(204);
+    // Header was signed but policy says retain.
+    expect(await hasEnvIdx(roomId, "s4c-env-1")).toBe(true);
+    expect(await getEnvelopeCount(roomId)).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 5 — Multi-device: two owner devices both ACK, deletion only fires
+  // once any owner ACKs (per spec "owner-acked-anywhere ⇒ may drop").
+  // -------------------------------------------------------------------------
+  it("5. Multi-device: two owner devices both ACK; deletion fires after either", async () => {
+    const roomId = uniqueRoomId("s05-multi-device");
+    const ownerKp = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({
+      roomId,
+      ownerSigningKey: ownerKp.publicKeyBytes,
+      policy: { deleteEventsAfterOwnerAck: true },
+    });
+    // Both owner devices share the same Ed25519 keypair (multi-device owner
+    // pattern: identity is keyed by ownerSigningKey).
+    const ownerA = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-own-a",
+      participantId: "owner",
+      kind: "owner",
+      keypair: ownerKp,
+    });
+    const ownerB = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-own-b",
+      participantId: "owner",
+      kind: "owner",
+      keypair: ownerKp,
+    });
+
+    // Two envelopes.
+    await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({ envelopeId: "s5-env-1", authorId: "owner", deviceId: "dev-own-a" }),
+        buildEnvelope({ envelopeId: "s5-env-2", authorId: "owner", deviceId: "dev-own-a" }),
+      ],
+    });
+    expect(await getEnvelopeCount(roomId)).toBe(2);
+
+    // device A acks env-1 (with owner-sig + delete policy) → env-1 dropped.
+    const r1 = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: ["s5-env-1"], deviceId: ownerA.deviceId },
+      ownerSig: { privateKey: ownerKp.privateKey },
+    });
+    expect(r1.status).toBe(204);
+    expect(await hasEnvIdx(roomId, "s5-env-1")).toBe(false);
+    expect(await hasOwnerAckMarker(roomId, "s5-env-1")).toBe(true);
+    expect(await getEnvelopeCount(roomId)).toBe(1);
+
+    // device B acks env-2 → also deleted (independent owner device).
+    const r2 = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: ["s5-env-2"], deviceId: ownerB.deviceId },
+      ownerSig: { privateKey: ownerKp.privateKey },
+    });
+    expect(r2.status).toBe(204);
+    expect(await hasEnvIdx(roomId, "s5-env-2")).toBe(false);
+    expect(await getEnvelopeCount(roomId)).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 6 — Signaling (a: live round-trip; b: offline target mailbox).
+  // -------------------------------------------------------------------------
+  it("6a. Signaling: signal envelope routes to target.deviceId over WS", async () => {
+    const roomId = uniqueRoomId("s06a-signal-live");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-from",
+      participantId: "fa",
+    });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-to",
+      participantId: "tg",
+    });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-other",
+      participantId: "oth",
+    });
+
+    const a = await openSocket({ roomId, deviceId: "dev-from", admissionKey });
+    const b = await openSocket({ roomId, deviceId: "dev-to", admissionKey });
+    const c = await openSocket({ roomId, deviceId: "dev-other", admissionKey });
+    const qa = new FrameQueue(a.ws);
+    const qb = new FrameQueue(b.ws);
+    const qc = new FrameQueue(c.ws);
+    a.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    b.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    c.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    await drainHelloThroughPing(qa);
+    await drainHelloThroughPing(qb);
+    await drainHelloThroughPing(qc);
+
+    const r = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "s6a-sig-1",
+          authorId: "fa",
+          deviceId: "dev-from",
+          kind: "signal",
+          target: { deviceId: "dev-to" },
+        }),
+      ],
+    });
+    expect(r.status).toBe(201);
+
+    // Target receives it.
+    const onTo = await qb.next(2000);
+    expect(isEnvelope(onTo)).toBe(true);
+    if (isEnvelope(onTo)) {
+      expect(onTo.envelope.envelopeId).toBe("s6a-sig-1");
+      expect(onTo.envelope.target?.deviceId).toBe("dev-to");
+    }
+    // Non-target peers must not see it.
+    const onFrom = await qa.next(300);
+    const onOther = await qc.next(300);
+    expect(onFrom).toBeUndefined();
+    expect(onOther).toBeUndefined();
+
+    a.ws.close(1000);
+    b.ws.close(1000);
+    c.ws.close(1000);
+  });
+
+  it("6b. Signaling: offline target gets stored signal envelope on reconnect", async () => {
+    const roomId = uniqueRoomId("s06b-signal-mailbox");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-from",
+      participantId: "fa",
+    });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-target",
+      participantId: "tg",
+    });
+
+    // Target is offline at time of signal upload.
+    const r = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "s6b-sig-stored",
+          authorId: "fa",
+          deviceId: "dev-from",
+          kind: "signal",
+          target: { deviceId: "dev-target" },
+        }),
+      ],
+    });
+    expect(r.status).toBe(201);
+
+    // Target connects later — hello.missedSignalEnvelopeIds includes the stored
+    // signal envelope id and the envelope is delivered on backfill.
+    const { ws } = await openSocket({ roomId, deviceId: "dev-target", admissionKey });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    const drained = await drainHelloThroughPing(q);
+    expect(drained.hello.missedSignalEnvelopeIds).toContain("s6b-sig-stored");
+    // The stored signal envelope must also be delivered as a backfill envelope
+    // frame so the target can decrypt + handle it.
+    const ids = drained.backfill.map((f) => f.envelope.envelopeId);
+    expect(ids).toContain("s6b-sig-stored");
+    ws.close(1000);
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 7 — R2 spillover (presign + PUT + GET round-trip).
+  // Spec calls out 3 MiB; we use 1 MiB + 1 KiB to keep the test fast while
+  // still being above the 1 MiB R2 threshold gate.
+  // -------------------------------------------------------------------------
+  it("7. R2 spillover: presign → PUT → GET round-trips an encrypted snapshot", async () => {
+    const roomId = uniqueRoomId("s07-r2-roundtrip");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-rt",
+      participantId: "bob",
+    });
+
+    const blobBytes = 1 * 1024 * 1024 + 1024; // 1 MiB + 1 KiB — above threshold
+    const ciphertext = new Uint8Array(blobBytes);
+    for (let i = 0; i < blobBytes; i++) ciphertext[i] = (i * 37) & 0xff;
+
+    // Presign request.
+    const presignUrl = `${URL_BASE}/v2/rooms/${roomId}/blobs`;
+    const presignBody = JSON.stringify({
+      envelopeId: "s7-blob",
+      authorId: "bob",
+      deviceId: "dev-rt",
+      ciphertextBytes: blobBytes,
+    });
+    const adm = await admissionHeaderFor({
+      method: "POST",
+      url: presignUrl,
+      body: presignBody,
+      admissionKey,
+    });
+    const pow = await mintPow({
+      roomId,
+      deviceId: "dev-rt",
+      method: "POST",
+      path: `/v2/rooms/${roomId}/blobs`,
+    });
+    const presignRes = await SELF.fetch(presignUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Attn-Admission": adm, "Attn-PoW": pow },
+      body: presignBody,
+    });
+    expect(presignRes.status).toBe(200);
+    const presigned = (await presignRes.json()) as {
+      uploadUrl: string;
+      method: "PUT";
+      headers: Record<string, string>;
+      expiresAt: number;
+      blobKey: string;
+    };
+    expect(presigned.blobKey).toBe(`rooms/${roomId}/blobs/s7-blob`);
+
+    // PUT to the presigned URL.
+    const putRes = await SELF.fetch(`${URL_BASE}${presigned.uploadUrl}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: ciphertext,
+    });
+    expect(putRes.status).toBe(204);
+
+    // GET via download URL.
+    const download = await presignBlobDownload(env, roomId, "s7-blob");
+    const getRes = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, { method: "GET" });
+    expect(getRes.status).toBe(200);
+    const fetched = new Uint8Array(await getRes.arrayBuffer());
+    expect(fetched.byteLength).toBe(blobBytes);
+    expect(fetched[0]).toBe(ciphertext[0]);
+    expect(fetched[blobBytes - 1]).toBe(ciphertext[blobBytes - 1]);
   });
 });

@@ -25,7 +25,7 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-import { base64UrlEncode } from "../../src/admission";
+import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import type { Env } from "../../src/env";
 import type { RoomPolicy } from "../../src/schema";
 
@@ -65,22 +65,58 @@ function uniqueRoomId(label: string): string {
   return `${label}-${Date.now().toString(36)}-${roomCounter}`;
 }
 
+async function generateEd25519Keypair(): Promise<{
+  publicKey: CryptoKey;
+  privateKey: CryptoKey;
+  publicKeyBytes: Uint8Array;
+}> {
+  const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+    "sign",
+    "verify",
+  ])) as CryptoKeyPair;
+  const raw = await crypto.subtle.exportKey("raw", kp.publicKey);
+  if (!(raw instanceof ArrayBuffer)) {
+    throw new Error("exportKey('raw') unexpectedly returned a JWK");
+  }
+  return {
+    publicKey: kp.publicKey,
+    privateKey: kp.privateKey,
+    publicKeyBytes: new Uint8Array(raw),
+  };
+}
+
 async function createRoom(opts: {
   roomId: string;
   allowBrowser: boolean;
-  ownerSigningKey?: Uint8Array;
 }): Promise<Uint8Array> {
-  const ownerKey = opts.ownerSigningKey ?? makeKeyBytes(0x10);
+  // attn-nnj.5.17 (security-review §H1): first-create requires
+  // Attn-Owner-Signature self-rooted to the body's ownerSigningKey. Real
+  // Ed25519 keypairs are cheap — no reason to keep `makeKeyBytes` placeholder
+  // owner keys around for these tests.
+  const ownerKp = await generateEd25519Keypair();
   const admissionKey = makeKeyBytes((roomCounter * 13 + 0x33) & 0xff);
   const body = JSON.stringify({
     v: 2,
     policy: defaultPolicy({ allowBrowser: opts.allowBrowser }),
-    ownerSigningKey: base64UrlEncode(ownerKey),
+    ownerSigningKey: base64UrlEncode(ownerKp.publicKeyBytes),
     admissionKey: base64UrlEncode(admissionKey),
   });
-  const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  const signing = new Request(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, ownerKp.privateKey, canonical),
+  );
+  const res = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": base64UrlEncode(sig),
+    },
     body,
   });
   if (res.status !== 201) {

@@ -90,24 +90,56 @@ function uniqueRoomId(label: string): string {
 async function createRoom(opts: {
   roomId: string;
   policy?: Partial<RoomPolicy>;
-  ownerSigningKey: Uint8Array;
+  ownerKp: SubtleKeypair;
 }): Promise<Uint8Array> {
   const admissionKey = makeAdmissionKey((roomCounter * 7) & 0xff);
   const body = JSON.stringify({
     v: 2,
     policy: defaultPolicy(opts.policy ?? {}),
-    ownerSigningKey: base64UrlEncode(opts.ownerSigningKey),
+    ownerSigningKey: base64UrlEncode(opts.ownerKp.publicKeyBytes),
     admissionKey: base64UrlEncode(admissionKey),
   });
-  const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  // attn-nnj.5.17 (security-review §H1): first-create requires
+  // Attn-Owner-Signature self-rooted to the body's ownerSigningKey.
+  const ownerSig = await buildOwnerSig({
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    url,
+    body,
+    privateKey: opts.ownerKp.privateKey,
+  });
+  const res = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": ownerSig,
+    },
     body,
   });
   if (res.status !== 201) {
     throw new Error(`room create failed: ${res.status} ${await res.text()}`);
   }
   return admissionKey;
+}
+
+async function buildOwnerSig(opts: {
+  method: string;
+  url: string;
+  body?: string;
+  privateKey: CryptoKey;
+}): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  const signing = new Request(opts.url, {
+    method: opts.method,
+    headers,
+    body: opts.body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(opts.url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, opts.privateKey, canonical),
+  );
+  return base64UrlEncode(sig);
 }
 
 // --- device builder (copied minimal subset from devices.test.ts) --------
@@ -324,7 +356,7 @@ describe("POST /v2/rooms/:roomId/envelopes — happy path", () => {
   it("accepts a single envelope and returns 201 with serverSeq", async () => {
     const roomId = uniqueRoomId("env-single");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -354,7 +386,7 @@ describe("POST /v2/rooms/:roomId/envelopes — happy path", () => {
   it("accepts a batch of 5 envelopes and returns 5 monotonically-increasing serverSeqs", async () => {
     const roomId = uniqueRoomId("env-batch5");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -390,7 +422,7 @@ describe("POST /v2/rooms/:roomId/envelopes — idempotency", () => {
   it("re-uploading an envelope returns the prior serverSeq without bumping the counter", async () => {
     const roomId = uniqueRoomId("env-idem");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -444,7 +476,7 @@ describe("POST /v2/rooms/:roomId/envelopes — batch cap", () => {
   it("rejects a batch of 33 envelopes with 400 ATTN_BATCH_TOO_LARGE", async () => {
     const roomId = uniqueRoomId("env-cap");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -473,7 +505,7 @@ describe("POST /v2/rooms/:roomId/envelopes — per-envelope validation", () => {
   it("rejects when ciphertextBytes does not equal decoded length (400 ATTN_CIPHERTEXT_LENGTH_MISMATCH)", async () => {
     const roomId = uniqueRoomId("env-mismatch");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -501,7 +533,7 @@ describe("POST /v2/rooms/:roomId/envelopes — per-envelope validation", () => {
     // maxEventBytes=1024 makes the threshold easy to cross without huge payloads.
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { maxEventBytes: 1024 },
     });
     await registerDevice({
@@ -529,7 +561,7 @@ describe("POST /v2/rooms/:roomId/envelopes — per-envelope validation", () => {
     const owner = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { maxSnapshotBytes: 2048, maxEventBytes: 2048 },
     });
     await registerDevice({
@@ -555,7 +587,7 @@ describe("POST /v2/rooms/:roomId/envelopes — per-envelope validation", () => {
   it("rejects an envelope whose (authorId, deviceId) is not registered (400 ATTN_DEVICE_UNREGISTERED)", async () => {
     const roomId = uniqueRoomId("env-unreg");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -583,7 +615,7 @@ describe("POST /v2/rooms/:roomId/envelopes — room caps", () => {
     // Tiny event cap so a single batch trips it.
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { maxEvents: 2 },
     });
     await registerDevice({
@@ -621,7 +653,7 @@ describe("POST /v2/rooms/:roomId/envelopes — room caps", () => {
     // whose ciphertextBytes pushes us over.
     const roomId = uniqueRoomId("env-bcap");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -657,7 +689,7 @@ describe("POST /v2/rooms/:roomId/envelopes — protection layers", () => {
   it("rejects POST without Attn-Admission header (401)", async () => {
     const roomId = uniqueRoomId("env-no-adm");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -684,7 +716,7 @@ describe("POST /v2/rooms/:roomId/envelopes — protection layers", () => {
   it("rejects POST without Attn-PoW header (400 ATTN_POW_INVALID)", async () => {
     const roomId = uniqueRoomId("env-no-pow");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -713,7 +745,7 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
   it("stores a kind=signal envelope under env_by_target:<targetDeviceId>:...", async () => {
     const roomId = uniqueRoomId("env-signal");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -757,7 +789,7 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
     // Big maxEvents so we don't trip the event cap first (need at least 65).
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { maxEvents: 200 },
     });
     await registerDevice({

@@ -1010,11 +1010,27 @@ impl Bootstrapper {
             &body_bytes,
         );
 
+        // Attn-Owner-Signature (security-review.md §H1): prove possession of
+        // the owner private key on first-create. The relay verifies this
+        // against `ownerSigningKey` in the body before persisting room meta.
+        // On rejoin, the relay short-circuits on admission HMAC alone, but we
+        // attach the header unconditionally — the Share/Join client can't
+        // know whether this call is first-create or rejoin until it sees the
+        // response status (201 vs 200), and the relay accepts a valid sig
+        // either way.
+        let owner_sig_header = owner_sig_header_value(
+            &identity.signing_key()?,
+            "POST",
+            &path,
+            &body_bytes,
+        );
+
         let resp = self
             .http
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
             .header("Attn-Admission", admission_header)
+            .header("Attn-Owner-Signature", owner_sig_header)
             .body(body_bytes.clone())
             .send()
             .await
@@ -1204,6 +1220,40 @@ fn admission_header_value(
     url_path: &str,
     body: &[u8],
 ) -> String {
+    let canonical = build_canonical_request(method, url_path, body);
+    let mut mac = <Hmac<Sha256>>::new_from_slice(admission_key)
+        .expect("HMAC accepts any key length");
+    mac.update(&canonical);
+    let tag = mac.finalize().into_bytes();
+    format!("v2.{}", URL_SAFE_NO_PAD.encode(tag))
+}
+
+/// Build the `Attn-Owner-Signature` header per relay-spec.md §Owner Distinction
+/// and §POST /v2/rooms/:roomId. Ed25519 signature over the same canonicalRequest
+/// bytes used for `Attn-Admission`. Wire format is just `base64url(sig)` —
+/// no version prefix, matching `relay/src/owner-sig.ts`.
+fn owner_sig_header_value(
+    signing_key: &DeviceSigningKey,
+    method: &str,
+    url_path: &str,
+    body: &[u8],
+) -> String {
+    let canonical = build_canonical_request(method, url_path, body);
+    use ed25519_dalek::Signer as _;
+    let inner: ed25519_dalek::SigningKey =
+        ed25519_dalek::SigningKey::from_bytes(&signing_key.to_bytes());
+    let sig = inner.sign(&canonical);
+    URL_SAFE_NO_PAD.encode(sig.to_bytes())
+}
+
+/// canonicalRequest bytes per relay-spec.md §Identity / §Admission Key:
+///
+///   METHOD || "\n" || URL_PATH || "\n" || CANONICAL_QUERY || "\n" || SHA256(body)
+///
+/// Share/Join calls never use a query string, so CANONICAL_QUERY is always the
+/// empty string. Shared between admission HMAC and owner Ed25519 signature so
+/// the two layered headers commit to the same byte sequence.
+fn build_canonical_request(method: &str, url_path: &str, body: &[u8]) -> Vec<u8> {
     let body_hash = Sha256::digest(body);
     let mut canonical = Vec::with_capacity(
         method.len() + 1 + url_path.len() + 1 /* empty query */ + 1 + body_hash.len(),
@@ -1212,14 +1262,9 @@ fn admission_header_value(
     canonical.push(b'\n');
     canonical.extend_from_slice(url_path.as_bytes());
     canonical.push(b'\n');
-    // Empty canonical query (Share/Join calls never use one).
     canonical.push(b'\n');
     canonical.extend_from_slice(&body_hash);
-    let mut mac = <Hmac<Sha256>>::new_from_slice(admission_key)
-        .expect("HMAC accepts any key length");
-    mac.update(&canonical);
-    let tag = mac.finalize().into_bytes();
-    format!("v2.{}", URL_SAFE_NO_PAD.encode(tag))
+    canonical
 }
 
 /// Translate a non-2xx HTTP body into a typed relay error. Falls back to an
@@ -1593,6 +1638,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path_regex_for_room_create())
             .and(header_exists("Attn-Admission"))
+            .and(header_exists("Attn-Owner-Signature"))
             .respond_with(|req: &Request| {
                 let body: serde_json::Value =
                     serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
@@ -2074,6 +2120,127 @@ mod tests {
         // (`kind` field), not the capability set.
         let reviewer_caps = agent_capabilities(ParticipantKind::Reviewer);
         assert_eq!(caps, reviewer_caps);
+    }
+
+    // --- attn-nnj.5.17 (H1) — Attn-Owner-Signature on first room create ---
+
+    /// The Share flow must attach an `Attn-Owner-Signature` whose Ed25519
+    /// signature verifies against the body's `ownerSigningKey`. This is the
+    /// H1 mitigation: a leaked URL is not enough to register as room owner —
+    /// the requester must also hold the owner private key.
+    #[tokio::test]
+    async fn share_attaches_owner_sig_that_verifies_against_canonical_request() {
+        use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+        use std::sync::Mutex;
+        use wiremock::matchers::path_regex;
+
+        let server = MockServer::start().await;
+        let id_dir = TempDir::new().expect("id tempdir");
+        let (_store_tmp, _store, boot) =
+            make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
+
+        // Capture the request so we can re-derive canonicalRequest and
+        // verify the sig the same way the relay does.
+        let captured: Arc<Mutex<Option<(String, String, Vec<u8>, String)>>> =
+            Arc::new(Mutex::new(None));
+        let capture = captured.clone();
+
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/v2/rooms/[A-Za-z0-9_-]{20,32}$"))
+            .and(header_exists("Attn-Owner-Signature"))
+            .respond_with(move |req: &Request| {
+                let owner_sig = req
+                    .headers
+                    .get("Attn-Owner-Signature")
+                    .map(|v| v.to_str().unwrap_or("").to_string())
+                    .unwrap_or_default();
+                *capture.lock().unwrap() = Some((
+                    req.method.to_string(),
+                    req.url.path().to_string(),
+                    req.body.clone(),
+                    owner_sig,
+                ));
+                let body: serde_json::Value =
+                    serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+                let owner_key = body
+                    .get("ownerSigningKey")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let digest = Sha256::digest(owner_key.as_bytes());
+                let owner_key_id = URL_SAFE_NO_PAD.encode(digest);
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "roomId": req.url.path().rsplit('/').next().unwrap_or(""),
+                    "createdAt": 1_700_000_000_000u64,
+                    "expiresAt": 1_700_086_400_000u64,
+                    "policy": {},
+                    "ownerSigningKeyId": owner_key_id,
+                    "serverSeq": 0,
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex_for_devices())
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        boot.share(PathBuf::from("/tmp/owner-sig-test.md"), RoomMode::Async, None)
+            .await
+            .expect("share");
+
+        // Decode the captured request + sig.
+        let (method_s, url_path, body_bytes, owner_sig_b64) = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("server must have observed the POST /v2/rooms/:roomId");
+
+        // Re-build canonicalRequest exactly like the relay (and our shared
+        // build_canonical_request helper): METHOD || \n || PATH || \n ||
+        // EMPTY_QUERY || \n || SHA256(body).
+        let canonical = build_canonical_request(&method_s, &url_path, &body_bytes);
+
+        // Extract ownerSigningKey from the request body, decode, import as
+        // an Ed25519 verifying key, and verify the sig over canonical.
+        let parsed: serde_json::Value = serde_json::from_slice(&body_bytes).expect("body json");
+        let owner_pub_b64 = parsed
+            .get("ownerSigningKey")
+            .and_then(|v| v.as_str())
+            .expect("body has ownerSigningKey");
+        let owner_pub_bytes = URL_SAFE_NO_PAD
+            .decode(owner_pub_b64.as_bytes())
+            .expect("ownerSigningKey decodes");
+        let owner_pub_arr: [u8; 32] =
+            owner_pub_bytes.as_slice().try_into().expect("32-byte pubkey");
+        let verifying = VerifyingKey::from_bytes(&owner_pub_arr).expect("valid pubkey");
+
+        let sig_bytes = URL_SAFE_NO_PAD
+            .decode(owner_sig_b64.as_bytes())
+            .expect("Attn-Owner-Signature decodes");
+        let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().expect("64-byte sig");
+        let sig = Signature::from_bytes(&sig_arr);
+
+        verifying
+            .verify(&canonical, &sig)
+            .expect("Attn-Owner-Signature must verify against ownerSigningKey + canonicalRequest");
+    }
+
+    /// `build_canonical_request` must produce exactly:
+    ///   METHOD || "\n" || PATH || "\n" || "" || "\n" || SHA256(body)
+    /// Drift here causes silent admission/owner-sig mismatches with the relay.
+    #[test]
+    fn build_canonical_request_matches_relay_format() {
+        let bytes = build_canonical_request("POST", "/v2/rooms/abc", b"hello");
+        // The first four parts are deterministic newline-separated text.
+        let prefix_len = "POST".len() + 1 + "/v2/rooms/abc".len() + 1 + 0 + 1;
+        let expected_prefix = b"POST\n/v2/rooms/abc\n\n";
+        assert_eq!(&bytes[..prefix_len], expected_prefix);
+        // Last 32 bytes must be SHA-256(body).
+        let body_hash = Sha256::digest(b"hello");
+        assert_eq!(&bytes[prefix_len..], body_hash.as_slice());
+        assert_eq!(bytes.len(), prefix_len + 32);
     }
 
     // --- helpers ----------------------------------------------------------

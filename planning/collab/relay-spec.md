@@ -68,7 +68,7 @@ Note: `admissionKey` is per-room, derived from `roomSecret`, and the server only
 
 ### Owner Distinction
 
-`POST /v2/rooms/:roomId` (room creation) includes the owner's public signing key in the body. The DO stores this as `ownerSigningKeyId`. All privileged ops (`POST /acks` with delete, `DELETE /v2/rooms/:roomId`) require an additional `Attn-Owner-Signature` header carrying an Ed25519 signature over the same `canonicalRequest`, verifiable against `ownerSigningKeyId`.
+`POST /v2/rooms/:roomId` (room creation) includes the owner's public signing key in the body. The DO stores this as `ownerSigningKeyId`. The first-create POST itself also requires an `Attn-Owner-Signature` Ed25519 sig over canonicalRequest, verified against the pubkey in the body (self-rooting) — this is the security-review §H1 mitigation that prevents a leaked-URL race attacker from registering as owner. All subsequent privileged ops (`POST /acks` with delete, `DELETE /v2/rooms/:roomId`) require the same header verified against the stored `ownerSigningKeyId`.
 
 This is the **only** server-side distinction between owner and reviewer.
 
@@ -151,7 +151,9 @@ Behavior:
 
 - If the room does not exist, create the DO, persist the policy and `ownerSigningKey`. Policy values are clamped to the server's hard maxima. Return `201`.
 - If the room exists, ignore the body and return the stored policy as `200`. **Do not** allow policy mutation after creation; that would let a stolen URL extend a room's TTL.
-- Requires admission HMAC. (No PoW — room creation is the bootstrap step; PoW is required from `POST /devices` onward.)
+- **First-create only**: requires `Attn-Owner-Signature` — an Ed25519 signature over the same `canonicalRequest` shape used for admission, verified against the body's `ownerSigningKey`. This is the H1 mitigation from `planning/collab/security-review.md` §H1: without it, anyone with the share URL could win a race to register their own pubkey as the room owner. The signature is self-verifying (pubkey in body, signature over canonical bytes), so no server-side state is required to check it. Missing header → `403 ATTN_OWNER_SIG_REQUIRED`; signature/keypair mismatch → `403 ATTN_OWNER_SIG_INVALID`.
+- **Rejoin**: requires admission HMAC. No new `Attn-Owner-Signature` is required — the room's owner identity was bound at first-create and is immutable. (Subsequent owner-privileged ops like `DELETE /v2/rooms/:roomId` independently require `Attn-Owner-Signature` verified against the stored `ownerSigningKey`.)
+- (No PoW — room creation is the bootstrap step; PoW is required from `POST /devices` onward.)
 
 Response:
 

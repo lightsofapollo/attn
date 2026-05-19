@@ -98,18 +98,33 @@ function uniqueRoomId(label: string): string {
 async function createRoom(opts: {
   roomId: string;
   policy?: Partial<RoomPolicy>;
-  ownerSigningKey: Uint8Array;
+  ownerKp: SubtleKeypair;
 }): Promise<Uint8Array> {
   const admissionKey = makeAdmissionKey((roomCounter * 11) & 0xff);
   const body = JSON.stringify({
     v: 2,
     policy: defaultPolicy(opts.policy ?? {}),
-    ownerSigningKey: base64UrlEncode(opts.ownerSigningKey),
+    ownerSigningKey: base64UrlEncode(opts.ownerKp.publicKeyBytes),
     admissionKey: base64UrlEncode(admissionKey),
   });
-  const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  // attn-nnj.5.17 (security-review §H1): first-create requires
+  // Attn-Owner-Signature self-rooted to the body's ownerSigningKey.
+  const signing = new Request(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, opts.ownerKp.privateKey, canonical),
+  );
+  const res = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": base64UrlEncode(sig),
+    },
     body,
   });
   if (res.status !== 201) {
@@ -465,7 +480,7 @@ describe("WS /socket — admission", () => {
   it("returns 401 ATTN_ADMISSION_INVALID when Sec-WebSocket-Protocol is missing", async () => {
     const roomId = uniqueRoomId("ws-no-proto");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-a", participantId: "alice" });
 
     const { ws, response } = await openSocket({
@@ -483,7 +498,7 @@ describe("WS /socket — admission", () => {
   it("accepts the upgrade and closes with 4000 when the HMAC is wrong", async () => {
     const roomId = uniqueRoomId("ws-bad-hmac");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-b", participantId: "bob" });
 
     const { ws, response } = await openSocket({
@@ -502,7 +517,7 @@ describe("WS /socket — admission", () => {
   it("opens with valid admission and replies with a hello frame after subscribe", async () => {
     const roomId = uniqueRoomId("ws-hello");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-h", participantId: "harriet" });
 
     const { ws, response } = await openSocket({ roomId, deviceId: "dev-h", admissionKey });
@@ -524,7 +539,7 @@ describe("WS /socket — backfill", () => {
   it("replays all stored envelopes when subscribe.after=0", async () => {
     const roomId = uniqueRoomId("ws-backfill-zero");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-bk", participantId: "kara" });
 
     // Pre-load 3 envelopes.
@@ -560,7 +575,7 @@ describe("WS /socket — backfill", () => {
   it("replays only envelopes with serverSeq > after", async () => {
     const roomId = uniqueRoomId("ws-backfill-after");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-bk2", participantId: "kara" });
     for (let i = 0; i < 4; i++) {
       await postEnvelopes({
@@ -592,7 +607,7 @@ describe("WS /socket — backfill", () => {
   it("emits ATTN_CURSOR_TOO_OLD + close 4005 when after < oldest_retained_seq", async () => {
     const roomId = uniqueRoomId("ws-cursor-too-old");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-co", participantId: "owen" });
     await postEnvelopes({
       roomId,
@@ -627,7 +642,7 @@ describe("WS /socket — live broadcast", () => {
   it("delivers a freshly-ingested envelope to a subscribed peer", async () => {
     const roomId = uniqueRoomId("ws-live");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-l1", participantId: "lara" });
 
     const { ws } = await openSocket({ roomId, deviceId: "dev-l1", admissionKey });
@@ -659,7 +674,7 @@ describe("WS /socket — live broadcast", () => {
   it("delivers signal envelopes only to target.deviceId; other peers see nothing", async () => {
     const roomId = uniqueRoomId("ws-signal");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-from", participantId: "fa" });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-to", participantId: "tg" });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-other", participantId: "oth" });
@@ -719,7 +734,7 @@ describe("WS /socket — presence", () => {
   it("broadcasts presence:join to existing peers when a new socket opens", async () => {
     const roomId = uniqueRoomId("ws-presence-join");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-p1", participantId: "p1" });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-p2", participantId: "p2" });
 
@@ -753,7 +768,7 @@ describe("WS /socket — presence", () => {
   it("broadcasts presence:leave to remaining peers when a socket closes", async () => {
     const roomId = uniqueRoomId("ws-presence-leave");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-l1", participantId: "l1" });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-l2", participantId: "l2" });
 
@@ -784,7 +799,7 @@ describe("WS /socket — ping/pong", () => {
   it("server sends a ping after hello; client pong is accepted without error", async () => {
     const roomId = uniqueRoomId("ws-pp");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-pp", participantId: "pp" });
 
     const { ws } = await openSocket({ roomId, deviceId: "dev-pp", admissionKey });
@@ -812,7 +827,7 @@ describe("WS /socket — peer cap", () => {
     // Set maxPeers=2 so the third connect trips the cap immediately.
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { maxPeers: 2 },
     });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-c1", participantId: "c1" });
@@ -845,7 +860,7 @@ describe("WS /socket — hibernation roundtrip", () => {
   it("a reconnecting peer with after=lastSeq picks up new envelopes posted in between", async () => {
     const roomId = uniqueRoomId("ws-hibernate");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-hb", participantId: "hb" });
 
     // First connection: subscribe + see hello, then disconnect.

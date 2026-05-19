@@ -182,18 +182,34 @@ interface RoomCreateResponse {
 async function createRoom(opts: {
   roomId: string;
   policy?: Partial<RoomPolicy>;
-  ownerSigningKey: Uint8Array;
+  ownerKp: SubtleKeypair;
 }): Promise<CreateRoomResult> {
   const admissionKey = makeAdmissionKey((roomCounter * 19) & 0xff);
   const body = JSON.stringify({
     v: 2,
     policy: defaultPolicy(opts.policy ?? {}),
-    ownerSigningKey: base64UrlEncode(opts.ownerSigningKey),
+    ownerSigningKey: base64UrlEncode(opts.ownerKp.publicKeyBytes),
     admissionKey: base64UrlEncode(admissionKey),
   });
-  const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  // attn-nnj.5.17 (security-review §H1): first-create requires
+  // Attn-Owner-Signature self-rooted to the body's ownerSigningKey.
+  const signing = new Request(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "CF-Connecting-IP": testIp() },
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, opts.ownerKp.privateKey, canonical),
+  );
+  const res = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "CF-Connecting-IP": testIp(),
+      "Attn-Owner-Signature": base64UrlEncode(sig),
+    },
     body,
   });
   if (res.status !== 201) {
@@ -715,7 +731,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     // Create the room.
     const { admissionKey, createResponse } = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
     expect(createResponse.roomId).toBe(roomId);
     expect(createResponse.serverSeq).toBe(0);
@@ -787,7 +803,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("2a. WS backfill: after=0 receives all envelopes", async () => {
     const roomId = uniqueRoomId("s02a-backfill-zero");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -825,7 +841,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("2b. WS backfill: after=lastSeen receives only newer", async () => {
     const roomId = uniqueRoomId("s02b-backfill-after");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -863,7 +879,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("2c. WS backfill: after=deletedSeq closes 4005 with resyncFromSeq", async () => {
     const roomId = uniqueRoomId("s02c-backfill-stale");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -905,7 +921,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const owner = await generateEd25519Keypair();
     const { admissionKey } = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { maxEvents: 3 },
     });
     await registerDevice({
@@ -938,7 +954,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("3b. Cap: maxRoomBytes fills → 507 ATTN_ROOM_STORAGE_FULL", async () => {
     const roomId = uniqueRoomId("s03b-cap-bytes");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -976,7 +992,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const owner = await generateEd25519Keypair();
     const { admissionKey } = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { maxEventBytes: 512 },
     });
     await registerDevice({
@@ -1007,7 +1023,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("3d. Cap: batch of 33 envelopes → 400 ATTN_BATCH_TOO_LARGE", async () => {
     const roomId = uniqueRoomId("s03d-cap-batch");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -1031,7 +1047,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const ownerKp = await generateEd25519Keypair();
     const { admissionKey } = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
       policy: { deleteEventsAfterOwnerAck: true },
     });
     // Register owner + reviewer; the reviewer attempts the ACK.
@@ -1075,7 +1091,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const ownerKp = await generateEd25519Keypair();
     const { admissionKey } = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
       policy: { deleteEventsAfterOwnerAck: true },
     });
     const ownerDev = await registerDevice({
@@ -1114,7 +1130,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     // Default policy — deleteEventsAfterOwnerAck=false.
     const { admissionKey, createResponse } = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
     expect(createResponse.policy.deleteEventsAfterOwnerAck).toBe(false);
     const ownerDev = await registerDevice({
@@ -1159,7 +1175,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const ownerKp = await generateEd25519Keypair();
     const { admissionKey } = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
       policy: { deleteEventsAfterOwnerAck: true },
     });
     // Both owner devices share the same Ed25519 keypair (multi-device owner
@@ -1222,7 +1238,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("6a. Signaling: signal envelope routes to target.deviceId over WS", async () => {
     const roomId = uniqueRoomId("s06a-signal-live");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -1291,7 +1307,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("6b. Signaling: offline target gets stored signal envelope on reconnect", async () => {
     const roomId = uniqueRoomId("s06b-signal-mailbox");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -1348,7 +1364,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("7. R2 spillover: presign → PUT → GET round-trips an encrypted snapshot", async () => {
     const roomId = uniqueRoomId("s07-r2-roundtrip");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -1434,7 +1450,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const ownerKp = await generateEd25519Keypair();
     const { admissionKey } = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
       policy: { expiresAt: Date.now() + 60_000 },
     });
     await registerDevice({
@@ -1482,7 +1498,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const owner = await generateEd25519Keypair();
     await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { idleTimeoutMs: 60_000 },
     });
     expect(await countStorageKeys(roomId)).toBeGreaterThan(0);
@@ -1501,7 +1517,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("10. Hibernation: WS closes, peer posts envelope while away, reconnect picks it up", async () => {
     const roomId = uniqueRoomId("s10-hibernate");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -1545,7 +1561,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("11. Rate limit: 121st write/min from one device → 429 ATTN_RATE_LIMITED", async () => {
     const roomId = uniqueRoomId("s11-rate");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -1583,7 +1599,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("12a. PoW: write without Attn-PoW → 400 ATTN_POW_INVALID", async () => {
     const roomId = uniqueRoomId("s12a-pow-missing");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -1607,7 +1623,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("12b. PoW: write with valid token → 201 accepted", async () => {
     const roomId = uniqueRoomId("s12b-pow-valid");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -1630,7 +1646,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   it("12c. PoW: replay same token → 400 ATTN_POW_INVALID", async () => {
     const roomId = uniqueRoomId("s12c-pow-replay");
     const owner = await generateEd25519Keypair();
-    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const { admissionKey } = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -1682,7 +1698,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const owner = await generateEd25519Keypair();
     const { admissionKey, createResponse } = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { powBits: 14 },
     });
     expect(createResponse.policy.powBits).toBe(14);
@@ -1753,7 +1769,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const owner = await generateEd25519Keypair();
     const { createResponse } = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: {
         expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, // 30d ask
         longSession: true,
@@ -1772,7 +1788,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const owner = await generateEd25519Keypair();
     const { createResponse } = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: {
         expiresAt: Date.now() + 2 * 24 * 60 * 60 * 1000, // 2d ask
         longSession: false,

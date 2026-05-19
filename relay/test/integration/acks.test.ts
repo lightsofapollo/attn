@@ -106,24 +106,56 @@ function uniqueRoomId(label: string): string {
 async function createRoom(opts: {
   roomId: string;
   policy?: Partial<RoomPolicy>;
-  ownerSigningKey: Uint8Array;
+  ownerKp: SubtleKeypair;
 }): Promise<Uint8Array> {
   const admissionKey = makeAdmissionKey((roomCounter * 11) & 0xff);
   const body = JSON.stringify({
     v: 2,
     policy: defaultPolicy(opts.policy ?? {}),
-    ownerSigningKey: base64UrlEncode(opts.ownerSigningKey),
+    ownerSigningKey: base64UrlEncode(opts.ownerKp.publicKeyBytes),
     admissionKey: base64UrlEncode(admissionKey),
   });
-  const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  // attn-nnj.5.17 (security-review §H1): first-create requires
+  // Attn-Owner-Signature self-rooted to the body's ownerSigningKey.
+  const ownerSig = await buildOwnerSig({
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    url,
+    body,
+    privateKey: opts.ownerKp.privateKey,
+  });
+  const res = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": ownerSig,
+    },
     body,
   });
   if (res.status !== 201) {
     throw new Error(`room create failed: ${res.status} ${await res.text()}`);
   }
   return admissionKey;
+}
+
+async function buildOwnerSig(opts: {
+  method: string;
+  url: string;
+  body?: string;
+  privateKey: CryptoKey;
+}): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  const signing = new Request(opts.url, {
+    method: opts.method,
+    headers,
+    body: opts.body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(opts.url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, opts.privateKey, canonical),
+  );
+  return base64UrlEncode(sig);
 }
 
 // --- device builder ------------------------------------------------------
@@ -452,7 +484,7 @@ describe("POST /v2/rooms/:roomId/acks — reviewer ack without delete flag", () 
   it("returns 204 and leaves the envelope in place when no owner-sig header is sent", async () => {
     const roomId = uniqueRoomId("ack-reviewer");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     const reviewer = await registerDevice({
       roomId,
       admissionKey,
@@ -492,7 +524,7 @@ describe("POST /v2/rooms/:roomId/acks — owner ack with delete-disabled policy"
   it("retains the envelope when owner-sig header is absent (default policy)", async () => {
     const roomId = uniqueRoomId("ack-owner-noheader");
     const ownerKp = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: ownerKp.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp });
     const ownerDev = await registerDevice({
       roomId,
       admissionKey,
@@ -529,7 +561,7 @@ describe("POST /v2/rooms/:roomId/acks — owner ack with delete-disabled policy"
     const roomId = uniqueRoomId("ack-owner-policyoff");
     const ownerKp = await generateEd25519Keypair();
     // policy is explicit-default (deleteEventsAfterOwnerAck:false).
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: ownerKp.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp });
     const ownerDev = await registerDevice({
       roomId,
       admissionKey,
@@ -571,7 +603,7 @@ describe("POST /v2/rooms/:roomId/acks — owner ack with delete-enabled policy",
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
       policy: { deleteEventsAfterOwnerAck: true },
     });
     const ownerDev = await registerDevice({
@@ -618,7 +650,7 @@ describe("POST /v2/rooms/:roomId/acks — non-owner with header is silently igno
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
       // Delete enabled — so the only thing blocking deletion is "device is reviewer".
       policy: { deleteEventsAfterOwnerAck: true },
     });
@@ -672,7 +704,7 @@ describe("POST /v2/rooms/:roomId/acks — idempotency", () => {
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
       policy: { deleteEventsAfterOwnerAck: true },
     });
     const ownerDev = await registerDevice({
@@ -720,7 +752,7 @@ describe("POST /v2/rooms/:roomId/acks — idempotency", () => {
   it("returns 204 when acking an envelopeId that was never posted", async () => {
     const roomId = uniqueRoomId("ack-unknown");
     const ownerKp = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: ownerKp.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp });
     const reviewer = await registerDevice({
       roomId,
       admissionKey,
@@ -744,7 +776,7 @@ describe("POST /v2/rooms/:roomId/acks — protection layers", () => {
   it("rejects POST without Attn-Admission header (401)", async () => {
     const roomId = uniqueRoomId("ack-no-adm");
     const ownerKp = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: ownerKp.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp });
     const reviewer = await registerDevice({
       roomId,
       admissionKey,
@@ -766,7 +798,7 @@ describe("POST /v2/rooms/:roomId/acks — protection layers", () => {
   it("rejects POST without Attn-PoW header (400 ATTN_POW_INVALID)", async () => {
     const roomId = uniqueRoomId("ack-no-pow");
     const ownerKp = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: ownerKp.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp });
     const reviewer = await registerDevice({
       roomId,
       admissionKey,
@@ -790,7 +822,7 @@ describe("POST /v2/rooms/:roomId/acks — batch", () => {
   it("marks per-device ack slots for every envelopeId in a batch of 5", async () => {
     const roomId = uniqueRoomId("ack-batch");
     const ownerKp = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: ownerKp.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp });
     const reviewer = await registerDevice({
       roomId,
       admissionKey,
@@ -839,7 +871,7 @@ describe("POST /v2/rooms/:roomId/acks — owner-sig invalid", () => {
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
       policy: { deleteEventsAfterOwnerAck: true },
     });
     const ownerDev = await registerDevice({

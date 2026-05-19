@@ -3,6 +3,8 @@
  *
  * Spec: planning/collab/relay-spec.md §POST /v2/rooms/:roomId
  * Amendments: #2 (admission), #8 (TTL clamps), #12 (deleteEventsAfterOwnerAck default)
+ * Security: planning/collab/security-review.md §H1 (attn-nnj.5.17 —
+ *   require Attn-Owner-Signature on first-create)
  *
  * These tests go through the Worker via SELF.fetch so they exercise the index.ts
  * router + RoomDO end-to-end. DO storage assertions use runInDurableObject
@@ -15,6 +17,11 @@ import { describe, expect, it } from "vitest";
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import type { Env } from "../../src/env";
 import type { RoomPolicy } from "../../src/schema";
+import {
+  generateEd25519Keypair,
+  ownerSignatureHeader,
+  type SubtleEd25519Keypair,
+} from "../helpers/owner-sig";
 
 // Make the bindings declared in wrangler.toml visible on `env` per the
 // vitest-pool-workers ambient-module pattern.
@@ -47,23 +54,6 @@ function makeKeyBytes(seed: number): Uint8Array {
   const bytes = new Uint8Array(32);
   for (let i = 0; i < 32; i++) bytes[i] = (seed + i) & 0xff;
   return bytes;
-}
-
-interface CreateBodyInput {
-  policy?: Partial<RoomPolicy>;
-  ownerSigningKey?: string;
-  admissionKey?: string;
-  v?: unknown;
-}
-
-function buildCreateBody(input: CreateBodyInput = {}): string {
-  const body = {
-    v: input.v ?? 2,
-    policy: defaultPolicy(input.policy ?? {}),
-    ownerSigningKey: input.ownerSigningKey ?? base64UrlEncode(makeKeyBytes(0x10)),
-    admissionKey: input.admissionKey ?? base64UrlEncode(makeKeyBytes(0x20)),
-  };
-  return JSON.stringify(body);
 }
 
 async function hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array> {
@@ -115,25 +105,89 @@ function uniqueRoomId(label: string): string {
   return `${label}-${Date.now().toString(36)}-${roomCounter}`;
 }
 
+interface BuildBodyInput {
+  policy?: Partial<RoomPolicy>;
+  ownerPublicKeyBytes?: Uint8Array;
+  admissionKey?: Uint8Array;
+  v?: unknown;
+}
+
+interface BuiltCreate {
+  body: string;
+  ownerKp: SubtleEd25519Keypair;
+  admissionKeyBytes: Uint8Array;
+}
+
+/**
+ * Build a valid `POST /v2/rooms/:roomId` body + owner keypair pair. Tests
+ * that need to tamper with the body (mismatched key, garbled fields, etc.)
+ * can override the body string or use the keypair to sign deliberately
+ * incorrect canonical bytes.
+ */
+async function buildCreate(input: BuildBodyInput = {}): Promise<BuiltCreate> {
+  const ownerKp = await generateEd25519Keypair();
+  const admissionKeyBytes = input.admissionKey ?? makeKeyBytes(0x20);
+  const ownerPublic = input.ownerPublicKeyBytes ?? ownerKp.publicKeyBytes;
+  const body = JSON.stringify({
+    v: input.v ?? 2,
+    policy: defaultPolicy(input.policy ?? {}),
+    ownerSigningKey: base64UrlEncode(ownerPublic),
+    admissionKey: base64UrlEncode(admissionKeyBytes),
+  });
+  return { body, ownerKp, admissionKeyBytes };
+}
+
+/**
+ * Convenience wrapper: build body, build owner-sig header, POST the room.
+ * Used by every happy-path test plus a few error-path tests where the
+ * intention is to verify behavior AFTER a valid first-create succeeded.
+ */
+async function postCreate(opts: {
+  roomId: string;
+  policy?: Partial<RoomPolicy>;
+  ownerPublicKeyBytes?: Uint8Array;
+  admissionKey?: Uint8Array;
+}): Promise<{
+  response: Response;
+  body: string;
+  ownerKp: SubtleEd25519Keypair;
+  admissionKeyBytes: Uint8Array;
+}> {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  const built = await buildCreate({
+    policy: opts.policy,
+    ownerPublicKeyBytes: opts.ownerPublicKeyBytes,
+    admissionKey: opts.admissionKey,
+  });
+  const ownerSig = await ownerSignatureHeader({
+    method: "POST",
+    url,
+    body: built.body,
+    privateKey: built.ownerKp.privateKey,
+  });
+  const response = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": ownerSig,
+    },
+    body: built.body,
+  });
+  return {
+    response,
+    body: built.body,
+    ownerKp: built.ownerKp,
+    admissionKeyBytes: built.admissionKeyBytes,
+  };
+}
+
 describe("POST /v2/rooms/:roomId — happy path", () => {
   it("creates a room and returns 201 with the clamped policy", async () => {
     const roomId = uniqueRoomId("happy");
-    const url = `${URL_BASE}/v2/rooms/${roomId}`;
-    const ownerKey = makeKeyBytes(0x11);
     const expiresAt = Date.now() + 60 * 60 * 1000;
-    const policy = defaultPolicy({ expiresAt });
-
-    const body = JSON.stringify({
-      v: 2,
-      policy,
-      ownerSigningKey: base64UrlEncode(ownerKey),
-      admissionKey: base64UrlEncode(makeKeyBytes(0x21)),
-    });
-
-    const res = await SELF.fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
+    const { response: res, ownerKp } = await postCreate({
+      roomId,
+      policy: { expiresAt },
     });
 
     expect(res.status).toBe(201);
@@ -146,32 +200,146 @@ describe("POST /v2/rooms/:roomId — happy path", () => {
     expect(typeof json.ownerSigningKeyId).toBe("string");
     expect(json.ownerSigningKeyId.length).toBeGreaterThan(0);
     expect(json.policy.mode).toBe("live");
-    expect(json.policy.maxPeers).toBe(policy.maxPeers);
+    expect(json.policy.maxPeers).toBe(4);
     expect(json.policy.powBits).toBe(16);
     expect(json.policy.deleteEventsAfterOwnerAck).toBe(false);
-  });
 
-  it("ownerSigningKeyId equals base64url(SHA-256(ownerSigningKey))", async () => {
-    const roomId = uniqueRoomId("keyid");
-    const ownerKey = makeKeyBytes(0x42);
-
+    // ownerSigningKeyId is base64url(SHA-256(ownerSigningKey)).
     const expected = base64UrlEncode(
-      new Uint8Array(await crypto.subtle.digest("SHA-256", ownerKey)),
+      new Uint8Array(await crypto.subtle.digest("SHA-256", ownerKp.publicKeyBytes)),
     );
+    expect(json.ownerSigningKeyId).toBe(expected);
+  });
+});
 
-    const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
+describe("POST /v2/rooms/:roomId — H1 first-create owner signature", () => {
+  it("rejects first-create with no Attn-Owner-Signature (403 ATTN_OWNER_SIG_REQUIRED)", async () => {
+    const roomId = uniqueRoomId("h1-missing");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+    const { body } = await buildCreate();
+    const res = await SELF.fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        v: 2,
-        policy: defaultPolicy(),
-        ownerSigningKey: base64UrlEncode(ownerKey),
-        admissionKey: base64UrlEncode(makeKeyBytes(0x52)),
-      }),
+      body,
     });
-    expect(res.status).toBe(201);
-    const json = (await res.json()) as RoomCreateResponse;
-    expect(json.ownerSigningKeyId).toBe(expected);
+    expect(res.status).toBe(403);
+    const err = (await res.json()) as RoomErrorResponse;
+    expect(err.error.code).toBe("ATTN_OWNER_SIG_REQUIRED");
+  });
+
+  it("rejects first-create when sig is by a different key (403 ATTN_OWNER_SIG_INVALID)", async () => {
+    const roomId = uniqueRoomId("h1-wrong-key");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+    // Body declares ownerKp as the owner, but we sign with attackerKp.
+    const ownerKp = await generateEd25519Keypair();
+    const attackerKp = await generateEd25519Keypair();
+    const built = await buildCreate({ ownerPublicKeyBytes: ownerKp.publicKeyBytes });
+    const wrongSig = await ownerSignatureHeader({
+      method: "POST",
+      url,
+      body: built.body,
+      privateKey: attackerKp.privateKey,
+    });
+    const res = await SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Attn-Owner-Signature": wrongSig,
+      },
+      body: built.body,
+    });
+    expect(res.status).toBe(403);
+    const err = (await res.json()) as RoomErrorResponse;
+    expect(err.error.code).toBe("ATTN_OWNER_SIG_INVALID");
+  });
+
+  it("rejects first-create when the body is tampered after signing (403 ATTN_OWNER_SIG_INVALID)", async () => {
+    const roomId = uniqueRoomId("h1-tampered");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+    const ownerKp = await generateEd25519Keypair();
+    const originalBody = JSON.stringify({
+      v: 2,
+      policy: defaultPolicy({ maxPeers: 2 }),
+      ownerSigningKey: base64UrlEncode(ownerKp.publicKeyBytes),
+      admissionKey: base64UrlEncode(makeKeyBytes(0x44)),
+    });
+    // Sign the original body...
+    const sig = await ownerSignatureHeader({
+      method: "POST",
+      url,
+      body: originalBody,
+      privateKey: ownerKp.privateKey,
+    });
+    // ...but actually POST a tampered body (different policy).
+    const tamperedBody = JSON.stringify({
+      v: 2,
+      policy: defaultPolicy({ maxPeers: 7 }), // attacker raises peer cap
+      ownerSigningKey: base64UrlEncode(ownerKp.publicKeyBytes),
+      admissionKey: base64UrlEncode(makeKeyBytes(0x44)),
+    });
+    const res = await SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Attn-Owner-Signature": sig,
+      },
+      body: tamperedBody,
+    });
+    expect(res.status).toBe(403);
+    const err = (await res.json()) as RoomErrorResponse;
+    expect(err.error.code).toBe("ATTN_OWNER_SIG_INVALID");
+  });
+
+  it("rejects first-create when Attn-Owner-Signature is malformed (403 ATTN_OWNER_SIG_INVALID)", async () => {
+    const roomId = uniqueRoomId("h1-malformed");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+    const { body } = await buildCreate();
+    const res = await SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Attn-Owner-Signature": "not-a-real-base64url-sig!!!",
+      },
+      body,
+    });
+    expect(res.status).toBe(403);
+    const err = (await res.json()) as RoomErrorResponse;
+    expect(err.error.code).toBe("ATTN_OWNER_SIG_INVALID");
+  });
+
+  it("rejoin does NOT require a new owner signature — admission HMAC alone suffices", async () => {
+    const roomId = uniqueRoomId("h1-rejoin-no-sig");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+
+    // First-create with a valid owner sig.
+    const first = await postCreate({ roomId });
+    expect(first.response.status).toBe(201);
+    const firstJson = (await first.response.json()) as RoomCreateResponse;
+
+    // Rejoin: build a fresh body (relay ignores it), build admission HMAC,
+    // and DELIBERATELY omit Attn-Owner-Signature. Must still succeed.
+    const rejoinBody = JSON.stringify({
+      v: 2,
+      policy: defaultPolicy({ maxPeers: 7 }), // ignored
+      ownerSigningKey: base64UrlEncode(first.ownerKp.publicKeyBytes),
+      admissionKey: base64UrlEncode(first.admissionKeyBytes),
+    });
+    const adm = await admissionHeaderFor({
+      method: "POST",
+      url,
+      body: rejoinBody,
+      admissionKey: first.admissionKeyBytes,
+    });
+    const second = await SELF.fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Attn-Admission": adm },
+      body: rejoinBody,
+    });
+    expect(second.status).toBe(200);
+    const secondJson = (await second.json()) as RoomCreateResponse;
+    expect(secondJson.policy.maxPeers).toBe(firstJson.policy.maxPeers);
+    expect(secondJson.createdAt).toBe(firstJson.createdAt);
+    expect(secondJson.ownerSigningKeyId).toBe(firstJson.ownerSigningKeyId);
   });
 });
 
@@ -179,36 +347,28 @@ describe("POST /v2/rooms/:roomId — rejoin", () => {
   it("returns 200 with the stored policy on second POST (admission-verified, no mutation)", async () => {
     const roomId = uniqueRoomId("rejoin");
     const url = `${URL_BASE}/v2/rooms/${roomId}`;
-    const admissionKey = makeKeyBytes(0x33);
-    const ownerKey = makeKeyBytes(0x34);
-    const originalPolicy = defaultPolicy({ maxPeers: 3 });
-    const originalBody = JSON.stringify({
-      v: 2,
-      policy: originalPolicy,
-      ownerSigningKey: base64UrlEncode(ownerKey),
-      admissionKey: base64UrlEncode(admissionKey),
-    });
 
-    const first = await SELF.fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: originalBody,
+    const first = await postCreate({
+      roomId,
+      policy: { maxPeers: 3 },
+      admissionKey: makeKeyBytes(0x33),
     });
-    expect(first.status).toBe(201);
-    const firstJson = (await first.json()) as RoomCreateResponse;
+    expect(first.response.status).toBe(201);
+    const firstJson = (await first.response.json()) as RoomCreateResponse;
 
-    // Second POST tries to mutate maxPeers — should be ignored.
+    // Second POST tries to mutate maxPeers — should be ignored. Use the
+    // SAME admissionKey so admission HMAC verifies on the relay side.
     const mutatedBody = JSON.stringify({
       v: 2,
       policy: defaultPolicy({ maxPeers: 7 }),
-      ownerSigningKey: base64UrlEncode(ownerKey),
-      admissionKey: base64UrlEncode(admissionKey),
+      ownerSigningKey: base64UrlEncode(first.ownerKp.publicKeyBytes),
+      admissionKey: base64UrlEncode(first.admissionKeyBytes),
     });
     const adm = await admissionHeaderFor({
       method: "POST",
       url,
       body: mutatedBody,
-      admissionKey,
+      admissionKey: first.admissionKeyBytes,
     });
     const second = await SELF.fetch(url, {
       method: "POST",
@@ -226,18 +386,22 @@ describe("POST /v2/rooms/:roomId — rejoin", () => {
     const roomId = uniqueRoomId("rejoin-admission");
     const url = `${URL_BASE}/v2/rooms/${roomId}`;
 
-    const create = await SELF.fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: buildCreateBody(),
-    });
-    expect(create.status).toBe(201);
+    const first = await postCreate({ roomId });
+    expect(first.response.status).toBe(201);
 
-    // No admission header at all on the rejoin.
+    // Try to "rejoin" with a fresh body, valid owner-sig, but NO admission
+    // header. The relay's rejoin branch fires on existing-room and rejects
+    // before even looking at the owner sig.
+    const rejoinBody = JSON.stringify({
+      v: 2,
+      policy: defaultPolicy(),
+      ownerSigningKey: base64UrlEncode(first.ownerKp.publicKeyBytes),
+      admissionKey: base64UrlEncode(first.admissionKeyBytes),
+    });
     const reject = await SELF.fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: buildCreateBody(),
+      body: rejoinBody,
     });
     expect(reject.status).toBe(401);
     const json = (await reject.json()) as RoomErrorResponse;
@@ -248,25 +412,9 @@ describe("POST /v2/rooms/:roomId — rejoin", () => {
 describe("POST /v2/rooms/:roomId — clamping", () => {
   it("clamps maxPeers down to HARD_MAX_PEERS", async () => {
     const roomId = uniqueRoomId("clamp-peers");
-
-    // Bypass the zod max(8) by hand-building the body — the handler clamps to
-    // env.HARD_MAX_PEERS regardless. We want to exercise the clamp path even
-    // though the schema also tops at 8; this keeps the test honest if hard
-    // limits diverge later.
-    const overlyLargePolicy = { ...defaultPolicy(), maxPeers: 8 };
-    const ownerKey = makeKeyBytes(0x71);
-    const admissionKey = makeKeyBytes(0x72);
-    const body = JSON.stringify({
-      v: 2,
-      policy: overlyLargePolicy,
-      ownerSigningKey: base64UrlEncode(ownerKey),
-      admissionKey: base64UrlEncode(admissionKey),
-    });
-
-    const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
+    const { response: res } = await postCreate({
+      roomId,
+      policy: { maxPeers: 8 },
     });
     expect(res.status).toBe(201);
     const json = (await res.json()) as RoomCreateResponse;
@@ -275,22 +423,13 @@ describe("POST /v2/rooms/:roomId — clamping", () => {
 
   it("clamps oversized maxSnapshotBytes / maxEventBytes / maxEvents", async () => {
     const roomId = uniqueRoomId("clamp-bytes");
-    const policy = defaultPolicy({
-      maxSnapshotBytes: 10 * 1024 * 1024 * 1024, // 10 GiB nonsense
-      maxEventBytes: 10 * 1024 * 1024, // 10 MiB nonsense
-      maxEvents: 1_000_000,
-    });
-    const body = JSON.stringify({
-      v: 2,
-      policy,
-      ownerSigningKey: base64UrlEncode(makeKeyBytes(0x81)),
-      admissionKey: base64UrlEncode(makeKeyBytes(0x82)),
-    });
-
-    const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
+    const { response: res } = await postCreate({
+      roomId,
+      policy: {
+        maxSnapshotBytes: 10 * 1024 * 1024 * 1024, // 10 GiB nonsense
+        maxEventBytes: 10 * 1024 * 1024, // 10 MiB nonsense
+        maxEvents: 1_000_000,
+      },
     });
     expect(res.status).toBe(201);
     const json = (await res.json()) as RoomCreateResponse;
@@ -301,25 +440,16 @@ describe("POST /v2/rooms/:roomId — clamping", () => {
 
   it("clamps expiresAt to createdAt + 24h by default", async () => {
     const roomId = uniqueRoomId("clamp-ttl");
-    const policy = defaultPolicy({
-      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, // +30d
-      longSession: false,
-    });
     const t0 = Date.now();
-    const body = JSON.stringify({
-      v: 2,
-      policy,
-      ownerSigningKey: base64UrlEncode(makeKeyBytes(0x91)),
-      admissionKey: base64UrlEncode(makeKeyBytes(0x92)),
-    });
-    const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
+    const { response: res } = await postCreate({
+      roomId,
+      policy: {
+        expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, // +30d
+        longSession: false,
+      },
     });
     expect(res.status).toBe(201);
     const json = (await res.json()) as RoomCreateResponse;
-    // Should be clamped at most to createdAt + 24h. Allow a 5s test slack.
     const upper = json.createdAt + 24 * 60 * 60 * 1000;
     expect(json.expiresAt).toBeGreaterThanOrEqual(t0);
     expect(json.expiresAt).toBeLessThanOrEqual(upper);
@@ -328,25 +458,17 @@ describe("POST /v2/rooms/:roomId — clamping", () => {
 
   it("clamps expiresAt to createdAt + 7d when longSession=true", async () => {
     const roomId = uniqueRoomId("clamp-ttl-long");
-    const policy = defaultPolicy({
-      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, // +30d
-      longSession: true,
-    });
-    const body = JSON.stringify({
-      v: 2,
-      policy,
-      ownerSigningKey: base64UrlEncode(makeKeyBytes(0xa1)),
-      admissionKey: base64UrlEncode(makeKeyBytes(0xa2)),
-    });
-    const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
+    const { response: res } = await postCreate({
+      roomId,
+      policy: {
+        expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, // +30d
+        longSession: true,
+      },
     });
     expect(res.status).toBe(201);
     const json = (await res.json()) as RoomCreateResponse;
     const upper = json.createdAt + 7 * 24 * 60 * 60 * 1000;
-    const lower = json.createdAt + 24 * 60 * 60 * 1000; // must exceed default 24h
+    const lower = json.createdAt + 24 * 60 * 60 * 1000;
     expect(json.expiresAt).toBeGreaterThan(lower);
     expect(json.expiresAt).toBeLessThanOrEqual(upper);
     expect(json.policy.longSession).toBe(true);
@@ -354,24 +476,13 @@ describe("POST /v2/rooms/:roomId — clamping", () => {
 
   it("clamps idleTimeoutMs above 60s and below wall-clock TTL", async () => {
     const roomId = uniqueRoomId("clamp-idle");
-    // idleTimeoutMs >= 60_000 is enforced by zod, so client can only request
-    // the upper bound here. We pass idleTimeoutMs larger than wall-clock TTL
-    // (e.g. expiresAt + 1h) — handler must clamp to TTL.
     const expiresAt = Date.now() + 60 * 60 * 1000; // +1h
-    const policy = defaultPolicy({
-      expiresAt,
-      idleTimeoutMs: 24 * 60 * 60 * 1000, // 24h, way > 1h TTL
-    });
-    const body = JSON.stringify({
-      v: 2,
-      policy,
-      ownerSigningKey: base64UrlEncode(makeKeyBytes(0xb1)),
-      admissionKey: base64UrlEncode(makeKeyBytes(0xb2)),
-    });
-    const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
+    const { response: res } = await postCreate({
+      roomId,
+      policy: {
+        expiresAt,
+        idleTimeoutMs: 24 * 60 * 60 * 1000, // way > 1h TTL
+      },
     });
     expect(res.status).toBe(201);
     const json = (await res.json()) as RoomCreateResponse;
@@ -384,6 +495,8 @@ describe("POST /v2/rooms/:roomId — clamping", () => {
 describe("POST /v2/rooms/:roomId — defaults", () => {
   it("defaults deleteEventsAfterOwnerAck to false (amendments #12)", async () => {
     const roomId = uniqueRoomId("default-delete");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+    const ownerKp = await generateEd25519Keypair();
     // Build the body manually to omit the field entirely.
     const body = JSON.stringify({
       v: 2,
@@ -395,12 +508,21 @@ describe("POST /v2/rooms/:roomId — defaults", () => {
         maxEvents: 100,
         expiresAt: Date.now() + 60 * 60 * 1000,
       },
-      ownerSigningKey: base64UrlEncode(makeKeyBytes(0xc1)),
+      ownerSigningKey: base64UrlEncode(ownerKp.publicKeyBytes),
       admissionKey: base64UrlEncode(makeKeyBytes(0xc2)),
     });
-    const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
+    const ownerSig = await ownerSignatureHeader({
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      url,
+      body,
+      privateKey: ownerKp.privateKey,
+    });
+    const res = await SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Attn-Owner-Signature": ownerSig,
+      },
       body,
     });
     expect(res.status).toBe(201);
@@ -410,6 +532,8 @@ describe("POST /v2/rooms/:roomId — defaults", () => {
 
   it("defaults powBits to 16 when omitted", async () => {
     const roomId = uniqueRoomId("default-pow");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+    const ownerKp = await generateEd25519Keypair();
     const body = JSON.stringify({
       v: 2,
       policy: {
@@ -420,12 +544,21 @@ describe("POST /v2/rooms/:roomId — defaults", () => {
         maxEvents: 50,
         expiresAt: Date.now() + 60 * 60 * 1000,
       },
-      ownerSigningKey: base64UrlEncode(makeKeyBytes(0xd1)),
+      ownerSigningKey: base64UrlEncode(ownerKp.publicKeyBytes),
       admissionKey: base64UrlEncode(makeKeyBytes(0xd2)),
     });
-    const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
+    const ownerSig = await ownerSignatureHeader({
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      url,
+      body,
+      privateKey: ownerKp.privateKey,
+    });
+    const res = await SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Attn-Owner-Signature": ownerSig,
+      },
       body,
     });
     expect(res.status).toBe(201);
@@ -435,6 +568,12 @@ describe("POST /v2/rooms/:roomId — defaults", () => {
 });
 
 describe("POST /v2/rooms/:roomId — schema validation", () => {
+  // For these tests we don't bother with a valid owner-sig: the version /
+  // body-validation gates run before the owner-sig check in the handler
+  // when the body is unparseable. The wrong-key length and wrong-mode tests
+  // attach a valid sig over the offending body so we exercise the path
+  // where the body decodes but ownerSigningKey itself is malformed.
+
   it("rejects v=1 with ATTN_VERSION_UNSUPPORTED (400)", async () => {
     const roomId = uniqueRoomId("v1");
     const body = JSON.stringify({
@@ -471,7 +610,6 @@ describe("POST /v2/rooms/:roomId — schema validation", () => {
       v: 2,
       policy: defaultPolicy(),
       admissionKey: base64UrlEncode(makeKeyBytes(0xf2)),
-      // ownerSigningKey omitted on purpose
     });
     const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
       method: "POST",
@@ -490,7 +628,6 @@ describe("POST /v2/rooms/:roomId — schema validation", () => {
       v: 2,
       policy: defaultPolicy(),
       ownerSigningKey: base64UrlEncode(makeKeyBytes(0x12)),
-      // admissionKey omitted on purpose
     });
     const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
       method: "POST",
@@ -543,19 +680,11 @@ describe("POST /v2/rooms/:roomId — schema validation", () => {
 describe("POST /v2/rooms/:roomId — DO storage state", () => {
   it("persists the clamped policy and metadata to DO storage", async () => {
     const roomId = uniqueRoomId("storage");
-    const url = `${URL_BASE}/v2/rooms/${roomId}`;
-    const ownerKey = makeKeyBytes(0xab);
     const admissionKey = makeKeyBytes(0xcd);
-
-    const res = await SELF.fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        v: 2,
-        policy: defaultPolicy({ maxPeers: 2 }),
-        ownerSigningKey: base64UrlEncode(ownerKey),
-        admissionKey: base64UrlEncode(admissionKey),
-      }),
+    const { response: res, ownerKp } = await postCreate({
+      roomId,
+      policy: { maxPeers: 2 },
+      admissionKey,
     });
     expect(res.status).toBe(201);
     const json = (await res.json()) as RoomCreateResponse;
@@ -572,7 +701,9 @@ describe("POST /v2/rooms/:roomId — DO storage state", () => {
       expect(Array.from(storedAdmission ?? new Uint8Array())).toEqual(Array.from(admissionKey));
 
       const storedOwner = await ctx.storage.get<Uint8Array>("meta:owner_signing_key");
-      expect(Array.from(storedOwner ?? new Uint8Array())).toEqual(Array.from(ownerKey));
+      expect(Array.from(storedOwner ?? new Uint8Array())).toEqual(
+        Array.from(ownerKp.publicKeyBytes),
+      );
 
       const ownerKeyId = await ctx.storage.get<string>("meta:owner_signing_key_id");
       expect(ownerKeyId).toBe(json.ownerSigningKeyId);
@@ -588,13 +719,9 @@ describe("POST /v2/rooms/:roomId — DO storage state", () => {
 
   it("schedules an alarm bounded by hard-max-at and idle deadline", async () => {
     const roomId = uniqueRoomId("alarm");
-    const url = `${URL_BASE}/v2/rooms/${roomId}`;
-    const res = await SELF.fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: buildCreateBody({
-        policy: { idleTimeoutMs: 60_000 }, // 60s — should win over hard-max
-      }),
+    const { response: res } = await postCreate({
+      roomId,
+      policy: { idleTimeoutMs: 60_000 }, // 60s — should win over hard-max
     });
     expect(res.status).toBe(201);
     const json = (await res.json()) as RoomCreateResponse;
@@ -604,8 +731,29 @@ describe("POST /v2/rooms/:roomId — DO storage state", () => {
     await runInDurableObject(stub, async (_instance, ctx) => {
       const alarmAt = await ctx.storage.getAlarm();
       expect(alarmAt).not.toBeNull();
-      // alarm should be createdAt + idleTimeoutMs (60s) — well before hardMaxAt.
       expect(alarmAt).toBe(json.createdAt + 60_000);
+    });
+  });
+
+  it("does NOT persist any meta when the owner sig is missing (storage stays empty)", async () => {
+    // Regression: ensure the H1 gate runs BEFORE storage writes, so a failed
+    // first-create can't half-create a room (or worse, store the attacker's
+    // body keys).
+    const roomId = uniqueRoomId("h1-no-write");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+    const { body } = await buildCreate();
+    const res = await SELF.fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    expect(res.status).toBe(403);
+
+    const stubId = env.RELAY_ROOMS.idFromName(roomId);
+    const stub = env.RELAY_ROOMS.get(stubId);
+    await runInDurableObject(stub, async (_inst, ctx) => {
+      const all = await ctx.storage.list();
+      expect(all.size).toBe(0);
     });
   });
 });
@@ -614,33 +762,27 @@ describe("POST /v2/rooms/:roomId — round-trip with admission on rejoin", () =>
   it("succeeds with a correctly-HMAC'd admission header on rejoin", async () => {
     const roomId = uniqueRoomId("rejoin-ok");
     const url = `${URL_BASE}/v2/rooms/${roomId}`;
-    const admissionKey = makeKeyBytes(0xee);
-    const ownerKey = makeKeyBytes(0xef);
-    const body = JSON.stringify({
+
+    const first = await postCreate({ roomId });
+    expect(first.response.status).toBe(201);
+    const firstJson = (await first.response.json()) as RoomCreateResponse;
+
+    const rejoinBody = JSON.stringify({
       v: 2,
       policy: defaultPolicy(),
-      ownerSigningKey: base64UrlEncode(ownerKey),
-      admissionKey: base64UrlEncode(admissionKey),
+      ownerSigningKey: base64UrlEncode(first.ownerKp.publicKeyBytes),
+      admissionKey: base64UrlEncode(first.admissionKeyBytes),
     });
-
-    const first = await SELF.fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-    });
-    expect(first.status).toBe(201);
-    const firstJson = (await first.json()) as RoomCreateResponse;
-
     const adm = await admissionHeaderFor({
       method: "POST",
       url,
-      body,
-      admissionKey,
+      body: rejoinBody,
+      admissionKey: first.admissionKeyBytes,
     });
     const second = await SELF.fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Attn-Admission": adm },
-      body,
+      body: rejoinBody,
     });
     expect(second.status).toBe(200);
     const secondJson = (await second.json()) as RoomCreateResponse;

@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-007",
+  "baseHash": "2mMvS9hZTShwSihs5wwemk2UsJN1qlUcFK_M6scEzmU",
+  "position": {
+    "byteRange": [
+      44,
+      61
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "| one   | two   |",
+    "exactHash": "8997c95696e58ed9aff095607f956f905bca02be6d02a0882e36acd19fa637ba",
+    "normalized": "one two",
+    "normalizedHash": "8ab63e29a4ba14e4e1688f9c15e5af90895421358c945b0431f85d66977bd3d2"
+  },
+  "block": {
+    "snapshotBlockId": "0b956b21a135dc0c0c35edb950c97f4bbb25700321c2cf7283123b4e2e0279df",
+    "contentFingerprint": "827d4044e1fad360301cfd6abff804d4b32ee95ee34f59a059ada3c2832aed6d",
+    "kind": "table",
+    "offsetInBlockBytes": [
+      36,
+      53
+    ],
+    "blockByteRange": [
+      8,
+      61
+    ],
+    "blockLineRange": [
+      3,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Data\n\n| Col A | Col B |\n| ----- | ----- |\n",
+    "suffix": "\n\nTrailing paragraph.\n",
+    "prefixHash": "e8f840e909314dfb713f56c034d7c360a415196c7e06f59c80c182b354bb11d7",
+    "suffixHash": "652140371f075fb8cb91a7a1b05794cfde91c27c10ffb535e9321b0dd7c0df1e"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "cec3a9b89b2e391393d0f68e4bc12a9fa6cf358b3cdf79496dc442d52b8dd528",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "status": "ambiguous",
+  "reason": "two_quote_matches_within_0.10",
+  "candidates": [
+    {
+      "confidence": 0.9,
+      "reason": "quote_match",
+      "preview": "Unique target paragraph.",
+      "currentRange": {
+        "byteRange": [
+          15,
+          39
+        ],
+        "lineRange": [
+          5,
+          5
+        ]
+      }
+    },
+    {
+      "confidence": 0.9,
+      "reason": "quote_match",
+      "preview": "Unique target paragraph.",
+      "currentRange": {
+        "byteRange": [
+          50,
+          74
+        ],
+        "lineRange": [
+          9,
+          9
+        ]
+      }
+    }
+  ]
+}

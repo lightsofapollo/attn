@@ -1,0 +1,36 @@
+{
+  "status": "ambiguous",
+  "reason": "two_quote_matches_within_0.10",
+  "candidates": [
+    {
+      "confidence": 0.9,
+      "reason": "quote_match",
+      "preview": "| same |",
+      "currentRange": {
+        "byteRange": [
+          24,
+          32
+        ],
+        "lineRange": [
+          5,
+          5
+        ]
+      }
+    },
+    {
+      "confidence": 0.9,
+      "reason": "quote_match",
+      "preview": "| same |",
+      "currentRange": {
+        "byteRange": [
+          33,
+          41
+        ],
+        "lineRange": [
+          6,
+          6
+        ]
+      }
+    }
+  ]
+}

@@ -22,11 +22,17 @@ The corpus must exist BEFORE the implementations — see
 | `aead.json`              | §Envelope Encryption (AEAD)                   | attn-nnj.1.5   |
 | `envelope.json`          | end-to-end round-trip                         | attn-nnj.1.9   |
 | `pow.json`               | §Hashcash Proof-of-Work                       | attn-nnj.1.7   |
+| `anchor-cases/`          | §Anchor Resolution                            | attn-nnj.3.6   |
 
 All seven files currently contain `_schema` metadata plus one or more
 placeholder entries whose values are the literal string `"__PENDING__"`.
 The owning issue replaces those placeholders with computed values and
 adds whatever additional vectors it deems necessary.
+
+`anchor-cases/` is a directory of hand-curated `(original.md, edited.md,
+anchor.json, expected.json)` cases consumed by both the Rust
+(`attn-nnj.3.4`) and TS (`attn-nnj.3.5`) anchor resolvers. See
+`anchor-cases/README.md` for the corpus layout and contribution rules.
 
 ## Format conventions
 

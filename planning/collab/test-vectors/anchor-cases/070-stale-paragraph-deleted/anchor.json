@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-070",
+  "baseHash": "5ZI7aIuj9tpUA4aG-PxB1gDHvU06Uy_YSovkwEV-KOA",
+  "position": {
+    "byteRange": [
+      25,
+      52
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "Deletable target paragraph.",
+    "exactHash": "cbbdb1417e5751ee74362f94f59eabb5e42421d04626a623ef30f59a0862e4ca",
+    "normalized": "deletable target paragraph",
+    "normalizedHash": "f6a9e7cd643b6dfc97ccf418b259fa55f26b3ec92b2d941f5371c2d9c394b943"
+  },
+  "block": {
+    "snapshotBlockId": "316aa99a66359352bbe2906e49b47f19ea4e041f32ce9ac153d364fbc740ad22",
+    "contentFingerprint": "89b99d18caa2b7482ab3c383ec893e1db42e1821dc24be11f4f551e72a4446e8",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      27
+    ],
+    "blockByteRange": [
+      25,
+      52
+    ],
+    "blockLineRange": [
+      5,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\nIntro paragraph.\n\n",
+    "suffix": "\n\nOutro paragraph.\n",
+    "prefixHash": "573abca3567e5775fa6dd5bf032ad30173ddbf6dcc7c70e2376ab3dc8d52e806",
+    "suffixHash": "9dca0dc0c23baceb61b92fcdd316336cd39745ee1607cc14770e662507cd2a5c"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

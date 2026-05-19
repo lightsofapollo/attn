@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-085",
+  "baseHash": "WYJ6WyNMsn_v37-hf1N2cXY2wZrjejHswyITtmm2nZk",
+  "position": {
+    "byteRange": [
+      7,
+      17
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "repeat me.",
+    "exactHash": "a2424df616839d0e91182c70d371f20eb36ca2616495e05d8e1c7d452fc0ee42",
+    "normalized": "repeat me",
+    "normalizedHash": "c38ef2d82dbabe4c9c496d72ddeb1e45bb305a33d85e93a7c6272bb75ae7faa9"
+  },
+  "block": {
+    "snapshotBlockId": "1ad9bcf58f374ad5d9cd6823cd0890c0ced1e371bf5a554d442dfcfa148b62f9",
+    "contentFingerprint": "519e72d76f78ba4c4789d9437c623226c27f7d4b3bd2efee53107e8dac563fd2",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      10
+    ],
+    "blockByteRange": [
+      7,
+      17
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\n",
+    "suffix": "\n\nrepeat me.\n\nrepeat me.\n",
+    "prefixHash": "8ad72c6e42b2e0e20cd3139e4e277042c6587f8e4f4a484647beac7562af946a",
+    "suffixHash": "341a5456d7525edd3dc7ae243576a0ea2c55e67a536f0c85ad547564c1efe597"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

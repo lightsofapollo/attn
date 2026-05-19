@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-050",
+  "baseHash": "6O6OO3DfyxQwZtS0gGllZVqYjGJLzmjOnkdfXbYBaBM",
+  "position": {
+    "byteRange": [
+      7,
+      51
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "The quick brown fox jumps over the lazy dog.",
+    "exactHash": "ef537f25c895bfa782526529a9b63d97aa631564d5d789c2b765448c8635fb6c",
+    "normalized": "the quick brown fox jumps over the lazy dog",
+    "normalizedHash": "05c6e08f1d9fdafa03147fcb8f82f124c76d2f70e3d989dc8aadb5e7d7450bec"
+  },
+  "block": {
+    "snapshotBlockId": "eb1363030865b8e0184ca5d71c02d7ce378d40a7e9d443e06323a6fc06c8f2a1",
+    "contentFingerprint": "ba1341d6dd6b314d5d5eaad6d48ff761f61eb1454c977e20c27c75889396dbf6",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      44
+    ],
+    "blockByteRange": [
+      7,
+      51
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\n",
+    "suffix": "\n",
+    "prefixHash": "8ad72c6e42b2e0e20cd3139e4e277042c6587f8e4f4a484647beac7562af946a",
+    "suffixHash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

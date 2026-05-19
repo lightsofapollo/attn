@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-006",
+  "baseHash": "zcU_Ndoqscug4zEbUb-hCLLwxhpDYUrQIO7IRYoFOOA",
+  "position": {
+    "byteRange": [
+      9,
+      29
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "Alpha paragraph one.",
+    "exactHash": "0dffc46c1a498c1984ed97dbd398acc62e7dd4a8d0f7c6e04fc28aaff0c2dcdf",
+    "normalized": "alpha paragraph one",
+    "normalizedHash": "018bda2d83d71db8d4fa6f9de6325b534022effb20c63ba76504d84b4a95b79c"
+  },
+  "block": {
+    "snapshotBlockId": "185891a5056a6976b6a461579752307ec28eade0f8d07cb91b44bb32811eca19",
+    "contentFingerprint": "da9a25ad8860670ec780a19fbdc86c2d2fea477be70b9cc1d761d70ff407fe7c",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      20
+    ],
+    "blockByteRange": [
+      9,
+      29
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Title\n\n",
+    "suffix": "\n\nBeta paragraph two.\n",
+    "prefixHash": "d07e786edc925a6748c76ca1d1fd44e6b7aa583b429ecd5146b26a81daee85b3",
+    "suffixHash": "af80bab868f847a45fab077d2e0ab40e1c5330a7affd1d3045c6ea39a6b997a2"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "7e8cd2056da73a7fefb6cd91f4e5d199d08d9058c517b9a2476b1b520324d674",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

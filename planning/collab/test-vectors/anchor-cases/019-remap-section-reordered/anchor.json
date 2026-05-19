@@ -1,0 +1,60 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-019",
+  "baseHash": "aAhMpUZbaBvUkTM_Qh23w0IPYK_KgymeKi707r2YcR4",
+  "position": {
+    "byteRange": [
+      28,
+      54
+    ],
+    "lineRange": [
+      9,
+      9
+    ]
+  },
+  "quote": {
+    "exact": "Distinctive sentence here.",
+    "exactHash": "db65dadb3bc0972cf61dadaf31b487814a6901600a1364e39380586a83ec6925",
+    "normalized": "distinctive sentence here",
+    "normalizedHash": "8dfcc11fb0010b7526e17d336f024e404ee7088f273e31bde01f1bb2e10eae4d"
+  },
+  "block": {
+    "snapshotBlockId": "feae89d930b397a2f1dd87faba7ff4a2d7bd34b00c7f1075b3ac88f390176a67",
+    "contentFingerprint": "ebfd8c68de68d74c9e20318de7a4349b33eb0cf4918e299651e3b971fc64f074",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      26
+    ],
+    "blockByteRange": [
+      28,
+      54
+    ],
+    "blockLineRange": [
+      9,
+      9
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\n## A\n\nA-body.\n\n## B\n\n",
+    "suffix": "\n\n## C\n\nC-body.\n",
+    "prefixHash": "e4c678c20332406256a5616278a7adfcc9e1a630976d14de2c9bf9a2a94655b0",
+    "suffixHash": "2424eb2acf3d49fdb54c724ae9d022290479805ae13bf3caa0f7ad6cafcdeaa5"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      },
+      {
+        "level": 2,
+        "textHash": "df7e70e5021544f4834bbee64a9e3789febc4be81470df629cad6ddb03320a5c",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

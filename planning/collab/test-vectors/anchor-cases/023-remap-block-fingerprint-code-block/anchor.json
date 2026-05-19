@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-023",
+  "baseHash": "LiQDRNWN92qXhqOp3q0LD5xjbef8LHvv2jJG5RxEu0c",
+  "position": {
+    "byteRange": [
+      45,
+      74
+    ],
+    "lineRange": [
+      8,
+      8
+    ]
+  },
+  "quote": {
+    "exact": "fn target() { /* keep me */ }",
+    "exactHash": "761539a97ec0fe5e0cc9315ab43809fcf8b6f9c7ec185f4fceb8917fe2b008e5",
+    "normalized": "fn target keep me",
+    "normalizedHash": "e1bfbf0ae379beb32c7f8eff57db5206aae58e8473bb7bee7ce76230093e04d2"
+  },
+  "block": {
+    "snapshotBlockId": "b3423cab046bfca956215bad473fa81b66908831930c08d06769e50be496be45",
+    "contentFingerprint": "e37e5d2cf5808fe20b5802922dc9e00d10f780ccc4f1e4c8592a776bfc7e4b3f",
+    "kind": "code_block",
+    "offsetInBlockBytes": [
+      8,
+      37
+    ],
+    "blockByteRange": [
+      37,
+      78
+    ],
+    "blockLineRange": [
+      7,
+      9
+    ]
+  },
+  "context": {
+    "prefix": "# Snippets\n\n```rust\nfn one() {}\n```\n\n```rust\n",
+    "suffix": "\n```\n",
+    "prefixHash": "d3230dd1926c18a27305e7dcffa16b93f891afb022cc562ff347ff5e23d7b8cf",
+    "suffixHash": "8a1e845405a6ac0993774e56b5e3d233ebf146a18bb8d93238bb835176efe41a"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "ff717209de745aa29c21f1efb08f907102b354c94d37f29e011742c8af28bb53",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

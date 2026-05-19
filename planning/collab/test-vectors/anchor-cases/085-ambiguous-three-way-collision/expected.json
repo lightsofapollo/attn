@@ -1,0 +1,51 @@
+{
+  "status": "ambiguous",
+  "reason": "three_quote_matches_within_0.10",
+  "candidates": [
+    {
+      "confidence": 0.9,
+      "reason": "quote_match",
+      "preview": "repeat me.",
+      "currentRange": {
+        "byteRange": [
+          7,
+          17
+        ],
+        "lineRange": [
+          3,
+          3
+        ]
+      }
+    },
+    {
+      "confidence": 0.9,
+      "reason": "quote_match",
+      "preview": "repeat me.",
+      "currentRange": {
+        "byteRange": [
+          19,
+          29
+        ],
+        "lineRange": [
+          5,
+          5
+        ]
+      }
+    },
+    {
+      "confidence": 0.9,
+      "reason": "quote_match",
+      "preview": "repeat me.",
+      "currentRange": {
+        "byteRange": [
+          31,
+          41
+        ],
+        "lineRange": [
+          7,
+          7
+        ]
+      }
+    }
+  ]
+}

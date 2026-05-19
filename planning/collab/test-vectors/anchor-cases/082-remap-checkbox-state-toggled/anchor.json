@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-082",
+  "baseHash": "ZXywofUAKa1kyS03X2u7RnOLkgHqbLEl3-bBYiAEOYM",
+  "position": {
+    "byteRange": [
+      15,
+      39
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "write tests for resolver",
+    "exactHash": "2d3747a2b601117578f0dff27400650c42bd207e55789570cdaf5911a96d3b95",
+    "normalized": "write tests for resolver",
+    "normalizedHash": "2d3747a2b601117578f0dff27400650c42bd207e55789570cdaf5911a96d3b95"
+  },
+  "block": {
+    "snapshotBlockId": "66043e104ba2ffeaf96da86f29bbeb54bc5326ab278672ce6a279275e436530e",
+    "contentFingerprint": "4a515c9b2dc687ba1401fce0735f796457941021468461459b47ba91ed8e5ad2",
+    "kind": "list_item",
+    "offsetInBlockBytes": [
+      6,
+      30
+    ],
+    "blockByteRange": [
+      9,
+      39
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Tasks\n\n- [ ] ",
+    "suffix": "\n- [ ] ship release\n",
+    "prefixHash": "957cefef019362f956e042c4ed4b21aa03a54169d4cef00dd4cd85bd9872c5eb",
+    "suffixHash": "482d00ae5d78b93167fa1fa4fa1266e21ea5ef6623da3619ea48a32b0c93cb94"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "b3a60e61a5233d0506ac737405a2a45280349683cac68722f18d0b73eb495ef4",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

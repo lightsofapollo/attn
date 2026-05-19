@@ -1,0 +1,65 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-034",
+  "baseHash": "TbCgHtFKggpeL5NkKCuMpLRlrdnez6vzUHZ3_XJp6OA",
+  "position": {
+    "byteRange": [
+      24,
+      55
+    ],
+    "lineRange": [
+      7,
+      7
+    ]
+  },
+  "quote": {
+    "exact": "Distinctive line under A/Inner.",
+    "exactHash": "d6c5bb5dbe3f53db5d05f48a0e3716d039eeda8ca40f56ebd0b92b5d6f1ec3aa",
+    "normalized": "distinctive line under a inner",
+    "normalizedHash": "744c767a11fac29b1e54cc0d05c2fe8a8c78f830874a87adbe06aaeffefda456"
+  },
+  "block": {
+    "snapshotBlockId": "2e579ecbed50b2a78a6e56112e6c142bbe0190273038654f0417edf431a39d42",
+    "contentFingerprint": "7e1c2da71ccd945902c746812f5a30125dbed10ff491dde0e1f70e547a9f696c",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      31
+    ],
+    "blockByteRange": [
+      24,
+      55
+    ],
+    "blockLineRange": [
+      7,
+      7
+    ]
+  },
+  "context": {
+    "prefix": "# Top\n\n## A\n\n### Inner\n\n",
+    "suffix": "\n\n## B\n\nNothing.\n",
+    "prefixHash": "79a63218d0e210d5377754f8eb2ff6779c42a0b29e34ec2cca8edd24bb7f6424",
+    "suffixHash": "6e5a8c07d75df0c6b44ac80b9a8ea6f0ea0160f1a5cf2bb20bb26996ffdaf792"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "d5cdfcf7ff75338fa974145a13378ee35f7ea04cfabd74b8f5fb6df350cfbcca",
+        "ordinalAtLevel": 0
+      },
+      {
+        "level": 2,
+        "textHash": "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+        "ordinalAtLevel": 0
+      },
+      {
+        "level": 3,
+        "textHash": "fa338a5ea2014716bd663325667163585de0cf9830c5a2b280c5873745cd3f8e",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-051",
+  "baseHash": "d7tfDQpCzUk2tzRhZ6fNGIa7lx6IwLyryvlwHH3_fS4",
+  "position": {
+    "byteRange": [
+      7,
+      34
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "We need to ship before EOQ.",
+    "exactHash": "8907ab240e39e64d71a81a85f5dd73b9f9c56da49d3f7a1a40944b9912aec1d8",
+    "normalized": "we need to ship before eoq",
+    "normalizedHash": "f94cff50ed587a9303f02757c35611cb42155ae39bc31b292dc610357191751a"
+  },
+  "block": {
+    "snapshotBlockId": "cf18dde3c111e2f0c451393601740879a33a7bb031b7d0c6d59b8fe74c4cdfef",
+    "contentFingerprint": "952803f6172250f5fd70c30f4172c81e6033320cca85ea51442e4648d9089137",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      27
+    ],
+    "blockByteRange": [
+      7,
+      34
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\n",
+    "suffix": "\n",
+    "prefixHash": "8ad72c6e42b2e0e20cd3139e4e277042c6587f8e4f4a484647beac7562af946a",
+    "suffixHash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "status": "ambiguous",
+  "reason": "two_quote_matches_within_0.10",
+  "candidates": [
+    {
+      "confidence": 0.9,
+      "reason": "quote_match",
+      "preview": "Target under first Notes.",
+      "currentRange": {
+        "byteRange": [
+          17,
+          42
+        ],
+        "lineRange": [
+          5,
+          5
+        ]
+      }
+    },
+    {
+      "confidence": 0.9,
+      "reason": "quote_match",
+      "preview": "Target under first Notes.",
+      "currentRange": {
+        "byteRange": [
+          54,
+          79
+        ],
+        "lineRange": [
+          9,
+          9
+        ]
+      }
+    }
+  ]
+}

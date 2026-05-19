@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-061",
+  "baseHash": "ha6ShgJ-ppahv_GVCkFN76gMw7OSlfXQMTP1DAt0bsg",
+  "position": {
+    "byteRange": [
+      11,
+      20
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "review PR",
+    "exactHash": "860d98e5186d9683e835e3382dc0df6e2e79892c082c6f81e39cfb386f2fd08a",
+    "normalized": "review pr",
+    "normalizedHash": "5b5280d23099e6475fbc9e632c6d47e7b6753c536019724c27feb66dc7d9e3d0"
+  },
+  "block": {
+    "snapshotBlockId": "8c011481bd347a5738ad06a0d5fe0e680c6210a1dd9b9dc327328582e92bd359",
+    "contentFingerprint": "da32d8a56057e57c06621da82b5c3e3a62c172697e5a2591c51efe9806cfbcbf",
+    "kind": "list_item",
+    "offsetInBlockBytes": [
+      2,
+      11
+    ],
+    "blockByteRange": [
+      9,
+      20
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Tasks\n\n- ",
+    "suffix": "\n- write tests\n- review PR\n- ship build\n",
+    "prefixHash": "cec5d50b006e04f583ceff842fe316316976d3f8de3033e3f9ba5f50af353472",
+    "suffixHash": "63710b24f01beac4f29ae40aeec2208359570a1b13daafbfc5772f60a326c073"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "b3a60e61a5233d0506ac737405a2a45280349683cac68722f18d0b73eb495ef4",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

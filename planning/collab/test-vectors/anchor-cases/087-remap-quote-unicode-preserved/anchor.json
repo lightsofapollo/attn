@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-087",
+  "baseHash": "VBzjAfG2KPc6c-34KzRI16IvW_64VCwAUDhWpR-J63A",
+  "position": {
+    "byteRange": [
+      7,
+      43
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "Le café est délicieux aujourd'hui.",
+    "exactHash": "fcaaf6bd9792c0e05020cb2ed97ec355a71d7024a0c2892257e5a65575adc1ac",
+    "normalized": "le café est délicieux aujourd hui",
+    "normalizedHash": "e4aa2d3558dd8c84ac34bf60f7018a00f8e857a54bcaed19691abb453dd7fea5"
+  },
+  "block": {
+    "snapshotBlockId": "886ce8715696280b9389c4e6db3ea0f777c8ad6dfa0d4aa4b26aed016cd1f654",
+    "contentFingerprint": "b287c9babf0e9e07dea7ddc11e91183ef63707289dca4a8f113d02900eaec096",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      36
+    ],
+    "blockByteRange": [
+      7,
+      43
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\n",
+    "suffix": "\n",
+    "prefixHash": "8ad72c6e42b2e0e20cd3139e4e277042c6587f8e4f4a484647beac7562af946a",
+    "suffixHash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-086",
+  "baseHash": "9OknJajo-Hh8ybRJ1EnfWj-fGsYbobJh9jhxJ0kpO6M",
+  "position": {
+    "byteRange": [
+      20,
+      51
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "Anchored note inside the quote.",
+    "exactHash": "104d760b4e638439466acc6c1a975837cd27622a33e2cf440a4b5109750acc14",
+    "normalized": "anchored note inside the quote",
+    "normalizedHash": "12eb5e4acb5c1e9266deab2f931f2b2eec6a3f33b586105b8be37b4a7630731b"
+  },
+  "block": {
+    "snapshotBlockId": "b82b3883ca99ca6a9796312bc9fa35522a92b4d98a04ba35031658dcada6a563",
+    "contentFingerprint": "13af367a537fc21bab627e83a04836f7759bec089e94aa0bdce3d0cc35c52084",
+    "kind": "blockquote",
+    "offsetInBlockBytes": [
+      2,
+      33
+    ],
+    "blockByteRange": [
+      18,
+      51
+    ],
+    "blockLineRange": [
+      5,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\nPreamble.\n\n> ",
+    "suffix": "\n\nClosing.\n",
+    "prefixHash": "6d93d6351cfe786513c9bdda8ceac67e73d85f66f5e2ea788e6564027ad06377",
+    "suffixHash": "40c6b0ec702515173368ed4d28985f6faab28abd3b1bc8cd76b76b1757ad3a25"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

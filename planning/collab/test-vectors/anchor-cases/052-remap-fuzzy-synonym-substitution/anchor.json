@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-052",
+  "baseHash": "UF0bN3ZbVCY3yVdZuX7IREMklUlr3uI1X0fnbmAODs8",
+  "position": {
+    "byteRange": [
+      7,
+      42
+    ],
+    "lineRange": [
+      3,
+      3
+    ]
+  },
+  "quote": {
+    "exact": "The service must be available 24/7.",
+    "exactHash": "c8118c5f109c104c93070d2453ba3ac21319e0e32290c4089223ad5c8c4c27ce",
+    "normalized": "the service must be available 24 7",
+    "normalizedHash": "9e4139cb9255fe169f8e507426ad9041a279ba2e404ce4f98acb0ea3aa2bda7c"
+  },
+  "block": {
+    "snapshotBlockId": "ae54accce9aceb143c7f4042a572937c363a44ec76e4be7cf4da01cdffdbc325",
+    "contentFingerprint": "2d7bce14c5aa6dbf03bb7c4b200eb9ff36a417597e1c2cdcf9f48c4f758c37b7",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      35
+    ],
+    "blockByteRange": [
+      7,
+      42
+    ],
+    "blockLineRange": [
+      3,
+      3
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\n",
+    "suffix": "\n",
+    "prefixHash": "8ad72c6e42b2e0e20cd3139e4e277042c6587f8e4f4a484647beac7562af946a",
+    "suffixHash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

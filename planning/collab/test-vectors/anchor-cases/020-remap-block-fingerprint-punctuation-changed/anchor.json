@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-020",
+  "baseHash": "3tPOCK2383CxjFzGnkuKafROX4-BKgop7Oi27C2AgKA",
+  "position": {
+    "byteRange": [
+      17,
+      52
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "Fingerprint target paragraph, here.",
+    "exactHash": "9ccff59ed09b36b153ee11bca4e50efaf808060aa850e9228b51b9148383c161",
+    "normalized": "fingerprint target paragraph here",
+    "normalizedHash": "039fd455c974466b1b4a88db925e887b9bd89488ec4eb37937f56ba52cf7a841"
+  },
+  "block": {
+    "snapshotBlockId": "2297dd043c09570e59f60e9cbb293ff8c2610ea93c1800e64626a5bd72c06507",
+    "contentFingerprint": "9dd3cc012cf58acbdeb8d22a5d717fbea159375e05f90a3d7b4243d3eb64c4fd",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      35
+    ],
+    "blockByteRange": [
+      17,
+      52
+    ],
+    "blockLineRange": [
+      5,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Title\n\nIntro.\n\n",
+    "suffix": "\n\nTrailing.\n",
+    "prefixHash": "8b6d295deb89ca8f4aebf2bd00ea713e983eb05975cb6d369ab044785753d3ad",
+    "suffixHash": "a0e2fb4f3cb7b0bc6e143c65e5fe071bebb9ef63ff6d012a35a2375ad17a680c"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "7e8cd2056da73a7fefb6cd91f4e5d199d08d9058c517b9a2476b1b520324d674",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

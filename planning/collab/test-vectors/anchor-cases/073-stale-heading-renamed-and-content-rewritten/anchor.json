@@ -1,0 +1,60 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-073",
+  "baseHash": "ZEY7hWLdnoyJuuyCeplLTWAkkYf3zesmjRpOlOyc1tY",
+  "position": {
+    "byteRange": [
+      20,
+      54
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "The one true sentence of ChapterA.",
+    "exactHash": "374b339f073670377236c59565ec1e0bf4b8d490598f8a2c3a8b5075f228c323",
+    "normalized": "the one true sentence of chaptera",
+    "normalizedHash": "8eed000467cb38f1b279b6c9600fa513343323f50a8c2ef2d6ebf8e4e9beb8d9"
+  },
+  "block": {
+    "snapshotBlockId": "22276ce6f686b4801719c8ce405025a91e088f3827e42bc9ec5acbb672c4e861",
+    "contentFingerprint": "3c4736ff2352e9901be51141227ac899ecd6b01551406ed7ef487d09e89c8bcf",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      34
+    ],
+    "blockByteRange": [
+      20,
+      54
+    ],
+    "blockLineRange": [
+      5,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Doc\n\n## ChapterA\n\n",
+    "suffix": "\n",
+    "prefixHash": "4bfa59d477460004421c7042d8fa64a17486b7f8126cd9ca5c4230044d4c2ccd",
+    "suffixHash": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "49f4e57c2625d4aeb4c5fd15cdc68fce543ea1790ceef4dcecf9e610b1609106",
+        "ordinalAtLevel": 0
+      },
+      {
+        "level": 2,
+        "textHash": "97eb7a684fa95241bbc621d88e36461e82caecdea38892ea3c33ea89971f0aae",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 0
+  }
+}

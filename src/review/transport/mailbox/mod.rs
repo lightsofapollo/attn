@@ -121,6 +121,32 @@ impl Default for CursorRecoveryPolicy {
     }
 }
 
+impl MailboxConfig {
+    /// Build a `MailboxConfig` from a room secret. Derives the per-room
+    /// admission key via `derive_room_keys` — the same KDF the relay and the
+    /// Bootstrapper use, so a Share/Join handoff produces matching HMAC keys.
+    ///
+    /// `pow_difficulty` is owned by room policy on the server; the caller
+    /// passes the value returned from `POST /v2/rooms/:roomId` (defaulting to
+    /// the spec-mandated 12 when no relay round-trip has happened yet).
+    pub fn from_room_secret(
+        relay_url: String,
+        room_id: RoomId,
+        device_id: DeviceId,
+        room_secret: &[u8; 32],
+        pow_difficulty: u32,
+    ) -> Self {
+        let keys = crate::review::crypto::kdf::derive_room_keys(room_secret);
+        Self {
+            relay_url,
+            room_id,
+            device_id,
+            admission_key: *keys.admission_key.as_bytes(),
+            pow_difficulty,
+        }
+    }
+}
+
 /// Drains the on-disk outbox and posts batches to the relay.
 ///
 /// Owns:
@@ -1146,5 +1172,27 @@ mod tests {
             ("a".to_string(), "0".to_string()),
         ]);
         assert_eq!(q, "a=0&a=one%20space&b=two");
+    }
+
+    // -- MailboxConfig::from_room_secret derives admission key matching KDF -
+
+    #[test]
+    fn config_from_room_secret_matches_derive_room_keys() {
+        let secret = [0x77u8; 32];
+        let cfg = MailboxConfig::from_room_secret(
+            "https://relay.example".to_string(),
+            id::<RoomId>(TEST_ROOM),
+            id::<DeviceId>(TEST_DEVICE),
+            &secret,
+            12,
+        );
+        let direct = crate::review::crypto::kdf::derive_room_keys(&secret);
+        assert_eq!(
+            cfg.admission_key,
+            *direct.admission_key.as_bytes(),
+            "from_room_secret must derive the same admission key as derive_room_keys"
+        );
+        assert_eq!(cfg.relay_url, "https://relay.example");
+        assert_eq!(cfg.pow_difficulty, 12);
     }
 }

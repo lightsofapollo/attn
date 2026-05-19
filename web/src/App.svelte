@@ -24,6 +24,7 @@
     loadChildren,
     navigate,
     openExternal,
+    reviewAcceptSuggestion,
     searchFiles,
     switchProject,
   } from './lib/ipc';
@@ -43,6 +44,7 @@
   import DirectoryOverview from './lib/DirectoryOverview.svelte';
   import CommandPalette from './lib/CommandPalette.svelte';
   import KeyboardShortcutsDialog from './lib/KeyboardShortcutsDialog.svelte';
+  import ReviewApplyExpand from './lib/ReviewApplyExpand.svelte';
   import { toast } from 'svelte-sonner';
   import { Toaster } from '$lib/components/ui/sonner';
   import { SidebarProvider, SidebarInset } from '$lib/components/ui/sidebar';
@@ -1284,6 +1286,34 @@
         commandPaletteOpen = !commandPaletteOpen;
         if (commandPaletteOpen) shortcutsOpen = false;
       },
+      // Three-way apply hooks (attn-nnj.8.3). Read the verdict from the
+      // store each time so we always operate on the currently-open card;
+      // mirror the same accept/keep/edit-trigger/cancel semantics the
+      // component implements.
+      isApplyExpandOpen: () => reviewStore.activeThreeWayApply !== null,
+      onAcceptApply: () => {
+        const v = reviewStore.activeThreeWayApply;
+        if (!v) return;
+        void reviewAcceptSuggestion(v.roomId, v.suggestionId);
+        reviewStore.clearThreeWayApply();
+      },
+      onKeepMine: () => {
+        reviewStore.clearThreeWayApply();
+      },
+      onEditApply: () => {
+        // The component owns the textarea; the global handler only needs
+        // to ensure focus reaches the card. The Svelte component reads the
+        // store and renders accordingly — we toggle a state flag exposed
+        // through a separate path. For now, focusing the card via its
+        // `data-testid` triggers the existing onkeydown to handle `e`.
+        const card = document.querySelector<HTMLElement>(
+          '[data-testid="three-way-apply-expand"]',
+        );
+        card?.focus();
+      },
+      onCancelApply: () => {
+        reviewStore.clearThreeWayApply();
+      },
     });
     return () => {
       cleanup();
@@ -1478,6 +1508,7 @@
 
 <svelte:window onkeydown={(e) => { handleGlobalShortcutsHelpHotkey(e); handleGlobalRightRailHotkey(e); }} />
 <KeyboardShortcutsDialog bind:open={shortcutsOpen} />
+<ReviewApplyExpand />
 <CommandPalette
   bind:open={commandPaletteOpen}
   {rootPath}

@@ -925,3 +925,189 @@ mod tests {
         assert_eq!(update.callback_name(), "reviewAnchorResolution");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bootstrap integration tests (attn-nnj.6.6)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod bootstrap_integration_tests {
+    use super::*;
+    use crate::review::bootstrap::{
+        BootstrapConfig, Bootstrapper, build_invite_url, load_identity_from,
+    };
+    use crate::review::crypto::kdf::derive_room_id;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::mpsc;
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Wire a manager pre-loaded with a bootstrap pipeline pointing at the
+    /// supplied wiremock URL. Returns the manager + the receiver of emitted
+    /// updates + a temp dir holding both the store and the identity file.
+    fn make_bootstrapped_manager(
+        relay_url: String,
+    ) -> (
+        ReviewManager,
+        mpsc::Receiver<ReviewUpdate>,
+        TempDir,
+        TempDir,
+    ) {
+        let store_tmp = TempDir::new().expect("store tempdir");
+        let id_tmp = TempDir::new().expect("id tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(store_tmp.path().join("reviews")).expect("open store"),
+        );
+        let working_copy = Arc::new(WorkingCopyService::new());
+
+        let (tx, rx) = mpsc::channel::<ReviewUpdate>();
+        let tx = StdMutex::new(tx);
+        let sink: UpdateSink = Box::new(move |update| {
+            let _ = tx.lock().expect("sink mutex").send(update);
+        });
+
+        let cfg = Arc::new(BootstrapConfig {
+            relay_url,
+            identity_dir: Some(id_tmp.path().to_path_buf()),
+        });
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("client");
+        let boot = Arc::new(Bootstrapper::with_http_client(
+            Arc::clone(&store),
+            cfg,
+            http,
+        ));
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime"),
+        );
+        let cache = Arc::new(RwLock::new(HashMap::new()));
+        let mgr = ReviewManager::new(store, working_copy, sink)
+            .with_bootstrap_components(boot, runtime, cache);
+        (mgr, rx, store_tmp, id_tmp)
+    }
+
+    /// Set up wiremock stubs accepting any room create + device register.
+    async fn mount_create_and_register(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/v2/rooms/[A-Za-z0-9_-]+$",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "roomId": "any",
+                "createdAt": 0u64,
+                "expiresAt": 0u64,
+                "policy": {},
+                "ownerSigningKeyId": "k",
+                "serverSeq": 0,
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/v2/rooms/[A-Za-z0-9_-]+/devices$",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_get_devices_empty(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"^/v2/rooms/[A-Za-z0-9_-]+/devices$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "devices": []
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[test]
+    fn submit_share_with_bootstrap_emits_live_status_with_invite() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let server = runtime.block_on(MockServer::start());
+        runtime.block_on(mount_create_and_register(&server));
+
+        let (mgr, rx, _store_tmp, id_tmp) = make_bootstrapped_manager(server.uri());
+        mgr.submit(ReviewCommand::Share {
+            path: std::path::PathBuf::from("/tmp/manager-share.md"),
+            mode: "async".to_string(),
+            ttl: None,
+        });
+
+        let update = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("update");
+        match update {
+            ReviewUpdate::RoomStatusChanged { status, .. } => {
+                assert!(
+                    status.starts_with("Live|attn://review/"),
+                    "status must encode invite, got: {status}"
+                );
+                // No follow-up error update.
+                assert!(rx.try_recv().is_err(), "single update per Share");
+            }
+            other => panic!("expected RoomStatusChanged, got {other:?}"),
+        }
+        // Identity must be on disk.
+        let identity = load_identity_from(id_tmp.path()).expect("load id").expect("present");
+        assert!(!identity.device_id.is_empty());
+        assert!(!identity.public_signing_key.is_empty());
+    }
+
+    #[test]
+    fn submit_join_with_bootstrap_emits_joined_status() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let server = runtime.block_on(MockServer::start());
+        runtime.block_on(mount_create_and_register(&server));
+        runtime.block_on(mount_get_devices_empty(&server));
+
+        let (mgr, rx, _store_tmp, _id_tmp) = make_bootstrapped_manager(server.uri());
+
+        let secret = [0x33u8; 32];
+        let room_id = derive_room_id(&secret);
+        let invite = build_invite_url(&room_id, &secret);
+
+        mgr.submit(ReviewCommand::Join {
+            invite: invite.clone(),
+        });
+        let update = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("update");
+        match update {
+            ReviewUpdate::RoomStatusChanged {
+                room_id: rid,
+                status,
+            } => {
+                assert_eq!(rid, room_id);
+                assert_eq!(status, "Joined");
+            }
+            other => panic!("expected RoomStatusChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_join_with_malformed_invite_emits_error_update() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let server = runtime.block_on(MockServer::start());
+        let (mgr, rx, _store_tmp, _id_tmp) = make_bootstrapped_manager(server.uri());
+
+        mgr.submit(ReviewCommand::Join {
+            invite: "not-an-invite".to_string(),
+        });
+        let update = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("update");
+        match update {
+            ReviewUpdate::Error { code, .. } => {
+                assert_eq!(code, "ATTN_INVITE_PARSE");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+}

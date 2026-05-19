@@ -170,9 +170,65 @@ export function buildReviewDecorations(
         }),
       );
     }
+
+    // Suggestion ghost text: render the PROPOSED replacement/insertion
+    // inline (green) right after the anchored range so the author sees
+    // exactly what the reviewer is proposing — the editorial "suggesting
+    // mode" surface. Deletions are already conveyed by the red
+    // `suggestion-deletion` strikethrough on the range itself.
+    for (const item of visible) {
+      if (item.kind !== 'suggestion' && item.kind !== 'suggestion-deletion') {
+        continue;
+      }
+      const ghost = ghostInsertionText(eventIndex, item.eventId);
+      if (ghost === null) continue;
+      out.push(
+        Decoration.widget(entry.to, () => suggestionGhostWidget(ghost, item.eventId), {
+          side: 1,
+          key: `${entry.from}:${entry.to}:${item.eventId}:ghost`,
+        }),
+      );
+    }
   }
 
   return out;
+}
+
+/**
+ * The text a suggestion proposes to insert, for inline ghost rendering.
+ * `Replace` → replacement; `InsertBefore`/`InsertAfter` → inserted text;
+ * `Delete` → `null` (the strikethrough already conveys it).
+ */
+function ghostInsertionText(
+  index: Map<EventId, ReviewEvent>,
+  eventId: EventId,
+): string | null {
+  const event = index.get(eventId);
+  if (!event || event.body.type !== 'suggestion_created') return null;
+  const op = event.body.operation;
+  switch (op.kind) {
+    case 'replace':
+      return op.replacement;
+    case 'insert_before':
+    case 'insert_after':
+      return op.text;
+    case 'delete':
+      return null;
+  }
+}
+
+/** Build the green ghost-text widget DOM node for a proposed insertion. */
+function suggestionGhostWidget(text: string, eventId: EventId): HTMLElement {
+  const span = document.createElement('span');
+  span.className = 'attn-suggestion-ghost';
+  span.setAttribute('data-event-id', eventId);
+  span.setAttribute('data-review-kind', 'suggestion-insertion');
+  span.setAttribute('aria-label', `Suggested insertion: ${text}`);
+  span.setAttribute('role', 'mark');
+  // Truncate very long proposals in the inline view; the full text lives
+  // in the margin card.
+  span.textContent = text.length > 120 ? `${text.slice(0, 117)}…` : text;
+  return span;
 }
 
 // ---------------------------------------------------------------------------

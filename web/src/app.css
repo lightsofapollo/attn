@@ -748,6 +748,22 @@
     text-decoration-thickness: 1px;
   }
 
+  /* Inline ghost text for a proposed insertion/replacement — the editorial
+     "suggesting mode" surface. Green to read as "added", slightly inset so
+     it's visually distinct from the author's own prose. */
+  .attn-suggestion-ghost {
+    background-color: color-mix(in oklab, oklch(0.72 0.18 150) 22%, transparent);
+    color: color-mix(in oklab, oklch(0.45 0.16 150) 90%, var(--foreground));
+    border-radius: 2px;
+    padding: 0 2px;
+    margin-inline-start: 2px;
+    text-decoration: underline;
+    text-decoration-style: solid;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+
   .attn-review-confidence--high {
     background-color: var(--confidence-high);
   }

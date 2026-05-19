@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 
 const {
+  accessSync,
   chmodSync,
+  constants: fsConstants,
   createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -58,6 +61,22 @@ async function main() {
   const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
   const version = packageJson.version;
   const headless = isHeadlessInvocation(args);
+
+  // Prefer a natively-installed `attn` over anything we'd download. A dev
+  // who built the binary, a Homebrew/cargo install, or a prior
+  // `npx attnmd` that installed the ~/.local/bin alias should all be used
+  // directly — `npx attnmd` becomes a thin "use what's here, else fetch"
+  // shim rather than always pulling its own copy. The recursion guard in
+  // `findNativeBinary` excludes this package's own launcher so a global
+  // `npm i -g attn` symlink can't loop back here.
+  const nativeBinary = findNativeBinary();
+  if (nativeBinary) {
+    if (process.env.ATTN_DEBUG_LAUNCHER) {
+      console.error(`attn: using native binary ${nativeBinary}`);
+    }
+    run(nativeBinary, args);
+    return;
+  }
 
   let appPath = null;
   if (process.platform === "darwin") {
@@ -148,6 +167,109 @@ function findGlobalAppInstall() {
     }
   }
   return null;
+}
+
+/**
+ * Locate an already-installed `attn` we can hand off to instead of
+ * downloading. Priority:
+ *   1. $ATTN_BIN explicit override
+ *   2. `attn` on PATH (via `command -v`)
+ *   3. The ~/.local/bin alias this launcher installs on first run
+ *   4. Common manual / package-manager install dirs (Homebrew, cargo)
+ *
+ * Each candidate is validated by `isUsableNativeBinary`, which rejects
+ * anything inside this npm package (so a global `npm i -g attn` symlink,
+ * whose realpath points back at bin/attn.js, can't cause infinite
+ * recursion).
+ */
+function findNativeBinary() {
+  const candidates = [];
+
+  if (process.env.ATTN_BIN) {
+    candidates.push(process.env.ATTN_BIN);
+  }
+
+  const onPath = whichAttn();
+  if (onPath) {
+    candidates.push(onPath);
+  }
+
+  candidates.push(
+    installLinkPath, // ~/.local/bin/attn — the alias we install ourselves
+    "/opt/homebrew/bin/attn",
+    "/usr/local/bin/attn",
+    join(userHome, ".cargo", "bin", "attn"),
+  );
+
+  for (const candidate of candidates) {
+    if (isUsableNativeBinary(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/** Resolve `attn` on PATH without throwing. Returns null when not found. */
+function whichAttn() {
+  const probe = spawnSync(
+    process.platform === "win32" ? "where" : "command",
+    process.platform === "win32" ? ["attn"] : ["-v", "attn"],
+    { encoding: "utf8", shell: process.platform !== "win32" },
+  );
+  if (probe.status !== 0 || !probe.stdout) {
+    return null;
+  }
+  const first = probe.stdout.split("\n").map((l) => l.trim()).find(Boolean);
+  return first || null;
+}
+
+/**
+ * True when `candidate` is an executable we can safely exec as a real
+ * `attn` — i.e. it exists, is executable, and (after symlink resolution)
+ * does NOT live inside this npm package. The last check is the recursion
+ * guard: a global `npm i -g attn` makes `attn` on PATH a symlink to
+ * `<package>/bin/attn.js`; handing off to that would re-enter this script
+ * forever.
+ */
+function isUsableNativeBinary(candidate) {
+  if (!candidate) return false;
+  try {
+    accessSync(candidate, fsConstants.X_OK);
+  } catch {
+    return false;
+  }
+  let resolved;
+  try {
+    resolved = realpathSync(candidate);
+  } catch {
+    return false;
+  }
+  // Recursion guard: never hand off to another copy of THIS launcher.
+  // Two ways that happens:
+  //   1. The candidate resolves to this exact file (a symlink to it).
+  //   2. A global `npm i -g attn` makes `attn` on PATH a symlink to some
+  //      package's `bin/attn.js`; any `.js` is a node launcher, not a
+  //      native binary, so reject it.
+  // A compiled binary under this repo's `target/` (dev builds) is fine —
+  // it can't re-enter this script — so we deliberately DON'T reject the
+  // whole package dir, only the launcher itself + the `bin/` dir + `.js`.
+  try {
+    if (resolved === realpathSync(__filename)) return false;
+  } catch {
+    /* __filename always resolves; ignore */
+  }
+  if (resolved.endsWith(".js")) return false;
+  const binDirReal = (() => {
+    try {
+      return realpathSync(join(packageDir, "bin"));
+    } catch {
+      return join(packageDir, "bin");
+    }
+  })();
+  if (resolved.startsWith(binDirReal + "/") || resolved === binDirReal) {
+    return false;
+  }
+  return true;
 }
 
 function ensureCurrentAppLink(appPath) {

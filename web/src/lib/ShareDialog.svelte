@@ -235,28 +235,80 @@
     </Dialog.Header>
 
     <!-- ============================================================
-         Primary card: the URL. This is the whole point of the dialog.
+         Primary card: the one-liner command. This works for ANYONE —
+         npx uses a locally-installed attn if present, else downloads on
+         first run. No account, no signup, no "do you have the app?".
          ============================================================ -->
     <div
       class="flex w-full min-w-0 flex-col gap-2 overflow-hidden rounded-lg border border-primary/40 bg-primary/5 p-4 transition-colors"
-      data-slot="share-url-card"
+      data-slot="share-command-card"
     >
       <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        <Link class="size-3.5" aria-hidden="true" />
-        Reviewer link
+        <Terminal class="size-3.5" aria-hidden="true" />
+        Send this command
       </div>
       {#if isMinting}
         <div class="flex items-center gap-2 py-1.5 text-sm text-muted-foreground" data-slot="share-minting">
           <span class="inline-block size-3 animate-pulse rounded-full bg-primary/60" aria-hidden="true"></span>
           Minting room…
         </div>
-      {:else if isReady && inviteUrl.length > 0}
-        <!-- The URL itself is the headline — click anywhere on it to
-             select + auto-copy. The explicit Copy button sits below as a
-             primary CTA so it can't be clipped on narrow viewports. -->
+      {:else if isReady && cliCommand.length > 0}
         <button
           type="button"
-          class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 text-left font-mono text-xs text-foreground hover:border-primary/60 hover:bg-background"
+          class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 text-left font-mono text-xs text-foreground hover:border-primary/60"
+          data-slot="share-cli-command"
+          onclick={handleCopyCli}
+          title="Click to copy"
+        >
+          <span class="block truncate">{cliCommand}</span>
+        </button>
+        <Button
+          type="button"
+          variant="default"
+          size="default"
+          onclick={handleCopyCli}
+          data-slot="share-copy-cli"
+          class="w-full"
+        >
+          {#if copiedCli}
+            <Check class="size-4" aria-hidden="true" />
+            <span>Copied to clipboard</span>
+          {:else}
+            <Copy class="size-4" aria-hidden="true" />
+            <span>Copy invite command</span>
+          {/if}
+        </Button>
+        <p class="text-xs text-muted-foreground">
+          Send this to anyone. <code>npx</code> uses their installed attn if they have
+          one, otherwise downloads it on first run — no account, no signup. They join
+          over an end-to-end encrypted channel.
+        </p>
+      {:else}
+        <input
+          type="text"
+          class="rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-muted-foreground"
+          readonly
+          value=""
+          placeholder="npx attnmd review join … (generated after Start)"
+          data-slot="share-cli-command"
+        />
+      {/if}
+    </div>
+
+    <!-- ============================================================
+         Secondary card: the raw attn:// link — for reviewers who have
+         attn installed and want a clickable deep-link instead of a
+         terminal command.
+         ============================================================ -->
+    {#if isReady && inviteUrl.length > 0}
+      <div class="flex w-full min-w-0 flex-col gap-2 overflow-hidden rounded-lg border border-border/60 bg-muted/30 p-4" data-slot="share-url-card">
+        <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          <Link class="size-3.5" aria-hidden="true" />
+          Direct link
+        </div>
+        <button
+          type="button"
+          class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 text-left font-mono text-xs text-foreground hover:border-primary/60"
           data-slot="share-invite-url-button"
           onclick={handleCopyUrl}
           title="Click to copy"
@@ -275,7 +327,7 @@
         />
         <Button
           type="button"
-          variant={copiedUrl ? 'default' : 'default'}
+          variant="outline"
           size="default"
           onclick={handleCopyUrl}
           data-slot="share-copy-url"
@@ -283,65 +335,14 @@
         >
           {#if copiedUrl}
             <Check class="size-4" aria-hidden="true" />
-            <span>Copied to clipboard</span>
+            <span>Copied link</span>
           {:else}
             <Copy class="size-4" aria-hidden="true" />
-            <span>Copy reviewer link</span>
+            <span>Copy direct link</span>
           {/if}
         </Button>
         <p class="text-xs text-muted-foreground">
-          Send this to anyone you want to review with. They'll join over an end-to-end
-          encrypted channel — no account, no signup.
-        </p>
-      {:else}
-        <input
-          type="text"
-          class="rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-muted-foreground"
-          readonly
-          value=""
-          placeholder="attn://review/… (generated after Start)"
-          data-slot="share-invite-url"
-        />
-      {/if}
-    </div>
-
-    <!-- ============================================================
-         Secondary card: CLI fallback for headless reviewers / agents.
-         ============================================================ -->
-    {#if isReady && cliCommand.length > 0}
-      <div class="flex w-full min-w-0 flex-col gap-2 overflow-hidden rounded-lg border border-border/60 bg-muted/30 p-4" data-slot="share-cli-card">
-        <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          <Terminal class="size-3.5" aria-hidden="true" />
-          Terminal command
-        </div>
-        <button
-          type="button"
-          class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 text-left font-mono text-xs text-foreground hover:border-primary/60"
-          data-slot="share-cli-command"
-          onclick={handleCopyCli}
-          title="Click to copy"
-        >
-          <span class="block truncate">{cliCommand}</span>
-        </button>
-        <Button
-          type="button"
-          variant="outline"
-          size="default"
-          onclick={handleCopyCli}
-          data-slot="share-copy-cli"
-          class="w-full"
-        >
-          {#if copiedCli}
-            <Check class="size-4" aria-hidden="true" />
-            <span>Copied command</span>
-          {:else}
-            <Copy class="size-4" aria-hidden="true" />
-            <span>Copy terminal command</span>
-          {/if}
-        </Button>
-        <p class="text-xs text-muted-foreground">
-          Zero-install: <code>npx</code> downloads attn on first run. For AI agents,
-          automation, or anyone whose browser doesn't open <code>attn://</code> links.
+          Opens directly in attn for reviewers who already have it installed.
         </p>
       </div>
     {/if}

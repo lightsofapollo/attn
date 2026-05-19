@@ -1,7 +1,16 @@
-{"_schema":{"spec":"planning/collab/crypto-spec.md#canonical-json-rfc-8785-jcs","purpose":"Pin canonical JSON serialization across Rust and TS.","format":"Newline-delimited JSON. Each line is either this schema object (first line only) OR a vector object: {\"name\": str, \"input\": <any>, \"canonical\": <utf8 string>}. The `canonical` field is the EXACT byte sequence the implementation must produce when serializing `input`.","rules":["Object keys sorted ASCII-ascending","No insignificant whitespace","UTF-8 no BOM","Numbers per ECMA-404 + IEEE 754 round-trip; in signed payloads we restrict to integers","null is `null`; absent fields are OMITTED (never serialized as null)","String escapes minimal: only control chars, `\\\"`, and `\\\\`"],"filledBy":"attn-nnj.1.3 (Canonical JSON helper)"}}
-{"name":"nested object with sorted keys","input":{"b":2,"a":{"y":[3,2,1],"x":"hi"}},"canonical":"__PENDING__"}
-{"name":"unicode strings (BMP + surrogate-pair)","input":{"emoji":"😀","greek":"αβγ"},"canonical":"__PENDING__"}
-{"name":"integer numbers and arrays","input":{"counts":[0,1,9007199254740991,-1]},"canonical":"__PENDING__"}
-{"name":"omitted-null vs explicit-null (omitted field MUST disappear)","input":{"snapshotId":null,"present":"yes"},"canonical":"__PENDING__"}
-{"name":"empty containers","input":{"obj":{},"arr":[]},"canonical":"__PENDING__"}
-{"name":"string escaping (control chars + quote + backslash)","input":{"s":"line1\nline2\t\"quoted\"\\back"},"canonical":"__PENDING__"}
+{"_schema":{"spec":"planning/collab/crypto-spec.md#canonical-json-rfc-8785-jcs","purpose":"Pin canonical JSON serialization across Rust and TS.","format":"Newline-delimited JSON. Each line is either this schema object (first line only) OR a vector object: {\"name\": str, \"input\": <any>, \"canonical\": <utf8 string>}. The `canonical` field is the EXACT byte sequence the implementation must produce when serializing `input`.","rules":["Object keys sorted ASCII-ascending","No insignificant whitespace","UTF-8 no BOM","Numbers per ECMA-404 + IEEE 754 round-trip; in signed payloads we restrict to integers","null is `null`; absent fields are OMITTED (never serialized as null)","String escapes minimal: only control chars (\\u00XX, lowercase hex), `\\\"`, and `\\\\`"],"filledBy":"attn-nnj.1.3 (Canonical JSON helper)"}}
+{"name":"empty object","input":{},"canonical":"{}"}
+{"name":"empty array","input":[],"canonical":"[]"}
+{"name":"key sort places capitals before lowercase (ASCII)","input":{"b":1,"A":2,"a":3},"canonical":"{\"A\":2,\"a\":3,\"b\":1}"}
+{"name":"nested object with sorted keys","input":{"b":2,"a":{"y":[3,2,1],"x":"hi"}},"canonical":"{\"a\":{\"x\":\"hi\",\"y\":[3,2,1]},\"b\":2}"}
+{"name":"empty containers (arr sorts before obj)","input":{"obj":{},"arr":[]},"canonical":"{\"arr\":[],\"obj\":{}}"}
+{"name":"unicode strings (BMP + supplementary) emitted as raw UTF-8","input":{"emoji":"😀","greek":"αβγ"},"canonical":"{\"emoji\":\"😀\",\"greek\":\"αβγ\"}"}
+{"name":"integer numbers including 2^53-1 and negatives","input":{"counts":[0,1,9007199254740991,-1]},"canonical":"{\"counts\":[0,1,9007199254740991,-1]}"}
+{"name":"omitted-null vs explicit-null (object null fields disappear)","input":{"snapshotId":null,"present":"yes"},"canonical":"{\"present\":\"yes\"}"}
+{"name":"nulls inside arrays are preserved","input":{"arr":[1,null,2]},"canonical":"{\"arr\":[1,null,2]}"}
+{"name":"string escaping (control chars use \\u00XX, quote+backslash use shortform)","input":{"s":"line1\nline2\t\"quoted\"\\back"},"canonical":"{\"s\":\"line1\\u000aline2\\u0009\\\"quoted\\\"\\\\back\"}"}
+{"name":"recursive null-drop (nested object becomes pruned)","input":{"a":{"b":null,"c":2}},"canonical":"{\"a\":{\"c\":2}}"}
+{"name":"booleans round-trip","input":{"t":true,"f":false},"canonical":"{\"f\":false,\"t\":true}"}
+{"name":"array order is preserved (canonical JSON does NOT sort arrays)","input":{"meta":{"parentEventIds":["evt-c","evt-a","evt-b"],"v":2}},"canonical":"{\"meta\":{\"parentEventIds\":[\"evt-c\",\"evt-a\",\"evt-b\"],\"v\":2}}"}
+{"name":"camelCase keys (typical attn schema) sort deterministically","input":{"snapshotId":"snap-1","authorId":"author-1","createdAt":1700000000000},"canonical":"{\"authorId\":\"author-1\",\"createdAt\":1700000000000,\"snapshotId\":\"snap-1\"}"}
+{"name":"unit separator (U+001F) — highest control char that gets escaped","input":{"x":"\u001f"},"canonical":"{\"x\":\"\\u001f\"}"}

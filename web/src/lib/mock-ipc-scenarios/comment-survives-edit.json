@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "name": "comment-survives-edit",
+  "description": "Owner edits the paragraph containing the reviewer's anchor; resolver remaps the comment via the quote-match fallback so the thread survives.",
+  "defaultDelayMs": 80,
+  "steps": [
+    {
+      "delayMs": 0,
+      "kind": "status",
+      "payload": {
+        "roomId": "scenario-room-1",
+        "mode": "hybrid",
+        "connection": "live_direct",
+        "peers": [
+          {
+            "participantId": "owner-1",
+            "deviceId": "owner-device-1",
+            "displayName": "Owner",
+            "kind": "owner",
+            "online": true,
+            "onSnapshotId": "snap-1"
+          },
+          {
+            "participantId": "reviewer-1",
+            "deviceId": "reviewer-device-1",
+            "displayName": "Reviewer",
+            "kind": "reviewer",
+            "online": true,
+            "onSnapshotId": "snap-1"
+          }
+        ],
+        "outboxPending": 0,
+        "lastImportedSeq": 0
+      }
+    },
+    {
+      "delayMs": 50,
+      "kind": "snapshot",
+      "payload": {
+        "roomId": "scenario-room-1",
+        "fileId": "scenario-file-1",
+        "snapshotId": "snap-1",
+        "createdAt": 1700000000000,
+        "createdBy": "owner-1",
+        "baseHash": "hash-snap-1",
+        "byteLength": 86,
+        "markdown": "## Anchor Target\n\nThe paragraph immediately following this heading is the primary anchor target.\n"
+      }
+    },
+    {
+      "delayMs": 80,
+      "kind": "event",
+      "payload": {
+        "meta": {
+          "v": 2,
+          "eventId": "evt-comment-1",
+          "roomId": "scenario-room-1",
+          "authorId": "reviewer-1",
+          "deviceId": "reviewer-device-1",
+          "createdAt": 1700000001000,
+          "parentEventIds": [],
+          "snapshotId": "snap-1"
+        },
+        "body": {
+          "type": "comment_created",
+          "threadId": "thread-1",
+          "anchor": {
+            "v": 2,
+            "fileId": "scenario-file-1",
+            "snapshotId": "snap-1",
+            "baseHash": "hash-snap-1",
+            "position": {
+              "byteRange": [20, 100],
+              "lineRange": [3, 3]
+            },
+            "quote": {
+              "exact": "primary anchor target",
+              "exactHash": "qh-primary-anchor-target",
+              "normalized": "primary anchor target",
+              "normalizedHash": "qhn-primary-anchor-target"
+            }
+          },
+          "body": "Should this read \"primary review target\" instead?"
+        },
+        "auth": {
+          "signature": "scenario-sig",
+          "signingKeyId": "scenario-key-reviewer-1"
+        }
+      }
+    },
+    {
+      "delayMs": 120,
+      "kind": "snapshot",
+      "payload": {
+        "roomId": "scenario-room-1",
+        "fileId": "scenario-file-1",
+        "snapshotId": "snap-2",
+        "parentSnapshotId": "snap-1",
+        "createdAt": 1700000002000,
+        "createdBy": "owner-1",
+        "baseHash": "hash-snap-2",
+        "byteLength": 140,
+        "markdown": "## Anchor Target\n\nAfter the owner inserts a clarifying note, the paragraph immediately following this heading is the primary anchor target.\n"
+      }
+    },
+    {
+      "delayMs": 60,
+      "kind": "anchor_resolution",
+      "payload": {
+        "roomId": "scenario-room-1",
+        "fileId": "scenario-file-1",
+        "eventId": "evt-comment-1",
+        "resolved": {
+          "status": "remapped",
+          "confidence": 0.9,
+          "currentRange": {
+            "byteRange": [82, 103],
+            "lineRange": [3, 3]
+          },
+          "reason": "quote_match"
+        }
+      }
+    }
+  ]
+}

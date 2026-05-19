@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "name": "stale-suggestion",
+  "description": "Reviewer suggests a replacement on a paragraph the owner then deletes; the resolver reports status=stale so the right rail can render a stale chip.",
+  "defaultDelayMs": 80,
+  "steps": [
+    {
+      "delayMs": 0,
+      "kind": "status",
+      "payload": {
+        "roomId": "scenario-room-3",
+        "mode": "hybrid",
+        "connection": "live_direct",
+        "peers": [
+          {
+            "participantId": "owner-1",
+            "deviceId": "owner-device-1",
+            "displayName": "Owner",
+            "kind": "owner",
+            "online": true,
+            "onSnapshotId": "snap-stale-1"
+          },
+          {
+            "participantId": "reviewer-1",
+            "deviceId": "reviewer-device-1",
+            "displayName": "Reviewer",
+            "kind": "reviewer",
+            "online": false
+          }
+        ],
+        "outboxPending": 0
+      }
+    },
+    {
+      "delayMs": 50,
+      "kind": "snapshot",
+      "payload": {
+        "roomId": "scenario-room-3",
+        "fileId": "scenario-file-3",
+        "snapshotId": "snap-stale-1",
+        "createdAt": 1700000020000,
+        "createdBy": "owner-1",
+        "baseHash": "hash-stale-1",
+        "byteLength": 90,
+        "markdown": "## Notes\n\nThis paragraph will be deleted by the owner.\n\nKeep this paragraph.\n"
+      }
+    },
+    {
+      "delayMs": 80,
+      "kind": "event",
+      "payload": {
+        "meta": {
+          "v": 2,
+          "eventId": "evt-suggestion-stale-1",
+          "roomId": "scenario-room-3",
+          "authorId": "reviewer-1",
+          "deviceId": "reviewer-device-1",
+          "createdAt": 1700000021000,
+          "parentEventIds": [],
+          "snapshotId": "snap-stale-1"
+        },
+        "body": {
+          "type": "suggestion_created",
+          "suggestionId": "sugg-stale-1",
+          "anchor": {
+            "v": 2,
+            "fileId": "scenario-file-3",
+            "snapshotId": "snap-stale-1",
+            "baseHash": "hash-stale-1",
+            "position": {
+              "byteRange": [11, 60],
+              "lineRange": [3, 3]
+            },
+            "quote": {
+              "exact": "This paragraph will be deleted by the owner.",
+              "exactHash": "qh-deleted-paragraph",
+              "normalized": "this paragraph will be deleted by the owner",
+              "normalizedHash": "qhn-deleted-paragraph"
+            }
+          },
+          "operation": {
+            "kind": "replace",
+            "expectedText": "This paragraph will be deleted by the owner.",
+            "replacement": "This paragraph will be reworded instead."
+          },
+          "note": "Soften the tone here."
+        },
+        "auth": {
+          "signature": "scenario-sig",
+          "signingKeyId": "scenario-key-reviewer-1"
+        }
+      }
+    },
+    {
+      "delayMs": 120,
+      "kind": "snapshot",
+      "payload": {
+        "roomId": "scenario-room-3",
+        "fileId": "scenario-file-3",
+        "snapshotId": "snap-stale-2",
+        "parentSnapshotId": "snap-stale-1",
+        "createdAt": 1700000022000,
+        "createdBy": "owner-1",
+        "baseHash": "hash-stale-2",
+        "byteLength": 35,
+        "markdown": "## Notes\n\nKeep this paragraph.\n"
+      }
+    },
+    {
+      "delayMs": 60,
+      "kind": "anchor_resolution",
+      "payload": {
+        "roomId": "scenario-room-3",
+        "fileId": "scenario-file-3",
+        "eventId": "evt-suggestion-stale-1",
+        "resolved": {
+          "status": "stale",
+          "reason": "no_candidates"
+        }
+      }
+    }
+  ]
+}

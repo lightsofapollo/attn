@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "name": "ambiguous-anchor",
+  "description": "Reviewer comment quote appears in two near-identical paragraphs; the resolver returns status=ambiguous with multiple candidates so the picker UI fires.",
+  "defaultDelayMs": 80,
+  "steps": [
+    {
+      "delayMs": 0,
+      "kind": "status",
+      "payload": {
+        "roomId": "scenario-room-2",
+        "mode": "async",
+        "connection": "mailbox",
+        "peers": [
+          {
+            "participantId": "owner-1",
+            "deviceId": "owner-device-1",
+            "displayName": "Owner",
+            "kind": "owner",
+            "online": true,
+            "onSnapshotId": "snap-amb-1"
+          }
+        ],
+        "outboxPending": 0
+      }
+    },
+    {
+      "delayMs": 50,
+      "kind": "snapshot",
+      "payload": {
+        "roomId": "scenario-room-2",
+        "fileId": "scenario-file-2",
+        "snapshotId": "snap-amb-1",
+        "createdAt": 1700000010000,
+        "createdBy": "owner-1",
+        "baseHash": "hash-amb-1",
+        "byteLength": 220,
+        "markdown": "## Section A\n\nThe shared phrase appears here.\n\n## Section B\n\nThe shared phrase appears here too.\n"
+      }
+    },
+    {
+      "delayMs": 80,
+      "kind": "event",
+      "payload": {
+        "meta": {
+          "v": 2,
+          "eventId": "evt-comment-amb-1",
+          "roomId": "scenario-room-2",
+          "authorId": "reviewer-1",
+          "deviceId": "reviewer-device-1",
+          "createdAt": 1700000011000,
+          "parentEventIds": [],
+          "snapshotId": "snap-amb-1"
+        },
+        "body": {
+          "type": "comment_created",
+          "threadId": "thread-amb-1",
+          "anchor": {
+            "v": 2,
+            "fileId": "scenario-file-2",
+            "snapshotId": "snap-amb-1",
+            "baseHash": "hash-amb-1",
+            "position": {
+              "byteRange": [14, 35],
+              "lineRange": [3, 3]
+            },
+            "quote": {
+              "exact": "The shared phrase",
+              "exactHash": "qh-shared-phrase",
+              "normalized": "the shared phrase",
+              "normalizedHash": "qhn-shared-phrase"
+            }
+          },
+          "body": "Which occurrence is this comment about?"
+        },
+        "auth": {
+          "signature": "scenario-sig",
+          "signingKeyId": "scenario-key-reviewer-1"
+        }
+      }
+    },
+    {
+      "delayMs": 60,
+      "kind": "anchor_resolution",
+      "payload": {
+        "roomId": "scenario-room-2",
+        "fileId": "scenario-file-2",
+        "eventId": "evt-comment-amb-1",
+        "resolved": {
+          "status": "ambiguous",
+          "reason": "top_two_within_0.10",
+          "candidates": [
+            {
+              "confidence": 0.88,
+              "currentRange": {
+                "byteRange": [14, 35],
+                "lineRange": [3, 3]
+              },
+              "reason": "quote_match",
+              "preview": "The shared phrase appears here."
+            },
+            {
+              "confidence": 0.86,
+              "currentRange": {
+                "byteRange": [55, 76],
+                "lineRange": [7, 7]
+              },
+              "reason": "quote_match",
+              "preview": "The shared phrase appears here too."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -129,6 +129,20 @@ function uniqueRoomId(label: string): string {
   return `accept-${label}-${Date.now().toString(36)}-${roomCounter}`;
 }
 
+/**
+ * Each test gets a unique source IP so the Worker-edge per-IP rate cap and
+ * anti-enum bucket (600/min and 30 unknown-rooms/5min respectively) don't
+ * cross-contaminate the rest of the suite. The acceptance suite runs alongside
+ * rate-limit.test.ts inside the same Worker isolate; without per-test IPs, the
+ * cumulative "unknown" IP bucket would push downstream tests over the limit.
+ */
+function testIp(): string {
+  // 10.<roomCounter-hi>.<roomCounter-lo>.1 — unique per test invocation.
+  const hi = (roomCounter >> 8) & 0xff;
+  const lo = roomCounter & 0xff;
+  return `10.250.${hi}.${lo === 0 ? 1 : lo}`;
+}
+
 interface SubtleKeypair {
   publicKey: CryptoKey;
   privateKey: CryptoKey;
@@ -179,7 +193,7 @@ async function createRoom(opts: {
   });
   const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "CF-Connecting-IP": testIp() },
     body,
   });
   if (res.status !== 201) {
@@ -287,6 +301,7 @@ async function registerDevice(opts: {
       "Content-Type": "application/json",
       "Attn-Admission": adm,
       "Attn-PoW": pow,
+      "CF-Connecting-IP": testIp(),
     },
     body,
   });
@@ -350,7 +365,10 @@ async function postEnvelopes(opts: {
 }): Promise<Response> {
   const url = `${URL_BASE}/v2/rooms/${opts.roomId}/envelopes`;
   const body = JSON.stringify({ envelopes: opts.envelopes });
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "CF-Connecting-IP": testIp(),
+  };
   headers["Attn-Admission"] = await admissionHeaderFor({
     method: "POST",
     url,
@@ -385,7 +403,10 @@ async function postAcks(opts: {
 }): Promise<Response> {
   const url = `${URL_BASE}/v2/rooms/${opts.roomId}/acks`;
   const body = JSON.stringify(opts.body);
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "CF-Connecting-IP": testIp(),
+  };
   headers["Attn-Admission"] = await admissionHeaderFor({
     method: "POST",
     url,
@@ -420,7 +441,7 @@ async function deleteRoom(opts: {
   powDeviceId?: string;
 }): Promise<Response> {
   const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { "CF-Connecting-IP": testIp() };
   headers["Attn-Admission"] = await admissionHeaderFor({
     method: "DELETE",
     url,
@@ -463,7 +484,10 @@ async function openSocket(opts: {
   admissionKey: Uint8Array;
 }): Promise<{ ws: WebSocket; response: Response }> {
   const url = `${URL_BASE}/v2/rooms/${opts.roomId}/socket?device_id=${encodeURIComponent(opts.deviceId)}`;
-  const headers: Record<string, string> = { Upgrade: "websocket" };
+  const headers: Record<string, string> = {
+    Upgrade: "websocket",
+    "CF-Connecting-IP": testIp(),
+  };
   headers["Sec-WebSocket-Protocol"] = await buildSocketProtocolHeader({
     roomId: opts.roomId,
     deviceId: opts.deviceId,
@@ -1356,9 +1380,15 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
       method: "POST",
       path: `/v2/rooms/${roomId}/blobs`,
     });
+    const ip = testIp();
     const presignRes = await SELF.fetch(presignUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Attn-Admission": adm, "Attn-PoW": pow },
+      headers: {
+        "Content-Type": "application/json",
+        "Attn-Admission": adm,
+        "Attn-PoW": pow,
+        "CF-Connecting-IP": ip,
+      },
       body: presignBody,
     });
     expect(presignRes.status).toBe(200);
@@ -1374,14 +1404,17 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     // PUT to the presigned URL.
     const putRes = await SELF.fetch(`${URL_BASE}${presigned.uploadUrl}`, {
       method: "PUT",
-      headers: { "Content-Type": "application/octet-stream" },
+      headers: { "Content-Type": "application/octet-stream", "CF-Connecting-IP": ip },
       body: ciphertext,
     });
     expect(putRes.status).toBe(204);
 
     // GET via download URL.
     const download = await presignBlobDownload(env, roomId, "s7-blob");
-    const getRes = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, { method: "GET" });
+    const getRes = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, {
+      method: "GET",
+      headers: { "CF-Connecting-IP": ip },
+    });
     expect(getRes.status).toBe(200);
     const fetched = new Uint8Array(await getRes.arrayBuffer());
     expect(fetched.byteLength).toBe(blobBytes);
@@ -1436,7 +1469,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     const adm = await admissionHeaderFor({ method: "GET", url: getUrl, admissionKey });
     const probe = await SELF.fetch(getUrl, {
       method: "GET",
-      headers: { "Attn-Admission": adm },
+      headers: { "Attn-Admission": adm, "CF-Connecting-IP": testIp() },
     });
     expect(probe.status).toBe(404);
   });

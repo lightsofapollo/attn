@@ -36,7 +36,6 @@
   } from './lib/font-scale';
   import { initTheme } from './lib/theme';
   import { createTab, findTabByPath, type Tab } from './lib/tabs';
-  import CommentComposer from './lib/CommentComposer.svelte';
   import Editor from './lib/Editor.svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import TabBar from './lib/TabBar.svelte';
@@ -48,6 +47,9 @@
   import ReviewApplyExpand from './lib/ReviewApplyExpand.svelte';
   import ReviewBar from './lib/ReviewBar.svelte';
   import ShareDialog from './lib/ShareDialog.svelte';
+  import SuggestionComposer from './lib/SuggestionComposer.svelte';
+  import { hasTextSelection } from './lib/review/popover-anchor';
+  import type { ConstructAnchorContext } from './lib/review/anchors';
   import { toast } from 'svelte-sonner';
   import { Toaster } from '$lib/components/ui/sonner';
   import { SidebarProvider, SidebarInset } from '$lib/components/ui/sidebar';
@@ -140,52 +142,78 @@
   const reviewPlugin: PMPlugin = reviewDecorationsPlugin();
   const editorPlugins: PMPlugin[] = [reviewPlugin];
   let pmViewForReview: EditorView | undefined = $state(undefined);
-  let commentComposerRef: ReturnType<typeof CommentComposer> | undefined = $state(undefined);
 
   function handleEditorReady(view: EditorView): void {
     pmViewForReview = view;
   }
 
+  // ---------------------------------------------------------------------------
+  // Suggestion composer (attn-nnj.4.5)
+  //
+  // Cmd+Shift+. opens a popover composer anchored to the current PM
+  // selection. The composer needs a snapshot-scoped ConstructAnchorContext
+  // (FileId + SnapshotId + AnchorIndex + baseHash) which we resolve at
+  // open-time from the review store. If no active review room / snapshot is
+  // bound, the binding is a no-op — there's nothing to suggest against.
+  // ---------------------------------------------------------------------------
+
+  interface SuggestionComposerState {
+    view: EditorView;
+    from: number;
+    to: number;
+    anchorContext: ConstructAnchorContext;
+    roomId: import('./lib/types').RoomId;
+  }
+
+  let suggestionComposer = $state<SuggestionComposerState | null>(null);
+
   /**
-   * Open the comment composer (Cmd/Ctrl+. keybinding, per attn-nnj.4.4).
-   * Bails out if no editor view is mounted, the selection is empty, or we
-   * don't have the snapshot context needed to build a 5-layer Anchor — the
-   * Anchor's `snapshotId` / `baseHash` / `index` are all required by the
-   * resolver, so opening a composer without them would yield events that
-   * can never be replayed.
+   * Resolve the snapshot the suggestion should be authored against. Prefers
+   * the explicitly-locked `currentSnapshotId`; otherwise the most recently
+   * imported snapshot for the current file.
    */
-  function openCommentComposer(): void {
+  function resolveActiveSnapshotForCompose(): import('./lib/types').ReviewSnapshot | null {
+    const fileId = reviewStore.currentFileId;
+    const roomId = reviewStore.currentRoomId;
+    if (!fileId || !roomId) return null;
+    const lockedId = reviewStore.currentSnapshotId;
+    const candidates = reviewStore.snapshots.filter(
+      (s) => s.roomId === roomId && s.fileId === fileId,
+    );
+    if (candidates.length === 0) return null;
+    if (lockedId) {
+      const locked = candidates.find((s) => s.snapshotId === lockedId);
+      if (locked) return locked;
+    }
+    // Fallback: latest by createdAt.
+    return [...candidates].sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+  }
+
+  function openSuggestionComposer(): void {
     const view = pmViewForReview;
     if (!view) return;
-    if (view.state.selection.empty) return;
-
+    if (!hasTextSelection(view)) return;
     const roomId = reviewStore.currentRoomId;
-    const fileId = reviewStore.currentFileId;
-    if (!roomId || !fileId) return;
-
-    // Choose the snapshot the comment is being authored against. Prefer the
-    // explicitly-pinned `currentSnapshotId`; otherwise fall back to the most
-    // recently imported snapshot for the current file that carries an inline
-    // `anchorIndex` (only those are usable by `anchorFromSelection`).
-    const targetSnapshotId = reviewStore.currentSnapshotId;
-    const candidates = reviewStore.snapshots.filter(
-      (s) => s.fileId === fileId && s.anchorIndex !== undefined,
-    );
-    const snapshot = targetSnapshotId
-      ? candidates.find((s) => s.snapshotId === targetSnapshotId)
-      : candidates[candidates.length - 1];
+    if (!roomId) return;
+    const snapshot = resolveActiveSnapshotForCompose();
     if (!snapshot || !snapshot.anchorIndex) return;
-
-    commentComposerRef?.open({
+    const { from, to } = view.state.selection;
+    suggestionComposer = {
       view,
+      from,
+      to,
       roomId,
-      ctx: {
+      anchorContext: {
         index: snapshot.anchorIndex,
         fileId: snapshot.fileId,
         snapshotId: snapshot.snapshotId,
         baseHash: snapshot.baseHash,
       },
-    });
+    };
+  }
+
+  function closeSuggestionComposer(): void {
+    suggestionComposer = null;
   }
 
   // Touch reactive store reads here so Svelte schedules a rebuild whenever
@@ -1388,8 +1416,8 @@
       onShareOpen: () => {
         openShareDialog();
       },
-      onCommentComposer: () => {
-        openCommentComposer();
+      onSuggestionComposer: () => {
+        openSuggestionComposer();
       },
       // Three-way apply hooks (attn-nnj.8.3). Read the verdict from the
       // store each time so we always operate on the currently-open card;
@@ -1626,13 +1654,26 @@
 {/if}
 
 <svelte:window onkeydown={(e) => { handleGlobalShortcutsHelpHotkey(e); handleGlobalRightRailHotkey(e); }} />
-<KeyboardShortcutsDialog bind:open={shortcutsOpen} />
+<KeyboardShortcutsDialog
+  bind:open={shortcutsOpen}
+  hasSuggestionComposer={true}
+  hasToggleReviewPanel={true}
+/>
 <ShareDialog
   bind:open={shareDialogOpen}
   filePath={activePath}
 />
 <ReviewApplyExpand />
-<CommentComposer bind:this={commentComposerRef} />
+{#if suggestionComposer}
+  <SuggestionComposer
+    view={suggestionComposer.view}
+    from={suggestionComposer.from}
+    to={suggestionComposer.to}
+    anchorContext={suggestionComposer.anchorContext}
+    roomId={suggestionComposer.roomId}
+    onClose={closeSuggestionComposer}
+  />
+{/if}
 <CommandPalette
   bind:open={commandPaletteOpen}
   {rootPath}

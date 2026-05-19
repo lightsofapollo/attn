@@ -1013,6 +1013,17 @@ mod tests {
                 expires_at: 1_700_000_300_000,
                 difficulty: 12,
             },
+            EndpointSpec {
+                name: "POST /v2/rooms/:roomId — room create (owner bootstrap)",
+                method: "POST",
+                path_template: "/v2/rooms/:roomId",
+                path_substituted: "/v2/rooms/EXAMPLE_ROOM",
+                room_id: "EXAMPLE_ROOM",
+                device_id: "EXAMPLE_DEVICE",
+                rand_seed: 0x60,
+                expires_at: 1_700_000_300_000,
+                difficulty: 12,
+            },
         ];
 
         for spec in &specs {

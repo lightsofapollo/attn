@@ -889,4 +889,82 @@ mod tests {
         let id = derive_event_id(&meta, &body).unwrap();
         assert_eq!(id_to_string(&id).len(), 43);
     }
+
+    /// Helper: prints event-id vectors for parent-count edge cases (1, 3, 10).
+    /// Run with:
+    ///   cargo test review::crypto::ids::tests::print_event_id_parent_count_vectors \
+    ///     -- --ignored --nocapture
+    /// then copy the JSON into `planning/collab/test-vectors/event-id.json`.
+    #[test]
+    #[ignore]
+    fn print_event_id_parent_count_vectors() {
+        // Match the shared corpus inputs (roomId, author/device/snapshot).
+        // RoomId comes from roomSecret = 0x11 * 32; see event-id.json header.
+        let room_id_str = "hjCfgOvsatNOUedgxhZpyw";
+        let author_str = "p-author-01";
+        let device_str = "d-device-01";
+        let snapshot_str = "eQ7pDCC-mekpz-we7gDYag";
+        let base_hash_str = "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y";
+
+        for (label, parent_strs, created_at) in [
+            ("1-parent", vec!["evt-only"], 1_700_000_010_000u64),
+            (
+                "3-parents (out of order)",
+                vec!["evt-MMM", "evt-AAA", "evt-ZZZ"],
+                1_700_000_020_000,
+            ),
+            (
+                "10-parents (out of order)",
+                vec![
+                    "evt-09", "evt-01", "evt-08", "evt-02", "evt-07", "evt-03", "evt-06",
+                    "evt-04", "evt-05", "evt-00",
+                ],
+                1_700_000_030_000,
+            ),
+        ] {
+            let parents: Vec<EventId> = parent_strs
+                .iter()
+                .map(|s| typed_id::<EventId>(s))
+                .collect();
+            let meta = EventMeta {
+                v: 2,
+                event_id: typed_id::<EventId>("placeholder-event-id"),
+                room_id: typed_id::<RoomId>(room_id_str),
+                author_id: typed_id::<ParticipantId>(author_str),
+                device_id: typed_id::<DeviceId>(device_str),
+                created_at,
+                parent_event_ids: parents,
+                snapshot_id: Some(typed_id::<SnapshotId>(snapshot_str)),
+            };
+            let body = ReviewEventBody::CommentCreated {
+                thread_id: format!("thread-{label}"),
+                anchor: Anchor {
+                    v: 2,
+                    file_id: typed_id::<FileId>("f-file-01"),
+                    snapshot_id: typed_id::<SnapshotId>(snapshot_str),
+                    base_hash: typed_id::<ContentHash>(base_hash_str),
+                    position: PositionAnchor {
+                        byte_range: [0, 5],
+                        line_range: [1, 1],
+                        pm_range: None,
+                    },
+                    quote: None,
+                    block: None,
+                    context: None,
+                    structure: None,
+                },
+                body: format!("parent-count vector: {label}"),
+            };
+            let id = derive_event_id(&meta, &body).unwrap();
+            let signable = SignablePayload::from_event(&meta, &body);
+            let canon = String::from_utf8(to_canonical_bytes(&signable).unwrap()).unwrap();
+            eprintln!("=== {label} ===");
+            eprintln!("createdAt: {created_at}");
+            eprintln!("threadId: thread-{label}");
+            eprintln!("body: parent-count vector: {label}");
+            eprintln!("canonicalBytes: {canon}");
+            eprintln!("eventId: {}", id_to_string(&id));
+            eprintln!();
+        }
+    }
 }

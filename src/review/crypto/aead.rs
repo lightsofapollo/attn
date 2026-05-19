@@ -460,7 +460,95 @@ mod tests {
             },
         };
 
-        let inputs = [v1, v2];
+        // Vector 3: signaling envelope (signalingKey) with kind="signal".
+        // Exercises the signalingKey path and the third AAD `kind` variant.
+        let mut k3 = [0u8; 32];
+        for (i, b) in k3.iter_mut().enumerate() {
+            *b = 0x55u8.wrapping_add(i as u8);
+        }
+        let mut n3 = [0u8; 24];
+        for (i, b) in n3.iter_mut().enumerate() {
+            *b = 0x33u8 ^ (i as u8);
+        }
+        let v3 = VectorInput {
+            name: "signal envelope encrypted with signalingKey",
+            key_kind: "signalingKey",
+            key: k3,
+            nonce: n3,
+            plaintext: br#"{"type":"presence_updated","online":true}"#.to_vec(),
+            aad: EnvelopeAad {
+                v: 2,
+                room_id: "room-cccc".into(),
+                envelope_id: "env-0003".into(),
+                kind: "signal".into(),
+                author_id: "carol".into(),
+                device_id: "dev-3".into(),
+                created_at: 1_736_200_000_000,
+            },
+        };
+
+        // Vector 4: large plaintext (near maxEventBytes — chosen at 4 KiB to
+        // keep the corpus small but still exercise multi-block AEAD).
+        // Plaintext is deterministic: ASCII pattern bytes 0x20..0xFF repeating.
+        let mut k4 = [0u8; 32];
+        for (i, b) in k4.iter_mut().enumerate() {
+            *b = 0x77u8.wrapping_add(i as u8 * 3);
+        }
+        let mut n4 = [0u8; 24];
+        for (i, b) in n4.iter_mut().enumerate() {
+            *b = 0x88u8.wrapping_add(i as u8);
+        }
+        // 4096 bytes of deterministic pattern data.
+        let mut pt4 = Vec::with_capacity(4096);
+        for i in 0..4096 {
+            pt4.push(((i % 224) + 0x20) as u8);
+        }
+        let v4 = VectorInput {
+            name: "large 4KiB plaintext encrypted with eventKey (multi-block AEAD path)",
+            key_kind: "eventKey",
+            key: k4,
+            nonce: n4,
+            plaintext: pt4,
+            aad: EnvelopeAad {
+                v: 2,
+                room_id: "room-dddd".into(),
+                envelope_id: "env-0004".into(),
+                kind: "event".into(),
+                author_id: "dave".into(),
+                device_id: "dev-4".into(),
+                created_at: 1_736_300_000_000,
+            },
+        };
+
+        // Vector 5: non-ASCII plaintext (multi-byte UTF-8 only, no ASCII).
+        // Distinct from v2 (which mixes ASCII + emoji) — this is pure
+        // multi-byte to lock the bytewise AEAD path on UTF-8 sequences.
+        let mut k5 = [0u8; 32];
+        for (i, b) in k5.iter_mut().enumerate() {
+            *b = 0xC3u8 ^ (i as u8 * 5);
+        }
+        let mut n5 = [0u8; 24];
+        for (i, b) in n5.iter_mut().enumerate() {
+            *b = 0xAAu8.wrapping_sub(i as u8);
+        }
+        let v5 = VectorInput {
+            name: "pure non-ASCII plaintext (mixed scripts) encrypted with eventKey",
+            key_kind: "eventKey",
+            key: k5,
+            nonce: n5,
+            plaintext: "日本語 αβγ Привет 🚀🔐 — 中文".as_bytes().to_vec(),
+            aad: EnvelopeAad {
+                v: 2,
+                room_id: "room-eeee".into(),
+                envelope_id: "env-0005".into(),
+                kind: "event".into(),
+                author_id: "erin".into(),
+                device_id: "dev-5".into(),
+                created_at: 1_736_400_000_000,
+            },
+        };
+
+        let inputs = [v1, v2, v3, v4, v5];
         let vectors: Vec<serde_json::Value> = inputs
             .iter()
             .map(|v| {

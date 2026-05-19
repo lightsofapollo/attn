@@ -41,6 +41,30 @@
         "signalingKey": "YflXiYRmAefa3GaOBHK7aBL2qNdsArNYcA0FmytNIP0",
         "admissionKey": "QL-Tmh9JdtUcgIwICIvcl_Xguw2VK9mO4gDj0e6Utxc"
       }
+    },
+    {
+      "name": "all-ones roomSecret (0xFF * 32) — max-byte boundary",
+      "roomSecret": "__________________________________________8",
+      "expected": {
+        "roomId": "IZC58zYvytwT_MsxkojQww",
+        "rootKey": "ocftXT1F4S_tOQDpB3aqNTDkLViaTIIVQEt_hEv9Wcg",
+        "eventKey": "UejjiUBzGIV_r3fkkWLspHkUbw7W_Nr-3KC-iSRqCGA",
+        "snapshotKey": "4r8q95WuE-SGag-NZ0AMjIhy9p1ly2d46BP0P0Js76I",
+        "signalingKey": "K7b5EgpWMIYPK3vXKBmRNu634VPU-S3lxr3OY-Qr1YE",
+        "admissionKey": "AIHIo2Rc4t99dv-Mx3B3o5gZFlOqLhEtqAt7GEYRYk0"
+      }
+    },
+    {
+      "name": "ASCII pattern roomSecret (0x41..0x60: 'A'..'`') — printable-byte boundary",
+      "roomSecret": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A",
+      "expected": {
+        "roomId": "HM9KFfBs4yLfInUo1W5xOw",
+        "rootKey": "ihX9c3KLI-n2QBPfNXF2Ia78x1tSB4iW8ZBlJRbrEvM",
+        "eventKey": "w8zynvwlgfDYVaJ1KejqG88Tmdl-tYyflsXVkc9xQTw",
+        "snapshotKey": "MsM0v8G3hhz7QfOvFhBIAsSWNiRLYIfdpqwKynImD70",
+        "signalingKey": "TtfXNnD1y9fb3NbU3I8jXP0S2EFTEoSwap_pn6bZdbE",
+        "admissionKey": "S_UPEWXkOP7WSlQ9oAzYYdZechjgocNISqbkZUHoM3s"
+      }
     }
   ]
 }

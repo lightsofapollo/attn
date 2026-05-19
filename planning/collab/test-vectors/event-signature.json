@@ -99,6 +99,93 @@
         "signature": "6pL0X1BwKMjg55SbXTMdw7i-abPXmPGRqH5WHwkpjqbY1WjLdgEn2pHHfZSJvvoYMPdE0MeSYBcJTE-mDqLGAw",
         "signingKeyId": "OfcT0KZEJT8EUpQhufUbmwiXnQgpWVnE85kO5hf1E58"
       }
+    },
+    {
+      "name": "CommentResolved with one parent — exercises the resolved-by tagged variant",
+      "signingKey": {
+        "private": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+        "public": "F8t5-ytBIPKx7GXkGY1uCLKOgT_rAeSkAIObheGAgM4"
+      },
+      "event": {
+        "meta": {
+          "v": 2,
+          "eventId": "placeholder-event-id-3",
+          "roomId": "room-vec-3",
+          "authorId": "p-vec-3",
+          "deviceId": "d-vec-3",
+          "createdAt": 1700000002000,
+          "parentEventIds": ["evt-parent-3"]
+        },
+        "body": {
+          "type": "comment_resolved",
+          "threadId": "thr-vec-3",
+          "resolvedBy": "p-resolver-3"
+        }
+      },
+      "expected": {
+        "canonicalSignedBytes": "{\"body\":{\"resolvedBy\":\"p-resolver-3\",\"threadId\":\"thr-vec-3\",\"type\":\"comment_resolved\"},\"meta\":{\"authorId\":\"p-vec-3\",\"createdAt\":1700000002000,\"deviceId\":\"d-vec-3\",\"parentEventIds\":[\"evt-parent-3\"],\"roomId\":\"room-vec-3\",\"v\":2}}",
+        "signature": "-fKakWWZjxH6Pf7V3AGeM16PScr63SWdG-3X3UtArGx_LUZMpmdjAaidFbcrcDPEmU4Hu440f-HHBezSs0yFDg",
+        "signingKeyId": "bI-GB9vocHemKimQzgfZSq90nfdvh7mOt4am0Q8DB2U"
+      }
+    },
+    {
+      "name": "PresenceUpdated (no anchor, optional cursor omitted) — locks signal-body shape",
+      "signingKey": {
+        "private": "REREREREREREREREREREREREREREREREREREREREREQ",
+        "public": "11l5O7wTooGagnx2rbb7qKSa7gB_SfLQmS2ZuCWtLEg"
+      },
+      "event": {
+        "meta": {
+          "v": 2,
+          "eventId": "placeholder-event-id-4",
+          "roomId": "room-vec-4",
+          "authorId": "p-vec-4",
+          "deviceId": "d-vec-4",
+          "createdAt": 1700000003000,
+          "parentEventIds": []
+        },
+        "body": {
+          "type": "presence_updated",
+          "participantId": "p-vec-4",
+          "deviceId": "d-vec-4",
+          "online": true
+        }
+      },
+      "expected": {
+        "canonicalSignedBytes": "{\"body\":{\"deviceId\":\"d-vec-4\",\"online\":true,\"participantId\":\"p-vec-4\",\"type\":\"presence_updated\"},\"meta\":{\"authorId\":\"p-vec-4\",\"createdAt\":1700000003000,\"deviceId\":\"d-vec-4\",\"parentEventIds\":[],\"roomId\":\"room-vec-4\",\"v\":2}}",
+        "signature": "ruIW3txT7CCuaznqUztINZOVhvTM3CiyJ8YKf0hZmY77v50souBBERPON_bIeRMVDMOR-2iBeLPIP5U-74SMDg",
+        "signingKeyId": "sUcFiI9KaDkaCapZaN0l0Ww7unuzttFb81TY3KroWkc"
+      }
+    },
+    {
+      "name": "SuggestionAccepted with three parents (out of order) + snapshot — exercises sort-before-sign on a longer parent list",
+      "signingKey": {
+        "private": "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU",
+        "public": "xoImN8fTEOxXYnvgC6JZ0lN0n0qvZERwz_vlOjX3MkI"
+      },
+      "event": {
+        "meta": {
+          "v": 2,
+          "eventId": "placeholder-event-id-5",
+          "roomId": "room-vec-5",
+          "authorId": "p-vec-5",
+          "deviceId": "d-vec-5",
+          "createdAt": 1700000004500,
+          "parentEventIds": ["evt-mid-5", "evt-aaa-5", "evt-zzz-5"],
+          "snapshotId": "snap-vec-5"
+        },
+        "body": {
+          "type": "suggestion_accepted",
+          "suggestionId": "sug-vec-5",
+          "appliedRevisionId": "rev-vec-5",
+          "resultingHash": "hash-after-apply-5"
+        }
+      },
+      "expected": {
+        "canonicalSignedBytes": "{\"body\":{\"appliedRevisionId\":\"rev-vec-5\",\"resultingHash\":\"hash-after-apply-5\",\"suggestionId\":\"sug-vec-5\",\"type\":\"suggestion_accepted\"},\"meta\":{\"authorId\":\"p-vec-5\",\"createdAt\":1700000004500,\"deviceId\":\"d-vec-5\",\"parentEventIds\":[\"evt-aaa-5\",\"evt-mid-5\",\"evt-zzz-5\"],\"roomId\":\"room-vec-5\",\"snapshotId\":\"snap-vec-5\",\"v\":2}}",
+        "signature": "doERvA05RpnAWdc5u1l2MZZQP2ZlpXXTds4ZHLh70w9m11mgOJSjahCXJrioirwj1jNr8vkXgFqmulTeA5zgBw",
+        "signingKeyId": "tMHs6Jjs4k4k5gEjL5XGoYlxaJoN1mnm14IYU3whw4k"
+      }
     }
   ]
 }

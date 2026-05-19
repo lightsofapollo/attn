@@ -14,3 +14,9 @@
 {"name":"array order is preserved (canonical JSON does NOT sort arrays)","input":{"meta":{"parentEventIds":["evt-c","evt-a","evt-b"],"v":2}},"canonical":"{\"meta\":{\"parentEventIds\":[\"evt-c\",\"evt-a\",\"evt-b\"],\"v\":2}}"}
 {"name":"camelCase keys (typical attn schema) sort deterministically","input":{"snapshotId":"snap-1","authorId":"author-1","createdAt":1700000000000},"canonical":"{\"authorId\":\"author-1\",\"createdAt\":1700000000000,\"snapshotId\":\"snap-1\"}"}
 {"name":"unit separator (U+001F) — highest control char that gets escaped","input":{"x":"\u001f"},"canonical":"{\"x\":\"\\u001f\"}"}
+{"name": "DEL (U+007F) is NOT a JCS control char and passes through as raw byte", "input": {"x": ""}, "canonical": "{\"x\":\"\"}"}
+{"name": "max safe integer (2^53-1) emitted as plain decimal — no exponent", "input": {"n": 9007199254740991}, "canonical": "{\"n\":9007199254740991}"}
+{"name": "first integer past JS safe range (2^53) round-trips as plain digits", "input": {"n": 9007199254740992}, "canonical": "{\"n\":9007199254740992}"}
+{"name": "deep array nesting (depth 5) preserves shape", "input": [[[[[]]]]], "canonical": "[[[[[]]]]]"}
+{"name": "unicode normalization boundary — NFC é vs NFD e+◌́ stay distinct (no normalization)", "input": {"nfc": "é", "nfd": "é"}, "canonical": "{\"nfc\":\"é\",\"nfd\":\"é\"}"}
+{"name": "DEL inside larger string passes through alongside ASCII and emoji", "input": {"s": "ab🚀"}, "canonical": "{\"s\":\"ab🚀\"}"}

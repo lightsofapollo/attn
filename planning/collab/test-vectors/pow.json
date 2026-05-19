@@ -124,6 +124,26 @@
         "tokenHashHex": "0003e34d9d6c314962c98e7c26387f3ecd49a962fec4baed36231c6ec541ec35",
         "token": "attn-pow:v2:12:1700000300000:EXAMPLE_ROOM:EXAMPLE_DEVICE:R6K2doruI0w:UPpRUlNUVVZXWFlaW1xdXg:2922"
       }
+    },
+    {
+      "name": "POST /v2/rooms/:roomId — room create (owner bootstrap)",
+      "inputs": {
+        "method": "POST",
+        "path": "/v2/rooms/:roomId",
+        "pathSubstituted": "/v2/rooms/EXAMPLE_ROOM",
+        "roomId": "EXAMPLE_ROOM",
+        "deviceId": "EXAMPLE_DEVICE",
+        "rand": "YMphYmNkZWZnaGlqa2xtbg",
+        "expiresAt": 1700000300000,
+        "difficulty": 12
+      },
+      "expected": {
+        "requestPathHash": "lrcPhCGI1BU",
+        "resource": "EXAMPLE_ROOM:EXAMPLE_DEVICE:lrcPhCGI1BU",
+        "counter": "5593",
+        "tokenHashHex": "00041fd295d9bc149eab2bf58ef748d90bfc8e94404edc72a8fb60c90caf80ff",
+        "token": "attn-pow:v2:12:1700000300000:EXAMPLE_ROOM:EXAMPLE_DEVICE:lrcPhCGI1BU:YMphYmNkZWZnaGlqa2xtbg:5593"
+      }
     }
   ]
 }

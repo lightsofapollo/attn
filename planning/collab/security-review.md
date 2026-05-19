@@ -279,7 +279,7 @@ amendments.md §"Inline snapshot encryption over DataChannel" (lines 178–183) 
 
 ### Findings
 
-#### H2 — `kind="signal"` envelope `target.deviceId` is NOT AAD-bound; relay can redirect a signal envelope to any peer. *Severity: High (signal envelopes only, but worth fixing).*
+#### H2 — `kind="signal"` envelope `target.deviceId` is NOT AAD-bound; relay can redirect a signal envelope to any peer. *Severity: High (signal envelopes only, but worth fixing). Status: **MITIGATED in v2** via inbound-dispatch enforcement (attn-nnj.7.9). Cryptographic mitigation deferred to v3.*
 
 `src/review/transport/signaling.rs::assemble_signal_envelope` (lines 165–181) explicitly omits `target_device_id` from AAD with the comment "matching the crypto-spec.md §Envelope Encryption AAD shape." crypto-spec.md indeed pins the AAD shape to seven fields without `target`. The justification at signaling.rs:170–172 says "Receivers validate origin via the signed `from` field inside the plaintext payload instead."
 
@@ -287,8 +287,12 @@ This is correct for **origin** (the receiver can verify the sender via the `from
 
 **Impact**: in WebRTC negotiation, a misrouted offer to peer B (where the offer was for peer A) causes peer B to think they're being asked to negotiate with the sender. The DTLS fingerprint binding in the SDP would prevent actual session hijack (the SDP carries a fingerprint that has to match the DTLS handshake), but the misrouting is itself a privacy break: peer B learns peer A is in the room and is initiating a P2P connection. In a multi-reviewer room, this leaks the room topology to a relay attacker.
 
-**Recommendations**:
-1. **Inbound dispatch**: enforce that the recovered `SignalingPayload`'s receiver (implicitly the local device) cross-checks against `envelope.target.deviceId == self.device_id`. The `disassemble_signal_envelope` in `signaling.rs` does not do this. The caller (WebRTC layer, Phase 4) should reject signal envelopes whose `target.deviceId` is not self. Document this as a hard invariant in `signaling.rs` and the inbound pipeline.
+**v2 mitigation (LANDED, attn-nnj.7.9)**: `InboundPipeline::import_signal_envelope` now takes an `expected_target_device_id: &DeviceId` parameter and enforces `envelope.target == None || envelope.target.deviceId == expected` BEFORE AEAD-open. Mismatches return the new `InboundError::TargetDeviceMismatch { expected, actual }` so a relay-redirected envelope is dropped before its plaintext reaches the WebRTC state machine or the WS event channel. Both call sites — `transport::webrtc::handle_inbound_envelope` (DataChannel path) and `transport::mailbox::ws::MailboxWsClient::handle_envelope` (mailbox WS path) — pass their local DeviceId from `WebRtcConfig.local_device_id` / `MailboxConfig.device_id` respectively. Broadcast signal envelopes (`target=None`) are still accepted; the relay-spec wire format supports them and the WebRTC state machine uses them for "advertise presence" flows. Unit tests in `transport::inbound::tests` cover: target=self → accept; target=Some(other) → `TargetDeviceMismatch`; target=None (broadcast) → accept.
+
+**v3 amendment (deferred)**: optionally extend `EnvelopeAad` to include `target` for `kind="signal"` only. Cost: AAD shape diverges by kind; existing test corpora + the TS/WASM client need a coordinated bump. Benefit: makes target-redirect a Poly1305 MAC failure at decrypt time instead of a post-decrypt application-level check. Tracked as a v3 spec candidate; the v2 server-trust-style mitigation already closes the privacy gap for the threat model in this review.
+
+**Recommendations** (historical, retained):
+1. **Inbound dispatch**: enforce that the recovered `SignalingPayload`'s receiver (implicitly the local device) cross-checks against `envelope.target.deviceId == self.device_id`. The `disassemble_signal_envelope` in `signaling.rs` does not do this. The caller (WebRTC layer, Phase 4) should reject signal envelopes whose `target.deviceId` is not self. Document this as a hard invariant in `signaling.rs` and the inbound pipeline. *— LANDED in attn-nnj.7.9 (moved the enforcement up one layer into `InboundPipeline` so both DC and WS paths share it).*
 2. **Spec amendment**: optionally extend `EnvelopeAad` to include `target` for `kind="signal"` only. Cost: AAD shape diverges by kind. Benefit: makes target-redirect a MAC failure. Worth weighing — for now, recommend (1) as the cheap mitigation and treat (2) as a v3 candidate.
 
 #### M4 (replaces #1.5 caveat) — `target` rebinding not provably caught at decrypt time
@@ -316,7 +320,7 @@ crypto-spec.md §Nonce Discipline lines 112–115 says "the AEAD encrypts the *b
 | # | Finding | Severity | Recommendation |
 |---|---|---|---|
 | **H1** | Room-create POST is un-admitted by design; pre-publication race possible if URL leaks before create completes | High | Add `Attn-Owner-Signature` requirement on `POST /v2/rooms/:roomId` first-create (owner signs canonicalRequest with the same key being registered). Also document the share-UI invariant in crypto-spec.md. |
-| **H2** | `target.deviceId` on signal envelopes is not AAD-bound; relay can redirect signal envelopes to non-target peers | High | Enforce `envelope.target.deviceId == self.device_id` in the inbound signal dispatcher (Phase 4). Consider extending AAD for `kind="signal"` to include `target` as a v3 spec amendment. |
+| **H2** | `target.deviceId` on signal envelopes is not AAD-bound; relay can redirect signal envelopes to non-target peers | High → **Mitigated (v2)** | `InboundPipeline::import_signal_envelope` enforces `envelope.target == None \|\| envelope.target.deviceId == self.device_id`; both DataChannel + mailbox-WS callers pass their local DeviceId (attn-nnj.7.9). v3 candidate: bind `target` directly into AAD for `kind="signal"`. |
 | **M1** | `EnvelopeAad.created_at: i64` vs `MailboxEnvelope.created_at: u64` — silent type-width drift between Rust/TS would surface as opaque AEAD decrypt failure | Medium | Pin to `u64` everywhere; add a corpus vector with `created_at > 2^53` to lock JS Number behavior. |
 | **M2** | PoW `expiresAt` upper bound is `now + 10min`; spec says 5-min mint expiry. Lets a malicious client hold a token alive longer than intended | Medium | Tighten to `now + 6min` (5-min mint + 1-min skew). |
 | **M3** | `parseAndStripInviteFromUrl` strips fragment AFTER parse; if parse throws, fragment lingers and caller must remember to strip | Medium | Reverse order: `stripFragment(win)` first, then `parseInviteUrl(fullUrl)`. |

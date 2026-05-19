@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+pub mod anchors;
 pub mod apply;
 pub mod crypto;
 pub mod envelope;

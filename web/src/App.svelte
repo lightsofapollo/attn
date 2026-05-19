@@ -55,6 +55,12 @@
     markdownSourceUrl,
   } from './lib/markdown-layer';
   import { reviewStore } from './lib/review/store.svelte';
+  import {
+    requestReviewDecorationsRebuild,
+    reviewDecorationsPlugin,
+  } from './lib/prosemirror/review-decorations';
+  import type { EditorView } from 'prosemirror-view';
+  import type { Plugin as PMPlugin } from 'prosemirror-state';
 
   interface Props {
     /**
@@ -117,6 +123,29 @@
   // shortcut (Cmd+J) is wired here as a placeholder until 12.9 owns it.
   // State lives on `reviewStore.panelOpen` so the future keyboard hook /
   // ReviewPanel can drive it via `reviewStore.togglePanel()`.
+
+  // Review-decoration plugin host (attn-nnj.4.6). One plugin instance per
+  // editor mount; the `onReady` callback hands us the EditorView so the
+  // store-driven $effect can dispatch rebuild signals without subscribing
+  // to runes inside the plugin's `apply` handler.
+  const reviewPlugin: PMPlugin = reviewDecorationsPlugin();
+  const editorPlugins: PMPlugin[] = [reviewPlugin];
+  let pmViewForReview: EditorView | undefined = $state(undefined);
+
+  function handleEditorReady(view: EditorView): void {
+    pmViewForReview = view;
+  }
+
+  // Touch reactive store reads here so Svelte schedules a rebuild whenever
+  // the anchor-resolution map, event log, or focus target changes.
+  $effect(() => {
+    void reviewStore.anchorResolutions;
+    void reviewStore.events;
+    void reviewStore.focusEventId;
+    void reviewStore.hoveredEventId;
+    if (!pmViewForReview) return;
+    requestReviewDecorationsRebuild(pmViewForReview);
+  });
 
   function emptyPlanStructure(): PlanStructure {
     return { phases: [], tasks: [], file_refs: [] };
@@ -1331,6 +1360,8 @@
         onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
+        plugins={editorPlugins}
+        onReady={handleEditorReady}
       />
     {:else if activeFileType === 'image'}
       <ImageViewer src={markdownSourceUrl(activePath)} />
@@ -1389,6 +1420,8 @@
         onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
+        plugins={editorPlugins}
+        onReady={handleEditorReady}
       />
     {:else}
       <div class="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">

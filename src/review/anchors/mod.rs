@@ -9,5 +9,10 @@
 pub mod index;
 pub mod resolve;
 
+#[cfg(test)]
+pub mod calibration;
+
 pub use index::{AnchorIndexError, build_anchor_index};
-pub use resolve::{PmStepJournal, ResolveError, resolve_anchor};
+pub use resolve::{
+    PmStepJournal, ResolveError, ResolverConfig, resolve_anchor, resolve_anchor_with_config,
+};

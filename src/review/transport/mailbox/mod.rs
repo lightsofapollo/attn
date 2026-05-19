@@ -12,11 +12,14 @@
 //!   - `planning/collab/crypto-spec.md` §Hashcash Proof-of-Work
 //!     §Envelope Batch Cap (32 envelopes per request)
 //!
-//! WebSocket subscribe + the inbound pipeline land in attn-nnj.6.3 / 6.4.
+//! The WebSocket subscribe path lives in `mailbox::ws` (attn-nnj.6.3); the
+//! inbound decrypt + verify pipeline lives in `super::inbound` (attn-nnj.6.4).
 //! This module deliberately stays narrowly focused on the outbound path so
 //! the two halves can ship in parallel.
 
 #![allow(dead_code)]
+
+pub mod ws;
 
 use std::path::PathBuf;
 use std::sync::Arc;

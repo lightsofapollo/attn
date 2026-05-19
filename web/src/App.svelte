@@ -47,6 +47,7 @@
   import ReviewApplyExpand from './lib/ReviewApplyExpand.svelte';
   import ReviewBar from './lib/ReviewBar.svelte';
   import ShareDialog from './lib/ShareDialog.svelte';
+  import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
   import { hasTextSelection } from './lib/review/popover-anchor';
   import type { ConstructAnchorContext } from './lib/review/anchors';
@@ -157,6 +158,14 @@
   // bound, the binding is a no-op — there's nothing to suggest against.
   // ---------------------------------------------------------------------------
 
+  interface CommentComposerState {
+    view: EditorView;
+    from: number;
+    to: number;
+    anchorContext: ConstructAnchorContext;
+    roomId: RoomId;
+  }
+
   interface SuggestionComposerState {
     view: EditorView;
     from: number;
@@ -165,6 +174,7 @@
     roomId: import('./lib/types').RoomId;
   }
 
+  let commentComposer = $state<CommentComposerState | null>(null);
   let suggestionComposer = $state<SuggestionComposerState | null>(null);
 
   /**
@@ -189,6 +199,29 @@
     return [...candidates].sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
   }
 
+  function openCommentComposer(): void {
+    const view = pmViewForReview;
+    if (!view) return;
+    if (!hasTextSelection(view)) return;
+    const roomId = reviewStore.currentRoomId;
+    if (!roomId) return;
+    const snapshot = resolveActiveSnapshotForCompose();
+    if (!snapshot || !snapshot.anchorIndex) return;
+    const { from, to } = view.state.selection;
+    commentComposer = {
+      view,
+      from,
+      to,
+      roomId,
+      anchorContext: {
+        index: snapshot.anchorIndex,
+        fileId: snapshot.fileId,
+        snapshotId: snapshot.snapshotId,
+        baseHash: snapshot.baseHash,
+      },
+    };
+  }
+
   function openSuggestionComposer(): void {
     const view = pmViewForReview;
     if (!view) return;
@@ -210,6 +243,10 @@
         baseHash: snapshot.baseHash,
       },
     };
+  }
+
+  function closeCommentComposer(): void {
+    commentComposer = null;
   }
 
   function closeSuggestionComposer(): void {
@@ -1416,6 +1453,9 @@
       onShareOpen: () => {
         openShareDialog();
       },
+      onCommentComposer: () => {
+        openCommentComposer();
+      },
       onSuggestionComposer: () => {
         openSuggestionComposer();
       },
@@ -1656,6 +1696,7 @@
 <svelte:window onkeydown={(e) => { handleGlobalShortcutsHelpHotkey(e); handleGlobalRightRailHotkey(e); }} />
 <KeyboardShortcutsDialog
   bind:open={shortcutsOpen}
+  hasCommentComposer={true}
   hasSuggestionComposer={true}
   hasToggleReviewPanel={true}
 />
@@ -1664,6 +1705,17 @@
   filePath={activePath}
 />
 <ReviewApplyExpand />
+{#if commentComposer}
+  <CommentComposer
+    view={commentComposer.view}
+    from={commentComposer.from}
+    to={commentComposer.to}
+    anchorContext={commentComposer.anchorContext}
+    roomId={commentComposer.roomId}
+    onClose={closeCommentComposer}
+  />
+{/if}
+
 {#if suggestionComposer}
   <SuggestionComposer
     view={suggestionComposer.view}

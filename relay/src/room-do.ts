@@ -49,6 +49,54 @@ const ROOM_ENVELOPES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/envelopes\/?$/;
 const ROOM_ACKS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/acks\/?$/;
 const ROOM_SOCKET_PATH_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
 const ROOM_BLOBS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/?$/;
+/** Any path starting with `/v2/rooms/:roomId` (optionally followed by a subroute). */
+const ROOM_PATH_LOOSE_RE = /^\/v2\/rooms\/([^/]+)(?:\/.*)?$/;
+
+/**
+ * Best-effort extraction of the roomId from any room-scoped path. Used by the
+ * OPTIONS preflight handler so a single regex covers `/devices`, `/envelopes`,
+ * `/acks`, `/blobs`, `/socket`, and the bare `/v2/rooms/:roomId` route.
+ */
+function extractRoomIdAnyPath(pathname: string): string | undefined {
+  const m = pathname.match(ROOM_PATH_LOOSE_RE);
+  return m?.[1];
+}
+
+/**
+ * Parse `ALLOWED_BROWSER_ORIGINS` (comma-separated env var) into a Set for
+ * O(1) membership lookup. Whitespace and empty entries are skipped so a stray
+ * trailing comma doesn't allow the empty origin.
+ *
+ * Duplicated from index.ts so the DO can run its WS-Origin check without
+ * round-tripping back to the Worker. Both call sites must stay in sync;
+ * relay-spec.md §Browser Considerations is the source of truth.
+ */
+function parseEnvAllowedOrigins(env: Env): Set<string> {
+  const raw = env.ALLOWED_BROWSER_ORIGINS ?? "";
+  const out = new Set<string>();
+  for (const piece of raw.split(",")) {
+    const trimmed = piece.trim();
+    if (trimmed !== "") out.add(trimmed);
+  }
+  return out;
+}
+
+/**
+ * Build the headers for a 101 WebSocket upgrade response, tagging
+ * `X-Attn-Allow-Browser` so the Worker's corsMiddleware can attach CORS
+ * headers when the origin is allowed. The 101 path can't be re-tagged in
+ * `tagAllowBrowserOnResponse` (the runtime freezes 101 response headers
+ * once the webSocket is attached), so we set the header at construction.
+ */
+function buildSocketUpgradeHeaders(policy: RoomPolicy | undefined): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Sec-WebSocket-Protocol": "attn.v2",
+  };
+  if (policy !== undefined) {
+    headers["X-Attn-Allow-Browser"] = policy.allowBrowser ? "true" : "false";
+  }
+  return headers;
+}
 
 /** R2 spillover threshold: snapshot_blob envelopes above this go to R2 via
  *  POST /v2/rooms/:roomId/blobs (relay-spec.md §POST /blobs). Anything at or
@@ -190,8 +238,34 @@ export class RoomDO extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    const response = await this.dispatch(request);
+    // CORS handshake (attn-nnj.9.5): every response from this DO is tagged with
+    // an `X-Attn-Allow-Browser` header reflecting the room's `policy.allowBrowser`
+    // setting. The Worker reads + strips this header on the response edge to
+    // decide whether to attach CORS headers. We tag at the DO boundary so the
+    // Worker doesn't need its own policy fetch round-trip on every request.
+    return this.tagAllowBrowserOnResponse(request, response);
+  }
+
+  private async dispatch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const roomMatch = url.pathname.match(ROOM_PATH_RE);
+
+    // CORS preflight (attn-nnj.9.5). Browser clients hit OPTIONS before any
+    // cross-origin POST/DELETE/GET; we answer 204 with no body. The Worker
+    // attaches CORS headers based on `X-Attn-Allow-Browser`. We accept OPTIONS
+    // on any room-scoped path so the same handler covers /devices, /envelopes,
+    // /acks, /blobs, /socket.
+    if (request.method === "OPTIONS") {
+      // The DO is addressed by roomId — pull it from whichever room-scoped
+      // path matched. Use the broadest matcher (ROOM_PATH_RE matches only
+      // `/v2/rooms/:roomId`); for sub-paths we extract via a lenient regex.
+      const roomId = roomMatch?.[1] ?? extractRoomIdAnyPath(url.pathname);
+      if (roomId === undefined || roomId === "") {
+        return errorResponse(400, "ATTN_ROOM_ID_INVALID", "roomId required");
+      }
+      return this.handleOptionsPreflight(roomId);
+    }
 
     if (roomMatch && request.method === "POST") {
       const roomId = roomMatch[1];
@@ -274,6 +348,66 @@ export class RoomDO extends DurableObject<Env> {
 
     // Other endpoints land in 5.8-5.13.
     return errorResponse(404, "ATTN_NOT_FOUND", `no handler for ${request.method} ${url.pathname}`);
+  }
+
+  /**
+   * CORS preflight. Returns 204 unconditionally — the Worker decides whether
+   * to attach actual CORS headers based on the `X-Attn-Allow-Browser` header
+   * that `tagAllowBrowserOnResponse` adds.
+   *
+   * We deliberately respond 204 even when the room has `allowBrowser=false` so
+   * the response doesn't leak existence: a 404 here would let an attacker
+   * enumerate rooms by sending OPTIONS preflights and watching for the
+   * difference between 204 (room exists, browser disallowed) and 404 (room
+   * doesn't exist). The CORS-header-absence on the Worker side is the only
+   * signal a non-browser-allowed room gives.
+   */
+  private async handleOptionsPreflight(_roomId: string): Promise<Response> {
+    return new Response(null, { status: 204 });
+  }
+
+  /**
+   * Post-process every response leaving the DO and tag it with
+   * `X-Attn-Allow-Browser: true|false` based on the room's stored
+   * `policy.allowBrowser`. The Worker strips this header before returning
+   * to the client — see `corsMiddleware` in index.ts.
+   *
+   * For rooms that don't exist (no stored policy), we omit the header
+   * entirely. This avoids leaking room existence on routes that return
+   * 404 (the absence of the header on a `/socket` 404 is indistinguishable
+   * from the room being native-only).
+   *
+   * On a 101 WebSocket upgrade response, the runtime won't let us mutate
+   * headers post-construction; the DO already builds the 101 response with
+   * the right header via `withAllowBrowserHeader` so this branch is a no-op.
+   */
+  private async tagAllowBrowserOnResponse(
+    request: Request,
+    response: Response,
+  ): Promise<Response> {
+    // Don't touch 101 — the runtime treats the response headers as frozen
+    // once the webSocket field is attached. handleSocketUpgrade is
+    // responsible for setting the header at construction time.
+    if (response.status === 101) return response;
+
+    let policy: RoomPolicy | undefined;
+    try {
+      policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+    } catch {
+      policy = undefined;
+    }
+    if (policy === undefined) return response;
+
+    // Rebuild the response so we can mutate headers (the original headers may
+    // be immutable depending on how the inner handler constructed it).
+    const newHeaders = new Headers(response.headers);
+    newHeaders.set("X-Attn-Allow-Browser", policy.allowBrowser ? "true" : "false");
+    void request; // silenced — kept in signature for future per-method tagging
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders,
+    });
   }
 
   // -- POST /v2/rooms/:roomId ---------------------------------------------
@@ -1778,6 +1912,34 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
     }
 
+    // Browser-policy Origin allowlist check (attn-nnj.9.5, relay-spec.md
+    // §Browser Considerations). A WebSocket upgrade with an `Origin` header
+    // signals a browser client; enforce the room's allow-browser policy +
+    // the ALLOWED_BROWSER_ORIGINS env var allowlist. Native clients omit
+    // the Origin header and pass straight through.
+    const origin = request.headers.get("Origin");
+    if (origin !== null && origin !== "") {
+      const policyForOrigin = await this.ctx.storage.get<RoomPolicy>(META.policy);
+      if (policyForOrigin === undefined) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
+      }
+      if (!policyForOrigin.allowBrowser) {
+        return errorResponse(
+          403,
+          "ATTN_BROWSER_DISALLOWED",
+          `room ${roomId} does not allow browser clients`,
+        );
+      }
+      const allowed = parseEnvAllowedOrigins(this.env);
+      if (!allowed.has(origin)) {
+        return errorResponse(
+          403,
+          "ATTN_ORIGIN_FORBIDDEN",
+          `origin ${origin} not in ALLOWED_BROWSER_ORIGINS`,
+        );
+      }
+    }
+
     // Pre-expiry cleanup check (amendments.md #9): if the room is within 1h of
     // `meta:expires_at`, run alarm() immediately to belt-and-braces against
     // alarm slippage near TTL. If the alarm wipes the room, the very next
@@ -1823,10 +1985,11 @@ export class RoomDO extends DurableObject<Env> {
       } catch {
         // swallow
       }
+      const policyForTag = await this.ctx.storage.get<RoomPolicy>(META.policy);
       return new Response(null, {
         status: 101,
         webSocket: c,
-        headers: { "Sec-WebSocket-Protocol": "attn.v2" },
+        headers: buildSocketUpgradeHeaders(policyForTag),
       });
     }
 
@@ -1890,7 +2053,7 @@ export class RoomDO extends DurableObject<Env> {
       return new Response(null, {
         status: 101,
         webSocket: client,
-        headers: { "Sec-WebSocket-Protocol": "attn.v2" },
+        headers: buildSocketUpgradeHeaders(policy),
       });
     }
 
@@ -1900,7 +2063,7 @@ export class RoomDO extends DurableObject<Env> {
     return new Response(null, {
       status: 101,
       webSocket: client,
-      headers: { "Sec-WebSocket-Protocol": "attn.v2" },
+      headers: buildSocketUpgradeHeaders(policy),
     });
   }
 

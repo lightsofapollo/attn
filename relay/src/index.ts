@@ -56,6 +56,118 @@ function clientIp(request: Request): string {
 }
 
 /**
+ * Internal handshake header set by RoomDO on every response from a room whose
+ * `policy.allowBrowser == true`. The Worker reads (and STRIPS) this header on
+ * the response edge to decide whether to attach CORS headers. Stripping is
+ * mandatory: this is implementation detail leaked across the DO→Worker boundary
+ * and should never be observable by a browser/native client.
+ *
+ * See relay-spec.md §Browser Considerations.
+ */
+const INTERNAL_ALLOW_BROWSER_HEADER = "X-Attn-Allow-Browser";
+
+/**
+ * Headers a browser client is allowed to send on a CORS request. Mirrors the
+ * relay-spec list (Content-Type for JSON bodies, the three Attn-* protocol
+ * headers).
+ */
+const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW";
+
+/** Methods the relay exposes to browsers — everything in the v2 HTTP surface. */
+const CORS_ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS";
+
+/**
+ * Parse `ALLOWED_BROWSER_ORIGINS` into a Set for O(1) membership lookup.
+ *
+ * The env var is a comma-separated allowlist (e.g.
+ * `"https://attn.dev,https://staging.attn.dev"`). Empty / whitespace entries
+ * are skipped so a stray trailing comma doesn't accidentally allow the empty
+ * Origin.
+ */
+function parseAllowedOrigins(env: Env): Set<string> {
+  const raw = env.ALLOWED_BROWSER_ORIGINS ?? "";
+  const out = new Set<string>();
+  for (const piece of raw.split(",")) {
+    const trimmed = piece.trim();
+    if (trimmed !== "") out.add(trimmed);
+  }
+  return out;
+}
+
+/**
+ * Returns the request Origin if (and only if) it is in the configured
+ * allowlist. Returning the original-cased value lets us echo it back exactly
+ * in `Access-Control-Allow-Origin` per the CORS spec.
+ */
+function originIfAllowed(request: Request, env: Env): string | undefined {
+  const origin = request.headers.get("Origin");
+  if (origin === null || origin === "") return undefined;
+  const allowed = parseAllowedOrigins(env);
+  return allowed.has(origin) ? origin : undefined;
+}
+
+/**
+ * Attach CORS headers to a response when the DO signaled `allowBrowser=true`
+ * (via the internal `X-Attn-Allow-Browser` handshake header) AND the request's
+ * Origin is in the configured allowlist.
+ *
+ * The internal header is ALWAYS stripped before returning to the client —
+ * implementation-detail leak protection. The function returns a new Response
+ * with a mutable Headers map; callers should discard the original.
+ */
+function corsMiddleware(request: Request, env: Env, response: Response): Response {
+  const allowBrowser = response.headers.get(INTERNAL_ALLOW_BROWSER_HEADER) === "true";
+  // Always create a fresh Headers object so we can mutate without aliasing
+  // the (often immutable) original. We don't read body to keep streaming intact.
+  const newHeaders = new Headers(response.headers);
+  newHeaders.delete(INTERNAL_ALLOW_BROWSER_HEADER);
+
+  if (allowBrowser) {
+    const origin = originIfAllowed(request, env);
+    if (origin !== undefined) {
+      newHeaders.set("Access-Control-Allow-Origin", origin);
+      newHeaders.set("Access-Control-Allow-Headers", CORS_ALLOWED_HEADERS);
+      newHeaders.set("Access-Control-Allow-Methods", CORS_ALLOWED_METHODS);
+      // `Vary: Origin` lets caches keep one entry per origin so non-allowlisted
+      // hits don't poison the response for a later allowlisted requester.
+      const existingVary = newHeaders.get("Vary");
+      newHeaders.set("Vary", existingVary === null ? "Origin" : `${existingVary}, Origin`);
+    }
+  }
+
+  // WebSocket upgrade responses carry the upgraded socket on a non-cloneable
+  // field; rebuilding the Response with `new Response(body, init)` preserves
+  // status + headers but drops `webSocket`. We special-case 101 by re-using
+  // the original response and only patching headers in place where possible.
+  if (response.status === 101 && response.webSocket !== null) {
+    // For 101 upgrade responses Cloudflare's runtime accepts a fresh response
+    // that carries `webSocket` via init. Pass it explicitly.
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders,
+      webSocket: response.webSocket,
+    });
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: newHeaders,
+  });
+}
+
+/**
+ * Build a synthetic 204 No Content response for OPTIONS preflight requests
+ * to non-room routes (e.g. `/health`). Non-room routes never see browsers in
+ * a real deployment, but answering OPTIONS politely avoids a 4xx that some
+ * CORS-aware HTTP libraries treat as fatal even on routes they don't care
+ * about.
+ */
+function buildPreflightForNonRoomRoute(): Response {
+  return new Response(null, { status: 204 });
+}
+
+/**
  * Route matcher for any path that targets a single room: matches
  * `/v2/rooms/:roomId` and `/v2/rooms/:roomId/<subroute>`. The first capture
  * is the `roomId` we hand to the DO namespace.
@@ -129,6 +241,14 @@ export default {
       });
     }
 
+    // OPTIONS preflight for any non-room route (incl. /health) — answer 204
+    // without CORS headers. Browsers only legitimately preflight room routes;
+    // a 204 here is just defensive politeness. Room-route OPTIONS is dispatched
+    // to the DO below so the response can be conditioned on policy.allowBrowser.
+    if (request.method === "OPTIONS" && !ROOM_ROUTE_RE.test(url.pathname)) {
+      return buildPreflightForNonRoomRoute();
+    }
+
     // Edge per-IP rate limit. Applies to every route below — every request
     // that resolves to a room contributes to the source IP's quota. We pass
     // `roomExists=true` so this initial check ONLY exercises the per-IP cap;
@@ -151,6 +271,11 @@ export default {
     // (HMAC carried via Sec-WebSocket-Protocol per relay-spec.md §WS Protocol)
     // and accepts the socket. We just forward — the DO returns a 101 with the
     // selected subprotocol and the upgraded peer.
+    //
+    // Browser-policy Origin check happens inside the DO (where the room policy
+    // is loaded). The DO also signals allowBrowser back via the internal
+    // X-Attn-Allow-Browser header so corsMiddleware can attach CORS to the
+    // 101 response when appropriate.
     const socketMatch = url.pathname.match(ROOM_SOCKET_RE);
     if (socketMatch && socketMatch[1]) {
       const upgrade = request.headers.get("Upgrade");
@@ -160,7 +285,8 @@ export default {
       const roomId = socketMatch[1];
       const id = env.RELAY_ROOMS.idFromName(roomId);
       const stub = env.RELAY_ROOMS.get(id);
-      return stub.fetch(request);
+      const response = await stub.fetch(request);
+      return corsMiddleware(request, env, response);
     }
 
     // R2 blob upload/download — Worker-handled to avoid round-tripping bytes
@@ -173,6 +299,12 @@ export default {
     if (blobObjectMatch && blobObjectMatch[1] && blobObjectMatch[2]) {
       const roomId = blobObjectMatch[1];
       const envelopeId = decodeURIComponent(blobObjectMatch[2]);
+      // Blob PUT/GET don't pass through the DO, so the Worker fetches policy
+      // directly from the DO (via a GET on the room itself) only when we need
+      // to emit CORS — for now, blob responses skip CORS entirely since the
+      // browser allowBrowser flow uses POST /blobs (which routes to the DO) +
+      // a server-mediated upload. PUT/GET cap-bearing routes are native-style.
+      // Preflight OPTIONS is still answered (via the DO ROUTE_RE handler below).
       if (request.method === "PUT") {
         return handleBlobPut(request, env, url, roomId, envelopeId);
       }
@@ -204,9 +336,9 @@ export default {
       // apply (the per-IP rate cap still does, which already ran above).
       if (response.status === 404) {
         const upgraded = await maybeUpgradeUnknownRoomTo429(response, ip, roomId);
-        if (upgraded !== undefined) return upgraded;
+        if (upgraded !== undefined) return corsMiddleware(request, env, upgraded);
       }
-      return response;
+      return corsMiddleware(request, env, response);
     }
 
     return new Response("not implemented yet", { status: 404 });

@@ -93,6 +93,12 @@ tasks:
     cmds:
       - scripts/test-dual-instance-smoke.sh
 
+  test:webrtc:
+    desc: "Run the WebRTC end-to-end test (Rust transport + bash daemon shape). Honors ATTN_SKIP_WEBRTC_E2E=1 on flaky CI."
+    cmds:
+      - cargo test --test webrtc_e2e -- --nocapture
+      - scripts/test-webrtc-e2e.sh
+
   check:size:
     desc: Build release and verify the binary stays under the 25 MiB collab v2 budget (see planning/collab/amendments.md §Decision #1).
     cmds:

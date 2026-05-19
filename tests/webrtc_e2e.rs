@@ -593,14 +593,25 @@ async fn webrtc_happy_path_delivers_comment_envelope_to_owner_store() {
         return;
     }
 
-    // Mint + send the comment via the DataChannel.
+    // Mint + send the comment via the DataChannel. The peer-connection
+    // state can reach Connected slightly before the SCTP DataChannel
+    // ready_state flips to Open, so we retry with a short backoff —
+    // matching how a production sender would queue on top of an outbox
+    // rather than fail the first time.
     let envelope = mint_reviewer_comment_envelope(&harness, "first comment over WebRTC");
     let envelope_id = envelope.envelope_id.clone();
-    let ack = harness
-        .reviewer
-        .send_envelope(envelope.clone())
-        .await
-        .expect("send_envelope ok over DataChannel");
+    let ack = timeout(Duration::from_secs(10), async {
+        loop {
+            match harness.reviewer.send_envelope(envelope.clone()).await {
+                Ok(ack) => return ack,
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    })
+    .await
+    .expect("DataChannel must open + accept send within 10s");
     assert_eq!(
         ack.envelope_id, envelope_id,
         "send_envelope must echo the envelope_id"

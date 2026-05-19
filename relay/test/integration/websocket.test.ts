@@ -480,21 +480,23 @@ describe("WS /socket — admission", () => {
     expect(err.error.code).toBe("ATTN_ADMISSION_INVALID");
   });
 
-  it("returns 401 ATTN_ADMISSION_INVALID when the HMAC is wrong", async () => {
+  it("accepts the upgrade and closes with 4000 when the HMAC is wrong", async () => {
     const roomId = uniqueRoomId("ws-bad-hmac");
     const owner = await generateEd25519Keypair();
     const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-b", participantId: "bob" });
 
-    const { response } = await openSocket({
+    const { ws, response } = await openSocket({
       roomId,
       deviceId: "dev-b",
       admissionKey,
       badHmac: true,
     });
-    expect(response.status).toBe(401);
-    const err = (await response.json()) as { error: { code: string } };
-    expect(err.error.code).toBe("ATTN_ADMISSION_INVALID");
+    expect(response.status).toBe(101);
+    const q = new FrameQueue(ws);
+    await q.waitClosed(2000);
+    expect(q.closed).toBe(true);
+    expect(q.closeCode).toBe(4000);
   });
 
   it("opens with valid admission and replies with a hello frame after subscribe", async () => {

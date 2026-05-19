@@ -968,16 +968,15 @@ export class RoomDO extends DurableObject<Env> {
    * — same scheme as the HTTP endpoints, only the body is the empty string.
    *
    * Failure modes:
-   *   - missing/wrong upgrade header → 426 (router-level guard already filters)
+   *   - non-GET method               → 405
+   *   - missing/wrong upgrade header → 426
    *   - room doesn't exist           → 404
-   *   - admission HMAC fails         → 401 + Sec-WebSocket-Protocol omitted
-   *     (returning 101 + close 4000 would require accept-then-close; we
-   *     prefer the cleaner HTTP-level 401 before any upgrade, matching the
-   *     "admission HMAC invalid (when handshake admission fails)" wording
-   *     in the spec's close-code table)
-   *   - peer cap reached             → 101 + accept + close(4004) so the
-   *     client sees the close code (browsers can't read response status
-   *     after a failed upgrade reliably)
+   *   - missing Sec-WebSocket-Protocol → 401 (no peer to close-frame yet)
+   *   - admission HMAC fails         → 101 + close(4000) so the spec's
+   *     close-code surface is observable. Browsers can't read response
+   *     status after a failed upgrade reliably; close 4000 is the canonical
+   *     signal per relay-spec.md §Close Codes.
+   *   - peer cap reached             → 101 + accept + close(4004)
    */
   private async handleSocketUpgrade(
     request: Request,
@@ -1003,6 +1002,10 @@ export class RoomDO extends DurableObject<Env> {
     const protocolHeader = request.headers.get("Sec-WebSocket-Protocol");
     const parsedProtocol = parseAttnProtocol(protocolHeader);
     if (parsedProtocol === undefined) {
+      // Without a parseable subprotocol we can't even negotiate `attn.v2`, so
+      // we refuse the upgrade outright. This is the only admission-failure
+      // path that does NOT return 101+close — the upgrade can't proceed if
+      // the server can't pick a subprotocol to respond with.
       return errorResponse(
         401,
         "ATTN_ADMISSION_INVALID",
@@ -1018,11 +1021,20 @@ export class RoomDO extends DurableObject<Env> {
       admissionKey: storedAdmissionKey,
     });
     if (!hmacOk) {
-      return errorResponse(
-        401,
-        "ATTN_ADMISSION_INVALID",
-        `admission HMAC mismatch for room ${roomId}`,
-      );
+      // Per spec: accept the upgrade so the client observes close 4000.
+      const pair = new WebSocketPair();
+      const [c, s] = [pair[0], pair[1]];
+      s.accept();
+      try {
+        s.close(CLOSE_ADMISSION_INVALID, "admission HMAC invalid");
+      } catch {
+        // swallow
+      }
+      return new Response(null, {
+        status: 101,
+        webSocket: c,
+        headers: { "Sec-WebSocket-Protocol": "attn.v2" },
+      });
     }
 
     // device_id query parameter is required so we can tag the socket.
@@ -1650,6 +1662,7 @@ function formatZodError(err: z.ZodError): string {
 
 /** WS close codes per relay-spec.md §WebSocket Protocol. */
 const CLOSE_NORMAL = 1000;
+const CLOSE_ADMISSION_INVALID = 4000;
 const CLOSE_ROOM_DELETED = 4001;
 const CLOSE_ROOM_EXPIRED = 4002;
 const CLOSE_RATE_LIMIT = 4003;
@@ -1661,6 +1674,7 @@ const CLOSE_CURSOR_TOO_OLD = 4005;
 // canonical names rather than magic numbers.
 export const WS_CLOSE_CODES = {
   normal: CLOSE_NORMAL,
+  admissionInvalid: CLOSE_ADMISSION_INVALID,
   roomDeleted: CLOSE_ROOM_DELETED,
   roomExpired: CLOSE_ROOM_EXPIRED,
   rateLimit: CLOSE_RATE_LIMIT,

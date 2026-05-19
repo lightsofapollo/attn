@@ -85,6 +85,42 @@ pub struct MailboxConfig {
     pub pow_difficulty: u32,
 }
 
+/// How the WS client reacts when the relay surfaces an
+/// `ATTN_CURSOR_TOO_OLD` error (close code 4005, see relay-spec.md §Close
+/// Codes and §Stale-cursor recovery).
+///
+/// The relay sends `error { code: "ATTN_CURSOR_TOO_OLD", resyncFromSeq }`
+/// followed by close `4005` when the client's `after` cursor is older than
+/// the relay's `meta:oldest_retained_seq`. The recovery decision is
+/// policy-dependent:
+///
+/// - `ResyncFromOldest` — async path: discard the local cursor, reset it to
+///   `resyncFromSeq` (the relay's oldest retained), and reconnect. This
+///   accepts that any envelopes between the old cursor and `resyncFromSeq`
+///   are permanently lost (deleted by owner ACK or expiry).
+/// - `RequestSnapshot` — live (P2P) path: emit an Error event and let the
+///   higher-level orchestrator initiate a `RequestSnapshot` over WebRTC
+///   (Phase 4). The client does NOT auto-reconnect — the caller must call
+///   `run` again after the snapshot lands.
+/// - `Manual` — the caller decides what to do via the emitted Error event;
+///   the client does not auto-reconnect. Used in tests and for owner-side
+///   UI flows where a human is in the loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorRecoveryPolicy {
+    /// Reset cursor to `resyncFromSeq` and reconnect. Default.
+    ResyncFromOldest,
+    /// Emit an error, do not reconnect — caller initiates a P2P snapshot.
+    RequestSnapshot,
+    /// Emit an error, do not reconnect — caller drives the next step.
+    Manual,
+}
+
+impl Default for CursorRecoveryPolicy {
+    fn default() -> Self {
+        CursorRecoveryPolicy::ResyncFromOldest
+    }
+}
+
 /// Drains the on-disk outbox and posts batches to the relay.
 ///
 /// Owns:

@@ -113,9 +113,29 @@ export function buildReviewDecorations(
   const eventIndex = indexEventsById(inputs.events);
   const perRange = new Map<string, RangeEntry>();
 
+  // Suggestions that have been accepted or rejected are no longer pending —
+  // their proposed change is either applied (and now part of the doc) or
+  // discarded, so they must NOT keep rendering inline ghost text. Collect
+  // their suggestion_ids from SuggestionAccepted/Rejected events.
+  const resolvedSuggestionIds = new Set<string>();
+  for (const event of inputs.events) {
+    const body = event.body;
+    if (body.type === 'suggestion_accepted' || body.type === 'suggestion_rejected') {
+      resolvedSuggestionIds.add(body.suggestionId);
+    }
+  }
+
   for (const [eventId, update] of Object.entries(inputs.resolutions)) {
     const kind = lookupEventKind(eventIndex, eventId);
     if (!kind) continue;
+    // Skip suggestions whose proposal has already been accepted/rejected.
+    const ev = eventIndex.get(eventId);
+    if (
+      ev?.body.type === 'suggestion_created' &&
+      resolvedSuggestionIds.has(ev.body.suggestionId)
+    ) {
+      continue;
+    }
     const range = resolutionRange(update.resolved);
     if (!range) continue;
     const [pmFrom, pmTo] = clampRange(range, inputs.docSize);

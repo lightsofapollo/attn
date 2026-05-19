@@ -10,7 +10,7 @@
 │  • File system access    │  ──────────────────► │  • Svelte 5 UI       │
 │  • File watching         │                     │  • HTML injection    │
 │  • comrak: MD → HTML     │  ipc.postMessage()  │  • Mermaid (lazy)    │
-│  • syntect: code blocks  │  ◄────────────────── │  • CM6 edit mode     │
+│  • syntect: code blocks  │  ◄────────────────── │  • ProseMirror editor│
 │  • Plan structure parse  │                     │  • Sidebar nav       │
 │  • Beads detection       │                     │  • Keyboard shortcuts│
 │  • Theme CSS generation  │                     │  • Theme switching   │
@@ -63,7 +63,7 @@ plan.md (on disk)
 │  - Finds .mermaid-block divs, lazy-loads mermaid.js │
 │  - Renders mermaid with theme matching data-theme   │
 │  - All code highlighting is already done — just CSS  │
-│  - 'e' key → CodeMirror 6 with raw markdown (EDIT)  │
+│  - 'e' key → ProseMirror editor over the same doc   │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -78,18 +78,20 @@ plan.md (on disk)
 │                                                      │
 │  Press 'e' ──►                                      │
 ├─────────────────────────────────────────────────────┤
-│  EDIT MODE (CodeMirror 6)                            │
-│  Raw markdown source. Syntax highlighted.           │
-│  Nested language highlighting in code blocks.       │
-│  Heading folding. Find/replace. Multi-cursor.       │
+│  EDIT MODE (ProseMirror)                             │
+│  Same ProseMirror document, now editable.            │
+│  Code blocks highlighted via shiki / prosemirror-    │
+│  highlight. Tables, math, mermaid as NodeViews.     │
+│  Find/replace via prosemirror-search.                │
 │                                                      │
-│  Press 'e' or Esc ──► Rust re-renders, back to READ │
+│  Press 'e' or Esc ──► serialize to markdown, save,  │
+│                       back to READ                  │
 └─────────────────────────────────────────────────────┘
 ```
 
-Read mode: Rust-fast rendered HTML. The primary experience.
-Edit mode: CodeMirror 6 with the markdown source. Full code editing inside fenced blocks.
-Checkbox toggling: Works in read mode directly — no editor needed.
+Read mode: ProseMirror document mounted read-only over the parsed markdown.
+Edit mode: same ProseMirror document, made editable. Save serializes back to markdown and writes via IPC.
+Checkbox toggling: works in either mode via a custom `task_list_item` NodeView — no mode switch needed.
 
 ### Code Highlighting: comrak + syntect
 
@@ -178,31 +180,48 @@ for (const block of blocks) {
 }
 ```
 
-### Checkbox Toggling (in read mode, no editor needed)
+### Checkbox Toggling (any mode, via ProseMirror NodeView)
+
+The `task_list_item` schema node has a custom NodeView that owns the checkbox
+input directly. Clicking the checkbox dispatches a ProseMirror transaction
+that flips the `checked` attribute, then serializes the doc back to markdown
+and sends an `edit_save` IPC message:
 
 ```
-User clicks checkbox in rendered HTML
-  → Svelte intercepts click event on input[type="checkbox"]
-  → Sends { type: "checkbox_toggle", line: 14, checked: true } to Rust via IPC
-  → Rust flips `- [ ]` to `- [x]` (or vice versa) at that line in the source file
-  → File watcher detects change → re-renders → pushes updated HTML
+User clicks checkbox in ProseMirror doc
+  → task_list_item NodeView intercepts mousedown
+  → dispatches setNodeMarkup transaction (checked = !checked)
+  → markdownSerializer.serialize(doc) → markdown string
+  → Sends { type: "edit_save", content: "..." } to Rust via IPC
+  → Rust writes to disk
+  → File watcher detects change; self-write is reconciled, no re-parse
 ```
 
-### Edit Mode: CodeMirror 6
+### Edit Mode: ProseMirror
 
-Lazy-loaded only when user presses `e`. Key extensions:
-- `@codemirror/lang-markdown` — markdown syntax highlighting + structure
-- Nested language highlighting — code blocks get their own language mode (Rust, TS, Python, etc.)
-- `@codemirror/language` — heading folding, indent handling
-- `@codemirror/search` — find/replace
-- Line wrapping, bracket matching, multi-cursor
+The same ProseMirror `EditorView` powers both read and edit modes — `editable`
+is just a prop flipped on `'e'`. Stack (all eagerly bundled, no lazy split):
+- `prosemirror-model` / `prosemirror-state` / `prosemirror-view` — core
+- `prosemirror-markdown` — markdown parser + serializer (round-trips the
+  source via `markdown-it` plus the custom schema in `web/src/lib/schema.ts`)
+- `prosemirror-history` — undo/redo
+- `prosemirror-keymap` + `prosemirror-commands` — default + app-level keymaps
+- `prosemirror-search` — find/replace panel
+- `prosemirror-tables`, `prosemirror-schema-list` — structural extensions
+- `prosemirror-highlight` + `shiki` — syntax-highlighted code blocks via
+  the `codeHighlightPlugin` decoration plugin
+- Custom NodeViews for `task_list_item`, `code_block`, mermaid, math
+  (see `web/src/lib/prosemirror/`)
+
+Large documents (> 350K chars) fall back to a "safe mode" doc to avoid
+blocking the main thread during initial parse.
 
 On save (Cmd+S or exit edit mode):
-1. Get markdown string from CodeMirror
+1. `markdownSerializer.serialize(view.state.doc)` → markdown string
 2. Send `{ type: "edit_save", content: "..." }` to Rust via IPC
-3. Rust writes to disk
-4. File watcher triggers re-render
-5. Switch back to read mode with updated HTML
+3. Rust writes to disk (self-write is tracked by the watcher to skip the
+   re-parse round-trip when the round-tripped content matches)
+4. Flip `editable` back to `false` — same document, same selection/scroll
 
 ## Rust Side
 
@@ -254,9 +273,11 @@ All three are sent to the frontend. HTML goes into the content area. Raw markdow
 ### Key Frontend Dependencies
 
 - `mermaid` — diagram rendering (lazy loaded, ~200KB, only when blocks exist)
-- `@codemirror/view` + `@codemirror/state` — editor core (lazy loaded, ~80KB, only on 'e')
-- `@codemirror/lang-markdown` — markdown mode with nested language support
-- `@codemirror/lang-javascript`, `@codemirror/lang-rust`, etc. — per-language (lazy per block)
+- `prosemirror-*` — editor core, schema, markdown round-trip, history, search,
+  tables, keymap, commands (see `web/package.json` for the full list)
+- `prosemirror-highlight` + `shiki` — syntax-highlighted code blocks driven by
+  a ProseMirror decoration plugin
+- `katex` — math rendering inside the math NodeView
 
 ### Build
 
@@ -333,7 +354,7 @@ attn/
 │   │   ├── App.svelte     # root component, mode switching
 │   │   ├── Viewer.svelte  # read mode: HTML display + density modes
 │   │   ├── Sidebar.svelte # file tree navigation
-│   │   ├── Editor.svelte  # edit mode: CodeMirror 6 (lazy loaded)
+│   │   ├── Editor.svelte  # ProseMirror EditorView (shared read + edit)
 │   │   ├── keyboard.ts    # keyboard shortcut handling
 │   │   ├── ipc.ts         # window.__attn__ bridge + postMessage helpers
 │   │   └── theme.ts       # data-theme management, system preference detection

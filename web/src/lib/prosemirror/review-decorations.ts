@@ -27,7 +27,7 @@
 // on the plugin DOM via `props.handleDOMEvents` so they survive editor
 // remounts and live alongside the existing editor handlers.
 
-import { Plugin, PluginKey, type EditorState, type Transaction } from 'prosemirror-state';
+import { Plugin, PluginKey, type EditorState } from 'prosemirror-state';
 import { Decoration, DecorationSet, type EditorView } from 'prosemirror-view';
 
 import { reviewStore } from '../review/store.svelte';
@@ -396,5 +396,3 @@ export const __testing__ = {
   INLINE_CUTOFF,
 };
 
-// Silence "imported but unused" when we reference `Transaction` only in JSDoc.
-export type _ReviewDecorationsTransaction = Transaction;

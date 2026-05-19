@@ -9,6 +9,7 @@
 
 pub mod apply;
 pub mod crypto;
+pub mod envelope;
 pub mod ids;
 pub mod ipc;
 pub mod manager;

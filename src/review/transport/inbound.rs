@@ -543,14 +543,22 @@ mod tests {
     /// AEAD layer — bypasses `assemble_event_envelope` because those envelopes
     /// don't have a signed-event plaintext. Mirrors what the production
     /// snapshot/signal assemblers will eventually do (issues 5.x / 7.x).
+    ///
+    /// `target_device_id`: cleartext routing tag the relay would see. `None`
+    /// is the broadcast / target-less form (currently the only shape callers
+    /// in this module need for non-signal kinds); `Some(d)` is needed for the
+    /// H2 anti-redirect tests below where we mint a signal envelope addressed
+    /// to a specific (or attacker-spoofed) device.
     fn mint_blob_envelope(
         key: &[u8; 32],
         room_id: &RoomId,
         kind: EnvelopeKind,
         plaintext: &[u8],
         client_nonce: [u8; 16],
+        target_device_id: Option<DeviceId>,
     ) -> MailboxEnvelope {
         use crate::review::crypto::ids::derive_envelope_id_with_nonce;
+        use crate::review::model::EnvelopeTarget;
 
         let author_id: ParticipantId = id("p-author-01");
         let device_id: DeviceId = id("d-device-01");
@@ -579,7 +587,7 @@ mod tests {
             created_at: created_at_ms,
             expires_at: created_at_ms + 7 * 24 * 60 * 60 * 1000,
             kind,
-            target: None,
+            target: target_device_id.map(|d| EnvelopeTarget { device_id: d }),
             nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
             ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
             ciphertext_bytes: ciphertext.len() as u64,
@@ -774,6 +782,7 @@ mod tests {
             EnvelopeKind::SnapshotBlob,
             snapshot_bytes,
             [0x77u8; 16],
+            None,
         );
 
         let (envelope_id, plaintext) = pipeline
@@ -800,6 +809,7 @@ mod tests {
             EnvelopeKind::SnapshotBlob,
             b"will not decrypt",
             [0x77u8; 16],
+            None,
         );
 
         let err = pipeline
@@ -820,16 +830,20 @@ mod tests {
     async fn import_signal_envelope_decrypts_under_signaling_key() {
         let (pipeline, _store, _signer, room_id, _tmp) = fresh_pipeline_with_signer();
         let sdp_offer = br#"{"type":"offer","sdp":"v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n"}"#;
+        // Build with target=None (broadcast) — the permissive case for the
+        // H2 target check; covered separately in the targeted-self test.
         let envelope = mint_blob_envelope(
             &pipeline.signaling_key,
             &room_id,
             EnvelopeKind::Signal,
             sdp_offer,
             [0x88u8; 16],
+            None,
         );
 
+        let local_device: DeviceId = id("d-self");
         let plaintext = pipeline
-            .import_signal_envelope(&room_id, &envelope)
+            .import_signal_envelope(&room_id, &envelope, &local_device)
             .await
             .expect("signal decrypt");
         assert_eq!(plaintext, sdp_offer);
@@ -861,8 +875,12 @@ mod tests {
         }
 
         // Event envelope handed to the signal path -> KindMismatch.
+        // The KindMismatch check fires before the H2 target check, so the
+        // dummy local DeviceId here is irrelevant — we exercise the dispatch
+        // guard, not the target enforcement.
+        let local_device: DeviceId = id("d-self");
         let err = pipeline
-            .import_signal_envelope(&room_id, &event_envelope)
+            .import_signal_envelope(&room_id, &event_envelope, &local_device)
             .await
             .expect_err("event envelope on signal path must reject");
         assert!(matches!(err, InboundError::KindMismatch { .. }));
@@ -874,6 +892,7 @@ mod tests {
             EnvelopeKind::SnapshotBlob,
             b"snap",
             [0x99u8; 16],
+            None,
         );
         let err = pipeline
             .import_event_envelope(&room_id, &snapshot_envelope)

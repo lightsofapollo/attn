@@ -106,6 +106,69 @@ interface AttnBridge {
 /** Kinds of review callback the test helper can fire into the bridge. */
 export type MockReviewEmitKind = 'status' | 'event' | 'snapshot' | 'anchor_resolution';
 
+/**
+ * One scripted entry in a mock-IPC scenario file. Mirrors the
+ * `__mockEmitReview` argument shape so the loader can dispatch each step
+ * by routing `kind` → `emit{Kind}` against the bridge. `delayMs` is the
+ * pre-event wait used by `playScenario` (scaled by `opts.speed`).
+ *
+ * Payload typing is `unknown` because scenarios live in JSON and the
+ * downstream consumers (review store + components) re-validate as
+ * needed. The mock makes no shape guarantees beyond the variant tag.
+ *
+ * @see web/src/lib/mock-ipc-scenarios/*.json
+ */
+export interface MockScenarioStep {
+  kind: MockReviewEmitKind;
+  payload: unknown;
+  /** Delay (ms) before this step fires, relative to the previous step. */
+  delayMs?: number;
+  /** Optional human-readable note for debugging logs / E2E traces. */
+  note?: string;
+}
+
+/**
+ * Top-level shape of a JSON scenario in `web/src/lib/mock-ipc-scenarios/`.
+ * `version` is pinned to `1` for now; loaders reject anything else so we
+ * can evolve the wire format without silent breakage.
+ */
+export interface MockScenario {
+  version: 1;
+  name: string;
+  description?: string;
+  /** Fallback delay (ms) applied when a step omits `delayMs`. */
+  defaultDelayMs?: number;
+  steps: MockScenarioStep[];
+}
+
+/** Optional playback knobs for `playScenario`. */
+export interface PlayScenarioOptions {
+  /**
+   * Playback rate. `speed=1` plays scenario delays as authored;
+   * `speed=2` halves them; `speed=0` collapses delays to zero (useful
+   * for unit tests that drive scenarios synchronously).
+   */
+  speed?: number;
+  /** Receive each step + its index after it fires. Useful for tests. */
+  onStep?: (step: MockScenarioStep, index: number) => void;
+}
+
+/**
+ * Public surface exposed on `window.__attnMockScenario`. Daemon E2E
+ * tests call into it via `attn --eval "window.__attnMockScenario.play(...)"`.
+ */
+export interface MockScenarioApi {
+  /** List of bundled scenario names (resolves at install time). */
+  available: readonly string[];
+  /** Load a scenario file by short name. */
+  load: (name: string) => Promise<MockScenario>;
+  /**
+   * Load + replay a scenario sequentially. Returns the resolved scenario
+   * once the final step has fired so callers can chain `await` cleanly.
+   */
+  play: (name: string, opts?: PlayScenarioOptions) => Promise<MockScenario>;
+}
+
 declare global {
   interface Window {
     __attn__?: AttnBridge;
@@ -117,6 +180,13 @@ declare global {
      * wry host). Wired up in `installMockIpc`. See attn-nnj.12.6.
      */
     __mockEmitReview?: (kind: MockReviewEmitKind, payload: unknown) => void;
+    /**
+     * E2E helper: load and replay a scripted mock-IPC review scenario.
+     * Exposed by `installMockIpc` so the daemon `--eval` channel can drive
+     * Phase 2 review surfaces without booting the Rust ReviewManager.
+     * See attn-nnj.4.1.
+     */
+    __attnMockScenario?: MockScenarioApi;
   }
 }
 
@@ -382,6 +452,141 @@ export function __mockEmitReview(kind: MockReviewEmitKind, payload: unknown): vo
   emitMockReview(kind, payload);
 }
 
+// ---------------------------------------------------------------------------
+// Scripted scenario loader / player (attn-nnj.4.1)
+//
+// Scenarios live under `web/src/lib/mock-ipc-scenarios/*.json` and are
+// resolved at build time via Vite's `import.meta.glob`. Each scenario is an
+// ordered list of `{ kind, payload, delayMs }` steps which we replay
+// sequentially into the bridge using the same `emit*` helpers that back
+// `__mockEmitReview`.
+//
+// The player is intentionally tolerant: it does not validate payload shapes
+// (consumers re-validate) and it swallows unknown kinds rather than
+// throwing, so a partially-typo'd scenario still drives whatever steps it
+// got right. Hard errors (bad `version`, missing file) still surface so
+// authoring mistakes are obvious.
+// ---------------------------------------------------------------------------
+
+// `import.meta.glob('./mock-ipc-scenarios/*.json', { eager: false })` returns
+// a map of relative path → lazy loader. The cast threads the loader's
+// dynamic-import shape through TypeScript without leaking `any` into the
+// public API (lint rule: no `any` types).
+type ScenarioModule = { default: MockScenario };
+type ScenarioGlobMap = Record<string, () => Promise<ScenarioModule>>;
+
+const scenarioLoaders = import.meta.glob<ScenarioModule>(
+  './mock-ipc-scenarios/*.json',
+) as ScenarioGlobMap;
+
+/**
+ * Short-name → loader map. Short names strip the directory prefix and
+ * `.json` suffix so callers say `'comment-survives-edit'`, not the full
+ * relative path.
+ */
+const scenarioIndex: Map<string, () => Promise<ScenarioModule>> = (() => {
+  const m = new Map<string, () => Promise<ScenarioModule>>();
+  for (const path of Object.keys(scenarioLoaders)) {
+    const filename = path.split('/').pop() ?? path;
+    const name = filename.replace(/\.json$/, '');
+    const loader = scenarioLoaders[path];
+    if (loader) m.set(name, loader);
+  }
+  return m;
+})();
+
+/**
+ * Resolve a scenario JSON file by short name (e.g. `'comment-survives-edit'`).
+ * Throws when the name is unknown or the loaded JSON fails the basic
+ * `version === 1` + `Array.isArray(steps)` shape check.
+ */
+export async function loadScenario(name: string): Promise<MockScenario> {
+  const loader = scenarioIndex.get(name);
+  if (!loader) {
+    const known = Array.from(scenarioIndex.keys()).join(', ') || '<none>';
+    throw new Error(`mock-ipc: unknown scenario '${name}' (known: ${known})`);
+  }
+  const mod = await loader();
+  const scenario = mod.default;
+  if (!scenario || scenario.version !== 1) {
+    throw new Error(
+      `mock-ipc: scenario '${name}' has unsupported version (expected 1)`,
+    );
+  }
+  if (!Array.isArray(scenario.steps)) {
+    throw new Error(`mock-ipc: scenario '${name}' is missing .steps[]`);
+  }
+  return scenario;
+}
+
+/** List of bundled scenarios. Stable order based on filesystem glob result. */
+export function listScenarios(): string[] {
+  return Array.from(scenarioIndex.keys()).sort();
+}
+
+function applyStep(step: MockScenarioStep): void {
+  // Unknown kinds are tolerated (logged) rather than thrown so a partial
+  // scenario still fires its valid steps.
+  switch (step.kind) {
+    case 'status':
+    case 'event':
+    case 'snapshot':
+    case 'anchor_resolution':
+      emitMockReview(step.kind, step.payload);
+      return;
+    default:
+      console.warn('[attn] mock scenario: unknown step kind', step);
+      return;
+  }
+}
+
+function wait(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Load `name` and fire its steps in order against the bridge. Sequential —
+ * each step waits for its `delayMs` (scaled by `opts.speed`) before firing,
+ * so consumers see callbacks in the same order they were authored.
+ *
+ * Returns the loaded `MockScenario` once playback completes. Errors during
+ * loading propagate; errors inside a single step are caught + logged so
+ * playback continues (the goal is "make Phase 2 features testable", not
+ * "be a strict validator").
+ */
+export async function playScenario(
+  name: string,
+  opts: PlayScenarioOptions = {},
+): Promise<MockScenario> {
+  const scenario = await loadScenario(name);
+  const speed = opts.speed && opts.speed > 0 ? opts.speed : 1;
+  const fallbackDelay = scenario.defaultDelayMs ?? 0;
+
+  for (let i = 0; i < scenario.steps.length; i++) {
+    const step = scenario.steps[i]!;
+    const rawDelay = step.delayMs ?? fallbackDelay;
+    const scaledDelay = speed === Infinity ? 0 : Math.max(0, rawDelay / speed);
+    await wait(scaledDelay);
+    try {
+      applyStep(step);
+    } catch (err) {
+      console.error('[attn] mock scenario step failed', { step, err });
+    }
+    opts.onStep?.(step, i);
+  }
+  return scenario;
+}
+
+/** Build the public scenario API attached to `window.__attnMockScenario`. */
+function buildScenarioApi(): MockScenarioApi {
+  return {
+    available: listScenarios(),
+    load: loadScenario,
+    play: playScenario,
+  };
+}
+
 export function installMockIpc(): void {
   // Only install if not running inside wry (no native ipc)
   if (window.ipc) return;
@@ -423,4 +628,9 @@ export function installMockIpc(): void {
   // Expose the E2E helper. Stays on `window` so the daemon `--eval` channel
   // can drive it without bundling a separate test entry point.
   window.__mockEmitReview = __mockEmitReview;
+
+  // Expose the scripted scenario API (attn-nnj.4.1). E2E callers do:
+  //   attn --eval "window.__attnMockScenario.play('comment-survives-edit')"
+  // and watch the review store for the resulting events.
+  window.__attnMockScenario = buildScenarioApi();
 }

@@ -5,61 +5,84 @@
     "format": {
       "version": "Integer corpus version.",
       "vectors[].name": "Human label.",
-      "vectors[].event.meta": "Object WITHOUT `eventId` (the ID is computed FROM these bytes).",
-      "vectors[].event.body": "ReviewEventBody.",
-      "vectors[].expected.canonicalBytes": "UTF-8 string fed into SHA-256.",
+      "vectors[].event.meta": "Object WITHOUT `eventId` (the ID is computed FROM these bytes). Field shape matches the Rust `EventMeta` serde camelCase form minus `eventId`.",
+      "vectors[].event.body": "ReviewEventBody, tagged by `type` per the Rust serde derive.",
+      "vectors[].expected.canonicalBytes": "UTF-8 string fed into SHA-256 (object keys sorted ASCII-asc, absent fields omitted, parentEventIds pre-sorted).",
       "vectors[].expected.eventId": "base64url-no-pad of the full 32-byte SHA-256 digest (per spec, EventId uses the full digest, unlike EnvelopeId which truncates to 16 bytes)."
     },
     "rules": [
-      "`parentEventIds` MUST be sorted ASCII-ascending before hashing.",
+      "`parentEventIds` MUST be sorted ASCII-ascending before hashing (the corpus stores the post-sort order so the bytes are self-evident).",
       "`snapshotId` is OMITTED entirely if absent (never serialized as null).",
-      "`meta.eventId` is NOT included in the bytes that produce eventId; it is added to meta AFTER computation for transmission."
+      "`meta.eventId` is NOT included in the bytes that produce eventId; it is added to meta AFTER computation for transmission.",
+      "Vectors use fixed `roomSecret = 0x11 * 32`, deriving `roomId=hjCfgOvsatNOUedgxhZpyw` so cross-impl runs are reproducible without reimplementing the KDF."
     ],
     "filledBy": "attn-nnj.1.8 (ID helpers)"
   },
   "version": 1,
   "vectors": [
     {
-      "name": "root event (no parents, no snapshot)",
+      "name": "root event (no parents, no snapshot, simple comment_created body)",
       "event": {
         "meta": {
           "v": 2,
-          "roomId": "__PENDING_ROOM_ID__",
-          "authorId": "__PENDING_AUTHOR_ID__",
-          "deviceId": "__PENDING_DEVICE_ID__",
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
+          "authorId": "p-author-01",
+          "deviceId": "d-device-01",
           "createdAt": 1700000000000,
           "parentEventIds": []
         },
         "body": {
-          "kind": "comment",
-          "text": "hello"
+          "type": "comment_created",
+          "threadId": "thread-1",
+          "anchor": {
+            "v": 2,
+            "fileId": "f-file-01",
+            "snapshotId": "eQ7pDCC-mekpz-we7gDYag",
+            "baseHash": "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+            "position": {
+              "byteRange": [0, 9],
+              "lineRange": [1, 1]
+            }
+          },
+          "body": "hello"
         }
       },
       "expected": {
-        "canonicalBytes": "__PENDING__",
-        "eventId": "__PENDING__"
+        "canonicalBytes": "{\"body\":{\"anchor\":{\"baseHash\":\"fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y\",\"fileId\":\"f-file-01\",\"position\":{\"byteRange\":[0,9],\"lineRange\":[1,1]},\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2},\"body\":\"hello\",\"threadId\":\"thread-1\",\"type\":\"comment_created\"},\"meta\":{\"authorId\":\"p-author-01\",\"createdAt\":1700000000000,\"deviceId\":\"d-device-01\",\"parentEventIds\":[],\"roomId\":\"hjCfgOvsatNOUedgxhZpyw\",\"v\":2}}",
+        "eventId": "tkM6Sv6hKfUHM5Jm4G6NhqGwYaLFwinqHmaGI234upo"
       }
     },
     {
-      "name": "child event with unsorted parents (must be sorted before hashing)",
+      "name": "child event with two parents (stored pre-sorted) + snapshotId present",
       "event": {
         "meta": {
           "v": 2,
-          "roomId": "__PENDING_ROOM_ID__",
-          "authorId": "__PENDING_AUTHOR_ID__",
-          "deviceId": "__PENDING_DEVICE_ID__",
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
+          "authorId": "p-author-01",
+          "deviceId": "d-device-01",
           "createdAt": 1700000001000,
-          "parentEventIds": ["zzz_PENDING__", "aaa_PENDING__"],
-          "snapshotId": "__PENDING_SNAPSHOT_ID__"
+          "parentEventIds": ["evt-AAA", "evt-ZZZ"],
+          "snapshotId": "eQ7pDCC-mekpz-we7gDYag"
         },
         "body": {
-          "kind": "comment",
-          "text": "child"
+          "type": "comment_created",
+          "threadId": "thread-2",
+          "anchor": {
+            "v": 2,
+            "fileId": "f-file-01",
+            "snapshotId": "eQ7pDCC-mekpz-we7gDYag",
+            "baseHash": "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+            "position": {
+              "byteRange": [2, 9],
+              "lineRange": [1, 1]
+            }
+          },
+          "body": "child"
         }
       },
       "expected": {
-        "canonicalBytes": "__PENDING__",
-        "eventId": "__PENDING__"
+        "canonicalBytes": "{\"body\":{\"anchor\":{\"baseHash\":\"fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y\",\"fileId\":\"f-file-01\",\"position\":{\"byteRange\":[2,9],\"lineRange\":[1,1]},\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2},\"body\":\"child\",\"threadId\":\"thread-2\",\"type\":\"comment_created\"},\"meta\":{\"authorId\":\"p-author-01\",\"createdAt\":1700000001000,\"deviceId\":\"d-device-01\",\"parentEventIds\":[\"evt-AAA\",\"evt-ZZZ\"],\"roomId\":\"hjCfgOvsatNOUedgxhZpyw\",\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2}}",
+        "eventId": "RK6sKAm4nL7iR3pNpXzVp598c29o2V7KaxJJzN7e050"
       }
     }
   ]

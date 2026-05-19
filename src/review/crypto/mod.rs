@@ -10,6 +10,7 @@
 
 pub mod aead;
 pub mod canonical;
+pub mod ids;
 pub mod kdf;
 pub mod pow;
 pub mod signing;

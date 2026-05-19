@@ -1,7 +1,7 @@
 {
   "_schema": {
     "spec": "planning/collab/crypto-spec.md#envelope-encryption-aead",
-    "purpose": "End-to-end round-trip: event -> canonicalJSON -> Ed25519 sign -> AEAD seal -> envelope JSON. Each vector pins every intermediate step so a divergence in any layer is caught by a single test.",
+    "purpose": "End-to-end round-trip: event -> canonicalJSON -> Ed25519 sign -> AEAD seal -> envelope JSON. Each vector pins every intermediate step so a divergence in any layer is caught by a single test. Until attn-nnj.1.9 lands, the signature/AEAD/ciphertext/full-envelope fields are __PENDING__; the EventId and EnvelopeId derivations are filled by attn-nnj.1.8.",
     "format": {
       "version": "Integer corpus version.",
       "vectors[].name": "Human label.",
@@ -12,21 +12,27 @@
       "vectors[].inputs.clientNonce": "base64url-no-pad of 16 random bytes used for EnvelopeId derivation (null for event-shaped envelopes that use the simpler `SHA-256(\"envelope v2\" || roomId || eventId)` form).",
       "vectors[].inputs.aeadNonce": "base64url-no-pad of the 24-byte XChaCha20 nonce. Pinned to keep ciphertext deterministic.",
       "vectors[].inputs.createdAt": "Integer ms timestamp baked into both event meta and envelope AAD.",
-      "vectors[].expected.eventId": "Computed from canonical event bytes.",
-      "vectors[].expected.envelopeId": "Per kind: event-kind uses simpler form; signal/snapshot use clientNonce form.",
-      "vectors[].expected.signature": "base64url-no-pad of the Ed25519 signature over canonical event bytes.",
-      "vectors[].expected.aadJson": "UTF-8 canonical JSON of the AAD object.",
-      "vectors[].expected.ciphertext": "base64url-no-pad of XChaCha20-Poly1305 output.",
-      "vectors[].expected.envelope": "Full envelope JSON as it would appear in the relay's DO storage AND in `POST /v2/rooms/:roomId/envelopes` request body."
+      "vectors[].expected.eventId": "Computed from canonical event bytes (filled in 1.8).",
+      "vectors[].expected.envelopeId": "Per kind: event-kind uses simpler form; signal/snapshot use clientNonce form (filled in 1.8).",
+      "vectors[].expected.signature": "base64url-no-pad of the Ed25519 signature over canonical event bytes (filled in 1.9).",
+      "vectors[].expected.aadJson": "UTF-8 canonical JSON of the AAD object (filled in 1.9).",
+      "vectors[].expected.ciphertext": "base64url-no-pad of XChaCha20-Poly1305 output (filled in 1.9).",
+      "vectors[].expected.envelope": "Full envelope JSON as it would appear in the relay's DO storage AND in `POST /v2/rooms/:roomId/envelopes` request body (kind/ids filled in 1.8; nonce/ciphertext filled in 1.9)."
     },
-    "filledBy": "attn-nnj.1.9 (envelope assemble/disassemble integration)"
+    "rules": [
+      "Vectors share the canonical roomSecret = 0x11*32 (roomId = hjCfgOvsatNOUedgxhZpyw) and authorId/deviceId labels with event-id.json so the cross-vector inputs match.",
+      "EnvelopeId for kind=event uses `SHA-256(\"envelope v2\" || roomId || eventId)[:16]`.",
+      "EnvelopeId for kind=signal/snapshot_blob uses `SHA-256(\"envelope v2\" || roomId || deviceId || clientNonce)[:16]`.",
+      "When a vector pins a clientNonce, retries MUST reuse the same nonce so the relay can dedup."
+    ],
+    "filledBy": "attn-nnj.1.8 (EventId + EnvelopeId); attn-nnj.1.9 (AEAD, signature, full envelope round-trip)"
   },
   "version": 1,
   "vectors": [
     {
-      "name": "kind=event round-trip with simple comment body",
+      "name": "kind=event round-trip with simple comment_created body (envelopeId uses event-form)",
       "inputs": {
-        "roomSecret": "__PENDING__",
+        "roomSecret": "ERERERERERERERERERERERERERERERERERERERERERE",
         "keys": {
           "eventKey": "__PENDING__"
         },
@@ -37,15 +43,26 @@
         "event": {
           "meta": {
             "v": 2,
-            "roomId": "__PENDING_ROOM_ID__",
-            "authorId": "__PENDING_AUTHOR_ID__",
-            "deviceId": "__PENDING_DEVICE_ID__",
+            "roomId": "hjCfgOvsatNOUedgxhZpyw",
+            "authorId": "p-author-01",
+            "deviceId": "d-device-01",
             "createdAt": 1700000000000,
             "parentEventIds": []
           },
           "body": {
-            "kind": "comment",
-            "text": "hello"
+            "type": "comment_created",
+            "threadId": "thread-1",
+            "anchor": {
+              "v": 2,
+              "fileId": "f-file-01",
+              "snapshotId": "eQ7pDCC-mekpz-we7gDYag",
+              "baseHash": "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+              "position": {
+                "byteRange": [0, 9],
+                "lineRange": [1, 1]
+              }
+            },
+            "body": "hello"
           }
         },
         "clientNonce": null,
@@ -53,19 +70,69 @@
         "createdAt": 1700000000000
       },
       "expected": {
-        "eventId": "__PENDING__",
-        "envelopeId": "__PENDING__",
+        "eventId": "tkM6Sv6hKfUHM5Jm4G6NhqGwYaLFwinqHmaGI234upo",
+        "envelopeId": "CAyIYGgblSXAJs-buK6IDA",
         "signature": "__PENDING__",
         "aadJson": "__PENDING__",
         "ciphertext": "__PENDING__",
         "envelope": {
           "v": 2,
-          "envelopeId": "__PENDING__",
-          "roomId": "__PENDING_ROOM_ID__",
+          "envelopeId": "CAyIYGgblSXAJs-buK6IDA",
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
           "kind": "event",
-          "authorId": "__PENDING_AUTHOR_ID__",
-          "deviceId": "__PENDING_DEVICE_ID__",
+          "authorId": "p-author-01",
+          "deviceId": "d-device-01",
           "createdAt": 1700000000000,
+          "nonce": "__PENDING__",
+          "ciphertext": "__PENDING__"
+        }
+      }
+    },
+    {
+      "name": "kind=signal envelope (envelopeId uses clientNonce-form, fixed 0x42*16 nonce)",
+      "inputs": {
+        "roomSecret": "ERERERERERERERERERERERERERERERERERERERERERE",
+        "keys": {
+          "signalingKey": "__PENDING__"
+        },
+        "signingKey": {
+          "private": "__PENDING__",
+          "public": "__PENDING__"
+        },
+        "event": {
+          "meta": {
+            "v": 2,
+            "roomId": "hjCfgOvsatNOUedgxhZpyw",
+            "authorId": "p-author-01",
+            "deviceId": "d-device-01",
+            "createdAt": 1700000002000,
+            "parentEventIds": []
+          },
+          "body": {
+            "type": "presence_updated",
+            "participantId": "p-author-01",
+            "deviceId": "d-device-01",
+            "online": true
+          }
+        },
+        "clientNonce": "QkJCQkJCQkJCQkJCQkJCQg",
+        "aeadNonce": "__PENDING__",
+        "createdAt": 1700000002000
+      },
+      "expected": {
+        "eventId": "9xTaZRO1KXMS7_mAKMU3MEFeOMX7slZyAVCfnfYC_mQ",
+        "envelopeId": "kaaz9g9SvaE3rBF7jcWokg",
+        "signature": "__PENDING__",
+        "aadJson": "__PENDING__",
+        "ciphertext": "__PENDING__",
+        "envelope": {
+          "v": 2,
+          "envelopeId": "kaaz9g9SvaE3rBF7jcWokg",
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
+          "kind": "signal",
+          "authorId": "p-author-01",
+          "deviceId": "d-device-01",
+          "createdAt": 1700000002000,
           "nonce": "__PENDING__",
           "ciphertext": "__PENDING__"
         }

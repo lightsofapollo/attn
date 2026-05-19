@@ -13,6 +13,20 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RoomId(String);
 
+impl RoomId {
+    /// Wrap a pre-derived id string (e.g. from `crypto::kdf::derive_room_id`).
+    /// Crate-private to keep all id construction routed through the typed
+    /// derivation helpers in `crypto::`.
+    pub(crate) fn new(id: String) -> Self {
+        Self(id)
+    }
+
+    /// Borrow the underlying base64url-no-pad string representation.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Stable identifier for a shared document within a room. Decoupled from
 /// the on-disk path so renames don't break references.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

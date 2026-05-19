@@ -253,6 +253,8 @@ async function registerDevice(opts: {
   kind?: "owner" | "reviewer" | "agent";
   /** Required when kind="owner" (must match stored ownerSigningKey). */
   keypair?: SubtleKeypair;
+  /** Override PoW difficulty (defaults to 12, room minimum). */
+  powDifficulty?: number;
 }): Promise<RegisteredDevice> {
   const kp = opts.keypair ?? (await generateEd25519Keypair());
   const kind = opts.kind ?? "reviewer";
@@ -277,6 +279,7 @@ async function registerDevice(opts: {
     deviceId: opts.deviceId,
     method: "POST",
     path: `/v2/rooms/${opts.roomId}/devices`,
+    difficulty: opts.powDifficulty,
   });
   const res = await SELF.fetch(url, {
     method: "POST",
@@ -1313,6 +1316,11 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
   // Spec calls out 3 MiB; we use 1 MiB + 1 KiB to keep the test fast while
   // still being above the 1 MiB R2 threshold gate.
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Scenario 7 — R2 spillover (presign + PUT + GET round-trip).
+  // Spec calls out 3 MiB; we use 1 MiB + 1 KiB to keep the test fast while
+  // still being above the 1 MiB R2 threshold gate.
+  // -------------------------------------------------------------------------
   it("7. R2 spillover: presign → PUT → GET round-trips an encrypted snapshot", async () => {
     const roomId = uniqueRoomId("s07-r2-roundtrip");
     const owner = await generateEd25519Keypair();
@@ -1380,4 +1388,367 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     expect(fetched[0]).toBe(ciphertext[0]);
     expect(fetched[blobBytes - 1]).toBe(ciphertext[blobBytes - 1]);
   });
+
+  // -------------------------------------------------------------------------
+  // Scenario 8 — Hard-max TTL.
+  // The spec describes "create with expiresAt = now + 60s, wait for alarm".
+  // We fire the alarm() handler directly after rewinding hard_max_at into the
+  // past so the test stays fast and deterministic — the runtime alarm
+  // scheduler is Cloudflare's contract, not ours.
+  // -------------------------------------------------------------------------
+  it("8. Hard-max TTL: alarm wipes storage, WS closes 4002, post-expiry → 404", async () => {
+    const roomId = uniqueRoomId("s08-hard-max");
+    const ownerKp = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({
+      roomId,
+      ownerSigningKey: ownerKp.publicKeyBytes,
+      policy: { expiresAt: Date.now() + 60_000 },
+    });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-tt",
+      participantId: "owner",
+      kind: "owner",
+      keypair: ownerKp,
+    });
+
+    // Open a live WS so we can observe close 4002 when the alarm fires.
+    const { ws } = await openSocket({ roomId, deviceId: "dev-tt", admissionKey });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    await drainHelloThroughPing(q);
+
+    // Rewind hard_max_at past `now` and fire the alarm.
+    await rewindMeta(roomId, "meta:hard_max_at", 24 * 60 * 60 * 1000);
+    await fireAlarmDirect(roomId);
+
+    // Storage wiped.
+    expect(await countStorageKeys(roomId)).toBe(0);
+
+    // WS observed close 4002.
+    await q.waitClosed(3000);
+    expect(q.closed).toBe(true);
+    expect(q.closeCode).toBe(4002);
+
+    // Subsequent GET /devices → 404.
+    const getUrl = `${URL_BASE}/v2/rooms/${roomId}/devices`;
+    const adm = await admissionHeaderFor({ method: "GET", url: getUrl, admissionKey });
+    const probe = await SELF.fetch(getUrl, {
+      method: "GET",
+      headers: { "Attn-Admission": adm },
+    });
+    expect(probe.status).toBe(404);
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 9 — Idle timeout.
+  // -------------------------------------------------------------------------
+  it("9. Idle timeout: last_event_at + idleTimeoutMs in past → alarm wipes room", async () => {
+    const roomId = uniqueRoomId("s09-idle");
+    const owner = await generateEd25519Keypair();
+    await createRoom({
+      roomId,
+      ownerSigningKey: owner.publicKeyBytes,
+      policy: { idleTimeoutMs: 60_000 },
+    });
+    expect(await countStorageKeys(roomId)).toBeGreaterThan(0);
+
+    // Rewind last_event_at 5min — far past the 1m idle window — while keeping
+    // hard_max_at fresh so this is purely an idle-driven expiry.
+    await rewindMeta(roomId, "meta:last_event_at", 5 * 60 * 1000);
+    await fireAlarmDirect(roomId);
+
+    expect(await countStorageKeys(roomId)).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 10 — Hibernation roundtrip.
+  // -------------------------------------------------------------------------
+  it("10. Hibernation: WS closes, peer posts envelope while away, reconnect picks it up", async () => {
+    const roomId = uniqueRoomId("s10-hibernate");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-hb",
+      participantId: "hb",
+    });
+
+    // First connect → hello + ping (no backfill yet) → close.
+    const first = await openSocket({ roomId, deviceId: "dev-hb", admissionKey });
+    const q1 = new FrameQueue(first.ws);
+    first.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    await drainHelloThroughPing(q1);
+    first.ws.close(1000, "bye");
+    await q1.waitClosed();
+
+    // Post an envelope while no one is connected — the DO is between WS sessions.
+    const r = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({ envelopeId: "hb-1", authorId: "hb", deviceId: "dev-hb" }),
+      ],
+    });
+    expect(r.status).toBe(201);
+
+    // Reconnect with after=0 → backfill picks up the missed envelope.
+    const second = await openSocket({ roomId, deviceId: "dev-hb", admissionKey });
+    const q2 = new FrameQueue(second.ws);
+    second.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    const drained = await drainHelloThroughPing(q2);
+    const ids = drained.backfill.map((f) => f.envelope.envelopeId);
+    expect(ids).toContain("hb-1");
+    second.ws.close(1000);
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 11 — Rate limit (per-device).
+  // We seed the per-device counter at 120 so the next write trips the cap;
+  // exercising the same code path the natural 121st write would.
+  // -------------------------------------------------------------------------
+  it("11. Rate limit: 121st write/min from one device → 429 ATTN_RATE_LIMITED", async () => {
+    const roomId = uniqueRoomId("s11-rate");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-rate",
+      participantId: "alice",
+    });
+
+    // Seed the bucket to 120.
+    await runInDurableObject(getStub(roomId), async (_inst, state) => {
+      const windowStartMin = Math.floor(Date.now() / 60_000);
+      await state.storage.put(rateKey("dev-rate", windowStartMin), 120);
+    });
+
+    const res = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "rate-overflow",
+          authorId: "alice",
+          deviceId: "dev-rate",
+        }),
+      ],
+    });
+    expect(res.status).toBe(429);
+    const err = (await res.json()) as ErrorResponse;
+    expect(err.error.code).toBe("ATTN_RATE_LIMITED");
+    expect(err.error.retryAfterMs ?? 0).toBeGreaterThan(0);
+    expect(res.headers.get("Retry-After")).not.toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 12 — PoW (a..c sub-cases).
+  // -------------------------------------------------------------------------
+  it("12a. PoW: write without Attn-PoW → 400 ATTN_POW_INVALID", async () => {
+    const roomId = uniqueRoomId("s12a-pow-missing");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-np",
+      participantId: "leo",
+    });
+
+    const res = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({ envelopeId: "pow-missing", authorId: "leo", deviceId: "dev-np" }),
+      ],
+      omitPow: true,
+    });
+    expect(res.status).toBe(400);
+    const err = (await res.json()) as ErrorResponse;
+    expect(err.error.code).toBe("ATTN_POW_INVALID");
+  });
+
+  it("12b. PoW: write with valid token → 201 accepted", async () => {
+    const roomId = uniqueRoomId("s12b-pow-valid");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-ok",
+      participantId: "mia",
+    });
+
+    const res = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({ envelopeId: "pow-valid", authorId: "mia", deviceId: "dev-ok" }),
+      ],
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as AcceptResponse;
+    expect(body.accepted[0]?.envelopeId).toBe("pow-valid");
+  });
+
+  it("12c. PoW: replay same token → 400 ATTN_POW_INVALID", async () => {
+    const roomId = uniqueRoomId("s12c-pow-replay");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey } = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-rp",
+      participantId: "nina",
+    });
+
+    // Mint a PoW token explicitly so we can reuse it.
+    const pow = await mintPow({
+      roomId,
+      deviceId: "dev-rp",
+      method: "POST",
+      path: `/v2/rooms/${roomId}/envelopes`,
+    });
+
+    // First use: accepted.
+    const r1 = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({ envelopeId: "pow-r1", authorId: "nina", deviceId: "dev-rp" }),
+      ],
+      reusePow: pow,
+    });
+    expect(r1.status).toBe(201);
+
+    // Second use of the SAME token → replay rejected.
+    const r2 = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({ envelopeId: "pow-r2", authorId: "nina", deviceId: "dev-rp" }),
+      ],
+      reusePow: pow,
+    });
+    expect(r2.status).toBe(400);
+    const err = (await r2.json()) as ErrorResponse;
+    expect(err.error.code).toBe("ATTN_POW_INVALID");
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 13 — PoW difficulty override.
+  // The relay clamps powBits to [12, 24]; we use 14 here so we can mint a
+  // 12-bit token for the negative case + a 14-bit token for the positive case
+  // without paying a 16+ bit miner cost in CI.
+  // -------------------------------------------------------------------------
+  it("13. PoW difficulty override: powBits=14 — 12-bit token rejected, 14-bit token accepted", async () => {
+    const roomId = uniqueRoomId("s13-pow-diff");
+    const owner = await generateEd25519Keypair();
+    const { admissionKey, createResponse } = await createRoom({
+      roomId,
+      ownerSigningKey: owner.publicKeyBytes,
+      policy: { powBits: 14 },
+    });
+    expect(createResponse.policy.powBits).toBe(14);
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-pd",
+      participantId: "olive",
+      powDifficulty: 14,
+    });
+
+    // 12-bit token → rejected against the room's 14-bit requirement.
+    const lowPow = await mintPowForTests({
+      roomId,
+      deviceId: "dev-pd",
+      method: "POST",
+      path: `/v2/rooms/${roomId}/envelopes`,
+      difficulty: 12,
+      expiresAt: nextPowExpiresAt(),
+      rand: FIXED_POW_RAND,
+    });
+    const r1 = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "diff-low",
+          authorId: "olive",
+          deviceId: "dev-pd",
+        }),
+      ],
+      reusePow: lowPow,
+    });
+    expect(r1.status).toBe(400);
+    const err = (await r1.json()) as ErrorResponse;
+    expect(err.error.code).toBe("ATTN_POW_INVALID");
+
+    // 14-bit token → accepted.
+    const okPow = await mintPowForTests({
+      roomId,
+      deviceId: "dev-pd",
+      method: "POST",
+      path: `/v2/rooms/${roomId}/envelopes`,
+      difficulty: 14,
+      expiresAt: nextPowExpiresAt(),
+      rand: FIXED_POW_RAND,
+    });
+    const r2 = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "diff-ok",
+          authorId: "olive",
+          deviceId: "dev-pd",
+        }),
+      ],
+      reusePow: okPow,
+    });
+    expect(r2.status).toBe(201);
+  });
+
+  // -------------------------------------------------------------------------
+  // Scenario 14 — longSession TTL clamps.
+  // -------------------------------------------------------------------------
+  it("14a. longSession=true clamps expiresAt to createdAt + 7d", async () => {
+    const roomId = uniqueRoomId("s14a-long");
+    const owner = await generateEd25519Keypair();
+    const { createResponse } = await createRoom({
+      roomId,
+      ownerSigningKey: owner.publicKeyBytes,
+      policy: {
+        expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000, // 30d ask
+        longSession: true,
+      },
+    });
+    // Should land between 24h (default cap) and 7d (longSession cap).
+    const upper = createResponse.createdAt + 7 * 24 * 60 * 60 * 1000;
+    const lower = createResponse.createdAt + 24 * 60 * 60 * 1000;
+    expect(createResponse.expiresAt).toBeGreaterThan(lower);
+    expect(createResponse.expiresAt).toBeLessThanOrEqual(upper);
+    expect(createResponse.policy.longSession).toBe(true);
+  });
+
+  it("14b. longSession=false clamps expiresAt to createdAt + 24h", async () => {
+    const roomId = uniqueRoomId("s14b-short");
+    const owner = await generateEd25519Keypair();
+    const { createResponse } = await createRoom({
+      roomId,
+      ownerSigningKey: owner.publicKeyBytes,
+      policy: {
+        expiresAt: Date.now() + 2 * 24 * 60 * 60 * 1000, // 2d ask
+        longSession: false,
+      },
+    });
+    const upper = createResponse.createdAt + 24 * 60 * 60 * 1000;
+    expect(createResponse.expiresAt).toBeLessThanOrEqual(upper);
+    expect(createResponse.expiresAt).toBeGreaterThan(createResponse.createdAt);
+    expect(createResponse.policy.longSession).toBe(false);
+  });
+
 });

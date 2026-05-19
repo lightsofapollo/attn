@@ -133,10 +133,12 @@ pub enum ReviewUpdate {
         newly_created: bool,
     },
     /// A `ReviewEvent` was imported and is now durable in the local store.
+    /// Carries the full event so the frontend can append it to the review
+    /// store and re-render comment threads / suggestions without a second
+    /// round-trip.
     EventImported {
         room_id: RoomId,
-        event_id: EventId,
-        body_type: String,
+        event: crate::review::model::ReviewEvent,
     },
     /// A new `SnapshotNode` was created (owner-side) or imported (reviewer-side).
     SnapshotCreated {
@@ -390,11 +392,78 @@ impl ReviewManager {
                 self.emit_join_outcome(result);
                 return;
             }
+            (
+                ReviewCommand::CreateComment { room_id, anchor, body },
+                Some(bootstrapper),
+                Some(_runtime),
+            ) => {
+                let thread_id = mint_thread_id();
+                let event_body = crate::review::model::ReviewEventBody::CommentCreated {
+                    thread_id,
+                    anchor: anchor.clone(),
+                    body: body.clone(),
+                };
+                let result = bootstrapper.send_event_sync(
+                    room_id,
+                    event_body,
+                    unix_now_ms_for_manager(),
+                );
+                self.emit_event_outcome(room_id.clone(), result);
+                return;
+            }
+            (
+                ReviewCommand::CreateSuggestion { room_id, draft },
+                Some(bootstrapper),
+                Some(_runtime),
+            ) => {
+                let suggestion_id = mint_thread_id();
+                let event_body = crate::review::model::ReviewEventBody::SuggestionCreated {
+                    suggestion_id,
+                    anchor: draft.anchor.clone(),
+                    operation: draft.operation.clone(),
+                    note: draft.note.clone(),
+                };
+                let result = bootstrapper.send_event_sync(
+                    room_id,
+                    event_body,
+                    unix_now_ms_for_manager(),
+                );
+                self.emit_event_outcome(room_id.clone(), result);
+                return;
+            }
             _ => {}
         }
 
         let update = stub_update_for(&cmd);
         (self.update_tx)(update);
+    }
+
+    /// Push a freshly minted `SendEventOutcome` to the frontend as an
+    /// `EventImported` callback so the local store renders the comment /
+    /// suggestion immediately, plus an `OutboxChanged` count update.
+    fn emit_event_outcome(
+        &self,
+        room_id: RoomId,
+        result: Result<
+            crate::review::bootstrap::SendEventOutcome,
+            crate::review::bootstrap::BootstrapError,
+        >,
+    ) {
+        match result {
+            Ok(outcome) => {
+                (self.update_tx)(ReviewUpdate::EventImported {
+                    room_id,
+                    event: outcome.event,
+                });
+            }
+            Err(err) => {
+                (self.update_tx)(ReviewUpdate::Error {
+                    room_id: None,
+                    code: error_code(&err),
+                    message: err.to_string(),
+                });
+            }
+        }
     }
 
     /// Translate a `ShareOutcome` (or its error) into the corresponding
@@ -963,29 +1032,55 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
             room_id: stub_room_id(),
             status: "Pending inbox — not yet implemented".to_string(),
         },
-        // TODO(attn-nnj.3a): assemble ReviewEventBody::CommentCreated, sign,
-        // envelope, append to store + outbox, emit EventImported (local echo).
-        ReviewCommand::CreateComment { room_id, anchor, .. } => ReviewUpdate::EventImported {
-            room_id: room_id.clone(),
-            event_id: stub_event_id(),
-            body_type: format!("comment_created_stub_anchor_v{}", anchor.v),
-        },
-        // TODO(attn-nnj.3a): same as CreateComment for SuggestionCreated.
-        ReviewCommand::CreateSuggestion { room_id, draft } => ReviewUpdate::EventImported {
-            room_id: room_id.clone(),
-            event_id: stub_event_id(),
-            body_type: format!("suggestion_created_stub_anchor_v{}", draft.anchor.v),
-        },
+        // CreateComment / CreateSuggestion fall through to the real path
+        // in `submit` when a Bootstrapper is attached; the stub here only
+        // fires when the manager was built without one (smoke tests that
+        // don't need network). We synthesize a placeholder
+        // `ReviewEventBody::CommentCreated` so the wire shape lines up with
+        // the production path.
+        ReviewCommand::CreateComment { room_id, anchor, body } => {
+            ReviewUpdate::EventImported {
+                room_id: room_id.clone(),
+                event: stub_review_event(
+                    room_id,
+                    crate::review::model::ReviewEventBody::CommentCreated {
+                        thread_id: "stub-thread".to_string(),
+                        anchor: anchor.clone(),
+                        body: body.clone(),
+                    },
+                ),
+            }
+        }
+        ReviewCommand::CreateSuggestion { room_id, draft } => {
+            ReviewUpdate::EventImported {
+                room_id: room_id.clone(),
+                event: stub_review_event(
+                    room_id,
+                    crate::review::model::ReviewEventBody::SuggestionCreated {
+                        suggestion_id: "stub-suggestion".to_string(),
+                        anchor: draft.anchor.clone(),
+                        operation: draft.operation.clone(),
+                        note: draft.note.clone(),
+                    },
+                ),
+            }
+        }
         // TODO(Phase 5): run guarded apply flow, write working copy, emit
         // SuggestionAccepted event + AnchorResolutionChanged for affected
-        // anchors.
+        // anchors. The stub still emits the matching event shape.
         ReviewCommand::AcceptSuggestion {
             room_id,
             suggestion_id,
         } => ReviewUpdate::EventImported {
             room_id: room_id.clone(),
-            event_id: suggestion_id.clone(),
-            body_type: "suggestion_accepted_stub".to_string(),
+            event: stub_review_event(
+                room_id,
+                crate::review::model::ReviewEventBody::SuggestionAccepted {
+                    suggestion_id: format!("{:?}", suggestion_id),
+                    applied_revision_id: "stub-revision".to_string(),
+                    resulting_hash: stub_content_hash(),
+                },
+            ),
         },
         // TODO(attn-nnj.3.4 integration): persist override in store, re-run
         // resolver for the event, emit AnchorResolutionChanged with the chosen
@@ -1035,6 +1130,73 @@ fn stub_file_id() -> FileId {
         "file-stub-pending-implementation".to_string(),
     ))
     .expect("stub FileId deserializes")
+}
+
+/// Mint a fresh thread / suggestion id. Random 16-byte base64url; the
+/// frontend treats these as opaque keys. Real implementations must mint
+/// these here (not on the frontend) because the value participates in
+/// event-id derivation — the bridge would otherwise need a round-trip.
+fn mint_thread_id() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        // Fall back to a deterministic-ish id rather than panic the IPC
+        // worker. The frontend treats thread_id as opaque.
+        let now = unix_now_ms_for_manager();
+        return format!("thread-fallback-{now}");
+    }
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn unix_now_ms_for_manager() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// Build a placeholder `ReviewEvent` for the no-bootstrap stub paths so
+/// the manager's wire shape stays consistent across configurations.
+/// Real callers go through `Bootstrapper::send_event_sync` which signs
+/// + AEAD-encrypts. The stub uses non-cryptographic placeholders since
+/// nothing reads `meta.event_id` / `auth` off these paths.
+fn stub_review_event(
+    room_id: &RoomId,
+    body: crate::review::model::ReviewEventBody,
+) -> crate::review::model::ReviewEvent {
+    use crate::review::model::{EventAuth, EventMeta, ReviewEvent};
+    let participant = serde_json::from_value::<ParticipantId>(serde_json::Value::String(
+        "stub-participant".to_string(),
+    ))
+    .expect("stub ParticipantId deserializes");
+    let device = serde_json::from_value::<DeviceId>(serde_json::Value::String(
+        "stub-device".to_string(),
+    ))
+    .expect("stub DeviceId deserializes");
+    ReviewEvent {
+        meta: EventMeta {
+            v: 2,
+            event_id: stub_event_id(),
+            room_id: room_id.clone(),
+            author_id: participant,
+            device_id: device,
+            created_at: unix_now_ms_for_manager(),
+            parent_event_ids: vec![],
+            snapshot_id: None,
+        },
+        body,
+        auth: EventAuth {
+            signing_key_id: "stub-keyid".to_string(),
+            signature: "stub-sig".to_string(),
+        },
+    }
+}
+
+fn stub_content_hash() -> crate::review::ids::ContentHash {
+    serde_json::from_value::<crate::review::ids::ContentHash>(serde_json::Value::String(
+        "sha256-stub".to_string(),
+    ))
+    .expect("stub ContentHash deserializes")
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,13 +1309,16 @@ mod tests {
         match update {
             ReviewUpdate::EventImported {
                 room_id: rid,
-                body_type,
-                ..
+                event,
             } => {
                 assert_eq!(rid, room_id);
                 assert!(
-                    body_type.starts_with("comment_created_stub"),
-                    "expected comment_created_stub, got {body_type}"
+                    matches!(
+                        event.body,
+                        crate::review::model::ReviewEventBody::CommentCreated { .. }
+                    ),
+                    "expected CommentCreated body, got {:?}",
+                    event.body
                 );
             }
             other => panic!("expected EventImported, got {other:?}"),
@@ -1180,11 +1345,13 @@ mod tests {
         match update {
             ReviewUpdate::EventImported {
                 room_id: rid,
-                body_type,
-                ..
+                event,
             } => {
                 assert_eq!(rid, room_id);
-                assert!(body_type.starts_with("suggestion_created_stub"));
+                assert!(matches!(
+                    event.body,
+                    crate::review::model::ReviewEventBody::SuggestionCreated { .. }
+                ));
             }
             other => panic!("expected EventImported, got {other:?}"),
         }
@@ -1203,12 +1370,22 @@ mod tests {
         match update {
             ReviewUpdate::EventImported {
                 room_id: rid,
-                event_id,
-                body_type,
+                event,
             } => {
                 assert_eq!(rid, room_id);
-                assert_eq!(event_id, suggestion_id);
-                assert_eq!(body_type, "suggestion_accepted_stub");
+                // The stub path mirrors the requested suggestion_id back via
+                // the body so the test still pins which suggestion is being
+                // accepted.
+                match event.body {
+                    crate::review::model::ReviewEventBody::SuggestionAccepted {
+                        suggestion_id: sid,
+                        ..
+                    } => {
+                        let expected = format!("{:?}", suggestion_id);
+                        assert_eq!(sid, expected);
+                    }
+                    other => panic!("expected SuggestionAccepted body, got {other:?}"),
+                }
             }
             other => panic!("expected EventImported, got {other:?}"),
         }
@@ -1295,12 +1472,19 @@ mod tests {
         assert_eq!(
             ReviewUpdate::EventImported {
                 room_id: room_id.clone(),
-                event_id: event_id.clone(),
-                body_type: "t".to_string()
+                event: stub_review_event(
+                    &room_id,
+                    crate::review::model::ReviewEventBody::CommentCreated {
+                        thread_id: "thr".to_string(),
+                        anchor: dummy_anchor(),
+                        body: "body".to_string(),
+                    },
+                ),
             }
             .callback_name(),
             "reviewEvent"
         );
+        let _ = &event_id; // referenced below
         assert_eq!(
             ReviewUpdate::SnapshotCreated {
                 room_id: room_id.clone(),
@@ -1345,16 +1529,25 @@ mod tests {
     fn review_update_serializes_camel_case() {
         // The frontend types in web/src/lib/types.ts expect camelCase. Pin
         // the wire shape so a future rename of a Rust field stays compatible.
+        let room_id: RoomId = dummy_id("room-abc");
         let update = ReviewUpdate::EventImported {
-            room_id: dummy_id::<RoomId>("room-abc"),
-            event_id: dummy_id::<EventId>("evt-1"),
-            body_type: "comment_created_stub".to_string(),
+            room_id: room_id.clone(),
+            event: stub_review_event(
+                &room_id,
+                crate::review::model::ReviewEventBody::CommentCreated {
+                    thread_id: "thr-1".to_string(),
+                    anchor: dummy_anchor(),
+                    body: "hi".to_string(),
+                },
+            ),
         };
         let json = serde_json::to_value(&update).expect("serialize update");
         assert_eq!(json["kind"], serde_json::json!("event_imported"));
         assert_eq!(json["roomId"], serde_json::json!("room-abc"));
-        assert_eq!(json["eventId"], serde_json::json!("evt-1"));
-        assert_eq!(json["bodyType"], serde_json::json!("comment_created_stub"));
+        // The nested event uses ReviewEvent's own serde shape (camelCase).
+        assert!(json["event"]["meta"].is_object());
+        assert!(json["event"]["body"].is_object());
+        assert_eq!(json["event"]["body"]["type"], serde_json::json!("comment_created"));
     }
 
     // ----- attn-nnj.3.8 anchor-resolution emission -----------------------

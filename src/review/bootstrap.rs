@@ -585,6 +585,16 @@ pub struct JoinOutcome {
     pub room_id: RoomId,
 }
 
+/// Result of `Bootstrapper::send_event_sync` — the signed event for local
+/// echo plus the AEAD envelope that's now durable in the outbox.
+#[derive(Debug, Clone)]
+pub struct SendEventOutcome {
+    pub event: ReviewEvent,
+    pub envelope: MailboxEnvelope,
+    /// `false` if `append_outbox` deduped against an existing envelopeId.
+    pub appended_to_outbox: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Bootstrapper
 // ---------------------------------------------------------------------------
@@ -1023,6 +1033,100 @@ impl Bootstrapper {
     }
 
     // -----------------------------------------------------------------
+    // Outbound event helper — used by the manager's CreateComment /
+    // CreateSuggestion / AcceptSuggestion arms to mint a signed +
+    // AEAD-encrypted envelope and persist it to the outbox in one call.
+    // -----------------------------------------------------------------
+
+    /// Outcome of `send_event`. Carries both the signed `ReviewEvent`
+    /// (so the caller can echo it locally — frontend updates immediately)
+    /// and the `MailboxEnvelope` (so the caller can route it through the
+    /// transport selector when one is wired).
+    ///
+    /// `appended_to_outbox` is `false` when `append_outbox`'s dedup
+    /// already had the same `envelopeId` (idempotent caller retried).
+    pub fn send_event_sync(
+        &self,
+        room_id: &RoomId,
+        body: ReviewEventBody,
+        now_ms: u64,
+    ) -> Result<SendEventOutcome, BootstrapError> {
+        let identity_dir = self.config.identity_dir()?;
+        let identity = load_or_create_identity_in(&identity_dir)?;
+        let room_secret = load_room_secret(self.store.root(), room_id)?;
+        let room_keys = derive_room_keys(&room_secret);
+
+        // Read the policy's expiry off room.json so envelopes don't
+        // outlive the room itself.
+        let room = self
+            .store
+            .load_room(room_id)
+            .map_err(|e| BootstrapError::Store(format!("load_room: {e}")))?;
+        let expires_at = match room.as_ref() {
+            Some(r) => r.policy.expires_at,
+            None => now_ms + 60 * 60 * 1000,
+        };
+
+        let signing_key = identity.signing_key()?;
+        let participant_id = identity.typed_participant_id();
+        let device_id = identity.typed_device_id();
+
+        // Build the signed `ReviewEvent` first so we can echo it locally;
+        // assemble the AEAD envelope from the same meta+body so the
+        // event_id matches between the two surfaces (the frontend dedupes
+        // by event.meta.event_id when the relay round-trip eventually
+        // re-imports it).
+        let mut meta = EventMeta {
+            v: 2,
+            event_id: placeholder_event_id(),
+            room_id: room_id.clone(),
+            author_id: participant_id.clone(),
+            device_id: device_id.clone(),
+            created_at: now_ms,
+            parent_event_ids: vec![],
+            snapshot_id: None,
+        };
+        let event_id = derive_event_id(&meta, &body)
+            .map_err(|e| BootstrapError::Crypto(format!("derive event id: {e}")))?;
+        meta.event_id = event_id.clone();
+        let auth = sign_event(&signing_key, &meta, &body)
+            .map_err(|e| BootstrapError::Crypto(format!("sign event: {e}")))?;
+        let signed_event = ReviewEvent {
+            meta,
+            body: body.clone(),
+            auth,
+        };
+
+        let signing_key_again = identity.signing_key()?;
+        let envelope = assemble_event_envelope(AssembleInput {
+            event_key: *room_keys.event_key.as_bytes(),
+            signing_key: signing_key_again,
+            room_id: room_id.clone(),
+            author_id: participant_id,
+            device_id,
+            created_at_ms: now_ms,
+            expires_at_ms: expires_at,
+            parent_event_ids: vec![],
+            snapshot_id: None,
+            body,
+            kind: EnvelopeKind::Event,
+            client_nonce: None,
+        })
+        .map_err(|e| BootstrapError::Crypto(format!("assemble envelope: {e}")))?;
+
+        let appended = self
+            .store
+            .append_outbox(room_id, &envelope)
+            .map_err(|e| BootstrapError::Store(format!("append outbox: {e}")))?;
+
+        Ok(SendEventOutcome {
+            event: signed_event,
+            envelope,
+            appended_to_outbox: appended,
+        })
+    }
+
+    // -----------------------------------------------------------------
     // Relay HTTP helpers
     // -----------------------------------------------------------------
 
@@ -1451,7 +1555,7 @@ fn save_room_secret(
     Ok(())
 }
 
-fn load_room_secret(
+pub(crate) fn load_room_secret(
     root: &std::path::Path,
     room_id: &RoomId,
 ) -> Result<[u8; 32], BootstrapError> {

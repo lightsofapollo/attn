@@ -1000,8 +1000,22 @@ fn load_window_icon() -> Option<tao::window::Icon> {
 fn build_review_dispatch_js(
     update: &crate::review::manager::ReviewUpdate,
 ) -> Result<String, serde_json::Error> {
+    use crate::review::manager::ReviewUpdate;
     let callback = update.callback_name();
-    let json = serde_json::to_string(update)?;
+    // Some variants need to be "unwrapped" before they reach the JS bridge
+    // so the payload's shape lines up with the typed callback signature in
+    // `web/src/lib/mock-ipc.ts`. The default wire form (`{kind:..., ...rest}`)
+    // is fine for status / share / anchor / outbox / error — those callbacks
+    // accept the union-typed payload directly. The exception is
+    // `EventImported`, which the frontend's `reviewEvent(payload: ReviewEvent)`
+    // expects to receive *as* a `ReviewEvent` (i.e. `{meta, body, auth}`),
+    // not wrapped in a discriminator. Extracting `event` here keeps the
+    // Rust shape rich (room_id available to manager-side observers) while
+    // still feeding the bridge what its typed signature wants.
+    let json = match update {
+        ReviewUpdate::EventImported { event, .. } => serde_json::to_string(event)?,
+        _ => serde_json::to_string(update)?,
+    };
     Ok(format!(
         "window.__attn__ && window.__attn__.{callback}({json})"
     ))

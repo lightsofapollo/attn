@@ -828,10 +828,14 @@ mod tests {
 
         let update = rx.try_recv().expect("manager should have received one update");
         match update {
-            ReviewUpdate::EventImported { body_type, .. } => {
+            ReviewUpdate::EventImported { event, .. } => {
                 assert!(
-                    body_type.starts_with("comment_created_stub"),
-                    "expected comment_created_stub, got {body_type}"
+                    matches!(
+                        event.body,
+                        crate::review::model::ReviewEventBody::CommentCreated { .. }
+                    ),
+                    "expected CommentCreated body, got {:?}",
+                    event.body
                 );
             }
             other => panic!("expected EventImported, got {other:?}"),

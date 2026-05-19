@@ -101,7 +101,8 @@ export type IpcMessageType =
   | 'review_create_comment'
   | 'review_create_suggestion'
   | 'review_accept_suggestion'
-  | 'review_resolve_anchor';
+  | 'review_resolve_anchor'
+  | 'review_collab_send';
 
 export interface CheckboxToggleMessage {
   type: 'checkbox_toggle';
@@ -222,6 +223,13 @@ export interface ReviewResolveAnchorMessage {
   range: PositionAnchor;
 }
 
+export interface ReviewCollabSendMessage {
+  type: 'review_collab_send';
+  roomId: RoomId;
+  /** Opaque prosemirror-collab JSON (submission or broadcast). */
+  payload: string;
+}
+
 export type IpcMessage =
   | CheckboxToggleMessage
   | NavigateMessage
@@ -240,7 +248,8 @@ export type IpcMessage =
   | ReviewCreateCommentMessage
   | ReviewCreateSuggestionMessage
   | ReviewAcceptSuggestionMessage
-  | ReviewResolveAnchorMessage;
+  | ReviewResolveAnchorMessage
+  | ReviewCollabSendMessage;
 
 export type AppMode = 'read' | 'edit';
 
@@ -868,6 +877,19 @@ export interface ReviewPresenceChanged {
 export interface ReviewConnectionChanged {
   roomId: RoomId;
   connection: ReviewStatus['connection'];
+}
+
+/**
+ * Inbound live co-typing traffic pushed via
+ * `window.__attn__.reviewCollab(...)`. `payload` is the opaque
+ * prosemirror-collab JSON (a CollabSubmission or CollabBroadcast, JSON-
+ * stringified) the sender's webview emitted; `from` is the originating device
+ * so the receiver can drop its own echoes. @see prosemirror/collab-session.
+ */
+export interface ReviewCollabSignal {
+  roomId: RoomId;
+  from: DeviceId;
+  payload: string;
 }
 
 /**

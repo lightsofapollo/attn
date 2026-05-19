@@ -134,3 +134,12 @@ export function reviewResolveAnchor(
   send({ type: 'review_resolve_anchor', roomId, eventId, range });
   return Promise.resolve();
 }
+
+/**
+ * Send a live co-typing payload (a stringified CollabSubmission or
+ * CollabBroadcast) to the room over the encrypted signal channel. The daemon
+ * shuttles `payload` opaquely.
+ */
+export function reviewCollabSend(roomId: RoomId, payload: string): void {
+  send({ type: 'review_collab_send', roomId, payload });
+}

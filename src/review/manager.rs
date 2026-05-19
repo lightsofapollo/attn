@@ -99,6 +99,10 @@ pub enum ReviewCommand {
     /// Owner edited a shared file — republish a fresh snapshot so connected
     /// reviewers see the update. No-op when `path` isn't part of any share.
     PublishSnapshot { path: PathBuf },
+    /// Send a live co-typing payload (prosemirror-collab submission or
+    /// broadcast) from this webview to the room over the encrypted signal
+    /// channel. `payload` is opaque JSON the daemon doesn't parse.
+    SendCollab { room_id: RoomId, payload: String },
 }
 
 /// Updates the `ReviewManager` emits up to the tao event loop.
@@ -176,6 +180,14 @@ pub enum ReviewUpdate {
         room_id: RoomId,
         connection: String,
     },
+    /// Inbound live co-typing traffic for the webview's prosemirror-collab
+    /// authority/client. `payload` is the opaque step JSON the sender emitted;
+    /// `from` lets the webview drop its own broadcast echoes.
+    CollabSignal {
+        room_id: RoomId,
+        from: String,
+        payload: String,
+    },
     /// The outbox depth for a room changed (envelopes queued for send).
     OutboxChanged {
         room_id: RoomId,
@@ -207,6 +219,7 @@ impl ReviewUpdate {
             ReviewUpdate::AnchorResolutionChanged { .. } => "reviewAnchorResolution",
             ReviewUpdate::PresenceChanged { .. } => "reviewPresence",
             ReviewUpdate::ConnectionChanged { .. } => "reviewConnection",
+            ReviewUpdate::CollabSignal { .. } => "reviewCollab",
             ReviewUpdate::OutboxChanged { .. } => "reviewStatus",
             ReviewUpdate::Error { .. } => "reviewStatus",
         }
@@ -482,6 +495,10 @@ impl ReviewManager {
                 Some(_runtime),
             ) => {
                 self.resolve_anchor(bootstrapper, room_id, event_id, range);
+                return;
+            }
+            (ReviewCommand::SendCollab { room_id, payload }, Some(bootstrapper), Some(_runtime)) => {
+                self.send_collab(bootstrapper, room_id, payload);
                 return;
             }
             (ReviewCommand::PublishSnapshot { path }, Some(bootstrapper), Some(_runtime)) => {
@@ -802,6 +819,68 @@ impl ReviewManager {
             event_id.as_str(),
             room_id.as_str()
         );
+    }
+
+    /// Send a live co-typing payload over the encrypted `signal` channel.
+    ///
+    /// The webview's prosemirror-collab authority/client produced `payload`
+    /// (a submission or an authoritative broadcast); we seal it as a
+    /// `SignalingPayload::Collab` under the room's signaling key and append it
+    /// to the outbox as a broadcast (target=None) so every connected peer
+    /// receives it. The running OutboxProcessor POSTs it to the relay, which
+    /// fans it out over the live WebSocket. Steps ride this ephemeral,
+    /// FIFO-capped lane — never the durable event log.
+    fn send_collab(&self, bootstrapper: &Arc<Bootstrapper>, room_id: &RoomId, payload: &str) {
+        use crate::review::bootstrap::load_room_secret;
+        use crate::review::crypto::kdf::derive_room_keys;
+
+        let emit_err = |msg: String| {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: "ATTN_COLLAB_SEND".to_string(),
+                message: msg,
+            });
+        };
+
+        let secret = match load_room_secret(self.store.root(), room_id) {
+            Ok(s) => s,
+            Err(e) => return emit_err(format!("load room secret: {e}")),
+        };
+        let keys = derive_room_keys(&secret);
+
+        let identity = match bootstrapper
+            .config()
+            .identity_dir()
+            .and_then(|dir| crate::review::bootstrap::load_or_create_identity_in(&dir))
+        {
+            Ok(id) => id,
+            Err(e) => return emit_err(format!("load identity: {e}")),
+        };
+        let device_id = identity.typed_device_id();
+        let participant_id = identity.typed_participant_id();
+
+        let now_ms = unix_now_ms_for_manager() as i64;
+        let envelope = match assemble_signal_envelope(
+            SignalingPayload::Collab {
+                from: device_id.clone(),
+                payload: payload.to_string(),
+            },
+            keys.signaling_key.as_bytes(),
+            room_id,
+            &participant_id,
+            &device_id,
+            None, // broadcast to the whole room
+            &fresh_client_nonce_16(),
+            now_ms,
+            now_ms + SIGNAL_TTL_MS,
+        ) {
+            Ok(env) => env,
+            Err(e) => return emit_err(format!("assemble collab signal: {e}")),
+        };
+
+        if let Err(e) = self.store.append_outbox(room_id, &envelope) {
+            emit_err(format!("enqueue collab signal: {e}"));
+        }
     }
 
     /// Translate a `ShareOutcome` (or its error) into the corresponding
@@ -1722,6 +1801,12 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
             room_id: stub_room_id(),
             status: "Pending snapshot publish — no bootstrap attached".to_string(),
         },
+        // SendCollab requires a live bootstrap+runtime; without one (smoke
+        // tests) it's a benign no-op surfaced as status.
+        ReviewCommand::SendCollab { .. } => ReviewUpdate::RoomStatusChanged {
+            room_id: stub_room_id(),
+            status: "Pending collab send — no bootstrap attached".to_string(),
+        },
     }
 }
 
@@ -1904,6 +1989,19 @@ fn forward_transport_event(
                     on_snapshot_id: None,
                 }],
                 replace: false,
+            });
+        }
+        TransportEvent::CollabSignal { room_id: rid, from, payload } => {
+            // Drop our own broadcast echo (the relay fans broadcasts back to
+            // the author); the webview also guards, but skipping here saves a
+            // bridge round-trip.
+            if from.as_str() == self_device_id {
+                return;
+            }
+            (update_tx)(ReviewUpdate::CollabSignal {
+                room_id: rid,
+                from: from.as_str().to_string(),
+                payload,
             });
         }
         TransportEvent::PolicyChanged { .. } => {

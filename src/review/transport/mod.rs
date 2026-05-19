@@ -102,6 +102,16 @@ pub enum TransportEvent {
         device_id: DeviceId,
         participant_id: String,
     },
+    /// Live co-typing traffic decoded from a `signal` envelope. `payload` is
+    /// the opaque prosemirror-collab JSON the sender's webview emitted (a
+    /// submission or a broadcast); the daemon shuttles it to its own webview
+    /// without parsing. `from` is the originating device (lets the webview
+    /// drop its own broadcast echoes).
+    CollabSignal {
+        room_id: RoomId,
+        from: DeviceId,
+        payload: String,
+    },
     /// The room policy changed (owner edit, capability revocation, expiry
     /// update). Consumer should reload policy-dependent UI / caps.
     PolicyChanged { policy: RoomPolicy },

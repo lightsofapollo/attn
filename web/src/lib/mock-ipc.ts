@@ -73,6 +73,7 @@ type ReviewSnapshotFn = (snapshot: ReviewSnapshot) => void;
 type ReviewAnchorResolutionFn = (update: ReviewAnchorResolutionUpdate) => void;
 type ReviewPresenceFn = (payload: import('../lib/types').ReviewPresenceChanged) => void;
 type ReviewConnectionFn = (payload: import('../lib/types').ReviewConnectionChanged) => void;
+type ReviewCollabFn = (payload: import('../lib/types').ReviewCollabSignal) => void;
 
 interface AttnBridge {
   setContent: SetContentFn;
@@ -121,6 +122,11 @@ interface AttnBridge {
    * Drives the ConnectionBadge. Optional: only the daemon emits it.
    */
   reviewConnection?: ReviewConnectionFn;
+  /**
+   * Push inbound live co-typing traffic (prosemirror-collab steps) to the
+   * webview's collab controller. Optional: only the daemon emits it.
+   */
+  reviewCollab?: ReviewCollabFn;
   /**
    * Optional: focus the margin card whose underlying root event matches
    * `eventId`. Implemented by attn-nnj.4.3's ReviewMargin via

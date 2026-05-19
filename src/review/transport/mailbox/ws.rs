@@ -791,6 +791,7 @@ impl MailboxWsClient {
                 let kind = envelope.kind;
                 use crate::review::model::EnvelopeKind;
                 let mut decoded_event: Option<crate::review::model::ReviewEvent> = None;
+                let mut decoded_collab: Option<(crate::review::ids::DeviceId, String)> = None;
                 let import_res: Result<(), crate::review::transport::inbound::InboundError> =
                     match kind {
                         EnvelopeKind::Event => match self
@@ -808,7 +809,7 @@ impl MailboxWsClient {
                             .import_snapshot_envelope(&room_id, &envelope)
                             .await
                             .map(|_| ()),
-                        EnvelopeKind::Signal => self
+                        EnvelopeKind::Signal => match self
                             .inbound
                             .import_signal_envelope(
                                 &room_id,
@@ -816,7 +817,26 @@ impl MailboxWsClient {
                                 &self.config.device_id,
                             )
                             .await
-                            .map(|_| ()),
+                        {
+                            Ok(plaintext) => {
+                                // Surface live co-typing steps; other signal
+                                // kinds (WebRTC SDP/ICE) decrypt fine but
+                                // aren't consumed here yet.
+                                if let Ok(
+                                    crate::review::transport::signaling::SignalingPayload::Collab {
+                                        from,
+                                        payload,
+                                    },
+                                ) = serde_json::from_slice::<
+                                    crate::review::transport::signaling::SignalingPayload,
+                                >(&plaintext)
+                                {
+                                    decoded_collab = Some((from, payload));
+                                }
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        },
                     };
 
                 match import_res {
@@ -842,6 +862,13 @@ impl MailboxWsClient {
                             let _ = self.events_tx.send(TransportEvent::EventImported {
                                 room_id: room_id.clone(),
                                 event,
+                            });
+                        }
+                        if let Some((from, payload)) = decoded_collab {
+                            let _ = self.events_tx.send(TransportEvent::CollabSignal {
+                                room_id: room_id.clone(),
+                                from,
+                                payload,
                             });
                         }
                         let _ = self.events_tx.send(TransportEvent::Envelope {

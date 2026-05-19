@@ -106,6 +106,14 @@ pub enum IpcMessage {
         event_id: EventId,
         range: PositionAnchor,
     },
+
+    #[serde(rename = "review_collab_send", rename_all = "camelCase")]
+    ReviewCollabSend {
+        room_id: RoomId,
+        /// Opaque prosemirror-collab JSON (submission or broadcast). The
+        /// daemon shuttles it without parsing.
+        payload: String,
+    },
 }
 
 /// Shared state accessible from the IPC handler.
@@ -343,6 +351,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                         range,
                     },
                 );
+            }
+            IpcMessage::ReviewCollabSend { room_id, payload } => {
+                submit_review_command(state, ReviewCommand::SendCollab { room_id, payload });
             }
         },
         Err(e) => {

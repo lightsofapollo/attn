@@ -53,6 +53,12 @@ impl SnapshotId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EventId(String);
 
+impl EventId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Identifier for a physical device (one user may have many devices).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DeviceId(String);

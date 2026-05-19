@@ -434,6 +434,14 @@ impl ReviewManager {
                 self.emit_event_outcome(room_id.clone(), result);
                 return;
             }
+            (
+                ReviewCommand::AcceptSuggestion { room_id, suggestion_id },
+                Some(bootstrapper),
+                Some(_runtime),
+            ) => {
+                self.accept_suggestion(bootstrapper, room_id, suggestion_id);
+                return;
+            }
             (ReviewCommand::PublishSnapshot { path }, Some(bootstrapper), Some(_runtime)) => {
                 match bootstrapper
                     .republish_snapshot_for_path(path, unix_now_ms_for_manager())
@@ -490,6 +498,171 @@ impl ReviewManager {
                 });
             }
         }
+    }
+
+    /// Owner accepts a suggestion: resolve it against the current document,
+    /// apply the `Ready` verdict to the working copy, emit a
+    /// `SuggestionAccepted` event, and republish the snapshot so reviewers
+    /// see the applied change. Non-`Ready` verdicts (drift / ambiguous /
+    /// stale) surface as a `ReviewUpdate::Error` so the UI can prompt the
+    /// three-way / re-anchor flow instead of silently rewriting.
+    fn accept_suggestion(
+        &self,
+        bootstrapper: &Arc<Bootstrapper>,
+        room_id: &RoomId,
+        suggestion_id: &EventId,
+    ) {
+        use crate::review::anchors::index::build_anchor_index;
+        use crate::review::apply::{apply_ready_verdict, resolve_suggestion, ApplyContext};
+        use crate::review::crypto::ids::{content_hash, derive_snapshot_id};
+
+        let emit_err = |code: &str, msg: String| {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: code.to_string(),
+                message: msg,
+            });
+        };
+
+        // 1. Find the SuggestionCreated event whose suggestion_id matches.
+        let want = format!("{:?}", suggestion_id);
+        let mut found: Option<(EventId, crate::review::model::ReviewEventBody)> = None;
+        match self.store.iter_events(room_id) {
+            Ok(iter) => {
+                for ev in iter.flatten() {
+                    if let crate::review::model::ReviewEventBody::SuggestionCreated {
+                        suggestion_id: sid,
+                        ..
+                    } = &ev.body
+                    {
+                        // suggestion_id arrives as either the typed EventId's
+                        // debug form or the raw string; match on the raw
+                        // wire value the body carries.
+                        if *sid == suggestion_id.as_str() || format!("{:?}", sid) == want {
+                            found = Some((ev.meta.event_id.clone(), ev.body.clone()));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                emit_err("ATTN_ACCEPT", format!("read events: {e}"));
+                return;
+            }
+        }
+        let Some((event_id, body)) = found else {
+            emit_err(
+                "ATTN_ACCEPT",
+                format!("suggestion {} not found in room", suggestion_id.as_str()),
+            );
+            return;
+        };
+
+        // 2. Resolve the on-disk path for this room's shared file.
+        let path = match crate::review::bootstrap::find_path_for_room(
+            self.store.root(),
+            room_id,
+        ) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                emit_err("ATTN_ACCEPT", "no local file for room".to_string());
+                return;
+            }
+            Err(e) => {
+                emit_err("ATTN_ACCEPT", format!("path lookup: {e}"));
+                return;
+            }
+        };
+
+        // 3. Read current bytes + build the resolution context.
+        let current_bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                emit_err("ATTN_ACCEPT", format!("read {}: {e}", path.display()));
+                return;
+            }
+        };
+        let current_hash = content_hash(&current_bytes);
+        let now_ms = unix_now_ms_for_manager();
+        // The anchor index's snapshot_id only seeds per-block ids; a fresh
+        // derived id is fine for resolution against the live doc.
+        let anchor = match &body {
+            crate::review::model::ReviewEventBody::SuggestionCreated { anchor, .. } => anchor,
+            _ => unreachable!("found is always SuggestionCreated"),
+        };
+        let file_id = anchor.file_id.clone();
+        let tmp_snapshot_id = derive_snapshot_id(room_id, &file_id, &current_hash, now_ms as i64);
+        let current_index = match build_anchor_index(&current_bytes, &tmp_snapshot_id) {
+            Ok(idx) => idx,
+            Err(e) => {
+                emit_err("ATTN_ACCEPT", format!("anchor index: {e}"));
+                return;
+            }
+        };
+
+        // 4. Resolve → verdict.
+        let verdict = match resolve_suggestion(
+            &event_id,
+            &body,
+            &current_index,
+            &current_bytes,
+            &current_hash,
+            None,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                emit_err("ATTN_ACCEPT", format!("resolve: {e}"));
+                return;
+            }
+        };
+
+        // 5. Apply Ready verdicts; surface anything else for the UI to
+        //    drive the three-way / re-anchor path.
+        let ctx = ApplyContext {
+            working_copy: Arc::clone(&self.working_copy),
+            store: Arc::clone(&self.store),
+            room_id: room_id.clone(),
+            file_id,
+            path: path.clone(),
+        };
+        let outcome = match apply_ready_verdict(&verdict, &ctx, &current_bytes) {
+            Ok(o) => o,
+            Err(e) => {
+                emit_err(
+                    "ATTN_ACCEPT_NOT_READY",
+                    format!("suggestion needs review before apply: {e}"),
+                );
+                return;
+            }
+        };
+
+        // 6. Emit a SuggestionAccepted event (round-trips to reviewers).
+        let accepted_body = crate::review::model::ReviewEventBody::SuggestionAccepted {
+            suggestion_id: match &body {
+                crate::review::model::ReviewEventBody::SuggestionCreated {
+                    suggestion_id,
+                    ..
+                } => suggestion_id.clone(),
+                _ => unreachable!(),
+            },
+            applied_revision_id: format!("{:?}", outcome.revision.revision_id),
+            resulting_hash: outcome.resulting_hash.clone(),
+        };
+        let send = bootstrapper.send_event_sync(room_id, accepted_body, now_ms);
+        self.emit_event_outcome(room_id.clone(), send);
+
+        // 7. Republish the snapshot — the working copy changed, so reviewers
+        //    must get the new content.
+        if let Err(e) = bootstrapper.republish_snapshot_for_path(&path, now_ms) {
+            emit_err("ATTN_SNAPSHOT_PUBLISH", format!("post-accept republish: {e}"));
+        }
+
+        eprintln!(
+            "review: accepted suggestion {} → applied to {} (room={})",
+            suggestion_id.as_str(),
+            path.display(),
+            room_id.as_str()
+        );
     }
 
     /// Translate a `ShareOutcome` (or its error) into the corresponding

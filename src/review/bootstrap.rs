@@ -1747,6 +1747,20 @@ fn write_local_shares(
     Ok(())
 }
 
+/// Reverse of `find_room_for_path`: the on-disk path a room's shared
+/// document lives at. Used by the AcceptSuggestion apply flow to read the
+/// current bytes + write the accepted result. `None` when the room has no
+/// local share record (e.g. a reviewer-only daemon).
+pub(crate) fn find_path_for_room(
+    root: &std::path::Path,
+    room_id: &RoomId,
+) -> Result<Option<PathBuf>, BootstrapError> {
+    let all = load_local_shares(root)?;
+    Ok(all
+        .get(room_id.as_str())
+        .map(|record| PathBuf::from(&record.path)))
+}
+
 /// Look up the room a shared `path` belongs to, plus the stable file_id if
 /// one has been recorded. Returns `None` when the path isn't shared.
 fn find_room_for_path(

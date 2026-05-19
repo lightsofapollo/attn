@@ -34,13 +34,19 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { EditorView } from 'prosemirror-view';
-  import { anchorFromSelection, type ConstructAnchorContext } from './review/anchors';
+  import type { ConstructAnchorContext } from './review/anchors';
   import { getPopoverAnchor } from './review/popover-anchor';
   import { reviewCreateSuggestion } from './ipc';
   import { Button } from './components/ui/button';
-  import type { RoomId, SuggestionDraft, SuggestionOperation } from './types';
+  import {
+    buildSuggestionDraft as buildDraftFromForm,
+    isSubmitEnabled,
+    type ComposerFormState,
+    type ComposerOperationKind,
+  } from './SuggestionComposer.logic';
+  import type { RoomId, SuggestionDraft } from './types';
 
-  type OperationKind = 'replace' | 'delete' | 'insert_before' | 'insert_after';
+  type OperationKind = ComposerOperationKind;
 
   interface Props {
     /** PM view that owns the selection. */
@@ -94,18 +100,17 @@
   /** Whether the current mode shows an expected_text (read-only) row. */
   const showsExpectedText = $derived(kind === 'replace' || kind === 'delete');
 
-  /** Submit gate — replace requires the replacement; insert modes require text. */
-  const submitDisabled = $derived.by(() => {
-    switch (kind) {
-      case 'replace':
-        return replacementText.length === 0;
-      case 'delete':
-        return false;
-      case 'insert_before':
-      case 'insert_after':
-        return insertText.length === 0;
-    }
+  /** Form snapshot pushed to the pure builders. */
+  const formSnapshot = $derived<ComposerFormState>({
+    kind,
+    selectedText,
+    replacementText,
+    insertText,
+    note,
   });
+
+  /** Submit gate — replace requires the replacement; insert modes require text. */
+  const submitDisabled = $derived(!isSubmitEnabled(formSnapshot));
 
   // ---------------------------------------------------------------------------
   // Popover positioning — computed once on mount + window resize. The PM
@@ -138,29 +143,8 @@
   // Build + submit
   // ---------------------------------------------------------------------------
 
-  function buildOperation(): SuggestionOperation {
-    switch (kind) {
-      case 'replace':
-        return { kind: 'replace', expectedText: selectedText, replacement: replacementText };
-      case 'delete':
-        return { kind: 'delete', expectedText: selectedText };
-      case 'insert_before':
-        return { kind: 'insert_before', text: insertText };
-      case 'insert_after':
-        return { kind: 'insert_after', text: insertText };
-    }
-  }
-
   export function buildDraft(): SuggestionDraft {
-    const anchor = anchorFromSelection(view, from, to, anchorContext);
-    const draft: SuggestionDraft = {
-      anchor,
-      operation: buildOperation(),
-    };
-    if (note.trim().length > 0) {
-      draft.note = note.trim();
-    }
-    return draft;
+    return buildDraftFromForm(view, from, to, anchorContext, formSnapshot);
   }
 
   async function handleSubmit(): Promise<void> {

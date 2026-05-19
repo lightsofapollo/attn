@@ -97,24 +97,56 @@ function uniqueRoomId(label: string): string {
 async function createRoom(opts: {
   roomId: string;
   policy?: Partial<RoomPolicy>;
-  ownerSigningKey: Uint8Array;
+  ownerKp: SubtleKeypair;
 }): Promise<Uint8Array> {
   const admissionKey = makeAdmissionKey((roomCounter * 13) & 0xff);
   const body = JSON.stringify({
     v: 2,
     policy: defaultPolicy(opts.policy ?? {}),
-    ownerSigningKey: base64UrlEncode(opts.ownerSigningKey),
+    ownerSigningKey: base64UrlEncode(opts.ownerKp.publicKeyBytes),
     admissionKey: base64UrlEncode(admissionKey),
   });
-  const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  // attn-nnj.5.17 (security-review §H1): first-create requires
+  // Attn-Owner-Signature self-rooted to the body's ownerSigningKey.
+  const ownerSig = await buildOwnerSig({
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    url,
+    body,
+    privateKey: opts.ownerKp.privateKey,
+  });
+  const res = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": ownerSig,
+    },
     body,
   });
   if (res.status !== 201) {
     throw new Error(`room create failed: ${res.status} ${await res.text()}`);
   }
   return admissionKey;
+}
+
+async function buildOwnerSig(opts: {
+  method: string;
+  url: string;
+  body?: string;
+  privateKey: CryptoKey;
+}): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  const signing = new Request(opts.url, {
+    method: opts.method,
+    headers,
+    body: opts.body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(opts.url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, opts.privateKey, canonical),
+  );
+  return base64UrlEncode(sig);
 }
 
 // --- device builder ------------------------------------------------------
@@ -306,7 +338,7 @@ describe("POST /v2/rooms/:roomId/blobs — happy path", () => {
   it("returns a presigned upload URL for an above-1MiB request", async () => {
     const roomId = uniqueRoomId("blob-presign");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -335,7 +367,7 @@ describe("POST /v2/rooms/:roomId/blobs — happy path", () => {
   it("uploads bytes via PUT and retrieves them via GET (round-trip)", async () => {
     const roomId = uniqueRoomId("blob-rt");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -381,7 +413,7 @@ describe("POST /v2/rooms/:roomId/blobs — threshold gate", () => {
   it("rejects ciphertextBytes <= 1 MiB with 400 ATTN_BLOB_TOO_SMALL", async () => {
     const roomId = uniqueRoomId("blob-small");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -411,7 +443,7 @@ describe("POST /v2/rooms/:roomId/blobs — room cap", () => {
     // policy.maxSnapshotBytes individually).
     const roomId = uniqueRoomId("blob-overcap");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -445,7 +477,7 @@ describe("POST /v2/rooms/:roomId/blobs — device registration", () => {
   it("rejects when (authorId, deviceId) is not registered with 400 ATTN_DEVICE_UNREGISTERED", async () => {
     const roomId = uniqueRoomId("blob-unreg");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     // Register a different device than the one we'll claim authorship from.
     await registerDevice({
       roomId,
@@ -481,7 +513,7 @@ describe("PUT /v2/rooms/:roomId/blobs/:envelopeId — cap enforcement", () => {
   it("rejects PUT whose body length does not match the cap with 400 ATTN_BLOB_LENGTH_MISMATCH", async () => {
     const roomId = uniqueRoomId("blob-lenmis");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -530,7 +562,7 @@ describe("Room delete sweeps blobs (cross-check with 5.10)", () => {
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
     // Register the owner device using the room's actual ownerKp (only one
     // signing key matches the stored ownerSigningKey).

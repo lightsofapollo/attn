@@ -107,18 +107,34 @@ interface CreateRoomResult {
 async function createRoom(opts: {
   roomId: string;
   policy?: Partial<RoomPolicy>;
-  ownerSigningKey: Uint8Array;
+  ownerKp: { publicKeyBytes: Uint8Array; privateKey: CryptoKey };
 }): Promise<CreateRoomResult> {
   const admissionKey = makeAdmissionKey((roomCounter * 17) & 0xff);
   const body = JSON.stringify({
     v: 2,
     policy: defaultPolicy(opts.policy ?? {}),
-    ownerSigningKey: base64UrlEncode(opts.ownerSigningKey),
+    ownerSigningKey: base64UrlEncode(opts.ownerKp.publicKeyBytes),
     admissionKey: base64UrlEncode(admissionKey),
   });
-  const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  // attn-nnj.5.17 (security-review §H1): first-create requires
+  // Attn-Owner-Signature self-rooted to the body's ownerSigningKey.
+  const signing = new Request(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, opts.ownerKp.privateKey, canonical),
+  );
+  const ownerSig = base64UrlEncode(sig);
+  const res = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": ownerSig,
+    },
     body,
   });
   if (res.status !== 201) {
@@ -221,7 +237,7 @@ describe("RoomDO alarm — hard-max expiry", () => {
     const owner = await generateOwnerKeypair();
     const { admissionKey } = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       // expiresAt very near `now`; we'll also rewind hard_max_at to make it past.
       policy: { expiresAt: Date.now() + 60_000 },
     });
@@ -262,7 +278,7 @@ describe("RoomDO alarm — idle timeout", () => {
     const owner = await generateOwnerKeypair();
     await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       // 1m idle so the rewind below clears it without affecting hard_max_at.
       policy: { idleTimeoutMs: 60_000 },
     });
@@ -281,7 +297,7 @@ describe("RoomDO alarm — idle timeout", () => {
     const owner = await generateOwnerKeypair();
     await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { idleTimeoutMs: 60 * 60 * 1000 }, // 1h
     });
 
@@ -311,7 +327,7 @@ describe("RoomDO alarm — pow_seen pruning", () => {
     const owner = await generateOwnerKeypair();
     await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { idleTimeoutMs: 60 * 60 * 1000 }, // keep idle far away
     });
 
@@ -341,7 +357,7 @@ describe("RoomDO alarm — pow_seen pruning", () => {
     const owner = await generateOwnerKeypair();
     await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       policy: { idleTimeoutMs: 60 * 60 * 1000 },
     });
 
@@ -368,7 +384,7 @@ describe("RoomDO alarm — WS-connect cleanup_check", () => {
     const owner = await generateOwnerKeypair();
     const { admissionKey } = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       // Use a 2h expiresAt so it falls within the 1h pre-expiry window after we
       // rewind it below. Idle is 30m — also not relevant on its own here.
       policy: { expiresAt: Date.now() + 2 * 60 * 60 * 1000 },
@@ -401,7 +417,7 @@ describe("RoomDO alarm — WS-connect cleanup_check", () => {
     const owner = await generateOwnerKeypair();
     const { admissionKey } = await createRoom({
       roomId,
-      ownerSigningKey: owner.publicKeyBytes,
+      ownerKp: owner,
       // 6h expiresAt — well outside the 1h window.
       policy: { expiresAt: Date.now() + 6 * 60 * 60 * 1000 },
     });

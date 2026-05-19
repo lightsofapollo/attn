@@ -105,6 +105,10 @@ interface CreateRoomStep extends BaseStep {
     omitAdmission?: boolean;
     /** Use a freshly-minted admission key instead of the room's stored one. */
     badAdmission?: boolean;
+    /** Skip Attn-Owner-Signature entirely (negative path — H1 requirement). */
+    omitOwnerSig?: boolean;
+    /** Sign canonicalRequest with a non-owner key (negative path). */
+    badOwnerSig?: boolean;
   };
   expect: ExpectResponse;
 }
@@ -116,6 +120,9 @@ interface RecreateRoomStep extends BaseStep {
     policy?: Partial<RoomPolicy>;
     omitAdmission?: boolean;
     badAdmission?: boolean;
+    /** Whether to attach Attn-Owner-Signature. Rejoin path doesn't require it,
+     * so this defaults to true (we still attach for parity with `share`). */
+    omitOwnerSig?: boolean;
   };
   expect: ExpectResponse;
 }
@@ -566,6 +573,28 @@ async function admissionHeaderFor(opts: {
   return `v2.${base64UrlEncode(hmac)}`;
 }
 
+/** Build `Attn-Owner-Signature` header value (Ed25519 over canonicalRequest,
+ * base64url-encoded). Matches `relay/src/owner-sig.ts`. */
+async function ownerSignatureHeaderFor(opts: {
+  method: string;
+  url: string;
+  body?: string;
+  privateKey: CryptoKey;
+}): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  const signing = new Request(opts.url, {
+    method: opts.method,
+    headers,
+    body: opts.body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(opts.url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, opts.privateKey, canonical),
+  );
+  return base64UrlEncode(sig);
+}
+
 async function generateEd25519Keypair(): Promise<Keypair> {
   const kp = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
@@ -767,6 +796,21 @@ async function actCreateRoom(
       admissionKey: key,
     });
   }
+  // attn-nnj.5.17 (security-review §H1): first-create requires
+  // Attn-Owner-Signature. Default behavior attaches a valid sig signed by
+  // the room's owner keypair. `omitOwnerSig` and `badOwnerSig` exist for
+  // dedicated negative-path scenarios.
+  if (!(step.params.omitOwnerSig ?? false)) {
+    const signingKey = step.params.badOwnerSig
+      ? (await generateEd25519Keypair()).privateKey
+      : ownerKp.privateKey;
+    headers["Attn-Owner-Signature"] = await ownerSignatureHeaderFor({
+      method: "POST",
+      url,
+      body,
+      privateKey: signingKey,
+    });
+  }
   const res = await SELF.fetch(url, { method: "POST", headers, body });
   const responseBody = await assertResponse(res, step.expect, label);
   if (res.status === 201 || res.status === 200) {
@@ -803,6 +847,17 @@ async function actRecreateRoom(
       url,
       body,
       admissionKey: key,
+    });
+  }
+  // Attach Attn-Owner-Signature by default. The relay's rejoin path doesn't
+  // require it, but a real client (Rust bootstrapper) attaches it unconditionally
+  // — mirroring that behavior keeps the corpus aligned.
+  if (!(step.params.omitOwnerSig ?? false)) {
+    headers["Attn-Owner-Signature"] = await ownerSignatureHeaderFor({
+      method: "POST",
+      url,
+      body,
+      privateKey: room.ownerKp.privateKey,
     });
   }
   const res = await SELF.fetch(url, { method: "POST", headers, body });

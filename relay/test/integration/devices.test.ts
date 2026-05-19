@@ -90,28 +90,69 @@ function uniqueRoomId(label: string): string {
   return `${label}-${Date.now().toString(36)}-${roomCounter}`;
 }
 
-/** Create a room and return the admissionKey we used (for follow-up requests). */
+/** Create a room and return the admissionKey we used (for follow-up requests).
+ *
+ * Per attn-nnj.5.17 / security-review.md §H1, first-create POSTs must also
+ * carry `Attn-Owner-Signature` (Ed25519 over canonicalRequest) verified
+ * against the body's `ownerSigningKey`. We sign with the keypair's private
+ * half so the relay's verifier sees a valid sig.
+ */
 async function createRoom(opts: {
   roomId: string;
   policy?: Partial<RoomPolicy>;
-  ownerSigningKey: Uint8Array;
+  ownerKp: SubtleKeypair;
 }): Promise<Uint8Array> {
   const admissionKey = makeAdmissionKey(roomCounter & 0xff);
   const body = JSON.stringify({
     v: 2,
     policy: defaultPolicy(opts.policy ?? {}),
-    ownerSigningKey: base64UrlEncode(opts.ownerSigningKey),
+    ownerSigningKey: base64UrlEncode(opts.ownerKp.publicKeyBytes),
     admissionKey: base64UrlEncode(admissionKey),
   });
-  const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  const ownerSig = await buildOwnerSig({
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    url,
+    body,
+    privateKey: opts.ownerKp.privateKey,
+  });
+  const res = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": ownerSig,
+    },
     body,
   });
   if (res.status !== 201) {
     throw new Error(`room create failed: ${res.status} ${await res.text()}`);
   }
   return admissionKey;
+}
+
+/** Ed25519 signature over canonicalRequest, base64url-encoded.
+ *
+ * Same canonical bytes as admission HMAC (see `canonicalRequest` in
+ * `../../src/admission`). Matches `relay/src/owner-sig.ts` exactly.
+ */
+async function buildOwnerSig(opts: {
+  method: string;
+  url: string;
+  body?: string;
+  privateKey: CryptoKey;
+}): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  const signing = new Request(opts.url, {
+    method: opts.method,
+    headers,
+    body: opts.body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(opts.url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, opts.privateKey, canonical),
+  );
+  return base64UrlEncode(sig);
 }
 
 // --- device-registration body builder -----------------------------------
@@ -196,7 +237,7 @@ describe("POST /v2/rooms/:roomId/devices — happy path", () => {
   it("registers a reviewer device and returns 204; GET shows it", async () => {
     const roomId = uniqueRoomId("happy-reviewer");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
 
     const reviewer = await generateEd25519Keypair();
     const body = await buildSignedDeviceBody(
@@ -245,7 +286,7 @@ describe("POST /v2/rooms/:roomId/devices — happy path", () => {
   it("registers an owner device when publicSigningKey matches stored ownerSigningKey", async () => {
     const roomId = uniqueRoomId("happy-owner");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
 
     const body = await buildSignedDeviceBody(
       {
@@ -277,7 +318,7 @@ describe("POST /v2/rooms/:roomId/devices — owner-key gate", () => {
   it("rejects kind=owner with a mismatched key (403 ATTN_OWNER_KEY_MISMATCH)", async () => {
     const roomId = uniqueRoomId("owner-mismatch");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
 
     // Attacker generates a different keypair and tries to claim owner-kind.
     const attacker = await generateEd25519Keypair();
@@ -313,7 +354,7 @@ describe("POST /v2/rooms/:roomId/devices — upsert + key-immutability", () => {
   it("re-registering same (participantId, deviceId) with same key succeeds (204)", async () => {
     const roomId = uniqueRoomId("idempotent");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
 
     const reviewer = await generateEd25519Keypair();
     const url = `${URL_BASE}/v2/rooms/${roomId}/devices`;
@@ -362,7 +403,7 @@ describe("POST /v2/rooms/:roomId/devices — upsert + key-immutability", () => {
   it("re-registering same (participantId, deviceId) with a DIFFERENT key returns 409", async () => {
     const roomId = uniqueRoomId("key-changed");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
 
     const url = `${URL_BASE}/v2/rooms/${roomId}/devices`;
     const firstKp = await generateEd25519Keypair();
@@ -418,7 +459,7 @@ describe("POST /v2/rooms/:roomId/devices — selfSignature validation", () => {
   it("rejects when selfSignature is from a different keypair (400 ATTN_DEVICE_SELF_SIG_INVALID)", async () => {
     const roomId = uniqueRoomId("wrong-sig-key");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
 
     const claimed = await generateEd25519Keypair();
     const attacker = await generateEd25519Keypair();
@@ -454,7 +495,7 @@ describe("POST /v2/rooms/:roomId/devices — selfSignature validation", () => {
   it("rejects a tampered body (kind flipped after signing → 400)", async () => {
     const roomId = uniqueRoomId("tampered-body");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
 
     const kp = await generateEd25519Keypair();
     // Build & sign with kind=reviewer …
@@ -491,7 +532,7 @@ describe("POST /v2/rooms/:roomId/devices — protection layers", () => {
   it("rejects POST without admission header (401)", async () => {
     const roomId = uniqueRoomId("no-admission");
     const owner = await generateEd25519Keypair();
-    await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    await createRoom({ roomId, ownerKp: owner });
 
     const reviewer = await generateEd25519Keypair();
     const body = await buildSignedDeviceBody(
@@ -517,7 +558,7 @@ describe("POST /v2/rooms/:roomId/devices — protection layers", () => {
   it("rejects POST without PoW header (400 ATTN_POW_INVALID)", async () => {
     const roomId = uniqueRoomId("no-pow");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
 
     const reviewer = await generateEd25519Keypair();
     const body = await buildSignedDeviceBody(
@@ -545,7 +586,7 @@ describe("GET /v2/rooms/:roomId/devices", () => {
   it("returns devices in registration order", async () => {
     const roomId = uniqueRoomId("order");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     const url = `${URL_BASE}/v2/rooms/${roomId}/devices`;
 
     // Register three devices in a known order.

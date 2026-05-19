@@ -85,19 +85,34 @@ function uniqueRoomId(label: string): string {
 
 async function createRoom(opts: {
   roomId: string;
-  ownerSigningKey: Uint8Array;
+  ownerKp: SubtleKeypair;
   policy?: Partial<RoomPolicy>;
 }): Promise<Uint8Array> {
   const admissionKey = makeAdmissionKey((counter * 13) & 0xff);
   const body = JSON.stringify({
     v: 2,
     policy: defaultPolicy(opts.policy ?? {}),
-    ownerSigningKey: base64UrlEncode(opts.ownerSigningKey),
+    ownerSigningKey: base64UrlEncode(opts.ownerKp.publicKeyBytes),
     admissionKey: base64UrlEncode(admissionKey),
   });
-  const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  // attn-nnj.5.17 (security-review §H1): first-create requires
+  // Attn-Owner-Signature self-rooted to the body's ownerSigningKey.
+  const signing = new Request(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, opts.ownerKp.privateKey, canonical),
+  );
+  const res = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": base64UrlEncode(sig),
+    },
     body,
   });
   if (res.status !== 201) {
@@ -245,7 +260,7 @@ describe("rate limit — per-device (DO)", () => {
   it("rejects the 121st write in a single minute with 429 ATTN_RATE_LIMITED", async () => {
     const roomId = uniqueRoomId("rate-dev-121");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -282,7 +297,7 @@ describe("rate limit — per-device (DO)", () => {
   it("isolates per-device buckets — a different device in the same room can still write", async () => {
     const roomId = uniqueRoomId("rate-dev-isolation");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -328,7 +343,7 @@ describe("rate limit — per-device (DO)", () => {
   it("admission failures are NOT rate-limited (admission runs before the cap check)", async () => {
     const roomId = uniqueRoomId("rate-dev-admission-order");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,
@@ -451,9 +466,27 @@ describe("rate limit — anti-enumeration (GET /devices probes)", () => {
       ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
       admissionKey: base64UrlEncode(admissionKey),
     });
-    const createRes = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
+    const createUrl = `${URL_BASE}/v2/rooms/${roomId}`;
+    // attn-nnj.5.17: first-create needs Attn-Owner-Signature (H1).
+    const createSigning = new Request(createUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    const createCanonical = await canonicalRequest(
+      createSigning,
+      new URL(createUrl).pathname,
+    );
+    const createSig = new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, owner.privateKey, createCanonical),
+    );
+    const createRes = await SELF.fetch(createUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "CF-Connecting-IP": ip,
+        "Attn-Owner-Signature": base64UrlEncode(createSig),
+      },
       body,
     });
     expect(createRes.status).toBe(201);
@@ -518,7 +551,7 @@ describe("rate limit — response shape", () => {
   it("429 ATTN_RATE_LIMITED carries Retry-After + retryAfterMs + canonical code", async () => {
     const roomId = uniqueRoomId("rate-shape");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerSigningKey: owner.publicKeyBytes });
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({
       roomId,
       admissionKey,

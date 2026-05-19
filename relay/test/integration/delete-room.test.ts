@@ -106,18 +106,33 @@ function uniqueRoomId(label: string): string {
 async function createRoom(opts: {
   roomId: string;
   policy?: Partial<RoomPolicy>;
-  ownerSigningKey: Uint8Array;
+  ownerKp: SubtleKeypair;
 }): Promise<Uint8Array> {
   const admissionKey = makeAdmissionKey((roomCounter * 11) & 0xff);
   const body = JSON.stringify({
     v: 2,
     policy: defaultPolicy(opts.policy ?? {}),
-    ownerSigningKey: base64UrlEncode(opts.ownerSigningKey),
+    ownerSigningKey: base64UrlEncode(opts.ownerKp.publicKeyBytes),
     admissionKey: base64UrlEncode(admissionKey),
   });
-  const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${opts.roomId}`, {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}`;
+  // attn-nnj.5.17 (security-review §H1): first-create requires
+  // Attn-Owner-Signature self-rooted to the body's ownerSigningKey.
+  const signing = new Request(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body,
+  });
+  const canonical = await canonicalRequest(signing, new URL(url).pathname);
+  const sig = new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, opts.ownerKp.privateKey, canonical),
+  );
+  const res = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": base64UrlEncode(sig),
+    },
     body,
   });
   if (res.status !== 201) {
@@ -488,7 +503,7 @@ describe("DELETE /v2/rooms/:roomId — happy path", () => {
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
     await registerDevice({
       roomId,
@@ -536,7 +551,7 @@ describe("DELETE /v2/rooms/:roomId — admission required", () => {
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
     await registerDevice({
       roomId,
@@ -568,7 +583,7 @@ describe("DELETE /v2/rooms/:roomId — PoW required", () => {
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
     await registerDevice({
       roomId,
@@ -598,7 +613,7 @@ describe("DELETE /v2/rooms/:roomId — owner signature required", () => {
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
 
     const res = await deleteRoom({
@@ -618,7 +633,7 @@ describe("DELETE /v2/rooms/:roomId — owner signature required", () => {
     const reviewerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
     // Sign with reviewer's key — it has a valid Ed25519 sig shape but doesn't
     // match the stored ownerSigningKey.
@@ -642,7 +657,7 @@ describe("DELETE /v2/rooms/:roomId — closes live WS clients with 4001", () => 
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
     await registerDevice({
       roomId,
@@ -695,7 +710,7 @@ describe("DELETE /v2/rooms/:roomId — post-delete state", () => {
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
     const reviewer = await registerDevice({
       roomId,
@@ -773,7 +788,7 @@ describe("DELETE /v2/rooms/:roomId — R2 cleanup", () => {
     const ownerKp = await generateEd25519Keypair();
     const admissionKey = await createRoom({
       roomId,
-      ownerSigningKey: ownerKp.publicKeyBytes,
+      ownerKp,
     });
     await registerDevice({
       roomId,

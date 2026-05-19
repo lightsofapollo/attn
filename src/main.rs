@@ -318,6 +318,11 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             None
         }
     };
+    // Shared with the file watcher (attn-nnj.2.6) so the watcher can
+    // distinguish self-writes from external edits. The IPC `WorkingCopyService`
+    // call sites and the FsChanged handler both reach into AppState for this
+    // Arc so they all refer to the same tracker instance.
+    let self_write_tracker = Arc::new(crate::review::watcher_state::SelfWriteTracker::new());
     let app_state = Arc::new(Mutex::new(ipc::AppState {
         active_path: initial_ui_path.clone(),
         active_project_root: tree_root.clone(),
@@ -325,7 +330,27 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         review_rooms: std::collections::HashMap::new(),
         file_to_room: std::collections::HashMap::new(),
         review_store,
+        self_write_tracker: Arc::clone(&self_write_tracker),
     }));
+
+    // Prune expired entries from the self-write tracker on a slow ticker.
+    // Lookups also prune lazily, so this thread is purely insurance against
+    // an idle daemon accumulating entries from saves whose `FsChanged`
+    // events somehow got dropped. 10 s is well above the 5 s TTL so we
+    // never run faster than needed.
+    {
+        let tracker = Arc::clone(&self_write_tracker);
+        std::thread::Builder::new()
+            .name("self-write-tracker-pruner".to_string())
+            .spawn(move || {
+                let interval = std::time::Duration::from_secs(10);
+                loop {
+                    std::thread::sleep(interval);
+                    tracker.prune();
+                }
+            })
+            .ok();
+    }
     let ipc_state = Arc::clone(&app_state);
     let ipc_proxy = event_loop.create_proxy();
 
@@ -546,6 +571,12 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 if paths.is_empty() {
                     return;
                 }
+
+                // First: distinguish daemon self-writes from external edits
+                // and (if external) journal a `LocalRevision`. This is
+                // orthogonal to the frontend reload signal — that still
+                // fires regardless of who wrote the file. attn-nnj.2.6.
+                classify_and_record_changes(&paths, &app_state);
 
                 let mut dedup = HashSet::new();
                 let changed_paths: Vec<String> = paths
@@ -1104,6 +1135,84 @@ fn diag_mode_from_env() -> String {
     }
 }
 
+/// For each path in an `FsChanged` event, hash the file, ask the
+/// [`SelfWriteTracker`](crate::review::watcher_state::SelfWriteTracker)
+/// whether the daemon was the author, and — if it was an external write —
+/// append a `LocalRevision { source: ExternalFileChange }` for any path
+/// mapped to a `(room, file)` (issue attn-nnj.2.6).
+///
+/// This intentionally does NOT short-circuit the frontend reload signal
+/// the caller still emits — the tracker is orthogonal to the UX-side
+/// content refresh.
+fn classify_and_record_changes(paths: &[PathBuf], app_state: &Arc<Mutex<ipc::AppState>>) {
+    use crate::review::ids::ContentHash;
+    use crate::review::working_copy::WorkingCopyService;
+
+    // Snapshot the bits of AppState we need under a short-lived lock.
+    let (tracker, file_map_has_entries) = {
+        let Ok(state) = app_state.lock() else {
+            return;
+        };
+        (
+            state.self_write_tracker.clone(),
+            !state.file_to_room.is_empty(),
+        )
+    };
+
+    let svc = WorkingCopyService::new();
+    for path in paths {
+        // Skip non-file paths (directories, vanished files). Modify events
+        // for directories are a notify-on-macos quirk we don't care about.
+        if !path.is_file() {
+            continue;
+        }
+
+        let hash: ContentHash = match svc.hash_path(path) {
+            Ok(h) => h,
+            Err(err) => {
+                eprintln!(
+                    "attn: watcher could not hash {} for self-write classification: {}",
+                    path.display(),
+                    err
+                );
+                continue;
+            }
+        };
+
+        if tracker.consume_match(path, &hash) {
+            // Self-write: the IPC handler's save flow already recorded a
+            // LocalRevision via persist_revision_if_mapped. Drop on the floor.
+            continue;
+        }
+
+        // External change. Only worth recording if there's at least one
+        // room mapping; otherwise we'd just build and discard the
+        // revision. Skip the build cost in the common (no-room) case.
+        if !file_map_has_entries {
+            continue;
+        }
+
+        // We don't yet have a `previous_hash` source-of-truth in AppState
+        // (that arrives with attn-nnj.2.8 ReviewManager + per-file
+        // last-known-hash tracking). For now, parent the revision off
+        // the empty content hash — sync still works because peers
+        // negotiate based on next_hash and the journal is for audit.
+        let prev = crate::review::crypto::ids::content_hash(b"");
+        let revision = match svc.build_external_change_revision(path, prev) {
+            Ok(rev) => rev,
+            Err(err) => {
+                eprintln!(
+                    "attn: watcher could not build external-change revision for {}: {}",
+                    path.display(),
+                    err
+                );
+                continue;
+            }
+        };
+        crate::ipc::append_revision_if_mapped(app_state, path, &revision);
+    }
+}
+
 fn content_metadata_for_path(path: &Path) -> (Option<u64>, Option<u64>) {
     if !path.is_file() {
         return (None, None);
@@ -1368,5 +1477,163 @@ mod tests {
             "attn://localhost/reviewable/abc"
         ));
         assert!(!is_reserved_localhost_review("attn://review/abc"));
+    }
+
+    // ----- attn-nnj.2.6 watcher classification ---------------------------
+    //
+    // These exercise `classify_and_record_changes` end-to-end: build a
+    // real AppState (with a ReviewStore + file_to_room mapping), simulate
+    // either a WorkingCopyService save (self-write) or a raw fs::write
+    // (external), then call the classifier and assert the journal state.
+
+    use crate::review::ids::{FileId, RoomId};
+    use crate::review::model::{LocalRevision, RevisionSource};
+    use crate::review::store::ReviewStore;
+    use crate::review::watcher_state::SelfWriteTracker;
+    use crate::review::working_copy::{SaveRequest, SaveSource, WorkingCopyService};
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    fn dummy_id<T: for<'de> serde::Deserialize<'de>>(s: &str) -> T {
+        serde_json::from_value(Value::String(s.to_string())).expect("id deserializes")
+    }
+
+    fn make_mapped_state(
+        path: PathBuf,
+        store: Arc<ReviewStore>,
+        tracker: Arc<SelfWriteTracker>,
+        room: RoomId,
+        file: FileId,
+    ) -> Arc<Mutex<ipc::AppState>> {
+        let mut map = HashMap::new();
+        map.insert(path.clone(), (room, file));
+        Arc::new(Mutex::new(ipc::AppState {
+            active_path: path.clone(),
+            active_project_root: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            active_tab_id: None,
+            review_rooms: HashMap::new(),
+            file_to_room: map,
+            review_store: Some(store),
+            self_write_tracker: tracker,
+        }))
+    }
+
+    #[test]
+    fn watcher_classifier_drops_self_writes() {
+        // WorkingCopyService::save → SelfWriteTracker has an entry →
+        // classify_and_record_changes consumes it and records NOTHING in
+        // the revision journal.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("store"),
+        );
+        let tracker = Arc::new(SelfWriteTracker::new());
+        let path = tmp.path().join("doc.md");
+        let room: RoomId = dummy_id("room-self-write");
+        let file: FileId = dummy_id("file-self-write");
+
+        let state =
+            make_mapped_state(path.clone(), store.clone(), tracker.clone(), room.clone(), file.clone());
+
+        // Save via WCS (records to tracker as a side effect).
+        let svc = WorkingCopyService::with_tracker(tracker.clone());
+        let result = svc
+            .save(SaveRequest {
+                path: path.clone(),
+                content: "hello world\n".to_string(),
+                expected_hash: None,
+                source: SaveSource::UserEdit,
+            })
+            .expect("save");
+        // The IPC save flow would also persist the revision; here we skip
+        // it to isolate the classifier — we only care that the classifier
+        // doesn't ADD a spurious extra revision.
+
+        classify_and_record_changes(std::slice::from_ref(&path), &state);
+
+        // Tracker entry consumed.
+        assert!(
+            !tracker.consume_match(&path, &result.next_hash),
+            "classifier should have consumed the tracker entry"
+        );
+
+        // Journal must be empty — the classifier MUST NOT have written.
+        let journal: Vec<LocalRevision> = store
+            .iter_revisions(&room, &file)
+            .map(|iter| iter.collect::<Result<_, _>>().expect("decode"))
+            .unwrap_or_default();
+        assert!(
+            journal.is_empty(),
+            "self-write classification must not emit a journal entry, got {} entries",
+            journal.len()
+        );
+    }
+
+    #[test]
+    fn watcher_classifier_records_external_changes() {
+        // Bare fs::write (no WCS, no tracker entry) → classifier sees a
+        // miss and persists a LocalRevision with source=ExternalFileChange.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("store"),
+        );
+        let tracker = Arc::new(SelfWriteTracker::new());
+        let path = tmp.path().join("doc.md");
+        let room: RoomId = dummy_id("room-external");
+        let file: FileId = dummy_id("file-external");
+
+        let state =
+            make_mapped_state(path.clone(), store.clone(), tracker, room.clone(), file.clone());
+
+        // Bypass WorkingCopyService entirely.
+        std::fs::write(&path, b"external edit\n").expect("seed external write");
+        classify_and_record_changes(std::slice::from_ref(&path), &state);
+
+        let journal: Vec<LocalRevision> = store
+            .iter_revisions(&room, &file)
+            .expect("iter")
+            .collect::<Result<_, _>>()
+            .expect("decode");
+        assert_eq!(
+            journal.len(),
+            1,
+            "external write must record exactly one LocalRevision"
+        );
+        assert_eq!(journal[0].source, RevisionSource::ExternalFileChange);
+        let expected_hash =
+            crate::review::crypto::ids::content_hash(b"external edit\n");
+        assert_eq!(journal[0].next_hash, expected_hash);
+    }
+
+    #[test]
+    fn watcher_classifier_external_change_unmapped_path_no_op() {
+        // External edit to a path that isn't in any room → no panic, no
+        // journal entries written, no reviews/rooms/ dir created.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("store"),
+        );
+        let tracker = Arc::new(SelfWriteTracker::new());
+        let path = tmp.path().join("unmapped.md");
+        std::fs::write(&path, b"nobody knows\n").expect("seed");
+
+        let state = Arc::new(Mutex::new(ipc::AppState {
+            active_path: path.clone(),
+            active_project_root: tmp.path().to_path_buf(),
+            active_tab_id: None,
+            review_rooms: HashMap::new(),
+            file_to_room: HashMap::new(),
+            review_store: Some(store),
+            self_write_tracker: tracker,
+        }));
+
+        classify_and_record_changes(std::slice::from_ref(&path), &state);
+
+        let rooms_dir = tmp.path().join("reviews").join("rooms");
+        assert!(
+            !rooms_dir.exists(),
+            "expected no rooms dir created for unmapped path"
+        );
     }
 }

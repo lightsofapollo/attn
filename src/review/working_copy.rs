@@ -24,10 +24,12 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::review::crypto::ids::content_hash;
 use crate::review::ids::{ContentHash, EventId, RoomId};
 use crate::review::model::{LocalRevision, RevisionSource};
+use crate::review::watcher_state::SelfWriteTracker;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -123,22 +125,45 @@ pub struct SaveResult {
 // Service
 // ---------------------------------------------------------------------------
 
-/// Stateless working-copy writer. Held by `AppState` / `ReviewManager` once
-/// the latter exists (issue attn-nnj.2.8); for now callers can instantiate
-/// per-call without losing correctness.
+/// Working-copy writer. Held by `AppState` / `ReviewManager` once the latter
+/// exists (issue attn-nnj.2.8); today callers can instantiate per-call
+/// without losing correctness.
 ///
-/// Could grow shared state later — e.g. a recent-self-write set so the file
-/// watcher can distinguish self-writes from external edits without round-
-/// tripping through the OS.
+/// Shared state: an optional [`SelfWriteTracker`] that the file watcher
+/// consults to distinguish daemon-originated writes from external edits
+/// (issue attn-nnj.2.6). When the tracker is `None` (legacy callers,
+/// unit tests that don't care) the service still hashes and writes the
+/// file correctly — the watcher just won't be able to attribute the
+/// event back to this save.
 #[derive(Debug, Default)]
 pub struct WorkingCopyService {
-    // Intentionally empty for now. See module-level doc comment.
-    _private: (),
+    self_write_tracker: Option<Arc<SelfWriteTracker>>,
 }
 
 impl WorkingCopyService {
+    /// Construct without a tracker. Equivalent to
+    /// [`WorkingCopyService::with_tracker(None)`].
     pub fn new() -> Self {
-        Self { _private: () }
+        Self {
+            self_write_tracker: None,
+        }
+    }
+
+    /// Construct with a shared [`SelfWriteTracker`]. The tracker is held by
+    /// the daemon's main event loop alongside the file watcher; every
+    /// successful save records `(path, next_hash)` so the watcher can drop
+    /// the resulting `FsChanged` event instead of treating it as an
+    /// external edit.
+    pub fn with_tracker(tracker: Arc<SelfWriteTracker>) -> Self {
+        Self {
+            self_write_tracker: Some(tracker),
+        }
+    }
+
+    /// Test/inspection helper: surface the shared tracker (if any) so
+    /// callers can wire the same instance into the file watcher.
+    pub fn self_write_tracker(&self) -> Option<&Arc<SelfWriteTracker>> {
+        self.self_write_tracker.as_ref()
     }
 
     /// Atomic write: serialize to a `<path>.attn-tmp` sibling and `rename`
@@ -180,6 +205,14 @@ impl WorkingCopyService {
         //    only guaranteed within a filesystem).
         write_atomic(&req.path, req.content.as_bytes())?;
 
+        // 4a. Tell the file watcher this write came from us so the resulting
+        //     notify event doesn't get journaled as an ExternalFileChange.
+        //     Done AFTER the rename so we never record an entry the
+        //     filesystem hasn't yet observed.
+        if let Some(tracker) = &self.self_write_tracker {
+            tracker.record_self_write(req.path.clone(), next_hash.clone());
+        }
+
         // 5. Build a LocalRevision describing the change. revision_id is a
         //    UUID-ish content-addressed string (parent_hash + next_hash + a
         //    timestamp) so it's deterministic per save attempt without
@@ -210,6 +243,34 @@ impl WorkingCopyService {
     pub fn hash_path(&self, path: &Path) -> Result<ContentHash, WorkingCopyError> {
         let bytes = fs::read(path)?;
         Ok(hash_canonical(&bytes))
+    }
+
+    /// Build a `LocalRevision` describing an externally-originated change
+    /// to `path`. Reads the file, hashes it, and produces a revision with
+    /// `source: ExternalFileChange`.
+    ///
+    /// `previous_hash` is the parent that the watcher believes was the
+    /// last-known on-disk hash (the daemon should provide its last
+    /// recorded hash here; for the simple case where we have no prior
+    /// state we pass the empty hash). The returned revision is **not**
+    /// persisted — the caller decides whether to journal it via
+    /// [`crate::ipc::append_revision_if_mapped`].
+    pub fn build_external_change_revision(
+        &self,
+        path: &Path,
+        previous_hash: ContentHash,
+    ) -> Result<LocalRevision, WorkingCopyError> {
+        let next_hash = self.hash_path(path)?;
+        let created_at = now_unix_millis();
+        Ok(LocalRevision {
+            revision_id: derive_revision_id(&previous_hash, &next_hash, created_at),
+            parent_hash: previous_hash,
+            next_hash,
+            created_at,
+            source: RevisionSource::ExternalFileChange,
+            pm_steps: None,
+            patch_text: None,
+        })
     }
 }
 
@@ -590,6 +651,64 @@ mod tests {
         let b = derive_revision_id(&prev, &next, 42);
         assert_eq!(a, b, "revision_id derivation must be deterministic");
         assert_ne!(a, derive_revision_id(&prev, &next, 43));
+    }
+
+    #[test]
+    fn save_records_to_self_write_tracker_when_attached() {
+        // Wire a tracker into the service, save twice, and confirm each
+        // (path, next_hash) is consumable from the tracker. This is the
+        // primary contract for attn-nnj.2.6 — the watcher relies on the
+        // tracker being populated synchronously with every successful
+        // write.
+        let tmp = TempDir::new().unwrap();
+        let path = fixture_path(&tmp, "doc.md");
+        let tracker = std::sync::Arc::new(SelfWriteTracker::new());
+        let svc = WorkingCopyService::with_tracker(tracker.clone());
+
+        let first = svc
+            .save(SaveRequest {
+                path: path.clone(),
+                content: "one\n".to_string(),
+                expected_hash: None,
+                source: SaveSource::UserEdit,
+            })
+            .expect("first save");
+        assert!(
+            tracker.consume_match(&path, &first.next_hash),
+            "tracker must contain first save's (path, hash)"
+        );
+
+        let second = svc
+            .save(SaveRequest {
+                path: path.clone(),
+                content: "two\n".to_string(),
+                expected_hash: None,
+                source: SaveSource::CheckboxToggle,
+            })
+            .expect("second save");
+        assert!(
+            tracker.consume_match(&path, &second.next_hash),
+            "tracker must contain second save's (path, hash)"
+        );
+    }
+
+    #[test]
+    fn save_without_tracker_still_succeeds() {
+        // Legacy path: WorkingCopyService::new() has no tracker; the save
+        // must still write atomically and return a valid SaveResult.
+        let tmp = TempDir::new().unwrap();
+        let path = fixture_path(&tmp, "doc.md");
+        let svc = WorkingCopyService::new();
+        let result = svc
+            .save(SaveRequest {
+                path: path.clone(),
+                content: "no tracker\n".to_string(),
+                expected_hash: None,
+                source: SaveSource::UserEdit,
+            })
+            .expect("save without tracker");
+        assert_eq!(result.next_hash, content_hash(b"no tracker\n"));
+        assert!(svc.self_write_tracker().is_none());
     }
 
     #[test]

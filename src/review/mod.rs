@@ -17,4 +17,5 @@ pub mod manager;
 pub mod model;
 pub mod store;
 pub mod transport;
+pub mod watcher_state;
 pub mod working_copy;

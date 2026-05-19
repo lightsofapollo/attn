@@ -1,6 +1,7 @@
 use crate::review::ids::{EventId, FileId, RoomId};
 use crate::review::model::{Anchor, PositionAnchor, SuggestionDraft};
 use crate::review::store::ReviewStore;
+use crate::review::watcher_state::SelfWriteTracker;
 use crate::review::working_copy::{SaveRequest, SaveResult, SaveSource, WorkingCopyService};
 use crate::watcher::UserEvent;
 use serde::Deserialize;
@@ -143,6 +144,12 @@ pub struct AppState {
     /// need to persist (e.g. revision journal appends) check `is_some()`
     /// before reaching in.
     pub review_store: Option<Arc<ReviewStore>>,
+    /// Shared tracker the file watcher consults to distinguish daemon
+    /// self-writes from external edits (issue attn-nnj.2.6). Every IPC
+    /// handler that writes through `WorkingCopyService` must construct the
+    /// service with `WorkingCopyService::with_tracker(self_write_tracker.clone())`
+    /// so the watcher can drop the corresponding `FsChanged` event.
+    pub self_write_tracker: Arc<SelfWriteTracker>,
 }
 
 /// Lightweight handle for a live review room. `ReviewManager` owns the heavy
@@ -185,11 +192,11 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 // §Working Copy Service the service is stateless today, so
                 // it's safe to instantiate per-call until `ReviewManager`
                 // (attn-nnj.2.8) holds a long-lived handle.
-                let path = {
+                let (path, tracker) = {
                     let Ok(state) = state.lock() else { return };
-                    state.active_path.clone()
+                    (state.active_path.clone(), state.self_write_tracker.clone())
                 };
-                let svc = WorkingCopyService::new();
+                let svc = WorkingCopyService::with_tracker(tracker);
                 match svc.save(SaveRequest {
                     path: path.clone(),
                     content,
@@ -316,9 +323,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
 /// revision tracking. The file watcher will detect the write and trigger a
 /// re-render.
 fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
-    let path = {
+    let (path, tracker) = {
         let Ok(state) = state.lock() else { return };
-        state.active_path.clone()
+        (state.active_path.clone(), state.self_write_tracker.clone())
     };
 
     let content = match std::fs::read_to_string(&path) {
@@ -367,7 +374,7 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
         output.push('\n');
     }
 
-    let svc = WorkingCopyService::new();
+    let svc = WorkingCopyService::with_tracker(tracker);
     match svc.save(SaveRequest {
         path: path.clone(),
         content: output,
@@ -405,6 +412,32 @@ fn persist_revision_if_mapped(state: &Arc<Mutex<AppState>>, path: &Path, result:
     }
 }
 
+/// Append a `LocalRevision` to the room's journal if `path` is mapped to a
+/// `(room, file)` AND a `ReviewStore` is open. Same routing as
+/// [`persist_revision_if_mapped`] but takes a bare `LocalRevision` rather
+/// than a `SaveResult` — used by the file watcher's external-change path
+/// (attn-nnj.2.6) where there is no `WorkingCopyService::save` call.
+pub fn append_revision_if_mapped(
+    state: &Arc<Mutex<AppState>>,
+    path: &Path,
+    revision: &crate::review::model::LocalRevision,
+) {
+    let Ok(state) = state.lock() else { return };
+    let Some(store) = state.review_store.as_ref() else {
+        return;
+    };
+    let Some((room_id, file_id)) = state.file_to_room.get(path) else {
+        return;
+    };
+    if let Err(err) = store.append_revision(room_id, file_id, revision) {
+        eprintln!(
+            "attn: failed to append external local revision for {}: {}",
+            path.display(),
+            err
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +462,7 @@ mod tests {
             review_rooms: HashMap::new(),
             file_to_room,
             review_store,
+            self_write_tracker: Arc::new(SelfWriteTracker::new()),
         }))
     }
 

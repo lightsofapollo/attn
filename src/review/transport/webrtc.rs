@@ -638,15 +638,18 @@ impl WebRtcTransport {
         Ok(())
     }
 
-    // -----------------------------------------------------------------
-    // Internal helpers
-    // -----------------------------------------------------------------
-
     /// Mint and publish a single signal envelope onto `signaling_tx`.
     /// `client_nonce` is freshly random per call — outbound signal
     /// envelopes are not retried at this layer (the 7.4 state machine
     /// handles retries by re-invoking `create_offer` / `handle_offer`).
-    fn publish_signal(&self, payload: SignalingPayload) -> Result<(), TransportError> {
+    ///
+    /// Public so the `ReviewManager` can mint a `SignalingPayload::RequestSnapshot`
+    /// (attn-nnj.7.6) and route it through the same outbound signaling lane
+    /// the SDP/ICE flow uses. The envelope is sealed under `signaling_key`
+    /// and pushed onto `signaling_tx`; the mailbox arm consumes the receive
+    /// side and POSTs it to the relay's `/envelopes` endpoint with
+    /// `kind=signal`.
+    pub fn publish_signal(&self, payload: SignalingPayload) -> Result<(), TransportError> {
         let envelope = mint_signal_envelope(
             payload,
             &self.config,
@@ -659,6 +662,10 @@ impl WebRtcTransport {
             .map_err(|_| TransportError::Disconnected("signaling_tx receiver dropped".into()))?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------
 
     /// Bridge webrtc-rs's `on_ice_candidate` callback onto `signaling_tx`.
     fn wire_on_ice_candidate(

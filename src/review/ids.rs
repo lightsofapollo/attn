@@ -73,6 +73,12 @@ impl DeviceId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ParticipantId(String);
 
+impl ParticipantId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Hash of canonical UTF-8 bytes of file content. Recomputed on every
 /// snapshot creation and working-copy save.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

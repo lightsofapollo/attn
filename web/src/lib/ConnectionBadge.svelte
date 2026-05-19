@@ -64,14 +64,17 @@
 
   let popoverOpen = $state(false);
 
-  // The badge mirrors `reviewStore.status.connection`. When no status payload
-  // has arrived yet (room minted but transport pending), fall back to Offline
-  // so we don't render an empty chip — §5 says Offline is the safe default.
+  // The badge mirrors the live transport state. `reviewStore.connection` is
+  // driven directly by the daemon's `reviewConnection` callback (mailbox on
+  // relay subscribe, offline on disconnect) — the `RoomStatusChanged` wire
+  // variant only carries a status string, so `status.connection` is never
+  // populated. We still prefer `status.connection` if a future full-status
+  // payload sets it. §5 says Offline is the safe default.
   const connection: ConnectionState = $derived(
-    reviewStore.status?.connection ?? 'offline',
+    reviewStore.status?.connection ?? reviewStore.connection,
   );
 
-  const peers: ReviewStatusPeer[] = $derived(reviewStore.peers);
+  const peers: ReviewStatusPeer[] = $derived(reviewStore.peersResolved);
   const outboxPending: number = $derived(
     reviewStore.status?.outboxPending ?? 0,
   );

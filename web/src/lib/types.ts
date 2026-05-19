@@ -846,6 +846,31 @@ export interface ReviewStatusPeer {
 }
 
 /**
+ * Live presence delta pushed via `window.__attn__.reviewPresence(...)`.
+ *
+ * The daemon translates relay `hello`/`presence` frames into this shape.
+ * `replace=true` carries the authoritative full roster (a Hello frame on
+ * (re)connect); `replace=false` is a single join/leave the store merges by
+ * `deviceId`. @see store.applyPresence.
+ */
+export interface ReviewPresenceChanged {
+  roomId: RoomId;
+  peers: ReviewStatusPeer[];
+  replace: boolean;
+}
+
+/**
+ * Live transport connection-state change pushed via
+ * `window.__attn__.reviewConnection(...)`. The daemon emits `mailbox` when
+ * the relay socket subscribes and `offline` on disconnect. Drives the
+ * ConnectionBadge. @see store.applyConnection.
+ */
+export interface ReviewConnectionChanged {
+  roomId: RoomId;
+  connection: ReviewStatus['connection'];
+}
+
+/**
  * Snapshot payload pushed via `window.__attn__.reviewSnapshot(...)` when Rust
  * imports a new snapshot (live DataChannel or mailbox).
  * @see planning/collab/data-model.md §Snapshot Graph

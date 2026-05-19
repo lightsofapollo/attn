@@ -71,6 +71,8 @@ type ReviewShareReadyFn = (payload: import('../lib/types').ReviewShareReady) => 
 type ReviewEventFn = (payload: ReviewEvent) => void;
 type ReviewSnapshotFn = (snapshot: ReviewSnapshot) => void;
 type ReviewAnchorResolutionFn = (update: ReviewAnchorResolutionUpdate) => void;
+type ReviewPresenceFn = (payload: import('../lib/types').ReviewPresenceChanged) => void;
+type ReviewConnectionFn = (payload: import('../lib/types').ReviewConnectionChanged) => void;
 
 interface AttnBridge {
   setContent: SetContentFn;
@@ -108,6 +110,17 @@ interface AttnBridge {
    * @see planning/collab/data-model.md §Anchor Resolution
    */
   reviewAnchorResolution: ReviewAnchorResolutionFn;
+  /**
+   * Push a live presence delta (relay `hello`/`presence` frames). Feeds
+   * `reviewStore.peers` → PeerStrip face chips. Optional: only the daemon
+   * emits it; the mock harness leaves it unset.
+   */
+  reviewPresence?: ReviewPresenceFn;
+  /**
+   * Push a live transport connection-state change (`mailbox`/`offline`).
+   * Drives the ConnectionBadge. Optional: only the daemon emits it.
+   */
+  reviewConnection?: ReviewConnectionFn;
   /**
    * Optional: focus the margin card whose underlying root event matches
    * `eventId`. Implemented by attn-nnj.4.3's ReviewMargin via

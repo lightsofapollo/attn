@@ -1300,6 +1300,19 @@
         console.debug('[review:anchor]', update);
         reviewStore.applyAnchorResolution(update);
       },
+      // Live presence: relay `hello` (full roster) and `presence`
+      // (join/leave) frames, translated by the daemon into face-chip deltas
+      // that feed `reviewStore.peers` → PeerStrip.
+      reviewPresence(payload: import('./lib/types').ReviewPresenceChanged) {
+        console.debug('[review:presence]', payload);
+        reviewStore.applyPresence(payload);
+      },
+      // Live transport state: `mailbox` on relay subscribe, `offline` on
+      // disconnect. Drives the ConnectionBadge.
+      reviewConnection(payload: import('./lib/types').ReviewConnectionChanged) {
+        console.debug('[review:connection]', payload);
+        reviewStore.applyConnection(payload);
+      },
       // Per planning/collab/ui/review-panel-design.md §6: ReviewMargin
       // exposes `focusCard(eventId)` on the bridge so the editor's
       // inline-decoration click handler (10.2) and E2E automation can

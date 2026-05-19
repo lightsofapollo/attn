@@ -31,6 +31,7 @@ import {
 import type {
   EventId,
   FileId,
+  ParticipantId,
   PositionAnchor,
   RequiresThreeWayVerdict,
   ReviewAnchorResolutionUpdate,
@@ -90,6 +91,17 @@ export class ReviewStore {
 
   /** Latest transport status payload for `currentRoomId`. */
   status = $state<ReviewStatus | null>(null);
+
+  /**
+   * Live transport connection state for the connection badge. The
+   * `RoomStatusChanged` wire variant only carries a status *string* (no
+   * structured `connection` field), so the badge can't read it from
+   * `status`. We drive this directly from the presence path instead: a
+   * relay `hello`/`presence` frame is proof we're subscribed to the mailbox
+   * transport. WebRTC upgrade (`live_direct`) lands with the live-channel
+   * work; until then a connected room is `mailbox`.
+   */
+  connection = $state<ReviewStatus['connection']>('offline');
 
   /** Peer roster mirrored from `status.peers` for convenient binding. */
   peers = $state<ReviewStatusPeer[]>([]);
@@ -228,6 +240,41 @@ export class ReviewStore {
   );
 
   /**
+   * The room owner's participantId, learned from the authoritative snapshot
+   * author (the owner publishes the initial snapshot, so its author is the
+   * owner). This is reliable on every participant — unlike the local room
+   * record's `createdBy`, which the join flow doesn't populate with the
+   * owner's id on a reviewer. `null` until the first snapshot arrives.
+   */
+  ownerParticipantId: ParticipantId | null = $derived.by(() => {
+    let earliest: ReviewSnapshot | null = null;
+    for (const snap of this.snapshots) {
+      if (earliest === null || snap.createdAt < earliest.createdAt) {
+        earliest = snap;
+      }
+    }
+    return earliest?.createdBy ?? null;
+  });
+
+  /**
+   * Peer roster with the owner chip's role corrected from the snapshot
+   * author. The Rust presence forwarder can't always tag the owner (it
+   * derives from the unreliable local room record), so we promote the
+   * matching peer to `owner` here — warm color + `O` monogram. Reactive:
+   * re-runs when the snapshot arrives, re-coloring the chip live. PeerStrip
+   * binds to this instead of the raw `peers`.
+   */
+  peersResolved: ReviewStatusPeer[] = $derived.by(() => {
+    const owner = this.ownerParticipantId;
+    if (owner === null) return this.peers;
+    return this.peers.map((peer) =>
+      peer.participantId === owner && peer.kind !== 'owner'
+        ? { ...peer, kind: 'owner', displayName: 'Owner' }
+        : peer,
+    );
+  });
+
+  /**
    * Unresolved-thread badge for the panel header (issue 4.3 chrome).
    */
   unresolvedThreadCount: number = $derived(
@@ -245,6 +292,54 @@ export class ReviewStore {
     // shape today (issue: the wire variant carries `status: string`). Guard
     // against `peers` being absent so derived selectors don't crash.
     this.peers = status.peers ?? [];
+  }
+
+  /**
+   * Apply a live presence delta pushed by Rust over `reviewPresence`.
+   *
+   * The daemon's event forwarder translates relay `hello` (full roster on
+   * (re)connect) and `presence` (single join/leave) frames into this shape.
+   * `replace=true` is authoritative — it overwrites the whole roster.
+   * `replace=false` is a delta: an online peer is upserted (keyed by
+   * `deviceId`), an offline peer (a leave) is dropped so its chip vanishes.
+   */
+  applyPresence(payload: {
+    roomId: RoomId;
+    peers: ReviewStatusPeer[];
+    replace: boolean;
+  }): void {
+    this.currentRoomId = payload.roomId;
+    if (payload.replace) {
+      this.peers = payload.peers;
+      return;
+    }
+    const byDevice = new Map(this.peers.map((p) => [p.deviceId, p]));
+    for (const peer of payload.peers) {
+      if (peer.online) {
+        byDevice.set(peer.deviceId, peer);
+      } else {
+        byDevice.delete(peer.deviceId);
+      }
+    }
+    this.peers = [...byDevice.values()];
+  }
+
+  /**
+   * Apply a live transport connection-state change pushed by Rust over
+   * `reviewConnection`. The daemon emits `mailbox` when the relay socket
+   * subscribes (a `hello` frame) and `offline` when it disconnects. Drives
+   * the ConnectionBadge. On going offline we also clear the peer roster —
+   * we can't know who's still present once our socket is gone.
+   */
+  applyConnection(payload: {
+    roomId: RoomId;
+    connection: ReviewStatus['connection'];
+  }): void {
+    this.currentRoomId = payload.roomId;
+    this.connection = payload.connection;
+    if (payload.connection === 'offline') {
+      this.peers = [];
+    }
   }
 
   /**

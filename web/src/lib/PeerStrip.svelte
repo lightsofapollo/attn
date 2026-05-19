@@ -85,7 +85,7 @@
   // the effect.
   let hoveredPeerId = $state<string | null>(null);
 
-  const peers: ReviewStatusPeer[] = $derived(reviewStore.peers);
+  const peers: ReviewStatusPeer[] = $derived(reviewStore.peersResolved);
   const split = $derived(splitForStrip(peers));
 
   // When a peer's chip is clicked, kick off the fingerprint hash if we

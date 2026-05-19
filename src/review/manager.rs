@@ -159,6 +159,23 @@ pub enum ReviewUpdate {
         file_id: FileId,
         resolved: ResolvedAnchor,
     },
+    /// The room's live peer roster changed. `replace=true` means `peers`
+    /// is the authoritative full roster (a Hello frame on (re)connect);
+    /// `replace=false` is a single join/leave delta the store merges by
+    /// `deviceId`. Drives the `PeerStrip` face chips.
+    PresenceChanged {
+        room_id: RoomId,
+        peers: Vec<PeerPresence>,
+        replace: bool,
+    },
+    /// The live transport connection state changed. `mailbox` once the relay
+    /// socket subscribes (a Hello frame), `offline` on disconnect. Drives the
+    /// `ConnectionBadge`. Values match the frontend `ReviewStatus.connection`
+    /// union (`live_direct | mailbox | offline | direct_failed`).
+    ConnectionChanged {
+        room_id: RoomId,
+        connection: String,
+    },
     /// The outbox depth for a room changed (envelopes queued for send).
     OutboxChanged {
         room_id: RoomId,
@@ -188,10 +205,27 @@ impl ReviewUpdate {
             ReviewUpdate::EventImported { .. } => "reviewEvent",
             ReviewUpdate::SnapshotCreated { .. } => "reviewSnapshot",
             ReviewUpdate::AnchorResolutionChanged { .. } => "reviewAnchorResolution",
+            ReviewUpdate::PresenceChanged { .. } => "reviewPresence",
+            ReviewUpdate::ConnectionChanged { .. } => "reviewConnection",
             ReviewUpdate::OutboxChanged { .. } => "reviewStatus",
             ReviewUpdate::Error { .. } => "reviewStatus",
         }
     }
+}
+
+/// One peer's presence summary, shaped to match the frontend
+/// `ReviewStatusPeer` (`web/src/lib/types.ts`) so it deserializes straight
+/// into `reviewStore.peers` via `window.__attn__.reviewPresence(...)`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerPresence {
+    pub participant_id: String,
+    pub device_id: String,
+    pub display_name: String,
+    pub kind: crate::review::model::ParticipantKind,
+    pub online: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_snapshot_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -903,12 +937,27 @@ impl ReviewManager {
 
         // Event forwarder: drain TransportEvents into ReviewUpdates so
         // the frontend store reflects inbound comments / presence /
-        // policy changes in real time.
+        // policy changes in real time. We capture our own device id (to
+        // drop self-echoes from the presence roster) and the room's owner
+        // participant (to tag the owner chip warm vs. reviewer cool).
         let update_tx = Arc::clone(&self.update_tx);
         let room_id_owned = room_id.clone();
+        let self_device_id = device_id.as_str().to_string();
+        let owner_participant_id: Option<String> = self
+            .store
+            .load_room(room_id)
+            .ok()
+            .flatten()
+            .map(|room| room.created_by.as_str().to_string());
         runtime.spawn(async move {
             while let Some(event) = events_rx.recv().await {
-                forward_transport_event(&update_tx, &room_id_owned, event);
+                forward_transport_event(
+                    &update_tx,
+                    &room_id_owned,
+                    &self_device_id,
+                    owner_participant_id.as_deref(),
+                    event,
+                );
             }
         });
 
@@ -1688,9 +1737,11 @@ impl crate::review::transport::DeviceKeyRefresher for BootstrapKeyRefresher {
 fn forward_transport_event(
     update_tx: &UpdateSink,
     room_id: &RoomId,
+    self_device_id: &str,
+    owner_participant_id: Option<&str>,
     event: crate::review::transport::TransportEvent,
 ) {
-    use crate::review::transport::TransportEvent;
+    use crate::review::transport::{PresenceEvent, TransportEvent};
     match event {
         TransportEvent::EventImported {
             room_id: rid,
@@ -1704,16 +1755,63 @@ fn forward_transport_event(
             // ReviewUpdate variant in the snapshot pipeline; today they
             // just persist via the InboundPipeline.
         }
-        TransportEvent::Hello { .. } => {
-            // Hello drives a presence/online indicator. Not yet surfaced.
+        TransportEvent::Hello { devices, .. } => {
+            // A Hello means our relay socket subscribed — we're live on the
+            // mailbox transport. Surface that to the connection badge first.
+            (update_tx)(ReviewUpdate::ConnectionChanged {
+                room_id: room_id.clone(),
+                connection: "mailbox".to_string(),
+            });
+            // Authoritative full roster on (re)connect — replace the store's
+            // peer list with everyone the relay reports, minus ourselves.
+            let peers = devices
+                .iter()
+                .filter(|d| d.device_id.as_str() != self_device_id)
+                .map(|d| peer_presence_from_device(d, owner_participant_id))
+                .collect::<Vec<_>>();
+            (update_tx)(ReviewUpdate::PresenceChanged {
+                room_id: room_id.clone(),
+                peers,
+                replace: true,
+            });
         }
-        TransportEvent::Presence { .. } => {
-            // Peer presence update — will drive face chips in a follow-up.
+        TransportEvent::Presence {
+            event,
+            device_id,
+            participant_id,
+        } => {
+            // Single join/leave delta — skip our own echo, then upsert one
+            // chip. The relay doesn't carry the peer's device client kind on
+            // the presence frame, so kind is inferred from owner identity.
+            if device_id.as_str() == self_device_id {
+                return;
+            }
+            let online = matches!(event, PresenceEvent::Join);
+            let kind = participant_kind_for(&participant_id, owner_participant_id, None);
+            (update_tx)(ReviewUpdate::PresenceChanged {
+                room_id: room_id.clone(),
+                peers: vec![PeerPresence {
+                    display_name: presence_display_name(kind),
+                    participant_id,
+                    device_id: device_id.as_str().to_string(),
+                    kind,
+                    online,
+                    on_snapshot_id: None,
+                }],
+                replace: false,
+            });
         }
         TransportEvent::PolicyChanged { .. } => {
             // Room policy edits. Not yet surfaced.
         }
         TransportEvent::Disconnected { reason, close_code } => {
+            // Flip the connection badge to offline. The WS auto-reconnect
+            // loop will emit a fresh Hello (→ mailbox) when it re-subscribes,
+            // so a transient drop self-heals in the UI.
+            (update_tx)(ReviewUpdate::ConnectionChanged {
+                room_id: room_id.clone(),
+                connection: "offline".to_string(),
+            });
             (update_tx)(ReviewUpdate::Error {
                 room_id: Some(room_id.clone()),
                 code: format!(
@@ -1730,6 +1828,56 @@ fn forward_transport_event(
                 message,
             });
         }
+    }
+}
+
+/// Infer a peer's `ParticipantKind` for the presence chips. The relay's
+/// device directory doesn't carry an owner/reviewer label, so we derive it:
+/// the room's `created_by` participant is the owner, an `agent-cli` device
+/// client is an agent, everything else is a reviewer.
+fn participant_kind_for(
+    participant_id: &str,
+    owner_participant_id: Option<&str>,
+    client: Option<crate::review::model::DeviceClient>,
+) -> crate::review::model::ParticipantKind {
+    use crate::review::model::{DeviceClient, ParticipantKind};
+    if owner_participant_id == Some(participant_id) {
+        return ParticipantKind::Owner;
+    }
+    match client {
+        Some(DeviceClient::AgentCli) => ParticipantKind::Agent,
+        _ => ParticipantKind::Reviewer,
+    }
+}
+
+/// Friendly display label for a presence chip. The daemon's device
+/// directory has no human display name, so we label by role; the chip's
+/// monogram is the first letter (`O`/`R`) and the identity card's tail-6
+/// fingerprint disambiguates same-role peers.
+fn presence_display_name(kind: crate::review::model::ParticipantKind) -> String {
+    use crate::review::model::ParticipantKind;
+    match kind {
+        ParticipantKind::Owner => "Owner".to_string(),
+        ParticipantKind::Agent => "Agent".to_string(),
+        ParticipantKind::Reviewer => "Reviewer".to_string(),
+    }
+}
+
+/// Build a `PeerPresence` from a relay `Device` (Hello roster). Devices in a
+/// Hello frame are, by definition, currently connected → `online = true`.
+fn peer_presence_from_device(
+    device: &crate::review::model::Device,
+    owner_participant_id: Option<&str>,
+) -> PeerPresence {
+    let participant_id = device.participant_id.as_str().to_string();
+    let kind = participant_kind_for(&participant_id, owner_participant_id, Some(device.client));
+    PeerPresence {
+        display_name: presence_display_name(kind),
+        participant_id,
+        device_id: device.device_id.as_str().to_string(),
+        kind,
+        online: true,
+        on_snapshot_id: None,
     }
 }
 

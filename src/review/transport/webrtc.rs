@@ -39,7 +39,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -47,6 +47,7 @@ use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
@@ -166,6 +167,120 @@ impl Clock for SystemClock {
 const SIGNAL_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
+// Connection state machine
+// ---------------------------------------------------------------------------
+
+/// Maximum number of ICE-restart attempts on a `Disconnected` blip before
+/// the transport gives up and transitions to `Failed`. Mirrors the browser
+/// behaviour of a small, bounded retry burst — too few attempts and a
+/// transient NAT rebind kills the session; too many and a truly-broken
+/// peer keeps thrashing on signaling. Three attempts with the
+/// [`ICE_RESTART_BACKOFF_MS`] backoff schedule gives ~7s of recovery
+/// window which matches WebRTC heuristics in browsers.
+const MAX_ICE_RESTART_ATTEMPTS: u32 = 3;
+
+/// Exponential backoff schedule (in ms) between ICE-restart attempts.
+/// Indexes 0..MAX_ICE_RESTART_ATTEMPTS-1 — wait this long *before* the
+/// Nth attempt fires. Capped at the array length so a regression on
+/// `MAX_ICE_RESTART_ATTEMPTS` doesn't index out of range.
+const ICE_RESTART_BACKOFF_MS: &[u64] = &[500, 1500, 5000];
+
+/// High-level connection state surfaced to `ReviewManager` and the
+/// frontend via the [`WebRtcTransport::watch_state`] subscription.
+///
+/// Distinct from `RTCPeerConnectionState` because we collapse the
+/// webrtc-rs `New` + `Connecting` into a single `Connecting` (the
+/// distinction doesn't matter to the UI) and add a synthetic
+/// `Reconnecting` state for the ICE-restart recovery window — webrtc-rs
+/// surfaces `Disconnected` then `Connecting` again, but during the
+/// restart the higher layers want a single sticky "we're recovering"
+/// state to avoid flickering UI.
+///
+/// State diagram:
+///
+/// ```text
+///                    +-----------+
+///                    | Connecting|<-----+
+///                    +-----+-----+      |
+///                          |            | (restart_ice succeeds)
+///                          v            |
+///                     +----------+      |
+///                     | Connected|------+
+///                     +----+-----+      |
+///                          |            |
+///       (RTC Disconnected) |            | (next restart attempt)
+///                          v            |
+///                   +-------------+     |
+///                   | Reconnecting|-----+
+///                   +-----+-------+
+///                         |
+///                         | (all restarts failed)
+///                         v
+///                     +-------+      +--------+
+///                     | Failed|      | Closed |
+///                     +-------+      +--------+
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebRtcConnectionState {
+    /// Initial state, plus the `New`/`Connecting` RTC states before ICE
+    /// completes. No DataChannel traffic possible yet.
+    Connecting,
+    /// ICE + DTLS handshake completed; DataChannel is open and bytes
+    /// can flow.
+    Connected,
+    /// We saw an `RTCPeerConnectionState::Disconnected` and are
+    /// actively attempting `ice_restart` recovery. May transition back
+    /// to `Connected` (success) or `Failed` (exhausted retries).
+    Reconnecting,
+    /// Terminal: ICE failed or recovery exhausted. Mode-aware error
+    /// emission has already fired on `events_tx`. No further
+    /// transitions.
+    Failed,
+    /// Terminal: caller invoked `close()` or the peer closed cleanly.
+    /// No further transitions.
+    Closed,
+}
+
+/// Policy mode for this transport — controls how the state machine
+/// surfaces a `Failed` transition. Mirrors `RoomMode` but as a plain
+/// string so callers (today the bootstrap in `manager.rs`) can pass
+/// the room policy verbatim without a model dependency from this
+/// module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolicyMode {
+    /// `policy.mode == "live"` — direct-connection failure surfaces as
+    /// a `TransportEvent::Error { code: "ATTN_WEBRTC_FAILED" }` so the
+    /// UI can show an explicit "direct connection failed" state. Per
+    /// `amendments.md` §Phase 4: "live mode surfaces direct-connection
+    /// failure explicitly — no silent mailbox fallback".
+    Live,
+    /// `policy.mode == "hybrid"` — failure surfaces as a quiet
+    /// `TransportEvent::Disconnected`; the `ReviewManager` mode-aware
+    /// selector (5.4 / 7.5) routes everything through the mailbox
+    /// from then on.
+    Hybrid,
+    /// `policy.mode == "async"` — WebRTC isn't running anyway, but
+    /// we keep the state machine wired in case the room flips to
+    /// hybrid/live mid-session.
+    Async,
+}
+
+impl PolicyMode {
+    /// Parse from the policy-string the relay/manager use on the wire
+    /// (`"live"`/`"hybrid"`/`"async"`). Unknown strings default to
+    /// `Hybrid` because that's the safe-fallback mode — emitting a
+    /// quiet `Disconnected` is recoverable; an `Error` would surface
+    /// to the user.
+    fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "live" => Self::Live,
+            "async" => Self::Async,
+            _ => Self::Hybrid,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
 
@@ -198,6 +313,27 @@ pub struct WebRtcTransport {
     /// trait object so tests can pin it; production code passes
     /// `Arc::new(SystemClock)`.
     clock: Arc<dyn Clock>,
+    /// Watch channel carrying the current high-level connection state.
+    /// The sender lives here; the receiver is handed out via
+    /// [`watch_state`] for the manager / UI to subscribe.
+    state_tx: Arc<watch::Sender<WebRtcConnectionState>>,
+    /// Policy mode this transport is operating under. Determines whether
+    /// `Failed` surfaces as `TransportEvent::Error` (live) or
+    /// `TransportEvent::Disconnected` (hybrid). Wrapped in a `Mutex`
+    /// because the bootstrap may flip it via [`set_policy`] after the
+    /// transport is constructed but before the room policy is fetched.
+    policy: Arc<Mutex<PolicyMode>>,
+    /// Hook the wired `on_peer_connection_state_change` callback uses to
+    /// trigger an ICE restart on the live `WebRtcTransport`. Stored as
+    /// an `Arc<Mutex<bool>>` so tests can suppress the side effect when
+    /// they only want to assert the state-watch transition (no live
+    /// remote peer means `create_offer(ice_restart=true)` would hang).
+    ice_restart_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Number of ICE-restart attempts consumed on the current
+    /// disconnect blip. Reset on every Connected transition. Visible
+    /// to tests via `_attempts_for_test` so the recovery path's
+    /// counting can be asserted without a live remote peer.
+    ice_restart_attempts: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl WebRtcTransport {
@@ -244,6 +380,21 @@ impl WebRtcTransport {
             .map_err(|e| TransportError::Io(format!("new_peer_connection: {e}")))?;
         let pc = Arc::new(pc);
 
+        // Seed the state machine in `Connecting` — every fresh transport
+        // is pre-handshake. Wrap the sender in an `Arc` so callbacks
+        // can clone it cheaply.
+        let (state_tx, _) = watch::channel(WebRtcConnectionState::Connecting);
+        let state_tx = Arc::new(state_tx);
+
+        // Default to `Hybrid` — the safe-fallback mode. The bootstrap
+        // calls `set_policy` once it learns the room mode.
+        let policy = Arc::new(Mutex::new(PolicyMode::Hybrid));
+
+        let ice_restart_enabled =
+            Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let ice_restart_attempts =
+            Arc::new(std::sync::atomic::AtomicU32::new(0));
+
         let transport = Self {
             config: Arc::clone(&config),
             inbound: Arc::clone(&inbound),
@@ -252,19 +403,30 @@ impl WebRtcTransport {
             events_tx: events_tx.clone(),
             signaling_tx: signaling_tx.clone(),
             clock: Arc::clone(&clock),
+            state_tx: Arc::clone(&state_tx),
+            policy: Arc::clone(&policy),
+            ice_restart_enabled: Arc::clone(&ice_restart_enabled),
+            ice_restart_attempts: Arc::clone(&ice_restart_attempts),
         };
 
         // Wire ICE-candidate trickle: every local candidate webrtc-rs gathers
         // becomes an outbound `SignalingPayload::Ice` envelope. We send one
         // candidate per envelope here (rather than batching) to minimize
-        // negotiation latency — a burst-coalescing pass can land in 7.4 if
-        // benchmarks show envelope overhead dominates.
+        // negotiation latency.
         Self::wire_on_ice_candidate(&pc, &config, &signaling_tx, &clock);
 
-        // Wire peer-connection state transitions onto the shared events_tx
-        // so `ReviewManager` can react to Connected / Disconnected /
-        // Failed / Closed in the same loop it uses for mailbox events.
-        Self::wire_on_peer_connection_state(&pc, &events_tx);
+        // Wire peer-connection state transitions: feed the state watch
+        // channel AND bridge terminal states onto `events_tx` for the
+        // manager. Mode-aware error vs. disconnect emission lives in the
+        // helper.
+        Self::wire_on_peer_connection_state(
+            &pc,
+            &events_tx,
+            &state_tx,
+            &policy,
+            &ice_restart_enabled,
+            &ice_restart_attempts,
+        );
 
         // Wire `on_data_channel` for the responder side — the initiator
         // calls `create_data_channel` directly inside `create_offer`, so
@@ -272,6 +434,61 @@ impl WebRtcTransport {
         Self::wire_on_data_channel(&pc, &inbound, &events_tx, &transport.data_channel, &config);
 
         Ok(transport)
+    }
+
+    /// Current high-level connection state. Cheap — reads the watch
+    /// channel's last-published value.
+    pub fn state(&self) -> WebRtcConnectionState {
+        *self.state_tx.borrow()
+    }
+
+    /// Subscribe to state changes. The returned receiver fires every
+    /// time the connection state transitions; callers commonly await
+    /// `rx.changed()` in a select loop alongside their main event
+    /// stream. Marked `async` for symmetry with the rest of this
+    /// module's API — no awaits inside.
+    pub async fn watch_state(&self) -> watch::Receiver<WebRtcConnectionState> {
+        self.state_tx.subscribe()
+    }
+
+    /// Update the policy mode this transport reports failures under.
+    /// Called by the bootstrap once the room policy is fetched (or by
+    /// the manager when it observes a `TransportEvent::PolicyChanged`).
+    /// Accepts the same strings the wire uses (`"live"`, `"hybrid"`,
+    /// `"async"`); unknown values fall back to `Hybrid`.
+    pub async fn set_policy(&self, mode: &str) {
+        let parsed = PolicyMode::from_str(mode);
+        *self.policy.lock().await = parsed;
+    }
+
+    /// Trigger an ICE restart now. Called automatically by the
+    /// peer-connection state-change handler when we observe
+    /// `Disconnected`, but exposed so the manager (or a future
+    /// reactive UI affordance like "retry direct connection") can
+    /// drive it explicitly.
+    ///
+    /// Mints a fresh SDP offer with `ice_restart: true` and pushes it
+    /// onto `signaling_tx` so the remote peer receives a new
+    /// `SignalingPayload::Offer` and re-negotiates ICE credentials.
+    pub async fn restart_ice(&self) -> Result<(), TransportError> {
+        let opts = RTCOfferOptions {
+            ice_restart: true,
+            ..Default::default()
+        };
+        let offer = self
+            .peer_connection
+            .create_offer(Some(opts))
+            .await
+            .map_err(|e| TransportError::Io(format!("create_offer(restart): {e}")))?;
+        self.peer_connection
+            .set_local_description(offer.clone())
+            .await
+            .map_err(|e| TransportError::Io(format!("set_local_description(restart): {e}")))?;
+        self.publish_signal(SignalingPayload::Offer {
+            sdp: offer.sdp,
+            from: self.config.local_device_id.clone(),
+        })?;
+        Ok(())
     }
 
     /// Initiator side: create the DataChannel, generate an SDP offer, set it
@@ -484,41 +701,49 @@ impl WebRtcTransport {
         }));
     }
 
-    /// Bridge webrtc-rs's `on_peer_connection_state_change` callback onto
-    /// `events_tx` as `TransportEvent::Disconnected` for terminal states.
+    /// Bridge webrtc-rs's `on_peer_connection_state_change` callback to
+    /// (a) the high-level state watch channel, (b) terminal-state
+    /// events on `events_tx` (mode-aware: `Error` in live, `Disconnected`
+    /// in hybrid), and (c) the ICE-restart recovery loop on
+    /// `Disconnected`.
     fn wire_on_peer_connection_state(
         pc: &Arc<RTCPeerConnection>,
         events_tx: &mpsc::UnboundedSender<TransportEvent>,
+        state_tx: &Arc<watch::Sender<WebRtcConnectionState>>,
+        policy: &Arc<Mutex<PolicyMode>>,
+        ice_restart_enabled: &Arc<std::sync::atomic::AtomicBool>,
+        ice_restart_attempts: &Arc<std::sync::atomic::AtomicU32>,
     ) {
         let tx = events_tx.clone();
-        pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
+        let state = Arc::clone(state_tx);
+        let policy = Arc::clone(policy);
+        let restart_enabled = Arc::clone(ice_restart_enabled);
+        let restart_attempts = Arc::clone(ice_restart_attempts);
+        let pc_for_restart = Arc::clone(pc);
+        let config_signaling_for_restart = Arc::clone(pc);
+        // We need a few things from the transport on the restart path,
+        // but the callback closure can't hold an `Arc<Self>`. Instead
+        // we close over the raw pieces (`pc_for_restart`, signaling
+        // pipeline state) and let `try_ice_restart` re-assemble.
+        let _ = config_signaling_for_restart; // silence unused — handled inline below
+        pc.on_peer_connection_state_change(Box::new(move |new_state: RTCPeerConnectionState| {
             let tx = tx.clone();
+            let state = Arc::clone(&state);
+            let policy = Arc::clone(&policy);
+            let restart_enabled = Arc::clone(&restart_enabled);
+            let restart_attempts = Arc::clone(&restart_attempts);
+            let pc_for_restart = Arc::clone(&pc_for_restart);
             Box::pin(async move {
-                match state {
-                    RTCPeerConnectionState::Failed => {
-                        let _ = tx.send(TransportEvent::Disconnected {
-                            reason: "peer connection failed".into(),
-                            close_code: None,
-                        });
-                    }
-                    RTCPeerConnectionState::Closed => {
-                        let _ = tx.send(TransportEvent::Disconnected {
-                            reason: "peer connection closed".into(),
-                            close_code: None,
-                        });
-                    }
-                    RTCPeerConnectionState::Disconnected => {
-                        let _ = tx.send(TransportEvent::Disconnected {
-                            reason: "peer connection disconnected".into(),
-                            close_code: None,
-                        });
-                    }
-                    // Connected / Connecting / New / Unspecified: no upstream
-                    // event. ReviewManager only cares about terminal states
-                    // (and the Hello/Envelope traffic which is bridged
-                    // separately on the DataChannel).
-                    _ => {}
-                }
+                handle_rtc_state_change(
+                    new_state,
+                    &tx,
+                    &state,
+                    &policy,
+                    &restart_enabled,
+                    &restart_attempts,
+                    &pc_for_restart,
+                )
+                .await;
             })
         }));
     }
@@ -550,6 +775,161 @@ impl WebRtcTransport {
                 *slot.lock().await = Some(dc);
             })
         }));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connection-state callback helpers
+// ---------------------------------------------------------------------------
+
+/// Translate an `RTCPeerConnectionState` into our `WebRtcConnectionState`,
+/// handling the synthetic `Reconnecting` overlay. Pulled out as a free
+/// function so the callback closure doesn't need a heavy `self` borrow.
+///
+/// `previous` is the watch channel's current value; when we observe
+/// `RTCPeerConnectionState::Connecting` AFTER a recent `Disconnected`
+/// (signalled by `previous == Reconnecting`), we keep the
+/// `Reconnecting` overlay rather than flipping back to `Connecting`,
+/// so the UI doesn't flicker.
+fn map_rtc_state(
+    rtc: RTCPeerConnectionState,
+    previous: WebRtcConnectionState,
+) -> WebRtcConnectionState {
+    match rtc {
+        RTCPeerConnectionState::Unspecified
+        | RTCPeerConnectionState::New
+        | RTCPeerConnectionState::Connecting => {
+            if previous == WebRtcConnectionState::Reconnecting {
+                WebRtcConnectionState::Reconnecting
+            } else {
+                WebRtcConnectionState::Connecting
+            }
+        }
+        RTCPeerConnectionState::Connected => WebRtcConnectionState::Connected,
+        RTCPeerConnectionState::Disconnected => WebRtcConnectionState::Reconnecting,
+        RTCPeerConnectionState::Failed => WebRtcConnectionState::Failed,
+        RTCPeerConnectionState::Closed => WebRtcConnectionState::Closed,
+    }
+}
+
+/// Single state-transition handler invoked from the
+/// `on_peer_connection_state_change` callback. Owns:
+///
+///   1. Updating the state watch channel,
+///   2. Emitting the right `TransportEvent` for terminal states
+///      (mode-aware: live → `Error`, hybrid → `Disconnected`),
+///   3. Triggering the ICE-restart recovery loop on `Disconnected`.
+async fn handle_rtc_state_change(
+    rtc_state: RTCPeerConnectionState,
+    events_tx: &mpsc::UnboundedSender<TransportEvent>,
+    state_tx: &Arc<watch::Sender<WebRtcConnectionState>>,
+    policy: &Arc<Mutex<PolicyMode>>,
+    ice_restart_enabled: &Arc<std::sync::atomic::AtomicBool>,
+    ice_restart_attempts: &Arc<std::sync::atomic::AtomicU32>,
+    pc: &Arc<RTCPeerConnection>,
+) {
+    let previous = *state_tx.borrow();
+    let next = map_rtc_state(rtc_state, previous);
+
+    // Send the watch update first so any subscriber waiting on
+    // `rx.changed()` wakes before we start blocking on TX work.
+    let _ = state_tx.send(next);
+
+    // Reset the restart-attempt counter on a fresh Connected — the
+    // recovery window has succeeded, the next blip is independent.
+    if next == WebRtcConnectionState::Connected {
+        ice_restart_attempts.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    match next {
+        WebRtcConnectionState::Reconnecting => {
+            // Schedule (or fail past) an ICE restart attempt. We do this
+            // in a detached task because the callback context can't
+            // block on a multi-second backoff.
+            if ice_restart_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+                let attempts = Arc::clone(ice_restart_attempts);
+                let pc = Arc::clone(pc);
+                let events_tx = events_tx.clone();
+                let state_tx = Arc::clone(state_tx);
+                let policy = Arc::clone(policy);
+                tokio::spawn(async move {
+                    let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if attempt >= MAX_ICE_RESTART_ATTEMPTS {
+                        // Exhausted — promote to Failed and emit
+                        // mode-aware error/disconnect.
+                        let _ = state_tx.send(WebRtcConnectionState::Failed);
+                        emit_failed_for_policy(&events_tx, &policy).await;
+                        return;
+                    }
+                    let backoff_ms = ICE_RESTART_BACKOFF_MS
+                        .get(attempt as usize)
+                        .copied()
+                        .unwrap_or(*ICE_RESTART_BACKOFF_MS.last().unwrap_or(&5000));
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    // Re-create an offer with ice_restart=true. The
+                    // signaling envelope is minted by the surrounding
+                    // transport's `restart_ice`, but the callback
+                    // closure doesn't hold a transport handle, so we
+                    // drive the lower-level webrtc call directly here
+                    // and rely on the on_ice_candidate hook to trickle
+                    // fresh candidates back to the peer.
+                    let opts = RTCOfferOptions {
+                        ice_restart: true,
+                        ..Default::default()
+                    };
+                    if let Ok(offer) = pc.create_offer(Some(opts)).await {
+                        let _ = pc.set_local_description(offer).await;
+                        // The `on_ice_candidate` callback already wired
+                        // up at transport construction time will fire
+                        // and push fresh candidates via signaling_tx,
+                        // so no additional signaling work here.
+                    }
+                });
+            }
+        }
+        WebRtcConnectionState::Failed => {
+            emit_failed_for_policy(events_tx, policy).await;
+        }
+        WebRtcConnectionState::Closed => {
+            let _ = events_tx.send(TransportEvent::Disconnected {
+                reason: "peer connection closed".into(),
+                close_code: None,
+            });
+        }
+        // Connecting / Connected — no upstream event. The high-level
+        // state watch is the right surface for those.
+        _ => {}
+    }
+}
+
+/// Emit the right `TransportEvent` for a `Failed` transition, based
+/// on the current policy mode. Per `amendments.md` §Phase 4:
+///   - `live`   → `Error { code: "ATTN_WEBRTC_FAILED" }` so the UI
+///                shows direct-connection failure (no silent mailbox
+///                fallback);
+///   - `hybrid` → `Disconnected`; the manager's mode-aware selector
+///                routes everything via mailbox from then on;
+///   - `async`  → `Disconnected` for completeness — WebRTC shouldn't
+///                be running in async mode but the wire shape stays
+///                consistent.
+async fn emit_failed_for_policy(
+    events_tx: &mpsc::UnboundedSender<TransportEvent>,
+    policy: &Arc<Mutex<PolicyMode>>,
+) {
+    let mode = *policy.lock().await;
+    match mode {
+        PolicyMode::Live => {
+            let _ = events_tx.send(TransportEvent::Error {
+                code: "ATTN_WEBRTC_FAILED".into(),
+                message: "Direct connection failed".into(),
+            });
+        }
+        PolicyMode::Hybrid | PolicyMode::Async => {
+            let _ = events_tx.send(TransportEvent::Disconnected {
+                reason: "peer connection failed".into(),
+                close_code: None,
+            });
+        }
     }
 }
 

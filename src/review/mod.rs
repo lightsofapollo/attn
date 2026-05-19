@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+pub mod agent_identity;
 pub mod anchors;
 pub mod apply;
 pub mod bootstrap;

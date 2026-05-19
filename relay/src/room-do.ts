@@ -1251,21 +1251,23 @@ export class RoomDO extends DurableObject<Env> {
     roomId: string,
     urlPath: string,
   ): Promise<Response> {
-    // 1. Existence check — without admissionKey we couldn't verify admission
-    //    anyway, and every other endpoint surfaces unknown rooms as 404.
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
-    // DELETE has no body per the spec, but we still buffer (a) so we can clone
-    // the request twice (admission + owner-sig) and (b) so canonicalRequest sees
-    // a deterministic empty SHA. We tolerate a body present-but-empty too.
+    // DELETE has no body per the spec, but we still drain the request stream
+    // up front so workerd doesn't surface the "Can't read from request stream
+    // after response has been sent" warning on the early-404 path below. The
+    // bytes get reused by admission + owner-sig verifiers (each needs to
+    // re-clone the request to compute its own canonical SHA).
     let bodyBytes: Uint8Array;
     try {
       bodyBytes = new Uint8Array(await request.arrayBuffer());
     } catch (err) {
       return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
+    }
+
+    // 1. Existence check — without admissionKey we couldn't verify admission
+    //    anyway, and every other endpoint surfaces unknown rooms as 404.
+    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
+    if (storedAdmissionKey === undefined) {
+      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
     }
 
     // 2. Admission — URL-as-bearer trust boundary.

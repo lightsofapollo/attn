@@ -31,13 +31,14 @@
   import { Selection } from 'prosemirror-state';
   import type { EditorView } from 'prosemirror-view';
   import ReviewMarginCard from './ReviewMarginCard.svelte';
+  import { positionAnchorFromSelection } from './review/anchors';
   import {
     layoutCards,
     visibleCards,
     type MarginCardInput,
     type MarginCardPlacement,
   } from './review/margin-layout';
-  import { anchorTopY } from './review/popover-anchor';
+  import { anchorTopY, hasTextSelection } from './review/popover-anchor';
   import { reviewStore } from './review/store.svelte';
   import type {
     EventId,
@@ -108,8 +109,11 @@
   // entry instead of a positioned card.
   const REMAP_PANEL_ONLY_CUTOFF = 0.70;
 
+  const discardedStale = $derived(reviewStore.discardedStale);
+  const manualReanchorState = $derived(reviewStore.manualReanchorState);
+
   const orphanThreadIds: Set<EventId> = $derived(buildOrphanIds(
-    threads, ambiguous, stale, resolutions,
+    threads, ambiguous, stale, resolutions, discardedStale,
   ));
 
   function buildOrphanIds(
@@ -117,10 +121,15 @@
     amb: ReadonlyArray<{ eventId: EventId }>,
     stl: ReadonlyArray<{ eventId: EventId }>,
     rs: Record<EventId, { resolved: ResolvedAnchor }>,
+    discarded: ReadonlySet<EventId>,
   ): Set<EventId> {
     const out = new Set<EventId>();
     for (const a of amb) out.add(a.eventId);
-    for (const s of stl) out.add(s.eventId);
+    // Stale rows the user clicked "Discard" on disappear from the tray
+    // entirely (panel-only UX; the underlying event remains in the log).
+    for (const s of stl) {
+      if (!discarded.has(s.eventId)) out.add(s.eventId);
+    }
     for (const t of ts) {
       const update = rs[t.rootEvent.meta.eventId];
       if (!update) continue;
@@ -311,6 +320,83 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Stale-card manual reanchor orchestration (attn-nnj.4.8)
+  // ---------------------------------------------------------------------------
+  //
+  // The stale card has two actions: "Re-anchor manually" (drops the card
+  // into pick-mode and waits for a PM selection) and "Discard" (hides the
+  // card from the orphan tray without re-anchoring). The store owns the
+  // single-card-at-a-time invariant; the margin component listens for
+  // the editor selection that confirms the new anchor.
+
+  function lookupRoomIdForStale(eventId: EventId): string | null {
+    const update = resolutions[eventId];
+    if (!update) return null;
+    if (update.resolved.status !== 'stale') return null;
+    return update.roomId;
+  }
+
+  function handleRequestReanchor(eventId: EventId): void {
+    const roomId = lookupRoomIdForStale(eventId);
+    if (!roomId) return;
+    reviewStore.enterManualReanchor(eventId, roomId);
+  }
+
+  function handleDiscardStale(eventId: EventId): void {
+    reviewStore.discardStaleCard(eventId);
+  }
+
+  function handleCancelReanchor(): void {
+    reviewStore.cancelManualReanchor();
+  }
+
+  /**
+   * Confirm the current PM selection as the new anchor for the stale
+   * card currently in flight. Called by:
+   *  - clicking the floating "Use this selection" overlay button, or
+   *  - pressing Enter while a stale card is awaiting reanchor.
+   * No-op when no card is in flight or when the PM selection is empty.
+   */
+  function confirmReanchorFromSelection(): void {
+    const state = manualReanchorState;
+    if (!state) return;
+    const v = view;
+    if (!v) return;
+    if (!hasTextSelection(v)) return;
+    const { from, to } = v.state.selection;
+    const positionAnchor: PositionAnchor = positionAnchorFromSelection(v, from, to);
+    reviewStore.confirmManualReanchor(positionAnchor);
+  }
+
+  // Global key listener: Enter confirms, Escape cancels. Only attached
+  // while a stale card is in flight so we don't interfere with normal
+  // editor input.
+  $effect(() => {
+    if (!manualReanchorState) return;
+    const handler = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        reviewStore.cancelManualReanchor();
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+        const v = view;
+        if (!v || !hasTextSelection(v)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        confirmReanchorFromSelection();
+      }
+    };
+    // Capture-phase so we run before the PM keymap handles Enter as a
+    // paragraph split inside the editor.
+    window.addEventListener('keydown', handler, true);
+    return () => {
+      window.removeEventListener('keydown', handler, true);
+    };
+  });
+
+  // ---------------------------------------------------------------------------
   // Side-effects: scroll / resize / view-change / recompute
   // ---------------------------------------------------------------------------
 
@@ -474,6 +560,10 @@
               onReject={() => dismissLocally(t.id)}
               onResolve={() => dismissLocally(t.id)}
               pendingDismiss={locallyDismissed.has(t.id)}
+              onRequestReanchor={() => handleRequestReanchor(t.rootEvent.meta.eventId)}
+              onDiscardStale={() => handleDiscardStale(t.rootEvent.meta.eventId)}
+              onCancelReanchor={handleCancelReanchor}
+              awaitingReanchor={manualReanchorState?.eventId === t.rootEvent.meta.eventId}
             />
           </li>
         {/each}
@@ -561,6 +651,46 @@
     <p class="review-margin-empty" data-testid="review-margin-empty">
       No review threads on this file.
     </p>
+  {/if}
+
+  <!--
+    Global select-mode overlay (attn-nnj.4.8). Appears whenever a stale
+    card is awaiting a new anchor. The "Use this selection" button confirms
+    the current PM selection; Cancel clears the in-flight state. The
+    overlay is rendered at the bottom of the margin so it doesn't fight
+    with sticky-top orphan-tray scroll behavior.
+  -->
+  {#if manualReanchorState}
+    <div
+      class="review-margin-reanchor-overlay"
+      data-testid="review-margin-reanchor-overlay"
+      data-event-id={manualReanchorState.eventId}
+      role="region"
+      aria-label="Re-anchor stale comment"
+    >
+      <p class="rmro-hint">
+        Select the new location for this comment in the editor, then click
+        “Use this selection”.
+      </p>
+      <div class="rmro-actions">
+        <button
+          type="button"
+          class="rmro-btn rmro-btn-primary"
+          data-testid="review-margin-reanchor-confirm"
+          onclick={confirmReanchorFromSelection}
+        >
+          Use this selection
+        </button>
+        <button
+          type="button"
+          class="rmro-btn"
+          data-testid="review-margin-reanchor-cancel"
+          onclick={handleCancelReanchor}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
   {/if}
 </div>
 
@@ -680,5 +810,55 @@
     color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
     font-size: 12px;
     text-align: center;
+  }
+
+  /* Floating overlay shown while a stale card waits for a new anchor. */
+  .review-margin-reanchor-overlay {
+    position: sticky;
+    bottom: 8px;
+    margin: 12px 0 0;
+    padding: 10px 12px;
+    background: var(--popover, var(--background, #fff));
+    border: 1px solid var(--destructive, #dc2626);
+    border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.15);
+    font-size: 12px;
+    z-index: 3;
+  }
+
+  .rmro-hint {
+    margin: 0 0 8px;
+    color: var(--foreground, inherit);
+    line-height: 1.4;
+  }
+
+  .rmro-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .rmro-btn {
+    background: transparent;
+    border: 1px solid var(--border, rgba(0, 0, 0, 0.14));
+    color: inherit;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .rmro-btn:hover {
+    background: var(--muted, rgba(0, 0, 0, 0.04));
+  }
+
+  .rmro-btn-primary {
+    background: var(--primary, #2563eb);
+    color: var(--primary-foreground, #fff);
+    border-color: var(--primary, #2563eb);
+  }
+
+  .rmro-btn-primary:hover {
+    filter: brightness(0.96);
+    background: var(--primary, #2563eb);
   }
 </style>

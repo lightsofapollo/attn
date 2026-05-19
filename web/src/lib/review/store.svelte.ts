@@ -15,6 +15,7 @@
 // `./selectors.ts` as pure functions so they can be exercised by raw `tsx`
 // without the runes runtime; `$derived` here is a thin reactive wrapper.
 
+import { reviewResolveAnchor } from '../ipc';
 import {
   ambiguousAnchors,
   partitionPeersBySnapshot,
@@ -30,6 +31,7 @@ import {
 import type {
   EventId,
   FileId,
+  PositionAnchor,
   RequiresThreeWayVerdict,
   ReviewAnchorResolutionUpdate,
   ReviewEvent,
@@ -40,6 +42,23 @@ import type {
   SnapshotId,
   Thread,
 } from '../types';
+
+/**
+ * Identifies which stale comment card (by root event id) is currently
+ * awaiting a manual re-anchor from the user. The PM editor enters
+ * select-text-in-editor mode while this is non-null; on next confirmed
+ * selection the store emits a `reviewResolveAnchor` IPC and clears.
+ *
+ * Carrying the `roomId` here avoids an extra lookup at confirm time —
+ * the stale resolution carries the same roomId, so we cache it when the
+ * user enters the flow.
+ *
+ * @see planning/collab/amendments.md Decision #15
+ */
+export interface ManualReanchorState {
+  eventId: EventId;
+  roomId: RoomId;
+}
 
 /**
  * Reactive review-session store. One global singleton; mounted by the bridge
@@ -293,6 +312,71 @@ export class ReviewStore {
 
   clearThreeWayApply(): void {
     this.activeThreeWayApply = null;
+  }
+
+  /**
+   * Identifies which stale comment is currently in "pick a new anchor"
+   * mode. `null` means no stale card is awaiting a selection. Only one
+   * stale card may be in flight at a time — entering the flow from a
+   * second card replaces the first. See attn-nnj.4.8.
+   */
+  manualReanchorState = $state<ManualReanchorState | null>(null);
+
+  /**
+   * IDs of stale comments the user has chosen to discard (panel-only
+   * dismissal — does not remove the underlying thread, just hides the
+   * stale card from the orphan tray). Mirrors the `locallyDismissed`
+   * UX-only pattern already used by ReviewMargin for reject/resolve.
+   */
+  discardedStale = $state<Set<EventId>>(new Set<EventId>());
+
+  /**
+   * Enter manual-reanchor mode for `eventId`. The caller is expected to
+   * supply the room id from the stale resolution (the store doesn't
+   * search for it). Replaces any in-flight reanchor state.
+   */
+  enterManualReanchor(eventId: EventId, roomId: RoomId): void {
+    this.manualReanchorState = { eventId, roomId };
+  }
+
+  /**
+   * Confirm the user-built anchor for the currently-active stale card.
+   * Emits a `reviewResolveAnchor` IPC and clears the local state. The
+   * resolver round-trip will flip the status away from `stale`, which
+   * naturally removes the card from the orphan tray.
+   *
+   * No-op when no card is in flight.
+   */
+  confirmManualReanchor(positionAnchor: PositionAnchor): void {
+    const state = this.manualReanchorState;
+    if (!state) return;
+    void reviewResolveAnchor(state.roomId, state.eventId, positionAnchor);
+    this.manualReanchorState = null;
+  }
+
+  /**
+   * Cancel manual-reanchor without emitting IPC. Used by Escape, by
+   * clicking outside the editor selection target, or by switching to a
+   * different stale card.
+   */
+  cancelManualReanchor(): void {
+    this.manualReanchorState = null;
+  }
+
+  /**
+   * Hide a stale card from the orphan tray without re-anchoring. The
+   * card remains in the event log; this is purely a UX dismissal so the
+   * tray doesn't grow unbounded with un-actionable stale rows.
+   */
+  discardStaleCard(eventId: EventId): void {
+    if (this.discardedStale.has(eventId)) return;
+    const next = new Set(this.discardedStale);
+    next.add(eventId);
+    this.discardedStale = next;
+    // Clear any in-flight reanchor on the same card.
+    if (this.manualReanchorState?.eventId === eventId) {
+      this.manualReanchorState = null;
+    }
   }
 }
 

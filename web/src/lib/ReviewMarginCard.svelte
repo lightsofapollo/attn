@@ -61,6 +61,19 @@
      *  any optimistic local marking until the store gets the
      *  AnchorResolutionChanged update back. */
     onCandidatePicked?: (candidate: ResolvedAnchorCandidate, index: number) => void;
+    /** Fires when the user clicks "Re-anchor manually" on a stale card.
+     *  ReviewMargin orchestrates the editor select-mode overlay across
+     *  all stale cards in response to this. */
+    onRequestReanchor?: () => void;
+    /** Fires when the user clicks "Discard" on a stale card.
+     *  ReviewMargin removes the card from the orphan tray. */
+    onDiscardStale?: () => void;
+    /** True when *this* stale card is the one currently awaiting a new
+     *  anchor — flips the body into a "Select text in the editor…" hint
+     *  with a Cancel button. */
+    awaitingReanchor?: boolean;
+    /** Cancel the in-flight reanchor for this card. */
+    onCancelReanchor?: () => void;
   }
 
   let {
@@ -77,6 +90,10 @@
     onResolve,
     pendingDismiss = false,
     onCandidatePicked,
+    onRequestReanchor,
+    onDiscardStale,
+    awaitingReanchor = false,
+    onCancelReanchor,
   }: Props = $props();
 
   // ---------------------------------------------------------------------------
@@ -166,6 +183,40 @@
   // Actions
   // ---------------------------------------------------------------------------
 
+  // ---------------------------------------------------------------------------
+  // Stale-state quote extraction (attn-nnj.4.8)
+  // ---------------------------------------------------------------------------
+  //
+  // When a comment goes stale (resolver couldn't find the anchor anymore)
+  // we show the originally-selected quote prominently so the owner can
+  // hunt for the equivalent text in the editor and click "Re-anchor
+  // manually" to drop a new selection on it. The quote on the original
+  // anchor (`thread.anchor.quote.exact`) is the source of truth.
+
+  const staleQuote = $derived(extractStaleQuote(thread));
+
+  function extractStaleQuote(t: Thread): string {
+    const q = t.anchor?.quote?.exact ?? '';
+    // Trim to ~160 chars to avoid blowing up the card.
+    if (q.length <= 160) return q;
+    return `${q.slice(0, 159)}…`;
+  }
+
+  function handleRequestReanchor(e: MouseEvent): void {
+    e.stopPropagation();
+    if (onRequestReanchor) onRequestReanchor();
+  }
+
+  function handleDiscardStale(e: MouseEvent): void {
+    e.stopPropagation();
+    if (onDiscardStale) onDiscardStale();
+  }
+
+  function handleCancelReanchor(e: MouseEvent): void {
+    e.stopPropagation();
+    if (onCancelReanchor) onCancelReanchor();
+  }
+
   function handleAccept(): void {
     if (kind !== 'suggestion') return;
     // For now, the suggestion event id IS the suggestionId (the body
@@ -236,6 +287,7 @@
   data-hovered={hovered ? 'true' : 'false'}
   data-offset={offset ? 'true' : 'false'}
   data-pending-dismiss={pendingDismiss ? 'true' : 'false'}
+  data-awaiting-reanchor={awaitingReanchor ? 'true' : 'false'}
   onclick={handleCardClick}
   onkeydown={handleKeydown}
   onmouseenter={handleMouseEnter}
@@ -264,14 +316,38 @@
     {/if}
   </header>
 
-  {#if quotePreview}
-    <p class="rmc-quote" title={quotePreview}>{quotePreview}</p>
-  {/if}
-
-  <p class="rmc-body">{body}</p>
-
-  {#if thread.replies.length > 0}
-    <p class="rmc-replies">{thread.replies.length} reply{thread.replies.length === 1 ? '' : 's'}</p>
+  {#if state === 'stale'}
+    <!--
+      Stale body: show the originally-selected quote so the user can find
+      the equivalent text in the editor. Per Decision #15 the inline
+      mark is gone (we couldn't anchor), so this is the *only* surface
+      that knows what the comment was about.
+    -->
+    {#if staleQuote}
+      <p
+        class="rmc-stale-quote"
+        data-testid="review-margin-card-stale-quote"
+        title={staleQuote}
+      >
+        “{staleQuote}”
+      </p>
+    {:else}
+      <p class="rmc-stale-quote rmc-stale-quote-empty">
+        (no quote captured for this anchor)
+      </p>
+    {/if}
+    <p class="rmc-body" data-testid="review-margin-card-stale-body">{body}</p>
+    {#if thread.replies.length > 0}
+      <p class="rmc-replies">{thread.replies.length} reply{thread.replies.length === 1 ? '' : 's'}</p>
+    {/if}
+  {:else}
+    {#if quotePreview}
+      <p class="rmc-quote" title={quotePreview}>{quotePreview}</p>
+    {/if}
+    <p class="rmc-body">{body}</p>
+    {#if thread.replies.length > 0}
+      <p class="rmc-replies">{thread.replies.length} reply{thread.replies.length === 1 ? '' : 's'}</p>
+    {/if}
   {/if}
 
   {#if state === 'ambiguous' && ambiguousCandidates.length > 0}
@@ -286,8 +362,50 @@
     />
   {/if}
 
+  {#if state === 'stale' && awaitingReanchor}
+    <p
+      class="rmc-stale-hint"
+      data-testid="review-margin-card-stale-hint"
+    >
+      Select the new location for this comment in the editor.
+    </p>
+  {/if}
+
   <footer class="rmc-actions">
-    {#if kind === 'suggestion'}
+    {#if state === 'stale'}
+      {#if awaitingReanchor}
+        <button
+          type="button"
+          class="rmc-btn"
+          data-action="cancel-reanchor"
+          data-testid="review-margin-card-cancel-reanchor"
+          onclick={handleCancelReanchor}
+        >
+          Cancel
+        </button>
+      {:else}
+        <button
+          type="button"
+          class="rmc-btn rmc-btn-primary"
+          data-action="reanchor"
+          data-testid="review-margin-card-reanchor"
+          onclick={handleRequestReanchor}
+          disabled={pendingDismiss}
+        >
+          Re-anchor manually
+        </button>
+        <button
+          type="button"
+          class="rmc-btn"
+          data-action="discard-stale"
+          data-testid="review-margin-card-discard-stale"
+          onclick={handleDiscardStale}
+          disabled={pendingDismiss}
+        >
+          Discard
+        </button>
+      {/if}
+    {:else if kind === 'suggestion'}
       <button
         type="button"
         class="rmc-btn rmc-btn-primary"
@@ -437,6 +555,43 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* Stale quote is rendered more prominently than `.rmc-quote` (multi-line
+     clamp, accented border) so the user can scan for it in the editor. */
+  .rmc-stale-quote {
+    margin: 0 0 6px;
+    padding: 4px 8px;
+    background: var(--muted, rgba(0, 0, 0, 0.04));
+    border-left: 2px solid var(--destructive, #dc2626);
+    color: var(--foreground, inherit);
+    font-size: 11px;
+    font-style: italic;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-wrap: break-word;
+  }
+
+  .rmc-stale-quote-empty {
+    font-style: italic;
+    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
+  }
+
+  /* In-flight hint while the user is supposed to be selecting in PM. */
+  .rmc-stale-hint {
+    margin: 0 0 8px;
+    padding: 6px 8px;
+    background: var(--accent, rgba(37, 99, 235, 0.08));
+    border-radius: 4px;
+    font-size: 11px;
+    color: var(--accent-foreground, var(--foreground, inherit));
+  }
+
+  .review-margin-card[data-awaiting-reanchor='true'] {
+    box-shadow: 0 0 0 2px var(--destructive, #dc2626);
   }
 
   .rmc-body {

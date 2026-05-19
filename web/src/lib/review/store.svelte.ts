@@ -14,6 +14,7 @@
 // expand the body-shape unknowns into typed thread views here.
 
 import type {
+  EventId,
   ReviewAnchorResolutionUpdate,
   ReviewEvent,
   ReviewSnapshot,
@@ -67,6 +68,21 @@ export class ReviewStore {
   pendingOutbox = $state<unknown[]>([]);
 
   /**
+   * Currently focused review event (click target from editor inline mark or
+   * panel card). Decorations apply the `is-focused` pulse class, and the
+   * panel scrolls/pulses the matching card. Invariant: one focused event at
+   * a time — see `planning/collab/ui/inline-decorations.md` §4.
+   */
+  focusEventId = $state<EventId | null>(null);
+
+  /**
+   * Currently hovered review event for cross-surface highlight (editor mark
+   * ↔ panel card border). Distinct from `focusEventId` because hover is
+   * transient and does not scroll either surface.
+   */
+  hoveredEventId = $state<EventId | null>(null);
+
+  /**
    * Derived flag used as a tiny end-to-end reactivity probe. Phase 2 4.2
    * replaces this with rich selectors (comments-on-current-snapshot, etc.).
    */
@@ -112,6 +128,22 @@ export class ReviewStore {
   /** Toggle the right-rail review panel open/closed. */
   togglePanel(): void {
     this.panelOpen = !this.panelOpen;
+  }
+
+  /**
+   * Set the focused event (cross-surface click target). Pass `null` to clear.
+   * Per `planning/collab/ui/inline-decorations.md` §4, only one event is
+   * focused at a time, so setting this clears any prior pulse.
+   */
+  setFocusEventId(eventId: EventId | null): void {
+    this.focusEventId = eventId;
+  }
+
+  /**
+   * Set the hovered event id (editor ↔ panel link). Pass `null` to clear.
+   */
+  setHoveredEventId(eventId: EventId | null): void {
+    this.hoveredEventId = eventId;
   }
 }
 

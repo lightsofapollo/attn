@@ -1092,6 +1092,15 @@
         console.debug('[review:anchor]', update);
         reviewStore.applyAnchorResolution(update);
       },
+      // Per planning/collab/ui/review-panel-design.md §6: ReviewMargin
+      // exposes `focusCard(eventId)` on the bridge so the editor's
+      // inline-decoration click handler (10.2) and E2E automation can
+      // scroll/highlight the matching margin card. The margin's own
+      // $effect already watches `reviewStore.focusEventId`, so this is
+      // a thin pass-through.
+      reviewFocusCard(eventId: string) {
+        reviewStore.setFocusEventId(eventId);
+      },
     };
 
     type QueuedMessage =

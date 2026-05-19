@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 pub mod inbound;
 pub mod mailbox;
+pub mod selector;
 pub mod signaling;
 pub mod webrtc;
 

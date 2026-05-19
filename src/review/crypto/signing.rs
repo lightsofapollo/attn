@@ -655,9 +655,72 @@ mod tests {
             note: Some("typo".to_string()),
         };
 
+        // Vector 3: CommentResolved — exercises the resolved-by tagged variant.
+        let seed3: [u8; 32] = [0x33u8; 32];
+        let meta3 = EventMeta {
+            v: 2,
+            event_id: id::<EventId>("placeholder-event-id-3"),
+            room_id: id::<RoomId>("room-vec-3"),
+            author_id: id::<ParticipantId>("p-vec-3"),
+            device_id: id::<DeviceId>("d-vec-3"),
+            created_at: 1_700_000_002_000,
+            parent_event_ids: vec![id::<EventId>("evt-parent-3")],
+            snapshot_id: None,
+        };
+        let body3 = ReviewEventBody::CommentResolved {
+            thread_id: "thr-vec-3".to_string(),
+            resolved_by: id::<ParticipantId>("p-resolver-3"),
+        };
+
+        // Vector 4: PresenceUpdated (signal body shape) — exercises a body
+        // with `online:true`, no anchor, no thread, optional cursor omitted.
+        let seed4: [u8; 32] = [0x44u8; 32];
+        let meta4 = EventMeta {
+            v: 2,
+            event_id: id::<EventId>("placeholder-event-id-4"),
+            room_id: id::<RoomId>("room-vec-4"),
+            author_id: id::<ParticipantId>("p-vec-4"),
+            device_id: id::<DeviceId>("d-vec-4"),
+            created_at: 1_700_000_003_000,
+            parent_event_ids: vec![],
+            snapshot_id: None,
+        };
+        let body4 = ReviewEventBody::PresenceUpdated {
+            participant_id: id::<ParticipantId>("p-vec-4"),
+            device_id: id::<DeviceId>("d-vec-4"),
+            online: true,
+            cursor: None,
+        };
+
+        // Vector 5: SuggestionAccepted — exercises content-hash field types
+        // and the applied-revision string. Distinct body shape from v2.
+        let seed5: [u8; 32] = [0x55u8; 32];
+        let meta5 = EventMeta {
+            v: 2,
+            event_id: id::<EventId>("placeholder-event-id-5"),
+            room_id: id::<RoomId>("room-vec-5"),
+            author_id: id::<ParticipantId>("p-vec-5"),
+            device_id: id::<DeviceId>("d-vec-5"),
+            created_at: 1_700_000_004_500,
+            parent_event_ids: vec![
+                id::<EventId>("evt-mid-5"),
+                id::<EventId>("evt-aaa-5"),
+                id::<EventId>("evt-zzz-5"),
+            ],
+            snapshot_id: Some(id::<SnapshotId>("snap-vec-5")),
+        };
+        let body5 = ReviewEventBody::SuggestionAccepted {
+            suggestion_id: "sug-vec-5".to_string(),
+            applied_revision_id: "rev-vec-5".to_string(),
+            resulting_hash: id::<ContentHash>("hash-after-apply-5"),
+        };
+
         for (label, seed, meta, body) in [
             ("vec1", seed1, &meta1, &body1),
             ("vec2", seed2, &meta2, &body2),
+            ("vec3", seed3, &meta3, &body3),
+            ("vec4", seed4, &meta4, &body4),
+            ("vec5", seed5, &meta5, &body5),
         ] {
             let sk = DeviceSigningKey::from_bytes(&seed).unwrap();
             let vk = sk.verifying_key();

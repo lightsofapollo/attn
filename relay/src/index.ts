@@ -25,7 +25,30 @@ export default {
     //     throw err;
     //   }
     //
-    // Owner-privileged routes additionally call verifyOwnerSignature (5.3); writes also call verifyPow (5.4).
+    // Owner-privileged routes additionally call verifyOwnerSignature (5.3);
+    // writes also call verifyPow (5.4). The owner check composes after
+    // admission so we never reveal whether owner-sig was even attempted on
+    // a request the URL-bearer wouldn't otherwise be allowed to make:
+    //
+    //   import { verifyOwnerSignature, OwnerSigError } from "./owner-sig";
+    //
+    //   // ... inside DELETE /v2/rooms/:roomId or POST /acks (with delete=true):
+    //   await verifyAdmission(request, url.pathname, { roomId, admissionKey });
+    //   try {
+    //     await verifyOwnerSignature(request, url.pathname, ownerSigningKey);
+    //   } catch (err) {
+    //     if (err instanceof OwnerSigError) {
+    //       return Response.json(
+    //         { error: { code: err.code, message: err.message } },
+    //         { status: 403 },
+    //       );
+    //     }
+    //     throw err;
+    //   }
+    //
+    // Endpoint dispatch is owned by attn-nnj.5.9 (DELETE /v2/rooms/:roomId)
+    // and attn-nnj.5.8 (POST /acks). This file currently only stubs the
+    // composition pattern so reviewers can see how the verifiers chain.
 
     if (url.pathname === "/health" && request.method === "GET") {
       return Response.json({

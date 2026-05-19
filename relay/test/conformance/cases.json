@@ -1,0 +1,6 @@
+{
+  "$schema": "./schema.md",
+  "version": 1,
+  "description": "Cross-language conformance corpus for the attn relay. See README.md for the format reference. Each scenario is a list of steps that BOTH the Miniflare replay runner (replay.test.ts) and the Rust transport tests (attn-nnj.6.7) execute end-to-end. Steps describe actions semantically (createRoom, registerDevice, etc.); crypto material (HMAC, Ed25519, PoW) is materialized at replay time from deterministic seeds so the same JSON works across runtimes.",
+  "scenarios": []
+}

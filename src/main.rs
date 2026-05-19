@@ -1565,6 +1565,7 @@ mod tests {
             file_to_room: map,
             review_store: Some(store),
             self_write_tracker: tracker,
+            review_manager: None,
         }))
     }
 
@@ -1675,6 +1676,7 @@ mod tests {
             file_to_room: HashMap::new(),
             review_store: Some(store),
             self_write_tracker: tracker,
+            review_manager: None,
         }));
 
         classify_and_record_changes(std::slice::from_ref(&path), &state);

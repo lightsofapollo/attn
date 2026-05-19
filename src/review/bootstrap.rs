@@ -1010,11 +1010,27 @@ impl Bootstrapper {
             &body_bytes,
         );
 
+        // Attn-Owner-Signature (security-review.md §H1): prove possession of
+        // the owner private key on first-create. The relay verifies this
+        // against `ownerSigningKey` in the body before persisting room meta.
+        // On rejoin, the relay short-circuits on admission HMAC alone, but we
+        // attach the header unconditionally — the Share/Join client can't
+        // know whether this call is first-create or rejoin until it sees the
+        // response status (201 vs 200), and the relay accepts a valid sig
+        // either way.
+        let owner_sig_header = owner_sig_header_value(
+            &identity.signing_key()?,
+            "POST",
+            &path,
+            &body_bytes,
+        );
+
         let resp = self
             .http
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
             .header("Attn-Admission", admission_header)
+            .header("Attn-Owner-Signature", owner_sig_header)
             .body(body_bytes.clone())
             .send()
             .await
@@ -1204,6 +1220,40 @@ fn admission_header_value(
     url_path: &str,
     body: &[u8],
 ) -> String {
+    let canonical = build_canonical_request(method, url_path, body);
+    let mut mac = <Hmac<Sha256>>::new_from_slice(admission_key)
+        .expect("HMAC accepts any key length");
+    mac.update(&canonical);
+    let tag = mac.finalize().into_bytes();
+    format!("v2.{}", URL_SAFE_NO_PAD.encode(tag))
+}
+
+/// Build the `Attn-Owner-Signature` header per relay-spec.md §Owner Distinction
+/// and §POST /v2/rooms/:roomId. Ed25519 signature over the same canonicalRequest
+/// bytes used for `Attn-Admission`. Wire format is just `base64url(sig)` —
+/// no version prefix, matching `relay/src/owner-sig.ts`.
+fn owner_sig_header_value(
+    signing_key: &DeviceSigningKey,
+    method: &str,
+    url_path: &str,
+    body: &[u8],
+) -> String {
+    let canonical = build_canonical_request(method, url_path, body);
+    use ed25519_dalek::Signer as _;
+    let inner: ed25519_dalek::SigningKey =
+        ed25519_dalek::SigningKey::from_bytes(&signing_key.to_bytes());
+    let sig = inner.sign(&canonical);
+    URL_SAFE_NO_PAD.encode(sig.to_bytes())
+}
+
+/// canonicalRequest bytes per relay-spec.md §Identity / §Admission Key:
+///
+///   METHOD || "\n" || URL_PATH || "\n" || CANONICAL_QUERY || "\n" || SHA256(body)
+///
+/// Share/Join calls never use a query string, so CANONICAL_QUERY is always the
+/// empty string. Shared between admission HMAC and owner Ed25519 signature so
+/// the two layered headers commit to the same byte sequence.
+fn build_canonical_request(method: &str, url_path: &str, body: &[u8]) -> Vec<u8> {
     let body_hash = Sha256::digest(body);
     let mut canonical = Vec::with_capacity(
         method.len() + 1 + url_path.len() + 1 /* empty query */ + 1 + body_hash.len(),
@@ -1212,14 +1262,9 @@ fn admission_header_value(
     canonical.push(b'\n');
     canonical.extend_from_slice(url_path.as_bytes());
     canonical.push(b'\n');
-    // Empty canonical query (Share/Join calls never use one).
     canonical.push(b'\n');
     canonical.extend_from_slice(&body_hash);
-    let mut mac = <Hmac<Sha256>>::new_from_slice(admission_key)
-        .expect("HMAC accepts any key length");
-    mac.update(&canonical);
-    let tag = mac.finalize().into_bytes();
-    format!("v2.{}", URL_SAFE_NO_PAD.encode(tag))
+    canonical
 }
 
 /// Translate a non-2xx HTTP body into a typed relay error. Falls back to an
@@ -1593,6 +1638,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path_regex_for_room_create())
             .and(header_exists("Attn-Admission"))
+            .and(header_exists("Attn-Owner-Signature"))
             .respond_with(|req: &Request| {
                 let body: serde_json::Value =
                     serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);

@@ -204,6 +204,22 @@ scripts/test-apply-e2e.sh
 
 Drives the full owner-side accept/reject pipeline end-to-end: snapshot + UserEdit drift forces the suggestion to REMAP, `apply_ready_verdict` writes the file, the `LocalRevision` journal lands UserEdit + AcceptedSuggestion in order, and a `SuggestionAccepted` (or `SuggestionRejected`) envelope round-trips through the outbox with `resulting_hash` matching the on-disk hash. The Rust E2E cases live in `src/review/apply.rs` as `e2e_*` tests; the bash wrapper also probes the running daemon for the same end-state via the `--eval` bridge (daemon-layer assertions print `PEND` until attn-nnj.8.5 wires the `AcceptSuggestion` command — flip via `ATTN_APPLY_E2E_REQUIRE_DAEMON=1`).
 
+### WebRTC end-to-end test (attn-nnj.7.7)
+
+Two surfaces:
+
+```bash
+task test:webrtc            # runs both the Rust test and the bash harness
+# or directly:
+cargo test --test webrtc_e2e -- --nocapture
+scripts/test-webrtc-e2e.sh
+```
+
+- **Rust**: `tests/webrtc_e2e.rs` stands up two `WebRtcTransport` instances inside the same process, drives them through SDP offer/answer + trickle ICE via an in-process signaling relay, sends a comment envelope over the DataChannel, and verifies the owner's `InboundPipeline` persisted it to `events.jsonl`. Requires loopback UDP and (optionally) STUN reachability to `stun.l.google.com`.
+- **Bash**: `scripts/test-webrtc-e2e.sh` boots two daemons via `scripts/lib/dual-instance.sh` and exercises the WebRTC handshake from the outside. Today it's primarily a daemon-shape scaffold — hard assertions on "the owner saw the reviewer's comment" PEND until attn-nnj.7.8 wires the ReviewManager IPC into `window.__attn__.review`.
+
+Both surfaces honor `ATTN_SKIP_WEBRTC_E2E=1` as a CI escape hatch: WebRTC bring-up needs real UDP sockets and is flaky on some infrastructure (especially macOS GH Actions runners). Skip-on-CI is a clean exit, not a failure.
+
 ### Manual testing workflow
 
 1. Start the daemon with HMR: `task dev ATTN_PATH=some/file.md`

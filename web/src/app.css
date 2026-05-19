@@ -866,3 +866,21 @@
   height: 28px;
   border-radius: 8px;
 }
+
+/* ============================================
+ * Dialog opacity override (WKWebView animation fix)
+ *
+ * `tw-animate-css`'s `animate-in fade-in-0` keyframe leaves
+ * dialog contents at opacity:0 in this WKWebView build when the
+ * dialog's child component mounts $effects on the same tick the
+ * dialog opens. Forcing opacity to 1 once data-state=open removes
+ * the regression without changing behavior in other dialog
+ * surfaces — the slide / zoom transforms still run.
+ *
+ * Track: when the bits-ui dialog dependency upgrades, retest
+ * by removing this rule.
+ * ============================================ */
+[data-slot="share-dialog"][data-state="open"],
+[data-slot="dialog-overlay"][data-state="open"] {
+  opacity: 1;
+}

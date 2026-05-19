@@ -77,12 +77,22 @@ const BOOTSTRAP_POW_DIFFICULTY: u32 = crate::review::crypto::pow::DEFAULT_DIFFIC
 /// after PoW invalidation.
 const BOOTSTRAP_POW_TTL_MS: u64 = crate::review::crypto::pow::DEFAULT_TTL_MS;
 
-/// Default `RoomPolicy` for newly shared rooms. Mirrors `data-model.md`'s
-/// async profile (no live, browser, or remote-agent participation) so a Share
-/// without explicit policy stays inside the most restrictive defaults.
+/// Default `RoomPolicy` for newly shared rooms.
+///
+/// Default mode is `Hybrid` — direct WebRTC when both peers are online,
+/// mailbox fallback when they're not, transparent switching as
+/// connectivity changes. The user-facing Share dialog does NOT expose
+/// a mode picker (per UX feedback 2026-05-19: "I want not live or
+/// envelope mode it should seamlessly do both"); only power-user CLI
+/// paths can override.
+///
+/// `allow_remote_agents` defaults to `true` because the only way to
+/// reach the doc as a reviewer today is `attn review join --as-agent`
+/// (the UI's paste-invite flow isn't built yet), so leaving this `false`
+/// would silently block every reviewer at the relay.
 fn default_room_policy(created_at_ms: u64) -> RoomPolicy {
     RoomPolicy {
-        mode: RoomMode::Async,
+        mode: RoomMode::Hybrid,
         max_peers: 8,
         max_snapshot_bytes: 5 * 1024 * 1024,
         max_event_bytes: 256 * 1024,
@@ -92,7 +102,7 @@ fn default_room_policy(created_at_ms: u64) -> RoomPolicy {
         expires_at: created_at_ms + 24 * 60 * 60 * 1000,
         delete_events_after_owner_ack: false,
         allow_browser: false,
-        allow_remote_agents: false,
+        allow_remote_agents: true,
     }
 }
 

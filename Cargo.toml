@@ -30,6 +30,13 @@ identifier = "dev.jameslal.attn"
 icon = ["icons/attn.icns", "icons/attn.png"]
 category = "DeveloperTool"
 short_description = "A beautiful markdown viewer that launches from the CLI"
+# Register the `attn://` URL scheme on macOS so the OS routes clicks on
+# `attn://review/<roomId>#key=...` invite links into a running daemon
+# (which boots if none is up). Without this, the invite URLs in the
+# Share dialog cannot be one-click joined — the reviewer has to paste
+# them into the CLI. cargo-bundle emits this as a CFBundleURLTypes
+# entry in the `.app/Contents/Info.plist`.
+osx_url_schemes = ["attn"]
 
 [[bin]]
 name = "attn"

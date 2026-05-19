@@ -727,7 +727,11 @@ impl MailboxWsClient {
                             .map(|_| ()),
                         EnvelopeKind::Signal => self
                             .inbound
-                            .import_signal_envelope(&room_id, &envelope)
+                            .import_signal_envelope(
+                                &room_id,
+                                &envelope,
+                                &self.config.device_id,
+                            )
                             .await
                             .map(|_| ()),
                     };

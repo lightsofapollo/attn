@@ -43,7 +43,7 @@ use crate::review::envelope::{
 };
 use crate::review::crypto::aead::{self, AeadError, AeadNonce, EnvelopeAad};
 use crate::review::crypto::signing::DeviceVerifyingKey;
-use crate::review::ids::RoomId;
+use crate::review::ids::{DeviceId, RoomId};
 use crate::review::model::{EnvelopeKind, MailboxEnvelope, ReviewEvent};
 use crate::review::store::ReviewStore;
 
@@ -102,6 +102,26 @@ pub enum InboundError {
     /// error in the caller, not a relay-side tampering attempt.
     #[error("envelope kind mismatch: expected {expected:?}, got {actual:?}")]
     KindMismatch { expected: EnvelopeKind, actual: EnvelopeKind },
+    /// Signal envelope's cleartext `target.deviceId` does not match the
+    /// receiver's local `deviceId`. Per `planning/collab/security-review.md`
+    /// §H2 (v2 mitigation): `target.deviceId` is not AAD-bound, so a malicious
+    /// relay could redirect a signal envelope to the wrong peer to leak room
+    /// topology or ICE candidates to non-target participants. The inbound
+    /// dispatcher enforces equality (or `target == None` for true broadcast)
+    /// before exposing the recovered plaintext upstream; rejection happens
+    /// AFTER AEAD-open (the MAC still proves room-membership of the sender),
+    /// but BEFORE the SDP/ICE bytes reach the WebRTC state machine.
+    ///
+    /// A v3 amendment may bind `target` directly into the AAD for
+    /// `kind="signal"`, which would convert this into a `AeadError::Decrypt`
+    /// at MAC time. Until then, this is the server-trust-style mitigation.
+    #[error(
+        "signal target deviceId mismatch: expected {expected}, got {actual:?} (anti-redirect)"
+    )]
+    TargetDeviceMismatch {
+        expected: String,
+        actual: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -292,10 +312,23 @@ impl InboundPipeline {
     /// layer either trusts the relay's `authorId`/`deviceId` headers (which
     /// are AAD-bound, so the relay cannot lie about them without invalidating
     /// the MAC), or layers its own DTLS fingerprint check on top.
+    ///
+    /// `expected_target_device_id`: the local device id. Per
+    /// `planning/collab/security-review.md` §H2 (v2 mitigation), this method
+    /// enforces `envelope.target.deviceId == expected_target_device_id` (or
+    /// `envelope.target == None` for a true broadcast). `target.deviceId` is
+    /// NOT bound into the AAD by spec, so a malicious relay can otherwise
+    /// redirect a signal envelope to a peer that wasn't supposed to receive
+    /// it — all room members hold `signalingKey` and can decrypt, but only
+    /// the intended target should consume the inner SDP/ICE. The check fires
+    /// AFTER `EnvelopeKind::Signal` dispatch and BEFORE AEAD-open, so an
+    /// attacker-redirected envelope is rejected without paying the AEAD cost
+    /// or surfacing plaintext upstream.
     pub async fn import_signal_envelope(
         &self,
         _room_id: &RoomId,
         envelope: &MailboxEnvelope,
+        expected_target_device_id: &DeviceId,
     ) -> Result<Vec<u8>, InboundError> {
         if envelope.kind != EnvelopeKind::Signal {
             return Err(InboundError::KindMismatch {
@@ -303,6 +336,25 @@ impl InboundPipeline {
                 actual: envelope.kind,
             });
         }
+
+        // H2 anti-redirect: only accept envelopes addressed to this device
+        // (or true broadcasts with target=None). Broadcasts remain allowed
+        // because the relay-spec wire format supports them and the WebRTC
+        // state machine handles "advertise presence" via target-less signals;
+        // anything with target=Some(other_device_id) is treated as a relay
+        // redirect attempt regardless of whether the inner payload would
+        // ultimately be rejected by the WebRTC layer's `from`-check.
+        match envelope.target.as_ref() {
+            None => { /* broadcast — allowed */ }
+            Some(t) if &t.device_id == expected_target_device_id => { /* ok */ }
+            Some(t) => {
+                return Err(InboundError::TargetDeviceMismatch {
+                    expected: id_to_string(expected_target_device_id),
+                    actual: Some(id_to_string(&t.device_id)),
+                });
+            }
+        }
+
         self.open_blob(envelope, &self.signaling_key)
     }
 
@@ -491,14 +543,22 @@ mod tests {
     /// AEAD layer — bypasses `assemble_event_envelope` because those envelopes
     /// don't have a signed-event plaintext. Mirrors what the production
     /// snapshot/signal assemblers will eventually do (issues 5.x / 7.x).
+    ///
+    /// `target_device_id`: cleartext routing tag the relay would see. `None`
+    /// is the broadcast / target-less form (currently the only shape callers
+    /// in this module need for non-signal kinds); `Some(d)` is needed for the
+    /// H2 anti-redirect tests below where we mint a signal envelope addressed
+    /// to a specific (or attacker-spoofed) device.
     fn mint_blob_envelope(
         key: &[u8; 32],
         room_id: &RoomId,
         kind: EnvelopeKind,
         plaintext: &[u8],
         client_nonce: [u8; 16],
+        target_device_id: Option<DeviceId>,
     ) -> MailboxEnvelope {
         use crate::review::crypto::ids::derive_envelope_id_with_nonce;
+        use crate::review::model::EnvelopeTarget;
 
         let author_id: ParticipantId = id("p-author-01");
         let device_id: DeviceId = id("d-device-01");
@@ -527,7 +587,7 @@ mod tests {
             created_at: created_at_ms,
             expires_at: created_at_ms + 7 * 24 * 60 * 60 * 1000,
             kind,
-            target: None,
+            target: target_device_id.map(|d| EnvelopeTarget { device_id: d }),
             nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
             ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
             ciphertext_bytes: ciphertext.len() as u64,
@@ -722,6 +782,7 @@ mod tests {
             EnvelopeKind::SnapshotBlob,
             snapshot_bytes,
             [0x77u8; 16],
+            None,
         );
 
         let (envelope_id, plaintext) = pipeline
@@ -748,6 +809,7 @@ mod tests {
             EnvelopeKind::SnapshotBlob,
             b"will not decrypt",
             [0x77u8; 16],
+            None,
         );
 
         let err = pipeline
@@ -768,16 +830,20 @@ mod tests {
     async fn import_signal_envelope_decrypts_under_signaling_key() {
         let (pipeline, _store, _signer, room_id, _tmp) = fresh_pipeline_with_signer();
         let sdp_offer = br#"{"type":"offer","sdp":"v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\n"}"#;
+        // Build with target=None (broadcast) — the permissive case for the
+        // H2 target check; covered separately in the targeted-self test.
         let envelope = mint_blob_envelope(
             &pipeline.signaling_key,
             &room_id,
             EnvelopeKind::Signal,
             sdp_offer,
             [0x88u8; 16],
+            None,
         );
 
+        let local_device: DeviceId = id("d-self");
         let plaintext = pipeline
-            .import_signal_envelope(&room_id, &envelope)
+            .import_signal_envelope(&room_id, &envelope, &local_device)
             .await
             .expect("signal decrypt");
         assert_eq!(plaintext, sdp_offer);
@@ -809,8 +875,12 @@ mod tests {
         }
 
         // Event envelope handed to the signal path -> KindMismatch.
+        // The KindMismatch check fires before the H2 target check, so the
+        // dummy local DeviceId here is irrelevant — we exercise the dispatch
+        // guard, not the target enforcement.
+        let local_device: DeviceId = id("d-self");
         let err = pipeline
-            .import_signal_envelope(&room_id, &event_envelope)
+            .import_signal_envelope(&room_id, &event_envelope, &local_device)
             .await
             .expect_err("event envelope on signal path must reject");
         assert!(matches!(err, InboundError::KindMismatch { .. }));
@@ -822,6 +892,7 @@ mod tests {
             EnvelopeKind::SnapshotBlob,
             b"snap",
             [0x99u8; 16],
+            None,
         );
         let err = pipeline
             .import_event_envelope(&room_id, &snapshot_envelope)
@@ -1004,5 +1075,113 @@ mod tests {
             imported >= 1,
             "expected at least 1 non-pending event vector from envelope.json corpus, got {imported}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // H2 (attn-nnj.7.9): target.deviceId enforcement on signal import.
+    //
+    // The signal envelope's `target.deviceId` is NOT bound into AEAD AAD
+    // by spec, so a relay can rewrite it without invalidating the MAC.
+    // `import_signal_envelope` therefore enforces equality with the local
+    // device id (or accepts the broadcast / target=None form) BEFORE
+    // AEAD-open, and surfaces a relay-redirect attempt as
+    // `InboundError::TargetDeviceMismatch`.
+    //
+    // Tests cover the three branches of the target check:
+    //   12. target=Some(self)  → accept (targeted-to-us).
+    //   13. target=Some(other) → reject with TargetDeviceMismatch (relay redirect).
+    //   14. target=None        → accept (true broadcast).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn h2_signal_envelope_with_matching_target_is_accepted() {
+        let (pipeline, _store, _signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let sdp_offer = br#"{"type":"offer","sdp":"v=0\r\n"}"#;
+        let local_device: DeviceId = id("d-local-self");
+        // Envelope addressed TO local_device — the normal targeted path.
+        let envelope = mint_blob_envelope(
+            &pipeline.signaling_key,
+            &room_id,
+            EnvelopeKind::Signal,
+            sdp_offer,
+            [0xA1u8; 16],
+            Some(local_device.clone()),
+        );
+
+        let plaintext = pipeline
+            .import_signal_envelope(&room_id, &envelope, &local_device)
+            .await
+            .expect("signal envelope addressed to self must import");
+        assert_eq!(plaintext, sdp_offer);
+    }
+
+    #[tokio::test]
+    async fn h2_signal_envelope_with_wrong_target_is_rejected_as_relay_redirect() {
+        let (pipeline, _store, _signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let sdp_offer = br#"{"type":"offer","sdp":"v=0\r\n"}"#;
+        let local_device: DeviceId = id("d-local-self");
+        let attacker_redirect_target: DeviceId = id("d-some-other-peer");
+        // Build a signal envelope sealed correctly under signalingKey but
+        // addressed to a different device — mimics what a malicious relay
+        // does when it rewrites `target.deviceId` to fan out to non-targets.
+        // Because target is NOT AAD-bound, AEAD-open would still succeed —
+        // the check must fire BEFORE we touch the ciphertext.
+        let envelope = mint_blob_envelope(
+            &pipeline.signaling_key,
+            &room_id,
+            EnvelopeKind::Signal,
+            sdp_offer,
+            [0xA2u8; 16],
+            Some(attacker_redirect_target.clone()),
+        );
+
+        let err = pipeline
+            .import_signal_envelope(&room_id, &envelope, &local_device)
+            .await
+            .expect_err("relay-redirected signal envelope must be rejected");
+        match err {
+            InboundError::TargetDeviceMismatch { expected, actual } => {
+                assert_eq!(
+                    expected,
+                    id_to_string(&local_device),
+                    "TargetDeviceMismatch must carry the expected (local) deviceId"
+                );
+                assert_eq!(
+                    actual,
+                    Some(id_to_string(&attacker_redirect_target)),
+                    "TargetDeviceMismatch must carry the relay-supplied (wrong) deviceId"
+                );
+            }
+            other => panic!("expected TargetDeviceMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn h2_signal_envelope_broadcast_target_none_is_accepted() {
+        let (pipeline, _store, _signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let payload = br#"{"type":"presence_ad"}"#;
+        let local_device: DeviceId = id("d-local-self");
+        // True broadcast — relay-spec wire format permits target=None, and
+        // the WebRTC state machine uses it for "advertise presence" style
+        // signals. The H2 check must NOT block broadcasts; that would
+        // break the negotiate-without-knowing-the-peer-yet flow.
+        let envelope = mint_blob_envelope(
+            &pipeline.signaling_key,
+            &room_id,
+            EnvelopeKind::Signal,
+            payload,
+            [0xA3u8; 16],
+            None,
+        );
+        assert!(
+            envelope.target.is_none(),
+            "test precondition: broadcast envelope must have target=None"
+        );
+
+        let plaintext = pipeline
+            .import_signal_envelope(&room_id, &envelope, &local_device)
+            .await
+            .expect("broadcast signal envelope must import regardless of local deviceId");
+        assert_eq!(plaintext, payload);
     }
 }

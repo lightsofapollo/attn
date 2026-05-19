@@ -1014,8 +1014,16 @@ async fn dispatch_inbound_message(
             // re-emit them as `TransportEvent::Envelope` — the 7.4 state
             // machine consumes signal envelopes via `signaling_tx`'s
             // companion receiver, not the inbound event channel.
+            //
+            // Anti-redirect (H2): pass the local device id as the expected
+            // target so a relay-redirected signal envelope (target ≠ self)
+            // is rejected before its plaintext reaches anything upstream.
             let _ = inbound
-                .import_signal_envelope(&config.room_id, &envelope)
+                .import_signal_envelope(
+                    &config.room_id,
+                    &envelope,
+                    &config.local_device_id,
+                )
                 .await;
         }
     }

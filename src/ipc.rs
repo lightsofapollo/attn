@@ -1,5 +1,6 @@
 use crate::review::ids::{EventId, RoomId};
 use crate::review::model::{Anchor, PositionAnchor, SuggestionDraft};
+use crate::review::working_copy::{SaveRequest, SaveSource, WorkingCopyService};
 use crate::watcher::UserEvent;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -165,8 +166,23 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 let _ = proxy.send_event(UserEvent::SearchFiles(query));
             }
             IpcMessage::EditSave { content } => {
-                let Ok(state) = state.lock() else { return };
-                if let Err(e) = std::fs::write(&state.active_path, &content) {
+                // Route the write through WorkingCopyService so collab state
+                // (revision journal, content hash, suggestion-accept hook)
+                // stays coherent. Per `planning/collab/data-model.md`
+                // §Working Copy Service the service is stateless today, so
+                // it's safe to instantiate per-call until `ReviewManager`
+                // (attn-nnj.2.8) holds a long-lived handle.
+                let path = {
+                    let Ok(state) = state.lock() else { return };
+                    state.active_path.clone()
+                };
+                let svc = WorkingCopyService::new();
+                if let Err(e) = svc.save(SaveRequest {
+                    path,
+                    content,
+                    expected_hash: None,
+                    source: SaveSource::UserEdit,
+                }) {
                     eprintln!("attn: failed to save: {}", e);
                 }
             }
@@ -281,13 +297,17 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
 }
 
 /// Toggle a checkbox on a specific line (1-based) in the markdown file.
-/// Replaces `- [ ]` with `- [x]` or vice versa, then writes the file back.
-/// The file watcher will detect the write and trigger a re-render.
+/// Replaces `- [ ]` with `- [x]` or vice versa, then writes the file back
+/// through `WorkingCopyService` so the change participates in collab
+/// revision tracking. The file watcher will detect the write and trigger a
+/// re-render.
 fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
-    let Ok(state) = state.lock() else { return };
-    let path = &state.active_path;
+    let path = {
+        let Ok(state) = state.lock() else { return };
+        state.active_path.clone()
+    };
 
-    let content = match std::fs::read_to_string(path) {
+    let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("attn: could not read file for checkbox toggle: {}", e);
@@ -333,7 +353,13 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
         output.push('\n');
     }
 
-    if let Err(e) = std::fs::write(path, &output) {
+    let svc = WorkingCopyService::new();
+    if let Err(e) = svc.save(SaveRequest {
+        path,
+        content: output,
+        expected_hash: None,
+        source: SaveSource::CheckboxToggle,
+    }) {
         eprintln!("attn: could not write file after checkbox toggle: {}", e);
     }
 }

@@ -29,6 +29,7 @@
 <script lang="ts">
   import Share2 from '@lucide/svelte/icons/share-2';
   import ConnectionBadge from './ConnectionBadge.svelte';
+  import SnapshotBadge from './SnapshotBadge.svelte';
   import { reviewStore } from './review/store.svelte';
 
   interface Props {
@@ -52,6 +53,11 @@
     onShareClick,
     onReconnect,
   }: Props = $props();
+
+  // SnapshotBadge needs the local participant's kind to flip between owner
+  // and reviewer perspectives. We map `isOwner` 1-to-1 because the parent
+  // already encodes the same distinction; this keeps the badge a leaf.
+  const localKind = $derived(isOwner ? 'owner' : 'reviewer');
 
   // Visible whenever a room is bound OR a share is being initiated.
   const visible = $derived(reviewStore.currentRoomId !== null || shareOpen);
@@ -116,16 +122,15 @@
     </div>
 
     <!--
-      Snapshot label sits at the right end (attn-nnj.4.9 owns the snapshot
-      badge proper). Show a minimal age-style stub when a snapshot is active.
+      Snapshot label sits at the right end (attn-nnj.4.9). The badge knows
+      how to collapse itself when no snapshot is active, so the slot is
+      always present and the host row reflows without it.
     -->
-    {#if reviewStore.currentSnapshotId}
-      <div
-        class="review-bar-snapshot shrink-0 text-[11px] text-muted-foreground"
-        data-slot="review-bar-snapshot"
-      >
-        snapshot {reviewStore.currentSnapshotId.slice(0, 8)}
-      </div>
-    {/if}
+    <div
+      class="review-bar-snapshot shrink-0"
+      data-slot="review-bar-snapshot"
+    >
+      <SnapshotBadge {localKind} />
+    </div>
   </div>
 {/if}

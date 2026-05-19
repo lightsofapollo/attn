@@ -422,13 +422,21 @@ export class RoomDO extends DurableObject<Env> {
    *   - The body carries `admissionKey` (32 bytes b64url); we store it at
    *     META.admissionKey and verify every subsequent request against it,
    *     starting with the rejoin path below.
+   *   - Additionally, per security-review.md §H1, we require an
+   *     `Attn-Owner-Signature` Ed25519 signature over canonicalRequest,
+   *     verified against the `ownerSigningKey` in the body. This proves the
+   *     requester actually owns the private half of the key they're about to
+   *     register, so a leaked URL alone cannot register a forged owner.
    *
    * Rejoin path:
    *   - admissionKey is loaded from DO storage and verified BEFORE we touch
    *     the body. We deliberately do not re-parse / re-validate the body on
    *     rejoin — the stored policy is authoritative and immutable (spec:
    *     "Do not allow policy mutation after creation; that would let a
-   *     stolen URL extend a room's TTL").
+   *     stolen URL extend a room's TTL"). No new owner-signature is required
+   *     on rejoin: the room's owner identity was bound at first-create and
+   *     can't be replaced; subsequent owner-privileged ops verify against the
+   *     stored `ownerSigningKey` directly.
    */
   private async handleRoomCreate(request: Request, roomId: string): Promise<Response> {
     const limits = readHardLimits(this.env);
@@ -517,6 +525,32 @@ export class RoomDO extends DurableObject<Env> {
     }
     if (admissionKeyBytes.length !== ADMISSION_KEY_BYTE_LEN) {
       return errorResponse(400, "ATTN_BODY_INVALID", `admissionKey must be ${ADMISSION_KEY_BYTE_LEN} bytes (got ${admissionKeyBytes.length})`);
+    }
+
+    // H1 defense (planning/collab/security-review.md §H1): require
+    // `Attn-Owner-Signature` on first-create so the requester proves possession
+    // of the private half of `ownerSigningKey`. URL leakage alone is no longer
+    // sufficient to claim ownership — the attacker would also need the owner's
+    // Ed25519 private key, which never leaves the legitimate owner's device.
+    //
+    // Self-rooting: we verify the signature against the public key in the body
+    // (which we just decoded above), not against a stored key. This is exactly
+    // the trust assumption we want for the first POST.
+    //
+    // We rebuild a `Request` from the buffered bytes so verifyOwnerSignature
+    // can re-clone the body without racing the original (already-drained) stream.
+    try {
+      const buffered = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: bodyBytes.byteLength === 0 ? null : bodyBytes,
+      });
+      await verifyOwnerSignature(buffered, new URL(request.url).pathname, ownerKeyBytes);
+    } catch (err) {
+      if (err instanceof OwnerSigError) {
+        return errorResponse(403, err.code, err.message);
+      }
+      throw err;
     }
 
     const createdAt = Date.now();

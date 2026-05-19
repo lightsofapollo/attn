@@ -1,46 +1,103 @@
 {
   "_schema": {
     "spec": "planning/collab/crypto-spec.md#signatures",
-    "purpose": "Pin Ed25519 signing of canonical JSON over (eventMeta || eventBody). Auth is NEVER part of signed bytes.",
+    "purpose": "Pin Ed25519 signing of canonical JSON over (eventMeta-WITHOUT-eventId || eventBody). `auth` is NEVER part of signed bytes. `eventId` is OMITTED before signing (chicken/egg: EventId is itself derived from these bytes — see attn-nnj.1.8).",
     "format": {
       "version": "Integer corpus version.",
       "vectors[].name": "Human label.",
-      "vectors[].signingKey.private": "base64url-no-pad of the 32-byte Ed25519 seed (NOT expanded secret key).",
+      "vectors[].signingKey.private": "base64url-no-pad of the 32-byte Ed25519 seed (NOT the 64-byte expanded secret key).",
       "vectors[].signingKey.public": "base64url-no-pad of the 32-byte Ed25519 public key derived from `private`.",
-      "vectors[].event.meta": "Object: { v, eventId?, roomId, authorId, deviceId, createdAt:int-ms, parentEventIds:[sorted], snapshotId? (omit if absent) }.",
-      "vectors[].event.body": "Object: ReviewEventBody. Shape is event-kind-specific; treat as opaque JSON for signing.",
-      "vectors[].expected.canonicalSignedBytes": "UTF-8 string: canonicalJSON({meta, body}). Useful to debug divergence before the signature step.",
+      "vectors[].event.meta": "Object: { v, eventId, roomId, authorId, deviceId, createdAt:int-ms, parentEventIds:[...], snapshotId? (omit if absent) }. NOTE: `eventId` is present here because this is the on-the-wire shape; the signer strips it before canonicalizing.",
+      "vectors[].event.body": "Object: ReviewEventBody. Tagged by `type`; field shape is event-kind-specific.",
+      "vectors[].expected.canonicalSignedBytes": "UTF-8 string: canonicalJSON({meta: <meta WITHOUT eventId, parentEventIds sorted ASCII-ascending>, body}). Useful to debug divergence before the signature step.",
       "vectors[].expected.signature": "base64url-no-pad of the 64-byte Ed25519 signature.",
       "vectors[].expected.signingKeyId": "base64url-no-pad of SHA-256(publicSigningKey). Lives in `auth.signingKeyId`."
     },
-    "filledBy": "attn-nnj.1.6 (Ed25519 sign/verify wrapper)"
+    "filledBy": "attn-nnj.1.6 (Ed25519 sign/verify wrapper)",
+    "determinism": "Ed25519 (RFC 8032) is deterministic — a given (seed, signedBytes) yields exactly one signature byte-for-byte. Cross-impl test means: TS/WASM impls must produce identical `signature` strings."
   },
   "version": 1,
   "vectors": [
     {
-      "name": "minimal comment event with no parents and no snapshot",
+      "name": "minimal CommentCreated, no parents, no snapshot, RFC 8032 test seed #1",
       "signingKey": {
-        "private": "__PENDING__",
-        "public": "__PENDING__"
+        "private": "nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A",
+        "public": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
       },
       "event": {
         "meta": {
           "v": 2,
-          "roomId": "__PENDING_ROOM_ID__",
-          "authorId": "__PENDING_AUTHOR_ID__",
-          "deviceId": "__PENDING_DEVICE_ID__",
+          "eventId": "placeholder-event-id-1",
+          "roomId": "room-vec-1",
+          "authorId": "p-vec-1",
+          "deviceId": "d-vec-1",
           "createdAt": 1700000000000,
           "parentEventIds": []
         },
         "body": {
-          "kind": "comment",
-          "text": "hello"
+          "type": "comment_created",
+          "threadId": "thr-vec-1",
+          "anchor": {
+            "v": 2,
+            "fileId": "file-vec-1",
+            "snapshotId": "snap-vec-1",
+            "baseHash": "hash-vec-1",
+            "position": {
+              "byteRange": [0, 5],
+              "lineRange": [1, 1]
+            }
+          },
+          "body": "hello"
         }
       },
       "expected": {
-        "canonicalSignedBytes": "__PENDING__",
-        "signature": "__PENDING__",
-        "signingKeyId": "__PENDING__"
+        "canonicalSignedBytes": "{\"body\":{\"anchor\":{\"baseHash\":\"hash-vec-1\",\"fileId\":\"file-vec-1\",\"position\":{\"byteRange\":[0,5],\"lineRange\":[1,1]},\"snapshotId\":\"snap-vec-1\",\"v\":2},\"body\":\"hello\",\"threadId\":\"thr-vec-1\",\"type\":\"comment_created\"},\"meta\":{\"authorId\":\"p-vec-1\",\"createdAt\":1700000000000,\"deviceId\":\"d-vec-1\",\"parentEventIds\":[],\"roomId\":\"room-vec-1\",\"v\":2}}",
+        "signature": "AhjF-bhD-hGCCfcffAiqI9k_H4TT1YYxJBP-h8oQo1PEMCrhJGxrHRMfgzlk-6orCed2jUkoID9wHldJliBbDw",
+        "signingKeyId": "If4x36FUomFia_hUBG_SJxt77UtqvkWqWId-9H-XIbk"
+      }
+    },
+    {
+      "name": "SuggestionCreated (replace) with snapshot and two parents listed out of order — exercises sort-before-signing",
+      "signingKey": {
+        "private": "TM0Imyj_ltqdtsNG7BFOD1uKMZ81q6Yk2oz27U-4pvs",
+        "public": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw"
+      },
+      "event": {
+        "meta": {
+          "v": 2,
+          "eventId": "placeholder-event-id-2",
+          "roomId": "room-vec-2",
+          "authorId": "p-vec-2",
+          "deviceId": "d-vec-2",
+          "createdAt": 1700000001500,
+          "parentEventIds": ["evt-zzz", "evt-aaa"],
+          "snapshotId": "snap-vec-2"
+        },
+        "body": {
+          "type": "suggestion_created",
+          "suggestionId": "sug-vec-2",
+          "anchor": {
+            "v": 2,
+            "fileId": "file-vec-2",
+            "snapshotId": "snap-vec-2",
+            "baseHash": "hash-vec-2",
+            "position": {
+              "byteRange": [10, 14],
+              "lineRange": [3, 3]
+            }
+          },
+          "operation": {
+            "kind": "replace",
+            "expectedText": "foo",
+            "replacement": "bar"
+          },
+          "note": "typo"
+        }
+      },
+      "expected": {
+        "canonicalSignedBytes": "{\"body\":{\"anchor\":{\"baseHash\":\"hash-vec-2\",\"fileId\":\"file-vec-2\",\"position\":{\"byteRange\":[10,14],\"lineRange\":[3,3]},\"snapshotId\":\"snap-vec-2\",\"v\":2},\"note\":\"typo\",\"operation\":{\"expectedText\":\"foo\",\"kind\":\"replace\",\"replacement\":\"bar\"},\"suggestionId\":\"sug-vec-2\",\"type\":\"suggestion_created\"},\"meta\":{\"authorId\":\"p-vec-2\",\"createdAt\":1700000001500,\"deviceId\":\"d-vec-2\",\"parentEventIds\":[\"evt-aaa\",\"evt-zzz\"],\"roomId\":\"room-vec-2\",\"snapshotId\":\"snap-vec-2\",\"v\":2}}",
+        "signature": "6pL0X1BwKMjg55SbXTMdw7i-abPXmPGRqH5WHwkpjqbY1WjLdgEn2pHHfZSJvvoYMPdE0MeSYBcJTE-mDqLGAw",
+        "signingKeyId": "OfcT0KZEJT8EUpQhufUbmwiXnQgpWVnE85kO5hf1E58"
       }
     }
   ]

@@ -2,5 +2,1171 @@
   "$schema": "./schema.md",
   "version": 1,
   "description": "Cross-language conformance corpus for the attn relay. See README.md for the format reference. Each scenario is a list of steps that BOTH the Miniflare replay runner (replay.test.ts) and the Rust transport tests (attn-nnj.6.7) execute end-to-end. Steps describe actions semantically (createRoom, registerDevice, etc.); crypto material (HMAC, Ed25519, PoW) is materialized at replay time from deterministic seeds so the same JSON works across runtimes.",
-  "scenarios": []
+  "scenarios": [
+    {
+      "id": "lifecycle-001",
+      "name": "Room lifecycle — create, register, post, subscribe, ack, delete",
+      "spec": "relay-spec.md §Test Plan #1",
+      "tags": ["lifecycle", "happy-path"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": { "policy": { "deleteEventsAfterOwnerAck": true } },
+          "expect": {
+            "status": 201,
+            "bodyShape": {
+              "serverSeq": 0,
+              "policyDeleteEventsAfterOwnerAck": true
+            }
+          }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "owner",
+          "params": {
+            "participantId": "owner-participant",
+            "kind": "owner",
+            "useOwnerKeypair": true
+          },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "reviewer",
+          "params": {
+            "participantId": "reviewer-participant",
+            "kind": "reviewer"
+          },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "listDevices",
+          "in": "room",
+          "expect": {
+            "status": 200,
+            "bodyShape": {
+              "devicesLength": 2,
+              "deviceIdsInOrder": ["owner", "reviewer"]
+            }
+          }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "reviewer",
+          "params": {
+            "envelopes": [
+              {
+                "envelopeId": "env-lc-1",
+                "authorDevice": "reviewer"
+              }
+            ]
+          },
+          "expect": {
+            "status": 201,
+            "bodyShape": {
+              "acceptedLength": 1,
+              "acceptedEnvelopeIds": ["env-lc-1"],
+              "acceptedServerSeqAtLeast": 1
+            }
+          }
+        },
+        {
+          "action": "openSocket",
+          "in": "room",
+          "from": "owner",
+          "as": "sock-owner"
+        },
+        {
+          "action": "sendFrame",
+          "socket": "sock-owner",
+          "frame": { "type": "subscribe", "after": 0 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock-owner",
+          "frame": { "type": "hello", "serverSeq": 1 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock-owner",
+          "ignore": ["ping"],
+          "frame": {
+            "type": "envelope",
+            "envelopeId": "env-lc-1",
+            "serverSeqAtLeast": 1
+          }
+        },
+        {
+          "action": "postAcks",
+          "in": "room",
+          "from": "owner",
+          "params": {
+            "envelopeIds": ["env-lc-1"],
+            "ownerSigFrom": "owner"
+          },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "expectStorageState",
+          "in": "room",
+          "expect": {
+            "missingEnvIdx": ["env-lc-1"],
+            "hasOwnerAckMarker": ["env-lc-1"]
+          }
+        },
+        {
+          "action": "closeSocket",
+          "socket": "sock-owner"
+        },
+        {
+          "action": "deleteRoom",
+          "in": "room",
+          "params": { "ownerSigFrom": "owner" },
+          "expect": { "status": 204 }
+        }
+      ]
+    },
+    {
+      "id": "backfill-002a",
+      "name": "WS backfill — after=0 replays all stored envelopes",
+      "spec": "relay-spec.md §Test Plan #2",
+      "tags": ["ws", "backfill"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "alice" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": {
+            "envelopes": [
+              { "envelopeId": "bf-1", "authorDevice": "dev" }
+            ]
+          },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": {
+            "envelopes": [
+              { "envelopeId": "bf-2", "authorDevice": "dev" }
+            ]
+          },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": {
+            "envelopes": [
+              { "envelopeId": "bf-3", "authorDevice": "dev" }
+            ]
+          },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "openSocket",
+          "in": "room",
+          "from": "dev",
+          "as": "sock"
+        },
+        {
+          "action": "sendFrame",
+          "socket": "sock",
+          "frame": { "type": "subscribe", "after": 0 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock",
+          "frame": { "type": "hello", "serverSeq": 3 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock",
+          "ignore": ["ping"],
+          "frame": { "type": "envelope", "envelopeId": "bf-1", "serverSeqAtLeast": 1 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock",
+          "ignore": ["ping"],
+          "frame": { "type": "envelope", "envelopeId": "bf-2", "serverSeqAtLeast": 2 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock",
+          "ignore": ["ping"],
+          "frame": { "type": "envelope", "envelopeId": "bf-3", "serverSeqAtLeast": 3 }
+        },
+        { "action": "closeSocket", "socket": "sock" }
+      ]
+    },
+    {
+      "id": "backfill-002b",
+      "name": "WS backfill — after=N replays only newer envelopes",
+      "spec": "relay-spec.md §Test Plan #2",
+      "tags": ["ws", "backfill"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "bob" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": { "envelopes": [{ "envelopeId": "mid-1", "authorDevice": "dev" }] },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": { "envelopes": [{ "envelopeId": "mid-2", "authorDevice": "dev" }] },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": { "envelopes": [{ "envelopeId": "mid-3", "authorDevice": "dev" }] },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": { "envelopes": [{ "envelopeId": "mid-4", "authorDevice": "dev" }] },
+          "expect": { "status": 201 }
+        },
+        { "action": "openSocket", "in": "room", "from": "dev", "as": "sock" },
+        {
+          "action": "sendFrame",
+          "socket": "sock",
+          "frame": { "type": "subscribe", "after": 2 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock",
+          "frame": { "type": "hello", "serverSeq": 4 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock",
+          "ignore": ["ping"],
+          "frame": { "type": "envelope", "envelopeId": "mid-3", "serverSeqAtLeast": 3 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock",
+          "ignore": ["ping"],
+          "frame": { "type": "envelope", "envelopeId": "mid-4", "serverSeqAtLeast": 4 }
+        },
+        { "action": "closeSocket", "socket": "sock" }
+      ]
+    },
+    {
+      "id": "backfill-002c",
+      "name": "WS backfill — after=deletedSeq emits ATTN_CURSOR_TOO_OLD and closes 4005",
+      "spec": "relay-spec.md §Test Plan #2",
+      "tags": ["ws", "backfill", "error"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "carol" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": { "envelopes": [{ "envelopeId": "too-old-1", "authorDevice": "dev" }] },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "bumpStorage",
+          "in": "room",
+          "key": "meta:oldest_retained_seq",
+          "value": 5
+        },
+        { "action": "openSocket", "in": "room", "from": "dev", "as": "sock" },
+        {
+          "action": "sendFrame",
+          "socket": "sock",
+          "frame": { "type": "subscribe", "after": 2 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock",
+          "frame": { "type": "error", "code": "ATTN_CURSOR_TOO_OLD", "hasResyncFromSeq": true }
+        },
+        { "action": "expectClose", "socket": "sock", "code": 4005 }
+      ]
+    },
+    {
+      "id": "caps-003a",
+      "name": "Cap — maxEvents rejects batch with 507 ATTN_ROOM_EVENT_CAP",
+      "spec": "relay-spec.md §Test Plan #3",
+      "tags": ["cap"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": { "policy": { "maxEvents": 2 } },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "ivy" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": {
+            "envelopes": [
+              { "envelopeId": "ev-1", "authorDevice": "dev" },
+              { "envelopeId": "ev-2", "authorDevice": "dev" }
+            ]
+          },
+          "expect": { "status": 201, "bodyShape": { "acceptedLength": 2 } }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": {
+            "envelopes": [{ "envelopeId": "ev-3", "authorDevice": "dev" }]
+          },
+          "expect": { "status": 507, "errorCode": "ATTN_ROOM_EVENT_CAP" }
+        }
+      ]
+    },
+    {
+      "id": "caps-003b",
+      "name": "Cap — maxRoomBytes rejects with 507 ATTN_ROOM_STORAGE_FULL",
+      "spec": "relay-spec.md §Test Plan #3",
+      "tags": ["cap"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "jack" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "bumpStorage",
+          "in": "room",
+          "key": "meta:bytes_used",
+          "value": 26214399
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": {
+            "envelopes": [
+              { "envelopeId": "ev-fat", "authorDevice": "dev", "ciphertextBytes": 2 }
+            ]
+          },
+          "expect": { "status": 507, "errorCode": "ATTN_ROOM_STORAGE_FULL" }
+        }
+      ]
+    },
+    {
+      "id": "caps-003c",
+      "name": "Cap — envelope exceeding maxEventBytes returns 413 ATTN_ENVELOPE_TOO_LARGE",
+      "spec": "relay-spec.md §Test Plan #3",
+      "tags": ["cap"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": { "policy": { "maxEventBytes": 1024 } },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "frank" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": {
+            "envelopes": [
+              {
+                "envelopeId": "ev-too-big",
+                "authorDevice": "dev",
+                "ciphertextBytes": 2048
+              }
+            ]
+          },
+          "expect": { "status": 413, "errorCode": "ATTN_ENVELOPE_TOO_LARGE" }
+        }
+      ]
+    },
+    {
+      "id": "caps-003d",
+      "name": "Cap — batch of 33 envelopes returns 400 ATTN_BATCH_TOO_LARGE",
+      "spec": "relay-spec.md §Test Plan #3",
+      "tags": ["cap"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "dave" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": {
+            "envelopes": [
+              { "envelopeId": "b-1", "authorDevice": "dev" },
+              { "envelopeId": "b-2", "authorDevice": "dev" },
+              { "envelopeId": "b-3", "authorDevice": "dev" },
+              { "envelopeId": "b-4", "authorDevice": "dev" },
+              { "envelopeId": "b-5", "authorDevice": "dev" },
+              { "envelopeId": "b-6", "authorDevice": "dev" },
+              { "envelopeId": "b-7", "authorDevice": "dev" },
+              { "envelopeId": "b-8", "authorDevice": "dev" },
+              { "envelopeId": "b-9", "authorDevice": "dev" },
+              { "envelopeId": "b-10", "authorDevice": "dev" },
+              { "envelopeId": "b-11", "authorDevice": "dev" },
+              { "envelopeId": "b-12", "authorDevice": "dev" },
+              { "envelopeId": "b-13", "authorDevice": "dev" },
+              { "envelopeId": "b-14", "authorDevice": "dev" },
+              { "envelopeId": "b-15", "authorDevice": "dev" },
+              { "envelopeId": "b-16", "authorDevice": "dev" },
+              { "envelopeId": "b-17", "authorDevice": "dev" },
+              { "envelopeId": "b-18", "authorDevice": "dev" },
+              { "envelopeId": "b-19", "authorDevice": "dev" },
+              { "envelopeId": "b-20", "authorDevice": "dev" },
+              { "envelopeId": "b-21", "authorDevice": "dev" },
+              { "envelopeId": "b-22", "authorDevice": "dev" },
+              { "envelopeId": "b-23", "authorDevice": "dev" },
+              { "envelopeId": "b-24", "authorDevice": "dev" },
+              { "envelopeId": "b-25", "authorDevice": "dev" },
+              { "envelopeId": "b-26", "authorDevice": "dev" },
+              { "envelopeId": "b-27", "authorDevice": "dev" },
+              { "envelopeId": "b-28", "authorDevice": "dev" },
+              { "envelopeId": "b-29", "authorDevice": "dev" },
+              { "envelopeId": "b-30", "authorDevice": "dev" },
+              { "envelopeId": "b-31", "authorDevice": "dev" },
+              { "envelopeId": "b-32", "authorDevice": "dev" },
+              { "envelopeId": "b-33", "authorDevice": "dev" }
+            ]
+          },
+          "expect": { "status": 400, "errorCode": "ATTN_BATCH_TOO_LARGE" }
+        }
+      ]
+    },
+    {
+      "id": "owner-auth-004a",
+      "name": "Owner auth — ack with owner-sig from wrong key under delete policy returns 403",
+      "spec": "relay-spec.md §Test Plan #4",
+      "tags": ["owner-auth"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": { "policy": { "deleteEventsAfterOwnerAck": true } },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "owner",
+          "params": {
+            "participantId": "owner-participant",
+            "kind": "owner",
+            "useOwnerKeypair": true
+          },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "reviewer",
+          "params": { "participantId": "reviewer-participant" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "reviewer",
+          "params": {
+            "envelopes": [{ "envelopeId": "oa-1", "authorDevice": "reviewer" }]
+          },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "postAcks",
+          "in": "room",
+          "from": "owner",
+          "params": {
+            "envelopeIds": ["oa-1"],
+            "ownerSigFrom": "reviewer"
+          },
+          "expect": { "status": 403, "errorCode": "ATTN_OWNER_SIG_INVALID" }
+        },
+        {
+          "action": "expectStorageState",
+          "in": "room",
+          "expect": { "hasEnvIdx": ["oa-1"] }
+        }
+      ]
+    },
+    {
+      "id": "owner-auth-004b",
+      "name": "Owner auth — owner ack with valid sig under delete policy removes envelope (204)",
+      "spec": "relay-spec.md §Test Plan #4",
+      "tags": ["owner-auth", "happy-path"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": { "policy": { "deleteEventsAfterOwnerAck": true } },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "owner",
+          "params": {
+            "participantId": "owner-participant",
+            "kind": "owner",
+            "useOwnerKeypair": true
+          },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "owner",
+          "params": {
+            "envelopes": [{ "envelopeId": "ob-1", "authorDevice": "owner" }]
+          },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "postAcks",
+          "in": "room",
+          "from": "owner",
+          "params": {
+            "envelopeIds": ["ob-1"],
+            "ownerSigFrom": "owner"
+          },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "expectStorageState",
+          "in": "room",
+          "expect": {
+            "missingEnvIdx": ["ob-1"],
+            "hasOwnerAckMarker": ["ob-1"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "owner-auth-004c",
+      "name": "Owner auth — reviewer ack under default policy is accepted but envelope retained",
+      "spec": "relay-spec.md §Test Plan #4",
+      "tags": ["owner-auth"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "reviewer-participant" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": {
+            "envelopes": [{ "envelopeId": "oc-1", "authorDevice": "dev" }]
+          },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "postAcks",
+          "in": "room",
+          "from": "dev",
+          "params": { "envelopeIds": ["oc-1"] },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "expectStorageState",
+          "in": "room",
+          "expect": { "hasEnvIdx": ["oc-1"] }
+        }
+      ]
+    },
+    {
+      "id": "multi-device-005",
+      "name": "Multi-device — two devices for same participant both registered and acked",
+      "spec": "relay-spec.md §Test Plan #5",
+      "tags": ["multi-device"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-a",
+          "params": { "participantId": "shared-participant" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-b",
+          "params": { "participantId": "shared-participant" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "listDevices",
+          "in": "room",
+          "expect": {
+            "status": 200,
+            "bodyShape": {
+              "devicesLength": 2,
+              "deviceIdsInOrder": ["dev-a", "dev-b"]
+            }
+          }
+        },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev-a",
+          "params": {
+            "envelopes": [{ "envelopeId": "md-1", "authorDevice": "dev-a" }]
+          },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "postAcks",
+          "in": "room",
+          "from": "dev-a",
+          "params": { "envelopeIds": ["md-1"] },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "postAcks",
+          "in": "room",
+          "from": "dev-b",
+          "params": { "envelopeIds": ["md-1"] },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "expectStorageState",
+          "in": "room",
+          "expect": {
+            "hasEnvIdx": ["md-1"],
+            "hasAckSlot": [
+              { "device": "dev-a", "envelopeId": "md-1" },
+              { "device": "dev-b", "envelopeId": "md-1" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "signaling-006",
+      "name": "Signaling — target.deviceId envelope routes only to that device",
+      "spec": "relay-spec.md §Test Plan #6",
+      "tags": ["signaling", "ws"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-from",
+          "params": { "participantId": "fa" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-to",
+          "params": { "participantId": "tg" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-other",
+          "params": { "participantId": "oth" },
+          "expect": { "status": 204 }
+        },
+        { "action": "openSocket", "in": "room", "from": "dev-from", "as": "sock-from" },
+        { "action": "openSocket", "in": "room", "from": "dev-to", "as": "sock-to" },
+        { "action": "openSocket", "in": "room", "from": "dev-other", "as": "sock-other" },
+        { "action": "sendFrame", "socket": "sock-from", "frame": { "type": "subscribe", "after": 0 } },
+        { "action": "sendFrame", "socket": "sock-to", "frame": { "type": "subscribe", "after": 0 } },
+        { "action": "sendFrame", "socket": "sock-other", "frame": { "type": "subscribe", "after": 0 } },
+        { "action": "expectFrame", "socket": "sock-from", "ignore": ["presence", "ping"], "frame": { "type": "hello" } },
+        { "action": "expectFrame", "socket": "sock-to", "ignore": ["presence", "ping"], "frame": { "type": "hello" } },
+        { "action": "expectFrame", "socket": "sock-other", "ignore": ["presence", "ping"], "frame": { "type": "hello" } },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev-from",
+          "params": {
+            "envelopes": [
+              {
+                "envelopeId": "sig-1",
+                "authorDevice": "dev-from",
+                "kind": "signal",
+                "target": "dev-to"
+              }
+            ]
+          },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "expectFrame",
+          "socket": "sock-to",
+          "ignore": ["ping", "presence"],
+          "frame": { "type": "envelope", "envelopeId": "sig-1" }
+        },
+        { "action": "closeSocket", "socket": "sock-from" },
+        { "action": "closeSocket", "socket": "sock-to" },
+        { "action": "closeSocket", "socket": "sock-other" }
+      ]
+    },
+    {
+      "id": "r2-spillover-007",
+      "name": "R2 spillover — POST /blobs presign + PUT + GET round-trip a 1 MiB+ ciphertext",
+      "spec": "relay-spec.md §Test Plan #7",
+      "tags": ["r2", "blobs"],
+      "requires": ["r2-spillover"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": { "policy": { "maxSnapshotBytes": 5242880 } },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "snap-author" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "presignBlob",
+          "in": "room",
+          "from": "dev",
+          "params": {
+            "envelopeId": "blob-1",
+            "ciphertextBytes": 1049600
+          },
+          "expect": { "status": 200 }
+        },
+        {
+          "action": "putBlob",
+          "as": "blob-1",
+          "params": { "bytes": 1049600 },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "getBlob",
+          "as": "blob-1",
+          "params": { "expectedBytes": 1049600 },
+          "expect": { "status": 200 }
+        }
+      ]
+    },
+    {
+      "id": "hard-max-ttl-008",
+      "name": "Hard-max TTL — alarm wipes room and subsequent ops 404",
+      "spec": "relay-spec.md §Test Plan #8",
+      "tags": ["alarm", "ttl"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": { "policy": { "expiresAt": 1747676760000 } },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "ttl-author" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "rewindStorage",
+          "in": "room",
+          "key": "meta:hard_max_at",
+          "deltaMs": 86400000
+        },
+        { "action": "fireAlarm", "in": "room" },
+        {
+          "action": "listDevices",
+          "in": "room",
+          "expect": { "status": 404, "errorCode": "ATTN_ROOM_NOT_FOUND" }
+        }
+      ]
+    },
+    {
+      "id": "idle-timeout-009",
+      "name": "Idle timeout — alarm wipes room when last_event_at falls past idle window",
+      "spec": "relay-spec.md §Test Plan #9",
+      "tags": ["alarm", "idle"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": { "policy": { "idleTimeoutMs": 60000 } },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "idle-author" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "rewindStorage",
+          "in": "room",
+          "key": "meta:last_event_at",
+          "deltaMs": 300000
+        },
+        { "action": "fireAlarm", "in": "room" },
+        {
+          "action": "listDevices",
+          "in": "room",
+          "expect": { "status": 404, "errorCode": "ATTN_ROOM_NOT_FOUND" }
+        }
+      ]
+    },
+    {
+      "id": "hibernation-010",
+      "name": "Hibernation roundtrip — reconnecting peer backfills envelopes posted while disconnected",
+      "spec": "relay-spec.md §Test Plan #10",
+      "tags": ["ws", "hibernation"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev",
+          "params": { "participantId": "hb-author" },
+          "expect": { "status": 204 }
+        },
+        { "action": "openSocket", "in": "room", "from": "dev", "as": "sock1" },
+        { "action": "sendFrame", "socket": "sock1", "frame": { "type": "subscribe", "after": 0 } },
+        { "action": "expectFrame", "socket": "sock1", "ignore": ["presence", "ping"], "frame": { "type": "hello", "serverSeq": 0 } },
+        { "action": "closeSocket", "socket": "sock1" },
+        {
+          "action": "postEnvelopes",
+          "in": "room",
+          "from": "dev",
+          "params": { "envelopes": [{ "envelopeId": "hb-1", "authorDevice": "dev" }] },
+          "expect": { "status": 201 }
+        },
+        { "action": "openSocket", "in": "room", "from": "dev", "as": "sock2" },
+        { "action": "sendFrame", "socket": "sock2", "frame": { "type": "subscribe", "after": 0 } },
+        { "action": "expectFrame", "socket": "sock2", "ignore": ["presence", "ping"], "frame": { "type": "hello", "serverSeq": 1 } },
+        { "action": "expectFrame", "socket": "sock2", "ignore": ["presence", "ping"], "frame": { "type": "envelope", "envelopeId": "hb-1" } },
+        { "action": "closeSocket", "socket": "sock2" }
+      ]
+    },
+    {
+      "id": "rate-limit-011",
+      "name": "Rate limit — 121st write/minute returns 429",
+      "spec": "relay-spec.md §Test Plan #11",
+      "tags": ["rate-limit"],
+      "requires": ["rate-limit"],
+      "skip": true,
+      "skipReason": "rate-limit checkRateLimit() returns ok unconditionally; lands in attn-nnj.5.13",
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        }
+      ]
+    },
+    {
+      "id": "pow-012a",
+      "name": "PoW — registerDevice without Attn-PoW returns 400 ATTN_POW_INVALID",
+      "spec": "relay-spec.md §Test Plan #12",
+      "tags": ["pow"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-no-pow",
+          "params": { "participantId": "p1", "omitPow": true },
+          "expect": { "status": 400, "errorCode": "ATTN_POW_INVALID" }
+        }
+      ]
+    },
+    {
+      "id": "pow-012b",
+      "name": "PoW — registerDevice with expired token returns 400 ATTN_POW_INVALID",
+      "spec": "relay-spec.md §Test Plan #12",
+      "tags": ["pow"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-expired",
+          "params": { "participantId": "p2", "powExpiresAtDelta": -360000 },
+          "expect": { "status": 400, "errorCode": "ATTN_POW_INVALID" }
+        }
+      ]
+    },
+    {
+      "id": "pow-012c",
+      "name": "PoW — registerDevice with token bound to wrong path returns 400 ATTN_POW_INVALID",
+      "spec": "relay-spec.md §Test Plan #12",
+      "tags": ["pow"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-wrong-path",
+          "params": {
+            "participantId": "p3",
+            "powPathOverride": "/v2/rooms/somewhere-else/envelopes"
+          },
+          "expect": { "status": 400, "errorCode": "ATTN_POW_INVALID" }
+        }
+      ]
+    },
+    {
+      "id": "pow-012d",
+      "name": "PoW — registerDevice with valid token returns 204",
+      "spec": "relay-spec.md §Test Plan #12",
+      "tags": ["pow", "happy-path"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-ok",
+          "params": { "participantId": "p4" },
+          "expect": { "status": 204 }
+        }
+      ]
+    },
+    {
+      "id": "pow-012e",
+      "name": "PoW — replaying a previously-accepted token returns 400 ATTN_POW_INVALID",
+      "spec": "relay-spec.md §Test Plan #12",
+      "tags": ["pow", "replay"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {},
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-first",
+          "params": { "participantId": "p5" },
+          "expect": { "status": 204 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-replay",
+          "params": { "participantId": "p5b", "replayLastPow": true },
+          "expect": { "status": 400, "errorCode": "ATTN_POW_INVALID" }
+        }
+      ]
+    },
+    {
+      "id": "pow-difficulty-013",
+      "name": "PoW difficulty — policy.powBits=14 rejects 12-bit token; accepts 14-bit token",
+      "spec": "relay-spec.md §Test Plan #13",
+      "tags": ["pow"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": { "policy": { "powBits": 14 } },
+          "expect": { "status": 201 }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-weak",
+          "params": { "participantId": "weak", "powBitsOverride": 12 },
+          "expect": { "status": 400, "errorCode": "ATTN_POW_INVALID" }
+        },
+        {
+          "action": "registerDevice",
+          "in": "room",
+          "as": "dev-strong",
+          "params": { "participantId": "strong" },
+          "expect": { "status": 204 }
+        }
+      ]
+    },
+    {
+      "id": "longsession-014a",
+      "name": "longSession=true with far-future expiresAt clamps to 7d cap (>24h, <=7d)",
+      "spec": "relay-spec.md §Test Plan #14",
+      "tags": ["policy", "longSession"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {
+            "policy": {
+              "longSession": true,
+              "expiresAt": 1893456000000
+            }
+          },
+          "expect": {
+            "status": 201,
+            "bodyShape": {
+              "policyLongSession": true,
+              "ttlMsAtLeast": 86400001,
+              "ttlMsAtMost": 604800000
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "longsession-014b",
+      "name": "longSession=false with far-future expiresAt clamps to 24h cap",
+      "spec": "relay-spec.md §Test Plan #14",
+      "tags": ["policy", "longSession"],
+      "steps": [
+        {
+          "action": "createRoom",
+          "as": "room",
+          "params": {
+            "policy": {
+              "longSession": false,
+              "expiresAt": 1893456000000
+            }
+          },
+          "expect": {
+            "status": 201,
+            "bodyShape": {
+              "policyLongSession": false,
+              "ttlMsAtMost": 86400000
+            }
+          }
+        }
+      ]
+    }
+  ]
 }

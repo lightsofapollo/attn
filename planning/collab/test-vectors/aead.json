@@ -1,45 +1,61 @@
 {
   "_schema": {
-    "spec": "planning/collab/crypto-spec.md#envelope-encryption-aead",
-    "purpose": "Pin XChaCha20-Poly1305 seal/open with explicit AAD so two implementations interoperate.",
+    "filledBy": "attn-nnj.1.5 (AEAD wrapper)",
     "format": {
-      "version": "Integer corpus version.",
-      "vectors[].name": "Human label.",
+      "vectors[].aad": "base64url-no-pad of the associated-data bytes (canonical JSON of envelope metadata block — see spec).",
+      "vectors[].expected.aadAsJson": "Convenience: the JSON view of `aad` (camelCase keys) for human inspection and for reconstructing the typed AAD in tests.",
+      "vectors[].expected.ciphertext": "base64url-no-pad of the AEAD output (ciphertext || 16-byte Poly1305 tag, per RustCrypto convention).",
       "vectors[].key": "base64url-no-pad of the 32-byte AEAD key (either eventKey or snapshotKey, see `keyKind`).",
       "vectors[].keyKind": "Which logical key this represents: \"eventKey\" | \"snapshotKey\" | \"signalingKey\".",
+      "vectors[].name": "Human label.",
       "vectors[].nonce": "base64url-no-pad of the 24-byte XChaCha20 nonce.",
       "vectors[].plaintext": "base64url-no-pad of the plaintext bytes (typically canonical JSON of a ReviewEvent or snapshot bytes).",
-      "vectors[].aad": "base64url-no-pad of the associated-data bytes (canonical JSON of envelope metadata block — see spec).",
-      "vectors[].expected.ciphertext": "base64url-no-pad of the AEAD output (ciphertext || 16-byte Poly1305 tag, per RustCrypto convention).",
-      "vectors[].expected.aadAsJson": "Optional convenience: the UTF-8 JSON view of `aad` for human inspection."
+      "version": "Integer corpus version."
     },
-    "filledBy": "attn-nnj.1.5 (AEAD wrapper)"
+    "purpose": "Pin XChaCha20-Poly1305 seal/open with explicit AAD so two implementations interoperate.",
+    "spec": "planning/collab/crypto-spec.md#envelope-encryption-aead"
   },
-  "version": 1,
   "vectors": [
     {
-      "name": "tiny event encrypted with eventKey",
-      "keyKind": "eventKey",
-      "key": "__PENDING__",
-      "nonce": "__PENDING__",
-      "plaintext": "__PENDING__",
-      "aad": "__PENDING__",
+      "aad": "eyJhdXRob3JJZCI6ImFsaWNlIiwiY3JlYXRlZEF0IjoxNzM2MDEyMzQ1Njc4LCJkZXZpY2VJZCI6ImRldi0xIiwiZW52ZWxvcGVJZCI6ImVudi0wMDAxIiwia2luZCI6ImV2ZW50Iiwicm9vbUlkIjoicm9vbS1hYWFhIiwidiI6Mn0",
       "expected": {
-        "ciphertext": "__PENDING__",
-        "aadAsJson": "__PENDING__"
-      }
+        "aadAsJson": {
+          "authorId": "alice",
+          "createdAt": 1736012345678,
+          "deviceId": "dev-1",
+          "envelopeId": "env-0001",
+          "kind": "event",
+          "roomId": "room-aaaa",
+          "v": 2
+        },
+        "ciphertext": "X95rkzjkTvGsoFWij_xHLnK7Kga8b5WRfGrlNy8wW5Vu"
+      },
+      "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "keyKind": "eventKey",
+      "name": "tiny event encrypted with eventKey",
+      "nonce": "EBESExQVFhcYGRobHB0eHyAhIiMkJSYn",
+      "plaintext": "eyJoZWxsbyI6IndvcmxkIn0"
     },
     {
-      "name": "snapshot blob encrypted with snapshotKey",
-      "keyKind": "snapshotKey",
-      "key": "__PENDING__",
-      "nonce": "__PENDING__",
-      "plaintext": "__PENDING__",
-      "aad": "__PENDING__",
+      "aad": "eyJhdXRob3JJZCI6ImJvYiIsImNyZWF0ZWRBdCI6MTczNjA5OTk5OTAwMCwiZGV2aWNlSWQiOiJkZXYtMiIsImVudmVsb3BlSWQiOiJlbnYtMDAwMiIsImtpbmQiOiJzbmFwc2hvdF9ibG9iIiwicm9vbUlkIjoicm9vbS1iYmJiIiwidiI6Mn0",
       "expected": {
-        "ciphertext": "__PENDING__",
-        "aadAsJson": "__PENDING__"
-      }
+        "aadAsJson": {
+          "authorId": "bob",
+          "createdAt": 1736099999000,
+          "deviceId": "dev-2",
+          "envelopeId": "env-0002",
+          "kind": "snapshot_blob",
+          "roomId": "room-bbbb",
+          "v": 2
+        },
+        "ciphertext": "CQ_T_hW_HHAMsvftYhjvATnzWJ8Cad1eBv-LZ5kcmfdFm27lujqcK1JAujo7vOFcpxBOEuK0gMiD"
+      },
+      "key": "oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8",
+      "keyKind": "snapshotKey",
+      "name": "snapshot blob encrypted with snapshotKey",
+      "nonce": "8PHy8_T19vf4-fr7_P3-_-Dh4uPk5ebn",
+      "plaintext": "c25hcHNob3QgYnl0ZXMg8J-agCDigJQgbm9uLUFTQ0lJICsgZW1vamk"
     }
-  ]
+  ],
+  "version": 1
 }

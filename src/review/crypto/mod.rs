@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+pub mod aead;
 pub mod canonical;
 pub mod kdf;
 

@@ -169,7 +169,14 @@ join_reviewer() {
     fi
 }
 
+# Guard against double-fire: SIGINT + EXIT would otherwise both invoke
+# cleanup and the user sees three "Cleaning up..." lines.
+__cleanup_ran=0
 cleanup() {
+    if [ "$__cleanup_ran" = "1" ]; then
+        return 0
+    fi
+    __cleanup_ran=1
     log "Cleaning up..."
     stop_dual || true
     stop_relay || true

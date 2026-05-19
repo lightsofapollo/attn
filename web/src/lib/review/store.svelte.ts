@@ -28,6 +28,7 @@ import {
   type StaleAnchorEntry,
 } from './selectors';
 import type {
+  EventId,
   FileId,
   ReviewAnchorResolutionUpdate,
   ReviewEvent,
@@ -97,6 +98,22 @@ export class ReviewStore {
    * bridge (issue 4.13). `outboxCount` reads `.length` only.
    */
   pendingOutbox = $state<unknown[]>([]);
+
+  /**
+   * Currently focused review event (click target from editor inline mark or
+   * panel card). The decorations plugin applies the `is-focused` pulse
+   * class, and the panel scrolls/pulses the matching card. Invariant: one
+   * focused event at a time — see
+   * `planning/collab/ui/inline-decorations.md` §4.
+   */
+  focusEventId = $state<EventId | null>(null);
+
+  /**
+   * Currently hovered review event for cross-surface highlight (editor mark
+   * ↔ panel card border). Distinct from `focusEventId` because hover is
+   * transient and does not scroll either surface.
+   */
+  hoveredEventId = $state<EventId | null>(null);
 
   /** Tiny reactivity probe — kept for the existing scaffold tests. */
   hasAnyEvent = $derived(this.events.length > 0);
@@ -244,6 +261,22 @@ export class ReviewStore {
   setCurrentSnapshot(snapshotId: SnapshotId | null): void {
     if (this.currentFileId === null) return;
     this.currentSnapshotId = snapshotId;
+  }
+
+  /**
+   * Set the focused event (cross-surface click target). Pass `null` to
+   * clear. Per `planning/collab/ui/inline-decorations.md` §4, only one
+   * event is focused at a time, so setting this clears any prior pulse.
+   */
+  setFocusEventId(eventId: EventId | null): void {
+    this.focusEventId = eventId;
+  }
+
+  /**
+   * Set the hovered event id (editor ↔ panel link). Pass `null` to clear.
+   */
+  setHoveredEventId(eventId: EventId | null): void {
+    this.hoveredEventId = eventId;
   }
 }
 

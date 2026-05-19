@@ -42,6 +42,16 @@
      * entries win on key collision so callers can override built-ins.
      */
     nodeViews?: Record<string, NodeViewConstructor>;
+    /**
+     * Invoked once the underlying `EditorView` is mounted (and again after a
+     * full re-mount). Callers use this to dispatch their own meta-only
+     * transactions — e.g. the review-decorations plugin host watches store
+     * mutations and pokes the view to rebuild its `DecorationSet`. The
+     * returned `EditorView` reference must NOT be retained past the
+     * companion `onTeardown` notification (provided via the `view` arg's
+     * `destroy` lifecycle inside this component).
+     */
+    onReady?: (view: EditorView) => void;
   }
 
   let {
@@ -54,6 +64,7 @@
     onDirtyChange,
     plugins: extraPlugins,
     nodeViews: extraNodeViews,
+    onReady,
   }: Props = $props();
   let editorEl: HTMLElement | undefined = $state(undefined);
   let view: EditorView | undefined;
@@ -509,6 +520,9 @@
     });
     lastMarkdown = markdown;
     setDirty(false);
+    if (onReady && view) {
+      onReady(view);
+    }
 
     return () => {
       view?.destroy();

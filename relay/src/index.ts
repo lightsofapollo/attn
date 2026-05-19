@@ -12,6 +12,9 @@ export { RoomDO };
  */
 const ROOM_ROUTE_RE = /^\/v2\/rooms\/([^/]+)(?:\/.*)?$/;
 
+/** WS upgrade route matcher: `/v2/rooms/:roomId/socket`. */
+const ROOM_SOCKET_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
+
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -63,6 +66,22 @@ export default {
         build: globalThis.BUILD_SHA ?? "dev",
         ts: Date.now(),
       });
+    }
+
+    // WebSocket upgrade for /v2/rooms/:roomId/socket. The DO performs admission
+    // (HMAC carried via Sec-WebSocket-Protocol per relay-spec.md §WS Protocol)
+    // and accepts the socket. We just forward — the DO returns a 101 with the
+    // selected subprotocol and the upgraded peer.
+    const socketMatch = url.pathname.match(ROOM_SOCKET_RE);
+    if (socketMatch && socketMatch[1]) {
+      const upgrade = request.headers.get("Upgrade");
+      if (upgrade !== "websocket" && upgrade !== "WebSocket") {
+        return new Response("expected websocket upgrade", { status: 426 });
+      }
+      const roomId = socketMatch[1];
+      const id = env.RELAY_ROOMS.idFromName(roomId);
+      const stub = env.RELAY_ROOMS.get(id);
+      return stub.fetch(request);
     }
 
     // Any `/v2/rooms/:roomId[/...]` request is dispatched to the DO for that

@@ -16,7 +16,14 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 
-import { verifyAdmission, AdmissionError, base64UrlDecode, base64UrlEncode } from "./admission";
+import {
+  verifyAdmission,
+  AdmissionError,
+  base64UrlDecode,
+  base64UrlEncode,
+  canonicalRequest as buildCanonicalRequest,
+  constantTimeEquals,
+} from "./admission";
 import { canonicalize, type CanonicalValue } from "./canonical";
 import type { Env } from "./env";
 import { PowError, verifyPow } from "./pow";
@@ -34,6 +41,7 @@ import {
 const ROOM_PATH_RE = /^\/v2\/rooms\/([^/]+)\/?$/;
 const ROOM_DEVICES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/devices\/?$/;
 const ROOM_ENVELOPES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/envelopes\/?$/;
+const ROOM_SOCKET_PATH_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
 
 const ED25519_PUB_BYTE_LEN = 32;
 const ED25519_SIG_BYTE_LEN = 64;
@@ -153,6 +161,15 @@ export class RoomDO extends DurableObject<Env> {
         return this.handleEnvelopesIngest(request, roomId, url.pathname);
       }
       return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /envelopes`);
+    }
+
+    const socketMatch = url.pathname.match(ROOM_SOCKET_PATH_RE);
+    if (socketMatch) {
+      const roomId = socketMatch[1];
+      if (roomId === undefined || roomId === "") {
+        return errorResponse(400, "ATTN_ROOM_ID_INVALID", "roomId required");
+      }
+      return this.handleSocketUpgrade(request, roomId, url);
     }
 
     // Other endpoints land in 5.8-5.13.
@@ -866,10 +883,14 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
 
-    // WS broadcast (5.11) lives outside this handler; accepted envelopes are
-    // durable in storage and will be re-delivered on subscriber connect.
-    // TODO(5.11): notify hibernating WS sessions via state.getWebSockets()
-    // tagged by deviceId/participantId.
+    // WS broadcast (5.11). Push each freshly-accepted envelope to live WS
+    // peers. Sub-cap eviction above may have removed a freshly-stored signal
+    // before we get here; we still broadcast (subscribers heard the offer in
+    // real time even though replay-after-reconnect skips it). Per-target
+    // filtering: kind=signal envelopes only deliver to target.deviceId.
+    if (fresh.length > 0) {
+      this.broadcastFreshEnvelopes(fresh, nextSeq);
+    }
 
     // Sort accepted by serverSeq so clients see a stable order matching
     // request order for fresh envelopes (duplicates land at their prior seq,
@@ -932,6 +953,410 @@ export class RoomDO extends DurableObject<Env> {
     if (keysToDelete.length > 0) {
       await this.ctx.storage.delete(keysToDelete);
     }
+  }
+
+  // -- WebSocket /v2/rooms/:roomId/socket --------------------------------
+
+  /**
+   * Upgrade handshake for the live socket. Per relay-spec.md §WebSocket
+   * Protocol the URL is `wss://relay/v2/rooms/:roomId/socket?device_id=...`
+   * and admission HMAC piggybacks on `Sec-WebSocket-Protocol`:
+   *
+   *   Sec-WebSocket-Protocol: attn.v2, hmac.<base64url HMAC>
+   *
+   * The HMAC's canonicalRequest covers `GET <path> <canonicalQuery> SHA256("")`
+   * — same scheme as the HTTP endpoints, only the body is the empty string.
+   *
+   * Failure modes:
+   *   - missing/wrong upgrade header → 426 (router-level guard already filters)
+   *   - room doesn't exist           → 404
+   *   - admission HMAC fails         → 401 + Sec-WebSocket-Protocol omitted
+   *     (returning 101 + close 4000 would require accept-then-close; we
+   *     prefer the cleaner HTTP-level 401 before any upgrade, matching the
+   *     "admission HMAC invalid (when handshake admission fails)" wording
+   *     in the spec's close-code table)
+   *   - peer cap reached             → 101 + accept + close(4004) so the
+   *     client sees the close code (browsers can't read response status
+   *     after a failed upgrade reliably)
+   */
+  private async handleSocketUpgrade(
+    request: Request,
+    roomId: string,
+    url: URL,
+  ): Promise<Response> {
+    if (request.method !== "GET") {
+      return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /socket`);
+    }
+    const upgrade = request.headers.get("Upgrade");
+    if (upgrade !== "websocket" && upgrade !== "WebSocket") {
+      return new Response("expected websocket upgrade", { status: 426 });
+    }
+
+    // Existence check before parsing the subprotocol so unknown rooms surface
+    // as 404 rather than 401 (matches the device list precedent).
+    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
+    if (storedAdmissionKey === undefined) {
+      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+    }
+
+    // Parse Sec-WebSocket-Protocol → ["attn.v2", "hmac.<b64url>"].
+    const protocolHeader = request.headers.get("Sec-WebSocket-Protocol");
+    const parsedProtocol = parseAttnProtocol(protocolHeader);
+    if (parsedProtocol === undefined) {
+      return errorResponse(
+        401,
+        "ATTN_ADMISSION_INVALID",
+        "Sec-WebSocket-Protocol must be 'attn.v2, hmac.<base64url>'",
+      );
+    }
+
+    // Verify admission. The canonical body is empty (GET).
+    const hmacOk = await verifyAdmissionHmac({
+      method: "GET",
+      url,
+      providedHmac: parsedProtocol.hmac,
+      admissionKey: storedAdmissionKey,
+    });
+    if (!hmacOk) {
+      return errorResponse(
+        401,
+        "ATTN_ADMISSION_INVALID",
+        `admission HMAC mismatch for room ${roomId}`,
+      );
+    }
+
+    // device_id query parameter is required so we can tag the socket.
+    const deviceId = url.searchParams.get("device_id");
+    if (deviceId === null || deviceId === "") {
+      return errorResponse(400, "ATTN_BODY_INVALID", "missing device_id query parameter");
+    }
+
+    // Look up the device's participantId. Per spec the WS open is for an
+    // already-registered device; unknown deviceId → 404 so the client knows to
+    // POST /devices first.
+    const deviceRecord = await this.findDeviceByDeviceId(deviceId);
+    if (deviceRecord === undefined) {
+      return errorResponse(
+        404,
+        "ATTN_DEVICE_UNREGISTERED",
+        `device ${deviceId} not registered in room ${roomId}`,
+      );
+    }
+    const participantId = deviceRecord.participantId;
+
+    // Peer cap: count distinct deviceIds currently connected.
+    const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+    if (policy === undefined) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
+    }
+    const connectedDevices = new Set<string>();
+    for (const existing of this.ctx.getWebSockets()) {
+      const attached = readAttachment(existing);
+      if (attached !== undefined) connectedDevices.add(attached.deviceId);
+    }
+    // If THIS deviceId is already connected we let it in (the prior socket
+    // will be replaced — the spec doesn't speak to multi-tab per device, so we
+    // treat it as the same peer). New deviceId beyond cap → close 4004.
+    const wouldBeOver =
+      !connectedDevices.has(deviceId) && connectedDevices.size >= policy.maxPeers;
+
+    // Build the upgrade response.
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+
+    // Tag the server end with [deviceId, participantId] per the spec.
+    // acceptWebSocket switches the runtime into hibernation mode.
+    this.ctx.acceptWebSocket(server, [deviceId, participantId]);
+    writeAttachment(server, {
+      deviceId,
+      participantId,
+      subscribed: false,
+      lastPongTs: 0,
+    });
+
+    if (wouldBeOver) {
+      // Close immediately so the client observes 4004 over the WS protocol.
+      try {
+        server.close(CLOSE_PEER_CAP, "peer cap reached");
+      } catch {
+        // swallow — close is best-effort
+      }
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+        headers: { "Sec-WebSocket-Protocol": "attn.v2" },
+      });
+    }
+
+    // Broadcast presence:join to every OTHER connected peer.
+    this.broadcastPresence({ event: "join", deviceId, participantId }, server);
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      headers: { "Sec-WebSocket-Protocol": "attn.v2" },
+    });
+  }
+
+  /**
+   * Hibernation entry-point: fires when a peer sends a frame. We re-load the
+   * per-socket state from the attachment so the handler can survive a DO
+   * eviction between frames.
+   */
+  override async webSocketMessage(ws: WebSocket, msg: string | ArrayBuffer): Promise<void> {
+    if (typeof msg !== "string") {
+      sendError(ws, "ATTN_FRAME_INVALID", "binary frames are reserved");
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(msg);
+    } catch (err) {
+      sendError(ws, "ATTN_FRAME_INVALID", `frame is not valid JSON: ${(err as Error).message}`);
+      return;
+    }
+    const frame = clientFrameSchema.safeParse(parsed);
+    if (!frame.success) {
+      sendError(ws, "ATTN_FRAME_INVALID", formatZodError(frame.error));
+      return;
+    }
+    const att = readAttachment(ws);
+    if (att === undefined) {
+      // Attachment shouldn't be missing — defensively close.
+      try {
+        ws.close(CLOSE_NORMAL, "missing attachment");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    const body = frame.data;
+    if (body.type === "subscribe") {
+      await this.handleSubscribe(ws, att, body.after);
+      return;
+    }
+    if (body.type === "pong") {
+      writeAttachment(ws, { ...att, lastPongTs: Date.now() });
+      return;
+    }
+  }
+
+  /** Hibernation entry-point on close. Broadcast presence:leave. */
+  override async webSocketClose(
+    ws: WebSocket,
+    _code: number,
+    _reason: string,
+    _wasClean: boolean,
+  ): Promise<void> {
+    const att = readAttachment(ws);
+    if (att !== undefined) {
+      this.broadcastPresence(
+        { event: "leave", deviceId: att.deviceId, participantId: att.participantId },
+        ws,
+      );
+    }
+    // No need to call ws.close — the runtime already did. We just clean up
+    // any state we owned (the attachment lives on the socket itself, which
+    // is GC'd with the connection).
+  }
+
+  /** Hibernation entry-point on socket-level error. Same handling as close. */
+  override async webSocketError(ws: WebSocket, _err: unknown): Promise<void> {
+    const att = readAttachment(ws);
+    if (att !== undefined) {
+      this.broadcastPresence(
+        { event: "leave", deviceId: att.deviceId, participantId: att.participantId },
+        ws,
+      );
+    }
+  }
+
+  /**
+   * Handle the client's `subscribe { after }` frame. Sends `hello` plus a
+   * replay of every envelope with serverSeq > after, in order. If `after` is
+   * behind the room's oldest retained seq we send an `error` frame + close
+   * 4005 per amendments.md #5.
+   */
+  private async handleSubscribe(ws: WebSocket, att: WSAttachment, after: number): Promise<void> {
+    // Idempotent: a second `subscribe` is allowed but only the first replay is
+    // sent. Subsequent subscribes are no-ops; the spec doesn't require
+    // re-replay and clients shouldn't be issuing them anyway.
+    if (att.subscribed) {
+      return;
+    }
+    const [policy, serverSeq, oldestRetainedSeq] = await Promise.all([
+      this.ctx.storage.get<RoomPolicy>(META.policy),
+      this.ctx.storage.get<number>(META.serverSeq),
+      this.ctx.storage.get<number>(META.oldestRetainedSeq),
+    ]);
+    if (policy === undefined || serverSeq === undefined) {
+      sendError(ws, "ATTN_ROOM_CORRUPT", "room metadata missing");
+      try {
+        ws.close(CLOSE_NORMAL, "corrupt");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    const oldest = oldestRetainedSeq ?? 0;
+    // Per spec: `after < oldest_retained_seq` → cursor too old. `after == 0`
+    // (first connect, no prior cursor) is always valid even if oldest > 0
+    // because the client is asking for "everything available".
+    if (after > 0 && after < oldest) {
+      sendError(ws, "ATTN_CURSOR_TOO_OLD", `cursor ${after} < oldest_retained_seq ${oldest}`, {
+        resyncFromSeq: oldest,
+      });
+      try {
+        ws.close(CLOSE_CURSOR_TOO_OLD, "cursor too old");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
+    // Build the hello frame.
+    const devices = await this.listDevicesInOrder();
+    const missedSignalEnvelopeIds = await this.collectMissedSignalIds(att.deviceId, after);
+    const hello: ServerFrame = {
+      type: "hello",
+      serverSeq,
+      policy,
+      devices,
+      missedSignalEnvelopeIds,
+    };
+    sendJson(ws, hello);
+
+    // Replay env:* > after, in lex (== serverSeq) order. Per-target filtering
+    // for signal envelopes — only deliver to the addressed deviceId.
+    const envEntries = await this.ctx.storage.list<EnvelopeRecord>({ prefix: ENV_PREFIX });
+    for (const record of envEntries.values()) {
+      if (record.serverSeq <= after) continue;
+      if (!deliverableTo(record, att.deviceId)) continue;
+      const frame: ServerFrame = { type: "envelope", envelope: record, serverSeq: record.serverSeq };
+      sendJson(ws, frame);
+    }
+
+    writeAttachment(ws, { ...att, subscribed: true });
+
+    // Emit an immediate ping so clients can observe the ping/pong contract.
+    // Periodic 30s pings are owned by the 5.12 alarm; this single ping is
+    // enough to satisfy the spec's "server sends ping" guarantee on connect
+    // and gives tests a deterministic frame to assert against.
+    sendJson(ws, { type: "ping", ts: Date.now() } satisfies ServerFrame);
+  }
+
+  /**
+   * Broadcast a freshly-accepted envelope batch to every connected WS that
+   * should receive it. Called from handleEnvelopesIngest after the atomic
+   * put-many commits.
+   *
+   * Signal envelopes are delivered only to `target.deviceId`. Other kinds
+   * broadcast to all peers (including the author, so multi-device peers see
+   * their own writes echoed for read-after-write consistency).
+   */
+  private broadcastFreshEnvelopes(fresh: EnvelopeInput[], lastSeq: number): void {
+    if (fresh.length === 0) return;
+    // We need each envelope's serverSeq. We allocated them sequentially in the
+    // same order as `fresh` ending at `lastSeq`.
+    const startSeq = lastSeq - fresh.length + 1;
+    const sockets = this.ctx.getWebSockets();
+    if (sockets.length === 0) return;
+    for (let i = 0; i < fresh.length; i++) {
+      const env = fresh[i];
+      if (env === undefined) continue;
+      const seq = startSeq + i;
+      const record: EnvelopeRecord = {
+        ...env,
+        target: env.target ?? null,
+        serverSeq: seq,
+      };
+      const frame: ServerFrame = { type: "envelope", envelope: record, serverSeq: seq };
+      const json = JSON.stringify(frame);
+      for (const sock of sockets) {
+        const att = readAttachment(sock);
+        if (att === undefined) continue;
+        if (!att.subscribed) continue;
+        if (!deliverableTo(record, att.deviceId)) continue;
+        sendRaw(sock, json);
+      }
+    }
+  }
+
+  /**
+   * Broadcast a presence frame to every connected peer except `originator`.
+   * Called from connect (join) and close (leave).
+   */
+  private broadcastPresence(
+    event: { event: "join" | "leave"; deviceId: string; participantId: string },
+    originator: WebSocket,
+  ): void {
+    const frame: ServerFrame = {
+      type: "presence",
+      event: event.event,
+      deviceId: event.deviceId,
+      participantId: event.participantId,
+    };
+    const json = JSON.stringify(frame);
+    for (const sock of this.ctx.getWebSockets()) {
+      if (sock === originator) continue;
+      const att = readAttachment(sock);
+      if (att === undefined) continue;
+      sendRaw(sock, json);
+    }
+  }
+
+  /**
+   * Lookup a device record by deviceId alone. The device storage key requires
+   * participantId; we walk the order index since callers (the WS upgrade)
+   * don't have the participantId yet. Bounded by HARD_MAX_PEERS (8) in steady
+   * state.
+   */
+  private async findDeviceByDeviceId(deviceId: string): Promise<DeviceRecord | undefined> {
+    const orderEntries = await this.ctx.storage.list<string>({ prefix: DEVICE_ORDER_PREFIX });
+    const suffix = `:${deviceId}`;
+    for (const key of orderEntries.keys()) {
+      if (!key.endsWith(suffix)) continue;
+      const { participantId, deviceId: parsedDeviceId } = parseDeviceOrderKey(key);
+      if (parsedDeviceId !== deviceId) continue;
+      const record = await this.ctx.storage.get<DeviceRecord>(deviceStorageKey(participantId, deviceId));
+      if (record !== undefined) return record;
+    }
+    return undefined;
+  }
+
+  /** Return device records in registration order. Used in `hello`. */
+  private async listDevicesInOrder(): Promise<DeviceRecord[]> {
+    const orderEntries = await this.ctx.storage.list<string>({ prefix: DEVICE_ORDER_PREFIX });
+    const records: DeviceRecord[] = [];
+    for (const orderKey of orderEntries.keys()) {
+      const { participantId, deviceId } = parseDeviceOrderKey(orderKey);
+      const record = await this.ctx.storage.get<DeviceRecord>(deviceStorageKey(participantId, deviceId));
+      if (record !== undefined) records.push(record);
+    }
+    return records;
+  }
+
+  /**
+   * Collect envelopeIds of signal envelopes targeted at `myDeviceId` whose
+   * serverSeq > `after`. The peer learns the IDs in `hello` so it can decide
+   * whether to re-fetch the payloads via the replay stream that follows.
+   * (In practice the replay below already includes them; we still surface the
+   * id list per the spec's `hello` shape.)
+   */
+  private async collectMissedSignalIds(myDeviceId: string, after: number): Promise<string[]> {
+    const prefix = envByTargetPrefix(myDeviceId);
+    const entries = await this.ctx.storage.list<string>({ prefix });
+    const ids: string[] = [];
+    for (const orderKey of entries.keys()) {
+      const parsed = parseEnvByTargetKey(orderKey);
+      if (parsed === undefined) continue;
+      const seqNum = Number(parsed.paddedSeq);
+      if (!Number.isSafeInteger(seqNum)) continue;
+      if (seqNum <= after) continue;
+      ids.push(parsed.envelopeId);
+    }
+    return ids;
   }
 
   // -- helpers for PoW replay + device ordering ---------------------------
@@ -1219,4 +1644,213 @@ function formatZodError(err: z.ZodError): string {
       return `${path}: ${issue.message}`;
     })
     .join("; ");
+}
+
+// --- WebSocket constants + types -----------------------------------------
+
+/** WS close codes per relay-spec.md §WebSocket Protocol. */
+const CLOSE_NORMAL = 1000;
+const CLOSE_ROOM_DELETED = 4001;
+const CLOSE_ROOM_EXPIRED = 4002;
+const CLOSE_RATE_LIMIT = 4003;
+const CLOSE_PEER_CAP = 4004;
+const CLOSE_CURSOR_TOO_OLD = 4005;
+
+// Exported so 5.9/5.12/5.13 can reuse the codes when they wire up their
+// flows. Underscore-prefixed in close handlers is also fine — these stay
+// canonical names rather than magic numbers.
+export const WS_CLOSE_CODES = {
+  normal: CLOSE_NORMAL,
+  roomDeleted: CLOSE_ROOM_DELETED,
+  roomExpired: CLOSE_ROOM_EXPIRED,
+  rateLimit: CLOSE_RATE_LIMIT,
+  peerCap: CLOSE_PEER_CAP,
+  cursorTooOld: CLOSE_CURSOR_TOO_OLD,
+} as const;
+
+/** Persisted per-socket state. Survives hibernation via serializeAttachment. */
+interface WSAttachment {
+  deviceId: string;
+  participantId: string;
+  /** True once the socket has received a successful `subscribe` reply. */
+  subscribed: boolean;
+  /** Last seen pong timestamp (ms). 0 until the first pong. */
+  lastPongTs: number;
+}
+
+/**
+ * Server-emitted frames per relay-spec.md §WebSocket Protocol.
+ * `MailboxEnvelope` is `EnvelopeRecord` on the server (the wire envelope plus
+ * server-stamped `serverSeq`).
+ */
+type ServerFrame =
+  | {
+      type: "hello";
+      serverSeq: number;
+      policy: RoomPolicy;
+      devices: DeviceRecord[];
+      missedSignalEnvelopeIds: string[];
+    }
+  | {
+      type: "envelope";
+      envelope: EnvelopeRecord;
+      serverSeq: number;
+    }
+  | {
+      type: "presence";
+      event: "join" | "leave";
+      deviceId: string;
+      participantId: string;
+    }
+  | {
+      type: "policy_changed";
+      policy: RoomPolicy;
+    }
+  | {
+      type: "ping";
+      ts: number;
+    }
+  | {
+      type: "error";
+      code: string;
+      message: string;
+      resyncFromSeq?: number;
+    };
+
+/** Client-sent frame schema. Validated with zod so unknown shapes surface
+ *  consistently with the HTTP request schemas. */
+const clientFrameSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("subscribe"),
+    after: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("pong"),
+    ts: z.number().int().nonnegative(),
+  }),
+]);
+
+// --- WebSocket helpers ---------------------------------------------------
+
+/**
+ * Parse Sec-WebSocket-Protocol expected as `attn.v2, hmac.<base64url>`.
+ * Returns undefined on any shape mismatch — the caller surfaces as 401.
+ */
+function parseAttnProtocol(header: string | null): { hmac: Uint8Array } | undefined {
+  if (header === null || header === "") return undefined;
+  // Cloudflare's runtime exposes the *comma-joined* original header. We split
+  // on `,` and trim each token, matching how browsers serialize the list.
+  const tokens = header.split(",").map((t) => t.trim()).filter((t) => t.length > 0);
+  if (tokens.length < 2) return undefined;
+  // Require the canonical subprotocol up front; reject mixed orderings so the
+  // canonical request stays deterministic on the client side.
+  if (tokens[0] !== "attn.v2") return undefined;
+  let hmacToken: string | undefined;
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t !== undefined && t.startsWith("hmac.")) {
+      hmacToken = t;
+      break;
+    }
+  }
+  if (hmacToken === undefined) return undefined;
+  const encoded = hmacToken.slice("hmac.".length);
+  if (encoded === "") return undefined;
+  let bytes: Uint8Array;
+  try {
+    bytes = base64UrlDecode(encoded);
+  } catch {
+    return undefined;
+  }
+  if (bytes.length !== 32) return undefined;
+  return { hmac: bytes };
+}
+
+/**
+ * Verify an admission HMAC supplied via subprotocol. The canonical request
+ * mirrors the HTTP path: METHOD || "\n" || URL_PATH || "\n" || CANONICAL_QUERY
+ * || "\n" || SHA256(""). We construct a dummy Request with an empty body so
+ * the existing canonicalRequest builder produces byte-identical output.
+ */
+async function verifyAdmissionHmac(opts: {
+  method: string;
+  url: URL;
+  providedHmac: Uint8Array;
+  admissionKey: Uint8Array;
+}): Promise<boolean> {
+  const dummy = new Request(opts.url.toString(), { method: opts.method });
+  const canonical = await buildCanonicalRequest(dummy, opts.url.pathname);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    opts.admissionKey,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const expected = new Uint8Array(await crypto.subtle.sign("HMAC", key, canonical));
+  return constantTimeEquals(expected, opts.providedHmac);
+}
+
+/** Read the per-socket attachment, returning undefined if missing/garbage. */
+function readAttachment(ws: WebSocket): WSAttachment | undefined {
+  const raw = ws.deserializeAttachment() as unknown;
+  if (raw === null || typeof raw !== "object") return undefined;
+  const r = raw as Partial<WSAttachment>;
+  if (typeof r.deviceId !== "string" || typeof r.participantId !== "string") return undefined;
+  return {
+    deviceId: r.deviceId,
+    participantId: r.participantId,
+    subscribed: r.subscribed === true,
+    lastPongTs: typeof r.lastPongTs === "number" ? r.lastPongTs : 0,
+  };
+}
+
+/** Persist the per-socket attachment so it survives DO hibernation. */
+function writeAttachment(ws: WebSocket, att: WSAttachment): void {
+  ws.serializeAttachment(att);
+}
+
+/** Send a JSON-encoded server frame to a single socket. */
+function sendJson(ws: WebSocket, frame: ServerFrame): void {
+  sendRaw(ws, JSON.stringify(frame));
+}
+
+/** Send a pre-stringified frame to a single socket. */
+function sendRaw(ws: WebSocket, payload: string): void {
+  try {
+    ws.send(payload);
+  } catch {
+    // Socket likely closed mid-broadcast; runtime will surface via
+    // webSocketClose. Swallow so one dead peer can't poison the loop.
+  }
+}
+
+/**
+ * Send an error frame. `resyncFromSeq` is included for ATTN_CURSOR_TOO_OLD;
+ * other error codes leave it undefined.
+ */
+function sendError(
+  ws: WebSocket,
+  code: string,
+  message: string,
+  extras?: { resyncFromSeq?: number },
+): void {
+  const frame: ServerFrame = {
+    type: "error",
+    code,
+    message,
+    ...(extras?.resyncFromSeq !== undefined ? { resyncFromSeq: extras.resyncFromSeq } : {}),
+  };
+  sendJson(ws, frame);
+}
+
+/**
+ * Per-target deliverability check. Signal envelopes deliver only to their
+ * target.deviceId; all other kinds broadcast to every connected peer.
+ */
+function deliverableTo(record: EnvelopeRecord, deviceId: string): boolean {
+  if (record.kind === "signal") {
+    return record.target?.deviceId === deviceId;
+  }
+  return true;
 }

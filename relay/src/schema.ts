@@ -76,3 +76,40 @@ export const roomCreationSchema = z.object({
 export type RoomCreationRequest = z.infer<typeof roomCreationSchema>;
 export type RoomPolicyInput = z.input<typeof policySchema>;
 export type RoomPolicy = z.infer<typeof policySchema>;
+
+// --- POST /v2/rooms/:roomId/devices --------------------------------------
+
+/**
+ * Per relay-spec.md §POST /v2/rooms/:roomId/devices and crypto-spec.md §Signing-Key
+ * Publication.
+ *
+ * - `publicSigningKey` is a base64url-encoded Ed25519 32-byte key. We validate the
+ *   raw shape here (string + base64url chars) and the byte-length post-decode in
+ *   the handler so the schema error stays compact ("ATTN_BODY_INVALID").
+ * - `publicEncryptionKey` is stored opaquely in v2 — the relay doesn't use it for
+ *   transport (5.6 scope), but it's promised to peers for the future v3
+ *   device-to-device E2E path.
+ * - `selfSignature` is 64 bytes after decode. Verification (signed-over canonical
+ *   body MINUS selfSignature) lives in the handler, not the schema.
+ */
+export const deviceRegistrationSchema = z.object({
+  deviceId: z.string().min(1).max(64),
+  participantId: z.string().min(1).max(64),
+  publicSigningKey: b64url.min(1, "publicSigningKey required"),
+  publicEncryptionKey: b64url.min(1, "publicEncryptionKey required"),
+  client: z.enum(["attn-native", "attn-browser", "agent-cli"]),
+  kind: z.enum(["owner", "reviewer", "agent"]),
+  selfSignature: b64url.min(1, "selfSignature required"),
+});
+
+export type DeviceRegistrationRequest = z.infer<typeof deviceRegistrationSchema>;
+
+/**
+ * Stored shape returned by `GET /v2/rooms/:roomId/devices`. Adds `registeredAt`
+ * (ms-epoch) to the request body and preserves all client-supplied fields
+ * (including `selfSignature` so clients can re-verify offline). Per spec we
+ * return devices in registration order.
+ */
+export interface DeviceRecord extends DeviceRegistrationRequest {
+  registeredAt: number;
+}

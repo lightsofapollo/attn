@@ -1194,6 +1194,20 @@
         console.debug('[review:status]', payload);
         reviewStore.applyStatus(payload);
       },
+      // Pushed by Rust right after `Bootstrapper::share` succeeds. Carries
+      // the invite URL + owner key, so the Share dialog renders the URL +
+      // verify-key fingerprint without a follow-up round-trip and without
+      // string-parsing a `Live|<invite>` blob.
+      reviewShareReady(payload: import('./lib/types').ReviewShareReady) {
+        console.debug('[review:share_ready]', payload);
+        reviewStore.applyShareReady({
+          roomId: payload.roomId,
+          inviteUrl: payload.inviteUrl,
+          ownerSigningKey: payload.ownerSigningKey,
+          mode: payload.mode,
+          expiresAt: payload.expiresAt,
+        });
+      },
       reviewEvent(payload: ReviewEvent) {
         console.debug('[review:event]', payload);
         reviewStore.applyEvent(payload);
@@ -1713,6 +1727,9 @@
 <ShareDialog
   bind:open={shareDialogOpen}
   filePath={activePath}
+  existingInviteUrl={reviewStore.currentShare?.inviteUrl ?? ''}
+  ownerSigningKey={reviewStore.currentShare?.ownerSigningKey ?? ''}
+  existingRoomId={reviewStore.currentShare?.roomId ?? null}
 />
 <ReviewApplyExpand />
 {#if commentComposer}

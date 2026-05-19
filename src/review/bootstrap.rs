@@ -315,6 +315,17 @@ pub struct ParsedInvite {
     pub room_secret: [u8; 32],
 }
 
+/// Translate a `RoomMode` to its wire-format string. Matches the IPC mode
+/// strings the frontend already deals with for ShareDialog mode selection
+/// (`live` / `async` / `hybrid`).
+pub(crate) fn room_mode_wire(mode: RoomMode) -> String {
+    match mode {
+        RoomMode::Live => "live".to_string(),
+        RoomMode::Async => "async".to_string(),
+        RoomMode::Hybrid => "hybrid".to_string(),
+    }
+}
+
 /// Build the invite URL for a freshly minted room.
 pub fn build_invite_url(room_id: &RoomId, room_secret: &[u8; 32]) -> String {
     format!(
@@ -546,6 +557,16 @@ pub struct ShareOutcome {
     /// `true` if the room was newly created, `false` if `Share` was a no-op
     /// because the bindings file already had an entry pointing at a live room.
     pub newly_created: bool,
+    /// Owner's public signing key (base64url). The frontend hashes this to
+    /// render the verify-key fingerprint that the owner reads out-of-band.
+    pub owner_signing_key: String,
+    /// The mode the room was minted with (`"live"` / `"async"` / `"hybrid"`),
+    /// so the frontend can render the right ReviewBar / mode badge without
+    /// re-querying the room file.
+    pub mode: String,
+    /// Wall-clock ms timestamp when the room expires. Drives the "Expires
+    /// in ..." countdown in the dialog.
+    pub expires_at: u64,
 }
 
 /// Successful Join outcome — carries the room id the user joined.
@@ -738,6 +759,9 @@ impl Bootstrapper {
             room_id,
             invite,
             newly_created: true,
+            owner_signing_key: identity.public_signing_key.clone(),
+            mode: room_mode_wire(policy.mode),
+            expires_at: policy.expires_at,
         })
     }
 
@@ -763,19 +787,27 @@ impl Bootstrapper {
                 .store
                 .load_room(&room_id)
                 .map_err(|e| BootstrapError::Store(format!("load_room: {e}")))?;
-            let still_live = match room {
-                Some(r) => r.policy.expires_at > now_ms,
-                None => false,
+            let policy = match room.as_ref().map(|r| r.policy.clone()) {
+                Some(p) if p.expires_at > now_ms => p,
+                _ => continue,
             };
-            if !still_live {
-                continue;
-            }
             let secret = load_room_secret(self.store.root(), &room_id)?;
             let invite = build_invite_url(&room_id, &secret);
+            // For the re-Share path we don't have the owner identity in
+            // scope, so resolve it the same way `share()` does. The dialog
+            // needs the signing key to render the fingerprint regardless of
+            // whether this Share is a fresh mint or a cached re-emit.
+            let identity_dir = self.config.identity_dir()?;
+            let identity = load_or_create_identity_in(&identity_dir)?;
+            let policy_mode = policy.mode;
+            let expires_at = policy.expires_at;
             return Ok(Some(ShareOutcome {
                 room_id,
                 invite,
                 newly_created: false,
+                owner_signing_key: identity.public_signing_key.clone(),
+                mode: room_mode_wire(policy_mode),
+                expires_at,
             }));
         }
         Ok(None)

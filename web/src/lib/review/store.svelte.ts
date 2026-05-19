@@ -95,6 +95,19 @@ export class ReviewStore {
   peers = $state<ReviewStatusPeer[]>([]);
 
   /**
+   * Active share for `currentRoomId` — the invite URL and verify-key fingerprint
+   * input the ShareDialog renders. Populated by `applyShareReady` when the
+   * daemon emits the rich post-share payload. Cleared if the room is closed.
+   */
+  currentShare = $state<{
+    roomId: RoomId;
+    inviteUrl: string;
+    ownerSigningKey: string;
+    mode: 'live' | 'async' | 'hybrid';
+    expiresAt: number;
+  } | null>(null);
+
+  /**
    * Append-only buffer of imported review events. The thread selectors
    * below reconstruct typed `Thread[]` from this.
    */
@@ -228,7 +241,33 @@ export class ReviewStore {
   applyStatus(status: ReviewStatus): void {
     this.currentRoomId = status.roomId;
     this.status = status;
-    this.peers = status.peers;
+    // Rust-side `RoomStatusChanged` doesn't always carry a full ReviewStatus
+    // shape today (issue: the wire variant carries `status: string`). Guard
+    // against `peers` being absent so derived selectors don't crash.
+    this.peers = status.peers ?? [];
+  }
+
+  /**
+   * Hydrate the active-share view-state from the daemon's
+   * `ReviewUpdate::ShareReady` payload. Sets `currentRoomId` so the
+   * ReviewBar becomes visible and stores the invite + signing key so the
+   * Share dialog can render the URL and fingerprint reactively.
+   */
+  applyShareReady(payload: {
+    roomId: RoomId;
+    inviteUrl: string;
+    ownerSigningKey: string;
+    mode: 'live' | 'async' | 'hybrid';
+    expiresAt: number;
+  }): void {
+    this.currentRoomId = payload.roomId;
+    this.currentShare = {
+      roomId: payload.roomId,
+      inviteUrl: payload.inviteUrl,
+      ownerSigningKey: payload.ownerSigningKey,
+      mode: payload.mode,
+      expiresAt: payload.expiresAt,
+    };
   }
 
   /**

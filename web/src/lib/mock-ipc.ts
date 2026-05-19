@@ -67,6 +67,7 @@ type SetContentFn = (data: ContentPayload) => void;
 type UpdateContentFn = (data: UpdatePayload) => void;
 type FontScaleFn = () => void;
 type ReviewStatusFn = (payload: ReviewStatus) => void;
+type ReviewShareReadyFn = (payload: import('../lib/types').ReviewShareReady) => void;
 type ReviewEventFn = (payload: ReviewEvent) => void;
 type ReviewSnapshotFn = (snapshot: ReviewSnapshot) => void;
 type ReviewAnchorResolutionFn = (update: ReviewAnchorResolutionUpdate) => void;
@@ -83,6 +84,12 @@ interface AttnBridge {
    * @see planning/collab/data-model.md §Webview IPC Changes
    */
   reviewStatus: ReviewStatusFn;
+  /**
+   * Pushed by Rust right after a Share completes, carrying the minted invite
+   * URL + verify-key fingerprint inputs so the dialog can render the URL
+   * reactively without a follow-up round-trip.
+   */
+  reviewShareReady?: ReviewShareReadyFn;
   /**
    * Push an append-only review-log event into the webview. No-op stub today —
    * wired to the review store later (see attn-nnj.12.10 / Phase 2).

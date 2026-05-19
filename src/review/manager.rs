@@ -120,6 +120,18 @@ pub enum ReviewCommand {
 pub enum ReviewUpdate {
     /// Room connection / mode / peer list changed.
     RoomStatusChanged { room_id: RoomId, status: String },
+    /// A Share completed and the owner's invite URL is ready to copy.
+    /// Separate from `RoomStatusChanged` so the frontend can keep the
+    /// Share dialog open and atomically populate the URL field, fingerprint,
+    /// expiry timer, etc. without parsing strings.
+    ShareReady {
+        room_id: RoomId,
+        invite_url: String,
+        owner_signing_key: String,
+        mode: String,
+        expires_at: u64,
+        newly_created: bool,
+    },
     /// A `ReviewEvent` was imported and is now durable in the local store.
     EventImported {
         room_id: RoomId,
@@ -167,6 +179,7 @@ impl ReviewUpdate {
     pub fn callback_name(&self) -> &'static str {
         match self {
             ReviewUpdate::RoomStatusChanged { .. } => "reviewStatus",
+            ReviewUpdate::ShareReady { .. } => "reviewShareReady",
             ReviewUpdate::EventImported { .. } => "reviewEvent",
             ReviewUpdate::SnapshotCreated { .. } => "reviewSnapshot",
             ReviewUpdate::AnchorResolutionChanged { .. } => "reviewAnchorResolution",
@@ -392,22 +405,34 @@ impl ReviewManager {
         &self,
         result: Result<ShareOutcome, crate::review::bootstrap::BootstrapError>,
     ) {
-        let update = match result {
-            Ok(outcome) => ReviewUpdate::RoomStatusChanged {
-                room_id: outcome.room_id,
-                // Status carries both the connection state and the invite.
-                // The frontend parses the prefix to detect the live state
-                // and extracts the URL after the pipe. See
-                // `web/src/lib/review/store.ts` (attn-nnj.0c.x).
-                status: format!("Live|{}", outcome.invite),
-            },
-            Err(err) => ReviewUpdate::Error {
-                room_id: None,
-                code: error_code(&err),
-                message: err.to_string(),
-            },
+        match result {
+            Ok(outcome) => {
+                // Emit the rich ShareReady payload first so the dialog
+                // populates the URL field, then drop a plain RoomStatusChanged
+                // so existing wiring (ReviewBar visibility predicate) also
+                // sees the room come online.
+                let room_id = outcome.room_id.clone();
+                (self.update_tx)(ReviewUpdate::ShareReady {
+                    room_id: outcome.room_id,
+                    invite_url: outcome.invite,
+                    owner_signing_key: outcome.owner_signing_key,
+                    mode: outcome.mode,
+                    expires_at: outcome.expires_at,
+                    newly_created: outcome.newly_created,
+                });
+                (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                    room_id,
+                    status: "Live".to_string(),
+                });
+            }
+            Err(err) => {
+                (self.update_tx)(ReviewUpdate::Error {
+                    room_id: None,
+                    code: error_code(&err),
+                    message: err.to_string(),
+                });
+            }
         };
-        (self.update_tx)(update);
     }
 
     /// Translate a `JoinOutcome` (or its error) into the corresponding
@@ -1536,18 +1561,38 @@ mod bootstrap_integration_tests {
             ttl: None,
         });
 
-        let update = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("update");
-        match update {
-            ReviewUpdate::RoomStatusChanged { status, .. } => {
+        // emit_share_outcome now drops two updates: ShareReady (rich
+        // payload for the dialog) followed by RoomStatusChanged (drives
+        // the ReviewBar visibility).
+        let first = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("first");
+        let invite = match first {
+            ReviewUpdate::ShareReady {
+                invite_url,
+                owner_signing_key,
+                mode,
+                expires_at,
+                ..
+            } => {
                 assert!(
-                    status.starts_with("Live|attn://review/"),
-                    "status must encode invite, got: {status}"
+                    invite_url.starts_with("attn://review/"),
+                    "ShareReady invite_url shape, got: {invite_url}"
                 );
-                // No follow-up error update.
-                assert!(rx.try_recv().is_err(), "single update per Share");
+                assert_eq!(mode, "async", "wire mode string round-trips");
+                assert!(!owner_signing_key.is_empty(), "owner key surfaced");
+                assert!(expires_at > 0, "expires_at populated");
+                invite_url
             }
-            other => panic!("expected RoomStatusChanged, got {other:?}"),
+            other => panic!("expected ShareReady first, got {other:?}"),
+        };
+        let second = rx.recv_timeout(std::time::Duration::from_secs(2)).expect("second");
+        match second {
+            ReviewUpdate::RoomStatusChanged { status, .. } => {
+                assert_eq!(status, "Live", "post-share status flips to Live");
+            }
+            other => panic!("expected RoomStatusChanged second, got {other:?}"),
         }
+        assert!(rx.try_recv().is_err(), "no spurious third update");
+        let _ = invite;
         // Identity must be on disk.
         let identity = load_identity_from(id_tmp.path()).expect("load id").expect("present");
         assert!(!identity.device_id.is_empty());

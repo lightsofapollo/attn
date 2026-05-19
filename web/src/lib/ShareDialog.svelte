@@ -93,19 +93,41 @@
 
   let selectedMode = $state<ShareMode>('live');
   let singleDeviceOnly = $state(false);
-  let inviteUrl = $state('');
-  let fingerprint = $state('—— —— ——');
   let copiedUrl = $state(false);
   let copiedFingerprint = $state(false);
+  /**
+   * Tracks the dialog's flow state. `idle` = pre-mint (mode picker visible),
+   * `minting` = waiting for the Rust `ShareReady` callback, `ready` = invite
+   * URL is populated and ready to copy.
+   */
+  let phase = $state<'idle' | 'minting' | 'ready'>('idle');
 
-  // Hydrate the inviteUrl from props whenever the dialog opens or the
-  // parent-supplied URL changes. Inspect-mode (existingRoomId !== null)
-  // surfaces the prior URL; mint-mode starts blank and fills after Start.
+  // The displayed invite URL flows from the parent (driven by
+  // `reviewStore.currentShare.inviteUrl`). When the dialog enters
+  // `minting` and the prop populates, switch to `ready`.
+  const inviteUrl = $derived(existingInviteUrl);
+  let fingerprint = $state('—— —— ——');
+
+  // Hydrate the dialog's flow state whenever the dialog opens.
+  // Inspect-mode (existingRoomId !== null) jumps straight to `ready`.
   $effect(() => {
     if (open) {
-      inviteUrl = existingInviteUrl;
       copiedUrl = false;
       copiedFingerprint = false;
+      phase = existingRoomId !== null ? 'ready' : 'idle';
+    }
+  });
+
+  // Bridge: when we're minting and the URL lands via the store, flip to
+  // `ready` so the user sees the URL appear and can copy it.
+  $effect(() => {
+    if (phase === 'minting' && inviteUrl.length > 0) {
+      phase = 'ready';
+      // Best-effort clipboard write so the URL is one Cmd-V away as soon
+      // as the user sees it. Failures are swallowed (no UI noise).
+      void copyToClipboard(inviteUrl);
+      copiedUrl = true;
+      setTimeout(() => (copiedUrl = false), 1500);
     }
   });
 
@@ -177,16 +199,19 @@
   }
 
   async function handleStart(): Promise<void> {
-    if (existingRoomId !== null) {
-      // Inspect-mode: [Done]. Close without re-minting.
+    if (phase === 'ready') {
+      // Mint succeeded — Start became Done. Close to dismiss.
       open = false;
       return;
     }
-    const { mode: ipcMode, ttl } = modeToIpc(selectedMode);
-    await reviewShare(filePath, ipcMode, ttl);
-    if (inviteUrl) {
-      await copyToClipboard(inviteUrl);
+    if (phase === 'minting') {
+      // Defensive: button is disabled during minting, but double-clicks
+      // shouldn't fire reviewShare twice.
+      return;
     }
+    const { mode: ipcMode, ttl } = modeToIpc(selectedMode);
+    phase = 'minting';
+    await reviewShare(filePath, ipcMode, ttl);
     onStart?.({
       mode: selectedMode,
       ipcMode,
@@ -194,7 +219,8 @@
       deleteEventsAfterOwnerAck: singleDeviceOnly,
       filePath,
     });
-    open = false;
+    // Stay open; the `$effect` above flips `phase` to 'ready' when the
+    // daemon's ShareReady callback populates `existingInviteUrl`.
   }
 
   function handleCancel(): void {
@@ -213,8 +239,11 @@
     { value: 'hybrid', label: 'Hybrid', helper: 'live if possible, mailbox fallback' },
   ];
 
-  const startLabel = $derived(existingRoomId !== null ? 'Done' : 'Start');
-  const modeDisabled = $derived(existingRoomId !== null);
+  const startLabel = $derived(
+    phase === 'ready' ? 'Done' : phase === 'minting' ? 'Minting…' : 'Start',
+  );
+  const modeDisabled = $derived(phase !== 'idle');
+  const startDisabled = $derived(filePath.length === 0 || phase === 'minting');
 </script>
 
 <Dialog.Root bind:open>
@@ -348,7 +377,7 @@
       <Button
         type="button"
         onclick={handleStart}
-        disabled={filePath.length === 0}
+        disabled={startDisabled}
         data-slot="share-start"
       >
         {startLabel}

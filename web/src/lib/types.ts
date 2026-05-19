@@ -799,6 +799,25 @@ export interface ReviewEvent {
 }
 
 /**
+ * Pushed via `window.__attn__.reviewShareReady(...)` immediately after
+ * the daemon mints (or re-emits) an invite. Carries everything the
+ * Share dialog needs to render the URL + fingerprint without a second
+ * round-trip.
+ *
+ * Wire shape mirrors `ReviewUpdate::ShareReady` in `src/review/manager.rs`.
+ */
+export interface ReviewShareReady {
+  kind: 'share_ready';
+  roomId: RoomId;
+  inviteUrl: string;
+  /** Base64url Ed25519 public signing key; fingerprint is sha256(this). */
+  ownerSigningKey: string;
+  mode: 'live' | 'async' | 'hybrid';
+  expiresAt: number;
+  newlyCreated: boolean;
+}
+
+/**
  * Transport/connection status surfaced to the UI for one room.
  *
  * Pushed via `window.__attn__.reviewStatus(...)` from Rust (see

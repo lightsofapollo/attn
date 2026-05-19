@@ -84,7 +84,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # (attn-nnj.1.7) needs `sync` (Mutex) and `rt` (spawn_blocking). Phase 4
 # (attn-nnj.6.x/7.x) will widen these as transports / outbox land.
 # WebSocket client (attn-nnj.6.3) needs `net` (TCP) and `io-util` (split/AsyncReadExt).
-tokio = { version = "1", features = ["sync", "rt", "macros", "time", "net", "io-util"] }
+# Bootstrap flow (attn-nnj.6.6) needs `rt-multi-thread` for the manager's blocking runtime.
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time", "net", "io-util"] }
 
 # WebSocket client used by the mailbox transport (attn-nnj.6.3). rustls-tls
 # keeps the binary self-contained without OpenSSL; webpki-roots provides the

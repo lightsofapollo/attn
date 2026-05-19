@@ -22,9 +22,13 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::review::bootstrap::{
+    BootstrapConfig, Bootstrapper, JoinOutcome, ShareOutcome,
+};
 use crate::review::ids::{EventId, FileId, RoomId};
-use crate::review::model::{Anchor, PositionAnchor, ResolvedAnchor, SuggestionDraft};
+use crate::review::model::{Anchor, PositionAnchor, ResolvedAnchor, RoomMode, SuggestionDraft};
 use crate::review::store::ReviewStore;
+use crate::review::transport::inbound::VerifyingKeyCache;
 use crate::review::working_copy::WorkingCopyService;
 
 // ---------------------------------------------------------------------------
@@ -183,6 +187,17 @@ pub struct ReviewManager {
     #[allow(dead_code)]
     working_copy: Arc<WorkingCopyService>,
     update_tx: UpdateSink,
+    /// Optional bootstrap pipeline (attn-nnj.6.6). When `None`, Share/Join
+    /// fall back to the scaffold stub status messages — keeps unit tests
+    /// that don't care about networking trivially constructable.
+    bootstrap: Option<Arc<Bootstrapper>>,
+    /// Tokio runtime used to drive bootstrap calls from the synchronous
+    /// `submit` dispatch. Lazy-instantiated alongside `bootstrap`; only
+    /// present when the manager was built via `with_bootstrap`.
+    runtime: Option<Arc<tokio::runtime::Runtime>>,
+    /// Verifying-key cache shared with the inbound pipeline (attn-nnj.6.4)
+    /// so Join can populate device keys before the first inbound envelope.
+    verifying_keys: Option<VerifyingKeyCache>,
 }
 
 impl ReviewManager {
@@ -199,19 +214,140 @@ impl ReviewManager {
             store,
             working_copy,
             update_tx,
+            bootstrap: None,
+            runtime: None,
+            verifying_keys: None,
         }
+    }
+
+    /// Attach the Share/Join bootstrap pipeline (attn-nnj.6.6).
+    ///
+    /// `relay_url` is the base URL of the Cloudflare relay (no trailing
+    /// slash). The optional `identity_dir` overrides
+    /// `daemon::runtime_dir()` for tests; production code passes `None`.
+    /// `verifying_keys` is the cache the inbound pipeline reads from —
+    /// Join populates it from `GET /v2/rooms/:roomId/devices` so the
+    /// pipeline can verify the first envelope it receives.
+    pub fn with_bootstrap(
+        mut self,
+        relay_url: String,
+        identity_dir: Option<std::path::PathBuf>,
+        verifying_keys: VerifyingKeyCache,
+    ) -> anyhow::Result<Self> {
+        let cfg = Arc::new(BootstrapConfig {
+            relay_url,
+            identity_dir,
+        });
+        let bootstrapper = Bootstrapper::new(Arc::clone(&self.store), cfg)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("attn-review-bootstrap")
+            .build()?;
+        self.bootstrap = Some(Arc::new(bootstrapper));
+        self.runtime = Some(Arc::new(runtime));
+        self.verifying_keys = Some(verifying_keys);
+        Ok(self)
+    }
+
+    /// Test-only constructor that injects a pre-built `Bootstrapper` + runtime
+    /// (used by the wiremock-backed tests).
+    #[cfg(test)]
+    pub fn with_bootstrap_components(
+        mut self,
+        bootstrapper: Arc<Bootstrapper>,
+        runtime: Arc<tokio::runtime::Runtime>,
+        verifying_keys: VerifyingKeyCache,
+    ) -> Self {
+        self.bootstrap = Some(bootstrapper);
+        self.runtime = Some(runtime);
+        self.verifying_keys = Some(verifying_keys);
+        self
     }
 
     /// Synchronous command dispatch.
     ///
-    /// Real implementations of each handler will likely async-spawn work onto
-    /// a tokio runtime once transport lands (3b/4). For the scaffold every
-    /// arm just logs the command and pushes a single stub `ReviewUpdate`
-    /// through the sink — enough to make the frontend↔Rust round-trip
-    /// observable in devtools and in tests.
+    /// `Share`/`Join` block on the bootstrap pipeline when one is attached;
+    /// every other variant emits the scaffold stub update. The blocking is
+    /// intentional today — the IPC layer already runs `submit` on a worker
+    /// thread, and the bootstrap calls (room create + device register + one
+    /// GET) complete in well under a second against a healthy relay.
     pub fn submit(&self, cmd: ReviewCommand) {
         eprintln!("review: received command {:?}", cmd);
+
+        // Bootstrap pipeline owns Share + Join when wired in. Everything else
+        // still goes through `stub_update_for` (filled in by follow-up issues).
+        match (&cmd, self.bootstrap.as_ref(), self.runtime.as_ref()) {
+            (
+                ReviewCommand::Share { path, mode, ttl },
+                Some(bootstrapper),
+                Some(runtime),
+            ) => {
+                let mode = mode_from_str(mode);
+                let result = runtime.block_on(bootstrapper.share(
+                    path.clone(),
+                    mode,
+                    ttl.clone(),
+                ));
+                self.emit_share_outcome(result);
+                return;
+            }
+            (ReviewCommand::Join { invite }, Some(bootstrapper), Some(runtime)) => {
+                let cache = self.verifying_keys.clone();
+                let result = runtime.block_on(bootstrapper.join(invite, cache));
+                self.emit_join_outcome(result);
+                return;
+            }
+            _ => {}
+        }
+
         let update = stub_update_for(&cmd);
+        (self.update_tx)(update);
+    }
+
+    /// Translate a `ShareOutcome` (or its error) into the corresponding
+    /// `ReviewUpdate` and dispatch it. Carries the invite in the status
+    /// field per the frontend contract — the right-rail Share view reads
+    /// `status` and surfaces the URL via a copy-to-clipboard button.
+    fn emit_share_outcome(
+        &self,
+        result: Result<ShareOutcome, crate::review::bootstrap::BootstrapError>,
+    ) {
+        let update = match result {
+            Ok(outcome) => ReviewUpdate::RoomStatusChanged {
+                room_id: outcome.room_id,
+                // Status carries both the connection state and the invite.
+                // The frontend parses the prefix to detect the live state
+                // and extracts the URL after the pipe. See
+                // `web/src/lib/review/store.ts` (attn-nnj.0c.x).
+                status: format!("Live|{}", outcome.invite),
+            },
+            Err(err) => ReviewUpdate::Error {
+                room_id: None,
+                code: error_code(&err),
+                message: err.to_string(),
+            },
+        };
+        (self.update_tx)(update);
+    }
+
+    /// Translate a `JoinOutcome` (or its error) into the corresponding
+    /// `ReviewUpdate` and dispatch it.
+    fn emit_join_outcome(
+        &self,
+        result: Result<JoinOutcome, crate::review::bootstrap::BootstrapError>,
+    ) {
+        let update = match result {
+            Ok(outcome) => ReviewUpdate::RoomStatusChanged {
+                room_id: outcome.room_id,
+                status: "Joined".to_string(),
+            },
+            Err(err) => ReviewUpdate::Error {
+                room_id: None,
+                code: error_code(&err),
+                message: err.to_string(),
+            },
+        };
         (self.update_tx)(update);
     }
 
@@ -235,6 +371,34 @@ impl ReviewManager {
             file_id,
             resolved,
         });
+    }
+}
+
+/// Translate a user-supplied mode string (`"live"`, `"async"`, `"hybrid"`)
+/// into the typed `RoomMode`. Defaults to `Async` for unknown values so
+/// callers don't have to special-case an empty/bad mode at the IPC layer —
+/// the bootstrap pipeline's relay request will reflect the chosen mode but
+/// the policy hard-cap stays the same regardless.
+fn mode_from_str(mode: &str) -> RoomMode {
+    match mode.to_ascii_lowercase().as_str() {
+        "live" => RoomMode::Live,
+        "hybrid" => RoomMode::Hybrid,
+        _ => RoomMode::Async,
+    }
+}
+
+/// Map a `BootstrapError` to a short stable error code for the frontend.
+/// Kept here rather than as a `Display` impl on the error so the wire string
+/// is independent of how the error is rendered in logs/devtools.
+fn error_code(err: &crate::review::bootstrap::BootstrapError) -> String {
+    use crate::review::bootstrap::BootstrapError;
+    match err {
+        BootstrapError::Identity(_) => "ATTN_IDENTITY".to_string(),
+        BootstrapError::Crypto(_) => "ATTN_CRYPTO".to_string(),
+        BootstrapError::Relay { code, .. } => code.clone(),
+        BootstrapError::Network(_) => "ATTN_NETWORK".to_string(),
+        BootstrapError::InviteParse(_) => "ATTN_INVITE_PARSE".to_string(),
+        BootstrapError::Store(_) => "ATTN_STORE".to_string(),
     }
 }
 
@@ -759,5 +923,191 @@ mod tests {
         assert_eq!(json["resolved"]["reason"], serde_json::json!("quote_match"));
         assert_eq!(json["resolved"]["confidence"], serde_json::json!(0.85));
         assert_eq!(update.callback_name(), "reviewAnchorResolution");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap integration tests (attn-nnj.6.6)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod bootstrap_integration_tests {
+    use super::*;
+    use crate::review::bootstrap::{
+        BootstrapConfig, Bootstrapper, build_invite_url, load_identity_from,
+    };
+    use crate::review::crypto::kdf::derive_room_id;
+    use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::mpsc;
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Wire a manager pre-loaded with a bootstrap pipeline pointing at the
+    /// supplied wiremock URL. Returns the manager + the receiver of emitted
+    /// updates + a temp dir holding both the store and the identity file.
+    fn make_bootstrapped_manager(
+        relay_url: String,
+    ) -> (
+        ReviewManager,
+        mpsc::Receiver<ReviewUpdate>,
+        TempDir,
+        TempDir,
+    ) {
+        let store_tmp = TempDir::new().expect("store tempdir");
+        let id_tmp = TempDir::new().expect("id tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(store_tmp.path().join("reviews")).expect("open store"),
+        );
+        let working_copy = Arc::new(WorkingCopyService::new());
+
+        let (tx, rx) = mpsc::channel::<ReviewUpdate>();
+        let tx = StdMutex::new(tx);
+        let sink: UpdateSink = Box::new(move |update| {
+            let _ = tx.lock().expect("sink mutex").send(update);
+        });
+
+        let cfg = Arc::new(BootstrapConfig {
+            relay_url,
+            identity_dir: Some(id_tmp.path().to_path_buf()),
+        });
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("client");
+        let boot = Arc::new(Bootstrapper::with_http_client(
+            Arc::clone(&store),
+            cfg,
+            http,
+        ));
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime"),
+        );
+        let cache = Arc::new(RwLock::new(HashMap::new()));
+        let mgr = ReviewManager::new(store, working_copy, sink)
+            .with_bootstrap_components(boot, runtime, cache);
+        (mgr, rx, store_tmp, id_tmp)
+    }
+
+    /// Set up wiremock stubs accepting any room create + device register.
+    async fn mount_create_and_register(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/v2/rooms/[A-Za-z0-9_-]+$",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "roomId": "any",
+                "createdAt": 0u64,
+                "expiresAt": 0u64,
+                "policy": {},
+                "ownerSigningKeyId": "k",
+                "serverSeq": 0,
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/v2/rooms/[A-Za-z0-9_-]+/devices$",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_get_devices_empty(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"^/v2/rooms/[A-Za-z0-9_-]+/devices$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "devices": []
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[test]
+    fn submit_share_with_bootstrap_emits_live_status_with_invite() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let server = runtime.block_on(MockServer::start());
+        runtime.block_on(mount_create_and_register(&server));
+
+        let (mgr, rx, _store_tmp, id_tmp) = make_bootstrapped_manager(server.uri());
+        mgr.submit(ReviewCommand::Share {
+            path: std::path::PathBuf::from("/tmp/manager-share.md"),
+            mode: "async".to_string(),
+            ttl: None,
+        });
+
+        let update = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("update");
+        match update {
+            ReviewUpdate::RoomStatusChanged { status, .. } => {
+                assert!(
+                    status.starts_with("Live|attn://review/"),
+                    "status must encode invite, got: {status}"
+                );
+                // No follow-up error update.
+                assert!(rx.try_recv().is_err(), "single update per Share");
+            }
+            other => panic!("expected RoomStatusChanged, got {other:?}"),
+        }
+        // Identity must be on disk.
+        let identity = load_identity_from(id_tmp.path()).expect("load id").expect("present");
+        assert!(!identity.device_id.is_empty());
+        assert!(!identity.public_signing_key.is_empty());
+    }
+
+    #[test]
+    fn submit_join_with_bootstrap_emits_joined_status() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let server = runtime.block_on(MockServer::start());
+        runtime.block_on(mount_create_and_register(&server));
+        runtime.block_on(mount_get_devices_empty(&server));
+
+        let (mgr, rx, _store_tmp, _id_tmp) = make_bootstrapped_manager(server.uri());
+
+        let secret = [0x33u8; 32];
+        let room_id = derive_room_id(&secret);
+        let invite = build_invite_url(&room_id, &secret);
+
+        mgr.submit(ReviewCommand::Join {
+            invite: invite.clone(),
+        });
+        let update = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("update");
+        match update {
+            ReviewUpdate::RoomStatusChanged {
+                room_id: rid,
+                status,
+            } => {
+                assert_eq!(rid, room_id);
+                assert_eq!(status, "Joined");
+            }
+            other => panic!("expected RoomStatusChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn submit_join_with_malformed_invite_emits_error_update() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let server = runtime.block_on(MockServer::start());
+        let (mgr, rx, _store_tmp, _id_tmp) = make_bootstrapped_manager(server.uri());
+
+        mgr.submit(ReviewCommand::Join {
+            invite: "not-an-invite".to_string(),
+        });
+        let update = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("update");
+        match update {
+            ReviewUpdate::Error { code, .. } => {
+                assert_eq!(code, "ATTN_INVITE_PARSE");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 }

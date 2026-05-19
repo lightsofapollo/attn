@@ -77,7 +77,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Async runtime — narrowest possible feature set for now. PoW token pool
 # (attn-nnj.1.7) needs `sync` (Mutex) and `rt` (spawn_blocking). Phase 4
 # (attn-nnj.6.x/7.x) will widen these as transports / outbox land.
-tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
 
 # Async-fn-in-trait shim for the Transport trait (attn-nnj.6.1). Stable
 # Rust's native `async fn` in traits is gaining ground but still lacks

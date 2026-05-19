@@ -17,18 +17,26 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::review::bootstrap::{
     BootstrapConfig, Bootstrapper, JoinOutcome, ShareOutcome,
 };
 use crate::review::ids::{EventId, FileId, RoomId};
-use crate::review::model::{Anchor, PositionAnchor, ResolvedAnchor, RoomMode, SuggestionDraft};
+use crate::review::model::{
+    Anchor, MailboxEnvelope, PositionAnchor, ResolvedAnchor, RoomMode, SuggestionDraft,
+};
 use crate::review::store::ReviewStore;
 use crate::review::transport::inbound::VerifyingKeyCache;
+use crate::review::transport::selector::{
+    self, RoomTransports, TransportConfig, TransportMode,
+};
+use crate::review::transport::{EnvelopeAck, TransportError};
 use crate::review::working_copy::WorkingCopyService;
 
 // ---------------------------------------------------------------------------
@@ -198,6 +206,16 @@ pub struct ReviewManager {
     /// Verifying-key cache shared with the inbound pipeline (attn-nnj.6.4)
     /// so Join can populate device keys before the first inbound envelope.
     verifying_keys: Option<VerifyingKeyCache>,
+    /// Active transport handles keyed by `RoomId`.
+    ///
+    /// Populated by `open_room_transports` and read by `send_envelopes` —
+    /// the mode-aware selector lives in `transport::selector`. The map is an
+    /// async mutex because mode transitions (Live -> Hybrid, Hybrid -> Async)
+    /// hold the value briefly while swapping handles.
+    ///
+    /// One inner `AsyncMutex` per room so distinct rooms can send in parallel
+    /// without blocking each other.
+    rooms: Arc<AsyncMutex<HashMap<RoomId, Arc<AsyncMutex<RoomTransports>>>>>,
 }
 
 impl ReviewManager {
@@ -217,6 +235,7 @@ impl ReviewManager {
             bootstrap: None,
             runtime: None,
             verifying_keys: None,
+            rooms: Arc::new(AsyncMutex::new(HashMap::new())),
         }
     }
 
@@ -371,6 +390,114 @@ impl ReviewManager {
             file_id,
             resolved,
         });
+    }
+
+    // -------------------------------------------------------------------
+    // Mode-aware transport selector (attn-nnj.7.5)
+    // -------------------------------------------------------------------
+
+    /// Materialize and persist the per-room transport handles for `room_id`
+    /// according to `mode`. Replaces any prior handles for the same room.
+    ///
+    /// The selector validates the (mode, config) pair via
+    /// `selector::build_room_transports`:
+    ///   - `Live` needs `webrtc`,
+    ///   - `Async` needs `mailbox`,
+    ///   - `Hybrid` needs both.
+    ///
+    /// Returns a clone of the resolved `RoomTransports` for the caller's
+    /// convenience (e.g. the bootstrap may want to read `mode` to decide
+    /// which inbound connection to spin up next).
+    pub async fn open_room_transports(
+        &self,
+        room_id: &RoomId,
+        mode: TransportMode,
+        config: TransportConfig,
+    ) -> Result<TransportMode, TransportError> {
+        let transports = selector::build_room_transports(mode, config)?;
+        let mode = transports.mode;
+        let shared = Arc::new(AsyncMutex::new(transports));
+        let mut rooms = self.rooms.lock().await;
+        rooms.insert(room_id.clone(), shared);
+        Ok(mode)
+    }
+
+    /// Outbound dispatch — route a batch of envelopes through the right
+    /// transport(s) for the room's current mode.
+    ///
+    /// Per `planning/collab/amendments.md` §Phase 4:
+    ///   - `Live` sends via WebRTC; if the DataChannel is not connected, the
+    ///     send fails and the manager surfaces a `ReviewUpdate::Error` with
+    ///     `code: "ATTN_LIVE_REQUIRED"`. The mailbox is NOT touched.
+    ///   - `Async` sends via mailbox only.
+    ///   - `Hybrid` writes to both; the mailbox always-on outbox owns the
+    ///     `serverSeq`s returned to the caller. The WebRTC arm is best-effort
+    ///     when connected.
+    ///
+    /// `TransportError` failures from any path bubble up unchanged. The
+    /// caller (typically the IPC layer or a higher-level command handler) is
+    /// responsible for translating them into `ReviewUpdate::Error` if they
+    /// need to surface to the UI; this method itself only emits the
+    /// `ATTN_LIVE_REQUIRED` error update on the dedicated Live-mode failure
+    /// path so the routing rule is observable from the manager's API.
+    pub async fn send_envelopes(
+        &self,
+        room_id: &RoomId,
+        envelopes: Vec<MailboxEnvelope>,
+    ) -> Result<Vec<EnvelopeAck>, TransportError> {
+        let shared = {
+            let rooms = self.rooms.lock().await;
+            rooms
+                .get(room_id)
+                .cloned()
+                .ok_or_else(|| TransportError::RoomNotFound)?
+        };
+        let transports = shared.lock().await;
+        let result = selector::send_envelopes(&transports, envelopes).await;
+        if let Err(TransportError::Io(msg)) = &result {
+            if msg.contains(selector::LIVE_REQUIRED_CODE) {
+                (self.update_tx)(ReviewUpdate::Error {
+                    room_id: Some(room_id.clone()),
+                    code: selector::LIVE_REQUIRED_CODE.to_string(),
+                    message: msg.clone(),
+                });
+            }
+        }
+        result
+    }
+
+    /// Apply a mode transition for `room_id`. Supports only the documented
+    /// safe transitions — see `selector::transition_mode`. The caller passes
+    /// a freshly-constructed mailbox handle for Live -> Hybrid; for the
+    /// Hybrid -> Async path the WebRTC handle is dropped (the manager does
+    /// not own the underlying close path — the caller closes the
+    /// `WebRtcTransport` separately).
+    pub async fn transition_room_mode(
+        &self,
+        room_id: &RoomId,
+        next: TransportMode,
+        new_mailbox: Option<Arc<dyn selector::MailboxSender>>,
+    ) -> Result<(), TransportError> {
+        let shared = {
+            let rooms = self.rooms.lock().await;
+            rooms
+                .get(room_id)
+                .cloned()
+                .ok_or_else(|| TransportError::RoomNotFound)?
+        };
+        let mut transports = shared.lock().await;
+        selector::transition_mode(&mut transports, next, new_mailbox)
+    }
+
+    /// Read the current `TransportMode` for `room_id`, or `None` if the room
+    /// has no transports open.
+    pub async fn room_mode(&self, room_id: &RoomId) -> Option<TransportMode> {
+        let shared = {
+            let rooms = self.rooms.lock().await;
+            rooms.get(room_id).cloned()?
+        };
+        let transports = shared.lock().await;
+        Some(transports.mode)
     }
 }
 
@@ -1111,3 +1238,390 @@ mod bootstrap_integration_tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Transport selector tests (attn-nnj.7.5)
+//
+// Drives `ReviewManager::open_room_transports` + `send_envelopes` end-to-end
+// through the public API using the in-process mock senders from
+// `transport::selector::test_support`. The selector module's own tests
+// pin the routing rules in isolation; this module proves the same rules
+// flow through the manager facade and that the manager dispatches the
+// expected `ReviewUpdate::Error` on the Live-required failure path.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod transport_selector_tests {
+    use super::*;
+    use crate::review::transport::selector::test_support::{
+        dummy_envelope, MailboxOutcome, MockMailbox, MockWebRtc,
+    };
+    use crate::review::transport::selector::{
+        MailboxSender, TransportConfig, TransportMode, WebRtcSender,
+    };
+    use crate::review::transport::TransportError;
+    use std::sync::Mutex;
+    use std::sync::mpsc;
+    use tempfile::TempDir;
+
+    fn make_manager() -> (ReviewManager, mpsc::Receiver<ReviewUpdate>, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let store =
+            Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
+        let working_copy = Arc::new(WorkingCopyService::new());
+        let (tx, rx) = mpsc::channel::<ReviewUpdate>();
+        let tx = Mutex::new(tx);
+        let sink: UpdateSink = Box::new(move |update| {
+            let _ = tx.lock().expect("sink mutex").send(update);
+        });
+        let mgr = ReviewManager::new(store, working_copy, sink);
+        (mgr, rx, tmp)
+    }
+
+    fn dummy_room() -> RoomId {
+        serde_json::from_value(serde_json::Value::String("room-7-5".to_string())).unwrap()
+    }
+
+    // -----------------------------------------------------------------
+    // 1. Live mode: webrtc disconnected -> ATTN_LIVE_REQUIRED error
+    //    update + envelopes NOT sent via mailbox (mailbox is None in Live).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn live_mode_disconnected_emits_live_required_and_does_not_send_mailbox() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room = dummy_room();
+        let webrtc = Arc::new(MockWebRtc::new(false)); // not connected
+
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Live,
+            TransportConfig::from_handles(None, Some(webrtc.clone() as Arc<dyn WebRtcSender>)),
+        )
+        .await
+        .expect("open live transports");
+
+        // Mailbox would never have been built in Live mode; assert via
+        // the manager's accessor.
+        assert_eq!(mgr.room_mode(&room).await, Some(TransportMode::Live));
+
+        let err = mgr
+            .send_envelopes(&room, vec![dummy_envelope("env-live-1", &room)])
+            .await
+            .expect_err("live send must fail when webrtc down");
+        match err {
+            TransportError::Io(msg) => {
+                assert!(
+                    msg.contains("ATTN_LIVE_REQUIRED"),
+                    "expected ATTN_LIVE_REQUIRED in error message, got: {msg}"
+                );
+            }
+            other => panic!("expected Io(ATTN_LIVE_REQUIRED), got {other:?}"),
+        }
+
+        // The manager surfaces the failure as a ReviewUpdate::Error so the UI
+        // can show "direct connection failed" — matching amendments.md
+        // Phase 4 "no silent mailbox fallback".
+        let update = rx.try_recv().expect("expected one update");
+        match update {
+            ReviewUpdate::Error {
+                room_id: rid,
+                code,
+                ..
+            } => {
+                assert_eq!(rid.as_ref(), Some(&room));
+                assert_eq!(code, "ATTN_LIVE_REQUIRED");
+            }
+            other => panic!("expected ReviewUpdate::Error, got {other:?}"),
+        }
+        // No webrtc send was attempted either — the pre-flight failed.
+        assert_eq!(webrtc.total_sent(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // 2. Live mode: even if mailbox returns AdmissionRejected and the
+    //    webrtc transport returns a connect-failure, the envelopes must
+    //    NOT be routed via mailbox. Verifies the no-fallback rule.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn live_mode_never_falls_back_to_mailbox_even_under_failure() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room = dummy_room();
+        // Mailbox would reject if asked (admission failure) — proves the
+        // selector NEVER asks it in Live mode.
+        let _mailbox_unused = Arc::new(MockMailbox::with_outcome(MailboxOutcome::Error(
+            TransportError::AdmissionRejected,
+        )));
+        let webrtc = Arc::new(MockWebRtc::new(false));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Live,
+            TransportConfig::from_handles(None, Some(webrtc.clone() as Arc<dyn WebRtcSender>)),
+        )
+        .await
+        .expect("open live transports");
+
+        let err = mgr
+            .send_envelopes(&room, vec![dummy_envelope("env-live-2", &room)])
+            .await
+            .expect_err("live send must fail");
+        assert!(matches!(err, TransportError::Io(_)));
+        // mailbox_unused was never wired in, so we can only assert that we
+        // never reached for a mailbox handle — which the selector enforces
+        // by holding `mailbox: None` for Live. The Live test in selector.rs
+        // covers the deeper "mailbox handle present but unused" case.
+        assert_eq!(webrtc.total_sent(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // 3. Async mode: only the mailbox is used; webrtc handle is None.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn async_mode_uses_mailbox_only_and_returns_server_seqs() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room = dummy_room();
+        let mailbox = Arc::new(MockMailbox::new());
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Async,
+            TransportConfig::from_handles(Some(mailbox.clone() as Arc<dyn MailboxSender>), None),
+        )
+        .await
+        .expect("open async transports");
+
+        assert_eq!(mgr.room_mode(&room).await, Some(TransportMode::Async));
+
+        let acks = mgr
+            .send_envelopes(
+                &room,
+                vec![
+                    dummy_envelope("env-async-1", &room),
+                    dummy_envelope("env-async-2", &room),
+                ],
+            )
+            .await
+            .expect("async send ok");
+        assert_eq!(acks.len(), 2);
+        // Mock mailbox assigns serverSeqs starting at 1.
+        assert_eq!(acks[0].server_seq, 1);
+        assert_eq!(acks[1].server_seq, 2);
+        assert_eq!(mailbox.total_sent(), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // 4. Hybrid mode: webrtc connected -> DataChannel send; mailbox also
+    //    receives the envelope (parallel delivery; receiver dedups).
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn hybrid_mode_connected_sends_to_both_paths() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room = dummy_room();
+        let mailbox = Arc::new(MockMailbox::new());
+        let webrtc = Arc::new(MockWebRtc::new(true));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Hybrid,
+            TransportConfig::from_handles(
+                Some(mailbox.clone() as Arc<dyn MailboxSender>),
+                Some(webrtc.clone() as Arc<dyn WebRtcSender>),
+            ),
+        )
+        .await
+        .expect("open hybrid transports");
+
+        let acks = mgr
+            .send_envelopes(&room, vec![dummy_envelope("env-hy-1", &room)])
+            .await
+            .expect("hybrid send ok");
+        assert_eq!(acks.len(), 1);
+        // Mailbox returned the serverSeq; webrtc also received the bytes.
+        assert_eq!(mailbox.total_sent(), 1);
+        assert_eq!(webrtc.total_sent(), 1, "hybrid must also drive webrtc");
+    }
+
+    // -----------------------------------------------------------------
+    // 5. Hybrid mode: webrtc disconnected -> mailbox only; NO error.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn hybrid_mode_disconnected_uses_mailbox_only_no_error() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room = dummy_room();
+        let mailbox = Arc::new(MockMailbox::new());
+        let webrtc = Arc::new(MockWebRtc::new(false));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Hybrid,
+            TransportConfig::from_handles(
+                Some(mailbox.clone() as Arc<dyn MailboxSender>),
+                Some(webrtc.clone() as Arc<dyn WebRtcSender>),
+            ),
+        )
+        .await
+        .expect("open hybrid transports");
+
+        let acks = mgr
+            .send_envelopes(&room, vec![dummy_envelope("env-hy-2", &room)])
+            .await
+            .expect("hybrid send must succeed even when webrtc is down");
+        assert_eq!(acks.len(), 1);
+        assert_eq!(mailbox.total_sent(), 1);
+        assert_eq!(webrtc.total_sent(), 0);
+        // No ReviewUpdate emitted on the no-error path.
+        assert!(rx.try_recv().is_err(), "no update on hybrid happy path");
+    }
+
+    // -----------------------------------------------------------------
+    // 6. Mode transition Live -> Hybrid: spawns mailbox transport without
+    //    dropping existing connection. Subsequent send must drive both
+    //    paths.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn live_to_hybrid_transition_attaches_mailbox_and_preserves_webrtc() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room = dummy_room();
+        let webrtc = Arc::new(MockWebRtc::new(true));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Live,
+            TransportConfig::from_handles(None, Some(webrtc.clone() as Arc<dyn WebRtcSender>)),
+        )
+        .await
+        .expect("open live");
+
+        // Confirm initial mode.
+        assert_eq!(mgr.room_mode(&room).await, Some(TransportMode::Live));
+
+        // Transition to Hybrid by attaching a fresh mailbox handle.
+        let mailbox = Arc::new(MockMailbox::new());
+        mgr.transition_room_mode(
+            &room,
+            TransportMode::Hybrid,
+            Some(mailbox.clone() as Arc<dyn MailboxSender>),
+        )
+        .await
+        .expect("Live -> Hybrid transition ok");
+        assert_eq!(mgr.room_mode(&room).await, Some(TransportMode::Hybrid));
+
+        // A subsequent send must drive both paths.
+        let acks = mgr
+            .send_envelopes(&room, vec![dummy_envelope("env-trans-1", &room)])
+            .await
+            .expect("send after transition ok");
+        assert_eq!(acks.len(), 1);
+        assert_eq!(mailbox.total_sent(), 1);
+        assert_eq!(webrtc.total_sent(), 1, "webrtc must NOT be dropped");
+    }
+
+    // -----------------------------------------------------------------
+    // 7. send_envelopes for an unknown room returns RoomNotFound.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn send_envelopes_unknown_room_returns_room_not_found() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room = dummy_room();
+        let err = mgr
+            .send_envelopes(&room, vec![dummy_envelope("env-x", &room)])
+            .await
+            .expect_err("unknown room must error");
+        assert!(matches!(err, TransportError::RoomNotFound));
+    }
+
+    // -----------------------------------------------------------------
+    // 8. send_envelopes failures bubble up as TransportError unchanged.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn async_mode_mailbox_failure_bubbles_up_unchanged() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room = dummy_room();
+        let mailbox = Arc::new(MockMailbox::with_outcome(MailboxOutcome::Error(
+            TransportError::RateLimited(2500),
+        )));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Async,
+            TransportConfig::from_handles(Some(mailbox as Arc<dyn MailboxSender>), None),
+        )
+        .await
+        .expect("open async");
+
+        let err = mgr
+            .send_envelopes(&room, vec![dummy_envelope("env-rate", &room)])
+            .await
+            .expect_err("rate limit must bubble");
+        match err {
+            TransportError::RateLimited(ms) => assert_eq!(ms, 2500),
+            other => panic!("expected RateLimited(2500), got {other:?}"),
+        }
+        // Mailbox failures are NOT the live-required path, so the manager
+        // does NOT emit a ReviewUpdate::Error — the caller is responsible
+        // for surfacing as needed.
+        assert!(rx.try_recv().is_err(), "no Error update on mailbox failure");
+    }
+
+    // -----------------------------------------------------------------
+    // 9. Hybrid -> Async transition drops the webrtc handle; subsequent
+    //    sends must use mailbox only.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn hybrid_to_async_transition_drops_webrtc() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room = dummy_room();
+        let mailbox = Arc::new(MockMailbox::new());
+        let webrtc = Arc::new(MockWebRtc::new(true));
+        mgr.open_room_transports(
+            &room,
+            TransportMode::Hybrid,
+            TransportConfig::from_handles(
+                Some(mailbox.clone() as Arc<dyn MailboxSender>),
+                Some(webrtc.clone() as Arc<dyn WebRtcSender>),
+            ),
+        )
+        .await
+        .expect("open hybrid");
+
+        mgr.transition_room_mode(&room, TransportMode::Async, None)
+            .await
+            .expect("Hybrid -> Async ok");
+        assert_eq!(mgr.room_mode(&room).await, Some(TransportMode::Async));
+
+        let acks = mgr
+            .send_envelopes(&room, vec![dummy_envelope("env-after-async", &room)])
+            .await
+            .expect("async send ok");
+        assert_eq!(acks.len(), 1);
+        assert_eq!(mailbox.total_sent(), 1);
+        // WebRTC was dropped; never touched.
+        assert_eq!(webrtc.total_sent(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // 10. open_room_transports with a mismatched config errors cleanly.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn open_room_transports_rejects_mismatched_config() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room = dummy_room();
+        // Live mode without a webrtc handle.
+        let err = mgr
+            .open_room_transports(
+                &room,
+                TransportMode::Live,
+                TransportConfig::from_handles(None, None),
+            )
+            .await
+            .expect_err("live without webrtc must error");
+        assert!(matches!(err, TransportError::Io(_)));
+        // Map remains empty.
+        assert_eq!(mgr.room_mode(&room).await, None);
+    }
+}
+

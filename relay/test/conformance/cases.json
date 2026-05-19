@@ -1464,9 +1464,7 @@
             "status": 200
           }
         }
-      ],
-      "skip": true,
-      "skipReason": "follow-up: scenario fixture needs timing/state adjustment (filed as attn-nnj.5.16)"
+      ]
     },
     {
       "id": "hard-max-ttl-008",

@@ -1561,8 +1561,25 @@ async function actGetBlob(
   const room = mustRoom(state, blob.roomHandle, label);
   const download = await presignBlobDownload(env, room.roomId, blob.envelopeId);
   const res = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, { method: "GET" });
-  await assertResponse(res, step.expect, label);
-  if (step.params.expectedBytes !== undefined && res.status === 200) {
+  // The blob GET response is binary; call assertResponse-equivalent checks
+  // inline so we can consume the body once via arrayBuffer().
+  if (res.status !== step.expect.status) {
+    let bodyTxt = "<binary>";
+    try {
+      bodyTxt = await res.clone().text();
+    } catch {
+      // ignore
+    }
+    expect.fail(
+      `${label}: expected status ${step.expect.status}, got ${res.status}\n  body: ${bodyTxt}`,
+    );
+  }
+  if (step.expect.errorCode !== undefined) {
+    const errBody = (await res.json()) as { error?: { code?: string } };
+    expect(errBody?.error?.code, label).toBe(step.expect.errorCode);
+    return;
+  }
+  if (res.status === 200 && step.params.expectedBytes !== undefined) {
     const got = new Uint8Array(await res.arrayBuffer());
     if (got.byteLength !== step.params.expectedBytes) {
       expect.fail(

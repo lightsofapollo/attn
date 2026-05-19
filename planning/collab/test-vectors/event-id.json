@@ -84,6 +84,116 @@
         "canonicalBytes": "{\"body\":{\"anchor\":{\"baseHash\":\"fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y\",\"fileId\":\"f-file-01\",\"position\":{\"byteRange\":[2,9],\"lineRange\":[1,1]},\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2},\"body\":\"child\",\"threadId\":\"thread-2\",\"type\":\"comment_created\"},\"meta\":{\"authorId\":\"p-author-01\",\"createdAt\":1700000001000,\"deviceId\":\"d-device-01\",\"parentEventIds\":[\"evt-AAA\",\"evt-ZZZ\"],\"roomId\":\"hjCfgOvsatNOUedgxhZpyw\",\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2}}",
         "eventId": "RK6sKAm4nL7iR3pNpXzVp598c29o2V7KaxJJzN7e050"
       }
+    },
+    {
+      "name": "1-parent event (single-parent boundary between root and DAG)",
+      "event": {
+        "meta": {
+          "v": 2,
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
+          "authorId": "p-author-01",
+          "deviceId": "d-device-01",
+          "createdAt": 1700000010000,
+          "parentEventIds": ["evt-only"],
+          "snapshotId": "eQ7pDCC-mekpz-we7gDYag"
+        },
+        "body": {
+          "type": "comment_created",
+          "threadId": "thread-1-parent",
+          "anchor": {
+            "v": 2,
+            "fileId": "f-file-01",
+            "snapshotId": "eQ7pDCC-mekpz-we7gDYag",
+            "baseHash": "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+            "position": {
+              "byteRange": [0, 5],
+              "lineRange": [1, 1]
+            }
+          },
+          "body": "parent-count vector: 1-parent"
+        }
+      },
+      "expected": {
+        "canonicalBytes": "{\"body\":{\"anchor\":{\"baseHash\":\"fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y\",\"fileId\":\"f-file-01\",\"position\":{\"byteRange\":[0,5],\"lineRange\":[1,1]},\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2},\"body\":\"parent-count vector: 1-parent\",\"threadId\":\"thread-1-parent\",\"type\":\"comment_created\"},\"meta\":{\"authorId\":\"p-author-01\",\"createdAt\":1700000010000,\"deviceId\":\"d-device-01\",\"parentEventIds\":[\"evt-only\"],\"roomId\":\"hjCfgOvsatNOUedgxhZpyw\",\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2}}",
+        "eventId": "Dkis4liEAFIG8_dHOekG_L4SDhQLzn_QS3_mL8gID2s"
+      }
+    },
+    {
+      "name": "3-parents event (parents listed out of order; corpus stores post-sort)",
+      "event": {
+        "meta": {
+          "v": 2,
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
+          "authorId": "p-author-01",
+          "deviceId": "d-device-01",
+          "createdAt": 1700000020000,
+          "parentEventIds": ["evt-AAA", "evt-MMM", "evt-ZZZ"],
+          "snapshotId": "eQ7pDCC-mekpz-we7gDYag"
+        },
+        "body": {
+          "type": "comment_created",
+          "threadId": "thread-3-parents (out of order)",
+          "anchor": {
+            "v": 2,
+            "fileId": "f-file-01",
+            "snapshotId": "eQ7pDCC-mekpz-we7gDYag",
+            "baseHash": "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+            "position": {
+              "byteRange": [0, 5],
+              "lineRange": [1, 1]
+            }
+          },
+          "body": "parent-count vector: 3-parents (out of order)"
+        }
+      },
+      "expected": {
+        "canonicalBytes": "{\"body\":{\"anchor\":{\"baseHash\":\"fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y\",\"fileId\":\"f-file-01\",\"position\":{\"byteRange\":[0,5],\"lineRange\":[1,1]},\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2},\"body\":\"parent-count vector: 3-parents (out of order)\",\"threadId\":\"thread-3-parents (out of order)\",\"type\":\"comment_created\"},\"meta\":{\"authorId\":\"p-author-01\",\"createdAt\":1700000020000,\"deviceId\":\"d-device-01\",\"parentEventIds\":[\"evt-AAA\",\"evt-MMM\",\"evt-ZZZ\"],\"roomId\":\"hjCfgOvsatNOUedgxhZpyw\",\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2}}",
+        "eventId": "Q3zyTdfUdCrvbjitkOgL7teUDd_g26_cq-6OZisLUGM"
+      }
+    },
+    {
+      "name": "10-parents event (corpus stores post-sort; locks sort-before-hash on a long list)",
+      "event": {
+        "meta": {
+          "v": 2,
+          "roomId": "hjCfgOvsatNOUedgxhZpyw",
+          "authorId": "p-author-01",
+          "deviceId": "d-device-01",
+          "createdAt": 1700000030000,
+          "parentEventIds": [
+            "evt-00",
+            "evt-01",
+            "evt-02",
+            "evt-03",
+            "evt-04",
+            "evt-05",
+            "evt-06",
+            "evt-07",
+            "evt-08",
+            "evt-09"
+          ],
+          "snapshotId": "eQ7pDCC-mekpz-we7gDYag"
+        },
+        "body": {
+          "type": "comment_created",
+          "threadId": "thread-10-parents (out of order)",
+          "anchor": {
+            "v": 2,
+            "fileId": "f-file-01",
+            "snapshotId": "eQ7pDCC-mekpz-we7gDYag",
+            "baseHash": "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
+            "position": {
+              "byteRange": [0, 5],
+              "lineRange": [1, 1]
+            }
+          },
+          "body": "parent-count vector: 10-parents (out of order)"
+        }
+      },
+      "expected": {
+        "canonicalBytes": "{\"body\":{\"anchor\":{\"baseHash\":\"fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y\",\"fileId\":\"f-file-01\",\"position\":{\"byteRange\":[0,5],\"lineRange\":[1,1]},\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2},\"body\":\"parent-count vector: 10-parents (out of order)\",\"threadId\":\"thread-10-parents (out of order)\",\"type\":\"comment_created\"},\"meta\":{\"authorId\":\"p-author-01\",\"createdAt\":1700000030000,\"deviceId\":\"d-device-01\",\"parentEventIds\":[\"evt-00\",\"evt-01\",\"evt-02\",\"evt-03\",\"evt-04\",\"evt-05\",\"evt-06\",\"evt-07\",\"evt-08\",\"evt-09\"],\"roomId\":\"hjCfgOvsatNOUedgxhZpyw\",\"snapshotId\":\"eQ7pDCC-mekpz-we7gDYag\",\"v\":2}}",
+        "eventId": "6qsWRyVBzZ5jsdGrfBqUJVzl_hhZPXLMOsFkdymNeNY"
+      }
     }
   ]
 }

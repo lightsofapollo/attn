@@ -95,7 +95,13 @@ export type IpcMessageType =
   | 'open_devtools'
   | 'drag_window'
   | 'js_log'
-  | 'js_error';
+  | 'js_error'
+  | 'review_share'
+  | 'review_join'
+  | 'review_create_comment'
+  | 'review_create_suggestion'
+  | 'review_accept_suggestion'
+  | 'review_resolve_anchor';
 
 export interface CheckboxToggleMessage {
   type: 'checkbox_toggle';
@@ -163,6 +169,52 @@ export interface JsErrorMessage {
   stack?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Review collaboration outbound IPC messages
+//
+// camelCase to match Rust's `#[serde(rename_all = "camelCase")]` on each
+// review variant in `src/ipc.rs` (see attn-nnj.2.9). Payload field types come
+// from the review domain types defined below.
+// ---------------------------------------------------------------------------
+
+export interface ReviewShareMessage {
+  type: 'review_share';
+  path: string;
+  mode: 'live' | 'async' | 'hybrid';
+  ttl?: string;
+}
+
+export interface ReviewJoinMessage {
+  type: 'review_join';
+  invite: string;
+}
+
+export interface ReviewCreateCommentMessage {
+  type: 'review_create_comment';
+  roomId: RoomId;
+  anchor: Anchor;
+  body: string;
+}
+
+export interface ReviewCreateSuggestionMessage {
+  type: 'review_create_suggestion';
+  roomId: RoomId;
+  draft: SuggestionDraft;
+}
+
+export interface ReviewAcceptSuggestionMessage {
+  type: 'review_accept_suggestion';
+  roomId: RoomId;
+  suggestionId: EventId;
+}
+
+export interface ReviewResolveAnchorMessage {
+  type: 'review_resolve_anchor';
+  roomId: RoomId;
+  eventId: EventId;
+  range: PositionAnchor;
+}
+
 export type IpcMessage =
   | CheckboxToggleMessage
   | NavigateMessage
@@ -175,7 +227,13 @@ export type IpcMessage =
   | OpenDevtoolsMessage
   | DragWindowMessage
   | JsLogMessage
-  | JsErrorMessage;
+  | JsErrorMessage
+  | ReviewShareMessage
+  | ReviewJoinMessage
+  | ReviewCreateCommentMessage
+  | ReviewCreateSuggestionMessage
+  | ReviewAcceptSuggestionMessage
+  | ReviewResolveAnchorMessage;
 
 export type AppMode = 'read' | 'edit';
 
@@ -530,6 +588,20 @@ export type SuggestionOperation =
       kind: 'delete';
       expectedText: string;
     };
+
+/**
+ * Draft payload sent over IPC by the frontend when creating a suggestion.
+ *
+ * Wraps the anchor + operation (+ optional note) so the Rust ReviewManager
+ * can mint a fresh `suggestionId` and assemble a `SuggestionCreatedBody`.
+ * Mirrors `crate::review::model::SuggestionDraft` (camelCase serde).
+ * @see planning/collab/data-model.md §Webview IPC Changes
+ */
+export interface SuggestionDraft {
+  anchor: Anchor;
+  operation: SuggestionOperation;
+  note?: string;
+}
 
 /**
  * Authoring metadata shared by every review event.

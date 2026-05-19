@@ -225,17 +225,31 @@ defineCase('later resolution for same eventId replaces the earlier one', () => {
 // Runner
 // ---------------------------------------------------------------------------
 
-let passed = 0;
-let failed = 0;
-for (const run of cases) {
-  const r = run();
-  if (r.ok) {
-    passed += 1;
-    console.log(`  ok  ${r.name}${r.detail ? ` — ${r.detail}` : ''}`);
-  } else {
-    failed += 1;
-    console.error(`  FAIL ${r.name}\n        ${r.detail ?? '(no detail)'}`);
+// Dodge `@types/node` (web/ tsconfig doesn't include it) by reading
+// `globalThis.process` through a narrow structural shape — same dodge
+// `resolver.test.ts` uses.
+interface NodeProcessShape {
+  exit?: (code: number) => void;
+}
+
+function runAllCases(): void {
+  let passed = 0;
+  let failed = 0;
+  for (const run of cases) {
+    const r = run();
+    if (r.ok) {
+      passed += 1;
+      console.log(`  ok  ${r.name}${r.detail ? ` — ${r.detail}` : ''}`);
+    } else {
+      failed += 1;
+      console.error(`  FAIL ${r.name}\n        ${r.detail ?? '(no detail)'}`);
+    }
+  }
+  console.log(`\n${passed} passed, ${failed} failed`);
+  if (failed > 0) {
+    const nodeProcess = (globalThis as unknown as { process?: NodeProcessShape }).process;
+    nodeProcess?.exit?.(1);
   }
 }
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+
+runAllCases();

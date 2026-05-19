@@ -114,6 +114,17 @@ pub enum SignalingPayload {
         since_snapshot_id: Option<SnapshotId>,
         from: DeviceId,
     },
+    /// Live co-typing traffic (prosemirror-collab steps). `payload` is the
+    /// exact JSON string the sender's webview emitted — a submission (any
+    /// client → owner) or an authoritative broadcast (owner → all). The
+    /// daemon NEVER parses it: the prosemirror-collab authority lives in the
+    /// owner's webview, so Rust is a pure encrypted step-pipe. Carried over
+    /// the ephemeral, FIFO-capped `signal` channel so high-frequency steps
+    /// never bloat the durable event log.
+    Collab {
+        from: DeviceId,
+        payload: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +375,43 @@ mod tests {
         let recovered =
             disassemble_signal_envelope(&envelope, &key).expect("disassemble offer");
         assert_eq!(recovered, payload);
+    }
+
+    // -----------------------------------------------------------------
+    // 1b. Round-trip Collab — the live co-typing step-pipe. Broadcast
+    //     (target=None, owner→all) and the opaque payload survives intact.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn round_trip_collab_broadcast() {
+        let (room, author, dev, _target) = fixture_ids();
+        let key = signaling_key();
+        // The daemon treats this as opaque; here it's a representative
+        // CollabBroadcast JSON the owner's webview would emit.
+        let payload = SignalingPayload::Collab {
+            from: dev.clone(),
+            payload: r#"{"kind":"broadcast","broadcast":{"startVersion":0,"steps":[{"stepType":"replace","from":1,"to":1,"slice":{"content":[{"type":"text","text":"X"}]}}],"clientIDs":["owner"]}}"#.to_string(),
+        };
+
+        let envelope = assemble_signal_envelope(
+            payload.clone(),
+            &key,
+            &room,
+            &author,
+            &dev,
+            None, // broadcast — every participant receives it
+            &[0x77u8; 16],
+            FIXED_TS_MS,
+            EXPIRES_MS,
+        )
+        .expect("assemble collab broadcast");
+
+        assert_eq!(envelope.kind, EnvelopeKind::Signal);
+        assert!(envelope.target.is_none(), "broadcast collab must have no target");
+
+        let recovered =
+            disassemble_signal_envelope(&envelope, &key).expect("disassemble collab");
+        assert_eq!(recovered, payload, "collab payload must survive the round-trip byte-for-byte");
     }
 
     // -----------------------------------------------------------------

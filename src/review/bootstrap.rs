@@ -1067,6 +1067,40 @@ impl Bootstrapper {
     // need R2 spillover, which doesn't apply to typical markdown docs.
     // -----------------------------------------------------------------
 
+    /// Fetch the room's device directory from the relay and merge every
+    /// device's verifying key into `cache`. Used by `ReviewManager` when it
+    /// spins up a room runtime (Share or resume) so the InboundPipeline can
+    /// verify signatures on envelopes — including the owner's own
+    /// self-echoed snapshot, which the relay broadcasts back to the author.
+    ///
+    /// Idempotent: re-running just re-inserts the same keys. Reviewers'
+    /// keys land here as `ParticipantJoined` events arrive, but seeding
+    /// from the directory at startup avoids a window where early envelopes
+    /// fail to verify with `unknown signer`.
+    pub async fn refresh_device_keys(
+        &self,
+        room_id: &RoomId,
+        cache: &Arc<RwLock<std::collections::HashMap<String, DeviceVerifyingKey>>>,
+    ) -> Result<usize, BootstrapError> {
+        let room_secret = load_room_secret(self.store.root(), room_id)?;
+        let room_keys = derive_room_keys(&room_secret);
+        let directory = self.list_devices(room_id, &room_keys.admission_key).await?;
+        let mut guard = cache.write().await;
+        let mut added = 0usize;
+        for dev in &directory {
+            let raw = URL_SAFE_NO_PAD
+                .decode(dev.public_signing_key.as_bytes())
+                .map_err(|e| BootstrapError::Crypto(format!("directory key decode: {e}")))?;
+            let bytes: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
+                BootstrapError::Crypto("directory key must decode to 32 bytes".into())
+            })?;
+            let vk = DeviceVerifyingKey::from_bytes(&bytes)?;
+            guard.insert(vk.signing_key_id_base64url(), vk);
+            added += 1;
+        }
+        Ok(added)
+    }
+
     /// Read the shared file off disk, build a snapshot of its current
     /// state, and append a `SnapshotCreated` event to the room's outbox.
     /// Returns the freshly minted `FileId` + `SnapshotId` so the caller

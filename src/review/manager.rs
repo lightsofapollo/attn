@@ -643,6 +643,26 @@ impl ReviewManager {
             outbox_clone.run(cancel_rx).await;
         });
 
+        // Seed the verifying-key cache from the relay's device directory
+        // BEFORE the WS connects, so the InboundPipeline can verify
+        // signatures on the first envelopes it sees — including the
+        // owner's own snapshot, which the relay broadcasts back to the
+        // author the instant the outbox POSTs it. Done synchronously
+        // (block_on) to close the race where that broadcast arrives
+        // before the directory fetch completes. The GET is ~milliseconds
+        // against a healthy relay; failures are logged but non-fatal
+        // (peer keys also arrive via ParticipantJoined events).
+        match runtime.block_on(bootstrap.refresh_device_keys(room_id, &verifying_keys)) {
+            Ok(n) => eprintln!(
+                "review: seeded {n} device key(s) for room={}",
+                room_id.as_str()
+            ),
+            Err(err) => eprintln!(
+                "review: refresh_device_keys failed room={}: {err}",
+                room_id.as_str()
+            ),
+        }
+
         // Inbound pipeline: decrypts incoming envelopes and appends them
         // to events.jsonl. Wired through the WS subscriber.
         let inbound = Arc::new(InboundPipeline::new(

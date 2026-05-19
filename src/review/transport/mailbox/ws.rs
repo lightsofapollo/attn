@@ -723,7 +723,17 @@ impl MailboxWsClient {
                 });
                 None
             }
-            ServerFrame::Envelope { envelope, server_seq } => {
+            ServerFrame::Envelope { mut envelope, server_seq } => {
+                // The relay's `EnvelopeRecord` omits `v` and `roomId` because
+                // those values are implicit in the WS subscription. Rust's
+                // MailboxEnvelope uses defaults to deserialize, but the AAD
+                // reconstruction inside `disassemble_event_envelope` would
+                // compute a mismatched MAC against the empty `roomId`
+                // placeholder. Restore the room_id from our subscription
+                // config so the AAD binds correctly.
+                if envelope.room_id.as_str().is_empty() {
+                    envelope.room_id = self.config.room_id.clone();
+                }
                 let room_id = envelope.room_id.clone();
                 let kind = envelope.kind;
                 use crate::review::model::EnvelopeKind;

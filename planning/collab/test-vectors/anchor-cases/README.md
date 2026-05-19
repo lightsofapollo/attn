@@ -54,6 +54,12 @@ primary outcome:
 
 Total: 53 cases (≥ 45 per `attn-nnj.3.6` acceptance).
 
+By `expected.status`: `exact` × 5, `remapped` × 35, `ambiguous` × 7,
+`stale` × 6. By `expected.reason` (or first-candidate reason for
+`ambiguous`): `base_hash_match` × 5, `quote_match` × 19,
+`block_fingerprint_match` × 5, `structure_quote_match` × 5,
+`context_match` × 3, `fuzzy_quote_match` × 3.
+
 The `block_fingerprint_match`, `structure_quote_match`, `context_match`,
 and `fuzzy_quote_match` reasons are tagged on the **lowest** confidence
 step a resolver might fall back to for that case. In practice the locked

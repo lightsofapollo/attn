@@ -45,6 +45,8 @@
   import CommandPalette from './lib/CommandPalette.svelte';
   import KeyboardShortcutsDialog from './lib/KeyboardShortcutsDialog.svelte';
   import ReviewApplyExpand from './lib/ReviewApplyExpand.svelte';
+  import ReviewBar from './lib/ReviewBar.svelte';
+  import ShareDialog from './lib/ShareDialog.svelte';
   import { toast } from 'svelte-sonner';
   import { Toaster } from '$lib/components/ui/sonner';
   import { SidebarProvider, SidebarInset } from '$lib/components/ui/sidebar';
@@ -78,6 +80,9 @@
   let mode: AppMode = $state('edit');
   let commandPaletteOpen = $state(false);
   let shortcutsOpen = $state(false);
+  // Share-for-review dialog (attn-nnj.4.10). Owner-only modal opened via
+  // the ReviewBar's [Share] button or the Cmd+Shift+S keybinding.
+  let shareDialogOpen = $state(false);
   let rawMarkdown = $state('');
   let structure: PlanStructure = $state({ phases: [], tasks: [], file_refs: [] });
   let fileTree: TreeNode[] = $state([]);
@@ -1198,6 +1203,17 @@
     reviewStore.togglePanel();
   }
 
+  /**
+   * Open the Share-for-review modal (attn-nnj.4.10). Triggered by the
+   * ReviewBar's [Share] button click handler and by the Cmd+Shift+S
+   * binding routed through initKeyboard. We gate on an active markdown
+   * tab — sharing a directory or a non-markdown asset is meaningless.
+   */
+  function openShareDialog(): void {
+    if (!activePath || activeFileType !== 'markdown') return;
+    shareDialogOpen = true;
+  }
+
   // Handle sidebar navigation events
   function handleSidebarNavigate(path: string, newTab: boolean): void {
     openPath(path, undefined, newTab);
@@ -1315,6 +1331,9 @@
         commandPaletteOpen = !commandPaletteOpen;
         if (commandPaletteOpen) shortcutsOpen = false;
       },
+      onShareOpen: () => {
+        openShareDialog();
+      },
       // Three-way apply hooks (attn-nnj.8.3). Read the verdict from the
       // store each time so we always operate on the currently-open card;
       // mirror the same accept/keep/edit-trigger/cancel semantics the
@@ -1365,6 +1384,16 @@
   {#if !hasSidebar}
     <div class="h-[40px] shrink-0"></div>
   {/if}
+  <!--
+    Review-bar row (attn-nnj.4.10). Self-gating: hidden unless a session is
+    bound to the active file OR the share dialog is being initiated. See
+    planning/collab/ui/connection-share.md §8.
+  -->
+  <ReviewBar
+    shareOpen={shareDialogOpen}
+    isOwner={true}
+    onShareClick={openShareDialog}
+  />
 
   <ScrollArea
     class="attn-content-viewport min-h-0 flex-1"
@@ -1541,6 +1570,10 @@
 
 <svelte:window onkeydown={(e) => { handleGlobalShortcutsHelpHotkey(e); handleGlobalRightRailHotkey(e); }} />
 <KeyboardShortcutsDialog bind:open={shortcutsOpen} />
+<ShareDialog
+  bind:open={shareDialogOpen}
+  filePath={activePath}
+/>
 <ReviewApplyExpand />
 <CommandPalette
   bind:open={commandPaletteOpen}

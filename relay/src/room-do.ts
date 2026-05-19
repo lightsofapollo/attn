@@ -27,7 +27,7 @@ import {
 import { canonicalize, type CanonicalValue } from "./canonical";
 import type { Env } from "./env";
 import { OwnerSigError, verifyOwnerSignature } from "./owner-sig";
-import { PowError, verifyPow } from "./pow";
+import { parsePow, PowError, verifyPow } from "./pow";
 import {
   acksRequestSchema,
   deviceRegistrationSchema,
@@ -134,6 +134,14 @@ export class RoomDO extends DurableObject<Env> {
         return errorResponse(400, "ATTN_ROOM_ID_INVALID", "roomId required");
       }
       return this.handleRoomCreate(request, roomId);
+    }
+
+    if (roomMatch && request.method === "DELETE") {
+      const roomId = roomMatch[1];
+      if (roomId === undefined || roomId === "") {
+        return errorResponse(400, "ATTN_ROOM_ID_INVALID", "roomId required");
+      }
+      return this.handleRoomDelete(request, roomId, url.pathname);
     }
 
     const devicesMatch = url.pathname.match(ROOM_DEVICES_PATH_RE);
@@ -1203,6 +1211,196 @@ export class RoomDO extends DurableObject<Env> {
     }
 
     return new Response(null, { status: 204 });
+  }
+
+  // -- DELETE /v2/rooms/:roomId -------------------------------------------
+
+  /**
+   * Wipe a room per relay-spec.md §DELETE /v2/rooms/:roomId.
+   *
+   * Layered checks (every layer required — owner-only privileged op):
+   *   1. Room exists (admissionKey loaded from DO storage; 404 otherwise).
+   *   2. Admission HMAC (`Attn-Admission`) — URL-as-bearer.
+   *   3. PoW (`Attn-PoW`) — write-cost gate. We parse the token to extract its
+   *      embedded deviceId, then pass that deviceId to `verifyPow` so the
+   *      `resource` check (roomId + deviceId + requestPathHash) re-validates the
+   *      same value bound into the hash. (Unlike POST endpoints, DELETE has no
+   *      body to carry deviceId, and the spec doesn't define a header for it —
+   *      the PoW token itself is the binding.)
+   *   4. Owner signature (`Attn-Owner-Signature`) — Ed25519 over canonicalRequest
+   *      against the stored ownerSigningKey. The only path to this endpoint.
+   *
+   * On success:
+   *   a. Close every live WebSocket with close code 4001 (room deleted). Hibernated
+   *      sockets re-surface via state.getWebSockets() so closes reach replay too.
+   *   b. Wipe ALL DO storage keys via state.storage.deleteAll() — meta, devices,
+   *      envelopes, acks, pow_seen, the lot. Cancel any scheduled alarm so we
+   *      don't re-trip the 4002 (expired) close on a now-empty DO.
+   *   c. Schedule R2 cleanup: list objects under `rooms/<roomId>/` and delete each.
+   *      Best-effort within this request. Anything that lags or fails falls back
+   *      to the bucket's 7-day lifecycle rule (relay-spec.md §R2 Integration).
+   *
+   * Subsequent requests targeting this roomId observe an empty DO — every other
+   * handler short-circuits to `404 ATTN_ROOM_NOT_FOUND` when meta:admission_key
+   * is missing.
+   *
+   * Response: 204 No Content.
+   */
+  private async handleRoomDelete(
+    request: Request,
+    roomId: string,
+    urlPath: string,
+  ): Promise<Response> {
+    // 1. Existence check — without admissionKey we couldn't verify admission
+    //    anyway, and every other endpoint surfaces unknown rooms as 404.
+    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
+    if (storedAdmissionKey === undefined) {
+      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+    }
+
+    // DELETE has no body per the spec, but we still buffer (a) so we can clone
+    // the request twice (admission + owner-sig) and (b) so canonicalRequest sees
+    // a deterministic empty SHA. We tolerate a body present-but-empty too.
+    let bodyBytes: Uint8Array;
+    try {
+      bodyBytes = new Uint8Array(await request.arrayBuffer());
+    } catch (err) {
+      return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
+    }
+
+    // 2. Admission — URL-as-bearer trust boundary.
+    try {
+      const buffered = bufferedRequest(request, bodyBytes);
+      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
+    } catch (err) {
+      if (err instanceof AdmissionError) {
+        return errorResponse(401, err.code, err.message);
+      }
+      throw err;
+    }
+
+    // 3. PoW. DELETE has no body to carry deviceId; the token itself binds it.
+    //    We parse first to extract the deviceId, then hand it to verifyPow which
+    //    re-validates the same value via the resource check + leading-zero count.
+    const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+    if (policy === undefined) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
+    }
+    const powToken = request.headers.get("Attn-PoW");
+    if (powToken === null || powToken === "") {
+      return errorResponse(400, "ATTN_POW_INVALID", "missing Attn-PoW header");
+    }
+    let powDeviceId: string;
+    try {
+      powDeviceId = parsePow(powToken).deviceId;
+    } catch (err) {
+      if (err instanceof PowError) {
+        return errorResponse(400, err.code, err.message);
+      }
+      throw err;
+    }
+    try {
+      await verifyPow(powToken, {
+        roomId,
+        deviceId: powDeviceId,
+        method: "DELETE",
+        urlPath,
+        policyPowBits: policy.powBits,
+        now: Date.now(),
+        isReplayed: (hash) => this.isPowSeen(hash),
+        markSeen: (hash, expiresAt) => this.markPowSeen(hash, expiresAt),
+      });
+    } catch (err) {
+      if (err instanceof PowError) {
+        return errorResponse(400, err.code, err.message);
+      }
+      throw err;
+    }
+
+    // 4. Owner signature — the only path that authorizes wipe. We check this
+    //    AFTER admission + PoW so a non-URL-holder never learns whether owner
+    //    sig was even attempted (same layering rationale as the rest of the
+    //    privileged routes).
+    const ownerKey = await this.ctx.storage.get<Uint8Array>(META.ownerSigningKey);
+    if (ownerKey === undefined) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing owner key`);
+    }
+    try {
+      const buffered = bufferedRequest(request, bodyBytes);
+      await verifyOwnerSignature(buffered, urlPath, ownerKey);
+    } catch (err) {
+      if (err instanceof OwnerSigError) {
+        return errorResponse(403, err.code, err.message);
+      }
+      throw err;
+    }
+
+    // ---- Authorized: actually wipe ----------------------------------------
+
+    // a. Close every live WS with 4001 (room deleted). We don't broadcast a
+    //    presence:leave first — the room is gone, leave frames would race the
+    //    close on the wire and confuse clients. Use a try/swallow loop so one
+    //    dead socket doesn't block the others.
+    for (const sock of this.ctx.getWebSockets()) {
+      try {
+        sock.close(CLOSE_ROOM_DELETED, "room deleted");
+      } catch {
+        // socket likely already closed; runtime will clean up
+      }
+    }
+
+    // b. Wipe every DO storage key in a single transaction. deleteAll() also
+    //    drops pow_seen:*, the alarm map, etc. After this the DO is observably
+    //    indistinguishable from a never-created room.
+    await this.ctx.storage.deleteAll();
+    // Cancel any pending alarm too — without this the next alarm fire would
+    // try to broadcast 4002 to a now-empty DO and re-run idle cleanup.
+    try {
+      await this.ctx.storage.deleteAlarm();
+    } catch {
+      // deleteAlarm is a no-op when no alarm is set, but the API surface
+      // varies across workerd versions; swallow any "no alarm" error.
+    }
+
+    // c. Schedule R2 cleanup. Best-effort: anything we can't get to falls back
+    //    to the bucket's 7-day lifecycle rule (relay-spec.md §R2 Integration).
+    //    We loop in pages of 1000 (R2 list cap) and delete each page in batches.
+    await this.cleanupRoomBlobs(roomId);
+
+    return new Response(null, { status: 204 });
+  }
+
+  /**
+   * List + delete every R2 object under `rooms/<roomId>/`. Iterates the list
+   * cursor until truncated=false. Errors are swallowed (best-effort per spec);
+   * the bucket lifecycle rule is the safety net.
+   */
+  private async cleanupRoomBlobs(roomId: string): Promise<void> {
+    const prefix = `rooms/${roomId}/`;
+    const bucket = this.env.RELAY_BLOBS;
+    if (bucket === undefined) return;
+    try {
+      let cursor: string | undefined;
+      // Bound the loop so a runaway list can't pin the DO event loop. In
+      // practice a single room never produces more than ~25 MiB / 5 MiB blobs,
+      // so 50 pages of 1000 is comfortable headroom.
+      for (let page = 0; page < 50; page++) {
+        const listed: R2Objects = await bucket.list({
+          prefix,
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        const keys = listed.objects.map((obj) => obj.key);
+        if (keys.length > 0) {
+          // R2.delete accepts an array of keys in a single round-trip.
+          await bucket.delete(keys);
+        }
+        if (!listed.truncated) return;
+        cursor = listed.truncated ? listed.cursor : undefined;
+        if (cursor === undefined) return;
+      }
+    } catch {
+      // Best-effort: lifecycle rule (7d) catches anything we leave behind.
+    }
   }
 
   /**

@@ -50,6 +50,12 @@ percent-encoding = "2.3.2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 nucleo-matcher = "0.3.1"
 
+# Markdown AST parser used by the canonical AnchorIndex builder
+# (attn-nnj.3.1 — see planning/collab/data-model.md §Anchor Index). We disable
+# the default `cli` + `syntect` features because we only need the parser; the
+# webview rendering pipeline lives in TypeScript.
+comrak = { version = "0.52", default-features = false }
+
 # Crypto foundations (attn-nnj.1.1 — per planning/collab/crypto-spec.md §Rust crates
 # and planning/collab/amendments.md §Codebase Corrections). No code uses these yet;
 # wrappers land in attn-nnj.1.3-1.8.

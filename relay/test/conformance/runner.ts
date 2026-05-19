@@ -57,6 +57,10 @@ export interface Scenario {
   spec?: string;
   tags?: string[];
   requires?: string[];
+  /** When true, the runner skips execution (replay.test.ts emits `it.skip`). */
+  skip?: boolean;
+  /** Human-readable rationale surfaced in the skip label. */
+  skipReason?: string;
   steps: Step[];
 }
 

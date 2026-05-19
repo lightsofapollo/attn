@@ -29,6 +29,7 @@ import type { Env } from "./env";
 import { OwnerSigError, verifyOwnerSignature } from "./owner-sig";
 import { parsePow, POW_MAX_LIFETIME_MS, PowError, verifyPow } from "./pow";
 import { presignBlobUpload, type PresignedUploadResult } from "./r2";
+import { DurableObjectRateLimit, type RateLimitResult } from "./rate-limit";
 import {
   acksRequestSchema,
   blobPresignRequestSchema,
@@ -116,6 +117,33 @@ interface ErrorBody {
 
 function errorResponse(status: number, code: string, message: string): Response {
   return Response.json({ error: { code, message } } satisfies ErrorBody, { status });
+}
+
+/**
+ * 429 builder for rate-limited DO responses. Mirrors the Worker-edge
+ * helper so the wire shape (Retry-After + X-Attn-Retry-After-Ms +
+ * error.retryAfterMs in body) is identical regardless of which layer
+ * detected the overflow.
+ */
+function buildRateLimitedResponse(result: RateLimitResult): Response {
+  const retryAfterMs = result.retryAfterMs ?? 60_000;
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: result.code ?? "ATTN_RATE_LIMITED",
+        message: "rate limit exceeded",
+        retryAfterMs,
+      },
+    }),
+    {
+      status: 429,
+      headers: new Headers({
+        "Content-Type": "application/json",
+        "Retry-After": String(Math.ceil(retryAfterMs / 1000)),
+        "X-Attn-Retry-After-Ms": String(retryAfterMs),
+      }),
+    },
+  );
 }
 
 interface HardLimits {
@@ -496,7 +524,13 @@ export class RoomDO extends DurableObject<Env> {
     }
     const body = result.data;
 
-    // 3. PoW — burnt once per request. Header carries the token verbatim.
+    // 3. Per-device rate limit (attn-nnj.5.13). Sits between admission and
+    //    PoW so admitted-but-noisy clients see a 429 immediately rather
+    //    than burning PoW cycles only to be rate-rejected.
+    const rateRejection = await this.enforceDeviceRateLimit(body.deviceId);
+    if (rateRejection !== undefined) return rateRejection;
+
+    // 4. PoW — burnt once per request. Header carries the token verbatim.
     const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
     if (policy === undefined) {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
@@ -523,7 +557,7 @@ export class RoomDO extends DurableObject<Env> {
       throw err;
     }
 
-    // 4. Decode the signing key + verify selfSignature.
+    // 5. Decode the signing key + verify selfSignature.
     let signingKeyBytes: Uint8Array;
     try {
       signingKeyBytes = base64UrlDecode(body.publicSigningKey);
@@ -751,6 +785,15 @@ export class RoomDO extends DurableObject<Env> {
       // zod's .min(1) makes this unreachable, but the type narrows for TS.
       return errorResponse(400, "ATTN_BODY_INVALID", "empty envelope batch");
     }
+
+    // 2a. Per-device rate limit (attn-nnj.5.13). Per relay-spec.md §Anti-Abuse,
+    //     all POST /envelopes traffic counts toward the per-device cap.
+    //     A batch is a single HTTP request so it bumps the counter once, not
+    //     N times; this matches the spec's "120/min/device" framing where
+    //     the unit is "request", not "envelope".
+    const rateRejection = await this.enforceDeviceRateLimit(first.deviceId);
+    if (rateRejection !== undefined) return rateRejection;
+
     try {
       await verifyPow(powToken, {
         roomId,
@@ -1113,7 +1156,11 @@ export class RoomDO extends DurableObject<Env> {
     }
     const body = result.data;
 
-    // 3. PoW — bound to (roomId, body.deviceId, POST, urlPath).
+    // 3. Per-device rate limit (attn-nnj.5.13).
+    const rateRejection = await this.enforceDeviceRateLimit(body.deviceId);
+    if (rateRejection !== undefined) return rateRejection;
+
+    // 4. PoW — bound to (roomId, body.deviceId, POST, urlPath).
     const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
     if (policy === undefined) {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
@@ -1140,7 +1187,7 @@ export class RoomDO extends DurableObject<Env> {
       throw err;
     }
 
-    // 4. Deletion gating — see method docstring for layering rationale.
+    // 5. Deletion gating — see method docstring for layering rationale.
     //    `deleteIntent` is the caller asking for deletion (owner-sig header
     //    present). `mayDelete` only flips true if every layer below also
     //    holds (policy enabled, acking device is owner-kind, signature ok).
@@ -1348,7 +1395,11 @@ export class RoomDO extends DurableObject<Env> {
     }
     const body = result.data;
 
-    // 3. PoW — bound to (roomId, body.deviceId, POST, urlPath).
+    // 3. Per-device rate limit (attn-nnj.5.13).
+    const rateRejection = await this.enforceDeviceRateLimit(body.deviceId);
+    if (rateRejection !== undefined) return rateRejection;
+
+    // 4. PoW — bound to (roomId, body.deviceId, POST, urlPath).
     const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
     if (policy === undefined) {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
@@ -1375,7 +1426,7 @@ export class RoomDO extends DurableObject<Env> {
       throw err;
     }
 
-    // 4. Threshold gate: payload must exceed 1 MiB. Below → use inline envelope path.
+    // 5. Threshold gate: payload must exceed 1 MiB. Below → use inline envelope path.
     if (body.ciphertextBytes <= BLOB_SPILLOVER_THRESHOLD_BYTES) {
       return errorResponse(
         400,
@@ -1555,6 +1606,12 @@ export class RoomDO extends DurableObject<Env> {
       }
       throw err;
     }
+
+    // 3a. Per-device rate limit (attn-nnj.5.13). Uses the deviceId
+    //     extracted from the PoW token since DELETE has no body.
+    const rateRejection = await this.enforceDeviceRateLimit(powDeviceId);
+    if (rateRejection !== undefined) return rateRejection;
+
     try {
       await verifyPow(powToken, {
         roomId,
@@ -2108,6 +2165,23 @@ export class RoomDO extends DurableObject<Env> {
   }
 
   // -- helpers for PoW replay + device ordering ---------------------------
+
+  /**
+   * Per-device rate limit check (attn-nnj.5.13). Lives inside the DO so the
+   * per-(deviceId, minute) counter persists across requests and shares
+   * storage with the room. Returns undefined when the caller is under
+   * the cap; returns a 429 Response when the cap is exceeded.
+   *
+   * Call from every write handler AFTER admission verification — admission
+   * is the trust boundary that ties a caller to a known URL, so we don't
+   * want unauthenticated traffic charging against a known device's quota.
+   */
+  private async enforceDeviceRateLimit(deviceId: string): Promise<Response | undefined> {
+    const limiter = new DurableObjectRateLimit(this.ctx.storage);
+    const result = await limiter.check(deviceId);
+    if (result.ok) return undefined;
+    return buildRateLimitedResponse(result);
+  }
 
   private async isPowSeen(hash: string): Promise<boolean> {
     return (await this.ctx.storage.get<number>(powSeenKey(hash))) !== undefined;

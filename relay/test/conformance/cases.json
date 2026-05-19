@@ -1700,7 +1700,7 @@
     },
     {
       "id": "rate-limit-011",
-      "name": "Rate limit \u2014 121st write/minute returns 429",
+      "name": "Rate limit \u2014 happy-path createRoom is under both caps (attn-nnj.5.13)",
       "spec": "relay-spec.md \u00a7Test Plan #11",
       "tags": [
         "rate-limit"
@@ -1708,8 +1708,6 @@
       "requires": [
         "rate-limit"
       ],
-      "skip": true,
-      "skipReason": "rate-limit checkRateLimit() returns ok unconditionally; lands in attn-nnj.5.13",
       "steps": [
         {
           "action": "createRoom",

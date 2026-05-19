@@ -34,6 +34,7 @@
   import CloudOff from '@lucide/svelte/icons/cloud-off';
   import Inbox from '@lucide/svelte/icons/inbox';
   import Wifi from '@lucide/svelte/icons/wifi';
+  import { defaultFormatLastSeen } from './connection-badge-format';
   import { reviewStore } from './review/store.svelte';
   import type { ReviewStatus, ReviewStatusPeer } from './types';
 
@@ -303,22 +304,3 @@
   {/if}
 </div>
 
-<script lang="ts" module>
-  // Module-scope helper: a minimal relative-time formatter usable as the
-  // default `formatLastSeen` prop. Tests inject their own to keep
-  // assertions deterministic.
-  export function defaultFormatLastSeen(
-    timestampMs: number,
-    nowMs: number,
-  ): string {
-    const diff = timestampMs - nowMs;
-    const absSec = Math.round(Math.abs(diff) / 1000);
-    if (absSec < 60) return diff < 0 ? `${absSec}s ago` : `in ${absSec}s`;
-    const mins = Math.round(absSec / 60);
-    if (mins < 60) return diff < 0 ? `${mins}m ago` : `in ${mins}m`;
-    const hours = Math.round(mins / 60);
-    if (hours < 24) return diff < 0 ? `${hours}h ago` : `in ${hours}h`;
-    const days = Math.round(hours / 24);
-    return diff < 0 ? `${days}d ago` : `in ${days}d`;
-  }
-</script>

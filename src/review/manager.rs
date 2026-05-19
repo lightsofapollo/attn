@@ -476,6 +476,14 @@ impl ReviewManager {
                 self.accept_suggestion(bootstrapper, room_id, suggestion_id);
                 return;
             }
+            (
+                ReviewCommand::ResolveAnchor { room_id, event_id, range },
+                Some(bootstrapper),
+                Some(_runtime),
+            ) => {
+                self.resolve_anchor(bootstrapper, room_id, event_id, range);
+                return;
+            }
             (ReviewCommand::PublishSnapshot { path }, Some(bootstrapper), Some(_runtime)) => {
                 match bootstrapper
                     .republish_snapshot_for_path(path, unix_now_ms_for_manager())
@@ -695,6 +703,103 @@ impl ReviewManager {
             "review: accepted suggestion {} → applied to {} (room={})",
             suggestion_id.as_str(),
             path.display(),
+            room_id.as_str()
+        );
+    }
+
+    /// Owner/reviewer manually re-anchors a stale comment or suggestion to a
+    /// range they selected in the editor. We:
+    ///   1. Look up the original event to recover its real `file_id` (the
+    ///      stub used a placeholder, so the resolution never matched a file).
+    ///   2. Emit a durable `AnchorManuallyResolved` event so the override
+    ///      persists and propagates to peers — a manual re-anchor is a shared
+    ///      fact, not a local-only view tweak.
+    ///   3. Push an `AnchorResolutionChanged` (confident `Remapped` at the
+    ///      chosen range) so the local card flips from stale to resolved
+    ///      immediately, without waiting for the event to round-trip.
+    fn resolve_anchor(
+        &self,
+        bootstrapper: &Arc<Bootstrapper>,
+        room_id: &RoomId,
+        event_id: &EventId,
+        range: &crate::review::model::PositionAnchor,
+    ) {
+        let emit_err = |code: &str, msg: String| {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: code.to_string(),
+                message: msg,
+            });
+        };
+
+        // 1. Find the target comment/suggestion event → its anchor's file_id.
+        let want = event_id.as_str();
+        let mut file_id: Option<FileId> = None;
+        match self.store.iter_events(room_id) {
+            Ok(iter) => {
+                for ev in iter.flatten() {
+                    if ev.meta.event_id.as_str() != want {
+                        continue;
+                    }
+                    file_id = match &ev.body {
+                        crate::review::model::ReviewEventBody::CommentCreated { anchor, .. } => {
+                            Some(anchor.file_id.clone())
+                        }
+                        crate::review::model::ReviewEventBody::SuggestionCreated {
+                            anchor, ..
+                        } => Some(anchor.file_id.clone()),
+                        _ => None,
+                    };
+                    break;
+                }
+            }
+            Err(e) => {
+                emit_err("ATTN_RESOLVE_ANCHOR", format!("read events: {e}"));
+                return;
+            }
+        }
+        let Some(file_id) = file_id else {
+            emit_err(
+                "ATTN_RESOLVE_ANCHOR",
+                format!("event {} not found or carries no anchor", want),
+            );
+            return;
+        };
+
+        // 2. Emit the durable, propagating override event.
+        let resolved_by = match bootstrapper.config().identity_dir().and_then(|dir| {
+            crate::review::bootstrap::load_or_create_identity_in(&dir)
+                .map_err(crate::review::bootstrap::BootstrapError::from)
+        }) {
+            Ok(identity) => identity.typed_participant_id(),
+            Err(e) => {
+                emit_err("ATTN_RESOLVE_ANCHOR", format!("load identity: {e}"));
+                return;
+            }
+        };
+        let body = crate::review::model::ReviewEventBody::AnchorManuallyResolved {
+            event_id: event_id.clone(),
+            range: range.clone(),
+            resolved_by,
+        };
+        let send = bootstrapper.send_event_sync(room_id, body, unix_now_ms_for_manager());
+        self.emit_event_outcome(room_id.clone(), send);
+
+        // 3. Push the immediate local resolution for the original event.
+        (self.update_tx)(ReviewUpdate::AnchorResolutionChanged {
+            room_id: room_id.clone(),
+            event_id: event_id.clone(),
+            file_id,
+            resolved: ResolvedAnchor::Remapped {
+                confidence: 1.0,
+                current_range: range.clone(),
+                reason: crate::review::model::RemappedReason::QuoteMatch,
+            },
+        });
+
+        eprintln!(
+            "review: manually re-anchored event {} (room={})",
+            event_id.as_str(),
             room_id.as_str()
         );
     }

@@ -122,6 +122,19 @@ pub enum PresenceEvent {
     Leave,
 }
 
+/// Refreshes the verifying-key cache when the inbound pipeline hits an
+/// `UnknownSigner` — i.e. an envelope arrived from a device that joined
+/// after the cache was last populated. The mailbox WS client calls this,
+/// then retries the import once. The implementation (wired by
+/// `ReviewManager`) re-fetches `GET /devices` and merges the roster into
+/// the shared cache the `InboundPipeline` reads from.
+#[async_trait]
+pub trait DeviceKeyRefresher: Send + Sync {
+    /// Re-fetch the room's device directory and merge it into the cache.
+    /// Returns the number of keys merged, or an error string for logging.
+    async fn refresh(&self) -> Result<usize, String>;
+}
+
 /// A `Transport` is bound to a single `(RoomId, DeviceId)` pair.
 ///
 /// Implementations:

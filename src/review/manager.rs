@@ -693,11 +693,23 @@ impl ReviewManager {
         // to events.jsonl. Wired through the WS subscriber.
         let inbound = Arc::new(InboundPipeline::new(
             Arc::clone(&self.store),
-            verifying_keys,
+            verifying_keys.clone(),
             *room_keys.event_key.as_bytes(),
             *room_keys.snapshot_key.as_bytes(),
             *room_keys.signaling_key.as_bytes(),
         ));
+
+        // Refresher invoked when an inbound envelope arrives from a peer
+        // that joined AFTER our cache was seeded (e.g. a reviewer's first
+        // comment reaching the owner). Re-fetches GET /devices into the
+        // shared cache; the WS retries the import once. Without this, a
+        // late joiner's events are dropped as UnknownSigner forever.
+        let key_refresher: Arc<dyn crate::review::transport::DeviceKeyRefresher> =
+            Arc::new(BootstrapKeyRefresher {
+                bootstrap: Arc::clone(bootstrap),
+                room_id: room_id.clone(),
+                cache: verifying_keys,
+            });
 
         // WS subscriber — long-lived task that auto-reconnects.
         let (events_tx, mut events_rx) =
@@ -707,7 +719,8 @@ impl ReviewManager {
             inbound,
             Arc::clone(&self.store),
             events_tx,
-        );
+        )
+        .with_key_refresher(key_refresher);
         let (ws_cancel_tx, ws_cancel_rx) = tokio::sync::watch::channel(false);
         // Same lifetime concern as the outbox cancel sender above.
         Box::leak(Box::new(ws_cancel_tx));
@@ -1471,6 +1484,27 @@ fn stub_review_event(
             signing_key_id: "stub-keyid".to_string(),
             signature: "stub-sig".to_string(),
         },
+    }
+}
+
+/// `DeviceKeyRefresher` impl that re-fetches the room's device directory
+/// through the `Bootstrapper` and merges it into the shared verifying-key
+/// cache. Wired into `MailboxWsClient` so a late joiner's first event
+/// (which arrives before the owner has that device's key) triggers a
+/// refresh + import retry instead of being dropped as `UnknownSigner`.
+struct BootstrapKeyRefresher {
+    bootstrap: Arc<Bootstrapper>,
+    room_id: RoomId,
+    cache: VerifyingKeyCache,
+}
+
+#[async_trait::async_trait]
+impl crate::review::transport::DeviceKeyRefresher for BootstrapKeyRefresher {
+    async fn refresh(&self) -> Result<usize, String> {
+        self.bootstrap
+            .refresh_device_keys(&self.room_id, &self.cache)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

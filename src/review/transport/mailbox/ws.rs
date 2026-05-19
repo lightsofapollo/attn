@@ -85,6 +85,11 @@ pub struct MailboxWsClient {
     store: Arc<ReviewStore>,
     recovery_policy: CursorRecoveryPolicy,
     events_tx: mpsc::UnboundedSender<TransportEvent>,
+    /// Optional device-key refresher. When an inbound event fails with
+    /// `UnknownSigner` (a peer joined after our cache was seeded), we call
+    /// this to re-fetch `GET /devices` + merge the roster, then retry the
+    /// import once. `None` in tests that don't exercise late joiners.
+    key_refresher: Option<Arc<dyn crate::review::transport::DeviceKeyRefresher>>,
 }
 
 impl MailboxWsClient {
@@ -106,6 +111,7 @@ impl MailboxWsClient {
             store,
             recovery_policy: CursorRecoveryPolicy::default(),
             events_tx,
+            key_refresher: None,
         }
     }
 
@@ -114,6 +120,53 @@ impl MailboxWsClient {
     pub fn with_recovery_policy(mut self, policy: CursorRecoveryPolicy) -> Self {
         self.recovery_policy = policy;
         self
+    }
+
+    /// Attach a device-key refresher invoked on `UnknownSigner` to fetch
+    /// late-joiner keys + retry the import once.
+    pub fn with_key_refresher(
+        mut self,
+        refresher: Arc<dyn crate::review::transport::DeviceKeyRefresher>,
+    ) -> Self {
+        self.key_refresher = Some(refresher);
+        self
+    }
+
+    /// Import an event envelope, refreshing the device-key cache and
+    /// retrying once if the first attempt fails with `UnknownSigner` (a
+    /// peer that joined after our cache was seeded). Per the inbound
+    /// pipeline contract (see `InboundError::UnknownSigner` docs).
+    async fn import_event_with_refresh(
+        &self,
+        room_id: &crate::review::ids::RoomId,
+        envelope: &crate::review::model::MailboxEnvelope,
+    ) -> Result<
+        crate::review::transport::inbound::ImportOutcome,
+        crate::review::transport::inbound::InboundError,
+    > {
+        use crate::review::transport::inbound::InboundError;
+        match self.inbound.import_event_envelope(room_id, envelope).await {
+            Ok(outcome) => Ok(outcome),
+            Err(InboundError::UnknownSigner { signing_key_id }) => {
+                let Some(refresher) = self.key_refresher.as_ref() else {
+                    return Err(InboundError::UnknownSigner { signing_key_id });
+                };
+                match refresher.refresh().await {
+                    Ok(n) => {
+                        eprintln!(
+                            "ws: refreshed {n} device key(s) after unknown signer {signing_key_id}; retrying import"
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("ws: device-key refresh failed: {e}");
+                    }
+                }
+                // Retry once. A persistent UnknownSigner after refresh is a
+                // genuine key-distribution failure and surfaces to the caller.
+                self.inbound.import_event_envelope(room_id, envelope).await
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// Borrow the active config (matches `OutboxProcessor::config`).
@@ -741,8 +794,7 @@ impl MailboxWsClient {
                 let import_res: Result<(), crate::review::transport::inbound::InboundError> =
                     match kind {
                         EnvelopeKind::Event => match self
-                            .inbound
-                            .import_event_envelope(&room_id, &envelope)
+                            .import_event_with_refresh(&room_id, &envelope)
                             .await
                         {
                             Ok(outcome) => {

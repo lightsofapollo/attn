@@ -29,6 +29,18 @@ placeholder entries whose values are the literal string `"__PENDING__"`.
 The owning issue replaces those placeholders with computed values and
 adds whatever additional vectors it deems necessary.
 
+Vector counts after the attn-nnj.11.6 corpus expansion pass (May 2026):
+
+| File                     | Vectors | Notes                                          |
+| ------------------------ | ------: | ---------------------------------------------- |
+| `canonical-json.jsonl`   |   21    | + DEL boundary, 2^53 boundary, deep nesting, NFC/NFD |
+| `kdf.json`               |    4    | + all-ones, ASCII-pattern roomSecret           |
+| `aead.json`              |    5    | + signal, large 4 KiB, pure non-ASCII          |
+| `event-signature.json`   |    5    | covers 5 distinct ReviewEventBody variants     |
+| `event-id.json`          |    5    | parent-count edges (0, 1, 2, 3, 10)            |
+| `envelope.json`          |    4    | event + 2 × signal + snapshot_blob             |
+| `pow.json`               |    6    | one vector per (method, path) the relay accepts |
+
 `anchor-cases/` is a directory of hand-curated `(original.md, edited.md,
 anchor.json, expected.json)` cases consumed by both the Rust
 (`attn-nnj.3.4`) and TS (`attn-nnj.3.5`) anchor resolvers. See

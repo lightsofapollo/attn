@@ -175,3 +175,29 @@ export interface EnvelopeRecord extends Omit<EnvelopeInput, "target"> {
   target: { deviceId: string } | null;
   serverSeq: number;
 }
+
+// --- POST /v2/rooms/:roomId/acks -----------------------------------------
+
+/**
+ * Per relay-spec.md §POST /v2/rooms/:roomId/acks.
+ *
+ * The body is a single batch of envelopeIds being acked by exactly one device.
+ * Per spec the request shape is `{ackedEnvelopeIds, deviceId}`; multiple
+ * devices ACKing the same envelope each issue their own request (the spec
+ * pins per-device ack tracking so each device's `ack:<deviceId>:<envelopeId>`
+ * slot is independently recorded).
+ *
+ * - `ackedEnvelopeIds` is bounded at 1..100 to keep one HTTP request's worth
+ *   of work cheap. The spec does not pin an explicit cap; 100 matches the
+ *   client batching cadence (mailbox replay scans typically yield 10s of
+ *   envelopes per round-trip).
+ * - `deviceId` must match a registered device in the room. The handler
+ *   re-checks against `device:<participantId>:<deviceId>` (looked up by
+ *   deviceId alone since the participantId isn't carried on the wire).
+ */
+export const acksRequestSchema = z.object({
+  ackedEnvelopeIds: z.array(z.string()).min(1).max(100),
+  deviceId: z.string(),
+});
+
+export type AcksRequest = z.infer<typeof acksRequestSchema>;

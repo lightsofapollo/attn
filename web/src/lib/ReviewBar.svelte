@@ -29,8 +29,10 @@
 <script lang="ts">
   import Share2 from '@lucide/svelte/icons/share-2';
   import ConnectionBadge from './ConnectionBadge.svelte';
+  import PeerStrip from './PeerStrip.svelte';
   import SnapshotBadge from './SnapshotBadge.svelte';
   import { reviewStore } from './review/store.svelte';
+  import type { ParticipantId } from './types';
 
   interface Props {
     /** Whether the share dialog is currently open (forces the row visible). */
@@ -45,6 +47,12 @@
      * side-effect so the chrome stays presentational.
      */
     onReconnect?: () => void;
+    /**
+     * The local participant's id, surfaced from the daemon's identity
+     * bootstrap. Passed through to PeerStrip so the matching chip carries
+     * a `(you)` label. `null` until the bridge populates it.
+     */
+    localParticipantId?: ParticipantId | null;
   }
 
   let {
@@ -52,6 +60,7 @@
     isOwner = true,
     onShareClick,
     onReconnect,
+    localParticipantId = null,
   }: Props = $props();
 
   // SnapshotBadge needs the local participant's kind to flip between owner
@@ -107,18 +116,17 @@
     <span class="text-muted-foreground/60" aria-hidden="true">·</span>
 
     <!--
-      Peer-strip slot (attn-nnj.4.12 fills this). Today we render a tight
-      summary count so the row has a visible non-empty area pre-4.12.
+      Peer-strip slot (attn-nnj.4.12). Compact horizontal row of
+      participant chips — round for humans, hex for agents, "+N" overflow
+      past 5 peers. Click → identity card; hover → presence detail.
+      See planning/collab/ui/connection-share.md §7 +
+      planning/collab/ui/presence-identity.md (10.5).
     -->
     <div
-      class="review-bar-peers min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
+      class="review-bar-peers min-w-0 flex-1"
       data-slot="review-bar-peers"
     >
-      {#if reviewStore.peers.length > 0}
-        {reviewStore.peers.length} peer{reviewStore.peers.length === 1 ? '' : 's'}
-      {:else}
-        no peers yet
-      {/if}
+      <PeerStrip {localParticipantId} />
     </div>
 
     <!--

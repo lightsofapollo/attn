@@ -439,7 +439,19 @@ impl MailboxWsClient {
         mut cancel: tokio::sync::watch::Receiver<bool>,
     ) -> Result<(), TransportError> {
         let after_seq = self.load_after_seq();
-        self.run_with_after_seq(after_seq, &mut cancel).await
+        eprintln!(
+            "ws: connecting room={} device={} after_seq={}",
+            self.config.room_id.as_str(),
+            id_to_string(&self.config.device_id),
+            after_seq
+        );
+        let result = self.run_with_after_seq(after_seq, &mut cancel).await;
+        eprintln!(
+            "ws: run loop exited room={} result={:?}",
+            self.config.room_id.as_str(),
+            result.as_ref().err().map(|e| e.to_string())
+        );
+        result
     }
 
     /// Internal: drive the loop starting from `after_seq`. Pulled out so
@@ -572,6 +584,7 @@ impl MailboxWsClient {
             },
         );
 
+        eprintln!("ws: dialing url={url} subprotocol={subprotocol}");
         let connect_fut = tokio_tungstenite::connect_async(request);
         let stream = tokio::select! {
             res = connect_fut => res,
@@ -581,6 +594,7 @@ impl MailboxWsClient {
         let (ws_stream, _resp) = match stream {
             Ok(pair) => pair,
             Err(e) => {
+                eprintln!("ws: dial failed url={url}: {e}");
                 // Some handshake failures expose the close-frame inline (the
                 // server may close 4000 during the HTTP upgrade if admission
                 // fails). We classify those as terminal AdmissionRejected so

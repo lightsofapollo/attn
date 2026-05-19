@@ -53,7 +53,8 @@ use crate::review::crypto::signing::{
     DeviceSigningKey, DeviceVerifyingKey, SignError, sign_event,
 };
 use crate::review::envelope::{AssembleInput, assemble_event_envelope};
-use crate::review::ids::{DeviceId, ParticipantId, RoomId};
+use crate::review::ids::{DeviceId, FileId, ParticipantId, RoomId, SnapshotId};
+use crate::review::model::SnapshotPlaintext;
 use crate::review::model::{
     Capability, Device, DeviceClient, EnvelopeKind, EventMeta, MailboxEnvelope, Participant,
     ParticipantKind, ReviewEvent, ReviewEventBody, ReviewRoom, RoomMode, RoomPolicy,
@@ -784,6 +785,17 @@ impl Bootstrapper {
         save_room_secret(self.store.root(), &room_id, &room_secret)?;
         record_local_share(self.store.root(), &room_id, &path)?;
 
+        // 6b. Publish the initial snapshot of the shared file so reviewers
+        //     get the doc bytes the moment they join. Failures here are
+        //     non-fatal — the room exists, the user can manually trigger
+        //     a snapshot later — so log and continue.
+        if let Err(err) = self.publish_initial_snapshot(&room_id, &path, now_ms) {
+            eprintln!(
+                "review: publish_initial_snapshot failed (room={}): {err}",
+                room_id.as_str()
+            );
+        }
+
         // 7. Build invite. `room_secret` is consumed when we encode it into the
         //    URL — after this point it only lives encrypted in the room file
         //    cache + on the relay (in the admissionKey form).
@@ -1044,6 +1056,73 @@ impl Bootstrapper {
         Ok(JoinOutcome {
             room_id: parsed.room_id,
         })
+    }
+
+    // -----------------------------------------------------------------
+    // Snapshot publishing — read the file off disk, build its AnchorIndex,
+    // and emit a `SnapshotCreated` event carrying the inline plaintext so
+    // reviewers can render the doc immediately on join. The plaintext is
+    // still AEAD-encrypted on the wire (inside the event envelope) — the
+    // `decision #14` separate-blob path is for snapshots large enough to
+    // need R2 spillover, which doesn't apply to typical markdown docs.
+    // -----------------------------------------------------------------
+
+    /// Read the shared file off disk, build a snapshot of its current
+    /// state, and append a `SnapshotCreated` event to the room's outbox.
+    /// Returns the freshly minted `FileId` + `SnapshotId` so the caller
+    /// can persist them into `ReviewRoom.documents` / `.snapshots`.
+    pub fn publish_initial_snapshot(
+        &self,
+        room_id: &RoomId,
+        path: &std::path::Path,
+        now_ms: u64,
+    ) -> Result<(FileId, SnapshotId), BootstrapError> {
+        use crate::review::anchors::index::build_anchor_index;
+        use crate::review::crypto::ids::{
+            content_hash, derive_file_id, derive_snapshot_id,
+        };
+
+        let markdown_bytes = std::fs::read(path)
+            .map_err(|e| BootstrapError::Store(format!("read {}: {e}", path.display())))?;
+        let base_hash = content_hash(&markdown_bytes);
+
+        let room_secret = load_room_secret(self.store.root(), room_id)?;
+        let display_path = path.to_string_lossy().to_string();
+        let file_id = derive_file_id(&room_secret, &display_path, &base_hash);
+        let snapshot_id = derive_snapshot_id(room_id, &file_id, &base_hash, now_ms as i64);
+
+        let markdown = String::from_utf8(markdown_bytes)
+            .map_err(|_| BootstrapError::Crypto("snapshot markdown must be utf-8".into()))?;
+        let anchor_index = build_anchor_index(markdown.as_bytes(), &snapshot_id)
+            .map_err(|e| BootstrapError::Crypto(format!("anchor index: {e}")))?;
+        let plaintext = SnapshotPlaintext {
+            markdown,
+            anchor_index,
+        };
+
+        let body = ReviewEventBody::SnapshotCreated {
+            file_id: file_id.clone(),
+            snapshot_id: snapshot_id.clone(),
+            parent_snapshot_id: None,
+            base_hash,
+            encrypted_blob_ref: None,
+            // Inline the plaintext. The whole event body is AEAD-encrypted
+            // by `assemble_event_envelope`, so the markdown is still
+            // ciphertext on the wire — `decision #14` is preserved in
+            // spirit (no plaintext over HTTP) even though the field
+            // serializes through the event JSON.
+            inline_snapshot: Some(plaintext),
+        };
+
+        let outcome = self.send_event_sync(room_id, body, now_ms)?;
+        eprintln!(
+            "review: published initial snapshot file={} snapshot={} bytes={} room={}",
+            file_id.as_str(),
+            snapshot_id.as_str(),
+            outcome.envelope.ciphertext_bytes,
+            room_id.as_str(),
+        );
+        Ok((file_id, snapshot_id))
     }
 
     // -----------------------------------------------------------------

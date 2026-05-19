@@ -47,6 +47,18 @@ pub struct ReviewRoom {
     pub event_heads: Vec<EventId>,
 }
 
+/// Default serde for MailboxEnvelope `v` field — used when the relay's WS
+/// frame omits it (the wire shape on the receive side carries less than
+/// what we POST, since the relay knows v/roomId from context).
+fn default_envelope_version() -> u32 {
+    2
+}
+
+fn default_room_id_placeholder() -> RoomId {
+    serde_json::from_value(serde_json::Value::String(String::new()))
+        .expect("RoomId deserializes from any string")
+}
+
 /// Room-level capability and lifecycle policy enforced by the relay.
 ///
 /// Spec: `data-model.md` §Review Room. Default for `deleteEventsAfterOwnerAck`
@@ -115,6 +127,10 @@ pub struct Device {
     pub public_encryption_key: String,
     pub public_signing_key: String,
     pub client: DeviceClient,
+    /// Wall-clock ms when the device was registered. Accepts the relay's
+    /// `registeredAt` alias so a Hello frame's `devices` list deserializes
+    /// without a JSON pre-processing step.
+    #[serde(alias = "registeredAt", default)]
     pub created_at: u64,
 }
 
@@ -743,7 +759,18 @@ pub struct SuggestionDraft {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MailboxEnvelope {
+    /// Envelope schema version. Defaults to 2 on deserialize so the
+    /// relay's WS Envelope frames (whose record shape omits this field —
+    /// the relay knows it from context) decode without manual JSON
+    /// patching.
+    #[serde(default = "default_envelope_version")]
     pub v: u32,
+    /// Owning room. Defaults to the empty `RoomId` on deserialize because
+    /// the relay's WS Envelope frame omits it — every subscriber knows
+    /// the room from the WebSocket URL it opened. Local writers fill
+    /// this in correctly; receive paths look it up from their
+    /// `MailboxConfig` rather than the envelope.
+    #[serde(default = "default_room_id_placeholder")]
     pub room_id: RoomId,
     pub envelope_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]

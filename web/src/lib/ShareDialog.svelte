@@ -226,7 +226,7 @@
 </script>
 
 <Dialog.Root bind:open>
-  <Dialog.Content class="sm:max-w-xl" data-slot="share-dialog">
+  <Dialog.Content class="w-[min(36rem,calc(100%-2rem))] max-w-[36rem] overflow-hidden" data-slot="share-dialog">
     <Dialog.Header>
       <Dialog.Title>Share for review</Dialog.Title>
       <Dialog.Description>
@@ -238,7 +238,7 @@
          Primary card: the URL. This is the whole point of the dialog.
          ============================================================ -->
     <div
-      class="flex flex-col gap-2 rounded-lg border border-primary/40 bg-primary/5 p-4 transition-colors"
+      class="flex w-full min-w-0 flex-col gap-2 overflow-hidden rounded-lg border border-primary/40 bg-primary/5 p-4 transition-colors"
       data-slot="share-url-card"
     >
       <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -309,7 +309,7 @@
          Secondary card: CLI fallback for headless reviewers / agents.
          ============================================================ -->
     {#if isReady && cliCommand.length > 0}
-      <div class="flex flex-col gap-2 rounded-lg border border-border/60 bg-muted/30 p-4" data-slot="share-cli-card">
+      <div class="flex w-full min-w-0 flex-col gap-2 overflow-hidden rounded-lg border border-border/60 bg-muted/30 p-4" data-slot="share-cli-card">
         <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
           <Terminal class="size-3.5" aria-hidden="true" />
           Terminal command

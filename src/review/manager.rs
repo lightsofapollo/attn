@@ -627,7 +627,17 @@ impl ReviewManager {
             Arc::clone(&mailbox_config),
             token_pool,
         )?);
-        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        // Leak the sender so it lives for the daemon's lifetime. The
+        // alternative is keeping a `Vec<Sender>` somewhere on the
+        // manager; daemons spawn per-room runtimes once at boot and
+        // never tear them down individually, so a per-room leak is
+        // bounded by the number of joined rooms (typically < 10).
+        // Without this, the sender drops at the end of this scope and
+        // `cancel.changed()` resolves Err, which the WS `select!`
+        // interprets as a cancel — aborting the connect_async before
+        // it even completes.
+        Box::leak(Box::new(cancel_tx));
         let outbox_clone = Arc::clone(&outbox);
         runtime.spawn(async move {
             outbox_clone.run(cancel_rx).await;
@@ -652,9 +662,11 @@ impl ReviewManager {
             Arc::clone(&self.store),
             events_tx,
         );
-        let (_ws_cancel_tx, ws_cancel_rx) = tokio::sync::watch::channel(false);
+        let (ws_cancel_tx, ws_cancel_rx) = tokio::sync::watch::channel(false);
+        // Same lifetime concern as the outbox cancel sender above.
+        Box::leak(Box::new(ws_cancel_tx));
         runtime.spawn(async move {
-            ws_client.run(ws_cancel_rx).await;
+            let _ = ws_client.run(ws_cancel_rx).await;
         });
 
         // Event forwarder: drain TransportEvents into ReviewUpdates so

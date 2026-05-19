@@ -32,10 +32,22 @@ impl RoomId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FileId(String);
 
+impl FileId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Identifier for a snapshot — an immutable point-in-time content version
 /// of a `FileId` used as an anchor base.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SnapshotId(String);
+
+impl SnapshotId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Identifier for a single review event (comment/suggestion/snapshot/etc).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

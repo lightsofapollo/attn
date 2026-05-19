@@ -73,6 +73,12 @@ thiserror = "2"
 # (attn-nnj.6.x/7.x) will widen these as transports / outbox land.
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 
+# Async-fn-in-trait shim for the Transport trait (attn-nnj.6.1). Stable
+# Rust's native `async fn` in traits is gaining ground but still lacks
+# trait-object support, which the daemon needs to swap Mailbox/WebRTC
+# transports behind a `Box<dyn Transport>`. Drop once `dyn` support lands.
+async-trait = "0.1"
+
 [dev-dependencies]
 tempfile = "3"
 

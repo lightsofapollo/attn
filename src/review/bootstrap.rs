@@ -458,7 +458,7 @@ struct CreateRoomResponse {
 
 /// `POST /v2/rooms/:roomId/devices` request body. Spec: relay-spec.md
 /// §`POST /v2/rooms/:roomId/devices`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RegisterDeviceBody {
     device_id: String,
@@ -785,17 +785,78 @@ impl Bootstrapper {
     // Join
     // -----------------------------------------------------------------
 
-    /// Join an existing room from an invite. Populates the verifying-key
-    /// cache so the inbound pipeline can verify incoming signatures.
+    /// Join an existing room from an invite as a regular reviewer.
+    /// Loads (or generates) the daemon's `~/.attn/identity.json` and runs
+    /// the shared [`Self::join_with_identity`] pipeline with
+    /// `kind="reviewer"`.
     pub async fn join(
         &self,
         invite: &str,
         verifying_keys: Option<Arc<RwLock<std::collections::HashMap<String, DeviceVerifyingKey>>>>,
     ) -> Result<JoinOutcome, BootstrapError> {
-        let now_ms = unix_now_ms();
-        let parsed = parse_invite(invite)?;
         let identity_dir = self.config.identity_dir()?;
         let identity = load_or_create_identity_in(&identity_dir)?;
+        self.join_with_identity(
+            invite,
+            &identity,
+            ParticipantKind::Reviewer,
+            DeviceClient::AttnNative,
+            verifying_keys,
+        )
+        .await
+    }
+
+    /// Join an existing room from an invite as an `kind: "agent"`
+    /// participant.
+    ///
+    /// Spec: `planning/collab/amendments.md` §Agent CLI key handling
+    /// (the "Remote agents (different machines or hosted) join the room as
+    /// `kind: "agent"` participants and are first-class members with their
+    /// own keys, registered via `POST /devices` like any reviewer" bullet).
+    ///
+    /// `agent_identity` is the agent's own keypair as written by
+    /// [`crate::review::agent_identity::register_agent_in`]. The daemon's
+    /// owner identity is **not** touched — comments + suggestions emitted
+    /// by this join are attributed to the agent participant.
+    ///
+    /// The device record sent to the relay uses `client: "agent-cli"` (the
+    /// `agent-cli` variant on `DeviceClient`) so the relay's device
+    /// directory can attribute traffic without an extra encoding.
+    pub async fn join_as_agent(
+        &self,
+        invite: &str,
+        agent_identity: &DeviceIdentity,
+        verifying_keys: Option<Arc<RwLock<std::collections::HashMap<String, DeviceVerifyingKey>>>>,
+    ) -> Result<JoinOutcome, BootstrapError> {
+        self.join_with_identity(
+            invite,
+            agent_identity,
+            ParticipantKind::Agent,
+            DeviceClient::AgentCli,
+            verifying_keys,
+        )
+        .await
+    }
+
+    /// Shared join pipeline. `kind` selects the wire-form `kind` field on
+    /// `POST /devices` (`"reviewer"` or `"agent"`) and the local
+    /// `ParticipantKind` baked into the `ParticipantJoined` event body.
+    /// `client` selects the `DeviceClient` variant the relay uses for
+    /// per-device attribution.
+    ///
+    /// Spec: relay-spec.md §`POST /v2/rooms/:roomId/devices` accepts
+    /// `kind: "owner" | "reviewer" | "agent"`; data-model.md §Participant
+    /// And Device documents the local model side.
+    async fn join_with_identity(
+        &self,
+        invite: &str,
+        identity: &DeviceIdentity,
+        kind: ParticipantKind,
+        client: DeviceClient,
+        verifying_keys: Option<Arc<RwLock<std::collections::HashMap<String, DeviceVerifyingKey>>>>,
+    ) -> Result<JoinOutcome, BootstrapError> {
+        let now_ms = unix_now_ms();
+        let parsed = parse_invite(invite)?;
         let room_keys = derive_room_keys(&parsed.room_secret);
 
         // 1. Re-create the room on the relay. POST is idempotent — if the room
@@ -803,14 +864,28 @@ impl Bootstrapper {
         //    on. Per relay-spec.md, reviewer-side POST `/rooms/:roomId` is the
         //    canonical way to "join or rejoin" a room.
         let policy = default_room_policy(now_ms);
-        self.create_room(&parsed.room_id, &policy, &identity, &room_keys.admission_key)
+        self.create_room(&parsed.room_id, &policy, identity, &room_keys.admission_key)
             .await?;
 
-        // 2. Register this device as a reviewer.
-        self.register_device(
+        // 2. Register this device as a reviewer or agent per `kind`.
+        //    Spec: relay-spec.md §`POST /v2/rooms/:roomId/devices`. The wire
+        //    kind string is "agent" for remote agents (validated by 5.6's
+        //    deviceRegistrationSchema enum).
+        let wire_kind = match kind {
+            ParticipantKind::Owner => "owner",
+            ParticipantKind::Reviewer => "reviewer",
+            ParticipantKind::Agent => "agent",
+        };
+        let wire_client = match client {
+            DeviceClient::AttnNative => "attn-native",
+            DeviceClient::AttnBrowser => "attn-browser",
+            DeviceClient::AgentCli => "agent-cli",
+        };
+        self.register_device_with_client(
             &parsed.room_id,
-            &identity,
-            "reviewer",
+            identity,
+            wire_kind,
+            wire_client,
             &room_keys.admission_key,
         )
         .await?;
@@ -837,7 +912,9 @@ impl Bootstrapper {
         }
 
         // 4. Sign + enqueue a ParticipantJoined event so the owner sees us in
-        //    their inbox.
+        //    their inbox. Agents land in the event log with
+        //    `ParticipantKind::Agent` so peer-strip + presence UI (10.5) can
+        //    consult the kind for the hex chip + ⊳ glyph rendering.
         let signing_key = identity.signing_key()?;
         let participant_id = identity.typed_participant_id();
         let device_id = identity.typed_device_id();
@@ -845,13 +922,9 @@ impl Bootstrapper {
         let participant = Participant {
             participant_id: participant_id.clone(),
             display_name: identity.participant_id.clone(),
-            kind: ParticipantKind::Reviewer,
+            kind,
             public_signing_key: identity.public_signing_key.clone(),
-            capabilities: vec![
-                Capability::ReadSnapshot,
-                Capability::WriteComment,
-                Capability::WriteSuggestion,
-            ],
+            capabilities: agent_capabilities(kind),
         };
         let _ = vk; // verifying key materialization sanity-checked the seed.
         let device_payload = Device {
@@ -859,7 +932,7 @@ impl Bootstrapper {
             participant_id: participant_id.clone(),
             public_encryption_key: identity.public_encryption_key.clone(),
             public_signing_key: identity.public_signing_key.clone(),
-            client: DeviceClient::AttnNative,
+            client,
             created_at: now_ms,
         };
         let body = ReviewEventBody::ParticipantJoined {
@@ -974,6 +1047,18 @@ impl Bootstrapper {
         kind: &str,
         admission_key: &crate::review::crypto::kdf::DerivedKey,
     ) -> Result<(), BootstrapError> {
+        self.register_device_with_client(room_id, identity, kind, "attn-native", admission_key)
+            .await
+    }
+
+    async fn register_device_with_client(
+        &self,
+        room_id: &RoomId,
+        identity: &DeviceIdentity,
+        kind: &str,
+        client: &str,
+        admission_key: &crate::review::crypto::kdf::DerivedKey,
+    ) -> Result<(), BootstrapError> {
         // Construct the body WITHOUT selfSignature first, sign its canonical
         // bytes, then attach selfSignature. Mirrors relay-spec.md §`POST
         // /v2/rooms/:roomId/devices` "verify selfSignature against the
@@ -983,7 +1068,7 @@ impl Bootstrapper {
             participant_id: identity.participant_id.clone(),
             public_signing_key: identity.public_signing_key.clone(),
             public_encryption_key: identity.public_encryption_key.clone(),
-            client: "attn-native".to_string(),
+            client: client.to_string(),
             kind: kind.to_string(),
             self_signature: String::new(),
         };
@@ -1151,6 +1236,32 @@ fn relay_error(status: u16, body: &[u8]) -> BootstrapError {
         status,
         code: parsed.error.code,
         message: parsed.error.message,
+    }
+}
+
+/// Capability set granted to a newly-joined participant. Mirrors
+/// `data-model.md` §Participant And Device — reviewers and agents share the
+/// "write findings" capability set today; agents additionally do *not* get
+/// `RoomAdmin` or `AcceptSuggestion` (only the owner accepts on their own
+/// behalf). The owner branch is unreachable today (Share owns owner creation)
+/// but is kept exhaustive so a future `ParticipantKind` variant doesn't
+/// silently fall through.
+fn agent_capabilities(kind: ParticipantKind) -> Vec<Capability> {
+    match kind {
+        ParticipantKind::Owner => vec![
+            Capability::RoomAdmin,
+            Capability::ReadSnapshot,
+            Capability::WriteComment,
+            Capability::WriteSuggestion,
+            Capability::ResolveComment,
+            Capability::AcceptSuggestion,
+            Capability::PublishSnapshot,
+        ],
+        ParticipantKind::Reviewer | ParticipantKind::Agent => vec![
+            Capability::ReadSnapshot,
+            Capability::WriteComment,
+            Capability::WriteSuggestion,
+        ],
     }
 }
 
@@ -1740,6 +1851,229 @@ mod tests {
         // No HTTP calls should have fired.
         let reqs = server.received_requests().await.expect("requests");
         assert!(reqs.is_empty(), "malformed invite must not hit the relay");
+    }
+
+    // --- Join as agent flow (attn-nnj.9.6) --------------------------------
+
+    #[tokio::test]
+    async fn join_as_agent_registers_with_kind_agent_and_agent_cli_client() {
+        // The remote-agent participant type sends `kind: "agent"` (NOT
+        // "reviewer") and `client: "agent-cli"` on POST /devices, signed by
+        // the agent's own Ed25519 key — verifies the wire shape pinned by
+        // amendments.md §Agent CLI key handling.
+        let server = MockServer::start().await;
+        let id_dir = TempDir::new().expect("id tempdir");
+        let (_store_tmp, store, boot) =
+            make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
+
+        // Build an invite the agent will join with.
+        let secret = [0x5Au8; 32];
+        let room_id = derive_room_id(&secret);
+        let invite = build_invite_url(&room_id, &secret);
+
+        // Spin up an explicit agent identity (parallels what
+        // `agent_identity::register_agent_in` produces).
+        let agent_identity = DeviceIdentity::generate().expect("agent identity");
+        let agent_pub_key = agent_identity.public_signing_key.clone();
+        let agent_device_id = agent_identity.device_id.clone();
+
+        // Capture the device-registration body for assertions.
+        let captured: Arc<std::sync::Mutex<Option<RegisterDeviceBody>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let capture_clone = captured.clone();
+
+        Mock::given(method("POST"))
+            .and(path_regex_for_room_create())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "roomId": "x",
+                "createdAt": 0u64,
+                "expiresAt": 0u64,
+                "policy": {},
+                "ownerSigningKeyId": "k",
+                "serverSeq": 0,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex_for_devices())
+            .respond_with(move |req: &Request| {
+                if let Ok(body) = serde_json::from_slice::<RegisterDeviceBody>(&req.body) {
+                    *capture_clone.lock().unwrap() = Some(body);
+                }
+                ResponseTemplate::new(204)
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex_for_devices())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "devices": []
+            })))
+            .mount(&server)
+            .await;
+
+        let outcome = boot
+            .join_as_agent(&invite, &agent_identity, None)
+            .await
+            .expect("join_as_agent");
+        assert_eq!(outcome.room_id, room_id);
+
+        // The wire body must be `kind=agent`, `client=agent-cli`, and the
+        // pubkey + deviceId from the agent identity (NOT the daemon's).
+        let body = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("devices POST must have been captured");
+        assert_eq!(body.kind, "agent");
+        assert_eq!(body.client, "agent-cli");
+        assert_eq!(
+            body.public_signing_key, agent_pub_key,
+            "register-device body must carry the agent's pubkey, not the daemon's"
+        );
+        assert_eq!(body.device_id, agent_device_id);
+
+        // The ParticipantJoined envelope landed on the outbox with the
+        // agent identity's pubkey as the signer.
+        let envelopes: Vec<MailboxEnvelope> = store
+            .iter_outbox(&room_id)
+            .expect("iter")
+            .collect::<anyhow::Result<_>>()
+            .expect("decode");
+        assert_eq!(envelopes.len(), 1, "exactly one ParticipantJoined envelope");
+
+        // Daemon-side identity must NOT have been touched — proves the
+        // agent join uses its own key, not the owner's daemon identity.
+        let daemon_id_path = id_dir.path().join(IDENTITY_FILENAME);
+        assert!(
+            !daemon_id_path.exists(),
+            "join_as_agent must not auto-create the daemon identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_as_agent_uses_distinct_identities_for_multiple_agents() {
+        // Two agents (rufus + alex) join the same room independently. Each
+        // POST /devices must carry the respective agent's pubkey — proves
+        // multiple agents are first-class, distinct participants.
+        let server = MockServer::start().await;
+        let id_dir = TempDir::new().expect("id tempdir");
+        let (_store_tmp, _store, boot) =
+            make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
+
+        let secret = [0x6Bu8; 32];
+        let room_id = derive_room_id(&secret);
+        let invite = build_invite_url(&room_id, &secret);
+
+        let rufus = DeviceIdentity::generate().expect("rufus identity");
+        let alex = DeviceIdentity::generate().expect("alex identity");
+        assert_ne!(rufus.public_signing_key, alex.public_signing_key);
+
+        let captured: Arc<std::sync::Mutex<Vec<RegisterDeviceBody>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture_clone = captured.clone();
+
+        Mock::given(method("POST"))
+            .and(path_regex_for_room_create())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "roomId": "x",
+                "createdAt": 0u64,
+                "expiresAt": 0u64,
+                "policy": {},
+                "ownerSigningKeyId": "k",
+                "serverSeq": 0,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex_for_devices())
+            .respond_with(move |req: &Request| {
+                if let Ok(body) = serde_json::from_slice::<RegisterDeviceBody>(&req.body) {
+                    capture_clone.lock().unwrap().push(body);
+                }
+                ResponseTemplate::new(204)
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex_for_devices())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "devices": []
+            })))
+            .mount(&server)
+            .await;
+
+        let _ = boot
+            .join_as_agent(&invite, &rufus, None)
+            .await
+            .expect("rufus join");
+        let _ = boot
+            .join_as_agent(&invite, &alex, None)
+            .await
+            .expect("alex join");
+
+        let bodies = captured.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2, "two devices POSTs expected");
+        let keys: std::collections::HashSet<_> =
+            bodies.iter().map(|b| b.public_signing_key.clone()).collect();
+        assert_eq!(
+            keys.len(),
+            2,
+            "the two agents must register distinct pubkeys (got {keys:?})"
+        );
+        assert!(keys.contains(&rufus.public_signing_key));
+        assert!(keys.contains(&alex.public_signing_key));
+        for body in &bodies {
+            assert_eq!(body.kind, "agent");
+            assert_eq!(body.client, "agent-cli");
+        }
+    }
+
+    #[tokio::test]
+    async fn join_as_agent_rejects_malformed_invite_without_network() {
+        let server = MockServer::start().await;
+        let id_dir = TempDir::new().expect("id tempdir");
+        let (_store_tmp, _store, boot) =
+            make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
+
+        let agent_identity = DeviceIdentity::generate().expect("agent identity");
+        let err = boot
+            .join_as_agent("not-an-invite", &agent_identity, None)
+            .await
+            .expect_err("malformed");
+        match err {
+            BootstrapError::InviteParse(_) => {}
+            other => panic!("expected InviteParse, got {other:?}"),
+        }
+        let reqs = server.received_requests().await.expect("requests");
+        assert!(
+            reqs.is_empty(),
+            "malformed invite must not hit the relay (got {} reqs)",
+            reqs.len()
+        );
+    }
+
+    #[test]
+    fn agent_capabilities_match_data_model_spec() {
+        // Spec: data-model.md §Participant And Device. Agents get the
+        // read/write-finding capabilities but NOT room admin / accept-
+        // suggestion (those are owner-only). This is the canonical place
+        // the policy is enforced for join_as_agent.
+        let caps = agent_capabilities(ParticipantKind::Agent);
+        assert!(caps.contains(&Capability::ReadSnapshot));
+        assert!(caps.contains(&Capability::WriteComment));
+        assert!(caps.contains(&Capability::WriteSuggestion));
+        assert!(!caps.contains(&Capability::RoomAdmin));
+        assert!(!caps.contains(&Capability::AcceptSuggestion));
+        assert!(!caps.contains(&Capability::PublishSnapshot));
+
+        // Reviewer parity — sanity that we didn't accidentally differentiate
+        // agents below reviewers; the kind distinction is on the wire
+        // (`kind` field), not the capability set.
+        let reviewer_caps = agent_capabilities(ParticipantKind::Reviewer);
+        assert_eq!(caps, reviewer_caps);
     }
 
     // --- helpers ----------------------------------------------------------

@@ -42,8 +42,8 @@ use serde::{Deserialize, Serialize};
 use crate::daemon::runtime_dir;
 use crate::review::ids::{FileId, RoomId, SnapshotId};
 use crate::review::model::{
-    Device, LocalFileBinding, MailboxEnvelope, Participant, ReviewEvent, ReviewRoom, SnapshotNode,
-    SyncCursor,
+    Device, LocalFileBinding, LocalRevision, MailboxEnvelope, Participant, ReviewEvent,
+    ReviewRoom, SnapshotNode, SyncCursor,
 };
 
 /// Persistent JSON+JSONL store for review rooms.
@@ -113,6 +113,15 @@ impl ReviewStore {
 
     fn outbox_file(&self, room_id: &RoomId) -> PathBuf {
         self.room_dir(room_id).join("outbox.jsonl")
+    }
+
+    fn revisions_dir(&self, room_id: &RoomId) -> PathBuf {
+        self.room_dir(room_id).join("revisions")
+    }
+
+    fn revisions_file(&self, room_id: &RoomId, file_id: &FileId) -> PathBuf {
+        self.revisions_dir(room_id)
+            .join(format!("{}.jsonl", file_id_str(file_id)))
     }
 
     // ---------------------------------------------------------------------
@@ -226,6 +235,40 @@ impl ReviewStore {
         room_id: &RoomId,
     ) -> Result<impl Iterator<Item = Result<MailboxEnvelope>>> {
         jsonl_iter(&self.outbox_file(room_id))
+    }
+
+    // ---------------------------------------------------------------------
+    // Revision journal (append-only JSONL, one file per FileId, no dedup).
+    //
+    // Per the issue spec: revisions are unique by `revision_id`, but the
+    // store does NOT scan-and-dedup. Callers (`WorkingCopyService` + the
+    // IPC handlers wired in attn-nnj.2.5) drive this once per successful
+    // save and own the responsibility of not double-appending. This matches
+    // the data-model.md §Local Replicas layout where the journal is the
+    // restart-safe replay log for sync.
+    // ---------------------------------------------------------------------
+
+    /// Append a `LocalRevision` to `rooms/<roomId>/revisions/<fileId>.jsonl`.
+    /// Creates the file (and parent directory) on first append.
+    pub fn append_revision(
+        &self,
+        room_id: &RoomId,
+        file_id: &FileId,
+        revision: &LocalRevision,
+    ) -> Result<()> {
+        let path = self.revisions_file(room_id, file_id);
+        append_jsonl(&self.revisions_dir(room_id), &path, revision)
+    }
+
+    /// Iterate every `LocalRevision` in a `(room, file)` journal. Returns an
+    /// empty iterator when the file is missing — matching `iter_events` and
+    /// `iter_outbox` so callers can treat "never written" the same as "empty".
+    pub fn iter_revisions(
+        &self,
+        room_id: &RoomId,
+        file_id: &FileId,
+    ) -> Result<impl Iterator<Item = Result<LocalRevision>>> {
+        jsonl_iter(&self.revisions_file(room_id, file_id))
     }
 
     // ---------------------------------------------------------------------
@@ -478,6 +521,10 @@ fn snapshot_id_str(id: &SnapshotId) -> String {
     serialized_string_id(id).expect("SnapshotId always serializes to a string")
 }
 
+fn file_id_str(id: &FileId) -> String {
+    serialized_string_id(id).expect("FileId always serializes to a string")
+}
+
 fn serialized_string_id<T: Serialize>(id: &T) -> Option<String> {
     match serde_json::to_value(id).ok()? {
         serde_json::Value::String(s) => Some(s),
@@ -501,9 +548,9 @@ mod tests {
         ContentHash, DeviceId, EventId, FileId, ParticipantId, RoomId, SnapshotId,
     };
     use crate::review::model::{
-        AnchorIndex, CanonicalEncoding, EnvelopeKind, EventAuth, EventMeta, MailboxEnvelope,
-        ReviewEvent, ReviewEventBody, ReviewRoom, RoomMode, RoomPolicy, SnapshotNode,
-        SnapshotPlaintext, SyncCursor,
+        AnchorIndex, CanonicalEncoding, EnvelopeKind, EventAuth, EventMeta, LocalRevision,
+        MailboxEnvelope, ReviewEvent, ReviewEventBody, ReviewRoom, RevisionSource, RoomMode,
+        RoomPolicy, SnapshotNode, SnapshotPlaintext, SyncCursor,
     };
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -623,6 +670,18 @@ mod tests {
             last_pulled_seq: 7,
             imported_event_ids: vec![id::<EventId>("evt-1"), id::<EventId>("evt-2")],
             pending_outbound_envelope_ids: vec!["env-99".to_string()],
+        }
+    }
+
+    fn sample_revision(revision_id: &str, parent: &str, next: &str) -> LocalRevision {
+        LocalRevision {
+            revision_id: revision_id.to_string(),
+            parent_hash: id::<ContentHash>(parent),
+            next_hash: id::<ContentHash>(next),
+            created_at: 1_700_000_000_020,
+            source: RevisionSource::ProsemirrorEdit,
+            pm_steps: None,
+            patch_text: None,
         }
     }
 
@@ -811,5 +870,139 @@ mod tests {
                 None => std::env::remove_var("ATTN_HOME"),
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Revision journal (attn-nnj.2.5)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn append_revision_creates_file_with_single_line() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-abc");
+        let file_id: FileId = id("file-1");
+        let rev = sample_revision("rev-1", "h-prev", "h-next");
+
+        store
+            .append_revision(&room_id, &file_id, &rev)
+            .expect("append");
+
+        // File exists at the spec'd path.
+        let path = store.revisions_file(&room_id, &file_id);
+        assert!(path.exists(), "expected {}", path.display());
+
+        // Exactly one record on disk.
+        let collected: Vec<LocalRevision> = store
+            .iter_revisions(&room_id, &file_id)
+            .expect("iter")
+            .collect::<Result<_>>()
+            .expect("decode");
+        assert_eq!(collected, vec![rev]);
+    }
+
+    #[test]
+    fn append_revision_preserves_order_across_appends() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-abc");
+        let file_id: FileId = id("file-1");
+        let rev_a = sample_revision("rev-a", "h0", "h1");
+        let rev_b = sample_revision("rev-b", "h1", "h2");
+
+        store
+            .append_revision(&room_id, &file_id, &rev_a)
+            .expect("append a");
+        store
+            .append_revision(&room_id, &file_id, &rev_b)
+            .expect("append b");
+
+        let collected: Vec<LocalRevision> = store
+            .iter_revisions(&room_id, &file_id)
+            .expect("iter")
+            .collect::<Result<_>>()
+            .expect("decode");
+        assert_eq!(collected, vec![rev_a, rev_b]);
+    }
+
+    #[test]
+    fn revisions_are_partitioned_by_room() {
+        // Two rooms each get their own journal for the same FileId string —
+        // a write to one must not leak into the other.
+        let (_tmp, store) = fresh_store();
+        let room_a: RoomId = id("room-a");
+        let room_b: RoomId = id("room-b");
+        let file_id: FileId = id("file-shared");
+
+        let rev_a = sample_revision("rev-a", "h0", "h1");
+        let rev_b = sample_revision("rev-b", "h0", "h2");
+
+        store
+            .append_revision(&room_a, &file_id, &rev_a)
+            .expect("append a");
+        store
+            .append_revision(&room_b, &file_id, &rev_b)
+            .expect("append b");
+
+        let in_a: Vec<LocalRevision> = store
+            .iter_revisions(&room_a, &file_id)
+            .expect("iter a")
+            .collect::<Result<_>>()
+            .expect("decode a");
+        let in_b: Vec<LocalRevision> = store
+            .iter_revisions(&room_b, &file_id)
+            .expect("iter b")
+            .collect::<Result<_>>()
+            .expect("decode b");
+
+        assert_eq!(in_a, vec![rev_a]);
+        assert_eq!(in_b, vec![rev_b]);
+    }
+
+    #[test]
+    fn revisions_are_partitioned_by_file_within_a_room() {
+        // Distinct FileIds within the same room have independent journals.
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-abc");
+        let file_one: FileId = id("file-1");
+        let file_two: FileId = id("file-2");
+
+        let rev_one = sample_revision("rev-one", "h0", "h1");
+        let rev_two = sample_revision("rev-two", "h0", "h2");
+
+        store
+            .append_revision(&room_id, &file_one, &rev_one)
+            .expect("append one");
+        store
+            .append_revision(&room_id, &file_two, &rev_two)
+            .expect("append two");
+
+        let in_one: Vec<LocalRevision> = store
+            .iter_revisions(&room_id, &file_one)
+            .expect("iter one")
+            .collect::<Result<_>>()
+            .expect("decode one");
+        let in_two: Vec<LocalRevision> = store
+            .iter_revisions(&room_id, &file_two)
+            .expect("iter two")
+            .collect::<Result<_>>()
+            .expect("decode two");
+
+        assert_eq!(in_one, vec![rev_one]);
+        assert_eq!(in_two, vec![rev_two]);
+    }
+
+    #[test]
+    fn iter_revisions_on_missing_file_returns_empty_iterator() {
+        // Mirrors iter_events / iter_outbox: a never-written journal yields
+        // Ok(iter) with zero items, not Err.
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-empty");
+        let file_id: FileId = id("file-never-written");
+
+        let collected: Vec<LocalRevision> = store
+            .iter_revisions(&room_id, &file_id)
+            .expect("iter missing")
+            .collect::<Result<_>>()
+            .expect("decode missing");
+        assert!(collected.is_empty());
     }
 }

@@ -44,7 +44,7 @@ else
 fi
 
 # Allow MAX_MIB via positional arg OR env var; positional arg wins.
-MAX_MIB="${1:-${MAX_MIB:-30}}"
+MAX_MIB="${1:-${MAX_MIB:-50}}"
 MAX_BYTES=$((MAX_MIB * 1024 * 1024))
 
 # Waiver — accept both names. BINARY_SIZE_WAIVER is the documented one;

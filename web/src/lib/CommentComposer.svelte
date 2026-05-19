@@ -45,7 +45,7 @@
     anchorPos: PopoverAnchor;
   }
 
-  let state = $state<OpenState | null>(null);
+  let openState: OpenState | null = $state(null);
   let body = $state('');
   let textareaEl: HTMLTextAreaElement | undefined = $state(undefined);
 
@@ -70,7 +70,7 @@
     const quote = view.state.doc.textBetween(from, to, '\n', '​');
     const anchorPos = getPopoverAnchor(view, from, to);
 
-    state = { view, from, to, quote, ctx, roomId, anchorPos };
+    openState = { view, from, to, quote, ctx, roomId, anchorPos };
     body = '';
 
     // Focus on next microtask so the textarea exists in the DOM.
@@ -79,17 +79,17 @@
 
   /** Close the composer without emitting any IPC. */
   export function close(): void {
-    state = null;
+    openState = null;
     body = '';
   }
 
   /** True while the composer popover is mounted. */
   export function isOpen(): boolean {
-    return state !== null;
+    return openState !== null;
   }
 
   async function handleSubmit(): Promise<void> {
-    const s = state;
+    const s = openState;
     if (!s) return;
     const trimmed = body.trim();
     if (trimmed.length === 0) return;
@@ -119,7 +119,7 @@
   }
 </script>
 
-{#if state}
+{#if openState}
   <div
     class="comment-composer-backdrop fixed inset-0 z-40"
     data-slot="comment-composer-backdrop"
@@ -129,17 +129,18 @@
   <div
     class="comment-composer fixed z-50 flex w-[320px] flex-col gap-2 rounded-lg border border-border bg-popover p-3 text-sm shadow-lg"
     data-slot="comment-composer"
-    data-side={state.anchorPos.recommendedPosition.side}
-    style="top: {state.anchorPos.recommendedPosition.top}px; left: {state.anchorPos.recommendedPosition.left}px;"
+    data-side={openState.anchorPos.recommendedPosition.side}
+    style="top: {openState.anchorPos.recommendedPosition.top}px; left: {openState.anchorPos.recommendedPosition.left}px;"
     role="dialog"
     aria-label="Add comment"
+    tabindex="-1"
     onkeydown={handleKeydown}
   >
     <div
       class="comment-composer-quote max-h-20 overflow-hidden border-l-2 border-primary/60 bg-muted/30 px-2 py-1 text-xs italic text-muted-foreground"
       data-slot="comment-composer-quote"
     >
-      {state.quote}
+      {openState.quote}
     </div>
     <textarea
       bind:this={textareaEl}

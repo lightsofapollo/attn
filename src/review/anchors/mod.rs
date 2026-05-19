@@ -7,5 +7,7 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod index;
+pub mod resolve;
 
 pub use index::{AnchorIndexError, build_anchor_index};
+pub use resolve::{PmStepJournal, ResolveError, resolve_anchor};

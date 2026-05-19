@@ -101,6 +101,15 @@ interface AttnBridge {
    * @see planning/collab/data-model.md §Anchor Resolution
    */
   reviewAnchorResolution: ReviewAnchorResolutionFn;
+  /**
+   * Optional: focus the margin card whose underlying root event matches
+   * `eventId`. Implemented by attn-nnj.4.3's ReviewMargin via
+   * `reviewStore.setFocusEventId`; exposed on the bridge so 10.2's
+   * editor ↔ surface focus sync can call it from highlight-click
+   * handlers and so E2E tests can drive focus without poking the store.
+   * @see planning/collab/ui/review-panel-design.md §6
+   */
+  reviewFocusCard?: (eventId: string) => void;
 }
 
 /** Kinds of review callback the test helper can fire into the bridge. */

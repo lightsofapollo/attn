@@ -59,6 +59,7 @@
     markdownSourceUrl,
   } from './lib/markdown-layer';
   import { reviewStore } from './lib/review/store.svelte';
+  import ReviewMargin from './lib/ReviewMargin.svelte';
   import {
     requestReviewDecorationsRebuild,
     reviewDecorationsPlugin,
@@ -1096,6 +1097,15 @@
         console.debug('[review:anchor]', update);
         reviewStore.applyAnchorResolution(update);
       },
+      // Per planning/collab/ui/review-panel-design.md §6: ReviewMargin
+      // exposes `focusCard(eventId)` on the bridge so the editor's
+      // inline-decoration click handler (10.2) and E2E automation can
+      // scroll/highlight the matching margin card. The margin's own
+      // $effect already watches `reviewStore.focusEventId`, so this is
+      // a thin pass-through.
+      reviewFocusCard(eventId: string) {
+        reviewStore.setFocusEventId(eventId);
+      },
     };
 
     type QueuedMessage =
@@ -1444,15 +1454,15 @@
 
 {#snippet rightRailPlaceholder()}
   <!--
-    Placeholder content for the right-rail slot. Phase 2 (attn-nnj.4.3) will
-    swap this for `<ReviewPanel>`. Keeping this neutral lets us validate the
-    layout (width, transitions, no chrome shift) before the review domain
-    lands.
+    Default right-rail content: mounts the Google-Docs-style margin overlay
+    (attn-nnj.4.3). The margin renders its own empty state when no review
+    threads exist for the active file, so this is the right level to mount
+    it unconditionally.
+
+    Callers that pass an explicit `rightRail` snippet prop override this
+    (used by tests or alternative shells).
   -->
-  <div class="right-rail-placeholder flex h-full flex-col gap-2 p-3 text-xs text-muted-foreground">
-    <p class="text-sm font-medium text-foreground">Right rail</p>
-    <p>No review session active.</p>
-  </div>
+  <ReviewMargin view={pmViewForReview} />
 {/snippet}
 
 {#snippet minimalDiagnosticContent()}
@@ -1538,8 +1548,8 @@
         {@render mainContent()}
       </div>
       <aside
-        class="right-rail flex h-full shrink-0 flex-col overflow-hidden border-l border-border bg-background transition-[width] duration-200 ease-linear"
-        style="width: {reviewStore.panelOpen ? '360px' : '0px'};"
+        class="right-rail relative flex h-full shrink-0 flex-col overflow-y-auto overflow-x-hidden bg-background transition-[width] duration-200 ease-linear"
+        style="width: {reviewStore.panelOpen ? '320px' : '0px'};"
         data-state={reviewStore.panelOpen ? 'open' : 'closed'}
         data-slot="right-rail"
         aria-hidden={!reviewStore.panelOpen}

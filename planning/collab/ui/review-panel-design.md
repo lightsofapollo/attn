@@ -1,48 +1,453 @@
-# Review Panel: Layout & Threading Model
+# Review Surface: Margin Sticky Cards (Google-Docs Model)
 
 Status: design proposal — awaiting human review (`bd human` on attn-nnj.10.1).
-Blocks: attn-nnj.4.3 (ReviewPanel.svelte), 4.6 (decorations), 4.7 (ambiguous picker),
-4.8 (stale panel state), 4.9 (snapshot badge), 4.10 (share button), 4.11 (connection badge).
+Blocks: attn-nnj.4.3 (`ReviewMargin.svelte`), 4.6 (decorations), 4.7 (ambiguous
+picker), 4.8 (stale state), 4.9 (snapshot badge), 4.10 (share button),
+4.11 (connection badge).
 
 References:
 
-- `planning/collab/data-model.md` §UI/UX Changes (lines 776+) — the surface inventory.
-- `planning/collab/amendments.md` Decision #15 — anchor resolver confidence cutoffs
-  (`exact` / `remapped + moved badge` / `ambiguous` / `stale`).
-- `planning/collab/amendments.md` Decision #11 — snapshot cadence
-  (snapshots are *coarse*: roughly one per meaningful save batch, not per keystroke).
-- `web/src/App.svelte` lines 1421-1435 — the right-rail aside slot
-  (`360px` fixed, mounted via `rightRail` snippet prop, toggled by `Cmd+J`).
-- `web/src/lib/Sidebar.svelte` — style reference (tabbed segmented control between
-  Files/Outline, `SidebarMenu`, `Command.*` for search).
-- `web/src/lib/TabBar.svelte` — style reference for any tabbed sub-navigation
-  (rounded segments, `color-mix` accent tinting).
+- `planning/collab/ui/inline-decorations.md` (10.2) — inline highlight system;
+  unchanged. Only the click-target of a highlight pivots from "panel item" to
+  "margin card."
+- `planning/collab/ui/connection-share.md` (10.3) — review-bar row above the
+  editor; independent of the panel-vs-margin choice and unchanged.
+- `planning/collab/data-model.md` §UI/UX Changes (lines 776+) — surface inventory.
+- `planning/collab/amendments.md` Decision #15 — anchor resolver confidence
+  cutoffs (LOCKED).
+- `planning/collab/amendments.md` Decision #11 — coarse snapshot cadence.
+- `web/src/App.svelte` lines 1448-1462 — the existing right-rail aside
+  (`360px` fixed, `rightRail` snippet slot, toggled by `Cmd+J`). This rewrite
+  **repurposes that slot as an overlay container**, not a fixed-width sibling.
+- `web/src/lib/review/popover-anchor.ts` — the existing `view.coordsAtPos(...)`
+  utility used by the hover popover. Reused for per-anchor y-resolution.
+- `web/src/lib/review/store.svelte.ts` — `reviewStore.events` +
+  `reviewStore.anchorResolutions` drive recomputation.
 
 ---
 
-## 1. Problem Framing
+## 0. Pivot Note
 
-The review panel is the only durable surface for collaboration that does not anchor
-to a specific paragraph in the document. It must host: open comment threads,
-suggestion cards with accept/reject controls, ambiguous-anchor pickers when the
-resolver returns two or more candidates within 0.10 confidence (Decision #15),
-stale items that lost their anchor entirely and need manual re-anchoring,
-per-file and per-snapshot context (Decision #11 means a single review can span
-2–5 snapshots of the same file), and inline status (snapshot age, "reviewer on
-older snapshot," connection badge). Density matters: an agent that has run a
-careful pass typically produces 20–40 findings, and the panel sits in a 360 px
-column to the right of the editor — narrower than a GitHub PR file pane. The
-default-active perspective also flips between *owner* (triaging incoming
-findings, accepting suggestions) and *reviewer* (composing comments, watching
-acceptance state). One layout has to serve both without modal switches.
+The original 10.1 design (a 360px panel "river" of flat thread cards with
+file/snapshot chips) was reconsidered after the v2 use case sharpened: a
+review session targets **1-5 markdown files** and **~40 findings**, runs for
+roughly an hour, and is dominated by an owner walking the document
+top-to-bottom alongside an agent's annotations. At that scale **spatial
+anchoring beats triage filtering**: the owner's mental model is "what does
+this paragraph say to me," not "show me all open suggestions sorted by
+recency." A right-rail panel forces a constant gaze ping-pong between the
+inline highlight and a separate sorted list; a Google-Docs-style margin places
+each card *next to* the text it annotates and removes the lookup step
+entirely.
 
-## 2. Three Candidate Layouts
+The recommendation has flipped. The three-candidate exploration that produced
+the original "flat list with chips" recommendation is preserved at the bottom
+of this doc under "Considered alternatives" so the reasoning trail is
+recoverable, but it is no longer the proposed design. The new model is
+specified in §1-§6 below.
 
-### Candidate (a): Grouped by File → Snapshot → Thread
+---
 
-Classic IDE PR-comments tree. The hierarchy mirrors the data model
-(`fileId → snapshotId → AnchorRef → thread`) directly. Each file is collapsible;
-each snapshot inside the file is collapsible; threads sit as leaves.
+## 1. The New Model — Margin Sticky Cards
+
+The right-rail aside (App.svelte:1448-1462) becomes an **overlay container
+for margin cards**. It is ~320px wide, lives flush to the right edge of the
+document scroll area, and **scrolls with the document** rather than
+independently. Each open thread renders as a card positioned at the y-pixel
+of its resolved anchor. The result reads as Google Docs comments: the card
+sits beside the paragraph it talks about.
+
+### 1.1 Layout
+
+```text
+┌── tao window ──────────────────────────────────────────────────────────────────────────┐
+│ ┌── Sidebar ──┐┌── SidebarInset ────────────────────────────────────────────────────┐  │
+│ │  Files      ││ [TabBar] data-model.md  amendments.md                          40px│  │
+│ │  Outline    ││ ▸ planning › collab › data-model.md                            40px│  │
+│ │             ││ [Share] ● Live direct  · 👤james 🤖rufus 👤alex   [snap 14:02] 36px│  │ ← 10.3 review-bar row
+│ │             ││ ┌── editor scroll area ────────────────────────┐┌── margin ─────┐  │  │
+│ │             ││ │                                              ││ ╔═══════════╗ │  │  │ ← orphan tray
+│ │             ││ │ # Phase 0c                                   ││ ║ 2 needs   ║ │  │  │   (sticky-top)
+│ │             ││ │                                              ││ ║ attention ║ │  │  │
+│ │             ││ │ The anchor resolver runs 8 steps.            ││ ╚═══════════╝ │  │  │
+│ │             ││ │ ~~~~~~~~~~~~~~~                              ││ ┌───────────┐ │  │  │ ← card 1
+│ │             ││ │                                              ││ │ rufus 6m  │ │  │  │   aligned to
+│ │             ││ │                                              ││ │ suggest ▲ │ │  │  │   "anchor"
+│ │             ││ │ Each step emits a candidate.                 ││ │ → 10 steps│ │  │  │
+│ │             ││ │ ====                                         ││ │ [accept]  │ │  │  │
+│ │             ││ │                                              ││ └───────────┘ │  │  │
+│ │             ││ │                                              ││ ┌───────────┐ │  │  │ ← card 2
+│ │             ││ │ Combine into a deduplicated set.             ││ │ alex 3m   │ │  │  │   aligned to
+│ │             ││ │ ~~~~~~~~                                     ││ │ "Do we    │ │  │  │   "combine"
+│ │             ││ │                                              ││ │  need…?"  │ │  │  │
+│ │             ││ │                                              ││ │  1 reply  │ │  │  │
+│ │             ││ │                                              ││ └───────────┘ │  │  │
+│ │             ││ │ Emit ambiguous when top two are within 0.10. ││               │  │  │
+│ │             ││ │                                              ││ ┌───────────┐ │  │  │ ← card 3
+│ │             ││ │                                              ││ │ rufus 11m │ │  │  │
+│ │             ││ │                                              ││ │ ▲ moved   │ │  │  │
+│ │             ││ │                                              ││ │ "weights  │ │  │  │
+│ │             ││ │                                              ││ │  tunable" │ │  │  │
+│ │             ││ │                                              ││ └───────────┘ │  │  │
+│ │             ││ │                                              ││ ─────────────│  │  │ ← collapsed
+│ │             ││ │                                              ││  ✓ resolved 12│  │  │   resolved strip
+│ │             ││ └──────────────────────────────────────────────┘└───────────────┘  │  │
+│ └─────────────┘└────────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+                                                                  ↑ margin overlay
+                                                                    width 320px
+                                                                    Cmd+J toggles
+```
+
+The margin overlay shares the editor's vertical scroll: when the user scrolls
+the document, cards move with it because their `top` is computed in document
+space, not viewport space.
+
+### 1.2 Card anatomy
+
+```text
+┌──────────────────────────────────┐
+│ rufus · 6m         suggest ▲ ◧ │ ← author chip, age, kind badge, state badge, overflow menu
+│ §Anchor resolver               │ ← section / line context (single line, ellipsis)
+│ ─────────────────────────────── │
+│ replace "8 steps" → "10 steps  │ ← body (4 line clamp, click to expand)
+│ (+math, +mermaid)"             │
+│ ─────────────────────────────── │
+│ [accept]  [accept+edit]  [✕]   │ ← action row (kind-specific; suggestion shown)
+└──────────────────────────────────┘
+   width: 320px  ·  clamp body: 4 lines  ·  shadow on focus
+```
+
+Card variants share the header/footer chrome and swap the middle:
+
+- **Comment** — body + (n replies) chevron; action row collapses to `↩ reply`.
+- **Suggestion** — diff body + `[accept] [accept+edit] [reject]`.
+- **Suggestion + stale source** — diff body with red "source changed" strip +
+  `[open three-way] [reject]`. Three-way opens an inline editor overlay
+  (see §6 implementation outline; no modal per project rule).
+- **Ambiguous** — lives in the orphan tray (§2), not in line.
+- **Stale (no anchor)** — lives in the orphan tray (§2).
+- **Remapped, 0.70-0.89 confidence** — a `▲ moved` badge sits in the header
+  next to the kind badge. The body is otherwise a normal comment/suggestion.
+  This is the panel-side counterpart to 10.2's inline `moved` underline; both
+  visuals draw from the same `reviewStore.anchorResolutions` entry so there
+  is no double source of truth.
+
+### 1.3 Stack / collision rules
+
+Two or more anchors that resolve close together cannot all sit at their
+ideal `top` without overlapping. Resolution mirrors Google Docs:
+
+1. Walk cards in **document order** (smallest `anchorY` first).
+2. For each card, set `top = max(anchorY, previousBottom + gutter)` where
+   `gutter` is 8px.
+3. If `top !== anchorY`, the card is "offset." Draw a 1px **SVG connector
+   line** from the card's left edge midpoint back to the highlight in the
+   editor. The line uses the same stroke color as the inline highlight kind.
+4. The card never sits *above* its anchor — only below. If the natural
+   position is occupied, it pushes down, never up.
+5. If the entire margin column overflows the visible scroll, cards beyond the
+   viewport still exist (they participate in y-layout) — they are just
+   off-screen. Virtualization (§6) clips rendering to a viewport ± 800px band.
+
+### 1.4 Width, position, scroll
+
+- **Card width**: fixed at **320px** (clamp 280-320 in narrow viewports;
+  below 280 the margin collapses and we fall back to the orphan tray for all
+  cards — see §7 open question 5).
+- **Vertical position**: per anchor, computed via `coordsAtPos(view,
+  anchor.byteRange[0])` (reuses `web/src/lib/review/popover-anchor.ts`).
+- **Horizontal position**: fixed; margin overlay does not scroll horizontally.
+- **Vertical scroll**: margin overlay does **not** scroll independently. Its
+  parent is the editor scroll container, so cards move with the text.
+
+### 1.5 Focus state
+
+- **Active card**: full opacity, shadow elevation, 1px accent border.
+- **Inactive cards**: 60% opacity, no shadow.
+- **Click an inline highlight** → marks the corresponding margin card active,
+  scrolls it into view (smooth, 200ms), and pulses the accent border once.
+- **Click a margin card** → moves the editor cursor to the anchor's start
+  position and scrolls the editor to put the anchor at ~1/3 viewport height.
+- **Keyboard**: `j`/`k` cycles the active card (and scrolls editor +
+  margin in lockstep); `Enter` opens replies / expands body; `Esc` deactivates.
+
+These match 10.2's `editor ↔ surface focus sync` requirement without
+modification: 10.2 doesn't care whether the "surface" is a panel item or a
+margin card, only that the focused review record is a single store value.
+
+---
+
+## 2. The Orphan Tray
+
+Some cards have no single y-position to align to. Cluster them at the **top
+of the margin** in a sticky-pinned tray so they cannot scroll away.
+
+```text
+┌──────────────────────────────────┐
+│ ╔═══════════════════════════╗   │
+│ ║ 2 needs attention         ║   │ ← chip header; sticky to top of margin
+│ ╠═══════════════════════════╣   │
+│ ║ rufus · 7m       ? amb    ║   │ ← ambiguous card
+│ ║ §line ~412                ║   │
+│ ║ "weights are tunable"     ║   │
+│ ║ 2 candidates              ║   │
+│ ║ ◯ §Anchor resolver L412   ║   │ ← inline picker
+│ ║ ◯ §Calibration   L488     ║   │
+│ ║ [pick] [skip]             ║   │
+│ ╠═══════════════════════════╣   │
+│ ║ rufus · 22m  ⚠ stale      ║   │ ← stale card
+│ ║ last seen §line ~488      ║   │
+│ ║ "underlying text changed" ║   │
+│ ║ [re-anchor manually] [✕]  ║   │
+│ ╚═══════════════════════════╝   │
+└──────────────────────────────────┘
+```
+
+Tray rules:
+
+- **Sticky-top**: tray uses `position: sticky; top: 0` within the margin
+  overlay so it pins at the visible top while the user scrolls past anchored
+  cards below.
+- **Counter chip**: `N needs attention` where N = ambiguous + stale + remapped
+  in the 0.35-0.69 range (single-candidate panel-only per amendments §15 step
+  6, which produces "panel-only with no picker" — these get the simplest tray
+  card: a one-line "confirm anchor at §X" affordance).
+- **Ambiguous card** has the picker inline: radio list of candidates with
+  section/line context and a `[pick]` button. No popup, no modal. Picking a
+  candidate immediately exits the tray and the card animates down to its new
+  anchor position over 250ms.
+- **Stale card** has only `[re-anchor manually]` — clicking it puts the editor
+  into a "drop anchor here" mode (next click in the document places the
+  anchor). `[✕]` dismisses the thread as resolved.
+- **Tray scroll**: if the tray itself exceeds ~40% of viewport height, it
+  scrolls internally. Anchored cards below the tray keep their normal layout.
+
+The orphan tray is the **only** place ambiguous and stale items appear. That
+matches amendments §15: "`ambiguous` → panel-only with picker" / "`stale` →
+panel-only, requires manual re-anchor" — the margin overlay *is* the panel
+in this design, and the tray is its dedicated dock for items that cannot
+spatial-align.
+
+---
+
+## 3. Resolved State
+
+Resolved threads do **not** disappear. They shrink to a **single-line grey
+strip** in place (same y-position as the active card would have had):
+
+```text
+│ ─── ✓ rufus · resolved 2m · §Anchor resolver ─── │
+```
+
+The strip is 24px tall, uses the `--muted-foreground` color, and is dismissed
+from the document-order layout queue (it can be skipped over for collision
+purposes — newer active cards collapse past it).
+
+If there are more than 5 collapsed strips visible in the current viewport,
+the design collapses them further to a "show all resolved" pill at the
+**bottom of the margin** (still inside the overlay, after the last anchored
+card):
+
+```text
+│ ─────────────────────────────────── │
+│       ⌃ 12 resolved · show          │ ← bottom pill, click to expand all strips
+│ ─────────────────────────────────── │
+```
+
+Clicking the pill expands all strips inline at their anchor positions.
+Clicking a strip pops it back to a full card for one cycle (until next focus
+change).
+
+---
+
+## 4. Coherence with 10.2 and 10.3
+
+### 10.2 — Inline decorations (unchanged)
+
+10.2's split-treatment decoration system stands. The inline highlight kinds,
+the `▲ moved` underline at 0.70-0.89 confidence, and the hover popover are
+all unchanged. Only one interaction shifts:
+
+- **Old**: clicking an inline highlight focuses the corresponding **panel
+  item** in the right-rail river.
+- **New**: clicking an inline highlight focuses the corresponding **margin
+  card** (and scrolls it into view if collision-offset).
+
+The `moved` state at 0.70-0.89 confidence (amendments §15: "0.70-0.89 →
+inline highlight + 'moved' badge in panel") now reads as: **inline
+underline** (10.2's responsibility) **plus** a `▲ moved` badge on the margin
+card header (this doc's §1.2). Both are driven by the same
+`reviewStore.anchorResolutions` record — single source of truth.
+
+10.2's editor ↔ surface focus sync hook is unchanged. The "surface" is now
+the margin overlay; the hook still receives a `(threadId, anchorId)` pair
+and dispatches focus to whatever surface owns that thread (margin card or
+orphan tray entry).
+
+### 10.3 — Review-bar row + share (unchanged)
+
+10.3's recommendation stands without modification. The review-bar row
+(`[Share] · ● Live · 👤peers · [snap @14:02]`) sits **between the breadcrumb
+and the editor**, above both the editor scroll area and the margin overlay.
+Geometry:
+
+```text
+PathBreadcrumb           ← 40px
+┌─ review-bar row ──────┐ ← 36px (10.3)
+│ [Share] ● Live peers… │
+└───────────────────────┘
+┌─ editor ───────┐┌ margin ┐ ← editor + margin overlay share vertical space
+│                ││  cards │
+│                ││        │
+└────────────────┘└────────┘
+```
+
+The connection badge, peer strip, share button, and snapshot badge all live
+in 10.3's row. They are **not** duplicated in the margin overlay. The margin
+overlay's only header chrome is the orphan tray (§2).
+
+### 12.1 — Right-rail slot becomes the margin overlay container
+
+App.svelte:1448-1462 today defines the right-rail as a fixed-width
+(`360px`) flex sibling of the editor with `border-l` and its own overflow.
+The margin overlay needs a different geometry:
+
+- It is **inside** the editor scroll container, not a sibling of it.
+- It does **not** have its own scrollbar.
+- Its width is **320px** (down from 360px).
+- The border is dropped; cards stand on their own with shadow on focus.
+
+This is a small CSS adjustment, not a layout rewrite. The `rightRail` snippet
+prop continues to exist; `ReviewMargin.svelte` mounts into it. The 4.3
+implementer wraps the snippet contents in an absolutely-positioned overlay
+inside the editor's scroll parent. Document this in 4.3's task description
+so the implementer doesn't try to keep the `aside` as a flex sibling.
+
+---
+
+## 5. Keyboard Story
+
+Same shape as the original recommendation, retargeted to cards-in-margin:
+
+- `Cmd+J` toggles the margin overlay (existing wiring in App.svelte).
+- `j` / `k` cycles the active card top-to-bottom. The editor scrolls in
+  lockstep so the anchor of the active card sits at ~1/3 viewport height.
+- `Enter` expands replies / opens body / expands picker.
+- `Esc` deactivates the current card.
+- `a` / `r` accept / reject on a suggestion card.
+- `t` jumps focus into the orphan tray; `j`/`k` then cycles tray items.
+- `?` opens the shortcuts dialog (existing).
+
+No per-tab cursor (this isn't tabbed). No multi-level navigation. Single
+cursor over the document-order list (tray items first, then anchored cards,
+then collapsed-resolved strips if expanded).
+
+---
+
+## 6. Implementation Outline for attn-nnj.4.3
+
+- **Mount**: `web/src/lib/ReviewMargin.svelte` mounted into App.svelte's
+  `rightRail` snippet slot. No layout rewrite of App.svelte; the slot is
+  repurposed as an overlay (see §4 / 12.1 note).
+- **Container CSS**: the snippet contents render an
+  `absolute`-positioned `<div>` pinned to `right: 0; top: 0` inside the
+  editor's scroll parent, width 320px, height = scroll-content height. The
+  existing `<aside>` becomes a positioning ancestor only — strip its
+  `border-l` and `overflow` rules.
+- **Per-card render**: for each visible thread, render a `<ReviewMarginCard>`
+  with `style="top: {top}px"`. `top` is the collision-resolved y-pixel from
+  §1.3.
+- **Anchor-y resolution**: use `view.coordsAtPos(view, anchor.byteRange[0])`
+  to get the top-y of the highlight. Reuse `web/src/lib/review/
+  popover-anchor.ts`; if that module currently returns only the popover-
+  relevant coords, extract a small `anchorTopY(view, byteOffset): number`
+  helper alongside it.
+- **Collision pass**: pure function `layoutCards(anchorsInDocOrder, gutter):
+  Array<{cardId, top, offset}>`. Unit-testable; no DOM access. Returns the
+  per-card `top` and whether the card is offset (drives the SVG connector).
+- **SVG connectors**: one `<svg>` inside the overlay container with `<line>`
+  elements from each offset card's left-midpoint to its anchor's right edge.
+  Recomputed on the same tick as `layoutCards`.
+- **Reactivity**: subscribe to `reviewStore.events` and
+  `reviewStore.anchorResolutions`. Recompute on doc change (debounced
+  16ms) and on store change.
+- **Orphan tray**: separate `<ReviewMarginTray>` rendered at the top of the
+  overlay with `position: sticky; top: 0`. Consumes the same store; filters
+  to `status === 'ambiguous' || status === 'stale' || (status === 'remapped'
+  && confidence < 0.70)`.
+- **Resolved strips**: filtered list of resolved threads, rendered at their
+  anchor's `top`. The "show all" bottom pill mounts after the last anchored
+  card.
+- **Performance**: cap rendered cards at ~50 in viewport (a 800px band above
+  and below visible viewport). Below 50 visible, no virtualization. Above
+  100 in document, virtualize using the same band logic. Off-band cards
+  still participate in collision-y calculation (so on-band layout is
+  correct) but skip DOM render.
+- **Focus sync**: `ReviewMargin` exposes `focusCard(threadId)` on the
+  `window.__attn__` bridge; 10.2's `editor ↔ surface focus sync` hook calls
+  it on highlight click. Conversely, clicking a margin card calls
+  `view.dispatch(state.tr.setSelection(...))` to move the editor cursor.
+
+---
+
+## 7. Open Questions for the User
+
+These affect 4.3's implementation; decide before the issue starts.
+
+1. **Comment thread replies (expand pattern)** — when a comment has N
+   replies, do we (a) expand them in place inside the card (card grows tall,
+   pushes other cards down via collision), (b) always show them (verbose for
+   long threads, eats vertical space), or (c) open a popover/sidebar when the
+   card is focused (keeps cards compact, but adds a hover surface)?
+   Recommendation: (a), capped at 5 replies visible with a "… N more" chevron
+   that opens a per-card scroll inside the card.
+
+2. **Initial scroll position when entering a doc with active reviews** —
+   center the editor on the **first comment** (most context for the owner),
+   or stay at the **top** (predictable, owner picks their pace)?
+   Recommendation: top by default; flash the first card to draw the eye.
+
+3. **Edit-mode visibility** — when the editor is in edit mode (user is
+   typing), do cards stay visible (Google Docs behavior) or hide (some apps,
+   to maximize horizontal space)? Recommendation: stay visible; cards are
+   the whole point of the design.
+
+4. **Connector treatment when a card is collision-offset** — SVG line
+   (cleanest), dotted border around the inline highlight that thickens when
+   the card is focused (less new visual vocabulary), or both? Google Docs
+   uses both subtly. Recommendation: SVG line for offset cards (always);
+   highlight border thickens only on focus.
+
+---
+
+## 8. Considered Alternatives — Original Panel-River Exploration
+
+*This section is preserved as historical context. The recommendation below
+("Candidate b: flat thread list") was the original 10.1 conclusion. It was
+superseded by the margin-card design above. The candidates remain useful for
+understanding what was rejected and why, and for revisiting if the v2 use
+case shifts (e.g., reviews across 50+ files where spatial anchoring loses
+to filtering).*
+
+### 8.1 Original problem framing
+
+The review panel is the only durable surface for collaboration that does not
+anchor to a specific paragraph in the document. It must host: open comment
+threads, suggestion cards with accept/reject controls, ambiguous-anchor
+pickers when the resolver returns two or more candidates within 0.10
+confidence (Decision #15), stale items that lost their anchor entirely and
+need manual re-anchoring, per-file and per-snapshot context (Decision #11
+means a single review can span 2-5 snapshots of the same file), and inline
+status (snapshot age, "reviewer on older snapshot," connection badge).
+Density matters: an agent that has run a careful pass typically produces
+20-40 findings, and the panel sits in a 360 px column to the right of the
+editor — narrower than a GitHub PR file pane.
+
+### 8.2 Candidate (a): Grouped by File → Snapshot → Thread
+
+Classic IDE PR-comments tree. Hierarchy mirrors the data model
+(`fileId → snapshotId → AnchorRef → thread`).
 
 ```text
 ┌─────────────────────────── 360px ────────────────────────────┐
@@ -60,47 +465,20 @@ each snapshot inside the file is collapsible; threads sit as leaves.
 │     │ replace "8 steps" → "10 steps (+math,        accept  ││
 │     │   +mermaid)"                       diff ▾    reject  ││
 │     └──────────────────────────────────────────────────────┘│
-│     ┌──────────────────────────────────────────────────────┐│
-│     │ agent-rufus · 7m · §line ~412            ? ambiguous ││
-│     │ "weights are tunable"  · 2 candidates       pick →   ││
-│     └──────────────────────────────────────────────────────┘│
 │   ▶ snapshot @ 13:30 (superseded)        2 threads          │
 │ ▶ planning/collab/relay-spec.md          4 threads · 1 sugg │
-│ ▶ planning/collab/crypto-spec.md         3 threads · 1 sugg │
-│ ▶ planning/collab/amendments.md          5 threads          │
 ├──────────────────────────────────────────────────────────────┤
 │ ▶ Stale (2)         ▶ Resolved (12)                          │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Pros:
+Rejected because: three layers of disclosure swamp a 30-comment review;
+snapshot is the least interesting axis (Decision #11 means most files have
+one current snapshot); chrome cost is paid every render.
 
-- Mirrors the data model — engineers reading the code can predict the structure.
-- Per-snapshot grouping makes "reviewer's snapshot vs current" visible at a glance.
-- Triage by file is fast when one file dominates.
+### 8.3 Candidate (b): Flat Thread List with File/Snapshot Chips
 
-Cons:
-
-- Three layers of disclosure (file > snapshot > thread). Two open files = a lot
-  of vertical bookkeeping. A 30-comment review across 4 files renders ~15 chrome
-  rows before a single thread is visible if everything is collapsed.
-- Snapshot grouping is the *least* interesting axis for the owner: Decision #11
-  produces few snapshots (1 every ~30s of active editing, gated by open threads),
-  so most reviews end up with one "current" snapshot per file and the snapshot
-  row is dead weight.
-- The chrome ruins density: ~3 threads visible above the fold at the default
-  360 px × ~900 px panel, vs 5–6 in the other candidates.
-
-Density estimate (30 comments across 4 files, all expanded):
-~3 threads above the fold at default panel height. Scrolling required for everything.
-
----
-
-### Candidate (b): Flat Thread List with File/Snapshot Chips
-
-Linear/Notion-style. Threads are first-class line items, ordered newest-first
-(or by sort dropdown). File and snapshot are *chips* on each thread, not parent
-containers. Filtering replaces grouping.
+Linear/Notion-style. Threads are first-class line items, ordered newest-first.
 
 ```text
 ┌─────────────────────────── 360px ────────────────────────────┐
@@ -124,11 +502,6 @@ containers. Filtering replaces grouping.
 │ │ kills it."                                              │ │
 │ └──────────────────────────────────────────────────────────┘ │
 │ ┌──────────────────────────────────────────────────────────┐ │
-│ │ alex · 9m                            comment             │ │
-│ │ relay-spec.md · snap 14:02 · §Admission Key             │ │
-│ │ "Worth a worked example of the HMAC inputs."            │ │
-│ └──────────────────────────────────────────────────────────┘ │
-│ ┌──────────────────────────────────────────────────────────┐ │
 │ │ agent-rufus · 11m              stale · re-anchor ⚠       │ │
 │ │ data-model.md · snap 13:30 · §line ~488 (lost)          │ │
 │ └──────────────────────────────────────────────────────────┘ │
@@ -137,35 +510,15 @@ containers. Filtering replaces grouping.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Pros:
+**Was the original recommendation.** Superseded because spatial anchoring
+beats filter-driven grouping at the v2 scale (~40 findings across 1-5
+files). The "scroll a river of cards while glancing at highlights" gaze
+pattern lost to "card sits next to the highlight."
 
-- Density: 5–6 threads above the fold at 360 px. Cards are 4–5 lines each.
-- Single scrollable river — j/k moves through *threads*, not chrome.
-- Time-ordered feels right for a live review session: the latest agent finding
-  bubbles to the top regardless of which file it touched.
-- File/snapshot filters in the toolbar give the candidate-(a) view on demand,
-  without paying the chrome cost when you don't need it.
+### 8.4 Candidate (c): Tabbed by Lifecycle State
 
-Cons:
-
-- Per-file overview is one click away (filter dropdown). When one file has 15
-  threads and others have 1–2, that imbalance is less obvious.
-- Snapshot-grouped mental model (reviewer pinned to 13:30, owner now on 14:02)
-  is conveyed by the chip, not the structure — easier to miss.
-- Toolbar real estate is heavy (4 controls + search). Risk of feeling busy in
-  short reviews (<5 threads).
-
-Density estimate (30 comments, no filter):
-~5–6 threads above the fold. Stale and resolved are out of the river.
-
----
-
-### Candidate (c): Tabbed by Lifecycle State
-
-Tabs across the top: **Threads** (open + replied), **Suggestions** (pending
-accept/reject), **Pickers** (ambiguous, awaiting anchor decision), **Stale**
-(lost anchor, needs manual re-anchor). Inside each tab the list is flat and
-chronological — same card shape as (b), without the filter row.
+Tabs across the top: Threads / Suggestions / Pickers / Stale. Inside each
+tab the list is flat and chronological.
 
 ```text
 ┌─────────────────────────── 360px ────────────────────────────┐
@@ -180,245 +533,34 @@ chronological — same card shape as (b), without the filter row.
 │ │ agent-rufus · 6m                                         │ │
 │ │ data-model.md · §Anchor resolver               ▲ moved   │ │
 │ │ replace "8 steps" → "10 steps (+math, +mermaid)"        │ │
-│ │ ─ diff ──────────────────────────────────────────────── │ │
-│ │ - The anchor resolver runs 8 steps.                     │ │
-│ │ + The anchor resolver runs 10 steps (+math, +mermaid).  │ │
-│ │ ──────────────────────────────────────────────────────── │ │
-│ │              [accept]  [accept + edit]   [reject]       │ │
-│ └──────────────────────────────────────────────────────────┘ │
-│ ┌──────────────────────────────────────────────────────────┐ │
-│ │ agent-rufus · 15m                                        │ │
-│ │ relay-spec.md · §POST /envelopes                         │ │
-│ │ insert: "Batch cap = 32 (Decision #7)."                 │ │
 │ │              [accept]  [accept + edit]   [reject]       │ │
 │ └──────────────────────────────────────────────────────────┘ │
 │ ┌──────────────────────────────────────────────────────────┐ │
 │ │ agent-rufus · 22m              three-way · stale source ⚠│ │
 │ │ data-model.md · §line ~488                              │ │
-│ │ underlying text changed since suggestion authored.      │ │
 │ │              [open three-way]   [reject]                │ │
 │ └──────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Pros:
+Rejected because: owner has to context-switch across four tabs to check
+"is there anything left"; reviewer's primary action lives in two of four
+tabs only; tabs eat three rows of chrome on every view; the lifecycle
+"home" of an accepted-then-replied suggestion is ambiguous.
 
-- Each tab has a single clear job; no mode-switching inside a tab.
-- Ambiguous pickers and stale items get a dedicated home — they cannot get
-  buried under regular threads. Direct mapping from Decision #15's four states
-  (`exact` / `remapped` / `ambiguous` / `stale`) to UI placement.
-- Pending suggestions are the highest-leverage owner action; surfacing them on
-  a counted tab pressures the owner to clear them.
-- Each tab can have tab-specific chrome (three-way apply UI in Suggestions, big
-  picker dropdown in Pickers) without cluttering the other tabs.
+### 8.5 Why the margin pivot wins over the original recommendation (b)
 
-Cons:
+The margin design subsumes (b)'s strengths and removes its weakness:
 
-- Owner has to context-switch between 4 tabs to fully triage a review.
-  ("Is there anything left?" requires checking 4 counts.)
-- Reviewer composing a follow-up comment on a previously-suggested edit has to
-  jump Suggestions → Threads when the suggestion is accepted and conversation
-  continues.
-- A thread that *was* a suggestion (now accepted) and now has follow-up replies
-  has an ambiguous home. Hidden-state machine bugs likely.
-- Tabs eat 3 rows of vertical chrome on every view.
+- **(b) gave**: density, single-cursor keyboard, file/snapshot chips on cards,
+  inline-expandable pickers. **Margin keeps all four** (cards are smaller,
+  one cursor over document-order list, chips on cards, picker in tray).
+- **(b)'s weakness**: constant gaze ping-pong between inline highlight and
+  the panel river. **Margin removes it**: card is *adjacent to* the highlight.
+- **(b)'s filter-driven grouping** is now unnecessary at v2 scale: spatial
+  position is the grouping. File switching is implicit (you're in the file
+  whose cards you see). Snapshot is shown in 10.3's snapshot badge.
 
-Density estimate (30 comments split across tabs ~17/4/2/2):
-~4 cards above the fold inside the active tab (suggestions are taller); ~6 in
-the Threads tab. Total visibility across tabs requires explicit clicks.
-
----
-
-## 3. Cross-Cutting Concerns
-
-### 30-comment review feel
-
-- (a) Tree: Heavy. Disclosure arrows everywhere. Owner ends up either expanding
-  everything (and scrolling forever) or playing accordion. Worst case for
-  density.
-- (b) Flat: Best. The river is the right shape for "work through findings
-  top-to-bottom." Filters collapse to specific files on demand.
-- (c) Tabbed: Forces a triage *order* (clear Pickers → clear Suggestions →
-  reply to Threads → re-anchor Stale). That's helpful for a structured owner,
-  prescriptive for everyone else.
-
-### Ambiguous picker placement
-
-Picker payload: 2–4 candidate ranges from the resolver, each with confidence
-score, ~80 chars of surrounding context, and a "pick" button. Per Decision #15,
-ambiguous is panel-only — there is no inline highlight to click.
-
-- (a) Tree: Inline-expandable inside the thread card. The candidate list pushes
-  the card to ~12 lines. Two ambiguous items in the same file expand to dwarf
-  everything else.
-- (b) Flat: Card collapsed by default shows "? ambiguous · 2 candidates · pick
-  anchor →". Click expands inline; expanded card grows to ~10 lines but the
-  river handles it. Acceptable. **Modal is rejected** — modals break keyboard
-  triage flow.
-- (c) Tabbed: Dedicated Pickers tab, expanded by default since the tab exists
-  *for* this. Single ambiguous item gets the full panel width and can show
-  candidate diff context generously.
-
-### Stale items
-
-- (a) Tree: Bottom-of-panel collapsed footer ("▶ Stale (2)"). Visible but
-  out-of-flow. Per-file context is lost when collapsed.
-- (b) Flat: Inline cards with a `stale · re-anchor` badge, sorted to the bottom
-  by default (or filter-only). Stale items never disappear, but they get out of
-  the way of active work. The card shows the *last known* snapshot/section so
-  the re-anchor decision has context.
-- (c) Tabbed: Dedicated Stale tab. Counter forces attention; tab is empty in
-  the happy path so the cost is invisible most of the time.
-
-### Resolved thread visibility
-
-- (a) Tree: "▶ Resolved (12)" collapsed footer per the design above. Most users
-  never expand it; resolved is effectively hidden but discoverable.
-- (b) Flat: Hidden by default, "12 resolved · show" link at the bottom. Click
-  splices them into the river (greyed, with a `✓ resolved` chip) sorted by
-  resolution time.
-- (c) Tabbed: Per-tab filter "show resolved" toggle in each tab's header. More
-  switches to manage.
-
-Recommend **hidden-by-default with one-click reveal** across all candidates,
-matching Linear. Reviews that exhaust the open list want closure, not
-distraction.
-
-### Owner vs reviewer perspective flex
-
-The two perspectives differ in *which actions matter*:
-
-- **Owner** triages: accept/reject suggestions, pick ambiguous anchors, reply
-  to comments. The Suggestions and Pickers states are owner-only actionable.
-- **Reviewer** composes: writes new comments/suggestions, watches acceptance
-  state on prior submissions, replies to owner.
-
-- (a) Tree: Same view both perspectives. Reviewer wades through the same chrome
-  to find their own threads.
-- (b) Flat: A `mine` filter solves reviewer's "where are my submissions?"
-  question. Default sort (newest) serves both perspectives.
-- (c) Tabbed: Worst fit for reviewer — Suggestions and Pickers tabs are mostly
-  not-actionable for reviewers, so two of four tabs are dead weight. Reviewer
-  effectively lives in the Threads tab.
-
-### Keyboard-only navigation
-
-Per `/Users/jameslal/.claude/CLAUDE.md`: no `window.confirm` / `alert`; all
-interactions must be in-app, and a first-class keyboard story is required.
-
-Shared minimum: `Cmd+J` toggles the panel (already wired in App.svelte). `j`/`k`
-moves between items. `Enter` opens / expands. `Esc` collapses or closes.
-`a` accept, `r` reject on a suggestion. `?` opens shortcuts dialog.
-
-- (a) Tree: Three navigation levels (file/snapshot/thread). Either `h`/`l`
-  toggles disclosure on the current row, or `j`/`k` skips through chrome rows
-  (annoying) or skips them (then chrome state is invisible from keyboard).
-  Hard to get right.
-- (b) Flat: One list, one cursor. `j`/`k` cycles cards. `f` opens filter
-  popover (keyboard-navigable). `/` focuses search. Clean.
-- (c) Tabbed: `1`/`2`/`3`/`4` jumps tabs (or `Tab` cycles), `j`/`k` inside.
-  Two-level model but each level is shallow and predictable.
-
-(b) and (c) are both achievable; (a) is the hardest.
-
----
-
-## 4. Recommendation
-
-**Adopt Candidate (b): flat thread list with file/snapshot chips,
-filter-driven grouping.**
-
-Justification:
-
-1. **Density wins.** The panel is 360 px wide and competes for vertical space
-   with the editor's outline view. A 30-finding review fits in ~5 screen
-   heights vs ~10 for the tree, and ambiguous/stale items don't disappear into
-   collapsed sections.
-
-2. **Decision #11 makes snapshot-as-container low-value.** The snapshot cadence
-   is coarse (~one per save batch with open threads, never per keystroke). Most
-   reviews end up with one current snapshot per file plus maybe one superseded.
-   Promoting snapshot to a hierarchy layer (candidate a) inflates chrome for a
-   dimension that has 1–2 values. Chip on the card is exactly right.
-
-3. **Decision #15's four states map naturally to inline badges, not tabs.**
-   `exact` is silent; `remapped` gets a `▲ moved` badge inline; `ambiguous`
-   gets a `? ambiguous · N candidates · pick →` card with inline-expandable
-   picker; `stale` gets a `stale · re-anchor ⚠` badge and sorts to the bottom
-   (still in the river). The reviewer/owner can see them in one scroll without
-   tab switching. This matches the resolver's UI-cutoffs table in §15 directly:
-   "≥0.90 inline / 0.70–0.89 inline + badge / ambiguous panel-only with picker
-   / stale panel-only manual re-anchor" all live in one river with different
-   badges.
-
-4. **Keyboard story is simplest.** Single cursor, single river. No
-   level-switching, no decision about whether `j` skips chrome.
-
-5. **Flex between owner and reviewer is cheap.** Add a `mine` filter plus a
-   default sort (newest); both perspectives use the same layout. No "owner
-   mode" vs "reviewer mode" toggle to maintain.
-
-6. **The tabbed model (c) is appealing for a structured triage flow but is
-   wrong for ongoing review.** Once the owner clears Pickers and Suggestions,
-   the other tabs are empty and the layout has spent 3 rows of chrome on
-   nothing. (c)'s strengths can be recovered as filter presets in (b):
-   `filter: ambiguous`, `filter: suggestions`, `filter: stale`.
-
-7. **The tree model (a) is the IDE convention but optimizes for the wrong
-   axis** — file-tree review made sense in a multi-hundred-file PR. attn rooms
-   live for an hour and review 1–5 markdown files; the tree's discriminating
-   power is wasted, and its chrome cost is paid every render.
-
-### Implementation outline for attn-nnj.4.3
-
-- `ReviewPanel.svelte` mounted into App.svelte's existing `rightRail` snippet
-  slot (no layout change to App).
-- Top bar: counters (`23 open · 4 suggest`), connection badge, panel close.
-- Filter row: `file ▾`, `snapshot ▾`, `state ▾` (open/suggestions/ambiguous/
-  stale/resolved/mine), `sort ▾` (newest/oldest/file-then-newest), search.
-  Filters are persisted per-room in `localStorage`.
-- Card list inside `ScrollArea`, virtualized if >100 items.
-- Card states: comment, suggestion (with accept/reject/edit), suggestion +
-  three-way (when source text changed since author), ambiguous + inline picker,
-  stale + re-anchor action, resolved (greyed).
-- Each card carries `file · snapshot-time · §section-or-line` as a chip row
-  immediately under the author/timestamp.
-- Resolved hidden by default, revealed via `12 resolved · show` footer link.
-- Keyboard: `j`/`k`, `Enter` to expand, `Esc` to collapse, `a`/`r` for
-  suggestions, `/` for search, `f` for filter popover, `Cmd+J` to toggle.
-
-This matches the "Owner UI" surfaces enumerated in `data-model.md` §UI/UX
-Changes line-by-line: share button (separate, in the toolbar — not in the
-panel; ships in 4.10), room mode selector (toolbar), connection badge (panel
-header), peer strip (panel header second row — out of scope here, ships in
-4.11), review panel (this doc), snapshot badge (editor header, ships in 4.9),
-inline highlights (editor decorations, ships in 4.6), ambiguous picker (panel
-card, this doc), stale state (panel card, this doc), suggestion card (panel
-card, this doc), three-way apply (suggestion card expanded state).
-
----
-
-## 5. Open Questions for the User
-
-The following affect 4.3's data model and need a decision before panel
-implementation begins:
-
-1. **Resolved threads: hidden or always-shown?** Recommendation above is
-   hidden-by-default with a reveal link (Linear's behavior). Notion shows them
-   greyed inline. Which?
-
-2. **Filter persistence scope: per-room or global?** A reviewer who lives in
-   `filter: mine` probably wants that across rooms. A triaging owner probably
-   wants per-room (different reviews have different shapes). Default proposed:
-   per-room.
-
-3. **Card timestamp format: relative (`3m`, `2h`) or absolute (`14:02`)?**
-   Relative reads more natural in a live session; absolute is unambiguous when
-   reviewing async-mode catchup. Could split: relative for <24h, absolute
-   beyond. Decide before implementation to avoid mid-stream churn.
-
-4. **Suggestion card width: stay in 360 px panel, or allow expand-to-
-   half-editor?** Three-way apply (stale-source suggestions) shows three text
-   columns and is cramped at 360 px. Option: clicking "open three-way" opens
-   an inline-editor overlay (full editor width, panel stays open) rather than
-   a true modal. Needs UX validation against the no-modals rule.
+The (c) tab argument ("ambiguous/stale need dedicated homes") is preserved
+in the margin design via the **orphan tray** (§2), which is a single sticky
+slot rather than two tabs.

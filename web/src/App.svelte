@@ -114,6 +114,34 @@
   let hasActiveTab = $derived(Boolean(activeTab));
   let activeFileType = $derived<FileType>(activeTab?.fileType ?? 'unsupported');
   let hasSidebar = $derived(fileTree.length > 0);
+
+  // Reviewer rendering: when this daemon joined a room (currentRoomId set)
+  // and has received the owner's snapshot for the active file, render the
+  // snapshot markdown. The owner keeps rendering their local file (they
+  // have a real tab + rawMarkdown); a pure reviewer has no local tab, so
+  // the snapshot is the only document they can see. See store.applyEvent —
+  // SnapshotCreated events are mirrored into `reviewStore.snapshots` and
+  // auto-set `currentFileId`.
+  let reviewSnapshotMarkdown = $derived.by(() => {
+    const roomId = reviewStore.currentRoomId;
+    const fileId = reviewStore.currentFileId;
+    if (!roomId || !fileId) return null;
+    const snap = reviewStore.snapshots.find(
+      (s) => s.roomId === roomId && s.fileId === fileId && typeof s.markdown === 'string',
+    );
+    return snap?.markdown ?? null;
+  });
+  // A pure reviewer = joined a room, received a snapshot, but has no local
+  // file tab open. This is what flips the editor from the "No file
+  // selected" empty state to rendering the shared doc.
+  let isReviewerViewingSnapshot = $derived(
+    !hasActiveTab && reviewSnapshotMarkdown !== null,
+  );
+  // The markdown the editor actually renders: local file when one is open,
+  // otherwise the received snapshot.
+  let effectiveMarkdown = $derived(
+    hasActiveTab ? rawMarkdown : (reviewSnapshotMarkdown ?? rawMarkdown),
+  );
   let showTabBar = $derived(tabs.length > 1);
   const loadedMtimeByPath = new Map<string, number>();
   const markdownCacheByPath = new Map<string, string>();
@@ -1550,7 +1578,22 @@
     bind:viewportRef={contentViewport}
   >
 
-    {#if !hasActiveTab}
+    {#if isReviewerViewingSnapshot}
+      <!-- Pure-reviewer mode: no local file, render the owner's shared
+           snapshot read-only. The ReviewMargin overlay (right rail) still
+           mounts so comments anchor against this content. -->
+      <Editor
+        bind:this={editorRef}
+        markdown={effectiveMarkdown}
+        editable={false}
+        onLinkNavigate={handleEditorLinkNavigate}
+        onSave={saveEdits}
+        onCancel={cancelEdit}
+        onDirtyChange={handleEditorDirtyChange}
+        plugins={editorPlugins}
+        onReady={handleEditorReady}
+      />
+    {:else if !hasActiveTab}
       <div class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
         <p class="text-sm font-medium text-foreground">No file selected</p>
         {#if hasSidebar}
@@ -1562,7 +1605,7 @@
     {:else if activeFileType === 'markdown'}
       <Editor
         bind:this={editorRef}
-        markdown={rawMarkdown}
+        markdown={effectiveMarkdown}
         editable={mode === 'edit'}
         onLinkNavigate={handleEditorLinkNavigate}
         onSave={saveEdits}

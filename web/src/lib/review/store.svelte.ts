@@ -273,9 +273,44 @@ export class ReviewStore {
   /**
    * Append an imported review event. Phase 2 4.2 builds derived thread views
    * over this list; the scaffold just stores them in arrival order.
+   *
+   * `SnapshotCreated` events carry the document bytes inline (the owner's
+   * snapshot the reviewer needs to render). We mirror those into the
+   * `snapshots` view here so the editor can pick up the markdown without a
+   * separate `reviewSnapshot` callback — the daemon delivers snapshots as
+   * regular events over the encrypted channel, not via a distinct IPC.
    */
   applyEvent(event: ReviewEvent): void {
     this.events = [...this.events, event];
+
+    if (event.body.type === 'snapshot_created') {
+      const body = event.body;
+      const inline = body.inlineSnapshot;
+      const snapshot: ReviewSnapshot = {
+        roomId: event.meta.roomId,
+        fileId: body.fileId,
+        snapshotId: body.snapshotId,
+        parentSnapshotId: body.parentSnapshotId,
+        createdAt: event.meta.createdAt,
+        createdBy: event.meta.authorId,
+        baseHash: body.baseHash,
+        byteLength: inline ? inline.markdown.length : 0,
+        markdown: inline?.markdown,
+        anchorIndex: inline?.anchorIndex,
+        encryptedBlobRef: body.encryptedBlobRef,
+      };
+      // De-dupe by snapshotId — the relay echoes the owner's own snapshot
+      // back to them, and a reconnect can replay it.
+      if (!this.snapshots.some((s) => s.snapshotId === snapshot.snapshotId)) {
+        this.snapshots = [...this.snapshots, snapshot];
+      }
+      // Auto-focus the file the snapshot belongs to when nothing is
+      // selected yet — this is what makes the reviewer's editor switch
+      // from "their local files" to "the shared doc" on first snapshot.
+      if (this.currentFileId === null) {
+        this.currentFileId = body.fileId;
+      }
+    }
   }
 
   /**

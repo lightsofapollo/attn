@@ -28,8 +28,10 @@ import { canonicalize, type CanonicalValue } from "./canonical";
 import type { Env } from "./env";
 import { OwnerSigError, verifyOwnerSignature } from "./owner-sig";
 import { parsePow, POW_MAX_LIFETIME_MS, PowError, verifyPow } from "./pow";
+import { presignBlobUpload, type PresignedUploadResult } from "./r2";
 import {
   acksRequestSchema,
+  blobPresignRequestSchema,
   deviceRegistrationSchema,
   envelopeBatchSchema,
   roomCreationSchema,
@@ -45,6 +47,14 @@ const ROOM_DEVICES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/devices\/?$/;
 const ROOM_ENVELOPES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/envelopes\/?$/;
 const ROOM_ACKS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/acks\/?$/;
 const ROOM_SOCKET_PATH_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
+const ROOM_BLOBS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/?$/;
+
+/** R2 spillover threshold: snapshot_blob envelopes above this go to R2 via
+ *  POST /v2/rooms/:roomId/blobs (relay-spec.md §POST /blobs). Anything at or
+ *  below uses the inline envelope path, which is more efficient for small
+ *  payloads (one HTTP round-trip instead of three).
+ */
+const BLOB_SPILLOVER_THRESHOLD_BYTES = 1 * 1024 * 1024;
 
 const ED25519_PUB_BYTE_LEN = 32;
 const ED25519_SIG_BYTE_LEN = 64;
@@ -211,6 +221,18 @@ export class RoomDO extends DurableObject<Env> {
         return this.handleAcks(request, roomId, url.pathname);
       }
       return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /acks`);
+    }
+
+    const blobsMatch = url.pathname.match(ROOM_BLOBS_PATH_RE);
+    if (blobsMatch) {
+      const roomId = blobsMatch[1];
+      if (roomId === undefined || roomId === "") {
+        return errorResponse(400, "ATTN_ROOM_ID_INVALID", "roomId required");
+      }
+      if (request.method === "POST") {
+        return this.handleBlobPresign(request, roomId, url.pathname);
+      }
+      return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /blobs`);
     }
 
     const socketMatch = url.pathname.match(ROOM_SOCKET_PATH_RE);
@@ -1246,6 +1268,205 @@ export class RoomDO extends DurableObject<Env> {
     return new Response(null, { status: 204 });
   }
 
+  // -- POST /v2/rooms/:roomId/blobs ---------------------------------------
+
+  /**
+   * R2 spillover presign endpoint per relay-spec.md §POST /v2/rooms/:roomId/blobs.
+   *
+   * Returns a short-lived upload capability the client uses to PUT the raw
+   * ciphertext directly to R2 (via the Worker's internal route — see r2.ts
+   * docstring for the trade-off vs. real S3 presigning).
+   *
+   * Layered checks (mirror the other write endpoints):
+   *   1. Room exists (admissionKey loaded from DO storage; 404 otherwise).
+   *   2. Admission HMAC.
+   *   3. Schema-validate body so we have a deviceId for the PoW binding + the
+   *      ciphertextBytes value for the spillover threshold + cap checks.
+   *   4. PoW — bound to (roomId, body.deviceId, POST, urlPath).
+   *   5. Threshold gate: `ciphertextBytes > 1 MiB`. Below that → 400, the
+   *      client should use the inline envelope path.
+   *   6. Hard cap: `policy.maxSnapshotBytes` upper bound (no point reserving
+   *      a slot the eventual POST /envelopes would reject).
+   *   7. Room-bytes cap: `(meta:bytes_used + meta:bytes_used_r2 + ciphertextBytes)
+   *      <= HARD_MAX_ROOM_BYTES`. Reserve up-front so two concurrent presigns
+   *      cannot double-spend the remaining budget.
+   *   8. Device registration check — (authorId, deviceId) must be registered.
+   *   9. Persist a reservation record at `blob_resv:<envelopeId>` carrying the
+   *      reserved byte count + token expiry. The PUT route consumes the
+   *      reservation; the GET route is independent and only checks R2 directly.
+   *  10. Mint upload capability + return.
+   *
+   * Reservation lifecycle:
+   *   - Created here, debits `meta:bytes_used_r2` immediately.
+   *   - Cleared by the eventual POST /envelopes for the same envelopeId, or
+   *     when the underlying R2 object lands and the client confirms.
+   *   - Falls out via the bucket's 7-day lifecycle rule + DO alarm wipe if
+   *     the client never follows through. Acceptable: each room is capped at
+   *     25 MiB total so a runaway client can't pin large reservations indefinitely.
+   */
+  private async handleBlobPresign(
+    request: Request,
+    roomId: string,
+    urlPath: string,
+  ): Promise<Response> {
+    const limits = readHardLimits(this.env);
+    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
+    if (storedAdmissionKey === undefined) {
+      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+    }
+
+    // Buffer body once — admission + JSON.parse both need it.
+    let bodyBytes: Uint8Array;
+    try {
+      bodyBytes = new Uint8Array(await request.arrayBuffer());
+    } catch (err) {
+      return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
+    }
+
+    // 1. Admission.
+    try {
+      const buffered = bufferedRequest(request, bodyBytes);
+      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
+    } catch (err) {
+      if (err instanceof AdmissionError) {
+        return errorResponse(401, err.code, err.message);
+      }
+      throw err;
+    }
+
+    // 2. Schema-validate so we have a deviceId for the PoW binding.
+    let parsed: unknown;
+    try {
+      const text = new TextDecoder().decode(bodyBytes);
+      parsed = JSON.parse(text);
+    } catch (err) {
+      return errorResponse(400, "ATTN_BODY_INVALID", `request body is not valid JSON: ${(err as Error).message}`);
+    }
+    const result = blobPresignRequestSchema.safeParse(parsed);
+    if (!result.success) {
+      return errorResponse(400, "ATTN_BODY_INVALID", formatZodError(result.error));
+    }
+    const body = result.data;
+
+    // 3. PoW — bound to (roomId, body.deviceId, POST, urlPath).
+    const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+    if (policy === undefined) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
+    }
+    const powToken = request.headers.get("Attn-PoW");
+    if (powToken === null || powToken === "") {
+      return errorResponse(400, "ATTN_POW_INVALID", "missing Attn-PoW header");
+    }
+    try {
+      await verifyPow(powToken, {
+        roomId,
+        deviceId: body.deviceId,
+        method: "POST",
+        urlPath,
+        policyPowBits: policy.powBits,
+        now: Date.now(),
+        isReplayed: (hash) => this.isPowSeen(hash),
+        markSeen: (hash, expiresAt) => this.markPowSeen(hash, expiresAt),
+      });
+    } catch (err) {
+      if (err instanceof PowError) {
+        return errorResponse(400, err.code, err.message);
+      }
+      throw err;
+    }
+
+    // 4. Threshold gate: payload must exceed 1 MiB. Below → use inline envelope path.
+    if (body.ciphertextBytes <= BLOB_SPILLOVER_THRESHOLD_BYTES) {
+      return errorResponse(
+        400,
+        "ATTN_BLOB_TOO_SMALL",
+        `ciphertextBytes=${body.ciphertextBytes} <= ${BLOB_SPILLOVER_THRESHOLD_BYTES}; use inline envelope path`,
+      );
+    }
+
+    // 5. Per-snapshot cap.
+    if (body.ciphertextBytes > policy.maxSnapshotBytes) {
+      return errorResponse(
+        413,
+        "ATTN_ENVELOPE_TOO_LARGE",
+        `ciphertextBytes=${body.ciphertextBytes} > policy.maxSnapshotBytes=${policy.maxSnapshotBytes}`,
+      );
+    }
+
+    // 6. Device registration check.
+    const deviceKey = deviceStorageKey(body.authorId, body.deviceId);
+    const deviceRecord = await this.ctx.storage.get<DeviceRecord>(deviceKey);
+    if (deviceRecord === undefined) {
+      return errorResponse(
+        400,
+        "ATTN_DEVICE_UNREGISTERED",
+        `(authorId=${body.authorId}, deviceId=${body.deviceId}) not registered`,
+      );
+    }
+
+    // 7. Room-bytes cap. Sum DO bytes + R2 bytes + outstanding reservations
+    //    + this request's ask. Reservations are tracked in meta:bytes_used_r2
+    //    so concurrent presigns cannot double-spend the budget.
+    const resvKey = blobReservationKey(body.envelopeId);
+    const existing = await this.ctx.storage.get<BlobReservation>(resvKey);
+    const [curBytes, curBytesR2] = await Promise.all([
+      this.ctx.storage.get<number>(META.bytesUsed),
+      this.ctx.storage.get<number>(META.bytesUsedR2),
+    ]);
+    const runningBytes = curBytes ?? 0;
+    const runningBytesR2 = curBytesR2 ?? 0;
+
+    // Idempotent re-presign for the same envelopeId. We return a fresh token
+    // but do NOT debit again — the prior reservation already counted toward
+    // running_r2_bytes. This means a stuck client can re-issue presigns
+    // without inflating accounting.
+    let addedR2 = body.ciphertextBytes;
+    if (existing !== undefined) {
+      if (existing.ciphertextBytes !== body.ciphertextBytes) {
+        return errorResponse(
+          409,
+          "ATTN_BLOB_RESERVATION_MISMATCH",
+          `envelopeId ${body.envelopeId} already reserved at ${existing.ciphertextBytes} bytes`,
+        );
+      }
+      addedR2 = 0;
+    }
+    if (runningBytes + runningBytesR2 + addedR2 > limits.maxRoomBytes) {
+      return errorResponse(
+        507,
+        "ATTN_ROOM_STORAGE_FULL",
+        `room ${roomId} storage cap reached (have ${runningBytes + runningBytesR2}, +${addedR2} > ${limits.maxRoomBytes})`,
+      );
+    }
+
+    // 8. Mint upload cap. Default 15-min TTL per spec.
+    let presigned: PresignedUploadResult;
+    try {
+      presigned = await presignBlobUpload(this.env, roomId, body.envelopeId, body.ciphertextBytes);
+    } catch (err) {
+      return errorResponse(500, "ATTN_BLOB_PRESIGN_FAILED", `presign failed: ${(err as Error).message}`);
+    }
+
+    // 9. Persist the reservation + update meta:bytes_used_r2 atomically.
+    const reservation: BlobReservation = {
+      envelopeId: body.envelopeId,
+      authorId: body.authorId,
+      deviceId: body.deviceId,
+      ciphertextBytes: body.ciphertextBytes,
+      reservedAt: Date.now(),
+      uploadExpiresAt: presigned.expiresAt,
+    };
+    const writes: Record<string, unknown> = {
+      [resvKey]: reservation,
+    };
+    if (addedR2 > 0) {
+      writes[META.bytesUsedR2] = runningBytesR2 + addedR2;
+    }
+    await this.ctx.storage.put<unknown>(writes);
+
+    return Response.json(presigned, { status: 200 });
+  }
+
   // -- DELETE /v2/rooms/:roomId -------------------------------------------
 
   /**
@@ -2205,6 +2426,28 @@ function ackKey(deviceId: string, envelopeId: string): string {
 /** Owner-ack marker: `ack_owner:<envelopeId>` → "" (presence-only). */
 function ackOwnerKey(envelopeId: string): string {
   return `${ACK_OWNER_PREFIX}${envelopeId}`;
+}
+
+// --- blob reservation keying ---------------------------------------------
+
+const BLOB_RESV_PREFIX = "blob_resv:";
+
+/**
+ * R2 reservation record stored at `blob_resv:<envelopeId>` while a client holds
+ * an outstanding presigned upload URL. Counted against `meta:bytes_used_r2`
+ * so two concurrent presigns can't double-spend the room's byte budget.
+ */
+interface BlobReservation {
+  envelopeId: string;
+  authorId: string;
+  deviceId: string;
+  ciphertextBytes: number;
+  reservedAt: number;
+  uploadExpiresAt: number;
+}
+
+function blobReservationKey(envelopeId: string): string {
+  return `${BLOB_RESV_PREFIX}${envelopeId}`;
 }
 
 /**

@@ -201,3 +201,32 @@ export const acksRequestSchema = z.object({
 });
 
 export type AcksRequest = z.infer<typeof acksRequestSchema>;
+
+// --- POST /v2/rooms/:roomId/blobs ----------------------------------------
+
+/**
+ * Per relay-spec.md §POST /v2/rooms/:roomId/blobs (R2 spillover) and
+ * amendments.md #9 (R2 7-day lifecycle as safety net only).
+ *
+ * Used when `kind == "snapshot_blob"` and `ciphertextBytes > 1 MiB`. The client
+ * gets back a presigned upload URL, PUTs the ciphertext to R2 directly, then
+ * issues a follow-up POST /envelopes with a small BlobRef payload that points
+ * to the uploaded object.
+ *
+ * - `envelopeId` must be the same one the eventual POST /envelopes will use
+ *   (the relay keys R2 objects under `rooms/<roomId>/blobs/<envelopeId>` to
+ *   make alarm-driven cleanup a single prefix sweep).
+ * - `authorId` / `deviceId` must reference an already-registered device. The
+ *   handler re-checks both before reserving R2 bytes.
+ * - `ciphertextBytes` must be > 1 MiB; below that the spec requires the inline
+ *   envelope path (per-envelope size cap in handleEnvelopesIngest already
+ *   covers the upper bound via `policy.maxSnapshotBytes`).
+ */
+export const blobPresignRequestSchema = z.object({
+  envelopeId: z.string().min(1),
+  authorId: z.string().min(1).max(64),
+  deviceId: z.string().min(1).max(64),
+  ciphertextBytes: z.number().int().positive(),
+});
+
+export type BlobPresignRequest = z.infer<typeof blobPresignRequestSchema>;

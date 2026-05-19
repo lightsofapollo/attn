@@ -1,0 +1,55 @@
+{
+  "v": 2,
+  "fileId": "file-corpus-fixture",
+  "snapshotId": "snapshot-022",
+  "baseHash": "fhe3xB5JlBnrCHMgI2HicAxcg53aakIkecmkr1jeCqs",
+  "position": {
+    "byteRange": [
+      19,
+      57
+    ],
+    "lineRange": [
+      5,
+      5
+    ]
+  },
+  "quote": {
+    "exact": "Block body with Specific Wording here.",
+    "exactHash": "47cf00b5be4c5d359c3ee8ee1754d8f89fb13d983ed13b57753a511eba6e5242",
+    "normalized": "block body with specific wording here",
+    "normalizedHash": "bcd39c5a6f747220dbe80415316ae23954355ba3c2bc134dc30314e02ee45fb8"
+  },
+  "block": {
+    "snapshotBlockId": "430bff20046ff4e792147e8059b900d0752f7b4d3ac28e3684006695a59eda1c",
+    "contentFingerprint": "fd5bc591fde224fba120055267c8963ede504a7285e87d718b7e390ffc817244",
+    "kind": "paragraph",
+    "offsetInBlockBytes": [
+      0,
+      38
+    ],
+    "blockByteRange": [
+      19,
+      57
+    ],
+    "blockLineRange": [
+      5,
+      5
+    ]
+  },
+  "context": {
+    "prefix": "# Gallery\n\nIntro.\n\n",
+    "suffix": "\n\nClosing.\n",
+    "prefixHash": "c5348fa354da2465aeee4a1d8793c2f50533f23bcc109dc2626cc96501d4b161",
+    "suffixHash": "40c6b0ec702515173368ed4d28985f6faab28abd3b1bc8cd76b76b1757ad3a25"
+  },
+  "structure": {
+    "headingPath": [
+      {
+        "level": 1,
+        "textHash": "352cfc749e55222e135ee48e67631ba33f834d936c137560fd39063d2e57e5cb",
+        "ordinalAtLevel": 0
+      }
+    ],
+    "ordinalInParent": 1
+  }
+}

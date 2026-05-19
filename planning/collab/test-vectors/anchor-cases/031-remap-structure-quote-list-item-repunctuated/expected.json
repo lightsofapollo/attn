@@ -1,15 +1,15 @@
 {
   "status": "remapped",
-  "confidence": 0.85,
-  "reason": "block_fingerprint_match",
+  "confidence": 0.8,
+  "reason": "structure_quote_match",
   "currentRange": {
     "byteRange": [
-      20,
-      51
+      19,
+      30
     ],
     "lineRange": [
-      4,
-      4
+      5,
+      5
     ]
   }
 }

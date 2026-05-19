@@ -1,7 +1,7 @@
 # Snippets
 
 ```rust
-fn target() { /* keep me */ }
+fn target() {  /* keep me */  }
 ```
 
 ```rust

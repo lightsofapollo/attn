@@ -706,25 +706,30 @@ def cases() -> list[Case]:
     # with no quote text), and byte range has shifted.
     # =====================================================================
 
+    # block_fingerprint_match (0.85) — the quote text in original.md changed
+    # in edited.md (e.g., punctuation tweak), so the unique-quote search
+    # FAILS, but the block's normalizedText + kind + headingPath still match
+    # via contentFingerprint. The resolver should fall through quote_match,
+    # then land on block_fingerprint_match.
     out.append(
         Case(
             number=20,
-            slug="remap-block-fingerprint-byterange-shifted",
+            slug="remap-block-fingerprint-punctuation-changed",
             original_md=(
-                "# Title\n\nIntro paragraph (short).\n\nFingerprint target paragraph here.\n\nTrailing line.\n"
+                "# Title\n\nIntro.\n\nFingerprint target paragraph, here.\n\nTrailing.\n"
             ),
             edited_md=(
-                "# Title\n\nIntro paragraph is now substantially longer than it used to be.\n\nFingerprint target paragraph here.\n\nTrailing line.\n"
+                "# Title\n\nIntro is now substantially longer.\n\nFingerprint target paragraph here!\n\nTrailing.\n"
             ),
-            quote="Fingerprint target paragraph here.",
-            block_text="Fingerprint target paragraph here.",
+            quote="Fingerprint target paragraph, here.",
+            block_text="Fingerprint target paragraph, here.",
             heading_path=[HeadingRef(1, "Title", 0)],
             ordinal_in_parent=1,
             expected={
                 "status": "remapped",
-                "confidence": 0.90,
-                "currentRangeNeedle": "Fingerprint target paragraph here.",
-                "reason": "quote_match",
+                "confidence": 0.85,
+                "currentRangeNeedle": "Fingerprint target paragraph here!",
+                "reason": "block_fingerprint_match",
             },
         )
     )
@@ -732,25 +737,22 @@ def cases() -> list[Case]:
     out.append(
         Case(
             number=21,
-            slug="remap-block-fingerprint-no-quote-block-comment",
+            slug="remap-block-fingerprint-whitespace-collapsed",
             original_md=(
                 "# H\n\nFingerprintable paragraph A.\n\nLater paragraph B.\n"
             ),
             edited_md=(
-                "# H\n\nPrepended new line.\n\nFingerprintable paragraph A.\n\nLater paragraph B.\n"
+                "# H\n\nPrepended new line.\n\nFingerprintable    paragraph   A.\n\nLater paragraph B.\n"
             ),
-            # Block-level comment — no quote, anchor relies on the block
-            # fingerprint. Set quote=None via empty quote_exact, then mark
-            # in expected.
             quote="Fingerprintable paragraph A.",
             block_text="Fingerprintable paragraph A.",
             heading_path=[HeadingRef(1, "H", 0)],
             ordinal_in_parent=0,
             expected={
                 "status": "remapped",
-                "confidence": 0.90,
-                "currentRangeNeedle": "Fingerprintable paragraph A.",
-                "reason": "quote_match",
+                "confidence": 0.85,
+                "currentRangeNeedle": "Fingerprintable    paragraph   A.",
+                "reason": "block_fingerprint_match",
             },
         )
     )
@@ -758,22 +760,22 @@ def cases() -> list[Case]:
     out.append(
         Case(
             number=22,
-            slug="remap-block-fingerprint-image-block",
+            slug="remap-block-fingerprint-casing-tweak",
             original_md=(
-                "# Gallery\n\n![alt one](one.png)\n\n![alt two](two.png)\n\n![alt three](three.png)\n"
+                "# Gallery\n\nIntro.\n\nBlock body with Specific Wording here.\n\nClosing.\n"
             ),
             edited_md=(
-                "# Gallery\n\n![alt three](three.png)\n\n![alt one](one.png)\n\n![alt two](two.png)\n"
+                "# Gallery\n\nIntro is longer now.\n\nBlock body with specific WORDING here.\n\nClosing.\n"
             ),
-            quote="![alt two](two.png)",
-            block_text="![alt two](two.png)",
+            quote="Block body with Specific Wording here.",
+            block_text="Block body with Specific Wording here.",
             heading_path=[HeadingRef(1, "Gallery", 0)],
             ordinal_in_parent=1,
             expected={
                 "status": "remapped",
-                "confidence": 0.90,
-                "currentRangeNeedle": "![alt two](two.png)",
-                "reason": "quote_match",
+                "confidence": 0.85,
+                "currentRangeNeedle": "Block body with specific WORDING here.",
+                "reason": "block_fingerprint_match",
             },
         )
     )
@@ -785,8 +787,11 @@ def cases() -> list[Case]:
             original_md=(
                 "# Snippets\n\n```rust\nfn one() {}\n```\n\n```rust\nfn target() { /* keep me */ }\n```\n"
             ),
+            # Code-block normalization treats punctuation+whitespace as
+            # equivalent — the slightly-reformatted code block still
+            # fingerprints the same.
             edited_md=(
-                "# Snippets\n\n```rust\nfn target() { /* keep me */ }\n```\n\n```rust\nfn one() {}\n```\n"
+                "# Snippets\n\n```rust\nfn target() {  /* keep me */  }\n```\n\n```rust\nfn one() {}\n```\n"
             ),
             quote="fn target() { /* keep me */ }",
             block_text=(
@@ -797,9 +802,9 @@ def cases() -> list[Case]:
             ordinal_in_parent=1,
             expected={
                 "status": "remapped",
-                "confidence": 0.90,
-                "currentRangeNeedle": "fn target() { /* keep me */ }",
-                "reason": "quote_match",
+                "confidence": 0.85,
+                "currentRangeNeedle": "fn target() {  /* keep me */  }",
+                "reason": "block_fingerprint_match",
             },
         )
     )
@@ -807,23 +812,23 @@ def cases() -> list[Case]:
     out.append(
         Case(
             number=24,
-            slug="remap-block-fingerprint-table-shifted",
+            slug="remap-block-fingerprint-table-cell-repunctuated",
             original_md=(
-                "# Data\n\nIntro.\n\n| H1 | H2 |\n| -- | -- |\n| aa | bb |\n"
+                "# Data\n\n| H1 | H2 |\n| -- | -- |\n| aa, alpha | bb |\n"
             ),
             edited_md=(
-                "# Data\n\nIntro line one.\n\nIntro line two.\n\n| H1 | H2 |\n| -- | -- |\n| aa | bb |\n"
+                "# Data\n\n| H1 | H2 |\n| -- | -- |\n| aa alpha | bb |\n"
             ),
-            quote="| aa | bb |",
-            block_text="| H1 | H2 |\n| -- | -- |\n| aa | bb |",
+            quote="aa, alpha",
+            block_text="| H1 | H2 |\n| -- | -- |\n| aa, alpha | bb |",
             block_kind="table",
             heading_path=[HeadingRef(1, "Data", 0)],
-            ordinal_in_parent=1,
+            ordinal_in_parent=0,
             expected={
                 "status": "remapped",
-                "confidence": 0.90,
-                "currentRangeNeedle": "| aa | bb |",
-                "reason": "quote_match",
+                "confidence": 0.85,
+                "currentRangeNeedle": "aa alpha",
+                "reason": "block_fingerprint_match",
             },
         )
     )
@@ -838,25 +843,31 @@ def cases() -> list[Case]:
     # quote_match at 0.90; we tag the LAYER expectation here.)
     # =====================================================================
 
+    # structure_quote_match (0.80) — exact quote text changed (so the
+    # 0.90 quote_match step misses), but the NORMALIZED quote text still
+    # matches within the original heading path. The structure layer
+    # narrows the search to a single section, where a normalized-match
+    # fires. (If we let the quote also exist elsewhere, the resolver
+    # might return ambiguous; we keep one normalized match per case.)
     out.append(
         Case(
             number=30,
-            slug="remap-structure-quote-position-shift-in-section",
+            slug="remap-structure-quote-normalized-within-section",
             original_md=(
-                "# Top\n\n## Stable\n\nIntro of stable section.\n\nTarget sentence inside stable.\n\nClosing of stable.\n"
+                "# Top\n\n## Stable\n\nTarget sentence inside stable.\n\n## Other\n\nUnrelated.\n"
             ),
             edited_md=(
-                "# Top\n\n## Stable\n\nIntro of stable section is now longer and more verbose than before.\n\nTarget sentence inside stable.\n\nClosing of stable.\n"
+                "# Top\n\n## Stable\n\nThe target sentence, inside Stable!\n\n## Other\n\nUnrelated.\n"
             ),
             quote="Target sentence inside stable.",
             block_text="Target sentence inside stable.",
             heading_path=[HeadingRef(1, "Top", 0), HeadingRef(2, "Stable", 0)],
-            ordinal_in_parent=1,
+            ordinal_in_parent=0,
             expected={
                 "status": "remapped",
-                "confidence": 0.90,
-                "currentRangeNeedle": "Target sentence inside stable.",
-                "reason": "quote_match",
+                "confidence": 0.80,
+                "currentRangeNeedle": "The target sentence, inside Stable!",
+                "reason": "structure_quote_match",
             },
         )
     )
@@ -864,22 +875,23 @@ def cases() -> list[Case]:
     out.append(
         Case(
             number=31,
-            slug="remap-structure-quote-sibling-section-renamed",
+            slug="remap-structure-quote-list-item-repunctuated",
             original_md=(
-                "# Top\n\n## Stable\n\nKey idea in this section.\n\n## Other\n\nUnrelated.\n"
+                "# Top\n\n## Tasks\n\n- beta task\n\n## Misc\n\n- other\n"
             ),
             edited_md=(
-                "# Top\n\n## Stable\n\nKey idea in this section.\n\n## RenamedOther\n\nUnrelated.\n"
+                "# Top\n\n## Tasks\n\n- Beta, task!\n\n## Misc\n\n- other\n"
             ),
-            quote="Key idea in this section.",
-            block_text="Key idea in this section.",
-            heading_path=[HeadingRef(1, "Top", 0), HeadingRef(2, "Stable", 0)],
+            quote="beta task",
+            block_text="- beta task",
+            block_kind="list_item",
+            heading_path=[HeadingRef(1, "Top", 0), HeadingRef(2, "Tasks", 0)],
             ordinal_in_parent=0,
             expected={
                 "status": "remapped",
-                "confidence": 0.90,
-                "currentRangeNeedle": "Key idea in this section.",
-                "reason": "quote_match",
+                "confidence": 0.80,
+                "currentRangeNeedle": "Beta, task!",
+                "reason": "structure_quote_match",
             },
         )
     )
@@ -887,12 +899,12 @@ def cases() -> list[Case]:
     out.append(
         Case(
             number=32,
-            slug="remap-structure-quote-paragraph-prepended-in-section",
+            slug="remap-structure-quote-casing-changed-in-section",
             original_md=(
                 "# Top\n\n## Stable\n\nAnchored sentence inside Stable.\n\n## Other\n\nUnrelated.\n"
             ),
             edited_md=(
-                "# Top\n\n## Stable\n\nNew paragraph prepended.\n\nAnchored sentence inside Stable.\n\n## Other\n\nUnrelated.\n"
+                "# Top\n\n## Stable\n\nANCHORED SENTENCE inside STABLE.\n\n## Other\n\nUnrelated.\n"
             ),
             quote="Anchored sentence inside Stable.",
             block_text="Anchored sentence inside Stable.",
@@ -900,9 +912,9 @@ def cases() -> list[Case]:
             ordinal_in_parent=0,
             expected={
                 "status": "remapped",
-                "confidence": 0.90,
-                "currentRangeNeedle": "Anchored sentence inside Stable.",
-                "reason": "quote_match",
+                "confidence": 0.80,
+                "currentRangeNeedle": "ANCHORED SENTENCE inside STABLE.",
+                "reason": "structure_quote_match",
             },
         )
     )
@@ -910,23 +922,23 @@ def cases() -> list[Case]:
     out.append(
         Case(
             number=33,
-            slug="remap-structure-quote-blockquote-shifted",
+            slug="remap-structure-quote-blockquote-repunctuated",
             original_md=(
-                "# Top\n\n## Notes\n\nPreface.\n\n> Anchored quote text inside notes.\n\nClosing.\n"
+                "# Top\n\n## Notes\n\n> Anchored quote text inside notes.\n\n## Other\n\nNothing.\n"
             ),
             edited_md=(
-                "# Top\n\n## Notes\n\nPreface line one.\n\nPreface line two.\n\n> Anchored quote text inside notes.\n\nClosing.\n"
+                "# Top\n\n## Notes\n\n> Anchored quote text, inside notes!\n\n## Other\n\nNothing.\n"
             ),
             quote="Anchored quote text inside notes.",
             block_text="> Anchored quote text inside notes.",
             block_kind="blockquote",
             heading_path=[HeadingRef(1, "Top", 0), HeadingRef(2, "Notes", 0)],
-            ordinal_in_parent=1,
+            ordinal_in_parent=0,
             expected={
                 "status": "remapped",
-                "confidence": 0.90,
-                "currentRangeNeedle": "Anchored quote text inside notes.",
-                "reason": "quote_match",
+                "confidence": 0.80,
+                "currentRangeNeedle": "Anchored quote text, inside notes!",
+                "reason": "structure_quote_match",
             },
         )
     )
@@ -934,23 +946,28 @@ def cases() -> list[Case]:
     out.append(
         Case(
             number=34,
-            slug="remap-structure-quote-list-item-in-renamed-sibling",
+            slug="remap-structure-quote-deep-path-disambiguates",
             original_md=(
-                "# Top\n\n## Tasks\n\n- alpha task\n- beta task\n- gamma task\n\n## Misc\n\nNote.\n"
+                "# Top\n\n## A\n\n### Inner\n\nDistinctive line under A/Inner.\n\n## B\n\nNothing.\n"
             ),
+            # Quote rewritten with extra punctuation; only the original
+            # heading-path section contains a normalized match.
             edited_md=(
-                "# Top\n\n## Tasks\n\n- alpha task\n- beta task\n- gamma task\n\n## NotesRenamed\n\nNote.\n"
+                "# Top\n\n## A\n\n### Inner\n\nDistinctive! Line under A/Inner.\n\n## B\n\nNothing.\n"
             ),
-            quote="beta task",
-            block_text="- beta task",
-            block_kind="list_item",
-            heading_path=[HeadingRef(1, "Top", 0), HeadingRef(2, "Tasks", 0)],
-            ordinal_in_parent=1,
+            quote="Distinctive line under A/Inner.",
+            block_text="Distinctive line under A/Inner.",
+            heading_path=[
+                HeadingRef(1, "Top", 0),
+                HeadingRef(2, "A", 0),
+                HeadingRef(3, "Inner", 0),
+            ],
+            ordinal_in_parent=0,
             expected={
                 "status": "remapped",
-                "confidence": 0.90,
-                "currentRangeNeedle": "beta task",
-                "reason": "quote_match",
+                "confidence": 0.80,
+                "currentRangeNeedle": "Distinctive! Line under A/Inner.",
+                "reason": "structure_quote_match",
             },
         )
     )

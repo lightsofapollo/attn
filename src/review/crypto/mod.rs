@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+pub mod aead;
 pub mod canonical;
 
 // Re-export the canonical-JSON primitives at the `crypto::` level so future

@@ -118,6 +118,30 @@ pub trait WebRtcSender: Send + Sync {
         &self,
         envelopes: Vec<MailboxEnvelope>,
     ) -> Result<Vec<EnvelopeAck>, TransportError>;
+
+    /// Push a single `SignalingPayload` onto the transport's outbound
+    /// signaling lane. The implementer assembles + seals a `kind=signal`
+    /// envelope under `signaling_key` and routes it through whatever
+    /// signaling carrier it owns (typically the mailbox-arm-forwarded
+    /// `POST /envelopes`, per `webrtc.rs::publish_signal`).
+    ///
+    /// Used by `ReviewManager::request_snapshot` (attn-nnj.7.6) so a
+    /// recovering reviewer can ask its peer for the latest snapshot over
+    /// the same signaling channel the SDP/ICE handshake rides.
+    ///
+    /// Defaults to `TransportError::Io("publish_signal: not supported")` so
+    /// existing in-tree mock implementations (and any future read-only
+    /// transports) don't have to opt in to recovery semantics — the manager
+    /// surfaces the failure to the UI and the caller can retry via mailbox.
+    fn publish_signal(
+        &self,
+        payload: crate::review::transport::signaling::SignalingPayload,
+    ) -> Result<(), TransportError> {
+        let _ = payload;
+        Err(TransportError::Io(
+            "publish_signal: not supported by this WebRtcSender impl".into(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +215,13 @@ impl WebRtcSender for WebRtcTransportAdapter {
             acks.push(ack);
         }
         Ok(acks)
+    }
+
+    fn publish_signal(
+        &self,
+        payload: crate::review::transport::signaling::SignalingPayload,
+    ) -> Result<(), TransportError> {
+        self.transport.publish_signal(payload)
     }
 }
 
@@ -588,6 +619,12 @@ pub(crate) mod test_support {
         pub sent: StdMutex<Vec<Vec<MailboxEnvelope>>>,
         pub connected: std::sync::atomic::AtomicBool,
         pub outcome: StdMutex<WebRtcOutcome>,
+        /// Captured `SignalingPayload`s passed to `publish_signal`. Tests
+        /// inspect this to confirm `ReviewManager::request_snapshot` routed
+        /// through the WebRTC arm with the right `(file_id, sinceSnapshotId)`
+        /// (attn-nnj.7.6).
+        pub signals:
+            StdMutex<Vec<crate::review::transport::signaling::SignalingPayload>>,
     }
 
     pub enum WebRtcOutcome {
@@ -601,6 +638,7 @@ pub(crate) mod test_support {
                 sent: StdMutex::new(Vec::new()),
                 connected: std::sync::atomic::AtomicBool::new(connected),
                 outcome: StdMutex::new(WebRtcOutcome::AcceptAll),
+                signals: StdMutex::new(Vec::new()),
             }
         }
 
@@ -624,6 +662,14 @@ pub(crate) mod test_support {
                 .iter()
                 .map(|b| b.len())
                 .sum()
+        }
+
+        /// Snapshot of every `SignalingPayload` the manager pushed through
+        /// `publish_signal`.
+        pub fn published_signals(
+            &self,
+        ) -> Vec<crate::review::transport::signaling::SignalingPayload> {
+            self.signals.lock().unwrap().clone()
         }
     }
 
@@ -657,6 +703,23 @@ pub(crate) mod test_support {
                 }
                 WebRtcOutcome::Error(err) => Err(err),
             }
+        }
+
+        fn publish_signal(
+            &self,
+            payload: crate::review::transport::signaling::SignalingPayload,
+        ) -> Result<(), TransportError> {
+            // Live mode of the recovery path: the channel must be open before
+            // we accept a signal — mirrors `WebRtcTransport::publish_signal`,
+            // which would fail with `signaling_tx receiver dropped` if the
+            // mailbox-forward task had exited.
+            if !self.connected.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(TransportError::Disconnected(
+                    "MockWebRtc: not connected".into(),
+                ));
+            }
+            self.signals.lock().unwrap().push(payload);
+            Ok(())
         }
     }
 

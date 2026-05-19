@@ -186,6 +186,85 @@ impl ReviewStore {
         write_json_atomic(&dir, &self.snapshot_file(room_id, &snapshot.snapshot_id), snapshot)
     }
 
+    /// Iterate every `SnapshotNode` persisted for `room_id`. Yields decode
+    /// errors so a corrupted file does not silently disappear; callers can
+    /// fold them into their error channel.
+    ///
+    /// Returns an empty iterator when the room or its `snapshots/` directory
+    /// is absent — same shape as `iter_events` / `iter_outbox`.
+    pub fn iter_snapshots(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Vec<Result<SnapshotNode>>> {
+        let dir = self.room_dir(room_id).join("snapshots");
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("could not read {}", dir.display()));
+            }
+        };
+        let mut out = Vec::new();
+        for entry in read_dir {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            if !ft.is_file() {
+                continue;
+            }
+            // Only `.json` files in this directory are snapshot blobs; skip
+            // anything else (e.g. a future sidecar index).
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let parsed: Result<Option<SnapshotNode>> = read_json(&path);
+            match parsed {
+                Ok(Some(node)) => out.push(Ok(node)),
+                Ok(None) => {} // file vanished mid-iteration; ignore.
+                Err(err) => out.push(Err(err)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Return the most-recently-created `SnapshotNode` for `file_id` in
+    /// `room_id`, or `Ok(None)` if no snapshot for that file is persisted.
+    ///
+    /// Ordering is by `SnapshotNode.created_at` (unix-ms), ties broken by
+    /// `snapshot_id` lexicographically so the result is deterministic when
+    /// two snapshots share the same timestamp.
+    ///
+    /// Used by `ReviewManager::handle_inbound_request_snapshot`
+    /// (attn-nnj.7.6) to find the snapshot the owner should re-emit over
+    /// the DataChannel when a peer asks for recovery.
+    pub fn latest_snapshot_for_file(
+        &self,
+        room_id: &RoomId,
+        file_id: &FileId,
+    ) -> Result<Option<SnapshotNode>> {
+        let mut best: Option<SnapshotNode> = None;
+        for entry in self.iter_snapshots(room_id)? {
+            let node = entry?;
+            if node.file_id != *file_id {
+                continue;
+            }
+            best = Some(match best {
+                None => node,
+                Some(prev) => {
+                    if (node.created_at, snapshot_id_str(&node.snapshot_id))
+                        > (prev.created_at, snapshot_id_str(&prev.snapshot_id))
+                    {
+                        node
+                    } else {
+                        prev
+                    }
+                }
+            });
+        }
+        Ok(best)
+    }
+
     // ---------------------------------------------------------------------
     // Event log (append-only JSONL, dedup'd by EventId)
     // ---------------------------------------------------------------------

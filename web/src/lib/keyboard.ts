@@ -15,6 +15,13 @@ export interface KeyboardConfig {
   onSuggestionComposer?: () => void;
   onToggleReviewPanel?: () => void;
   /**
+   * Owner-only Share-for-review dialog opener (attn-nnj.4.10 / 12.9).
+   * Bound to `Cmd/Ctrl+Shift+S` per planning/collab/ui/connection-share.md
+   * §8 keybinding table. Distinct from `Cmd+S` (save) — there is no
+   * save-as in attn, so Shift+S is free.
+   */
+  onShareOpen?: () => void;
+  /**
    * Three-way apply hooks (attn-nnj.8.3 / planning/collab/ui/three-way-apply.md
    * §6 keybindings). Fired only when `isApplyExpandOpen()` returns true, so
    * `a` doesn't collide with the margin-card accept binding on a collapsed
@@ -197,6 +204,13 @@ export function initKeyboard(config: KeyboardConfig): () => void {
       if (!e.shiftKey && (key === 'j' || key === 'J') && config.onToggleReviewPanel) {
         e.preventDefault();
         config.onToggleReviewPanel();
+        return;
+      }
+      // Cmd/Ctrl+Shift+S opens the Share-for-review dialog (owner-only).
+      // Mnemonic; does not collide with Cmd+S save (no save-as in attn).
+      if (e.shiftKey && (key === 's' || key === 'S' || code === 'KeyS') && config.onShareOpen) {
+        e.preventDefault();
+        config.onShareOpen();
         return;
       }
     }

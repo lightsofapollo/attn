@@ -69,6 +69,7 @@
     requestReviewDecorationsRebuild,
     reviewDecorationsPlugin,
   } from './lib/prosemirror/review-decorations';
+  import { resolveAnchor } from './lib/review/resolver';
   import type { EditorView } from 'prosemirror-view';
   import type { Plugin as PMPlugin } from 'prosemirror-state';
 
@@ -286,6 +287,51 @@
   function closeSuggestionComposer(): void {
     suggestionComposer = null;
   }
+
+  // Resolve every comment/suggestion anchor against the active snapshot so
+  // the inline decorations + margin cards have positions to render at.
+  // Without this nothing in the review surface is visible even though the
+  // events have arrived — the resolver maps each anchor's authored
+  // baseHash onto the current document. For events anchored to the
+  // snapshot the reviewer/owner is viewing, this is the exact (base-hash
+  // match) path and returns the anchor's own position.
+  $effect(() => {
+    const roomId = reviewStore.currentRoomId;
+    const fileId = reviewStore.currentFileId;
+    const events = reviewStore.events;
+    if (!roomId || !fileId) return;
+    // Latest snapshot for the active file provides the anchor index +
+    // content hash the resolver needs.
+    const snaps = reviewStore.snapshots.filter(
+      (s) => s.roomId === roomId && s.fileId === fileId && s.anchorIndex,
+    );
+    if (snaps.length === 0) return;
+    const snapshot = snaps.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
+    if (!snapshot.anchorIndex || typeof snapshot.markdown !== 'string') return;
+    const ctx = {
+      currentIndex: snapshot.anchorIndex,
+      currentMarkdownBytes: new TextEncoder().encode(snapshot.markdown),
+      currentHash: snapshot.baseHash,
+    };
+    for (const event of events) {
+      const body = event.body;
+      const anchor =
+        body.type === 'comment_created' || body.type === 'suggestion_created'
+          ? body.anchor
+          : null;
+      if (!anchor) continue;
+      // Skip if we already resolved this event against this snapshot.
+      const existing = reviewStore.anchorResolutions[event.meta.eventId];
+      if (existing) continue;
+      const resolved = resolveAnchor(anchor, ctx);
+      reviewStore.applyAnchorResolution({
+        roomId,
+        fileId,
+        eventId: event.meta.eventId,
+        resolved,
+      });
+    }
+  });
 
   // Touch reactive store reads here so Svelte schedules a rebuild whenever
   // the anchor-resolution map, event log, or focus target changes.

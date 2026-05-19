@@ -17,18 +17,26 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::review::bootstrap::{
     BootstrapConfig, Bootstrapper, JoinOutcome, ShareOutcome,
 };
 use crate::review::ids::{EventId, FileId, RoomId};
-use crate::review::model::{Anchor, PositionAnchor, ResolvedAnchor, RoomMode, SuggestionDraft};
+use crate::review::model::{
+    Anchor, MailboxEnvelope, PositionAnchor, ResolvedAnchor, RoomMode, SuggestionDraft,
+};
 use crate::review::store::ReviewStore;
 use crate::review::transport::inbound::VerifyingKeyCache;
+use crate::review::transport::selector::{
+    self, RoomTransports, TransportConfig, TransportMode,
+};
+use crate::review::transport::{EnvelopeAck, TransportError};
 use crate::review::working_copy::WorkingCopyService;
 
 // ---------------------------------------------------------------------------
@@ -198,6 +206,16 @@ pub struct ReviewManager {
     /// Verifying-key cache shared with the inbound pipeline (attn-nnj.6.4)
     /// so Join can populate device keys before the first inbound envelope.
     verifying_keys: Option<VerifyingKeyCache>,
+    /// Active transport handles keyed by `RoomId`.
+    ///
+    /// Populated by `open_room_transports` and read by `send_envelopes` —
+    /// the mode-aware selector lives in `transport::selector`. The map is an
+    /// async mutex because mode transitions (Live -> Hybrid, Hybrid -> Async)
+    /// hold the value briefly while swapping handles.
+    ///
+    /// One inner `AsyncMutex` per room so distinct rooms can send in parallel
+    /// without blocking each other.
+    rooms: Arc<AsyncMutex<HashMap<RoomId, Arc<AsyncMutex<RoomTransports>>>>>,
 }
 
 impl ReviewManager {
@@ -217,6 +235,7 @@ impl ReviewManager {
             bootstrap: None,
             runtime: None,
             verifying_keys: None,
+            rooms: Arc::new(AsyncMutex::new(HashMap::new())),
         }
     }
 
@@ -371,6 +390,114 @@ impl ReviewManager {
             file_id,
             resolved,
         });
+    }
+
+    // -------------------------------------------------------------------
+    // Mode-aware transport selector (attn-nnj.7.5)
+    // -------------------------------------------------------------------
+
+    /// Materialize and persist the per-room transport handles for `room_id`
+    /// according to `mode`. Replaces any prior handles for the same room.
+    ///
+    /// The selector validates the (mode, config) pair via
+    /// `selector::build_room_transports`:
+    ///   - `Live` needs `webrtc`,
+    ///   - `Async` needs `mailbox`,
+    ///   - `Hybrid` needs both.
+    ///
+    /// Returns a clone of the resolved `RoomTransports` for the caller's
+    /// convenience (e.g. the bootstrap may want to read `mode` to decide
+    /// which inbound connection to spin up next).
+    pub async fn open_room_transports(
+        &self,
+        room_id: &RoomId,
+        mode: TransportMode,
+        config: TransportConfig,
+    ) -> Result<TransportMode, TransportError> {
+        let transports = selector::build_room_transports(mode, config)?;
+        let mode = transports.mode;
+        let shared = Arc::new(AsyncMutex::new(transports));
+        let mut rooms = self.rooms.lock().await;
+        rooms.insert(room_id.clone(), shared);
+        Ok(mode)
+    }
+
+    /// Outbound dispatch — route a batch of envelopes through the right
+    /// transport(s) for the room's current mode.
+    ///
+    /// Per `planning/collab/amendments.md` §Phase 4:
+    ///   - `Live` sends via WebRTC; if the DataChannel is not connected, the
+    ///     send fails and the manager surfaces a `ReviewUpdate::Error` with
+    ///     `code: "ATTN_LIVE_REQUIRED"`. The mailbox is NOT touched.
+    ///   - `Async` sends via mailbox only.
+    ///   - `Hybrid` writes to both; the mailbox always-on outbox owns the
+    ///     `serverSeq`s returned to the caller. The WebRTC arm is best-effort
+    ///     when connected.
+    ///
+    /// `TransportError` failures from any path bubble up unchanged. The
+    /// caller (typically the IPC layer or a higher-level command handler) is
+    /// responsible for translating them into `ReviewUpdate::Error` if they
+    /// need to surface to the UI; this method itself only emits the
+    /// `ATTN_LIVE_REQUIRED` error update on the dedicated Live-mode failure
+    /// path so the routing rule is observable from the manager's API.
+    pub async fn send_envelopes(
+        &self,
+        room_id: &RoomId,
+        envelopes: Vec<MailboxEnvelope>,
+    ) -> Result<Vec<EnvelopeAck>, TransportError> {
+        let shared = {
+            let rooms = self.rooms.lock().await;
+            rooms
+                .get(room_id)
+                .cloned()
+                .ok_or_else(|| TransportError::RoomNotFound)?
+        };
+        let transports = shared.lock().await;
+        let result = selector::send_envelopes(&transports, envelopes).await;
+        if let Err(TransportError::Io(msg)) = &result {
+            if msg.contains(selector::LIVE_REQUIRED_CODE) {
+                (self.update_tx)(ReviewUpdate::Error {
+                    room_id: Some(room_id.clone()),
+                    code: selector::LIVE_REQUIRED_CODE.to_string(),
+                    message: msg.clone(),
+                });
+            }
+        }
+        result
+    }
+
+    /// Apply a mode transition for `room_id`. Supports only the documented
+    /// safe transitions — see `selector::transition_mode`. The caller passes
+    /// a freshly-constructed mailbox handle for Live -> Hybrid; for the
+    /// Hybrid -> Async path the WebRTC handle is dropped (the manager does
+    /// not own the underlying close path — the caller closes the
+    /// `WebRtcTransport` separately).
+    pub async fn transition_room_mode(
+        &self,
+        room_id: &RoomId,
+        next: TransportMode,
+        new_mailbox: Option<Arc<dyn selector::MailboxSender>>,
+    ) -> Result<(), TransportError> {
+        let shared = {
+            let rooms = self.rooms.lock().await;
+            rooms
+                .get(room_id)
+                .cloned()
+                .ok_or_else(|| TransportError::RoomNotFound)?
+        };
+        let mut transports = shared.lock().await;
+        selector::transition_mode(&mut transports, next, new_mailbox)
+    }
+
+    /// Read the current `TransportMode` for `room_id`, or `None` if the room
+    /// has no transports open.
+    pub async fn room_mode(&self, room_id: &RoomId) -> Option<TransportMode> {
+        let shared = {
+            let rooms = self.rooms.lock().await;
+            rooms.get(room_id).cloned()?
+        };
+        let transports = shared.lock().await;
+        Some(transports.mode)
     }
 }
 

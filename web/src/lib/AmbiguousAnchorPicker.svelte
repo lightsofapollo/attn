@@ -128,8 +128,9 @@
   class="ambiguous-picker"
   data-testid="ambiguous-anchor-picker"
   data-event-id={eventId}
+  data-candidate-count={candidates.length}
   data-picked={pickedIndex !== null ? 'true' : 'false'}
-  aria-label="Choose an anchor candidate"
+  aria-label={`Choose an anchor candidate — ${candidates.length} options`}
 >
   {#if reason}
     <p class="ap-reason" data-testid="ambiguous-picker-reason">{reason}</p>

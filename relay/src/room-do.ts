@@ -3061,7 +3061,12 @@ function sendError(
  */
 function deliverableTo(record: EnvelopeRecord, deviceId: string): boolean {
   if (record.kind === "signal") {
-    return record.target?.deviceId === deviceId;
+    // Targeted signal (WebRTC SDP/ICE) → only the addressed device.
+    // Broadcast signal (target=null, e.g. live co-typing steps) → every
+    // peer. The author also receives its own broadcast back; consumers drop
+    // self-echoes via the payload's `from` field.
+    if (record.target?.deviceId == null) return true;
+    return record.target.deviceId === deviceId;
   }
   return true;
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { EditorState, type Plugin } from 'prosemirror-state';
+  import { EditorState, Plugin } from 'prosemirror-state';
   import { EditorView, type NodeView, type NodeViewConstructor } from 'prosemirror-view';
   import { Node as PmNode } from 'prosemirror-model';
   import {
@@ -15,6 +15,7 @@
   import { keymap } from 'prosemirror-keymap';
   import { baseKeymap, selectAll } from 'prosemirror-commands';
   import { history, redo, undo } from 'prosemirror-history';
+  import { collab } from 'prosemirror-collab';
   import { codeHighlightPlugin } from './prosemirror/code-highlight';
   import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
   import { mathNodeView } from './prosemirror/math';
@@ -52,6 +53,17 @@
      * `destroy` lifecycle inside this component).
      */
     onReady?: (view: EditorView) => void;
+    /**
+     * When set, the editor joins a live co-typing session: the
+     * `prosemirror-collab` plugin is installed at version 0 with this client
+     * id, and the editor STOPS resetting from the `markdown` prop (collab
+     * steps become the source of truth). The parent seeds v0 by passing the
+     * agreed shared-doc markdown and keeping it stable for the session.
+     * `undefined` = normal markdown-driven editor (unchanged behavior).
+     */
+    collabClientId?: string;
+    /** Fired after every local doc-changing transaction during a collab session. */
+    onCollabDocChange?: () => void;
   }
 
   let {
@@ -65,6 +77,8 @@
     plugins: extraPlugins,
     nodeViews: extraNodeViews,
     onReady,
+    collabClientId,
+    onCollabDocChange,
   }: Props = $props();
   let editorEl: HTMLElement | undefined = $state(undefined);
   let view: EditorView | undefined;
@@ -163,6 +177,23 @@
       history(),
       search(),
     ];
+    // Live co-typing: install collab at v0 + a doc-change notifier. collab()
+    // uses a module-shared PluginKey, so a `reconfigure` preserves its state
+    // (version + unconfirmed steps) across plugin-list changes.
+    if (collabClientId) {
+      plugins.push(collab({ version: 0, clientID: collabClientId }));
+      plugins.push(
+        new Plugin({
+          view: () => ({
+            update: (v, prev) => {
+              if (!v.state.doc.eq(prev.doc)) {
+                onCollabDocChange?.();
+              }
+            },
+          }),
+        }),
+      );
+    }
     if (md.length <= LARGE_MARKDOWN_CHAR_LIMIT) {
       plugins.push(codeHighlightPlugin());
     }
@@ -533,6 +564,10 @@
   // React to markdown prop changes (from outside, e.g. file watcher updates)
   $effect(() => {
     if (!view) return;
+    // During a live collab session the collab steps are the source of truth —
+    // ignore external markdown updates so a snapshot republish / file-watcher
+    // tick can't clobber the live document.
+    if (collabClientId) return;
     // Only update if the markdown actually changed from what we last set
     if (markdown === lastMarkdown) return;
     const normalizedIncoming = normalizeMarkdownForCompare(markdown);

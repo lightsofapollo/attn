@@ -25,9 +25,12 @@
     navigate,
     openExternal,
     reviewAcceptSuggestion,
+    reviewCollabSend,
     searchFiles,
     switchProject,
   } from './lib/ipc';
+  import { CollabController } from './lib/prosemirror/collab-controller';
+  import type { EditorBridge } from './lib/prosemirror/collab-session';
   import {
     decreaseFontScale as decreaseGlobalFontScale,
     increaseFontScale as increaseGlobalFontScale,
@@ -181,6 +184,75 @@
 
   function handleEditorReady(view: EditorView): void {
     pmViewForReview = view;
+    maybeStartCollab(view);
+    // Automation hook: expose the live editor view so E2E (`--eval`) can
+    // dispatch transactions (e.g. drive co-typing in tests).
+    (window as unknown as { __attnPmView?: EditorView }).__attnPmView = view;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live co-typing (prosemirror-collab over the encrypted signal channel).
+  //
+  // Role: we're the owner iff we minted the share (currentShare set); every
+  // other participant is a reviewer/client. A session is "active" when we're
+  // connected to a room and looking at the shared markdown doc. While active
+  // the editor installs the collab plugin (seeded from the frozen v0 markdown)
+  // and stops resetting from the markdown prop — collab steps own the doc.
+  // ---------------------------------------------------------------------------
+  let collabRole = $derived<'owner' | 'reviewer'>(
+    reviewStore.currentShare !== null ? 'owner' : 'reviewer',
+  );
+  let collabActive = $derived(
+    reviewStore.currentRoomId !== null &&
+      reviewStore.connection === 'mailbox' &&
+      // Owner views their local markdown file; a pure reviewer views the
+      // shared snapshot (no local tab → activeFileType is 'unsupported').
+      (activeFileType === 'markdown' || isReviewerViewingSnapshot) &&
+      reviewStore.snapshots.some((s) => s.fileId === reviewStore.currentFileId),
+  );
+  // Stable per-session client id (collab requires a unique, stable id per
+  // editor) and a frozen v0 seed so the editor's markdown prop can't shift
+  // mid-session and trigger a reset.
+  let collabClientId = $state<string | null>(null);
+  let collabSeedMarkdown = $state<string | null>(null);
+  let collabController: CollabController | null = null;
+
+  // Activate / tear down as `collabActive` flips. Capturing clientId + seed
+  // here (not in render) keeps them stable for the whole session.
+  $effect(() => {
+    if (collabActive && collabClientId === null) {
+      collabClientId = crypto.randomUUID();
+      collabSeedMarkdown = effectiveMarkdown;
+    } else if (!collabActive && collabClientId !== null) {
+      collabClientId = null;
+      collabSeedMarkdown = null;
+      collabController = null;
+    }
+  });
+
+  function maybeStartCollab(view: EditorView): void {
+    // onReady fires for every editor mount; only build a controller when the
+    // collab plugin is actually installed (collabClientId set at create time).
+    if (!collabActive || collabClientId === null) {
+      collabController = null;
+      return;
+    }
+    const roomId = reviewStore.currentRoomId;
+    if (!roomId) return;
+    const bridge: EditorBridge = {
+      getState: () => view.state,
+      apply: (tr) => view.dispatch(tr),
+    };
+    collabController = new CollabController({
+      bridge,
+      isOwner: collabRole === 'owner',
+      initialDoc: view.state.doc,
+      send: (payload) => reviewCollabSend(roomId, payload),
+    });
+  }
+
+  function handleCollabDocChange(): void {
+    collabController?.onLocalChange();
   }
 
   // ---------------------------------------------------------------------------
@@ -1313,6 +1385,10 @@
         console.debug('[review:connection]', payload);
         reviewStore.applyConnection(payload);
       },
+      // Inbound live co-typing steps — route into the active collab session.
+      reviewCollab(payload: import('./lib/types').ReviewCollabSignal) {
+        collabController?.onInbound(payload.payload);
+      },
       // Per planning/collab/ui/review-panel-design.md §6: ReviewMargin
       // exposes `focusCard(eventId)` on the bridge so the editor's
       // inline-decoration click handler (10.2) and E2E automation can
@@ -1666,18 +1742,21 @@
 
     {#if isReviewerViewingSnapshot}
       <!-- Pure-reviewer mode: no local file, render the owner's shared
-           snapshot read-only. The ReviewMargin overlay (right rail) still
-           mounts so comments anchor against this content. -->
+           snapshot. Read-only normally; during a live session collab makes it
+           editable so the reviewer can co-type. The ReviewMargin overlay
+           (right rail) still mounts so comments anchor against this content. -->
       <Editor
         bind:this={editorRef}
-        markdown={effectiveMarkdown}
-        editable={false}
+        markdown={collabActive ? (collabSeedMarkdown ?? effectiveMarkdown) : effectiveMarkdown}
+        editable={collabActive}
         onLinkNavigate={handleEditorLinkNavigate}
         onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
         plugins={editorPlugins}
         onReady={handleEditorReady}
+        collabClientId={collabClientId ?? undefined}
+        onCollabDocChange={handleCollabDocChange}
       />
     {:else if !hasActiveTab}
       <div class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
@@ -1691,14 +1770,16 @@
     {:else if activeFileType === 'markdown'}
       <Editor
         bind:this={editorRef}
-        markdown={effectiveMarkdown}
-        editable={mode === 'edit'}
+        markdown={collabActive ? (collabSeedMarkdown ?? effectiveMarkdown) : effectiveMarkdown}
+        editable={collabActive || mode === 'edit'}
         onLinkNavigate={handleEditorLinkNavigate}
         onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
         plugins={editorPlugins}
         onReady={handleEditorReady}
+        collabClientId={collabClientId ?? undefined}
+        onCollabDocChange={handleCollabDocChange}
       />
     {:else if activeFileType === 'image'}
       <ImageViewer src={markdownSourceUrl(activePath)} />

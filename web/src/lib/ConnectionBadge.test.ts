@@ -1,30 +1,22 @@
-// Manual smoke harness for ConnectionBadge.svelte (attn-nnj.4.11).
-// Pattern mirrors ShareDialog.test.ts — `web/` has no vitest config yet,
-// so tests are tsx-runnable functions with a tiny harness.
+// Manual smoke harness for ConnectionBadge.svelte (status-first rewrite).
+// `web/` has no vitest config; tests are tsx-runnable functions with a tiny
+// harness. tsx can't mount the .svelte file (runes compile only through Vite),
+// so we test the contracts the component depends on:
 //
-// Run with:
+//   1-4. State → presentation mapping for all four transports (label is
+//        STATUS, never the transport mechanism). mailbox + direct_failed both
+//        present as "Connected" (relay works → not an error to the user).
+//   5.   Null status falls back to Offline (safe default).
+//   6.   Popover open/close toggle predicate.
+//   7.   Per-peer presence label (here/away — no transport jargon).
+//   8.   defaultFormatLastSeen helper outputs correct relative times.
+//   9.   "Try a faster connection" handler fires AND closes the popover.
+//   10.  Three distinct user-facing labels (Connected is shared by design).
 //
-//   cd web && npx tsx src/lib/ConnectionBadge.test.ts
-//
-// IMPORTANT: tsx cannot mount the .svelte file (runes only compile through
-// the Vite + svelte plugin). So we test the contracts the component
-// depends on:
-//
-//   1. State → label mapping for all 4 transports.
-//   2. State → tone-class mapping (--primary / --muted / --destructive).
-//   3. Direct-failed visual is "louder" — carries the destructive ring.
-//   4. Popover open/close toggle predicate.
-//   5. Per-peer transport derivation rule.
-//   6. Default formatLastSeen helper outputs correct relative time strings.
-//   7. Reconnect handler dispatches AND closes the popover.
-//   8. Falls back to "offline" when reviewStore.status is null.
+// Run with:  cd web && npx tsx src/lib/ConnectionBadge.test.ts
 
 import { defaultFormatLastSeen } from './connection-badge-format';
 import type { ReviewStatus, ReviewStatusPeer } from './types';
-
-// ---------------------------------------------------------------------------
-// Tiny harness (matches ShareDialog.test.ts conventions)
-// ---------------------------------------------------------------------------
 
 interface CaseResult {
   name: string;
@@ -54,55 +46,61 @@ function assert(cond: boolean, msg: string): asserts cond {
 }
 
 // ---------------------------------------------------------------------------
-// Fixtures — re-declare the state descriptor table from ConnectionBadge.svelte
-// so this test catches drift. If the badge's `STATE_DESCRIPTORS` table is
-// changed, this fixture must change too — that's the point.
+// Fixtures — mirror the descriptor table from ConnectionBadge.svelte so this
+// test catches drift. If the badge's STATE_DESCRIPTORS table changes, this
+// fixture must change too — that's the point.
 // ---------------------------------------------------------------------------
 
 type ConnectionState = ReviewStatus['connection'];
+type IconKind = 'live' | 'connected' | 'offline';
 
 interface StateDescriptor {
   label: string;
-  tooltip: string;
+  detail: string;
   toneClass: string;
   iconClass: string;
+  icon: IconKind;
+  canTryFaster: boolean;
 }
+
+const CONNECTED_TONE =
+  'text-primary border-primary/30 bg-primary/5 hover:bg-primary/10';
 
 const STATE_DESCRIPTORS: Record<ConnectionState, StateDescriptor> = {
   live_direct: {
-    label: 'Live direct',
-    tooltip: 'Realtime via DataChannel',
-    toneClass:
-      'text-primary border-primary/40 bg-primary/10 hover:bg-primary/15',
+    label: 'Live',
+    detail: 'Connected live — changes appear instantly (peer-to-peer).',
+    toneClass: 'text-primary border-primary/50 bg-primary/15 hover:bg-primary/20',
     iconClass: 'text-primary',
+    icon: 'live',
+    canTryFaster: false,
   },
   mailbox: {
-    label: 'Mailbox',
-    tooltip: 'Async via relay',
-    toneClass:
-      'text-muted-foreground border-border bg-muted/40 hover:bg-muted/60',
-    iconClass: 'text-muted-foreground',
+    label: 'Connected',
+    detail: 'Connected — changes sync through the encrypted relay, usually within a second.',
+    toneClass: CONNECTED_TONE,
+    iconClass: 'text-primary',
+    icon: 'connected',
+    canTryFaster: true,
+  },
+  direct_failed: {
+    label: 'Connected',
+    detail: 'Connected through the relay. A faster peer-to-peer link wasn’t available, so changes sync in about a second.',
+    toneClass: CONNECTED_TONE,
+    iconClass: 'text-primary',
+    icon: 'connected',
+    canTryFaster: true,
   },
   offline: {
     label: 'Offline',
-    tooltip: 'No transport — events queue locally',
+    detail: 'Offline — your changes are saved and will sync automatically when you reconnect.',
     toneClass:
       'text-muted-foreground/70 border-border/60 bg-muted/20 hover:bg-muted/40 opacity-80',
     iconClass: 'text-muted-foreground/70',
-  },
-  direct_failed: {
-    label: 'Direct failed',
-    tooltip: 'Live mode requested, DataChannel could not connect',
-    toneClass:
-      'text-destructive border-destructive/60 bg-destructive/10 hover:bg-destructive/20 ring-1 ring-destructive/30',
-    iconClass: 'text-destructive',
+    icon: 'offline',
+    canTryFaster: false,
   },
 };
-
-// ---------------------------------------------------------------------------
-// Stub reviewStore — same approach as ShareDialog.test.ts. The real store
-// uses runes; we only need `status` + `peers` for the badge's contract.
-// ---------------------------------------------------------------------------
 
 interface StubStore {
   status: ReviewStatus | null;
@@ -124,241 +122,133 @@ function makeStatus(connection: ConnectionState, overrides: Partial<ReviewStatus
   };
 }
 
-// Mirror of the badge's `connection` derivation:
-//   reviewStore.status?.connection ?? 'offline'
+// Mirror of the badge's `connection` derivation.
 function deriveConnection(store: StubStore): ConnectionState {
   return store.status?.connection ?? 'offline';
 }
 
-// Mirror of the badge's `peerTransport` rule.
-function peerTransport(
-  connection: ConnectionState,
-  peer: ReviewStatusPeer,
-): 'direct' | 'mailbox' | 'offline' {
-  if (!peer.online) return 'offline';
-  if (connection === 'live_direct') return 'direct';
-  if (connection === 'mailbox') return 'mailbox';
-  if (connection === 'direct_failed') return 'mailbox';
-  return 'offline';
+// Mirror of the badge's `peerStatus` rule.
+function peerStatus(peer: ReviewStatusPeer): 'here' | 'away' {
+  return peer.online ? 'here' : 'away';
 }
 
 // ---------------------------------------------------------------------------
 // Test cases
 // ---------------------------------------------------------------------------
 
-// (1) State=Live → label "Live direct" + --primary class
-defineCase('Live state → chip shows "Live direct" with --primary tone', () => {
+defineCase('live_direct → "Live", primary tone, live icon, no try-faster', () => {
   const store = makeStubStore();
   store.status = makeStatus('live_direct');
-  const c = deriveConnection(store);
-  const d = STATE_DESCRIPTORS[c];
-  assert(c === 'live_direct', `expected live_direct, got ${c}`);
-  assert(d.label === 'Live direct', `expected label "Live direct", got "${d.label}"`);
-  assert(
-    d.toneClass.includes('text-primary'),
-    `expected tone class to include text-primary, got "${d.toneClass}"`,
-  );
-  assert(
-    d.iconClass.includes('text-primary'),
-    `expected icon class to include text-primary, got "${d.iconClass}"`,
-  );
+  const d = STATE_DESCRIPTORS[deriveConnection(store)];
+  assert(d.label === 'Live', `expected "Live", got "${d.label}"`);
+  assert(d.icon === 'live', `expected live icon, got ${d.icon}`);
+  assert(d.toneClass.includes('text-primary'), 'live should use --primary');
+  assert(d.canTryFaster === false, 'already live — no "try faster"');
 });
 
-// (2) State=Mailbox → label "Mailbox" + neutral muted-foreground tone
-defineCase('Mailbox state → chip shows "Mailbox" with --muted-foreground tone', () => {
+defineCase('mailbox → "Connected" (not "Mailbox"), offers try-faster', () => {
   const store = makeStubStore();
   store.status = makeStatus('mailbox');
-  const c = deriveConnection(store);
-  const d = STATE_DESCRIPTORS[c];
-  assert(c === 'mailbox', `expected mailbox, got ${c}`);
-  assert(d.label === 'Mailbox', `expected label "Mailbox", got "${d.label}"`);
-  assert(
-    d.toneClass.includes('text-muted-foreground'),
-    `expected tone class to include text-muted-foreground, got "${d.toneClass}"`,
-  );
-  // Mailbox is neutral, not dim — must NOT include opacity-80 (offline's dim).
-  assert(
-    !d.toneClass.includes('opacity-80'),
-    'mailbox should NOT carry offline opacity-80 dimming',
-  );
+  const d = STATE_DESCRIPTORS[deriveConnection(store)];
+  // "Connected" (status), never the transport mechanism "Mailbox".
+  assert(d.label === 'Connected', `expected "Connected", got "${d.label}"`);
+  assert(d.icon === 'connected', `expected connected icon, got ${d.icon}`);
+  assert(d.canTryFaster === true, 'connected-via-relay should offer try-faster');
 });
 
-// (3) State=Offline → chip dims (muted-foreground + reduced opacity)
-defineCase('Offline state → chip dims via --muted-foreground @ reduced opacity', () => {
-  const store = makeStubStore();
-  store.status = makeStatus('offline');
-  const c = deriveConnection(store);
-  const d = STATE_DESCRIPTORS[c];
-  assert(c === 'offline', `expected offline, got ${c}`);
-  assert(d.label === 'Offline', `expected label "Offline", got "${d.label}"`);
-  assert(
-    d.toneClass.includes('text-muted-foreground/70'),
-    `expected dimmed text-muted-foreground/70, got "${d.toneClass}"`,
-  );
-  assert(
-    d.toneClass.includes('opacity-80'),
-    `expected opacity-80 dim, got "${d.toneClass}"`,
-  );
-});
-
-// (4) State=DirectFailed → --destructive AND "louder" (ring) per §5
-defineCase('DirectFailed → uses --destructive + louder visual (ring)', () => {
+defineCase('direct_failed → "Connected", NOT an error state', () => {
   const store = makeStubStore();
   store.status = makeStatus('direct_failed');
-  const c = deriveConnection(store);
-  const d = STATE_DESCRIPTORS[c];
-  assert(c === 'direct_failed', `expected direct_failed, got ${c}`);
-  assert(d.label === 'Direct failed', `expected label "Direct failed", got "${d.label}"`);
-  assert(
-    d.toneClass.includes('text-destructive'),
-    `expected text-destructive, got "${d.toneClass}"`,
-  );
-  assert(
-    d.toneClass.includes('border-destructive/60'),
-    `expected destructive border, got "${d.toneClass}"`,
-  );
-  // §5: "slightly louder than the others (warning)". The visual cue is the
-  // ring-1 + destructive ring color — none of the other 3 states carry a ring.
-  assert(
-    d.toneClass.includes('ring-1'),
-    `Direct failed must be louder via ring-1, got "${d.toneClass}"`,
-  );
-  assert(
-    !STATE_DESCRIPTORS.live_direct.toneClass.includes('ring-1'),
-    'Live direct must not carry a ring (only Direct failed does)',
-  );
-  assert(
-    !STATE_DESCRIPTORS.mailbox.toneClass.includes('ring-1'),
-    'Mailbox must not carry a ring (only Direct failed does)',
-  );
-  assert(
-    !STATE_DESCRIPTORS.offline.toneClass.includes('ring-1'),
-    'Offline must not carry a ring (only Direct failed does)',
-  );
+  const d = STATE_DESCRIPTORS[deriveConnection(store)];
+  assert(d.label === 'Connected', `expected "Connected", got "${d.label}"`);
+  // The relay path works, so it must NOT look like an error.
+  assert(!d.toneClass.includes('text-destructive'), 'must not use destructive tone');
+  assert(!d.toneClass.includes('ring-1'), 'must not be visually "loud"');
+  // Presented identically to mailbox (only the detail copy differs).
+  assert(d.toneClass === STATE_DESCRIPTORS.mailbox.toneClass, 'shares the Connected tone');
+  assert(d.detail !== STATE_DESCRIPTORS.mailbox.detail, 'detail copy explains the relay fallback');
+  assert(d.canTryFaster === true, 'should still offer try-faster');
 });
 
-// (5) Falls back to "offline" when reviewStore.status is null
-defineCase('Null status falls back to Offline state (safe default)', () => {
+defineCase('offline → "Offline", dimmed, no try-faster', () => {
+  const store = makeStubStore();
+  store.status = makeStatus('offline');
+  const d = STATE_DESCRIPTORS[deriveConnection(store)];
+  assert(d.label === 'Offline', `expected "Offline", got "${d.label}"`);
+  assert(d.toneClass.includes('opacity-80'), 'offline should be dimmed');
+  assert(d.icon === 'offline', `expected offline icon, got ${d.icon}`);
+  assert(d.canTryFaster === false, 'offline cannot try a faster connection');
+});
+
+defineCase('Null status falls back to Offline (safe default)', () => {
   const store = makeStubStore();
   store.status = null;
-  const c = deriveConnection(store);
-  assert(c === 'offline', `expected fallback to offline, got ${c}`);
+  assert(deriveConnection(store) === 'offline', 'null status must be offline');
 });
 
-// (6) Click chip → popover toggles open. Mirror the togglePopover predicate.
 defineCase('Click chip → popover toggles open then closed', () => {
-  // The component's `togglePopover` flips a boolean; we mirror it. Use a
-  // helper that returns the next state so TS doesn't narrow on a literal
-  // initializer (the closure-mutated case below would otherwise be flagged).
   function nextOpen(prev: boolean): boolean {
     return !prev;
   }
   let popoverOpen = false;
-  assert(popoverOpen === false, 'expected popover initially closed');
   popoverOpen = nextOpen(popoverOpen);
-  assert(popoverOpen === true, 'expected popover open after first click');
+  assert(popoverOpen === true, 'open after first click');
   popoverOpen = nextOpen(popoverOpen);
-  assert(popoverOpen === false, 'expected popover closed after second click');
+  assert(popoverOpen === false, 'closed after second click');
 });
 
-// (7) Popover shows correct transport details — peer count, per-peer transport.
-defineCase('Popover renders peer count + per-peer transport correctly', () => {
-  const owner: ReviewStatusPeer = {
-    participantId: 'p_owner' as ReviewStatusPeer['participantId'],
-    deviceId: 'd_owner' as ReviewStatusPeer['deviceId'],
-    displayName: 'James',
-    kind: 'owner',
-    online: true,
-  };
-  const reviewer: ReviewStatusPeer = {
-    participantId: 'p_alex' as ReviewStatusPeer['participantId'],
-    deviceId: 'd_alex' as ReviewStatusPeer['deviceId'],
+defineCase('peerStatus → "here" when online, "away" when not', () => {
+  const online: ReviewStatusPeer = {
+    participantId: 'p1' as ReviewStatusPeer['participantId'],
+    deviceId: 'd1' as ReviewStatusPeer['deviceId'],
     displayName: 'Alex',
     kind: 'reviewer',
     online: true,
   };
-  const agent: ReviewStatusPeer = {
-    participantId: 'p_lint' as ReviewStatusPeer['participantId'],
-    deviceId: 'd_lint' as ReviewStatusPeer['deviceId'],
-    displayName: 'lint-bot',
-    kind: 'agent',
-    online: false,
-  };
-  const peers = [owner, reviewer, agent];
-  assert(peers.length === 3, `expected 3 peers, got ${peers.length}`);
-
-  // Live: online peers report "direct", offline peer reports "offline".
-  assert(peerTransport('live_direct', owner) === 'direct', 'owner should be direct in live mode');
-  assert(peerTransport('live_direct', reviewer) === 'direct', 'reviewer should be direct in live mode');
-  assert(peerTransport('live_direct', agent) === 'offline', 'offline agent stays offline in live mode');
-
-  // Mailbox: online peers are "mailbox"; offline stays "offline".
-  assert(peerTransport('mailbox', owner) === 'mailbox', 'owner should be mailbox in mailbox mode');
-  assert(peerTransport('mailbox', agent) === 'offline', 'offline agent stays offline in mailbox mode');
-
-  // Direct failed: live policy degraded, so online peers shown as mailbox.
-  assert(peerTransport('direct_failed', reviewer) === 'mailbox', 'direct_failed online peer reports mailbox');
-
-  // Offline state: everyone is offline regardless of peer.online.
-  assert(peerTransport('offline', owner) === 'offline', 'offline state must be offline for everyone');
-  assert(peerTransport('offline', reviewer) === 'offline', 'offline state must be offline for everyone');
+  const offline: ReviewStatusPeer = { ...online, deviceId: 'd2' as ReviewStatusPeer['deviceId'], online: false };
+  assert(peerStatus(online) === 'here', 'online peer is "here"');
+  assert(peerStatus(offline) === 'away', 'offline peer is "away"');
 });
 
-// (8) defaultFormatLastSeen produces sensible relative-time strings.
 defineCase('defaultFormatLastSeen formats relative times correctly', () => {
   const now = 1_700_000_000_000;
-  assert(defaultFormatLastSeen(now - 5_000, now) === '5s ago', 'expected "5s ago" for 5s past');
-  assert(defaultFormatLastSeen(now - 90_000, now) === '2m ago', 'expected "2m ago" for 90s past');
-  assert(defaultFormatLastSeen(now - 3_600_000, now) === '1h ago', 'expected "1h ago" for 1h past');
-  assert(defaultFormatLastSeen(now - 86_400_000 * 3, now) === '3d ago', 'expected "3d ago" for 3d past');
-  assert(
-    defaultFormatLastSeen(now + 30_000, now).startsWith('in '),
-    'expected future timestamp to use "in N…" prefix',
-  );
+  assert(defaultFormatLastSeen(now - 5_000, now) === '5s ago', 'expected "5s ago"');
+  assert(defaultFormatLastSeen(now - 90_000, now) === '2m ago', 'expected "2m ago"');
+  assert(defaultFormatLastSeen(now - 3_600_000, now) === '1h ago', 'expected "1h ago"');
+  assert(defaultFormatLastSeen(now - 86_400_000 * 3, now) === '3d ago', 'expected "3d ago"');
+  assert(defaultFormatLastSeen(now + 30_000, now).startsWith('in '), 'future uses "in N…"');
 });
 
-// (9) Reconnect handler fires AND closes the popover (component contract).
-defineCase('Reconnect handler dispatches callback AND closes popover', () => {
-  const state: { popoverOpen: boolean; reconnectFired: number } = {
-    popoverOpen: true,
-    reconnectFired: 0,
-  };
-  // Mirror handleReconnect from ConnectionBadge.svelte.
+defineCase('Try-faster handler fires callback AND closes popover', () => {
+  const state: { popoverOpen: boolean; fired: number } = { popoverOpen: true, fired: 0 };
   const onReconnect = (): void => {
-    state.reconnectFired += 1;
+    state.fired += 1;
   };
   function handleReconnect(): void {
     onReconnect();
     state.popoverOpen = false;
   }
-
   handleReconnect();
-  assert(
-    state.reconnectFired === 1,
-    `expected onReconnect to fire once, got ${state.reconnectFired}`,
-  );
-  assert(
-    state.popoverOpen === false,
-    'expected popover to close after retry direct',
-  );
+  assert(state.fired === 1, `expected callback once, got ${state.fired}`);
+  assert(state.popoverOpen === false, 'popover closes after try-faster');
 });
 
-// (10) All 4 states have non-empty distinct labels (no duplicates).
-defineCase('All four states have non-empty distinct labels', () => {
+defineCase('Three distinct user-facing labels (Connected is shared by design)', () => {
   const labels = new Set<string>();
   const states: ConnectionState[] = ['live_direct', 'mailbox', 'offline', 'direct_failed'];
   for (const s of states) {
     const d = STATE_DESCRIPTORS[s];
-    assert(d.label.length > 0, `state ${s} must have a non-empty label`);
-    assert(d.tooltip.length > 0, `state ${s} must have a non-empty tooltip`);
-    assert(!labels.has(d.label), `duplicate label "${d.label}" for state ${s}`);
+    assert(d.label.length > 0, `state ${s} must have a label`);
+    assert(d.detail.length > 0, `state ${s} must have a detail`);
     labels.add(d.label);
   }
-  assert(labels.size === 4, `expected 4 distinct labels, got ${labels.size}`);
+  // mailbox + direct_failed deliberately collapse to "Connected".
+  assert(labels.size === 3, `expected 3 distinct labels (Live/Connected/Offline), got ${labels.size}`);
+  assert(labels.has('Connected') && labels.has('Live') && labels.has('Offline'), 'labels are Live/Connected/Offline');
 });
 
 // ---------------------------------------------------------------------------
-// Runner — same shape as ShareDialog.test.ts / resolver.test.ts
+// Runner
 // ---------------------------------------------------------------------------
 
 interface NodeProcessShape {

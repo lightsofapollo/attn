@@ -207,6 +207,12 @@ if poll 25000 has_n_peers attn_owner 2; then ok "owner sees $(peer_count attn_ow
 if poll 25000 has_n_peers attn_rvB 2;   then ok "rvB sees $(peer_count attn_rvB) peer chips (>=2)";   else bad "rvB peers=$(peer_count attn_rvB) (<2)"; fi
 if poll 25000 has_n_peers attn_rvC 2;   then ok "rvC sees $(peer_count attn_rvC) peer chips (>=2)";   else bad "rvC peers=$(peer_count attn_rvC) (<2)"; fi
 
+# ---------- Phase: Connection badge is status-first (no transport jargon) ----------
+badge_text() { "$1" --eval "document.querySelector('[data-slot=connection-badge-chip]')?.textContent?.trim() || ''" 2>/dev/null | tr -d '"'; }
+badge_status_first() { case "$(badge_text attn_owner)" in Connected|Live) return 0;; *) return 1;; esac; }
+log "Connection badge should read a plain status (Connected/Live), not 'Mailbox'"
+if poll 10000 badge_status_first; then ok "owner badge reads '$(badge_text attn_owner)' (status-first)"; else bad "owner badge reads '$(badge_text attn_owner)' (expected Connected/Live)"; fi
+
 # ---------- Phase: Co-typing ----------
 pm_text() { "$1" --eval "window.__attnPmView ? window.__attnPmView.state.doc.textContent : ''" 2>/dev/null | tr -d '"'; }
 pm_ready() { [ -n "$("$1" --eval "window.__attnPmView ? 'y' : ''" 2>/dev/null | tr -d '"')" ]; }
@@ -261,10 +267,11 @@ fi
 
 # NOTE: a "departed peer's caret clears" E2E phase belongs here, but it is
 # currently blocked by a separate defect: an owner snapshot republish
-# mid-session rebuilds the reviewer's collab controller and wipes all
-# remote-cursor state, so the assertion can't isolate the leave path. The
-# leave logic itself (CollabController.removeCursorsForDevice) is covered by
-# collab-controller.test.ts. Re-add this phase once that churn defect is fixed.
+# mid-session remounts the reviewer's editor + rebuilds the collab controller,
+# wiping all remote-cursor state, so the assertion can't isolate the leave
+# path. The leave logic itself (CollabController.removeCursorsForDevice) is
+# covered by collab-controller.test.ts. Re-add this phase once that churn
+# defect is fixed.
 
 # ---------- Evidence ----------
 log "Capturing screenshots → $SHOT_DIR"

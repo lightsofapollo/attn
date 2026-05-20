@@ -1105,6 +1105,12 @@ impl ReviewManager {
         // WS subscriber — long-lived task that auto-reconnects.
         let (events_tx, mut events_rx) =
             tokio::sync::mpsc::unbounded_channel::<TransportEvent>();
+        // Clones for the WebRTC live arm (built lazily when a peer appears).
+        // The transport shares the same inbound pipeline (dedups by EventId via
+        // the store) and emits inbound DataChannel envelopes onto the same
+        // events channel, so they flow through the forwarder below unchanged.
+        let webrtc_inbound = Arc::clone(&inbound);
+        let webrtc_events_tx = events_tx.clone();
         let ws_client = MailboxWsClient::new(
             mailbox_config,
             inbound,
@@ -1119,12 +1125,45 @@ impl ReviewManager {
             let _ = ws_client.run(ws_cancel_rx).await;
         });
 
-        // Event forwarder: drain TransportEvents into ReviewUpdates so
-        // the frontend store reflects inbound comments / presence /
-        // policy changes in real time. We capture our own device id (to
-        // drop self-echoes from the presence roster) and the room's owner
-        // participant (to tag the owner chip warm vs. reviewer cool).
+        // ---- WebRTC live data plane (Hybrid) ------------------------------
+        // Negotiate a DataChannel with the peer so the high-frequency live
+        // traffic (collab steps, cursors) flows peer-to-peer; the relay stays
+        // the signaling carrier (SDP/ICE) + durable/offline fallback. Keeping
+        // steps off the relay is the whole point — relay bandwidth/DO-time is
+        // the cost driver at scale. Stage 2 handles the 2-party (first-peer)
+        // case; the N-peer star lands in a later stage.
+        let webrtc_author_id = identity.typed_participant_id();
+        let webrtc_local_device = device_id.clone();
+        let webrtc_event_key = *room_keys.event_key.as_bytes();
+        let webrtc_snapshot_key = *room_keys.snapshot_key.as_bytes();
+        let webrtc_signaling_key = *room_keys.signaling_key.as_bytes();
+        let webrtc_room_id = room_id.clone();
+
+        // Outbound signaling forwarder: drain the transport's signaling_tx into
+        // the durable outbox and drain it immediately, so SDP/ICE reach the
+        // peer without waiting on the outbox poll tick (prompt negotiation).
+        let (webrtc_sig_tx, mut webrtc_sig_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::review::model::MailboxEnvelope>();
+        let sig_outbox = Arc::clone(&outbox);
+        runtime.spawn(async move {
+            while let Some(env) = webrtc_sig_rx.recv().await {
+                if let Err(err) = sig_outbox.enqueue(env) {
+                    eprintln!("webrtc: signaling enqueue failed: {err}");
+                    continue;
+                }
+                if let Err(err) = sig_outbox.process_once().await {
+                    eprintln!("webrtc: signaling drain failed: {err}");
+                }
+            }
+        });
+
+        // Event forwarder + WebRTC orchestrator: drains TransportEvents into
+        // ReviewUpdates (inbound comments / presence / policy) AND drives the
+        // peer connection. We capture our own device id (to drop self-echoes
+        // and pick the initiator) and the room's owner participant (to tag the
+        // owner chip warm vs. reviewer cool).
         let update_tx = Arc::clone(&self.update_tx);
+        let badge_update_tx = Arc::clone(&self.update_tx);
         let room_id_owned = room_id.clone();
         let self_device_id = device_id.as_str().to_string();
         let owner_participant_id: Option<String> = self
@@ -1134,7 +1173,146 @@ impl ReviewManager {
             .flatten()
             .map(|room| room.created_by.as_str().to_string());
         runtime.spawn(async move {
+            use crate::review::transport::signaling::SignalingPayload;
+            use crate::review::transport::webrtc::{
+                WebRtcConfig, WebRtcConnectionState, WebRtcTransport,
+            };
+            use crate::review::transport::PresenceEvent;
+
+            // 1:1 transport for the FIRST peer we see (2-party), stored with
+            // its remote deviceId so signaling from any OTHER peer is ignored
+            // rather than misrouted into this connection. Additional peers stay
+            // relay-only until the N-peer star (later stage). `None` until a
+            // peer appears (via Hello / Presence) or sends us an offer.
+            let mut webrtc: Option<(crate::review::ids::DeviceId, Arc<WebRtcTransport>)> = None;
+
             while let Some(event) = events_rx.recv().await {
+                // Derive a peer hint + whether THIS event may trigger us to
+                // initiate. Presence/Hello → we may offer; an inbound signal
+                // means the peer is already negotiating, so we only answer.
+                let (peer_hint, may_offer): (Option<crate::review::ids::DeviceId>, bool) =
+                    match &event {
+                        TransportEvent::Hello { devices, .. } => (
+                            devices
+                                .iter()
+                                .map(|d| d.device_id.clone())
+                                .find(|d| d.as_str() != self_device_id),
+                            true,
+                        ),
+                        TransportEvent::Presence {
+                            event: PresenceEvent::Join,
+                            device_id: peer,
+                            ..
+                        } => (
+                            Some(peer.clone()).filter(|d| d.as_str() != self_device_id),
+                            true,
+                        ),
+                        TransportEvent::Signaling { payload, .. } => {
+                            let from = match payload {
+                                SignalingPayload::Offer { from, .. }
+                                | SignalingPayload::Answer { from, .. }
+                                | SignalingPayload::Ice { from, .. } => Some(from.clone()),
+                                _ => None,
+                            };
+                            (from.filter(|d| d.as_str() != self_device_id), false)
+                        }
+                        _ => (None, false),
+                    };
+
+                // Build the transport on first contact with a peer.
+                if webrtc.is_none()
+                    && let Some(remote) = peer_hint
+                {
+                    let cfg = Arc::new(WebRtcConfig {
+                        room_id: webrtc_room_id.clone(),
+                        author_id: webrtc_author_id.clone(),
+                        local_device_id: webrtc_local_device.clone(),
+                        remote_device_id: remote.clone(),
+                        event_key: webrtc_event_key,
+                        snapshot_key: webrtc_snapshot_key,
+                        signaling_key: webrtc_signaling_key,
+                        stun_servers: Vec::new(),
+                    });
+                    match WebRtcTransport::new(
+                        cfg,
+                        Arc::clone(&webrtc_inbound),
+                        webrtc_events_tx.clone(),
+                        webrtc_sig_tx.clone(),
+                    )
+                    .await
+                    {
+                        Ok(transport) => {
+                            let transport = Arc::new(transport);
+                            // Badge: reflect DataChannel state — Live when the
+                            // channel is open, mailbox (the fallback) otherwise.
+                            let badge_tx = Arc::clone(&badge_update_tx);
+                            let badge_room = webrtc_room_id.clone();
+                            let mut state_rx = transport.watch_state().await;
+                            tokio::spawn(async move {
+                                loop {
+                                    let connected = matches!(
+                                        *state_rx.borrow(),
+                                        WebRtcConnectionState::Connected
+                                    );
+                                    (badge_tx)(ReviewUpdate::ConnectionChanged {
+                                        room_id: badge_room.clone(),
+                                        connection: if connected {
+                                            "live_direct".to_string()
+                                        } else {
+                                            "mailbox".to_string()
+                                        },
+                                    });
+                                    if state_rx.changed().await.is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                            // Deterministic initiator tie-break: the smaller
+                            // deviceId offers, the other answers — avoids glare
+                            // (both sides offering at once).
+                            if may_offer
+                                && webrtc_local_device.as_str() < remote.as_str()
+                                && let Err(err) = transport.create_offer().await
+                            {
+                                eprintln!("webrtc: create_offer failed: {err}");
+                            }
+                            webrtc = Some((remote, transport));
+                        }
+                        Err(err) => eprintln!("webrtc: transport build failed: {err}"),
+                    }
+                }
+
+                // Route inbound SDP/ICE control-plane to the transport — but
+                // ONLY when it came from the peer this transport is bound to.
+                // Signaling from any other peer is dropped (2-party scope).
+                if let (TransportEvent::Signaling { payload, .. }, Some((remote, transport))) =
+                    (&event, webrtc.as_ref())
+                {
+                    let from = match payload {
+                        SignalingPayload::Offer { from, .. }
+                        | SignalingPayload::Answer { from, .. }
+                        | SignalingPayload::Ice { from, .. } => Some(from),
+                        _ => None,
+                    };
+                    if from == Some(remote) {
+                        let res = match payload {
+                            SignalingPayload::Offer { sdp, .. } => {
+                                transport.handle_offer(sdp.clone()).await
+                            }
+                            SignalingPayload::Answer { sdp, .. } => {
+                                transport.handle_answer(sdp.clone()).await
+                            }
+                            SignalingPayload::Ice { candidates, .. } => {
+                                transport.handle_ice(candidates.clone()).await
+                            }
+                            _ => Ok(()),
+                        };
+                        if let Err(err) = res {
+                            eprintln!("webrtc: applying signaling failed: {err}");
+                        }
+                    }
+                }
+
                 forward_transport_event(
                     &update_tx,
                     &room_id_owned,

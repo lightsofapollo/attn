@@ -114,6 +114,11 @@ tasks:
     cmds:
       - scripts/test-3party-e2e.sh
 
+  test:webrtc:live:
+    desc: "WebRTC live_direct orchestrator E2E — owner + 1 reviewer negotiate a real DataChannel over the relay's signaling channel; asserts the badge flips to live_direct. Honors ATTN_SKIP_WEBRTC_E2E=1."
+    cmds:
+      - scripts/test-webrtc-live-e2e.sh
+
   check:size:
     desc: Build release and verify the binary stays under the 25 MiB collab v2 budget (see planning/collab/amendments.md §Decision #1).
     cmds:

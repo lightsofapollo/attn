@@ -405,6 +405,10 @@ fn spawn_signaling_relay(
                         // Not exercised in 7.7 — the bash-side harness will
                         // drive this via ReviewManager later.
                     }
+                    SignalingPayload::Collab { .. } => {
+                        // Live co-typing rides the DataChannel, not the
+                        // handshake signaling lane — ignore here.
+                    }
                 }
             }
         });
@@ -431,6 +435,7 @@ fn spawn_signaling_relay(
                         let _ = reviewer.handle_offer(sdp).await;
                     }
                     SignalingPayload::RequestSnapshot { .. } => {}
+                    SignalingPayload::Collab { .. } => {}
                 }
             }
         });

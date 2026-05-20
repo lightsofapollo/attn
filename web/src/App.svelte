@@ -204,7 +204,10 @@
   );
   let collabActive = $derived(
     reviewStore.currentRoomId !== null &&
-      reviewStore.connection === 'mailbox' &&
+      // Active whenever a transport is up — mailbox OR the WebRTC DataChannel
+      // (live_direct), or the relay fallback after a failed direct attempt.
+      // Only 'offline' means no path for steps.
+      reviewStore.connection !== 'offline' &&
       // Owner views their local markdown file; a pure reviewer views the
       // shared snapshot (no local tab → activeFileType is 'unsupported').
       (activeFileType === 'markdown' || isReviewerViewingSnapshot) &&

@@ -477,6 +477,10 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         daemon::start_listener(event_loop.create_proxy(), review_manager.clone())?;
 
     let custom_protocol_review_manager = review_manager.clone();
+    // Separate clone for the macOS open-URL handler (`Event::Opened`) in the
+    // event loop below — a clicked `attn://review/...#key=...` invite from a
+    // browser/Slack launches or foregrounds attn and joins the room.
+    let opened_review_manager = review_manager.clone();
     let mut webview_builder = WebViewBuilder::new()
         .with_initialization_script(&initialization_script)
         .with_ipc_handler(move |msg| {
@@ -869,6 +873,23 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 let _ = window.drag_window();
             }
             #[cfg(target_os = "macos")]
+            // macOS open-URL: a clicked `attn://review/<roomId>#key=...` invite
+            // (from a browser, Slack, etc.) is delivered here by Launch
+            // Services — to a freshly-launched OR an already-running instance.
+            // Route it to the daemon's join path and bring the window forward
+            // so the reviewer lands in the room. The fragment (room key) is
+            // preserved by `url::Url` and never leaves the device.
+            #[cfg(target_os = "macos")]
+            Event::Opened { urls } => {
+                for url in &urls {
+                    if let Some(invite) = parse_review_invite(url.as_str()) {
+                        daemon::dispatch_review_join(&invite, opened_review_manager.as_ref());
+                        platform::activate_app();
+                        window.set_visible(true);
+                        window.set_focus();
+                    }
+                }
+            }
             Event::UserEvent(UserEvent::ShowWindow) => {
                 platform::activate_app();
                 window.set_visible(true);

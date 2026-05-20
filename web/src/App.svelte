@@ -251,8 +251,20 @@
     });
   }
 
+  let collabSaveTimer: ReturnType<typeof setTimeout> | null = null;
   function handleCollabDocChange(): void {
     collabController?.onLocalChange();
+    // The owner persists the converged live doc to disk (debounced) so a
+    // co-typing session isn't lost on close and each save republishes a
+    // snapshot capturing the latest state. Reviewers have no local file, so
+    // only the owner writes back.
+    if (collabRole === 'owner' && collabActive) {
+      if (collabSaveTimer !== null) clearTimeout(collabSaveTimer);
+      collabSaveTimer = setTimeout(() => {
+        collabSaveTimer = null;
+        saveEdits();
+      }, 1500);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1729,7 +1741,7 @@
       <span>Shared document</span>
       <span class="text-violet-500/50" aria-hidden="true">·</span>
       <span class="font-normal text-violet-600/80 dark:text-violet-400/80">
-        read-only · end-to-end encrypted
+        {collabActive ? 'live editing' : 'read-only'} · end-to-end encrypted
       </span>
     </div>
   {/if}

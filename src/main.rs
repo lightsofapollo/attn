@@ -1866,6 +1866,26 @@ mod tests {
         let room: RoomId = dummy_id("room-abc");
         let event: crate::review::ids::EventId = dummy_id("evt-1");
 
+        // `EventImported` now carries a full `ReviewEvent` (was a flattened
+        // event_id/body_type pair). Build a minimal one for the routing check.
+        let imported_event = crate::review::model::ReviewEvent {
+            meta: crate::review::model::EventMeta {
+                v: 2,
+                event_id: event.clone(),
+                room_id: room.clone(),
+                author_id: dummy_id::<crate::review::ids::ParticipantId>("p-1"),
+                device_id: dummy_id::<crate::review::ids::DeviceId>("d-1"),
+                created_at: 0,
+                parent_event_ids: vec![],
+                snapshot_id: None,
+            },
+            body: crate::review::model::ReviewEventBody::SessionEnded { reason: None },
+            auth: crate::review::model::EventAuth {
+                signature: "sig".to_string(),
+                signing_key_id: "k".to_string(),
+            },
+        };
+
         let cases = vec![
             (
                 ReviewUpdate::RoomStatusChanged {
@@ -1877,8 +1897,7 @@ mod tests {
             (
                 ReviewUpdate::EventImported {
                     room_id: room.clone(),
-                    event_id: event.clone(),
-                    body_type: "comment_created".to_string(),
+                    event: imported_event,
                 },
                 "reviewEvent",
             ),

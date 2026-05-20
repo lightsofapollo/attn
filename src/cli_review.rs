@@ -66,20 +66,28 @@ pub enum ReviewSubcommand {
         as_agent: Option<String>,
     },
 
-    /// Join a review room as an `kind: "agent"` participant.
+    /// Join a review room from an `attn://review/<roomId>#key=...` invite.
     ///
-    /// Spec: amendments.md §Agent CLI key handling — remote agents POST
-    /// `/devices` with `kind="agent"` (NOT "reviewer") so the relay's
-    /// device-registration schema attributes traffic correctly. The
-    /// `--as-agent <name>` flag is REQUIRED today: the join uses the
-    /// agent's persisted Ed25519 key from `register-agent`.
+    /// Two modes, so a CLI join always lines up with the device that's
+    /// actually in the room:
+    ///
+    /// - **Default (no `--as-agent`)**: hand the invite to the running attn
+    ///   daemon, which joins as ITS OWN device identity. The app window then
+    ///   reflects the join. This is the path for a human who already has attn
+    ///   open — it avoids the mismatch where a CLI join used a separate device
+    ///   from the daemon, leaving the window out of sync.
+    /// - **`--as-agent <name>`**: a headless join under the named agent's
+    ///   persisted Ed25519 key (`register-agent` first). For bots / zero-install
+    ///   reviewers with no daemon. Per amendments.md §Agent CLI key handling the
+    ///   relay registers this device as `kind="agent"`.
     Join {
         /// `attn://review/<roomId>#key=...` invite URL.
         invite: String,
-        /// Name of the agent whose identity will sign the join.
+        /// Join headlessly as this agent instead of routing to the daemon.
         #[arg(long, value_name = "NAME")]
-        as_agent: String,
-        /// Override the relay URL (default: env `ATTN_RELAY_URL`).
+        as_agent: Option<String>,
+        /// Override the relay URL (default: env `ATTN_RELAY_URL`). Only used by
+        /// the `--as-agent` path; the daemon path uses the daemon's own relay.
         #[arg(long, value_name = "URL")]
         relay_url: Option<String>,
     },
@@ -104,8 +112,31 @@ pub fn run(args: ReviewArgs) -> Result<()> {
             invite,
             as_agent,
             relay_url,
-        } => run_join_as_agent(&invite, &as_agent, relay_url.as_deref()),
+        } => match as_agent {
+            Some(name) => run_join_as_agent(&invite, &name, relay_url.as_deref()),
+            None => run_join_via_daemon(&invite),
+        },
     }
+}
+
+/// Hand the invite to the running attn daemon so it joins as its OWN device
+/// identity (the same device the app window presents). This keeps the CLI join
+/// consistent with the daemon — a no-`--as-agent` join shows up in the app.
+///
+/// Fails with a helpful message when no daemon is running, since this path has
+/// nothing to route to (the caller should open attn first, or pass
+/// `--as-agent <name>` for a standalone headless join).
+fn run_join_via_daemon(invite: &str) -> Result<()> {
+    crate::daemon::send_review_join(invite).map_err(|e| {
+        anyhow::anyhow!(
+            "could not reach a running attn daemon to join ({e}).\n\
+             Open attn first (so the app joins as its own device), or pass \
+             `--as-agent <name>` for a headless join."
+        )
+    })?;
+    println!("join request sent to the running attn daemon");
+    println!("  invite: {invite}");
+    Ok(())
 }
 
 fn run_register_agent(name: &str) -> Result<()> {
@@ -221,22 +252,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_register_then_join_uses_agent_key_not_daemon() {
-        // The CLI integration is exercised end-to-end by the bootstrap +
-        // agent_identity tests; this unit test just pins the wire path —
-        // that the `Join.as_agent` field is plumbed straight into the
-        // agent-keyed `join_as_agent` path (not the daemon path).
-        // We assert by introspecting the Subcommand variants — the
-        // type-level test is more durable than a brittle integration
-        // shim that would need to fork the relay client.
+    fn join_with_as_agent_takes_the_headless_agent_path() {
+        // `--as-agent X` → standalone headless join under agent X's key.
         let cmd = ReviewSubcommand::Join {
             invite: "attn://review/abc#key=AAAA".to_string(),
-            as_agent: "rufus".to_string(),
+            as_agent: Some("rufus".to_string()),
             relay_url: None,
         };
         match cmd {
             ReviewSubcommand::Join { as_agent, .. } => {
-                assert_eq!(as_agent, "rufus");
+                assert_eq!(as_agent.as_deref(), Some("rufus"));
+            }
+            other => panic!("expected Join, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn join_without_as_agent_routes_to_the_daemon() {
+        // No `--as-agent` → route to the running daemon so it joins as its own
+        // device (consistent with the app window — fixes the device mismatch).
+        let cmd = ReviewSubcommand::Join {
+            invite: "attn://review/abc#key=AAAA".to_string(),
+            as_agent: None,
+            relay_url: None,
+        };
+        match cmd {
+            ReviewSubcommand::Join { as_agent, .. } => {
+                assert!(as_agent.is_none(), "no agent → daemon-routed join");
             }
             other => panic!("expected Join, got {other:?}"),
         }

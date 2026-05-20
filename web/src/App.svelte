@@ -185,7 +185,6 @@
 
   function handleEditorReady(view: EditorView): void {
     pmViewForReview = view;
-    maybeStartCollab(view);
     // Automation hook: expose the live editor view so E2E (`--eval`) can
     // dispatch transactions (e.g. drive co-typing in tests).
     (window as unknown as { __attnPmView?: EditorView }).__attnPmView = view;
@@ -228,6 +227,18 @@
       collabClientId = null;
       collabSeedMarkdown = null;
       collabController = null;
+    }
+  });
+
+  // Build the collab controller once the session is active and the editor view
+  // exists. This is reactive (not driven by the editor's onReady) because the
+  // view is now created once on mount and reconfigured in place — onReady fires
+  // a single time, possibly before collab activates. The `!collabController`
+  // guard makes this idempotent across unrelated re-runs.
+  $effect(() => {
+    const view = pmViewForReview;
+    if (collabActive && collabClientId !== null && view && collabController === null) {
+      maybeStartCollab(view);
     }
   });
 

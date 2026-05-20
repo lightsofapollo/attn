@@ -265,13 +265,14 @@ else
     bad "comment composer did not open (editorial may be gated by collab)"
 fi
 
-# NOTE: a "departed peer's caret clears" E2E phase belongs here, but it is
-# currently blocked by a separate defect: an owner snapshot republish
-# mid-session remounts the reviewer's editor + rebuilds the collab controller,
-# wiping all remote-cursor state, so the assertion can't isolate the leave
-# path. The leave logic itself (CollabController.removeCursorsForDevice) is
-# covered by collab-controller.test.ts. Re-add this phase once that churn
-# defect is fixed.
+# ---------- Phase: Caret cleanup on leave ----------
+# A departed peer's caret must clear, and the SURVIVING peer's caret must
+# remain — proves the session is stable across the owner's mid-session snapshot
+# republish (the churn that used to remount the editor and wipe all carets).
+log "rvC leaves (kill) → its caret clears from the owner, rvB's stays"
+kill_pid "$RVC_PID"; RVC_PID=""
+owner_caret_is_one() { [ "$(caret_count attn_owner)" -eq 1 ]; }
+if poll 25000 owner_caret_is_one; then ok "owner caret settled at 1 after rvC left (rvB's caret survived)"; else bad "owner shows $(caret_count attn_owner) carets after rvC left (expected 1)"; fi
 
 # ---------- Evidence ----------
 log "Capturing screenshots → $SHOT_DIR"

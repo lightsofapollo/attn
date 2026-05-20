@@ -11,7 +11,7 @@
     search,
     setSearchState,
   } from 'prosemirror-search';
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { keymap } from 'prosemirror-keymap';
   import { baseKeymap, selectAll } from 'prosemirror-commands';
   import { history, redo, undo } from 'prosemirror-history';
@@ -536,32 +536,43 @@
     void openFindPanel();
   }
 
-  // Create EditorView on mount
+  // Create the EditorView ONCE, on mount. The only tracked dependency is
+  // `editorEl`; every reactive read inside (markdown, buildPlugins →
+  // extraPlugins/collabClientId, buildNodeViews → extraNodeViews) is wrapped in
+  // `untrack` so a prop change can't destroy + recreate the whole view. That
+  // recreate path used to fire on every review-decoration update — throwing
+  // away the user's selection/scroll/undo and (during a live session) wiping
+  // remote carets by re-running onReady. Subsequent changes are applied
+  // in place by the dedicated reactors below: markdown → resetToMarkdown,
+  // editable → setProps, plugins/nodeViews → reconfigure.
   $effect(() => {
     if (!editorEl) return;
-    const state = createState(markdown);
-    view = new EditorView(editorEl, {
-      state,
-      editable: () => editable,
-      handleDOMEvents: {
-        click: (_view, event) => handleEditorClick(event as MouseEvent),
-        keydown: (editorView, event) => handleEditorKeydown(editorView, event as KeyboardEvent),
-      },
-      dispatchTransaction(tr) {
-        if (!view) return;
-        const nextState = view.state.apply(tr);
-        view.updateState(nextState);
-        if (tr.docChanged && editable) {
-          setDirty(true);
-        }
-      },
-      nodeViews: buildNodeViews(),
+    const el = editorEl;
+    untrack(() => {
+      const state = createState(markdown);
+      view = new EditorView(el, {
+        state,
+        editable: () => editable,
+        handleDOMEvents: {
+          click: (_view, event) => handleEditorClick(event as MouseEvent),
+          keydown: (editorView, event) => handleEditorKeydown(editorView, event as KeyboardEvent),
+        },
+        dispatchTransaction(tr) {
+          if (!view) return;
+          const nextState = view.state.apply(tr);
+          view.updateState(nextState);
+          if (tr.docChanged && editable) {
+            setDirty(true);
+          }
+        },
+        nodeViews: buildNodeViews(),
+      });
+      lastMarkdown = markdown;
+      setDirty(false);
+      if (onReady && view) {
+        onReady(view);
+      }
     });
-    lastMarkdown = markdown;
-    setDirty(false);
-    if (onReady && view) {
-      onReady(view);
-    }
 
     return () => {
       view?.destroy();

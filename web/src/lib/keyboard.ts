@@ -98,6 +98,37 @@ export function initKeyboard(config: KeyboardConfig): () => void {
       }
     }
 
+    // Review-surface shortcuts must keep working even while a text-editing
+    // surface is focused — you comment on, suggest against, share, and toggle
+    // the panel for the very document you're co-typing. Every one requires
+    // `meta`, so none can eat a literal character. (Undo/redo/tab-nav stay
+    // below the editing guard so ProseMirror's own keymap owns them while the
+    // editor is focused — handling them here too would double-fire.)
+    if (meta) {
+      if (code === 'Period' || key === '.' || key === '>') {
+        if (e.shiftKey && config.onSuggestionComposer) {
+          e.preventDefault();
+          config.onSuggestionComposer();
+          return;
+        }
+        if (!e.shiftKey && config.onCommentComposer) {
+          e.preventDefault();
+          config.onCommentComposer();
+          return;
+        }
+      }
+      if (!e.shiftKey && (key === 'j' || key === 'J') && config.onToggleReviewPanel) {
+        e.preventDefault();
+        config.onToggleReviewPanel();
+        return;
+      }
+      if (e.shiftKey && (key === 's' || key === 'S' || code === 'KeyS') && config.onShareOpen) {
+        e.preventDefault();
+        config.onShareOpen();
+        return;
+      }
+    }
+
     // App-level shortcuts should never steal focus from text-editing surfaces.
     if (editingTarget) {
       return;
@@ -185,34 +216,10 @@ export function initKeyboard(config: KeyboardConfig): () => void {
         config.onTabNext();
         return;
       }
-      // Cmd/Ctrl+. opens the comment composer; Cmd/Ctrl+Shift+. opens the
-      // suggestion composer. Match on physical key (`Period`) so the binding
-      // survives Shift altering the produced character (`.` → `>`).
-      if (code === 'Period' || key === '.' || key === '>') {
-        if (e.shiftKey && config.onSuggestionComposer) {
-          e.preventDefault();
-          config.onSuggestionComposer();
-          return;
-        }
-        if (!e.shiftKey && config.onCommentComposer) {
-          e.preventDefault();
-          config.onCommentComposer();
-          return;
-        }
-      }
-      // Cmd/Ctrl+J toggles the review panel.
-      if (!e.shiftKey && (key === 'j' || key === 'J') && config.onToggleReviewPanel) {
-        e.preventDefault();
-        config.onToggleReviewPanel();
-        return;
-      }
-      // Cmd/Ctrl+Shift+S opens the Share-for-review dialog (owner-only).
-      // Mnemonic; does not collide with Cmd+S save (no save-as in attn).
-      if (e.shiftKey && (key === 's' || key === 'S' || code === 'KeyS') && config.onShareOpen) {
-        e.preventDefault();
-        config.onShareOpen();
-        return;
-      }
+      // NOTE: the comment/suggestion (Cmd+.), review-panel (Cmd+J), and share
+      // (Cmd+Shift+S) shortcuts are handled ABOVE the editing-target guard so
+      // they keep working while the live editor is focused. Do not re-add them
+      // here — that would double-fire for the non-editing case.
     }
 
     switch (e.key) {

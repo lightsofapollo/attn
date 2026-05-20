@@ -89,5 +89,20 @@ log "Waiting for the WebRTC DataChannel (badge → live_direct)"
 if poll 40000 owner_live; then ok "owner badge = live_direct (DataChannel up)"; else bad "owner badge = '$(badge_state attn_owner)' (expected live_direct)"; fi
 if poll 10000 rv_live;    then ok "reviewer badge = live_direct";            else bad "reviewer badge = '$(badge_state attn_rv)' (expected live_direct)"; fi
 
+# Co-typing over the DataChannel. With one connected peer, send_collab routes
+# steps over the channel and SKIPS the relay (see manager::send_collab) — so if
+# edits propagate while the badge is live_direct, the DataChannel is carrying
+# the live data plane, exactly the cost goal.
+pm_text() { "$1" --eval "window.__attnPmView ? window.__attnPmView.state.doc.textContent : ''" 2>/dev/null | tr -d '"'; }
+pm_ready() { [ -n "$("$1" --eval "window.__attnPmView ? 'y' : ''" 2>/dev/null | tr -d '"')" ]; }
+pm_insert() { "$1" --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';v.focus();v.dispatch(v.state.tr.insertText('$2',1));return 'ok';})()" >/dev/null 2>&1; }
+text_has() { pm_text "$1" | grep -q "$2"; }
+log "Co-typing over the DataChannel (relay skipped when peers==1 + connected)"
+poll 20000 pm_ready attn_owner && poll 20000 pm_ready attn_rv && ok "editors live" || bad "editors not live"
+pm_insert attn_owner 'OWNERDC'
+if poll 20000 text_has attn_rv 'OWNERDC'; then ok "owner edit reached reviewer over the DataChannel"; else bad "owner edit never reached reviewer"; fi
+pm_insert attn_rv 'RVDC'
+if poll 20000 text_has attn_owner 'RVDC'; then ok "reviewer edit reached owner over the DataChannel"; else bad "reviewer edit never reached owner"; fi
+
 echo ""; log "Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

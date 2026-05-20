@@ -1008,23 +1008,32 @@ async fn dispatch_inbound_message(
             }
         }
         EnvelopeKind::Signal => {
-            // Signal envelopes that arrive via the DataChannel are unusual
-            // (the normal path is the mailbox), but we still hand them to
-            // the same import method so the AAD/AEAD check fires. We do not
-            // re-emit them as `TransportEvent::Envelope` — the 7.4 state
-            // machine consumes signal envelopes via `signaling_tx`'s
-            // companion receiver, not the inbound event channel.
+            // Live co-typing (Collab) is the signal kind we EXPECT on the
+            // DataChannel — it's the high-frequency data plane we moved off the
+            // relay. Decode + re-emit as CollabSignal so the webview's
+            // prosemirror-collab session consumes it, exactly as the mailbox WS
+            // path does. SDP/ICE still ride the relay, so they're not expected
+            // here and stay unrouted.
             //
             // Anti-redirect (H2): pass the local device id as the expected
             // target so a relay-redirected signal envelope (target ≠ self)
             // is rejected before its plaintext reaches anything upstream.
-            let _ = inbound
+            if let Ok(plaintext) = inbound
                 .import_signal_envelope(
                     &config.room_id,
                     &envelope,
                     &config.local_device_id,
                 )
-                .await;
+                .await
+                && let Ok(SignalingPayload::Collab { from, payload }) =
+                    serde_json::from_slice::<SignalingPayload>(&plaintext)
+            {
+                let _ = events_tx.send(TransportEvent::CollabSignal {
+                    room_id: config.room_id.clone(),
+                    from,
+                    payload,
+                });
+            }
         }
     }
 }

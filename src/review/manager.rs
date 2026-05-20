@@ -295,6 +295,22 @@ pub struct ReviewManager {
     /// `Arc<RwLock<...>>` because reads dominate writes — every send takes
     /// a read snapshot, registration is a one-shot per (room, device) pair.
     signal_contexts: Arc<tokio::sync::RwLock<HashMap<RoomId, Arc<RoomSignalContext>>>>,
+
+    /// Live WebRTC handle per room (2-party). `send_collab` consults this to put
+    /// high-frequency collab steps on the DataChannel instead of the relay when
+    /// the channel is the SOLE path to the room — keeping that traffic (the
+    /// cost driver at scale) off the relay. Gated on `peers == 1`: with more
+    /// peers the relay broadcast still reaches the relay-only peer(s), and
+    /// double-sending would double-apply collab steps. Populated + kept current
+    /// by the per-room orchestrator in `start_room_runtime`.
+    live_webrtc: Arc<std::sync::Mutex<HashMap<RoomId, LiveWebrtc>>>,
+}
+
+/// A room's live WebRTC transport plus the current non-self peer count, used by
+/// `send_collab` to decide whether the DataChannel covers the whole room.
+struct LiveWebrtc {
+    transport: Arc<crate::review::transport::webrtc::WebRtcTransport>,
+    peers: usize,
 }
 
 /// Identity + key material a room needs to mint outbound signal and
@@ -361,6 +377,7 @@ impl ReviewManager {
             verifying_keys: None,
             rooms: Arc::new(AsyncMutex::new(HashMap::new())),
             signal_contexts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            live_webrtc: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -878,6 +895,40 @@ impl ReviewManager {
             Err(e) => return emit_err(format!("assemble collab signal: {e}")),
         };
 
+        // Prefer the WebRTC DataChannel when it is the SOLE path to the room
+        // (a single connected peer) — this keeps the high-frequency step/cursor
+        // traffic off the relay, which is the cost driver at scale. With more
+        // than one peer the relay broadcast still reaches the relay-only
+        // peer(s), and sending over both would double-apply collab steps, so we
+        // fall through to the relay instead.
+        {
+            use crate::review::transport::webrtc::WebRtcConnectionState;
+            let live_transport = self
+                .live_webrtc
+                .lock()
+                .ok()
+                .and_then(|map| {
+                    map.get(room_id).and_then(|live| {
+                        (live.peers == 1
+                            && matches!(
+                                live.transport.state(),
+                                WebRtcConnectionState::Connected
+                            ))
+                        .then(|| Arc::clone(&live.transport))
+                    })
+                });
+            if let Some(transport) = live_transport
+                && let Some(runtime) = self.runtime.as_ref()
+            {
+                let env = envelope.clone();
+                runtime.spawn(async move {
+                    let _ = transport.send_envelope(env).await;
+                });
+                return; // delivered over the DataChannel — skip the relay
+            }
+        }
+
+        // Fallback: relay (no live channel, or multiple peers to fan out to).
         if let Err(e) = self.store.append_outbox(room_id, &envelope) {
             emit_err(format!("enqueue collab signal: {e}"));
         }
@@ -1164,6 +1215,7 @@ impl ReviewManager {
         // owner chip warm vs. reviewer cool).
         let update_tx = Arc::clone(&self.update_tx);
         let badge_update_tx = Arc::clone(&self.update_tx);
+        let webrtc_live_map = Arc::clone(&self.live_webrtc);
         let room_id_owned = room_id.clone();
         let self_device_id = device_id.as_str().to_string();
         let owner_participant_id: Option<String> = self
@@ -1185,8 +1237,39 @@ impl ReviewManager {
             // relay-only until the N-peer star (later stage). `None` until a
             // peer appears (via Hello / Presence) or sends us an offer.
             let mut webrtc: Option<(crate::review::ids::DeviceId, Arc<WebRtcTransport>)> = None;
+            // Non-self peer count, kept current from Hello (absolute) + Presence
+            // (delta). Gates collab onto the DataChannel only when peers == 1.
+            let mut peer_count: usize = 0;
 
             while let Some(event) = events_rx.recv().await {
+                // Maintain the peer count + mirror it into the live map.
+                match &event {
+                    TransportEvent::Hello { devices, .. } => {
+                        peer_count = devices
+                            .iter()
+                            .filter(|d| d.device_id.as_str() != self_device_id)
+                            .count();
+                    }
+                    TransportEvent::Presence {
+                        event: PresenceEvent::Join,
+                        device_id: peer,
+                        ..
+                    } if peer.as_str() != self_device_id => peer_count += 1,
+                    TransportEvent::Presence {
+                        event: PresenceEvent::Leave,
+                        device_id: peer,
+                        ..
+                    } if peer.as_str() != self_device_id => {
+                        peer_count = peer_count.saturating_sub(1)
+                    }
+                    _ => {}
+                }
+                if let Ok(mut map) = webrtc_live_map.lock()
+                    && let Some(live) = map.get_mut(&webrtc_room_id)
+                {
+                    live.peers = peer_count;
+                }
+
                 // Derive a peer hint + whether THIS event may trigger us to
                 // initiate. Presence/Hello → we may offer; an inbound signal
                 // means the peer is already negotiating, so we only answer.
@@ -1270,6 +1353,16 @@ impl ReviewManager {
                             // Deterministic initiator tie-break: the smaller
                             // deviceId offers, the other answers — avoids glare
                             // (both sides offering at once).
+                            // Publish for send_collab's routing decision.
+                            if let Ok(mut map) = webrtc_live_map.lock() {
+                                map.insert(
+                                    webrtc_room_id.clone(),
+                                    LiveWebrtc {
+                                        transport: Arc::clone(&transport),
+                                        peers: peer_count,
+                                    },
+                                );
+                            }
                             if may_offer
                                 && webrtc_local_device.as_str() < remote.as_str()
                                 && let Err(err) = transport.create_offer().await

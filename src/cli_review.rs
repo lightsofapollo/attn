@@ -166,7 +166,8 @@ fn run_join_as_agent(invite: &str, name: &str, relay_url_override: Option<&str>)
 
     let relay_url = relay_url_override
         .map(str::to_string)
-        .or_else(|| std::env::var("ATTN_RELAY_URL").ok())
+        .or_else(|| std::env::var("ATTN_RELAY_URL").ok().filter(|s| !s.is_empty()))
+        .or_else(|| option_env!("ATTN_DEFAULT_RELAY_URL").map(str::to_string))
         .unwrap_or_else(|| DEFAULT_RELAY_URL.to_string());
     if relay_url.is_empty() {
         bail!("relay url is empty; pass --relay-url or set ATTN_RELAY_URL");

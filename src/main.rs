@@ -364,13 +364,22 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
 
         // Attach the bootstrap pipeline so Share/Join IPCs go through real
         // create-room + register-device against the relay rather than the
-        // stub. Falling back to the stub when ATTN_RELAY_URL is unset would
-        // hide a misconfig — log and skip instead, but keep the manager so
-        // non-network review commands still dispatch.
-        let relay_url = std::env::var("ATTN_RELAY_URL").unwrap_or_default();
+        // stub.
+        //
+        // Resolution: a runtime ATTN_RELAY_URL always wins (dev, tests,
+        // self-hosting). Otherwise fall back to ATTN_DEFAULT_RELAY_URL baked in
+        // at build time — release builds set it to the production relay so a
+        // downloaded app collaborates out of the box without any env var.
+        // Neither set (e.g. a bare `cargo build`) keeps the stub so local dev
+        // is unchanged.
+        let relay_url = std::env::var("ATTN_RELAY_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| option_env!("ATTN_DEFAULT_RELAY_URL").map(str::to_string))
+            .unwrap_or_default();
         if relay_url.is_empty() {
             eprintln!(
-                "attn: ATTN_RELAY_URL unset — Share/Join will use the scaffold stub"
+                "attn: no relay configured (set ATTN_RELAY_URL, or bake ATTN_DEFAULT_RELAY_URL at build time) — Share/Join will use the scaffold stub"
             );
             return Some(Arc::new(base));
         }

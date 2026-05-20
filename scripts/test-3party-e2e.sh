@@ -259,6 +259,13 @@ else
     bad "comment composer did not open (editorial may be gated by collab)"
 fi
 
+# NOTE: a "departed peer's caret clears" E2E phase belongs here, but it is
+# currently blocked by a separate defect: an owner snapshot republish
+# mid-session rebuilds the reviewer's collab controller and wipes all
+# remote-cursor state, so the assertion can't isolate the leave path. The
+# leave logic itself (CollabController.removeCursorsForDevice) is covered by
+# collab-controller.test.ts. Re-add this phase once that churn defect is fixed.
+
 # ---------- Evidence ----------
 log "Capturing screenshots → $SHOT_DIR"
 attn_owner --screenshot >/dev/null 2>&1 && cp "$OWNER_HOME"/screenshot*.png "$SHOT_DIR/owner.png" 2>/dev/null || true

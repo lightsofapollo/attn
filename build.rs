@@ -12,6 +12,13 @@ fn main() {
     watch_dir("web/src");
     watch_dir("web/styles");
     watch_dir("web/scripts");
+    // Re-embed whenever a prebuilt bundle changes. Without this, `npm run
+    // build` (or `task dev`/`scripts/build.sh`) can refresh web/dist/index.html
+    // while a bare `cargo build` keeps embedding the stale OUT_DIR copy —
+    // silently shipping an old frontend. (The dir-watch below covers source
+    // edits, but the dist copy short-circuits Vite when a bundle already
+    // exists, so the built artifact must be a rerun trigger in its own right.)
+    println!("cargo:rerun-if-changed=web/dist/index.html");
     println!("cargo:rerun-if-changed=web/index.html");
     println!("cargo:rerun-if-changed=web/package.json");
     println!("cargo:rerun-if-changed=web/package-lock.json");

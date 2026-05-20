@@ -1404,6 +1404,15 @@
       // that feed `reviewStore.peers` → PeerStrip.
       reviewPresence(payload: import('./lib/types').ReviewPresenceChanged) {
         console.debug('[review:presence]', payload);
+        // Clear any live caret for a peer that just went offline so a
+        // departed reviewer's cursor doesn't linger for the rest of the
+        // session. Join/leave deltas arrive as `replace=false` with the
+        // peer's `online` flag flipped.
+        if (!payload.replace) {
+          for (const peer of payload.peers) {
+            if (!peer.online) collabController?.removeCursorsForDevice(peer.deviceId);
+          }
+        }
         reviewStore.applyPresence(payload);
       },
       // Live transport state: `mailbox` on relay subscribe, `offline` on
@@ -1414,7 +1423,7 @@
       },
       // Inbound live co-typing steps — route into the active collab session.
       reviewCollab(payload: import('./lib/types').ReviewCollabSignal) {
-        collabController?.onInbound(payload.payload);
+        collabController?.onInbound(payload.payload, payload.from);
       },
       // Per planning/collab/ui/review-panel-design.md §6: ReviewMargin
       // exposes `focusCard(eventId)` on the bridge so the editor's

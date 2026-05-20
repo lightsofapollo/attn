@@ -57,6 +57,9 @@ export class CollabController {
   private readonly selfColor: string;
   private readonly onRemoteCursors: ((cursors: RemoteCursor[]) => void) | null;
   private readonly remoteCursors = new Map<string, RemoteCursor>();
+  // clientID → sender deviceId, so a peer's caret can be cleared on leave
+  // (presence frames identify peers by deviceId, cursors by collab clientID).
+  private readonly cursorDevice = new Map<string, string>();
 
   constructor(opts: {
     bridge: EditorBridge;
@@ -123,11 +126,14 @@ export class CollabController {
   }
 
   /**
-   * Handle an inbound wire message. The owner consumes `submit`s (and ignores
-   * `broadcast` echoes it authored); a reviewer consumes `broadcast`s (and
-   * ignores other reviewers' `submit`s, since it isn't the authority).
+   * Handle an inbound wire message from `fromDeviceId` (the daemon stamps the
+   * sender's deviceId on every CollabSignal). The owner consumes `submit`s
+   * (and ignores `broadcast` echoes it authored); a reviewer consumes
+   * `broadcast`s (and ignores other reviewers' `submit`s, since it isn't the
+   * authority). Cursors record their sender device so they can be cleared when
+   * that device leaves.
    */
-  onInbound(payload: string): void {
+  onInbound(payload: string, fromDeviceId: string): void {
     let msg: CollabWireMessage;
     try {
       msg = JSON.parse(payload) as CollabWireMessage;
@@ -138,6 +144,7 @@ export class CollabController {
     if (msg.kind === 'cursor') {
       if (msg.cursor.clientID === this.selfClientId) return;
       this.remoteCursors.set(msg.cursor.clientID, msg.cursor);
+      this.cursorDevice.set(msg.cursor.clientID, fromDeviceId);
       this.onRemoteCursors?.([...this.remoteCursors.values()]);
       return;
     }
@@ -148,11 +155,26 @@ export class CollabController {
     }
   }
 
-  /** Drop a peer's cursor (e.g. on leave). */
+  /** Drop a single peer's cursor by collab clientID. */
   removeCursor(clientID: string): void {
+    this.cursorDevice.delete(clientID);
     if (this.remoteCursors.delete(clientID)) {
       this.onRemoteCursors?.([...this.remoteCursors.values()]);
     }
+  }
+
+  /**
+   * Drop every caret belonging to a device that left the room, so a departed
+   * participant's cursor doesn't linger on screen for the rest of the session.
+   */
+  removeCursorsForDevice(deviceId: string): void {
+    let changed = false;
+    for (const [clientID, dev] of this.cursorDevice) {
+      if (dev !== deviceId) continue;
+      this.cursorDevice.delete(clientID);
+      if (this.remoteCursors.delete(clientID)) changed = true;
+    }
+    if (changed) this.onRemoteCursors?.([...this.remoteCursors.values()]);
   }
 
   private submitOut(submission: CollabSubmission): void {

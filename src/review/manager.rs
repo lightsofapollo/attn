@@ -306,10 +306,12 @@ pub struct ReviewManager {
     live_webrtc: Arc<std::sync::Mutex<HashMap<RoomId, LiveWebrtc>>>,
 }
 
-/// A room's live WebRTC transport plus the current non-self peer count, used by
-/// `send_collab` to decide whether the DataChannel covers the whole room.
+/// A room's live WebRTC mesh — one DataChannel transport per other participant
+/// — plus the current non-self peer count. `send_collab` fans collab steps out
+/// over every transport when the mesh is complete (`transports.len() == peers`
+/// and all Connected), else falls back to the relay.
 struct LiveWebrtc {
-    transport: Arc<crate::review::transport::webrtc::WebRtcTransport>,
+    transports: HashMap<crate::review::ids::DeviceId, Arc<crate::review::transport::webrtc::WebRtcTransport>>,
     peers: usize,
 }
 
@@ -903,32 +905,41 @@ impl ReviewManager {
         // fall through to the relay instead.
         {
             use crate::review::transport::webrtc::WebRtcConnectionState;
-            let live_transport = self
+            // Mesh is complete iff every peer has a Connected DataChannel.
+            let mesh: Option<Vec<Arc<crate::review::transport::webrtc::WebRtcTransport>>> = self
                 .live_webrtc
                 .lock()
                 .ok()
                 .and_then(|map| {
                     map.get(room_id).and_then(|live| {
-                        (live.peers == 1
-                            && matches!(
-                                live.transport.state(),
-                                WebRtcConnectionState::Connected
-                            ))
-                        .then(|| Arc::clone(&live.transport))
+                        let all_connected = live.peers > 0
+                            && live.transports.len() == live.peers
+                            && live.transports.values().all(|t| {
+                                matches!(t.state(), WebRtcConnectionState::Connected)
+                            });
+                        all_connected.then(|| live.transports.values().cloned().collect())
                     })
                 });
-            if let Some(transport) = live_transport
+            if let Some(channels) = mesh
                 && let Some(runtime) = self.runtime.as_ref()
             {
-                let env = envelope.clone();
-                runtime.spawn(async move {
-                    let _ = transport.send_envelope(env).await;
-                });
-                return; // delivered over the DataChannel — skip the relay
+                // Fan out over every peer channel; skip the relay entirely.
+                // (The owner's authoritative broadcast reaches each reviewer;
+                // a reviewer's submit reaches the owner — and other reviewers
+                // ignore stray submits, so the mesh is safe.)
+                for transport in channels {
+                    let env = envelope.clone();
+                    runtime.spawn(async move {
+                        let _ = transport.send_envelope(env).await;
+                    });
+                }
+                return; // delivered over the mesh — skip the relay
             }
         }
 
-        // Fallback: relay (no live channel, or multiple peers to fan out to).
+        // Fallback: relay (mesh incomplete — a peer is still connecting or
+        // unreachable, so the relay broadcast covers everyone without
+        // double-applying).
         if let Err(e) = self.store.append_outbox(room_id, &envelope) {
             emit_err(format!("enqueue collab signal: {e}"));
         }
@@ -1231,14 +1242,14 @@ impl ReviewManager {
             };
             use crate::review::transport::PresenceEvent;
 
-            // 1:1 transport for the FIRST peer we see (2-party), stored with
-            // its remote deviceId so signaling from any OTHER peer is ignored
-            // rather than misrouted into this connection. Additional peers stay
-            // relay-only until the N-peer star (later stage). `None` until a
-            // peer appears (via Hello / Presence) or sends us an offer.
-            let mut webrtc: Option<(crate::review::ids::DeviceId, Arc<WebRtcTransport>)> = None;
+            // Full-mesh DataChannel transports keyed by peer deviceId: every
+            // participant connects to every other, so cursors (all-to-all
+            // presence) and the owner-authority collab both flow P2P. Mirrored
+            // into the manager's live_webrtc map for send_collab's fan-out.
+            let mut transports: HashMap<crate::review::ids::DeviceId, Arc<WebRtcTransport>> =
+                HashMap::new();
             // Non-self peer count, kept current from Hello (absolute) + Presence
-            // (delta). Gates collab onto the DataChannel only when peers == 1.
+            // (delta). The mesh is "complete" when transports.len() == peer_count.
             let mut peer_count: usize = 0;
 
             while let Some(event) = events_rx.recv().await {
@@ -1270,26 +1281,24 @@ impl ReviewManager {
                     live.peers = peer_count;
                 }
 
-                // Derive a peer hint + whether THIS event may trigger us to
-                // initiate. Presence/Hello → we may offer; an inbound signal
-                // means the peer is already negotiating, so we only answer.
-                let (peer_hint, may_offer): (Option<crate::review::ids::DeviceId>, bool) =
+                // Which peers need a transport from THIS event, and whether we
+                // may initiate. Hello → all peers; Presence(Join) → that peer;
+                // an inbound signal → its sender (and we only answer, not offer).
+                let (peers_to_build, may_offer): (Vec<crate::review::ids::DeviceId>, bool) =
                     match &event {
                         TransportEvent::Hello { devices, .. } => (
                             devices
                                 .iter()
                                 .map(|d| d.device_id.clone())
-                                .find(|d| d.as_str() != self_device_id),
+                                .filter(|d| d.as_str() != self_device_id)
+                                .collect(),
                             true,
                         ),
                         TransportEvent::Presence {
                             event: PresenceEvent::Join,
                             device_id: peer,
                             ..
-                        } => (
-                            Some(peer.clone()).filter(|d| d.as_str() != self_device_id),
-                            true,
-                        ),
+                        } if peer.as_str() != self_device_id => (vec![peer.clone()], true),
                         TransportEvent::Signaling { payload, .. } => {
                             let from = match payload {
                                 SignalingPayload::Offer { from, .. }
@@ -1297,15 +1306,21 @@ impl ReviewManager {
                                 | SignalingPayload::Ice { from, .. } => Some(from.clone()),
                                 _ => None,
                             };
-                            (from.filter(|d| d.as_str() != self_device_id), false)
+                            (
+                                from.filter(|d| d.as_str() != self_device_id)
+                                    .into_iter()
+                                    .collect(),
+                                false,
+                            )
                         }
-                        _ => (None, false),
+                        _ => (Vec::new(), false),
                     };
 
-                // Build the transport on first contact with a peer.
-                if webrtc.is_none()
-                    && let Some(remote) = peer_hint
-                {
+                // Build a transport for each peer we don't have one for yet.
+                for remote in peers_to_build {
+                    if transports.contains_key(&remote) {
+                        continue;
+                    }
                     let cfg = Arc::new(WebRtcConfig {
                         room_id: webrtc_room_id.clone(),
                         author_id: webrtc_author_id.clone(),
@@ -1326,20 +1341,48 @@ impl ReviewManager {
                     {
                         Ok(transport) => {
                             let transport = Arc::new(transport);
-                            // Badge: reflect DataChannel state — Live when the
-                            // channel is open, mailbox (the fallback) otherwise.
+                            transports.insert(remote.clone(), Arc::clone(&transport));
+                            // Mirror into the manager-shared live map so
+                            // send_collab can fan out over the mesh.
+                            if let Ok(mut map) = webrtc_live_map.lock() {
+                                let entry =
+                                    map.entry(webrtc_room_id.clone()).or_insert_with(|| {
+                                        LiveWebrtc {
+                                            transports: HashMap::new(),
+                                            peers: peer_count,
+                                        }
+                                    });
+                                entry.transports.insert(remote.clone(), Arc::clone(&transport));
+                                entry.peers = peer_count;
+                            }
+                            // Badge: a per-transport state watch that recomputes
+                            // the AGGREGATE — live_direct only when EVERY peer's
+                            // channel is open; mailbox (the fallback) otherwise.
                             let badge_tx = Arc::clone(&badge_update_tx);
                             let badge_room = webrtc_room_id.clone();
+                            let badge_map = Arc::clone(&webrtc_live_map);
                             let mut state_rx = transport.watch_state().await;
                             tokio::spawn(async move {
                                 loop {
-                                    let connected = matches!(
-                                        *state_rx.borrow(),
-                                        WebRtcConnectionState::Connected
-                                    );
+                                    let all_live = badge_map
+                                        .lock()
+                                        .ok()
+                                        .and_then(|map| {
+                                            map.get(&badge_room).map(|live| {
+                                                live.peers > 0
+                                                    && live.transports.len() == live.peers
+                                                    && live.transports.values().all(|t| {
+                                                        matches!(
+                                                            t.state(),
+                                                            WebRtcConnectionState::Connected
+                                                        )
+                                                    })
+                                            })
+                                        })
+                                        .unwrap_or(false);
                                     (badge_tx)(ReviewUpdate::ConnectionChanged {
                                         room_id: badge_room.clone(),
-                                        connection: if connected {
+                                        connection: if all_live {
                                             "live_direct".to_string()
                                         } else {
                                             "mailbox".to_string()
@@ -1351,43 +1394,29 @@ impl ReviewManager {
                                 }
                             });
                             // Deterministic initiator tie-break: the smaller
-                            // deviceId offers, the other answers — avoids glare
-                            // (both sides offering at once).
-                            // Publish for send_collab's routing decision.
-                            if let Ok(mut map) = webrtc_live_map.lock() {
-                                map.insert(
-                                    webrtc_room_id.clone(),
-                                    LiveWebrtc {
-                                        transport: Arc::clone(&transport),
-                                        peers: peer_count,
-                                    },
-                                );
-                            }
+                            // deviceId offers, the other answers (glare-free).
                             if may_offer
                                 && webrtc_local_device.as_str() < remote.as_str()
                                 && let Err(err) = transport.create_offer().await
                             {
                                 eprintln!("webrtc: create_offer failed: {err}");
                             }
-                            webrtc = Some((remote, transport));
                         }
                         Err(err) => eprintln!("webrtc: transport build failed: {err}"),
                     }
                 }
 
-                // Route inbound SDP/ICE control-plane to the transport — but
-                // ONLY when it came from the peer this transport is bound to.
-                // Signaling from any other peer is dropped (2-party scope).
-                if let (TransportEvent::Signaling { payload, .. }, Some((remote, transport))) =
-                    (&event, webrtc.as_ref())
-                {
+                // Route inbound SDP/ICE to the transport bound to that peer.
+                if let TransportEvent::Signaling { payload, .. } = &event {
                     let from = match payload {
                         SignalingPayload::Offer { from, .. }
                         | SignalingPayload::Answer { from, .. }
-                        | SignalingPayload::Ice { from, .. } => Some(from),
+                        | SignalingPayload::Ice { from, .. } => Some(from.clone()),
                         _ => None,
                     };
-                    if from == Some(remote) {
+                    if let Some(from) = from
+                        && let Some(transport) = transports.get(&from)
+                    {
                         let res = match payload {
                             SignalingPayload::Offer { sdp, .. } => {
                                 transport.handle_offer(sdp.clone()).await

@@ -268,7 +268,11 @@ if wait_ready attn_rvB '.comment-composer textarea' 8000; then
     ok "comment composer opened over the live editor"
     attn_rvB --fill '.comment-composer textarea' "$COMMENT_MARK" >/dev/null 2>&1
     attn_rvB --click 'text=Submit' >/dev/null 2>&1
-    owner_saw_comment() { grep -q "$COMMENT_MARK" "$WORK/owner.log"; }
+    # Verify the comment reached + was decrypted by the owner: it lands in the
+    # owner's local event log (events.jsonl). We no longer log comment bodies to
+    # stderr (privacy), and the rendered card can be in the stale tray after the
+    # doc drifts — the persisted decrypted event is the reliable signal.
+    owner_saw_comment() { grep -rqa "$COMMENT_MARK" "$OWNER_HOME/reviews" 2>/dev/null; }
     if poll 20000 owner_saw_comment; then ok "owner received rvB's comment during the live session"; else bad "owner never received the live comment"; fi
 else
     bad "comment composer did not open (editorial may be gated by collab)"

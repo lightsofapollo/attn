@@ -1378,13 +1378,8 @@
       resetFontScale() {
         resetGlobalFontScale();
       },
-      // Review callbacks delegate to the global review store
-      // (attn-nnj.12.10). Phase 2 wiring (4.x) layers typed derived selectors
-      // and panel components on top of this state. Keeping a console.debug
-      // here makes it easy to verify wire-up during dev without opening
-      // devtools every time.
+      // Review callbacks delegate to the global review store.
       reviewStatus(payload: ReviewStatus) {
-        console.debug('[review:status]', payload);
         reviewStore.applyStatus(payload);
       },
       // Pushed by Rust right after `Bootstrapper::share` succeeds. Carries
@@ -1392,7 +1387,6 @@
       // verify-key fingerprint without a follow-up round-trip and without
       // string-parsing a `Live|<invite>` blob.
       reviewShareReady(payload: import('./lib/types').ReviewShareReady) {
-        console.debug('[review:share_ready]', payload);
         reviewStore.applyShareReady({
           roomId: payload.roomId,
           inviteUrl: payload.inviteUrl,
@@ -1402,22 +1396,18 @@
         });
       },
       reviewEvent(payload: ReviewEvent) {
-        console.debug('[review:event]', payload);
         reviewStore.applyEvent(payload);
       },
       reviewSnapshot(snapshot: ReviewSnapshot) {
-        console.debug('[review:snapshot]', snapshot);
         reviewStore.applySnapshot(snapshot);
       },
       reviewAnchorResolution(update: ReviewAnchorResolutionUpdate) {
-        console.debug('[review:anchor]', update);
         reviewStore.applyAnchorResolution(update);
       },
       // Live presence: relay `hello` (full roster) and `presence`
       // (join/leave) frames, translated by the daemon into face-chip deltas
       // that feed `reviewStore.peers` → PeerStrip.
       reviewPresence(payload: import('./lib/types').ReviewPresenceChanged) {
-        console.debug('[review:presence]', payload);
         // Clear any live caret for a peer that just went offline so a
         // departed reviewer's cursor doesn't linger for the rest of the
         // session. Join/leave deltas arrive as `replace=false` with the
@@ -1432,7 +1422,6 @@
       // Live transport state: `mailbox` on relay subscribe, `offline` on
       // disconnect. Drives the ConnectionBadge.
       reviewConnection(payload: import('./lib/types').ReviewConnectionChanged) {
-        console.debug('[review:connection]', payload);
         reviewStore.applyConnection(payload);
       },
       // Inbound live co-typing steps — route into the active collab session.
@@ -1759,7 +1748,7 @@
   -->
   <ReviewBar
     shareOpen={shareDialogOpen}
-    isOwner={true}
+    isOwner={collabRole === 'owner'}
     onShareClick={openShareDialog}
   />
 

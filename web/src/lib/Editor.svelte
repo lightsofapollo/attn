@@ -494,7 +494,6 @@
 
   export function resetToMarkdown(nextMarkdown: string): void {
     if (!view) return;
-    const updateStart = performance.now();
     const bookmark = view.state.selection.getBookmark();
     const updateDoc = parseMarkdownDoc(nextMarkdown, 'update');
     let state = EditorState.create({
@@ -507,7 +506,6 @@
     } catch {
       // If previous selection can't be restored, keep default selection.
     }
-    console.info(`[attn] pm update done in ${(performance.now() - updateStart).toFixed(1)}ms`);
     view.updateState(state);
     if (findOpen && findQuery) {
       updateSearchQuery();

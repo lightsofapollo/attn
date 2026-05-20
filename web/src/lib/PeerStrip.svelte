@@ -134,13 +134,12 @@
 
   // Presence summary string for the hover tooltip. The strip itself shows
   // a green/grey dot via CSS, but the tooltip surfaces the words.
-  function presenceLabel(peer: ReviewStatusPeer, nowMs: number): string {
-    // The bridge does not yet surface a `lastSeenMs` per peer (Phase 0c
-    // pending — 4.13). Until it does we use "viewing" when `online` and
-    // "last seen" with a placeholder when not. The format function is
-    // still wired in so any future bridge update lights up automatically.
-    if (peer.online) return 'currently viewing';
-    return formatLastSeen(nowMs - 5 * 60_000, nowMs); // placeholder: 5m
+  function presenceLabel(peer: ReviewStatusPeer, _nowMs: number): string {
+    // The bridge does not yet surface a per-peer `lastSeenMs`, so we do NOT
+    // fabricate a relative time (it used to always say "5m ago"). Report
+    // online/offline honestly; `formatLastSeen` stays a prop so a future
+    // bridge update can light up real "last seen" without an API change.
+    return peer.online ? 'currently viewing' : 'offline';
   }
 
   function snapshotLabel(peer: ReviewStatusPeer): string {

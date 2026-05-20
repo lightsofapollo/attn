@@ -436,7 +436,9 @@ impl ReviewManager {
     /// thread, and the bootstrap calls (room create + device register + one
     /// GET) complete in well under a second against a healthy relay.
     pub fn submit(&self, cmd: ReviewCommand) {
-        eprintln!("review: received command {:?}", cmd);
+        // Log only the command NAME — never the `{:?}` body, which would spill
+        // comment/suggestion plaintext + collab steps to stderr.
+        eprintln!("review: received command {}", review_command_name(&cmd));
 
         // Bootstrap pipeline owns Share + Join when wired in. Everything else
         // still goes through `stub_update_for` (filled in by follow-up issues).
@@ -1983,11 +1985,27 @@ fn error_code(err: &crate::review::bootstrap::BootstrapError) -> String {
 // Stub update generation
 // ---------------------------------------------------------------------------
 
+/// The command's variant name only — for logging without spilling payloads
+/// (comment/suggestion plaintext, collab steps) to stderr.
+fn review_command_name(cmd: &ReviewCommand) -> &'static str {
+    match cmd {
+        ReviewCommand::Share { .. } => "Share",
+        ReviewCommand::Join { .. } => "Join",
+        ReviewCommand::Pull { .. } => "Pull",
+        ReviewCommand::Stop { .. } => "Stop",
+        ReviewCommand::Inbox => "Inbox",
+        ReviewCommand::CreateComment { .. } => "CreateComment",
+        ReviewCommand::CreateSuggestion { .. } => "CreateSuggestion",
+        ReviewCommand::AcceptSuggestion { .. } => "AcceptSuggestion",
+        ReviewCommand::ResolveAnchor { .. } => "ResolveAnchor",
+        ReviewCommand::SendCollab { .. } => "SendCollab",
+        ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
+    }
+}
+
 /// Build a sensible no-op `ReviewUpdate` for a given command. Centralized so
 /// the scaffold contract is testable in one place and so future handlers can
 /// progressively replace each arm with real work without touching `submit`.
-///
-/// TODO comments call out the issue that will replace each branch.
 fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
     match cmd {
         // TODO(attn-nnj.3a/3b): create the room runtime, persist `ReviewRoom`,

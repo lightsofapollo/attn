@@ -233,15 +233,17 @@
         {/if}
 
         <footer class="flex items-center justify-end gap-2 pt-1">
-          <button
-            type="button"
-            class="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] font-medium hover:bg-muted"
-            data-slot="outbox-indicator-retry"
-            onclick={handleRetry}
-          >
-            <RefreshCcw class="size-3" aria-hidden="true" />
-            <span>Retry now</span>
-          </button>
+          {#if onRetry}
+            <button
+              type="button"
+              class="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] font-medium hover:bg-muted"
+              data-slot="outbox-indicator-retry"
+              onclick={handleRetry}
+            >
+              <RefreshCcw class="size-3" aria-hidden="true" />
+              <span>Retry now</span>
+            </button>
+          {/if}
           <button
             type="button"
             class="rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted"

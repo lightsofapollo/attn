@@ -112,6 +112,16 @@ pub enum TransportEvent {
         from: DeviceId,
         payload: String,
     },
+    /// WebRTC negotiation signaling (SDP offer/answer, trickle ICE) decoded
+    /// from a `signal` envelope. The per-room connection orchestrator routes
+    /// this to the matching `WebRtcTransport` (handle_offer / handle_answer /
+    /// add_remote_ice). This is the CONTROL plane — once the DataChannel opens,
+    /// the high-frequency DATA plane (collab steps, cursors) rides the channel
+    /// directly, not the relay. `Collab` keeps its own `CollabSignal` variant.
+    Signaling {
+        room_id: RoomId,
+        payload: crate::review::transport::signaling::SignalingPayload,
+    },
     /// The room policy changed (owner edit, capability revocation, expiry
     /// update). Consumer should reload policy-dependent UI / caps.
     PolicyChanged { policy: RoomPolicy },

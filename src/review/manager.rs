@@ -2007,6 +2007,11 @@ fn forward_transport_event(
         TransportEvent::PolicyChanged { .. } => {
             // Room policy edits. Not yet surfaced.
         }
+        TransportEvent::Signaling { .. } => {
+            // WebRTC SDP/ICE control-plane. The per-room connection
+            // orchestrator (Stage 2) intercepts these before this forwarder to
+            // drive the WebRtcTransport; decoded-but-unrouted here is a no-op.
+        }
         TransportEvent::Disconnected { reason, close_code } => {
             // Flip the connection badge to offline. The WS auto-reconnect
             // loop will emit a fresh Hello (→ mailbox) when it re-subscribes,

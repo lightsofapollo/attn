@@ -792,6 +792,9 @@ impl MailboxWsClient {
                 use crate::review::model::EnvelopeKind;
                 let mut decoded_event: Option<crate::review::model::ReviewEvent> = None;
                 let mut decoded_collab: Option<(crate::review::ids::DeviceId, String)> = None;
+                let mut decoded_signaling: Option<
+                    crate::review::transport::signaling::SignalingPayload,
+                > = None;
                 let import_res: Result<(), crate::review::transport::inbound::InboundError> =
                     match kind {
                         EnvelopeKind::Event => match self
@@ -819,19 +822,24 @@ impl MailboxWsClient {
                             .await
                         {
                             Ok(plaintext) => {
-                                // Surface live co-typing steps; other signal
-                                // kinds (WebRTC SDP/ICE) decrypt fine but
-                                // aren't consumed here yet.
-                                if let Ok(
-                                    crate::review::transport::signaling::SignalingPayload::Collab {
-                                        from,
-                                        payload,
-                                    },
-                                ) = serde_json::from_slice::<
-                                    crate::review::transport::signaling::SignalingPayload,
-                                >(&plaintext)
-                                {
-                                    decoded_collab = Some((from, payload));
+                                use crate::review::transport::signaling::SignalingPayload;
+                                match serde_json::from_slice::<SignalingPayload>(&plaintext) {
+                                    // High-frequency live co-typing steps.
+                                    Ok(SignalingPayload::Collab { from, payload }) => {
+                                        decoded_collab = Some((from, payload));
+                                    }
+                                    // WebRTC negotiation control-plane — routed
+                                    // to the connection orchestrator.
+                                    Ok(
+                                        p @ (SignalingPayload::Offer { .. }
+                                        | SignalingPayload::Answer { .. }
+                                        | SignalingPayload::Ice { .. }),
+                                    ) => {
+                                        decoded_signaling = Some(p);
+                                    }
+                                    // RequestSnapshot decrypts fine but is
+                                    // consumed via the manager's recovery path.
+                                    Ok(SignalingPayload::RequestSnapshot { .. }) | Err(_) => {}
                                 }
                                 Ok(())
                             }
@@ -868,6 +876,12 @@ impl MailboxWsClient {
                             let _ = self.events_tx.send(TransportEvent::CollabSignal {
                                 room_id: room_id.clone(),
                                 from,
+                                payload,
+                            });
+                        }
+                        if let Some(payload) = decoded_signaling {
+                            let _ = self.events_tx.send(TransportEvent::Signaling {
+                                room_id: room_id.clone(),
                                 payload,
                             });
                         }

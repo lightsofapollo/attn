@@ -1946,8 +1946,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     // Three participants each upload one envelope BEFORE the 4th joins.
     const ids = ["mpL-owner-1", "mpL-revA-1", "mpL-revB-1"];
     const senders = [ownerDev, reviewerA, reviewerB] as const;
-    for (let i = 0; i < 3; i++) {
-      const s = senders[i];
+    for (const [i, s] of senders.entries()) {
       const r = await postEnvelopes({
         roomId,
         admissionKey,

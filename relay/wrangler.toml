@@ -3,6 +3,17 @@ main = "src/index.ts"
 compatibility_date = "2026-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+# account_id is intentionally NOT hardcoded — wrangler resolves it from
+# `wrangler login` or the CLOUDFLARE_ACCOUNT_ID env var, so this config stays
+# account-agnostic and safe to commit. See relay/README.md §Deploy.
+
+# Production observability — surfaces invocation logs + metrics in the
+# Cloudflare dashboard. The relay is low-QPS, so full (100%) sampling is
+# affordable and worth it for a fresh production surface.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [[durable_objects.bindings]]
 name = "RELAY_ROOMS"
 class_name = "RoomDO"

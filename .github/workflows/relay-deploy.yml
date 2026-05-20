@@ -1,0 +1,61 @@
+name: Relay Deploy
+
+# Manual-only: never fires on push/PR. Trigger from the Actions tab and pick the
+# target environment. Typechecks + runs the full conformance suite before any
+# deploy, and hard-fails early if the Cloudflare token secret is missing.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy attn-relay (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+
+      - name: Install relay dependencies
+        run: npm ci
+        working-directory: relay
+
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: relay
+
+      - name: Test (conformance corpus)
+        run: npm test
+        working-directory: relay
+
+      - name: Deploy
+        working-directory: relay
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN secret is not set. Add it under repo Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          if [ "${{ inputs.environment }}" = "production" ]; then
+            npx wrangler deploy
+          else
+            npx wrangler deploy --env staging
+          fi

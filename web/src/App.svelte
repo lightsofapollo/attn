@@ -31,6 +31,7 @@
   } from './lib/ipc';
   import { CollabController } from './lib/prosemirror/collab-controller';
   import type { EditorBridge } from './lib/prosemirror/collab-session';
+  import { remoteCursorsKey } from './lib/prosemirror/remote-cursors';
   import {
     decreaseFontScale as decreaseGlobalFontScale,
     increaseFontScale as increaseGlobalFontScale,
@@ -243,12 +244,26 @@
       getState: () => view.state,
       apply: (tr) => view.dispatch(tr),
     };
+    const isOwner = collabRole === 'owner';
     collabController = new CollabController({
       bridge,
-      isOwner: collabRole === 'owner',
+      isOwner,
       initialDoc: view.state.doc,
       send: (payload) => reviewCollabSend(roomId, payload),
+      selfClientId: collabClientId,
+      selfLabel: isOwner ? 'Owner' : 'Reviewer',
+      // Caret colors mirror the presence chips: owner warm, reviewer cool.
+      selfColor: isOwner ? '#d97706' : '#2563eb',
+      onRemoteCursors: (cursors) => {
+        // Push the remote-caret set into the editor as a meta transaction so
+        // the remoteCursorsPlugin re-renders its decorations.
+        view.dispatch(view.state.tr.setMeta(remoteCursorsKey, cursors));
+      },
     });
+  }
+
+  function handleCollabSelectionChange(head: number): void {
+    collabController?.broadcastCursor(head);
   }
 
   let collabSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1769,6 +1784,7 @@
         onReady={handleEditorReady}
         collabClientId={collabClientId ?? undefined}
         onCollabDocChange={handleCollabDocChange}
+        onCollabSelectionChange={handleCollabSelectionChange}
       />
     {:else if !hasActiveTab}
       <div class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
@@ -1792,6 +1808,7 @@
         onReady={handleEditorReady}
         collabClientId={collabClientId ?? undefined}
         onCollabDocChange={handleCollabDocChange}
+        onCollabSelectionChange={handleCollabSelectionChange}
       />
     {:else if activeFileType === 'image'}
       <ImageViewer src={markdownSourceUrl(activePath)} />

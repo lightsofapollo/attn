@@ -21,10 +21,22 @@ import {
 } from './collab-authority';
 import { CollabClient, CollabHost, type EditorBridge } from './collab-session';
 
+/** A remote participant's live caret, keyed by their collab clientID. */
+export interface RemoteCursor {
+  clientID: string;
+  /** Caret position in document coordinates. */
+  head: number;
+  /** Human label shown next to the caret (e.g. "Owner"). */
+  label: string;
+  /** CSS color for the caret + label chip. */
+  color: string;
+}
+
 /** Tagged wire envelope carried inside a SignalingPayload::Collab payload. */
 export type CollabWireMessage =
   | { kind: 'submit'; submission: CollabSubmission }
-  | { kind: 'broadcast'; broadcast: CollabBroadcast };
+  | { kind: 'broadcast'; broadcast: CollabBroadcast }
+  | { kind: 'cursor'; cursor: RemoteCursor };
 
 /** Sends an already-serialized wire message to the room. */
 export type SendSignalFn = (payload: string) => void;
@@ -40,6 +52,11 @@ export class CollabController {
   private readonly send: SendSignalFn;
   private readonly client: CollabClient;
   private readonly host: CollabHost | null;
+  private readonly selfClientId: string;
+  private readonly selfLabel: string;
+  private readonly selfColor: string;
+  private readonly onRemoteCursors: ((cursors: RemoteCursor[]) => void) | null;
+  private readonly remoteCursors = new Map<string, RemoteCursor>();
 
   constructor(opts: {
     bridge: EditorBridge;
@@ -47,9 +64,20 @@ export class CollabController {
     /** Seed doc for the authority (owner only) — must equal the editor's v0 doc. */
     initialDoc: PmNode;
     send: SendSignalFn;
+    /** This editor's collab clientID — stamped on outgoing cursor messages. */
+    selfClientId: string;
+    /** Label + color for this participant's caret as seen by others. */
+    selfLabel: string;
+    selfColor: string;
+    /** Notified whenever the remote-cursor set changes (drives decorations). */
+    onRemoteCursors?: (cursors: RemoteCursor[]) => void;
   }) {
     this.isOwner = opts.isOwner;
     this.send = opts.send;
+    this.selfClientId = opts.selfClientId;
+    this.selfLabel = opts.selfLabel;
+    this.selfColor = opts.selfColor;
+    this.onRemoteCursors = opts.onRemoteCursors ?? null;
 
     if (opts.isOwner) {
       const authority = new CollabAuthority(opts.initialDoc);
@@ -75,6 +103,26 @@ export class CollabController {
   }
 
   /**
+   * Broadcast this editor's caret position to the room. Sent on the same
+   * signal channel as steps but OUTSIDE the authority — cursors are presence,
+   * not document mutations. Every participant (owner + reviewers) both sends
+   * and receives these.
+   */
+  broadcastCursor(head: number): void {
+    this.send(
+      JSON.stringify({
+        kind: 'cursor',
+        cursor: {
+          clientID: this.selfClientId,
+          head,
+          label: this.selfLabel,
+          color: this.selfColor,
+        },
+      } satisfies CollabWireMessage),
+    );
+  }
+
+  /**
    * Handle an inbound wire message. The owner consumes `submit`s (and ignores
    * `broadcast` echoes it authored); a reviewer consumes `broadcast`s (and
    * ignores other reviewers' `submit`s, since it isn't the authority).
@@ -86,10 +134,24 @@ export class CollabController {
     } catch {
       return; // malformed — drop (a resync will recover live state)
     }
+    // Cursors are presence: every role consumes them (skipping our own).
+    if (msg.kind === 'cursor') {
+      if (msg.cursor.clientID === this.selfClientId) return;
+      this.remoteCursors.set(msg.cursor.clientID, msg.cursor);
+      this.onRemoteCursors?.([...this.remoteCursors.values()]);
+      return;
+    }
     if (this.isOwner) {
       if (msg.kind === 'submit') this.host!.onSubmission(msg.submission);
     } else {
       if (msg.kind === 'broadcast') this.client.receive(msg.broadcast);
+    }
+  }
+
+  /** Drop a peer's cursor (e.g. on leave). */
+  removeCursor(clientID: string): void {
+    if (this.remoteCursors.delete(clientID)) {
+      this.onRemoteCursors?.([...this.remoteCursors.values()]);
     }
   }
 

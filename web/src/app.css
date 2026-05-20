@@ -913,3 +913,34 @@
 .shared-doc-viewport {
   box-shadow: inset 3px 0 0 0 color-mix(in oklab, var(--color-violet-500, oklch(0.606 0.25 292.717)) 55%, transparent);
 }
+
+/* Live co-typing remote carets (remote-cursors.ts). A thin colored bar at the
+   peer's caret with a floating name chip. Color is set inline per peer. */
+.attn-remote-caret {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 1.1em;
+  margin: 0;
+  vertical-align: text-bottom;
+  border-left-width: 2px;
+  border-left-style: solid;
+  /* border-color set inline per participant */
+  pointer-events: none;
+}
+
+.attn-remote-caret-label {
+  position: absolute;
+  top: -1.15em;
+  left: -2px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: white;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+  /* background-color set inline per participant */
+}

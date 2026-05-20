@@ -16,6 +16,7 @@
   import { baseKeymap, selectAll } from 'prosemirror-commands';
   import { history, redo, undo } from 'prosemirror-history';
   import { collab } from 'prosemirror-collab';
+  import { remoteCursorsPlugin } from './prosemirror/remote-cursors';
   import { codeHighlightPlugin } from './prosemirror/code-highlight';
   import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
   import { mathNodeView } from './prosemirror/math';
@@ -64,6 +65,8 @@
     collabClientId?: string;
     /** Fired after every local doc-changing transaction during a collab session. */
     onCollabDocChange?: () => void;
+    /** Fired when the local selection (caret) moves during a collab session. */
+    onCollabSelectionChange?: (head: number) => void;
   }
 
   let {
@@ -79,6 +82,7 @@
     onReady,
     collabClientId,
     onCollabDocChange,
+    onCollabSelectionChange,
   }: Props = $props();
   let editorEl: HTMLElement | undefined = $state(undefined);
   let view: EditorView | undefined;
@@ -182,12 +186,16 @@
     // (version + unconfirmed steps) across plugin-list changes.
     if (collabClientId) {
       plugins.push(collab({ version: 0, clientID: collabClientId }));
+      plugins.push(remoteCursorsPlugin());
       plugins.push(
         new Plugin({
           view: () => ({
             update: (v, prev) => {
               if (!v.state.doc.eq(prev.doc)) {
                 onCollabDocChange?.();
+              }
+              if (!v.state.selection.eq(prev.selection)) {
+                onCollabSelectionChange?.(v.state.selection.head);
               }
             },
           }),

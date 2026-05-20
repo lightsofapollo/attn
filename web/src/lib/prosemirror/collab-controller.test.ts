@@ -12,7 +12,7 @@ import { collab } from 'prosemirror-collab';
 import { EditorState } from 'prosemirror-state';
 
 import { schema } from '../schema';
-import { CollabController } from './collab-controller';
+import { CollabController, type RemoteCursor } from './collab-controller';
 import type { EditorBridge } from './collab-session';
 
 let passed = 0;
@@ -69,17 +69,27 @@ function makeSession(initial: string) {
   const toReviewer: string[] = [];
   const toOwner: string[] = [];
 
+  const ownerCursors: RemoteCursor[][] = [];
+  const reviewerCursors: RemoteCursor[][] = [];
   const owner = new CollabController({
     bridge: ownerEd.bridge,
     isOwner: true,
     initialDoc: docWithText(initial),
     send: (p) => toReviewer.push(p),
+    selfClientId: 'owner',
+    selfLabel: 'Owner',
+    selfColor: '#d97706',
+    onRemoteCursors: (c) => ownerCursors.push(c),
   });
   const reviewer = new CollabController({
     bridge: reviewerEd.bridge,
     isOwner: false,
     initialDoc: docWithText(initial),
     send: (p) => toOwner.push(p),
+    selfClientId: 'reviewer',
+    selfLabel: 'Reviewer',
+    selfColor: '#2563eb',
+    onRemoteCursors: (c) => reviewerCursors.push(c),
   });
 
   function pump(): void {
@@ -98,7 +108,7 @@ function makeSession(initial: string) {
     throw new Error('pump did not settle');
   }
 
-  return { ownerEd, reviewerEd, owner, reviewer, pump };
+  return { ownerEd, reviewerEd, owner, reviewer, pump, ownerCursors, reviewerCursors };
 }
 
 defineCase('owner edit reaches reviewer through the wire envelope', () => {
@@ -140,6 +150,18 @@ defineCase('owner ignores its own broadcast echo; reviewer ignores stray submits
   const rbefore = s.reviewerEd.text;
   s.reviewer.onInbound(JSON.stringify({ kind: 'submit', submission: { clientID: 'x', version: 0, steps: [] } }));
   assert(s.reviewerEd.text === rbefore, 'reviewer must ignore submits');
+});
+
+defineCase('cursor broadcast reaches the other peer, not self', () => {
+  const s = makeSession('hello');
+  s.reviewer.broadcastCursor(3);
+  s.pump();
+  // Owner should now see the reviewer's caret; reviewer should not see its own.
+  const lastOwner = s.ownerCursors[s.ownerCursors.length - 1] ?? [];
+  assert(lastOwner.length === 1, `owner expected 1 remote cursor, got ${lastOwner.length}`);
+  assert(lastOwner[0].clientID === 'reviewer' && lastOwner[0].head === 3, `wrong cursor: ${JSON.stringify(lastOwner[0])}`);
+  assert(lastOwner[0].label === 'Reviewer', `wrong label: ${lastOwner[0].label}`);
+  assert(s.reviewerCursors.length === 0, 'reviewer must not record its own cursor');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

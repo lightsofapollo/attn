@@ -28,6 +28,7 @@
 -->
 
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { Selection } from 'prosemirror-state';
   import type { EditorView } from 'prosemirror-view';
   import ReviewMarginCard from './ReviewMarginCard.svelte';
@@ -172,6 +173,17 @@
   // dependency it can mutate without infinite-looping.
 
   let _recalcTick = $state(0);
+
+  // Bump the recompute tick. `untrack` the read of `_recalcTick` so that
+  // callers running inside an $effect (the store-change recalc, the measured-
+  // height pass, and the scroll/resize effect that invokes its handler
+  // synchronously) do NOT take a reactive dependency on the very signal they
+  // write — that read+write-same-state pattern is an infinite loop
+  // (effect_update_depth_exceeded), which Svelte then disables, leaving anchor
+  // positions (and thus inline comment/suggestion marks) un-rendered.
+  function bumpRecalc(): void {
+    _recalcTick = untrack(() => _recalcTick) + 1;
+  }
 
   const anchorYs: Map<string, number> = $derived.by(() => {
     void _recalcTick; // force recompute on tick bump
@@ -405,7 +417,7 @@
     void reviewStore.events;
     void reviewStore.anchorResolutions;
     void resolutions;
-    _recalcTick = _recalcTick + 1;
+    bumpRecalc();
   });
 
   // Bump _recalcTick on a scroll/resize within the editor's scroll container
@@ -415,7 +427,7 @@
     const scrollParent = containerEl.closest('[data-slot="scroll-area-viewport"]')
       ?? containerEl.parentElement;
     const handler = (): void => {
-      _recalcTick = _recalcTick + 1;
+      bumpRecalc();
       if (scrollParent) {
         viewportTop = (scrollParent as HTMLElement).scrollTop;
         viewportHeight = (scrollParent as HTMLElement).clientHeight;
@@ -451,7 +463,7 @@
       }
     }
     if (dirty) {
-      _recalcTick = _recalcTick + 1;
+      bumpRecalc();
     }
   });
 

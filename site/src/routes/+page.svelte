@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Hero from '$lib/Hero.svelte';
+	import Collaborate from '$lib/Collaborate.svelte';
 	import FeatureSection from '$lib/FeatureSection.svelte';
 	import FeatureCard from '$lib/FeatureCard.svelte';
 	import CodeBlock from '$lib/CodeBlock.svelte';
@@ -8,7 +9,11 @@
 </script>
 
 <svelte:head>
-	<title>attn — your markdown, rendered beautifully</title>
+	<title>attn — markdown, rendered beautifully &amp; reviewed together</title>
+	<meta
+		name="description"
+		content="A native markdown viewer in one <20MB binary — now with live, end-to-end-encrypted, peer-to-peer collaboration. Co-type, comment, and suggest in real time."
+	/>
 </svelte:head>
 
 <Hero />
@@ -21,6 +26,9 @@
 		Just your markdown, rendered beautifully.
 	</p>
 </section>
+
+<!-- Live collaboration (the headline new capability) -->
+<Collaborate />
 
 <!-- Feature zigzag sections -->
 <div id="features" class="max-w-6xl mx-auto px-6">

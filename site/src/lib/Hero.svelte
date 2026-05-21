@@ -9,7 +9,9 @@
 		</h1>
 
 		<p class="font-sans text-xl text-muted-foreground mt-6 max-w-xl mx-auto leading-relaxed">
-			Your markdown, rendered beautifully.
+			Your markdown, rendered beautifully — and
+			<a href="#collaborate" class="text-foreground underline decoration-primary/40 underline-offset-4 hover:decoration-primary">reviewed together</a>,
+			end-to-end encrypted.
 		</p>
 
 		<div class="mt-8">

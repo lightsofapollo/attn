@@ -10,6 +10,9 @@
 		</a>
 
 		<div class="flex items-center gap-6">
+			<a href="#collaborate" class="font-sans text-sm text-muted-foreground hover:text-foreground transition-colors">
+				Collaborate
+			</a>
 			<a href="#features" class="font-sans text-sm text-muted-foreground hover:text-foreground transition-colors">
 				Features
 			</a>

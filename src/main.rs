@@ -707,6 +707,27 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     .filter(|path| dedup.insert(path.clone()))
                     .collect();
 
+                // Folder-share dynamics: when a *.md is created or modified
+                // inside a shared directory (or it's a shared single file),
+                // republish its snapshot so reviewers see new + edited files
+                // live. `republish_snapshot_for_path` is a no-op for unshared
+                // paths and only the owner holds the local-share record, so
+                // firing this for every changed markdown file is safe.
+                if matches!(kind, FsChangeKind::Create | FsChangeKind::Modify)
+                    && let Some(mgr) = app_state.lock().ok().and_then(|s| s.review_manager.clone())
+                {
+                    for p in &changed_paths {
+                        let path = std::path::Path::new(p);
+                        if path.extension().is_some_and(|e| {
+                            e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown")
+                        }) {
+                            mgr.submit(crate::review::manager::ReviewCommand::PublishSnapshot {
+                                path: path.to_path_buf(),
+                            });
+                        }
+                    }
+                }
+
                 let active_path = app_state.lock().ok().map(|state| state.active_path.clone());
                 let active_path_str = active_path
                     .as_ref()

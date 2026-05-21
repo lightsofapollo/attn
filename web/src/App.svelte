@@ -69,6 +69,7 @@
   } from './lib/markdown-layer';
   import { reviewStore } from './lib/review/store.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
+  import ReviewFileNav from './lib/ReviewFileNav.svelte';
   import {
     requestReviewDecorationsRebuild,
     reviewDecorationsPlugin,
@@ -1797,6 +1798,8 @@
            snapshot. Read-only normally; during a live session collab makes it
            editable so the reviewer can co-type. The ReviewMargin overlay
            (right rail) still mounts so comments anchor against this content. -->
+      <!-- Folder-share file switcher; self-gates to nothing for single-file shares. -->
+      <ReviewFileNav />
       <Editor
         bind:this={editorRef}
         markdown={collabActive ? (collabSeedMarkdown ?? effectiveMarkdown) : effectiveMarkdown}

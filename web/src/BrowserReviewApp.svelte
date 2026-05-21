@@ -36,6 +36,7 @@
   import type { Plugin as PMPlugin } from 'prosemirror-state';
   import Editor from './lib/Editor.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
+  import ReviewFileNav from './lib/ReviewFileNav.svelte';
   import CommentComposer from './lib/CommentComposer.svelte';
   import { hasTextSelection } from './lib/review/popover-anchor';
   import { reviewStore } from './lib/review/store.svelte';
@@ -261,14 +262,18 @@ interface CommentComposerState {
     </div>
   {:else}
     <div class="browser-review-body flex min-h-0 flex-1 flex-row overflow-hidden">
-      <div class="browser-review-editor min-w-0 flex-1 overflow-auto"
-        data-slot="browser-review-editor">
-        <Editor
-          markdown={sessionState.snapshotMarkdown ?? ''}
-          editable={false}
-          plugins={editorPlugins}
-          onReady={handleEditorReady}
-        />
+      <div class="browser-review-editor-col flex min-w-0 flex-1 flex-col overflow-hidden">
+        <!-- Folder-share file switcher; renders nothing for single-file shares. -->
+        <ReviewFileNav />
+        <div class="browser-review-editor min-w-0 flex-1 overflow-auto"
+          data-slot="browser-review-editor">
+          <Editor
+            markdown={sessionState.snapshotMarkdown ?? ''}
+            editable={false}
+            plugins={editorPlugins}
+            onReady={handleEditorReady}
+          />
+        </div>
       </div>
       <aside class="browser-review-margin w-[320px] shrink-0 overflow-y-auto border-l border-border bg-background"
         data-slot="browser-review-margin">

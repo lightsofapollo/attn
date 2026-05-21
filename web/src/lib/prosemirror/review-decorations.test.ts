@@ -76,15 +76,21 @@ if (!fakeGlobals.navigator) {
 // resolution map / event list as plain inputs — but the module-level
 // singleton in `store.svelte.ts` runs at import time. The stub treats
 // `$state(v)` as the identity function.
+type DerivedRune = (<T>(value: T) => T) & { by: <T>(fn: () => T) => T };
 const fakeRunes = globalThis as unknown as {
   $state?: <T>(value: T) => T;
-  $derived?: <T>(value: T) => T;
+  $derived?: DerivedRune;
 };
 if (typeof fakeRunes.$state !== 'function') {
   fakeRunes.$state = <T>(value: T): T => value;
 }
 if (typeof fakeRunes.$derived !== 'function') {
-  fakeRunes.$derived = <T>(value: T): T => value;
+  // Identity for `$derived(expr)`; `$derived.by(fn)` evaluates `fn` once. The
+  // store's module-init runs these against its empty initial state, which is
+  // all this test needs (it drives `buildReviewDecorations` with plain inputs).
+  const derived = (<T>(value: T): T => value) as DerivedRune;
+  derived.by = <T>(fn: () => T): T => fn();
+  fakeRunes.$derived = derived;
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +354,10 @@ defineCase('remapped suggestion at 0.85 → underline/med-confidence class', () 
     docSize: 1000,
     focusEventId: null,
   });
-  assert(decos.length === 1, `expected 1 decoration, got ${decos.length}`);
+  // Two decorations: the inline mark (index 0) PLUS the suggestion ghost-text
+  // widget that renders the proposed insertion. Marks are pushed before ghost
+  // widgets, so decos[0] is the mark.
+  assert(decos.length === 2, `expected 2 decorations (mark + ghost), got ${decos.length}`);
   const cls = decorationClass(decos[0] as unknown as AnyDecoration);
   assert(
     cls.includes('attn-review-suggestion--moved'),

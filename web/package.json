@@ -7,7 +7,9 @@
     "generate:icons": "node scripts/generate-vscode-icon-map.mjs --default-pack=eyecons",
     "dev": "npm run generate:icons && vite",
     "build": "npm run generate:icons && vite build",
-    "check": "npm run generate:icons && svelte-check --tsconfig ./tsconfig.json"
+    "check": "npm run generate:icons && svelte-check --tsconfig ./tsconfig.json",
+    "test": "node scripts/run-tests.mjs",
+    "test:unit": "node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@fontsource-variable/source-code-pro": "^5.2.7",

@@ -176,6 +176,9 @@ function buildPreflightForNonRoomRoute(): Response {
  */
 const ROOM_ROUTE_RE = /^\/v2\/rooms\/([^/]+)(?:\/.*)?$/;
 
+/** Bare room path (no subroute) — `POST` here is room creation. */
+const ROOM_CREATE_RE = /^\/v2\/rooms\/([^/]+)\/?$/;
+
 /** WS upgrade route matcher: `/v2/rooms/:roomId/socket`. */
 const ROOM_SOCKET_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
 
@@ -267,6 +270,22 @@ export default {
     const edgeResult = edgeRateLimit.check(ip, rateRoomId, true);
     if (!edgeResult.ok) {
       return rateLimitedResponse(edgeResult);
+    }
+
+    // Tighter per-IP cap for room CREATION (POST on the bare room path). Each
+    // create spawns a Durable Object + storage + an alarm, so this is the top
+    // R2/DO cost vector — throttle it well below the general per-IP cap before
+    // forwarding to the DO (abuse hardening; complements PoW + the WAF rule).
+    //
+    // Skipped when the source IP is unattributable ("unknown"): Cloudflare
+    // always injects CF-Connecting-IP at the edge (a client can't strip it), so
+    // in production this is never "unknown". Lumping every anonymous dev/test
+    // caller into one create bucket would be a counterproductive false-positive.
+    if (ip !== "unknown" && request.method === "POST" && ROOM_CREATE_RE.test(url.pathname)) {
+      const createResult = edgeRateLimit.checkCreate(ip);
+      if (!createResult.ok) {
+        return rateLimitedResponse(createResult);
+      }
     }
 
     // WebSocket upgrade for /v2/rooms/:roomId/socket. The DO performs admission

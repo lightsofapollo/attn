@@ -70,6 +70,32 @@ describe("WorkerEdgeRateLimit — per-IP cap", () => {
   });
 });
 
+describe("WorkerEdgeRateLimit — per-IP create cap", () => {
+  it("allows up to perIpCreatePerMinute creates and rejects the (cap+1)th", () => {
+    const now = 1_700_000_000_000;
+    const limiter = new WorkerEdgeRateLimit(DEFAULT_RATE_LIMIT_CONFIG, () => now);
+    for (let i = 0; i < DEFAULT_RATE_LIMIT_CONFIG.perIpCreatePerMinute; i++) {
+      expect(limiter.checkCreate("1.2.3.4").ok).toBe(true);
+    }
+    const overflow = limiter.checkCreate("1.2.3.4");
+    expect(overflow.ok).toBe(false);
+    expect(overflow.code).toBe("ATTN_RATE_LIMITED");
+    expect(overflow.retryAfterMs).toBeGreaterThan(0);
+  });
+
+  it("uses a bucket separate from the general per-IP cap", () => {
+    const now = 2_000_000;
+    const limiter = new WorkerEdgeRateLimit(DEFAULT_RATE_LIMIT_CONFIG, () => now);
+    for (let i = 0; i < DEFAULT_RATE_LIMIT_CONFIG.perIpCreatePerMinute; i++) {
+      limiter.checkCreate("5.5.5.5");
+    }
+    // Create cap exhausted...
+    expect(limiter.checkCreate("5.5.5.5").ok).toBe(false);
+    // ...but general requests from the same IP still pass (separate counter).
+    expect(limiter.check("5.5.5.5", "room", true).ok).toBe(true);
+  });
+});
+
 describe("WorkerEdgeRateLimit — anti-enumeration cap", () => {
   it("rejects the 31st distinct unknown roomId in the same 5min window", () => {
     let now = 5_000_000_000_000;
@@ -157,7 +183,7 @@ describe("WorkerEdgeRateLimit — anti-enumeration cap", () => {
     let now = 0;
     // Choose a tight config so we can saturate both caps quickly.
     const limiter = new WorkerEdgeRateLimit(
-      { perDevicePerMinute: 120, perIpPerMinute: 5, antiEnumPerFiveMin: 3 },
+      { perDevicePerMinute: 120, perIpPerMinute: 5, perIpCreatePerMinute: 15, antiEnumPerFiveMin: 3 },
       () => now,
     );
 

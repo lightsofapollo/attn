@@ -38,6 +38,13 @@ export interface RateLimitConfig {
   /** Per-IP per-minute cap (default 600 per relay-spec.md §Caps). */
   perIpPerMinute: number;
   /**
+   * Per-IP per-minute cap for ROOM CREATION specifically — much tighter than
+   * the general per-IP cap. Each create spawns a Durable Object + SQLite +
+   * an alarm, so a single IP minting hundreds of rooms/min is the top R2/DO
+   * cost vector (abuse hardening).
+   */
+  perIpCreatePerMinute: number;
+  /**
    * Anti-enumeration cap: distinct unknown roomIds an IP can probe in 5min
    * before getting blocked (default 30 per relay-spec.md §Anti-Abuse).
    */
@@ -48,6 +55,7 @@ export interface RateLimitConfig {
 export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
   perDevicePerMinute: 120,
   perIpPerMinute: 600,
+  perIpCreatePerMinute: 15,
   antiEnumPerFiveMin: 30,
 };
 
@@ -98,6 +106,8 @@ export class WorkerEdgeRateLimit {
    * memory budget so an attacker can't OOM the global namespace.
    */
   private readonly ipBuckets: Map<string, IpBucket> = new Map();
+  /** Per-IP room-CREATE buckets — a separate, tighter counter from ipBuckets. */
+  private readonly ipCreateBuckets: Map<string, IpBucket> = new Map();
   /** Per-IP anti-enum buckets — pruned lazily on each call. */
   private readonly antiEnumBuckets: Map<string, AntiEnumBucket> = new Map();
   /** Allows tests to advance the clock without timer fakes. */
@@ -145,6 +155,28 @@ export class WorkerEdgeRateLimit {
 
     // 2. Per-IP total request rate. Counted whether the room exists or not.
     return this.incrementIpBucket(ip, now);
+  }
+
+  /**
+   * Tighter per-IP cap for ROOM CREATION (POST /v2/rooms/:roomId). Uses a
+   * separate bucket from the general per-IP cap so a flood of cheap create
+   * requests — the top R2/DO cost vector — is throttled long before it hits
+   * the 600/min general cap. Caller invokes this only on the create route.
+   */
+  checkCreate(ip: string): RateLimitResult {
+    const now = this.nowFn();
+    const currentWindow = Math.floor(now / MINUTE_MS) * MINUTE_MS;
+    let bucket = this.ipCreateBuckets.get(ip);
+    if (bucket === undefined || bucket.windowStart !== currentWindow) {
+      bucket = { count: 0, windowStart: currentWindow };
+      this.ipCreateBuckets.set(ip, bucket);
+    }
+    bucket.count += 1;
+    if (bucket.count > this.config.perIpCreatePerMinute) {
+      const retryAfterMs = Math.max(1, bucket.windowStart + MINUTE_MS - now);
+      return { ok: false, code: "ATTN_RATE_LIMITED", retryAfterMs };
+    }
+    return { ok: true };
   }
 
   /**

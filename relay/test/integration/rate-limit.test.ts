@@ -395,22 +395,32 @@ describe("rate limit — per-device (DO)", () => {
 // requests in this isolate. Tests below use unique IPs per scenario so
 // state doesn't leak between cases.
 
-describe("rate limit — anti-enumeration (Worker edge)", () => {
-  it("rejects the 31st distinct unknown roomId from one IP with 429 ATTN_ENUM_LIMITED", async () => {
-    const enumIp = "10.20.30.40";
-    // Hit 30 unknown rooms — all should return 404 (the natural DO answer).
-    for (let i = 0; i < 30; i++) {
-      const res = await SELF.fetch(`${URL_BASE}/v2/rooms/enum-${counter}-${i}`, {
+describe("rate limit — per-IP room-create cap (Worker edge)", () => {
+  it("throttles room creation from one IP: the (cap+1)th create in a minute → 429 ATTN_RATE_LIMITED", async () => {
+    // Unique IP per run so the shared module-level limiter doesn't leak buckets
+    // between cases (singleWorker isolate). CF-Connecting-IP must be a real
+    // value — the edge create-cap is skipped for the "unknown" dev/test fallback.
+    const createIp = `10.21.${(counter * 13) & 0xff}.7`;
+    // The first `perIpCreatePerMinute` (15) creates pass the cap. They 400 on
+    // the empty body (schema fail); the point is they are NOT rate-limited.
+    for (let i = 0; i < 15; i++) {
+      const res = await SELF.fetch(`${URL_BASE}/v2/rooms/createcap-${counter}-${i}`, {
         method: "POST",
-        headers: { "CF-Connecting-IP": enumIp, "Content-Type": "application/json" },
+        headers: { "CF-Connecting-IP": createIp, "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      // 404 ATTN_ROOM_NOT_FOUND is the DO's "room not found" — but the room
-      // POST handler runs CREATE on first POST, so the 1st request actually
-      // succeeds at creating a room with whatever body it had. To force the
-      // "not found" path we need a non-create method.
-      expect([404, 400, 401, 201]).toContain(res.status);
+      expect(res.status).not.toBe(429);
     }
+    // The 16th create from the same IP within the minute trips the create cap
+    // at the edge, BEFORE the DO sees it.
+    const blocked = await SELF.fetch(`${URL_BASE}/v2/rooms/createcap-${counter}-over`, {
+      method: "POST",
+      headers: { "CF-Connecting-IP": createIp, "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(blocked.status).toBe(429);
+    const j = (await blocked.json()) as { error?: { code?: string } };
+    expect(j.error?.code).toBe("ATTN_RATE_LIMITED");
   });
 });
 

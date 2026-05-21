@@ -86,6 +86,14 @@ pub enum ReviewCommand {
         room_id: RoomId,
         suggestion_id: EventId,
     },
+    /// Owner rejects a suggestion; mints a `SuggestionRejected` event so every
+    /// participant's log records the decline and the inline ghost text stops
+    /// rendering. No apply, no on-disk change.
+    RejectSuggestion {
+        room_id: RoomId,
+        suggestion_id: EventId,
+        reason: Option<String>,
+    },
     /// Owner manually re-anchors a stale comment/suggestion to a new range.
     ResolveAnchor {
         room_id: RoomId,
@@ -525,6 +533,18 @@ impl ReviewManager {
                 return;
             }
             (
+                ReviewCommand::RejectSuggestion {
+                    room_id,
+                    suggestion_id,
+                    reason,
+                },
+                Some(bootstrapper),
+                Some(_runtime),
+            ) => {
+                self.reject_suggestion(bootstrapper, room_id, suggestion_id, reason.clone());
+                return;
+            }
+            (
                 ReviewCommand::ResolveAnchor {
                     room_id,
                     event_id,
@@ -806,6 +826,26 @@ impl ReviewManager {
                 });
             }
         }
+    }
+
+    /// Owner rejects a suggestion: mint a `SuggestionRejected` event through
+    /// the same outbox path as comments/suggestions. No apply and no on-disk
+    /// change — the event simply records the decline so it propagates to every
+    /// participant and the decoration layer drops the suggestion's ghost text.
+    fn reject_suggestion(
+        &self,
+        bootstrapper: &Arc<Bootstrapper>,
+        room_id: &RoomId,
+        suggestion_id: &EventId,
+        reason: Option<String>,
+    ) {
+        let event_body = crate::review::model::ReviewEventBody::SuggestionRejected {
+            suggestion_id: suggestion_id.as_str().to_string(),
+            reason,
+        };
+        let result =
+            bootstrapper.send_event_sync(room_id, event_body, unix_now_ms_for_manager());
+        self.emit_event_outcome(room_id.clone(), result);
     }
 
     /// Owner accepts a suggestion: resolve it against the current document,
@@ -2235,6 +2275,7 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::CreateComment { .. } => "CreateComment",
         ReviewCommand::CreateSuggestion { .. } => "CreateSuggestion",
         ReviewCommand::AcceptSuggestion { .. } => "AcceptSuggestion",
+        ReviewCommand::RejectSuggestion { .. } => "RejectSuggestion",
         ReviewCommand::ResolveAnchor { .. } => "ResolveAnchor",
         ReviewCommand::SendCollab { .. } => "SendCollab",
         ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
@@ -2359,6 +2400,12 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
         ReviewCommand::SendCollab { .. } => ReviewUpdate::RoomStatusChanged {
             room_id: stub_room_id(),
             status: "Pending collab send — no bootstrap attached".to_string(),
+        },
+        // RejectSuggestion mints an event via the outbox; without a bootstrap
+        // (smoke tests) it's a benign no-op surfaced as status.
+        ReviewCommand::RejectSuggestion { .. } => ReviewUpdate::RoomStatusChanged {
+            room_id: stub_room_id(),
+            status: "Pending suggestion reject — no bootstrap attached".to_string(),
         },
     }
 }

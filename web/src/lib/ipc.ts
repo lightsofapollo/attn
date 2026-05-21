@@ -126,6 +126,20 @@ export function reviewAcceptSuggestion(
   return Promise.resolve();
 }
 
+export function reviewRejectSuggestion(
+  roomId: RoomId,
+  suggestionId: EventId,
+  reason?: string,
+): Promise<void> {
+  send({
+    type: 'review_reject_suggestion',
+    roomId,
+    suggestionId,
+    ...(reason !== undefined ? { reason } : {}),
+  });
+  return Promise.resolve();
+}
+
 export function reviewResolveAnchor(
   roomId: RoomId,
   eventId: EventId,

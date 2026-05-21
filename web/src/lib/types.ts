@@ -101,6 +101,7 @@ export type IpcMessageType =
   | 'review_create_comment'
   | 'review_create_suggestion'
   | 'review_accept_suggestion'
+  | 'review_reject_suggestion'
   | 'review_resolve_anchor'
   | 'review_collab_send';
 
@@ -216,6 +217,14 @@ export interface ReviewAcceptSuggestionMessage {
   editedReplacement?: string;
 }
 
+export interface ReviewRejectSuggestionMessage {
+  type: 'review_reject_suggestion';
+  roomId: RoomId;
+  suggestionId: EventId;
+  /** Optional free-text reason recorded on the SuggestionRejected event. */
+  reason?: string;
+}
+
 export interface ReviewResolveAnchorMessage {
   type: 'review_resolve_anchor';
   roomId: RoomId;
@@ -248,6 +257,7 @@ export type IpcMessage =
   | ReviewCreateCommentMessage
   | ReviewCreateSuggestionMessage
   | ReviewAcceptSuggestionMessage
+  | ReviewRejectSuggestionMessage
   | ReviewResolveAnchorMessage
   | ReviewCollabSendMessage;
 

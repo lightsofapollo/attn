@@ -100,6 +100,14 @@ pub enum IpcMessage {
         suggestion_id: EventId,
     },
 
+    #[serde(rename = "review_reject_suggestion", rename_all = "camelCase")]
+    ReviewRejectSuggestion {
+        room_id: RoomId,
+        suggestion_id: EventId,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+
     #[serde(rename = "review_resolve_anchor", rename_all = "camelCase")]
     ReviewResolveAnchor {
         room_id: RoomId,
@@ -332,6 +340,20 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                     ReviewCommand::AcceptSuggestion {
                         room_id,
                         suggestion_id,
+                    },
+                );
+            }
+            IpcMessage::ReviewRejectSuggestion {
+                room_id,
+                suggestion_id,
+                reason,
+            } => {
+                submit_review_command(
+                    state,
+                    ReviewCommand::RejectSuggestion {
+                        room_id,
+                        suggestion_id,
+                        reason,
                     },
                 );
             }
@@ -689,6 +711,27 @@ mod tests {
         assert!(matches!(msg, IpcMessage::ReviewResolveAnchor { .. }));
     }
 
+    #[test]
+    fn ipc_message_review_reject_suggestion_parses_with_and_without_reason() {
+        // The Reject button omits `reason`; the field is `#[serde(default)]`.
+        let with_reason = r#"{"type":"review_reject_suggestion","roomId":"room-abc","suggestionId":"sugg-1","reason":"out of scope"}"#;
+        let msg: IpcMessage =
+            serde_json::from_str(with_reason).expect("parse review_reject_suggestion with reason");
+        if let IpcMessage::ReviewRejectSuggestion { reason, .. } = msg {
+            assert_eq!(reason.as_deref(), Some("out of scope"));
+        } else {
+            panic!("expected ReviewRejectSuggestion");
+        }
+
+        let no_reason = r#"{"type":"review_reject_suggestion","roomId":"room-abc","suggestionId":"sugg-1"}"#;
+        let msg: IpcMessage = serde_json::from_str(no_reason)
+            .expect("parse review_reject_suggestion without reason");
+        assert!(matches!(
+            msg,
+            IpcMessage::ReviewRejectSuggestion { reason: None, .. }
+        ));
+    }
+
     // -----------------------------------------------------------------
     // ReviewManager dispatch round-trip (attn-nnj.2.8)
     // -----------------------------------------------------------------
@@ -751,6 +794,15 @@ mod tests {
             } => ReviewCommand::AcceptSuggestion {
                 room_id,
                 suggestion_id,
+            },
+            IpcMessage::ReviewRejectSuggestion {
+                room_id,
+                suggestion_id,
+                reason,
+            } => ReviewCommand::RejectSuggestion {
+                room_id,
+                suggestion_id,
+                reason,
             },
             IpcMessage::ReviewResolveAnchor {
                 room_id,

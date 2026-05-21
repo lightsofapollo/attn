@@ -18,7 +18,7 @@
 
 <script lang="ts">
   import AmbiguousAnchorPicker from './AmbiguousAnchorPicker.svelte';
-  import { reviewAcceptSuggestion } from './ipc';
+  import { reviewAcceptSuggestion, reviewRejectSuggestion } from './ipc';
   import { reviewStore } from './review/store.svelte';
   import type { EventId, ResolvedAnchorCandidate, RoomId, Thread } from './types';
 
@@ -231,6 +231,17 @@
 
   function handleReject(e: MouseEvent): void {
     e.stopPropagation();
+    // Suggestions: persist + propagate the rejection (mirror handleAccept) so
+    // every participant's log records it and the ghost text stops rendering.
+    // Comments have no rejection event, so they only dismiss locally.
+    if (kind === 'suggestion') {
+      const root = thread.rootEvent.body;
+      if (root.type === 'suggestion_created') {
+        const roomId: RoomId = thread.rootEvent.meta.roomId;
+        const suggestionId: EventId = root.suggestionId;
+        void reviewRejectSuggestion(roomId, suggestionId);
+      }
+    }
     if (onReject) onReject();
   }
 

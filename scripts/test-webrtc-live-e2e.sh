@@ -20,7 +20,10 @@ fi
 
 : "${RELAY_PORT:=8791}"
 : "${ATTN_BIN:=$PROJECT_DIR/target/debug/attn}"
-RELAY_URL="http://localhost:${RELAY_PORT}"
+# ATTN_EXTERNAL_RELAY (e.g. https://relay.attn.sh) tests against an
+# already-deployed relay instead of booting a local Miniflare one — the
+# "test the fully deployed app" path.
+RELAY_URL="${ATTN_EXTERNAL_RELAY:-http://localhost:${RELAY_PORT}}"
 OWNER_HOME="/tmp/attn-wrtc-owner"
 RV_HOME="/tmp/attn-wrtc-rv"
 WORK="/tmp/attn-wrtc-work"
@@ -48,13 +51,19 @@ rm -rf "$OWNER_HOME" "$RV_HOME" "$WORK"; mkdir -p "$OWNER_HOME" "$RV_HOME" "$WOR
 printf '# WebRTC Live\n\nseed line\n' > "$SHARED_DOC"
 printf '# rv placeholder\n' > "$WORK/rv.md"
 
-[ -d "$PROJECT_DIR/relay/node_modules" ] || (cd relay && npm ci >/dev/null)
-log "Starting relay on :$RELAY_PORT"
-( cd "$PROJECT_DIR/relay" && exec npx wrangler dev --local --port "$RELAY_PORT" ) >"$RELAY_LOG" 2>&1 &
-RELAY_PID=$!
-deadline=$(( $(date +%s) + 60 ))
-while [ "$(date +%s)" -lt "$deadline" ]; do curl -fsS "$RELAY_URL/health" >/dev/null 2>&1 && break; kill -0 "$RELAY_PID" 2>/dev/null || { log "relay died"; tail -20 "$RELAY_LOG"; exit 1; }; sleep 0.3; done
-log "Relay healthy"
+if [ -n "${ATTN_EXTERNAL_RELAY:-}" ]; then
+    log "Using external relay: $RELAY_URL"
+    curl -fsS "$RELAY_URL/health" >/dev/null 2>&1 || { log "external relay /health not reachable at $RELAY_URL"; exit 1; }
+    log "External relay healthy"
+else
+    [ -d "$PROJECT_DIR/relay/node_modules" ] || (cd relay && npm ci >/dev/null)
+    log "Starting relay on :$RELAY_PORT"
+    ( cd "$PROJECT_DIR/relay" && exec npx wrangler dev --local --port "$RELAY_PORT" ) >"$RELAY_LOG" 2>&1 &
+    RELAY_PID=$!
+    deadline=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do curl -fsS "$RELAY_URL/health" >/dev/null 2>&1 && break; kill -0 "$RELAY_PID" 2>/dev/null || { log "relay died"; tail -20 "$RELAY_LOG"; exit 1; }; sleep 0.3; done
+    log "Relay healthy"
+fi
 
 log "Booting owner + reviewer daemons"
 ATTN_HOME="$OWNER_HOME" ATTN_RELAY_URL="$RELAY_URL" "$ATTN_BIN" --no-fork "$SHARED_DOC" >"$WORK/owner.log" 2>&1 & OWNER_PID=$!

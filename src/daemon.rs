@@ -386,6 +386,24 @@ pub fn send_review_join(invite: &str) -> Result<()> {
     }
 }
 
+/// Hand a path to the running daemon to share for review, as ITS OWN device
+/// identity (the app window then shows the invite). `path` may be a single file
+/// or a directory — a directory publishes a snapshot per `*.md` under it
+/// (folder-share), and files added later are picked up automatically.
+pub fn send_review_share(path: &str, mode: &str, ttl: Option<&str>) -> Result<()> {
+    let msg = SocketMessage::ReviewShare {
+        path: path.to_string(),
+        mode: mode.to_string(),
+        ttl: ttl.map(|s| s.to_string()),
+    };
+    match send_command(&msg)? {
+        Some(SocketResponse::Ok) => Ok(()),
+        Some(SocketResponse::Error { message }) => bail!("review_share failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
 /// Send a command to the daemon and read the response.
 /// Returns None if no daemon is running.
 fn send_command(msg: &SocketMessage) -> Result<Option<SocketResponse>> {

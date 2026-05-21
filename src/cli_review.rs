@@ -90,6 +90,23 @@ pub enum ReviewSubcommand {
         #[arg(long, value_name = "URL")]
         relay_url: Option<String>,
     },
+
+    /// Share a file or directory for review via the running attn daemon.
+    ///
+    /// A directory publishes a snapshot per `*.md` under it (folder-share);
+    /// files added to the directory later are picked up automatically. The
+    /// daemon shares as its own device identity, and the app window shows the
+    /// invite link.
+    Share {
+        /// File or directory to share.
+        path: String,
+        /// Room mode: `live`, `async`, or `hybrid`.
+        #[arg(long, default_value = "live")]
+        mode: String,
+        /// TTL for async/hybrid rooms (e.g. `24h`, `7d`).
+        #[arg(long, value_name = "TTL")]
+        ttl: Option<String>,
+    },
 }
 
 /// Default relay URL when `--relay-url` isn't passed and `ATTN_RELAY_URL`
@@ -115,7 +132,29 @@ pub fn run(args: ReviewArgs) -> Result<()> {
             Some(name) => run_join_as_agent(&invite, &name, relay_url.as_deref()),
             None => run_join_via_daemon(&invite),
         },
+        ReviewSubcommand::Share { path, mode, ttl } => {
+            run_share_via_daemon(&path, &mode, ttl.as_deref())
+        }
     }
+}
+
+/// Hand a file/directory to the running daemon to share for review. We
+/// canonicalize to an absolute path so it matches the daemon's fs-watcher
+/// paths (folder-share republishes newly-added files by absolute-path prefix).
+fn run_share_via_daemon(path: &str, mode: &str, ttl: Option<&str>) -> Result<()> {
+    let abs = std::fs::canonicalize(path)
+        .with_context(|| format!("resolve share path {path:?}"))?;
+    let abs = abs.to_string_lossy().to_string();
+    crate::daemon::send_review_share(&abs, mode, ttl).map_err(|e| {
+        anyhow::anyhow!(
+            "could not reach a running attn daemon to share ({e}).\n\
+             Open attn first, then run `attn review share <path>`."
+        )
+    })?;
+    println!("share request sent to the running attn daemon");
+    println!("  path: {abs}");
+    println!("  (the app window shows the invite link)");
+    Ok(())
 }
 
 /// Hand the invite to the running attn daemon so it joins as its OWN device

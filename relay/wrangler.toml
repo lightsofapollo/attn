@@ -54,5 +54,46 @@ MAX_POW_BITS = "24"
 # in-browser reviewer served from the attn.sh apex + staging subdomain.
 ALLOWED_BROWSER_ORIGINS = "https://attn.sh,https://staging.attn.sh"
 
+# Staging deploys to a DISTINCT worker so `wrangler deploy --env staging` can
+# NEVER overwrite the production "attn-relay" worker or take its relay.attn.sh
+# route. Named-environment routes are not inherited from the top level, so
+# staging is workers.dev-only. Durable Object namespaces are per-worker, so
+# staging rooms are isolated from prod. (The R2 bucket is shared by name, but
+# blobs are keyed by roomId, so staging + prod objects never collide.)
+[env.staging]
+name = "attn-relay-staging"
+workers_dev = true
+
 [env.staging.vars]
-ALLOWED_BROWSER_ORIGINS = "https://attn.sh,http://localhost:5173"
+# vars are NOT inherited by named environments, so the full set is repeated
+# here (otherwise a staging deploy is missing HARD_MAX_*/POW config and 500s).
+HARD_MAX_PEERS = "8"
+HARD_MAX_ROOM_BYTES = "26214400"
+HARD_MAX_EVENT_BYTES = "262144"
+HARD_MAX_SNAPSHOT_BYTES = "5242880"
+HARD_MAX_EVENTS = "500"
+HARD_MAX_BATCH_ENVELOPES = "32"
+HARD_MAX_TTL_MS = "86400000"
+HARD_MAX_TTL_LONG_MS = "604800000"
+DEFAULT_IDLE_TIMEOUT_MS = "3600000"
+DEFAULT_POW_BITS = "16"
+MIN_POW_BITS = "12"
+MAX_POW_BITS = "24"
+ALLOWED_BROWSER_ORIGINS = "https://staging.attn.sh,http://localhost:5173"
+
+# Named environments do NOT inherit durable_objects / r2_buckets / migrations
+# from the top level, so they're declared explicitly here. The DO namespace is
+# scoped to the (distinct) staging worker, so staging rooms never touch prod.
+# The R2 bucket name is shared, but objects are keyed by roomId so staging +
+# prod blobs never collide.
+[[env.staging.durable_objects.bindings]]
+name = "RELAY_ROOMS"
+class_name = "RoomDO"
+
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomDO"]
+
+[[env.staging.r2_buckets]]
+binding = "RELAY_BLOBS"
+bucket_name = "attn-relay-blobs"

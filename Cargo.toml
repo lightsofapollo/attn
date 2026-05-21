@@ -140,3 +140,14 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSI
 objc2-foundation = "0.3"
 objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2"] }
 block2 = "0.6"
+
+# Release profile tuned for the 25 MiB binary-size budget (scripts/
+# check-binary-size.sh; webrtc-rs + tokio + rustls + comrak are the weight).
+# A bare `cargo build --release` previously shipped UNSTRIPPED with no LTO.
+# panic = "unwind" is kept (the default): a panic in a background tokio task
+# must not abort the whole desktop app.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = true

@@ -43,8 +43,10 @@ else
     RESET=""
 fi
 
-# Allow MAX_MIB via positional arg OR env var; positional arg wins.
-MAX_MIB="${1:-${MAX_MIB:-50}}"
+# Allow MAX_MIB via positional arg OR env var; positional arg wins. Default is
+# the agreed Decision #1 budget (25 MiB) — NOT 50; CI + Taskfile call this with
+# no arg, so the default IS the enforced gate.
+MAX_MIB="${1:-${MAX_MIB:-25}}"
 MAX_BYTES=$((MAX_MIB * 1024 * 1024))
 
 # Waiver — accept both names. BINARY_SIZE_WAIVER is the documented one;

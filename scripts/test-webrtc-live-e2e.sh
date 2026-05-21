@@ -113,5 +113,24 @@ if poll 20000 text_has attn_rv 'OWNERDC'; then ok "owner edit reached reviewer o
 pm_insert attn_rv 'RVDC'
 if poll 20000 text_has attn_owner 'RVDC'; then ok "reviewer edit reached owner over the DataChannel"; else bad "reviewer edit never reached owner"; fi
 
+# Review EVENTS (not just collab steps) over the DataChannel must reach the
+# receiver's UI. Regression guard for the bug where webrtc inbound events were
+# persisted to events.jsonl but dropped from the frontend (forward_transport_event
+# no-op'd TransportEvent::Envelope). The reviewer comments; the owner's DOM must
+# show it — proving the P2P hot path carries review events AND renders them.
+log "Review comment over the DataChannel renders on the owner UI"
+MARK="DCWEBRTC$$"
+composer_ready() { [ -n "$(attn_rv --eval "document.querySelector('.comment-composer textarea')?'y':''" 2>/dev/null | tr -d '"')" ]; }
+owner_has_comment() { [ -n "$(attn_owner --eval "document.body.textContent.includes('$MARK')?'y':''" 2>/dev/null | tr -d '"')" ]; }
+attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';var S=v.state.selection.constructor;v.focus();v.dispatch(v.state.tr.setSelection(S.create(v.state.doc,1,Math.min(6,v.state.doc.content.size-1))));return 'ok';})()" >/dev/null 2>&1
+attn_rv --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'.',code:'Period',metaKey:true,bubbles:true}));'x'" >/dev/null 2>&1
+if poll 8000 composer_ready; then
+  attn_rv --fill '.comment-composer textarea' "$MARK ship it" >/dev/null 2>&1
+  attn_rv --click 'text=Submit' >/dev/null 2>&1
+  if poll 15000 owner_has_comment; then ok "comment over DataChannel rendered on owner UI"; else bad "comment over DataChannel did NOT render on owner UI"; fi
+else
+  bad "reviewer comment composer did not open"
+fi
+
 echo ""; log "Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

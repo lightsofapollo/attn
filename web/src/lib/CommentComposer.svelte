@@ -71,6 +71,7 @@
   class="comment-composer absolute z-50 w-[360px] rounded border bg-popover p-3 shadow-lg"
   style="top: {anchorPos.recommendedPosition.top}px; left: {anchorPos.recommendedPosition.left}px"
   role="dialog"
+  tabindex="-1"
   aria-label="Comment composer"
   onkeydown={handleKeydown}
 >

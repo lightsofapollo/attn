@@ -89,8 +89,11 @@
   let copiedCli = $state(false);
   let copiedFingerprint = $state(false);
   let advancedOpen = $state(false);
-  let phase = $state<'idle' | 'minting' | 'ready'>('idle');
+  let phase = $state<'idle' | 'minting' | 'ready' | 'error'>('idle');
   let fingerprint = $state('—— —— ——');
+  /** Guards the minting phase: if ShareReady never lands, surface an error. */
+  let mintTimeout: ReturnType<typeof setTimeout> | null = null;
+  const MINT_TIMEOUT_MS = 15000;
 
   const inviteUrl = $derived(existingInviteUrl);
   /**
@@ -125,6 +128,10 @@
   // Transition minting → ready when the daemon's ShareReady IPC lands.
   $effect(() => {
     if (phase === 'minting' && inviteUrl.length > 0) {
+      if (mintTimeout) {
+        clearTimeout(mintTimeout);
+        mintTimeout = null;
+      }
       phase = 'ready';
       // Auto-copy the URL — the entire point of this dialog is "click,
       // get URL". The user expects it on their clipboard the second they
@@ -154,6 +161,14 @@
     if (filePath.length === 0) return;
     const { mode: ipcMode, ttl } = modeToIpc(selectedMode);
     phase = 'minting';
+    // reviewShare is fire-and-forget IPC; the daemon answers asynchronously via
+    // the ShareReady callback. If the relay is unreachable or create_room
+    // fails, ShareReady never lands — so guard with a timeout that flips to an
+    // explicit error state (with retry) instead of spinning forever.
+    if (mintTimeout) clearTimeout(mintTimeout);
+    mintTimeout = setTimeout(() => {
+      if (phase === 'minting') phase = 'error';
+    }, MINT_TIMEOUT_MS);
     await reviewShare(filePath, ipcMode, ttl);
     onStart?.({
       mode: selectedMode,
@@ -162,6 +177,11 @@
       deleteEventsAfterOwnerAck: singleDeviceOnly,
       filePath,
     });
+  }
+
+  function retryMint(): void {
+    phase = 'idle';
+    void autoMint();
   }
 
   export function modeToIpc(mode: ShareMode): { mode: 'live' | 'async' | 'hybrid'; ttl?: string } {
@@ -223,6 +243,7 @@
 
   const isMinting = $derived(phase === 'minting');
   const isReady = $derived(phase === 'ready');
+  const isError = $derived(phase === 'error');
 </script>
 
 <Dialog.Root bind:open>
@@ -251,6 +272,20 @@
         <div class="flex items-center gap-2 py-1.5 text-sm text-muted-foreground" data-slot="share-minting">
           <span class="inline-block size-3 animate-pulse rounded-full bg-primary/60" aria-hidden="true"></span>
           Minting room…
+        </div>
+      {:else if isError}
+        <div class="flex flex-col gap-2 py-1.5 text-sm" data-slot="share-error">
+          <span class="text-destructive">
+            Couldn't reach the review relay — the share didn't complete.
+          </span>
+          <button
+            type="button"
+            class="self-start rounded-md border border-border px-3 py-1 text-xs hover:border-primary/60"
+            data-slot="share-retry"
+            onclick={retryMint}
+          >
+            Try again
+          </button>
         </div>
       {:else if isReady && cliCommand.length > 0}
         <button

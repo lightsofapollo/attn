@@ -269,11 +269,12 @@ export function partitionPeersBySnapshot(
   const onLatestSnapshot: ReviewStatusPeer[] = [];
   const onOlderSnapshot: ReviewStatusPeer[] = [];
   for (const peer of peers) {
-    if (
-      latestSnapshotId !== null
-      && peer.onSnapshotId !== undefined
-      && peer.onSnapshotId === latestSnapshotId
-    ) {
+    // A peer whose snapshot id we don't know yet (presence frames don't carry
+    // it) is UNKNOWN — not "older". Counting unknown as older made the owner
+    // badge perpetually warn "Reviewer on older snapshot" the instant anyone
+    // joined. Only flag peers we KNOW are on a non-latest snapshot.
+    if (peer.onSnapshotId === undefined) continue;
+    if (latestSnapshotId !== null && peer.onSnapshotId === latestSnapshotId) {
       onLatestSnapshot.push(peer);
     } else {
       onOlderSnapshot.push(peer);

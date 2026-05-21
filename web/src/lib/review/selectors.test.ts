@@ -382,15 +382,24 @@ defineCase('partitionPeersBySnapshot splits by onSnapshotId vs latest', () => {
     latestIds.length === 2 && latestIds.includes('alice') && latestIds.includes('dave'),
     `expected alice+dave on latest, got ${latestIds.join(',')}`,
   );
+  // carol has no snapshot id → UNKNOWN, not older (avoids the false "Reviewer
+  // on older snapshot" warning when presence doesn't carry the snapshot id).
   assert(
-    olderIds.length === 2 && olderIds.includes('bob') && olderIds.includes('carol'),
-    `expected bob+carol on older, got ${olderIds.join(',')}`,
+    olderIds.length === 1 && olderIds.includes('bob'),
+    `expected only bob on older (carol unknown is excluded), got ${olderIds.join(',')}`,
+  );
+  assert(
+    !latestIds.includes('carol') && !olderIds.includes('carol'),
+    'unknown-snapshot peer must be in neither bucket',
   );
 
-  // null latest => everyone older
+  // null latest => peers with a KNOWN snapshot are older; unknown still excluded
   const allOlder = partitionPeersBySnapshot(peers, null);
   assert(allOlder.onLatestSnapshot.length === 0, 'null latest => latest bucket empty');
-  assert(allOlder.onOlderSnapshot.length === 4, 'null latest => everyone older');
+  assert(
+    allOlder.onOlderSnapshot.length === 3,
+    'null latest => the 3 known-snapshot peers are older (carol unknown excluded)',
+  );
 });
 
 defineCase('outboxCount tracks pendingOutbox.length (proxy via array.length)', () => {

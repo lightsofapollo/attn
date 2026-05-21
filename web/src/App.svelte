@@ -245,6 +245,19 @@
     }
   });
 
+  // Auto-open the review rail the first time the current file has feedback (a
+  // comment or suggestion). Without this the rail stays collapsed and a
+  // reviewer's notes are invisible until someone happens to press Cmd+J — so
+  // incoming review work silently disappears. Open only ONCE so a deliberate
+  // Cmd+J close stays closed.
+  let reviewRailAutoOpened = $state(false);
+  $effect(() => {
+    if (reviewStore.threadsForCurrentFile.length > 0 && !reviewRailAutoOpened) {
+      reviewRailAutoOpened = true;
+      if (!reviewStore.panelOpen) reviewStore.panelOpen = true;
+    }
+  });
+
   function maybeStartCollab(view: EditorView): void {
     // onReady fires for every editor mount; only build a controller when the
     // collab plugin is actually installed (collabClientId set at create time).

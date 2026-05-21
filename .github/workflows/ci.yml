@@ -47,14 +47,14 @@ jobs:
       - name: Run Rust tests
         run: cargo test --locked
 
-      # Binary-size gate — enforces the 25 MiB target from
+      # Binary-size gate — enforces the 30 MiB target from
       # planning/collab/amendments.md §Decision #1 (webrtc-rs is the main risk).
       # Emergency bypass via env: ATTN_SIZE_BUDGET_WAIVER=1 (also accepts
       # BINARY_SIZE_WAIVER=1). See CLAUDE.md §"Binary-size gate".
       - name: Build release for size check
         run: cargo build --release --locked
 
-      - name: Check binary size (25 MiB budget)
+      - name: Check binary size (30 MiB budget)
         run: scripts/check-binary-size.sh
 
   rust-build-linux:
@@ -118,3 +118,33 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  relay-tests:
+    name: Relay Tests (Ubuntu)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The relay is the collab backbone (room auth, caps, PoW, abuse gates).
+      # Its vitest-pool-workers suite (~293 tests) previously ran only on the
+      # manual relay-deploy workflow — gate it on every PR/push so the collab
+      # path can't regress unnoticed.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test

@@ -4,9 +4,9 @@
 
   The Rust manager surfaces four transport states. We deliberately DO NOT show
   the transport mechanism ("mailbox", "DataChannel") to the user — that's
-  internal plumbing. The badge communicates *connection status* in plain
-  English, matching the product direction ("seamlessly do both and switch — no
-  live vs envelope mode"):
+  internal plumbing. In the compact review dock the visible chip is icon-only
+  so the document keeps priority; the status label remains in the DOM for
+  accessibility and E2E assertions.
 
     live_direct   → "Live"       (instant, peer-to-peer)
     mailbox       → "Connected"  (syncing via the relay, ~1s)
@@ -155,7 +155,7 @@
 <div class="connection-badge relative inline-flex" data-slot="connection-badge">
   <button
     type="button"
-    class="chip inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {descriptor.toneClass}"
+    class="chip inline-flex size-7 shrink-0 items-center justify-center rounded-full border text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {descriptor.toneClass}"
     data-slot="connection-badge-chip"
     data-state={connection}
     aria-label={descriptor.label}
@@ -171,7 +171,7 @@
     {:else}
       <CloudOff class="size-3 {descriptor.iconClass}" aria-hidden="true" />
     {/if}
-    <span>{descriptor.label}</span>
+    <span class="sr-only">{descriptor.label}</span>
   </button>
 
   {#if popoverOpen}
@@ -272,4 +272,3 @@
     </div>
   {/if}
 </div>
-

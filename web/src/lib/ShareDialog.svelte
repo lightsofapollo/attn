@@ -324,7 +324,7 @@
           class="rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-muted-foreground"
           readonly
           value=""
-          placeholder="npx attnmd review join … (generated after Start)"
+          placeholder="npx attnmd review join … (generated when the room is ready)"
           data-slot="share-cli-command"
         />
       {/if}

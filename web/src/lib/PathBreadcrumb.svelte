@@ -8,11 +8,14 @@
     BreadcrumbSeparator,
   } from '$lib/components/ui/breadcrumb';
   import { dragWindow } from './ipc';
+  import Share2 from '@lucide/svelte/icons/share-2';
 
   interface Props {
     path: string;
     rootPath?: string;
     onNavigate?: (path: string) => void;
+    onShare?: () => void;
+    shareEnabled?: boolean;
     avoidWindowControls?: boolean;
     fixed?: boolean;
     topOffsetPx?: number;
@@ -22,6 +25,8 @@
     path,
     rootPath = '',
     onNavigate,
+    onShare,
+    shareEnabled = false,
     avoidWindowControls = false,
     fixed = false,
     topOffsetPx = 0,
@@ -63,10 +68,15 @@
       onNavigate(segmentPath);
     }
   }
+
+  function handleShareClick(): void {
+    if (!shareEnabled) return;
+    onShare?.();
+  }
 </script>
 
 <div
-  class={`flex shrink-0 items-center justify-between h-[40px] min-w-0 pr-4 pt-3 pb-0 bg-background/95 backdrop-blur-[1px] ${fixed ? 'fixed inset-x-0 z-30' : ''}`}
+  class={`flex shrink-0 items-center justify-between gap-2 h-[40px] min-w-0 pr-4 pt-3 pb-0 bg-background/95 backdrop-blur-[1px] ${fixed ? 'fixed inset-x-0 z-30' : ''}`}
   style={`-webkit-user-select: none; padding-left: ${avoidWindowControls ? '6.5rem' : '1rem'}; ${fixed ? `top: ${topOffsetPx}px;` : ''}`}
   role="button"
   aria-label="Drag window"
@@ -74,7 +84,7 @@
   onmousedown={dragWindow}
 >
   {#if segments.length > 1}
-    <Breadcrumb class="mt-1.5 min-w-0 max-w-full overflow-x-auto overflow-y-hidden [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+    <Breadcrumb class="mt-1.5 min-w-0 flex-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
       <BreadcrumbList class="w-max min-w-full flex-nowrap whitespace-nowrap break-normal">
         {#each segments as segment, i (segment.fullPath)}
           {#if i > 0}
@@ -95,5 +105,21 @@
         {/each}
       </BreadcrumbList>
     </Breadcrumb>
+  {:else}
+    <div class="min-w-0 flex-1" aria-hidden="true"></div>
+  {/if}
+  {#if onShare}
+    <button
+      type="button"
+      class="mt-1.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/50 bg-background/55 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-40"
+      style="-webkit-app-region: no-drag"
+      aria-label="Share for review"
+      title="Share for review"
+      disabled={!shareEnabled}
+      onclick={handleShareClick}
+    >
+      <Share2 class="size-3.5" aria-hidden="true" />
+      <span class="sr-only">Share for review</span>
+    </button>
   {/if}
 </div>

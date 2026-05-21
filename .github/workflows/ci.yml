@@ -52,6 +52,8 @@ jobs:
       # Emergency bypass via env: ATTN_SIZE_BUDGET_WAIVER=1 (also accepts
       # BINARY_SIZE_WAIVER=1). See CLAUDE.md §"Binary-size gate".
       - name: Build release for size check
+        env:
+          ATTN_DEFAULT_RELAY_URL: https://relay.attn.sh
         run: cargo build --release --locked
 
       - name: Check binary size (30 MiB budget)

@@ -682,6 +682,7 @@ export interface SnapshotCreatedBody {
   type: 'snapshot_created';
   fileId: FileId;
   snapshotId: SnapshotId;
+  ownerDisplayPath?: string;
   parentSnapshotId?: SnapshotId;
   baseHash: ContentHash;
   encryptedBlobRef?: BlobRef;
@@ -862,6 +863,10 @@ export interface ReviewStatusPeer {
   kind: Participant['kind'];
   online: boolean;
   onSnapshotId?: SnapshotId;
+  locationFileId?: FileId;
+  locationSnapshotId?: SnapshotId;
+  locationPath?: string;
+  lastLocationAt?: number;
 }
 
 /**
@@ -911,6 +916,7 @@ export interface ReviewSnapshot {
   roomId: RoomId;
   fileId: FileId;
   snapshotId: SnapshotId;
+  ownerDisplayPath?: string;
   parentSnapshotId?: SnapshotId;
   supersedesSnapshotId?: SnapshotId;
   createdAt: number;

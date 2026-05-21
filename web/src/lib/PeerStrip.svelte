@@ -162,12 +162,12 @@
   <!-- Empty strip per §7 — no border, no chips. The host (ReviewBar) keeps
        its own divider so this collapses cleanly. -->
   <div
-    class="peer-strip-empty inline-flex items-center text-[11px] text-muted-foreground/70"
+    class="peer-strip-empty sr-only"
     data-slot="peer-strip"
     data-state="empty"
     aria-label="No peers"
   >
-    <span aria-hidden="true">·</span>
+    No peers
   </div>
 {:else}
   <div
@@ -220,7 +220,7 @@
         </button>
         {#if youHere}
           <span
-            class="mt-0.5 text-[9px] leading-none text-muted-foreground"
+            class="sr-only"
             data-slot="peer-chip-you-label"
           >
             (you)

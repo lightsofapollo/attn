@@ -628,6 +628,40 @@
     min-width: 0;
   }
 
+  .sidebar-collab-badge {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0.56rem;
+    width: 0.56rem;
+    height: 0.56rem;
+    border-radius: 999px;
+    border: 1px solid color-mix(in oklch, var(--background) 86%, white 14%);
+    background: var(--peer-avatar-bg-reviewer);
+    color: white;
+    font-size: 0.48rem;
+    font-weight: 800;
+    line-height: 1;
+    box-shadow:
+      0 0 0 1px color-mix(in oklch, var(--peer-avatar-bg-reviewer) 22%, transparent),
+      0 1px 2px color-mix(in oklch, black 18%, transparent);
+  }
+
+  .sidebar-collab-badge:not(:empty) {
+    width: auto;
+    min-width: 1rem;
+    height: 0.9rem;
+    padding: 0 0.24rem;
+  }
+
+  .sidebar-collab-badge--inherited {
+    opacity: 0.44;
+    box-shadow:
+      0 0 0 1px color-mix(in oklch, var(--peer-avatar-bg-reviewer) 12%, transparent),
+      0 1px 1px color-mix(in oklch, black 10%, transparent);
+  }
+
   .sidebar-tree-meta {
     flex: 0 0 auto;
     border-radius: 999px;

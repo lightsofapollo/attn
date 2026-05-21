@@ -663,6 +663,10 @@ pub enum ReviewEventBody {
     SnapshotCreated {
         file_id: FileId,
         snapshot_id: SnapshotId,
+        /// Owner-side display path for presence/location UI. This is carried
+        /// inside the encrypted event body, so the relay cannot read it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        owner_display_path: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         parent_snapshot_id: Option<SnapshotId>,
         base_hash: ContentHash,

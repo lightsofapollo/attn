@@ -152,7 +152,7 @@
   >
     <button
       type="button"
-      class="outbox-pill inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/40 px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+      class="outbox-pill inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-border bg-muted/40 px-2 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       data-slot="outbox-indicator-pill"
       aria-label={pillLabel}
       aria-haspopup="dialog"
@@ -161,7 +161,8 @@
       onclick={togglePopover}
     >
       <Inbox class="size-3 text-muted-foreground" aria-hidden="true" />
-      <span>{pillLabel}</span>
+      <span>{pending}</span>
+      <span class="sr-only">{pillLabel}</span>
     </button>
 
     {#if showOwnerOfflineNotice}

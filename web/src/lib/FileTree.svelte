@@ -19,8 +19,13 @@
     CollapsibleTrigger,
   } from '$lib/components/ui/collapsible';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Share2 from '@lucide/svelte/icons/share-2';
   import { resolveFileIcon, resolveFolderIcon } from '$lib/icon-resolver';
   import { getIconPack, subscribeIconPack } from '$lib/icon-pack';
+  import {
+    sidebarPresenceBadgeForNode,
+    type SidebarPresenceLocation,
+  } from './sidebar-presence';
 
   interface Props {
     nodes: TreeNode[];
@@ -29,9 +34,20 @@
     rootPath?: string;
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
+    onShare?: (path: string) => void;
+    collaboratorLocations?: SidebarPresenceLocation[];
   }
 
-  let { nodes, activePath = '', depth = 0, rootPath = '', onNavigate, onExpand }: Props = $props();
+  let {
+    nodes,
+    activePath = '',
+    depth = 0,
+    rootPath = '',
+    onNavigate,
+    onExpand,
+    onShare,
+    collaboratorLocations = [],
+  }: Props = $props();
 
   let expanded: Record<string, boolean> = $state({});
   let iconPack = $state(getIconPack());
@@ -181,11 +197,20 @@
   function handleOpenExternal(path: string): void {
     openExternal(path);
   }
+
+  function handleShare(path: string): void {
+    onShare?.(path);
+  }
+
+  function presenceBadgeFor(node: TreeNode, expandedForNode: boolean) {
+    return sidebarPresenceBadgeForNode(node, collaboratorLocations, expandedForNode);
+  }
 </script>
 
 {#each nodes as node (node.path)}
   {#if node.isDir}
     {@const exp = isExpanded(node.path)}
+    {@const presenceBadge = presenceBadgeFor(node, exp)}
     <Collapsible
       open={exp}
       onOpenChange={(v) => handleDirOpenChange(node.path, v)}
@@ -204,13 +229,23 @@
               <ChevronRight class="sidebar-tree-chevron size-3.5 shrink-0 transition-transform duration-150 group-data-[state=open]/collapsible:rotate-90" />
               <img src={getFolderIcon(node.name, node.path)} alt="" aria-hidden="true" class="sidebar-tree-icon-image size-3.5 shrink-0" />
               <span class="sidebar-tree-name truncate">{node.name}</span>
+              {#if presenceBadge}
+                <span
+                  class:sidebar-collab-badge--inherited={presenceBadge.inherited}
+                  class="sidebar-collab-badge"
+                  title={`${presenceBadge.count} collaborator${presenceBadge.count === 1 ? '' : 's'} viewing ${presenceBadge.inherited ? 'inside this folder' : 'this folder'}`}
+                  aria-label={`${presenceBadge.count} collaborator${presenceBadge.count === 1 ? '' : 's'} viewing ${presenceBadge.inherited ? 'inside this folder' : 'this folder'}`}
+                >
+                  {#if presenceBadge.count > 1}{presenceBadge.count}{/if}
+                </span>
+              {/if}
             </SidebarMenuButton>
           {/snippet}
         </CollapsibleTrigger>
         <CollapsibleContent>
           {#if node.children}
             <div class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
-              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} />
+              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {collaboratorLocations} />
             </div>
           {/if}
         </CollapsibleContent>
@@ -218,6 +253,7 @@
     </Collapsible>
   {:else}
     {@const icon = getFileIcon(node)}
+    {@const presenceBadge = presenceBadgeFor(node, false)}
     <SidebarMenuItem>
       <ContextMenu>
         <ContextMenuTrigger>
@@ -244,6 +280,16 @@
                 <span aria-hidden="true" class="sidebar-tree-markdown-marker">·</span>
               {/if}
               <span class="sidebar-tree-name truncate">{node.name}</span>
+              {#if presenceBadge}
+                <span
+                  class:sidebar-collab-badge--inherited={presenceBadge.inherited}
+                  class="sidebar-collab-badge"
+                  title={`${presenceBadge.count} collaborator${presenceBadge.count === 1 ? '' : 's'} viewing this file`}
+                  aria-label={`${presenceBadge.count} collaborator${presenceBadge.count === 1 ? '' : 's'} viewing this file`}
+                >
+                  {#if presenceBadge.count > 1}{presenceBadge.count}{/if}
+                </span>
+              {/if}
             </SidebarMenuButton>
           {/snippet}
         </ContextMenuTrigger>
@@ -264,6 +310,14 @@
           <ContextMenuSeparator />
           <ContextMenuItem onSelect={() => handleOpenExternal(node.path)}>
             Open in external (open)
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            disabled={node.fileType !== 'markdown' || !onShare}
+            onSelect={() => handleShare(node.path)}
+          >
+            <Share2 class="size-4" aria-hidden="true" />
+            Share
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>

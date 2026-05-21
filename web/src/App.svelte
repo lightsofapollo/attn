@@ -282,6 +282,10 @@
       selfLabel: isOwner ? 'Owner' : 'Reviewer',
       // Caret colors mirror the presence chips: owner warm, reviewer cool.
       selfColor: isOwner ? '#d97706' : '#2563eb',
+      getLocation: currentCollabLocation,
+      onPeerLocation: (deviceId, location) => {
+        reviewStore.notePeerLocation(deviceId, location);
+      },
       onRemoteCursors: (cursors) => {
         // Push the remote-caret set into the editor as a meta transaction so
         // the remoteCursorsPlugin re-renders its decorations.
@@ -292,6 +296,47 @@
 
   function handleCollabSelectionChange(head: number): void {
     collabController?.broadcastCursor(head);
+  }
+
+  function latestSnapshotForCurrentFile(): ReviewSnapshot | null {
+    const roomId = reviewStore.currentRoomId;
+    const fileId = reviewStore.currentFileId;
+    if (!roomId || !fileId) return null;
+
+    if (reviewStore.currentSnapshotId) {
+      const locked = reviewStore.snapshots.find(
+        (snapshot) =>
+          snapshot.roomId === roomId
+          && snapshot.fileId === fileId
+          && snapshot.snapshotId === reviewStore.currentSnapshotId,
+      );
+      if (locked) return locked;
+    }
+
+    let latest: ReviewSnapshot | null = null;
+    for (const snapshot of reviewStore.snapshots) {
+      if (snapshot.roomId !== roomId || snapshot.fileId !== fileId) continue;
+      if (latest === null || snapshot.createdAt > latest.createdAt) {
+        latest = snapshot;
+      }
+    }
+    return latest;
+  }
+
+  function currentCollabLocation(): {
+    fileId?: import('./lib/types').FileId;
+    snapshotId?: import('./lib/types').SnapshotId;
+    path?: string;
+  } | null {
+    const snapshot = latestSnapshotForCurrentFile();
+    const path = activePath || snapshot?.ownerDisplayPath;
+    const fileId = reviewStore.currentFileId ?? snapshot?.fileId;
+    if (!fileId && !path) return null;
+    return {
+      ...(fileId ? { fileId } : {}),
+      ...(snapshot?.snapshotId ? { snapshotId: snapshot.snapshotId } : {}),
+      ...(path ? { path } : {}),
+    };
   }
 
   let collabSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1575,7 +1620,17 @@
    * tab — sharing a directory or a non-markdown asset is meaningless.
    */
   function openShareDialog(): void {
-    if (!activePath || activeFileType !== 'markdown') return;
+    if (!activePath) return;
+    openShareDialogForPath(activePath);
+  }
+
+  function openShareDialogForPath(path: string): void {
+    if (!path) return;
+    const ft = detectFileType(path);
+    if (ft !== 'markdown') return;
+    if (path !== activePath || activeFileType !== 'markdown') {
+      openPath(path, ft, false);
+    }
     shareDialogOpen = true;
   }
 
@@ -1751,6 +1806,8 @@
     fixed={!hasSidebar}
     topOffsetPx={34}
     onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
+    onShare={openShareDialog}
+    shareEnabled={activeFileType === 'markdown'}
   />
   {#if !hasSidebar}
     <div class="h-[40px] shrink-0"></div>
@@ -1946,6 +2003,7 @@
       onProjectSwitch={handleProjectSwitch}
       onNavigate={handleSidebarNavigate}
       onExpand={handleTreeExpand}
+      onShare={openShareDialogForPath}
       onSearchQuery={handleSidebarSearchQuery}
       onOutlineNavigate={handleOutlineNavigate}
     />

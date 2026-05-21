@@ -20,6 +20,8 @@
     DropdownMenuTrigger,
   } from '$lib/components/ui/dropdown-menu';
   import * as Command from '$lib/components/ui/command';
+  import { reviewStore } from './review/store.svelte';
+  import type { SidebarPresenceLocation } from './sidebar-presence';
 
   interface Props {
     entries: TreeNode[];
@@ -32,6 +34,7 @@
     onProjectSwitch?: (path: string) => void;
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
+    onShare?: (path: string) => void;
     onSearchQuery?: (query: string) => void;
     outline?: { id: string; text: string; level: number; line: number }[];
     activeOutlineId?: string;
@@ -49,6 +52,7 @@
     onProjectSwitch,
     onNavigate,
     onExpand,
+    onShare,
     onSearchQuery,
     outline = [],
     activeOutlineId = '',
@@ -81,6 +85,14 @@
   let backendQueryAligned = $derived(remoteSearchQuery.trim().toLowerCase() === normalizedQuery);
   let showBackendMatches = $derived(
     sidebarView === 'files' && normalizedQuery.length > 0 && backendQueryAligned,
+  );
+  let collaboratorLocations: SidebarPresenceLocation[] = $derived.by(() =>
+    reviewStore.peersResolved
+      .filter((peer) => peer.online && typeof peer.locationPath === 'string' && peer.locationPath.length > 0)
+      .map((peer) => ({
+        id: `${peer.participantId}:${peer.deviceId}`,
+        path: peer.locationPath as string,
+      })),
   );
 
   function countFiles(nodes: TreeNode[]): number {
@@ -306,7 +318,7 @@
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
                 {#key treeRenderKey}
-                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} />
+                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {collaboratorLocations} />
                 {/key}
               </SidebarMenu>
             {:else}

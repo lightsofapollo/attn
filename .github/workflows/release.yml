@@ -212,6 +212,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
+        env:
+          ATTN_DEFAULT_RELAY_URL: https://relay.attn.sh
         run: cargo build --release --target x86_64-unknown-linux-gnu
 
       - name: Prepare binary assets

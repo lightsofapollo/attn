@@ -1,8 +1,10 @@
 <!--
   Snapshot badge (attn-nnj.4.9, per planning/collab/data-model.md §UI/UX).
 
-  Renders the right-end label of the review-bar row (4.10 left a slot for it
-  at `[data-slot="review-bar-snapshot"]`). The badge has two perspectives:
+  Renders the snapshot control in the compact review dock. The older
+  review-bar row used full text labels; this keeps those labels in aria/text
+  for tests and screen readers, but only shows a small marker unless attention
+  is needed.
 
   Owner perspective (kind === "owner"):
     - "Snapshot current"                    green   (file's latest snapshot)
@@ -232,7 +234,7 @@
       {#if ownerLabel === 'current'}
         <button
           type="button"
-          class="snapshot-chip inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-primary/40 bg-primary/10 px-2.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          class="snapshot-chip inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-primary/35 bg-primary/10 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           data-slot="snapshot-badge-chip"
           data-state="current"
           aria-label="Snapshot current"
@@ -242,7 +244,7 @@
           onclick={togglePopover}
         >
           <Camera class="size-3 text-primary" aria-hidden="true" />
-          <span>Snapshot current</span>
+          <span class="sr-only">Snapshot current</span>
         </button>
       {:else if ownerLabel === 'superseded'}
         <!--
@@ -267,6 +269,9 @@
           >
             <Camera class="size-3 text-muted-foreground" aria-hidden="true" />
             <span class="line-through" data-slot="snapshot-badge-strike">
+              Old
+            </span>
+            <span class="sr-only">
               Snapshot superseded
             </span>
           </button>
@@ -288,7 +293,7 @@
         -->
         <button
           type="button"
-          class="snapshot-chip inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-amber-500/60 bg-amber-500/10 px-2.5 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 dark:text-amber-300"
+          class="snapshot-chip inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-amber-500/60 bg-amber-500/10 px-2 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 dark:text-amber-300"
           data-slot="snapshot-badge-chip"
           data-state="reviewer_on_older"
           aria-label="Reviewer on older snapshot"
@@ -303,7 +308,8 @@
             class="size-3 text-amber-700 dark:text-amber-300"
             aria-hidden="true"
           />
-          <span>Reviewer on older snapshot</span>
+          <span>Older</span>
+          <span class="sr-only">Reviewer on older snapshot</span>
         </button>
       {/if}
     {:else}
@@ -314,7 +320,7 @@
       -->
       <button
         type="button"
-        class="snapshot-chip inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-primary/40 bg-primary/10 px-2.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        class="snapshot-chip inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-primary/35 bg-primary/10 px-2 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
         data-slot="snapshot-badge-chip"
         data-state="reviewer_current"
         aria-label="Snapshot @ {formatSnapshotClock(activeSnapshot.createdAt)}"
@@ -324,7 +330,8 @@
         onclick={togglePopover}
       >
         <Camera class="size-3 text-primary" aria-hidden="true" />
-        <span>Snapshot @ {formatSnapshotClock(activeSnapshot.createdAt)}</span>
+        <span>{formatSnapshotClock(activeSnapshot.createdAt)}</span>
+        <span class="sr-only">Snapshot @ {formatSnapshotClock(activeSnapshot.createdAt)}</span>
       </button>
       {#if ownerOnNewerSnapshot}
         <span

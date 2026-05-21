@@ -61,6 +61,13 @@ export interface ManualReanchorState {
   roomId: RoomId;
 }
 
+interface PeerLocation {
+  locationFileId?: FileId;
+  locationSnapshotId?: SnapshotId;
+  locationPath?: string;
+  lastLocationAt: number;
+}
+
 /**
  * Reactive review-session store. One global singleton; mounted by the bridge
  * callbacks in `App.svelte` and read by the right-rail / review components.
@@ -105,6 +112,9 @@ export class ReviewStore {
 
   /** Peer roster mirrored from `status.peers` for convenient binding. */
   peers = $state<ReviewStatusPeer[]>([]);
+
+  /** Transient live-view locations learned from encrypted cursor signals. */
+  peerLocations = $state<Record<string, PeerLocation>>({});
 
   /**
    * Active share for `currentRoomId` — the invite URL and verify-key fingerprint
@@ -266,11 +276,12 @@ export class ReviewStore {
    */
   peersResolved: ReviewStatusPeer[] = $derived.by(() => {
     const owner = this.ownerParticipantId;
-    if (owner === null) return this.peers;
     return this.peers.map((peer) =>
-      peer.participantId === owner && peer.kind !== 'owner'
-        ? { ...peer, kind: 'owner', displayName: 'Owner' }
-        : peer,
+      this.resolvePeerLocation(
+        owner !== null && peer.participantId === owner && peer.kind !== 'owner'
+          ? { ...peer, kind: 'owner', displayName: 'Owner' }
+          : peer,
+      ),
     );
   });
 
@@ -311,6 +322,10 @@ export class ReviewStore {
     this.currentRoomId = payload.roomId;
     if (payload.replace) {
       this.peers = payload.peers;
+      const liveDevices = new Set(payload.peers.filter((p) => p.online).map((p) => p.deviceId));
+      this.peerLocations = Object.fromEntries(
+        Object.entries(this.peerLocations).filter(([deviceId]) => liveDevices.has(deviceId)),
+      );
       return;
     }
     const byDevice = new Map(this.peers.map((p) => [p.deviceId, p]));
@@ -319,6 +334,8 @@ export class ReviewStore {
         byDevice.set(peer.deviceId, peer);
       } else {
         byDevice.delete(peer.deviceId);
+        const { [peer.deviceId]: _removed, ...rest } = this.peerLocations;
+        this.peerLocations = rest;
       }
     }
     this.peers = [...byDevice.values()];
@@ -385,6 +402,7 @@ export class ReviewStore {
         roomId: event.meta.roomId,
         fileId: body.fileId,
         snapshotId: body.snapshotId,
+        ownerDisplayPath: body.ownerDisplayPath,
         parentSnapshotId: body.parentSnapshotId,
         createdAt: event.meta.createdAt,
         createdBy: event.meta.authorId,
@@ -414,6 +432,40 @@ export class ReviewStore {
    */
   applySnapshot(snapshot: ReviewSnapshot): void {
     this.snapshots = [...this.snapshots, snapshot];
+  }
+
+  notePeerLocation(
+    deviceId: string,
+    location: {
+      fileId?: FileId;
+      snapshotId?: SnapshotId;
+      path?: string;
+    },
+  ): void {
+    if (!deviceId) return;
+    const path = location.path?.trim();
+    this.peerLocations = {
+      ...this.peerLocations,
+      [deviceId]: {
+        locationFileId: location.fileId,
+        locationSnapshotId: location.snapshotId,
+        locationPath: path && path.length > 0 ? path : undefined,
+        lastLocationAt: Date.now(),
+      },
+    };
+  }
+
+  private resolvePeerLocation(peer: ReviewStatusPeer): ReviewStatusPeer {
+    const location = this.peerLocations[peer.deviceId];
+    if (location === undefined) return peer;
+    return {
+      ...peer,
+      locationFileId: location.locationFileId,
+      locationSnapshotId: location.locationSnapshotId,
+      locationPath: location.locationPath,
+      lastLocationAt: location.lastLocationAt,
+      onSnapshotId: location.locationSnapshotId ?? peer.onSnapshotId,
+    };
   }
 
   /**

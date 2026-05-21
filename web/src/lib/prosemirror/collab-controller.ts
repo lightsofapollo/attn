@@ -20,6 +20,13 @@ import {
   type CollabSubmission,
 } from './collab-authority';
 import { CollabClient, CollabHost, type EditorBridge } from './collab-session';
+import type { FileId, SnapshotId } from '../types';
+
+export interface CollabPeerLocation {
+  fileId?: FileId;
+  snapshotId?: SnapshotId;
+  path?: string;
+}
 
 /** A remote participant's live caret, keyed by their collab clientID. */
 export interface RemoteCursor {
@@ -30,6 +37,8 @@ export interface RemoteCursor {
   label: string;
   /** CSS color for the caret + label chip. */
   color: string;
+  /** Current shared-file location, carried with cursor presence. */
+  location?: CollabPeerLocation;
 }
 
 /** Tagged wire envelope carried inside a SignalingPayload::Collab payload. */
@@ -56,6 +65,8 @@ export class CollabController {
   private readonly selfLabel: string;
   private readonly selfColor: string;
   private readonly onRemoteCursors: ((cursors: RemoteCursor[]) => void) | null;
+  private readonly getLocation: (() => CollabPeerLocation | null) | null;
+  private readonly onPeerLocation: ((deviceId: string, location: CollabPeerLocation) => void) | null;
   private readonly remoteCursors = new Map<string, RemoteCursor>();
   // clientID → sender deviceId, so a peer's caret can be cleared on leave
   // (presence frames identify peers by deviceId, cursors by collab clientID).
@@ -74,6 +85,10 @@ export class CollabController {
     selfColor: string;
     /** Notified whenever the remote-cursor set changes (drives decorations). */
     onRemoteCursors?: (cursors: RemoteCursor[]) => void;
+    /** Reads the current shared-file location when sending cursor presence. */
+    getLocation?: () => CollabPeerLocation | null;
+    /** Notified when a remote cursor reports its current shared-file location. */
+    onPeerLocation?: (deviceId: string, location: CollabPeerLocation) => void;
   }) {
     this.isOwner = opts.isOwner;
     this.send = opts.send;
@@ -81,6 +96,8 @@ export class CollabController {
     this.selfLabel = opts.selfLabel;
     this.selfColor = opts.selfColor;
     this.onRemoteCursors = opts.onRemoteCursors ?? null;
+    this.getLocation = opts.getLocation ?? null;
+    this.onPeerLocation = opts.onPeerLocation ?? null;
 
     if (opts.isOwner) {
       const authority = new CollabAuthority(opts.initialDoc);
@@ -112,6 +129,7 @@ export class CollabController {
    * and receives these.
    */
   broadcastCursor(head: number): void {
+    const location = this.getLocation?.() ?? undefined;
     this.send(
       JSON.stringify({
         kind: 'cursor',
@@ -120,6 +138,7 @@ export class CollabController {
           head,
           label: this.selfLabel,
           color: this.selfColor,
+          ...(location ? { location } : {}),
         },
       } satisfies CollabWireMessage),
     );
@@ -145,6 +164,9 @@ export class CollabController {
       if (msg.cursor.clientID === this.selfClientId) return;
       this.remoteCursors.set(msg.cursor.clientID, msg.cursor);
       this.cursorDevice.set(msg.cursor.clientID, fromDeviceId);
+      if (msg.cursor.location !== undefined) {
+        this.onPeerLocation?.(fromDeviceId, msg.cursor.location);
+      }
       this.onRemoteCursors?.([...this.remoteCursors.values()]);
       return;
     }

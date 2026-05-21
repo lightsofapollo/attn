@@ -37,7 +37,7 @@
 			</a>
 		</div>
 
-		<div class="relative mt-16 max-w-4xl mx-auto rounded-xl shadow-2xl border border-border overflow-hidden bg-card">
+		<div class="relative mt-16 max-w-5xl mx-auto rounded-xl shadow-2xl border border-border overflow-hidden bg-card">
 			<img
 				src="/screenshots/collab-light.png"
 				alt="A live attn session: the shared doc with the owner's amber caret and a reviewer's blue caret, end-to-end encrypted"
@@ -50,6 +50,16 @@
 				class="absolute inset-0 w-full transition-opacity duration-500"
 				class:opacity-0={getTheme() !== 'dark'}
 			/>
+			<video
+				class="absolute inset-0 h-full w-full object-cover"
+				src="/screenshots/collab-hero.mp4"
+				poster={getTheme() === 'dark' ? '/screenshots/collab-dark.png' : '/screenshots/collab-light.png'}
+				autoplay
+				muted
+				loop
+				playsinline
+				aria-label="Live attn collaboration: a reviewer types into a shared markdown document while comments and remote carets update in the owner window"
+			></video>
 		</div>
 	</div>
 </section>

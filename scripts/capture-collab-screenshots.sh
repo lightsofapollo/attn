@@ -10,6 +10,8 @@
 #   collab-{light,dark}.png — the shared doc with the reviewer's live caret,
 #                             anchored highlights, and the inline comment +
 #                             suggestion cards in the margin.
+#   collab-hero.mp4         — an MP4 recording of the same live session while
+#                             the reviewer types into the owner's shared doc.
 #
 # Requires a debug build (--screenshot is debug+macOS only).
 
@@ -37,6 +39,7 @@ trap cleanup EXIT INT TERM
 
 # Capture helpers (all shots are of the owner window).
 shot(){ attn_owner --screenshot 2>/dev/null | grep -oE '/tmp/attn-screenshot-[0-9]+\.png' | tail -1; }
+owner_window_id(){ attn_owner --info 2>/dev/null | awk '/^window_id:/ {print $2; exit}'; }
 # Match the app's setTheme (theme.ts): set BOTH data-theme AND the .dark class,
 # otherwise prose text color and shadcn surfaces disagree.
 set_theme(){ attn_owner --eval "var d=document.documentElement;d.dataset.theme='$1';d.classList.toggle('dark','$1'==='dark');'x'" >/dev/null 2>&1; }
@@ -45,6 +48,39 @@ sel(){ attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';v
 # Select a substring by content (robust against position drift). $2 (optional)
 # 'collapse' parks a caret at the start instead of selecting the range.
 selText(){ local mode="${2:-}"; attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';var doc=v.state.doc,n='$1',f=null;doc.descendants(function(node,pos){if(f||!node.isText)return !f;var i=node.text.indexOf(n);if(i>=0)f={a:pos+i,b:pos+i+n.length};return !f;});if(!f)return 'notfound';var S=v.state.selection.constructor;v.focus();var to='$mode'==='collapse'?f.a:f.b;v.dispatch(v.state.tr.setSelection(S.create(doc,f.a,to)));return 'ok';})()" 2>/dev/null | tr -d '"'; }
+pm_insert_reviewer(){ local text="$1"; text="${text//\\/\\\\}"; text="${text//\'/\\\'}"; attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no-view';v.focus();v.dispatch(v.state.tr.insertText('$text'));return 'ok';})()" >/dev/null 2>&1; }
+type_reviewer_text(){ local text="$1"; local i ch; for ((i=0; i<${#text}; i++)); do ch="${text:i:1}"; pm_insert_reviewer "$ch"; sleep 0.16; done; }
+record_hero_video(){
+  local out="$OUT/collab-hero.mp4"
+  local raw="$WORK/collab-hero.mov"
+  local wid
+  wid="$(owner_window_id)"
+  if [ -z "$wid" ]; then log "SKIP collab-hero.mp4 (no owner window id)"; return 0; fi
+  if ! command -v screencapture >/dev/null 2>&1; then log "SKIP collab-hero.mp4 (screencapture missing)"; return 0; fi
+
+  rm -f "$raw" "$out"
+  set_theme dark
+  sleep 0.6
+  log "recording collab-hero.mp4 from owner window $wid"
+  screencapture -x -v -V 8 -l "$wid" "$raw" >/dev/null 2>&1 &
+  local rec_pid=$!
+  sleep 0.9
+  selText 'public launch' collapse >/dev/null
+  sleep 0.5
+  type_reviewer_text 'partner-led '
+  sleep 1.4
+  wait "$rec_pid" || { log "FAILED recording collab-hero.mp4"; return 0; }
+
+  if [ ! -f "$raw" ]; then log "FAILED collab-hero.mp4 (recorder produced no file)"; return 0; fi
+  if command -v ffmpeg >/dev/null 2>&1; then
+    ffmpeg -y -i "$raw" -an -vf "scale='min(1600,iw)':-2" -pix_fmt yuv420p -movflags +faststart "$out" >/dev/null 2>&1 \
+      && log "wrote collab-hero.mp4" \
+      || log "FAILED transcoding collab-hero.mp4"
+  else
+    mv "$raw" "$out"
+    log "wrote collab-hero.mp4 (raw screencapture output)"
+  fi
+}
 
 rm -rf "$OWNER_HOME" "$RV_HOME" "$WORK"; mkdir -p "$OWNER_HOME" "$RV_HOME" "$WORK" "$WORK/empty-rv" "$OUT"
 cat > "$SHARED_DOC" <<'MD'
@@ -133,6 +169,9 @@ log "owner transport: $(attn_owner --eval "(/Live|Connected|Offline/.exec(docume
 log "owner persisted suggestion_created: $(grep -rqa 'suggestion_created' "$OWNER_HOME/reviews" 2>/dev/null && echo YES || echo NO)"
 log "owner persisted comment_created: $(grep -rqa 'comment_created' "$OWNER_HOME/reviews" 2>/dev/null && echo YES || echo NO)"
 attn_owner --eval "JSON.stringify({cards: document.querySelectorAll('[data-testid=review-margin-card]').length, trayChildren: (document.querySelector('[data-testid=review-margin-tray]')?.children.length||0), hasSuggestionText: document.body.textContent.includes('bug bash'), backdrop: !!document.querySelector('.comment-composer-backdrop, [data-slot=suggestion-composer], [data-slot=share-dialog]')})" 2>/dev/null
+
+# --- Hero MP4 ---
+record_hero_video
 
 # --- Editorial shots ---
 set_theme light; sleep 1; save "$(shot)" collab-light.png

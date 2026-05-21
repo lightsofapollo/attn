@@ -1,12 +1,11 @@
 <!--
-  Review-bar row (attn-nnj.4.10, per planning/collab/ui/connection-share.md §8).
+  Compact review dock.
 
-  A dedicated 36 px header row that appears ONLY when a review session is bound
-  to the active file. Otherwise the viewer chrome is byte-identical to today.
-
-  Left-to-right order (§8 recommendation):
-
-    [Share]  →  connection badge  →  peer strip  →  snapshot label
+  This started as a dedicated 36 px review-bar row. User feedback from the
+  marketing hero pass made that feel too heavy: "Sharing / Connected /
+  Snapshot current" was claiming a full strip of chrome before the document
+  itself. The dock now overlays the breadcrumb line with the same testable
+  slots, but the visible surface is icon + avatar driven.
 
   Owner asymmetry: the Share button is the owner-only slot. In this issue
   (4.10) the connection-badge and peer-strip slots are intentionally stubs —
@@ -91,75 +90,67 @@
 
 {#if visible}
   <div
-    class="review-bar flex h-9 shrink-0 items-center gap-3 border-b border-border bg-background/95 px-3 text-xs"
+    class="review-bar relative z-40 h-0 shrink-0 overflow-visible px-3 text-xs"
     data-slot="review-bar"
     data-state={reviewStore.currentRoomId !== null ? 'active' : 'pending'}
   >
-    {#if isOwner}
-      <button
-        type="button"
-        class="share-pill inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/50 px-3 text-xs font-medium text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-        data-slot="review-bar-share"
-        data-state={reviewStore.currentRoomId !== null ? 'sharing' : 'idle'}
-        aria-label={shareLabel}
-        onclick={handleShareClick}
+    <div
+      class="review-bar-dock pointer-events-auto ml-auto flex h-8 max-w-[min(34rem,calc(100%-0.75rem))] -translate-y-[36px] items-center gap-1.5 overflow-visible rounded-full border border-border/70 bg-background/75 px-1.5 shadow-[0_8px_24px_color-mix(in_oklch,black_12%,transparent)] backdrop-blur-md dark:bg-background/65 dark:shadow-[0_10px_32px_color-mix(in_oklch,black_38%,transparent)]"
+      data-slot="review-bar-dock"
+    >
+      {#if isOwner}
+        <button
+          type="button"
+          class="share-pill inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-border/60 bg-muted/35 text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          data-slot="review-bar-share"
+          data-state={reviewStore.currentRoomId !== null ? 'sharing' : 'idle'}
+          aria-label={shareLabel}
+          title={shareLabel}
+          onclick={handleShareClick}
+        >
+          <Share2 class="size-3.5" aria-hidden="true" />
+          <span class="sr-only">{shareLabel}</span>
+        </button>
+      {/if}
+
+      <div
+        class="review-bar-connection shrink-0"
+        data-slot="review-bar-connection"
       >
-        <Share2 class="size-3.5" aria-hidden="true" />
-        <span>{shareLabel}</span>
-      </button>
-    {/if}
+        <ConnectionBadge {onReconnect} />
+      </div>
 
-    <!--
-      Connection-badge slot (attn-nnj.4.11). Subscribes to
-      `reviewStore.status` and renders the 4-state chip + popover per
-      planning/collab/ui/connection-share.md §5.
-    -->
-    <div
-      class="review-bar-connection"
-      data-slot="review-bar-connection"
-    >
-      <ConnectionBadge {onReconnect} />
-    </div>
+      <span class="h-4 w-px shrink-0 bg-border/70" aria-hidden="true"></span>
 
-    <span class="text-muted-foreground/60" aria-hidden="true">·</span>
+      <div
+        class="review-bar-peers min-w-0 shrink"
+        data-slot="review-bar-peers"
+      >
+        <PeerStrip {localParticipantId} />
+      </div>
 
-    <!--
-      Peer-strip slot (attn-nnj.4.12). Compact horizontal row of
-      participant chips — round for humans, hex for agents, "+N" overflow
-      past 5 peers. Click → identity card; hover → presence detail.
-      See planning/collab/ui/connection-share.md §7 +
-      planning/collab/ui/presence-identity.md (10.5).
-    -->
-    <div
-      class="review-bar-peers min-w-0 flex-1"
-      data-slot="review-bar-peers"
-    >
-      <PeerStrip {localParticipantId} />
-    </div>
+      <div
+        class="review-bar-snapshot shrink-0"
+        data-slot="review-bar-snapshot"
+      >
+        <SnapshotBadge {localKind} />
+      </div>
 
-    <!--
-      Snapshot label sits at the right end (attn-nnj.4.9). The badge knows
-      how to collapse itself when no snapshot is active, so the slot is
-      always present and the host row reflows without it.
-    -->
-    <div
-      class="review-bar-snapshot shrink-0"
-      data-slot="review-bar-snapshot"
-    >
-      <SnapshotBadge {localKind} />
-    </div>
-
-    <!--
-      Outbox indicator (attn-nnj.4.13). Right-end pill that surfaces queued
-      outbound envelopes. Collapses to nothing when the outbox is empty so
-      the row reflows without a reserved gap. Reviewer-side gets the
-      "Owner offline" notice when applicable; owner-side never does.
-    -->
-    <div
-      class="review-bar-outbox shrink-0"
-      data-slot="review-bar-outbox"
-    >
-      <OutboxIndicator {isOwner} onRetry={onOutboxRetry} />
+      <div
+        class="review-bar-outbox shrink-0"
+        data-slot="review-bar-outbox"
+      >
+        <OutboxIndicator {isOwner} onRetry={onOutboxRetry} />
+      </div>
     </div>
   </div>
 {/if}
+
+<style>
+  @media (max-width: 720px) {
+    .review-bar-dock {
+      max-width: calc(100vw - 1rem);
+      transform: translateY(-34px);
+    }
+  }
+</style>

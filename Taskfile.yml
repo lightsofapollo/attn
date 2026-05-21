@@ -15,6 +15,7 @@ tasks:
         DEV_HOST="{{.DEV_HOST_VALUE}}"
         DEV_PORT="{{.DEV_PORT_VALUE}}"
         ATTN_PATH="{{.ATTN_PATH_VALUE}}"
+        : "${ATTN_RELAY_URL:=https://relay.attn.sh}"
 
         choose_dev_port() {
           local start_port=5173
@@ -79,8 +80,8 @@ tasks:
           sleep 0.2
         done
 
-        echo "Launching attn with HMR enabled (path: ${ATTN_PATH})"
-        ATTN_DEV_SERVER_URL="${ATTN_DEV_SERVER_URL}" cargo run -- --no-fork "${ATTN_PATH}"
+        echo "Launching attn with HMR enabled (path: ${ATTN_PATH}, relay: ${ATTN_RELAY_URL})"
+        ATTN_DEV_SERVER_URL="${ATTN_DEV_SERVER_URL}" ATTN_RELAY_URL="${ATTN_RELAY_URL}" cargo run -- --no-fork "${ATTN_PATH}"
         '
 
   dev:collab:
@@ -132,5 +133,5 @@ tasks:
   check:size:
     desc: Build release and verify the binary stays under the 25 MiB collab v2 budget (see planning/collab/amendments.md §Decision #1).
     cmds:
-      - cargo build --release
+      - ATTN_DEFAULT_RELAY_URL="${ATTN_DEFAULT_RELAY_URL:-https://relay.attn.sh}" cargo build --release
       - scripts/check-binary-size.sh

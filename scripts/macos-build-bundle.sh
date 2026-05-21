@@ -8,6 +8,10 @@ cd "$PROJECT_DIR"
 MODE="${1:-prod}"
 TARGET="${2:-aarch64-apple-darwin}"
 
+# Release/prod bundles must collaborate out of the box. A runtime
+# ATTN_RELAY_URL still overrides this baked default.
+: "${ATTN_DEFAULT_RELAY_URL:=https://relay.attn.sh}"
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "ERROR: macos-build-bundle.sh must run on macOS" >&2
   exit 1
@@ -32,12 +36,14 @@ case "$MODE" in
     ;;
   release)
     echo "==> Building release app bundle for $TARGET"
-    cargo bundle --release --target "$TARGET"
+    echo "    ATTN_DEFAULT_RELAY_URL=$ATTN_DEFAULT_RELAY_URL"
+    ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" cargo bundle --release --target "$TARGET"
     ARTIFACT_DIR="target/$TARGET/release/bundle/osx"
     ;;
   prod|production)
     echo "==> Building production app bundle for $TARGET"
-    cargo bundle --release --target "$TARGET"
+    echo "    ATTN_DEFAULT_RELAY_URL=$ATTN_DEFAULT_RELAY_URL"
+    ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" cargo bundle --release --target "$TARGET"
     ARTIFACT_DIR="target/$TARGET/release/bundle/osx"
     ;;
   *)

@@ -843,8 +843,7 @@ impl ReviewManager {
             suggestion_id: suggestion_id.as_str().to_string(),
             reason,
         };
-        let result =
-            bootstrapper.send_event_sync(room_id, event_body, unix_now_ms_for_manager());
+        let result = bootstrapper.send_event_sync(room_id, event_body, unix_now_ms_for_manager());
         self.emit_event_outcome(room_id.clone(), result);
     }
 
@@ -2129,6 +2128,7 @@ impl ReviewManager {
         let body = ReviewEventBody::SnapshotCreated {
             file_id: latest.file_id.clone(),
             snapshot_id: latest.snapshot_id.clone(),
+            owner_display_path: None,
             parent_snapshot_id: latest.parent_snapshot_id.clone(),
             base_hash: latest.base_hash.clone(),
             encrypted_blob_ref: latest.encrypted_blob_ref.clone(),

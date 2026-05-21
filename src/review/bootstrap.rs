@@ -1157,6 +1157,7 @@ impl Bootstrapper {
         let body = ReviewEventBody::SnapshotCreated {
             file_id: file_id.clone(),
             snapshot_id: snapshot_id.clone(),
+            owner_display_path: Some(display_path),
             parent_snapshot_id: None,
             base_hash,
             encrypted_blob_ref: None,
@@ -1803,7 +1804,13 @@ fn is_ignored_dir_component(name: &str) -> bool {
     name.starts_with('.')
         || matches!(
             name,
-            "node_modules" | "target" | "dist" | "build" | "out" | "coverage" | "__pycache__"
+            "node_modules"
+                | "target"
+                | "dist"
+                | "build"
+                | "out"
+                | "coverage"
+                | "__pycache__"
                 | "venv"
         )
 }

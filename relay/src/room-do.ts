@@ -159,6 +159,14 @@ const POW_PRUNE_INTERVAL_MS = 5 * 60 * 1000;
  */
 const PRE_EXPIRY_CLEANUP_WINDOW_MS = 60 * 60 * 1000;
 
+/**
+ * Max bytes accepted on the room-create body (abuse hardening). The create
+ * payload is two base64url keys (~44 bytes each) + a small policy object, so a
+ * few KB is generous. Create is reachable before admission/PoW, so we bound it
+ * tightly to deny a memory-amplification vector.
+ */
+const ROOM_CREATE_MAX_BODY_BYTES = 4096;
+
 interface ErrorBody {
   error: { code: string; message: string };
 }
@@ -441,6 +449,16 @@ export class RoomDO extends DurableObject<Env> {
   private async handleRoomCreate(request: Request, roomId: string): Promise<Response> {
     const limits = readHardLimits(this.env);
 
+    // Body-size guard (abuse hardening). The create body is tiny — two keys +
+    // a small policy object — so anything over a few KB is junk/abuse. Reject
+    // on a declared Content-Length BEFORE buffering: create is one of the few
+    // routes reachable before admission/PoW, so an unbounded read here is a
+    // cheap memory-amplification vector.
+    const declaredLen = Number(request.headers.get("Content-Length") ?? "");
+    if (Number.isFinite(declaredLen) && declaredLen > ROOM_CREATE_MAX_BODY_BYTES) {
+      return errorResponse(413, "ATTN_BODY_TOO_LARGE", `create body exceeds ${ROOM_CREATE_MAX_BODY_BYTES} bytes`);
+    }
+
     // Always drain the body to bytes up front. Branches below may short-circuit
     // before parsing JSON (rejoin path, admission failure) — leaving the
     // request stream half-read causes workerd to surface a post-response
@@ -451,6 +469,11 @@ export class RoomDO extends DurableObject<Env> {
       bodyBytes = new Uint8Array(await request.arrayBuffer());
     } catch (err) {
       return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
+    }
+    // Belt-and-braces: Content-Length may be absent (chunked) or lie. Reject
+    // the actual buffered size too.
+    if (bodyBytes.byteLength > ROOM_CREATE_MAX_BODY_BYTES) {
+      return errorResponse(413, "ATTN_BODY_TOO_LARGE", `create body exceeds ${ROOM_CREATE_MAX_BODY_BYTES} bytes`);
     }
 
     const existingCreatedAt = await this.ctx.storage.get<number>(META.createdAt);

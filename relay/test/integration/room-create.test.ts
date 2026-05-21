@@ -212,6 +212,25 @@ describe("POST /v2/rooms/:roomId — happy path", () => {
   });
 });
 
+describe("POST /v2/rooms/:roomId — body-size guard (abuse hardening)", () => {
+  it("rejects an oversized create body with 413 ATTN_BODY_TOO_LARGE before any auth check", async () => {
+    const roomId = uniqueRoomId("toobig");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+    // > ROOM_CREATE_MAX_BODY_BYTES (4096). No Attn-Owner-Signature on purpose:
+    // the size guard must fire BEFORE owner-sig verification, so this is 413,
+    // not 403.
+    const oversized = "x".repeat(5000);
+    const res = await SELF.fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: oversized,
+    });
+    expect(res.status).toBe(413);
+    const err = (await res.json()) as RoomErrorResponse;
+    expect(err.error.code).toBe("ATTN_BODY_TOO_LARGE");
+  });
+});
+
 describe("POST /v2/rooms/:roomId — H1 first-create owner signature", () => {
   it("rejects first-create with no Attn-Owner-Signature (403 ATTN_OWNER_SIG_REQUIRED)", async () => {
     const roomId = uniqueRoomId("h1-missing");

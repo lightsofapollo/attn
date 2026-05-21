@@ -51,8 +51,8 @@ MAX_POW_BITS = "24"
 # match one of these origins when `policy.allowBrowser == true`; native
 # clients (no Origin header) bypass the check entirely. Native clients (the
 # desktop app + npx CLI) send no Origin, so this only gates the (deferred)
-# in-browser reviewer served from attn.sh.
-ALLOWED_BROWSER_ORIGINS = "https://attn.sh"
+# in-browser reviewer served from the attn.sh apex + staging subdomain.
+ALLOWED_BROWSER_ORIGINS = "https://attn.sh,https://staging.attn.sh"
 
 [env.staging.vars]
 ALLOWED_BROWSER_ORIGINS = "https://attn.sh,http://localhost:5173"

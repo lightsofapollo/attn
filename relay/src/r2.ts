@@ -88,7 +88,7 @@ export async function presignBlobUpload(
     expiresAt,
     ciphertextBytes,
   };
-  const token = await signCap(payload);
+  const token = await signCap(payload, env);
   const blobKey = blobObjectKey(roomId, envelopeId);
   // The path is the spec's `/v2/rooms/:roomId/blobs/:envelopeId`. The client
   // appends the token as a query parameter so the URL is fully self-contained
@@ -121,7 +121,7 @@ export async function presignBlobDownload(
     envelopeId,
     expiresAt,
   };
-  const token = await signCap(payload);
+  const token = await signCap(payload, env);
   const downloadUrl = `/v2/rooms/${encodeURIComponent(roomId)}/blobs/${encodeURIComponent(envelopeId)}?cap=${encodeURIComponent(token)}`;
   return {
     downloadUrl,
@@ -174,6 +174,7 @@ export async function deleteRoomBlobs(env: Env, roomId: string): Promise<number>
 export async function verifyBlobCap(
   token: string,
   expect: { method: "PUT" | "GET"; roomId: string; envelopeId: string; now?: number },
+  env: Env,
 ): Promise<BlobCapPayload | undefined> {
   if (!token.startsWith(TOKEN_PREFIX)) return undefined;
   const rest = token.slice(TOKEN_PREFIX.length);
@@ -189,7 +190,7 @@ export async function verifyBlobCap(
   } catch {
     return undefined;
   }
-  const expectedMac = await hmac(payloadBytes);
+  const expectedMac = await hmac(payloadBytes, env);
   if (!constantTimeEquals(expectedMac, providedMac)) return undefined;
 
   let payload: BlobCapPayload;
@@ -208,17 +209,20 @@ export async function verifyBlobCap(
 
 // --- internals -----------------------------------------------------------
 
-/** Cached HMAC key derived from the bucket binding name. */
+/** Cached HMAC key (per isolate; the secret is stable for the isolate's life). */
 let cachedSigningKey: CryptoKey | undefined;
 
-async function getSigningKey(): Promise<CryptoKey> {
+async function getSigningKey(env: Env): Promise<CryptoKey> {
   if (cachedSigningKey !== undefined) return cachedSigningKey;
-  // In production we'd use a secret; for v2 development we derive deterministically
-  // from a fixed seed so the same Worker instance can verify its own tokens. The
-  // bucket binding is not exposed by name on the env handle, so we hard-code the
-  // canonical bucket name from wrangler.toml.
-  const seed = new TextEncoder().encode("attn-relay-blobs:v1:cap-signing");
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", seed));
+  // Production: a wrangler SECRET (`BLOB_CAP_SIGNING_KEY`). We SHA-256 the
+  // secret string into a fixed 32-byte HMAC key so any-length secret works.
+  // Dev/tests fall back to a deterministic derived key so the same isolate can
+  // verify its own tokens — but that fallback is forgeable from the (open)
+  // source, which is why production MUST set the secret (see env.ts).
+  const secret = env.BLOB_CAP_SIGNING_KEY;
+  const material =
+    typeof secret === "string" && secret.length > 0 ? secret : "attn-relay-blobs:v1:cap-signing";
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(material)));
   cachedSigningKey = await crypto.subtle.importKey(
     "raw",
     digest,
@@ -229,16 +233,16 @@ async function getSigningKey(): Promise<CryptoKey> {
   return cachedSigningKey;
 }
 
-async function hmac(data: Uint8Array): Promise<Uint8Array> {
-  const key = await getSigningKey();
+async function hmac(data: Uint8Array, env: Env): Promise<Uint8Array> {
+  const key = await getSigningKey(env);
   return new Uint8Array(await crypto.subtle.sign("HMAC", key, data));
 }
 
-async function signCap(payload: BlobCapPayload): Promise<string> {
+async function signCap(payload: BlobCapPayload, env: Env): Promise<string> {
   // Canonical JSON: sort keys lexicographically so the HMAC reproduces.
   const canonical = canonicalizePayload(payload);
   const payloadBytes = new TextEncoder().encode(canonical);
-  const mac = await hmac(payloadBytes);
+  const mac = await hmac(payloadBytes, env);
   return `${TOKEN_PREFIX}${base64UrlEncode(payloadBytes)}:${base64UrlEncode(mac)}`;
 }
 

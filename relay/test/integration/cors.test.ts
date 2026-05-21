@@ -127,12 +127,12 @@ async function createRoom(opts: {
 
 /**
  * The test env binding inherits from the top-level [vars] in wrangler.toml,
- * which configures `ALLOWED_BROWSER_ORIGINS = "https://attn.dev,https://staging.attn.dev"`.
+ * which configures `ALLOWED_BROWSER_ORIGINS = "https://attn.sh,https://staging.attn.sh"`.
  * Tests in this file assume both of those origins are in the allowlist and
  * that `https://evil.example` is NOT.
  */
-const ALLOWED_PROD_ORIGIN = "https://attn.dev";
-const ALLOWED_STAGING_ORIGIN = "https://staging.attn.dev";
+const ALLOWED_PROD_ORIGIN = "https://attn.sh";
+const ALLOWED_STAGING_ORIGIN = "https://staging.attn.sh";
 const DISALLOWED_ORIGIN = "https://evil.example";
 
 // Sanity-check: tie the assumption to a real read so failures surface here
@@ -141,7 +141,7 @@ function ensureFixtureEnv(): void {
   const raw = env.ALLOWED_BROWSER_ORIGINS;
   if (!raw.includes(ALLOWED_PROD_ORIGIN) || !raw.includes(ALLOWED_STAGING_ORIGIN)) {
     throw new Error(
-      `cors.test.ts assumes ALLOWED_BROWSER_ORIGINS contains both attn.dev and staging.attn.dev; got ${raw}`,
+      `cors.test.ts assumes ALLOWED_BROWSER_ORIGINS contains both attn.sh and staging.attn.sh; got ${raw}`,
     );
   }
 }
@@ -156,7 +156,7 @@ describe("CORS — OPTIONS preflight", () => {
     const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}/devices`, {
       method: "OPTIONS",
       headers: {
-        Origin: "https://attn.dev",
+        Origin: "https://attn.sh",
         "Access-Control-Request-Method": "POST",
         "Access-Control-Request-Headers": "Content-Type, Attn-Admission",
       },
@@ -176,13 +176,13 @@ describe("CORS — OPTIONS preflight", () => {
     const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}/envelopes`, {
       method: "OPTIONS",
       headers: {
-        Origin: "https://attn.dev",
+        Origin: "https://attn.sh",
         "Access-Control-Request-Method": "POST",
         "Access-Control-Request-Headers": "Content-Type, Attn-Admission, Attn-PoW",
       },
     });
     expect(res.status).toBe(204);
-    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://attn.dev");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://attn.sh");
     expect(res.headers.get("Access-Control-Allow-Headers")).toBe(
       "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW",
     );
@@ -225,7 +225,7 @@ describe("CORS — regular HTTP responses", () => {
     const url = `${URL_BASE}/v2/rooms/${roomId}/devices`;
     const res = await SELF.fetch(url, {
       method: "GET",
-      headers: { Origin: "https://attn.dev" },
+      headers: { Origin: "https://attn.sh" },
     });
     // Either 200 (empty list) or 401 (admission required). Both must lack CORS.
     expect([200, 401, 404]).toContain(res.status);
@@ -242,10 +242,10 @@ describe("CORS — regular HTTP responses", () => {
     const url = `${URL_BASE}/v2/rooms/${roomId}/devices`;
     const res = await SELF.fetch(url, {
       method: "GET",
-      headers: { Origin: "https://attn.dev" },
+      headers: { Origin: "https://attn.sh" },
     });
     expect([200, 401, 404]).toContain(res.status);
-    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://attn.dev");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://attn.sh");
     expect(res.headers.get("Access-Control-Allow-Methods")).toBe(
       "GET, POST, DELETE, OPTIONS",
     );
@@ -293,7 +293,7 @@ describe("CORS — WebSocket upgrade Origin check", () => {
       {
         headers: {
           Upgrade: "websocket",
-          Origin: "https://attn.dev",
+          Origin: "https://attn.sh",
           "Sec-WebSocket-Protocol": "attn.v2, hmac.AAAA",
         },
       },
@@ -335,7 +335,7 @@ describe("CORS — WebSocket upgrade Origin check", () => {
       {
         headers: {
           Upgrade: "websocket",
-          Origin: "https://attn.dev",
+          Origin: "https://attn.sh",
           "Sec-WebSocket-Protocol": "attn.v2, hmac.AAAA",
         },
       },

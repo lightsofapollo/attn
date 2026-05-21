@@ -33,4 +33,13 @@ export interface Env {
 
   // Browser CORS allowlist (comma-separated origins).
   ALLOWED_BROWSER_ORIGINS: string;
+
+  /**
+   * HMAC key for signing/verifying R2 blob-access caps. Set as a wrangler
+   * SECRET in production: `wrangler secret put BLOB_CAP_SIGNING_KEY`. When unset
+   * (local dev / tests), r2.ts falls back to a deterministic derived key — but
+   * that fallback is forgeable from the public source, so any public deployment
+   * MUST set this secret.
+   */
+  BLOB_CAP_SIGNING_KEY?: string;
 }

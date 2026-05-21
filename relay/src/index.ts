@@ -80,7 +80,7 @@ const CORS_ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS";
  * Parse `ALLOWED_BROWSER_ORIGINS` into a Set for O(1) membership lookup.
  *
  * The env var is a comma-separated allowlist (e.g.
- * `"https://attn.dev,https://staging.attn.dev"`). Empty / whitespace entries
+ * `"https://attn.sh,https://staging.attn.sh"`). Empty / whitespace entries
  * are skipped so a stray trailing comma doesn't accidentally allow the empty
  * Origin.
  *
@@ -413,7 +413,7 @@ async function handleBlobPut(
   if (cap === null || cap === "") {
     return blobErrorResponse(401, "ATTN_BLOB_CAP_MISSING", "cap query parameter required");
   }
-  const verified = await verifyBlobCap(cap, { method: "PUT", roomId, envelopeId });
+  const verified = await verifyBlobCap(cap, { method: "PUT", roomId, envelopeId }, env);
   if (verified === undefined) {
     return blobErrorResponse(401, "ATTN_BLOB_CAP_INVALID", "invalid or expired blob cap");
   }
@@ -470,7 +470,7 @@ async function handleBlobGet(
   if (cap === null || cap === "") {
     return blobErrorResponse(401, "ATTN_BLOB_CAP_MISSING", "cap query parameter required");
   }
-  const verified = await verifyBlobCap(cap, { method: "GET", roomId, envelopeId });
+  const verified = await verifyBlobCap(cap, { method: "GET", roomId, envelopeId }, env);
   if (verified === undefined) {
     return blobErrorResponse(401, "ATTN_BLOB_CAP_INVALID", "invalid or expired blob cap");
   }

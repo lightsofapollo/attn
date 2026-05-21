@@ -771,18 +771,24 @@ impl Bootstrapper {
         self.store
             .save_room(&review_room)
             .map_err(|e| BootstrapError::Store(format!("save_room: {e}")))?;
+        let is_dir = path.is_dir();
         save_room_secret(self.store.root(), &room_id, &room_secret)?;
-        record_local_share(self.store.root(), &room_id, &path)?;
+        record_local_share(self.store.root(), &room_id, &path, is_dir)?;
 
-        // 6b. Publish the initial snapshot of the shared file so reviewers
-        //     get the doc bytes the moment they join. Failures here are
-        //     non-fatal — the room exists, the user can manually trigger
-        //     a snapshot later — so log and continue.
-        if let Err(err) = self.publish_initial_snapshot(&room_id, &path, now_ms) {
-            eprintln!(
-                "review: publish_initial_snapshot failed (room={}): {err}",
-                room_id.as_str()
-            );
+        // 6b. Publish the initial snapshot(s) so reviewers get the doc bytes the
+        //     moment they join. A single file → just it; a folder-share → every
+        //     `*.md` under the directory (recursively, skipping ignored dirs).
+        //     New files added to a shared folder later are picked up by the
+        //     fs-watcher → `republish_snapshot_for_path`. Failures are non-fatal
+        //     — the room exists; log and continue.
+        for doc_path in markdown_targets(&path) {
+            if let Err(err) = self.publish_initial_snapshot(&room_id, &doc_path, now_ms) {
+                eprintln!(
+                    "review: publish_initial_snapshot failed (room={}, file={}): {err}",
+                    room_id.as_str(),
+                    doc_path.display()
+                );
+            }
         }
 
         // 7. Build invite. `room_secret` is consumed when we encode it into the
@@ -1166,7 +1172,7 @@ impl Bootstrapper {
         // Persist the stable file_id on the first publish so future edits
         // reuse it (looked up via `find_room_for_path`).
         if is_first {
-            record_share_file_id(self.store.root(), room_id, &file_id)?;
+            record_share_file_id(self.store.root(), room_id, path, &file_id)?;
         }
         eprintln!(
             "review: published snapshot file={} snapshot={} bytes={} first={} room={}",
@@ -1653,13 +1659,22 @@ fn unix_now_ms() -> u64 {
 struct LocalShareRecord {
     path: String,
     created_at: u64,
-    /// Stable document identity for `path` within this room. Set when the
-    /// initial snapshot is published; reused for every subsequent
-    /// republish so the FileId stays constant across edits (only the
+    /// `true` when `path` is a directory (folder-share): the room holds a
+    /// snapshot per `*.md` file under it, tracked in `files`. New files added
+    /// to the directory are picked up by the fs-watcher and published lazily.
+    #[serde(default)]
+    is_dir: bool,
+    /// Stable document identity for `path` within this room (single-file
+    /// share). Set when the initial snapshot is published; reused for every
+    /// subsequent republish so the FileId stays constant across edits (only the
     /// SnapshotId changes). `None` for shares minted before this field
     /// existed — `publish_snapshot` derives + persists it on first edit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     file_id: Option<String>,
+    /// Folder-share only: per-file stable FileIds keyed by absolute file path.
+    /// Grows as new `*.md` files appear in the shared directory.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    files: std::collections::HashMap<String, String>,
 }
 
 fn shares_dir(root: &std::path::Path) -> PathBuf {
@@ -1693,32 +1708,47 @@ fn record_local_share(
     root: &std::path::Path,
     room_id: &RoomId,
     path: &std::path::Path,
+    is_dir: bool,
 ) -> Result<(), BootstrapError> {
     let mut all = load_local_shares(root)?;
-    // Preserve a previously-stored file_id if this room was already shared
-    // (re-share of the same path) so the document identity stays stable.
-    let prior_file_id = all.get(room_id.as_str()).and_then(|r| r.file_id.clone());
+    // Preserve previously-stored file ids if this room was already shared
+    // (re-share of the same path) so document identity stays stable.
+    let prior = all.get(room_id.as_str());
+    let prior_file_id = prior.and_then(|r| r.file_id.clone());
+    let prior_files = prior.map(|r| r.files.clone()).unwrap_or_default();
     all.insert(
         room_id.as_str().to_string(),
         LocalShareRecord {
             path: path.to_string_lossy().to_string(),
             created_at: unix_now_ms(),
+            is_dir,
             file_id: prior_file_id,
+            files: prior_files,
         },
     );
     write_local_shares(root, &all)
 }
 
-/// Persist the stable `file_id` for a room's shared document so subsequent
-/// snapshot republishes (on owner edit) reuse the same document identity.
+/// Persist the stable `file_id` for a shared document (`path`) so subsequent
+/// snapshot republishes (on owner edit) reuse the same document identity. For
+/// a folder-share room the id is recorded per-file in `files`; for a
+/// single-file room it's the room-level `file_id`.
 fn record_share_file_id(
     root: &std::path::Path,
     room_id: &RoomId,
+    path: &std::path::Path,
     file_id: &FileId,
 ) -> Result<(), BootstrapError> {
     let mut all = load_local_shares(root)?;
     if let Some(record) = all.get_mut(room_id.as_str()) {
-        record.file_id = Some(file_id.as_str().to_string());
+        if record.is_dir {
+            record.files.insert(
+                path.to_string_lossy().to_string(),
+                file_id.as_str().to_string(),
+            );
+        } else {
+            record.file_id = Some(file_id.as_str().to_string());
+        }
         write_local_shares(root, &all)?;
     }
     Ok(())
@@ -1755,19 +1785,87 @@ pub(crate) fn find_path_for_room(
         .map(|record| PathBuf::from(&record.path)))
 }
 
-/// Look up the room a shared `path` belongs to, plus the stable file_id if
-/// one has been recorded. Returns `None` when the path isn't shared.
+/// `true` if `path` ends in a markdown extension.
+fn is_markdown_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+}
+
+/// `true` if `path` is `dir` or sits underneath it (component-wise, so
+/// `/a/b` does NOT match `/a/bc`).
+fn path_within(dir: &str, path: &std::path::Path) -> bool {
+    path.starts_with(std::path::Path::new(dir))
+}
+
+/// Directory/file names skipped when walking a folder-share (mirrors the
+/// fs-watcher's ignore set so we don't publish snapshots for build output etc.).
+fn is_ignored_dir_component(name: &str) -> bool {
+    name.starts_with('.')
+        || matches!(
+            name,
+            "node_modules" | "target" | "dist" | "build" | "out" | "coverage" | "__pycache__"
+                | "venv"
+        )
+}
+
+/// The files to snapshot for a share. A regular file → just itself; a directory
+/// (folder-share) → every `*.md` under it (recursively), skipping ignored dirs.
+/// Sorted for stable ordering.
+fn markdown_targets(path: &std::path::Path) -> Vec<PathBuf> {
+    if !path.is_dir() {
+        return vec![path.to_path_buf()];
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    collect_markdown(path, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_markdown(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if is_ignored_dir_component(&name.to_string_lossy()) {
+            continue;
+        }
+        let p = entry.path();
+        if p.is_dir() {
+            collect_markdown(&p, out);
+        } else if is_markdown_path(&p) {
+            out.push(p);
+        }
+    }
+}
+
+/// Look up the room a shared `path` belongs to, plus the stable file_id if one
+/// has been recorded. Matches either a single-file share (exact path) or a
+/// folder share (a `*.md` file under the shared directory). For a folder share,
+/// a not-yet-seen file returns `(room, None)` so the caller derives a fresh
+/// FileId on first publish. Returns `None` when the path isn't shared.
 fn find_room_for_path(
     root: &std::path::Path,
     path: &std::path::Path,
 ) -> Result<Option<(RoomId, Option<FileId>)>, BootstrapError> {
-    let target = path.to_string_lossy();
+    let target = path.to_string_lossy().to_string();
     let all = load_local_shares(root)?;
     for (room_id_str, record) in all {
-        if record.path == target {
+        let matched: Option<Option<String>> = if record.is_dir {
+            if is_markdown_path(path) && path_within(&record.path, path) {
+                Some(record.files.get(&target).cloned())
+            } else {
+                None
+            }
+        } else if record.path == target {
+            Some(record.file_id.clone())
+        } else {
+            None
+        };
+        if let Some(file_id_str) = matched {
             let room_id: RoomId = serde_json::from_value(serde_json::Value::String(room_id_str))
                 .expect("RoomId deserializes from any string");
-            let file_id = record.file_id.map(|s| {
+            let file_id = file_id_str.map(|s| {
                 serde_json::from_value::<FileId>(serde_json::Value::String(s))
                     .expect("FileId deserializes from any string")
             });
@@ -1916,6 +2014,73 @@ mod tests {
             .expect("client");
         let boot = Bootstrapper::with_http_client(store.clone(), cfg, http);
         (tmp, store, boot)
+    }
+
+    // --- folder-share binding ----------------------------------------------
+
+    #[test]
+    fn folder_share_collects_md_and_binds_files_under_dir() {
+        use std::fs;
+        let root = TempDir::new().expect("store root");
+        let docs = TempDir::new().expect("docs dir");
+        fs::write(docs.path().join("a.md"), b"# A").unwrap();
+        fs::write(docs.path().join("b.md"), b"# B").unwrap();
+        fs::write(docs.path().join("notes.txt"), b"x").unwrap();
+        fs::create_dir(docs.path().join("node_modules")).unwrap();
+        fs::write(docs.path().join("node_modules/c.md"), b"# C").unwrap();
+        fs::create_dir(docs.path().join("sub")).unwrap();
+        fs::write(docs.path().join("sub/d.md"), b"# D").unwrap();
+
+        // Directory → every *.md (recursive, sorted), skipping notes.txt +
+        // node_modules; a single file → just itself.
+        assert_eq!(
+            markdown_targets(docs.path()),
+            vec![
+                docs.path().join("a.md"),
+                docs.path().join("b.md"),
+                docs.path().join("sub").join("d.md"),
+            ]
+        );
+        assert_eq!(
+            markdown_targets(&docs.path().join("a.md")),
+            vec![docs.path().join("a.md")]
+        );
+
+        // Folder-share binding round-trip.
+        let room: RoomId =
+            serde_json::from_value(serde_json::Value::String("room-folder".into())).unwrap();
+        record_local_share(root.path(), &room, docs.path(), true).expect("record dir share");
+        let file_a: FileId =
+            serde_json::from_value(serde_json::Value::String("file-a".into())).unwrap();
+        record_share_file_id(root.path(), &room, &docs.path().join("a.md"), &file_a)
+            .expect("record file id");
+
+        // a.md is recorded → (room, Some(file-a)).
+        let (r, f) = find_room_for_path(root.path(), &docs.path().join("a.md"))
+            .unwrap()
+            .expect("a.md resolves to the folder room");
+        assert_eq!(r.as_str(), "room-folder");
+        assert_eq!(f.expect("file-a recorded").as_str(), "file-a");
+
+        // b.md is inside the folder but not yet published → (room, None) so the
+        // caller derives a fresh FileId on first publish.
+        let (r, f) = find_room_for_path(root.path(), &docs.path().join("b.md"))
+            .unwrap()
+            .expect("b.md resolves to the folder room");
+        assert_eq!(r.as_str(), "room-folder");
+        assert!(f.is_none());
+
+        // Non-markdown inside the folder, and any path outside, do NOT match.
+        assert!(
+            find_room_for_path(root.path(), &docs.path().join("notes.txt"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            find_room_for_path(root.path(), std::path::Path::new("/nope/x.md"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     // --- identity round-trip ----------------------------------------------

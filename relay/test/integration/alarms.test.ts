@@ -231,6 +231,47 @@ async function waitFor(cond: () => boolean | Promise<boolean>, timeoutMs = 2000)
 
 // --- tests ---------------------------------------------------------------
 
+describe("RoomDO alarm — probation (un-activated room eviction)", () => {
+  it("evicts a room that received no events by createdAt + ROOM_PROBATION_MS", async () => {
+    const roomId = uniqueRoomId("alarm-probation");
+    const owner = await generateOwnerKeypair();
+    await createRoom({
+      roomId,
+      ownerKp: owner,
+      // Keep idle + hard-max far away so ONLY the probation path can fire.
+      policy: { idleTimeoutMs: 60 * 60 * 1000, expiresAt: Date.now() + 24 * 60 * 60 * 1000 },
+    });
+    expect(await countStorageKeys(roomId)).toBeGreaterThan(0);
+
+    // No events were ever posted → envelopeCount stays 0. Rewind createdAt past
+    // the 15min probation window so the alarm sees an abandoned room.
+    await rewindMeta(roomId, "meta:created_at", 16 * 60 * 1000);
+    await fireAlarmDirect(roomId);
+
+    expect(await countStorageKeys(roomId)).toBe(0);
+  });
+
+  it("does NOT evict an activated room (envelopeCount > 0) past the probation window", async () => {
+    const roomId = uniqueRoomId("alarm-activated");
+    const owner = await generateOwnerKeypair();
+    await createRoom({
+      roomId,
+      ownerKp: owner,
+      policy: { idleTimeoutMs: 60 * 60 * 1000, expiresAt: Date.now() + 24 * 60 * 60 * 1000 },
+    });
+
+    // Simulate "activated": at least one event has been ingested.
+    await runInDurableObject(getStub(roomId), async (_inst, state) => {
+      await state.storage.put<number>("meta:envelope_count", 1);
+    });
+    await rewindMeta(roomId, "meta:created_at", 16 * 60 * 1000);
+    await fireAlarmDirect(roomId);
+
+    // Activated rooms skip probation; idle + hard-max are both far away.
+    expect(await countStorageKeys(roomId)).toBeGreaterThan(0);
+  });
+});
+
 describe("RoomDO alarm — hard-max expiry", () => {
   it("wipes storage + closes WS with 4002 once now >= hard_max_at", async () => {
     const roomId = uniqueRoomId("alarm-hardmax");

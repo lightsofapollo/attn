@@ -167,6 +167,16 @@ const PRE_EXPIRY_CLEANUP_WINDOW_MS = 60 * 60 * 1000;
  */
 const ROOM_CREATE_MAX_BODY_BYTES = 4096;
 
+/**
+ * Probation window for an UN-ACTIVATED room (abuse hardening). A legitimate
+ * room receives its first event (RoomCreated) within seconds of create, so
+ * `envelopeCount` goes > 0 almost immediately. A room that has received NO
+ * events by `createdAt + ROOM_PROBATION_MS` is abandoned create-spam — evict it
+ * eagerly so a mass-create flood self-cleans in minutes rather than living the
+ * full 24h–7d TTL. This is the primary bound on accumulated DO/R2 cost.
+ */
+const ROOM_PROBATION_MS = 15 * 60 * 1000;
+
 interface ErrorBody {
   error: { code: string; message: string };
 }
@@ -603,12 +613,16 @@ export class RoomDO extends DurableObject<Env> {
 
     // Schedule the TTL/idle alarm. The alarm() handler owns the actual
     // expire/prune logic; `rescheduleAlarm()` picks the earliest of
-    // (hard_max_at, last_event_at + idleTimeoutMs, next_pow_prune_at).
+    // (hard_max_at, last_event_at + idleTimeoutMs, next_pow_prune_at,
+    // probationAt). The room is un-activated at create (envelopeCount = 0), so
+    // we arm the probation deadline — if no event arrives by then, alarm()
+    // evicts it as abandoned create-spam.
     await this.rescheduleAlarm({
       now: createdAt,
       hardMaxAt: clamped.hardMaxAt,
       lastEventAt: createdAt,
       idleTimeoutMs: clamped.idleTimeoutMs,
+      probationAt: createdAt + ROOM_PROBATION_MS,
     });
 
     return Response.json(
@@ -2436,10 +2450,12 @@ export class RoomDO extends DurableObject<Env> {
    */
   override async alarm(): Promise<void> {
     const now = Date.now();
-    const [hardMaxAt, lastEventAt, policy] = await Promise.all([
+    const [hardMaxAt, lastEventAt, policy, createdAt, envelopeCount] = await Promise.all([
       this.ctx.storage.get<number>(META.hardMaxAt),
       this.ctx.storage.get<number>(META.lastEventAt),
       this.ctx.storage.get<RoomPolicy>(META.policy),
+      this.ctx.storage.get<number>(META.createdAt),
+      this.ctx.storage.get<number>(META.envelopeCount),
     ]);
 
     // Room state already wiped (e.g., raced with DELETE). Nothing to do.
@@ -2457,15 +2473,27 @@ export class RoomDO extends DurableObject<Env> {
       return;
     }
 
+    // Probation: a room that never received an event (abandoned create-spam)
+    // is evicted at createdAt + ROOM_PROBATION_MS — the primary cost bound on a
+    // mass-create flood. A real room reaches envelopeCount > 0 within seconds
+    // of create, so it's "activated" and skips this.
+    const activated = (envelopeCount ?? 0) > 0;
+    if (!activated && createdAt !== undefined && now >= createdAt + ROOM_PROBATION_MS) {
+      await this.expireRoom();
+      return;
+    }
+
     // Periodic pow-prune sweep.
     await this.prunePowSeen(now);
 
-    // Re-schedule to the next earliest wake time.
+    // Re-schedule to the next earliest wake time. Keep the probation deadline in
+    // the schedule while the room is still un-activated.
     await this.rescheduleAlarm({
       now,
       hardMaxAt,
       lastEventAt,
       idleTimeoutMs,
+      probationAt: activated || createdAt === undefined ? undefined : createdAt + ROOM_PROBATION_MS,
     });
   }
 
@@ -2479,11 +2507,18 @@ export class RoomDO extends DurableObject<Env> {
     hardMaxAt: number;
     lastEventAt: number;
     idleTimeoutMs: number;
+    /**
+     * When the room is still UN-ACTIVATED (no events yet), the time by which it
+     * must be evicted as abandoned create-spam. Omitted once the room has any
+     * event, so activated rooms follow only the idle/hard-max schedule.
+     */
+    probationAt?: number;
   }): Promise<void> {
     const idleAt = opts.lastEventAt + opts.idleTimeoutMs;
     const powPruneAt = opts.now + POW_PRUNE_INTERVAL_MS;
-    const alarmAt = Math.min(opts.hardMaxAt, idleAt, powPruneAt);
-    await this.ctx.storage.setAlarm(alarmAt);
+    const candidates = [opts.hardMaxAt, idleAt, powPruneAt];
+    if (opts.probationAt !== undefined) candidates.push(opts.probationAt);
+    await this.ctx.storage.setAlarm(Math.min(...candidates));
   }
 
   /**

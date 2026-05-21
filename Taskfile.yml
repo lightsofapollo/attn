@@ -98,6 +98,11 @@ tasks:
     cmds:
       - scripts/test-review-render-e2e.sh
 
+  test:folder-share:
+    desc: Folder-share E2E — `attn review share <dir>` publishes a snapshot per .md + new files appear live
+    cmds:
+      - scripts/test-folder-share-e2e.sh
+
   test:apply:
     desc: Run the apply E2E test suite — Rust cargo tests + optional daemon flow (attn-nnj.8.6)
     cmds:

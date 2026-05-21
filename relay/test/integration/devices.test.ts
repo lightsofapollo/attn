@@ -17,7 +17,7 @@ import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
 import type { DeviceRecord, RoomPolicy } from "../../src/schema";
-import { FIXED_POW_RAND, mintPowForTests } from "../helpers/pow";
+import { FIXED_POW_RAND, createPowHeader, mintPowForTests } from "../helpers/pow";
 
 // Expose env bindings to `env` typing per vitest-pool-workers ambient pattern.
 declare module "cloudflare:test" {
@@ -121,6 +121,7 @@ async function createRoom(opts: {
     headers: {
       "Content-Type": "application/json",
       "Attn-Owner-Signature": ownerSig,
+      "Attn-PoW": await createPowHeader(opts.roomId, opts.ownerKp.publicKeyBytes),
     },
     body,
   });

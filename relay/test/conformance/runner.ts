@@ -36,7 +36,7 @@ import type {
   EnvelopeRecord,
   RoomPolicy,
 } from "../../src/schema";
-import { FIXED_POW_RAND, mintPowForTests } from "../helpers/pow";
+import { FIXED_POW_RAND, createPowHeader, mintPowForTests } from "../helpers/pow";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -810,6 +810,10 @@ async function actCreateRoom(
       body,
       privateKey: signingKey,
     });
+    // First-create also requires a 12-bit Attn-PoW bound to (roomId,
+    // ownerSigningKeyId, POST, /v2/rooms/:roomId). Verified AFTER owner-sig,
+    // so it's only attached on the success path (alongside the owner sig).
+    headers["Attn-PoW"] = await createPowHeader(roomId, ownerKp.publicKeyBytes);
   }
   const res = await SELF.fetch(url, { method: "POST", headers, body });
   const responseBody = await assertResponse(res, step.expect, label);

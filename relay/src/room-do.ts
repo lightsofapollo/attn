@@ -591,6 +591,35 @@ export class RoomDO extends DurableObject<Env> {
 
     const ownerSigningKeyId = await sha256B64Url(ownerKeyBytes);
 
+    // PoW (abuse hardening). Other write/join/delete routes already gate on
+    // Attn-PoW; create did not, making it the one cheap, unbounded entry point.
+    // The client mints a token bound to (roomId, ownerSigningKeyId, POST, path)
+    // — ownerSigningKeyId is the deviceId slot, which the relay can derive from
+    // the body's ownerSigningKey without a separate field. Verified at the
+    // MIN_POW_BITS floor (the client mints at that difficulty) and replay-
+    // protected via the shared pow_seen set.
+    const powToken = request.headers.get("Attn-PoW");
+    if (powToken === null || powToken === "") {
+      return errorResponse(400, "ATTN_POW_INVALID", "missing Attn-PoW header");
+    }
+    try {
+      await verifyPow(powToken, {
+        roomId,
+        deviceId: ownerSigningKeyId,
+        method: "POST",
+        urlPath: new URL(request.url).pathname,
+        policyPowBits: limits.minPowBits,
+        now: createdAt,
+        isReplayed: (hash) => this.isPowSeen(hash),
+        markSeen: (hash, expiresAt) => this.markPowSeen(hash, expiresAt),
+      });
+    } catch (err) {
+      if (err instanceof PowError) {
+        return errorResponse(400, err.code, err.message);
+      }
+      throw err;
+    }
+
     // Persist everything in one DO transaction. We use put-many so the writes
     // commit atomically — partial creates are observable as either fully-done
     // or fully-absent.

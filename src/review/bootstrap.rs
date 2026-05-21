@@ -1345,12 +1345,29 @@ impl Bootstrapper {
             &body_bytes,
         );
 
+        // Attn-PoW (abuse hardening). The relay gates room-create on a PoW token
+        // bound to (roomId, ownerSigningKeyId, POST, path). ownerSigningKeyId is
+        // base64url(SHA-256(ownerSigningKey)) — the relay derives the same id
+        // from the body, and we mint against it here so the deviceId slot
+        // matches without an extra wire field.
+        let owner_signing_key_id = identity.verifying_key()?.signing_key_id_base64url();
+        let pow_token = TokenPool::new(
+            room_id.as_str().to_string(),
+            owner_signing_key_id,
+            BOOTSTRAP_POW_DIFFICULTY,
+            BOOTSTRAP_POW_TTL_MS,
+        )
+        .take("POST", &path)
+        .await
+        .map_err(|e| BootstrapError::Crypto(format!("create pow: {e}")))?;
+
         let resp = self
             .http
             .post(&url)
             .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
             .header("Attn-Admission", admission_header)
             .header("Attn-Owner-Signature", owner_sig_header)
+            .header("Attn-PoW", pow_token)
             .body(body_bytes.clone())
             .send()
             .await

@@ -34,7 +34,7 @@ import {
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
 import type { EnvelopeInput, RoomPolicy } from "../../src/schema";
-import { FIXED_POW_RAND, mintPowForTests } from "../helpers/pow";
+import { FIXED_POW_RAND, createPowHeader, mintPowForTests } from "../helpers/pow";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -132,6 +132,7 @@ async function createRoom(opts: {
     headers: {
       "Content-Type": "application/json",
       "Attn-Owner-Signature": base64UrlEncode(sig),
+      "Attn-PoW": await createPowHeader(opts.roomId, opts.ownerKp.publicKeyBytes),
     },
     body,
   });

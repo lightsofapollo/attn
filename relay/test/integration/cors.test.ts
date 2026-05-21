@@ -28,6 +28,7 @@ import { describe, expect, it } from "vitest";
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import type { Env } from "../../src/env";
 import type { RoomPolicy } from "../../src/schema";
+import { createPowHeader } from "../helpers/pow";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -116,6 +117,7 @@ async function createRoom(opts: {
     headers: {
       "Content-Type": "application/json",
       "Attn-Owner-Signature": base64UrlEncode(sig),
+      "Attn-PoW": await createPowHeader(opts.roomId, ownerKp.publicKeyBytes),
     },
     body,
   });

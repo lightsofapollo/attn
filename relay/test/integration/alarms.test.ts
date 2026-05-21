@@ -32,6 +32,7 @@ import {
 } from "../../src/admission";
 import type { Env } from "../../src/env";
 import type { RoomPolicy } from "../../src/schema";
+import { createPowHeader } from "../helpers/pow";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -134,6 +135,7 @@ async function createRoom(opts: {
     headers: {
       "Content-Type": "application/json",
       "Attn-Owner-Signature": ownerSig,
+      "Attn-PoW": await createPowHeader(opts.roomId, opts.ownerKp.publicKeyBytes),
     },
     body,
   });
@@ -161,6 +163,19 @@ async function listKeys(roomId: string, prefix: string): Promise<string[]> {
   return runInDurableObject(getStub(roomId), async (_inst, state) => {
     const all = await state.storage.list({ prefix });
     return [...all.keys()];
+  });
+}
+
+/**
+ * First-create now consumes an Attn-PoW token, which the relay records in the
+ * `pow_seen:` replay set. The pow-prune tests below seed their own fixed set of
+ * `pow_seen:` rows and assert on the exact set after the alarm runs, so we drop
+ * the create-time row first to keep those assertions deterministic.
+ */
+async function clearPowSeen(roomId: string): Promise<void> {
+  await runInDurableObject(getStub(roomId), async (_inst, state) => {
+    const seen = await state.storage.list({ prefix: "pow_seen:" });
+    for (const key of seen.keys()) await state.storage.delete(key);
   });
 }
 
@@ -371,6 +386,7 @@ describe("RoomDO alarm — pow_seen pruning", () => {
       ownerKp: owner,
       policy: { idleTimeoutMs: 60 * 60 * 1000 }, // keep idle far away
     });
+    await clearPowSeen(roomId);
 
     // Seed three rows: two stale (expiresAt + 10min in the past) and one fresh.
     const now = Date.now();
@@ -401,6 +417,7 @@ describe("RoomDO alarm — pow_seen pruning", () => {
       ownerKp: owner,
       policy: { idleTimeoutMs: 60 * 60 * 1000 },
     });
+    await clearPowSeen(roomId);
 
     // Borderline-fresh: expiresAt just barely outside the "stale" cutoff.
     // (Stale = expiresAt + 10min < now → expiresAt < now - 10min.)

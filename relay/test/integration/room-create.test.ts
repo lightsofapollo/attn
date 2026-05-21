@@ -22,6 +22,7 @@ import {
   ownerSignatureHeader,
   type SubtleEd25519Keypair,
 } from "../helpers/owner-sig";
+import { createPowHeader } from "../helpers/pow";
 
 // Make the bindings declared in wrangler.toml visible on `env` per the
 // vitest-pool-workers ambient-module pattern.
@@ -170,6 +171,7 @@ async function postCreate(opts: {
     headers: {
       "Content-Type": "application/json",
       "Attn-Owner-Signature": ownerSig,
+      "Attn-PoW": await createPowHeader(opts.roomId, built.ownerKp.publicKeyBytes),
     },
     body: built.body,
   });
@@ -541,6 +543,7 @@ describe("POST /v2/rooms/:roomId — defaults", () => {
       headers: {
         "Content-Type": "application/json",
         "Attn-Owner-Signature": ownerSig,
+        "Attn-PoW": await createPowHeader(roomId, ownerKp.publicKeyBytes),
       },
       body,
     });
@@ -577,6 +580,7 @@ describe("POST /v2/rooms/:roomId — defaults", () => {
       headers: {
         "Content-Type": "application/json",
         "Attn-Owner-Signature": ownerSig,
+        "Attn-PoW": await createPowHeader(roomId, ownerKp.publicKeyBytes),
       },
       body,
     });

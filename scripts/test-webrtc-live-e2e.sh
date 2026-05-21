@@ -131,6 +131,10 @@ if poll 8000 composer_ready; then
 else
   bad "reviewer comment composer did not open"
 fi
+# NOTE: a suggestion-over-DataChannel UI guard belongs here too, but the
+# suggestion composer only opens while the reviewer is VIEWING THE SNAPSHOT,
+# and this harness boots the reviewer on a local file for co-typing. The
+# snapshot-viewing path is exercised by scripts/capture-collab-screenshots.sh.
 
 echo ""; log "Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

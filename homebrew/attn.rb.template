@@ -18,6 +18,23 @@ class Attn < Formula
     end
   end
 
+  # attn is a wry/WebKitGTK desktop app. The Linux binary dynamically links the
+  # system GTK/WebKit/appindicator libraries (it's built against them on CI), so
+  # they must be present at runtime. We do NOT `depends_on` Homebrew's gtk — that
+  # would pull a parallel GTK stack that conflicts with the system one for a GUI
+  # app — and instead point users at their distro packages.
+  def caveats
+    return unless OS.linux?
+
+    <<~EOS
+      attn is a GTK/WebKitGTK desktop app. On Linux it needs these system
+      libraries at runtime — install them with your package manager, e.g. on
+      Debian/Ubuntu:
+        sudo apt-get install libgtk-3-0 libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+      (Fedora: gtk3 webkit2gtk4.1 libayatana-appindicator-gtk3)
+    EOS
+  end
+
   def install
     if OS.mac?
       # Homebrew strips the top-level attn.app/ dir from the zip,

@@ -237,7 +237,9 @@ fn parse_token(token: &str) -> Result<ParsedToken<'_>, PowError> {
     // counter must be a non-negative decimal integer (strings to be safe for
     // values > 2^53 in JSON). We accept any non-empty digit string.
     if counter.is_empty() || !counter.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(PowError::Parse("counter must be decimal digits".to_string()));
+        return Err(PowError::Parse(
+            "counter must be decimal digits".to_string(),
+        ));
     }
     if room_id.is_empty() || device_id.is_empty() || request_path_hash.is_empty() {
         return Err(PowError::Parse(
@@ -846,24 +848,14 @@ mod tests {
 
     #[tokio::test]
     async fn token_pool_take_returns_fresh_tokens() {
-        let pool = TokenPool::new(
-            "ROOM".into(),
-            "DEVICE".into(),
-            TEST_DIFFICULTY,
-            TEST_TTL,
-        );
+        let pool = TokenPool::new("ROOM".into(), "DEVICE".into(), TEST_DIFFICULTY, TEST_TTL);
         let token = pool.take("POST", "/v2/rooms/R/envelopes").await.unwrap();
         verify_local(&token, TEST_DIFFICULTY).expect("token from pool verifies");
     }
 
     #[tokio::test]
     async fn token_pool_replenish_fills_slot() {
-        let pool = TokenPool::new(
-            "ROOM".into(),
-            "DEVICE".into(),
-            TEST_DIFFICULTY,
-            TEST_TTL,
-        );
+        let pool = TokenPool::new("ROOM".into(), "DEVICE".into(), TEST_DIFFICULTY, TEST_TTL);
         let minted = pool
             .replenish("POST", "/v2/rooms/R/envelopes", 3)
             .await
@@ -878,12 +870,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_pool_replenish_is_idempotent_when_full() {
-        let pool = TokenPool::new(
-            "ROOM".into(),
-            "DEVICE".into(),
-            TEST_DIFFICULTY,
-            TEST_TTL,
-        );
+        let pool = TokenPool::new("ROOM".into(), "DEVICE".into(), TEST_DIFFICULTY, TEST_TTL);
         let first = pool
             .replenish("POST", "/v2/rooms/R/envelopes", 2)
             .await
@@ -898,18 +885,11 @@ mod tests {
 
     #[tokio::test]
     async fn token_pool_separates_method_path_slots() {
-        let pool = TokenPool::new(
-            "ROOM".into(),
-            "DEVICE".into(),
-            TEST_DIFFICULTY,
-            TEST_TTL,
-        );
+        let pool = TokenPool::new("ROOM".into(), "DEVICE".into(), TEST_DIFFICULTY, TEST_TTL);
         pool.replenish("POST", "/v2/rooms/R/envelopes", 1)
             .await
             .unwrap();
-        pool.replenish("POST", "/v2/rooms/R/acks", 1)
-            .await
-            .unwrap();
+        pool.replenish("POST", "/v2/rooms/R/acks", 1).await.unwrap();
         assert_eq!(pool.slot_len("POST", "/v2/rooms/R/envelopes").await, 1);
         assert_eq!(pool.slot_len("POST", "/v2/rooms/R/acks").await, 1);
         assert_eq!(pool.slot_len("DELETE", "/v2/rooms/R/envelopes").await, 0);

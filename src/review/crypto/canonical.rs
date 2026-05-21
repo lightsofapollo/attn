@@ -200,10 +200,10 @@ fn write_string(s: &str, out: &mut String) {
 /// defensive — `as_f64` could return non-finite if a future serde_json
 /// version relaxes its invariants).
 fn write_number(n: &serde_json::Number, out: &mut String) -> Result<(), CanonError> {
-    if let Some(f) = n.as_f64() {
-        if !f.is_finite() {
-            return Err(CanonError::NonFiniteNumber);
-        }
+    if let Some(f) = n.as_f64()
+        && !f.is_finite()
+    {
+        return Err(CanonError::NonFiniteNumber);
     }
     // serde_json formats integers as plain digits ("42", "-1", "9007199254740991")
     // and floats per ECMA-404. We never re-format ourselves — that's where
@@ -280,10 +280,7 @@ mod tests {
     fn string_with_tab_carriage_return_and_null_byte() {
         // Tab = U+0009, CR = U+000D, NUL = U+0000 — all rendered as \u00XX.
         let v = json!("\t\r\u{0000}");
-        assert_eq!(
-            canonicalize_value(&v).unwrap(),
-            "\"\\u0009\\u000d\\u0000\""
-        );
+        assert_eq!(canonicalize_value(&v).unwrap(), "\"\\u0009\\u000d\\u0000\"");
     }
 
     #[test]
@@ -351,7 +348,10 @@ mod tests {
             #[serde(skip_serializing_if = "Option::is_none")]
             snapshot_id: Option<&'static str>,
         }
-        let m = Meta { id: "evt-1", snapshot_id: None };
+        let m = Meta {
+            id: "evt-1",
+            snapshot_id: None,
+        };
         assert_eq!(to_canonical_string(&m).unwrap(), "{\"id\":\"evt-1\"}");
     }
 
@@ -365,7 +365,10 @@ mod tests {
             id: &'static str,
             snapshot_id: Option<&'static str>,
         }
-        let m = Meta { id: "evt-1", snapshot_id: None };
+        let m = Meta {
+            id: "evt-1",
+            snapshot_id: None,
+        };
         assert_eq!(to_canonical_string(&m).unwrap(), "{\"id\":\"evt-1\"}");
     }
 
@@ -414,8 +417,7 @@ mod tests {
     /// Compile-time-embedded corpus shared with the (future) TS/WASM client.
     /// See `planning/collab/test-vectors/canonical-json.jsonl` and the
     /// neighboring README for the format contract.
-    const CORPUS: &str =
-        include_str!("../../../planning/collab/test-vectors/canonical-json.jsonl");
+    const CORPUS: &str = include_str!("../../../planning/collab/test-vectors/canonical-json.jsonl");
 
     #[test]
     fn test_vector_corpus_round_trip() {

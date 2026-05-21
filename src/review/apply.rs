@@ -24,9 +24,7 @@ use crate::review::model::{
     ReviewEventBody, SuggestionOperation,
 };
 use crate::review::store::ReviewStore;
-use crate::review::working_copy::{
-    SaveRequest, SaveSource, WorkingCopyError, WorkingCopyService,
-};
+use crate::review::working_copy::{SaveRequest, SaveSource, WorkingCopyError, WorkingCopyService};
 use unicode_normalization::UnicodeNormalization;
 
 // ---------------------------------------------------------------------------
@@ -239,10 +237,9 @@ pub fn resolve_suggestion(
     // handle the owner UI uses to refer to the suggestion). Mint it from the
     // wire string the same way `model::tests` does — through serde — so we
     // never expose a constructor for typed ids outside the crypto module.
-    let suggestion_id_typed: EventId = serde_json::from_value(
-        serde_json::Value::String(suggestion_id.clone()),
-    )
-    .map_err(|e| ApplyError::Other(format!("suggestion id not serializable: {e}")))?;
+    let suggestion_id_typed: EventId =
+        serde_json::from_value(serde_json::Value::String(suggestion_id.clone()))
+            .map_err(|e| ApplyError::Other(format!("suggestion id not serializable: {e}")))?;
 
     let resolved = resolve_anchor(
         anchor,
@@ -337,7 +334,11 @@ pub fn apply_ready_verdict(
             target_byte_range,
             replacement,
             ..
-        } => (suggestion_id.clone(), *target_byte_range, replacement.clone()),
+        } => (
+            suggestion_id.clone(),
+            *target_byte_range,
+            replacement.clone(),
+        ),
         ApplyVerdict::RequiresThreeWay { .. } => {
             return Err(ApplyError::NotApplicable {
                 kind: "RequiresThreeWay",
@@ -746,8 +747,8 @@ fn trailing_whitespace_equal(a: &str, b: &str) -> bool {
             (Some(la), Some(lb)) => {
                 // Trim ONLY ASCII space + tab. We don't trim '\r' here —
                 // CRLF vs LF must be a real mismatch.
-                let la_t = la.trim_end_matches(|c: char| c == ' ' || c == '\t');
-                let lb_t = lb.trim_end_matches(|c: char| c == ' ' || c == '\t');
+                let la_t = la.trim_end_matches([' ', '\t']);
+                let lb_t = lb.trim_end_matches([' ', '\t']);
                 if la_t != lb_t {
                     return false;
                 }
@@ -862,9 +863,11 @@ mod tests {
     }
 
     /// Build the `SuggestionCreated` body wrapping `op` + `anchor`.
-    fn suggestion_event(suggestion_id: &str, anchor: Anchor, op: SuggestionOperation)
-        -> ReviewEventBody
-    {
+    fn suggestion_event(
+        suggestion_id: &str,
+        anchor: Anchor,
+        op: SuggestionOperation,
+    ) -> ReviewEventBody {
         ReviewEventBody::SuggestionCreated {
             suggestion_id: suggestion_id.to_string(),
             anchor,
@@ -888,8 +891,8 @@ mod tests {
             replacement: "auburn".into(),
         };
         let body = suggestion_event("sug-1", anchor, op);
-        let verdict = resolve_suggestion(&event_id("evt-1"), &body, &idx, md, &h, None)
-            .expect("verdict");
+        let verdict =
+            resolve_suggestion(&event_id("evt-1"), &body, &idx, md, &h, None).expect("verdict");
         match verdict {
             ApplyVerdict::Ready {
                 replacement,
@@ -923,8 +926,8 @@ mod tests {
             replacement: "auburn".into(),
         };
         let body = suggestion_event("sug-2", anchor, op);
-        let verdict = resolve_suggestion(&event_id("evt-2"), &body, &idx, md, &h, None)
-            .expect("verdict");
+        let verdict =
+            resolve_suggestion(&event_id("evt-2"), &body, &idx, md, &h, None).expect("verdict");
         match verdict {
             ApplyVerdict::RequiresThreeWay {
                 snapshot_expected,
@@ -1058,11 +1061,15 @@ mod tests {
             replacement: "omega".into(),
         };
         let body = suggestion_event("sug-6", anchor, op);
-        let verdict = resolve_suggestion(&event_id("evt-6"), &body, &idx, md, &h, None)
-            .expect("verdict");
+        let verdict =
+            resolve_suggestion(&event_id("evt-6"), &body, &idx, md, &h, None).expect("verdict");
         match verdict {
             ApplyVerdict::Ambiguous { candidates, .. } => {
-                assert!(candidates.len() >= 3, "expected >=3 candidates, got {}", candidates.len());
+                assert!(
+                    candidates.len() >= 3,
+                    "expected >=3 candidates, got {}",
+                    candidates.len()
+                );
             }
             other => panic!("expected Ambiguous, got {other:?}"),
         }
@@ -1111,7 +1118,10 @@ mod tests {
         let verdict = resolve_suggestion(&event_id("evt-7"), &body, &idx, current, &h, None)
             .expect("verdict");
         match verdict {
-            ApplyVerdict::Stale { reason, suggestion_id } => {
+            ApplyVerdict::Stale {
+                reason,
+                suggestion_id,
+            } => {
                 assert!(!reason.is_empty());
                 assert_eq!(suggestion_id, event_id("sug-7"));
             }
@@ -1128,10 +1138,12 @@ mod tests {
         let idx = build_anchor_index(md, &snap_id(snap)).expect("idx");
         let h = content_hash(md);
         let anchor = quote_anchor(md, "brown", snap);
-        let op = SuggestionOperation::InsertBefore { text: "very ".into() };
+        let op = SuggestionOperation::InsertBefore {
+            text: "very ".into(),
+        };
         let body = suggestion_event("sug-8", anchor, op);
-        let verdict = resolve_suggestion(&event_id("evt-8"), &body, &idx, md, &h, None)
-            .expect("verdict");
+        let verdict =
+            resolve_suggestion(&event_id("evt-8"), &body, &idx, md, &h, None).expect("verdict");
         match verdict {
             ApplyVerdict::Ready {
                 replacement,
@@ -1157,10 +1169,12 @@ mod tests {
         let idx = build_anchor_index(md, &snap_id(snap)).expect("idx");
         let h = content_hash(md);
         let anchor = quote_anchor(md, "brown", snap);
-        let op = SuggestionOperation::InsertAfter { text: " (auburn)".into() };
+        let op = SuggestionOperation::InsertAfter {
+            text: " (auburn)".into(),
+        };
         let body = suggestion_event("sug-9", anchor, op);
-        let verdict = resolve_suggestion(&event_id("evt-9"), &body, &idx, md, &h, None)
-            .expect("verdict");
+        let verdict =
+            resolve_suggestion(&event_id("evt-9"), &body, &idx, md, &h, None).expect("verdict");
         match verdict {
             ApplyVerdict::Ready {
                 replacement,
@@ -1189,8 +1203,8 @@ mod tests {
             expected_text: "brown".into(),
         };
         let body = suggestion_event("sug-10", anchor, op);
-        let verdict = resolve_suggestion(&event_id("evt-10"), &body, &idx, md, &h, None)
-            .expect("verdict");
+        let verdict =
+            resolve_suggestion(&event_id("evt-10"), &body, &idx, md, &h, None).expect("verdict");
         match verdict {
             ApplyVerdict::Ready {
                 replacement,
@@ -1217,8 +1231,8 @@ mod tests {
             expected_text: "scarlet".into(),
         };
         let body = suggestion_event("sug-11", anchor, op);
-        let verdict = resolve_suggestion(&event_id("evt-11"), &body, &idx, md, &h, None)
-            .expect("verdict");
+        let verdict =
+            resolve_suggestion(&event_id("evt-11"), &body, &idx, md, &h, None).expect("verdict");
         match verdict {
             ApplyVerdict::RequiresThreeWay {
                 snapshot_expected,
@@ -1466,11 +1480,15 @@ mod tests {
             "",
             "ascii",
             "with\nnewlines",
-            "café",          // NFC
-            "cafe\u{0301}",  // NFD
+            "café",         // NFC
+            "cafe\u{0301}", // NFD
             "🚀 ship",
         ] {
-            assert_eq!(classify_text_match(s, s), TextMatchKind::Exact, "self: {s:?}");
+            assert_eq!(
+                classify_text_match(s, s),
+                TextMatchKind::Exact,
+                "self: {s:?}"
+            );
             let appended = format!("{s}x");
             assert_eq!(
                 classify_text_match(s, &appended),
@@ -1504,8 +1522,8 @@ mod tests {
             replacement: "espresso".into(),
         };
         let body = suggestion_event("sug-nfd", anchor, op);
-        let verdict = resolve_suggestion(&event_id("evt-nfd"), &body, &idx, md, &h, None)
-            .expect("verdict");
+        let verdict =
+            resolve_suggestion(&event_id("evt-nfd"), &body, &idx, md, &h, None).expect("verdict");
         match verdict {
             ApplyVerdict::Ready {
                 match_kind,
@@ -1539,8 +1557,8 @@ mod tests {
             replacement: "wolf".into(),
         };
         let body = suggestion_event("sug-trail", anchor, op);
-        let verdict = resolve_suggestion(&event_id("evt-trail"), &body, &idx, md, &h, None)
-            .expect("verdict");
+        let verdict =
+            resolve_suggestion(&event_id("evt-trail"), &body, &idx, md, &h, None).expect("verdict");
         match verdict {
             ApplyVerdict::Ready {
                 match_kind,
@@ -1574,8 +1592,8 @@ mod tests {
             replacement: "line A\nline B".into(),
         };
         let body = suggestion_event("sug-crlf", anchor, op);
-        let verdict = resolve_suggestion(&event_id("evt-crlf"), &body, &idx, md, &h, None)
-            .expect("verdict");
+        let verdict =
+            resolve_suggestion(&event_id("evt-crlf"), &body, &idx, md, &h, None).expect("verdict");
         assert!(
             matches!(verdict, ApplyVerdict::RequiresThreeWay { .. }),
             "expected RequiresThreeWay (CRLF mismatch), got {verdict:?}",
@@ -1608,8 +1626,7 @@ mod tests {
         let tmp = TempDir::new().expect("tempdir");
         let path = tmp.path().join("doc.md");
         std::fs::write(&path, initial_bytes).expect("seed");
-        let store =
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store");
+        let store = ReviewStore::open_at(tmp.path().join("reviews")).expect("open store");
         let ctx = ApplyContext {
             working_copy: Arc::new(WorkingCopyService::new()),
             store: Arc::new(store),
@@ -1623,11 +1640,7 @@ mod tests {
     /// Construct a `Ready` verdict directly without going through the
     /// resolver. Lets each apply test pick its own splice target precisely
     /// instead of fighting the resolver's quote-matching heuristics.
-    fn ready_verdict(
-        suggestion: &str,
-        range: (usize, usize),
-        replacement: &str,
-    ) -> ApplyVerdict {
+    fn ready_verdict(suggestion: &str, range: (usize, usize), replacement: &str) -> ApplyVerdict {
         ApplyVerdict::Ready {
             suggestion_id: event_id(suggestion),
             target_byte_range: range,
@@ -1648,8 +1661,7 @@ mod tests {
         // "brown" sits at bytes 10..15.
         let verdict = ready_verdict("sug-r1", (10, 15), "auburn");
 
-        let outcome =
-            apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+        let outcome = apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
 
         // (a) Disk reflects the splice.
         let on_disk = std::fs::read(&ctx.path).expect("read disk");
@@ -1690,8 +1702,7 @@ mod tests {
         // result reads cleanly: "the quick fox\n".
         let verdict = ready_verdict("sug-del", (10, 16), "");
 
-        let outcome =
-            apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+        let outcome = apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
 
         let on_disk = std::fs::read(&ctx.path).expect("read disk");
         assert_eq!(on_disk, b"the quick fox\n");
@@ -1792,8 +1803,8 @@ mod tests {
             }],
         };
 
-        let err = apply_ready_verdict(&verdict, &ctx, initial)
-            .expect_err("non-Ready apply must fail");
+        let err =
+            apply_ready_verdict(&verdict, &ctx, initial).expect_err("non-Ready apply must fail");
         match err {
             ApplyError::NotApplicable { kind } => assert_eq!(kind, "Ambiguous"),
             other => panic!("expected NotApplicable, got {other:?}"),
@@ -1868,8 +1879,8 @@ mod tests {
         let initial = "🚀ok".as_bytes();
         let (ctx, _tmp) = make_ctx(initial);
         let verdict = ready_verdict("sug-bad", (1, 4), "x");
-        let err = apply_ready_verdict(&verdict, &ctx, initial)
-            .expect_err("misaligned range must fail");
+        let err =
+            apply_ready_verdict(&verdict, &ctx, initial).expect_err("misaligned range must fail");
         match err {
             ApplyError::BadByteRange { start, end, .. } => {
                 assert_eq!(start, 1);
@@ -1894,7 +1905,14 @@ mod tests {
         let err = apply_ready_verdict(&verdict, &ctx, initial)
             .expect_err("out-of-bounds range must fail");
         assert!(
-            matches!(err, ApplyError::BadByteRange { start: 3, end: 100, len: 6 }),
+            matches!(
+                err,
+                ApplyError::BadByteRange {
+                    start: 3,
+                    end: 100,
+                    len: 6
+                }
+            ),
             "got {err:?}",
         );
     }
@@ -1916,13 +1934,11 @@ mod tests {
             replacement: "tawny".into(),
         };
         let body = suggestion_event("sug-pipe", anchor, op);
-        let verdict =
-            resolve_suggestion(&event_id("evt-pipe"), &body, &idx, initial, &h, None)
-                .expect("verdict");
+        let verdict = resolve_suggestion(&event_id("evt-pipe"), &body, &idx, initial, &h, None)
+            .expect("verdict");
         assert!(matches!(verdict, ApplyVerdict::Ready { .. }));
 
-        let outcome =
-            apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+        let outcome = apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
 
         assert_eq!(
             std::fs::read(&ctx.path).expect("read"),
@@ -2109,9 +2125,7 @@ second paragraph with new text inside
         // real owner edit (snapshot -> evolved-current).
         std::fs::write(&path, E2E_SNAPSHOT_MD).expect("seed snapshot bytes");
 
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         let working_copy = Arc::new(WorkingCopyService::new());
 
         // Record the UserEdit: snapshot → current. This is what the owner's
@@ -2173,7 +2187,7 @@ second paragraph with new text inside
         // remap (NOT an exact base_hash match), and the target range must
         // land on "old text" inside the CURRENT bytes — proving the anchor
         // moved through the resolver, not through the raw snapshot offset.
-        let resulting_hash_from_apply = match &verdict {
+        match &verdict {
             ApplyVerdict::Ready {
                 target_byte_range: (s, e),
                 replacement,
@@ -2188,12 +2202,10 @@ second paragraph with new text inside
                 // Read-only checks done; let the orchestrator handle the rest.
             }
             other => panic!("expected Ready (remap), got {other:?}"),
-        };
-        let _ = resulting_hash_from_apply; // silence unused — read-only assertion above.
+        }
 
         // (4) Apply the verdict.
-        let outcome =
-            apply_ready_verdict(&verdict, &ctx, current_bytes).expect("apply succeeds");
+        let outcome = apply_ready_verdict(&verdict, &ctx, current_bytes).expect("apply succeeds");
 
         // (a) File on disk reflects the splice.
         let on_disk = std::fs::read(&ctx.path).expect("read disk");
@@ -2242,9 +2254,8 @@ second paragraph with new text inside
             applied_revision_id: outcome.revision.revision_id.clone(),
             resulting_hash: outcome.resulting_hash.clone(),
         };
-        let envelope =
-            assemble_event_envelope(e2e_emit_input(accept_body, 1_700_000_010_000))
-                .expect("envelope assembles");
+        let envelope = assemble_event_envelope(e2e_emit_input(accept_body, 1_700_000_010_000))
+            .expect("envelope assembles");
 
         // (6) Outbox round-trip.
         assert!(
@@ -2259,7 +2270,11 @@ second paragraph with new text inside
             .expect("iter outbox")
             .collect::<Result<Vec<_>, _>>()
             .expect("envelopes decode");
-        assert_eq!(envelopes.len(), 1, "outbox holds exactly the accept envelope");
+        assert_eq!(
+            envelopes.len(),
+            1,
+            "outbox holds exactly the accept envelope"
+        );
         assert_eq!(envelopes[0].envelope_id, envelope.envelope_id);
         assert_eq!(envelopes[0].kind, EnvelopeKind::Event);
         assert_eq!(envelopes[0].room_id, ctx.room_id);
@@ -2371,9 +2386,8 @@ second paragraph with new text inside
             suggestion_id: "sug-e2e-3way".to_string(),
             reason: Some("requires_three_way".to_string()),
         };
-        let envelope =
-            assemble_event_envelope(e2e_emit_input(reject_body, 1_700_000_020_000))
-                .expect("reject envelope assembles");
+        let envelope = assemble_event_envelope(e2e_emit_input(reject_body, 1_700_000_020_000))
+            .expect("reject envelope assembles");
         assert!(
             ctx.store
                 .append_outbox(&ctx.room_id, &envelope)
@@ -2478,9 +2492,8 @@ second paragraph with new text inside
             suggestion_id: "sug-e2e-stale".to_string(),
             reason: Some("stale".to_string()),
         };
-        let envelope =
-            assemble_event_envelope(e2e_emit_input(reject_body, 1_700_000_030_000))
-                .expect("envelope assembles");
+        let envelope = assemble_event_envelope(e2e_emit_input(reject_body, 1_700_000_030_000))
+            .expect("envelope assembles");
         assert!(
             ctx.store
                 .append_outbox(&ctx.room_id, &envelope)
@@ -2539,8 +2552,7 @@ second paragraph with new text inside
         )
         .expect("resolver");
         assert!(matches!(verdict, ApplyVerdict::Ready { .. }));
-        let outcome =
-            apply_ready_verdict(&verdict, &ctx, current_bytes).expect("apply");
+        let outcome = apply_ready_verdict(&verdict, &ctx, current_bytes).expect("apply");
 
         // Build + emit the accept envelope.
         let accept_body = ReviewEventBody::SuggestionAccepted {
@@ -2548,9 +2560,8 @@ second paragraph with new text inside
             applied_revision_id: outcome.revision.revision_id.clone(),
             resulting_hash: outcome.resulting_hash.clone(),
         };
-        let envelope =
-            assemble_event_envelope(e2e_emit_input(accept_body, 1_700_000_040_000))
-                .expect("envelope assembles");
+        let envelope = assemble_event_envelope(e2e_emit_input(accept_body, 1_700_000_040_000))
+            .expect("envelope assembles");
         ctx.store
             .append_outbox(&ctx.room_id, &envelope)
             .expect("append");
@@ -2665,12 +2676,14 @@ second paragraph with new text inside
         )
         .expect("resolver");
         assert!(matches!(verdict, ApplyVerdict::Ready { .. }));
-        let outcome =
-            apply_ready_verdict(&verdict, &ctx, current_bytes).expect("apply");
+        let outcome = apply_ready_verdict(&verdict, &ctx, current_bytes).expect("apply");
         assert_eq!(
             std::fs::read(&ctx.path).expect("read"),
             E2E_FINAL_MD.as_bytes(),
         );
-        assert_eq!(outcome.resulting_hash, content_hash(E2E_FINAL_MD.as_bytes()));
+        assert_eq!(
+            outcome.resulting_hash,
+            content_hash(E2E_FINAL_MD.as_bytes())
+        );
     }
 }

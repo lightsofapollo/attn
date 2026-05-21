@@ -28,8 +28,7 @@ use crate::review::agent_identity::{
     AGENTS_DIRNAME, list_agents_in, load_agent_in, register_agent_in,
 };
 use crate::review::bootstrap::{
-    BootstrapConfig, BootstrapError, Bootstrapper, IDENTITY_FILENAME,
-    load_or_create_identity_in,
+    BootstrapConfig, BootstrapError, Bootstrapper, IDENTITY_FILENAME, load_or_create_identity_in,
 };
 use crate::review::store::ReviewStore;
 use std::sync::Arc;
@@ -141,10 +140,13 @@ fn run_join_via_daemon(invite: &str) -> Result<()> {
 
 fn run_register_agent(name: &str) -> Result<()> {
     let base = runtime_dir().context("resolve runtime_dir for agent registry")?;
-    let identity = register_agent_in(&base, name)
-        .with_context(|| format!("register agent {name:?}"))?;
+    let identity =
+        register_agent_in(&base, name).with_context(|| format!("register agent {name:?}"))?;
     println!("registered agent {name:?}");
-    println!("  identity:   {}/{AGENTS_DIRNAME}/{name}/{IDENTITY_FILENAME}", base.display());
+    println!(
+        "  identity:   {}/{AGENTS_DIRNAME}/{name}/{IDENTITY_FILENAME}",
+        base.display()
+    );
     println!("  deviceId:   {}", identity.device_id);
     println!("  participant:{}", identity.participant_id);
     println!("  pubkey:     {}", identity.public_signing_key);
@@ -172,13 +174,11 @@ fn run_whoami(as_agent: Option<&str>) -> Result<()> {
     let base = runtime_dir().context("resolve runtime_dir")?;
     let (label, identity) = match as_agent {
         Some(name) => {
-            let id = load_agent_in(&base, name)
-                .with_context(|| format!("load agent {name:?}"))?;
+            let id = load_agent_in(&base, name).with_context(|| format!("load agent {name:?}"))?;
             (format!("agent {name:?}"), id)
         }
         None => {
-            let id = load_or_create_identity_in(&base)
-                .context("load or create daemon identity")?;
+            let id = load_or_create_identity_in(&base).context("load or create daemon identity")?;
             ("daemon (owner)".to_string(), id)
         }
     };
@@ -197,7 +197,11 @@ fn run_join_as_agent(invite: &str, name: &str, relay_url_override: Option<&str>)
 
     let relay_url = relay_url_override
         .map(str::to_string)
-        .or_else(|| std::env::var("ATTN_RELAY_URL").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("ATTN_RELAY_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .or_else(|| option_env!("ATTN_DEFAULT_RELAY_URL").map(str::to_string))
         .unwrap_or_else(|| DEFAULT_RELAY_URL.to_string());
     if relay_url.is_empty() {
@@ -208,15 +212,12 @@ fn run_join_as_agent(invite: &str, name: &str, relay_url_override: Option<&str>)
     // means the agent's outbox + room.json merge into the existing review
     // surface if the same machine is also the owner. For a pure remote
     // bot this is still safe — the store is created on first use.
-    let store = Arc::new(
-        ReviewStore::open().context("open review store for agent join")?,
-    );
+    let store = Arc::new(ReviewStore::open().context("open review store for agent join")?);
     let config = Arc::new(BootstrapConfig {
         relay_url,
         identity_dir: Some(base.clone()),
     });
-    let boot = Bootstrapper::new(store, config)
-        .context("build Bootstrapper")?;
+    let boot = Bootstrapper::new(store, config).context("build Bootstrapper")?;
 
     // Drive the async join from a freshly-built runtime so we don't
     // require main() to be async.
@@ -240,7 +241,11 @@ fn run_join_as_agent(invite: &str, name: &str, relay_url_override: Option<&str>)
 /// machine-readable code on the CLI).
 fn bootstrap_err_to_anyhow(err: BootstrapError) -> anyhow::Error {
     match err {
-        BootstrapError::Relay { status, code, message } => {
+        BootstrapError::Relay {
+            status,
+            code,
+            message,
+        } => {
             anyhow::anyhow!("relay rejected join: HTTP {status} {code}: {message}")
         }
         other => anyhow::anyhow!(other),

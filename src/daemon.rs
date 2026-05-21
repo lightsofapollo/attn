@@ -508,15 +508,12 @@ pub fn maybe_fork(no_fork: bool) -> Result<()> {
 /// `ReviewManager`. Mirrors `ipc::submit_review_command` — if the manager is
 /// absent (store unavailable at startup) the command is logged and dropped,
 /// keeping the daemon up even when collab persistence is broken.
-fn submit_review_socket_command(
-    review_manager: Option<&Arc<ReviewManager>>,
-    cmd: ReviewCommand,
-) {
+fn submit_review_socket_command(review_manager: Option<&Arc<ReviewManager>>, cmd: ReviewCommand) {
     match review_manager {
         Some(manager) => manager.submit(cmd),
-        None => eprintln!(
-            "attn: socket review command dropped — ReviewManager unavailable: {cmd:?}"
-        ),
+        None => {
+            eprintln!("attn: socket review command dropped — ReviewManager unavailable: {cmd:?}")
+        }
     }
 }
 
@@ -720,10 +717,7 @@ fn handle_client(
                 // + socket routes observably equivalent) and dispatch into the
                 // ReviewManager so the scaffold's stub Update flows through.
                 log_review_join_intent(&invite);
-                submit_review_socket_command(
-                    review_manager,
-                    ReviewCommand::Join { invite },
-                );
+                submit_review_socket_command(review_manager, ReviewCommand::Join { invite });
                 let resp = SocketResponse::Ok;
                 let _ = writeln!(
                     stream,
@@ -983,8 +977,7 @@ mod tests {
 
     fn make_test_manager() -> (Arc<ReviewManager>, mpsc::Receiver<ReviewUpdate>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let store =
-            Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         let working_copy = Arc::new(WorkingCopyService::new());
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
         let tx = Mutex::new(tx);
@@ -1021,10 +1014,7 @@ mod tests {
         // Defensive: a daemon that couldn't open the review store at startup
         // hands `None` into `start_listener`. The socket handler must drop
         // the command rather than panic.
-        submit_review_socket_command(
-            None,
-            ReviewCommand::Inbox,
-        );
+        submit_review_socket_command(None, ReviewCommand::Inbox);
         // Pass = no panic.
     }
 

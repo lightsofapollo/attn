@@ -205,14 +205,8 @@ mod tests {
         assert_eq!(b64(keys.root_key.as_bytes()), ZERO_ROOT_KEY_B64);
         assert_eq!(b64(keys.event_key.as_bytes()), ZERO_EVENT_KEY_B64);
         assert_eq!(b64(keys.snapshot_key.as_bytes()), ZERO_SNAPSHOT_KEY_B64);
-        assert_eq!(
-            b64(keys.signaling_key.as_bytes()),
-            ZERO_SIGNALING_KEY_B64
-        );
-        assert_eq!(
-            b64(keys.admission_key.as_bytes()),
-            ZERO_ADMISSION_KEY_B64
-        );
+        assert_eq!(b64(keys.signaling_key.as_bytes()), ZERO_SIGNALING_KEY_B64);
+        assert_eq!(b64(keys.admission_key.as_bytes()), ZERO_ADMISSION_KEY_B64);
     }
 
     #[test]
@@ -340,8 +334,7 @@ mod tests {
         admission_key: String,
     }
 
-    const CORPUS_JSON: &str =
-        include_str!("../../../planning/collab/test-vectors/kdf.json");
+    const CORPUS_JSON: &str = include_str!("../../../planning/collab/test-vectors/kdf.json");
 
     fn decode_secret(s: &str) -> [u8; 32] {
         let bytes = URL_SAFE_NO_PAD

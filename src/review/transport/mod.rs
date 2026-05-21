@@ -69,6 +69,10 @@ pub enum TransportError {
 ///
 /// The transport runs its own task internally; the consumer drains an
 /// `UnboundedReceiver<TransportEvent>` returned from `connect`.
+// `EventImported` carries a full `ReviewEvent` (~816B). These events flow one at
+// a time over an unbounded channel and are consumed immediately; boxing would
+// only churn every construct/match site for no real allocation win.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum TransportEvent {
     /// First frame the relay sends after admission completes.
@@ -192,11 +196,8 @@ pub trait Transport: Send + Sync {
     /// When `with_delete` is `true` and the room policy has
     /// `delete_events_after_owner_ack`, the relay will GC the acked
     /// envelopes from the mailbox.
-    async fn ack(
-        &self,
-        envelope_ids: Vec<String>,
-        with_delete: bool,
-    ) -> Result<(), TransportError>;
+    async fn ack(&self, envelope_ids: Vec<String>, with_delete: bool)
+    -> Result<(), TransportError>;
 
     /// Disconnect cleanly. The transport's background task exits and any
     /// outstanding receivers see a final `Disconnected` event before close.
@@ -336,9 +337,7 @@ mod tests {
 
         // Spot-check that numeric payloads survive into the message.
         assert!(
-            TransportError::CursorTooOld(99)
-                .to_string()
-                .contains("99"),
+            TransportError::CursorTooOld(99).to_string().contains("99"),
             "CursorTooOld should embed the seq number"
         );
         assert!(

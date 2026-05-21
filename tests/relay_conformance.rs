@@ -86,7 +86,9 @@ fn default_corpus_version() -> u32 {
 #[serde(rename_all = "camelCase")]
 struct Scenario {
     name: String,
-    /// Optional doc string. Surfaced in failure messages.
+    /// Optional doc string. Part of the corpus JSON schema (kept so authors can
+    /// annotate scenarios); not yet surfaced in Rust output.
+    #[allow(dead_code)] // schema field — deserialized from the corpus, not read in code.
     #[serde(default)]
     description: Option<String>,
     /// Setup steps run first. Failures here surface as `setup failure` so the
@@ -300,7 +302,10 @@ async fn corpus_schema_round_trips_a_minimal_fixture() -> Result<()> {
     assert_eq!(corpus.scenarios.len(), 3);
     assert_eq!(corpus.scenarios[0].name, "health-smoke");
     assert!(corpus.scenarios[1].skip);
-    assert_eq!(corpus.scenarios[1].skip_reason.as_deref(), Some("not yet implemented"));
+    assert_eq!(
+        corpus.scenarios[1].skip_reason.as_deref(),
+        Some("not yet implemented")
+    );
     assert_eq!(corpus.scenarios[2].setup.len(), 1);
     assert_eq!(corpus.scenarios[2].setup[0].path, "/v2/rooms/foo");
     Ok(())
@@ -375,12 +380,12 @@ async fn run_scenario(client: &MailboxClient, scenario: &Scenario) -> Result<()>
             actual_status
         ));
     }
-    if let Some(expected_body) = &expected.body {
-        if let Err(e) = subset_match(expected_body, &actual_body) {
-            return Err(anyhow!(
-                "body mismatch: {e}\n  expected: {expected_body}\n  actual:   {actual_body}"
-            ));
-        }
+    if let Some(expected_body) = &expected.body
+        && let Err(e) = subset_match(expected_body, &actual_body)
+    {
+        return Err(anyhow!(
+            "body mismatch: {e}\n  expected: {expected_body}\n  actual:   {actual_body}"
+        ));
     }
     Ok(())
 }
@@ -397,12 +402,7 @@ async fn run_step(client: &MailboxClient, step: &Step) -> Result<(u16, Value)> {
         Some(v) => Some(serde_json::to_vec(v)?),
     };
     client
-        .request(
-            &step.method,
-            &step.path,
-            &headers,
-            body_bytes.as_deref(),
-        )
+        .request(&step.method, &step.path, &headers, body_bytes.as_deref())
         .await
 }
 

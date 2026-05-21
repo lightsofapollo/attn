@@ -49,9 +49,7 @@ use crate::daemon::runtime_dir;
 use crate::review::crypto::ids::{derive_envelope_id_for_event, derive_event_id};
 use crate::review::crypto::kdf::{derive_room_id, derive_room_keys};
 use crate::review::crypto::pow::TokenPool;
-use crate::review::crypto::signing::{
-    DeviceSigningKey, DeviceVerifyingKey, SignError, sign_event,
-};
+use crate::review::crypto::signing::{DeviceSigningKey, DeviceVerifyingKey, SignError, sign_event};
 use crate::review::envelope::{AssembleInput, assemble_event_envelope};
 use crate::review::ids::{DeviceId, FileId, ParticipantId, RoomId, SnapshotId};
 use crate::review::model::SnapshotPlaintext;
@@ -278,14 +276,12 @@ pub fn save_identity_to(
     dir: &std::path::Path,
     identity: &DeviceIdentity,
 ) -> Result<(), BootstrapError> {
-    std::fs::create_dir_all(dir).map_err(|e| {
-        BootstrapError::Identity(format!("create dir {}: {e}", dir.display()))
-    })?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| BootstrapError::Identity(format!("create dir {}: {e}", dir.display())))?;
     let path = dir.join(IDENTITY_FILENAME);
     let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(identity).map_err(|e| {
-        BootstrapError::Identity(format!("serialize identity: {e}"))
-    })?;
+    let bytes = serde_json::to_vec_pretty(identity)
+        .map_err(|e| BootstrapError::Identity(format!("serialize identity: {e}")))?;
     std::fs::write(&tmp, &bytes)
         .map_err(|e| BootstrapError::Identity(format!("write {}: {e}", tmp.display())))?;
     std::fs::rename(&tmp, &path).map_err(|e| {
@@ -310,9 +306,7 @@ pub fn load_or_create_identity() -> Result<DeviceIdentity, BootstrapError> {
 
 /// Like `load_or_create_identity` but with an explicit directory. Used by the
 /// bootstrap flow when a manager-scoped override is in play and by tests.
-pub fn load_or_create_identity_in(
-    dir: &std::path::Path,
-) -> Result<DeviceIdentity, BootstrapError> {
+pub fn load_or_create_identity_in(dir: &std::path::Path) -> Result<DeviceIdentity, BootstrapError> {
     if let Some(existing) = load_identity_from(dir)? {
         return Ok(existing);
     }
@@ -710,13 +704,8 @@ impl Bootstrapper {
             .await?;
 
         // 4. Publish the owner device.
-        self.register_device(
-            &room_id,
-            &identity,
-            "owner",
-            &room_keys.admission_key,
-        )
-        .await?;
+        self.register_device(&room_id, &identity, "owner", &room_keys.admission_key)
+            .await?;
 
         // 5. Sign + enqueue a RoomCreated envelope so the room's append-only
         //    log starts with the right genesis event. The outbox processor
@@ -1133,9 +1122,7 @@ impl Bootstrapper {
         now_ms: u64,
     ) -> Result<(FileId, SnapshotId), BootstrapError> {
         use crate::review::anchors::index::build_anchor_index;
-        use crate::review::crypto::ids::{
-            content_hash, derive_file_id, derive_snapshot_id,
-        };
+        use crate::review::crypto::ids::{content_hash, derive_file_id, derive_snapshot_id};
 
         let markdown_bytes = std::fs::read(path)
             .map_err(|e| BootstrapError::Store(format!("read {}: {e}", path.display())))?;
@@ -1145,7 +1132,10 @@ impl Bootstrapper {
         let display_path = path.to_string_lossy().to_string();
         let (file_id, is_first) = match existing_file_id {
             Some(fid) => (fid, false),
-            None => (derive_file_id(&room_secret, &display_path, &base_hash), true),
+            None => (
+                derive_file_id(&room_secret, &display_path, &base_hash),
+                true,
+            ),
         };
         let snapshot_id = derive_snapshot_id(room_id, &file_id, &base_hash, now_ms as i64);
 
@@ -1197,9 +1187,7 @@ impl Bootstrapper {
         path: &std::path::Path,
         now_ms: u64,
     ) -> Result<Option<(RoomId, FileId, SnapshotId)>, BootstrapError> {
-        let Some((room_id, file_id)) =
-            find_room_for_path(self.store.root(), path)?
-        else {
+        let Some((room_id, file_id)) = find_room_for_path(self.store.root(), path)? else {
             return Ok(None);
         };
         let (fid, sid) = self.publish_snapshot(&room_id, path, file_id, now_ms)?;
@@ -1323,12 +1311,8 @@ impl Bootstrapper {
             .map_err(|e| BootstrapError::Crypto(format!("serialize CreateRoomBody: {e}")))?;
         let path = format!("/v2/rooms/{}", room_id.as_str());
         let url = format!("{}{}", self.config.relay_url.trim_end_matches('/'), path);
-        let admission_header = admission_header_value(
-            admission_key.as_bytes(),
-            "POST",
-            &path,
-            &body_bytes,
-        );
+        let admission_header =
+            admission_header_value(admission_key.as_bytes(), "POST", &path, &body_bytes);
 
         // Attn-Owner-Signature (security-review.md §H1): prove possession of
         // the owner private key on first-create. The relay verifies this
@@ -1338,12 +1322,8 @@ impl Bootstrapper {
         // know whether this call is first-create or rejoin until it sees the
         // response status (201 vs 200), and the relay accepts a valid sig
         // either way.
-        let owner_sig_header = owner_sig_header_value(
-            &identity.signing_key()?,
-            "POST",
-            &path,
-            &body_bytes,
-        );
+        let owner_sig_header =
+            owner_sig_header_value(&identity.signing_key()?, "POST", &path, &body_bytes);
 
         // Attn-PoW (abuse hardening). The relay gates room-create on a PoW token
         // bound to (roomId, ownerSigningKeyId, POST, path). ownerSigningKeyId is
@@ -1364,7 +1344,10 @@ impl Bootstrapper {
         let resp = self
             .http
             .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )
             .header("Attn-Admission", admission_header)
             .header("Attn-Owner-Signature", owner_sig_header)
             .header("Attn-PoW", pow_token)
@@ -1380,12 +1363,10 @@ impl Bootstrapper {
         match status.as_u16() {
             200 | 201 => {
                 let _parsed: CreateRoomResponse =
-                    serde_json::from_slice(&raw).map_err(|e| {
-                        BootstrapError::Relay {
-                            status: status.as_u16(),
-                            code: "ATTN_RESPONSE_DECODE".to_string(),
-                            message: e.to_string(),
-                        }
+                    serde_json::from_slice(&raw).map_err(|e| BootstrapError::Relay {
+                        status: status.as_u16(),
+                        code: "ATTN_RESPONSE_DECODE".to_string(),
+                        message: e.to_string(),
                     })?;
                 Ok(())
             }
@@ -1451,17 +1432,16 @@ impl Bootstrapper {
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| BootstrapError::Crypto(format!("serialize RegisterDeviceBody: {e}")))?;
         let url = format!("{}{}", self.config.relay_url.trim_end_matches('/'), path);
-        let admission_header = admission_header_value(
-            admission_key.as_bytes(),
-            "POST",
-            &path,
-            &body_bytes,
-        );
+        let admission_header =
+            admission_header_value(admission_key.as_bytes(), "POST", &path, &body_bytes);
 
         let resp = self
             .http
             .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )
             .header("Attn-Admission", admission_header)
             .header("Attn-PoW", pow_token)
             .body(body_bytes)
@@ -1488,8 +1468,7 @@ impl Bootstrapper {
     ) -> Result<Vec<DirectoryDevice>, BootstrapError> {
         let path = format!("/v2/rooms/{}/devices", room_id.as_str());
         let url = format!("{}{}", self.config.relay_url.trim_end_matches('/'), path);
-        let admission_header =
-            admission_header_value(admission_key.as_bytes(), "GET", &path, &[]);
+        let admission_header = admission_header_value(admission_key.as_bytes(), "GET", &path, &[]);
         let resp = self
             .http
             .get(&url)
@@ -1504,13 +1483,12 @@ impl Bootstrapper {
             .map_err(|e| BootstrapError::Network(format!("read body: {e}")))?;
         match status.as_u16() {
             200 => {
-                let parsed: ListDevicesResponse = serde_json::from_slice(&raw).map_err(|e| {
-                    BootstrapError::Relay {
+                let parsed: ListDevicesResponse =
+                    serde_json::from_slice(&raw).map_err(|e| BootstrapError::Relay {
                         status: 200,
                         code: "ATTN_RESPONSE_DECODE".to_string(),
                         message: e.to_string(),
-                    }
-                })?;
+                    })?;
                 Ok(parsed.devices)
             }
             other => Err(relay_error(other, &raw)),
@@ -1558,8 +1536,8 @@ fn admission_header_value(
     body: &[u8],
 ) -> String {
     let canonical = build_canonical_request(method, url_path, body);
-    let mut mac = <Hmac<Sha256>>::new_from_slice(admission_key)
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        <Hmac<Sha256>>::new_from_slice(admission_key).expect("HMAC accepts any key length");
     mac.update(&canonical);
     let tag = mac.finalize().into_bytes();
     format!("v2.{}", URL_SAFE_NO_PAD.encode(tag))
@@ -1701,9 +1679,8 @@ fn load_local_shares(
 ) -> Result<std::collections::HashMap<String, LocalShareRecord>, BootstrapError> {
     let path = local_shares_index_path(root);
     match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
-            BootstrapError::Store(format!("decode {}: {e}", path.display()))
-        }),
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|e| BootstrapError::Store(format!("decode {}: {e}", path.display()))),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
         Err(err) => Err(BootstrapError::Store(format!(
             "read {}: {err}",
@@ -1788,9 +1765,8 @@ fn find_room_for_path(
     let all = load_local_shares(root)?;
     for (room_id_str, record) in all {
         if record.path == target {
-            let room_id: RoomId =
-                serde_json::from_value(serde_json::Value::String(room_id_str))
-                    .expect("RoomId deserializes from any string");
+            let room_id: RoomId = serde_json::from_value(serde_json::Value::String(room_id_str))
+                .expect("RoomId deserializes from any string");
             let file_id = record.file_id.map(|s| {
                 serde_json::from_value::<FileId>(serde_json::Value::String(s))
                     .expect("FileId deserializes from any string")
@@ -1949,7 +1925,11 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
 
         // First call: no file -> generate + persist.
-        assert!(load_identity_from(dir.path()).expect("load empty").is_none());
+        assert!(
+            load_identity_from(dir.path())
+                .expect("load empty")
+                .is_none()
+        );
         let created = load_or_create_identity_in(dir.path()).expect("create");
 
         // The file must exist now and decode to the same struct.
@@ -1961,7 +1941,9 @@ mod tests {
         assert_eq!(created, loaded, "identity must persist across calls");
 
         // Explicit load path also returns the persisted record.
-        let raw = load_identity_from(dir.path()).expect("load").expect("present");
+        let raw = load_identity_from(dir.path())
+            .expect("load")
+            .expect("present");
         assert_eq!(raw, created);
 
         // Signing key reconstructs from the seed.
@@ -2008,8 +1990,7 @@ mod tests {
 
     #[test]
     fn parse_invite_rejects_bad_base64() {
-        let err = parse_invite("attn://review/abc#key=***not_base64***")
-            .expect_err("bad b64");
+        let err = parse_invite("attn://review/abc#key=***not_base64***").expect_err("bad b64");
         match err {
             BootstrapError::InviteParse(msg) => assert!(msg.contains("base64url"), "got: {msg}"),
             other => panic!("expected InviteParse, got {other:?}"),
@@ -2085,8 +2066,9 @@ mod tests {
         assert!(outcome.newly_created);
 
         // Identity is on disk.
-        let id_on_disk =
-            load_identity_from(id_dir.path()).expect("load id").expect("identity present");
+        let id_on_disk = load_identity_from(id_dir.path())
+            .expect("load id")
+            .expect("identity present");
         let derived_pub = id_on_disk
             .verifying_key()
             .expect("vk")
@@ -2263,10 +2245,7 @@ mod tests {
 
         let cache: Arc<RwLock<HashMap<String, DeviceVerifyingKey>>> =
             Arc::new(RwLock::new(HashMap::new()));
-        let outcome = boot
-            .join(&invite, Some(cache.clone()))
-            .await
-            .expect("join");
+        let outcome = boot.join(&invite, Some(cache.clone())).await.expect("join");
         assert_eq!(outcome.room_id, room_id);
 
         // Verifying-key cache must contain the owner's keyId.
@@ -2469,8 +2448,10 @@ mod tests {
 
         let bodies = captured.lock().unwrap().clone();
         assert_eq!(bodies.len(), 2, "two devices POSTs expected");
-        let keys: std::collections::HashSet<_> =
-            bodies.iter().map(|b| b.public_signing_key.clone()).collect();
+        let keys: std::collections::HashSet<_> = bodies
+            .iter()
+            .map(|b| b.public_signing_key.clone())
+            .collect();
         assert_eq!(
             keys.len(),
             2,
@@ -2548,8 +2529,9 @@ mod tests {
 
         // Capture the request so we can re-derive canonicalRequest and
         // verify the sig the same way the relay does.
-        let captured: Arc<Mutex<Option<(String, String, Vec<u8>, String)>>> =
-            Arc::new(Mutex::new(None));
+        // (method, path, body, owner-signature) snapshot of the mocked request.
+        type CapturedRequest = (String, String, Vec<u8>, String);
+        let captured: Arc<Mutex<Option<CapturedRequest>>> = Arc::new(Mutex::new(None));
         let capture = captured.clone();
 
         Mock::given(method("POST"))
@@ -2593,9 +2575,13 @@ mod tests {
             .mount(&server)
             .await;
 
-        boot.share(PathBuf::from("/tmp/owner-sig-test.md"), RoomMode::Async, None)
-            .await
-            .expect("share");
+        boot.share(
+            PathBuf::from("/tmp/owner-sig-test.md"),
+            RoomMode::Async,
+            None,
+        )
+        .await
+        .expect("share");
 
         // Decode the captured request + sig.
         let (method_s, url_path, body_bytes, owner_sig_b64) = captured
@@ -2619,8 +2605,10 @@ mod tests {
         let owner_pub_bytes = URL_SAFE_NO_PAD
             .decode(owner_pub_b64.as_bytes())
             .expect("ownerSigningKey decodes");
-        let owner_pub_arr: [u8; 32] =
-            owner_pub_bytes.as_slice().try_into().expect("32-byte pubkey");
+        let owner_pub_arr: [u8; 32] = owner_pub_bytes
+            .as_slice()
+            .try_into()
+            .expect("32-byte pubkey");
         let verifying = VerifyingKey::from_bytes(&owner_pub_arr).expect("valid pubkey");
 
         let sig_bytes = URL_SAFE_NO_PAD
@@ -2641,7 +2629,7 @@ mod tests {
     fn build_canonical_request_matches_relay_format() {
         let bytes = build_canonical_request("POST", "/v2/rooms/abc", b"hello");
         // The first four parts are deterministic newline-separated text.
-        let prefix_len = "POST".len() + 1 + "/v2/rooms/abc".len() + 1 + 0 + 1;
+        let prefix_len = ("POST".len() + 1 + "/v2/rooms/abc".len() + 1) + 1;
         let expected_prefix = b"POST\n/v2/rooms/abc\n\n";
         assert_eq!(&bytes[..prefix_len], expected_prefix);
         // Last 32 bytes must be SHA-256(body).

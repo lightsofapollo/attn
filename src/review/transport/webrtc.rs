@@ -54,9 +54,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::review::ids::{DeviceId, ParticipantId, RoomId};
 use crate::review::model::MailboxEnvelope;
 use crate::review::transport::inbound::InboundPipeline;
-use crate::review::transport::signaling::{
-    SignalingPayload, assemble_signal_envelope,
-};
+use crate::review::transport::signaling::{SignalingPayload, assemble_signal_envelope};
 use crate::review::transport::{EnvelopeAck, TransportError, TransportEvent};
 
 /// Default STUN server set when `WebRtcConfig::stun_servers` is empty. Google
@@ -390,10 +388,8 @@ impl WebRtcTransport {
         // calls `set_policy` once it learns the room mode.
         let policy = Arc::new(Mutex::new(PolicyMode::Hybrid));
 
-        let ice_restart_enabled =
-            Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let ice_restart_attempts =
-            Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let ice_restart_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let ice_restart_attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
         let transport = Self {
             config: Arc::clone(&config),
@@ -912,13 +908,11 @@ async fn handle_rtc_state_change(
 /// Emit the right `TransportEvent` for a `Failed` transition, based
 /// on the current policy mode. Per `amendments.md` §Phase 4:
 ///   - `live`   → `Error { code: "ATTN_WEBRTC_FAILED" }` so the UI
-///                shows direct-connection failure (no silent mailbox
-///                fallback);
+///     shows direct-connection failure (no silent mailbox fallback);
 ///   - `hybrid` → `Disconnected`; the manager's mode-aware selector
-///                routes everything via mailbox from then on;
+///     routes everything via mailbox from then on;
 ///   - `async`  → `Disconnected` for completeness — WebRTC shouldn't
-///                be running in async mode but the wire shape stays
-///                consistent.
+///     be running in async mode but the wire shape stays consistent.
 async fn emit_failed_for_policy(
     events_tx: &mpsc::UnboundedSender<TransportEvent>,
     policy: &Arc<Mutex<PolicyMode>>,
@@ -1025,11 +1019,7 @@ async fn dispatch_inbound_message(
             // target so a relay-redirected signal envelope (target ≠ self)
             // is rejected before its plaintext reaches anything upstream.
             if let Ok(plaintext) = inbound
-                .import_signal_envelope(
-                    &config.room_id,
-                    &envelope,
-                    &config.local_device_id,
-                )
+                .import_signal_envelope(&config.room_id, &envelope, &config.local_device_id)
                 .await
                 && let Ok(SignalingPayload::Collab { from, payload }) =
                     serde_json::from_slice::<SignalingPayload>(&plaintext)
@@ -1148,9 +1138,7 @@ mod tests {
 
     fn fixture_pipeline() -> (Arc<InboundPipeline>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         let keys = derive_room_keys(&TEST_ROOM_SECRET);
         let cache: VerifyingKeyCache = Arc::new(RwLock::new(HashMap::new()));
         let pipeline = InboundPipeline::new(

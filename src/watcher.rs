@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 use tao::event_loop::EventLoopProxy;
 
 /// Sent from background threads to wake the event loop.
+// The `Review` variant wraps a `ReviewUpdate` (~816B via `EventImported`); these
+// are sent one at a time to wake the event loop and consumed immediately, so
+// boxing would only add indirection without a meaningful size win.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum UserEvent {
     /// One or more watched files changed on disk.

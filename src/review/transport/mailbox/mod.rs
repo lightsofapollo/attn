@@ -105,20 +105,15 @@ pub struct MailboxConfig {
 /// - `Manual` — the caller decides what to do via the emitted Error event;
 ///   the client does not auto-reconnect. Used in tests and for owner-side
 ///   UI flows where a human is in the loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CursorRecoveryPolicy {
     /// Reset cursor to `resyncFromSeq` and reconnect. Default.
+    #[default]
     ResyncFromOldest,
     /// Emit an error, do not reconnect — caller initiates a P2P snapshot.
     RequestSnapshot,
     /// Emit an error, do not reconnect — caller drives the next step.
     Manual,
-}
-
-impl Default for CursorRecoveryPolicy {
-    fn default() -> Self {
-        CursorRecoveryPolicy::ResyncFromOldest
-    }
 }
 
 impl MailboxConfig {
@@ -293,8 +288,8 @@ fn load_sent_ids(
         if line.is_empty() {
             continue;
         }
-        let rec: SentRecord = serde_json::from_slice(line)
-            .with_context(|| format!("decode {}", path.display()))?;
+        let rec: SentRecord =
+            serde_json::from_slice(line).with_context(|| format!("decode {}", path.display()))?;
         out.insert(rec.envelope_id);
     }
     Ok(out)
@@ -310,8 +305,7 @@ fn append_sent_record(
     use std::io::Write as _;
     let path = sent_log_path(store_root, room_id);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let mut line = serde_json::to_string(record)
         .with_context(|| format!("serialize sent record for {}", path.display()))?;
@@ -387,8 +381,7 @@ fn canonicalize_query(pairs: &[(String, String)]) -> String {
 fn rfc3986_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
-        let is_unreserved = b.is_ascii_alphanumeric()
-            || matches!(b, b'-' | b'.' | b'_' | b'~');
+        let is_unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~');
         if is_unreserved {
             out.push(b as char);
         } else {
@@ -408,8 +401,8 @@ fn admission_header_value(
     body: &[u8],
 ) -> String {
     let canonical = canonical_request_bytes(method, url_path, query_pairs, body);
-    let mut mac = <Hmac<Sha256>>::new_from_slice(admission_key)
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        <Hmac<Sha256>>::new_from_slice(admission_key).expect("HMAC accepts any key length");
     mac.update(&canonical);
     let tag = mac.finalize().into_bytes();
     format!("v2.{}", URL_SAFE_NO_PAD.encode(tag))
@@ -644,7 +637,10 @@ impl OutboxProcessor {
         let resp = self
             .http_client
             .post(url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )
             .header("Attn-Admission", admission)
             .header("Attn-PoW", pow_token)
             .body(body.to_vec())
@@ -857,7 +853,9 @@ mod tests {
 
     /// Build a wiremock response that echoes the request envelopes back as
     /// accepted with monotonically increasing serverSeqs.
-    fn echo_accept_response(start_seq: u64) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync + 'static {
+    fn echo_accept_response(
+        start_seq: u64,
+    ) -> impl Fn(&Request) -> ResponseTemplate + Send + Sync + 'static {
         move |req: &Request| {
             let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
             let envelopes = body
@@ -904,7 +902,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        processor.enqueue(sample_envelope("env-1")).expect("enqueue");
+        processor
+            .enqueue(sample_envelope("env-1"))
+            .expect("enqueue");
 
         // Verify the store has it (so a restart would replay).
         let on_disk: Vec<MailboxEnvelope> = store
@@ -991,7 +991,11 @@ mod tests {
         }
 
         let acks = processor.process_once().await.expect("process_once");
-        assert_eq!(acks.len(), 33, "all 33 must be acked across the two batches");
+        assert_eq!(
+            acks.len(),
+            33,
+            "all 33 must be acked across the two batches"
+        );
 
         let requests = server.received_requests().await.expect("requests");
         assert_eq!(requests.len(), 2, "33 envelopes must split into 32 + 1");
@@ -1021,7 +1025,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        processor.enqueue(sample_envelope("env-1")).expect("enqueue");
+        processor
+            .enqueue(sample_envelope("env-1"))
+            .expect("enqueue");
         let err = processor.process_once().await.expect_err("rate limit");
         match err {
             TransportError::RateLimited(ms) => assert_eq!(ms, 2500),
@@ -1049,7 +1055,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        processor.enqueue(sample_envelope("env-1")).expect("enqueue");
+        processor
+            .enqueue(sample_envelope("env-1"))
+            .expect("enqueue");
         let err = processor.process_once().await.expect_err("401");
         assert!(
             matches!(err, TransportError::AdmissionRejected),
@@ -1073,7 +1081,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        processor.enqueue(sample_envelope("env-1")).expect("enqueue");
+        processor
+            .enqueue(sample_envelope("env-1"))
+            .expect("enqueue");
         let err = processor.process_once().await.expect_err("507");
         assert!(matches!(err, TransportError::StorageCapReached));
 
@@ -1117,7 +1127,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        processor.enqueue(sample_envelope("env-1")).expect("enqueue");
+        processor
+            .enqueue(sample_envelope("env-1"))
+            .expect("enqueue");
         let acks = processor.process_once().await.expect("process_once");
         assert_eq!(acks.len(), 1);
         assert_eq!(acks[0].server_seq, 1);

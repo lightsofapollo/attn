@@ -24,9 +24,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::review::bootstrap::{
-    BootstrapConfig, Bootstrapper, JoinOutcome, ShareOutcome,
-};
+use crate::review::bootstrap::{BootstrapConfig, Bootstrapper, JoinOutcome, ShareOutcome};
 use crate::review::crypto::signing::DeviceSigningKey;
 use crate::review::envelope::{AssembleInput, assemble_event_envelope};
 use crate::review::ids::{DeviceId, EventId, FileId, ParticipantId, RoomId, SnapshotId};
@@ -36,9 +34,7 @@ use crate::review::model::{
 };
 use crate::review::store::ReviewStore;
 use crate::review::transport::inbound::VerifyingKeyCache;
-use crate::review::transport::selector::{
-    self, RoomTransports, TransportConfig, TransportMode,
-};
+use crate::review::transport::selector::{self, RoomTransports, TransportConfig, TransportMode};
 use crate::review::transport::signaling::{SignalingPayload, assemble_signal_envelope};
 use crate::review::transport::{EnvelopeAck, TransportError};
 use crate::review::working_copy::WorkingCopyService;
@@ -122,8 +118,16 @@ pub enum ReviewCommand {
 /// The payload is intentionally serialized as `camelCase` JSON via serde so it
 /// round-trips through `evaluate_script` into the TypeScript types in
 /// `web/src/lib/types.ts` without an extra translation layer.
+// `EventImported` carries a full `ReviewEvent` (~816B). Boxing it would churn
+// every match/construct site across the IPC + transport layers for a payload
+// that is built once and immediately consumed — not worth the indirection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ReviewUpdate {
     /// Room connection / mode / peer list changed.
     RoomStatusChanged { room_id: RoomId, status: String },
@@ -176,10 +180,7 @@ pub enum ReviewUpdate {
     /// socket subscribes (a Hello frame), `offline` on disconnect. Drives the
     /// `ConnectionBadge`. Values match the frontend `ReviewStatus.connection`
     /// union (`live_direct | mailbox | offline | direct_failed`).
-    ConnectionChanged {
-        room_id: RoomId,
-        connection: String,
-    },
+    ConnectionChanged { room_id: RoomId, connection: String },
     /// Inbound live co-typing traffic for the webview's prosemirror-collab
     /// authority/client. `payload` is the opaque step JSON the sender emitted;
     /// `from` lets the webview drop its own broadcast echoes.
@@ -316,7 +317,9 @@ pub struct ReviewManager {
     /// Per-room outbox handle. Retained alongside `cancels` so `Pull` can force
     /// a one-shot drain (`OutboxProcessor::process_once`) without re-deriving
     /// the room keys / mailbox config. Dropped on `Stop`.
-    outboxes: Arc<std::sync::Mutex<HashMap<RoomId, Arc<crate::review::transport::mailbox::OutboxProcessor>>>>,
+    outboxes: Arc<
+        std::sync::Mutex<HashMap<RoomId, Arc<crate::review::transport::mailbox::OutboxProcessor>>>,
+    >,
 }
 
 /// A room's live WebRTC mesh — one DataChannel transport per other participant
@@ -324,7 +327,10 @@ pub struct ReviewManager {
 /// over every transport when the mesh is complete (`transports.len() == peers`
 /// and all Connected), else falls back to the relay.
 struct LiveWebrtc {
-    transports: HashMap<crate::review::ids::DeviceId, Arc<crate::review::transport::webrtc::WebRtcTransport>>,
+    transports: HashMap<
+        crate::review::ids::DeviceId,
+        Arc<crate::review::transport::webrtc::WebRtcTransport>,
+    >,
     peers: usize,
 }
 
@@ -458,17 +464,9 @@ impl ReviewManager {
         // Bootstrap pipeline owns Share + Join when wired in. Everything else
         // still goes through `stub_update_for` (filled in by follow-up issues).
         match (&cmd, self.bootstrap.as_ref(), self.runtime.as_ref()) {
-            (
-                ReviewCommand::Share { path, mode, ttl },
-                Some(bootstrapper),
-                Some(runtime),
-            ) => {
+            (ReviewCommand::Share { path, mode, ttl }, Some(bootstrapper), Some(runtime)) => {
                 let mode = mode_from_str(mode);
-                let result = runtime.block_on(bootstrapper.share(
-                    path.clone(),
-                    mode,
-                    ttl.clone(),
-                ));
+                let result = runtime.block_on(bootstrapper.share(path.clone(), mode, ttl.clone()));
                 self.emit_share_outcome(result);
                 return;
             }
@@ -479,7 +477,11 @@ impl ReviewManager {
                 return;
             }
             (
-                ReviewCommand::CreateComment { room_id, anchor, body },
+                ReviewCommand::CreateComment {
+                    room_id,
+                    anchor,
+                    body,
+                },
                 Some(bootstrapper),
                 Some(_runtime),
             ) => {
@@ -489,11 +491,8 @@ impl ReviewManager {
                     anchor: anchor.clone(),
                     body: body.clone(),
                 };
-                let result = bootstrapper.send_event_sync(
-                    room_id,
-                    event_body,
-                    unix_now_ms_for_manager(),
-                );
+                let result =
+                    bootstrapper.send_event_sync(room_id, event_body, unix_now_ms_for_manager());
                 self.emit_event_outcome(room_id.clone(), result);
                 return;
             }
@@ -509,16 +508,16 @@ impl ReviewManager {
                     operation: draft.operation.clone(),
                     note: draft.note.clone(),
                 };
-                let result = bootstrapper.send_event_sync(
-                    room_id,
-                    event_body,
-                    unix_now_ms_for_manager(),
-                );
+                let result =
+                    bootstrapper.send_event_sync(room_id, event_body, unix_now_ms_for_manager());
                 self.emit_event_outcome(room_id.clone(), result);
                 return;
             }
             (
-                ReviewCommand::AcceptSuggestion { room_id, suggestion_id },
+                ReviewCommand::AcceptSuggestion {
+                    room_id,
+                    suggestion_id,
+                },
                 Some(bootstrapper),
                 Some(_runtime),
             ) => {
@@ -526,21 +525,27 @@ impl ReviewManager {
                 return;
             }
             (
-                ReviewCommand::ResolveAnchor { room_id, event_id, range },
+                ReviewCommand::ResolveAnchor {
+                    room_id,
+                    event_id,
+                    range,
+                },
                 Some(bootstrapper),
                 Some(_runtime),
             ) => {
                 self.resolve_anchor(bootstrapper, room_id, event_id, range);
                 return;
             }
-            (ReviewCommand::SendCollab { room_id, payload }, Some(bootstrapper), Some(_runtime)) => {
+            (
+                ReviewCommand::SendCollab { room_id, payload },
+                Some(bootstrapper),
+                Some(_runtime),
+            ) => {
                 self.send_collab(bootstrapper, room_id, payload);
                 return;
             }
             (ReviewCommand::PublishSnapshot { path }, Some(bootstrapper), Some(_runtime)) => {
-                match bootstrapper
-                    .republish_snapshot_for_path(path, unix_now_ms_for_manager())
-                {
+                match bootstrapper.republish_snapshot_for_path(path, unix_now_ms_for_manager()) {
                     Ok(Some((room_id, _file_id, snapshot_id))) => {
                         eprintln!(
                             "review: republished snapshot {} for {} (room={})",
@@ -672,20 +677,22 @@ impl ReviewManager {
 
         // Snapshot the (room, outbox) pairs to drain. Cloning the Arcs lets us
         // drop the lock before the (potentially slow) network drain.
-        let targets: Vec<(RoomId, Arc<crate::review::transport::mailbox::OutboxProcessor>)> =
-            match self.outboxes.lock() {
-                Ok(map) => match &target {
-                    Some(room_id) => map
-                        .get(room_id)
-                        .map(|ob| vec![(room_id.clone(), Arc::clone(ob))])
-                        .unwrap_or_default(),
-                    None => map
-                        .iter()
-                        .map(|(rid, ob)| (rid.clone(), Arc::clone(ob)))
-                        .collect(),
-                },
-                Err(_) => Vec::new(),
-            };
+        let targets: Vec<(
+            RoomId,
+            Arc<crate::review::transport::mailbox::OutboxProcessor>,
+        )> = match self.outboxes.lock() {
+            Ok(map) => match &target {
+                Some(room_id) => map
+                    .get(room_id)
+                    .map(|ob| vec![(room_id.clone(), Arc::clone(ob))])
+                    .unwrap_or_default(),
+                None => map
+                    .iter()
+                    .map(|(rid, ob)| (rid.clone(), Arc::clone(ob)))
+                    .collect(),
+            },
+            Err(_) => Vec::new(),
+        };
 
         if targets.is_empty() {
             (self.update_tx)(ReviewUpdate::RoomStatusChanged {
@@ -814,7 +821,7 @@ impl ReviewManager {
         suggestion_id: &EventId,
     ) {
         use crate::review::anchors::index::build_anchor_index;
-        use crate::review::apply::{apply_ready_verdict, resolve_suggestion, ApplyContext};
+        use crate::review::apply::{ApplyContext, apply_ready_verdict, resolve_suggestion};
         use crate::review::crypto::ids::{content_hash, derive_snapshot_id};
 
         let emit_err = |code: &str, msg: String| {
@@ -860,10 +867,7 @@ impl ReviewManager {
         };
 
         // 2. Resolve the on-disk path for this room's shared file.
-        let path = match crate::review::bootstrap::find_path_for_room(
-            self.store.root(),
-            room_id,
-        ) {
+        let path = match crate::review::bootstrap::find_path_for_room(self.store.root(), room_id) {
             Ok(Some(p)) => p,
             Ok(None) => {
                 emit_err("ATTN_ACCEPT", "no local file for room".to_string());
@@ -941,8 +945,7 @@ impl ReviewManager {
         let accepted_body = crate::review::model::ReviewEventBody::SuggestionAccepted {
             suggestion_id: match &body {
                 crate::review::model::ReviewEventBody::SuggestionCreated {
-                    suggestion_id,
-                    ..
+                    suggestion_id, ..
                 } => suggestion_id.clone(),
                 _ => unreachable!(),
             },
@@ -955,7 +958,10 @@ impl ReviewManager {
         // 7. Republish the snapshot — the working copy changed, so reviewers
         //    must get the new content.
         if let Err(e) = bootstrapper.republish_snapshot_for_path(&path, now_ms) {
-            emit_err("ATTN_SNAPSHOT_PUBLISH", format!("post-accept republish: {e}"));
+            emit_err(
+                "ATTN_SNAPSHOT_PUBLISH",
+                format!("post-accept republish: {e}"),
+            );
         }
 
         eprintln!(
@@ -1001,9 +1007,9 @@ impl ReviewManager {
                         continue;
                     }
                     file_id = match &ev.body {
-                        crate::review::model::ReviewEventBody::CommentCreated { anchor, .. } => {
-                            Some(anchor.file_id.clone())
-                        }
+                        crate::review::model::ReviewEventBody::CommentCreated {
+                            anchor, ..
+                        } => Some(anchor.file_id.clone()),
                         crate::review::model::ReviewEventBody::SuggestionCreated {
                             anchor, ..
                         } => Some(anchor.file_id.clone()),
@@ -1026,10 +1032,11 @@ impl ReviewManager {
         };
 
         // 2. Emit the durable, propagating override event.
-        let resolved_by = match bootstrapper.config().identity_dir().and_then(|dir| {
-            crate::review::bootstrap::load_or_create_identity_in(&dir)
-                .map_err(crate::review::bootstrap::BootstrapError::from)
-        }) {
+        let resolved_by = match bootstrapper
+            .config()
+            .identity_dir()
+            .and_then(|dir| crate::review::bootstrap::load_or_create_identity_in(&dir))
+        {
             Ok(identity) => identity.typed_participant_id(),
             Err(e) => {
                 emit_err("ATTN_RESOLVE_ANCHOR", format!("load identity: {e}"));
@@ -1129,17 +1136,15 @@ impl ReviewManager {
         {
             use crate::review::transport::webrtc::WebRtcConnectionState;
             // Mesh is complete iff every peer has a Connected DataChannel.
-            let mesh: Option<Vec<Arc<crate::review::transport::webrtc::WebRtcTransport>>> = self
-                .live_webrtc
-                .lock()
-                .ok()
-                .and_then(|map| {
+            let mesh: Option<Vec<Arc<crate::review::transport::webrtc::WebRtcTransport>>> =
+                self.live_webrtc.lock().ok().and_then(|map| {
                     map.get(room_id).and_then(|live| {
                         let all_connected = live.peers > 0
                             && live.transports.len() == live.peers
-                            && live.transports.values().all(|t| {
-                                matches!(t.state(), WebRtcConnectionState::Connected)
-                            });
+                            && live
+                                .transports
+                                .values()
+                                .all(|t| matches!(t.state(), WebRtcConnectionState::Connected));
                         all_connected.then(|| live.transports.values().cloned().collect())
                     })
                 });
@@ -1276,11 +1281,11 @@ impl ReviewManager {
         use crate::review::bootstrap::load_room_secret;
         use crate::review::crypto::kdf::derive_room_keys;
         use crate::review::crypto::pow::TokenPool;
+        use crate::review::transport::TransportEvent;
         use crate::review::transport::inbound::InboundPipeline;
+        use crate::review::transport::mailbox::MailboxConfig;
         use crate::review::transport::mailbox::OutboxProcessor;
         use crate::review::transport::mailbox::ws::MailboxWsClient;
-        use crate::review::transport::mailbox::MailboxConfig;
-        use crate::review::transport::TransportEvent;
 
         let bootstrap = self
             .bootstrap
@@ -1409,21 +1414,16 @@ impl ReviewManager {
             });
 
         // WS subscriber — long-lived task that auto-reconnects.
-        let (events_tx, mut events_rx) =
-            tokio::sync::mpsc::unbounded_channel::<TransportEvent>();
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel::<TransportEvent>();
         // Clones for the WebRTC live arm (built lazily when a peer appears).
         // The transport shares the same inbound pipeline (dedups by EventId via
         // the store) and emits inbound DataChannel envelopes onto the same
         // events channel, so they flow through the forwarder below unchanged.
         let webrtc_inbound = Arc::clone(&inbound);
         let webrtc_events_tx = events_tx.clone();
-        let ws_client = MailboxWsClient::new(
-            mailbox_config,
-            inbound,
-            Arc::clone(&self.store),
-            events_tx,
-        )
-        .with_key_refresher(key_refresher);
+        let ws_client =
+            MailboxWsClient::new(mailbox_config, inbound, Arc::clone(&self.store), events_tx)
+                .with_key_refresher(key_refresher);
         // Shares the room's single cancel signal (subscribed above, before
         // the sender moved into `cancels`) so `Stop` winds the WS down too.
         runtime.spawn(async move {
@@ -1479,11 +1479,11 @@ impl ReviewManager {
             .flatten()
             .map(|room| room.created_by.as_str().to_string());
         runtime.spawn(async move {
+            use crate::review::transport::PresenceEvent;
             use crate::review::transport::signaling::SignalingPayload;
             use crate::review::transport::webrtc::{
                 WebRtcConfig, WebRtcConnectionState, WebRtcTransport,
             };
-            use crate::review::transport::PresenceEvent;
 
             // Full-mesh DataChannel transports keyed by peer deviceId: every
             // participant connects to every other, so cursors (all-to-all
@@ -1595,7 +1595,9 @@ impl ReviewManager {
                                             peers: peer_count,
                                         }
                                     });
-                                entry.transports.insert(remote.clone(), Arc::clone(&transport));
+                                entry
+                                    .transports
+                                    .insert(remote.clone(), Arc::clone(&transport));
                                 entry.peers = peer_count;
                             }
                             // Badge: a per-transport state watch that recomputes
@@ -1731,10 +1733,7 @@ impl ReviewManager {
                 }
                 Ok(None) => continue,
                 Err(err) => {
-                    eprintln!(
-                        "review: load_room failed for {}: {err}",
-                        room_id.as_str()
-                    );
+                    eprintln!("review: load_room failed for {}: {err}", room_id.as_str());
                     continue;
                 }
                 _ => {}
@@ -1840,18 +1839,18 @@ impl ReviewManager {
             rooms
                 .get(room_id)
                 .cloned()
-                .ok_or_else(|| TransportError::RoomNotFound)?
+                .ok_or(TransportError::RoomNotFound)?
         };
         let transports = shared.lock().await;
         let result = selector::send_envelopes(&transports, envelopes).await;
-        if let Err(TransportError::Io(msg)) = &result {
-            if msg.contains(selector::LIVE_REQUIRED_CODE) {
-                (self.update_tx)(ReviewUpdate::Error {
-                    room_id: Some(room_id.clone()),
-                    code: selector::LIVE_REQUIRED_CODE.to_string(),
-                    message: msg.clone(),
-                });
-            }
+        if let Err(TransportError::Io(msg)) = &result
+            && msg.contains(selector::LIVE_REQUIRED_CODE)
+        {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: selector::LIVE_REQUIRED_CODE.to_string(),
+                message: msg.clone(),
+            });
         }
         result
     }
@@ -1873,7 +1872,7 @@ impl ReviewManager {
             rooms
                 .get(room_id)
                 .cloned()
-                .ok_or_else(|| TransportError::RoomNotFound)?
+                .ok_or(TransportError::RoomNotFound)?
         };
         let mut transports = shared.lock().await;
         selector::transition_mode(&mut transports, next, new_mailbox)
@@ -2071,21 +2070,19 @@ impl ReviewManager {
 
         // ---- 2. If the requester is already at-or-ahead of the latest,
         //         skip the response — they have nothing newer to learn.
-        if let Some(since_id) = since_snapshot_id.as_ref() {
-            if let Some(since_node) = self
+        if let Some(since_id) = since_snapshot_id.as_ref()
+            && let Some(since_node) = self
                 .store
                 .load_snapshot(room_id, since_id)
                 .map_err(|e| TransportError::Io(format!("load_snapshot(since): {e}")))?
-            {
-                if since_node.created_at >= latest.created_at {
-                    return Ok(None);
-                }
-            }
-            // If the since_snapshot_id is unknown to us locally we still
-            // respond with the latest — the requester explicitly asked for
-            // a newer snapshot than one we don't have, which is the
-            // intended-recovery shape.
+            && since_node.created_at >= latest.created_at
+        {
+            return Ok(None);
         }
+        // If the since_snapshot_id is unknown to us locally we still
+        // respond with the latest — the requester explicitly asked for
+        // a newer snapshot than one we don't have, which is the
+        // intended-recovery shape.
 
         // ---- 3. Build the SnapshotCreated event body. Per amendments
         //         decision #14 the wire form omits the local plaintext.
@@ -2287,33 +2284,33 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
         // don't need network). We synthesize a placeholder
         // `ReviewEventBody::CommentCreated` so the wire shape lines up with
         // the production path.
-        ReviewCommand::CreateComment { room_id, anchor, body } => {
-            ReviewUpdate::EventImported {
-                room_id: room_id.clone(),
-                event: stub_review_event(
-                    room_id,
-                    crate::review::model::ReviewEventBody::CommentCreated {
-                        thread_id: "stub-thread".to_string(),
-                        anchor: anchor.clone(),
-                        body: body.clone(),
-                    },
-                ),
-            }
-        }
-        ReviewCommand::CreateSuggestion { room_id, draft } => {
-            ReviewUpdate::EventImported {
-                room_id: room_id.clone(),
-                event: stub_review_event(
-                    room_id,
-                    crate::review::model::ReviewEventBody::SuggestionCreated {
-                        suggestion_id: "stub-suggestion".to_string(),
-                        anchor: draft.anchor.clone(),
-                        operation: draft.operation.clone(),
-                        note: draft.note.clone(),
-                    },
-                ),
-            }
-        }
+        ReviewCommand::CreateComment {
+            room_id,
+            anchor,
+            body,
+        } => ReviewUpdate::EventImported {
+            room_id: room_id.clone(),
+            event: stub_review_event(
+                room_id,
+                crate::review::model::ReviewEventBody::CommentCreated {
+                    thread_id: "stub-thread".to_string(),
+                    anchor: anchor.clone(),
+                    body: body.clone(),
+                },
+            ),
+        },
+        ReviewCommand::CreateSuggestion { room_id, draft } => ReviewUpdate::EventImported {
+            room_id: room_id.clone(),
+            event: stub_review_event(
+                room_id,
+                crate::review::model::ReviewEventBody::SuggestionCreated {
+                    suggestion_id: "stub-suggestion".to_string(),
+                    anchor: draft.anchor.clone(),
+                    operation: draft.operation.clone(),
+                    note: draft.note.clone(),
+                },
+            ),
+        },
         // TODO(Phase 5): run guarded apply flow, write working copy, emit
         // SuggestionAccepted event + AnchorResolutionChanged for affected
         // anchors. The stub still emits the matching event shape.
@@ -2421,7 +2418,7 @@ fn unix_now_ms_for_manager() -> u64 {
 /// Build a placeholder `ReviewEvent` for the no-bootstrap stub paths so
 /// the manager's wire shape stays consistent across configurations.
 /// Real callers go through `Bootstrapper::send_event_sync` which signs
-/// + AEAD-encrypts. The stub uses non-cryptographic placeholders since
+/// and AEAD-encrypts. The stub uses non-cryptographic placeholders since
 /// nothing reads `meta.event_id` / `auth` off these paths.
 fn stub_review_event(
     room_id: &RoomId,
@@ -2432,10 +2429,9 @@ fn stub_review_event(
         "stub-participant".to_string(),
     ))
     .expect("stub ParticipantId deserializes");
-    let device = serde_json::from_value::<DeviceId>(serde_json::Value::String(
-        "stub-device".to_string(),
-    ))
-    .expect("stub DeviceId deserializes");
+    let device =
+        serde_json::from_value::<DeviceId>(serde_json::Value::String("stub-device".to_string()))
+            .expect("stub DeviceId deserializes");
     ReviewEvent {
         meta: EventMeta {
             v: 2,
@@ -2493,7 +2489,10 @@ fn forward_transport_event(
             room_id: rid,
             event,
         } => {
-            (update_tx)(ReviewUpdate::EventImported { room_id: rid, event });
+            (update_tx)(ReviewUpdate::EventImported {
+                room_id: rid,
+                event,
+            });
         }
         TransportEvent::Envelope { .. } => {
             // Already covered by EventImported (events) / handled elsewhere
@@ -2547,7 +2546,11 @@ fn forward_transport_event(
                 replace: false,
             });
         }
-        TransportEvent::CollabSignal { room_id: rid, from, payload } => {
+        TransportEvent::CollabSignal {
+            room_id: rid,
+            from,
+            payload,
+        } => {
             // Drop our own broadcast echo (the relay fans broadcasts back to
             // the author); the webview also guards, but skipping here saves a
             // bridge round-trip.
@@ -2669,8 +2672,7 @@ mod tests {
     /// so tests can assert which `ReviewUpdate`s the manager emitted.
     fn make_manager() -> (ReviewManager, mpsc::Receiver<ReviewUpdate>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let store =
-            Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         let working_copy = Arc::new(WorkingCopyService::new());
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
         let tx = Mutex::new(tx);
@@ -3000,7 +3002,10 @@ mod tests {
         // The nested event uses ReviewEvent's own serde shape (camelCase).
         assert!(json["event"]["meta"].is_object());
         assert!(json["event"]["body"].is_object());
-        assert_eq!(json["event"]["body"]["type"], serde_json::json!("comment_created"));
+        assert_eq!(
+            json["event"]["body"]["type"],
+            serde_json::json!("comment_created")
+        );
     }
 
     // ----- attn-nnj.3.8 anchor-resolution emission -----------------------
@@ -3115,10 +3120,13 @@ mod tests {
         let room_id: RoomId = dummy_id("room-stop");
         let cancel_rx = seed_room_runtime(&mgr, &room_id);
         // Mirror a live WebRTC entry so we can prove it is dropped too.
-        mgr.live_webrtc
-            .lock()
-            .expect("live lock")
-            .insert(room_id.clone(), LiveWebrtc { transports: HashMap::new(), peers: 1 });
+        mgr.live_webrtc.lock().expect("live lock").insert(
+            room_id.clone(),
+            LiveWebrtc {
+                transports: HashMap::new(),
+                peers: 1,
+            },
+        );
 
         assert!(!*cancel_rx.borrow(), "cancel starts false");
 
@@ -3133,21 +3141,33 @@ mod tests {
         );
         // The room is gone from every registry the runtime populated.
         assert!(
-            !mgr.cancels.lock().expect("cancels lock").contains_key(&room_id),
+            !mgr.cancels
+                .lock()
+                .expect("cancels lock")
+                .contains_key(&room_id),
             "Stop should remove the room from `cancels`"
         );
         assert!(
-            !mgr.live_webrtc.lock().expect("live lock").contains_key(&room_id),
+            !mgr.live_webrtc
+                .lock()
+                .expect("live lock")
+                .contains_key(&room_id),
             "Stop should remove the room from `live_webrtc`"
         );
         assert!(
-            !mgr.outboxes.lock().expect("outboxes lock").contains_key(&room_id),
+            !mgr.outboxes
+                .lock()
+                .expect("outboxes lock")
+                .contains_key(&room_id),
             "Stop should remove the room from `outboxes`"
         );
 
         let update = rx.try_recv().expect("expected one update");
         match update {
-            ReviewUpdate::RoomStatusChanged { room_id: rid, status } => {
+            ReviewUpdate::RoomStatusChanged {
+                room_id: rid,
+                status,
+            } => {
                 assert_eq!(rid, room_id);
                 assert_eq!(status, "Stopped");
             }
@@ -3274,9 +3294,8 @@ mod bootstrap_integration_tests {
     ) {
         let store_tmp = TempDir::new().expect("store tempdir");
         let id_tmp = TempDir::new().expect("id tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(store_tmp.path().join("reviews")).expect("open store"),
-        );
+        let store =
+            Arc::new(ReviewStore::open_at(store_tmp.path().join("reviews")).expect("open store"));
         let working_copy = Arc::new(WorkingCopyService::new());
 
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
@@ -3365,7 +3384,9 @@ mod bootstrap_integration_tests {
         // emit_share_outcome now drops two updates: ShareReady (rich
         // payload for the dialog) followed by RoomStatusChanged (drives
         // the ReviewBar visibility).
-        let first = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("first");
+        let first = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("first");
         let invite = match first {
             ReviewUpdate::ShareReady {
                 invite_url,
@@ -3385,7 +3406,9 @@ mod bootstrap_integration_tests {
             }
             other => panic!("expected ShareReady first, got {other:?}"),
         };
-        let second = rx.recv_timeout(std::time::Duration::from_secs(2)).expect("second");
+        let second = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("second");
         match second {
             ReviewUpdate::RoomStatusChanged { status, .. } => {
                 assert_eq!(status, "Live", "post-share status flips to Live");
@@ -3395,7 +3418,9 @@ mod bootstrap_integration_tests {
         assert!(rx.try_recv().is_err(), "no spurious third update");
         let _ = invite;
         // Identity must be on disk.
-        let identity = load_identity_from(id_tmp.path()).expect("load id").expect("present");
+        let identity = load_identity_from(id_tmp.path())
+            .expect("load id")
+            .expect("present");
         assert!(!identity.device_id.is_empty());
         assert!(!identity.public_signing_key.is_empty());
     }
@@ -3416,7 +3441,9 @@ mod bootstrap_integration_tests {
         mgr.submit(ReviewCommand::Join {
             invite: invite.clone(),
         });
-        let update = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("update");
+        let update = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("update");
         match update {
             ReviewUpdate::RoomStatusChanged {
                 room_id: rid,
@@ -3438,7 +3465,9 @@ mod bootstrap_integration_tests {
         mgr.submit(ReviewCommand::Join {
             invite: "not-an-invite".to_string(),
         });
-        let update = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("update");
+        let update = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("update");
         match update {
             ReviewUpdate::Error { code, .. } => {
                 assert_eq!(code, "ATTN_INVITE_PARSE");
@@ -3462,21 +3491,20 @@ mod bootstrap_integration_tests {
 #[cfg(test)]
 mod transport_selector_tests {
     use super::*;
+    use crate::review::transport::TransportError;
     use crate::review::transport::selector::test_support::{
-        dummy_envelope, MailboxOutcome, MockMailbox, MockWebRtc,
+        MailboxOutcome, MockMailbox, MockWebRtc, dummy_envelope,
     };
     use crate::review::transport::selector::{
         MailboxSender, TransportConfig, TransportMode, WebRtcSender,
     };
-    use crate::review::transport::TransportError;
     use std::sync::Mutex;
     use std::sync::mpsc;
     use tempfile::TempDir;
 
     fn make_manager() -> (ReviewManager, mpsc::Receiver<ReviewUpdate>, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let store =
-            Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         let working_copy = Arc::new(WorkingCopyService::new());
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
         let tx = Mutex::new(tx);
@@ -3534,9 +3562,7 @@ mod transport_selector_tests {
         let update = rx.try_recv().expect("expected one update");
         match update {
             ReviewUpdate::Error {
-                room_id: rid,
-                code,
-                ..
+                room_id: rid, code, ..
             } => {
                 assert_eq!(rid.as_ref(), Some(&room));
                 assert_eq!(code, "ATTN_LIVE_REQUIRED");
@@ -3851,7 +3877,9 @@ mod request_snapshot_tests {
     use crate::review::ids::{ContentHash, ParticipantId, SnapshotId};
     use crate::review::model::{AnchorIndex, CanonicalEncoding, SnapshotNode, SnapshotPlaintext};
     use crate::review::transport::selector::test_support::{MockMailbox, MockWebRtc};
-    use crate::review::transport::selector::{MailboxSender, TransportConfig, TransportMode, WebRtcSender};
+    use crate::review::transport::selector::{
+        MailboxSender, TransportConfig, TransportMode, WebRtcSender,
+    };
     use serde::Deserialize;
     use std::sync::Mutex as StdMutex;
     use std::sync::mpsc;
@@ -3870,11 +3898,14 @@ mod request_snapshot_tests {
     /// Build a `ReviewManager` + receiver + tempdir for a single recovery
     /// scenario. The manager is `new`-only (no bootstrap) — recovery tests
     /// drive the registry directly.
-    fn make_manager_with_store() -> (ReviewManager, mpsc::Receiver<ReviewUpdate>, TempDir, Arc<ReviewStore>) {
+    fn make_manager_with_store() -> (
+        ReviewManager,
+        mpsc::Receiver<ReviewUpdate>,
+        TempDir,
+        Arc<ReviewStore>,
+    ) {
         let tmp = TempDir::new().expect("tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         let working_copy = Arc::new(WorkingCopyService::new());
         let (tx, rx) = mpsc::channel::<ReviewUpdate>();
         let tx = StdMutex::new(tx);
@@ -3886,13 +3917,10 @@ mod request_snapshot_tests {
     }
 
     /// Mint a `RoomSignalContext` with the canonical pinned key material.
-    fn fixture_signal_context(
-        room_id: &RoomId,
-        target: Option<DeviceId>,
-    ) -> RoomSignalContext {
+    fn fixture_signal_context(room_id: &RoomId, target: Option<DeviceId>) -> RoomSignalContext {
         let keys = derive_room_keys(&TEST_ROOM_SECRET);
-        let signing_key = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED)
-            .expect("signing key from seed");
+        let signing_key =
+            DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).expect("signing key from seed");
         RoomSignalContext {
             room_id: room_id.clone(),
             author_id: id::<ParticipantId>("p-author-01"),
@@ -3980,7 +4008,11 @@ mod request_snapshot_tests {
         // Mailbox was never wired in Live mode; nothing should hit it.
         // (The selector invariant prevents a mailbox handle here, but we
         // also assert the webrtc path didn't fan out a bonus envelope.)
-        assert_eq!(webrtc.total_sent(), 0, "request_snapshot must not call send_envelopes");
+        assert_eq!(
+            webrtc.total_sent(),
+            0,
+            "request_snapshot must not call send_envelopes"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -4346,4 +4378,3 @@ mod request_snapshot_tests {
         }
     }
 }
-

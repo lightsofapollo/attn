@@ -330,9 +330,7 @@ pub fn assemble_event_envelope_with_nonce(
 /// Open a single encrypted envelope. Returns the recovered `ReviewEvent` on
 /// success; any cryptographic failure short-circuits with a typed error so
 /// the caller can decide whether to drop, retry, or surface to the user.
-pub fn disassemble_event_envelope(
-    input: DisassembleInput,
-) -> Result<ReviewEvent, EnvelopeError> {
+pub fn disassemble_event_envelope(input: DisassembleInput) -> Result<ReviewEvent, EnvelopeError> {
     let DisassembleInput {
         envelope,
         event_key,
@@ -356,10 +354,7 @@ pub fn disassemble_event_envelope(
         .decode(envelope.nonce.as_bytes())
         .map_err(|e| EnvelopeError::InvalidNonce(e.to_string()))?;
     let nonce: AeadNonce = nonce_bytes.as_slice().try_into().map_err(|_| {
-        EnvelopeError::InvalidNonce(format!(
-            "expected 24 bytes, got {}",
-            nonce_bytes.len()
-        ))
+        EnvelopeError::InvalidNonce(format!("expected 24 bytes, got {}", nonce_bytes.len()))
     })?;
     let ciphertext = URL_SAFE_NO_PAD
         .decode(envelope.ciphertext.as_bytes())
@@ -463,7 +458,6 @@ fn envelope_id_for(
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -624,7 +618,10 @@ mod tests {
         .expect("disassemble");
 
         assert_eq!(recovered.body, expected_body);
-        assert_eq!(recovered.meta.author_id, typed::<ParticipantId>("p-author-01"));
+        assert_eq!(
+            recovered.meta.author_id,
+            typed::<ParticipantId>("p-author-01")
+        );
         assert_eq!(recovered.meta.device_id, typed::<DeviceId>("d-device-01"));
         assert_eq!(recovered.meta.room_id, envelope.room_id);
         assert_eq!(recovered.meta.created_at, envelope.created_at);
@@ -709,7 +706,9 @@ mod tests {
 
         // Decode, flip a byte in the body (not the trailing 16-byte tag),
         // re-encode. Poly1305 must catch this.
-        let mut bytes = URL_SAFE_NO_PAD.decode(envelope.ciphertext.as_bytes()).unwrap();
+        let mut bytes = URL_SAFE_NO_PAD
+            .decode(envelope.ciphertext.as_bytes())
+            .unwrap();
         // Pick a byte well before the trailing tag.
         bytes[0] ^= 0x01;
         envelope.ciphertext = URL_SAFE_NO_PAD.encode(&bytes);
@@ -942,7 +941,12 @@ mod tests {
         let input = AssembleInput {
             kind: EnvelopeKind::SnapshotBlob,
             client_nonce: Some([0x77u8; 16]),
-            ..assemble_input_comment(snapshot_key, sk, EnvelopeKind::SnapshotBlob, Some([0x77u8; 16]))
+            ..assemble_input_comment(
+                snapshot_key,
+                sk,
+                EnvelopeKind::SnapshotBlob,
+                Some([0x77u8; 16]),
+            )
         };
         let envelope = assemble_event_envelope(input).unwrap();
 
@@ -973,8 +977,7 @@ mod tests {
 
     /// The corpus is shared with the (future) TS/WASM client.
     /// See `planning/collab/test-vectors/envelope.json`.
-    const ENVELOPE_CORPUS: &str =
-        include_str!("../../planning/collab/test-vectors/envelope.json");
+    const ENVELOPE_CORPUS: &str = include_str!("../../planning/collab/test-vectors/envelope.json");
 
     #[derive(Deserialize)]
     struct CorpusFile {
@@ -1119,8 +1122,9 @@ mod tests {
                 EnvelopeKind::SnapshotBlob => *keys.snapshot_key.as_bytes(),
             };
 
-            let signing_key = DeviceSigningKey::from_bytes(&b64_to_32(&v.inputs.signing_key.private))
-                .expect("corpus signing key");
+            let signing_key =
+                DeviceSigningKey::from_bytes(&b64_to_32(&v.inputs.signing_key.private))
+                    .expect("corpus signing key");
             // Double-check the corpus's pinned public matches the seed.
             assert_eq!(
                 signing_key.verifying_key().to_bytes(),
@@ -1148,10 +1152,8 @@ mod tests {
                 kind: envelope_kind,
                 client_nonce,
             };
-            let envelope =
-                assemble_event_envelope_with_nonce(input, Some(aead_nonce)).unwrap_or_else(|e| {
-                    panic!("[{}] assemble failed: {e}", v.name)
-                });
+            let envelope = assemble_event_envelope_with_nonce(input, Some(aead_nonce))
+                .unwrap_or_else(|e| panic!("[{}] assemble failed: {e}", v.name));
 
             // EnvelopeId must match the pinned value (closes the loop on the
             // EnvelopeId derivation rule per kind).
@@ -1170,10 +1172,11 @@ mod tests {
             );
 
             // Round-trip: open under the same key and recover the event.
-            let signer_keyid = DeviceSigningKey::from_bytes(&b64_to_32(&v.inputs.signing_key.private))
-                .unwrap()
-                .verifying_key()
-                .signing_key_id_base64url();
+            let signer_keyid =
+                DeviceSigningKey::from_bytes(&b64_to_32(&v.inputs.signing_key.private))
+                    .unwrap()
+                    .verifying_key()
+                    .signing_key_id_base64url();
             let mut vks = HashMap::new();
             vks.insert(
                 signer_keyid,

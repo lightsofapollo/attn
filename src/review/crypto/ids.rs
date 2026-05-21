@@ -663,8 +663,7 @@ mod tests {
     }
 
     fn body_from_corpus(body: &Value) -> ReviewEventBody {
-        serde_json::from_value(body.clone())
-            .expect("ReviewEventBody deserializes from corpus body")
+        serde_json::from_value(body.clone()).expect("ReviewEventBody deserializes from corpus body")
     }
 
     #[test]
@@ -807,13 +806,16 @@ mod tests {
                         .unwrap_or_else(|| {
                             panic!("vector {i} ({name}) needs clientNonce for kind {kind}")
                         });
-                    let nonce_bytes = URL_SAFE_NO_PAD
-                        .decode(nonce_b64.as_bytes())
-                        .unwrap_or_else(|_| panic!("vector {i} ({name}) clientNonce not base64url"));
-                    let nonce_arr: [u8; 16] = nonce_bytes
-                        .as_slice()
-                        .try_into()
-                        .unwrap_or_else(|_| panic!("vector {i} ({name}) clientNonce must be 16 bytes"));
+                    let nonce_bytes =
+                        URL_SAFE_NO_PAD
+                            .decode(nonce_b64.as_bytes())
+                            .unwrap_or_else(|_| {
+                                panic!("vector {i} ({name}) clientNonce not base64url")
+                            });
+                    let nonce_arr: [u8; 16] =
+                        nonce_bytes.as_slice().try_into().unwrap_or_else(|_| {
+                            panic!("vector {i} ({name}) clientNonce must be 16 bytes")
+                        });
                     derive_envelope_id_with_nonce(&room_id, device_id, &nonce_arr)
                 }
                 other => panic!("vector {i} ({name}) unknown envelope kind {other}"),
@@ -916,16 +918,14 @@ mod tests {
             (
                 "10-parents (out of order)",
                 vec![
-                    "evt-09", "evt-01", "evt-08", "evt-02", "evt-07", "evt-03", "evt-06",
-                    "evt-04", "evt-05", "evt-00",
+                    "evt-09", "evt-01", "evt-08", "evt-02", "evt-07", "evt-03", "evt-06", "evt-04",
+                    "evt-05", "evt-00",
                 ],
                 1_700_000_030_000,
             ),
         ] {
-            let parents: Vec<EventId> = parent_strs
-                .iter()
-                .map(|s| typed_id::<EventId>(s))
-                .collect();
+            let parents: Vec<EventId> =
+                parent_strs.iter().map(|s| typed_id::<EventId>(s)).collect();
             let meta = EventMeta {
                 v: 2,
                 event_id: typed_id::<EventId>("placeholder-event-id"),

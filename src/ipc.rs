@@ -321,10 +321,7 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 );
             }
             IpcMessage::ReviewCreateSuggestion { room_id, draft } => {
-                submit_review_command(
-                    state,
-                    ReviewCommand::CreateSuggestion { room_id, draft },
-                );
+                submit_review_command(state, ReviewCommand::CreateSuggestion { room_id, draft });
             }
             IpcMessage::ReviewAcceptSuggestion {
                 room_id,
@@ -448,9 +445,7 @@ fn submit_review_command(state: &Arc<Mutex<AppState>>, cmd: ReviewCommand) {
     };
     match manager {
         Some(manager) => manager.submit(cmd),
-        None => eprintln!(
-            "attn: review command dropped — ReviewManager unavailable: {cmd:?}"
-        ),
+        None => eprintln!("attn: review command dropped — ReviewManager unavailable: {cmd:?}"),
     }
 }
 
@@ -575,9 +570,7 @@ mod tests {
         // `LocalRevision` and returns it, but the IPC handler must NOT try
         // to call `append_revision` — nothing should hit disk or panic.
         let tmp = TempDir::new().expect("tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         let active_path = tmp.path().join("doc.md");
         std::fs::write(&active_path, b"# hi\n").expect("seed file");
 
@@ -600,9 +593,7 @@ mod tests {
         // When the path IS bound to a (room, file), the helper must append
         // the revision and the journal must be observable via iter_revisions.
         let tmp = TempDir::new().expect("tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         let active_path = tmp.path().join("doc.md");
         std::fs::write(&active_path, b"# hi\n").expect("seed file");
 
@@ -645,9 +636,7 @@ mod tests {
         // the file, but with no room mapping the revision is built and
         // discarded. The reviews/rooms/ tree stays empty.
         let tmp = TempDir::new().expect("tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         let active_path = tmp.path().join("doc.md");
         std::fs::write(&active_path, b"old\n").expect("seed file");
 
@@ -720,10 +709,7 @@ mod tests {
             let _ = tx.lock().expect("test sink mutex").send(update);
         });
         let working_copy = Arc::new(WorkingCopyService::new());
-        (
-            Arc::new(ReviewManager::new(store, working_copy, sink)),
-            rx,
-        )
+        (Arc::new(ReviewManager::new(store, working_copy, sink)), rx)
     }
 
     fn dummy_review_store(tmp: &TempDir) -> Arc<ReviewStore> {
@@ -792,17 +778,15 @@ mod tests {
 
         let active_path = tmp.path().join("doc.md");
         std::fs::write(&active_path, b"# hi\n").expect("seed file");
-        let state = make_state_with_manager(
-            active_path,
-            Some(store),
-            HashMap::new(),
-            Some(manager),
-        );
+        let state =
+            make_state_with_manager(active_path, Some(store), HashMap::new(), Some(manager));
 
         let body = r#"{"type":"review_share","path":"/tmp/plan.md","mode":"live"}"#;
         dispatch_review_ipc(body, &state);
 
-        let update = rx.try_recv().expect("manager should have received one update");
+        let update = rx
+            .try_recv()
+            .expect("manager should have received one update");
         match update {
             ReviewUpdate::RoomStatusChanged { status, .. } => {
                 assert!(
@@ -829,12 +813,8 @@ mod tests {
 
         let active_path = tmp.path().join("doc.md");
         std::fs::write(&active_path, b"# hi\n").expect("seed file");
-        let state = make_state_with_manager(
-            active_path,
-            Some(store),
-            HashMap::new(),
-            Some(manager),
-        );
+        let state =
+            make_state_with_manager(active_path, Some(store), HashMap::new(), Some(manager));
 
         let body = r#"{
             "type":"review_create_comment",
@@ -850,7 +830,9 @@ mod tests {
         }"#;
         dispatch_review_ipc(body, &state);
 
-        let update = rx.try_recv().expect("manager should have received one update");
+        let update = rx
+            .try_recv()
+            .expect("manager should have received one update");
         match update {
             ReviewUpdate::EventImported { event, .. } => {
                 assert!(

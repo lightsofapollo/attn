@@ -45,7 +45,8 @@ pub fn build_anchor_index(
     markdown_bytes: &[u8],
     snapshot_id: &SnapshotId,
 ) -> Result<AnchorIndex, AnchorIndexError> {
-    let markdown = std::str::from_utf8(markdown_bytes).map_err(|_| AnchorIndexError::InvalidUtf8)?;
+    let markdown =
+        std::str::from_utf8(markdown_bytes).map_err(|_| AnchorIndexError::InvalidUtf8)?;
 
     let doc_hash = content_hash(markdown_bytes);
     let line_count = count_lines(markdown_bytes);
@@ -174,9 +175,8 @@ impl<'a> Walker<'a> {
                 // heading's own ref records its own ordinalAtLevel, which is
                 // the count of preceding headings at this level plus one.
                 let level_index = (level as usize).min(6);
-                self.heading_ordinals[level_index] = self
-                    .heading_ordinals[level_index]
-                    .saturating_add(1);
+                self.heading_ordinals[level_index] =
+                    self.heading_ordinals[level_index].saturating_add(1);
                 let ordinal_at_level = self.heading_ordinals[level_index] - 1;
 
                 let path = self.heading_stack.clone();
@@ -276,9 +276,7 @@ impl<'a> Walker<'a> {
                 );
             }
 
-            NodeValue::BlockQuote
-            | NodeValue::MultilineBlockQuote(_)
-            | NodeValue::Alert(_) => {
+            NodeValue::BlockQuote | NodeValue::MultilineBlockQuote(_) | NodeValue::Alert(_) => {
                 // A blockquote/alert is its own block AND a container. The
                 // resolver treats the whole quote as the block; nested
                 // structure is not separately addressable in v2. Recursing
@@ -383,18 +381,16 @@ impl<'a> Walker<'a> {
     /// `level` lives under everything strictly above it; same-level headings
     /// are siblings, not children.
     fn pop_heading_stack_to(&mut self, level: u32) {
-        while self
-            .heading_stack
-            .last()
-            .is_some_and(|h| h.level >= level)
-        {
+        while self.heading_stack.last().is_some_and(|h| h.level >= level) {
             self.heading_stack.pop();
         }
     }
 
     fn byte_range_of(&self, sp: Sourcepos) -> [u64; 2] {
-        let start = source_offset_to_byte(self.line_starts, self.bytes, sp.start.line, sp.start.column);
-        let end_inclusive = source_offset_to_byte(self.line_starts, self.bytes, sp.end.line, sp.end.column);
+        let start =
+            source_offset_to_byte(self.line_starts, self.bytes, sp.start.line, sp.start.column);
+        let end_inclusive =
+            source_offset_to_byte(self.line_starts, self.bytes, sp.end.line, sp.end.column);
         // Sourcepos's end is the LAST byte of the node (inclusive). The
         // AnchorBlock byteRange is a half-open [start, end_exclusive) pair —
         // bump by 1, clamped to the buffer length so we never overshoot.
@@ -439,12 +435,8 @@ impl<'a> Walker<'a> {
             .and_modify(|n| *n = n.saturating_add(1))
             .or_insert(0);
 
-        let final_fp_input = compose_fingerprint_input(
-            kind_str,
-            &normalized,
-            &path_bytes,
-            duplicate_ordinal,
-        );
+        let final_fp_input =
+            compose_fingerprint_input(kind_str, &normalized, &path_bytes, duplicate_ordinal);
         let content_fingerprint = sha256_hex(&final_fp_input);
 
         // snapshotBlockId = sha256(snapshotId || byteRange || contentFingerprint).
@@ -579,7 +571,7 @@ fn classify_code_block(info: &str) -> AnchorBlockKind {
     // GFM info strings are case-sensitive in the spec but conventionally
     // lower-case; we trim and lower to match the frontend's mermaid
     // nodeview detection (web/src/lib/prosemirror/mermaid/...).
-    let lang = info.trim().split_whitespace().next().unwrap_or("");
+    let lang = info.split_whitespace().next().unwrap_or("");
     let lower = lang.to_ascii_lowercase();
     match lower.as_str() {
         "mermaid" => AnchorBlockKind::Mermaid,
@@ -674,9 +666,8 @@ fn compose_fingerprint_input(
     heading_path_bytes: &[u8],
     duplicate_ordinal: u32,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        kind.len() + normalized_text.len() + heading_path_bytes.len() + 16,
-    );
+    let mut buf =
+        Vec::with_capacity(kind.len() + normalized_text.len() + heading_path_bytes.len() + 16);
     buf.extend_from_slice(kind.as_bytes());
     buf.push(0x1f); // unit separator
     buf.extend_from_slice(normalized_text.as_bytes());
@@ -738,22 +729,14 @@ fn compute_line_starts(bytes: &[u8]) -> Vec<usize> {
 /// Convert a 1-based comrak (line, column) into a byte offset within the
 /// canonical bytes. Columns are byte-counted (not char-counted) per the
 /// comrak default. Past-EOF positions clamp to `bytes.len()`.
-fn source_offset_to_byte(
-    line_starts: &[usize],
-    bytes: &[u8],
-    line: usize,
-    column: usize,
-) -> u64 {
+fn source_offset_to_byte(line_starts: &[usize], bytes: &[u8], line: usize, column: usize) -> u64 {
     if line == 0 {
         // Sourcepos of (0,0,0,0) — comrak sometimes emits this for synthetic
         // nodes. Treat as start of buffer.
         return 0;
     }
     let line_idx = line.saturating_sub(1);
-    let line_start = line_starts
-        .get(line_idx)
-        .copied()
-        .unwrap_or(bytes.len());
+    let line_start = line_starts.get(line_idx).copied().unwrap_or(bytes.len());
     let col_offset = column.saturating_sub(1);
     let offset = line_start.saturating_add(col_offset);
     offset.min(bytes.len()) as u64
@@ -844,7 +827,12 @@ mod tests {
     fn single_paragraph_emits_one_paragraph_block() {
         let md = "Hello world.\n";
         let idx = build(md, "snap-1");
-        assert_eq!(idx.blocks.len(), 1, "expected 1 block, got {:?}", idx.blocks);
+        assert_eq!(
+            idx.blocks.len(),
+            1,
+            "expected 1 block, got {:?}",
+            idx.blocks
+        );
         let b = &idx.blocks[0];
         assert_eq!(b.kind, AnchorBlockKind::Paragraph);
         let span = &md.as_bytes()[b.byte_range[0] as usize..b.byte_range[1] as usize];
@@ -970,8 +958,7 @@ mod tests {
         // And the fingerprints must differ — that's the whole point of
         // mixing duplicateOrdinal into the input.
         assert_ne!(
-            idx.blocks[0].content_fingerprint,
-            idx.blocks[1].content_fingerprint,
+            idx.blocks[0].content_fingerprint, idx.blocks[1].content_fingerprint,
             "duplicate paragraphs must produce DIFFERENT contentFingerprints"
         );
     }
@@ -989,10 +976,12 @@ mod tests {
         let beta_para = idx
             .blocks
             .iter()
-            .find(|b| b.kind == AnchorBlockKind::Paragraph
-                && b.heading_path
-                    .first()
-                    .is_some_and(|r| r.ordinal_at_level == 1))
+            .find(|b| {
+                b.kind == AnchorBlockKind::Paragraph
+                    && b.heading_path
+                        .first()
+                        .is_some_and(|r| r.ordinal_at_level == 1)
+            })
             .expect("para under Beta must reference the 2nd H1 (ordinal 1)");
         assert_eq!(beta_para.heading_path.len(), 1);
     }
@@ -1007,8 +996,7 @@ mod tests {
         // affect contentFingerprint — only normalizedText, kind, path,
         // duplicateOrdinal do.
         assert_eq!(
-            a.blocks[1].content_fingerprint,
-            b.blocks[1].content_fingerprint,
+            a.blocks[1].content_fingerprint, b.blocks[1].content_fingerprint,
             "contentFingerprint must be snapshot-id-independent"
         );
     }
@@ -1112,8 +1100,8 @@ mod tests {
     fn invalid_utf8_returns_error() {
         // 0xFF on its own is invalid UTF-8.
         let bytes = [0xFFu8, 0xFE, 0xFD];
-        let err = build_anchor_index(&bytes, &snap("snap-bad"))
-            .expect_err("invalid UTF-8 should error");
+        let err =
+            build_anchor_index(&bytes, &snap("snap-bad")).expect_err("invalid UTF-8 should error");
         assert!(matches!(err, AnchorIndexError::InvalidUtf8));
     }
 

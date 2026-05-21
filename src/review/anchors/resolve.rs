@@ -18,8 +18,8 @@ use serde_json::Value;
 
 use crate::review::ids::ContentHash;
 use crate::review::model::{
-    Anchor, AnchorBlock, AnchorBlockKind, AnchorIndex, ExactReason, PositionAnchor,
-    RemappedReason, ResolvedAnchor, ResolvedAnchorCandidate,
+    Anchor, AnchorBlock, AnchorBlockKind, AnchorIndex, ExactReason, PositionAnchor, RemappedReason,
+    ResolvedAnchor, ResolvedAnchorCandidate,
 };
 
 // ---------------------------------------------------------------------------
@@ -179,9 +179,7 @@ impl CandidateReason {
     fn as_exact_reason(self) -> Option<ExactReason> {
         match self {
             CandidateReason::BaseHashMatch => Some(ExactReason::BaseHashMatch),
-            CandidateReason::MappedThroughLocalSteps => {
-                Some(ExactReason::MappedThroughLocalSteps)
-            }
+            CandidateReason::MappedThroughLocalSteps => Some(ExactReason::MappedThroughLocalSteps),
             _ => None,
         }
     }
@@ -315,8 +313,11 @@ pub fn resolve_anchor_with_config(
                 let block_bytes = byte_range_slice(current_markdown_bytes, ix_block.byte_range);
                 if let Some(rel) = find_first(block_bytes, quote.exact.as_bytes()) {
                     let abs_start = ix_block.byte_range[0] as usize + rel;
-                    let range =
-                        byte_range_to_position(current_markdown_bytes, abs_start, quote.exact.len());
+                    let range = byte_range_to_position(
+                        current_markdown_bytes,
+                        abs_start,
+                        quote.exact.len(),
+                    );
                     candidates.push(Candidate {
                         confidence: cfg.structure_quote,
                         current_range: range,
@@ -332,37 +333,36 @@ pub fn resolve_anchor_with_config(
     // 0..=quote_len*4 bytes (loose tolerance so the quote can have drifted
     // slightly). If the original quote was present in between, even better;
     // either way we emit a candidate ranging from prefix-end to suffix-start.
-    if let Some(ctx) = &anchor.context {
-        if !ctx.prefix.is_empty() && !ctx.suffix.is_empty() {
-            let max_gap = anchor
-                .quote
-                .as_ref()
-                .map(|q| q.exact.len().saturating_mul(4))
-                .unwrap_or(256);
-            for pre_start in find_all_byte_matches(current_markdown_bytes, ctx.prefix.as_bytes()) {
-                let pre_end = pre_start + ctx.prefix.len();
-                // Search for suffix starting at pre_end up to pre_end+max_gap.
-                let search_end = (pre_end + max_gap).min(current_markdown_bytes.len());
-                let suffix_window = &current_markdown_bytes[pre_end..search_end];
-                if let Some(rel_suffix) = find_first(suffix_window, ctx.suffix.as_bytes()) {
-                    let suf_start = pre_end + rel_suffix;
-                    let span_start = pre_end;
-                    let span_end = suf_start;
-                    if span_end >= span_start {
-                        let range = byte_range_to_position(
-                            current_markdown_bytes,
-                            span_start,
-                            span_end - span_start,
-                        );
-                        candidates.push(Candidate {
-                            confidence: cfg.context,
-                            current_range: range,
-                            reason: CandidateReason::ContextMatch,
-                            preview: clip_preview_bytes(
-                                &current_markdown_bytes[span_start..span_end],
-                            ),
-                        });
-                    }
+    if let Some(ctx) = &anchor.context
+        && !ctx.prefix.is_empty()
+        && !ctx.suffix.is_empty()
+    {
+        let max_gap = anchor
+            .quote
+            .as_ref()
+            .map(|q| q.exact.len().saturating_mul(4))
+            .unwrap_or(256);
+        for pre_start in find_all_byte_matches(current_markdown_bytes, ctx.prefix.as_bytes()) {
+            let pre_end = pre_start + ctx.prefix.len();
+            // Search for suffix starting at pre_end up to pre_end+max_gap.
+            let search_end = (pre_end + max_gap).min(current_markdown_bytes.len());
+            let suffix_window = &current_markdown_bytes[pre_end..search_end];
+            if let Some(rel_suffix) = find_first(suffix_window, ctx.suffix.as_bytes()) {
+                let suf_start = pre_end + rel_suffix;
+                let span_start = pre_end;
+                let span_end = suf_start;
+                if span_end >= span_start {
+                    let range = byte_range_to_position(
+                        current_markdown_bytes,
+                        span_start,
+                        span_end - span_start,
+                    );
+                    candidates.push(Candidate {
+                        confidence: cfg.context,
+                        current_range: range,
+                        reason: CandidateReason::ContextMatch,
+                        preview: clip_preview_bytes(&current_markdown_bytes[span_start..span_end]),
+                    });
                 }
             }
         }
@@ -380,10 +380,10 @@ pub fn resolve_anchor_with_config(
             let max_dist = (target.len() / 5).max(1);
             let kind_filter: Option<AnchorBlockKind> = anchor.block.as_ref().map(|b| b.kind);
             for ix_block in &current_index.blocks {
-                if let Some(k) = kind_filter {
-                    if ix_block.kind != k {
-                        continue;
-                    }
+                if let Some(k) = kind_filter
+                    && ix_block.kind != k
+                {
+                    continue;
                 }
                 let block_bytes = byte_range_slice(current_markdown_bytes, ix_block.byte_range);
                 if block_bytes.is_empty() {
@@ -399,7 +399,8 @@ pub fn resolve_anchor_with_config(
                     let confidence =
                         fuzzy_confidence_cfg(target.len(), dist, cfg.fuzzy_min, cfg.fuzzy_max);
                     let abs_start = ix_block.byte_range[0] as usize + rel_start;
-                    let range = byte_range_to_position(current_markdown_bytes, abs_start, match_len);
+                    let range =
+                        byte_range_to_position(current_markdown_bytes, abs_start, match_len);
                     let preview_end = (abs_start + match_len).min(current_markdown_bytes.len());
                     candidates.push(Candidate {
                         confidence,
@@ -425,8 +426,7 @@ pub fn resolve_anchor_with_config(
         let line_starts = compute_line_starts(current_markdown_bytes);
         let byte_start = line_start_byte(&line_starts, start_line);
         let byte_end_excl = line_start_byte(&line_starts, end_line.saturating_add(1));
-        let byte_end_excl =
-            byte_end_excl.min(current_markdown_bytes.len() as u64);
+        let byte_end_excl = byte_end_excl.min(current_markdown_bytes.len() as u64);
         // Distance penalty: if the original line range was past EOF we
         // had to clamp far — drop confidence further. The headline number
         // never exceeds LINE_PROX_MAX (0.35).
@@ -457,9 +457,7 @@ pub fn resolve_anchor_with_config(
 // Placeholder kept so the (currently unenforceable) WrongFile branch above
 // reads sensibly. Always returns the anchor's own fileId so the equality
 // check is a no-op; will be replaced when AnchorIndex grows a fileId field.
-fn current_index_file_id_placeholder(
-    anchor: &Anchor,
-) -> crate::review::ids::FileId {
+fn current_index_file_id_placeholder(anchor: &Anchor) -> crate::review::ids::FileId {
     anchor.file_id.clone()
 }
 
@@ -494,14 +492,14 @@ fn combine_and_decide_with_config(
 
     // Exact: only base_hash_match qualifies (~1.00). The float guard avoids
     // a future tweak to MAPPED_STEPS pushing us past 1.0 accidentally.
-    if top.confidence >= cfg.exact_threshold {
-        if let Some(reason) = top.reason.as_exact_reason() {
-            return ResolvedAnchor::Exact {
-                confidence: top.confidence,
-                current_range: top.current_range.clone(),
-                reason,
-            };
-        }
+    if top.confidence >= cfg.exact_threshold
+        && let Some(reason) = top.reason.as_exact_reason()
+    {
+        return ResolvedAnchor::Exact {
+            confidence: top.confidence,
+            current_range: top.current_range.clone(),
+            reason,
+        };
     }
 
     // Count candidates ≥ HIGH_CONFIDENCE.
@@ -530,25 +528,25 @@ fn combine_and_decide_with_config(
 
     // Remapped: exactly one in the high band (or the top is a clear winner
     // with no peer within 0.10).
-    if top.confidence >= cfg.high_confidence {
-        if let Some(reason) = top.reason.as_remapped_reason() {
-            return ResolvedAnchor::Remapped {
-                confidence: top.confidence,
-                current_range: top.current_range.clone(),
-                reason,
-            };
-        }
+    if top.confidence >= cfg.high_confidence
+        && let Some(reason) = top.reason.as_remapped_reason()
+    {
+        return ResolvedAnchor::Remapped {
+            confidence: top.confidence,
+            current_range: top.current_range.clone(),
+            reason,
+        };
     }
 
     // Mid-band: any candidate ≥ STALE_FLOOR → remap with the top one.
-    if top.confidence >= cfg.stale_floor {
-        if let Some(reason) = top.reason.as_remapped_reason() {
-            return ResolvedAnchor::Remapped {
-                confidence: top.confidence,
-                current_range: top.current_range.clone(),
-                reason,
-            };
-        }
+    if top.confidence >= cfg.stale_floor
+        && let Some(reason) = top.reason.as_remapped_reason()
+    {
+        return ResolvedAnchor::Remapped {
+            confidence: top.confidence,
+            current_range: top.current_range.clone(),
+            reason,
+        };
     }
 
     ResolvedAnchor::Stale {
@@ -890,6 +888,8 @@ mod tests {
 
     // ----- Anchor builders --------------------------------------------------
 
+    // Args map 1:1 onto the distinct `Anchor` components a test case sets up.
+    #[allow(clippy::too_many_arguments)]
     fn make_anchor(
         base_md: &[u8],
         file: &str,
@@ -957,19 +957,12 @@ mod tests {
         let md = b"# Hello\n\nA paragraph.\n";
         let idx = build_anchor_index(md, &snap_id("s1")).expect("idx");
         let h = content_hash(md);
-        let a = make_anchor(
-            md,
-            "f1",
-            "s1",
-            pos([0, 7], [1, 1]),
-            None,
-            None,
-            None,
-            None,
-        );
+        let a = make_anchor(md, "f1", "s1", pos([0, 7], [1, 1]), None, None, None, None);
         let res = resolve_anchor(&a, &idx, md, &h, None).expect("ok");
         match res {
-            ResolvedAnchor::Exact { confidence, reason, .. } => {
+            ResolvedAnchor::Exact {
+                confidence, reason, ..
+            } => {
                 assert!((confidence - 1.0).abs() < 1e-9);
                 assert!(matches!(reason, ExactReason::BaseHashMatch));
             }
@@ -997,7 +990,9 @@ mod tests {
         );
         let res = resolve_anchor(&a, &idx, current, &h, None).expect("ok");
         match res {
-            ResolvedAnchor::Remapped { confidence, reason, .. } => {
+            ResolvedAnchor::Remapped {
+                confidence, reason, ..
+            } => {
                 assert!((confidence - conf::QUOTE_UNIQUE).abs() < 1e-9);
                 assert!(matches!(reason, RemappedReason::QuoteMatch));
             }
@@ -1082,7 +1077,9 @@ mod tests {
         // Suppress unused warnings on the first attempt's locals.
         let _ = (base, current, idx, h);
         match res {
-            ResolvedAnchor::Remapped { confidence, reason, .. } => {
+            ResolvedAnchor::Remapped {
+                confidence, reason, ..
+            } => {
                 assert!((confidence - conf::BLOCK_FP).abs() < 1e-9);
                 assert!(matches!(reason, RemappedReason::BlockFingerprintMatch));
             }
@@ -1175,14 +1172,10 @@ mod tests {
         let current = b"# Top\n\nNew intro paragraph here.\n\n## Sub\n\nDistinct phrase here.\n";
         let idx = build_anchor_index(current, &snap_id("s5d")).expect("idx");
         let h = content_hash(current);
-        let h1_text_hash = build_anchor_index(base, &snap_id("s5e"))
-            .unwrap()
-            .headings[0]
+        let h1_text_hash = build_anchor_index(base, &snap_id("s5e")).unwrap().headings[0]
             .text_hash
             .clone();
-        let sub_text_hash = build_anchor_index(base, &snap_id("s5f"))
-            .unwrap()
-            .headings[1]
+        let sub_text_hash = build_anchor_index(base, &snap_id("s5f")).unwrap().headings[1]
             .text_hash
             .clone();
         use crate::review::model::AnchorHeadingRef;
@@ -1254,7 +1247,9 @@ mod tests {
         );
         let res = resolve_anchor(&a, &idx, current, &h, None).expect("ok");
         match res {
-            ResolvedAnchor::Remapped { confidence, reason, .. } => {
+            ResolvedAnchor::Remapped {
+                confidence, reason, ..
+            } => {
                 // Could be context (0.70) OR fuzzy (BETA→REPLACED at edit
                 // distance 7 with 0/5=0 max-dist is unlikely to match;
                 // unless 1 min). Both are valid mid-band Remapped — assert
@@ -1290,10 +1285,11 @@ mod tests {
         );
         let res = resolve_anchor(&a, &idx, current, &h, None).expect("ok");
         match res {
-            ResolvedAnchor::Remapped { confidence, reason, .. } => {
+            ResolvedAnchor::Remapped {
+                confidence, reason, ..
+            } => {
                 assert!(
-                    confidence >= conf::FUZZY_MIN - 1e-9
-                        && confidence <= conf::FUZZY_MAX + 1e-9,
+                    (conf::FUZZY_MIN - 1e-9..=conf::FUZZY_MAX + 1e-9).contains(&confidence),
                     "expected fuzzy band confidence, got {}",
                     confidence
                 );
@@ -1439,7 +1435,9 @@ mod tests {
         // So this collapses to a single 0.85 → Remapped, not Ambiguous.
         // We assert that and add a separate test for genuine ambiguity.
         match res {
-            ResolvedAnchor::Remapped { confidence, reason, .. } => {
+            ResolvedAnchor::Remapped {
+                confidence, reason, ..
+            } => {
                 assert!((confidence - conf::BLOCK_FP).abs() < 1e-9);
                 assert!(matches!(reason, RemappedReason::BlockFingerprintMatch));
             }
@@ -1470,7 +1468,10 @@ mod tests {
             ResolvedAnchor::Ambiguous { candidates, .. } => {
                 assert!(candidates.iter().all(|c| c.confidence >= 0.50));
                 let high_count = candidates.iter().filter(|c| c.confidence >= 0.70).count();
-                assert!(high_count >= 2, "expected ≥2 high-confidence, got {high_count}");
+                assert!(
+                    high_count >= 2,
+                    "expected ≥2 high-confidence, got {high_count}"
+                );
             }
             other => panic!("expected Ambiguous, got {:?}", other),
         }
@@ -1499,7 +1500,9 @@ mod tests {
         );
         let res = resolve_anchor(&a, &idx, current, &h, None).expect("ok");
         match res {
-            ResolvedAnchor::Remapped { confidence, reason, .. } => {
+            ResolvedAnchor::Remapped {
+                confidence, reason, ..
+            } => {
                 assert!((confidence - conf::QUOTE_UNIQUE).abs() < 1e-9);
                 assert!(matches!(reason, RemappedReason::QuoteMatch));
             }
@@ -1576,16 +1579,7 @@ mod tests {
         let md = b"# H\n\nbody.\n";
         let idx = build_anchor_index(md, &snap_id("s14")).expect("idx");
         let h = content_hash(md);
-        let a = make_anchor(
-            md,
-            "f1",
-            "s1",
-            pos([0, 3], [1, 1]),
-            None,
-            None,
-            None,
-            None,
-        );
+        let a = make_anchor(md, "f1", "s1", pos([0, 3], [1, 1]), None, None, None, None);
         let fake_steps: Value = serde_json::json!([{"stepType": "replace"}]);
         let res_a = resolve_anchor(&a, &idx, md, &h, None).expect("ok");
         let res_b = resolve_anchor(&a, &idx, md, &h, Some(&fake_steps)).expect("ok");
@@ -1620,11 +1614,7 @@ mod tests {
             },
         ];
         let mut out = dedup_by_range_max(v);
-        out.sort_by(|a, b| {
-            a.current_range
-                .byte_range[0]
-                .cmp(&b.current_range.byte_range[0])
-        });
+        out.sort_by(|a, b| a.current_range.byte_range[0].cmp(&b.current_range.byte_range[0]));
         assert_eq!(out.len(), 2);
         assert!((out[0].confidence - 0.85).abs() < 1e-9);
         assert_eq!(out[0].reason, CandidateReason::BlockFingerprintMatch);
@@ -1639,7 +1629,7 @@ mod tests {
         let c0 = fuzzy_confidence(20, 0);
         assert!((c0 - conf::FUZZY_MAX).abs() < 1e-9);
         // distance == max_allowed → FUZZY_MIN (0.50)
-        let max_allowed = (20usize / 5).max(1);
+        let max_allowed = 20usize / 5;
         let cmax = fuzzy_confidence(20, max_allowed);
         assert!((cmax - conf::FUZZY_MIN).abs() < 1e-9);
         // middle distance → between MIN and MAX
@@ -1688,10 +1678,9 @@ mod tests {
             // 3.6; this test deliberately keeps the shape loose (read as
             // serde_json::Value) so 3.6 can finalise the wire format
             // without re-touching this file.
-            let case: Value = serde_json::from_str(
-                &std::fs::read_to_string(&case_json).expect("read case"),
-            )
-            .expect("parse case");
+            let case: Value =
+                serde_json::from_str(&std::fs::read_to_string(&case_json).expect("read case"))
+                    .expect("parse case");
             let expected: Value = serde_json::from_str(
                 &std::fs::read_to_string(&expected_json).expect("read expected"),
             )
@@ -1705,13 +1694,14 @@ mod tests {
                 .unwrap_or_else(|_| snap_id("corpus-snap"));
             let idx = build_anchor_index(current_md.as_bytes(), &snap).expect("idx");
             let h = content_hash(current_md.as_bytes());
-            let got = resolve_anchor(&anchor, &idx, current_md.as_bytes(), &h, None)
-                .expect("resolve ok");
+            let got =
+                resolve_anchor(&anchor, &idx, current_md.as_bytes(), &h, None).expect("resolve ok");
             let got_value = serde_json::to_value(&got).expect("ser");
             // Compare just the `status` field — confidence calibration is
             // ongoing per amendments #15 and exact numbers may diverge.
             assert_eq!(
-                got_value["status"], expected["status"],
+                got_value["status"],
+                expected["status"],
                 "case {} expected status {} got {}",
                 path.display(),
                 expected["status"],

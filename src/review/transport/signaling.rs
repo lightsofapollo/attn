@@ -87,15 +87,9 @@ use crate::review::model::{EnvelopeKind, EnvelopeTarget, MailboxEnvelope};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SignalingPayload {
     /// WebRTC SDP offer from the dialing peer.
-    Offer {
-        sdp: String,
-        from: DeviceId,
-    },
+    Offer { sdp: String, from: DeviceId },
     /// WebRTC SDP answer from the answering peer.
-    Answer {
-        sdp: String,
-        from: DeviceId,
-    },
+    Answer { sdp: String, from: DeviceId },
     /// One or more trickle-ICE candidates.
     ///
     /// Bundled as `Vec<String>` (rather than one envelope per candidate) so a
@@ -121,10 +115,7 @@ pub enum SignalingPayload {
     /// owner's webview, so Rust is a pure encrypted step-pipe. Carried over
     /// the ephemeral, FIFO-capped `signal` channel so high-frequency steps
     /// never bloat the durable event log.
-    Collab {
-        from: DeviceId,
-        payload: String,
-    },
+    Collab { from: DeviceId, payload: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +141,9 @@ pub enum SignalingPayload {
 /// Returns a fully-populated [`MailboxEnvelope`] ready for the outbox; the
 /// caller is responsible for the actual relay POST (lives in
 /// `transport::mailbox`).
+// Each argument is a distinct crypto/wire input (keys, ids, nonce, timestamps);
+// bundling them into a params struct buys no clarity and churns every call site.
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_signal_envelope(
     payload: SignalingPayload,
     signaling_key: &[u8; 32],
@@ -372,8 +366,7 @@ mod tests {
             "targeted offer must populate envelope.target.deviceId"
         );
 
-        let recovered =
-            disassemble_signal_envelope(&envelope, &key).expect("disassemble offer");
+        let recovered = disassemble_signal_envelope(&envelope, &key).expect("disassemble offer");
         assert_eq!(recovered, payload);
     }
 
@@ -407,11 +400,16 @@ mod tests {
         .expect("assemble collab broadcast");
 
         assert_eq!(envelope.kind, EnvelopeKind::Signal);
-        assert!(envelope.target.is_none(), "broadcast collab must have no target");
+        assert!(
+            envelope.target.is_none(),
+            "broadcast collab must have no target"
+        );
 
-        let recovered =
-            disassemble_signal_envelope(&envelope, &key).expect("disassemble collab");
-        assert_eq!(recovered, payload, "collab payload must survive the round-trip byte-for-byte");
+        let recovered = disassemble_signal_envelope(&envelope, &key).expect("disassemble collab");
+        assert_eq!(
+            recovered, payload,
+            "collab payload must survive the round-trip byte-for-byte"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -813,8 +811,8 @@ mod tests {
         // (the AAD's `kind` field would diverge anyway, but the explicit
         // kind check gives a much sharper diagnostic).
         envelope.kind = EnvelopeKind::Event;
-        let err = disassemble_signal_envelope(&envelope, &key)
-            .expect_err("non-signal kind must reject");
+        let err =
+            disassemble_signal_envelope(&envelope, &key).expect_err("non-signal kind must reject");
         match err {
             EnvelopeError::InvalidPlaintext(msg) => {
                 assert!(

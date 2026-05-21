@@ -92,7 +92,10 @@ pub fn relay_dir() -> Result<PathBuf> {
 /// merges; the test calls `cases_path().exists()` and short-circuits with a
 /// log line so this can land before the TS-side corpus does.
 pub fn cases_path() -> Result<PathBuf> {
-    Ok(relay_dir()?.join("test").join("conformance").join("cases.json"))
+    Ok(relay_dir()?
+        .join("test")
+        .join("conformance")
+        .join("cases.json"))
 }
 
 /// Locate a usable wrangler binary. Prefers the relay-local
@@ -143,8 +146,8 @@ pub fn is_wrangler_available() -> bool {
 /// "retry once on bind failure" is the right contingency rather than
 /// inflating the helper with a port-allocation cache.
 pub fn pick_free_port() -> Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .context("bind 127.0.0.1:0 to pick free port")?;
+    let listener =
+        TcpListener::bind("127.0.0.1:0").context("bind 127.0.0.1:0 to pick free port")?;
     let port = listener.local_addr()?.port();
     drop(listener);
     Ok(port)
@@ -191,9 +194,7 @@ impl WranglerHandle {
         }
 
         let wrangler = locate_wrangler().ok_or_else(|| {
-            anyhow!(
-                "wrangler binary not found (looked under relay/node_modules/.bin/ and $PATH)"
-            )
+            anyhow!("wrangler binary not found (looked under relay/node_modules/.bin/ and $PATH)")
         })?;
         let relay = relay_dir()?;
         let port = pick_free_port()?;
@@ -351,8 +352,7 @@ impl MailboxClient {
             .bytes()
             .await
             .with_context(|| format!("read body from {url}"))?;
-        serde_json::from_slice::<Value>(&bytes)
-            .with_context(|| format!("parse JSON from {url}"))
+        serde_json::from_slice::<Value>(&bytes).with_context(|| format!("parse JSON from {url}"))
     }
 
     /// Drive a generic scenario step. Returns `(status, body_json_or_null)`.
@@ -369,7 +369,11 @@ impl MailboxClient {
         let url = format!(
             "{}{}",
             self.base_url.trim_end_matches('/'),
-            if path.starts_with('/') { path.to_string() } else { format!("/{path}") }
+            if path.starts_with('/') {
+                path.to_string()
+            } else {
+                format!("/{path}")
+            }
         );
         let mut req = match method.to_ascii_uppercase().as_str() {
             "GET" => self.http.get(&url),
@@ -385,7 +389,10 @@ impl MailboxClient {
         if let Some(b) = body {
             req = req.body(b.to_vec());
         }
-        let resp = req.send().await.with_context(|| format!("{method} {url}"))?;
+        let resp = req
+            .send()
+            .await
+            .with_context(|| format!("{method} {url}"))?;
         let status = resp.status().as_u16();
         let bytes = resp
             .bytes()
@@ -457,7 +464,11 @@ mod tests {
         let p = cases_path().expect("relay dir");
         // We don't assert that the file exists — it lands with 5.14. We just
         // make sure the path we'd open is the right one.
-        assert!(p.ends_with("relay/test/conformance/cases.json"), "got {}", p.display());
+        assert!(
+            p.ends_with("relay/test/conformance/cases.json"),
+            "got {}",
+            p.display()
+        );
     }
 
     #[test]

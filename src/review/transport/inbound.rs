@@ -38,11 +38,9 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::review::envelope::{
-    DisassembleInput, EnvelopeError, disassemble_event_envelope,
-};
 use crate::review::crypto::aead::{self, AeadError, AeadNonce, EnvelopeAad};
 use crate::review::crypto::signing::DeviceVerifyingKey;
+use crate::review::envelope::{DisassembleInput, EnvelopeError, disassemble_event_envelope};
 use crate::review::ids::{DeviceId, RoomId};
 use crate::review::model::{EnvelopeKind, MailboxEnvelope, ReviewEvent};
 use crate::review::store::ReviewStore;
@@ -101,7 +99,10 @@ pub enum InboundError {
     /// gives much better diagnostics — a kind/method mismatch is a programmer
     /// error in the caller, not a relay-side tampering attempt.
     #[error("envelope kind mismatch: expected {expected:?}, got {actual:?}")]
-    KindMismatch { expected: EnvelopeKind, actual: EnvelopeKind },
+    KindMismatch {
+        expected: EnvelopeKind,
+        actual: EnvelopeKind,
+    },
     /// Signal envelope's cleartext `target.deviceId` does not match the
     /// receiver's local `deviceId`. Per `planning/collab/security-review.md`
     /// §H2 (v2 mitigation): `target.deviceId` is not AAD-bound, so a malicious
@@ -115,9 +116,7 @@ pub enum InboundError {
     /// A v3 amendment may bind `target` directly into the AAD for
     /// `kind="signal"`, which would convert this into a `AeadError::Decrypt`
     /// at MAC time. Until then, this is the server-trust-style mitigation.
-    #[error(
-        "signal target deviceId mismatch: expected {expected}, got {actual:?} (anti-redirect)"
-    )]
+    #[error("signal target deviceId mismatch: expected {expected}, got {actual:?} (anti-redirect)")]
     TargetDeviceMismatch {
         expected: String,
         actual: Option<String>,
@@ -366,7 +365,11 @@ impl InboundPipeline {
     /// from the same cleartext envelope fields the relay sees — any tampering
     /// with `envelopeId`, `kind`, `authorId`, `deviceId`, or `createdAt`
     /// invalidates the MAC and surfaces as `AeadError::Decrypt`.
-    fn open_blob(&self, envelope: &MailboxEnvelope, key: &[u8; 32]) -> Result<Vec<u8>, InboundError> {
+    fn open_blob(
+        &self,
+        envelope: &MailboxEnvelope,
+        key: &[u8; 32],
+    ) -> Result<Vec<u8>, InboundError> {
         let aad = EnvelopeAad {
             v: envelope.v,
             room_id: envelope.room_id.as_str().to_string(),
@@ -381,10 +384,7 @@ impl InboundPipeline {
             .decode(envelope.nonce.as_bytes())
             .map_err(|e| InboundError::InvalidNonce(e.to_string()))?;
         let nonce: AeadNonce = nonce_bytes.as_slice().try_into().map_err(|_| {
-            InboundError::InvalidNonce(format!(
-                "expected 24 bytes, got {}",
-                nonce_bytes.len()
-            ))
+            InboundError::InvalidNonce(format!("expected 24 bytes, got {}", nonce_bytes.len()))
         })?;
         let ciphertext = URL_SAFE_NO_PAD
             .decode(envelope.ciphertext.as_bytes())
@@ -436,13 +436,9 @@ mod tests {
 
     use crate::review::crypto::kdf::derive_room_keys;
     use crate::review::crypto::signing::DeviceSigningKey;
-    use crate::review::envelope::{
-        AssembleInput, assemble_event_envelope,
-    };
+    use crate::review::envelope::{AssembleInput, assemble_event_envelope};
     use crate::review::ids::{ContentHash, DeviceId, FileId, ParticipantId, SnapshotId};
-    use crate::review::model::{
-        Anchor, EnvelopeKind, PositionAnchor, ReviewEventBody,
-    };
+    use crate::review::model::{Anchor, EnvelopeKind, PositionAnchor, ReviewEventBody};
 
     // -----------------------------------------------------------------
     // Test fixtures — mirror envelope.rs so a future schema change
@@ -460,16 +456,19 @@ mod tests {
 
     fn fresh_store() -> (TempDir, Arc<ReviewStore>) {
         let tmp = TempDir::new().expect("tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         (tmp, store)
     }
 
     /// Build a pipeline + the verifying-keys cache pre-populated with the
     /// signer's pubkey. Returns (pipeline, store, signing-seed, room_id, tmp).
-    fn fresh_pipeline_with_signer()
-    -> (InboundPipeline, Arc<ReviewStore>, DeviceSigningKey, RoomId, TempDir) {
+    fn fresh_pipeline_with_signer() -> (
+        InboundPipeline,
+        Arc<ReviewStore>,
+        DeviceSigningKey,
+        RoomId,
+        TempDir,
+    ) {
         let (tmp, store) = fresh_store();
         let keys = derive_room_keys(&TEST_ROOM_SECRET);
         let event_key = *keys.event_key.as_bytes();
@@ -483,13 +482,8 @@ mod tests {
         let cache: VerifyingKeyCache = Arc::new(RwLock::new(map));
 
         let room_id: RoomId = id("hjCfgOvsatNOUedgxhZpyw");
-        let pipeline = InboundPipeline::new(
-            store.clone(),
-            cache,
-            event_key,
-            snapshot_key,
-            signaling_key,
-        );
+        let pipeline =
+            InboundPipeline::new(store.clone(), cache, event_key, snapshot_key, signaling_key);
         (pipeline, store, signer, room_id, tmp)
     }
 
@@ -518,9 +512,7 @@ mod tests {
                     v: 2,
                     file_id: id::<FileId>("f-file-01"),
                     snapshot_id: id::<SnapshotId>("eQ7pDCC-mekpz-we7gDYag"),
-                    base_hash: id::<ContentHash>(
-                        "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
-                    ),
+                    base_hash: id::<ContentHash>("fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y"),
                     position: PositionAnchor {
                         byte_range: [0, 9],
                         line_range: [1, 1],
@@ -563,8 +555,11 @@ mod tests {
         let author_id: ParticipantId = id("p-author-01");
         let device_id: DeviceId = id("d-device-01");
         let created_at_ms: u64 = 1_700_000_000_000;
-        let envelope_id =
-            derive_envelope_id_with_nonce(room_id, id_to_string(&device_id).as_str(), &client_nonce);
+        let envelope_id = derive_envelope_id_with_nonce(
+            room_id,
+            id_to_string(&device_id).as_str(),
+            &client_nonce,
+        );
 
         let aad = EnvelopeAad {
             v: 2,
@@ -614,7 +609,9 @@ mod tests {
         );
         // The recovered event must carry the expected meta + body shape.
         match &outcome.event.body {
-            ReviewEventBody::CommentCreated { thread_id, body, .. } => {
+            ReviewEventBody::CommentCreated {
+                thread_id, body, ..
+            } => {
                 assert_eq!(thread_id, "thread-1");
                 assert_eq!(body, "hello");
             }
@@ -657,7 +654,9 @@ mod tests {
     async fn import_event_envelope_tampered_ciphertext_fails() {
         let (pipeline, _store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
         let mut envelope = mint_event_envelope(pipeline.event_key, signer, &room_id);
-        let mut bytes = URL_SAFE_NO_PAD.decode(envelope.ciphertext.as_bytes()).unwrap();
+        let mut bytes = URL_SAFE_NO_PAD
+            .decode(envelope.ciphertext.as_bytes())
+            .unwrap();
         bytes[0] ^= 0x01;
         envelope.ciphertext = URL_SAFE_NO_PAD.encode(&bytes);
 
@@ -691,13 +690,7 @@ mod tests {
         // Deliberately leave the verifying-keys cache empty so the assembler's
         // signingKeyId is not in the map.
         let empty: VerifyingKeyCache = Arc::new(RwLock::new(HashMap::new()));
-        let pipeline = InboundPipeline::new(
-            store,
-            empty,
-            event_key,
-            snapshot_key,
-            signaling_key,
-        );
+        let pipeline = InboundPipeline::new(store, empty, event_key, snapshot_key, signaling_key);
 
         let room_id: RoomId = id("hjCfgOvsatNOUedgxhZpyw");
         let signer = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
@@ -734,13 +727,7 @@ mod tests {
         let signaling_key = *keys.signaling_key.as_bytes();
 
         let empty: VerifyingKeyCache = Arc::new(RwLock::new(HashMap::new()));
-        let pipeline = InboundPipeline::new(
-            store,
-            empty,
-            event_key,
-            snapshot_key,
-            signaling_key,
-        );
+        let pipeline = InboundPipeline::new(store, empty, event_key, snapshot_key, signaling_key);
 
         let room_id: RoomId = id("hjCfgOvsatNOUedgxhZpyw");
         let signer = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
@@ -1011,9 +998,8 @@ mod tests {
             // Build a fresh store + pipeline per vector — dedup is per-store,
             // and we want the "newly imported" path to fire for every vector.
             let tmp = TempDir::new().expect("tempdir");
-            let store = Arc::new(
-                ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
-            );
+            let store =
+                Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
             let vk_bytes: [u8; 32] = URL_SAFE_NO_PAD
                 .decode(v.inputs.signing_key.public.as_bytes())
                 .unwrap()
@@ -1035,9 +1021,8 @@ mod tests {
 
             // Decode the corpus envelope as a MailboxEnvelope (camelCase
             // serde matches the JSON on disk).
-            let envelope: MailboxEnvelope =
-                serde_json::from_value(v.expected.envelope.clone())
-                    .unwrap_or_else(|e| panic!("[{}] envelope deserialize: {e}", v.name));
+            let envelope: MailboxEnvelope = serde_json::from_value(v.expected.envelope.clone())
+                .unwrap_or_else(|e| panic!("[{}] envelope deserialize: {e}", v.name));
             let room_id = envelope.room_id.clone();
 
             // First import: must succeed and be newly_imported.

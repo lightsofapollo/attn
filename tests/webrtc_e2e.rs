@@ -60,18 +60,12 @@ use attn::review::envelope::{AssembleInput, assemble_event_envelope};
 use attn::review::ids::{
     ContentHash, DeviceId, EventId, FileId, ParticipantId, RoomId, SnapshotId,
 };
-use attn::review::model::{
-    Anchor, EnvelopeKind, MailboxEnvelope, PositionAnchor, ReviewEventBody,
-};
+use attn::review::model::{Anchor, EnvelopeKind, MailboxEnvelope, PositionAnchor, ReviewEventBody};
 use attn::review::store::ReviewStore;
 use attn::review::transport::TransportEvent;
 use attn::review::transport::inbound::{InboundPipeline, VerifyingKeyCache};
-use attn::review::transport::signaling::{
-    SignalingPayload, disassemble_signal_envelope,
-};
-use attn::review::transport::webrtc::{
-    WebRtcConfig, WebRtcConnectionState, WebRtcTransport,
-};
+use attn::review::transport::signaling::{SignalingPayload, disassemble_signal_envelope};
+use attn::review::transport::webrtc::{WebRtcConfig, WebRtcConnectionState, WebRtcTransport};
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -110,8 +104,7 @@ fn skip_requested() -> bool {
 /// Construct a typed newtype id from a string through serde. Mirrors the
 /// helper used in every other test in this crate.
 fn id<T: for<'de> serde::Deserialize<'de>>(s: &str) -> T {
-    serde_json::from_value(serde_json::Value::String(s.to_string()))
-        .expect("typed id deserializes")
+    serde_json::from_value(serde_json::Value::String(s.to_string())).expect("typed id deserializes")
 }
 
 // ---------------------------------------------------------------------------
@@ -535,8 +528,7 @@ macro_rules! skip_if_unavailable {
 /// key. Used by tests that need a real-looking comment to push through the
 /// DataChannel.
 fn mint_reviewer_comment_envelope(harness: &E2eHarness, body_text: &str) -> MailboxEnvelope {
-    let signer =
-        DeviceSigningKey::from_bytes(&REVIEWER_SIGNING_SEED).expect("derive reviewer key");
+    let signer = DeviceSigningKey::from_bytes(&REVIEWER_SIGNING_SEED).expect("derive reviewer key");
     let input = AssembleInput {
         event_key: harness.event_key,
         signing_key: signer,
@@ -652,8 +644,7 @@ async fn webrtc_happy_path_delivers_comment_envelope_to_owner_store() {
     // via a fresh InboundPipeline view returns `newly_imported=false`
     // because the original import already wrote the EventId to disk.
     let keys = derive_room_keys(&TEST_ROOM_SECRET);
-    let signer =
-        DeviceSigningKey::from_bytes(&REVIEWER_SIGNING_SEED).expect("derive reviewer key");
+    let signer = DeviceSigningKey::from_bytes(&REVIEWER_SIGNING_SEED).expect("derive reviewer key");
     let reviewer_keyid = signer.verifying_key().signing_key_id_base64url();
     let mut verify_map = HashMap::new();
     verify_map.insert(reviewer_keyid, signer.verifying_key());
@@ -741,11 +732,7 @@ async fn webrtc_disconnect_surfaces_upstream_on_remaining_peer() {
     // Disconnected/Failed/Closed within a few seconds. With webrtc-rs the
     // DTLS / SCTP teardown takes a moment to propagate through the state
     // machine, so we wait on the watch channel.
-    harness
-        .reviewer
-        .close()
-        .await
-        .expect("reviewer close ok");
+    harness.reviewer.close().await.expect("reviewer close ok");
 
     let owner_terminal = timeout(Duration::from_secs(10), async {
         let mut rx = harness.owner.watch_state().await;

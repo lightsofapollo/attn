@@ -353,7 +353,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     // event loop via the proxy closure below, integrating with the existing
     // tao loop rather than spinning up a parallel one (per
     // `planning/collab/amendments.md` §Codebase Corrections).
-    let review_manager = review_store.as_ref().and_then(|store| {
+    let review_manager = review_store.as_ref().map(|store| {
         let proxy = event_loop.create_proxy();
         let update_tx: crate::review::manager::UpdateSink = Arc::new(move |update| {
             let _ = proxy.send_event(UserEvent::Review(update));
@@ -381,14 +381,14 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             eprintln!(
                 "attn: no relay configured (set ATTN_RELAY_URL, or bake ATTN_DEFAULT_RELAY_URL at build time) — Share/Join will use the scaffold stub"
             );
-            return Some(Arc::new(base));
+            return Arc::new(base);
         }
         let verifying_keys: crate::review::transport::inbound::VerifyingKeyCache =
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         match base.with_bootstrap(relay_url.clone(), None, verifying_keys) {
             Ok(mgr) => {
                 eprintln!("attn: review bootstrap attached (relay={})", relay_url);
-                Some(Arc::new(mgr))
+                Arc::new(mgr)
             }
             Err(err) => {
                 eprintln!(
@@ -406,11 +406,11 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 let working_copy = Arc::new(
                     crate::review::working_copy::WorkingCopyService::new(),
                 );
-                Some(Arc::new(ReviewManager::new(
+                Arc::new(ReviewManager::new(
                     Arc::clone(store),
                     working_copy,
                     update_tx,
-                )))
+                ))
             }
         }
     });
@@ -430,10 +430,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             .spawn(move || {
                 let resumed = mgr.resume_known_rooms();
                 if !resumed.is_empty() {
-                    eprintln!(
-                        "review: resumed {} known room(s) on boot",
-                        resumed.len()
-                    );
+                    eprintln!("review: resumed {} known room(s) on boot", resumed.len());
                 }
             })
             .ok();
@@ -535,9 +532,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             // misconfigured client cannot smuggle a file-serve request that
             // looks like an invite or vice versa.
             if is_reserved_localhost_review(&uri) {
-                eprintln!(
-                    "attn: refusing reserved attn://localhost/review/... path: {uri}"
-                );
+                eprintln!("attn: refusing reserved attn://localhost/review/... path: {uri}");
                 return wry::http::Response::builder()
                     .status(404)
                     .header("Content-Type", "text/plain; charset=utf-8")
@@ -1559,7 +1554,10 @@ fn is_reserved_localhost_review(uri: &str) -> bool {
     let Some(rest) = uri.strip_prefix("attn://localhost/review") else {
         return false;
     };
-    matches!(rest.chars().next(), None | Some('/') | Some('#') | Some('?'))
+    matches!(
+        rest.chars().next(),
+        None | Some('/') | Some('#') | Some('?')
+    )
 }
 
 fn mime_from_extension(path: &std::path::Path) -> &'static str {
@@ -1718,16 +1716,19 @@ mod tests {
         // classify_and_record_changes consumes it and records NOTHING in
         // the revision journal.
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("store"));
         let tracker = Arc::new(SelfWriteTracker::new());
         let path = tmp.path().join("doc.md");
         let room: RoomId = dummy_id("room-self-write");
         let file: FileId = dummy_id("file-self-write");
 
-        let state =
-            make_mapped_state(path.clone(), store.clone(), tracker.clone(), room.clone(), file.clone());
+        let state = make_mapped_state(
+            path.clone(),
+            store.clone(),
+            tracker.clone(),
+            room.clone(),
+            file.clone(),
+        );
 
         // Save via WCS (records to tracker as a side effect).
         let svc = WorkingCopyService::with_tracker(tracker.clone());
@@ -1768,16 +1769,19 @@ mod tests {
         // Bare fs::write (no WCS, no tracker entry) → classifier sees a
         // miss and persists a LocalRevision with source=ExternalFileChange.
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("store"));
         let tracker = Arc::new(SelfWriteTracker::new());
         let path = tmp.path().join("doc.md");
         let room: RoomId = dummy_id("room-external");
         let file: FileId = dummy_id("file-external");
 
-        let state =
-            make_mapped_state(path.clone(), store.clone(), tracker, room.clone(), file.clone());
+        let state = make_mapped_state(
+            path.clone(),
+            store.clone(),
+            tracker,
+            room.clone(),
+            file.clone(),
+        );
 
         // Bypass WorkingCopyService entirely.
         std::fs::write(&path, b"external edit\n").expect("seed external write");
@@ -1794,8 +1798,7 @@ mod tests {
             "external write must record exactly one LocalRevision"
         );
         assert_eq!(journal[0].source, RevisionSource::ExternalFileChange);
-        let expected_hash =
-            crate::review::crypto::ids::content_hash(b"external edit\n");
+        let expected_hash = crate::review::crypto::ids::content_hash(b"external edit\n");
         assert_eq!(journal[0].next_hash, expected_hash);
     }
 
@@ -1804,9 +1807,7 @@ mod tests {
         // External edit to a path that isn't in any room → no panic, no
         // journal entries written, no reviews/rooms/ dir created.
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("store"));
         let tracker = Arc::new(SelfWriteTracker::new());
         let path = tmp.path().join("unmapped.md");
         std::fs::write(&path, b"nobody knows\n").expect("seed");
@@ -1870,10 +1871,19 @@ mod tests {
         );
         // The JSON payload must include the camelCase keys the frontend type
         // (ReviewAnchorResolutionUpdate) declares.
-        assert!(js.contains("\"roomId\":\"room-abc\""), "missing roomId: {js}");
-        assert!(js.contains("\"eventId\":\"evt-7\""), "missing eventId: {js}");
+        assert!(
+            js.contains("\"roomId\":\"room-abc\""),
+            "missing roomId: {js}"
+        );
+        assert!(
+            js.contains("\"eventId\":\"evt-7\""),
+            "missing eventId: {js}"
+        );
         assert!(js.contains("\"fileId\":\"file-3\""), "missing fileId: {js}");
-        assert!(js.contains("\"status\":\"exact\""), "missing resolved.status: {js}");
+        assert!(
+            js.contains("\"status\":\"exact\""),
+            "missing resolved.status: {js}"
+        );
         assert!(
             js.contains("\"reason\":\"base_hash_match\""),
             "missing resolved.reason: {js}"

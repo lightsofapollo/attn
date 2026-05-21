@@ -249,8 +249,14 @@ impl std::fmt::Debug for RoomTransports {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RoomTransports")
             .field("mode", &self.mode)
-            .field("mailbox", &self.mailbox.as_ref().map(|_| "<dyn MailboxSender>"))
-            .field("webrtc", &self.webrtc.as_ref().map(|_| "<dyn WebRtcSender>"))
+            .field(
+                "mailbox",
+                &self.mailbox.as_ref().map(|_| "<dyn MailboxSender>"),
+            )
+            .field(
+                "webrtc",
+                &self.webrtc.as_ref().map(|_| "<dyn WebRtcSender>"),
+            )
             .finish()
     }
 }
@@ -411,14 +417,14 @@ pub async fn send_envelopes(
             // perspective, which is what the data-model commits to.
             let mailbox_acks = mailbox.send_envelopes(envelopes.clone()).await?;
 
-            if let Some(webrtc) = transports.webrtc.as_ref() {
-                if webrtc.is_connected() {
-                    // Best-effort DataChannel send. Errors here are swallowed
-                    // because the mailbox already accepted the envelopes;
-                    // the receiver-side `InboundPipeline` dedups by EventId
-                    // so a missed DataChannel attempt is harmless.
-                    let _ = webrtc.send_envelopes(envelopes).await;
-                }
+            if let Some(webrtc) = transports.webrtc.as_ref()
+                && webrtc.is_connected()
+            {
+                // Best-effort DataChannel send. Errors here are swallowed
+                // because the mailbox already accepted the envelopes;
+                // the receiver-side `InboundPipeline` dedups by EventId
+                // so a missed DataChannel attempt is harmless.
+                let _ = webrtc.send_envelopes(envelopes).await;
             }
             Ok(mailbox_acks)
         }
@@ -539,12 +545,7 @@ pub(crate) mod test_support {
         }
 
         pub fn total_sent(&self) -> usize {
-            self.sent
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|b| b.len())
-                .sum()
+            self.sent.lock().unwrap().iter().map(|b| b.len()).sum()
         }
     }
 
@@ -562,11 +563,9 @@ pub(crate) mod test_support {
             // to keep the same outcome across multiple calls, so clone the
             // enum's data instead.
             let outcome_snapshot = match &*outcome_guard {
-                MailboxOutcome::AcceptAll { start_seq } => {
-                    MailboxOutcome::AcceptAll {
-                        start_seq: *start_seq,
-                    }
-                }
+                MailboxOutcome::AcceptAll { start_seq } => MailboxOutcome::AcceptAll {
+                    start_seq: *start_seq,
+                },
                 MailboxOutcome::Error(err) => {
                     // Clone the error variant by reconstructing — TransportError
                     // doesn't impl Clone, so reconstruct only the variants we
@@ -623,8 +622,7 @@ pub(crate) mod test_support {
         /// inspect this to confirm `ReviewManager::request_snapshot` routed
         /// through the WebRTC arm with the right `(file_id, sinceSnapshotId)`
         /// (attn-nnj.7.6).
-        pub signals:
-            StdMutex<Vec<crate::review::transport::signaling::SignalingPayload>>,
+        pub signals: StdMutex<Vec<crate::review::transport::signaling::SignalingPayload>>,
     }
 
     pub enum WebRtcOutcome {
@@ -656,12 +654,7 @@ pub(crate) mod test_support {
         }
 
         pub fn total_sent(&self) -> usize {
-            self.sent
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|b| b.len())
-                .sum()
+            self.sent.lock().unwrap().iter().map(|b| b.len()).sum()
         }
 
         /// Snapshot of every `SignalingPayload` the manager pushed through
@@ -875,7 +868,11 @@ mod tests {
         // send layer rather than the pre-flight) and NOT sent via mailbox
         // (mailbox handle is None in Live anyway, but assert it twice via
         // the invariant).
-        assert_eq!(webrtc.total_sent(), 0, "live must not send on closed channel");
+        assert_eq!(
+            webrtc.total_sent(),
+            0,
+            "live must not send on closed channel"
+        );
         assert!(rt.mailbox.is_none(), "live must not hold a mailbox handle");
     }
 
@@ -965,7 +962,9 @@ mod tests {
             dummy_envelope("env-1", &room),
             dummy_envelope("env-2", &room),
         ];
-        let acks = send_envelopes(&rt, envelopes).await.expect("hybrid send ok");
+        let acks = send_envelopes(&rt, envelopes)
+            .await
+            .expect("hybrid send ok");
 
         // Acks come back from the mailbox arm (carry serverSeq).
         assert_eq!(acks.len(), 2);
@@ -1055,11 +1054,7 @@ mod tests {
     #[test]
     fn transition_live_to_hybrid_spawns_mailbox_without_dropping_webrtc() {
         let webrtc = Arc::new(MockWebRtc::new(true));
-        let mut rt = RoomTransports::new(
-            TransportMode::Live,
-            None,
-            Some(webrtc.clone() as Arc<_>),
-        );
+        let mut rt = RoomTransports::new(TransportMode::Live, None, Some(webrtc.clone() as Arc<_>));
         let mailbox = Arc::new(MockMailbox::new());
         transition_mode(
             &mut rt,
@@ -1090,8 +1085,7 @@ mod tests {
     #[test]
     fn transition_unsupported_returns_error() {
         let mailbox = Arc::new(MockMailbox::new());
-        let mut rt =
-            RoomTransports::new(TransportMode::Async, Some(mailbox as Arc<_>), None);
+        let mut rt = RoomTransports::new(TransportMode::Async, Some(mailbox as Arc<_>), None);
         // Async -> Live is not a supported transition (no WebRTC state to
         // recover from). The selector refuses it rather than silently
         // booting a new transport.
@@ -1103,11 +1097,8 @@ mod tests {
     #[test]
     fn transition_noop_when_same_mode() {
         let mailbox = Arc::new(MockMailbox::new());
-        let mut rt = RoomTransports::new(
-            TransportMode::Async,
-            Some(mailbox.clone() as Arc<_>),
-            None,
-        );
+        let mut rt =
+            RoomTransports::new(TransportMode::Async, Some(mailbox.clone() as Arc<_>), None);
         transition_mode(&mut rt, TransportMode::Async, None).expect("noop ok");
         assert_eq!(rt.mode, TransportMode::Async);
     }

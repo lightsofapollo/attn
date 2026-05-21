@@ -287,7 +287,11 @@ pub struct DocumentReplica {
 /// Spec: `data-model.md` §Local Replicas. Confidence is omitted for
 /// `unknown` because nothing is known yet.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ReplicaRelation {
     Same {
         snapshot_id: SnapshotId,
@@ -533,7 +537,11 @@ pub struct StructureAnchor {
 /// Spec: `data-model.md` §Anchor Resolution. Pinned algorithm in
 /// `amendments.md` decision #15.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ResolvedAnchor {
     Exact {
         confidence: f64,
@@ -637,7 +645,11 @@ pub struct EventAuth {
 ///
 /// Spec: `data-model.md` §Review Events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ReviewEventBody {
     RoomCreated {
         room_id: RoomId,
@@ -716,7 +728,11 @@ pub enum ReviewEventBody {
 ///
 /// Spec: `data-model.md` §Suggestion Events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum SuggestionOperation {
     Replace {
         expected_text: String,
@@ -870,8 +886,7 @@ mod tests {
     /// outside callers can only mint them via deserialization (which matches
     /// the wire model — ids only enter the system through JSON).
     fn id<T: for<'de> Deserialize<'de>>(s: &str) -> T {
-        serde_json::from_value(Value::String(s.to_string()))
-            .expect("id deserializes from string")
+        serde_json::from_value(Value::String(s.to_string())).expect("id deserializes from string")
     }
 
     /// Build a minimal valid `RoomPolicy` for tests.

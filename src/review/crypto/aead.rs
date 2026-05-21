@@ -18,8 +18,8 @@
 //!   never needs to distinguish them, and merging them avoids accidentally
 //!   leaking which input was wrong via timing or error-string differences.
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::XChaCha20Poly1305;
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use getrandom::getrandom;
 use serde::{Deserialize, Serialize};
 
@@ -341,8 +341,7 @@ mod tests {
 
     /// Compile-time-embedded corpus shared with the (future) TS/WASM client.
     /// See `planning/collab/test-vectors/aead.json`.
-    const CORPUS: &str =
-        include_str!("../../../planning/collab/test-vectors/aead.json");
+    const CORPUS: &str = include_str!("../../../planning/collab/test-vectors/aead.json");
 
     #[derive(Deserialize)]
     struct CorpusFile {
@@ -553,8 +552,7 @@ mod tests {
             .iter()
             .map(|v| {
                 let aad_bytes = canonical::to_canonical_bytes(&v.aad).unwrap();
-                let ct =
-                    seal_with_nonce(&v.key, &v.nonce, &v.plaintext, &v.aad).unwrap();
+                let ct = seal_with_nonce(&v.key, &v.nonce, &v.plaintext, &v.aad).unwrap();
                 serde_json::json!({
                     "name": v.name,
                     "keyKind": v.key_kind,
@@ -601,8 +599,7 @@ mod tests {
 
     #[test]
     fn corpus_replay_matches_expected_ciphertext() {
-        let file: CorpusFile = serde_json::from_str(CORPUS)
-            .expect("aead.json corpus must parse");
+        let file: CorpusFile = serde_json::from_str(CORPUS).expect("aead.json corpus must parse");
         assert!(
             file.vectors.len() >= 2,
             "expected >= 2 corpus vectors, got {}",
@@ -615,7 +612,10 @@ mod tests {
             // cleartext metadata, re-canonicalise it, then call open().
             let aad: EnvelopeAad = serde_json::from_value(v.expected.aad_as_json.clone())
                 .unwrap_or_else(|e| {
-                    panic!("vector {:?}: aadAsJson does not parse as EnvelopeAad: {e}", v.name)
+                    panic!(
+                        "vector {:?}: aadAsJson does not parse as EnvelopeAad: {e}",
+                        v.name
+                    )
                 });
 
             // 1. Our canonical-JSON of the typed AAD must equal the raw `aad`

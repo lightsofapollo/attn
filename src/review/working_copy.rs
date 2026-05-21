@@ -360,7 +360,11 @@ fn derive_revision_id(previous: &ContentHash, next: &ContentHash, created_at: u6
     hasher.update(b"attn local-revision v2");
     // Serialize the hashes the same way the wire form does — via serde —
     // so the id is invariant to internal representation changes.
-    hasher.update(serde_json::to_string(previous).unwrap_or_default().as_bytes());
+    hasher.update(
+        serde_json::to_string(previous)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     hasher.update(serde_json::to_string(next).unwrap_or_default().as_bytes());
     hasher.update(created_at.to_string().as_bytes());
     let digest = hasher.finalize();

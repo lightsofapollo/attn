@@ -208,11 +208,7 @@ impl MailboxWsClient {
     /// are owned by `ReviewManager` and would silently regress if we
     /// overwrote with empty defaults from inside the WS layer.
     fn save_seq(&self, seq: u64) {
-        let existing = self
-            .store
-            .load_cursor(&self.config.room_id)
-            .ok()
-            .flatten();
+        let existing = self.store.load_cursor(&self.config.room_id).ok().flatten();
         let cursor = match existing {
             Some(mut c) => {
                 c.last_pulled_seq = seq;
@@ -326,8 +322,8 @@ pub(crate) fn build_subprotocol(
     query_pairs: &[(String, String)],
 ) -> String {
     let canonical = canonical_request_bytes(method, url_path, query_pairs, b"");
-    let mut mac = <Hmac<Sha256>>::new_from_slice(admission_key)
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        <Hmac<Sha256>>::new_from_slice(admission_key).expect("HMAC accepts any key length");
     mac.update(&canonical);
     let tag = mac.finalize().into_bytes();
     format!("attn.v2, hmac.{}", URL_SAFE_NO_PAD.encode(tag))
@@ -523,7 +519,9 @@ impl MailboxWsClient {
                 return Ok(());
             }
 
-            let outcome = self.connect_once(last_seen_seq, cancel, &mut last_seen_seq).await;
+            let outcome = self
+                .connect_once(last_seen_seq, cancel, &mut last_seen_seq)
+                .await;
 
             match outcome {
                 ConnectionOutcome::Cancelled => return Ok(()),
@@ -612,8 +610,7 @@ impl MailboxWsClient {
         // would otherwise set its own protocol header.
         let device_id_str = id_to_string(&self.config.device_id);
         let path = socket_path(self.config.room_id.as_str());
-        let query: Vec<(String, String)> =
-            vec![("device_id".to_string(), device_id_str.clone())];
+        let query: Vec<(String, String)> = vec![("device_id".to_string(), device_id_str.clone())];
         let subprotocol = build_subprotocol(&self.config.admission_key, "GET", &path, &query);
 
         let url = build_ws_url(
@@ -652,10 +649,10 @@ impl MailboxWsClient {
                 // server may close 4000 during the HTTP upgrade if admission
                 // fails). We classify those as terminal AdmissionRejected so
                 // the caller doesn't reconnect into a guaranteed-failing loop.
-                if let tungstenite::Error::Http(resp) = &e {
-                    if resp.status().as_u16() == 401 {
-                        return ConnectionOutcome::Terminal(TransportError::AdmissionRejected);
-                    }
+                if let tungstenite::Error::Http(resp) = &e
+                    && resp.status().as_u16() == 401
+                {
+                    return ConnectionOutcome::Terminal(TransportError::AdmissionRejected);
                 }
                 return ConnectionOutcome::Transient(format!("ws connect: {e}"));
             }
@@ -671,7 +668,7 @@ impl MailboxWsClient {
                 return ConnectionOutcome::Transient(format!("serialize subscribe: {e}"));
             }
         };
-        if let Err(e) = sink.send(Message::Text(subscribe.into())).await {
+        if let Err(e) = sink.send(Message::Text(subscribe)).await {
             return ConnectionOutcome::Transient(format!("send subscribe: {e}"));
         }
 
@@ -776,7 +773,10 @@ impl MailboxWsClient {
                 });
                 None
             }
-            ServerFrame::Envelope { mut envelope, server_seq } => {
+            ServerFrame::Envelope {
+                mut envelope,
+                server_seq,
+            } => {
                 // The relay's `EnvelopeRecord` omits `v` and `roomId` because
                 // those values are implicit in the WS subscription. Rust's
                 // MailboxEnvelope uses defaults to deserialize, but the AAD
@@ -797,16 +797,15 @@ impl MailboxWsClient {
                 > = None;
                 let import_res: Result<(), crate::review::transport::inbound::InboundError> =
                     match kind {
-                        EnvelopeKind::Event => match self
-                            .import_event_with_refresh(&room_id, &envelope)
-                            .await
-                        {
-                            Ok(outcome) => {
-                                decoded_event = Some(outcome.event);
-                                Ok(())
+                        EnvelopeKind::Event => {
+                            match self.import_event_with_refresh(&room_id, &envelope).await {
+                                Ok(outcome) => {
+                                    decoded_event = Some(outcome.event);
+                                    Ok(())
+                                }
+                                Err(err) => Err(err),
                             }
-                            Err(err) => Err(err),
-                        },
+                        }
                         EnvelopeKind::SnapshotBlob => self
                             .inbound
                             .import_snapshot_envelope(&room_id, &envelope)
@@ -814,11 +813,7 @@ impl MailboxWsClient {
                             .map(|_| ()),
                         EnvelopeKind::Signal => match self
                             .inbound
-                            .import_signal_envelope(
-                                &room_id,
-                                &envelope,
-                                &self.config.device_id,
-                            )
+                            .import_signal_envelope(&room_id, &envelope, &self.config.device_id)
                             .await
                         {
                             Ok(plaintext) => {
@@ -928,7 +923,9 @@ impl MailboxWsClient {
                 None
             }
             ServerFrame::PolicyChanged { policy } => {
-                let _ = self.events_tx.send(TransportEvent::PolicyChanged { policy });
+                let _ = self
+                    .events_tx
+                    .send(TransportEvent::PolicyChanged { policy });
                 None
             }
             ServerFrame::Ping { ts } => {
@@ -938,12 +935,10 @@ impl MailboxWsClient {
                 let pong = match serde_json::to_string(&ClientFrame::Pong { ts }) {
                     Ok(s) => s,
                     Err(e) => {
-                        return Some(ConnectionOutcome::Transient(format!(
-                            "serialize pong: {e}"
-                        )));
+                        return Some(ConnectionOutcome::Transient(format!("serialize pong: {e}")));
                     }
                 };
-                if let Err(e) = sink.send(Message::Text(pong.into())).await {
+                if let Err(e) = sink.send(Message::Text(pong)).await {
                     return Some(ConnectionOutcome::Transient(format!("send pong: {e}")));
                 }
                 None
@@ -997,10 +992,9 @@ fn classify_close(close_frame: Option<CloseFrame>) -> ConnectionOutcome {
             // this as CursorTooOld; if not, surface the resync floor as 0.
             ConnectionOutcome::CursorTooOld(0)
         }
-        close_codes::NORMAL => ConnectionOutcome::Transient(format!(
-            "ws closed normally: {}",
-            cf.reason
-        )),
+        close_codes::NORMAL => {
+            ConnectionOutcome::Transient(format!("ws closed normally: {}", cf.reason))
+        }
         close_codes::RATE_LIMIT => {
             ConnectionOutcome::Transient(format!("ws rate-limited: {}", cf.reason))
         }
@@ -1073,17 +1067,19 @@ mod tests {
 
     fn fresh_store() -> (TempDir, Arc<ReviewStore>) {
         let tmp = TempDir::new().expect("tempdir");
-        let store = Arc::new(
-            ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"),
-        );
+        let store = Arc::new(ReviewStore::open_at(tmp.path().join("reviews")).expect("open store"));
         (tmp, store)
     }
 
     /// Build an `InboundPipeline` pre-loaded with the deterministic test
     /// signer so event envelopes encrypted+signed in the test mint with
     /// `TEST_SIGNING_SEED` round-trip cleanly.
-    fn fresh_pipeline()
-    -> (Arc<InboundPipeline>, Arc<ReviewStore>, DeviceVerifyingKey, TempDir) {
+    fn fresh_pipeline() -> (
+        Arc<InboundPipeline>,
+        Arc<ReviewStore>,
+        DeviceVerifyingKey,
+        TempDir,
+    ) {
         let (tmp, store) = fresh_store();
         let keys = derive_room_keys(&TEST_ROOM_SECRET);
         let event_key = *keys.event_key.as_bytes();
@@ -1129,9 +1125,7 @@ mod tests {
                     v: 2,
                     file_id: id::<FileId>("f-file-01"),
                     snapshot_id: id::<SnapshotId>("eQ7pDCC-mekpz-we7gDYag"),
-                    base_hash: id::<ContentHash>(
-                        "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
-                    ),
+                    base_hash: id::<ContentHash>("fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y"),
                     position: PositionAnchor {
                         byte_range: [0, 9],
                         line_range: [1, 1],
@@ -1174,22 +1168,18 @@ mod tests {
     /// missing `Sec-WebSocket-Protocol` echo as a protocol violation and
     /// closes the socket immediately — which is why we route through
     /// `accept_hdr_async` instead of plain `accept_async`.
-    async fn spawn_ws_server<F, Fut>(
-        handler: F,
-    ) -> (String, tokio::task::JoinHandle<()>)
+    // The `Result<Response, ErrorResponse>` shape is dictated by tungstenite's
+    // `accept_hdr_async` callback contract — we don't own the Err type and can't box it.
+    #[allow(clippy::result_large_err)]
+    async fn spawn_ws_server<F, Fut>(handler: F) -> (String, tokio::task::JoinHandle<()>)
     where
-        F: Fn(
-            tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-            usize,
-        ) -> Fut
+        F: Fn(tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, usize) -> Fut
             + Send
             + Sync
             + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        use tokio_tungstenite::tungstenite::handshake::server::{
-            ErrorResponse, Request, Response,
-        };
+        use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
@@ -1207,35 +1197,24 @@ mod tests {
                 let n = accept_count;
                 let handler = Arc::clone(&handler);
                 tokio::spawn(async move {
-                    let callback = |req: &Request, mut resp: Response| -> Result<
-                        Response,
-                        ErrorResponse,
-                    > {
-                        // Echo back the canonical `attn.v2` subprotocol if the
-                        // client offered it. Skipping the echo would have
-                        // tungstenite close on the client side.
-                        if let Some(proto_hdr) =
-                            req.headers().get("Sec-WebSocket-Protocol")
-                        {
-                            if let Ok(proto_str) = proto_hdr.to_str() {
-                                if proto_str
-                                    .split(',')
-                                    .any(|t| t.trim() == "attn.v2")
-                                {
-                                    resp.headers_mut().insert(
-                                        "Sec-WebSocket-Protocol",
-                                        "attn.v2".parse().unwrap(),
-                                    );
-                                }
+                    let callback =
+                        |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
+                            // Echo back the canonical `attn.v2` subprotocol if the
+                            // client offered it. Skipping the echo would have
+                            // tungstenite close on the client side.
+                            if let Some(proto_hdr) = req.headers().get("Sec-WebSocket-Protocol")
+                                && let Ok(proto_str) = proto_hdr.to_str()
+                                && proto_str.split(',').any(|t| t.trim() == "attn.v2")
+                            {
+                                resp.headers_mut()
+                                    .insert("Sec-WebSocket-Protocol", "attn.v2".parse().unwrap());
                             }
-                        }
-                        Ok(resp)
-                    };
-                    let ws =
-                        match tokio_tungstenite::accept_hdr_async(stream, callback).await {
-                            Ok(ws) => ws,
-                            Err(_) => return,
+                            Ok(resp)
                         };
+                    let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+                        Ok(ws) => ws,
+                        Err(_) => return,
+                    };
                     handler(ws, n).await;
                 });
             }
@@ -1290,10 +1269,16 @@ mod tests {
     #[test]
     fn ws_url_swaps_https_to_wss_and_includes_device_id_query() {
         let url = build_ws_url("https://relay.example", "room-1", "d-1");
-        assert_eq!(url, "wss://relay.example/v2/rooms/room-1/socket?device_id=d-1");
+        assert_eq!(
+            url,
+            "wss://relay.example/v2/rooms/room-1/socket?device_id=d-1"
+        );
 
         let url2 = build_ws_url("http://127.0.0.1:8787/", "room-1", "d-1");
-        assert_eq!(url2, "ws://127.0.0.1:8787/v2/rooms/room-1/socket?device_id=d-1");
+        assert_eq!(
+            url2,
+            "ws://127.0.0.1:8787/v2/rooms/room-1/socket?device_id=d-1"
+        );
     }
 
     // ----------------------------------------------------------------
@@ -1337,9 +1322,7 @@ mod tests {
                         v: 2,
                         file_id: id::<FileId>("f-file-01"),
                         snapshot_id: id::<SnapshotId>("eQ7pDCC-mekpz-we7gDYag"),
-                        base_hash: id::<ContentHash>(
-                            "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
-                        ),
+                        base_hash: id::<ContentHash>("fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y"),
                         position: PositionAnchor {
                             byte_range: [0, 9],
                             line_range: [1, 1],
@@ -1361,38 +1344,37 @@ mod tests {
 
         // Server: send hello, then 3 envelope frames, then close 1000.
         let envelopes_for_server = envelopes.clone();
-        let (relay_url, server_handle) =
-            spawn_ws_server(move |mut ws, _n| {
-                let envelopes_for_server = envelopes_for_server.clone();
-                async move {
-                    // Drain the client's subscribe frame.
-                    let _ = ws.next().await;
-                    let hello = json!({
-                        "type": "hello",
-                        "serverSeq": 100u64,
-                        "policy": sample_policy(),
-                        "devices": [],
-                        "missedSignalEnvelopeIds": [],
+        let (relay_url, server_handle) = spawn_ws_server(move |mut ws, _n| {
+            let envelopes_for_server = envelopes_for_server.clone();
+            async move {
+                // Drain the client's subscribe frame.
+                let _ = ws.next().await;
+                let hello = json!({
+                    "type": "hello",
+                    "serverSeq": 100u64,
+                    "policy": sample_policy(),
+                    "devices": [],
+                    "missedSignalEnvelopeIds": [],
+                });
+                ws.send(Message::Text(hello.to_string())).await.unwrap();
+                for (i, env) in envelopes_for_server.iter().enumerate() {
+                    let frame = json!({
+                        "type": "envelope",
+                        "envelope": env,
+                        "serverSeq": 101 + i as u64,
                     });
-                    ws.send(Message::Text(hello.to_string().into())).await.unwrap();
-                    for (i, env) in envelopes_for_server.iter().enumerate() {
-                        let frame = json!({
-                            "type": "envelope",
-                            "envelope": env,
-                            "serverSeq": 101 + i as u64,
-                        });
-                        ws.send(Message::Text(frame.to_string().into())).await.unwrap();
-                    }
-                    // Close normally — triggers Transient + reconnect loop.
-                    let _ = ws
-                        .send(Message::Close(Some(CloseFrame {
-                            code: CloseCode::Normal,
-                            reason: "done".into(),
-                        })))
-                        .await;
+                    ws.send(Message::Text(frame.to_string())).await.unwrap();
                 }
-            })
-            .await;
+                // Close normally — triggers Transient + reconnect loop.
+                let _ = ws
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::Normal,
+                        reason: "done".into(),
+                    })))
+                    .await;
+            }
+        })
+        .await;
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let client = build_client(relay_url, pipeline.clone(), store.clone(), events_tx);
@@ -1415,7 +1397,7 @@ mod tests {
                     hello_seen = true;
                 }
                 Ok(Some(TransportEvent::Envelope { server_seq, .. })) => {
-                    assert!(server_seq >= 101 && server_seq <= 103);
+                    assert!((101..=103).contains(&server_seq));
                     envelope_count += 1;
                 }
                 Ok(Some(_)) => continue,
@@ -1433,7 +1415,11 @@ mod tests {
             .expect("iter")
             .collect::<anyhow::Result<Vec<_>>>()
             .expect("decode");
-        assert_eq!(on_disk_events.len(), 3, "InboundPipeline must have imported 3 events");
+        assert_eq!(
+            on_disk_events.len(),
+            3,
+            "InboundPipeline must have imported 3 events"
+        );
 
         // Cancel the run loop and wait for a clean exit.
         let _ = cancel_tx.send(true);
@@ -1472,7 +1458,7 @@ mod tests {
                 "message": "cursor 5 < oldest_retained_seq 42",
                 "resyncFromSeq": 42u64,
             });
-            ws.send(Message::Text(err.to_string().into())).await.unwrap();
+            ws.send(Message::Text(err.to_string())).await.unwrap();
             // Server would close 4005 after — but the client initiates the
             // close itself on the error frame, so we just hold the socket.
             let _ = ws.next().await;
@@ -1491,8 +1477,7 @@ mod tests {
         );
         let (_cancel_tx, cancel_rx) = watch::channel(false);
 
-        let run_res =
-            tokio::time::timeout(Duration::from_secs(3), client.run(cancel_rx)).await;
+        let run_res = tokio::time::timeout(Duration::from_secs(3), client.run(cancel_rx)).await;
         let err = match run_res {
             Ok(Err(e)) => e,
             Ok(Ok(())) => panic!("expected CursorTooOld error, got Ok"),
@@ -1523,8 +1508,14 @@ mod tests {
                 _ => {}
             }
         }
-        assert!(saw_error_event, "Error event must be emitted for ATTN_CURSOR_TOO_OLD");
-        assert!(saw_disconnect, "Disconnected event must carry close code 4005");
+        assert!(
+            saw_error_event,
+            "Error event must be emitted for ATTN_CURSOR_TOO_OLD"
+        );
+        assert!(
+            saw_disconnect,
+            "Disconnected event must carry close code 4005"
+        );
         server_handle.abort();
     }
 
@@ -1603,7 +1594,7 @@ mod tests {
                     "devices": [],
                     "missedSignalEnvelopeIds": [],
                 });
-                ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                ws.send(Message::Text(hello.to_string())).await.unwrap();
                 if n == 1 {
                     let _ = ws
                         .send(Message::Close(Some(CloseFrame {
@@ -1640,17 +1631,26 @@ mod tests {
                 Ok(None) | Err(_) => break,
             }
         }
-        assert_eq!(hello_count, 2, "client must reconnect after server-initiated 1000 close");
+        assert_eq!(
+            hello_count, 2,
+            "client must reconnect after server-initiated 1000 close"
+        );
 
         let _ = cancel_tx.send(true);
         let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
         server_handle.abort();
 
         let connects = connect_count.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(connects >= 2, "expected at least 2 connect attempts, got {connects}");
+        assert!(
+            connects >= 2,
+            "expected at least 2 connect attempts, got {connects}"
+        );
 
         let after_seqs = last_subscribe_after.lock().await.clone();
-        assert!(after_seqs.len() >= 2, "expected ≥2 subscribe frames, got {after_seqs:?}");
+        assert!(
+            after_seqs.len() >= 2,
+            "expected ≥2 subscribe frames, got {after_seqs:?}"
+        );
         // First subscribe is `after: 0`. Subsequent reconnect after a hello
         // with serverSeq=0 and no envelopes must still send `after: 0` (no
         // envelopes acked → cursor doesn't advance).
@@ -1675,7 +1675,7 @@ mod tests {
                 "devices": [],
                 "missedSignalEnvelopeIds": [],
             });
-            ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+            ws.send(Message::Text(hello.to_string())).await.unwrap();
             // Hold the socket; await client close.
             while let Some(Ok(msg)) = ws.next().await {
                 if matches!(msg, Message::Close(_)) {
@@ -1734,11 +1734,11 @@ mod tests {
                     "devices": [],
                     "missedSignalEnvelopeIds": [],
                 });
-                ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                ws.send(Message::Text(hello.to_string())).await.unwrap();
 
                 // Send a ping with a recognizable ts.
                 let ping = json!({ "type": "ping", "ts": 12345i64 });
-                ws.send(Message::Text(ping.to_string().into())).await.unwrap();
+                ws.send(Message::Text(ping.to_string())).await.unwrap();
 
                 // Read the next frame; expect a pong with the same ts.
                 if let Some(Ok(Message::Text(payload))) = ws.next().await {
@@ -1776,7 +1776,11 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        assert_eq!(found, Some(12345i64), "client must answer ping with pong ts=12345");
+        assert_eq!(
+            found,
+            Some(12345i64),
+            "client must answer ping with pong ts=12345"
+        );
 
         let _ = cancel_tx.send(true);
         let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
@@ -1789,7 +1793,11 @@ mod tests {
 
     /// Mint `count` distinct event envelopes that the test pipeline can
     /// successfully import (same signer / room_id as `fresh_pipeline`).
-    fn mint_event_envelopes(event_key: [u8; 32], room_id: &RoomId, count: usize) -> Vec<MailboxEnvelope> {
+    fn mint_event_envelopes(
+        event_key: [u8; 32],
+        room_id: &RoomId,
+        count: usize,
+    ) -> Vec<MailboxEnvelope> {
         use crate::review::envelope::{AssembleInput, assemble_event_envelope};
         use crate::review::ids::{ContentHash, FileId, ParticipantId, SnapshotId};
         use crate::review::model::{Anchor, PositionAnchor, ReviewEventBody};
@@ -1812,9 +1820,7 @@ mod tests {
                         v: 2,
                         file_id: id::<FileId>("f-file-01"),
                         snapshot_id: id::<SnapshotId>("eQ7pDCC-mekpz-we7gDYag"),
-                        base_hash: id::<ContentHash>(
-                            "fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y",
-                        ),
+                        base_hash: id::<ContentHash>("fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y"),
                         position: PositionAnchor {
                             byte_range: [0, 9],
                             line_range: [1, 1],
@@ -1861,7 +1867,7 @@ mod tests {
                     "devices": [],
                     "missedSignalEnvelopeIds": [],
                 });
-                ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                ws.send(Message::Text(hello.to_string())).await.unwrap();
                 for (i, env) in envelopes_for_server.iter().enumerate() {
                     let frame = json!({
                         "type": "envelope",
@@ -1870,7 +1876,7 @@ mod tests {
                         // must land on 3 (the highest stamped seq).
                         "serverSeq": 1 + i as u64,
                     });
-                    ws.send(Message::Text(frame.to_string().into())).await.unwrap();
+                    ws.send(Message::Text(frame.to_string())).await.unwrap();
                 }
                 // Hold the socket; the test cancels.
                 let _ = ws.next().await;
@@ -1882,7 +1888,9 @@ mod tests {
         let client = build_client(relay_url, pipeline, store.clone(), events_tx);
         let (cancel_tx, cancel_rx) = watch::channel(false);
 
-        let run_handle = tokio::spawn(async move { let _ = client.run(cancel_rx).await; });
+        let run_handle = tokio::spawn(async move {
+            let _ = client.run(cancel_rx).await;
+        });
 
         // Drain envelopes until we've seen all 3.
         let mut envelope_count = 0;
@@ -1953,7 +1961,7 @@ mod tests {
                     "devices": [],
                     "missedSignalEnvelopeIds": [],
                 });
-                ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                ws.send(Message::Text(hello.to_string())).await.unwrap();
                 let _ = ws.next().await;
             }
         })
@@ -1962,7 +1970,9 @@ mod tests {
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
         let client = build_client(relay_url, pipeline, store, events_tx);
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let run_handle = tokio::spawn(async move { let _ = client.run(cancel_rx).await; });
+        let run_handle = tokio::spawn(async move {
+            let _ = client.run(cancel_rx).await;
+        });
 
         // Poll for the captured `after` value.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -2025,7 +2035,7 @@ mod tests {
                         "message": "cursor 5 < oldest 42",
                         "resyncFromSeq": 42u64,
                     });
-                    ws.send(Message::Text(err.to_string().into())).await.unwrap();
+                    ws.send(Message::Text(err.to_string())).await.unwrap();
                     let _ = ws.next().await; // wait for client close
                 } else {
                     // Reconnect: send hello and hold.
@@ -2036,7 +2046,7 @@ mod tests {
                         "devices": [],
                         "missedSignalEnvelopeIds": [],
                     });
-                    ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                    ws.send(Message::Text(hello.to_string())).await.unwrap();
                     let _ = ws.next().await;
                 }
             }
@@ -2052,7 +2062,9 @@ mod tests {
             CursorRecoveryPolicy::ResyncFromOldest,
         );
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let run_handle = tokio::spawn(async move { let _ = client.run(cancel_rx).await; });
+        let run_handle = tokio::spawn(async move {
+            let _ = client.run(cancel_rx).await;
+        });
 
         // Wait for the second hello (proving the auto-reconnect happened).
         let mut hello_count = 0;
@@ -2083,7 +2095,10 @@ mod tests {
 
         // The second subscribe MUST carry after=42.
         let after_seqs = captured_after.lock().await.clone();
-        assert!(after_seqs.len() >= 2, "expected ≥2 subscribe frames, got {after_seqs:?}");
+        assert!(
+            after_seqs.len() >= 2,
+            "expected ≥2 subscribe frames, got {after_seqs:?}"
+        );
         assert_eq!(after_seqs[0], 5, "first subscribe used the seeded cursor");
         assert_eq!(after_seqs[1], 42, "second subscribe must use resyncFromSeq");
 
@@ -2126,7 +2141,7 @@ mod tests {
                     "message": "cursor 5 < oldest 42",
                     "resyncFromSeq": 42u64,
                 });
-                ws.send(Message::Text(err.to_string().into())).await.unwrap();
+                ws.send(Message::Text(err.to_string())).await.unwrap();
                 let _ = ws.next().await;
             }
         })
@@ -2142,8 +2157,7 @@ mod tests {
         );
         let (_cancel_tx, cancel_rx) = watch::channel(false);
 
-        let run_res =
-            tokio::time::timeout(Duration::from_secs(3), client.run(cancel_rx)).await;
+        let run_res = tokio::time::timeout(Duration::from_secs(3), client.run(cancel_rx)).await;
         let err = match run_res {
             Ok(Err(e)) => e,
             other => panic!("expected CursorTooOld error, got {other:?}"),
@@ -2176,10 +2190,10 @@ mod tests {
         while let Ok(Some(ev)) =
             tokio::time::timeout(Duration::from_millis(50), events_rx.recv()).await
         {
-            if let TransportEvent::Error { code, .. } = ev {
-                if code == "ATTN_CURSOR_TOO_OLD" {
-                    saw_error = true;
-                }
+            if let TransportEvent::Error { code, .. } = ev
+                && code == "ATTN_CURSOR_TOO_OLD"
+            {
+                saw_error = true;
             }
         }
         assert!(saw_error, "Manual policy must still emit the Error event");
@@ -2218,7 +2232,7 @@ mod tests {
                     "message": "too old",
                     "resyncFromSeq": 99u64,
                 });
-                ws.send(Message::Text(err.to_string().into())).await.unwrap();
+                ws.send(Message::Text(err.to_string())).await.unwrap();
                 let _ = ws.next().await;
             }
         })
@@ -2234,8 +2248,7 @@ mod tests {
         );
         let (_cancel_tx, cancel_rx) = watch::channel(false);
 
-        let run_res =
-            tokio::time::timeout(Duration::from_secs(3), client.run(cancel_rx)).await;
+        let run_res = tokio::time::timeout(Duration::from_secs(3), client.run(cancel_rx)).await;
         match run_res {
             Ok(Err(TransportError::CursorTooOld(99))) => {}
             other => panic!("expected CursorTooOld(99), got {other:?}"),
@@ -2282,7 +2295,7 @@ mod tests {
                     "devices": [],
                     "missedSignalEnvelopeIds": [],
                 });
-                ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                ws.send(Message::Text(hello.to_string())).await.unwrap();
                 let _ = ws.next().await;
             }
         })
@@ -2291,7 +2304,9 @@ mod tests {
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
         let client = build_client(relay_url, pipeline, store, events_tx);
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let run_handle = tokio::spawn(async move { let _ = client.run(cancel_rx).await; });
+        let run_handle = tokio::spawn(async move {
+            let _ = client.run(cancel_rx).await;
+        });
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut got: Option<u64> = None;
@@ -2349,14 +2364,14 @@ mod tests {
                     "devices": [],
                     "missedSignalEnvelopeIds": [],
                 });
-                ws.send(Message::Text(hello.to_string().into())).await.unwrap();
+                ws.send(Message::Text(hello.to_string())).await.unwrap();
                 for (i, env) in envelopes_for_server.iter().enumerate() {
                     let frame = json!({
                         "type": "envelope",
                         "envelope": env,
                         "serverSeq": 11 + i as u64,
                     });
-                    ws.send(Message::Text(frame.to_string().into())).await.unwrap();
+                    ws.send(Message::Text(frame.to_string())).await.unwrap();
                 }
                 let _ = ws.next().await;
             }
@@ -2366,7 +2381,9 @@ mod tests {
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let client = build_client(relay_url, pipeline, store.clone(), events_tx);
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let run_handle = tokio::spawn(async move { let _ = client.run(cancel_rx).await; });
+        let run_handle = tokio::spawn(async move {
+            let _ = client.run(cancel_rx).await;
+        });
 
         // Wait for the envelope.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

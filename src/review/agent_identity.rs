@@ -36,8 +36,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::daemon::runtime_dir;
-use crate::review::bootstrap::{BootstrapError, DeviceIdentity, IDENTITY_FILENAME,
-    load_identity_from, save_identity_to};
+use crate::review::bootstrap::{
+    BootstrapError, DeviceIdentity, IDENTITY_FILENAME, load_identity_from, save_identity_to,
+};
 
 /// Directory name under `runtime_dir()` that holds per-agent identities.
 pub const AGENTS_DIRNAME: &str = "agents";
@@ -49,7 +50,9 @@ pub const AGENTS_DIRNAME: &str = "agents";
 /// leading dot — no `.hidden` agents).
 pub fn validate_agent_name(raw: &str) -> Result<&str, BootstrapError> {
     if raw.is_empty() {
-        return Err(BootstrapError::Identity("agent name must not be empty".into()));
+        return Err(BootstrapError::Identity(
+            "agent name must not be empty".into(),
+        ));
     }
     if raw.starts_with('.') {
         return Err(BootstrapError::Identity(
@@ -105,10 +108,7 @@ pub fn agent_identity_path_in(base: &Path, name: &str) -> Result<PathBuf, Bootst
 /// agent already has an identity on disk — registration is intentionally
 /// non-destructive so a stray `register-agent` call cannot rotate a
 /// remote-agent's key out from under the relay's device directory.
-pub fn register_agent_in(
-    base: &Path,
-    name: &str,
-) -> Result<DeviceIdentity, BootstrapError> {
+pub fn register_agent_in(base: &Path, name: &str) -> Result<DeviceIdentity, BootstrapError> {
     let dir = agent_dir_in(base, name)?;
     let path = dir.join(IDENTITY_FILENAME);
     if path.exists() {

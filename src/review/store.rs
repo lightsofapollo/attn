@@ -42,8 +42,8 @@ use serde::{Deserialize, Serialize};
 use crate::daemon::runtime_dir;
 use crate::review::ids::{FileId, RoomId, SnapshotId};
 use crate::review::model::{
-    Device, LocalFileBinding, LocalRevision, MailboxEnvelope, Participant, ReviewEvent,
-    ReviewRoom, SnapshotNode, SyncCursor,
+    Device, LocalFileBinding, LocalRevision, MailboxEnvelope, Participant, ReviewEvent, ReviewRoom,
+    SnapshotNode, SyncCursor,
 };
 
 /// Persistent JSON+JSONL store for review rooms.
@@ -147,8 +147,7 @@ impl ReviewStore {
             Ok(rd) => rd,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(out),
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("could not read {}", rooms_dir.display()));
+                return Err(err).with_context(|| format!("could not read {}", rooms_dir.display()));
             }
         };
         for entry in read_dir {
@@ -183,7 +182,11 @@ impl ReviewStore {
     /// Atomically write a single snapshot file.
     pub fn save_snapshot(&self, room_id: &RoomId, snapshot: &SnapshotNode) -> Result<()> {
         let dir = self.room_dir(room_id).join("snapshots");
-        write_json_atomic(&dir, &self.snapshot_file(room_id, &snapshot.snapshot_id), snapshot)
+        write_json_atomic(
+            &dir,
+            &self.snapshot_file(room_id, &snapshot.snapshot_id),
+            snapshot,
+        )
     }
 
     /// Iterate every `SnapshotNode` persisted for `room_id`. Yields decode
@@ -192,17 +195,13 @@ impl ReviewStore {
     ///
     /// Returns an empty iterator when the room or its `snapshots/` directory
     /// is absent — same shape as `iter_events` / `iter_outbox`.
-    pub fn iter_snapshots(
-        &self,
-        room_id: &RoomId,
-    ) -> Result<Vec<Result<SnapshotNode>>> {
+    pub fn iter_snapshots(&self, room_id: &RoomId) -> Result<Vec<Result<SnapshotNode>>> {
         let dir = self.room_dir(room_id).join("snapshots");
         let read_dir = match std::fs::read_dir(&dir) {
             Ok(rd) => rd,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("could not read {}", dir.display()));
+                return Err(err).with_context(|| format!("could not read {}", dir.display()));
             }
         };
         let mut out = Vec::new();
@@ -370,12 +369,11 @@ impl ReviewStore {
     // ---------------------------------------------------------------------
 
     /// Load `bindings.json`. Returns an empty map when absent.
-    pub fn load_bindings(
-        &self,
-        room_id: &RoomId,
-    ) -> Result<HashMap<FileId, LocalFileBinding>> {
-        Ok(read_json::<HashMap<FileId, LocalFileBinding>>(&self.bindings_file(room_id))?
-            .unwrap_or_default())
+    pub fn load_bindings(&self, room_id: &RoomId) -> Result<HashMap<FileId, LocalFileBinding>> {
+        Ok(
+            read_json::<HashMap<FileId, LocalFileBinding>>(&self.bindings_file(room_id))?
+                .unwrap_or_default(),
+        )
     }
 
     /// Atomically write `bindings.json`.
@@ -399,11 +397,7 @@ impl ReviewStore {
     }
 
     /// Atomically write `participants.json`.
-    pub fn save_participants(
-        &self,
-        room_id: &RoomId,
-        participants: &[Participant],
-    ) -> Result<()> {
+    pub fn save_participants(&self, room_id: &RoomId, participants: &[Participant]) -> Result<()> {
         let dir = self.room_dir(room_id);
         write_json_atomic(&dir, &self.participants_file(room_id), &participants)
     }
@@ -433,8 +427,8 @@ fn write_json_atomic<T: Serialize>(parent_dir: &Path, path: &Path, value: &T) ->
         .with_context(|| format!("serialize {}", path.display()))?;
     let tmp = with_tmp_suffix(path);
     {
-        let mut f = File::create(&tmp)
-            .with_context(|| format!("could not create {}", tmp.display()))?;
+        let mut f =
+            File::create(&tmp).with_context(|| format!("could not create {}", tmp.display()))?;
         f.write_all(&bytes)
             .with_context(|| format!("could not write {}", tmp.display()))?;
         f.flush()
@@ -492,11 +486,7 @@ fn append_jsonl<T: Serialize>(parent_dir: &Path, path: &Path, value: &T) -> Resu
 
 /// Linear-scan a JSONL file for a record whose value at the given
 /// dotted JSON path equals `target`. Missing file => `Ok(false)`.
-fn jsonl_contains_id(
-    path: &Path,
-    json_path: &[&str],
-    target: &serde_json::Value,
-) -> Result<bool> {
+fn jsonl_contains_id(path: &Path, json_path: &[&str], target: &serde_json::Value) -> Result<bool> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -506,8 +496,7 @@ fn jsonl_contains_id(
     };
     let reader = BufReader::new(file);
     for line in reader.lines() {
-        let line =
-            line.with_context(|| format!("could not read line from {}", path.display()))?;
+        let line = line.with_context(|| format!("could not read line from {}", path.display()))?;
         if line.trim().is_empty() {
             continue;
         }
@@ -842,7 +831,10 @@ mod tests {
 
         // Missing snapshot => Ok(None).
         let missing: SnapshotId = id("snap-missing");
-        assert_eq!(store.load_snapshot(&room_id, &missing).expect("missing"), None);
+        assert_eq!(
+            store.load_snapshot(&room_id, &missing).expect("missing"),
+            None
+        );
     }
 
     #[test]

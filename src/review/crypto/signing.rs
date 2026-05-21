@@ -46,10 +46,7 @@ pub enum SignError {
     /// `base64url(SHA-256(publicSigningKey))` of the supplied verifying key.
     /// Catches key-rotation / key-swap attempts (crypto-spec.md §Signatures
     /// step 2).
-    SigningKeyIdMismatch {
-        expected: String,
-        actual: String,
-    },
+    SigningKeyIdMismatch { expected: String, actual: String },
     /// The supplied base64url string did not decode to the expected length.
     InvalidSignatureEncoding(String),
 }
@@ -291,13 +288,9 @@ pub fn verify_event(
     let sig_bytes = URL_SAFE_NO_PAD
         .decode(&auth.signature)
         .map_err(|e| SignError::InvalidSignatureEncoding(e.to_string()))?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| SignError::InvalidSignatureEncoding(format!(
-            "expected 64 bytes, got {}",
-            sig_bytes.len()
-        )))?;
+    let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+        SignError::InvalidSignatureEncoding(format!("expected 64 bytes, got {}", sig_bytes.len()))
+    })?;
     let signature = Signature::from_bytes(&sig_arr);
 
     // 3. Recompute canonical bytes + verify.
@@ -318,10 +311,10 @@ mod tests {
     use serde::Deserialize;
     use serde_json::Value;
 
-    use crate::review::ids::{ContentHash, DeviceId, EventId, FileId, ParticipantId, RoomId, SnapshotId};
-    use crate::review::model::{
-        Anchor, EventMeta, PositionAnchor, ReviewEventBody,
+    use crate::review::ids::{
+        ContentHash, DeviceId, EventId, FileId, ParticipantId, RoomId, SnapshotId,
     };
+    use crate::review::model::{Anchor, EventMeta, PositionAnchor, ReviewEventBody};
 
     fn id<T: for<'de> Deserialize<'de>>(s: &str) -> T {
         serde_json::from_value(Value::String(s.to_string())).expect("id deserializes")
@@ -480,7 +473,10 @@ mod tests {
         // Signed bytes are identical regardless of caller-side ordering.
         let bytes_a = canonical_signed_bytes(&meta_a, &body).unwrap();
         let bytes_b = canonical_signed_bytes(&meta_b, &body).unwrap();
-        assert_eq!(bytes_a, bytes_b, "parentEventIds must be sorted before signing");
+        assert_eq!(
+            bytes_a, bytes_b,
+            "parentEventIds must be sorted before signing"
+        );
 
         // And the signature on meta_a verifies against meta_b (since the
         // signed bytes are the same).
@@ -546,7 +542,11 @@ mod tests {
     fn generate_produces_distinct_keys() {
         let a = DeviceSigningKey::generate().unwrap();
         let b = DeviceSigningKey::generate().unwrap();
-        assert_ne!(a.to_bytes(), b.to_bytes(), "generate must use fresh entropy");
+        assert_ne!(
+            a.to_bytes(),
+            b.to_bytes(),
+            "generate must use fresh entropy"
+        );
     }
 
     #[test]
@@ -750,8 +750,7 @@ mod tests {
 
     /// Compile-time-embedded corpus shared with the (future) TS/WASM client.
     /// See `planning/collab/test-vectors/event-signature.json` for the schema.
-    const CORPUS: &str =
-        include_str!("../../../planning/collab/test-vectors/event-signature.json");
+    const CORPUS: &str = include_str!("../../../planning/collab/test-vectors/event-signature.json");
 
     #[derive(Deserialize)]
     struct CorpusFile {
@@ -832,8 +831,8 @@ mod tests {
             );
 
             // Canonical signed bytes match (UTF-8 string in the vector).
-            let signed = canonical_signed_bytes(&v.event.meta, &v.event.body)
-                .expect("canonical bytes");
+            let signed =
+                canonical_signed_bytes(&v.event.meta, &v.event.body).expect("canonical bytes");
             assert_eq!(
                 std::str::from_utf8(&signed).expect("utf8"),
                 v.expected.canonical_signed_bytes,

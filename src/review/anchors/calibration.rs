@@ -33,6 +33,15 @@ use crate::review::crypto::ids::content_hash;
 use crate::review::ids::SnapshotId;
 use crate::review::model::{Anchor, ResolvedAnchor};
 
+// Perturbation table rows: a labelled config mutator plus the from/to values
+// printed in the calibration report. Aliased to keep the table literals legible.
+/// `(label, mutate(cfg), from, to)` — cutoff sweep rows.
+type CutoffPerturbation = (&'static str, fn(&mut ResolverConfig), f64, f64);
+/// `(label, mutate(cfg, delta), default)` — weight stress rows.
+type WeightPerturbation = (&'static str, fn(&mut ResolverConfig, f64), f64);
+/// `(label, mutate(cfg, delta))` — per-weight flip detail rows.
+type WeightMutator = (&'static str, fn(&mut ResolverConfig, f64));
+
 // ---------------------------------------------------------------------------
 // Corpus loader (mirrors planning/collab/test-vectors/anchor-cases/ layout)
 // ---------------------------------------------------------------------------
@@ -158,15 +167,8 @@ fn run_sweep(cases: &[Case], cfg: &ResolverConfig) -> SweepResult {
         let idx = build_anchor_index(&case.edited_bytes, &case.snapshot_id)
             .expect("build_anchor_index over edited.md");
         let h = content_hash(&case.edited_bytes);
-        let got = resolve_anchor_with_config(
-            &case.anchor,
-            &idx,
-            &case.edited_bytes,
-            &h,
-            None,
-            cfg,
-        )
-        .expect("resolve_anchor_with_config");
+        let got = resolve_anchor_with_config(&case.anchor, &idx, &case.edited_bytes, &h, None, cfg)
+            .expect("resolve_anchor_with_config");
         let got_status = resolve_status_of(&got);
         out.total += 1;
         if got_status != case.expected_status {
@@ -224,28 +226,35 @@ fn print_cutoff_stress(cases: &[Case]) {
     let baseline_d = run_sweep(cases, &ResolverConfig::DEFAULT).status_mismatches;
     println!("| (baseline) | n/a | n/a | {} |", baseline_d);
 
-    let perturbations: &[(&str, fn(&mut ResolverConfig), f64, f64)] = &[
+    let perturbations: &[CutoffPerturbation] = &[
         ("ambiguous_delta", |c| c.ambiguous_delta = 0.05, 0.10, 0.05),
         ("ambiguous_delta", |c| c.ambiguous_delta = 0.15, 0.10, 0.15),
         // Inline cutoff = HIGH_CONFIDENCE (boundary between remapped and stale).
         ("high_confidence", |c| c.high_confidence = 0.85, 0.70, 0.85),
         ("high_confidence", |c| c.high_confidence = 0.65, 0.70, 0.65),
         // Proximity / stale floor.
-        ("stale_floor",     |c| c.stale_floor = 0.50, 0.35, 0.50),
-        ("stale_floor",     |c| c.stale_floor = 0.25, 0.35, 0.25),
+        ("stale_floor", |c| c.stale_floor = 0.50, 0.35, 0.50),
+        ("stale_floor", |c| c.stale_floor = 0.25, 0.35, 0.25),
         // Ambiguous inclusion threshold.
-        ("ambiguous_include", |c| c.ambiguous_include = 0.40, 0.50, 0.40),
-        ("ambiguous_include", |c| c.ambiguous_include = 0.60, 0.50, 0.60),
+        (
+            "ambiguous_include",
+            |c| c.ambiguous_include = 0.40,
+            0.50,
+            0.40,
+        ),
+        (
+            "ambiguous_include",
+            |c| c.ambiguous_include = 0.60,
+            0.50,
+            0.60,
+        ),
     ];
 
     for (name, mutate, from, to) in perturbations {
         let mut cfg = ResolverConfig::DEFAULT;
         mutate(&mut cfg);
         let r = run_sweep(cases, &cfg);
-        println!(
-            "| {name} | {from} | {to} | {} |",
-            r.status_mismatches
-        );
+        println!("| {name} | {from} | {to} | {} |", r.status_mismatches);
     }
     println!();
 
@@ -303,13 +312,37 @@ fn print_weight_stress(cases: &[Case]) {
     println!("| weight | default | -0.05 | +0.05 |");
     println!("|--------|---------|-------|-------|");
 
-    let perturbations: &[(&str, fn(&mut ResolverConfig, f64), f64)] = &[
-        ("quote_unique",    |c, d| c.quote_unique = (c.quote_unique + d).clamp(0.0, 1.0), 0.90),
-        ("block_fp",        |c, d| c.block_fp = (c.block_fp + d).clamp(0.0, 1.0), 0.85),
-        ("structure_quote", |c, d| c.structure_quote = (c.structure_quote + d).clamp(0.0, 1.0), 0.80),
-        ("context",         |c, d| c.context = (c.context + d).clamp(0.0, 1.0), 0.70),
-        ("fuzzy_max",       |c, d| c.fuzzy_max = (c.fuzzy_max + d).clamp(c.fuzzy_min, 1.0), 0.75),
-        ("fuzzy_min",       |c, d| c.fuzzy_min = (c.fuzzy_min + d).clamp(0.0, c.fuzzy_max), 0.50),
+    let perturbations: &[WeightPerturbation] = &[
+        (
+            "quote_unique",
+            |c, d| c.quote_unique = (c.quote_unique + d).clamp(0.0, 1.0),
+            0.90,
+        ),
+        (
+            "block_fp",
+            |c, d| c.block_fp = (c.block_fp + d).clamp(0.0, 1.0),
+            0.85,
+        ),
+        (
+            "structure_quote",
+            |c, d| c.structure_quote = (c.structure_quote + d).clamp(0.0, 1.0),
+            0.80,
+        ),
+        (
+            "context",
+            |c, d| c.context = (c.context + d).clamp(0.0, 1.0),
+            0.70,
+        ),
+        (
+            "fuzzy_max",
+            |c, d| c.fuzzy_max = (c.fuzzy_max + d).clamp(c.fuzzy_min, 1.0),
+            0.75,
+        ),
+        (
+            "fuzzy_min",
+            |c, d| c.fuzzy_min = (c.fuzzy_min + d).clamp(0.0, c.fuzzy_max),
+            0.50,
+        ),
     ];
 
     for (name, mutate, default) in perturbations {
@@ -327,13 +360,13 @@ fn print_weight_stress(cases: &[Case]) {
 
     // Detail dump for any weight whose perturbation flipped a case.
     println!("### Detail: per-weight flips (only listed if non-zero)");
-    let detail: &[(&str, fn(&mut ResolverConfig, f64))] = &[
-        ("quote_unique",    |c, d| c.quote_unique += d),
-        ("block_fp",        |c, d| c.block_fp += d),
+    let detail: &[WeightMutator] = &[
+        ("quote_unique", |c, d| c.quote_unique += d),
+        ("block_fp", |c, d| c.block_fp += d),
         ("structure_quote", |c, d| c.structure_quote += d),
-        ("context",         |c, d| c.context += d),
-        ("fuzzy_max",       |c, d| c.fuzzy_max += d),
-        ("fuzzy_min",       |c, d| c.fuzzy_min += d),
+        ("context", |c, d| c.context += d),
+        ("fuzzy_max", |c, d| c.fuzzy_max += d),
+        ("fuzzy_min", |c, d| c.fuzzy_min += d),
     ];
     for (name, mutate) in detail {
         for delta in &[-0.05f64, 0.05] {
@@ -443,14 +476,17 @@ fn print_candidate_adjustments(cases: &[Case]) {
         // Floor proposal: line_prox_max=0.30 + block_fp=0.79 + cascade
         // structure_quote/context down so the rest of the cascade
         // preserves >0.10 gaps everywhere.
-        ("full recommendation (line_prox=0.30, block_fp=0.79, struct=0.74, ctx=0.64)", {
-            let mut c = ResolverConfig::DEFAULT;
-            c.line_prox_max = 0.30;
-            c.block_fp = 0.79;
-            c.structure_quote = 0.74;
-            c.context = 0.64;
-            c
-        }),
+        (
+            "full recommendation (line_prox=0.30, block_fp=0.79, struct=0.74, ctx=0.64)",
+            {
+                let mut c = ResolverConfig::DEFAULT;
+                c.line_prox_max = 0.30;
+                c.block_fp = 0.79;
+                c.structure_quote = 0.74;
+                c.context = 0.64;
+                c
+            },
+        ),
     ];
 
     for (label, cfg) in &configs {
@@ -522,8 +558,14 @@ fn calibration_loader_smoke() {
         cases.len()
     );
     // Distribution sanity per the README.
-    let exacts = cases.iter().filter(|c| c.expected_status == "exact").count();
-    let stales = cases.iter().filter(|c| c.expected_status == "stale").count();
+    let exacts = cases
+        .iter()
+        .filter(|c| c.expected_status == "exact")
+        .count();
+    let stales = cases
+        .iter()
+        .filter(|c| c.expected_status == "stale")
+        .count();
     assert!(exacts >= 4, "expected ≥4 exact cases, got {exacts}");
     assert!(stales >= 5, "expected ≥5 stale cases, got {stales}");
 }

@@ -29,7 +29,7 @@
 
 <section id="collaborate" class="py-28 px-6">
 	<div class="max-w-4xl mx-auto">
-		<div class="text-center max-w-2xl mx-auto mb-14">
+		<div class="text-center max-w-2xl mx-auto mb-12">
 			<p class="font-sans text-sm font-semibold uppercase tracking-widest text-primary mb-4">
 				New
 			</p>
@@ -41,6 +41,25 @@
 				always end-to-end encrypted, peer-to-peer when the network allows. No
 				accounts, and no server can read a word.
 			</p>
+		</div>
+
+		<!-- The real thing: a live review session — inline comment cards + a
+		     reviewer's cursor, rendered right in the editor. -->
+		<div
+			class="relative mb-16 rounded-xl shadow-2xl border border-border overflow-hidden bg-card"
+		>
+			<img
+				src="/screenshots/collab-light.png"
+				alt="A live attn review session: inline comment and suggestion cards beside the markdown, with a labeled collaborator cursor"
+				class="w-full transition-opacity duration-500"
+				class:opacity-0={getTheme() === 'dark'}
+			/>
+			<img
+				src="/screenshots/collab-dark.png"
+				alt="A live attn review session in dark mode"
+				class="absolute inset-0 w-full transition-opacity duration-500"
+				class:opacity-0={getTheme() !== 'dark'}
+			/>
 		</div>
 
 		<div class="grid sm:grid-cols-2 gap-x-12 gap-y-10">

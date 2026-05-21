@@ -21,8 +21,8 @@
 <!-- Pitch callout -->
 <section class="py-24 px-6 text-center">
 	<p class="font-serif text-3xl md:text-4xl leading-relaxed max-w-3xl mx-auto text-foreground">
-		&lt;20 MB. One binary.<br />
-		No Electron. No browser.<br />
+		Review together, in real time.<br />
+		Always end-to-end encrypted. Peer-to-peer when it can.<br />
 		Just your markdown, rendered beautifully.
 	</p>
 </section>

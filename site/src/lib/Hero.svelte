@@ -39,14 +39,14 @@
 
 		<div class="relative mt-16 max-w-4xl mx-auto rounded-xl shadow-2xl border border-border overflow-hidden bg-card">
 			<img
-				src="/screenshots/hero-light.png"
-				alt="attn in light mode"
+				src="/screenshots/collab-light.png"
+				alt="A live attn session: the shared doc with the owner's amber caret and a reviewer's blue caret, end-to-end encrypted"
 				class="w-full transition-opacity duration-500"
 				class:opacity-0={getTheme() === 'dark'}
 			/>
 			<img
-				src="/screenshots/hero-dark.png"
-				alt="attn in dark mode"
+				src="/screenshots/collab-dark.png"
+				alt="A live attn session in dark mode with two collaborators editing together"
 				class="absolute inset-0 w-full transition-opacity duration-500"
 				class:opacity-0={getTheme() !== 'dark'}
 			/>

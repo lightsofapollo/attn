@@ -1,13 +1,12 @@
 <script lang="ts">
 	import { getTheme } from './theme.svelte';
 
-	// Live collaboration — the headline capability added in the collab epic
-	// (live co-typing, inline review, end-to-end encryption, peer-to-peer).
-	// The screenshot is a REAL capture of a reviewer's window during a live
-	// session: the owner's shared doc with two labeled remote carets (amber
-	// owner, blue reviewer), the "Shared document · end-to-end encrypted"
-	// banner, presence chips, and the Live connection badge. Regenerate with
-	// scripts/capture-collab-screenshots.sh.
+	// Live collaboration — the headline capability added in the collab epic.
+	// The hero shows a real capture of a live review session (comment cards +
+	// cursors); this section breaks down what makes it work and shows the real
+	// Share dialog. Copy is deliberately accurate: ALWAYS end-to-end encrypted
+	// (the relay/R2 only ever hold ciphertext); peer-to-peer WHEN the network
+	// allows, with the encrypted relay as the fallback.
 	const points = [
 		{
 			title: 'Live co-typing',
@@ -18,19 +17,19 @@
 			body: 'Select text, comment, or propose an edit the author accepts with one keystroke — right where you read.'
 		},
 		{
-			title: 'End-to-end encrypted',
-			body: 'The room key lives in the invite link and never touches a server. The relay only ever sees ciphertext.'
+			title: 'Always end-to-end encrypted',
+			body: 'The room key lives in the invite link and never touches a server — so the relay, and anything it stores, only ever sees ciphertext. Never your words.'
 		},
 		{
-			title: 'Peer-to-peer',
-			body: 'Once connected, edits flow directly between people over WebRTC. The relay is just the handshake + fallback.'
+			title: 'Peer-to-peer when it can',
+			body: 'When both sides can reach each other, edits flow directly over WebRTC. When they can’t, the same encrypted bytes ride the relay — relayed, never readable.'
 		}
 	];
 </script>
 
 <section id="collaborate" class="py-28 px-6">
-	<div class="max-w-5xl mx-auto">
-		<div class="text-center max-w-2xl mx-auto mb-12">
+	<div class="max-w-4xl mx-auto">
+		<div class="text-center max-w-2xl mx-auto mb-14">
 			<p class="font-sans text-sm font-semibold uppercase tracking-widest text-primary mb-4">
 				New
 			</p>
@@ -39,43 +38,52 @@
 			</h2>
 			<p class="font-sans text-lg text-muted-foreground mt-5 leading-relaxed">
 				Share a doc with a link. Co-type, comment, and suggest in real time —
-				end-to-end encrypted, peer-to-peer. No accounts, no cloud copy of your words.
+				always end-to-end encrypted, peer-to-peer when the network allows. No
+				accounts, and no server can read a word.
 			</p>
 		</div>
 
-		<!-- Real screenshot of a live session (theme-aware) -->
-		<div
-			class="relative rounded-xl shadow-2xl border border-border overflow-hidden bg-card max-w-4xl mx-auto"
-		>
-			<img
-				src="/screenshots/collab-light.png"
-				alt="A live attn session: shared doc with the owner's amber caret and a reviewer's blue caret, end-to-end encrypted"
-				class="w-full transition-opacity duration-500"
-				class:opacity-0={getTheme() === 'dark'}
-			/>
-			<img
-				src="/screenshots/collab-dark.png"
-				alt="A live attn session in dark mode with two collaborators' cursors"
-				class="absolute inset-0 w-full transition-opacity duration-500"
-				class:opacity-0={getTheme() !== 'dark'}
-			/>
-		</div>
-
-		<!-- Feature points -->
-		<div class="grid sm:grid-cols-2 gap-x-10 gap-y-8 mt-16 max-w-3xl mx-auto">
+		<div class="grid sm:grid-cols-2 gap-x-12 gap-y-10">
 			{#each points as point, i}
 				<div class="flex gap-4">
 					<span
-						class="flex-shrink-0 font-mono text-sm w-8 h-8 rounded-full border border-border flex items-center justify-center text-muted-foreground"
+						class="flex-shrink-0 font-mono text-sm w-9 h-9 rounded-full border border-border flex items-center justify-center text-muted-foreground"
 					>
 						{i + 1}
 					</span>
 					<div>
 						<h3 class="font-serif text-xl font-semibold text-foreground">{point.title}</h3>
-						<p class="font-sans text-muted-foreground mt-1 leading-relaxed">{point.body}</p>
+						<p class="font-sans text-muted-foreground mt-1.5 leading-relaxed">{point.body}</p>
 					</div>
 				</div>
 			{/each}
+		</div>
+
+		<!-- Share in one click — the real Share dialog (npx command + direct link) -->
+		<div class="mt-20 text-center max-w-2xl mx-auto">
+			<h3 class="font-serif text-2xl md:text-3xl font-bold tracking-tight text-foreground">
+				Share in one click
+			</h3>
+			<p class="font-sans text-muted-foreground mt-3 leading-relaxed">
+				Hit Share and send a link — or an <code class="font-mono text-sm">npx</code> command that
+				downloads attn on first run. No account, no signup, encrypted end to end.
+			</p>
+		</div>
+		<div
+			class="relative mt-8 rounded-xl shadow-2xl border border-border overflow-hidden bg-card max-w-3xl mx-auto"
+		>
+			<img
+				src="/screenshots/share-light.png"
+				alt="The attn Share-for-review dialog: an npx invite command and a direct attn:// link, end-to-end encrypted"
+				class="w-full transition-opacity duration-500"
+				class:opacity-0={getTheme() === 'dark'}
+			/>
+			<img
+				src="/screenshots/share-dark.png"
+				alt="The attn Share-for-review dialog in dark mode"
+				class="absolute inset-0 w-full transition-opacity duration-500"
+				class:opacity-0={getTheme() !== 'dark'}
+			/>
 		</div>
 	</div>
 </section>

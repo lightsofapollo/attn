@@ -93,6 +93,11 @@ tasks:
     cmds:
       - scripts/test-review-e2e.sh
 
+  test:review-render:
+    desc: Inline-render regression guard — relay + owner, 3 comments must all render inline (no effect_update_depth loop)
+    cmds:
+      - scripts/test-review-render-e2e.sh
+
   test:apply:
     desc: Run the apply E2E test suite — Rust cargo tests + optional daemon flow (attn-nnj.8.6)
     cmds:

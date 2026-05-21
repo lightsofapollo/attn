@@ -68,12 +68,14 @@ export interface PeerSplit {
 // ---------------------------------------------------------------------------
 
 /**
- * Return the anchor authored on a `CommentCreated` event, or `null` for any
- * other body kind. Centralized so the thread builder doesn't sprinkle
- * discriminator checks throughout.
+ * Return the anchor authored on a thread-root event (`CommentCreated` or
+ * `SuggestionCreated`), or `null` for any other body kind. Centralized so the
+ * thread builder doesn't sprinkle discriminator checks throughout.
  */
-function commentAnchor(event: ReviewEvent): Anchor | null {
-  return event.body.type === 'comment_created' ? event.body.anchor : null;
+function rootEventAnchor(event: ReviewEvent): Anchor | null {
+  if (event.body.type === 'comment_created') return event.body.anchor;
+  if (event.body.type === 'suggestion_created') return event.body.anchor;
+  return null;
 }
 
 /**
@@ -127,6 +129,17 @@ export function reconstructThreads(
       } else {
         list.push(event);
       }
+    } else if (event.body.type === 'suggestion_created') {
+      // A suggestion is a single-event thread keyed by its suggestionId. Without
+      // this it never enters `threads` → never gets a margin card, so the owner
+      // can't see (or accept) a reviewer's proposed edit. ReviewMargin.kindFor
+      // already renders the suggestion branch once the thread reaches it.
+      const list = commentsByThread.get(event.body.suggestionId);
+      if (list === undefined) {
+        commentsByThread.set(event.body.suggestionId, [event]);
+      } else {
+        list.push(event);
+      }
     } else if (event.body.type === 'comment_resolved') {
       resolvedThreadIds.add(event.body.threadId);
     }
@@ -144,7 +157,7 @@ export function reconstructThreads(
       rootEvent,
       replies,
       resolved: resolvedThreadIds.has(threadId),
-      anchor: commentAnchor(rootEvent),
+      anchor: rootEventAnchor(rootEvent),
       resolvedAnchor: resolution !== undefined ? resolution.resolved : null,
     });
   }

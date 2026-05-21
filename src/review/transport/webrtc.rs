@@ -985,13 +985,19 @@ async fn dispatch_inbound_message(
     use crate::review::model::EnvelopeKind;
     match envelope.kind {
         EnvelopeKind::Event => {
-            if let Ok(_outcome) = inbound
+            // Surface DataChannel-delivered events to the UI exactly like the
+            // relay WS path does (mailbox/ws.rs). Emitting `Envelope` here was a
+            // silent no-op in `forward_transport_event` ("already covered by
+            // EventImported"), so once peers went P2P every review event
+            // (comments AND suggestions) was persisted to events.jsonl but never
+            // reached the frontend. Emit `EventImported` with the decoded event.
+            if let Ok(outcome) = inbound
                 .import_event_envelope(&config.room_id, &envelope)
                 .await
             {
-                let _ = events_tx.send(TransportEvent::Envelope {
-                    envelope,
-                    server_seq: 0,
+                let _ = events_tx.send(TransportEvent::EventImported {
+                    room_id: config.room_id.clone(),
+                    event: outcome.event,
                 });
             }
         }

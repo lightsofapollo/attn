@@ -623,21 +623,27 @@ async fn webrtc_happy_path_delivers_comment_envelope_to_owner_store() {
     );
 
     // The owner's `on_message` handler runs `InboundPipeline::import_event_envelope`
-    // which persists to `events.jsonl` and then forwards a
-    // `TransportEvent::Envelope` upstream. Wait for the upstream event so we
-    // know the import has completed.
+    // (persists to `events.jsonl`) and then surfaces the decoded event upstream
+    // as `TransportEvent::EventImported` — the SAME variant the relay WS path
+    // emits and the daemon's UI bridge consumes. Emitting `Envelope` here used
+    // to be a silent UI no-op (forward_transport_event drops it), so review
+    // events delivered over the P2P DataChannel never reached the frontend.
     let received = timeout(Duration::from_secs(5), harness.owner_events_rx.recv())
         .await
-        .expect("owner events_rx must surface envelope within 5s")
-        .expect("owner events_rx must not close before delivering envelope");
+        .expect("owner events_rx must surface event within 5s")
+        .expect("owner events_rx must not close before delivering event");
     match received {
-        TransportEvent::Envelope { envelope: rx_env, .. } => {
-            assert_eq!(
-                rx_env.envelope_id, envelope_id,
-                "owner must surface the same envelope_id the reviewer sent"
-            );
+        TransportEvent::EventImported { room_id, event } => {
+            assert_eq!(room_id, harness.room_id, "event must carry the room id");
+            match event.body {
+                ReviewEventBody::CommentCreated { body, .. } => assert_eq!(
+                    body, "first comment over WebRTC",
+                    "owner must surface the reviewer's comment text to the UI"
+                ),
+                other => panic!("expected CommentCreated body, got {other:?}"),
+            }
         }
-        other => panic!("expected TransportEvent::Envelope, got {other:?}"),
+        other => panic!("expected TransportEvent::EventImported, got {other:?}"),
     }
 
     // Owner's events.jsonl must contain the imported event. We don't have a

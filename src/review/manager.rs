@@ -304,6 +304,19 @@ pub struct ReviewManager {
     /// double-sending would double-apply collab steps. Populated + kept current
     /// by the per-room orchestrator in `start_room_runtime`.
     live_webrtc: Arc<std::sync::Mutex<HashMap<RoomId, LiveWebrtc>>>,
+
+    /// Per-room cooperative-shutdown handle. `start_room_runtime` inserts the
+    /// outbox/WS `cancel_tx` here keyed by room (instead of leaking it) so it
+    /// lives for the room's life — preserving the no-race behavior the WS
+    /// `select!` depends on — AND so `Stop` can flip it to wind the outbox +
+    /// WS tasks down cooperatively. The presence of a key is the authoritative
+    /// "this room has a live runtime" signal `Stop`/`Inbox` read.
+    cancels: Arc<std::sync::Mutex<HashMap<RoomId, tokio::sync::watch::Sender<bool>>>>,
+
+    /// Per-room outbox handle. Retained alongside `cancels` so `Pull` can force
+    /// a one-shot drain (`OutboxProcessor::process_once`) without re-deriving
+    /// the room keys / mailbox config. Dropped on `Stop`.
+    outboxes: Arc<std::sync::Mutex<HashMap<RoomId, Arc<crate::review::transport::mailbox::OutboxProcessor>>>>,
 }
 
 /// A room's live WebRTC mesh — one DataChannel transport per other participant
@@ -380,6 +393,8 @@ impl ReviewManager {
             rooms: Arc::new(AsyncMutex::new(HashMap::new())),
             signal_contexts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             live_webrtc: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            outboxes: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -545,11 +560,217 @@ impl ReviewManager {
                 }
                 return;
             }
+            // Stop / Pull / Inbox operate on the per-room runtime registries,
+            // not the bootstrap pipeline, so they match regardless of whether
+            // a Bootstrapper is attached (they no-op cleanly with no rooms).
+            (ReviewCommand::Stop { room_id }, _, _) => {
+                self.stop_rooms(room_id.clone());
+                return;
+            }
+            (ReviewCommand::Pull { room_id }, _, _) => {
+                self.pull_rooms(room_id.clone());
+                return;
+            }
+            (ReviewCommand::Inbox, _, _) => {
+                self.emit_inbox();
+                return;
+            }
             _ => {}
         }
 
         let update = stub_update_for(&cmd);
         (self.update_tx)(update);
+    }
+
+    /// Stop hosting/participating in `target` (every active room when `None`).
+    ///
+    /// For each affected room: flip the room's cancel signal (winding the
+    /// outbox + WS tasks down cooperatively) then drop its entries from every
+    /// registry. Dropping the `live_webrtc` entry drops the DataChannel
+    /// transports + the `webrtc_sig_tx`/`webrtc_events_tx` senders they hold,
+    /// which closes the signaling-forwarder + orchestrator channels and ends
+    /// those loops. Dropping the outbox handle releases it once the run loop
+    /// observes the cancel and returns.
+    ///
+    /// Idempotent: stopping an unknown room is a clean no-op `RoomStatusChanged`
+    /// update, never an error. We rely entirely on cooperative shutdown — no
+    /// `JoinHandle::abort` — so in-flight POSTs/imports finish before exit.
+    fn stop_rooms(&self, target: Option<RoomId>) {
+        // Determine which rooms to stop. `cancels` is the authoritative set of
+        // rooms with a live runtime (only `start_room_runtime` populates it).
+        let to_stop: Vec<RoomId> = match &target {
+            Some(room_id) => vec![room_id.clone()],
+            None => self
+                .cancels
+                .lock()
+                .map(|map| map.keys().cloned().collect())
+                .unwrap_or_default(),
+        };
+
+        for room_id in to_stop {
+            // Signal cancel BEFORE dropping the sender so the receivers observe
+            // `true` (a dropped sender resolves `changed()` as Err, which the
+            // WS loop also treats as shutdown — but an explicit `true` is the
+            // clean path and lets the outbox loop's `*cancel.borrow()` exit).
+            if let Ok(mut cancels) = self.cancels.lock()
+                && let Some(cancel_tx) = cancels.remove(&room_id)
+            {
+                let _ = cancel_tx.send(true);
+            }
+            // Drop the retained outbox handle; the run loop holds its own Arc
+            // and releases it after observing the cancel.
+            if let Ok(mut outboxes) = self.outboxes.lock() {
+                outboxes.remove(&room_id);
+            }
+            // Drop the live WebRTC mesh: closes the forwarder + orchestrator
+            // channels (their senders live in this entry / its transports).
+            if let Ok(mut live) = self.live_webrtc.lock() {
+                live.remove(&room_id);
+            }
+            // The async selector map + signal-context map need the runtime to
+            // take their async locks. Fall back to a blocking lock when no
+            // runtime is attached (e.g. unit tests) so cleanup is unconditional.
+            self.with_async_block(|| {
+                let rooms = Arc::clone(&self.rooms);
+                let signal_contexts = Arc::clone(&self.signal_contexts);
+                let room_id = room_id.clone();
+                async move {
+                    rooms.lock().await.remove(&room_id);
+                    signal_contexts.write().await.remove(&room_id);
+                }
+            });
+
+            eprintln!("review: stopped room runtime room={}", room_id.as_str());
+            (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                room_id,
+                status: "Stopped".to_string(),
+            });
+        }
+    }
+
+    /// Force a one-shot outbox drain for `target` (every active room when
+    /// `None`) so pending outbound envelopes flush immediately instead of
+    /// waiting on the outbox poll tick. The live WS already handles inbound,
+    /// so Pull is purely an outbound-flush nudge.
+    ///
+    /// A room with no live runtime (no retained outbox) is a no-op
+    /// `RoomStatusChanged` update, not an error. Drain errors surface as a
+    /// `ReviewUpdate::Error` so the UI can show why the flush stalled.
+    fn pull_rooms(&self, target: Option<RoomId>) {
+        let runtime = match self.runtime.as_ref() {
+            Some(rt) => Arc::clone(rt),
+            None => {
+                // No runtime → no live outbox to drive. Emit a no-op status so
+                // the caller still gets a response.
+                (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                    room_id: target.unwrap_or_else(stub_room_id),
+                    status: "Pulled (no active runtime)".to_string(),
+                });
+                return;
+            }
+        };
+
+        // Snapshot the (room, outbox) pairs to drain. Cloning the Arcs lets us
+        // drop the lock before the (potentially slow) network drain.
+        let targets: Vec<(RoomId, Arc<crate::review::transport::mailbox::OutboxProcessor>)> =
+            match self.outboxes.lock() {
+                Ok(map) => match &target {
+                    Some(room_id) => map
+                        .get(room_id)
+                        .map(|ob| vec![(room_id.clone(), Arc::clone(ob))])
+                        .unwrap_or_default(),
+                    None => map
+                        .iter()
+                        .map(|(rid, ob)| (rid.clone(), Arc::clone(ob)))
+                        .collect(),
+                },
+                Err(_) => Vec::new(),
+            };
+
+        if targets.is_empty() {
+            (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                room_id: target.unwrap_or_else(stub_room_id),
+                status: "Pulled (no active runtime)".to_string(),
+            });
+            return;
+        }
+
+        for (room_id, outbox) in targets {
+            match runtime.block_on(outbox.process_once()) {
+                Ok(acks) => {
+                    eprintln!(
+                        "review: pull drained {} envelope(s) for room={}",
+                        acks.len(),
+                        room_id.as_str()
+                    );
+                    (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                        room_id,
+                        status: format!("Pulled ({} sent)", acks.len()),
+                    });
+                }
+                Err(err) => {
+                    (self.update_tx)(ReviewUpdate::Error {
+                        room_id: Some(room_id),
+                        code: "ATTN_PULL_DRAIN".to_string(),
+                        message: err.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// List the rooms with a live runtime and emit one `RoomStatusChanged`
+    /// summarizing them. There is no dedicated inbox/aggregation variant on
+    /// `ReviewUpdate` yet, so we reuse `RoomStatusChanged` (the room-scoped
+    /// status channel) with a synthetic room id carrying the active count.
+    fn emit_inbox(&self) {
+        // `cancels` is the authoritative set of rooms with a live runtime.
+        let active: Vec<RoomId> = self
+            .cancels
+            .lock()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default();
+
+        let summary = if active.is_empty() {
+            "Inbox: no active rooms".to_string()
+        } else {
+            let ids = active
+                .iter()
+                .map(|r| r.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("Inbox: {} active room(s): {}", active.len(), ids)
+        };
+        eprintln!("review: {summary}");
+        (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+            room_id: stub_room_id(),
+            status: summary,
+        });
+    }
+
+    /// Run an async cleanup closure to completion from synchronous `submit`.
+    /// Uses the manager's runtime when one is attached; otherwise spins up a
+    /// throwaway current-thread runtime so registry cleanup (the async selector
+    /// + signal-context maps) is unconditional even in runtime-less unit tests.
+    fn with_async_block<F, Fut>(&self, f: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        match self.runtime.as_ref() {
+            Some(rt) => rt.block_on(f()),
+            None => {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt.block_on(f()),
+                    Err(err) => {
+                        eprintln!("review: transient runtime build failed: {err}");
+                    }
+                }
+            }
+        }
     }
 
     /// Push a freshly minted `SendEventOutcome` to the frontend as an
@@ -1033,7 +1254,8 @@ impl ReviewManager {
 
     /// Spawn the outbox drain + inbound WS subscriber for `room_id` onto the
     /// manager's tokio runtime. Idempotent: a duplicate call is a no-op since
-    /// the rooms map already has a handle (verified by `self.rooms`).
+    /// the `cancels` registry already holds a handle for the room (that map is
+    /// the authoritative "this room has a live runtime" set).
     ///
     /// What this wires up:
     ///   - `OutboxProcessor::run` — drains pending envelopes from
@@ -1074,6 +1296,19 @@ impl ReviewManager {
             .ok_or_else(|| anyhow::anyhow!("verifying-key cache absent"))?
             .clone();
 
+        // Idempotency guard: a room with a live cancel handle already has its
+        // outbox/WS/forwarder tasks running. Re-running here would insert a
+        // fresh `cancel_tx`, dropping the old one — making the live tasks'
+        // `cancel.changed()` resolve Err (misread as cancel) and tearing the
+        // connection down. Bail out cleanly instead. (`cancels` is the
+        // authoritative "this room has a runtime" set since this is the only
+        // place that populates it.)
+        if let Ok(cancels) = self.cancels.lock()
+            && cancels.contains_key(room_id)
+        {
+            return Ok(());
+        }
+
         // Identity for this device. Cheap to re-load; we don't need to
         // cache because the daemon owns its identity file for life.
         let identity_dir = bootstrap.config().identity_dir()?;
@@ -1109,16 +1344,23 @@ impl ReviewManager {
             token_pool,
         )?);
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        // Leak the sender so it lives for the daemon's lifetime. The
-        // alternative is keeping a `Vec<Sender>` somewhere on the
-        // manager; daemons spawn per-room runtimes once at boot and
-        // never tear them down individually, so a per-room leak is
-        // bounded by the number of joined rooms (typically < 10).
-        // Without this, the sender drops at the end of this scope and
-        // `cancel.changed()` resolves Err, which the WS `select!`
-        // interprets as a cancel — aborting the connect_async before
-        // it even completes.
-        Box::leak(Box::new(cancel_tx));
+        // One cancel signal drives BOTH the outbox loop and the WS subscriber:
+        // the outbox owns `cancel_rx`, the WS subscriber gets a `subscribe()`
+        // clone below. Retain the sender in the per-room `cancels` registry so
+        // it lives for the room's life — the same lifetime guarantee the old
+        // `Box::leak` provided, so the no-race behavior is preserved. (Without
+        // a live sender, `cancel.changed()` resolves Err, which the WS
+        // `select!` misreads as a cancel — aborting connect_async before it
+        // completes.) Holding it in the map ADDITIONALLY lets `Stop` flip it
+        // to wind the outbox + WS tasks down cooperatively. The matching
+        // outbox handle is retained too so `Pull` can force a one-shot drain.
+        let ws_cancel_rx = cancel_tx.subscribe();
+        if let Ok(mut cancels) = self.cancels.lock() {
+            cancels.insert(room_id.clone(), cancel_tx);
+        }
+        if let Ok(mut outboxes) = self.outboxes.lock() {
+            outboxes.insert(room_id.clone(), Arc::clone(&outbox));
+        }
         let outbox_clone = Arc::clone(&outbox);
         runtime.spawn(async move {
             outbox_clone.run(cancel_rx).await;
@@ -1182,9 +1424,8 @@ impl ReviewManager {
             events_tx,
         )
         .with_key_refresher(key_refresher);
-        let (ws_cancel_tx, ws_cancel_rx) = tokio::sync::watch::channel(false);
-        // Same lifetime concern as the outbox cancel sender above.
-        Box::leak(Box::new(ws_cancel_tx));
+        // Shares the room's single cancel signal (subscribed above, before
+        // the sender moved into `cancels`) so `Stop` winds the WS down too.
         runtime.spawn(async move {
             let _ = ws_client.run(ws_cancel_rx).await;
         });
@@ -2024,24 +2265,21 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
             room_id: stub_room_id(),
             status: format!("Pending join — not yet implemented (invite={invite})"),
         },
-        // TODO(attn-nnj.3b): drain mailbox for `room_id` (or all rooms), import
-        // each envelope, emit EventImported per record.
+        // Pull / Stop / Inbox are handled for real in `submit` (they drive the
+        // per-room runtime registries) and always return before reaching here.
+        // These arms keep the match exhaustive; they are not reached in
+        // practice.
         ReviewCommand::Pull { room_id } => ReviewUpdate::RoomStatusChanged {
             room_id: room_id.clone().unwrap_or_else(stub_room_id),
-            status: "Pending pull — not yet implemented".to_string(),
+            status: "Pulled".to_string(),
         },
-        // TODO(attn-nnj.3b): tear down transport for the room (or all rooms),
-        // mark as offline, emit RoomStatus.
         ReviewCommand::Stop { room_id } => ReviewUpdate::RoomStatusChanged {
             room_id: room_id.clone().unwrap_or_else(stub_room_id),
-            status: "Pending stop — not yet implemented".to_string(),
+            status: "Stopped".to_string(),
         },
-        // TODO(attn-nnj.3b): aggregate inbox across rooms, emit a synthetic
-        // RoomStatus per pending room or a dedicated InboxChanged variant
-        // (TBD when inbox UI lands).
         ReviewCommand::Inbox => ReviewUpdate::RoomStatusChanged {
             room_id: stub_room_id(),
-            status: "Pending inbox — not yet implemented".to_string(),
+            status: "Inbox".to_string(),
         },
         // CreateComment / CreateSuggestion fall through to the real path
         // in `submit` when a Bootstrapper is attached; the stub here only
@@ -2846,6 +3084,161 @@ mod tests {
         assert_eq!(json["resolved"]["reason"], serde_json::json!("quote_match"));
         assert_eq!(json["resolved"]["confidence"], serde_json::json!(0.85));
         assert_eq!(update.callback_name(), "reviewAnchorResolution");
+    }
+
+    // -----------------------------------------------------------------
+    // Stop / Inbox over the per-room runtime registries.
+    //
+    // We can't stand up a full `start_room_runtime` here (it needs a relay
+    // URL, identity, and a room secret on disk), so we simulate the registry
+    // state the runtime would have produced: a live `cancel_tx` keyed by room.
+    // This exercises exactly the teardown contract `Stop` relies on.
+    // -----------------------------------------------------------------
+
+    /// Seed a room's cancel handle as if `start_room_runtime` had run, and
+    /// return a receiver so the test can observe the cancel signal.
+    fn seed_room_runtime(
+        mgr: &ReviewManager,
+        room_id: &RoomId,
+    ) -> tokio::sync::watch::Receiver<bool> {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        mgr.cancels
+            .lock()
+            .expect("cancels lock")
+            .insert(room_id.clone(), cancel_tx);
+        cancel_rx
+    }
+
+    #[test]
+    fn stop_signals_cancel_and_removes_room_from_registries() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-stop");
+        let cancel_rx = seed_room_runtime(&mgr, &room_id);
+        // Mirror a live WebRTC entry so we can prove it is dropped too.
+        mgr.live_webrtc
+            .lock()
+            .expect("live lock")
+            .insert(room_id.clone(), LiveWebrtc { transports: HashMap::new(), peers: 1 });
+
+        assert!(!*cancel_rx.borrow(), "cancel starts false");
+
+        mgr.submit(ReviewCommand::Stop {
+            room_id: Some(room_id.clone()),
+        });
+
+        // Cancel was flipped before the sender dropped.
+        assert!(
+            *cancel_rx.borrow(),
+            "Stop should flip the room's cancel signal to true"
+        );
+        // The room is gone from every registry the runtime populated.
+        assert!(
+            !mgr.cancels.lock().expect("cancels lock").contains_key(&room_id),
+            "Stop should remove the room from `cancels`"
+        );
+        assert!(
+            !mgr.live_webrtc.lock().expect("live lock").contains_key(&room_id),
+            "Stop should remove the room from `live_webrtc`"
+        );
+        assert!(
+            !mgr.outboxes.lock().expect("outboxes lock").contains_key(&room_id),
+            "Stop should remove the room from `outboxes`"
+        );
+
+        let update = rx.try_recv().expect("expected one update");
+        match update {
+            ReviewUpdate::RoomStatusChanged { room_id: rid, status } => {
+                assert_eq!(rid, room_id);
+                assert_eq!(status, "Stopped");
+            }
+            other => panic!("expected RoomStatusChanged(Stopped), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_unknown_room_is_a_clean_noop() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-never-started");
+        // No runtime was ever seeded for this room.
+        mgr.submit(ReviewCommand::Stop {
+            room_id: Some(room_id.clone()),
+        });
+        // Still emits a status (never an Error), and registries stay empty.
+        let update = rx.try_recv().expect("expected one update");
+        assert!(
+            matches!(update, ReviewUpdate::RoomStatusChanged { status, .. } if status == "Stopped"),
+            "stopping an unknown room should be a clean Stopped status, not an error"
+        );
+    }
+
+    #[test]
+    fn stop_all_tears_down_every_active_room() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room_a: RoomId = dummy_id("room-a");
+        let room_b: RoomId = dummy_id("room-b");
+        let rx_a = seed_room_runtime(&mgr, &room_a);
+        let rx_b = seed_room_runtime(&mgr, &room_b);
+
+        mgr.submit(ReviewCommand::Stop { room_id: None });
+
+        assert!(*rx_a.borrow(), "room-a cancel flipped");
+        assert!(*rx_b.borrow(), "room-b cancel flipped");
+        assert!(
+            mgr.cancels.lock().expect("cancels lock").is_empty(),
+            "Stop(None) should drain the cancels registry"
+        );
+    }
+
+    #[test]
+    fn inbox_lists_active_rooms() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room_a: RoomId = dummy_id("room-inbox-a");
+        let room_b: RoomId = dummy_id("room-inbox-b");
+        let _rx_a = seed_room_runtime(&mgr, &room_a);
+        let _rx_b = seed_room_runtime(&mgr, &room_b);
+
+        mgr.submit(ReviewCommand::Inbox);
+
+        let update = rx.try_recv().expect("expected one update");
+        match update {
+            ReviewUpdate::RoomStatusChanged { status, .. } => {
+                assert!(status.contains("2 active room(s)"), "got: {status}");
+                assert!(status.contains("room-inbox-a"), "got: {status}");
+                assert!(status.contains("room-inbox-b"), "got: {status}");
+            }
+            other => panic!("expected RoomStatusChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inbox_with_no_active_rooms_reports_empty() {
+        let (mgr, rx, _tmp) = make_manager();
+        mgr.submit(ReviewCommand::Inbox);
+        let update = rx.try_recv().expect("expected one update");
+        match update {
+            ReviewUpdate::RoomStatusChanged { status, .. } => {
+                assert_eq!(status, "Inbox: no active rooms");
+            }
+            other => panic!("expected RoomStatusChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pull_without_runtime_is_a_noop_status() {
+        // The base `make_manager` attaches no tokio runtime, so Pull cannot
+        // drive an outbox — it must emit a benign status, never an error.
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-pull");
+        mgr.submit(ReviewCommand::Pull {
+            room_id: Some(room_id.clone()),
+        });
+        let update = rx.try_recv().expect("expected one update");
+        match update {
+            ReviewUpdate::RoomStatusChanged { status, .. } => {
+                assert!(status.starts_with("Pulled"), "got: {status}");
+            }
+            other => panic!("expected RoomStatusChanged, got {other:?}"),
+        }
     }
 }
 

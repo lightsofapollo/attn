@@ -58,12 +58,6 @@ npx attnmd
 npm install -g attnmd && attn
 ```
 
-### From source (crates.io)
-
-```bash
-cargo install attn
-```
-
 ### From source (git)
 
 ```bash

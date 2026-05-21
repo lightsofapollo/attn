@@ -91,6 +91,5 @@
 	<div class="space-y-4">
 		<CodeBlock label="Homebrew (recommended)" code="brew install lightsofapollo/attn/attn" />
 		<CodeBlock label="npm (quick)" code="npx attnmd" />
-		<CodeBlock label="From source" code="cargo install attn" />
 	</div>
 </section>

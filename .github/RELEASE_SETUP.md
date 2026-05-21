@@ -3,8 +3,10 @@
 This project ships:
 - signed/notarized macOS `.dmg` on every tag release
 - tag-based GitHub Releases with `attn` CLI binaries
-- crates.io publishing for `cargo install attn`
 - npm package publishing for `npx attnmd`
+
+(No crates.io publish: attn is a wry/GTK desktop GUI, not a clean
+cargo-installable CLI, and the generic `attn` crate name isn't ours.)
 
 ## What is included
 

@@ -7,6 +7,13 @@ compatibility_flags = ["nodejs_compat"]
 # `wrangler login` or the CLOUDFLARE_ACCOUNT_ID env var, so this config stays
 # account-agnostic and safe to commit. See relay/README.md §Deploy.
 
+# Production custom domain. `wrangler deploy` provisions the Workers Custom
+# Domain (DNS record + TLS cert) for relay.attn.sh — requires the attn.sh zone
+# in the deploying account. Clients point ATTN_DEFAULT_RELAY_URL here.
+[[routes]]
+pattern = "relay.attn.sh"
+custom_domain = true
+
 # Production observability — surfaces invocation logs + metrics in the
 # Cloudflare dashboard. The relay is low-QPS, so full (100%) sampling is
 # affordable and worth it for a fresh production surface.
@@ -42,10 +49,10 @@ MAX_POW_BITS = "24"
 # Comma-separated allowlist consumed by relay/src/index.ts `corsMiddleware` and
 # relay/src/room-do.ts `handleSocketUpgrade` (Origin check). Browsers must
 # match one of these origins when `policy.allowBrowser == true`; native
-# clients (no Origin header) bypass the check entirely. Multiple origins are
-# intentional for the prod target so the marketing site + the app domain
-# can both share one relay.
-ALLOWED_BROWSER_ORIGINS = "https://attn.dev,https://staging.attn.dev"
+# clients (no Origin header) bypass the check entirely. Native clients (the
+# desktop app + npx CLI) send no Origin, so this only gates the (deferred)
+# in-browser reviewer served from attn.sh.
+ALLOWED_BROWSER_ORIGINS = "https://attn.sh"
 
 [env.staging.vars]
-ALLOWED_BROWSER_ORIGINS = "https://staging.attn.dev,http://localhost:5173"
+ALLOWED_BROWSER_ORIGINS = "https://attn.sh,http://localhost:5173"

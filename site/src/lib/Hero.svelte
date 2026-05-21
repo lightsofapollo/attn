@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { getTheme } from './theme.svelte';
+
+	let isDark = $derived(getTheme() === 'dark');
 </script>
 
 <section class="min-h-[85vh] flex items-center justify-center px-6">
@@ -42,24 +44,32 @@
 				src="/screenshots/collab-light.png"
 				alt="A live attn session: the shared doc with the owner's amber caret and a reviewer's blue caret, end-to-end encrypted"
 				class="w-full transition-opacity duration-500"
-				class:opacity-0={getTheme() === 'dark'}
+				class:opacity-0={isDark}
 			/>
 			<img
 				src="/screenshots/collab-dark.png"
 				alt="A live attn session in dark mode with two collaborators editing together"
 				class="absolute inset-0 w-full transition-opacity duration-500"
-				class:opacity-0={getTheme() !== 'dark'}
+				class:opacity-0={!isDark}
 			/>
-			<video
-				class="absolute inset-0 h-full w-full object-cover"
-				src="/screenshots/collab-hero.mp4"
-				poster={getTheme() === 'dark' ? '/screenshots/collab-dark.png' : '/screenshots/collab-light.png'}
-				autoplay
-				muted
-				loop
-				playsinline
-				aria-label="Live attn collaboration: a reviewer types into a shared markdown document while comments and remote carets update in the owner window"
-			></video>
+			{#key isDark}
+				<video
+					class="absolute inset-0 h-full w-full object-cover"
+					poster={isDark ? '/screenshots/collab-dark.png' : '/screenshots/collab-light.png'}
+					autoplay
+					muted
+					loop
+					playsinline
+					aria-label="Live attn collaboration: a reviewer types into a shared markdown document while comments and remote carets update in the owner window"
+				>
+					<source src={isDark ? '/screenshots/collab-hero-dark.mp4' : '/screenshots/collab-hero-light.mp4'} type="video/mp4" />
+					<img
+						src={isDark ? '/screenshots/collab-hero-dark.gif' : '/screenshots/collab-hero-light.gif'}
+						alt="Live attn collaboration: a reviewer comments, suggests an edit, and types with a remote cursor in a shared markdown document"
+						class="h-full w-full object-cover"
+					/>
+				</video>
+			{/key}
 		</div>
 	</div>
 </section>

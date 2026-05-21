@@ -10,8 +10,12 @@
 #   collab-{light,dark}.png — the shared doc with the reviewer's live caret,
 #                             anchored highlights, and the inline comment +
 #                             suggestion cards in the margin.
-#   collab-hero.mp4         — an MP4 recording of the same live session while
-#                             the reviewer types into the owner's shared doc.
+#   collab-hero-{light,dark}.mp4
+#                           — MP4 recordings of the editorial workflow:
+#                             reviewer comment, reviewer suggestion, then
+#                             live multi-cursor editing in the owner's window.
+#   collab-hero-{light,dark}.gif
+#                           — compact GIF fallbacks generated from the MP4s.
 #
 # Requires a debug build (--screenshot is debug+macOS only).
 
@@ -26,6 +30,23 @@ RELAY_URL="http://localhost:${RELAY_PORT}"
 OWNER_HOME="/tmp/attn-cap-owner"; RV_HOME="/tmp/attn-cap-rv"
 WORK="/tmp/attn-cap-work"; SHARED_DOC="$WORK/launch-plan.md"; RELAY_LOG="$WORK/relay.log"
 OUT="$PROJECT_DIR/site/static/screenshots"
+
+: "${ATTN_CAPTURE_VARIANT:=}"
+if [ -z "$ATTN_CAPTURE_VARIANT" ]; then
+  for variant in light dark; do
+    printf '==> capture hero variant: %s\n' "$variant"
+    ATTN_CAPTURE_VARIANT="$variant" "$0" || exit $?
+  done
+  rm -f "$OUT/collab-hero.mp4" "$OUT/collab-hero.gif"
+  exit 0
+fi
+case "$ATTN_CAPTURE_VARIANT" in
+  light|dark) ;;
+  *) echo "ATTN_CAPTURE_VARIANT must be light or dark" >&2; exit 2 ;;
+esac
+HERO_THEME="$ATTN_CAPTURE_VARIANT"
+HERO_SUFFIX="$ATTN_CAPTURE_VARIANT"
+
 RELAY_PID=""; OWNER_PID=""; RV_PID=""
 
 log(){ printf '==> %s\n' "$*"; }
@@ -50,36 +71,81 @@ sel(){ attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';v
 selText(){ local mode="${2:-}"; attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';var doc=v.state.doc,n='$1',f=null;doc.descendants(function(node,pos){if(f||!node.isText)return !f;var i=node.text.indexOf(n);if(i>=0)f={a:pos+i,b:pos+i+n.length};return !f;});if(!f)return 'notfound';var S=v.state.selection.constructor;v.focus();var to='$mode'==='collapse'?f.a:f.b;v.dispatch(v.state.tr.setSelection(S.create(doc,f.a,to)));return 'ok';})()" 2>/dev/null | tr -d '"'; }
 pm_insert_reviewer(){ local text="$1"; text="${text//\\/\\\\}"; text="${text//\'/\\\'}"; attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no-view';v.focus();v.dispatch(v.state.tr.insertText('$text'));return 'ok';})()" >/dev/null 2>&1; }
 type_reviewer_text(){ local text="$1"; local i ch; for ((i=0; i<${#text}; i++)); do ch="${text:i:1}"; pm_insert_reviewer "$ch"; sleep 0.16; done; }
+drive_hero_workflow(){
+  sleep 0.8
+
+  log "hero workflow: reviewer comments on launch scope"
+  selText 'a few teams' >/dev/null
+  sleep 0.35
+  attn_rv --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'.',code:'Period',metaKey:true,bubbles:true}));'x'" >/dev/null 2>&1
+  if wait_ready attn_rv '.comment-composer textarea' 8000; then
+    attn_rv --fill '.comment-composer textarea' 'Can we open this to the whole waitlist, not just a few teams?' >/dev/null 2>&1
+    sleep 0.35
+    attn_rv --click 'text=Submit' >/dev/null 2>&1
+  else
+    log "comment composer did not open"
+  fi
+  sleep 1.3
+
+  log "hero workflow: reviewer suggests editorial rewrite"
+  selText 'internal dogfooding' >/dev/null
+  sleep 0.35
+  attn_rv --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'.',code:'Period',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
+  if wait_ready attn_rv '[data-slot=suggestion-composer-text]' 8000; then
+    attn_rv --fill '[data-slot=suggestion-composer-text]' 'internal dogfooding + a team bug bash' >/dev/null 2>&1
+    sleep 0.35
+    attn_rv --eval "document.querySelector('[data-slot=suggestion-composer-submit]')?.click(); 'x'" >/dev/null 2>&1
+  else
+    log "suggestion composer did not open"
+  fi
+  sleep 1.3
+
+  log "hero workflow: reviewer live-edits with remote cursor"
+  selText 'public launch' collapse >/dev/null
+  sleep 0.45
+  type_reviewer_text 'partner-led '
+  sleep 1.2
+}
+encode_hero_gif(){
+  local mp4="$OUT/collab-hero-${HERO_SUFFIX}.mp4"
+  local gif="$OUT/collab-hero-${HERO_SUFFIX}.gif"
+  local palette="$WORK/collab-hero-${HERO_SUFFIX}-palette.png"
+  if [ ! -f "$mp4" ]; then log "SKIP collab-hero-${HERO_SUFFIX}.gif (missing MP4)"; return 0; fi
+  if ! command -v ffmpeg >/dev/null 2>&1; then log "SKIP collab-hero-${HERO_SUFFIX}.gif (ffmpeg missing)"; return 0; fi
+
+  rm -f "$gif" "$palette"
+  ffmpeg -y -i "$mp4" -vf "fps=12,scale=960:-1:flags=lanczos,palettegen=stats_mode=diff" "$palette" >/dev/null 2>&1 \
+    && ffmpeg -y -i "$mp4" -i "$palette" -filter_complex "fps=12,scale=960:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" -loop 0 "$gif" >/dev/null 2>&1 \
+    && log "wrote collab-hero-${HERO_SUFFIX}.gif" \
+    || log "FAILED transcoding collab-hero-${HERO_SUFFIX}.gif"
+}
 record_hero_video(){
-  local out="$OUT/collab-hero.mp4"
-  local raw="$WORK/collab-hero.mov"
+  local out="$OUT/collab-hero-${HERO_SUFFIX}.mp4"
+  local raw="$WORK/collab-hero-${HERO_SUFFIX}.mov"
   local wid
   wid="$(owner_window_id)"
-  if [ -z "$wid" ]; then log "SKIP collab-hero.mp4 (no owner window id)"; return 0; fi
-  if ! command -v screencapture >/dev/null 2>&1; then log "SKIP collab-hero.mp4 (screencapture missing)"; return 0; fi
+  if [ -z "$wid" ]; then log "SKIP collab-hero-${HERO_SUFFIX}.mp4 (no owner window id)"; return 0; fi
+  if ! command -v screencapture >/dev/null 2>&1; then log "SKIP collab-hero-${HERO_SUFFIX}.mp4 (screencapture missing)"; return 0; fi
 
   rm -f "$raw" "$out"
-  set_theme dark
+  set_theme "$HERO_THEME"
   sleep 0.6
-  log "recording collab-hero.mp4 from owner window $wid"
-  screencapture -x -v -V 8 -l "$wid" "$raw" >/dev/null 2>&1 &
+  log "recording collab-hero-${HERO_SUFFIX}.mp4 from owner window $wid"
+  screencapture -x -v -V 13 -l "$wid" "$raw" >/dev/null 2>&1 &
   local rec_pid=$!
-  sleep 0.9
-  selText 'public launch' collapse >/dev/null
-  sleep 0.5
-  type_reviewer_text 'partner-led '
-  sleep 1.4
-  wait "$rec_pid" || { log "FAILED recording collab-hero.mp4"; return 0; }
+  drive_hero_workflow
+  wait "$rec_pid" || { log "FAILED recording collab-hero-${HERO_SUFFIX}.mp4"; return 0; }
 
-  if [ ! -f "$raw" ]; then log "FAILED collab-hero.mp4 (recorder produced no file)"; return 0; fi
+  if [ ! -f "$raw" ]; then log "FAILED collab-hero-${HERO_SUFFIX}.mp4 (recorder produced no file)"; return 0; fi
   if command -v ffmpeg >/dev/null 2>&1; then
     ffmpeg -y -i "$raw" -an -vf "scale='min(1600,iw)':-2" -pix_fmt yuv420p -movflags +faststart "$out" >/dev/null 2>&1 \
-      && log "wrote collab-hero.mp4" \
-      || log "FAILED transcoding collab-hero.mp4"
+      && log "wrote collab-hero-${HERO_SUFFIX}.mp4" \
+      || log "FAILED transcoding collab-hero-${HERO_SUFFIX}.mp4"
   else
     mv "$raw" "$out"
-    log "wrote collab-hero.mp4 (raw screencapture output)"
+    log "wrote collab-hero-${HERO_SUFFIX}.mp4 (raw screencapture output)"
   fi
+  encode_hero_gif
 }
 
 rm -rf "$OWNER_HOME" "$RV_HOME" "$WORK"; mkdir -p "$OWNER_HOME" "$RV_HOME" "$WORK" "$WORK/empty-rv" "$OUT"
@@ -135,29 +201,15 @@ rv_has_doc(){ [ -n "$(attn_rv --eval "window.__attnPmView && window.__attnPmView
 d=$(( $(date +%s)+30 )); while [ "$(date +%s)" -lt "$d" ]; do rv_has_doc && break; sleep 0.5; done
 log "reviewer shows shared doc: $(rv_has_doc && echo yes || echo NO)"
 
-# --- Reviewer COMMENTS on the first paragraph ---
-log "reviewer adds a comment: $(selText 'a few teams')"
-attn_rv --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'.',code:'Period',metaKey:true,bubbles:true}));'x'" >/dev/null 2>&1
-if wait_ready attn_rv '.comment-composer textarea' 8000; then
-  attn_rv --fill '.comment-composer textarea' 'Can we open this to the whole waitlist, not just a few teams?' >/dev/null 2>&1
-  attn_rv --click 'text=Submit' >/dev/null 2>&1
-else log "comment composer did not open"; fi
-sleep 1
+# Park the reviewer's caret before recording so the owner window starts with a
+# visible collaborator, then let the recording itself tell the feedback story.
+selText 'public launch' collapse >/dev/null
 
-# --- Reviewer SUGGESTS a replacement down in the Timeline (a different line, so
-#     the two cards don't collide in the margin) ---
-log "reviewer adds a suggestion: $(selText 'internal dogfooding')"
-attn_rv --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'.',code:'Period',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
-if wait_ready attn_rv '[data-slot=suggestion-composer-text]' 8000; then
-  attn_rv --fill '[data-slot=suggestion-composer-text]' 'internal dogfooding + a team bug bash' >/dev/null 2>&1
-  attn_rv --eval "document.querySelector('[data-slot=suggestion-composer-submit]')?.click(); 'x'" >/dev/null 2>&1
-else log "suggestion composer did not open"; fi
-sleep 1
+# --- Hero MP4/GIF ---
+record_hero_video
+
 # Did the suggestion register on the reviewer's OWN screen? (submit vs propagation)
 log "reviewer self-sees suggestion: $(attn_rv --eval "document.body.textContent.includes('bug bash')?'yes':'no'" 2>/dev/null | tr -d '"')"
-
-# Park the reviewer's caret on the launch line so the owner sees a live cursor.
-selText 'public launch' collapse
 
 # Wait for the owner's review-margin CARDS to actually render (rail auto-opens
 # on first feedback, then cards y-position via coordsAtPos). Wait on the DOM,
@@ -169,9 +221,6 @@ log "owner transport: $(attn_owner --eval "(/Live|Connected|Offline/.exec(docume
 log "owner persisted suggestion_created: $(grep -rqa 'suggestion_created' "$OWNER_HOME/reviews" 2>/dev/null && echo YES || echo NO)"
 log "owner persisted comment_created: $(grep -rqa 'comment_created' "$OWNER_HOME/reviews" 2>/dev/null && echo YES || echo NO)"
 attn_owner --eval "JSON.stringify({cards: document.querySelectorAll('[data-testid=review-margin-card]').length, trayChildren: (document.querySelector('[data-testid=review-margin-tray]')?.children.length||0), hasSuggestionText: document.body.textContent.includes('bug bash'), backdrop: !!document.querySelector('.comment-composer-backdrop, [data-slot=suggestion-composer], [data-slot=share-dialog]')})" 2>/dev/null
-
-# --- Hero MP4 ---
-record_hero_video
 
 # --- Editorial shots ---
 set_theme light; sleep 1; save "$(shot)" collab-light.png

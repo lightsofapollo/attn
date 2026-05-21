@@ -466,15 +466,17 @@
     width: 320px;
     box-sizing: border-box;
     padding: 10px 12px;
-    background: var(--popover, var(--background, #fff));
+    background: var(--review-card-surface, var(--popover, var(--background, #fff)));
     color: var(--popover-foreground, inherit);
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.10));
+    border: 1px solid var(--review-card-border, var(--border, rgba(0, 0, 0, 0.10)));
     border-radius: 6px;
     font-size: 12px;
     line-height: 1.4;
     cursor: pointer;
     text-align: left;
-    opacity: 0.62;
+    opacity: 0.94;
+    box-shadow: var(--review-card-shadow, 0 10px 28px rgba(0, 0, 0, 0.14));
+    backdrop-filter: blur(10px) saturate(1.1);
     transition:
       opacity 120ms ease-out,
       box-shadow 120ms ease-out,
@@ -483,18 +485,30 @@
 
   .review-margin-card:hover,
   .review-margin-card[data-hovered='true'] {
-    opacity: 0.85;
+    opacity: 1;
   }
 
   .review-margin-card[data-active='true'] {
     opacity: 1;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    box-shadow:
+      var(--review-card-shadow, 0 10px 28px rgba(0, 0, 0, 0.14)),
+      0 0 0 1px color-mix(in oklch, var(--primary, #2563eb) 46%, transparent);
     border-color: var(--accent-foreground, var(--primary, #2563eb));
   }
 
   .review-margin-card[data-pending-dismiss='true'] {
     opacity: 0.35;
     pointer-events: none;
+  }
+
+  .review-margin-card[data-kind='comment'] {
+    border-left: 3px solid var(--review-card-comment-accent, var(--comment-highlight, #d9a600));
+    padding-left: 10px;
+  }
+
+  .review-margin-card[data-kind='suggestion'] {
+    border-left: 3px solid var(--review-card-suggestion-accent, var(--suggestion-bg, #16a34a));
+    padding-left: 10px;
   }
 
   /* Stale state inherits the stale highlight tint so the card reads
@@ -519,10 +533,11 @@
 
   .rmc-author {
     font-weight: 600;
+    color: var(--foreground, inherit);
   }
 
   .rmc-age {
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
+    color: color-mix(in oklch, var(--foreground, currentColor) 62%, var(--muted-foreground, currentColor));
   }
 
   .rmc-spacer {
@@ -541,13 +556,15 @@
   }
 
   .rmc-kind-suggestion {
-    background: var(--suggestion-bg, transparent);
-    color: var(--foreground, inherit);
+    background: color-mix(in oklch, var(--review-card-suggestion-accent, #16a34a) 20%, transparent);
+    color: color-mix(in oklch, var(--review-card-suggestion-accent, #16a34a) 78%, var(--foreground, currentColor));
+    border-color: color-mix(in oklch, var(--review-card-suggestion-accent, #16a34a) 34%, transparent);
   }
 
   .rmc-kind-comment {
-    background: var(--comment-highlight, transparent);
-    color: var(--foreground, inherit);
+    background: color-mix(in oklch, var(--review-card-comment-accent, #d9a600) 20%, transparent);
+    color: color-mix(in oklch, var(--review-card-comment-accent, #d9a600) 78%, var(--foreground, currentColor));
+    border-color: color-mix(in oklch, var(--review-card-comment-accent, #d9a600) 34%, transparent);
   }
 
   .rmc-badge-moved {
@@ -571,7 +588,7 @@
   .rmc-quote {
     margin: 0 0 6px;
     padding: 0;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
+    color: color-mix(in oklch, var(--foreground, currentColor) 70%, var(--muted-foreground, currentColor));
     font-size: 11px;
     font-style: italic;
     overflow: hidden;
@@ -619,6 +636,7 @@
   .rmc-body {
     margin: 0 0 8px;
     padding: 0;
+    color: color-mix(in oklch, var(--foreground, currentColor) 88%, var(--muted-foreground, currentColor));
     /* 4-line clamp per §1.2 anatomy. */
     display: -webkit-box;
     -webkit-line-clamp: 4;
@@ -640,8 +658,8 @@
   }
 
   .rmc-btn {
-    background: transparent;
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.14));
+    background: color-mix(in oklch, var(--background, transparent) 36%, transparent);
+    border: 1px solid color-mix(in oklch, var(--foreground, currentColor) 18%, transparent);
     color: inherit;
     padding: 4px 10px;
     border-radius: 4px;

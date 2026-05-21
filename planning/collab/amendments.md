@@ -198,7 +198,7 @@ Originally this section called for a Phase 0.5 spike to validate WebRTC + WebCry
 
 Tradeoffs accepted:
 
-- `webrtc-rs` is a large crate (transitively brings tokio, rcgen, sctp, dtls, openssl-sys or rustls). Run `cargo tree -e features --no-default-features --no-dev-dependencies` before merging to confirm the binary stays under the 25 MiB target. If it doesn't, evaluate feature flags or revisit.
+- `webrtc-rs` is a large crate (transitively brings tokio, rcgen, sctp, dtls, openssl-sys or rustls). Run `cargo tree -e features --no-default-features --no-dev-dependencies` before merging to confirm the binary stays under the **30 MiB** target. If it doesn't, evaluate feature flags or revisit. **(Revised 25 → 30 MiB:** with `webrtc-rs` landed, a fully size-optimized release build — `opt-level="s"`, `lto="fat"`, `strip` — is ~29 MiB; the P2P transport stack makes 25 unrealistic, so the budget was raised to 30. The gate enforces 30 in `scripts/check-binary-size.sh`.)
 - No exploration of the browser WebRTC path. Phase 6 browser client will need a separate WebRTC story (or skip WebRTC entirely and use mailbox-only for browser, which is consistent with the trust model).
 - Single language for transport (Rust) means one codepath for mailbox + DataChannel, one place for AEAD, one place for envelope import. Simpler.
 

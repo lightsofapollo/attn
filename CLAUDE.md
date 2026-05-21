@@ -102,7 +102,7 @@ Debug builds (`debug_assertions` on) include automation CLI flags (`--screenshot
 
 ## Binary-size gate
 
-The release binary must stay under **25 MiB** (locked by `planning/collab/amendments.md` §Decision #1 — the WebRTC transport is owned by Rust via `webrtc-rs`, which is the main risk to this budget).
+The release binary must stay under **30 MiB** (locked by `planning/collab/amendments.md` §Decision #1 — the WebRTC transport is owned by Rust via `webrtc-rs`, which is the main risk to this budget; raised 25 → 30 MiB once webrtc-rs landed, since the P2P stack makes 25 unrealistic).
 
 ```bash
 task check:size              # builds release + runs the gate

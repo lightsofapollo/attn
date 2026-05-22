@@ -60,12 +60,12 @@
 					muted
 					loop
 					playsinline
-					aria-label="Live attn collaboration: a reviewer types into a shared markdown document while comments and remote carets update in the owner window"
+					aria-label="Live attn collaboration: a reviewer comments, suggests an edit, and moves a labeled cursor in the owner window"
 				>
 					<source src={isDark ? '/screenshots/collab-hero-dark.mp4' : '/screenshots/collab-hero-light.mp4'} type="video/mp4" />
 					<img
 						src={isDark ? '/screenshots/collab-hero-dark.gif' : '/screenshots/collab-hero-light.gif'}
-						alt="Live attn collaboration: a reviewer comments, suggests an edit, and types with a remote cursor in a shared markdown document"
+						alt="Live attn collaboration: a reviewer comments, suggests an edit, and moves a remote cursor in a shared markdown document"
 						class="h-full w-full object-cover"
 					/>
 				</video>

@@ -12,10 +12,12 @@
 #                             suggestion cards in the margin.
 #   collab-hero-{light,dark}.mp4
 #                           — MP4 recordings of the editorial workflow:
-#                             reviewer comment, reviewer suggestion, then
-#                             live multi-cursor editing in the owner's window.
+#                             reviewer comment, reviewer suggestion, then a
+#                             live reviewer cursor in the owner's window.
 #   collab-hero-{light,dark}.gif
 #                           — compact GIF fallbacks generated from the MP4s.
+#   share-flow-{light,dark}.gif
+#                           — compact GIFs of the actual one-click Share flow.
 #
 # Requires a debug build (--screenshot is debug+macOS only).
 
@@ -29,6 +31,7 @@ cd "$PROJECT_DIR"
 RELAY_URL="http://localhost:${RELAY_PORT}"
 OWNER_HOME="/tmp/attn-cap-owner"; RV_HOME="/tmp/attn-cap-rv"
 WORK="/tmp/attn-cap-work"; SHARED_DOC="$WORK/launch-plan.md"; RELAY_LOG="$WORK/relay.log"
+SCRATCH="/tmp/attn-cap-scratch"
 OUT="$PROJECT_DIR/site/static/screenshots"
 
 : "${ATTN_CAPTURE_VARIANT:=}"
@@ -55,12 +58,22 @@ attn_rv(){ ATTN_HOME="$RV_HOME" ATTN_RELAY_URL="$RELAY_URL" "$ATTN_BIN" "$@"; }
 poll(){ local t="$1"; shift; local d=$(( $(date +%s)*1000 + t )); while [ "$(($(date +%s)*1000))" -lt "$d" ]; do "$@" >/dev/null 2>&1 && return 0; sleep 0.25; done; return 1; }
 wait_ready(){ poll "${3:-25000}" "$1" --wait-for "$2" --timeout 1000; }
 kill_pid(){ local p="$1"; [ -z "$p" ] && return 0; kill "$p" 2>/dev/null||true; local i=0; while kill -0 "$p" 2>/dev/null && [ $i -lt 30 ];do sleep 0.1;i=$((i+1));done; kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null||true; }
-cleanup(){ log "cleanup"; kill_pid "$OWNER_PID"; kill_pid "$RV_PID"; [ -n "$RELAY_PID" ] && { pkill -P "$RELAY_PID" 2>/dev/null||true; kill_pid "$RELAY_PID"; }; pkill -f "wrangler dev --local --port $RELAY_PORT" 2>/dev/null||true; }
+cleanup(){ log "cleanup"; kill_pid "$OWNER_PID"; kill_pid "$RV_PID"; [ -n "$RELAY_PID" ] && { pkill -P "$RELAY_PID" 2>/dev/null||true; kill_pid "$RELAY_PID"; }; pkill -f "wrangler dev --local --port $RELAY_PORT" 2>/dev/null||true; rm -rf "$SCRATCH"; }
 trap cleanup EXIT INT TERM
 
 # Capture helpers (all shots are of the owner window).
 shot(){ attn_owner --screenshot 2>/dev/null | grep -oE '/tmp/attn-screenshot-[0-9]+\.png' | tail -1; }
 owner_window_id(){ attn_owner --info 2>/dev/null | awk '/^window_id:/ {print $2; exit}'; }
+reviewer_window_id(){ attn_rv --info 2>/dev/null | awk '/^window_id:/ {print $2; exit}'; }
+owner_shot(){
+  local wid out
+  wid="$(owner_window_id)"
+  out="$SCRATCH/owner-shot-$(date +%s%N).png"
+  if [ -n "$wid" ] && command -v screencapture >/dev/null 2>&1; then
+    screencapture -x -l "$wid" "$out" >/dev/null 2>&1 && { echo "$out"; return 0; }
+  fi
+  shot
+}
 # Match the app's setTheme (theme.ts): set BOTH data-theme AND the .dark class,
 # otherwise prose text color and shadcn surfaces disagree.
 set_theme(){ attn_owner --eval "var d=document.documentElement;d.dataset.theme='$1';d.classList.toggle('dark','$1'==='dark');'x'" >/dev/null 2>&1; }
@@ -100,16 +113,14 @@ drive_hero_workflow(){
   fi
   sleep 1.3
 
-  log "hero workflow: reviewer live-edits with remote cursor"
+  log "hero workflow: reviewer parks a live cursor"
   selText 'public launch' collapse >/dev/null
-  sleep 0.45
-  type_reviewer_text 'partner-led '
-  sleep 1.2
+  sleep 1.8
 }
 encode_hero_gif(){
   local mp4="$OUT/collab-hero-${HERO_SUFFIX}.mp4"
   local gif="$OUT/collab-hero-${HERO_SUFFIX}.gif"
-  local palette="$WORK/collab-hero-${HERO_SUFFIX}-palette.png"
+  local palette="$SCRATCH/collab-hero-${HERO_SUFFIX}-palette.png"
   if [ ! -f "$mp4" ]; then log "SKIP collab-hero-${HERO_SUFFIX}.gif (missing MP4)"; return 0; fi
   if ! command -v ffmpeg >/dev/null 2>&1; then log "SKIP collab-hero-${HERO_SUFFIX}.gif (ffmpeg missing)"; return 0; fi
 
@@ -121,7 +132,7 @@ encode_hero_gif(){
 }
 record_hero_video(){
   local out="$OUT/collab-hero-${HERO_SUFFIX}.mp4"
-  local raw="$WORK/collab-hero-${HERO_SUFFIX}.mov"
+  local raw="$SCRATCH/collab-hero-${HERO_SUFFIX}.mov"
   local wid
   wid="$(owner_window_id)"
   if [ -z "$wid" ]; then log "SKIP collab-hero-${HERO_SUFFIX}.mp4 (no owner window id)"; return 0; fi
@@ -131,7 +142,7 @@ record_hero_video(){
   set_theme "$HERO_THEME"
   sleep 0.6
   log "recording collab-hero-${HERO_SUFFIX}.mp4 from owner window $wid"
-  screencapture -x -v -V 13 -l "$wid" "$raw" >/dev/null 2>&1 &
+  screencapture -x -v -V 10 -l "$wid" "$raw" >/dev/null 2>&1 &
   local rec_pid=$!
   drive_hero_workflow
   wait "$rec_pid" || { log "FAILED recording collab-hero-${HERO_SUFFIX}.mp4"; return 0; }
@@ -147,8 +158,45 @@ record_hero_video(){
   fi
   encode_hero_gif
 }
+encode_share_flow_gif(){
+  local raw="$1"
+  local gif="$OUT/share-flow-${HERO_SUFFIX}.gif"
+  local palette="$SCRATCH/share-flow-${HERO_SUFFIX}-palette.png"
+  if [ ! -f "$raw" ]; then log "SKIP share-flow-${HERO_SUFFIX}.gif (missing recording)"; return 0; fi
+  if ! command -v ffmpeg >/dev/null 2>&1; then log "SKIP share-flow-${HERO_SUFFIX}.gif (ffmpeg missing)"; return 0; fi
 
-rm -rf "$OWNER_HOME" "$RV_HOME" "$WORK"; mkdir -p "$OWNER_HOME" "$RV_HOME" "$WORK" "$WORK/empty-rv" "$OUT"
+  rm -f "$gif" "$palette"
+  ffmpeg -y -i "$raw" -vf "fps=12,scale=960:-1:flags=lanczos,palettegen=stats_mode=diff" "$palette" >/dev/null 2>&1 \
+    && ffmpeg -y -i "$raw" -i "$palette" -filter_complex "fps=12,scale=960:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" -loop 0 "$gif" >/dev/null 2>&1 \
+    && log "wrote share-flow-${HERO_SUFFIX}.gif" \
+    || log "FAILED transcoding share-flow-${HERO_SUFFIX}.gif"
+}
+record_share_flow(){
+  local raw="$SCRATCH/share-flow-${HERO_SUFFIX}.mov"
+  local wid
+  wid="$(owner_window_id)"
+  set_theme "$HERO_THEME"
+  sleep 0.5
+
+  if [ -n "$wid" ] && command -v screencapture >/dev/null 2>&1; then
+    rm -f "$raw" "$OUT/share-flow-${HERO_SUFFIX}.gif"
+    log "recording share-flow-${HERO_SUFFIX}.gif from owner window $wid"
+    screencapture -x -v -V 4 -l "$wid" "$raw" >/dev/null 2>&1 &
+    local rec_pid=$!
+    sleep 0.65
+    attn_owner --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
+    wait_ready attn_owner '[data-slot=share-invite-url]' 20000 || { log "no invite"; kill_pid "$rec_pid"; exit 1; }
+    sleep 1.2
+    wait "$rec_pid" || log "FAILED recording share-flow-${HERO_SUFFIX}.gif"
+    encode_share_flow_gif "$raw"
+  else
+    log "open Share dialog"
+    attn_owner --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
+    wait_ready attn_owner '[data-slot=share-invite-url]' 20000 || { log "no invite"; exit 1; }
+  fi
+}
+
+rm -rf "$OWNER_HOME" "$RV_HOME" "$WORK" "$SCRATCH"; mkdir -p "$OWNER_HOME" "$RV_HOME" "$WORK" "$WORK/empty-rv" "$SCRATCH" "$OUT"
 cat > "$SHARED_DOC" <<'MD'
 # Q3 Launch Plan
 
@@ -173,16 +221,15 @@ ATTN_HOME="$RV_HOME" ATTN_RELAY_URL="$RELAY_URL" "$ATTN_BIN" --no-fork "$WORK/em
 wait_ready attn_owner 'h1' || { log "owner not ready"; exit 1; }
 wait_ready attn_rv 'body' || { log "rv not ready"; exit 1; }
 
-log "open Share dialog"
-attn_owner --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
-wait_ready attn_owner '[data-slot=share-invite-url]' 20000 || { log "no invite"; exit 1; }
+record_share_flow
 INVITE=""; d=$(( $(date +%s)+15 )); while [ "$(date +%s)" -lt "$d" ]; do INVITE="$(attn_owner --eval "document.querySelector('[data-slot=share-invite-url]')?.value||''" 2>/dev/null | tr -d '"\\' | tr -d '\r\n')"; case "$INVITE" in attn://review/*) break;; esac; sleep 0.3; done
 
 # --- SHARE dialog shots (no reviewer yet → clean, no warnings) ---
 dlg(){ attn_owner --eval "document.querySelector('[data-slot=share-invite-url]')?'open':'CLOSED'" 2>/dev/null | tr -d '"'; }
+set_theme light
 log "share dialog before light shot: $(dlg)"
-sleep 1; save "$(shot)" share-light.png          # default theme is already light
-set_theme dark; sleep 1; log "share dialog before dark shot: $(dlg)"; save "$(shot)" share-dark.png
+sleep 1; save "$(owner_shot)" share-light.png
+set_theme dark; sleep 1; log "share dialog before dark shot: $(dlg)"; save "$(owner_shot)" share-dark.png
 set_theme light; sleep 1
 
 # Close the dialog so the editorial shots show the doc — invoke the Done button
@@ -220,9 +267,10 @@ log "owner review-margin cards: $(cards_n)"
 log "owner transport: $(attn_owner --eval "(/Live|Connected|Offline/.exec(document.body.textContent)||['?'])[0]" 2>/dev/null | tr -d '"')"
 log "owner persisted suggestion_created: $(grep -rqa 'suggestion_created' "$OWNER_HOME/reviews" 2>/dev/null && echo YES || echo NO)"
 log "owner persisted comment_created: $(grep -rqa 'comment_created' "$OWNER_HOME/reviews" 2>/dev/null && echo YES || echo NO)"
-attn_owner --eval "JSON.stringify({cards: document.querySelectorAll('[data-testid=review-margin-card]').length, trayChildren: (document.querySelector('[data-testid=review-margin-tray]')?.children.length||0), hasSuggestionText: document.body.textContent.includes('bug bash'), backdrop: !!document.querySelector('.comment-composer-backdrop, [data-slot=suggestion-composer], [data-slot=share-dialog]')})" 2>/dev/null
+log "capture window ids: owner=$(owner_window_id) reviewer=$(reviewer_window_id)"
+attn_owner --eval "JSON.stringify({sharedBanner: !!document.querySelector('[data-slot=shared-doc-banner]'), cards: document.querySelectorAll('[data-testid=review-margin-card]').length, trayChildren: (document.querySelector('[data-testid=review-margin-tray]')?.children.length||0), hasSuggestionText: document.body.textContent.includes('bug bash'), backdrop: !!document.querySelector('.comment-composer-backdrop, [data-slot=suggestion-composer], [data-slot=share-dialog]')})" 2>/dev/null
 
 # --- Editorial shots ---
-set_theme light; sleep 1; save "$(shot)" collab-light.png
-set_theme dark; sleep 1; save "$(shot)" collab-dark.png
+set_theme light; sleep 1; save "$(owner_shot)" collab-light.png
+set_theme dark; sleep 1; save "$(owner_shot)" collab-dark.png
 log "done"

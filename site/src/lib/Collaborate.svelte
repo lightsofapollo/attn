@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { getTheme } from './theme.svelte';
 
+	let isDark = $derived(getTheme() === 'dark');
+
 	// Live collaboration — the headline capability added in the collab epic.
 	// The hero shows a real capture of a live review session (comment cards +
 	// cursors); this section breaks down what makes it work and shows the real
@@ -52,13 +54,13 @@
 				src="/screenshots/collab-light.png"
 				alt="A live attn review session: inline comment and suggestion cards beside the markdown, with a labeled collaborator cursor"
 				class="w-full transition-opacity duration-500"
-				class:opacity-0={getTheme() === 'dark'}
+				class:opacity-0={isDark}
 			/>
 			<img
 				src="/screenshots/collab-dark.png"
 				alt="A live attn review session in dark mode"
 				class="absolute inset-0 w-full transition-opacity duration-500"
-				class:opacity-0={getTheme() !== 'dark'}
+				class:opacity-0={!isDark}
 			/>
 		</div>
 
@@ -78,7 +80,7 @@
 			{/each}
 		</div>
 
-		<!-- Share in one click — the real Share dialog (npx command + direct link) -->
+		<!-- Share in one click — the real Share flow (npx command + direct link) -->
 		<div class="mt-20 text-center max-w-2xl mx-auto">
 			<h3 class="font-serif text-2xl md:text-3xl font-bold tracking-tight text-foreground">
 				Share in one click
@@ -89,20 +91,15 @@
 			</p>
 		</div>
 		<div
-			class="relative mt-8 rounded-xl shadow-2xl border border-border overflow-hidden bg-card max-w-3xl mx-auto"
+			class="relative mt-8 rounded-xl shadow-2xl border border-border overflow-hidden bg-card max-w-4xl mx-auto"
 		>
-			<img
-				src="/screenshots/share-light.png"
-				alt="The attn Share-for-review dialog: an npx invite command and a direct attn:// link, end-to-end encrypted"
-				class="w-full transition-opacity duration-500"
-				class:opacity-0={getTheme() === 'dark'}
-			/>
-			<img
-				src="/screenshots/share-dark.png"
-				alt="The attn Share-for-review dialog in dark mode"
-				class="absolute inset-0 w-full transition-opacity duration-500"
-				class:opacity-0={getTheme() !== 'dark'}
-			/>
+			{#key isDark}
+				<img
+					src={isDark ? '/screenshots/share-flow-dark.gif' : '/screenshots/share-flow-light.gif'}
+					alt="The attn Share-for-review flow: the user opens Share and receives an npx invite command plus a direct attn:// link"
+					class="w-full"
+				/>
+			{/key}
 		</div>
 	</div>
 </section>

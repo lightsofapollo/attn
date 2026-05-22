@@ -57,6 +57,7 @@ pub enum UserEvent {
     /// The user started dragging a custom title bar region.
     DragWindow,
     /// Show and focus the main window.
+    #[cfg(target_os = "macos")]
     ShowWindow,
     /// Hide the main window.
     #[cfg(target_os = "macos")]

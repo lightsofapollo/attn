@@ -477,6 +477,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     // Separate clone for the macOS open-URL handler (`Event::Opened`) in the
     // event loop below — a clicked `attn://review/...#key=...` invite from a
     // browser/Slack launches or foregrounds attn and joins the room.
+    #[cfg(target_os = "macos")]
     let opened_review_manager = review_manager.clone();
     let mut webview_builder = WebViewBuilder::new()
         .with_initialization_script(&initialization_script)
@@ -642,50 +643,48 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             Event::WindowEvent {
                 event: WindowEvent::KeyboardInput { event, .. },
                 ..
-            } => {
-                if event.state == ElementState::Pressed && !event.repeat {
-                    let mod_pressed = if cfg!(target_os = "macos") {
-                        modifiers.super_key()
-                    } else {
-                        modifiers.control_key()
-                    };
+            } if event.state == ElementState::Pressed && !event.repeat => {
+                let mod_pressed = if cfg!(target_os = "macos") {
+                    modifiers.super_key()
+                } else {
+                    modifiers.control_key()
+                };
 
-                    if mod_pressed {
-                        let zoom_script = if event.physical_key == KeyCode::Equal
-                            || event.physical_key == KeyCode::NumpadAdd
-                        {
-                            Some(
-                                "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.increaseFontScale?.(); }",
-                            )
-                        } else if event.physical_key == KeyCode::Minus
-                            || event.physical_key == KeyCode::NumpadSubtract
-                        {
-                            Some(
-                                "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.decreaseFontScale?.(); }",
-                            )
-                        } else if event.physical_key == KeyCode::Digit0
-                            || event.physical_key == KeyCode::Numpad0
-                        {
-                            Some(
-                                "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.resetFontScale?.(); }",
-                            )
-                        } else {
-                            None
-                        };
-                        if let Some(script) = zoom_script {
-                            let _ = webview.evaluate_script(script);
-                        }
-                    }
-
-                    #[cfg(debug_assertions)]
+                if mod_pressed {
+                    let zoom_script = if event.physical_key == KeyCode::Equal
+                        || event.physical_key == KeyCode::NumpadAdd
                     {
-                        let open_shortcut = event.physical_key == KeyCode::F12
-                            || (event.physical_key == KeyCode::KeyI
-                                && modifiers.super_key()
-                                && modifiers.alt_key());
-                        if open_shortcut {
-                            webview.open_devtools();
-                        }
+                        Some(
+                            "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.increaseFontScale?.(); }",
+                        )
+                    } else if event.physical_key == KeyCode::Minus
+                        || event.physical_key == KeyCode::NumpadSubtract
+                    {
+                        Some(
+                            "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.decreaseFontScale?.(); }",
+                        )
+                    } else if event.physical_key == KeyCode::Digit0
+                        || event.physical_key == KeyCode::Numpad0
+                    {
+                        Some(
+                            "if (!document.querySelector('.mermaid-fullscreen-modal')) { window.__attn__?.resetFontScale?.(); }",
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(script) = zoom_script {
+                        let _ = webview.evaluate_script(script);
+                    }
+                }
+
+                #[cfg(debug_assertions)]
+                {
+                    let open_shortcut = event.physical_key == KeyCode::F12
+                        || (event.physical_key == KeyCode::KeyI
+                            && modifiers.super_key()
+                            && modifiers.alt_key());
+                    if open_shortcut {
+                        webview.open_devtools();
                     }
                 }
             }
@@ -906,6 +905,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     }
                 }
             }
+            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::ShowWindow) => {
                 platform::activate_app();
                 window.set_visible(true);

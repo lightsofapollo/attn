@@ -13,44 +13,41 @@
 	let collabFallback = $derived(media(isDark ? '/screenshots/collab-hero-dark.gif' : '/screenshots/collab-hero-light.gif'));
 </script>
 
-<section class="relative overflow-hidden px-4 pb-20 pt-16 sm:px-6 md:pt-20">
-	<div class="mx-auto flex max-w-[96rem] flex-col items-center">
+<section class="relative overflow-hidden px-4 pb-12 pt-6 sm:px-6 md:pt-8">
+	<div class="mx-auto flex max-w-[112rem] flex-col items-center">
 		<div class="text-center max-w-4xl mx-auto">
-		<h1 class="font-serif text-6xl md:text-7xl tracking-tight font-bold text-foreground">
-			attn
-		</h1>
+			<h1 class="font-serif text-6xl md:text-7xl tracking-tight font-bold text-foreground leading-none">
+				attn
+			</h1>
 
-		<p class="font-sans text-xl text-muted-foreground mt-6 max-w-xl mx-auto leading-relaxed">
-			Your markdown, rendered beautifully — and
-			<a href="#collaborate" class="text-foreground underline decoration-primary/40 underline-offset-4 hover:decoration-primary">reviewed together</a>,
-			end-to-end encrypted.
-		</p>
+			<p class="font-sans text-xl md:text-2xl text-muted-foreground mt-3 max-w-2xl mx-auto leading-tight">
+				Your markdown, rendered beautifully — and
+				<a href="#collaborate" class="text-foreground underline decoration-primary/40 underline-offset-4 hover:decoration-primary">reviewed together</a>,
+				end-to-end encrypted.
+			</p>
 
-		<div class="mt-8">
-			<code class="inline-block bg-code-block border border-border rounded-lg px-5 py-3 font-mono text-base text-foreground">
-				$ attn .
-			</code>
+			<div class="mt-5 flex flex-col sm:flex-row sm:flex-wrap items-center justify-center gap-3">
+				<code class="inline-block bg-code-block border border-border rounded-lg px-4 py-2.5 font-mono text-base text-foreground">
+					$ attn .
+				</code>
+				<a
+					href="#install"
+					class="bg-primary text-primary-foreground px-6 py-3 rounded-lg font-sans font-semibold hover:opacity-90 transition-opacity"
+				>
+					brew install lightsofapollo/attn/attn
+				</a>
+				<a
+					href="https://github.com/lightsofapollo/attn"
+					target="_blank"
+					rel="noopener noreferrer"
+					class="border border-border bg-transparent hover:bg-accent px-6 py-3 rounded-lg font-sans font-semibold text-foreground transition-colors"
+				>
+					View on GitHub
+				</a>
+			</div>
 		</div>
 
-		<div class="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
-			<a
-				href="#install"
-				class="bg-primary text-primary-foreground px-6 py-3 rounded-lg font-sans font-semibold hover:opacity-90 transition-opacity"
-			>
-				brew install lightsofapollo/attn/attn
-			</a>
-			<a
-				href="https://github.com/lightsofapollo/attn"
-				target="_blank"
-				rel="noopener noreferrer"
-				class="border border-border bg-transparent hover:bg-accent px-6 py-3 rounded-lg font-sans font-semibold text-foreground transition-colors"
-			>
-				View on GitHub
-			</a>
-		</div>
-		</div>
-
-		<div class="relative mt-14 w-[min(90vw,84rem)] overflow-hidden rounded-xl border border-border bg-background aspect-[4/3]">
+		<div class="relative mt-7 w-full max-w-6xl overflow-hidden rounded-xl border border-border bg-background aspect-[4/3]">
 			{#key isDark}
 				<video
 					class="absolute inset-0 h-full w-full object-cover"

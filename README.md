@@ -17,8 +17,8 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="site/static/screenshots/collab-dark.png">
-    <img src="site/static/screenshots/collab-light.png" alt="attn showing a shared markdown review with comments, suggestions, and a collaborator cursor" width="860">
+    <source media="(prefers-color-scheme: dark)" srcset="https://media.githubusercontent.com/media/lightsofapollo/attn/main/site/static/screenshots/collab-dark.png">
+    <img src="https://media.githubusercontent.com/media/lightsofapollo/attn/main/site/static/screenshots/collab-light.png" alt="attn showing a shared markdown review with comments, suggestions, and a collaborator cursor" width="860">
   </picture>
 </p>
 
@@ -104,7 +104,6 @@ attn review join 'attn://review/<room-id>#key=<secret>'
 For headless reviewers or agents:
 
 ```bash
-attn review register-agent reviewer
 attn review join 'attn://review/<room-id>#key=<secret>' --as-agent reviewer
 ```
 
@@ -149,8 +148,7 @@ attn --json spec.md      # dump document structure as JSON
 
 ```bash
 attn review share docs/                         # share a file or folder
-attn review join 'attn://review/...'            # join through the running app
-attn review register-agent reviewer             # create a headless reviewer identity
+attn review join 'attn://review/...'            # open/join through the app
 attn review join 'attn://review/...' --as-agent reviewer
 attn review list-agents
 attn review whoami

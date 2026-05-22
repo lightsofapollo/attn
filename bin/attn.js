@@ -62,14 +62,10 @@ async function main() {
   const version = packageJson.version;
   const headless = isHeadlessInvocation(args);
 
-  // Prefer a natively-installed `attn` over anything we'd download. A dev
-  // who built the binary, a Homebrew/cargo install, or a prior
-  // `npx attnmd` that installed the ~/.local/bin alias should all be used
-  // directly — `npx attnmd` becomes a thin "use what's here, else fetch"
-  // shim rather than always pulling its own copy. The recursion guard in
-  // `findNativeBinary` excludes this package's own launcher so a global
-  // `npm i -g attn` symlink can't loop back here.
-  const nativeBinary = findNativeBinary();
+  // Prefer a natively-installed `attn` only when it matches this npm
+  // package. `npx attnmd@<version>` must not silently hand off to an older
+  // Homebrew/cargo/alias binary whose review protocol may be incompatible.
+  const nativeBinary = findNativeBinary(version);
   if (nativeBinary) {
     if (process.env.ATTN_DEBUG_LAUNCHER) {
       console.error(`attn: using native binary ${nativeBinary}`);
@@ -88,7 +84,8 @@ async function main() {
   }
 
   if (!appPath) {
-    if (!existsSync(runtimeBinaryPath)) {
+    if (!isExpectedBinaryVersion(runtimeBinaryPath, version)) {
+      safeRemove(runtimeBinaryPath);
       await ensureRuntimeBinary(version);
     }
     if (!existsSync(runtimeBinaryPath)) {
@@ -118,13 +115,16 @@ async function main() {
 }
 
 async function resolveAppPath(version) {
-  const globalApp = findGlobalAppInstall();
+  const globalApp = findGlobalAppInstall(version);
   if (globalApp) {
     return globalApp;
   }
 
   const managedVersionApp = join(managedAppsRoot, version, "attn.app");
-  if (existsSync(managedVersionApp)) {
+  if (
+    existsSync(managedVersionApp) &&
+    isExpectedBinaryVersion(join(managedVersionApp, "Contents", "MacOS", "attn"), version)
+  ) {
     ensureCurrentAppLink(managedVersionApp);
     return managedVersionApp;
   }
@@ -156,13 +156,14 @@ async function ensureRuntimeBinary(version) {
   console.error(`attn: installed runtime binary ${runtimeBinaryPath}`);
 }
 
-function findGlobalAppInstall() {
+function findGlobalAppInstall(version) {
   const candidates = [
     "/Applications/attn.app",
     join(userHome, "Applications", "attn.app"),
   ];
   for (const candidate of candidates) {
-    if (existsSync(candidate)) {
+    const binary = join(candidate, "Contents", "MacOS", "attn");
+    if (existsSync(candidate) && isExpectedBinaryVersion(binary, version)) {
       return candidate;
     }
   }
@@ -182,7 +183,7 @@ function findGlobalAppInstall() {
  * whose realpath points back at bin/attn.js, can't cause infinite
  * recursion).
  */
-function findNativeBinary() {
+function findNativeBinary(version) {
   const candidates = [];
 
   if (process.env.ATTN_BIN) {
@@ -202,7 +203,7 @@ function findNativeBinary() {
   );
 
   for (const candidate of candidates) {
-    if (isUsableNativeBinary(candidate)) {
+    if (isUsableNativeBinary(candidate, version)) {
       return candidate;
     }
   }
@@ -231,7 +232,7 @@ function whichAttn() {
  * `<package>/bin/attn.js`; handing off to that would re-enter this script
  * forever.
  */
-function isUsableNativeBinary(candidate) {
+function isUsableNativeBinary(candidate, version) {
   if (!candidate) return false;
   try {
     accessSync(candidate, fsConstants.X_OK);
@@ -269,7 +270,42 @@ function isUsableNativeBinary(candidate) {
   if (resolved.startsWith(binDirReal + "/") || resolved === binDirReal) {
     return false;
   }
-  return true;
+  return isExpectedBinaryVersion(resolved, version);
+}
+
+function isExpectedBinaryVersion(binary, version) {
+  if (!binary || !existsSync(binary)) {
+    return false;
+  }
+  if (process.env.ATTN_SKIP_NATIVE_VERSION_CHECK === "1") {
+    return true;
+  }
+  const actual = readBinaryVersion(binary);
+  const ok = actual === version;
+  if (!ok && process.env.ATTN_DEBUG_LAUNCHER) {
+    const label = actual ? `version ${actual}` : "unknown version";
+    console.error(`attn: skipping ${binary} (${label}; need ${version})`);
+  }
+  return ok;
+}
+
+function readBinaryVersion(binary) {
+  const result = spawnSync(binary, ["--version"], {
+    encoding: "utf8",
+    timeout: 2000,
+  });
+  if (result.error || result.status !== 0) {
+    return null;
+  }
+  const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+  const match = output.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/);
+  return match ? match[0] : null;
+}
+
+function safeRemove(path) {
+  if (existsSync(path)) {
+    rmSync(path, { recursive: true, force: true });
+  }
 }
 
 function ensureCurrentAppLink(appPath) {
@@ -389,6 +425,9 @@ if [ ! -e "$APP_LINK" ]; then
 fi
 BINARY="$APP_LINK/Contents/MacOS/attn"
 HEADLESS=0
+if [ "\${1:-}" = "review" ]; then
+  HEADLESS=1
+fi
 for arg in "$@"; do
   case "$arg" in
     --status|--json|--check|--info|--eval|--click|--wait-for|--query|--fill)
@@ -487,7 +526,7 @@ function resolvePathArgs(args) {
 }
 
 function isHeadlessInvocation(args) {
-  return args.some((arg) => HEADLESS_FLAGS.has(arg));
+  return args[0] === "review" || args.some((arg) => HEADLESS_FLAGS.has(arg));
 }
 
 function run(cmd, args) {

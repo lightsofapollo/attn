@@ -28,10 +28,14 @@ use crate::review::agent_identity::{
     AGENTS_DIRNAME, list_agents_in, load_agent_in, register_agent_in,
 };
 use crate::review::bootstrap::{
-    BootstrapConfig, BootstrapError, Bootstrapper, IDENTITY_FILENAME, load_or_create_identity_in,
+    BootstrapConfig, BootstrapError, Bootstrapper, DeviceIdentity, IDENTITY_FILENAME,
+    load_or_create_identity_in,
 };
 use crate::review::store::ReviewStore;
+use std::io::{self, IsTerminal, Write};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// `attn review …` argument tree.
 #[derive(Args, Debug)]
@@ -142,8 +146,8 @@ pub fn run(args: ReviewArgs) -> Result<()> {
 /// canonicalize to an absolute path so it matches the daemon's fs-watcher
 /// paths (folder-share republishes newly-added files by absolute-path prefix).
 fn run_share_via_daemon(path: &str, mode: &str, ttl: Option<&str>) -> Result<()> {
-    let abs = std::fs::canonicalize(path)
-        .with_context(|| format!("resolve share path {path:?}"))?;
+    let abs =
+        std::fs::canonicalize(path).with_context(|| format!("resolve share path {path:?}"))?;
     let abs = abs.to_string_lossy().to_string();
     crate::daemon::send_review_share(&abs, mode, ttl).map_err(|e| {
         anyhow::anyhow!(
@@ -161,20 +165,60 @@ fn run_share_via_daemon(path: &str, mode: &str, ttl: Option<&str>) -> Result<()>
 /// identity (the same device the app window presents). This keeps the CLI join
 /// consistent with the daemon — a no-`--as-agent` join shows up in the app.
 ///
-/// Fails with a helpful message when no daemon is running, since this path has
-/// nothing to route to (the caller should open attn first, or pass
-/// `--as-agent <name>` for a standalone headless join).
+/// If no daemon is running, start attn on the current directory, wait for its
+/// socket, then deliver the invite. That keeps the invite one-liner useful for
+/// first-time reviewers instead of requiring a separate "open attn" step.
 fn run_join_via_daemon(invite: &str) -> Result<()> {
-    crate::daemon::send_review_join(invite).map_err(|e| {
-        anyhow::anyhow!(
-            "could not reach a running attn daemon to join ({e}).\n\
-             Open attn first (so the app joins as its own device), or pass \
-             `--as-agent <name>` for a headless join."
-        )
-    })?;
+    crate::daemon::replace_stale_daemon().context("check running attn daemon")?;
+    match crate::daemon::send_review_join(invite) {
+        Ok(()) => {
+            println!("join request sent to the running attn daemon");
+            println!("  invite: {invite}");
+            return Ok(());
+        }
+        Err(_err) if crate::daemon::send_info().is_err() => {
+            start_app_for_join()?;
+            wait_for_daemon(Duration::from_secs(8))?;
+            crate::daemon::send_review_join(invite).map_err(|join_err| {
+                anyhow::anyhow!(
+                    "started attn, but could not send the review invite ({join_err}).\n\
+                     Invite: {invite}"
+                )
+            })?;
+        }
+        Err(err) => {
+            return Err(anyhow::anyhow!(
+                "could not send the review invite to the running attn daemon ({err})."
+            ));
+        }
+    }
     println!("join request sent to the running attn daemon");
     println!("  invite: {invite}");
     Ok(())
+}
+
+fn start_app_for_join() -> Result<()> {
+    let exe = std::env::current_exe().context("resolve current attn binary")?;
+    let cwd = std::env::current_dir().context("resolve current directory for review join")?;
+    Command::new(&exe)
+        .arg(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("start attn from {}", exe.display()))?;
+    Ok(())
+}
+
+fn wait_for_daemon(timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if crate::daemon::send_info().is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    bail!("started attn, but the daemon did not become ready within {timeout:?}");
 }
 
 fn run_register_agent(name: &str) -> Result<()> {
@@ -230,9 +274,7 @@ fn run_whoami(as_agent: Option<&str>) -> Result<()> {
 
 fn run_join_as_agent(invite: &str, name: &str, relay_url_override: Option<&str>) -> Result<()> {
     let base = runtime_dir().context("resolve runtime_dir for agent registry")?;
-    let agent_identity = load_agent_in(&base, name).with_context(|| {
-        format!("load agent {name:?} — run `attn review register-agent {name}` first")
-    })?;
+    let agent_identity = load_or_prompt_register_agent(&base, name)?;
 
     let relay_url = relay_url_override
         .map(str::to_string)
@@ -273,6 +315,37 @@ fn run_join_as_agent(invite: &str, name: &str, relay_url_override: Option<&str>)
     println!("  deviceId:   {}", agent_identity.device_id);
     println!("  participant:{}", agent_identity.participant_id);
     Ok(())
+}
+
+fn load_or_prompt_register_agent(base: &std::path::Path, name: &str) -> Result<DeviceIdentity> {
+    match load_agent_in(base, name) {
+        Ok(identity) => return Ok(identity),
+        Err(load_err) => {
+            if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+                return Err(anyhow::anyhow!(load_err).context(format!(
+                    "load agent {name:?} — run `attn review register-agent {name}` first"
+                )));
+            }
+            eprintln!("attn: agent {name:?} is not registered.");
+            print!("Create reviewer identity {name:?} now? [Y/n] ");
+            io::stdout().flush().context("flush prompt")?;
+            let mut answer = String::new();
+            io::stdin()
+                .read_line(&mut answer)
+                .context("read register-agent prompt")?;
+            let answer = answer.trim().to_ascii_lowercase();
+            if answer == "n" || answer == "no" {
+                return Err(anyhow::anyhow!(
+                    "agent {name:?} is not registered; run `attn review register-agent {name}` first"
+                ));
+            }
+        }
+    }
+
+    let identity =
+        register_agent_in(base, name).with_context(|| format!("register agent {name:?}"))?;
+    eprintln!("attn: registered agent {name:?}");
+    Ok(identity)
 }
 
 /// Translate a `BootstrapError` into an `anyhow::Error` while preserving

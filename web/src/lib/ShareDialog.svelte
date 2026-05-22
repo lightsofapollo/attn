@@ -106,7 +106,7 @@
    */
   const cliCommand = $derived(
     inviteUrl.length > 0
-      ? `npx attnmd review join '${inviteUrl}' --as-agent reviewer`
+      ? `npx attnmd review join '${inviteUrl}'`
       : '',
   );
 

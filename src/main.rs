@@ -28,7 +28,7 @@ use wry::WebViewBuilder;
 use crate::review::manager::ReviewManager;
 
 #[derive(Parser, Debug)]
-#[command(name = "attn", about = "A beautiful markdown viewer")]
+#[command(name = "attn", about = "A beautiful markdown viewer", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<TopLevelSubcommand>,

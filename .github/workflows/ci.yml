@@ -9,58 +9,38 @@ on:
 permissions:
   contents: read
 
+# Cancel superseded runs on the same ref. When you push three commits to a PR
+# in a row, only the newest needs to be green — don't tie up a 10x macOS runner
+# finishing builds for commits nobody will look at. (Scoped to PRs so we never
+# cancel an in-flight build of `main`.)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental compilation only pays off across edits on one machine; in CI it
+  # adds I/O and bloats the cache for no reuse. Off is the standard CI choice.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  # The two integration tests that need real UDP sockets / a running Miniflare
+  # relay self-skip on these. Set them explicitly so the suite is deterministic
+  # on Linux (and never hangs 30s waiting on loopback ICE).
+  ATTN_SKIP_WEBRTC_E2E: "1"
+  ATTN_SKIP_CONFORMANCE: "1"
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # Lints + the full Rust test suite + a Linux build, all on a 1x-cost Ubuntu
+  # runner. No #[test] function in the tree is macOS-gated (the macOS-only code
+  # in screenshot.rs / watcher.rs / main.rs is cfg'd out and has no tests), so
+  # this runs exactly the tests the old macOS job ran. This single job replaces
+  # both the old macOS "Rust Quality" clippy+test steps AND the separate Linux
+  # build job — `cargo test` + `cargo build` here prove the crate compiles,
+  # links, and passes on Linux.
+  # ---------------------------------------------------------------------------
   rust-quality:
-    name: Rust Quality (macOS)
-    runs-on: macos-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Install frontend dependencies
-        run: |
-          cd web
-          npm ci
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Run clippy (dev)
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Run clippy (release)
-        run: cargo clippy --all-targets --release -- -D warnings
-
-      - name: Run Rust tests
-        run: cargo test --locked
-
-      # Binary-size gate — enforces the 30 MiB target from
-      # planning/collab/amendments.md §Decision #1 (webrtc-rs is the main risk).
-      # Emergency bypass via env: ATTN_SIZE_BUDGET_WAIVER=1 (also accepts
-      # BINARY_SIZE_WAIVER=1). See CLAUDE.md §"Binary-size gate".
-      - name: Build release for size check
-        env:
-          ATTN_DEFAULT_RELAY_URL: https://relay.attn.sh
-        run: cargo build --release --locked
-
-      - name: Check binary size (30 MiB budget)
-        run: scripts/check-binary-size.sh
-
-  rust-build-linux:
-    name: Rust Build (Linux)
+    name: Rust Quality (Linux)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -78,22 +58,93 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Install frontend dependencies
+      # Produce web/dist/index.html up front. build.rs embeds this file; when it
+      # already exists, build.rs is a one-line copy. When it's absent (the old
+      # CI only ran `npm ci`), build.rs re-runs `npm ci` + the Vite build itself
+      # inside OUT_DIR — once per cargo profile, uncached. Building it once here
+      # collapses that repeated frontend build into a copy.
+      - name: Build frontend
         run: |
           cd web
           npm ci
+          npm run build
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-quality-linux
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # Dropped the old separate `cargo clippy --release`: it was a full second
+      # release-mode compile (~2.5 min) whose artifacts can't be reused by the
+      # size-gate build (clippy goes through RUSTC_WORKSPACE_WRAPPER, so its
+      # fingerprints differ from rustc's). Release-cfg code is still compile-
+      # checked by the actual release build in the size-gate job.
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build (debug)
+        run: cargo build --locked
+
+  # ---------------------------------------------------------------------------
+  # The shipped artifact is the macOS release binary, and the 30 MiB budget is
+  # calibrated against it (fat-LTO + strip — see planning/collab/amendments.md
+  # §Decision #1). This is the only job that genuinely needs macOS. It lives in
+  # its own job so it runs in PARALLEL with the quality job above instead of
+  # queueing behind ~8 min of clippy + tests. The fat-LTO link is inherently
+  # serial and rust-cache can't cache the workspace crate, so this build can't
+  # be made much faster without changing what the gate measures — the win is
+  # not waiting on everything else first.
+  # ---------------------------------------------------------------------------
+  size-gate:
+    name: Binary Size Gate (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd web
+          npm ci
+          npm run build
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: size-gate-macos
 
-      - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+      # Binary-size gate — enforces the 30 MiB target from
+      # planning/collab/amendments.md §Decision #1 (webrtc-rs is the main risk).
+      # Emergency bypass via env: ATTN_SIZE_BUDGET_WAIVER=1 (also accepts
+      # BINARY_SIZE_WAIVER=1). See CLAUDE.md §"Binary-size gate".
+      - name: Build release
+        env:
+          ATTN_DEFAULT_RELAY_URL: https://relay.attn.sh
+        run: cargo build --release --locked
 
-      - name: Build
-        run: cargo build --locked
+      - name: Check binary size (30 MiB budget)
+        run: scripts/check-binary-size.sh
 
   web-check:
     name: Web Check (Ubuntu)

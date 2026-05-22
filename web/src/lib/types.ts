@@ -103,6 +103,7 @@ export type IpcMessageType =
   | 'review_accept_suggestion'
   | 'review_reject_suggestion'
   | 'review_resolve_anchor'
+  | 'review_stop'
   | 'review_collab_send';
 
 export interface CheckboxToggleMessage {
@@ -232,6 +233,11 @@ export interface ReviewResolveAnchorMessage {
   range: PositionAnchor;
 }
 
+export interface ReviewStopMessage {
+  type: 'review_stop';
+  roomId?: RoomId;
+}
+
 export interface ReviewCollabSendMessage {
   type: 'review_collab_send';
   roomId: RoomId;
@@ -259,6 +265,7 @@ export type IpcMessage =
   | ReviewAcceptSuggestionMessage
   | ReviewRejectSuggestionMessage
   | ReviewResolveAnchorMessage
+  | ReviewStopMessage
   | ReviewCollabSendMessage;
 
 export type AppMode = 'read' | 'edit';
@@ -844,11 +851,14 @@ export interface ReviewShareReady {
  * `planning/collab/data-model.md` §Webview IPC Changes).
  */
 export interface ReviewStatus {
+  kind?: string;
   roomId: RoomId;
+  status?: string;
   mode: RoomPolicy['mode'];
   connection: 'live_direct' | 'mailbox' | 'offline' | 'direct_failed';
   peers: ReviewStatusPeer[];
   outboxPending: number;
+  pendingCount?: number;
   lastImportedSeq?: number;
   expiresAt?: number;
 }

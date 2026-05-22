@@ -115,6 +115,12 @@ pub enum IpcMessage {
         range: PositionAnchor,
     },
 
+    #[serde(rename = "review_stop", rename_all = "camelCase")]
+    ReviewStop {
+        #[serde(default)]
+        room_id: Option<RoomId>,
+    },
+
     #[serde(rename = "review_collab_send", rename_all = "camelCase")]
     ReviewCollabSend {
         room_id: RoomId,
@@ -370,6 +376,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                         range,
                     },
                 );
+            }
+            IpcMessage::ReviewStop { room_id } => {
+                submit_review_command(state, ReviewCommand::Stop { room_id });
             }
             IpcMessage::ReviewCollabSend { room_id, payload } => {
                 submit_review_command(state, ReviewCommand::SendCollab { room_id, payload });
@@ -712,6 +721,17 @@ mod tests {
     }
 
     #[test]
+    fn ipc_message_review_stop_parses_optional_room() {
+        let raw = r#"{"type":"review_stop","roomId":"room-abc"}"#;
+        let msg: IpcMessage = serde_json::from_str(raw).expect("parse review_stop");
+        assert!(matches!(msg, IpcMessage::ReviewStop { room_id: Some(_) }));
+
+        let raw_all = r#"{"type":"review_stop"}"#;
+        let msg_all: IpcMessage = serde_json::from_str(raw_all).expect("parse review_stop all");
+        assert!(matches!(msg_all, IpcMessage::ReviewStop { room_id: None }));
+    }
+
+    #[test]
     fn ipc_message_review_reject_suggestion_parses_with_and_without_reason() {
         // The Reject button omits `reason`; the field is `#[serde(default)]`.
         let with_reason = r#"{"type":"review_reject_suggestion","roomId":"room-abc","suggestionId":"sugg-1","reason":"out of scope"}"#;
@@ -814,6 +834,7 @@ mod tests {
                 event_id,
                 range,
             },
+            IpcMessage::ReviewStop { room_id } => ReviewCommand::Stop { room_id },
             other => panic!("not a review IpcMessage: {other:?}"),
         };
         submit_review_command(state, cmd);

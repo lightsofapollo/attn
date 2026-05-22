@@ -149,6 +149,11 @@ export function reviewResolveAnchor(
   return Promise.resolve();
 }
 
+export function reviewStop(roomId?: RoomId): Promise<void> {
+  send({ type: 'review_stop', ...(roomId !== undefined ? { roomId } : {}) });
+  return Promise.resolve();
+}
+
 /**
  * Send a live co-typing payload (a stringified CollabSubmission or
  * CollabBroadcast) to the room over the encrypted signal channel. The daemon

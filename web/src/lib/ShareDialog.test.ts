@@ -96,20 +96,21 @@ const ipc = installIpcCapture();
 
 interface StubReviewStore {
   currentRoomId: string | null;
+  rooms: unknown[];
   peers: unknown[];
 }
 
 function makeStubStore(): StubReviewStore {
-  return { currentRoomId: null, peers: [] };
+  return { currentRoomId: null, rooms: [], peers: [] };
 }
 
 /**
  * Mirror of the visibility predicate from ReviewBar.svelte:
  *
- *   visible = reviewStore.currentRoomId !== null || shareOpen
+ *   visible = reviewStore.currentRoomId !== null || reviewStore.roomsList.length > 0 || shareOpen
  */
 function reviewBarVisible(store: StubReviewStore, shareOpen: boolean): boolean {
-  return store.currentRoomId !== null || shareOpen;
+  return store.currentRoomId !== null || store.rooms.length > 0 || shareOpen;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +199,15 @@ defineCase('ReviewBar visible while share is being initiated', () => {
   assert(
     reviewBarVisible(store, true) === true,
     'expected visible when share dialog is open even without a room',
+  );
+});
+
+defineCase('ReviewBar visible when passive rooms are available', () => {
+  const store = makeStubStore();
+  store.rooms = [{ roomId: 'room-resumed' }];
+  assert(
+    reviewBarVisible(store, false) === true,
+    'expected visible when a resumed room can be selected',
   );
 });
 

@@ -26,6 +26,7 @@
     openExternal,
     reviewAcceptSuggestion,
     reviewCollabSend,
+    reviewStop,
     searchFiles,
     switchProject,
   } from './lib/ipc';
@@ -71,6 +72,7 @@
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
   import ReviewFileTree from './lib/ReviewFileTree.svelte';
+  import { shouldAutoSelectOnlyRoom } from './lib/review/room-ui';
   import {
     requestReviewDecorationsRebuild,
     reviewDecorationsPlugin,
@@ -140,7 +142,21 @@
       !shareDialogOpen &&
       reviewStore.currentRoomId === null,
   );
-  let showReviewChrome = $derived(reviewStore.currentRoomId !== null || shareDialogOpen);
+  let showReviewChrome = $derived(
+    reviewStore.currentRoomId !== null || reviewStore.roomsList.length > 0 || shareDialogOpen,
+  );
+
+  let autoSelectedRoomId = $state<string | null>(null);
+  $effect(() => {
+    const roomId = shouldAutoSelectOnlyRoom({
+      hasActiveTab,
+      currentRoomId: reviewStore.currentRoomId,
+      rooms: reviewStore.roomsList,
+    });
+    if (roomId === null || roomId === autoSelectedRoomId) return;
+    autoSelectedRoomId = roomId;
+    reviewStore.selectRoom(roomId);
+  });
 
   // Reviewer rendering: when this daemon joined a room (currentRoomId set)
   // and has received the owner's snapshot for the focused file, render the
@@ -1665,6 +1681,10 @@
     shareDialogOpen = true;
   }
 
+  function handleLeaveRoom(roomId: import('./lib/types').RoomId): void {
+    void reviewStop(roomId);
+  }
+
   // Handle sidebar navigation events
   function handleSidebarNavigate(path: string, newTab: boolean): void {
     openPath(path, undefined, newTab);
@@ -1965,8 +1985,9 @@
 {#snippet reviewChrome()}
   <ReviewBar
     shareOpen={shareDialogOpen}
-    isOwner={collabRole === 'owner'}
+    isOwner={reviewStore.currentRoomId === null || collabRole === 'owner'}
     onShareClick={openShareDialog}
+    onLeaveRoom={handleLeaveRoom}
   />
 {/snippet}
 

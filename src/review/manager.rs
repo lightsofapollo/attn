@@ -665,6 +665,13 @@ impl ReviewManager {
                 }
             });
 
+            if let Err(err) = self.store.delete_room(&room_id) {
+                eprintln!(
+                    "review: delete room state failed for {}: {err}",
+                    room_id.as_str()
+                );
+            }
+
             eprintln!("review: stopped room runtime room={}", room_id.as_str());
             (self.update_tx)(ReviewUpdate::RoomStatusChanged {
                 room_id,

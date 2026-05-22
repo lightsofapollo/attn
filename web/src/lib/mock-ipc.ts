@@ -355,6 +355,19 @@ function handleReviewJoin(_msg: Extract<IpcMessage, { type: 'review_join' }>): v
   }, 200);
 }
 
+function handleReviewStop(msg: Extract<IpcMessage, { type: 'review_stop' }>): void {
+  setTimeout(() => {
+    emitStatus({
+      roomId: msg.roomId ?? MOCK_ROOM_ID,
+      status: 'Stopped',
+      mode: 'live',
+      connection: 'offline',
+      peers: [],
+      outboxPending: 0,
+    });
+  }, 50);
+}
+
 function commentBody(anchor: Anchor, body: string, eventId: EventId): CommentCreatedBody {
   return {
     type: 'comment_created',
@@ -440,6 +453,9 @@ function dispatchReviewCommand(msg: IpcMessage): void {
       return;
     case 'review_join':
       handleReviewJoin(msg);
+      return;
+    case 'review_stop':
+      handleReviewStop(msg);
       return;
     case 'review_create_comment':
       handleReviewCreateComment(msg);

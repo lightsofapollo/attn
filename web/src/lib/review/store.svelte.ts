@@ -28,6 +28,7 @@ import {
   type PeerSplit,
   type StaleAnchorEntry,
 } from './selectors';
+import { shouldActivateRoomStatus, shouldForgetRoomStatus } from './room-ui';
 import type {
   EventId,
   FileId,
@@ -68,6 +69,23 @@ interface PeerLocation {
   lastLocationAt: number;
 }
 
+export interface ReviewRoomSummary {
+  roomId: RoomId;
+  status?: string;
+  role: 'owner' | 'reviewer' | 'unknown';
+  connection: ReviewStatus['connection'];
+  peers: ReviewStatusPeer[];
+  outboxPending: number;
+  share?: {
+    roomId: RoomId;
+    inviteUrl: string;
+    ownerSigningKey: string;
+    mode: 'live' | 'async' | 'hybrid';
+    expiresAt: number;
+  };
+  updatedAt: number;
+}
+
 /**
  * Reactive review-session store. One global singleton; mounted by the bridge
  * callbacks in `App.svelte` and read by the right-rail / review components.
@@ -83,6 +101,22 @@ export class ReviewStore {
 
   /** Currently-focused review room, if any. */
   currentRoomId = $state<RoomId | null>(null);
+
+  /**
+   * Rooms known to this webview. Resumed rooms live here passively until the
+   * user picks one, so a normal file open is never replaced by review mode.
+   */
+  rooms = $state<Record<string, ReviewRoomSummary>>({});
+
+  roomsList: ReviewRoomSummary[] = $derived.by(() =>
+    Object.values(this.rooms).sort((a, b) => b.updatedAt - a.updatedAt),
+  );
+
+  activeRoom: ReviewRoomSummary | null = $derived.by(() =>
+    this.currentRoomId !== null ? (this.rooms[this.currentRoomId] ?? null) : null,
+  );
+
+  dismissedRoomIds = $state<Set<RoomId>>(new Set<RoomId>());
 
   /**
    * File the panel/margin is scoped to. Driven by the active editor tab
@@ -259,6 +293,7 @@ export class ReviewStore {
   ownerParticipantId: ParticipantId | null = $derived.by(() => {
     let earliest: ReviewSnapshot | null = null;
     for (const snap of this.snapshots) {
+      if (this.currentRoomId !== null && snap.roomId !== this.currentRoomId) continue;
       if (earliest === null || snap.createdAt < earliest.createdAt) {
         earliest = snap;
       }
@@ -293,16 +328,56 @@ export class ReviewStore {
   );
 
   /**
-   * Apply a transport/connection status payload pushed by Rust. Replaces the
-   * current room context and peer roster.
+   * Apply a transport/connection status payload pushed by Rust. Joined/Live
+   * statuses activate the room; Resumed only populates the switcher.
    */
   applyStatus(status: ReviewStatus): void {
-    this.currentRoomId = status.roomId;
-    this.status = status;
-    // Rust-side `RoomStatusChanged` doesn't always carry a full ReviewStatus
-    // shape today (issue: the wire variant carries `status: string`). Guard
-    // against `peers` being absent so derived selectors don't crash.
-    this.peers = status.peers ?? [];
+    const roomId = status.roomId;
+    if (!roomId) return;
+    const lifecycle = status.status;
+
+    if (shouldForgetRoomStatus(lifecycle)) {
+      this.forgetRoom(roomId);
+      return;
+    }
+    if (shouldActivateRoomStatus(lifecycle)) {
+      const nextDismissed = new Set(this.dismissedRoomIds);
+      nextDismissed.delete(roomId);
+      this.dismissedRoomIds = nextDismissed;
+    } else if (this.dismissedRoomIds.has(roomId)) {
+      return;
+    }
+
+    const existing = this.rooms[roomId];
+    const role =
+      lifecycle === 'Live'
+        ? 'owner'
+        : lifecycle === 'Joined'
+          ? 'reviewer'
+          : (existing?.role ?? 'unknown');
+    const connection = status.connection ?? existing?.connection ?? 'offline';
+    const peers = status.peers ?? existing?.peers ?? [];
+    const outboxPending =
+      status.outboxPending ?? status.pendingCount ?? existing?.outboxPending ?? 0;
+
+    this.upsertRoom(roomId, {
+      status: lifecycle ?? existing?.status,
+      role,
+      connection,
+      peers,
+      outboxPending,
+    });
+
+    if (shouldActivateRoomStatus(lifecycle)) {
+      this.selectRoom(roomId);
+      return;
+    }
+
+    if (this.currentRoomId === roomId) {
+      this.status = status;
+      this.connection = connection;
+      this.peers = peers;
+    }
   }
 
   /**
@@ -319,26 +394,38 @@ export class ReviewStore {
     peers: ReviewStatusPeer[];
     replace: boolean;
   }): void {
-    this.currentRoomId = payload.roomId;
+    const existingPeers = this.rooms[payload.roomId]?.peers ?? [];
+    let nextPeers: ReviewStatusPeer[];
     if (payload.replace) {
-      this.peers = payload.peers;
-      const liveDevices = new Set(payload.peers.filter((p) => p.online).map((p) => p.deviceId));
+      nextPeers = payload.peers;
+    } else {
+      const byDevice = new Map(existingPeers.map((p) => [p.deviceId, p]));
+      for (const peer of payload.peers) {
+        if (peer.online) {
+          byDevice.set(peer.deviceId, peer);
+        } else {
+          byDevice.delete(peer.deviceId);
+        }
+      }
+      nextPeers = [...byDevice.values()];
+    }
+    this.upsertRoom(payload.roomId, { peers: nextPeers });
+    if (this.currentRoomId !== payload.roomId) return;
+
+    this.peers = nextPeers;
+    if (payload.replace) {
+      const liveDevices = new Set(nextPeers.filter((p) => p.online).map((p) => p.deviceId));
       this.peerLocations = Object.fromEntries(
         Object.entries(this.peerLocations).filter(([deviceId]) => liveDevices.has(deviceId)),
       );
       return;
     }
-    const byDevice = new Map(this.peers.map((p) => [p.deviceId, p]));
     for (const peer of payload.peers) {
-      if (peer.online) {
-        byDevice.set(peer.deviceId, peer);
-      } else {
-        byDevice.delete(peer.deviceId);
+      if (!peer.online) {
         const { [peer.deviceId]: _removed, ...rest } = this.peerLocations;
         this.peerLocations = rest;
       }
     }
-    this.peers = [...byDevice.values()];
   }
 
   /**
@@ -352,7 +439,12 @@ export class ReviewStore {
     roomId: RoomId;
     connection: ReviewStatus['connection'];
   }): void {
-    this.currentRoomId = payload.roomId;
+    this.upsertRoom(payload.roomId, {
+      connection: payload.connection,
+      ...(payload.connection === 'offline' ? { peers: [] } : {}),
+    });
+    if (this.currentRoomId !== payload.roomId) return;
+
     this.connection = payload.connection;
     if (payload.connection === 'offline') {
       this.peers = [];
@@ -372,14 +464,22 @@ export class ReviewStore {
     mode: 'live' | 'async' | 'hybrid';
     expiresAt: number;
   }): void {
-    this.currentRoomId = payload.roomId;
-    this.currentShare = {
+    const nextDismissed = new Set(this.dismissedRoomIds);
+    nextDismissed.delete(payload.roomId);
+    this.dismissedRoomIds = nextDismissed;
+    const share = {
       roomId: payload.roomId,
       inviteUrl: payload.inviteUrl,
       ownerSigningKey: payload.ownerSigningKey,
       mode: payload.mode,
       expiresAt: payload.expiresAt,
     };
+    this.upsertRoom(payload.roomId, {
+      status: 'Live',
+      role: 'owner',
+      share,
+    });
+    this.selectRoom(payload.roomId);
   }
 
   /**
@@ -394,6 +494,7 @@ export class ReviewStore {
    */
   applyEvent(event: ReviewEvent): void {
     this.events = [...this.events, event];
+    this.upsertRoom(event.meta.roomId, {});
 
     if (event.body.type === 'snapshot_created') {
       const body = event.body;
@@ -420,7 +521,7 @@ export class ReviewStore {
       // Auto-focus the file the snapshot belongs to when nothing is
       // selected yet — this is what makes the reviewer's editor switch
       // from "their local files" to "the shared doc" on first snapshot.
-      if (this.currentFileId === null) {
+      if (this.currentRoomId === event.meta.roomId && this.currentFileId === null) {
         this.currentFileId = body.fileId;
       }
     }
@@ -432,6 +533,10 @@ export class ReviewStore {
    */
   applySnapshot(snapshot: ReviewSnapshot): void {
     this.snapshots = [...this.snapshots, snapshot];
+    this.upsertRoom(snapshot.roomId, {});
+    if (this.currentRoomId === snapshot.roomId && this.currentFileId === null) {
+      this.currentFileId = snapshot.fileId;
+    }
   }
 
   notePeerLocation(
@@ -502,6 +607,42 @@ export class ReviewStore {
   setCurrentSnapshot(snapshotId: SnapshotId | null): void {
     if (this.currentFileId === null) return;
     this.currentSnapshotId = snapshotId;
+  }
+
+  selectRoom(roomId: RoomId): void {
+    const room = this.rooms[roomId];
+    if (room === undefined) return;
+    this.currentRoomId = roomId;
+    this.currentShare = room.share ?? null;
+    this.connection = room.connection;
+    this.peers = room.peers;
+    this.status = {
+      roomId,
+      status: room.status,
+      mode: room.share?.mode ?? 'live',
+      connection: room.connection,
+      peers: room.peers,
+      outboxPending: room.outboxPending,
+    };
+
+    const currentFileStillExists =
+      this.currentFileId !== null
+      && this.snapshots.some((s) => s.roomId === roomId && s.fileId === this.currentFileId);
+    if (!currentFileStillExists) {
+      let latest: ReviewSnapshot | null = null;
+      for (const snapshot of this.snapshots) {
+        if (snapshot.roomId !== roomId) continue;
+        if (latest === null || snapshot.createdAt > latest.createdAt) {
+          latest = snapshot;
+        }
+      }
+      this.currentFileId = latest?.fileId ?? null;
+    }
+    this.currentSnapshotId = null;
+  }
+
+  leaveRoom(roomId: RoomId): void {
+    this.forgetRoom(roomId);
   }
 
   /**
@@ -598,6 +739,65 @@ export class ReviewStore {
     if (this.manualReanchorState?.eventId === eventId) {
       this.manualReanchorState = null;
     }
+  }
+
+  private upsertRoom(
+    roomId: RoomId,
+    patch: Partial<Omit<ReviewRoomSummary, 'roomId' | 'updatedAt'>>,
+  ): ReviewRoomSummary {
+    if (this.dismissedRoomIds.has(roomId)) {
+      return this.rooms[roomId] ?? {
+        roomId,
+        role: 'unknown',
+        connection: 'offline',
+        peers: [],
+        outboxPending: 0,
+        updatedAt: Date.now(),
+      };
+    }
+    const existing = this.rooms[roomId];
+    const next: ReviewRoomSummary = {
+      roomId,
+      status: existing?.status,
+      role: existing?.role ?? 'unknown',
+      connection: existing?.connection ?? 'offline',
+      peers: existing?.peers ?? [],
+      outboxPending: existing?.outboxPending ?? 0,
+      share: existing?.share,
+      ...patch,
+      updatedAt: Date.now(),
+    };
+    this.rooms = {
+      ...this.rooms,
+      [roomId]: next,
+    };
+    return next;
+  }
+
+  private forgetRoom(roomId: RoomId): void {
+    const dismissed = new Set(this.dismissedRoomIds);
+    dismissed.add(roomId);
+    this.dismissedRoomIds = dismissed;
+    const { [roomId]: _removed, ...rest } = this.rooms;
+    this.rooms = rest;
+    this.events = this.events.filter((event) => event.meta.roomId !== roomId);
+    this.snapshots = this.snapshots.filter((snapshot) => snapshot.roomId !== roomId);
+    this.anchorResolutions = Object.fromEntries(
+      Object.entries(this.anchorResolutions).filter(([, update]) => update.roomId !== roomId),
+    );
+    if (this.currentRoomId !== roomId) return;
+    this.pendingOutbox = [];
+    this.currentRoomId = null;
+    this.currentShare = null;
+    this.currentFileId = null;
+    this.currentSnapshotId = null;
+    this.status = null;
+    this.connection = 'offline';
+    this.peers = [];
+    this.peerLocations = {};
+    this.focusEventId = null;
+    this.hoveredEventId = null;
+    this.panelOpen = false;
   }
 }
 

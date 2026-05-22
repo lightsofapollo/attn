@@ -166,6 +166,34 @@ impl ReviewStore {
         Ok(out)
     }
 
+    /// Remove all local state for a room. Missing rooms are a clean no-op.
+    pub fn delete_room(&self, room_id: &RoomId) -> Result<()> {
+        let dir = self.room_dir(room_id);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("could not remove {}", dir.display()));
+            }
+        }
+
+        // Room secrets live outside `rooms/` so remove the matching secret
+        // too; `local-shares.json` can tolerate stale metadata because
+        // `list_rooms` is the source of truth for resumable rooms.
+        let secret = self
+            .root
+            .join("shares")
+            .join(format!("{}.secret", room_id_str(room_id)));
+        match std::fs::remove_file(&secret) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| format!("could not remove {}", secret.display()));
+            }
+        }
+        Ok(())
+    }
+
     // ---------------------------------------------------------------------
     // Snapshots
     // ---------------------------------------------------------------------
@@ -904,6 +932,24 @@ mod tests {
         let rooms = store.list_rooms().expect("list_rooms");
         let names: Vec<String> = rooms.iter().map(room_id_str).collect();
         assert_eq!(names, vec!["room-a".to_string(), "room-b".to_string()]);
+    }
+
+    #[test]
+    fn delete_room_removes_room_from_resume_list() {
+        let (_tmp, store) = fresh_store();
+        let room = sample_room("room-a");
+        store.save_room(&room).expect("save room");
+
+        assert_eq!(store.list_rooms().expect("before").len(), 1);
+        store.delete_room(&room.room_id).expect("delete room");
+        assert!(store.list_rooms().expect("after").is_empty());
+        assert!(
+            store
+                .load_room(&room.room_id)
+                .expect("load deleted")
+                .is_none(),
+            "deleted room should not load"
+        );
     }
 
     #[test]

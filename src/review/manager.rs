@@ -3488,19 +3488,38 @@ mod bootstrap_integration_tests {
         mgr.submit(ReviewCommand::Join {
             invite: invite.clone(),
         });
-        let update = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("update");
-        match update {
-            ReviewUpdate::RoomStatusChanged {
-                room_id: rid,
-                status,
-            } => {
-                assert_eq!(rid, room_id);
-                assert_eq!(status, "Joined");
+        // The join flow spawns the live WS subscriber (start_room_runtime)
+        // BEFORE emitting "Joined" — see emit_join_outcome. With no WS mock
+        // mounted, that subscriber's dial 404s and emits an Error update,
+        // which can race ahead of "Joined" on the channel (it does on Linux).
+        // The contract under test is that "Joined" is surfaced regardless of
+        // WS health, so drain updates until we observe it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut joined = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
             }
-            other => panic!("expected RoomStatusChanged, got {other:?}"),
+            match rx.recv_timeout(remaining) {
+                Ok(ReviewUpdate::RoomStatusChanged {
+                    room_id: rid,
+                    status,
+                }) if status == "Joined" => {
+                    assert_eq!(rid, room_id);
+                    joined = true;
+                    break;
+                }
+                // Ignore the expected transient WS-dial failure and any other
+                // pre-"Joined" updates.
+                Ok(_) => continue,
+                Err(_) => break,
+            }
         }
+        assert!(
+            joined,
+            "expected a RoomStatusChanged {{ status: \"Joined\" }} update"
+        );
     }
 
     #[test]

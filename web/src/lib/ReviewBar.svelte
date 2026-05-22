@@ -53,6 +53,8 @@
      * so this component stays presentational. See attn-nnj.4.13.
      */
     onOutboxRetry?: () => void;
+    /** CSS right offset in px. Negative values let the parent span side rails. */
+    rightOffsetPx?: number;
     /**
      * The local participant's id, surfaced from the daemon's identity
      * bootstrap. Passed through to PeerStrip so the matching chip carries
@@ -67,6 +69,7 @@
     onShareClick,
     onReconnect,
     onOutboxRetry,
+    rightOffsetPx = 16,
     localParticipantId = null,
   }: Props = $props();
 
@@ -90,18 +93,19 @@
 
 {#if visible}
   <div
-    class="review-bar relative z-40 h-0 shrink-0 overflow-visible px-3 text-xs"
+    class="review-bar pointer-events-none absolute top-0 z-40 flex h-10 min-w-0 items-center justify-end overflow-visible text-xs"
+    style={`right: ${rightOffsetPx}px;`}
     data-slot="review-bar"
     data-state={reviewStore.currentRoomId !== null ? 'active' : 'pending'}
   >
     <div
-      class="review-bar-dock pointer-events-auto ml-auto flex h-8 max-w-[min(34rem,calc(100%-0.75rem))] -translate-y-[36px] items-center gap-1.5 overflow-visible rounded-full border border-border/70 bg-background/75 px-1.5 shadow-[0_8px_24px_color-mix(in_oklch,black_12%,transparent)] backdrop-blur-md dark:bg-background/65 dark:shadow-[0_10px_32px_color-mix(in_oklch,black_38%,transparent)]"
+      class="review-bar-dock pointer-events-auto inline-flex h-8 max-w-[calc(100vw-1rem)] shrink-0 items-center justify-end gap-1.5 overflow-visible px-0"
       data-slot="review-bar-dock"
     >
       {#if isOwner}
         <button
           type="button"
-          class="share-pill inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-border/60 bg-muted/35 text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          class="share-pill inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/50 bg-background/55 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           data-slot="review-bar-share"
           data-state={reviewStore.currentRoomId !== null ? 'sharing' : 'idle'}
           aria-label={shareLabel}
@@ -148,9 +152,12 @@
 
 <style>
   @media (max-width: 720px) {
+    .review-bar {
+      right: 0.5rem;
+    }
+
     .review-bar-dock {
       max-width: calc(100vw - 1rem);
-      transform: translateY(-34px);
     }
   }
 </style>

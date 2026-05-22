@@ -1,7 +1,16 @@
 <script lang="ts">
 	import { getTheme } from './theme.svelte';
 
+	const mediaVersion = '2026-05-22-collab-header';
+
+	function media(path: string): string {
+		return `${path}?v=${mediaVersion}`;
+	}
+
 	let isDark = $derived(getTheme() === 'dark');
+	let collabPoster = $derived(media(isDark ? '/screenshots/collab-dark.png' : '/screenshots/collab-light.png'));
+	let collabVideo = $derived(media(isDark ? '/screenshots/collab-hero-dark.mp4' : '/screenshots/collab-hero-light.mp4'));
+	let collabFallback = $derived(media(isDark ? '/screenshots/collab-hero-dark.gif' : '/screenshots/collab-hero-light.gif'));
 </script>
 
 <section class="min-h-[85vh] flex items-center justify-center px-6">
@@ -39,32 +48,20 @@
 			</a>
 		</div>
 
-		<div class="relative mt-16 max-w-5xl mx-auto rounded-xl shadow-2xl border border-border overflow-hidden bg-card">
-			<img
-				src="/screenshots/collab-light.png"
-				alt="A live attn session: the shared doc with the owner's amber caret and a reviewer's blue caret, end-to-end encrypted"
-				class="w-full transition-opacity duration-500"
-				class:opacity-0={isDark}
-			/>
-			<img
-				src="/screenshots/collab-dark.png"
-				alt="A live attn session in dark mode with two collaborators editing together"
-				class="absolute inset-0 w-full transition-opacity duration-500"
-				class:opacity-0={!isDark}
-			/>
+		<div class="relative mt-16 max-w-5xl mx-auto rounded-xl border border-border overflow-hidden bg-background aspect-[4/3]">
 			{#key isDark}
 				<video
 					class="absolute inset-0 h-full w-full object-cover"
-					poster={isDark ? '/screenshots/collab-dark.png' : '/screenshots/collab-light.png'}
+					poster={collabPoster}
 					autoplay
 					muted
 					loop
 					playsinline
 					aria-label="Live attn collaboration: a reviewer comments, suggests an edit, and moves a labeled cursor in the owner window"
 				>
-					<source src={isDark ? '/screenshots/collab-hero-dark.mp4' : '/screenshots/collab-hero-light.mp4'} type="video/mp4" />
+					<source src={collabVideo} type="video/mp4" />
 					<img
-						src={isDark ? '/screenshots/collab-hero-dark.gif' : '/screenshots/collab-hero-light.gif'}
+						src={collabFallback}
 						alt="Live attn collaboration: a reviewer comments, suggests an edit, and moves a remote cursor in a shared markdown document"
 						class="h-full w-full object-cover"
 					/>

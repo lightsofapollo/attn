@@ -33,6 +33,8 @@ OWNER_HOME="/tmp/attn-cap-owner"; RV_HOME="/tmp/attn-cap-rv"
 WORK="/tmp/attn-cap-work"; SHARED_DOC="$WORK/launch-plan.md"; RELAY_LOG="$WORK/relay.log"
 SCRATCH="/tmp/attn-cap-scratch"
 OUT="$PROJECT_DIR/site/static/screenshots"
+LIGHT_CAPTURE_BG="#e3dfd8"
+DARK_CAPTURE_BG="#090a0c"
 
 : "${ATTN_CAPTURE_VARIANT:=}"
 if [ -z "$ATTN_CAPTURE_VARIANT" ]; then
@@ -60,6 +62,46 @@ wait_ready(){ poll "${3:-25000}" "$1" --wait-for "$2" --timeout 1000; }
 kill_pid(){ local p="$1"; [ -z "$p" ] && return 0; kill "$p" 2>/dev/null||true; local i=0; while kill -0 "$p" 2>/dev/null && [ $i -lt 30 ];do sleep 0.1;i=$((i+1));done; kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null||true; }
 cleanup(){ log "cleanup"; kill_pid "$OWNER_PID"; kill_pid "$RV_PID"; [ -n "$RELAY_PID" ] && { pkill -P "$RELAY_PID" 2>/dev/null||true; kill_pid "$RELAY_PID"; }; pkill -f "wrangler dev --local --port $RELAY_PORT" 2>/dev/null||true; rm -rf "$SCRATCH"; }
 trap cleanup EXIT INT TERM
+focus_owner(){
+  local pid
+  pid="$(attn_owner --info 2>/dev/null | awk '/^pid:/ {print $2; exit}')"
+  if [ -n "$pid" ] && command -v osascript >/dev/null 2>&1; then
+    osascript -e "tell application \"System Events\" to set frontmost of first process whose unix id is $pid to true" >/dev/null 2>&1 || true
+  fi
+  attn_owner --eval "window.focus(); document.body.focus(); 'focused'" >/dev/null 2>&1 || true
+  sleep 0.35
+}
+bg_for_theme(){ [ "$1" = "dark" ] && printf '%s' "$DARK_CAPTURE_BG" || printf '%s' "$LIGHT_CAPTURE_BG"; }
+theme_for_asset(){ case "$1" in *-dark.*|*-dark) printf 'dark';; *) printf 'light';; esac; }
+media_dims(){ ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "$1" 2>/dev/null | head -1; }
+flatten_png_capture(){
+  local src="$1" dest="$2" theme="$3" dims bg tmp
+  if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then cp "$src" "$dest"; return $?; fi
+  dims="$(media_dims "$src")"
+  [ -z "$dims" ] && { cp "$src" "$dest"; return $?; }
+  bg="$(bg_for_theme "$theme")"
+  tmp="$SCRATCH/flatten-$(basename "$dest")"
+  ffmpeg -y -f lavfi -i "color=c=${bg}:s=${dims}:r=1" -i "$src" \
+    -filter_complex "[1:v]format=rgba[fg];[0:v][fg]overlay=shortest=1:format=auto,format=rgb24[out]" \
+    -map "[out]" -frames:v 1 "$tmp" >/dev/null 2>&1 \
+    && mv "$tmp" "$dest"
+}
+flatten_window_video(){
+  local src="$1" dest="$2" theme="$3" dims bg
+  if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then mv "$src" "$dest"; return $?; fi
+  dims="$(media_dims "$src")"
+  [ -z "$dims" ] && return 1
+  bg="$(bg_for_theme "$theme")"
+  if [ "$theme" = "light" ]; then
+    ffmpeg -y -f lavfi -i "color=c=${bg}:s=${dims}:r=60" -i "$src" \
+      -filter_complex "[1:v]format=rgba,colorkey=0x000000:0.018:0.0[fg];[0:v][fg]overlay=shortest=1:format=auto[flat];[flat]scale='min(1600,iw)':-2,format=yuv420p[out]" \
+      -map "[out]" -an -movflags +faststart "$dest" >/dev/null 2>&1
+  else
+    ffmpeg -y -f lavfi -i "color=c=${bg}:s=${dims}:r=60" -i "$src" \
+      -filter_complex "[1:v]format=rgba[fg];[0:v][fg]overlay=shortest=1:format=auto[flat];[flat]scale='min(1600,iw)':-2,format=yuv420p[out]" \
+      -map "[out]" -an -movflags +faststart "$dest" >/dev/null 2>&1
+  fi
+}
 
 # Capture helpers (all shots are of the owner window).
 shot(){ attn_owner --screenshot 2>/dev/null | grep -oE '/tmp/attn-screenshot-[0-9]+\.png' | tail -1; }
@@ -67,17 +109,23 @@ owner_window_id(){ attn_owner --info 2>/dev/null | awk '/^window_id:/ {print $2;
 reviewer_window_id(){ attn_rv --info 2>/dev/null | awk '/^window_id:/ {print $2; exit}'; }
 owner_shot(){
   local wid out
+  focus_owner
   wid="$(owner_window_id)"
   out="$SCRATCH/owner-shot-$(date +%s%N).png"
   if [ -n "$wid" ] && command -v screencapture >/dev/null 2>&1; then
-    screencapture -x -l "$wid" "$out" >/dev/null 2>&1 && { echo "$out"; return 0; }
+    screencapture -x -o -l "$wid" "$out" >/dev/null 2>&1 && { echo "$out"; return 0; }
   fi
   shot
 }
 # Match the app's setTheme (theme.ts): set BOTH data-theme AND the .dark class,
 # otherwise prose text color and shadcn surfaces disagree.
 set_theme(){ attn_owner --eval "var d=document.documentElement;d.dataset.theme='$1';d.classList.toggle('dark','$1'==='dark');'x'" >/dev/null 2>&1; }
-save(){ [ -n "$1" ] && cp "$1" "$OUT/$2" && log "wrote $2" || log "FAILED $2"; }
+save(){
+  local src="$1" name="$2" theme
+  if [ -z "$src" ]; then log "FAILED $name"; return 0; fi
+  theme="$(theme_for_asset "$name")"
+  flatten_png_capture "$src" "$OUT/$name" "$theme" && log "wrote $name" || log "FAILED $name"
+}
 sel(){ attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';var S=v.state.selection.constructor;v.focus();v.dispatch(v.state.tr.setSelection(S.create(v.state.doc,$1,$2)));return 'ok';})()" >/dev/null 2>&1; }
 # Select a substring by content (robust against position drift). $2 (optional)
 # 'collapse' parks a caret at the start instead of selecting the range.
@@ -140,16 +188,17 @@ record_hero_video(){
 
   rm -f "$raw" "$out"
   set_theme "$HERO_THEME"
+  focus_owner
   sleep 0.6
   log "recording collab-hero-${HERO_SUFFIX}.mp4 from owner window $wid"
-  screencapture -x -v -V 10 -l "$wid" "$raw" >/dev/null 2>&1 &
+  screencapture -x -o -v -V 10 -l "$wid" "$raw" >/dev/null 2>&1 &
   local rec_pid=$!
   drive_hero_workflow
   wait "$rec_pid" || { log "FAILED recording collab-hero-${HERO_SUFFIX}.mp4"; return 0; }
 
   if [ ! -f "$raw" ]; then log "FAILED collab-hero-${HERO_SUFFIX}.mp4 (recorder produced no file)"; return 0; fi
   if command -v ffmpeg >/dev/null 2>&1; then
-    ffmpeg -y -i "$raw" -an -vf "scale='min(1600,iw)':-2" -pix_fmt yuv420p -movflags +faststart "$out" >/dev/null 2>&1 \
+    flatten_window_video "$raw" "$out" "$HERO_THEME" \
       && log "wrote collab-hero-${HERO_SUFFIX}.mp4" \
       || log "FAILED transcoding collab-hero-${HERO_SUFFIX}.mp4"
   else
@@ -162,12 +211,14 @@ encode_share_flow_gif(){
   local raw="$1"
   local gif="$OUT/share-flow-${HERO_SUFFIX}.gif"
   local palette="$SCRATCH/share-flow-${HERO_SUFFIX}-palette.png"
+  local flat="$SCRATCH/share-flow-${HERO_SUFFIX}-flat.mp4"
   if [ ! -f "$raw" ]; then log "SKIP share-flow-${HERO_SUFFIX}.gif (missing recording)"; return 0; fi
   if ! command -v ffmpeg >/dev/null 2>&1; then log "SKIP share-flow-${HERO_SUFFIX}.gif (ffmpeg missing)"; return 0; fi
 
-  rm -f "$gif" "$palette"
-  ffmpeg -y -i "$raw" -vf "fps=12,scale=960:-1:flags=lanczos,palettegen=stats_mode=diff" "$palette" >/dev/null 2>&1 \
-    && ffmpeg -y -i "$raw" -i "$palette" -filter_complex "fps=12,scale=960:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" -loop 0 "$gif" >/dev/null 2>&1 \
+  rm -f "$gif" "$palette" "$flat"
+  flatten_window_video "$raw" "$flat" "$HERO_THEME" || { log "FAILED flattening share-flow-${HERO_SUFFIX}.gif"; return 0; }
+  ffmpeg -y -i "$flat" -vf "fps=12,scale=960:-1:flags=lanczos,palettegen=stats_mode=diff" "$palette" >/dev/null 2>&1 \
+    && ffmpeg -y -i "$flat" -i "$palette" -filter_complex "fps=12,scale=960:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" -loop 0 "$gif" >/dev/null 2>&1 \
     && log "wrote share-flow-${HERO_SUFFIX}.gif" \
     || log "FAILED transcoding share-flow-${HERO_SUFFIX}.gif"
 }
@@ -176,12 +227,13 @@ record_share_flow(){
   local wid
   wid="$(owner_window_id)"
   set_theme "$HERO_THEME"
+  focus_owner
   sleep 0.5
 
   if [ -n "$wid" ] && command -v screencapture >/dev/null 2>&1; then
     rm -f "$raw" "$OUT/share-flow-${HERO_SUFFIX}.gif"
     log "recording share-flow-${HERO_SUFFIX}.gif from owner window $wid"
-    screencapture -x -v -V 4 -l "$wid" "$raw" >/dev/null 2>&1 &
+    screencapture -x -o -v -V 4 -l "$wid" "$raw" >/dev/null 2>&1 &
     local rec_pid=$!
     sleep 0.65
     attn_owner --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
@@ -225,7 +277,7 @@ record_share_flow
 INVITE=""; d=$(( $(date +%s)+15 )); while [ "$(date +%s)" -lt "$d" ]; do INVITE="$(attn_owner --eval "document.querySelector('[data-slot=share-invite-url]')?.value||''" 2>/dev/null | tr -d '"\\' | tr -d '\r\n')"; case "$INVITE" in attn://review/*) break;; esac; sleep 0.3; done
 
 # --- SHARE dialog shots (no reviewer yet → clean, no warnings) ---
-dlg(){ attn_owner --eval "document.querySelector('[data-slot=share-invite-url]')?'open':'CLOSED'" 2>/dev/null | tr -d '"'; }
+dlg(){ attn_owner --eval "(document.querySelector('[data-slot=share-dialog]')||document.querySelector('[data-slot=dialog-overlay]'))?'open':'CLOSED'" 2>/dev/null | tr -d '"'; }
 set_theme light
 log "share dialog before light shot: $(dlg)"
 sleep 1; save "$(owner_shot)" share-light.png
@@ -237,7 +289,7 @@ set_theme light; sleep 1
 # auto-mint disables it briefly). Poll until the dialog is actually gone.
 for _ in $(seq 1 16); do
   [ "$(dlg)" = "CLOSED" ] && break
-  attn_owner --eval "var b=document.querySelector('[data-slot=share-start]'); if(b&&!b.disabled){b.click();} 'x'" >/dev/null 2>&1
+  attn_owner --eval "var b=document.querySelector('[data-slot=share-start]'); if(b&&!b.disabled){b.click();} var e=new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}); document.dispatchEvent(e); window.dispatchEvent(e); 'x'" >/dev/null 2>&1
   sleep 0.4
 done
 log "share dialog after close: $(dlg)"

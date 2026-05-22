@@ -320,7 +320,7 @@
       -->
       <button
         type="button"
-        class="snapshot-chip inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-primary/35 bg-primary/10 px-2 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        class="snapshot-chip inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-primary/35 bg-primary/10 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
         data-slot="snapshot-badge-chip"
         data-state="reviewer_current"
         aria-label="Snapshot @ {formatSnapshotClock(activeSnapshot.createdAt)}"
@@ -330,7 +330,6 @@
         onclick={togglePopover}
       >
         <Camera class="size-3 text-primary" aria-hidden="true" />
-        <span>{formatSnapshotClock(activeSnapshot.createdAt)}</span>
         <span class="sr-only">Snapshot @ {formatSnapshotClock(activeSnapshot.createdAt)}</span>
       </button>
       {#if ownerOnNewerSnapshot}

@@ -946,16 +946,18 @@
 }
 
 /* ============================================
- * Shared-document ambient accent (reviewer mode)
+ * Shared-document chrome (reviewer mode)
  *
- * When viewing someone else's shared snapshot (not a local file) the
- * content viewport gets a subtle violet left-edge so the "you're in
- * someone else's document" state reads even after the top banner
- * scrolls out of view. Pairs with [data-slot="shared-doc-banner"].
- * Per user feedback 2026-05-19.
+ * Keep reviewer mode visible but neutral. A previous left-edge accent read as
+ * an accidental layout border in screenshots and hero media.
  * ============================================ */
 .shared-doc-viewport {
-  box-shadow: inset 3px 0 0 0 color-mix(in oklab, var(--color-violet-500, oklch(0.606 0.25 292.717)) 55%, transparent);
+  box-shadow: none;
+}
+
+.shared-doc-banner {
+  background: color-mix(in oklab, var(--muted) 34%, var(--background) 66%);
+  box-shadow: 0 1px 0 color-mix(in oklab, var(--border) 72%, transparent);
 }
 
 /* Live co-typing remote carets (remote-cursors.ts). A thin colored bar at the

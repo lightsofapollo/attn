@@ -1,7 +1,15 @@
 <script lang="ts">
 	import { getTheme } from './theme.svelte';
 
+	const mediaVersion = '2026-05-22-collab-header';
+
+	function media(path: string): string {
+		return `${path}?v=${mediaVersion}`;
+	}
+
 	let isDark = $derived(getTheme() === 'dark');
+	let collabStill = $derived(media(isDark ? '/screenshots/collab-dark.png' : '/screenshots/collab-light.png'));
+	let shareFlow = $derived(media(isDark ? '/screenshots/share-flow-dark.gif' : '/screenshots/share-flow-light.gif'));
 
 	// Live collaboration — the headline capability added in the collab epic.
 	// The hero shows a real capture of a live review session (comment cards +
@@ -48,20 +56,15 @@
 		<!-- The real thing: a live review session — inline comment cards + a
 		     reviewer's cursor, rendered right in the editor. -->
 		<div
-			class="relative mb-16 rounded-xl shadow-2xl border border-border overflow-hidden bg-card"
+			class="relative mb-16 rounded-xl border border-border overflow-hidden bg-background"
 		>
-			<img
-				src="/screenshots/collab-light.png"
-				alt="A live attn review session: inline comment and suggestion cards beside the markdown, with a labeled collaborator cursor"
-				class="w-full transition-opacity duration-500"
-				class:opacity-0={isDark}
-			/>
-			<img
-				src="/screenshots/collab-dark.png"
-				alt="A live attn review session in dark mode"
-				class="absolute inset-0 w-full transition-opacity duration-500"
-				class:opacity-0={!isDark}
-			/>
+			{#key isDark}
+				<img
+					src={collabStill}
+					alt="A live attn review session: inline comment and suggestion cards beside the markdown, with a labeled collaborator cursor"
+					class="w-full"
+				/>
+			{/key}
 		</div>
 
 		<div class="grid sm:grid-cols-2 gap-x-12 gap-y-10">
@@ -91,11 +94,11 @@
 			</p>
 		</div>
 		<div
-			class="relative mt-8 rounded-xl shadow-2xl border border-border overflow-hidden bg-card max-w-4xl mx-auto"
+			class="relative mt-8 rounded-xl border border-border overflow-hidden bg-background max-w-4xl mx-auto"
 		>
 			{#key isDark}
 				<img
-					src={isDark ? '/screenshots/share-flow-dark.gif' : '/screenshots/share-flow-light.gif'}
+					src={shareFlow}
 					alt="The attn Share-for-review flow: the user opens Share and receives an npx invite command plus a direct attn:// link"
 					class="w-full"
 				/>

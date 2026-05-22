@@ -121,6 +121,12 @@
   let hasActiveTab = $derived(Boolean(activeTab));
   let activeFileType = $derived<FileType>(activeTab?.fileType ?? 'unsupported');
   let hasSidebar = $derived(fileTree.length > 0);
+  let showBreadcrumbShare = $derived(
+    activeFileType === 'markdown' &&
+      !shareDialogOpen &&
+      reviewStore.currentRoomId === null,
+  );
+  let showReviewChrome = $derived(reviewStore.currentRoomId !== null || shareDialogOpen);
 
   // Reviewer rendering: when this daemon joined a room (currentRoomId set)
   // and has received the owner's snapshot for the active file, render the
@@ -1799,46 +1805,37 @@
   {#if showTabBar}
     <TabBar {tabs} {activeTabId} onSwitch={switchTab} onClose={closeTab} />
   {/if}
-  <PathBreadcrumb
-    path={activePath}
-    {rootPath}
-    avoidWindowControls={!hasSidebar}
-    fixed={!hasSidebar}
-    topOffsetPx={34}
-    onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
-    onShare={openShareDialog}
-    shareEnabled={activeFileType === 'markdown'}
-  />
+  <div class="relative shrink-0">
+    <PathBreadcrumb
+      path={activePath}
+      {rootPath}
+      avoidWindowControls={!hasSidebar}
+      fixed={!hasSidebar}
+      topOffsetPx={34}
+      rightInsetPx={showReviewChrome && !reviewStore.panelOpen ? 328 : 16}
+      onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
+      onShare={showBreadcrumbShare ? openShareDialog : undefined}
+      shareEnabled={showBreadcrumbShare}
+    />
+  </div>
   {#if !hasSidebar}
     <div class="h-[40px] shrink-0"></div>
   {/if}
-  <!--
-    Review-bar row (attn-nnj.4.10). Self-gating: hidden unless a session is
-    bound to the active file OR the share dialog is being initiated. See
-    planning/collab/ui/connection-share.md §8.
-  -->
-  <ReviewBar
-    shareOpen={shareDialogOpen}
-    isOwner={collabRole === 'owner'}
-    onShareClick={openShareDialog}
-  />
 
   {#if isReviewerViewingSnapshot}
     <!--
-      Shared-document banner. Makes it unmistakable that the content below
-      is someone else's shared doc over an encrypted channel — NOT a local
-      file. Distinct violet accent (the rest of the app's chrome is neutral
-      / red-primary) so the "you're in someone else's document" state reads
-      at a glance. Per user feedback 2026-05-19.
+      Shared-document banner. Keep this as quiet app chrome: it needs to
+      distinguish reviewer mode from a local file without adding a hard color
+      stripe through the reading surface.
     -->
     <div
-      class="shared-doc-banner flex h-8 shrink-0 items-center gap-2 border-b border-violet-500/30 bg-violet-500/10 px-4 text-xs font-medium text-violet-700 dark:text-violet-300"
+      class="shared-doc-banner flex h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-muted/25 px-4 text-xs font-medium text-muted-foreground"
       data-slot="shared-doc-banner"
     >
       <Users class="size-3.5 shrink-0" aria-hidden="true" />
-      <span>Shared document</span>
-      <span class="text-violet-500/50" aria-hidden="true">·</span>
-      <span class="font-normal text-violet-600/80 dark:text-violet-400/80">
+      <span class="text-foreground/80">Shared document</span>
+      <span class="text-muted-foreground/45" aria-hidden="true">·</span>
+      <span class="font-normal text-muted-foreground">
         {collabActive ? 'live editing' : 'read-only'} · end-to-end encrypted
       </span>
     </div>
@@ -1928,6 +1925,14 @@
   <ReviewMargin view={pmViewForReview} />
 {/snippet}
 
+{#snippet reviewChrome()}
+  <ReviewBar
+    shareOpen={shareDialogOpen}
+    isOwner={collabRole === 'owner'}
+    onShareClick={openShareDialog}
+  />
+{/snippet}
+
 {#snippet minimalDiagnosticContent()}
   <div class="flex-1 overflow-auto px-4 py-3 font-mono text-xs leading-5 text-foreground">
     <p class="mb-2 font-semibold">Diagnostic mode: minimal</p>
@@ -2007,7 +2012,8 @@
       onSearchQuery={handleSidebarSearchQuery}
       onOutlineNavigate={handleOutlineNavigate}
     />
-    <SidebarInset class="!flex-row overflow-hidden">
+    <SidebarInset class="relative !flex-row overflow-hidden">
+      {@render reviewChrome()}
       <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
         {@render mainContent()}
       </div>
@@ -2029,7 +2035,8 @@
     </SidebarInset>
   </SidebarProvider>
 {:else}
-  <main class="flex h-screen flex-col overflow-hidden">
+  <main class="relative flex h-screen flex-col overflow-hidden">
+    {@render reviewChrome()}
     <div
       class="h-[34px] shrink-0"
       style="-webkit-user-select: none"

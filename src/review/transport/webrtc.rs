@@ -845,51 +845,52 @@ async fn handle_rtc_state_change(
     }
 
     match next {
-        WebRtcConnectionState::Reconnecting => {
+        WebRtcConnectionState::Reconnecting
+            if ice_restart_enabled.load(std::sync::atomic::Ordering::SeqCst) =>
+        {
             // Schedule (or fail past) an ICE restart attempt. We do this
             // in a detached task because the callback context can't
             // block on a multi-second backoff.
-            if ice_restart_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-                let attempts = Arc::clone(ice_restart_attempts);
-                let pc = Arc::clone(pc);
-                let events_tx = events_tx.clone();
-                let state_tx = Arc::clone(state_tx);
-                let policy = Arc::clone(policy);
-                tokio::spawn(async move {
-                    let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    if attempt >= MAX_ICE_RESTART_ATTEMPTS {
-                        // Exhausted — promote to Failed and emit
-                        // mode-aware error/disconnect.
-                        let _ = state_tx.send(WebRtcConnectionState::Failed);
-                        emit_failed_for_policy(&events_tx, &policy).await;
-                        return;
-                    }
-                    let backoff_ms = ICE_RESTART_BACKOFF_MS
-                        .get(attempt as usize)
-                        .copied()
-                        .unwrap_or(*ICE_RESTART_BACKOFF_MS.last().unwrap_or(&5000));
-                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-                    // Re-create an offer with ice_restart=true. The
-                    // signaling envelope is minted by the surrounding
-                    // transport's `restart_ice`, but the callback
-                    // closure doesn't hold a transport handle, so we
-                    // drive the lower-level webrtc call directly here
-                    // and rely on the on_ice_candidate hook to trickle
-                    // fresh candidates back to the peer.
-                    let opts = RTCOfferOptions {
-                        ice_restart: true,
-                        ..Default::default()
-                    };
-                    if let Ok(offer) = pc.create_offer(Some(opts)).await {
-                        let _ = pc.set_local_description(offer).await;
-                        // The `on_ice_candidate` callback already wired
-                        // up at transport construction time will fire
-                        // and push fresh candidates via signaling_tx,
-                        // so no additional signaling work here.
-                    }
-                });
-            }
+            let attempts = Arc::clone(ice_restart_attempts);
+            let pc = Arc::clone(pc);
+            let events_tx = events_tx.clone();
+            let state_tx = Arc::clone(state_tx);
+            let policy = Arc::clone(policy);
+            tokio::spawn(async move {
+                let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if attempt >= MAX_ICE_RESTART_ATTEMPTS {
+                    // Exhausted — promote to Failed and emit
+                    // mode-aware error/disconnect.
+                    let _ = state_tx.send(WebRtcConnectionState::Failed);
+                    emit_failed_for_policy(&events_tx, &policy).await;
+                    return;
+                }
+                let backoff_ms = ICE_RESTART_BACKOFF_MS
+                    .get(attempt as usize)
+                    .copied()
+                    .unwrap_or(*ICE_RESTART_BACKOFF_MS.last().unwrap_or(&5000));
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                // Re-create an offer with ice_restart=true. The
+                // signaling envelope is minted by the surrounding
+                // transport's `restart_ice`, but the callback
+                // closure doesn't hold a transport handle, so we
+                // drive the lower-level webrtc call directly here
+                // and rely on the on_ice_candidate hook to trickle
+                // fresh candidates back to the peer.
+                let opts = RTCOfferOptions {
+                    ice_restart: true,
+                    ..Default::default()
+                };
+                if let Ok(offer) = pc.create_offer(Some(opts)).await {
+                    let _ = pc.set_local_description(offer).await;
+                    // The `on_ice_candidate` callback already wired
+                    // up at transport construction time will fire
+                    // and push fresh candidates via signaling_tx,
+                    // so no additional signaling work here.
+                }
+            });
         }
+        WebRtcConnectionState::Reconnecting => {}
         WebRtcConnectionState::Failed => {
             emit_failed_for_policy(events_tx, policy).await;
         }

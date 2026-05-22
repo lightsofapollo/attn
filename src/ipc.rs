@@ -723,9 +723,10 @@ mod tests {
             panic!("expected ReviewRejectSuggestion");
         }
 
-        let no_reason = r#"{"type":"review_reject_suggestion","roomId":"room-abc","suggestionId":"sugg-1"}"#;
-        let msg: IpcMessage = serde_json::from_str(no_reason)
-            .expect("parse review_reject_suggestion without reason");
+        let no_reason =
+            r#"{"type":"review_reject_suggestion","roomId":"room-abc","suggestionId":"sugg-1"}"#;
+        let msg: IpcMessage =
+            serde_json::from_str(no_reason).expect("parse review_reject_suggestion without reason");
         assert!(matches!(
             msg,
             IpcMessage::ReviewRejectSuggestion { reason: None, .. }

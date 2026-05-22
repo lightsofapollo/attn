@@ -1495,15 +1495,13 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(50), events_rx.recv()).await
         {
             match ev {
-                TransportEvent::Error { code, .. } => {
-                    if code == "ATTN_CURSOR_TOO_OLD" {
-                        saw_error_event = true;
-                    }
+                TransportEvent::Error { code, .. } if code == "ATTN_CURSOR_TOO_OLD" => {
+                    saw_error_event = true;
                 }
-                TransportEvent::Disconnected { close_code, .. } => {
-                    if close_code == Some(close_codes::CURSOR_TOO_OLD) {
-                        saw_disconnect = true;
-                    }
+                TransportEvent::Disconnected { close_code, .. }
+                    if close_code == Some(close_codes::CURSOR_TOO_OLD) =>
+                {
+                    saw_disconnect = true;
                 }
                 _ => {}
             }

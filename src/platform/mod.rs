@@ -38,3 +38,6 @@ pub fn install_system_ui(
 pub fn activate_app() {
     macos::activate_app();
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn activate_app() {}

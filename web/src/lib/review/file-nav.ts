@@ -12,11 +12,14 @@
 // `file-nav.test.ts`).
 
 import type { FileId, RoomId, ReviewSnapshot } from '../types';
+import { commonRootDir, relativeToRoot } from './shared-tree';
 
 /** One row in the reviewer's file switcher. */
 export interface ReviewFileEntry {
   fileId: FileId;
   name: string;
+  /** Folder containing the file, relative to the shared root ('' = root). */
+  dir?: string;
 }
 
 /**
@@ -73,6 +76,17 @@ export function deriveFileEntries(
     }
   }
 
+  // Shared root across all display paths so the strip can show a folder hint
+  // for files nested in subfolders (without it, two `nested.md` in different
+  // folders are indistinguishable).
+  const paths: string[] = [];
+  for (const snap of latestByFile.values()) {
+    if (typeof snap.ownerDisplayPath === 'string' && snap.ownerDisplayPath.length > 0) {
+      paths.push(snap.ownerDisplayPath);
+    }
+  }
+  const root = commonRootDir(paths);
+
   // Build entries in first-seen fileId order so `Document N` numbering is
   // stable regardless of the final name sort.
   const entries: ReviewFileEntry[] = [];
@@ -80,7 +94,12 @@ export function deriveFileEntries(
   for (const [fileId, snap] of latestByFile) {
     const heading = headingName(snap.markdown);
     const name = heading ?? `Document ${++headinglessCount}`;
-    entries.push({ fileId, name });
+    let dir = '';
+    if (typeof snap.ownerDisplayPath === 'string' && snap.ownerDisplayPath.length > 0) {
+      const rel = relativeToRoot(snap.ownerDisplayPath, root);
+      dir = rel.replace(/\\/g, '/').split('/').slice(0, -1).join('/');
+    }
+    entries.push({ fileId, name, dir });
   }
 
   entries.sort((a, b) => a.name.localeCompare(b.name));

@@ -30,13 +30,16 @@
     {#each files as f (f.fileId)}
       <button
         type="button"
-        class="review-file-tab inline-flex h-6 max-w-[14rem] items-center truncate rounded-full border border-transparent px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        class="review-file-tab inline-flex h-6 max-w-[16rem] items-center gap-1 truncate rounded-full border border-transparent px-2.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
         class:active={f.fileId === reviewStore.currentFileId}
         data-file-id={f.fileId}
-        title={f.name}
+        title={f.dir ? `${f.dir}/${f.name}` : f.name}
         onclick={() => reviewStore.setCurrentFile(f.fileId)}
       >
-        {f.name}
+        {#if f.dir}
+          <span class="review-file-dir text-muted-foreground/60" data-slot="review-file-dir">{f.dir}/</span>
+        {/if}
+        <span class="truncate">{f.name}</span>
       </button>
     {/each}
   </nav>

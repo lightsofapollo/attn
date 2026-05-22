@@ -70,6 +70,7 @@
   import { reviewStore } from './lib/review/store.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
+  import ReviewFileTree from './lib/ReviewFileTree.svelte';
   import {
     requestReviewDecorationsRebuild,
     reviewDecorationsPlugin,
@@ -120,7 +121,20 @@
   let activePath = $derived(activeTab?.path ?? '');
   let hasActiveTab = $derived(Boolean(activeTab));
   let activeFileType = $derived<FileType>(activeTab?.fileType ?? 'unsupported');
-  let hasSidebar = $derived(fileTree.length > 0);
+
+  // Role: a reviewer is in a room they did NOT mint (no local `currentShare`).
+  // The owner is whoever minted the share. This is the single source of truth
+  // for "should this window show the shared document" — gating on role (not on
+  // "has no local tab") is what makes a reviewer jump to the shared content on
+  // join AND keeps the owner pinned to their local file (so the owner never
+  // flips into shared-doc mode after remote edits — see attn-0wa).
+  let isReviewerInRoom = $derived(
+    reviewStore.currentRoomId !== null && reviewStore.currentShare === null,
+  );
+
+  // A reviewer always gets the sidebar shell (to host the shared-file tree),
+  // even when they opened attn on an empty directory with no local files.
+  let hasSidebar = $derived(fileTree.length > 0 || isReviewerInRoom);
   let showBreadcrumbShare = $derived(
     activeFileType === 'markdown' &&
       !shareDialogOpen &&
@@ -129,12 +143,11 @@
   let showReviewChrome = $derived(reviewStore.currentRoomId !== null || shareDialogOpen);
 
   // Reviewer rendering: when this daemon joined a room (currentRoomId set)
-  // and has received the owner's snapshot for the active file, render the
+  // and has received the owner's snapshot for the focused file, render the
   // snapshot markdown. The owner keeps rendering their local file (they
-  // have a real tab + rawMarkdown); a pure reviewer has no local tab, so
-  // the snapshot is the only document they can see. See store.applyEvent —
-  // SnapshotCreated events are mirrored into `reviewStore.snapshots` and
-  // auto-set `currentFileId`.
+  // have a real tab + rawMarkdown). See store.applyEvent — SnapshotCreated
+  // events are mirrored into `reviewStore.snapshots` and auto-set
+  // `currentFileId`.
   let reviewSnapshotMarkdown = $derived.by(() => {
     const roomId = reviewStore.currentRoomId;
     const fileId = reviewStore.currentFileId;
@@ -149,16 +162,28 @@
     const latest = candidates.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
     return latest.markdown ?? null;
   });
-  // A pure reviewer = joined a room, received a snapshot, but has no local
-  // file tab open. This is what flips the editor from the "No file
-  // selected" empty state to rendering the shared doc.
+  // A reviewer who has received the owner's snapshot for the focused file
+  // renders the shared doc — regardless of whether they also have a local
+  // tab open. Joining a room is an explicit "show me the shared content"
+  // action, so the shared doc wins for reviewers.
   let isReviewerViewingSnapshot = $derived(
-    !hasActiveTab && reviewSnapshotMarkdown !== null,
+    isReviewerInRoom && reviewSnapshotMarkdown !== null,
   );
-  // The markdown the editor actually renders: local file when one is open,
-  // otherwise the received snapshot.
+  // Reviewer is in the room but the owner's snapshot for the focused file
+  // hasn't arrived yet — show a "waiting for shared content" state instead
+  // of silently leaving them on whatever local file they had open.
+  let isReviewerWaiting = $derived(
+    isReviewerInRoom && reviewSnapshotMarkdown === null,
+  );
+  // The markdown the editor actually renders: the shared snapshot for a
+  // reviewer, otherwise the local file (or a received snapshot when no local
+  // tab is open).
   let effectiveMarkdown = $derived(
-    hasActiveTab ? rawMarkdown : (reviewSnapshotMarkdown ?? rawMarkdown),
+    isReviewerViewingSnapshot
+      ? (reviewSnapshotMarkdown ?? rawMarkdown)
+      : hasActiveTab
+        ? rawMarkdown
+        : (reviewSnapshotMarkdown ?? rawMarkdown),
   );
   let showTabBar = $derived(tabs.length > 1);
   const loadedMtimeByPath = new Map<string, number>();
@@ -1847,11 +1872,23 @@
     bind:viewportRef={contentViewport}
   >
 
-    {#if isReviewerViewingSnapshot}
-      <!-- Pure-reviewer mode: no local file, render the owner's shared
-           snapshot. Read-only normally; during a live session collab makes it
-           editable so the reviewer can co-type. The ReviewMargin overlay
-           (right rail) still mounts so comments anchor against this content. -->
+    {#if isReviewerWaiting}
+      <!-- Reviewer joined a room but the owner's snapshot for the focused
+           file hasn't landed yet. Show a clear waiting state instead of
+           leaving them on whatever local file they had open. -->
+      <div
+        class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground"
+        data-slot="reviewer-waiting"
+      >
+        <span class="inline-block size-3 animate-pulse rounded-full bg-primary/60" aria-hidden="true"></span>
+        <p class="text-sm font-medium text-foreground">Connected to the shared room</p>
+        <p class="text-sm opacity-75">Waiting for the shared document…</p>
+      </div>
+    {:else if isReviewerViewingSnapshot}
+      <!-- Reviewer mode: render the owner's shared snapshot. Read-only
+           normally; during a live session collab makes it editable so the
+           reviewer can co-type. The ReviewMargin overlay (right rail) still
+           mounts so comments anchor against this content. -->
       <!-- Folder-share file switcher; self-gates to nothing for single-file shares. -->
       <ReviewFileNav />
       <Editor
@@ -1997,6 +2034,7 @@
   <SidebarProvider class="h-svh overflow-hidden">
     <Sidebar
       entries={fileTree}
+      reviewMode={isReviewerInRoom}
       {activePath}
       {rootPath}
       {knownProjects}

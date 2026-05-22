@@ -2,6 +2,7 @@
   import { tick } from 'svelte';
   import type { SearchResultItem, TreeNode } from './types';
   import FileTree from './FileTree.svelte';
+  import ReviewFileTree from './ReviewFileTree.svelte';
   import { dragWindow } from './ipc';
   import FolderTree from '@lucide/svelte/icons/folder-tree';
   import TextQuote from '@lucide/svelte/icons/text-quote';
@@ -25,6 +26,8 @@
 
   interface Props {
     entries: TreeNode[];
+    /** When true, the files pane shows the shared room's tree (reviewer). */
+    reviewMode?: boolean;
     activePath?: string;
     rootPath?: string;
     knownProjects?: string[];
@@ -43,6 +46,7 @@
 
   let {
     entries,
+    reviewMode = false,
     activePath = '',
     rootPath = '',
     knownProjects = [],
@@ -315,6 +319,10 @@
       <section class="sidebar-pane">
         <ScrollArea class="min-h-0 flex-1" scrollbarYClasses="pr-1">
           {#if sidebarView === 'files'}
+            {#if reviewMode}
+              <div class="px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">Shared files</div>
+              <ReviewFileTree />
+            {:else}
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
                 {#key treeRenderKey}
@@ -355,6 +363,7 @@
               <div class="sidebar-outline-empty">
                 <p class="sidebar-outline-empty-copy">Searching full project...</p>
               </div>
+            {/if}
             {/if}
           {:else if filteredOutline.length > 0}
             <div class="sidebar-outline-wrap">

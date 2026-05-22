@@ -30,6 +30,7 @@
   import ConnectionBadge from './ConnectionBadge.svelte';
   import OutboxIndicator from './OutboxIndicator.svelte';
   import PeerStrip from './PeerStrip.svelte';
+  import SharedFilesBadge from './SharedFilesBadge.svelte';
   import SnapshotBadge from './SnapshotBadge.svelte';
   import { reviewStore } from './review/store.svelte';
   import type { ParticipantId } from './types';
@@ -93,7 +94,7 @@
 
 {#if visible}
   <div
-    class="review-bar pointer-events-none absolute top-0 z-40 flex h-10 min-w-0 items-center justify-end overflow-visible text-xs"
+    class="review-bar pointer-events-none absolute top-1.5 z-40 flex h-10 min-w-0 items-center justify-end overflow-visible text-xs"
     style={`right: ${rightOffsetPx}px;`}
     data-slot="review-bar"
     data-state={reviewStore.currentRoomId !== null ? 'active' : 'pending'}
@@ -115,6 +116,9 @@
           <Share2 class="size-3.5" aria-hidden="true" />
           <span class="sr-only">{shareLabel}</span>
         </button>
+        <!-- Names WHAT is shared (file / "N files") so "Sharing" doesn't read
+             as "everything is shared". Self-gates until a file is published. -->
+        <SharedFilesBadge />
       {/if}
 
       <div

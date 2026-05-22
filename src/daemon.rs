@@ -543,17 +543,18 @@ fn parse_room_id(raw: String) -> crate::review::ids::RoomId {
         .expect("RoomId is just a string newtype")
 }
 
-/// Log a `ReviewJoin` invite for the stub join handler.
+/// Log a `ReviewJoin` invite as it is routed to the `ReviewManager`.
 ///
 /// Shared by both the socket-message dispatch in `handle_client` and the
 /// in-process custom-protocol handler in `main.rs`, so the routing surface
 /// behaves identically regardless of whether the invite arrives via the
-/// `attn://review/...` URL scheme (clicked in the OS) or a future
-/// `SocketMessage::ReviewJoin` from another process.
-///
-/// Real `ReviewManager` wiring lands in issue 2.8.
+/// `attn://review/...` URL scheme (clicked in the OS) or a
+/// `SocketMessage::ReviewJoin` (`attn review join <invite>`) from another
+/// process. The actual join runs in `ReviewManager::submit` →
+/// `Bootstrapper::join`, which subscribes the daemon's own window to the
+/// room (a windowed join — NOT the headless `--as-agent` path).
 pub fn log_review_join_intent(invite: &str) {
-    eprintln!("attn: review_join invite received (stub, manager wiring pending): {invite}");
+    eprintln!("attn: review join — routing invite to ReviewManager: {invite}");
 }
 
 /// Dispatch a `ReviewJoin` from the in-process custom-protocol handler.
@@ -731,9 +732,10 @@ fn handle_client(
                 );
             }
             Ok(SocketMessage::ReviewJoin { invite }) => {
-                // Both: log via the shared intent helper (keeps custom-protocol
-                // + socket routes observably equivalent) and dispatch into the
-                // ReviewManager so the scaffold's stub Update flows through.
+                // Log via the shared intent helper (keeps custom-protocol +
+                // socket routes observably equivalent) and dispatch into the
+                // ReviewManager, which performs the windowed join so this
+                // daemon's own window switches to the shared document.
                 log_review_join_intent(&invite);
                 submit_review_socket_command(review_manager, ReviewCommand::Join { invite });
                 let resp = SocketResponse::Ok;

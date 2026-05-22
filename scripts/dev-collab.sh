@@ -24,7 +24,6 @@
 #   ATTN_RELAY_URL   default http://localhost:8787
 #   FIXTURE_PATH     default tests/fixtures/basic.md
 #   ATTN_BIN         default $REPO/target/debug/attn (built on demand)
-#   REVIEWER_AGENT   default "reviewer" — agent name passed to `review join`
 #
 # Cleanup: SIGINT (Ctrl+C) or exit triggers stop_dual + stop_relay so the
 # relay process and both daemons exit cleanly.
@@ -38,7 +37,6 @@ cd "$PROJECT_DIR"
 : "${ATTN_RELAY_URL:=http://localhost:8787}"
 : "${FIXTURE_PATH:=tests/fixtures/basic.md}"
 : "${ATTN_BIN:=$PROJECT_DIR/target/debug/attn}"
-: "${REVIEWER_AGENT:=reviewer}"
 
 # Pin the per-instance ATTN_HOMEs the task issue asks for, then forward
 # them to scripts/lib/dual-instance.sh via its override knobs.
@@ -134,16 +132,8 @@ stop_relay() {
     RELAY_PID=""
 }
 
-# Register the reviewer agent under the reviewer ATTN_HOME so a later
-# `review join --as-agent <name>` has a key to sign with. Idempotent —
-# re-registering reports IDENTITY_EXISTS and the script continues.
-register_reviewer_agent() {
-    ATTN_HOME="$ATTN_DUAL_REVIEWER" "$ATTN_BIN" review register-agent "$REVIEWER_AGENT" \
-        >/dev/null 2>&1 || true
-}
-
 # Prompt the user for the invite URL printed by the owner's Share dialog,
-# then drive `attn review join` against the reviewer daemon.
+# then drive `attn review join` against the reviewer DAEMON.
 join_reviewer() {
     local invite=""
     if [ "${ATTN_COLLAB_NONINTERACTIVE:-0}" = "1" ]; then
@@ -160,9 +150,14 @@ join_reviewer() {
         return 0
     fi
 
-    log "Reviewer joining..."
+    log "Reviewer joining (windowed daemon)..."
+    # Route the join to the already-running reviewer DAEMON via its ATTN_HOME
+    # socket — deliberately NOT `--as-agent`, which forks a separate *headless*
+    # agent process (no window, no UI) and leaves the reviewer window idle.
+    # The daemon-routed join makes the reviewer's own window switch to the
+    # shared document, which is the experience a human reviewer expects.
     if ATTN_HOME="$ATTN_DUAL_REVIEWER" ATTN_RELAY_URL="$ATTN_RELAY_URL" \
-        "$ATTN_BIN" review join "$invite" --as-agent "$REVIEWER_AGENT"; then
+        "$ATTN_BIN" review join "$invite"; then
         log "Reviewer joined — both windows are now collaborating."
     else
         err "reviewer join failed — see daemon logs under $ATTN_DUAL_REVIEWER/"
@@ -193,7 +188,6 @@ source "$SCRIPT_DIR/lib/dual-instance.sh"
 trap cleanup EXIT INT TERM
 
 start_relay
-register_reviewer_agent
 
 log "Booting owner + reviewer daemons (ATTN_HOME isolation)"
 start_dual

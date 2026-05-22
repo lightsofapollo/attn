@@ -232,7 +232,7 @@
                chip; rendered as a sibling so the strip's flex flow handles
                positioning. -->
           <div
-            class="absolute top-full z-40 mt-2 w-48 rounded-md border border-border bg-popover p-2 text-[11px] text-popover-foreground shadow-md"
+            class="absolute right-0 top-full z-[60] mt-2 w-48 rounded-md border border-border bg-popover p-2 text-[11px] text-popover-foreground shadow-md"
             data-slot="peer-presence-tooltip"
             role="tooltip"
           >
@@ -333,7 +333,7 @@
         onclick={closeCard}
       ></button>
       <div
-        class="absolute left-0 top-full z-50 mt-1 w-72 rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-md"
+        class="absolute right-0 top-full z-[60] mt-1 w-72 rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-md"
         data-slot="peer-strip-identity-card"
         role="dialog"
         aria-label="Identity"

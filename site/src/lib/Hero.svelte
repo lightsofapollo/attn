@@ -13,8 +13,9 @@
 	let collabFallback = $derived(media(isDark ? '/screenshots/collab-hero-dark.gif' : '/screenshots/collab-hero-light.gif'));
 </script>
 
-<section class="min-h-[85vh] flex items-center justify-center px-6">
-	<div class="text-center max-w-4xl mx-auto">
+<section class="relative overflow-hidden px-4 pb-20 pt-16 sm:px-6 md:pt-20">
+	<div class="mx-auto flex max-w-[96rem] flex-col items-center">
+		<div class="text-center max-w-4xl mx-auto">
 		<h1 class="font-serif text-6xl md:text-7xl tracking-tight font-bold text-foreground">
 			attn
 		</h1>
@@ -47,8 +48,9 @@
 				View on GitHub
 			</a>
 		</div>
+		</div>
 
-		<div class="relative mt-16 max-w-5xl mx-auto rounded-xl border border-border overflow-hidden bg-background aspect-[4/3]">
+		<div class="relative mt-14 w-[min(90vw,84rem)] overflow-hidden rounded-xl border border-border bg-background aspect-[4/3]">
 			{#key isDark}
 				<video
 					class="absolute inset-0 h-full w-full object-cover"

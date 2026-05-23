@@ -176,6 +176,12 @@ pub struct DeviceIdentity {
     /// lands with the WebRTC issues (Phase 4). Surfaced now so the identity
     /// file's schema doesn't need a future migration.
     pub public_encryption_key: String,
+    /// Human display name peers see in presence + on comments/suggestions
+    /// (attn onboarding). `None`/empty until the user sets one — the onboarding
+    /// prompt seeds it from `resolve_default_display_name()`. `#[serde(default)]`
+    /// so identity.json files written before this field still load.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 impl DeviceIdentity {
@@ -207,7 +213,18 @@ impl DeviceIdentity {
             // Placeholder per module docs — re-use the Ed25519 public key.
             // ECDH key generation lands with WebRTC (Phase 4).
             public_encryption_key: public_signing_key,
+            // Decoupled from the crypto identity; set via the onboarding prompt.
+            display_name: None,
         })
+    }
+
+    /// The display name peers should see for this device, falling back to the
+    /// resolved OS/git default when the user hasn't set one. Never empty.
+    pub fn effective_display_name(&self) -> String {
+        match self.display_name.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => resolve_default_display_name(),
+        }
     }
 
     /// Reconstruct the live `DeviceSigningKey` from the persisted seed.
@@ -245,6 +262,57 @@ impl DeviceIdentity {
         serde_json::from_value(serde_json::Value::String(self.participant_id.clone()))
             .expect("ParticipantId deserializes from any non-empty string")
     }
+}
+
+/// Resolve a friendly default display name for the onboarding prompt to
+/// pre-fill: `git config user.name` → macOS full name (`id -F`) → `$USER`/
+/// `$USERNAME` → `"Anonymous"`. Each source is trimmed and skipped when empty.
+/// Pure best-effort — never errors, always returns a non-empty string.
+pub fn resolve_default_display_name() -> String {
+    fn run(cmd: &str, args: &[&str]) -> Option<String> {
+        let out = std::process::Command::new(cmd).args(args).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
+
+    run("git", &["config", "--get", "user.name"])
+        .or_else(|| {
+            // BSD `id -F` prints the user's full ("real") name on macOS.
+            if cfg!(target_os = "macos") {
+                run("id", &["-F"])
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            std::env::var("USER")
+                .ok()
+                .or_else(|| std::env::var("USERNAME").ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "Anonymous".to_string())
+}
+
+/// Persist a user-chosen display name onto the identity at `dir`, creating the
+/// identity first if it doesn't exist. An empty/whitespace name clears it back
+/// to the resolved default. Returns the effective name now in force.
+pub fn set_display_name_in(
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<String, BootstrapError> {
+    let mut identity = load_or_create_identity_in(dir)?;
+    let trimmed = name.trim();
+    identity.display_name = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    save_identity_to(dir, &identity)?;
+    Ok(identity.effective_display_name())
 }
 
 /// Path to the on-disk identity file inside `runtime_dir()`.
@@ -294,6 +362,21 @@ pub fn save_identity_to(
         ))
     })?;
     Ok(())
+}
+
+/// Load the device identity at `runtime_dir()` WITHOUT creating one. Used at
+/// startup to surface the profile (display name) to the UI without eagerly
+/// minting crypto keys for users who never collaborate.
+pub fn load_identity() -> Result<Option<DeviceIdentity>, BootstrapError> {
+    let dir = runtime_dir().map_err(|e| BootstrapError::Identity(format!("runtime_dir: {e}")))?;
+    load_identity_from(&dir)
+}
+
+/// Persist a user-chosen display name onto the identity at `runtime_dir()`.
+/// Thin wrapper over [`set_display_name_in`] for the daemon IPC handler.
+pub fn set_display_name(name: &str) -> Result<String, BootstrapError> {
+    let dir = runtime_dir().map_err(|e| BootstrapError::Identity(format!("runtime_dir: {e}")))?;
+    set_display_name_in(&dir, name)
 }
 
 /// Load (or generate-and-save) the device identity at `runtime_dir()`.
@@ -1014,7 +1097,9 @@ impl Bootstrapper {
         let vk = identity.verifying_key()?;
         let participant = Participant {
             participant_id: participant_id.clone(),
-            display_name: identity.participant_id.clone(),
+            // The user-chosen name (or resolved OS/git default) so peers see a
+            // real name instead of the opaque participant id (attn onboarding).
+            display_name: identity.effective_display_name(),
             kind,
             public_signing_key: identity.public_signing_key.clone(),
             capabilities: agent_capabilities(kind),
@@ -2246,6 +2331,57 @@ mod tests {
             BootstrapError::InviteParse(msg) => assert!(msg.contains("base64url"), "got: {msg}"),
             other => panic!("expected InviteParse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_default_display_name_is_non_empty() {
+        // Best-effort resolution must always yield something usable to pre-fill.
+        assert!(!resolve_default_display_name().is_empty());
+    }
+
+    #[test]
+    fn effective_display_name_falls_back_to_default_when_unset() {
+        let mut id = DeviceIdentity::generate().expect("generate");
+        assert!(id.display_name.is_none());
+        assert_eq!(id.effective_display_name(), resolve_default_display_name());
+        // Whitespace-only is treated as unset.
+        id.display_name = Some("   ".to_string());
+        assert_eq!(id.effective_display_name(), resolve_default_display_name());
+    }
+
+    #[test]
+    fn set_display_name_in_persists_then_clears() {
+        let dir = TempDir::new().expect("home dir");
+        // Set a name — creates the identity and persists the name.
+        let effective = set_display_name_in(dir.path(), "  Ada Lovelace  ").expect("set");
+        assert_eq!(effective, "Ada Lovelace"); // trimmed
+        let reloaded = load_identity_from(dir.path()).expect("load").expect("present");
+        assert_eq!(reloaded.display_name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(reloaded.effective_display_name(), "Ada Lovelace");
+
+        // Clearing with an empty string reverts to the resolved default.
+        let effective = set_display_name_in(dir.path(), "").expect("clear");
+        assert_eq!(effective, resolve_default_display_name());
+        let reloaded = load_identity_from(dir.path()).expect("load").expect("present");
+        assert!(reloaded.display_name.is_none());
+    }
+
+    #[test]
+    fn identity_json_without_display_name_field_still_loads() {
+        // Pre-onboarding identity.json had no displayName field — serde(default)
+        // must keep it loadable (None) rather than failing to deserialize.
+        let dir = TempDir::new().expect("home dir");
+        let legacy = r#"{
+            "deviceId": "dev0000000000000000000",
+            "participantId": "par0000000000000000000",
+            "signingKey": "c2lnbmluZ19rZXlfc2VlZF8zMmJ5dGVzX2xvbmdfISEh",
+            "publicSigningKey": "cHVibGljX3NpZ25pbmdfa2V5XzMyYnl0ZXNfISE",
+            "publicEncryptionKey": "cHVibGljX3NpZ25pbmdfa2V5XzMyYnl0ZXNfISE"
+        }"#;
+        std::fs::write(dir.path().join(IDENTITY_FILENAME), legacy).expect("write legacy");
+        let loaded = load_identity_from(dir.path()).expect("load").expect("present");
+        assert!(loaded.display_name.is_none());
+        assert_eq!(loaded.device_id, "dev0000000000000000000");
     }
 
     #[test]

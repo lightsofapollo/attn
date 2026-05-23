@@ -30,6 +30,7 @@
   import Wifi from '@lucide/svelte/icons/wifi';
   import Zap from '@lucide/svelte/icons/zap';
   import { reviewStore } from './review/store.svelte';
+  import { userProfile } from './review/profile.svelte';
   import type { ReviewStatus, ReviewStatusPeer } from './types';
 
   type ConnectionState = ReviewStatus['connection'];
@@ -211,6 +212,29 @@
       >
         {descriptor.detail}
       </p>
+
+      <div
+        class="mb-2 flex items-center justify-between gap-2 border-t border-border/50 pt-2"
+        data-slot="connection-badge-identity"
+      >
+        <span class="min-w-0 truncate text-[11px] text-muted-foreground">
+          You:
+          <span class="font-medium text-foreground" data-slot="connection-badge-self-name">
+            {userProfile.effectiveName}
+          </span>
+        </span>
+        <button
+          type="button"
+          class="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+          data-slot="connection-badge-edit-name"
+          onclick={() => {
+            userProfile.requestEdit();
+            closePopover();
+          }}
+        >
+          Edit
+        </button>
+      </div>
 
       {#if outboxPending > 0}
         <p class="mb-2 text-[11px] text-muted-foreground" data-slot="connection-badge-outbox">

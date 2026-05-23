@@ -264,6 +264,19 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let theme = if cli.dark { "dark" } else { "light" };
     let diag_mode = diag_mode_from_env();
 
+    // Review profile (onboarding): the user's chosen display name (if any), the
+    // resolved default to pre-fill the prompt with, and whether a name has been
+    // set yet (so the UI knows to prompt on first share/join). Load-only — we do
+    // NOT mint a crypto identity at startup for users who never collaborate.
+    let review_default_name = crate::review::bootstrap::resolve_default_display_name();
+    let review_display_name = crate::review::bootstrap::load_identity()
+        .ok()
+        .flatten()
+        .and_then(|id| id.display_name)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let review_display_name_set = review_display_name.is_some();
+
     let init_payload_json = serde_json::json!({
         "markdown": "",
         "structure": &initial_structure,
@@ -276,6 +289,11 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         "diagMode": diag_mode,
         "contentMtimeMs": initial_mtime_ms,
         "contentBytes": initial_bytes,
+        "reviewProfile": {
+            "displayName": review_display_name,
+            "defaultDisplayName": review_default_name,
+            "displayNameSet": review_display_name_set,
+        },
     })
     .to_string();
     let page_html = build_page_html(&init_payload_json, theme);

@@ -131,6 +131,12 @@ pub enum IpcMessage {
         room_id: Option<RoomId>,
     },
 
+    /// Persist the user's chosen display name (onboarding). Written to the
+    /// device identity so the next Share/Join publishes it as the participant's
+    /// `display_name`. An empty name clears it back to the resolved default.
+    #[serde(rename = "review_set_display_name", rename_all = "camelCase")]
+    ReviewSetDisplayName { name: String },
+
     #[serde(rename = "review_collab_send", rename_all = "camelCase")]
     ReviewCollabSend {
         room_id: RoomId,
@@ -397,6 +403,14 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             }
             IpcMessage::ReviewCollabSend { room_id, payload } => {
                 submit_review_command(state, ReviewCommand::SendCollab { room_id, payload });
+            }
+            IpcMessage::ReviewSetDisplayName { name } => {
+                // Direct identity write (not a ReviewManager command). The next
+                // Share/Join reads the updated identity. Don't log the name.
+                match crate::review::bootstrap::set_display_name(&name) {
+                    Ok(_) => eprintln!("attn: review display name updated"),
+                    Err(e) => eprintln!("attn: failed to set display name: {e}"),
+                }
             }
         },
         Err(e) => {

@@ -72,15 +72,28 @@ ATTN_HOME="$RV_HOME" ATTN_RELAY_URL="$URL" "$BIN" --no-fork "$W/rv.md" >"$W/rv.l
 poll 25000 owner --wait-for 'h1' --timeout 1000 || { bad "owner never rendered"; exit 1; }
 poll 25000 rv --wait-for 'h1' --timeout 1000 || { bad "reviewer never rendered"; exit 1; }
 
-log "owner shares (Cmd+Shift+S)"
+log "owner shares (Cmd+Shift+S) — onboarding name prompt intercepts the first share"
 owner --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
-poll 20000 owner --wait-for '[data-slot=share-invite-url]' --timeout 1000 || { bad "share dialog never opened"; exit 1; }
+# attn onboarding: the first share opens the display-name prompt BEFORE the
+# share dialog, pre-filled with the resolved git/OS default. Assert + dismiss.
+if poll 10000 has owner '[data-slot=name-prompt]'; then ok "onboarding: name prompt appeared on first share"; else bad "onboarding: name prompt did not appear"; fi
+prefill=$(owner --eval "document.querySelector('[data-slot=name-prompt-input]')?.value||''" 2>/dev/null | tr -d '"')
+[ -n "$prefill" ] && ok "onboarding: prompt pre-filled with a default ('$prefill')" || bad "onboarding: prompt prefill empty"
+owner --fill '[data-slot=name-prompt-input]' 'Olive Owner' >/dev/null 2>&1
+owner --click '[data-slot=name-prompt-confirm]' >/dev/null 2>&1
+poll 20000 owner --wait-for '[data-slot=share-invite-url]' --timeout 1000 || { bad "share dialog never opened after name prompt"; exit 1; }
 INVITE=""; d=$(( $(date +%s)+15 ))
 while [ "$(date +%s)" -lt "$d" ]; do
   INVITE=$(owner --eval "document.querySelector('[data-slot=share-invite-url]')?.value||''" 2>/dev/null | tr -d '"\\' | tr -d '\r\n')
   case "$INVITE" in attn://review/*) break;; esac; sleep 0.3
 done
 case "$INVITE" in attn://review/*) ok "owner minted invite";; *) bad "no invite (got '$INVITE')"; exit 1;; esac
+
+log "reviewer sets display name before joining (so the prompt doesn't fire post-join)"
+RVNAME="Riley Reviewer $$"
+rv --eval "window.__attn_user_profile__.save('$RVNAME');'x'" >/dev/null 2>&1
+# Wait for the daemon to persist it so the join publishes the chosen name.
+poll 5000 sh -c "grep -q 'Riley Reviewer' '$RV_HOME/identity.json'" && ok "onboarding: reviewer name persisted to identity" || bad "onboarding: reviewer name not persisted"
 
 log "reviewer joins"
 rv --eval "window.ipc&&window.ipc.postMessage(JSON.stringify({type:'review_join',invite:'$INVITE'}));'x'" >/dev/null 2>&1
@@ -103,6 +116,10 @@ rv --fill '.comment-composer textarea' "$MARK" >/dev/null 2>&1
 rv --click 'text=Submit' >/dev/null 2>&1
 owner_imported(){ grep -rqa "$MARK" "$OWNER_HOME/reviews" 2>/dev/null; }
 if poll 20000 owner_imported; then ok "comment delivered + imported by owner"; else bad "owner never imported the comment"; fi
+
+# onboarding: the reviewer's chosen display name (not the opaque participant id)
+# must have reached the owner via the ParticipantJoined event.
+if poll 10000 sh -c "grep -rqa 'Riley Reviewer' '$OWNER_HOME/reviews' 2>/dev/null"; then ok "onboarding: reviewer's display name propagated to owner"; else bad "onboarding: reviewer name did NOT reach owner"; fi
 
 # attn-cqk: the review rail auto-opens via a reactive $effect (App.svelte) the
 # first time the current file has a thread — no manual toggle. Verify the margin

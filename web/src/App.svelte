@@ -53,6 +53,8 @@
   import ReviewApplyExpand from './lib/ReviewApplyExpand.svelte';
   import ReviewBar from './lib/ReviewBar.svelte';
   import ShareDialog from './lib/ShareDialog.svelte';
+  import NamePrompt from './lib/NamePrompt.svelte';
+  import { userProfile } from './lib/review/profile.svelte';
   import Users from '@lucide/svelte/icons/users';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
@@ -104,6 +106,15 @@
   // Share-for-review dialog (attn-nnj.4.10). Owner-only modal opened via
   // the ReviewBar's [Share] button or the Cmd+Shift+S keybinding.
   let shareDialogOpen = $state(false);
+  // Onboarding display-name prompt. Shown once when the user first enters a
+  // room (share or join) with no name set; also reachable in 'edit' mode via
+  // the connection badge. `namePrompted` is a per-session one-shot guard.
+  let namePromptOpen = $state(false);
+  let namePromptMode = $state<'onboard' | 'edit'>('onboard');
+  let namePrompted = $state(false);
+  // When the onboarding prompt was opened by a share action, the share to
+  // resume once the user confirms/skips the name.
+  let pendingSharePath = $state<string | null>(null);
   let rawMarkdown = $state('');
   let structure: PlanStructure = $state({ phases: [], tasks: [], file_refs: [] });
   let fileTree: TreeNode[] = $state([]);
@@ -329,6 +340,51 @@
       if (!reviewStore.panelOpen) reviewStore.panelOpen = true;
     }
   });
+
+  // Onboarding: the first time the user enters a room (after sharing or joining)
+  // without a chosen display name, prompt them to confirm/set it. One-shot per
+  // session. Their name already defaults to the git/OS name, so this is a
+  // confirm-or-override step, not a blocker.
+  $effect(() => {
+    if (
+      reviewStore.currentRoomId !== null &&
+      !userProfile.isSet &&
+      !namePrompted &&
+      !namePromptOpen
+    ) {
+      namePrompted = true;
+      namePromptMode = 'onboard';
+      namePromptOpen = true;
+    }
+  });
+
+  // "Edit name" affordance (connection badge) flips a module signal; open the
+  // prompt in edit mode and clear the request.
+  $effect(() => {
+    if (userProfile.editRequested) {
+      userProfile.editRequested = false;
+      namePromptMode = 'edit';
+      namePromptOpen = true;
+    }
+  });
+
+  function handleNameConfirm(name: string): void {
+    userProfile.save(name);
+    resumePendingShare();
+  }
+
+  // Skip on the onboarding prompt: keep the resolved default and proceed.
+  function handleNameSkip(): void {
+    resumePendingShare();
+  }
+
+  // If the prompt was opened by a share action, continue to the ShareDialog now
+  // that a name is set (or skipped). `namePrompted`/`isSet` guard re-entry.
+  function resumePendingShare(): void {
+    const path = pendingSharePath;
+    pendingSharePath = null;
+    if (path) openShareDialogForPath(path);
+  }
 
   function maybeStartCollab(view: EditorView): void {
     // onReady fires for every editor mount; only build a controller when the
@@ -1294,6 +1350,9 @@
     // Clear so we only process once (prevents $effect re-entry)
     delete (window as { __attn_init__?: InitPayload }).__attn_init__;
 
+    // Seed the onboarding display name (chosen name + git/OS default).
+    userProfile.hydrate(init.reviewProfile);
+
     rawMarkdown = init.markdown ?? '';
     structure = init.structure ?? emptyPlanStructure();
     const initialMarkdown = typeof init.markdown === 'string' && init.markdown.length > 0
@@ -1624,6 +1683,10 @@
     // @see planning/collab/data-model.md §Review Store
     (window as Window & { __attn_review_store__?: typeof reviewStore })
       .__attn_review_store__ = reviewStore;
+    // Same rationale for the onboarding profile: E2E drives `save(name)` to set
+    // the display name deterministically before sharing/joining.
+    (window as Window & { __attn_user_profile__?: typeof userProfile })
+      .__attn_user_profile__ = userProfile;
 
     type QueuedMessage =
       | { kind: 'set'; data: ContentPayload }
@@ -1745,6 +1808,16 @@
     if (!path) return;
     const ft = detectFileType(path);
     if (ft !== 'markdown') return;
+    // First-time onboarding: confirm/set the display name BEFORE the first
+    // share so the published participant carries it (and so the prompt doesn't
+    // stack on top of the ShareDialog). Stash the path; resume after the prompt.
+    if (!userProfile.isSet && !namePrompted) {
+      namePrompted = true;
+      pendingSharePath = path;
+      namePromptMode = 'onboard';
+      namePromptOpen = true;
+      return;
+    }
     if (path !== activePath || activeFileType !== 'markdown') {
       openPath(path, ft, false);
     }
@@ -2193,6 +2266,13 @@
   existingRoomId={reviewStore.currentShare?.roomId ?? null}
   shareErrorMessage={reviewStore.lastError?.message ?? ''}
   onClearError={() => reviewStore.clearLastError()}
+/>
+<NamePrompt
+  bind:open={namePromptOpen}
+  suggestion={userProfile.suggestion}
+  mode={namePromptMode}
+  onConfirm={handleNameConfirm}
+  onSkip={handleNameSkip}
 />
 <ReviewApplyExpand />
 {#if toolbarSelection && pmViewForReview && !commentComposer && !suggestionComposer}

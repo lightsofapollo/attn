@@ -104,6 +104,7 @@ export type IpcMessageType =
   | 'review_reject_suggestion'
   | 'review_resolve_anchor'
   | 'review_resolve_comment'
+  | 'review_set_display_name'
   | 'review_stop'
   | 'review_collab_send';
 
@@ -240,6 +241,12 @@ export interface ReviewResolveCommentMessage {
   threadId: string;
 }
 
+export interface ReviewSetDisplayNameMessage {
+  type: 'review_set_display_name';
+  /** Empty/whitespace clears the override back to the resolved default. */
+  name: string;
+}
+
 export interface ReviewStopMessage {
   type: 'review_stop';
   roomId?: RoomId;
@@ -273,6 +280,7 @@ export type IpcMessage =
   | ReviewRejectSuggestionMessage
   | ReviewResolveAnchorMessage
   | ReviewResolveCommentMessage
+  | ReviewSetDisplayNameMessage
   | ReviewStopMessage
   | ReviewCollabSendMessage;
 
@@ -293,6 +301,19 @@ export interface InitPayload {
   diagMode?: DiagMode;
   contentMtimeMs?: number;
   contentBytes?: number;
+  reviewProfile?: ReviewProfileInit;
+}
+
+/**
+ * Onboarding display-name state seeded at startup. `displayName` is the user's
+ * chosen name (null until set); `defaultDisplayName` is the resolved git/OS
+ * default used to pre-fill the prompt; `displayNameSet` tells the UI whether to
+ * prompt on first share/join.
+ */
+export interface ReviewProfileInit {
+  displayName: string | null;
+  defaultDisplayName: string;
+  displayNameSet: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -168,6 +168,16 @@ export function reviewResolveComment(roomId: RoomId, threadId: string): Promise<
   return Promise.resolve();
 }
 
+/**
+ * Persist the user's chosen display name (onboarding). Written to the device
+ * identity; the next Share/Join publishes it as the participant's display name.
+ * Empty/whitespace clears the override back to the resolved git/OS default.
+ */
+export function reviewSetDisplayName(name: string): Promise<void> {
+  send({ type: 'review_set_display_name', name });
+  return Promise.resolve();
+}
+
 export function reviewStop(roomId?: RoomId): Promise<void> {
   send({ type: 'review_stop', ...(roomId !== undefined ? { roomId } : {}) });
   return Promise.resolve();

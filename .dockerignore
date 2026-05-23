@@ -1,0 +1,14 @@
+# Keep the build context small and avoid shipping the macOS-built artifacts /
+# deps into the Linux builder (cargo must rebuild for the container target).
+target/
+node_modules/
+**/node_modules/
+.git/
+.claude/
+relay/.wrangler/
+*.log
+/tmp/
+
+# NOTE: web/dist/index.html is intentionally KEPT in the context. build.rs
+# copies it and early-returns (no npm), so the Node-less builder can compile
+# the crate graph. attn-agent itself never serves it.

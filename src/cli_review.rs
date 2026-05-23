@@ -117,6 +117,44 @@ pub enum ReviewSubcommand {
         #[arg(long, value_name = "TTL")]
         ttl: Option<String>,
     },
+
+    /// Run a **headless, long-lived** review participant — no window, no
+    /// webview. The keystone for cross-topology testing (attn-8zd): a GUI-less
+    /// peer that joins a room, *holds* the connection (WebRTC mesh + relay WS),
+    /// applies inbound events/collab, and persists to the review store, so a
+    /// harness can run N peers in Docker containers / network namespaces and
+    /// assert convergence — something the native daemon (which needs a display)
+    /// can't do in headless CI.
+    ///
+    /// Driven over **stdin** as one JSON command per line; emits every
+    /// `ReviewUpdate` as one JSON line on **stdout** (prefixed `@update `) so a
+    /// test can observe convergence. Runs until stdin EOF or `{"cmd":"quit"}`.
+    ///
+    /// Identity + store come from `ATTN_HOME`; relay from `ATTN_RELAY_URL`
+    /// (same resolution as the daemon). Each container sets its own `ATTN_HOME`
+    /// so peers stay isolated.
+    ///
+    /// Stdin commands (one JSON object per line):
+    /// ```text
+    /// {"cmd":"share","path":"/work/doc.md","mode":"live"}
+    /// {"cmd":"join","invite":"attn://review/<roomId>#key=..."}
+    /// {"cmd":"comment","body":"text"}
+    /// {"cmd":"collab","payload":"{...opaque...}"}
+    /// {"cmd":"pull"}
+    /// {"cmd":"quit"}
+    /// ```
+    Agent {
+        /// Optionally share this path on startup (owner role) instead of
+        /// waiting for a `join` command. Mutually informative with `--mode`.
+        #[arg(long, value_name = "PATH")]
+        share: Option<String>,
+        /// Room mode for `--share`: `live`, `async`, or `hybrid`.
+        #[arg(long, default_value = "live")]
+        mode: String,
+        /// Override the relay URL (default: env `ATTN_RELAY_URL`).
+        #[arg(long, value_name = "URL")]
+        relay_url: Option<String>,
+    },
 }
 
 /// Default relay URL when `--relay-url` isn't passed and `ATTN_RELAY_URL`
@@ -150,6 +188,11 @@ pub fn run(args: ReviewArgs) -> Result<()> {
         ReviewSubcommand::Share { path, mode, ttl } => {
             run_share_via_daemon(&path, &mode, ttl.as_deref())
         }
+        ReviewSubcommand::Agent {
+            share,
+            mode,
+            relay_url,
+        } => run_agent(share.as_deref(), &mode, relay_url.as_deref()),
     }
 }
 
@@ -194,6 +237,14 @@ fn run_share_via_daemon(path: &str, mode: &str, ttl: Option<&str>) -> Result<()>
     println!("  path: {abs}");
     println!("  (the app window shows the invite link)");
     Ok(())
+}
+
+/// Run a headless, long-lived review participant. Delegates to the library
+/// (`crate::review::agent`) so the slim `src/bin/attn-agent.rs` binary shares
+/// one implementation without linking the GUI stack. See
+/// `ReviewSubcommand::Agent` for the stdin/stdout protocol.
+fn run_agent(share: Option<&str>, mode: &str, relay_url_override: Option<&str>) -> Result<()> {
+    crate::review::agent::run(share, mode, relay_url_override)
 }
 
 /// Hand the invite to the running attn daemon so it joins as its OWN device

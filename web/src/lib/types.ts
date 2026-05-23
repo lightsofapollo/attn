@@ -103,6 +103,7 @@ export type IpcMessageType =
   | 'review_accept_suggestion'
   | 'review_reject_suggestion'
   | 'review_resolve_anchor'
+  | 'review_resolve_comment'
   | 'review_stop'
   | 'review_collab_send';
 
@@ -233,6 +234,12 @@ export interface ReviewResolveAnchorMessage {
   range: PositionAnchor;
 }
 
+export interface ReviewResolveCommentMessage {
+  type: 'review_resolve_comment';
+  roomId: RoomId;
+  threadId: string;
+}
+
 export interface ReviewStopMessage {
   type: 'review_stop';
   roomId?: RoomId;
@@ -265,6 +272,7 @@ export type IpcMessage =
   | ReviewAcceptSuggestionMessage
   | ReviewRejectSuggestionMessage
   | ReviewResolveAnchorMessage
+  | ReviewResolveCommentMessage
   | ReviewStopMessage
   | ReviewCollabSendMessage;
 

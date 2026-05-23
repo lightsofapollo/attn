@@ -338,6 +338,13 @@
     void reviewResolveComment(roomId, threadId);
   }
 
+  // Reject is UI-only for now (no reject IPC yet — see ReviewMarginCard's
+  // `onReject` doc): optimistically hide the card locally without a daemon
+  // round-trip. `locallyDismissed` drives the card's `pendingDismiss`.
+  function dismissLocally(threadId: string): void {
+    locallyDismissed.add(threadId);
+  }
+
   // Post a reply (attn-1rm): a CommentCreated carrying the thread's existing id
   // and the root comment's anchor, so reconstructThreads groups it as a reply.
   function replyToThread(thread: Thread, body: string): void {

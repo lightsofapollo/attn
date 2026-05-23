@@ -36,6 +36,7 @@
   style="top: {pos.recommendedPosition.top}px; left: {pos.recommendedPosition.left}px"
   data-slot="selection-toolbar"
   role="toolbar"
+  tabindex="-1"
   aria-label="Review actions"
   onmousedown={(e) => e.preventDefault()}
 >

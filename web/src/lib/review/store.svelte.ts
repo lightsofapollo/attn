@@ -461,6 +461,16 @@ export class ReviewStore {
     if (this.currentRoomId !== payload.roomId) return;
 
     this.connection = payload.connection;
+    // Keep the active full-status object's connection in sync. The
+    // ConnectionBadge reads `status?.connection ?? connection`, and selectRoom
+    // seeds `status.connection` from the room's connection at selection time —
+    // typically 'offline', before any peer connects. Without this sync a later
+    // mailbox/live_direct update lands on `this.connection` but the badge keeps
+    // reading the stale `status.connection` and shows Offline forever even
+    // though the WebRTC DataChannel is live (attn-j5m).
+    if (this.status !== null) {
+      this.status = { ...this.status, connection: payload.connection };
+    }
     if (payload.connection === 'offline') {
       this.peers = [];
     }

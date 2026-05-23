@@ -504,9 +504,7 @@ impl ReviewManager {
                 Some(_runtime),
             ) => {
                 // A reply reuses the parent's thread id; a new comment mints one.
-                let thread_id = parent_thread_id
-                    .clone()
-                    .unwrap_or_else(mint_thread_id);
+                let thread_id = parent_thread_id.clone().unwrap_or_else(mint_thread_id);
                 let event_body = crate::review::model::ReviewEventBody::CommentCreated {
                     thread_id,
                     anchor: anchor.clone(),
@@ -1083,16 +1081,6 @@ impl ReviewManager {
         );
     }
 
-    /// Owner/reviewer manually re-anchors a stale comment or suggestion to a
-    /// range they selected in the editor. We:
-    ///   1. Look up the original event to recover its real `file_id` (the
-    ///      stub used a placeholder, so the resolution never matched a file).
-    ///   2. Emit a durable `AnchorManuallyResolved` event so the override
-    ///      persists and propagates to peers — a manual re-anchor is a shared
-    ///      fact, not a local-only view tweak.
-    ///   3. Push an `AnchorResolutionChanged` (confident `Remapped` at the
-    ///      chosen range) so the local card flips from stale to resolved
-    ///      immediately, without waiting for the event to round-trip.
     /// Mark a comment thread resolved. Mints a durable `CommentResolved`
     /// event (carrying the resolver's participant id) and sends it through the
     /// normal outbox path, so the resolution persists locally and propagates
@@ -1132,6 +1120,16 @@ impl ReviewManager {
         );
     }
 
+    /// Owner/reviewer manually re-anchors a stale comment or suggestion to a
+    /// range they selected in the editor. We:
+    ///   1. Look up the original event to recover its real `file_id` (the
+    ///      stub used a placeholder, so the resolution never matched a file).
+    ///   2. Emit a durable `AnchorManuallyResolved` event so the override
+    ///      persists and propagates to peers — a manual re-anchor is a shared
+    ///      fact, not a local-only view tweak.
+    ///   3. Push an `AnchorResolutionChanged` (confident `Remapped` at the
+    ///      chosen range) so the local card flips from stale to resolved
+    ///      immediately, without waiting for the event to round-trip.
     fn resolve_anchor(
         &self,
         bootstrapper: &Arc<Bootstrapper>,
@@ -2889,8 +2887,14 @@ mod tests {
         // The attn-7qv fix: some peers connected, some not (no-TURN partial
         // mesh) → send to the connected channel(s) AND relay for the rest.
         let r = decide_collab_routing(2, 1);
-        assert!(r.send_over_channels, "must still send to the connected peer");
-        assert!(r.use_relay, "incomplete mesh must relay to reach un-meshed peers");
+        assert!(
+            r.send_over_channels,
+            "must still send to the connected peer"
+        );
+        assert!(
+            r.use_relay,
+            "incomplete mesh must relay to reach un-meshed peers"
+        );
     }
 
     #[test]

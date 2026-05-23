@@ -89,7 +89,11 @@ impl Peer {
 
         let cache = Arc::new(RwLock::new(HashMap::new()));
         let mgr = ReviewManager::new(store, working_copy, sink)
-            .with_bootstrap(relay_url.to_string(), Some(id_tmp.path().to_path_buf()), cache)
+            .with_bootstrap(
+                relay_url.to_string(),
+                Some(id_tmp.path().to_path_buf()),
+                cache,
+            )
             .expect("attach bootstrap");
 
         Peer {
@@ -201,11 +205,19 @@ fn run_scenario(relay_url: &str, mode: &str) -> (bool, bool) {
         .invite_url()
         .expect("owner must emit a ShareReady invite");
     let room_id = owner.room_id().expect("owner must know the room id");
-    eprintln!("[{mode}] owner shared room={} invite={}", room_id.as_str(), &invite[..invite.len().min(40)]);
+    eprintln!(
+        "[{mode}] owner shared room={} invite={}",
+        room_id.as_str(),
+        &invite[..invite.len().min(40)]
+    );
 
     // 2. Both reviewers join (blocking through bootstrap).
-    rvb.mgr.submit(ReviewCommand::Join { invite: invite.clone() });
-    rvc.mgr.submit(ReviewCommand::Join { invite: invite.clone() });
+    rvb.mgr.submit(ReviewCommand::Join {
+        invite: invite.clone(),
+    });
+    rvc.mgr.submit(ReviewCommand::Join {
+        invite: invite.clone(),
+    });
 
     // 3. Give the room runtimes a moment to open their inbound WS subscription.
     //    We don't assert a specific status string (it varies by mode); the

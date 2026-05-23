@@ -303,7 +303,11 @@ mod tests {
         let path = dir.path().join("doc.md");
         std::fs::write(&path, "x").expect("write");
         let paths = vec![path];
-        for kind in [FsChangeKind::Create, FsChangeKind::Modify, FsChangeKind::Rename] {
+        for kind in [
+            FsChangeKind::Create,
+            FsChangeKind::Modify,
+            FsChangeKind::Rename,
+        ] {
             assert_eq!(reclassify_atomic_save_remove(kind, &paths), kind);
         }
     }

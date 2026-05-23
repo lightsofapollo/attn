@@ -300,10 +300,7 @@ pub fn resolve_default_display_name() -> String {
 /// Persist a user-chosen display name onto the identity at `dir`, creating the
 /// identity first if it doesn't exist. An empty/whitespace name clears it back
 /// to the resolved default. Returns the effective name now in force.
-pub fn set_display_name_in(
-    dir: &std::path::Path,
-    name: &str,
-) -> Result<String, BootstrapError> {
+pub fn set_display_name_in(dir: &std::path::Path, name: &str) -> Result<String, BootstrapError> {
     let mut identity = load_or_create_identity_in(dir)?;
     let trimmed = name.trim();
     identity.display_name = if trimmed.is_empty() {
@@ -2355,14 +2352,18 @@ mod tests {
         // Set a name — creates the identity and persists the name.
         let effective = set_display_name_in(dir.path(), "  Ada Lovelace  ").expect("set");
         assert_eq!(effective, "Ada Lovelace"); // trimmed
-        let reloaded = load_identity_from(dir.path()).expect("load").expect("present");
+        let reloaded = load_identity_from(dir.path())
+            .expect("load")
+            .expect("present");
         assert_eq!(reloaded.display_name.as_deref(), Some("Ada Lovelace"));
         assert_eq!(reloaded.effective_display_name(), "Ada Lovelace");
 
         // Clearing with an empty string reverts to the resolved default.
         let effective = set_display_name_in(dir.path(), "").expect("clear");
         assert_eq!(effective, resolve_default_display_name());
-        let reloaded = load_identity_from(dir.path()).expect("load").expect("present");
+        let reloaded = load_identity_from(dir.path())
+            .expect("load")
+            .expect("present");
         assert!(reloaded.display_name.is_none());
     }
 
@@ -2379,7 +2380,9 @@ mod tests {
             "publicEncryptionKey": "cHVibGljX3NpZ25pbmdfa2V5XzMyYnl0ZXNfISE"
         }"#;
         std::fs::write(dir.path().join(IDENTITY_FILENAME), legacy).expect("write legacy");
-        let loaded = load_identity_from(dir.path()).expect("load").expect("present");
+        let loaded = load_identity_from(dir.path())
+            .expect("load")
+            .expect("present");
         assert!(loaded.display_name.is_none());
         assert_eq!(loaded.device_id, "dev0000000000000000000");
     }

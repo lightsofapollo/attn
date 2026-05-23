@@ -120,10 +120,7 @@ pub enum IpcMessage {
     },
 
     #[serde(rename = "review_resolve_comment", rename_all = "camelCase")]
-    ReviewResolveComment {
-        room_id: RoomId,
-        thread_id: String,
-    },
+    ReviewResolveComment { room_id: RoomId, thread_id: String },
 
     #[serde(rename = "review_stop", rename_all = "camelCase")]
     ReviewStop {

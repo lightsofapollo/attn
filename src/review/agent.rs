@@ -7,7 +7,7 @@
 //! which the native daemon (it needs a display) can't do headlessly.
 //!
 //! This module lives in the **library** and references only `crate::review::*`
-//! + `crate::daemon::runtime_dir`, so the slim `src/bin/attn-agent.rs` binary
+//! and `crate::daemon::runtime_dir`, so the slim `src/bin/attn-agent.rs` binary
 //! that wraps it does **not** link `wry`/`webkit2gtk`. The full `attn` binary
 //! reaches the same logic via `attn review agent` (see `src/cli_review.rs`).
 //!
@@ -141,7 +141,10 @@ pub fn run(share: Option<&str>, mode: &str, relay_url: Option<&str>) -> Result<(
                 }
             }
             "join" => {
-                let invite = cmd.get("invite").and_then(|v| v.as_str()).unwrap_or_default();
+                let invite = cmd
+                    .get("invite")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 if invite.is_empty() {
                     emit(&stdout_lock, "error join: missing invite");
                 } else {

@@ -168,6 +168,15 @@ impl FileWatcher {
                     return;
                 }
 
+                // WSL / atomic-save guard (attn-134): editors and the 9p/drvfs
+                // bridge frequently report a Remove for an atomic save
+                // (write-temp + rename-over, or delete+recreate) even though the
+                // file is still present. A bare Remove for the *active* file
+                // would close the open document. If every path in a Remove event
+                // still exists on disk, it wasn't really removed — treat it as a
+                // Modify (reload) instead of a Remove (close / drop from tree).
+                let change_kind = reclassify_atomic_save_remove(change_kind, &filtered_paths);
+
                 let signature = EventSignature {
                     kind: change_kind,
                     paths: filtered_paths.clone(),
@@ -224,6 +233,19 @@ impl FileWatcher {
     }
 }
 
+/// WSL/atomic-save guard (attn-134). A `Remove` whose paths all still exist on
+/// disk is an atomic-save artifact (rename-over / delete+recreate), not a real
+/// deletion — reclassify it to `Modify` so the open file reloads instead of
+/// closing (and the file stays in the tree). A genuine deletion (path gone)
+/// stays a `Remove`. Non-Remove kinds pass through unchanged.
+fn reclassify_atomic_save_remove(kind: FsChangeKind, paths: &[PathBuf]) -> FsChangeKind {
+    if kind == FsChangeKind::Remove && !paths.is_empty() && paths.iter().all(|p| p.exists()) {
+        FsChangeKind::Modify
+    } else {
+        kind
+    }
+}
+
 fn should_emit_event(state: &mut DebounceState, now: Instant, next: &EventSignature) -> bool {
     let within_window = now.duration_since(state.last_emitted_at) < DEBOUNCE_WINDOW;
     let duplicate = state
@@ -247,6 +269,56 @@ mod tests {
             kind,
             paths: vec![PathBuf::from(path)],
         }
+    }
+
+    #[test]
+    fn atomic_save_remove_on_existing_file_reclassifies_to_modify() {
+        // WSL atomic-save (attn-134): a Remove for a file that still exists is a
+        // rename-over/delete+recreate artifact, not a deletion — reload, don't close.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "# still here\n").expect("write");
+        let paths = vec![path];
+        assert_eq!(
+            reclassify_atomic_save_remove(FsChangeKind::Remove, &paths),
+            FsChangeKind::Modify,
+            "Remove for an existing file must become Modify"
+        );
+    }
+
+    #[test]
+    fn genuine_remove_of_missing_file_stays_remove() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = vec![dir.path().join("gone.md")]; // never created
+        assert_eq!(
+            reclassify_atomic_save_remove(FsChangeKind::Remove, &paths),
+            FsChangeKind::Remove,
+            "Remove for a truly-missing file must stay Remove"
+        );
+    }
+
+    #[test]
+    fn non_remove_kinds_pass_through_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("doc.md");
+        std::fs::write(&path, "x").expect("write");
+        let paths = vec![path];
+        for kind in [FsChangeKind::Create, FsChangeKind::Modify, FsChangeKind::Rename] {
+            assert_eq!(reclassify_atomic_save_remove(kind, &paths), kind);
+        }
+    }
+
+    #[test]
+    fn mixed_remove_with_one_missing_path_stays_remove() {
+        // If any path is genuinely gone, it's a real deletion — don't downgrade.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let present = dir.path().join("a.md");
+        std::fs::write(&present, "x").expect("write");
+        let paths = vec![present, dir.path().join("b-gone.md")];
+        assert_eq!(
+            reclassify_atomic_save_remove(FsChangeKind::Remove, &paths),
+            FsChangeKind::Remove
+        );
     }
 
     #[test]

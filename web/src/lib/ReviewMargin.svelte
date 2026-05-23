@@ -579,7 +579,7 @@
             <ReviewMarginCard
               thread={t}
               kind={kindFor(t)}
-              state={stateFor(t)}
+              cardState={stateFor(t)}
               active={focusEventId === t.rootEvent.meta.eventId}
               hovered={hoveredEventId === t.rootEvent.meta.eventId}
               offset={false}
@@ -632,7 +632,7 @@
         <ReviewMarginCard
           thread={t}
           kind={kindFor(t)}
-          state={stateFor(t)}
+          cardState={stateFor(t)}
           active={focusEventId === t.rootEvent.meta.eventId}
           hovered={hoveredEventId === t.rootEvent.meta.eventId}
           offset={p.offset}

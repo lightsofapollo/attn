@@ -36,7 +36,7 @@
     /** Per-card visual kind — drives chrome + action row. */
     kind: CardKind;
     /** Per-card state — drives badge + opacity. */
-    state: CardState;
+    cardState: CardState;
     /** Active card gets full opacity, shadow, accent border (§1.5). */
     active: boolean;
     /** Hovered cross-surface (editor ↔ margin). */
@@ -82,7 +82,7 @@
   let {
     thread,
     kind,
-    state,
+    cardState,
     active,
     hovered,
     offset,
@@ -339,7 +339,7 @@
   data-testid="review-margin-card"
   data-thread-id={thread.id}
   data-kind={kind}
-  data-state={state}
+  data-state={cardState}
   data-active={active ? 'true' : 'false'}
   data-hovered={hovered ? 'true' : 'false'}
   data-offset={offset ? 'true' : 'false'}
@@ -351,7 +351,7 @@
   onmouseleave={handleMouseLeave}
   role="group"
   tabindex="0"
-  aria-label={`${kind} by ${authorName}, ${state}`}
+  aria-label={`${kind} by ${authorName}, ${cardState}`}
 >
   <header class="rmc-header">
     <span class="rmc-author">{authorName}</span>
@@ -362,7 +362,7 @@
     {:else}
       <span class="rmc-kind rmc-kind-comment">comment</span>
     {/if}
-    {#if state === 'remapped_moved'}
+    {#if cardState === 'remapped_moved'}
       <!--
         `attn-moved-badge` is the canonical selector per
         planning/collab/ui/inline-decorations.md §3 (the panel-side moved
@@ -375,16 +375,16 @@
         title="anchor was remapped"
         data-testid="review-margin-card-moved-badge"
       >moved</span>
-    {:else if state === 'ambiguous'}
+    {:else if cardState === 'ambiguous'}
       <span class="rmc-badge rmc-badge-ambiguous" title="multiple anchor candidates">amb</span>
-    {:else if state === 'stale'}
+    {:else if cardState === 'stale'}
       <span class="rmc-badge rmc-badge-stale" title="anchor lost — needs re-anchor">stale</span>
-    {:else if state === 'resolved'}
+    {:else if cardState === 'resolved'}
       <span class="rmc-badge rmc-badge-resolved">resolved</span>
     {/if}
   </header>
 
-  {#if state === 'stale'}
+  {#if cardState === 'stale'}
     <!--
       Stale body: show the originally-selected quote so the user can find
       the equivalent text in the editor. Per Decision #15 the inline
@@ -425,7 +425,7 @@
     {/if}
   {/if}
 
-  {#if state === 'ambiguous' && ambiguousCandidates.length > 0}
+  {#if cardState === 'ambiguous' && ambiguousCandidates.length > 0}
     <AmbiguousAnchorPicker
       roomId={thread.rootEvent.meta.roomId}
       eventId={thread.rootEvent.meta.eventId}
@@ -437,7 +437,7 @@
     />
   {/if}
 
-  {#if state === 'stale' && awaitingReanchor}
+  {#if cardState === 'stale' && awaitingReanchor}
     <p
       class="rmc-stale-hint"
       data-testid="review-margin-card-stale-hint"
@@ -447,7 +447,7 @@
   {/if}
 
   <footer class="rmc-actions">
-    {#if state === 'stale'}
+    {#if cardState === 'stale'}
       {#if awaitingReanchor}
         <button
           type="button"
@@ -517,7 +517,7 @@
         class="rmc-btn"
         data-action="resolve"
         onclick={handleResolve}
-        disabled={pendingDismiss || state === 'resolved'}
+        disabled={pendingDismiss || cardState === 'resolved'}
       >
         Resolve
       </button>

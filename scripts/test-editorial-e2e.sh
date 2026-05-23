@@ -15,9 +15,8 @@
 #
 # The reply/resolve write paths are driven via the exact IPC messages their
 # buttons send (ReviewMargin.replyToThread/resolveThread) and verified by the
-# durable events landing on the owner — because the right-rail margin overlay
-# does not mount under automation today (panelOpen reactivity; tracked as
-# attn-cqk). That one check is reported PEND, not FAIL.
+# durable events landing on the owner; the rendered margin card (with the
+# Reply/Resolve UI) is verified directly on the reviewer (attn-cqk).
 #
 # Skip with ATTN_SKIP_EDITORIAL_E2E=1 (needs a display + relay + loopback).
 set -uo pipefail
@@ -105,17 +104,11 @@ rv --click 'text=Submit' >/dev/null 2>&1
 owner_imported(){ grep -rqa "$MARK" "$OWNER_HOME/reviews" 2>/dev/null; }
 if poll 20000 owner_imported; then ok "comment delivered + imported by owner"; else bad "owner never imported the comment"; fi
 
-# Open the review panel via the real togglePanel() method (Cmd+J keydown
-# dispatched through --eval does not reach the handler; togglePanel() does).
-# ENSURE the panel is open (it auto-opens when the composer opens, App.svelte:329;
-# only toggle when currently closed so we never close an already-open panel).
-# CONFIRMED attn-cqk: even with panelOpen=true (set via the reactive
-# togglePanel()), the reviewer's right-rail <aside> stays data-state=closed and
-# the margin (data-slot=review-margin) never mounts — so the comment/reply/
-# resolve cards are invisible to the reviewer. The owner is unaffected. Hard FAIL
-# here is the intended signal until attn-cqk is fixed.
-rv --eval "var s=window.__attn_review_store__; if(!s.panelOpen) s.togglePanel(); 'open='+s.panelOpen" >/dev/null 2>&1
-if poll 10000 has rv '[data-testid=review-margin-card]'; then ok "attn-1rm/zhr: reviewer sees the margin card (Reply/Resolve UI visible)"; else bad "attn-cqk: reviewer margin never mounts (panelOpen=true but aside stays closed) — comments/reply/resolve invisible to reviewer"; fi
+# attn-cqk: the review rail auto-opens via a reactive $effect (App.svelte) the
+# first time the current file has a thread — no manual toggle. Verify the margin
+# card mounts for the reviewer (it didn't before the cardState rename: a `$state`
+# rune collided with the `state` prop in ReviewMarginCard and threw on render).
+if poll 12000 has rv '[data-testid=review-margin-card]'; then ok "attn-cqk: reviewer sees the margin card (rail auto-opened; Reply/Resolve visible)"; else bad "attn-cqk: reviewer margin never mounts after comment"; fi
 
 # attn-1rm — reply via the real IPC the button sends; verify grouping on owner.
 log "reviewer replies ($REPLY)"

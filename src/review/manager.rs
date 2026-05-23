@@ -2262,6 +2262,7 @@ fn error_code(err: &crate::review::bootstrap::BootstrapError) -> String {
         BootstrapError::Relay { code, .. } => code.clone(),
         BootstrapError::Network(_) => "ATTN_NETWORK".to_string(),
         BootstrapError::InviteParse(_) => "ATTN_INVITE_PARSE".to_string(),
+        BootstrapError::InvalidShare(_) => "ATTN_INVALID_SHARE".to_string(),
         BootstrapError::Store(_) => "ATTN_STORE".to_string(),
     }
 }
@@ -3385,6 +3386,13 @@ mod bootstrap_integration_tests {
         (mgr, rx, store_tmp, id_tmp)
     }
 
+    fn temp_markdown_file(name: &str, body: &str) -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new().expect("markdown tempdir");
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).expect("write markdown fixture");
+        (dir, path)
+    }
+
     /// Set up wiremock stubs accepting any room create + device register.
     async fn mount_create_and_register(server: &MockServer) {
         Mock::given(method("POST"))
@@ -3429,8 +3437,9 @@ mod bootstrap_integration_tests {
         runtime.block_on(mount_create_and_register(&server));
 
         let (mgr, rx, _store_tmp, id_tmp) = make_bootstrapped_manager(server.uri());
+        let (_doc_tmp, path) = temp_markdown_file("manager-share.md", "# Manager share\n");
         mgr.submit(ReviewCommand::Share {
-            path: std::path::PathBuf::from("/tmp/manager-share.md"),
+            path,
             mode: "async".to_string(),
             ttl: None,
         });

@@ -845,6 +845,17 @@ export interface ReviewShareReady {
 }
 
 /**
+ * Review command failure surfaced through `window.__attn__.reviewStatus(...)`
+ * until the bridge grows a dedicated error callback.
+ */
+export interface ReviewErrorStatus {
+  kind: 'error';
+  roomId?: RoomId | null;
+  code: string;
+  message: string;
+}
+
+/**
  * Transport/connection status surfaced to the UI for one room.
  *
  * Pushed via `window.__attn__.reviewStatus(...)` from Rust (see

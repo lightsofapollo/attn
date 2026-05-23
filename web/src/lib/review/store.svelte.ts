@@ -36,6 +36,7 @@ import type {
   PositionAnchor,
   RequiresThreeWayVerdict,
   ReviewAnchorResolutionUpdate,
+  ReviewErrorStatus,
   ReviewEvent,
   ReviewSnapshot,
   ReviewStatus,
@@ -132,6 +133,9 @@ export class ReviewStore {
 
   /** Latest transport status payload for `currentRoomId`. */
   status = $state<ReviewStatus | null>(null);
+
+  /** Latest review command failure, used by transient surfaces like Share. */
+  lastError = $state<(ReviewErrorStatus & { updatedAt: number }) | null>(null);
 
   /**
    * Live transport connection state for the connection badge. The
@@ -380,6 +384,17 @@ export class ReviewStore {
     }
   }
 
+  applyError(error: ReviewErrorStatus): void {
+    this.lastError = {
+      ...error,
+      updatedAt: Date.now(),
+    };
+  }
+
+  clearLastError(): void {
+    this.lastError = null;
+  }
+
   /**
    * Apply a live presence delta pushed by Rust over `reviewPresence`.
    *
@@ -464,6 +479,7 @@ export class ReviewStore {
     mode: 'live' | 'async' | 'hybrid';
     expiresAt: number;
   }): void {
+    this.clearLastError();
     const nextDismissed = new Set(this.dismissedRoomIds);
     nextDismissed.delete(payload.roomId);
     this.dismissedRoomIds = nextDismissed;

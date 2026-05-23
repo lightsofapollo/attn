@@ -51,8 +51,11 @@
     existingInviteUrl?: string;
     /** Non-null when a share already exists for this file. Suppresses re-mint. */
     existingRoomId?: RoomId | null;
+    /** Latest daemon-side share failure while this dialog is open. */
+    shareErrorMessage?: string;
     writeToClipboard?: (text: string) => Promise<void>;
     onStart?: (params: ShareStartParams) => void;
+    onClearError?: () => void;
   }
 
   export interface ShareStartParams {
@@ -69,8 +72,10 @@
     ownerSigningKey = '',
     existingInviteUrl = '',
     existingRoomId = null,
+    shareErrorMessage = '',
     writeToClipboard,
     onStart,
+    onClearError,
   }: Props = $props();
 
   // ---------------------------------------------------------------------------
@@ -145,6 +150,18 @@
     }
   });
 
+  // Transition minting → error as soon as Rust reports a share failure.
+  $effect(() => {
+    if (!open) return;
+    if (phase !== 'minting') return;
+    if (shareErrorMessage.length === 0) return;
+    if (mintTimeout) {
+      clearTimeout(mintTimeout);
+      mintTimeout = null;
+    }
+    phase = 'error';
+  });
+
   // Recompute the fingerprint whenever the owner key changes.
   $effect(() => {
     let cancelled = false;
@@ -160,6 +177,7 @@
   async function autoMint(): Promise<void> {
     if (filePath.length === 0) return;
     const { mode: ipcMode, ttl } = modeToIpc(selectedMode);
+    onClearError?.();
     phase = 'minting';
     // reviewShare is fire-and-forget IPC; the daemon answers asynchronously via
     // the ShareReady callback. If the relay is unreachable or create_room
@@ -276,7 +294,7 @@
       {:else if isError}
         <div class="flex flex-col gap-2 py-1.5 text-sm" data-slot="share-error">
           <span class="text-destructive">
-            Couldn't reach the review relay — the share didn't complete.
+            {shareErrorMessage || "Couldn't reach the review relay — the share didn't complete."}
           </span>
           <button
             type="button"

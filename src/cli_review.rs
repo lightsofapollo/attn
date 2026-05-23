@@ -33,6 +33,7 @@ use crate::review::bootstrap::{
 };
 use crate::review::store::ReviewStore;
 use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,6 +41,11 @@ use std::time::{Duration, Instant};
 /// `attn review …` argument tree.
 #[derive(Args, Debug)]
 pub struct ReviewArgs {
+    /// Target a specific attn daemon runtime. Equivalent to setting
+    /// `ATTN_HOME`, but easier to use when driving multiple windows.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub attn_home: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: ReviewSubcommand,
 }
@@ -124,7 +130,12 @@ const DEFAULT_RELAY_URL: &str = "http://127.0.0.1:8787";
 /// variant builds its own Tokio runtime so we don't have to plumb one in
 /// from `main.rs` (which is non-async).
 pub fn run(args: ReviewArgs) -> Result<()> {
-    match args.command {
+    let ReviewArgs { attn_home, command } = args;
+    if let Some(home) = attn_home {
+        set_attn_home_for_review(&home)?;
+    }
+
+    match command {
         ReviewSubcommand::RegisterAgent { name } => run_register_agent(&name),
         ReviewSubcommand::ListAgents => run_list_agents(),
         ReviewSubcommand::Whoami { as_agent } => run_whoami(as_agent.as_deref()),
@@ -139,6 +150,30 @@ pub fn run(args: ReviewArgs) -> Result<()> {
         ReviewSubcommand::Share { path, mode, ttl } => {
             run_share_via_daemon(&path, &mode, ttl.as_deref())
         }
+    }
+}
+
+fn set_attn_home_for_review(home: &Path) -> Result<()> {
+    let home = normalize_attn_home(home)?;
+    // SAFETY: `attn review ...` handles this option before starting any local
+    // worker threads. The value is then read synchronously by the daemon/store
+    // path helpers to choose the target socket namespace.
+    unsafe {
+        std::env::set_var("ATTN_HOME", home);
+    }
+    Ok(())
+}
+
+fn normalize_attn_home(home: &Path) -> Result<PathBuf> {
+    if home.as_os_str().is_empty() {
+        bail!("--attn-home requires a non-empty directory");
+    }
+    if home.is_absolute() {
+        Ok(home.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()
+            .context("resolve current directory for --attn-home")?
+            .join(home))
     }
 }
 
@@ -399,6 +434,19 @@ mod tests {
             }
             other => panic!("expected Join, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn attn_home_target_rejects_empty_path() {
+        let err = normalize_attn_home(Path::new("")).expect_err("empty path should fail");
+        assert!(err.to_string().contains("--attn-home"));
+    }
+
+    #[test]
+    fn attn_home_target_normalizes_relative_path() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let normalized = normalize_attn_home(Path::new("target/reviewer")).expect("normalize");
+        assert_eq!(normalized, cwd.join("target/reviewer"));
     }
 
     #[test]

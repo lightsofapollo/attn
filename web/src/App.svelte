@@ -11,6 +11,7 @@
     InitPayload,
     PlanStructure,
     ReviewAnchorResolutionUpdate,
+    ReviewErrorStatus,
     ReviewEvent,
     ReviewSnapshot,
     ReviewStatus,
@@ -430,6 +431,12 @@
 
   let commentComposer = $state<CommentComposerState | null>(null);
   let suggestionComposer = $state<SuggestionComposerState | null>(null);
+
+  function isReviewErrorStatus(
+    payload: ReviewStatus | ReviewErrorStatus,
+  ): payload is ReviewErrorStatus {
+    return payload.kind === 'error' && 'code' in payload && 'message' in payload;
+  }
 
   /**
    * Resolve the snapshot the suggestion should be authored against. Prefers
@@ -1485,7 +1492,11 @@
         resetGlobalFontScale();
       },
       // Review callbacks delegate to the global review store.
-      reviewStatus(payload: ReviewStatus) {
+      reviewStatus(payload: ReviewStatus | ReviewErrorStatus) {
+        if (isReviewErrorStatus(payload)) {
+          reviewStore.applyError(payload);
+          return;
+        }
         reviewStore.applyStatus(payload);
       },
       // Pushed by Rust right after `Bootstrapper::share` succeeds. Carries
@@ -2121,6 +2132,8 @@
   existingInviteUrl={reviewStore.currentShare?.inviteUrl ?? ''}
   ownerSigningKey={reviewStore.currentShare?.ownerSigningKey ?? ''}
   existingRoomId={reviewStore.currentShare?.roomId ?? null}
+  shareErrorMessage={reviewStore.lastError?.message ?? ''}
+  onClearError={() => reviewStore.clearLastError()}
 />
 <ReviewApplyExpand />
 {#if commentComposer}

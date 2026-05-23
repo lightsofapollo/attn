@@ -136,6 +136,8 @@ pub enum BootstrapError {
     Network(String),
     #[error("invite parse: {0}")]
     InviteParse(String),
+    #[error("invalid share: {0}")]
+    InvalidShare(String),
     #[error("store: {0}")]
     Store(String),
 }
@@ -678,6 +680,7 @@ impl Bootstrapper {
         let now_ms = unix_now_ms();
         let identity_dir = self.config.identity_dir()?;
         let identity = load_or_create_identity_in(&identity_dir)?;
+        let doc_targets = validate_share_targets(&path)?;
 
         // 1. Try to short-circuit: a re-Share of the same path returns the
         //    existing invite if we still have the secret on disk.
@@ -781,14 +784,31 @@ impl Bootstrapper {
         //     New files added to a shared folder later are picked up by the
         //     fs-watcher → `republish_snapshot_for_path`. Failures are non-fatal
         //     — the room exists; log and continue.
-        for doc_path in markdown_targets(&path) {
-            if let Err(err) = self.publish_initial_snapshot(&room_id, &doc_path, now_ms) {
-                eprintln!(
-                    "review: publish_initial_snapshot failed (room={}, file={}): {err}",
-                    room_id.as_str(),
-                    doc_path.display()
-                );
+        let mut published = 0usize;
+        let mut publish_errors = Vec::new();
+        for doc_path in doc_targets {
+            match self.publish_initial_snapshot(&room_id, &doc_path, now_ms) {
+                Ok(_) => published += 1,
+                Err(err) => {
+                    publish_errors.push(format!("{}: {err}", doc_path.display()));
+                    eprintln!(
+                        "review: publish_initial_snapshot failed (room={}, file={}): {err}",
+                        room_id.as_str(),
+                        doc_path.display()
+                    );
+                }
             }
+        }
+        if published == 0 {
+            return Err(BootstrapError::InvalidShare(format!(
+                "no markdown snapshots could be published for {}{}",
+                path.display(),
+                if publish_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", publish_errors.join("; "))
+                }
+            )));
         }
 
         // 7. Build invite. `room_secret` is consumed when we encode it into the
@@ -1820,12 +1840,40 @@ fn is_ignored_dir_component(name: &str) -> bool {
 /// Sorted for stable ordering.
 fn markdown_targets(path: &std::path::Path) -> Vec<PathBuf> {
     if !path.is_dir() {
-        return vec![path.to_path_buf()];
+        return if is_markdown_path(path) {
+            vec![path.to_path_buf()]
+        } else {
+            Vec::new()
+        };
     }
     let mut out: Vec<PathBuf> = Vec::new();
     collect_markdown(path, &mut out);
     out.sort();
     out
+}
+
+fn validate_share_targets(path: &std::path::Path) -> Result<Vec<PathBuf>, BootstrapError> {
+    let targets = markdown_targets(path);
+    if targets.is_empty() {
+        return Err(BootstrapError::InvalidShare(format!(
+            "{} is not shareable; choose a markdown file or a folder containing .md/.markdown files",
+            path.display()
+        )));
+    }
+
+    for target in &targets {
+        let bytes = std::fs::read(target).map_err(|e| {
+            BootstrapError::InvalidShare(format!("cannot read {}: {e}", target.display()))
+        })?;
+        if std::str::from_utf8(&bytes).is_err() {
+            return Err(BootstrapError::InvalidShare(format!(
+                "{} is not UTF-8 markdown",
+                target.display()
+            )));
+        }
+    }
+
+    Ok(targets)
 }
 
 fn collect_markdown(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
@@ -2023,6 +2071,13 @@ mod tests {
         (tmp, store, boot)
     }
 
+    fn temp_markdown_file(name: &str, body: &str) -> (TempDir, PathBuf) {
+        let dir = TempDir::new().expect("markdown tempdir");
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).expect("write markdown fixture");
+        (dir, path)
+    }
+
     // --- folder-share binding ----------------------------------------------
 
     #[test]
@@ -2051,6 +2106,10 @@ mod tests {
         assert_eq!(
             markdown_targets(&docs.path().join("a.md")),
             vec![docs.path().join("a.md")]
+        );
+        assert!(
+            markdown_targets(&docs.path().join("notes.txt")).is_empty(),
+            "single non-markdown files should not create empty review rooms"
         );
 
         // Folder-share binding round-trip.
@@ -2088,6 +2147,26 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn validate_share_targets_rejects_empty_or_binary_share() {
+        use std::fs;
+
+        let empty_dir = TempDir::new().expect("empty dir");
+        let err = validate_share_targets(empty_dir.path()).expect_err("empty folder rejected");
+        assert!(err.to_string().contains("not shareable"));
+
+        let docs = TempDir::new().expect("docs dir");
+        let image = docs.path().join("hero.png");
+        fs::write(&image, b"\x89PNG\r\n").unwrap();
+        let err = validate_share_targets(&image).expect_err("image rejected");
+        assert!(err.to_string().contains("not shareable"));
+
+        let bad_md = docs.path().join("bad.md");
+        fs::write(&bad_md, [0xff, 0xfe, 0xfd]).unwrap();
+        let err = validate_share_targets(&bad_md).expect_err("binary markdown rejected");
+        assert!(err.to_string().contains("UTF-8"));
     }
 
     // --- identity round-trip ----------------------------------------------
@@ -2230,7 +2309,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let path = PathBuf::from("/tmp/share-test/plan.md");
+        let (_doc_tmp, path) = temp_markdown_file("plan.md", "# Plan\n");
         let outcome = boot
             .share(path.clone(), RoomMode::Async, None)
             .await
@@ -2268,14 +2347,18 @@ mod tests {
         assert_eq!(loaded_room.event_heads.len(), 1);
         assert_eq!(loaded_room.policy.mode, RoomMode::Async);
 
-        // Outbox holds the RoomCreated envelope.
+        // Outbox holds the RoomCreated event plus the first document snapshot.
         let envelopes: Vec<MailboxEnvelope> = store
             .iter_outbox(&outcome.room_id)
             .expect("iter")
             .collect::<anyhow::Result<_>>()
             .expect("decode");
-        assert_eq!(envelopes.len(), 1);
-        assert_eq!(envelopes[0].kind, EnvelopeKind::Event);
+        assert_eq!(envelopes.len(), 2);
+        assert!(
+            envelopes
+                .iter()
+                .all(|envelope| envelope.kind == EnvelopeKind::Event)
+        );
     }
 
     #[tokio::test]
@@ -2303,8 +2386,9 @@ mod tests {
             .mount(&server)
             .await;
 
+        let (_doc_tmp, path) = temp_markdown_file("x.md", "# X\n");
         let outcome = boot
-            .share(PathBuf::from("/tmp/x.md"), RoomMode::Async, None)
+            .share(path, RoomMode::Async, None)
             .await
             .expect("share");
         assert!(outcome.invite.starts_with("attn://review/"));
@@ -2343,7 +2427,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let path = PathBuf::from("/tmp/idempotent.md");
+        let (_doc_tmp, path) = temp_markdown_file("idempotent.md", "# Idempotent\n");
         let first = boot
             .share(path.clone(), RoomMode::Async, None)
             .await
@@ -2747,13 +2831,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        boot.share(
-            PathBuf::from("/tmp/owner-sig-test.md"),
-            RoomMode::Async,
-            None,
-        )
-        .await
-        .expect("share");
+        let (_doc_tmp, path) = temp_markdown_file("owner-sig-test.md", "# Owner sig\n");
+        boot.share(path, RoomMode::Async, None)
+            .await
+            .expect("share");
 
         // Decode the captured request + sig.
         let (method_s, url_path, body_bytes, owner_sig_b64) = captured

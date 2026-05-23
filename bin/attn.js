@@ -102,11 +102,12 @@ async function main() {
     await maybePromptInstallAlias();
   }
 
-  if (headless) {
-    const binaryPath = join(appPath, "Contents", "MacOS", "attn");
-    if (!existsSync(binaryPath)) {
-      throw new Error(`managed app binary is missing at ${binaryPath}`);
-    }
+  const binaryPath = join(appPath, "Contents", "MacOS", "attn");
+  if (!existsSync(binaryPath)) {
+    throw new Error(`managed app binary is missing at ${binaryPath}`);
+  }
+
+  if (headless || shouldPreserveAppEnvironment()) {
     run(binaryPath, args);
     return;
   }
@@ -386,6 +387,9 @@ async function maybePromptInstallAlias() {
     return;
   }
   if (existsSync(installLinkPath)) {
+    if (isManagedAlias()) {
+      installAliasLauncher();
+    }
     return;
   }
 
@@ -408,6 +412,14 @@ async function maybePromptInstallAlias() {
     console.error(`attn: failed to install alias: ${error.message}`);
   } finally {
     rl.close();
+  }
+}
+
+function isManagedAlias() {
+  try {
+    return realpathSync(installLinkPath) === realpathSync(installLauncherPath);
+  } catch {
+    return false;
   }
 }
 
@@ -436,6 +448,9 @@ for arg in "$@"; do
   esac
 done
 if [ "$HEADLESS" -eq 1 ]; then
+  exec "$BINARY" "$@"
+fi
+if [ -n "\${ATTN_HOME:-}" ] || [ -n "\${ATTN_RELAY_URL:-}" ]; then
   exec "$BINARY" "$@"
 fi
 # Resolve the first positional arg to an absolute path since open launches with cwd=/
@@ -527,6 +542,18 @@ function resolvePathArgs(args) {
 
 function isHeadlessInvocation(args) {
   return args[0] === "review" || args.some((arg) => HEADLESS_FLAGS.has(arg));
+}
+
+function shouldPreserveAppEnvironment() {
+  // Launch Services does not reliably pass shell env to the app. `ATTN_HOME`
+  // selects the daemon socket namespace, and `ATTN_RELAY_URL` selects the
+  // review relay, so direct binary launch is required for multi-instance
+  // review flows driven by `npx attnmd`.
+  return hasEnvValue("ATTN_HOME") || hasEnvValue("ATTN_RELAY_URL");
+}
+
+function hasEnvValue(name) {
+  return Boolean(process.env[name] && process.env[name].trim() !== "");
 }
 
 function run(cmd, args) {

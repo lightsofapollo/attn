@@ -15,6 +15,7 @@
     "@fontsource-variable/source-code-pro": "^5.2.7",
     "@fontsource-variable/source-sans-3": "^5.2.9",
     "@fontsource-variable/source-serif-4": "^5.2.9",
+    "@handlewithcare/prosemirror-suggest-changes": "^0.1.8",
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",

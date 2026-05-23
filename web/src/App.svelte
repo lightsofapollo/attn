@@ -2069,6 +2069,8 @@
         collabClientId={collabClientId ?? undefined}
         onCollabDocChange={handleCollabDocChange}
         onCollabSelectionChange={handleCollabSelectionChange}
+        suggesting={collabActive && collabRole === 'reviewer'}
+        suggestionAuthor={userProfile.effectiveName}
       />
     {:else if !hasActiveTab}
       <div class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
@@ -2093,6 +2095,8 @@
         collabClientId={collabClientId ?? undefined}
         onCollabDocChange={handleCollabDocChange}
         onCollabSelectionChange={handleCollabSelectionChange}
+        suggesting={collabActive && collabRole === 'reviewer'}
+        suggestionAuthor={userProfile.effectiveName}
       />
     {:else if activeFileType === 'image'}
       <ImageViewer src={markdownSourceUrl(activePath)} />

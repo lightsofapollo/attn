@@ -10,6 +10,11 @@ import {
 import MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import type StateCore from 'markdown-it/lib/rules_core/state_core.mjs';
+import {
+  insertion,
+  deletion,
+  modification,
+} from '@handlewithcare/prosemirror-suggest-changes';
 
 // -- Nodes --
 
@@ -183,6 +188,13 @@ export const schema = new Schema({
   marks: (() => {
     let marks = baseMarks;
     marks = marks.addBefore('code', 'strikethrough', strikethroughMark);
+    // Track-changes marks (inline suggesting mode, attn-07i.2). The marks live
+    // in the schema so reviewer suggestions can be represented + synced over
+    // collab; the on-disk file serializes a *reverted* doc so it never contains
+    // them (see serializeAccepted in Editor.svelte).
+    marks = marks.addToEnd('insertion', insertion);
+    marks = marks.addToEnd('deletion', deletion);
+    marks = marks.addToEnd('modification', modification);
     return marks;
   })(),
 });
@@ -476,6 +488,13 @@ export const markdownSerializer = new MarkdownSerializer(
       mixable: true,
       expelEnclosingWhitespace: true,
     },
+    // Track-changes marks (attn-07i.2). Backstop only: the file path serializes
+    // a reverted (clean) doc, so these should never fire there. Render the bare
+    // content with no markdown syntax so any stray marked serialization can't
+    // throw "no mark serializer".
+    insertion: { open: '', close: '', mixable: true },
+    deletion: { open: '', close: '', mixable: true },
+    modification: { open: '', close: '', mixable: true },
   },
 );
 

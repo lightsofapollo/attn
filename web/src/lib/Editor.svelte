@@ -24,6 +24,15 @@
   import { tablePlugins } from './prosemirror/tables';
   import { editSave } from './ipc';
   import { markdownParser, markdownSerializer, schema } from './schema';
+  import {
+    suggestChanges,
+    suggestChangesKey,
+    isSuggestChangesEnabled,
+    enableSuggestChanges,
+    disableSuggestChanges,
+    transformToSuggestionTransaction,
+    revertSuggestions,
+  } from '@handlewithcare/prosemirror-suggest-changes';
 
   interface Props {
     markdown: string;
@@ -67,6 +76,17 @@
     onCollabDocChange?: () => void;
     /** Fired when the local selection (caret) moves during a collab session. */
     onCollabSelectionChange?: (head: number) => void;
+    /**
+     * Inline suggesting mode (attn-07i.2). When true, local edits are captured
+     * as tracked-change suggestions (insertion/deletion marks) instead of
+     * directly mutating the doc — reviewers suggest, the owner edits directly.
+     */
+    suggesting?: boolean;
+    /**
+     * The local author's display name, encoded into each suggestion's id so the
+     * owner can attribute it (the marks themselves carry only an id).
+     */
+    suggestionAuthor?: string;
   }
 
   let {
@@ -83,7 +103,35 @@
     collabClientId,
     onCollabDocChange,
     onCollabSelectionChange,
+    suggesting = false,
+    suggestionAuthor,
   }: Props = $props();
+
+  // Suggestion ids encode the author (the marks carry only an id) so the owner
+  // can show "suggested by <name>", and are random so they never collide across
+  // peers (the library's default auto-increment ids would). The author is
+  // URL-encoded so a `~` or space in the name can't break parsing on `~`.
+  function generateSuggestionId(): string {
+    const who = encodeURIComponent(suggestionAuthor ?? 'anon');
+    const rand =
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID().slice(0, 8)
+        : Math.random().toString(36).slice(2, 10);
+    return `${who}~${rand}`;
+  }
+
+  // The on-disk file holds ACCEPTED content only: revert pending suggestion
+  // marks on a throwaway transaction, then serialize, so the saved markdown
+  // never contains insertion/deletion marks (a reviewer's pending suggestion
+  // must not rewrite the owner's file — that was the original bug).
+  function serializeAccepted(): string {
+    if (!view) return '';
+    let doc = view.state.doc;
+    revertSuggestions(view.state, (tr) => {
+      doc = tr.doc;
+    });
+    return markdownSerializer.serialize(doc);
+  }
   let editorEl: HTMLElement | undefined = $state(undefined);
   let view: EditorView | undefined;
   let findOpen = $state(false);
@@ -93,6 +141,9 @@
   let dirty = false;
   let findInputEl: HTMLInputElement | undefined = $state(undefined);
   let findBarEl: HTMLFormElement | undefined = $state(undefined);
+  // Reactive "the EditorView is mounted" signal so the suggesting-mode effect
+  // below fires after mount (`view` itself is a plain let, not reactive).
+  let viewReady = $state(false);
 
   let lastSafeModeLength = -1;
   const PARSE_WARN_MS = 120;
@@ -180,6 +231,8 @@
     const plugins = [
       history(),
       search(),
+      // Track-changes state (enabled per-role below). Harmless when disabled.
+      suggestChanges(),
     ];
     // Live co-typing: install collab at v0 + a doc-change notifier. collab()
     // uses a module-shared PluginKey, so a `reconfigure` preserves its state
@@ -233,7 +286,7 @@
         },
         'Mod-s': () => {
           if (view) {
-            const current = markdownSerializer.serialize(view.state.doc);
+            const current = serializeAccepted();
             pendingLocalSaveNormalized = normalizeMarkdownForCompare(current);
           }
           if (onSave) onSave();
@@ -485,7 +538,8 @@
 
   export function getMarkdown(): string {
     if (!view) return markdown;
-    return markdownSerializer.serialize(view.state.doc);
+    // Accepted content only — pending suggestions are excluded from the file.
+    return serializeAccepted();
   }
 
   export function hasUnsavedChanges(): boolean {
@@ -516,7 +570,7 @@
 
   export function commitSaved(): void {
     if (!view) return;
-    lastMarkdown = markdownSerializer.serialize(view.state.doc);
+    lastMarkdown = serializeAccepted();
     setDirty(false);
   }
 
@@ -557,9 +611,27 @@
         },
         dispatchTransaction(tr) {
           if (!view) return;
-          const nextState = view.state.apply(tr);
+          // Inline suggesting: when enabled (reviewers), convert a local user
+          // edit into tracked-change marks instead of mutating the doc. Mirrors
+          // the library's `withSuggestChanges` guard — never re-suggest remote
+          // collab steps (`collab$`), undo/redo (`history$`), or the library's
+          // own apply/revert transactions (`skip`).
+          let applied = tr;
+          if (
+            tr.docChanged
+            && isSuggestChangesEnabled(view.state)
+            && !tr.getMeta('history$')
+            && !tr.getMeta('collab$')
+            && !('skip' in (tr.getMeta(suggestChangesKey) ?? {}))
+          ) {
+            // Only doc-changing edits become suggestions; selection/meta-only
+            // transactions (e.g. setting the comment anchor) pass through, so
+            // they don't get rewritten and lose their selection.
+            applied = transformToSuggestionTransaction(tr, view.state, generateSuggestionId);
+          }
+          const nextState = view.state.apply(applied);
           view.updateState(nextState);
-          if (tr.docChanged && editable) {
+          if (applied.docChanged && editable) {
             setDirty(true);
           }
         },
@@ -570,12 +642,29 @@
       if (onReady && view) {
         onReady(view);
       }
+      viewReady = true;
     });
 
     return () => {
+      viewReady = false;
       view?.destroy();
       view = undefined;
     };
+  });
+
+  // Sync suggesting mode with the `suggesting` prop: reviewers suggest (tracked
+  // changes), the owner edits directly. Re-runs when the role resolves (the
+  // prop flips) or after a remount (`viewReady`).
+  $effect(() => {
+    const want = suggesting;
+    if (!viewReady || !view) return;
+    const enabled = isSuggestChangesEnabled(view.state);
+    const dispatch = (tr: import('prosemirror-state').Transaction) => view?.dispatch(tr);
+    if (want && !enabled) {
+      enableSuggestChanges(view.state, dispatch);
+    } else if (!want && enabled) {
+      disableSuggestChanges(view.state, dispatch);
+    }
   });
 
   // React to markdown prop changes (from outside, e.g. file watcher updates)
@@ -596,7 +685,7 @@
     }
     // Preserve undo history/cursor when incoming text is effectively the same
     // content we already have in the editor (common after save/watcher round-trip).
-    const currentMarkdown = markdownSerializer.serialize(view.state.doc);
+    const currentMarkdown = serializeAccepted();
     if (normalizeMarkdownForCompare(currentMarkdown) === normalizedIncoming) {
       lastMarkdown = markdown;
       setDirty(false);

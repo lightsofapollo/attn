@@ -72,6 +72,9 @@ wait_ready attn_owner 'h1' 25000 || { log "owner never rendered"; exit 1; }
 wait_ready attn_rv    'h1' 25000 || { log "rv never rendered"; exit 1; }
 
 log "Owner shares (Cmd+Shift+S)"
+# Pre-set the display name so the onboarding prompt (which intercepts the first
+# share) doesn't block this co-typing test — onboarding is covered elsewhere.
+attn_owner --eval "window.__attn_user_profile__ && window.__attn_user_profile__.save('Owner');'x'" >/dev/null 2>&1 || true
 attn_owner --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1 || true
 wait_ready attn_owner '[data-slot=share-invite-url]' 20000 || { log "no invite field"; exit 1; }
 INVITE=""; deadline=$(( $(date +%s) + 15 ))
@@ -82,6 +85,9 @@ done
 case "$INVITE" in attn://review/*) ok "owner minted invite";; *) bad "no invite ('$INVITE')"; exit 1;; esac
 
 log "Reviewer joins (review_join IPC)"
+# Pre-set the reviewer's name too so the post-join onboarding prompt doesn't
+# overlay the editor during the co-typing/suggesting assertions below.
+attn_rv --eval "window.__attn_user_profile__ && window.__attn_user_profile__.save('Reviewer');'x'" >/dev/null 2>&1 || true
 attn_rv --eval "window.ipc && window.ipc.postMessage(JSON.stringify({type:'review_join',invite:'$INVITE'}));'x'" >/dev/null 2>&1 && ok "reviewer join dispatched" || bad "reviewer join failed"
 
 # Presence converges (each sees 1 peer).
@@ -98,27 +104,17 @@ log "Waiting for the WebRTC DataChannel (badge → live_direct)"
 if poll 40000 owner_live; then ok "owner badge = live_direct (DataChannel up)"; else bad "owner badge = '$(badge_state attn_owner)' (expected live_direct)"; fi
 if poll 10000 rv_live;    then ok "reviewer badge = live_direct";            else bad "reviewer badge = '$(badge_state attn_rv)' (expected live_direct)"; fi
 
-# Co-typing over the DataChannel. With one connected peer, send_collab routes
-# steps over the channel and SKIPS the relay (see manager::send_collab) — so if
-# edits propagate while the badge is live_direct, the DataChannel is carrying
-# the live data plane, exactly the cost goal.
 pm_text() { "$1" --eval "window.__attnPmView ? window.__attnPmView.state.doc.textContent : ''" 2>/dev/null | tr -d '"'; }
 pm_ready() { [ -n "$("$1" --eval "window.__attnPmView ? 'y' : ''" 2>/dev/null | tr -d '"')" ]; }
-pm_insert() { "$1" --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';v.focus();v.dispatch(v.state.tr.insertText('$2',1));return 'ok';})()" >/dev/null 2>&1; }
-text_has() { pm_text "$1" | grep -q "$2"; }
-log "Co-typing over the DataChannel (relay skipped when peers==1 + connected)"
-poll 20000 pm_ready attn_owner && poll 20000 pm_ready attn_rv && ok "editors live" || bad "editors not live"
-pm_insert attn_owner 'OWNERDC'
-if poll 20000 text_has attn_rv 'OWNERDC'; then ok "owner edit reached reviewer over the DataChannel"; else bad "owner edit never reached reviewer"; fi
-pm_insert attn_rv 'RVDC'
-if poll 20000 text_has attn_owner 'RVDC'; then ok "reviewer edit reached owner over the DataChannel"; else bad "reviewer edit never reached owner"; fi
 
 # Review EVENTS (not just collab steps) over the DataChannel must reach the
-# receiver's UI. Regression guard for the bug where webrtc inbound events were
-# persisted to events.jsonl but dropped from the frontend (forward_transport_event
-# no-op'd TransportEvent::Envelope). The reviewer comments; the owner's DOM must
-# show it — proving the P2P hot path carries review events AND renders them.
+# receiver's UI — regression guard for webrtc inbound events being persisted but
+# dropped from the frontend. Run BEFORE co-typing, on the stable seed doc:
+# commenting interacts with live co-typing + suggestion marks (Phase 2,
+# attn-07i.2); this guard is purely about event delivery + render over the P2P
+# channel.
 log "Review comment over the DataChannel renders on the owner UI"
+poll 20000 pm_ready attn_owner && poll 20000 pm_ready attn_rv || bad "editors not live for comment"
 MARK="DCWEBRTC$$"
 composer_ready() { [ -n "$(attn_rv --eval "document.querySelector('.comment-composer textarea')?'y':''" 2>/dev/null | tr -d '"')" ]; }
 owner_has_comment() { [ -n "$(attn_owner --eval "document.body.textContent.includes('$MARK')?'y':''" 2>/dev/null | tr -d '"')" ]; }
@@ -131,10 +127,33 @@ if poll 8000 composer_ready; then
 else
   bad "reviewer comment composer did not open"
 fi
-# NOTE: a suggestion-over-DataChannel UI guard belongs here too, but the
-# suggestion composer only opens while the reviewer is VIEWING THE SNAPSHOT,
-# and this harness boots the reviewer on a local file for co-typing. The
-# snapshot-viewing path is exercised by scripts/capture-collab-screenshots.sh.
+
+# Co-typing over the DataChannel. With one connected peer, send_collab routes
+# steps over the channel and SKIPS the relay (see manager::send_collab) — so if
+# edits propagate while the badge is live_direct, the DataChannel is carrying
+# the live data plane, exactly the cost goal.
+pm_insert() { "$1" --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';v.focus();v.dispatch(v.state.tr.insertText('$2',1));return 'ok';})()" >/dev/null 2>&1; }
+text_has() { pm_text "$1" | grep -q "$2"; }
+log "Co-typing over the DataChannel (relay skipped when peers==1 + connected)"
+poll 20000 pm_ready attn_owner && poll 20000 pm_ready attn_rv && ok "editors live" || bad "editors not live"
+pm_insert attn_owner 'OWNERDC'
+if poll 20000 text_has attn_rv 'OWNERDC'; then ok "owner edit reached reviewer over the DataChannel"; else bad "owner edit never reached reviewer"; fi
+pm_insert attn_rv 'RVDC'
+if poll 20000 text_has attn_owner 'RVDC'; then ok "reviewer edit reached owner over the DataChannel"; else bad "reviewer edit never reached owner"; fi
+
+# Inline suggesting mode (attn-07i.2): the reviewer suggests, the owner edits
+# directly. The reviewer's 'RVDC' must arrive on the owner as a tracked
+# SUGGESTION (insertion mark), not a raw edit.
+owner_rvdc_is_suggestion() {
+  [ "$(attn_owner --eval "(function(){var v=window.__attnPmView;if(!v)return '';var f='';v.state.doc.descendants(function(n){if(n.isText&&n.text&&n.text.indexOf('RVDC')>=0&&n.marks.some(function(m){return m.type.name==='insertion'}))f='y';});return f})()" 2>/dev/null | tr -d '"')" = "y" ]
+}
+if poll 12000 owner_rvdc_is_suggestion; then ok "suggesting: reviewer edit arrives as a tracked suggestion (insertion mark) on owner"; else bad "suggesting: reviewer edit was NOT a suggestion on owner"; fi
+
+# The owner's file holds ACCEPTED content only: the owner's own direct edit is
+# saved, the reviewer's pending suggestion is NOT (it must not modify the file).
+log "Suggesting: owner file = accepted content only"
+file_accepted_only() { grep -q 'OWNERDC' "$SHARED_DOC" && ! grep -q 'RVDC' "$SHARED_DOC"; }
+if poll 12000 file_accepted_only; then ok "suggesting: owner file has the owner's edit, NOT the reviewer's pending suggestion"; else bad "suggesting: file wrong (OWNERDC=$(grep -c OWNERDC "$SHARED_DOC" 2>/dev/null) RVDC=$(grep -c RVDC "$SHARED_DOC" 2>/dev/null))"; fi
 
 echo ""; log "Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

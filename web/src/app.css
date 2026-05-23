@@ -990,3 +990,30 @@
   user-select: none;
   /* background-color set inline per participant */
 }
+
+/* Inline suggesting mode (track changes, attn-07i.2). Reviewer suggestions
+   render as colored, attributed inline marks: green insertions, red
+   strikethrough deletions. The owner accepts/rejects; the file stays clean. */
+.ProseMirror ins[data-id] {
+  text-decoration: none;
+  color: #15803d;
+  background: rgba(34, 197, 94, 0.16);
+  border-radius: 2px;
+  box-decoration-break: clone;
+}
+.ProseMirror del[data-id] {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.13);
+  border-radius: 2px;
+  box-decoration-break: clone;
+}
+:root.dark .ProseMirror ins[data-id] {
+  color: #4ade80;
+  background: rgba(34, 197, 94, 0.18);
+}
+:root.dark .ProseMirror del[data-id] {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.16);
+}

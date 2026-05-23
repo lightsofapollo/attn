@@ -841,6 +841,13 @@ impl ReviewManager {
     ) {
         match result {
             Ok(outcome) => {
+                // attn-woc: also push the event over the live WebRTC mesh for
+                // low-latency delivery to connected peers. The durable relay
+                // path already ran in `send_event_sync` (outbox), which also
+                // covers un-meshed peers; receivers dedup by EventId so the
+                // double-delivery (mesh + relay) is harmless. This gives review
+                // events the same WebRTC-primary delivery as collab steps.
+                self.fan_envelope_over_mesh(&room_id, &outcome.envelope);
                 (self.update_tx)(ReviewUpdate::EventImported {
                     room_id,
                     event: outcome.event,
@@ -851,6 +858,43 @@ impl ReviewManager {
                     room_id: None,
                     code: error_code(&err),
                     message: err.to_string(),
+                });
+            }
+        }
+    }
+
+    /// Send an already-assembled envelope over every *connected* WebRTC
+    /// DataChannel for `room_id` (attn-woc). Used for review events on top of
+    /// their durable relay/outbox path — connected peers get it with mesh
+    /// latency; the relay still covers un-meshed peers; receivers dedup by
+    /// EventId. No-op when nothing is connected.
+    fn fan_envelope_over_mesh(
+        &self,
+        room_id: &RoomId,
+        envelope: &crate::review::model::MailboxEnvelope,
+    ) {
+        use crate::review::transport::webrtc::WebRtcConnectionState;
+        let channels: Vec<Arc<crate::review::transport::webrtc::WebRtcTransport>> = self
+            .live_webrtc
+            .lock()
+            .ok()
+            .map(|map| {
+                map.get(room_id)
+                    .map(|live| {
+                        live.transports
+                            .values()
+                            .filter(|t| matches!(t.state(), WebRtcConnectionState::Connected))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        if let Some(runtime) = self.runtime.as_ref() {
+            for transport in channels {
+                let env = envelope.clone();
+                runtime.spawn(async move {
+                    let _ = transport.send_envelope(env).await;
                 });
             }
         }

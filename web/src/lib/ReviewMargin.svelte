@@ -156,9 +156,14 @@
   const resolvedThreads: Thread[] = $derived(threads.filter((t) => t.resolved));
 
   // Orphan-tray threads — ambiguous + stale + low-confidence remapped that
-  // currently exist as threads in the active file.
+  // currently exist as threads in the active file. Excludes resolved (mirrors
+  // anchoredThreads): without `!t.resolved`, resolving an orphan-tray comment
+  // left it stuck in the tray with Reply/Resolve disabled (pendingDismiss), so
+  // it could never be dismissed.
   const orphanThreads: Thread[] = $derived(
-    threads.filter((t) => orphanThreadIds.has(t.rootEvent.meta.eventId)),
+    threads.filter(
+      (t) => !t.resolved && orphanThreadIds.has(t.rootEvent.meta.eventId),
+    ),
   );
 
   // ---------------------------------------------------------------------------
@@ -517,12 +522,9 @@
   // ---------------------------------------------------------------------------
 
   function authorNameFor(t: Thread): string {
-    // The Participant roster lives on the connection status. For now we
-    // fall back to the raw participantId (matches ReviewApplyExpand which
-    // does the same when no displayName has been pushed).
-    const auth = t.rootEvent.meta.authorId;
-    const peer = reviewStore.peers.find((p) => p.participantId === auth);
-    return peer?.displayName ?? auth;
+    // Prefer the real display name from the author's ParticipantJoined event
+    // (presence only carries the kind label); falls back to presence, then id.
+    return reviewStore.displayNameFor(t.rootEvent.meta.authorId);
   }
 
   function kindFor(t: Thread): 'comment' | 'suggestion' {

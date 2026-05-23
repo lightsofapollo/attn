@@ -406,7 +406,9 @@
       initialDoc: view.state.doc,
       send: (payload) => reviewCollabSend(roomId, payload),
       selfClientId: collabClientId,
-      selfLabel: isOwner ? 'Owner' : 'Reviewer',
+      // Caret label is the user's chosen/resolved display name (falls back to
+      // the kind only if somehow empty), so peers see a real name not "Reviewer".
+      selfLabel: userProfile.effectiveName || (isOwner ? 'Owner' : 'Reviewer'),
       // Caret colors mirror the presence chips: owner warm, reviewer cool.
       selfColor: isOwner ? '#d97706' : '#2563eb',
       getLocation: currentCollabLocation,

@@ -287,8 +287,7 @@
 
   /** Display name for a reply's author, mirroring ReviewMargin's resolver. */
   function replyAuthor(participantId: string): string {
-    const peer = reviewStore.peers.find((p) => p.participantId === participantId);
-    return peer?.displayName ?? participantId;
+    return reviewStore.displayNameFor(participantId);
   }
 
   /** A reply's body text (replies are always CommentCreated events). */
@@ -301,6 +300,10 @@
   }
 
   function handleKeydown(e: KeyboardEvent): void {
+    // Only the card itself activates on Enter/Space. Ignore keydowns bubbling
+    // up from child controls (e.g. the reply textarea) — otherwise this
+    // swallowed the space bar and you couldn't type spaces in a reply.
+    if (e.target !== e.currentTarget) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       onActivate();

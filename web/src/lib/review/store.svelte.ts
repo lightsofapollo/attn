@@ -306,6 +306,35 @@ export class ReviewStore {
   });
 
   /**
+   * participantId → human display name, harvested from imported
+   * `ParticipantJoined` events. This is the authoritative name source: relay
+   * presence frames only carry the kind label ("Reviewer"/"Agent"), so comment
+   * authors and carets must resolve here first to show the real name.
+   */
+  participantNames: Record<string, string> = $derived.by(() => {
+    const names: Record<string, string> = {};
+    for (const ev of this.events) {
+      if (ev.body.type === 'participant_joined') {
+        const p = ev.body.participant;
+        const name = p.displayName?.trim();
+        if (name) names[p.participantId] = name;
+      }
+    }
+    return names;
+  });
+
+  /**
+   * Best display name for a participant id: the real name from a
+   * `ParticipantJoined` event, then the presence roster label, then the raw id.
+   */
+  displayNameFor(participantId: string): string {
+    const fromEvents = this.participantNames[participantId];
+    if (fromEvents) return fromEvents;
+    const peer = this.peers.find((p) => p.participantId === participantId);
+    return peer?.displayName ?? participantId;
+  }
+
+  /**
    * Peer roster with the owner chip's role corrected from the snapshot
    * author. The Rust presence forwarder can't always tag the owner (it
    * derives from the unreliable local room record), so we promote the

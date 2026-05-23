@@ -127,6 +127,14 @@ if poll 10000 sh -c "grep -rqa 'Riley Reviewer' '$OWNER_HOME/reviews' 2>/dev/nul
 # rune collided with the `state` prop in ReviewMarginCard and threw on render).
 if poll 12000 has rv '[data-testid=review-margin-card]'; then ok "attn-cqk: reviewer sees the margin card (rail auto-opened; Reply/Resolve visible)"; else bad "attn-cqk: reviewer margin never mounts after comment"; fi
 
+# onboarding render: the card author shows the real display name (resolved from
+# the ParticipantJoined event), not the kind label "Reviewer" or the raw id.
+rvauthor=$(rv --eval "document.querySelector('[data-testid=review-margin-card] .rmc-author')?.textContent||''" 2>/dev/null | tr -d '"')
+case "$rvauthor" in
+  *"Riley Reviewer"*) ok "names: margin card renders the display name ('$rvauthor')";;
+  *) bad "names: card author is not the display name (got '$rvauthor')";;
+esac
+
 # attn-1rm — reply via the real IPC the button sends; verify grouping on owner.
 log "reviewer replies ($REPLY)"
 rv --eval "(function(){var s=window.__attn_review_store__;var t=s.threadsForCurrentFile[0];if(!t||t.rootEvent.body.type!=='comment_created')return 'no-thread';window.ipc.postMessage(JSON.stringify({type:'review_create_comment',roomId:s.currentRoomId,anchor:t.rootEvent.body.anchor,body:'$REPLY',parentThreadId:t.id}));return 'sent'})()" >/dev/null 2>&1

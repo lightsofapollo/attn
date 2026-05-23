@@ -125,5 +125,19 @@ rv --eval "(function(){var s=window.__attn_review_store__;var t=s.threadsForCurr
 owner_resolved(){ grep -rqa '"type":"comment_resolved"' "$OWNER_HOME/reviews" 2>/dev/null; }
 if poll 20000 owner_resolved; then ok "attn-zhr: CommentResolved imported by owner"; else bad "attn-zhr: no comment_resolved event"; fi
 
+# attn-tqq — explicit leave + switch controls.
+log "attn-tqq: room controls (switch list + leave)"
+# The ReviewBar dropdown (switch list + "Leave current room") is wired:
+# handleLeaveRoom -> reviewStore.leaveRoom (forgetRoom) + onLeaveRoom -> reviewStop.
+# bits-ui opens on real pointer events (not synthetic --click), so we verify the
+# switcher RENDERS and drive leave via the exact IPC the button sends
+# (review_stop). The daemon Stop emits "Stopped" -> forgetRoom -> back to local.
+if poll 6000 has rv '.room-menu-trigger'; then ok "attn-tqq: room switcher present (ReviewBar dropdown lists rooms)"; else bad "attn-tqq: no room switcher"; fi
+rv --eval "window.ipc.postMessage(JSON.stringify({type:'review_stop',roomId:window.__attn_review_store__.currentRoomId}));'sent'" >/dev/null 2>&1
+# Authoritative "left the room" signal: currentRoomId cleared (the shared-doc
+# banner follows reactively). Allow time for the daemon's transport teardown.
+room_cleared(){ [ "$(rv --eval "String(window.__attn_review_store__.currentRoomId)" 2>/dev/null | tr -d '"')" = "null" ]; }
+if poll 25000 room_cleared; then ok "attn-tqq: leave (review_stop) returns reviewer to local — current room cleared"; else bad "attn-tqq: leave did not clear the room (room=$(rv --eval "String(window.__attn_review_store__.currentRoomId)" 2>/dev/null))"; fi
+
 echo; log "Result: $PASS passed, $FAIL failed, $PEND pend"
 [ "$FAIL" -eq 0 ]

@@ -107,16 +107,22 @@ ctr_ip(){ docker inspect -f "{{.NetworkSettings.Networks.${NET}.IPAddress}}" "to
 
 # Block ALL traffic between the two sibling agents (both directions), leaving
 # the host relay reachable. Models "no peer-to-peer path; relay only".
+# Faithful no-TURN / symmetric-NAT model: block ALL UDP in every agent, both
+# directions. WebRTC ICE, DTLS, and the SCTP DataChannel all ride UDP, so this
+# guarantees no direct peer-to-peer channel can form — and with no TURN there
+# is no UDP relay to fall back on. The Cloudflare relay is reached over TCP
+# (WS signaling + HTTP outbox), which UDP-drop leaves untouched, so collab +
+# comments must survive over the relay alone. (An earlier version dropped only
+# inter-container IPs; ICE found a path around it and the mesh still formed —
+# blocking the whole UDP transport is unambiguous and path-independent.)
 partition_agents(){
-  log "PARTITION: dropping all inter-agent traffic (peers can't reach each other)"
-  local -A ip
-  for a in "${AGENTS[@]}"; do ip[$a]="$(ctr_ip "$a")"; done
+  log "PARTITION: blocking ALL UDP in every agent (no ICE/DTLS/DataChannel; relay TCP only)"
   for a in "${AGENTS[@]}"; do
-    for b in "${AGENTS[@]}"; do
-      [ "$a" = "$b" ] && continue
-      docker exec "topo-$a" iptables -A INPUT  -s "${ip[$b]}" -j DROP 2>/dev/null || true
-      docker exec "topo-$a" iptables -A OUTPUT -d "${ip[$b]}" -j DROP 2>/dev/null || true
-    done
+    docker exec "topo-$a" sh -c 'iptables -A INPUT -p udp -j DROP && iptables -A OUTPUT -p udp -j DROP' \
+      || { err "[$a] failed to install UDP-drop rules — partition not faithful"; return 1; }
+    # Verify the rules are actually present (a silent miss invalidates the test).
+    docker exec "topo-$a" iptables -S 2>/dev/null | grep -q -- '-p udp -j DROP' \
+      || { err "[$a] UDP-drop rules absent after install"; return 1; }
   done
 }
 
@@ -166,11 +172,30 @@ run_scenario(){ # topology(baseline|partition)
     done
   done
 
+  # Under partition the data MUST have ridden the relay, not a DataChannel.
+  # Prove the mesh never formed: `live_direct` is the connection state an agent
+  # emits the moment a WebRTC channel connects. If we see it, the UDP block
+  # leaked and "relay-only" wasn't actually exercised — so the partition pass is
+  # meaningless and the scenario fails regardless of convergence.
+  local mesh_ok=1
+  if [ "$topo" = "partition" ]; then
+    local meshed=0
+    for a in "${AGENTS[@]}"; do
+      grep -q '"connection":"live_direct"' "$SDIR/out_$a" 2>/dev/null && meshed=1
+    done
+    if [ "$meshed" = 0 ]; then
+      echo "  PASS [partition] mesh never formed (no live_direct) — relay carried comment+collab"
+    else
+      echo "  FAIL [partition] a DataChannel formed (live_direct seen) — UDP block leaked; relay-only NOT proven"
+      mesh_ok=0
+    fi
+  fi
+
   # Teardown this scenario's containers/network before the next.
   for a in "${AGENTS[@]}"; do docker rm -f "topo-$a" >/dev/null 2>&1 || true; done
   docker network rm "$NET" >/dev/null 2>&1 || true
   echo "RESULT[$topo]: $pass/$total"
-  [ "$pass" = "$total" ]
+  [ "$pass" = "$total" ] && [ "$mesh_ok" = 1 ]
 }
 
 mkdir -p "$WORK"
@@ -186,12 +211,14 @@ echo "================ SUMMARY ================"
 echo "baseline (full connectivity) : $([ $base_ok = 1 ] && echo PASS || echo FAIL)"
 echo "partition (no peer-to-peer)  : $([ $part_ok = 1 ] && echo PASS || echo FAIL)"
 if [ $base_ok = 1 ] && [ $part_ok = 0 ]; then
-  echo ">> BUG REPRODUCED: converges with direct connectivity, DROPS when peers"
-  echo "   can only reach the relay (no-TURN symmetric-NAT). Fix: attn-7qv."
+  echo ">> BUG REPRODUCED (attn-7qv): converges over the WebRTC mesh, but DROPS"
+  echo "   when ALL UDP is blocked and peers can only reach the relay (the"
+  echo "   no-TURN symmetric-NAT case). The per-peer relay fallback is incomplete."
   exit 1
 elif [ $base_ok = 1 ] && [ $part_ok = 1 ]; then
-  echo ">> Both topologies converge — relay fallback is robust (fix landed, or"
-  echo "   the drop needs a different fault profile)."
+  echo ">> attn-7qv VALIDATED: baseline converges WebRTC-primary; under a faithful"
+  echo "   UDP blackout the mesh never forms (no live_direct) yet comment+collab"
+  echo "   still converge via the relay alone. No-TURN fallback works."
   exit 0
 else
   echo ">> Baseline itself failed — harness/relay/image issue, not the bug."

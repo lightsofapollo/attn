@@ -220,6 +220,7 @@ fn run_scenario(relay_url: &str, mode: &str) -> (bool, bool) {
         room_id: room_id.clone(),
         anchor: placeholder_anchor(),
         body: marker.to_string(),
+        parent_thread_id: None,
     });
     assert!(
         rvb.saw_comment(marker),

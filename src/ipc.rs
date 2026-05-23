@@ -86,6 +86,10 @@ pub enum IpcMessage {
         room_id: RoomId,
         anchor: Anchor,
         body: String,
+        /// Present when this comment is a reply joining an existing thread
+        /// (attn-1rm); absent/null opens a new thread.
+        #[serde(default)]
+        parent_thread_id: Option<String>,
     },
 
     #[serde(rename = "review_create_suggestion", rename_all = "camelCase")]
@@ -113,6 +117,12 @@ pub enum IpcMessage {
         room_id: RoomId,
         event_id: EventId,
         range: PositionAnchor,
+    },
+
+    #[serde(rename = "review_resolve_comment", rename_all = "camelCase")]
+    ReviewResolveComment {
+        room_id: RoomId,
+        thread_id: String,
     },
 
     #[serde(rename = "review_stop", rename_all = "camelCase")]
@@ -324,6 +334,7 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 room_id,
                 anchor,
                 body,
+                parent_thread_id,
             } => {
                 submit_review_command(
                     state,
@@ -331,6 +342,7 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                         room_id,
                         anchor,
                         body,
+                        parent_thread_id,
                     },
                 );
             }
@@ -376,6 +388,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                         range,
                     },
                 );
+            }
+            IpcMessage::ReviewResolveComment { room_id, thread_id } => {
+                submit_review_command(state, ReviewCommand::ResolveComment { room_id, thread_id });
             }
             IpcMessage::ReviewStop { room_id } => {
                 submit_review_command(state, ReviewCommand::Stop { room_id });
@@ -721,6 +736,42 @@ mod tests {
     }
 
     #[test]
+    fn ipc_message_review_create_comment_parses_reply_and_root() {
+        // Reply: carries parentThreadId.
+        let reply = r#"{"type":"review_create_comment","roomId":"room-abc","anchor":{"v":2,"fileId":"f1","snapshotId":"s1","baseHash":"h1","position":{"byteRange":[0,3],"lineRange":[1,1]}},"body":"agreed","parentThreadId":"thread-1"}"#;
+        let msg: IpcMessage = serde_json::from_str(reply).expect("parse reply comment");
+        match msg {
+            IpcMessage::ReviewCreateComment {
+                parent_thread_id, ..
+            } => assert_eq!(parent_thread_id.as_deref(), Some("thread-1")),
+            other => panic!("expected ReviewCreateComment, got {other:?}"),
+        }
+        // Root comment: no parentThreadId → None (serde default), so old
+        // payloads keep parsing.
+        let root = r#"{"type":"review_create_comment","roomId":"room-abc","anchor":{"v":2,"fileId":"f1","snapshotId":"s1","baseHash":"h1","position":{"byteRange":[0,3],"lineRange":[1,1]}},"body":"hi"}"#;
+        let msg: IpcMessage = serde_json::from_str(root).expect("parse root comment");
+        match msg {
+            IpcMessage::ReviewCreateComment {
+                parent_thread_id, ..
+            } => assert!(parent_thread_id.is_none()),
+            other => panic!("expected ReviewCreateComment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ipc_message_review_resolve_comment_parses_camel_case_payload() {
+        let raw = r#"{"type":"review_resolve_comment","roomId":"room-abc","threadId":"thread-1"}"#;
+        let msg: IpcMessage = serde_json::from_str(raw).expect("parse review_resolve_comment");
+        match msg {
+            IpcMessage::ReviewResolveComment { room_id, thread_id } => {
+                assert_eq!(room_id.as_str(), "room-abc");
+                assert_eq!(thread_id, "thread-1");
+            }
+            other => panic!("expected ReviewResolveComment, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ipc_message_review_stop_parses_optional_room() {
         let raw = r#"{"type":"review_stop","roomId":"room-abc"}"#;
         let msg: IpcMessage = serde_json::from_str(raw).expect("parse review_stop");
@@ -801,10 +852,12 @@ mod tests {
                 room_id,
                 anchor,
                 body,
+                parent_thread_id,
             } => ReviewCommand::CreateComment {
                 room_id,
                 anchor,
                 body,
+                parent_thread_id,
             },
             IpcMessage::ReviewCreateSuggestion { room_id, draft } => {
                 ReviewCommand::CreateSuggestion { room_id, draft }
@@ -834,6 +887,9 @@ mod tests {
                 event_id,
                 range,
             },
+            IpcMessage::ReviewResolveComment { room_id, thread_id } => {
+                ReviewCommand::ResolveComment { room_id, thread_id }
+            }
             IpcMessage::ReviewStop { room_id } => ReviewCommand::Stop { room_id },
             other => panic!("not a review IpcMessage: {other:?}"),
         };

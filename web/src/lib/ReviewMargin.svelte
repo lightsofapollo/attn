@@ -41,6 +41,7 @@
   } from './review/margin-layout';
   import { anchorTopY, hasTextSelection } from './review/popover-anchor';
   import { reviewStore } from './review/store.svelte';
+  import { reviewResolveComment, reviewCreateComment } from './ipc';
   import type {
     EventId,
     PositionAnchor,
@@ -320,15 +321,31 @@
   );
 
   // ---------------------------------------------------------------------------
-  // Local UI state — pending reject/resolve until we have IPC for them
+  // Resolve a comment thread (attn-zhr). Mints a durable `CommentResolved`
+  // event via the daemon; `reconstructThreads` flips `thread.resolved` off it
+  // once the event round-trips, collapsing the card to its resolved strip. We
+  // also dim the card optimistically (`pendingDismiss`) so the click feels
+  // instant before the echo lands.
   // ---------------------------------------------------------------------------
 
   const locallyDismissed: Set<string> = $state(new Set());
 
-  function dismissLocally(threadId: string): void {
-    // SvelteKit's `$state(new Set(...))` returns a reactive Set. Mutating it
-    // triggers reactivity; we don't need to reassign.
+  function resolveThread(threadId: string): void {
+    const roomId = reviewStore.currentRoomId;
+    if (!roomId) return;
+    // `$state(new Set(...))` is reactive — mutating triggers reactivity.
     locallyDismissed.add(threadId);
+    void reviewResolveComment(roomId, threadId);
+  }
+
+  // Post a reply (attn-1rm): a CommentCreated carrying the thread's existing id
+  // and the root comment's anchor, so reconstructThreads groups it as a reply.
+  function replyToThread(thread: Thread, body: string): void {
+    const roomId = reviewStore.currentRoomId;
+    if (!roomId) return;
+    const root = thread.rootEvent.body;
+    if (root.type !== 'comment_created') return; // replies only on comment threads
+    void reviewCreateComment(roomId, root.anchor, body, thread.id);
   }
 
   // ---------------------------------------------------------------------------
@@ -570,7 +587,8 @@
               quotePreview={quotePreviewFor(t)}
               onActivate={() => activateThread(t)}
               onReject={() => dismissLocally(t.id)}
-              onResolve={() => dismissLocally(t.id)}
+              onResolve={() => resolveThread(t.id)}
+              onReply={(body) => replyToThread(t, body)}
               pendingDismiss={locallyDismissed.has(t.id)}
               onRequestReanchor={() => handleRequestReanchor(t.rootEvent.meta.eventId)}
               onDiscardStale={() => handleDiscardStale(t.rootEvent.meta.eventId)}
@@ -622,7 +640,8 @@
           quotePreview={quotePreviewFor(t)}
           onActivate={() => activateThread(t)}
           onReject={() => dismissLocally(t.id)}
-          onResolve={() => dismissLocally(t.id)}
+          onResolve={() => resolveThread(t.id)}
+              onReply={(body) => replyToThread(t, body)}
           pendingDismiss={locallyDismissed.has(t.id)}
         />
       </div>

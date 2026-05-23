@@ -99,8 +99,17 @@ export function reviewCreateComment(
   roomId: RoomId,
   anchor: Anchor,
   body: string,
+  parentThreadId?: string,
 ): Promise<void> {
-  send({ type: 'review_create_comment', roomId, anchor, body });
+  // `parentThreadId` joins an existing thread as a reply (attn-1rm); omit it to
+  // open a new thread. The reply reuses the root comment's anchor.
+  send({
+    type: 'review_create_comment',
+    roomId,
+    anchor,
+    body,
+    ...(parentThreadId !== undefined ? { parentThreadId } : {}),
+  });
   return Promise.resolve();
 }
 
@@ -146,6 +155,16 @@ export function reviewResolveAnchor(
   range: PositionAnchor,
 ): Promise<void> {
   send({ type: 'review_resolve_anchor', roomId, eventId, range });
+  return Promise.resolve();
+}
+
+/**
+ * Mark a comment thread resolved. The daemon mints a `CommentResolved` event
+ * that propagates to peers; `reconstructThreads` flips the thread's `resolved`
+ * flag off it, collapsing the card to its resolved strip.
+ */
+export function reviewResolveComment(roomId: RoomId, threadId: string): Promise<void> {
+  send({ type: 'review_resolve_comment', roomId, threadId });
   return Promise.resolve();
 }
 

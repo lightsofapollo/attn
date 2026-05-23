@@ -12,6 +12,40 @@ export function shouldForgetRoomStatus(status: string | undefined): boolean {
   return status === 'Stopped';
 }
 
+export type CollabRole = 'owner' | 'reviewer';
+export type RoomRole = 'owner' | 'reviewer' | 'unknown' | undefined;
+
+/**
+ * Should this window render the shared document (reviewer view) rather than
+ * the local file (owner view)?
+ *
+ * Gated on a POSITIVE reviewer role, not merely "no local share". The daemon
+ * reports the owner's room as `Live` → role `owner` and a joiner's as `Joined`
+ * → role `reviewer`. `hasLocalShare` is only true right after a fresh
+ * `ShareReady` and is lost on reconnect/rehydrate, so an owner returning to a
+ * remembered room has `hasLocalShare === false` yet `role === 'owner'` —
+ * gating on `hasLocalShare` alone flipped them into the shared-doc view
+ * (attn-0wa). Requiring `role === 'reviewer'` is a strict tightening: an owner
+ * (role `owner`/`unknown`) never flips; a real reviewer still does.
+ */
+export function isReviewerView(params: {
+  inRoom: boolean;
+  hasLocalShare: boolean;
+  role: RoomRole;
+}): boolean {
+  return params.inRoom && !params.hasLocalShare && params.role === 'reviewer';
+}
+
+/**
+ * The window's collaboration role: `owner` iff we minted the share this
+ * session (`hasLocalShare`) OR the daemon reports our durable role as `owner`.
+ * Everything else (including the brief `unknown` window before the first
+ * status arrives) is `reviewer`.
+ */
+export function collabRoleFor(params: { hasLocalShare: boolean; role: RoomRole }): CollabRole {
+  return params.hasLocalShare || params.role === 'owner' ? 'owner' : 'reviewer';
+}
+
 export function shouldAutoSelectOnlyRoom(params: {
   hasActiveTab: boolean;
   currentRoomId: RoomId | null;

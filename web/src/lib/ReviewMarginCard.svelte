@@ -51,8 +51,11 @@
     onActivate: () => void;
     /** Reject handler — UI-only until reject IPC exists (TODO 4.x). */
     onReject?: () => void;
-    /** Resolve handler — UI-only until resolve-comment IPC exists. */
+    /** Resolve handler — mints a CommentResolved event (attn-zhr). */
     onResolve?: () => void;
+    /** Post a reply to this thread (attn-1rm). Parent wires it to
+     *  reviewCreateComment with the root anchor + this thread id. */
+    onReply?: (body: string) => void;
     /** Locally-set marker — true after the user clicked reject/resolve and
      *  the IPC is not yet acknowledged (or doesn't exist yet). */
     pendingDismiss?: boolean;
@@ -88,6 +91,7 @@
     onActivate,
     onReject,
     onResolve,
+    onReply,
     pendingDismiss = false,
     onCandidatePicked,
     onRequestReanchor,
@@ -250,6 +254,48 @@
     if (onResolve) onResolve();
   }
 
+  // --- Replies (attn-1rm) -----------------------------------------------------
+  let replying = $state(false);
+  let replyBody = $state('');
+
+  function toggleReply(e: MouseEvent): void {
+    e.stopPropagation();
+    replying = !replying;
+    if (!replying) replyBody = '';
+  }
+
+  function submitReply(): void {
+    const trimmed = replyBody.trim();
+    if (trimmed.length === 0 || !onReply) return;
+    onReply(trimmed);
+    replyBody = '';
+    replying = false;
+  }
+
+  function handleReplyKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      replying = false;
+      replyBody = '';
+    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      submitReply();
+    }
+  }
+
+  /** Display name for a reply's author, mirroring ReviewMargin's resolver. */
+  function replyAuthor(participantId: string): string {
+    const peer = reviewStore.peers.find((p) => p.participantId === participantId);
+    return peer?.displayName ?? participantId;
+  }
+
+  /** A reply's body text (replies are always CommentCreated events). */
+  function replyText(ev: Thread['replies'][number]): string {
+    return ev.body.type === 'comment_created' ? ev.body.body : '';
+  }
+
   function handleCardClick(): void {
     onActivate();
   }
@@ -368,7 +414,14 @@
     {/if}
     <p class="rmc-body">{body}</p>
     {#if thread.replies.length > 0}
-      <p class="rmc-replies">{thread.replies.length} reply{thread.replies.length === 1 ? '' : 's'}</p>
+      <ul class="rmc-reply-list" data-slot="review-replies">
+        {#each thread.replies as reply (reply.meta.eventId)}
+          <li class="rmc-reply">
+            <span class="rmc-reply-author">{replyAuthor(reply.meta.authorId)}</span>
+            <span class="rmc-reply-body">{replyText(reply)}</span>
+          </li>
+        {/each}
+      </ul>
     {/if}
   {/if}
 
@@ -447,6 +500,18 @@
         Reject
       </button>
     {:else}
+      {#if onReply}
+        <button
+          type="button"
+          class="rmc-btn"
+          data-action="reply"
+          data-slot="review-reply-toggle"
+          onclick={toggleReply}
+          disabled={pendingDismiss}
+        >
+          Reply
+        </button>
+      {/if}
       <button
         type="button"
         class="rmc-btn"
@@ -458,6 +523,32 @@
       </button>
     {/if}
   </footer>
+
+  {#if replying}
+    <div class="rmc-reply-composer" data-slot="review-reply-composer">
+      <textarea
+        bind:value={replyBody}
+        class="rmc-reply-input"
+        placeholder="Reply&hellip;"
+        rows="2"
+        onkeydown={handleReplyKeydown}
+        onclick={(e) => e.stopPropagation()}
+      ></textarea>
+      <div class="rmc-reply-actions">
+        <button type="button" class="rmc-btn" onclick={(e) => { e.stopPropagation(); replying = false; replyBody = ''; }}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="rmc-btn rmc-btn-primary"
+          onclick={(e) => { e.stopPropagation(); submitReply(); }}
+          disabled={replyBody.trim().length === 0}
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -650,6 +741,57 @@
     margin: 0 0 8px;
     color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
     font-size: 11px;
+  }
+
+  .rmc-reply-list {
+    list-style: none;
+    margin: 0 0 8px;
+    padding: 0;
+    border-top: 1px solid var(--border, rgba(0, 0, 0, 0.08));
+  }
+
+  .rmc-reply {
+    display: flex;
+    gap: 6px;
+    padding: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  .rmc-reply-author {
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--foreground, inherit);
+  }
+
+  .rmc-reply-body {
+    color: var(--foreground, inherit);
+    overflow-wrap: anywhere;
+  }
+
+  .rmc-reply-composer {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border, rgba(0, 0, 0, 0.08));
+  }
+
+  .rmc-reply-input {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+    border-radius: 4px;
+    background: var(--background, #fff);
+    color: var(--foreground, inherit);
+    padding: 6px 8px;
+    font-size: 12px;
+  }
+
+  .rmc-reply-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 6px;
   }
 
   .rmc-actions {

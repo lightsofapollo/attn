@@ -56,6 +56,7 @@
   import Users from '@lucide/svelte/icons/users';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
+  import SelectionToolbar from './lib/SelectionToolbar.svelte';
   import { hasTextSelection } from './lib/review/popover-anchor';
   import type { ConstructAnchorContext } from './lib/review/anchors';
   import { toast } from 'svelte-sonner';
@@ -73,7 +74,11 @@
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
   import ReviewFileTree from './lib/ReviewFileTree.svelte';
-  import { shouldAutoSelectOnlyRoom } from './lib/review/room-ui';
+  import {
+    shouldAutoSelectOnlyRoom,
+    isReviewerView,
+    collabRoleFor,
+  } from './lib/review/room-ui';
   import {
     requestReviewDecorationsRebuild,
     reviewDecorationsPlugin,
@@ -131,8 +136,21 @@
   // "has no local tab") is what makes a reviewer jump to the shared content on
   // join AND keeps the owner pinned to their local file (so the owner never
   // flips into shared-doc mode after remote edits — see attn-0wa).
+  //
+  // We gate on a POSITIVE reviewer role (the daemon reports `Joined` → role
+  // `reviewer`; the owner gets `Live` → role `owner`), not just "no local
+  // share". `currentShare` is only set on a fresh `ShareReady` and is lost on
+  // reconnect/rehydrate, so an owner returning to a remembered room would have
+  // `currentShare === null` yet `role === 'owner'` — gating on `currentShare`
+  // alone flipped them into shared-doc view (attn-0wa). Requiring `role ===
+  // 'reviewer'` is a strict tightening: an owner (role `owner`/`unknown`) never
+  // flips, a real reviewer (role `reviewer`, no local share) still does.
   let isReviewerInRoom = $derived(
-    reviewStore.currentRoomId !== null && reviewStore.currentShare === null,
+    isReviewerView({
+      inRoom: reviewStore.currentRoomId !== null,
+      hasLocalShare: reviewStore.currentShare !== null,
+      role: reviewStore.activeRoom?.role,
+    }),
   );
 
   // A reviewer always gets the sidebar shell (to host the shared-file tree),
@@ -242,14 +260,19 @@
   // ---------------------------------------------------------------------------
   // Live co-typing (prosemirror-collab over the encrypted signal channel).
   //
-  // Role: we're the owner iff we minted the share (currentShare set); every
-  // other participant is a reviewer/client. A session is "active" when we're
-  // connected to a room and looking at the shared markdown doc. While active
-  // the editor installs the collab plugin (seeded from the frozen v0 markdown)
-  // and stops resetting from the markdown prop — collab steps own the doc.
+  // Role: we're the owner iff we minted the share (currentShare set) OR the
+  // daemon reports our role as `owner` for this room (durable across reconnect,
+  // where no fresh ShareReady fires — see attn-0wa). Every other participant is
+  // a reviewer/client. A session is "active" when we're connected to a room and
+  // looking at the shared markdown doc. While active the editor installs the
+  // collab plugin (seeded from the frozen v0 markdown) and stops resetting from
+  // the markdown prop — collab steps own the doc.
   // ---------------------------------------------------------------------------
   let collabRole = $derived<'owner' | 'reviewer'>(
-    reviewStore.currentShare !== null ? 'owner' : 'reviewer',
+    collabRoleFor({
+      hasLocalShare: reviewStore.currentShare !== null,
+      role: reviewStore.activeRoom?.role,
+    }),
   );
   let collabActive = $derived(
     reviewStore.currentRoomId !== null &&
@@ -513,6 +536,42 @@
   function closeSuggestionComposer(): void {
     suggestionComposer = null;
   }
+
+  // Floating selection toolbar (attn-bit): the discoverable surface for the
+  // otherwise keyboard-only comment/suggest actions. We track the live editor
+  // selection and expose {from,to} when — and only when — composing is
+  // actually possible (a room is active and we hold a snapshot with an anchor
+  // index to author against). The buttons call the same open* paths the
+  // shortcuts use.
+  let toolbarSelection = $state<{ from: number; to: number } | null>(null);
+
+  function refreshSelectionToolbar(): void {
+    const view = pmViewForReview;
+    if (!view || !hasTextSelection(view)) {
+      toolbarSelection = null;
+      return;
+    }
+    if (!reviewStore.currentRoomId) {
+      toolbarSelection = null;
+      return;
+    }
+    const snapshot = resolveActiveSnapshotForCompose();
+    if (!snapshot || !snapshot.anchorIndex) {
+      toolbarSelection = null;
+      return;
+    }
+    const { from, to } = view.state.selection;
+    toolbarSelection = { from, to };
+  }
+
+  $effect(() => {
+    // `selectionchange` covers both mouse and keyboard selection. We read the
+    // ProseMirror state (not the raw DOM selection) so the captured range
+    // matches what the composer will author against.
+    const handler = () => refreshSelectionToolbar();
+    document.addEventListener('selectionchange', handler);
+    return () => document.removeEventListener('selectionchange', handler);
+  });
 
   // Resolve every comment/suggestion anchor against the active snapshot so
   // the inline decorations + margin cards have positions to render at.
@@ -2136,6 +2195,15 @@
   onClearError={() => reviewStore.clearLastError()}
 />
 <ReviewApplyExpand />
+{#if toolbarSelection && pmViewForReview && !commentComposer && !suggestionComposer}
+  <SelectionToolbar
+    view={pmViewForReview}
+    from={toolbarSelection.from}
+    to={toolbarSelection.to}
+    onComment={openCommentComposer}
+    onSuggest={openSuggestionComposer}
+  />
+{/if}
 {#if commentComposer}
   <CommentComposer
     view={commentComposer.view}

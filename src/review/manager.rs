@@ -70,11 +70,16 @@ pub enum ReviewCommand {
     Stop { room_id: Option<RoomId> },
     /// List inbound review notifications across all rooms.
     Inbox,
-    /// Create a new comment thread anchored at `anchor` with body text.
+    /// Create a comment. With `parent_thread_id = None` this opens a new
+    /// thread; with `Some(thread_id)` it joins that thread as a reply
+    /// (attn-1rm). A reply reuses the root comment's `anchor`, supplied by the
+    /// caller — `reconstructThreads` groups by `threadId`, so a reply is just a
+    /// `CommentCreated` carrying the existing thread id.
     CreateComment {
         room_id: RoomId,
         anchor: Anchor,
         body: String,
+        parent_thread_id: Option<String>,
     },
     /// Create a new suggestion (replace/insert/delete) from a frontend draft.
     CreateSuggestion {
@@ -100,6 +105,10 @@ pub enum ReviewCommand {
         event_id: EventId,
         range: PositionAnchor,
     },
+    /// Mark a comment thread resolved. Mints a durable `CommentResolved`
+    /// event so the resolution persists and propagates to every peer (a
+    /// resolution is a shared fact, not a local view tweak).
+    ResolveComment { room_id: RoomId, thread_id: String },
     /// Owner edited a shared file — republish a fresh snapshot so connected
     /// reviewers see the update. No-op when `path` isn't part of any share.
     PublishSnapshot { path: PathBuf },
@@ -489,11 +498,15 @@ impl ReviewManager {
                     room_id,
                     anchor,
                     body,
+                    parent_thread_id,
                 },
                 Some(bootstrapper),
                 Some(_runtime),
             ) => {
-                let thread_id = mint_thread_id();
+                // A reply reuses the parent's thread id; a new comment mints one.
+                let thread_id = parent_thread_id
+                    .clone()
+                    .unwrap_or_else(mint_thread_id);
                 let event_body = crate::review::model::ReviewEventBody::CommentCreated {
                     thread_id,
                     anchor: anchor.clone(),
@@ -554,6 +567,14 @@ impl ReviewManager {
                 Some(_runtime),
             ) => {
                 self.resolve_anchor(bootstrapper, room_id, event_id, range);
+                return;
+            }
+            (
+                ReviewCommand::ResolveComment { room_id, thread_id },
+                Some(bootstrapper),
+                Some(_runtime),
+            ) => {
+                self.resolve_comment(bootstrapper, room_id, thread_id);
                 return;
             }
             (
@@ -1028,6 +1049,45 @@ impl ReviewManager {
     ///   3. Push an `AnchorResolutionChanged` (confident `Remapped` at the
     ///      chosen range) so the local card flips from stale to resolved
     ///      immediately, without waiting for the event to round-trip.
+    /// Mark a comment thread resolved. Mints a durable `CommentResolved`
+    /// event (carrying the resolver's participant id) and sends it through the
+    /// normal outbox path, so the resolution persists locally and propagates
+    /// to peers. The frontend's `reconstructThreads` flips the thread's
+    /// `resolved` flag off the same event, so the card collapses to its
+    /// resolved strip when the `EventImported` round-trips. Reopening is a
+    /// future `CommentReopened` event (not yet modeled).
+    fn resolve_comment(&self, bootstrapper: &Arc<Bootstrapper>, room_id: &RoomId, thread_id: &str) {
+        let emit_err = |msg: String| {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: "ATTN_RESOLVE_COMMENT".to_string(),
+                message: msg,
+            });
+        };
+
+        let resolved_by = match bootstrapper
+            .config()
+            .identity_dir()
+            .and_then(|dir| crate::review::bootstrap::load_or_create_identity_in(&dir))
+        {
+            Ok(identity) => identity.typed_participant_id(),
+            Err(e) => return emit_err(format!("load identity: {e}")),
+        };
+
+        let body = crate::review::model::ReviewEventBody::CommentResolved {
+            thread_id: thread_id.to_string(),
+            resolved_by,
+        };
+        let send = bootstrapper.send_event_sync(room_id, body, unix_now_ms_for_manager());
+        self.emit_event_outcome(room_id.clone(), send);
+
+        eprintln!(
+            "review: resolved comment thread {} (room={})",
+            thread_id,
+            room_id.as_str()
+        );
+    }
+
     fn resolve_anchor(
         &self,
         bootstrapper: &Arc<Bootstrapper>,
@@ -1173,48 +1233,58 @@ impl ReviewManager {
             Err(e) => return emit_err(format!("assemble collab signal: {e}")),
         };
 
-        // Prefer the WebRTC DataChannel when it is the SOLE path to the room
-        // (a single connected peer) — this keeps the high-frequency step/cursor
-        // traffic off the relay, which is the cost driver at scale. With more
-        // than one peer the relay broadcast still reaches the relay-only
-        // peer(s), and sending over both would double-apply collab steps, so we
-        // fall through to the relay instead.
-        {
+        // Per-peer routing (attn-7qv). The old logic was all-or-nothing — a
+        // COMPLETE mesh sent over channels only (skip relay), an INCOMPLETE mesh
+        // sent over the relay only (NO channels). That dropped data under a
+        // partial mesh: with no TURN, a peer-pair that can't form a direct
+        // DataChannel leaves the mesh incomplete, and a peer reachable ONLY via
+        // its DataChannel (relay used as signaling) then got nothing on the
+        // relay-only path. The robust rule: ALWAYS send over every *connected*
+        // channel, AND additionally relay whenever the mesh is incomplete so the
+        // un-meshable peer(s) still receive it. Connected peers may then see it
+        // twice (channel + relay broadcast); collab is idempotent on the
+        // receiver (steps dedup by version, cursor/presence is last-writer, and
+        // the `from` field drops self-echoes), so double-delivery is safe. A
+        // complete mesh still skips the relay to keep the high-frequency
+        // step/cursor traffic off it (the cost driver at scale).
+        let (channels, peer_count): (
+            Vec<Arc<crate::review::transport::webrtc::WebRtcTransport>>,
+            usize,
+        ) = {
             use crate::review::transport::webrtc::WebRtcConnectionState;
-            // Mesh is complete iff every peer has a Connected DataChannel.
-            let mesh: Option<Vec<Arc<crate::review::transport::webrtc::WebRtcTransport>>> =
-                self.live_webrtc.lock().ok().and_then(|map| {
-                    map.get(room_id).and_then(|live| {
-                        let all_connected = live.peers > 0
-                            && live.transports.len() == live.peers
-                            && live
-                                .transports
-                                .values()
-                                .all(|t| matches!(t.state(), WebRtcConnectionState::Connected));
-                        all_connected.then(|| live.transports.values().cloned().collect())
+            self.live_webrtc
+                .lock()
+                .ok()
+                .and_then(|map| {
+                    map.get(room_id).map(|live| {
+                        let connected: Vec<_> = live
+                            .transports
+                            .values()
+                            .filter(|t| matches!(t.state(), WebRtcConnectionState::Connected))
+                            .cloned()
+                            .collect();
+                        (connected, live.peers)
                     })
+                })
+                .unwrap_or_default()
+        };
+
+        let routing = decide_collab_routing(peer_count, channels.len());
+
+        if routing.send_over_channels
+            && let Some(runtime) = self.runtime.as_ref()
+        {
+            for transport in channels {
+                let env = envelope.clone();
+                runtime.spawn(async move {
+                    let _ = transport.send_envelope(env).await;
                 });
-            if let Some(channels) = mesh
-                && let Some(runtime) = self.runtime.as_ref()
-            {
-                // Fan out over every peer channel; skip the relay entirely.
-                // (The owner's authoritative broadcast reaches each reviewer;
-                // a reviewer's submit reaches the owner — and other reviewers
-                // ignore stray submits, so the mesh is safe.)
-                for transport in channels {
-                    let env = envelope.clone();
-                    runtime.spawn(async move {
-                        let _ = transport.send_envelope(env).await;
-                    });
-                }
-                return; // delivered over the mesh — skip the relay
             }
         }
 
-        // Fallback: relay (mesh incomplete — a peer is still connecting or
-        // unreachable, so the relay broadcast covers everyone without
-        // double-applying).
-        if let Err(e) = self.store.append_outbox(room_id, &envelope) {
+        if routing.use_relay
+            && let Err(e) = self.store.append_outbox(room_id, &envelope)
+        {
             emit_err(format!("enqueue collab signal: {e}"));
         }
     }
@@ -2273,6 +2343,34 @@ fn error_code(err: &crate::review::bootstrap::BootstrapError) -> String {
 
 /// The command's variant name only — for logging without spilling payloads
 /// (comment/suggestion plaintext, collab steps) to stderr.
+/// How a collab signal should be routed given the live mesh state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CollabRouting {
+    /// Send over every currently-connected DataChannel.
+    send_over_channels: bool,
+    /// Also enqueue on the relay (covers peers not reachable over the mesh).
+    use_relay: bool,
+}
+
+/// Decide collab routing from `(peer_count, connected_count)` — the room's peer
+/// count and how many have a Connected DataChannel right now (attn-7qv).
+///
+/// - Send over channels whenever at least one peer is connected.
+/// - Use the relay UNLESS the mesh is complete (every peer connected). An
+///   incomplete mesh (including a not-yet-formed one, or one a no-TURN
+///   symmetric NAT can never complete) relays so the un-meshable peer(s) still
+///   receive it; a complete mesh skips the relay to keep cost off it.
+///
+/// Double-delivery to connected peers under an incomplete mesh is intentional
+/// and safe — collab is idempotent on the receiver.
+fn decide_collab_routing(peer_count: usize, connected_count: usize) -> CollabRouting {
+    let complete_mesh = peer_count > 0 && connected_count == peer_count;
+    CollabRouting {
+        send_over_channels: connected_count > 0,
+        use_relay: !complete_mesh,
+    }
+}
+
 fn review_command_name(cmd: &ReviewCommand) -> &'static str {
     match cmd {
         ReviewCommand::Share { .. } => "Share",
@@ -2285,6 +2383,7 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::AcceptSuggestion { .. } => "AcceptSuggestion",
         ReviewCommand::RejectSuggestion { .. } => "RejectSuggestion",
         ReviewCommand::ResolveAnchor { .. } => "ResolveAnchor",
+        ReviewCommand::ResolveComment { .. } => "ResolveComment",
         ReviewCommand::SendCollab { .. } => "SendCollab",
         ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
     }
@@ -2337,6 +2436,7 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
             room_id,
             anchor,
             body,
+            ..
         } => ReviewUpdate::EventImported {
             room_id: room_id.clone(),
             event: stub_review_event(
@@ -2394,6 +2494,13 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
                 current_range: range.clone(),
                 reason: crate::review::model::RemappedReason::QuoteMatch,
             },
+        },
+        // ResolveComment goes through the real bootstrap path in `submit`
+        // (mints a CommentResolved event). Without a bootstrapper this stub
+        // just keeps the dispatch contract total.
+        ReviewCommand::ResolveComment { room_id, .. } => ReviewUpdate::RoomStatusChanged {
+            room_id: room_id.clone(),
+            status: "Pending resolve-comment — no bootstrap attached".to_string(),
         },
         // PublishSnapshot goes through the real bootstrap path in `submit`
         // when one is attached. Without a bootstrapper (smoke tests) it's a
@@ -2723,6 +2830,42 @@ mod tests {
     use std::sync::mpsc;
     use tempfile::TempDir;
 
+    // --- attn-7qv: per-peer collab routing decision -------------------------
+
+    #[test]
+    fn collab_routing_complete_mesh_sends_channels_only_no_relay() {
+        // Every peer connected → mesh covers everyone; skip the relay (cost).
+        let r = decide_collab_routing(2, 2);
+        assert!(r.send_over_channels);
+        assert!(!r.use_relay, "complete mesh must NOT relay");
+    }
+
+    #[test]
+    fn collab_routing_partial_mesh_sends_channels_and_relays() {
+        // The attn-7qv fix: some peers connected, some not (no-TURN partial
+        // mesh) → send to the connected channel(s) AND relay for the rest.
+        let r = decide_collab_routing(2, 1);
+        assert!(r.send_over_channels, "must still send to the connected peer");
+        assert!(r.use_relay, "incomplete mesh must relay to reach un-meshed peers");
+    }
+
+    #[test]
+    fn collab_routing_no_mesh_relays_only() {
+        // No DataChannels formed yet (or none possible) → relay only.
+        let r = decide_collab_routing(3, 0);
+        assert!(!r.send_over_channels);
+        assert!(r.use_relay);
+    }
+
+    #[test]
+    fn collab_routing_no_peers_relays() {
+        // No known peers → relay (matches the legacy fallback; harmless no-op
+        // if nobody is subscribed).
+        let r = decide_collab_routing(0, 0);
+        assert!(!r.send_over_channels);
+        assert!(r.use_relay);
+    }
+
     /// Build a `(ReviewManager, receiver)` pair backed by an std::mpsc channel
     /// so tests can assert which `ReviewUpdate`s the manager emitted.
     fn make_manager() -> (ReviewManager, mpsc::Receiver<ReviewUpdate>, TempDir) {
@@ -2814,6 +2957,7 @@ mod tests {
             room_id: room_id.clone(),
             anchor: dummy_anchor(),
             body: "looks great".to_string(),
+            parent_thread_id: None,
         });
         let update = rx.try_recv().expect("expected one update");
         match update {

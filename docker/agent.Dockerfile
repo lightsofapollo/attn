@@ -37,5 +37,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /src/target/release/attn-agent /usr/local/bin/attn-agent
 # Each container gets its own ATTN_HOME so peers stay isolated.
 ENV ATTN_HOME=/data
-RUN mkdir -p /data
+# /data = ATTN_HOME (identity/store); /ctl = container-local control channel
+# (the harness appends commands here via `docker exec`; the agent polls it).
+# Deliberately NOT a host bind mount — single-file bind mounts go stale on
+# Docker Desktop's FUSE layer and silently drop rapid appends.
+RUN mkdir -p /data /ctl
 ENTRYPOINT ["attn-agent"]

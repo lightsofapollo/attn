@@ -36,9 +36,8 @@ log(){ printf '== %s\n' "$*"; }
 err(){ printf 'topo: %s\n' "$*" >&2; }
 
 RELAY_PID=""
-declare -A FD PIDS
+declare -A PIDS
 cleanup(){
-  for a in "${AGENTS[@]}"; do exec {FD[$a]}>&- 2>/dev/null || true; done
   for a in "${AGENTS[@]}"; do docker rm -f "topo-$a" >/dev/null 2>&1 || true; done
   docker network rm "$NET" >/dev/null 2>&1 || true
   [ -n "$RELAY_PID" ] && { pkill -P "$RELAY_PID" 2>/dev/null; kill "$RELAY_PID" 2>/dev/null; }
@@ -73,26 +72,35 @@ start_relay(){
   log "relay healthy"
 }
 
-# Per-scenario directory for logs + FIFOs, so two sequential scenarios never
-# share (or truncate) each other's capture. Set by run_scenario.
+# Per-scenario directory for logs + command files, so two sequential scenarios
+# never share (or truncate) each other's capture. Set by run_scenario.
 SDIR="$WORK"
 
-# Run one agent container, stdin from a host FIFO, stdout to a host log.
+# Run one agent container. The control channel is a CONTAINER-LOCAL file the
+# agent polls (ATTN_AGENT_CMD_FILE=/ctl/cmd); the harness appends commands to it
+# via `docker exec`. We do NOT use `docker run -i` stdin, bind-mounted FIFOs, or
+# bind-mounted files: all three silently drop rapid back-to-back writes on
+# Docker Desktop (stdin/FIFO don't stream; single-file bind mounts go stale in
+# the FUSE attribute cache). `docker exec ... >> /ctl/cmd` writes inside the
+# container's own filesystem, so the agent sees every appended line immediately.
 start_agent(){ # name
-  local a="$1" fifo="$SDIR/in_$a" logf="$SDIR/out_$a"
-  : > "$logf"; rm -f "$fifo"; mkfifo "$fifo"
-  docker run -i --rm --name "topo-$a" \
+  local a="$1" logf="$SDIR/out_$a"
+  : > "$logf"
+  docker run --rm --name "topo-$a" \
       --network "$NET" \
       --cap-add NET_ADMIN \
       --add-host host.docker.internal:host-gateway \
       -e "ATTN_RELAY_URL=$RELAY_URL_CTR" \
       -e "ATTN_HOME=/data" \
+      -e "ATTN_AGENT_CMD_FILE=/ctl/cmd" \
       "$IMAGE" --mode live \
-      < "$fifo" > "$logf" 2>&1 &
+      > "$logf" 2>&1 &
   PIDS[$a]=$!
-  exec {FD[$a]}>"$fifo"   # hold write end open so the agent doesn't see EOF
 }
-send(){ printf '%s\n' "$2" >&"${FD[$1]}"; }
+# Append one JSON command line to the agent's container-local control file.
+# The JSON is passed as an argv element (not interpolated into the shell text)
+# so embedded quotes/braces/backslashes survive verbatim.
+send(){ docker exec "topo-$1" sh -c 'printf "%s\n" "$1" >> /ctl/cmd' _ "$2"; }
 saw(){ grep -q "$2" "$SDIR/out_$1" 2>/dev/null; }
 
 ctr_ip(){ docker inspect -f "{{.NetworkSettings.Networks.${NET}.IPAddress}}" "topo-$1" 2>/dev/null; }
@@ -119,7 +127,7 @@ run_scenario(){ # topology(baseline|partition)
   # Fresh per-scenario capture dir + clean FD/PID maps so scenarios never
   # share or truncate each other's logs/FIFOs.
   SDIR="$WORK/$topo"; mkdir -p "$SDIR"
-  FD=(); PIDS=()
+  PIDS=()
   docker network create "$NET" >/dev/null 2>&1 || true
   for a in "${AGENTS[@]}"; do start_agent "$a"; done
   sleep 2
@@ -159,7 +167,7 @@ run_scenario(){ # topology(baseline|partition)
   done
 
   # Teardown this scenario's containers/network before the next.
-  for a in "${AGENTS[@]}"; do exec {FD[$a]}>&- 2>/dev/null || true; docker rm -f "topo-$a" >/dev/null 2>&1 || true; done
+  for a in "${AGENTS[@]}"; do docker rm -f "topo-$a" >/dev/null 2>&1 || true; done
   docker network rm "$NET" >/dev/null 2>&1 || true
   echo "RESULT[$topo]: $pass/$total"
   [ "$pass" = "$total" ]

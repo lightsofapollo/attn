@@ -13,8 +13,10 @@
 //!
 //! ## Protocol
 //!
-//! Driven over **stdin**, one JSON command per line. Emits two kinds of lines
-//! on **stdout** (line-buffered, flushed):
+//! Driven over **stdin**, one JSON command per line (or, when
+//! `ATTN_AGENT_CMD_FILE` is set, by polling that file for appended lines — the
+//! reliable control channel for Docker Desktop, where stdin/FIFO drop writes).
+//! Emits two kinds of lines on **stdout** (line-buffered, flushed):
 //!   - `@update <json>` — one serialized [`ReviewUpdate`] per line.
 //!   - `@agent <msg>`   — control/diagnostic lines (`ready`, `stopped`, errors).
 //!
@@ -111,22 +113,21 @@ pub fn run(share: Option<&str>, mode: &str, relay_url: Option<&str>) -> Result<(
         }
     }
 
-    let stdin = std::io::stdin();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+    // Process one JSON command line. Returns `true` to stop the agent.
+    let handle_line = |line: &str| -> bool {
         let line = line.trim();
         if line.is_empty() {
-            continue;
+            return false;
         }
         let cmd: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
                 emit(&stdout_lock, &format!("error bad-json: {e}"));
-                continue;
+                return false;
             }
         };
         match cmd.get("cmd").and_then(|v| v.as_str()).unwrap_or("") {
-            "quit" => break,
+            "quit" => return true,
             "share" => {
                 let path = cmd.get("path").and_then(|v| v.as_str()).unwrap_or_default();
                 let m = cmd.get("mode").and_then(|v| v.as_str()).unwrap_or(mode);
@@ -151,7 +152,13 @@ pub fn run(share: Option<&str>, mode: &str, relay_url: Option<&str>) -> Result<(
             }
             "comment" => {
                 let body = cmd.get("body").and_then(|v| v.as_str()).unwrap_or_default();
-                match current_room.lock().expect("room mutex").clone() {
+                // Bind to a `let` so the MutexGuard temporary drops HERE, before
+                // `submit`. A `match current_room.lock()...` scrutinee would hold
+                // the guard across the whole arm — and `submit` runs synchronously
+                // on this thread down into the update sink, which re-locks the
+                // same `current_room` mutex (sink_room) → re-entrant deadlock.
+                let room = current_room.lock().expect("room mutex").clone();
+                match room {
                     Some(room_id) => manager.submit(ReviewCommand::CreateComment {
                         room_id,
                         anchor: placeholder_anchor(),
@@ -170,13 +177,69 @@ pub fn run(share: Option<&str>, mode: &str, relay_url: Option<&str>) -> Result<(
                             .unwrap_or_else(|| v.to_string())
                     })
                     .unwrap_or_default();
-                match current_room.lock().expect("room mutex").clone() {
+                // See the `comment` arm: release the room lock before `submit` to
+                // avoid the re-entrant deadlock via the update sink.
+                let room = current_room.lock().expect("room mutex").clone();
+                match room {
                     Some(room_id) => manager.submit(ReviewCommand::SendCollab { room_id, payload }),
                     None => emit(&stdout_lock, "error collab: no active room"),
                 }
             }
             "pull" => manager.submit(ReviewCommand::Pull { room_id: None }),
             other => emit(&stdout_lock, &format!("error unknown-cmd: {other}")),
+        }
+        false
+    };
+
+    // Control channel. Default is stdin (one JSON command per line). When
+    // `ATTN_AGENT_CMD_FILE` is set we instead *poll* a regular file for newly
+    // appended lines — the only control channel that streams reliably into a
+    // container on Docker Desktop, where both `docker run -i` stdin and
+    // bind-mounted FIFOs silently drop back-to-back writes. The harness
+    // bind-mounts a host file and appends one command per line; we track the
+    // byte offset consumed and re-read the tail each tick, holding any trailing
+    // partial (not yet newline-terminated) write for the next pass.
+    match std::env::var("ATTN_AGENT_CMD_FILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        Some(path) => {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut offset: u64 = 0;
+            let mut carry = String::new();
+            'poll: loop {
+                if let Ok(mut f) = std::fs::File::open(&path) {
+                    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                    if len < offset {
+                        // File was truncated/recreated — restart from the top.
+                        offset = 0;
+                        carry.clear();
+                    }
+                    if len > offset {
+                        f.seek(SeekFrom::Start(offset)).ok();
+                        let mut buf = String::new();
+                        let n = f.read_to_string(&mut buf).unwrap_or(0) as u64;
+                        offset += n;
+                        carry.push_str(&buf);
+                        while let Some(nl) = carry.find('\n') {
+                            let line: String = carry.drain(..=nl).collect();
+                            if handle_line(&line) {
+                                break 'poll;
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        }
+        None => {
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                let Ok(line) = line else { break };
+                if handle_line(&line) {
+                    break;
+                }
+            }
         }
     }
 

@@ -37,7 +37,7 @@
     onProjectSwitch?: (path: string) => void;
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
-    onShare?: (path: string) => void;
+    onShare?: (path: string, isDir?: boolean) => void;
     onSearchQuery?: (query: string) => void;
     outline?: { id: string; text: string; level: number; line: number }[];
     activeOutlineId?: string;

@@ -86,6 +86,7 @@
     shouldAutoSelectOnlyRoom,
     isReviewerView,
     collabRoleFor,
+    collabSeedReady,
   } from './lib/review/room-ui';
   import {
     requestReviewDecorationsRebuild,
@@ -113,6 +114,10 @@
   // Share-for-review dialog (attn-nnj.4.10). Owner-only modal opened via
   // the ReviewBar's [Share] button or the Cmd+Shift+S keybinding.
   let shareDialogOpen = $state(false);
+  // The explicit path the ShareDialog targets — a file OR a folder. Set on
+  // every open so the dialog shares the row that was clicked, not whatever
+  // file happens to be active (folder shares never navigate the owner).
+  let shareTargetPath = $state<string | null>(null);
   // Onboarding display-name prompt. Shown once when the user first enters a
   // room (share or join) with no name set; also reachable in 'edit' mode via
   // the connection badge. `namePrompted` is a per-session one-shot guard.
@@ -122,6 +127,7 @@
   // When the onboarding prompt was opened by a share action, the share to
   // resume once the user confirms/skips the name.
   let pendingSharePath = $state<string | null>(null);
+  let pendingShareIsDir = $state(false);
   let rawMarkdown = $state('');
   let structure: PlanStructure = $state({ phases: [], tasks: [], file_refs: [] });
   let fileTree: TreeNode[] = $state([]);
@@ -327,7 +333,20 @@
         clearTimeout(collabTeardownTimer);
         collabTeardownTimer = null;
       }
-      if (collabClientId === null) {
+      // Capture the seed ONCE, but only when we actually have the content to
+      // seed from. Grabbing a transient/empty `effectiveMarkdown` (a reconnect
+      // blip, or a reviewer whose shared snapshot hasn't landed yet) would lock
+      // the seed to '' — and because collab then owns the doc and stops
+      // resetting from the prop, the editor renders BLANK for the whole session
+      // (the "shared, then blank" bug). Require non-empty content, and for a
+      // reviewer require the shared snapshot so we never seed collab from the
+      // reviewer's own local file.
+      const seedReady = collabSeedReady({
+        effectiveMarkdown,
+        isReviewerInRoom,
+        isReviewerViewingSnapshot,
+      });
+      if (collabClientId === null && seedReady) {
         collabClientId = crypto.randomUUID();
         collabSeedMarkdown = effectiveMarkdown;
       }
@@ -409,8 +428,10 @@
   // that a name is set (or skipped). `namePrompted`/`isSet` guard re-entry.
   function resumePendingShare(): void {
     const path = pendingSharePath;
+    const isDir = pendingShareIsDir;
     pendingSharePath = null;
-    if (path) openShareDialogForPath(path);
+    pendingShareIsDir = false;
+    if (path) openShareDialogForPath(path, isDir);
   }
 
   function maybeStartCollab(view: EditorView): void {
@@ -1879,21 +1900,27 @@
     openShareDialogForPath(activePath);
   }
 
-  function openShareDialogForPath(path: string): void {
+  function openShareDialogForPath(path: string, isDir = false): void {
     if (!path) return;
     const ft = detectFileType(path);
-    if (ft !== 'markdown') return;
+    // A folder share enumerates its markdown files on the daemon side, so the
+    // path itself isn't a markdown file — only gate single-file shares on type.
+    if (!isDir && ft !== 'markdown') return;
     // First-time onboarding: confirm/set the display name BEFORE the first
     // share so the published participant carries it (and so the prompt doesn't
     // stack on top of the ShareDialog). Stash the path; resume after the prompt.
     if (!userProfile.isSet && !namePrompted) {
       namePrompted = true;
       pendingSharePath = path;
+      pendingShareIsDir = isDir;
       namePromptMode = 'onboard';
       namePromptOpen = true;
       return;
     }
-    if (path !== activePath || activeFileType !== 'markdown') {
+    shareTargetPath = path;
+    // Navigate to a single file so the owner sees what they're sharing; a
+    // folder isn't a document, so leave the owner on their current file.
+    if (!isDir && (path !== activePath || activeFileType !== 'markdown')) {
       openPath(path, ft, false);
     }
     shareDialogOpen = true;
@@ -2131,7 +2158,7 @@
       <ReviewFileNav />
       <Editor
         bind:this={editorRef}
-        markdown={collabActive ? (collabSeedMarkdown ?? effectiveMarkdown) : effectiveMarkdown}
+        markdown={collabActive ? (collabSeedMarkdown || effectiveMarkdown) : effectiveMarkdown}
         editable={collabActive}
         onLinkNavigate={handleEditorLinkNavigate}
         onSuggestionClick={handleSuggestionClick}
@@ -2158,7 +2185,7 @@
     {:else if activeFileType === 'markdown'}
       <Editor
         bind:this={editorRef}
-        markdown={collabActive ? (collabSeedMarkdown ?? effectiveMarkdown) : effectiveMarkdown}
+        markdown={collabActive ? (collabSeedMarkdown || effectiveMarkdown) : effectiveMarkdown}
         editable={collabActive || mode === 'edit'}
         onLinkNavigate={handleEditorLinkNavigate}
         onSuggestionClick={handleSuggestionClick}
@@ -2342,7 +2369,7 @@
 />
 <ShareDialog
   bind:open={shareDialogOpen}
-  filePath={activePath}
+  filePath={shareTargetPath ?? activePath}
   existingInviteUrl={reviewStore.currentShare?.inviteUrl ?? ''}
   ownerSigningKey={reviewStore.currentShare?.ownerSigningKey ?? ''}
   existingRoomId={reviewStore.currentShare?.roomId ?? null}

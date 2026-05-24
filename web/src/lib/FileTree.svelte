@@ -34,7 +34,7 @@
     rootPath?: string;
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
-    onShare?: (path: string) => void;
+    onShare?: (path: string, isDir?: boolean) => void;
     collaboratorLocations?: SidebarPresenceLocation[];
   }
 
@@ -198,8 +198,8 @@
     openExternal(path);
   }
 
-  function handleShare(path: string): void {
-    onShare?.(path);
+  function handleShare(path: string, isDir = false): void {
+    onShare?.(path, isDir);
   }
 
   function presenceBadgeFor(node: TreeNode, expandedForNode: boolean) {
@@ -217,31 +217,58 @@
       class="group/collapsible"
     >
       <SidebarMenuItem>
-        <CollapsibleTrigger>
-          {#snippet child({ props: triggerProps })}
-            <SidebarMenuButton
-              {...triggerProps}
-              size="sm"
-              class="sidebar-tree-row sidebar-tree-row--dir"
-              data-path={node.path}
-              style={`--tree-depth: ${depth};`}
+        <ContextMenu>
+          <ContextMenuTrigger>
+            {#snippet child({ props: ctxProps })}
+              <CollapsibleTrigger>
+                {#snippet child({ props: triggerProps })}
+                  <SidebarMenuButton
+                    {...ctxProps}
+                    {...triggerProps}
+                    size="sm"
+                    class="sidebar-tree-row sidebar-tree-row--dir"
+                    data-path={node.path}
+                    style={`--tree-depth: ${depth};`}
+                  >
+                    <ChevronRight class="sidebar-tree-chevron size-3.5 shrink-0 transition-transform duration-150 group-data-[state=open]/collapsible:rotate-90" />
+                    <img src={getFolderIcon(node.name, node.path)} alt="" aria-hidden="true" class="sidebar-tree-icon-image size-3.5 shrink-0" />
+                    <span class="sidebar-tree-name truncate">{node.name}</span>
+                    {#if presenceBadge}
+                      <span
+                        class:sidebar-collab-badge--inherited={presenceBadge.inherited}
+                        class="sidebar-collab-badge"
+                        title={`${presenceBadge.count} collaborator${presenceBadge.count === 1 ? '' : 's'} viewing ${presenceBadge.inherited ? 'inside this folder' : 'this folder'}`}
+                        aria-label={`${presenceBadge.count} collaborator${presenceBadge.count === 1 ? '' : 's'} viewing ${presenceBadge.inherited ? 'inside this folder' : 'this folder'}`}
+                      >
+                        {#if presenceBadge.count > 1}{presenceBadge.count}{/if}
+                      </span>
+                    {/if}
+                  </SidebarMenuButton>
+                {/snippet}
+              </CollapsibleTrigger>
+            {/snippet}
+          </ContextMenuTrigger>
+          <ContextMenuContent class="w-56">
+            <ContextMenuItem
+              disabled={!onShare}
+              onSelect={() => handleShare(node.path, true)}
             >
-              <ChevronRight class="sidebar-tree-chevron size-3.5 shrink-0 transition-transform duration-150 group-data-[state=open]/collapsible:rotate-90" />
-              <img src={getFolderIcon(node.name, node.path)} alt="" aria-hidden="true" class="sidebar-tree-icon-image size-3.5 shrink-0" />
-              <span class="sidebar-tree-name truncate">{node.name}</span>
-              {#if presenceBadge}
-                <span
-                  class:sidebar-collab-badge--inherited={presenceBadge.inherited}
-                  class="sidebar-collab-badge"
-                  title={`${presenceBadge.count} collaborator${presenceBadge.count === 1 ? '' : 's'} viewing ${presenceBadge.inherited ? 'inside this folder' : 'this folder'}`}
-                  aria-label={`${presenceBadge.count} collaborator${presenceBadge.count === 1 ? '' : 's'} viewing ${presenceBadge.inherited ? 'inside this folder' : 'this folder'}`}
-                >
-                  {#if presenceBadge.count > 1}{presenceBadge.count}{/if}
-                </span>
-              {/if}
-            </SidebarMenuButton>
-          {/snippet}
-        </CollapsibleTrigger>
+              <Share2 class="size-4" aria-hidden="true" />
+              Share folder
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem onSelect={() => handleCopyRelativePath(node.path)}>
+              Copy relative path
+            </ContextMenuItem>
+            <ContextMenuItem onSelect={() => handleCopyAbsolutePath(node.path)}>
+              Copy absolute path
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem onSelect={() => handleOpenExternal(node.path)}>
+              Open in external (open)
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
         <CollapsibleContent>
           {#if node.children}
             <div class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>

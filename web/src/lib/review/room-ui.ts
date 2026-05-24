@@ -46,6 +46,25 @@ export function collabRoleFor(params: { hasLocalShare: boolean; role: RoomRole }
   return params.hasLocalShare || params.role === 'owner' ? 'owner' : 'reviewer';
 }
 
+/**
+ * Is the editor safe to seed a collab session from right now?
+ *
+ * The collab seed is captured ONCE and then owns the doc (the editor stops
+ * resetting from its `markdown` prop), so seeding from a transient/empty value
+ * locks the editor BLANK for the whole session — the "shared, then blank" bug.
+ * Only seed when there's real content to seed from, and for a reviewer only
+ * once the shared snapshot has landed (`isReviewerViewingSnapshot`) so we never
+ * seed collab from the reviewer's own local file.
+ */
+export function collabSeedReady(params: {
+  effectiveMarkdown: string;
+  isReviewerInRoom: boolean;
+  isReviewerViewingSnapshot: boolean;
+}): boolean {
+  if (params.effectiveMarkdown.length === 0) return false;
+  return !params.isReviewerInRoom || params.isReviewerViewingSnapshot;
+}
+
 export function shouldAutoSelectOnlyRoom(params: {
   hasActiveTab: boolean;
   currentRoomId: RoomId | null;

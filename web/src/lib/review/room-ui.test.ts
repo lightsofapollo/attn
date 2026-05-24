@@ -6,6 +6,7 @@
 
 import {
   collabRoleFor,
+  collabSeedReady,
   isReviewerView,
   shouldActivateRoomStatus,
   shouldAutoSelectOnlyRoom,
@@ -138,6 +139,53 @@ defineCase('collabRoleFor: owner via local share OR durable role', () => {
   assert(
     collabRoleFor({ hasLocalShare: false, role: 'reviewer' }) === 'reviewer',
     'a joiner is a reviewer',
+  );
+});
+
+// --- attn-d5x: never seed a collab session from empty/transient content -----
+
+defineCase('collabSeedReady: owner with loaded content can seed', () => {
+  assert(
+    collabSeedReady({
+      effectiveMarkdown: '# Plan\n\nbody',
+      isReviewerInRoom: false,
+      isReviewerViewingSnapshot: false,
+    }) === true,
+    'an owner with real markdown should seed collab',
+  );
+});
+
+defineCase('collabSeedReady: empty markdown never seeds (the blank-editor bug)', () => {
+  // The regression: collab activates on a reconnect blip while effectiveMarkdown
+  // is momentarily '' — seeding '' locks the editor BLANK for the session.
+  assert(
+    collabSeedReady({
+      effectiveMarkdown: '',
+      isReviewerInRoom: false,
+      isReviewerViewingSnapshot: false,
+    }) === false,
+    'empty content must not be captured as the collab seed',
+  );
+});
+
+defineCase('collabSeedReady: reviewer waits for the shared snapshot before seeding', () => {
+  // A reviewer who also has a local markdown file open: collab could activate
+  // before the shared snapshot lands. We must NOT seed from their local file.
+  assert(
+    collabSeedReady({
+      effectiveMarkdown: '# my local file',
+      isReviewerInRoom: true,
+      isReviewerViewingSnapshot: false,
+    }) === false,
+    'a reviewer must not seed collab until the shared snapshot is present',
+  );
+  assert(
+    collabSeedReady({
+      effectiveMarkdown: '# shared doc',
+      isReviewerInRoom: true,
+      isReviewerViewingSnapshot: true,
+    }) === true,
+    'a reviewer seeds once the shared snapshot has landed',
   );
 });
 

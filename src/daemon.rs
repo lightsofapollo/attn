@@ -444,6 +444,27 @@ fn send_command(msg: &SocketMessage) -> Result<Option<SocketResponse>> {
     }
 }
 
+/// Resolve the daemon log path (`<ATTN_HOME>/attn.log`), rotating it to
+/// `attn.log.1` first if it has grown past ~5 MiB so the append-only log can't
+/// accumulate forever. Returns `(opened_append_handle, path)`.
+fn open_daemon_log() -> Option<(std::fs::File, std::path::PathBuf)> {
+    const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+    let dir = runtime_dir().ok()?;
+    // Ensure the home dir exists so logging works even on the very first launch
+    // (before the store has created it).
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("attn.log");
+    if std::fs::metadata(&path).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
+        let _ = std::fs::rename(&path, dir.join("attn.log.1"));
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    Some((file, path))
+}
+
 /// Fork the process. Parent exits, child becomes the daemon.
 /// If `no_fork` is true, skip forking (for development).
 pub fn maybe_fork(no_fork: bool) -> Result<()> {
@@ -468,17 +489,11 @@ pub fn maybe_fork(no_fork: bool) -> Result<()> {
         let mut cmd = Command::new(exe);
         cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null());
 
-        if let Ok(log_dir) = runtime_dir() {
-            let log_path = log_dir.join("attn.log");
-            if let Ok(log_file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-            {
-                cmd.stderr(Stdio::from(log_file));
-            } else {
-                cmd.stderr(Stdio::null());
-            }
+        if let Some((log_file, log_path)) = open_daemon_log() {
+            // Printed to the launching terminal (the child's stderr is about to
+            // be redirected into this file) so the user knows where to look.
+            eprintln!("attn: daemon logging to {}", log_path.display());
+            cmd.stderr(Stdio::from(log_file));
         } else {
             cmd.stderr(Stdio::null());
         }
@@ -498,13 +513,8 @@ pub fn maybe_fork(no_fork: bool) -> Result<()> {
                 // Become session leader
                 setsid().context("setsid failed")?;
 
-                // Redirect stderr to log file for debugging
-                if let Some(log_path) = runtime_dir().ok().map(|d| d.join("attn.log"))
-                    && let Ok(log_file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&log_path)
-                {
+                // Redirect stderr to the (rotated) log file for debugging.
+                if let Some((log_file, _)) = open_daemon_log() {
                     let fd = log_file.into_raw_fd();
                     let _ = dup2(fd, std::io::stderr().as_raw_fd());
                     let _ = close(fd);
@@ -515,7 +525,11 @@ pub fn maybe_fork(no_fork: bool) -> Result<()> {
                 Ok(())
             }
             ForkResult::Parent { .. } => {
-                // Parent process — exit immediately, returning shell control
+                // Parent process — tell the user where logs go, then exit and
+                // return shell control.
+                if let Ok(dir) = runtime_dir() {
+                    eprintln!("attn: daemon logging to {}", dir.join("attn.log").display());
+                }
                 std::process::exit(0);
             }
         }

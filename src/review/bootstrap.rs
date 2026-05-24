@@ -142,6 +142,18 @@ pub enum BootstrapError {
     Store(String),
 }
 
+impl BootstrapError {
+    /// True when the relay reports the room no longer exists (HTTP 404,
+    /// `ATTN_ROOM_NOT_FOUND`). The caller prunes such rooms from the local
+    /// store so the daemon stops resuming dead rooms on every boot.
+    pub fn is_room_not_found(&self) -> bool {
+        matches!(
+            self,
+            BootstrapError::Relay { status: 404, code, .. } if code == "ATTN_ROOM_NOT_FOUND"
+        )
+    }
+}
+
 impl From<SignError> for BootstrapError {
     fn from(e: SignError) -> Self {
         Self::Crypto(e.to_string())
@@ -2350,6 +2362,38 @@ mod tests {
             BootstrapError::InviteParse(msg) => assert!(msg.contains("base64url"), "got: {msg}"),
             other => panic!("expected InviteParse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn is_room_not_found_matches_only_the_specific_relay_code() {
+        // The dead-room signal we prune on: 404 + ATTN_ROOM_NOT_FOUND.
+        assert!(
+            BootstrapError::Relay {
+                status: 404,
+                code: "ATTN_ROOM_NOT_FOUND".into(),
+                message: "room X does not exist".into(),
+            }
+            .is_room_not_found(),
+        );
+        // A bare/unknown 404 (e.g. a routing miss) must NOT prune the room.
+        assert!(
+            !BootstrapError::Relay {
+                status: 404,
+                code: "ATTN_UNKNOWN".into(),
+                message: String::new(),
+            }
+            .is_room_not_found(),
+        );
+        // Admission rejection (401) is terminal but not a missing room.
+        assert!(
+            !BootstrapError::Relay {
+                status: 401,
+                code: "ATTN_ADMISSION_REJECTED".into(),
+                message: String::new(),
+            }
+            .is_room_not_found(),
+        );
+        assert!(!BootstrapError::Network("offline".into()).is_room_not_found());
     }
 
     #[test]

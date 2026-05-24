@@ -1543,6 +1543,37 @@ impl ReviewManager {
                 "review: seeded {n} device key(s) for room={}",
                 room_id.as_str()
             ),
+            // The relay says this room no longer exists. The local store still
+            // had it with a future TTL, so without this it would be resumed on
+            // EVERY boot — each time blocking here on a 404 then dialing a dead
+            // WS (the startup stall). Tear down the partial runtime we just
+            // spawned, forget the room, and abort so it never resumes again.
+            // (To revive, the owner re-Shares, which re-establishes the room.)
+            Err(err) if err.is_room_not_found() => {
+                eprintln!(
+                    "review: room={} no longer exists on the relay; forgetting it (won't resume again)",
+                    room_id.as_str()
+                );
+                if let Ok(mut cancels) = self.cancels.lock()
+                    && let Some(tx) = cancels.remove(room_id)
+                {
+                    let _ = tx.send(true);
+                }
+                if let Ok(mut outboxes) = self.outboxes.lock() {
+                    outboxes.remove(room_id);
+                }
+                if let Err(e) = self.store.delete_room(room_id) {
+                    eprintln!("review: delete_room failed for {}: {e}", room_id.as_str());
+                }
+                (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                    room_id: room_id.clone(),
+                    status: "Stopped".to_string(),
+                });
+                return Err(anyhow::anyhow!(
+                    "room {} no longer exists on the relay (forgotten)",
+                    room_id.as_str()
+                ));
+            }
             Err(err) => eprintln!(
                 "review: refresh_device_keys failed room={}: {err}",
                 room_id.as_str()

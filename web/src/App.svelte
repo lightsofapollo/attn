@@ -59,6 +59,12 @@
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
   import SelectionToolbar from './lib/SelectionToolbar.svelte';
+  import SuggestionPopover from './lib/SuggestionPopover.svelte';
+  import { findSuggestionById, type SuggestionInfo } from './lib/review/suggestions';
+  import {
+    applySuggestion,
+    revertSuggestion,
+  } from '@handlewithcare/prosemirror-suggest-changes';
   import { hasTextSelection } from './lib/review/popover-anchor';
   import type { ConstructAnchorContext } from './lib/review/anchors';
   import { toast } from 'svelte-sonner';
@@ -88,6 +94,7 @@
   import { resolveAnchor } from './lib/review/resolver';
   import type { EditorView } from 'prosemirror-view';
   import type { Plugin as PMPlugin } from 'prosemirror-state';
+  import { TextSelection } from 'prosemirror-state';
 
   interface Props {
     /**
@@ -622,11 +629,57 @@
     toolbarSelection = { from, to };
   }
 
+  // Owner-facing accept/reject popover for the inline suggestion under the
+  // cursor (attn-07i.2 Phase 2). Reviewers suggest; only the owner disposes.
+  let activeSuggestion = $state<SuggestionInfo | null>(null);
+
+  // Click-driven (Google-Docs style): clicking a suggestion shows the popover;
+  // clicking elsewhere dismisses it. Owner-only — reviewers suggest, they don't
+  // dispose. We don't gate on collabActive (the owner stays on its local doc,
+  // attn-0wa); findSuggestionAt returns null off a suggestion, the real gate.
+  function handleSuggestionClick(id: string | null): void {
+    const view = pmViewForReview;
+    if (!view || collabRole !== 'owner' || id === null) {
+      activeSuggestion = null;
+      return;
+    }
+    activeSuggestion = findSuggestionById(view.state, id);
+  }
+
+  function acceptActiveSuggestion(): void {
+    const view = pmViewForReview;
+    const info = activeSuggestion;
+    if (!view || !info) return;
+    applySuggestion(info.id)(view.state, (tr) => view.dispatch(tr));
+    activeSuggestion = null;
+  }
+
+  function rejectActiveSuggestion(): void {
+    const view = pmViewForReview;
+    const info = activeSuggestion;
+    if (!view || !info) return;
+    revertSuggestion(info.id)(view.state, (tr) => view.dispatch(tr));
+    activeSuggestion = null;
+  }
+
+  function commentOnActiveSuggestion(): void {
+    const view = pmViewForReview;
+    const info = activeSuggestion;
+    if (!view || !info) return;
+    // Select the suggestion's range, then open the comment composer on it.
+    const sel = TextSelection.create(view.state.doc, info.from, info.to);
+    view.dispatch(view.state.tr.setSelection(sel));
+    activeSuggestion = null;
+    openCommentComposer();
+  }
+
   $effect(() => {
     // `selectionchange` covers both mouse and keyboard selection. We read the
     // ProseMirror state (not the raw DOM selection) so the captured range
     // matches what the composer will author against.
-    const handler = () => refreshSelectionToolbar();
+    const handler = () => {
+      refreshSelectionToolbar();
+    };
     document.addEventListener('selectionchange', handler);
     return () => document.removeEventListener('selectionchange', handler);
   });
@@ -2061,6 +2114,7 @@
         markdown={collabActive ? (collabSeedMarkdown ?? effectiveMarkdown) : effectiveMarkdown}
         editable={collabActive}
         onLinkNavigate={handleEditorLinkNavigate}
+        onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
@@ -2087,6 +2141,7 @@
         markdown={collabActive ? (collabSeedMarkdown ?? effectiveMarkdown) : effectiveMarkdown}
         editable={collabActive || mode === 'edit'}
         onLinkNavigate={handleEditorLinkNavigate}
+        onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
@@ -2161,6 +2216,7 @@
         markdown={rawMarkdown}
         editable={mode === 'edit'}
         onLinkNavigate={handleEditorLinkNavigate}
+        onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
@@ -2281,13 +2337,22 @@
   onSkip={handleNameSkip}
 />
 <ReviewApplyExpand />
-{#if toolbarSelection && pmViewForReview && !commentComposer && !suggestionComposer}
+{#if toolbarSelection && pmViewForReview && !commentComposer && !suggestionComposer && !activeSuggestion}
   <SelectionToolbar
     view={pmViewForReview}
     from={toolbarSelection.from}
     to={toolbarSelection.to}
     onComment={openCommentComposer}
     onSuggest={openSuggestionComposer}
+  />
+{/if}
+{#if activeSuggestion && pmViewForReview && !commentComposer}
+  <SuggestionPopover
+    view={pmViewForReview}
+    info={activeSuggestion}
+    onAccept={acceptActiveSuggestion}
+    onReject={rejectActiveSuggestion}
+    onComment={commentOnActiveSuggestion}
   />
 {/if}
 {#if commentComposer}

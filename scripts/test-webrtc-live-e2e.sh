@@ -155,5 +155,10 @@ log "Suggesting: owner file = accepted content only"
 file_accepted_only() { grep -q 'OWNERDC' "$SHARED_DOC" && ! grep -q 'RVDC' "$SHARED_DOC"; }
 if poll 12000 file_accepted_only; then ok "suggesting: owner file has the owner's edit, NOT the reviewer's pending suggestion"; else bad "suggesting: file wrong (OWNERDC=$(grep -c OWNERDC "$SHARED_DOC" 2>/dev/null) RVDC=$(grep -c RVDC "$SHARED_DOC" 2>/dev/null))"; fi
 
+# Phase 2 owner accept/reject (popover + applySuggestion/revertSuggestion) is
+# implemented and the suggestion renders inline with attribution; the
+# click-to-accept E2E is pending an editor-view-attachment issue in this
+# harness's late-stage flow (tracked on attn-07i.2).
+
 echo ""; log "Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

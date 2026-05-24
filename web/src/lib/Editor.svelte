@@ -40,6 +40,13 @@
     onSave?: () => void;
     onCancel?: () => void;
     onLinkNavigate?: (href: string) => void;
+    /**
+     * Fired on every editor click with the clicked suggestion's id (read off the
+     * `<ins/del data-id>` element), or `null` when the click wasn't on a
+     * suggestion. The owner uses it to show/hide the accept/reject popover
+     * (attn-07i.2 Phase 2).
+     */
+    onSuggestionClick?: (id: string | null) => void;
     onCheckboxToggle?: (md: string) => void;
     onDirtyChange?: (dirty: boolean) => void;
     /**
@@ -95,6 +102,7 @@
     onSave,
     onCancel,
     onLinkNavigate,
+    onSuggestionClick,
     onCheckboxToggle,
     onDirtyChange,
     plugins: extraPlugins,
@@ -499,6 +507,21 @@
 
   function handleEditorClick(event: MouseEvent): boolean {
     const target = event.target as HTMLElement | null;
+    // Notify the parent of the clicked suggestion (read the id off the
+    // <ins/del data-id> element — no coords needed, so it works under
+    // automation), or null to dismiss the popover when clicking elsewhere.
+    if (onSuggestionClick) {
+      const sugEl = target?.closest('ins[data-id], del[data-id]') as HTMLElement | null;
+      let id: string | null = null;
+      if (sugEl?.dataset.id) {
+        try {
+          id = String(JSON.parse(sugEl.dataset.id));
+        } catch {
+          id = sugEl.dataset.id;
+        }
+      }
+      onSuggestionClick(id);
+    }
     const anchor = target?.closest('a[href]') as HTMLAnchorElement | null;
     if (!anchor) return false;
 

@@ -80,3 +80,45 @@ export function shortRoomId(roomId: RoomId): string {
   if (roomId.length <= 10) return roomId;
   return `${roomId.slice(0, 4)}…${roomId.slice(-4)}`;
 }
+
+function baseName(path: string): string {
+  const normalized = path.replace(/\/+$/, '');
+  const idx = normalized.lastIndexOf('/');
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
+}
+
+/** Longest common directory prefix of a set of paths (segment-aligned). */
+function commonDir(paths: string[]): string {
+  const segments = paths.map((p) => p.split('/'));
+  const first = segments[0] ?? [];
+  let i = 0;
+  while (i < first.length && segments.every((s) => s[i] === first[i])) i++;
+  return first.slice(0, i).join('/');
+}
+
+/**
+ * A human-readable name for a room, derived from the file(s) it shares (each
+ * snapshot carries the owner's `ownerDisplayPath`). A single-file room is named
+ * after that file; a folder/multi-file room after the shared folder + count.
+ * Returns `null` when no snapshots have arrived yet (caller falls back to the
+ * short room id).
+ */
+export function roomDisplayName(
+  snapshots: ReadonlyArray<{ roomId: RoomId; ownerDisplayPath?: string }>,
+  roomId: RoomId,
+): string | null {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  for (const snap of snapshots) {
+    if (snap.roomId !== roomId) continue;
+    const p = snap.ownerDisplayPath;
+    if (!p || seen.has(p)) continue;
+    seen.add(p);
+    paths.push(p);
+  }
+  if (paths.length === 0) return null;
+  if (paths.length === 1) return baseName(paths[0]);
+  const dir = commonDir(paths);
+  const prefix = dir ? `${baseName(dir)}/ ` : '';
+  return `${prefix}(${paths.length} files)`;
+}

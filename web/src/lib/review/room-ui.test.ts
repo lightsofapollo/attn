@@ -8,6 +8,7 @@ import {
   collabRoleFor,
   collabSeedReady,
   isReviewerView,
+  roomDisplayName,
   shouldActivateRoomStatus,
   shouldAutoSelectOnlyRoom,
   shouldForgetRoomStatus,
@@ -187,6 +188,44 @@ defineCase('collabSeedReady: reviewer waits for the shared snapshot before seedi
     }) === true,
     'a reviewer seeds once the shared snapshot has landed',
   );
+});
+
+// --- room names derived from shared files -----------------------------------
+
+defineCase('roomDisplayName: single-file room is named after the file', () => {
+  const snaps = [
+    { roomId: 'r1' as RoomId, ownerDisplayPath: '/Users/me/proj/goals.md' },
+  ];
+  assert(
+    roomDisplayName(snaps, 'r1' as RoomId) === 'goals.md',
+    'a single-file room should read as its basename',
+  );
+});
+
+defineCase('roomDisplayName: folder room is named after the shared folder + count', () => {
+  const snaps = [
+    { roomId: 'r1' as RoomId, ownerDisplayPath: '/Users/me/planning/a.md' },
+    { roomId: 'r1' as RoomId, ownerDisplayPath: '/Users/me/planning/b.md' },
+    { roomId: 'r1' as RoomId, ownerDisplayPath: '/Users/me/planning/sub/c.md' },
+  ];
+  assert(
+    roomDisplayName(snaps, 'r1' as RoomId) === 'planning/ (3 files)',
+    `expected 'planning/ (3 files)', got '${roomDisplayName(snaps, 'r1' as RoomId)}'`,
+  );
+});
+
+defineCase('roomDisplayName: dedupes repeated snapshots for one file', () => {
+  // Owner edits republish a new snapshot per save — same path, still one file.
+  const snaps = [
+    { roomId: 'r1' as RoomId, ownerDisplayPath: '/p/x.md' },
+    { roomId: 'r1' as RoomId, ownerDisplayPath: '/p/x.md' },
+  ];
+  assert(roomDisplayName(snaps, 'r1' as RoomId) === 'x.md', 'republished snapshots must not inflate the count');
+});
+
+defineCase('roomDisplayName: null when no snapshots for the room yet', () => {
+  const snaps = [{ roomId: 'other' as RoomId, ownerDisplayPath: '/p/x.md' }];
+  assert(roomDisplayName(snaps, 'r1' as RoomId) === null, 'no snapshots → null so the caller falls back to the short id');
 });
 
 let failed = 0;

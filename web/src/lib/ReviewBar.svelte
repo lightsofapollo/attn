@@ -43,7 +43,7 @@
     DropdownMenuSeparator,
     DropdownMenuTrigger,
   } from '$lib/components/ui/dropdown-menu';
-  import { shortRoomId } from './review/room-ui';
+  import { roomDisplayName, shortRoomId } from './review/room-ui';
   import { reviewStore } from './review/store.svelte';
   import type { ParticipantId, RoomId } from './types';
 
@@ -113,10 +113,12 @@
   }
 
   function roomLabel(roomId: RoomId, status?: string): string {
-    if (status === 'Live') return `Hosting ${shortRoomId(roomId)}`;
-    if (status === 'Joined') return `Joined ${shortRoomId(roomId)}`;
-    if (status === 'Resumed') return `Room ${shortRoomId(roomId)}`;
-    return `Room ${shortRoomId(roomId)}`;
+    // Name the room after the file(s) it shares; fall back to the short id
+    // until the first snapshot lands.
+    const name = roomDisplayName(reviewStore.snapshots, roomId) ?? shortRoomId(roomId);
+    const verb =
+      status === 'Live' ? 'Hosting' : status === 'Joined' ? 'Joined' : 'Room';
+    return `${verb}: ${name}`;
   }
 
   function handleLeaveRoom(): void {

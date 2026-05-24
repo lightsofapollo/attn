@@ -1717,9 +1717,23 @@ impl ReviewManager {
                         _ => (Vec::new(), false),
                     };
 
-                // Build a transport for each peer we don't have one for yet.
+                // Build a transport for each peer we don't have a LIVE one for.
+                // We consult the shared live map (not the local `transports`)
+                // because the per-transport badge watcher prunes it there when a
+                // connection dies terminally — so a peer whose DataChannel failed
+                // during a prolonged offline gets a FRESH transport (re-signaling
+                // a new offer/answer) on the next Hello, instead of being skipped
+                // forever and stuck on the relay fallback.
                 for remote in peers_to_build {
-                    if transports.contains_key(&remote) {
+                    let has_live_transport = webrtc_live_map
+                        .lock()
+                        .ok()
+                        .and_then(|m| {
+                            m.get(&webrtc_room_id)
+                                .map(|live| live.transports.contains_key(&remote))
+                        })
+                        .unwrap_or(false);
+                    if has_live_transport {
                         continue;
                     }
                     let cfg = Arc::new(WebRtcConfig {
@@ -1764,6 +1778,7 @@ impl ReviewManager {
                             let badge_tx = Arc::clone(&badge_update_tx);
                             let badge_room = webrtc_room_id.clone();
                             let badge_map = Arc::clone(&webrtc_live_map);
+                            let badge_remote = remote.clone();
                             let mut state_rx = transport.watch_state().await;
                             tokio::spawn(async move {
                                 loop {
@@ -1792,6 +1807,28 @@ impl ReviewManager {
                                         },
                                     });
                                     if state_rx.changed().await.is_err() {
+                                        break;
+                                    }
+                                    // Terminal death (ICE-restart exhausted, or
+                                    // closed after a prolonged offline): drop this
+                                    // transport from the live map so the next Hello
+                                    // on WS-reconnect re-negotiates a fresh
+                                    // DataChannel (re-signaling) instead of skipping
+                                    // the peer forever. Then stop watching it.
+                                    if matches!(
+                                        *state_rx.borrow(),
+                                        WebRtcConnectionState::Failed
+                                            | WebRtcConnectionState::Closed
+                                    ) {
+                                        if let Ok(mut map) = badge_map.lock()
+                                            && let Some(live) = map.get_mut(&badge_room)
+                                        {
+                                            live.transports.remove(&badge_remote);
+                                        }
+                                        (badge_tx)(ReviewUpdate::ConnectionChanged {
+                                            room_id: badge_room.clone(),
+                                            connection: "mailbox".to_string(),
+                                        });
                                         break;
                                     }
                                 }

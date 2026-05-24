@@ -672,6 +672,17 @@
       0 1px 1px color-mix(in oklch, black 10%, transparent);
   }
 
+  /* Inline "shared for review" marker (attn-e98) — the Share icon in the
+     accent colour, distinct from the presence dot above. */
+  .sidebar-shared-badge {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--primary);
+    opacity: 0.85;
+  }
+
   .sidebar-tree-meta {
     flex: 0 0 auto;
     border-radius: 999px;

@@ -35,6 +35,7 @@
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
     onShare?: (path: string, isDir?: boolean) => void;
+    sharedPaths?: Set<string>;
     collaboratorLocations?: SidebarPresenceLocation[];
   }
 
@@ -46,6 +47,7 @@
     onNavigate,
     onExpand,
     onShare,
+    sharedPaths = new Set<string>(),
     collaboratorLocations = [],
   }: Props = $props();
 
@@ -205,12 +207,29 @@
   function presenceBadgeFor(node: TreeNode, expandedForNode: boolean) {
     return sidebarPresenceBadgeForNode(node, collaboratorLocations, expandedForNode);
   }
+
+  // A file is shared when its own path is in a room; a folder is shared when it
+  // contains any shared file (folder shares surface as one snapshot per file).
+  function isPathShared(node: TreeNode): boolean {
+    if (sharedPaths.size === 0) return false;
+    const target = normalizePath(node.path);
+    if (!node.isDir) {
+      return sharedPaths.has(node.path) || sharedPaths.has(target);
+    }
+    const prefix = `${target}/`;
+    for (const shared of sharedPaths) {
+      const s = normalizePath(shared);
+      if (s === target || s.startsWith(prefix)) return true;
+    }
+    return false;
+  }
 </script>
 
 {#each nodes as node (node.path)}
   {#if node.isDir}
     {@const exp = isExpanded(node.path)}
     {@const presenceBadge = presenceBadgeFor(node, exp)}
+    {@const folderShared = isPathShared(node)}
     <Collapsible
       open={exp}
       onOpenChange={(v) => handleDirOpenChange(node.path, v)}
@@ -243,6 +262,11 @@
                         {#if presenceBadge.count > 1}{presenceBadge.count}{/if}
                       </span>
                     {/if}
+                    {#if folderShared}
+                      <span class="sidebar-shared-badge" title="Shared for review" aria-label="Shared for review">
+                        <Share2 class="size-3" aria-hidden="true" />
+                      </span>
+                    {/if}
                   </SidebarMenuButton>
                 {/snippet}
               </CollapsibleTrigger>
@@ -272,7 +296,7 @@
         <CollapsibleContent>
           {#if node.children}
             <div class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
-              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {collaboratorLocations} />
+              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {sharedPaths} {collaboratorLocations} />
             </div>
           {/if}
         </CollapsibleContent>
@@ -281,6 +305,7 @@
   {:else}
     {@const icon = getFileIcon(node)}
     {@const presenceBadge = presenceBadgeFor(node, false)}
+    {@const fileShared = isPathShared(node)}
     <SidebarMenuItem>
       <ContextMenu>
         <ContextMenuTrigger>
@@ -315,6 +340,11 @@
                   aria-label={`${presenceBadge.count} collaborator${presenceBadge.count === 1 ? '' : 's'} viewing this file`}
                 >
                   {#if presenceBadge.count > 1}{presenceBadge.count}{/if}
+                </span>
+              {/if}
+              {#if fileShared}
+                <span class="sidebar-shared-badge" title="Shared for review" aria-label="Shared for review">
+                  <Share2 class="size-3" aria-hidden="true" />
                 </span>
               {/if}
             </SidebarMenuButton>

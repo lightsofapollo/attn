@@ -245,6 +245,22 @@
         : (reviewSnapshotMarkdown ?? rawMarkdown),
   );
   let showTabBar = $derived(tabs.length > 1);
+  // Owner-side: which local paths are currently shared in a room. Drives the
+  // inline "shared" marker in the file tree. Derived from the owner's own
+  // published snapshots (each carries the absolute `ownerDisplayPath`), filtered
+  // to rooms where we are the owner so a room we merely joined never marks our
+  // local files. Folder shares surface as one snapshot per contained file, so a
+  // folder reads as shared when any descendant path is in this set.
+  let sharedPaths = $derived.by(() => {
+    const set = new Set<string>();
+    for (const snap of reviewStore.snapshots) {
+      const path = snap.ownerDisplayPath;
+      if (!path) continue;
+      if (reviewStore.rooms[snap.roomId]?.role !== 'owner') continue;
+      set.add(path);
+    }
+    return set;
+  });
   const loadedMtimeByPath = new Map<string, number>();
   const markdownCacheByPath = new Map<string, string>();
   const deferredReloadMtimeByPath = new Map<string, number | null>();
@@ -2316,6 +2332,7 @@
       remoteSearchItems={sidebarSearchResults}
       outline={outlineHeadings}
       {activeOutlineId}
+      {sharedPaths}
       onProjectSwitch={handleProjectSwitch}
       onNavigate={handleSidebarNavigate}
       onExpand={handleTreeExpand}

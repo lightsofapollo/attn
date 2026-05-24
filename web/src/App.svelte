@@ -312,14 +312,34 @@
 
   // Activate / tear down as `collabActive` flips. Capturing clientId + seed
   // here (not in render) keeps them stable for the whole session.
+  //
+  // Teardown is DEFERRED past a grace window: `collabActive` flips false
+  // momentarily whenever the owner's auto-save republishes a snapshot (the
+  // `snapshots.some(...)` term) or the connection blips. Tearing down
+  // immediately nulls collabClientId, which unblocks the editor's markdown
+  // reset and re-seeds it from the clean (suggestion-reverted) markdown —
+  // dropping every pending suggestion mark, so the owner never sees reviewers'
+  // suggestions. We only tear down if collab stays inactive past the window.
+  let collabTeardownTimer: ReturnType<typeof setTimeout> | null = null;
   $effect(() => {
-    if (collabActive && collabClientId === null) {
-      collabClientId = crypto.randomUUID();
-      collabSeedMarkdown = effectiveMarkdown;
-    } else if (!collabActive && collabClientId !== null) {
-      collabClientId = null;
-      collabSeedMarkdown = null;
-      collabController = null;
+    if (collabActive) {
+      if (collabTeardownTimer !== null) {
+        clearTimeout(collabTeardownTimer);
+        collabTeardownTimer = null;
+      }
+      if (collabClientId === null) {
+        collabClientId = crypto.randomUUID();
+        collabSeedMarkdown = effectiveMarkdown;
+      }
+    } else if (collabClientId !== null && collabTeardownTimer === null) {
+      collabTeardownTimer = setTimeout(() => {
+        collabTeardownTimer = null;
+        if (!collabActive) {
+          collabClientId = null;
+          collabSeedMarkdown = null;
+          collabController = null;
+        }
+      }, 4000);
     }
   });
 

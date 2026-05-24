@@ -155,10 +155,17 @@ log "Suggesting: owner file = accepted content only"
 file_accepted_only() { grep -q 'OWNERDC' "$SHARED_DOC" && ! grep -q 'RVDC' "$SHARED_DOC"; }
 if poll 12000 file_accepted_only; then ok "suggesting: owner file has the owner's edit, NOT the reviewer's pending suggestion"; else bad "suggesting: file wrong (OWNERDC=$(grep -c OWNERDC "$SHARED_DOC" 2>/dev/null) RVDC=$(grep -c RVDC "$SHARED_DOC" 2>/dev/null))"; fi
 
-# Phase 2 owner accept/reject (popover + applySuggestion/revertSuggestion) is
-# implemented and the suggestion renders inline with attribution; the
-# click-to-accept E2E is pending an editor-view-attachment issue in this
-# harness's late-stage flow (tracked on attn-07i.2).
+# Bug-1 regression guard (collab teardown debounce): the owner just auto-saved
+# (file_accepted_only above proves a save happened). WITHOUT the debounce, that
+# save flipped collabActive false → tore down collab → re-seeded the editor from
+# clean markdown → wiped the suggestion mark from the doc. Re-check the mark
+# SURVIVED the save. (Model-level via __attnPmView, so it's independent of the
+# harness's late-stage DOM-attachment quirk.)
+log "Suggesting: suggestion survives the owner's auto-save (collab not re-seeded)"
+if poll 8000 owner_rvdc_is_suggestion; then ok "suggesting: suggestion survives auto-save (no teardown/re-seed wipe)"; else bad "suggesting: suggestion wiped after save (collab re-seeded clean)"; fi
+# NOTE: click-to-accept (popover → applySuggestion) is implemented + renders but
+# its E2E is blocked by a late-stage detached owner editor in this harness
+# (document.querySelectorAll('.ProseMirror')=0); tracked on attn-07i.2.
 
 echo ""; log "Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

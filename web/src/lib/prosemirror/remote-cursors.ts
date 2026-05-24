@@ -43,7 +43,12 @@ export function remoteCursorsPlugin(): Plugin {
       init: () => [],
       apply(tr, prev) {
         const next = tr.getMeta(remoteCursorsKey) as RemoteCursor[] | undefined;
-        return next ?? prev;
+        if (next) return next;
+        // Map each remote caret through LOCAL edits so it stays anchored to its
+        // content instead of drifting when this user types (the head positions
+        // are document offsets — without this they point at shifted text).
+        if (!tr.docChanged || prev.length === 0) return prev;
+        return prev.map((cursor) => ({ ...cursor, head: tr.mapping.map(cursor.head) }));
       },
     },
     props: {

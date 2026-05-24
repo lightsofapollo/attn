@@ -82,6 +82,14 @@ getrandom = "0.2"
 zeroize = { version = "1", features = ["derive"] }
 thiserror = "2"
 
+# Structured, leveled, timestamped logging for the daemon (debugging relay /
+# remote sync issues). `env-filter` enables RUST_LOG/ATTN_LOG directives
+# (e.g. `attn=debug`); `time` gives wall-clock RFC3339 timestamps. Default
+# level is INFO. Output goes to stderr, which the daemon redirects to attn.log.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+
 # HTTP client for mailbox transport (attn-nnj.6.2). rustls-tls keeps the
 # binary self-contained without dragging in OpenSSL; default-features=false
 # strips the cookie/url-encoding-from-form bits we don't need. We do NOT

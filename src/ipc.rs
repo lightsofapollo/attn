@@ -259,17 +259,17 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                             manager.submit(ReviewCommand::PublishSnapshot { path: path.clone() });
                         }
                     }
-                    Err(e) => eprintln!("attn: failed to save: {}", e),
+                    Err(e) => tracing::error!("attn: failed to save: {}", e),
                 }
             }
             IpcMessage::ThemeChange { theme } => {
-                eprintln!("theme change: {}", theme);
+                tracing::info!("theme change: {}", theme);
             }
             IpcMessage::OpenExternal { path } => {
                 if !path.is_empty()
                     && let Err(err) = open::that(&path)
                 {
-                    eprintln!("attn: failed to open external path '{}': {}", path, err);
+                    tracing::warn!("attn: failed to open external path '{}': {}", path, err);
                 }
             }
             IpcMessage::DragWindow => {
@@ -287,16 +287,16 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 let level = level.to_ascii_lowercase();
                 match source {
                     Some(source) if !source.is_empty() => {
-                        eprintln!("attn: js {level}: {message} ({source})");
+                        tracing::debug!("attn: js {level}: {message} ({source})");
                     }
                     _ => {
-                        eprintln!("attn: js {level}: {message}");
+                        tracing::debug!("attn: js {level}: {message}");
                     }
                 }
                 if let Some(stack) = stack
                     && !stack.is_empty()
                 {
-                    eprintln!("attn: js {level} stack:\n{stack}");
+                    tracing::debug!("attn: js {level} stack:\n{stack}");
                 }
             }
             IpcMessage::JsError {
@@ -308,11 +308,11 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             } => {
                 let line = line.unwrap_or(0);
                 let column = column.unwrap_or(0);
-                eprintln!("attn: js error: {message} ({source}:{line}:{column})");
+                tracing::warn!("attn: js error: {message} ({source}:{line}:{column})");
                 if let Some(stack) = stack
                     && !stack.is_empty()
                 {
-                    eprintln!("attn: js error stack:\n{stack}");
+                    tracing::warn!("attn: js error stack:\n{stack}");
                 }
             }
             // Review collaboration handlers. Dispatch each message to
@@ -405,13 +405,13 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 // Direct identity write (not a ReviewManager command). The next
                 // Share/Join reads the updated identity. Don't log the name.
                 match crate::review::bootstrap::set_display_name(&name) {
-                    Ok(_) => eprintln!("attn: review display name updated"),
-                    Err(e) => eprintln!("attn: failed to set display name: {e}"),
+                    Ok(_) => tracing::info!("attn: review display name updated"),
+                    Err(e) => tracing::warn!("attn: failed to set display name: {e}"),
                 }
             }
         },
         Err(e) => {
-            eprintln!("attn: invalid IPC message: {}", e);
+            tracing::error!("attn: invalid IPC message: {}", e);
         }
     }
 }
@@ -430,7 +430,7 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("attn: could not read file for checkbox toggle: {}", e);
+            tracing::warn!("attn: could not read file for checkbox toggle: {}", e);
             return;
         }
     };
@@ -440,7 +440,7 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
     // line is 1-based from the structure
     let idx = line.wrapping_sub(1);
     if idx >= lines.len() {
-        eprintln!("attn: checkbox toggle line {} out of range", line);
+        tracing::warn!("attn: checkbox toggle line {} out of range", line);
         return;
     }
 
@@ -461,7 +461,7 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
     }
 
     if new_line == current_line {
-        eprintln!("attn: line {} does not contain a checkbox", line);
+        tracing::warn!("attn: line {} does not contain a checkbox", line);
         return;
     }
 
@@ -481,7 +481,7 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
         source: SaveSource::CheckboxToggle,
     }) {
         Ok(result) => persist_revision_if_mapped(state, &path, &result),
-        Err(e) => eprintln!("attn: could not write file after checkbox toggle: {}", e),
+        Err(e) => tracing::error!("attn: could not write file after checkbox toggle: {}", e),
     }
 }
 
@@ -495,14 +495,14 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
 fn submit_review_command(state: &Arc<Mutex<AppState>>, cmd: ReviewCommand) {
     let manager = {
         let Ok(state) = state.lock() else {
-            eprintln!("attn: review command dropped — AppState lock poisoned");
+            tracing::error!("attn: review command dropped — AppState lock poisoned");
             return;
         };
         state.review_manager.clone()
     };
     match manager {
         Some(manager) => manager.submit(cmd),
-        None => eprintln!("attn: review command dropped — ReviewManager unavailable: {cmd:?}"),
+        None => tracing::warn!("attn: review command dropped — ReviewManager unavailable: {cmd:?}"),
     }
 }
 
@@ -524,7 +524,7 @@ fn persist_revision_if_mapped(state: &Arc<Mutex<AppState>>, path: &Path, result:
         return;
     };
     if let Err(err) = store.append_revision(room_id, file_id, &result.revision) {
-        eprintln!(
+        tracing::warn!(
             "attn: failed to append local revision for {}: {}",
             path.display(),
             err
@@ -550,7 +550,7 @@ pub fn append_revision_if_mapped(
         return;
     };
     if let Err(err) = store.append_revision(room_id, file_id, revision) {
-        eprintln!(
+        tracing::warn!(
             "attn: failed to append external local revision for {}: {}",
             path.display(),
             err

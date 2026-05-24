@@ -476,7 +476,7 @@ impl ReviewManager {
     pub fn submit(&self, cmd: ReviewCommand) {
         // Log only the command NAME — never the `{:?}` body, which would spill
         // comment/suggestion plaintext + collab steps to stderr.
-        eprintln!("review: received command {}", review_command_name(&cmd));
+        tracing::info!("review: received command {}", review_command_name(&cmd));
 
         // Bootstrap pipeline owns Share + Join when wired in. Everything else
         // still goes through `stub_update_for` (filled in by follow-up issues).
@@ -586,7 +586,7 @@ impl ReviewManager {
             (ReviewCommand::PublishSnapshot { path }, Some(bootstrapper), Some(_runtime)) => {
                 match bootstrapper.republish_snapshot_for_path(path, unix_now_ms_for_manager()) {
                     Ok(Some((room_id, _file_id, snapshot_id))) => {
-                        eprintln!(
+                        tracing::info!(
                             "review: republished snapshot {} for {} (room={})",
                             snapshot_id.as_str(),
                             path.display(),
@@ -685,13 +685,13 @@ impl ReviewManager {
             });
 
             if let Err(err) = self.store.delete_room(&room_id) {
-                eprintln!(
+                tracing::warn!(
                     "review: delete room state failed for {}: {err}",
                     room_id.as_str()
                 );
             }
 
-            eprintln!("review: stopped room runtime room={}", room_id.as_str());
+            tracing::info!("review: stopped room runtime room={}", room_id.as_str());
             (self.update_tx)(ReviewUpdate::RoomStatusChanged {
                 room_id,
                 status: "Stopped".to_string(),
@@ -751,7 +751,7 @@ impl ReviewManager {
         for (room_id, outbox) in targets {
             match runtime.block_on(outbox.process_once()) {
                 Ok(acks) => {
-                    eprintln!(
+                    tracing::info!(
                         "review: pull drained {} envelope(s) for room={}",
                         acks.len(),
                         room_id.as_str()
@@ -794,7 +794,7 @@ impl ReviewManager {
                 .join(", ");
             format!("Inbox: {} active room(s): {}", active.len(), ids)
         };
-        eprintln!("review: {summary}");
+        tracing::info!("review: {summary}");
         (self.update_tx)(ReviewUpdate::RoomStatusChanged {
             room_id: stub_room_id(),
             status: summary,
@@ -819,7 +819,7 @@ impl ReviewManager {
                 {
                     Ok(rt) => rt.block_on(f()),
                     Err(err) => {
-                        eprintln!("review: transient runtime build failed: {err}");
+                        tracing::error!("review: transient runtime build failed: {err}");
                     }
                 }
             }
@@ -1073,7 +1073,7 @@ impl ReviewManager {
             );
         }
 
-        eprintln!(
+        tracing::info!(
             "review: accepted suggestion {} → applied to {} (room={})",
             suggestion_id.as_str(),
             path.display(),
@@ -1113,7 +1113,7 @@ impl ReviewManager {
         let send = bootstrapper.send_event_sync(room_id, body, unix_now_ms_for_manager());
         self.emit_event_outcome(room_id.clone(), send);
 
-        eprintln!(
+        tracing::info!(
             "review: resolved comment thread {} (room={})",
             thread_id,
             room_id.as_str()
@@ -1211,7 +1211,7 @@ impl ReviewManager {
             },
         });
 
-        eprintln!(
+        tracing::info!(
             "review: manually re-anchored event {} (room={})",
             event_id.as_str(),
             room_id.as_str()
@@ -1539,7 +1539,7 @@ impl ReviewManager {
         // against a healthy relay; failures are logged but non-fatal
         // (peer keys also arrive via ParticipantJoined events).
         match runtime.block_on(bootstrap.refresh_device_keys(room_id, &verifying_keys)) {
-            Ok(n) => eprintln!(
+            Ok(n) => tracing::info!(
                 "review: seeded {n} device key(s) for room={}",
                 room_id.as_str()
             ),
@@ -1550,7 +1550,7 @@ impl ReviewManager {
             // spawned, forget the room, and abort so it never resumes again.
             // (To revive, the owner re-Shares, which re-establishes the room.)
             Err(err) if err.is_room_not_found() => {
-                eprintln!(
+                tracing::warn!(
                     "review: room={} no longer exists on the relay; forgetting it (won't resume again)",
                     room_id.as_str()
                 );
@@ -1563,7 +1563,7 @@ impl ReviewManager {
                     outboxes.remove(room_id);
                 }
                 if let Err(e) = self.store.delete_room(room_id) {
-                    eprintln!("review: delete_room failed for {}: {e}", room_id.as_str());
+                    tracing::warn!("review: delete_room failed for {}: {e}", room_id.as_str());
                 }
                 (self.update_tx)(ReviewUpdate::RoomStatusChanged {
                     room_id: room_id.clone(),
@@ -1574,7 +1574,7 @@ impl ReviewManager {
                     room_id.as_str()
                 ));
             }
-            Err(err) => eprintln!(
+            Err(err) => tracing::warn!(
                 "review: refresh_device_keys failed room={}: {err}",
                 room_id.as_str()
             ),
@@ -1642,11 +1642,11 @@ impl ReviewManager {
         runtime.spawn(async move {
             while let Some(env) = webrtc_sig_rx.recv().await {
                 if let Err(err) = sig_outbox.enqueue(env) {
-                    eprintln!("webrtc: signaling enqueue failed: {err}");
+                    tracing::warn!("webrtc: signaling enqueue failed: {err}");
                     continue;
                 }
                 if let Err(err) = sig_outbox.process_once().await {
-                    eprintln!("webrtc: signaling drain failed: {err}");
+                    tracing::warn!("webrtc: signaling drain failed: {err}");
                 }
             }
         });
@@ -1870,10 +1870,10 @@ impl ReviewManager {
                                 && webrtc_local_device.as_str() < remote.as_str()
                                 && let Err(err) = transport.create_offer().await
                             {
-                                eprintln!("webrtc: create_offer failed: {err}");
+                                tracing::warn!("webrtc: create_offer failed: {err}");
                             }
                         }
-                        Err(err) => eprintln!("webrtc: transport build failed: {err}"),
+                        Err(err) => tracing::warn!("webrtc: transport build failed: {err}"),
                     }
                 }
 
@@ -1901,7 +1901,7 @@ impl ReviewManager {
                             _ => Ok(()),
                         };
                         if let Err(err) = res {
-                            eprintln!("webrtc: applying signaling failed: {err}");
+                            tracing::warn!("webrtc: applying signaling failed: {err}");
                         }
                     }
                 }
@@ -1916,7 +1916,7 @@ impl ReviewManager {
             }
         });
 
-        eprintln!(
+        tracing::info!(
             "review: started room runtime room={} outbox+ws subscribed",
             room_id.as_str()
         );
@@ -1935,7 +1935,7 @@ impl ReviewManager {
         let room_ids = match self.store.list_rooms() {
             Ok(ids) => ids,
             Err(err) => {
-                eprintln!("review: list_rooms failed: {err}");
+                tracing::warn!("review: list_rooms failed: {err}");
                 return vec![];
             }
         };
@@ -1949,7 +1949,7 @@ impl ReviewManager {
             // reconnect loops against rooms the relay will 4xx anyway.
             match self.store.load_room(&room_id) {
                 Ok(Some(room)) if room.policy.expires_at <= now_ms => {
-                    eprintln!(
+                    tracing::warn!(
                         "review: skipping expired room={} (expires_at={} now={})",
                         room_id.as_str(),
                         room.policy.expires_at,
@@ -1959,13 +1959,13 @@ impl ReviewManager {
                 }
                 Ok(None) => continue,
                 Err(err) => {
-                    eprintln!("review: load_room failed for {}: {err}", room_id.as_str());
+                    tracing::warn!("review: load_room failed for {}: {err}", room_id.as_str());
                     continue;
                 }
                 _ => {}
             }
             if let Err(err) = self.start_room_runtime(&room_id) {
-                eprintln!(
+                tracing::warn!(
                     "review: start_room_runtime failed for {}: {err}",
                     room_id.as_str()
                 );

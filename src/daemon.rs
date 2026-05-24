@@ -544,7 +544,7 @@ fn submit_review_socket_command(review_manager: Option<&Arc<ReviewManager>>, cmd
     match review_manager {
         Some(manager) => manager.submit(cmd),
         None => {
-            eprintln!("attn: socket review command dropped — ReviewManager unavailable: {cmd:?}")
+            tracing::warn!("attn: socket review command dropped — ReviewManager unavailable: {cmd:?}")
         }
     }
 }
@@ -568,7 +568,7 @@ fn parse_room_id(raw: String) -> crate::review::ids::RoomId {
 /// `Bootstrapper::join`, which subscribes the daemon's own window to the
 /// room (a windowed join — NOT the headless `--as-agent` path).
 pub fn log_review_join_intent(invite: &str) {
-    eprintln!("attn: review join — routing invite to ReviewManager: {invite}");
+    tracing::info!("attn: review join — routing invite to ReviewManager: {invite}");
 }
 
 /// Dispatch a `ReviewJoin` from the in-process custom-protocol handler.
@@ -625,7 +625,7 @@ pub fn start_listener(
                     handle_client(stream, &proxy, manager.as_ref());
                 }
                 Err(e) => {
-                    eprintln!("attn: socket accept error: {e}");
+                    tracing::warn!("attn: socket accept error: {e}");
                     break;
                 }
             }
@@ -643,7 +643,7 @@ fn handle_client(
     let reader_stream = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("attn: failed to clone stream: {e}");
+            tracing::warn!("attn: failed to clone stream: {e}");
             return;
         }
     };
@@ -817,7 +817,7 @@ fn handle_client(
                 );
             }
             Err(e) => {
-                eprintln!("attn: invalid socket message: {e}");
+                tracing::warn!("attn: invalid socket message: {e}");
                 let resp = SocketResponse::Error {
                     message: format!("invalid message: {e}"),
                 };

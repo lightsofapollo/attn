@@ -4,6 +4,7 @@ mod cli_review;
 mod daemon;
 mod files;
 mod ipc;
+mod logging;
 mod markdown;
 mod platform;
 mod projects;
@@ -238,6 +239,10 @@ fn run() -> Result<()> {
 }
 
 fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
+    // Install the tracing subscriber as the first thing the daemon does, after
+    // the fork has redirected stderr into attn.log. Every `info!`/`warn!`/… from
+    // here on is timestamped and level-filtered (ATTN_LOG/RUST_LOG, default info).
+    logging::init();
     let requested = normalize_input_path(path);
     let tree_root = projects::normalize_project_root(&requested);
     let initial_ui_path = if requested.is_file() {
@@ -249,7 +254,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let file_tree = files::read_tree_root_snapshot(&tree_root);
     let file_tree_nodes = count_tree_nodes(&file_tree);
     let file_tree_json = serde_json::to_string(&file_tree).unwrap_or_default();
-    eprintln!(
+    tracing::info!(
         "attn: startup tree root={} nodes={} json_bytes={}",
         tree_root.display(),
         file_tree_nodes,
@@ -298,16 +303,16 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     .to_string();
     let page_html = build_page_html(&init_payload_json, theme);
     let page_html_bytes = page_html.clone().into_bytes();
-    eprintln!("attn: startup page_html_bytes={}", page_html.len());
+    tracing::info!("attn: startup page_html_bytes={}", page_html.len());
     let dev_server_url = dev_server_url_from_env();
     let dev_server_origin = dev_server_url.as_deref().and_then(origin_from_url);
     let initialization_script =
         build_initialization_script(dev_server_url.is_some(), &init_payload_json);
 
     if let Some(url) = &dev_server_url {
-        eprintln!("attn: loading UI from Vite dev server at {url}");
+        tracing::info!("attn: loading UI from Vite dev server at {url}");
     } else {
-        eprintln!("attn: loading embedded UI");
+        tracing::info!("attn: loading embedded UI");
     }
 
     // Create window and webview with typed event loop
@@ -321,7 +326,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         match watcher::FileWatcher::new(&tree_root, watcher_proxy.clone()) {
             Ok(fw) => Some(fw),
             Err(e) => {
-                eprintln!("attn: could not watch project tree: {e}");
+                tracing::warn!("attn: could not watch project tree: {e}");
                 None
             }
         }
@@ -356,7 +361,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let review_store = match crate::review::store::ReviewStore::open() {
         Ok(store) => Some(Arc::new(store)),
         Err(err) => {
-            eprintln!("attn: review store unavailable, revisions will not persist: {err}");
+            tracing::warn!("attn: review store unavailable, revisions will not persist: {err}");
             None
         }
     };
@@ -396,7 +401,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             .or_else(|| option_env!("ATTN_DEFAULT_RELAY_URL").map(str::to_string))
             .unwrap_or_default();
         if relay_url.is_empty() {
-            eprintln!(
+            tracing::warn!(
                 "attn: no relay configured (set ATTN_RELAY_URL, or bake ATTN_DEFAULT_RELAY_URL at build time) — Share/Join will use the scaffold stub"
             );
             return Arc::new(base);
@@ -405,11 +410,11 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         match base.with_bootstrap(relay_url.clone(), None, verifying_keys) {
             Ok(mgr) => {
-                eprintln!("attn: review bootstrap attached (relay={})", relay_url);
+                tracing::info!("attn: review bootstrap attached (relay={})", relay_url);
                 Arc::new(mgr)
             }
             Err(err) => {
-                eprintln!(
+                tracing::warn!(
                     "attn: failed to attach review bootstrap (relay={}): {} — \
                      falling back to stub",
                     relay_url, err
@@ -433,7 +438,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         }
     });
     if review_manager.is_none() {
-        eprintln!("attn: review manager unavailable, review commands will be no-ops");
+        tracing::warn!("attn: review manager unavailable, review commands will be no-ops");
     }
 
     // Auto-resume any rooms the user already joined / shared in a prior
@@ -448,7 +453,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             .spawn(move || {
                 let resumed = mgr.resume_known_rooms();
                 if !resumed.is_empty() {
-                    eprintln!("review: resumed {} known room(s) on boot", resumed.len());
+                    tracing::info!("review: resumed {} known room(s) on boot", resumed.len());
                 }
             })
             .ok();
@@ -551,7 +556,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             // misconfigured client cannot smuggle a file-serve request that
             // looks like an invite or vice versa.
             if is_reserved_localhost_review(&uri) {
-                eprintln!("attn: refusing reserved attn://localhost/review/... path: {uri}");
+                tracing::warn!("attn: refusing reserved attn://localhost/review/... path: {uri}");
                 return wry::http::Response::builder()
                     .status(404)
                     .header("Content-Type", "text/plain; charset=utf-8")
@@ -602,7 +607,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let wsl = is_wsl();
     #[cfg(target_os = "linux")]
     if wsl {
-        eprintln!("attn: WSL detected, disabling hardware acceleration");
+        tracing::info!("attn: WSL detected, disabling hardware acceleration");
         // SAFETY: called before spawning any threads; single-threaded at this point.
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
     }
@@ -633,12 +638,12 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         }
     }
 
-    eprintln!("attn: webview initialized");
+    tracing::info!("attn: webview initialized");
 
     let mut current_tree_root = tree_root.clone();
 
     let mut modifiers = ModifiersState::default();
-    eprintln!("attn: event loop running");
+    tracing::info!("attn: event loop running");
 
     // Run event loop
     event_loop.run(move |event, _, control_flow| {
@@ -839,7 +844,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     }
                     Err(err) => {
                         let callback = update.callback_name();
-                        eprintln!(
+                        tracing::warn!(
                             "attn: failed to serialize ReviewUpdate for {callback}: {err}"
                         );
                     }
@@ -955,10 +960,10 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             Event::UserEvent(UserEvent::InstallCliAlias) => match cli_alias::install_attn_cli_alias()
             {
                 Ok(cli_alias::InstallCliAliasResult::AlreadyInstalled(path)) => {
-                    eprintln!("attn: CLI alias already installed at {}", path.display());
+                    tracing::info!("attn: CLI alias already installed at {}", path.display());
                 }
                 Ok(cli_alias::InstallCliAliasResult::Installed { path, dir_on_path }) => {
-                    eprintln!("attn: installed CLI alias at {}", path.display());
+                    tracing::info!("attn: installed CLI alias at {}", path.display());
                     if !dir_on_path {
                         let message = format!(
                             "Installed attn at {}.\nThat directory is not on PATH for this app session.\nAdd it to your shell PATH to run `attn` from terminal.",
@@ -971,7 +976,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     }
                 }
                 Err(err) => {
-                    eprintln!("attn: failed to install CLI alias: {err:#}");
+                    tracing::warn!("attn: failed to install CLI alias: {err:#}");
                 }
             },
             #[cfg(target_os = "macos")]
@@ -1012,7 +1017,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
 
                 if let Some(watcher) = file_watcher.as_mut() {
                     if let Err(e) = watcher.update_root(&current_tree_root) {
-                        eprintln!(
+                        tracing::warn!(
                             "attn: could not retarget watcher to {}: {}",
                             current_tree_root.display(),
                             e
@@ -1024,7 +1029,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                             file_watcher = Some(w);
                         }
                         Err(e) => {
-                            eprintln!(
+                            tracing::warn!(
                                 "attn: could not start watcher for {}: {}",
                                 current_tree_root.display(),
                                 e

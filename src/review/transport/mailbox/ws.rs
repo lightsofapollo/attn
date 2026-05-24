@@ -645,14 +645,19 @@ impl MailboxWsClient {
             Ok(pair) => pair,
             Err(e) => {
                 eprintln!("ws: dial failed url={url}: {e}");
-                // Some handshake failures expose the close-frame inline (the
-                // server may close 4000 during the HTTP upgrade if admission
-                // fails). We classify those as terminal AdmissionRejected so
-                // the caller doesn't reconnect into a guaranteed-failing loop.
-                if let tungstenite::Error::Http(resp) = &e
-                    && resp.status().as_u16() == 401
-                {
-                    return ConnectionOutcome::Terminal(TransportError::AdmissionRejected);
+                // Some handshake failures expose the HTTP status inline. Classify
+                // the ones that can NEVER succeed by retrying as Terminal so the
+                // caller doesn't spin a guaranteed-failing reconnect loop:
+                //   401 → admission rejected.
+                //   404 → the room is gone on the relay (expired / deleted /
+                //         different relay instance). A resumed room from a prior
+                //         session hits this and would otherwise retry forever.
+                if let tungstenite::Error::Http(resp) = &e {
+                    match resp.status().as_u16() {
+                        401 => return ConnectionOutcome::Terminal(TransportError::AdmissionRejected),
+                        404 => return ConnectionOutcome::Terminal(TransportError::RoomNotFound),
+                        _ => {}
+                    }
                 }
                 return ConnectionOutcome::Transient(format!("ws connect: {e}"));
             }

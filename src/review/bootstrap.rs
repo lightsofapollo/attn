@@ -762,9 +762,31 @@ impl Bootstrapper {
         let identity = load_or_create_identity_in(&identity_dir)?;
         let doc_targets = validate_share_targets(&path)?;
 
-        // 1. Try to short-circuit: a re-Share of the same path returns the
-        //    existing invite if we still have the secret on disk.
+        // 1. Re-Share of the same path: reuse the existing room id + invite, but
+        //    RE-ESTABLISH the room on the relay first. The local binding only
+        //    proves WE still think the room is live (room.json TTL); the relay
+        //    may have expired/deleted it (or it lived on a different instance),
+        //    which left the owner endlessly dialing a dead room (404 storm).
+        //    create_room is idempotent on roomId — a no-op when the room exists,
+        //    a clean re-create (same id, derived from the secret) when it's gone.
         if let Some(existing) = self.find_existing_share(&path, now_ms)? {
+            let secret = load_room_secret(self.store.root(), &existing.room_id)?;
+            let keys = derive_room_keys(&secret);
+            let policy = self
+                .store
+                .load_room(&existing.room_id)
+                .ok()
+                .flatten()
+                .map(|r| r.policy)
+                .unwrap_or_else(|| {
+                    let mut p = default_room_policy(now_ms);
+                    p.mode = mode;
+                    p
+                });
+            self.create_room(&existing.room_id, &policy, &identity, &keys.admission_key)
+                .await?;
+            self.register_device(&existing.room_id, &identity, "owner", &keys.admission_key)
+                .await?;
             return Ok(existing);
         }
 
@@ -2544,8 +2566,11 @@ mod tests {
         let (_store_tmp, _store, boot) =
             make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
 
-        // Allow exactly ONE create + one register: a second Share of the
-        // same path must short-circuit without any further HTTP.
+        // A re-Share of the same path returns the SAME room + invite (user-facing
+        // idempotency), but it re-establishes the room on the relay first
+        // (create_room is idempotent) so a relay that expired/lost the room can't
+        // leave the owner dialing a dead room. So we expect TWO creates + two
+        // registers across the two Shares.
         Mock::given(method("POST"))
             .and(path_regex_for_room_create())
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
@@ -2556,13 +2581,13 @@ mod tests {
                 "ownerSigningKeyId": "k",
                 "serverSeq": 0,
             })))
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
             .and(path_regex_for_devices())
             .respond_with(ResponseTemplate::new(204))
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
 

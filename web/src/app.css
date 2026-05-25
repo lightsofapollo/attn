@@ -957,6 +957,25 @@
 }
 
 /* ============================================
+ * Dialog EXIT-animation override (WKWebView unmount fix)
+ *
+ * Same root cause, close path: `tw-animate-css`'s `animate-out fade-out-0`
+ * keyframe runs but never fires `animationend` in this WKWebView build, so
+ * bits-ui (which waits for the exit animation before unmounting) leaves the
+ * dialog overlay + content MOUNTED FOREVER after close — a stuck full-screen
+ * `z-50 pointer-events:auto` overlay (and a focus-trap) that blocks the rest of
+ * the app: the comment composer can't be typed in, the owner can't reach the
+ * composer after sharing, etc. Removing the exit animation makes bits-ui see no
+ * animation (animationName: none) and unmount immediately on close.
+ *
+ * Track: retest by removing this rule when the bits-ui dependency upgrades.
+ * ============================================ */
+[data-slot="dialog-overlay"][data-state="closed"],
+[role="dialog"][data-state="closed"] {
+  animation: none !important;
+}
+
+/* ============================================
  * Shared-document chrome (reviewer mode)
  *
  * Keep reviewer mode visible but neutral. A previous left-edge accent read as

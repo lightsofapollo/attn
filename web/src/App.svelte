@@ -736,11 +736,24 @@
     // `selectionchange` covers both mouse and keyboard selection. We read the
     // ProseMirror state (not the raw DOM selection) so the captured range
     // matches what the composer will author against.
+    //
+    // We ALSO re-anchor on scroll + resize: the toolbar is placed at the
+    // selection's on-screen coordinates, so scrolling the editor (or resizing)
+    // moves the selected text out from under it. Without this the toolbar
+    // stayed frozen at its original spot while the text scrolled away. Scroll
+    // is captured (true) so it catches the editor's inner scroll container,
+    // whose scroll events don't bubble to the document.
     const handler = () => {
       refreshSelectionToolbar();
     };
     document.addEventListener('selectionchange', handler);
-    return () => document.removeEventListener('selectionchange', handler);
+    window.addEventListener('scroll', handler, true);
+    window.addEventListener('resize', handler);
+    return () => {
+      document.removeEventListener('selectionchange', handler);
+      window.removeEventListener('scroll', handler, true);
+      window.removeEventListener('resize', handler);
+    };
   });
 
   // Resolve every comment/suggestion anchor against the active snapshot so

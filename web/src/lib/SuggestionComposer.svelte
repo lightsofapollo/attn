@@ -123,7 +123,7 @@
 
   function recomputePosition(): void {
     try {
-      const anchor = getPopoverAnchor(view, from, to, { width: 360, height: 280 });
+      const anchor = getPopoverAnchor(view, from, to, { width: 420, height: 320 });
       top = anchor.recommendedPosition.top;
       left = anchor.recommendedPosition.left;
     } catch {
@@ -211,7 +211,7 @@
 
 <div
   bind:this={rootEl}
-  class="suggestion-composer fixed z-50 flex w-[360px] flex-col gap-3 rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-md"
+  class="suggestion-composer fixed z-50 flex w-[420px] flex-col gap-4 rounded-md border border-border bg-popover p-4 text-popover-foreground shadow-md"
   style="top: {top}px; left: {left}px;"
   role="dialog"
   tabindex="-1"
@@ -233,10 +233,10 @@
 
   <fieldset class="flex flex-col gap-1.5" data-slot="suggestion-composer-mode-group">
     <legend class="text-xs font-medium text-foreground">Operation</legend>
-    <div class="grid grid-cols-2 gap-1.5">
+    <div class="grid grid-cols-2 gap-2">
       {#each operationOptions as opt (opt.value)}
         <label
-          class="flex cursor-pointer items-start gap-2 rounded-sm border border-border/60 bg-muted/30 p-1.5 text-xs transition-colors hover:bg-muted/60 has-[:checked]:border-primary/60 has-[:checked]:bg-accent/50"
+          class="flex cursor-pointer items-start gap-2 rounded-sm border border-border/60 bg-muted/30 p-2.5 text-xs transition-colors hover:bg-muted/60 has-[:checked]:border-primary/60 has-[:checked]:bg-accent/50"
         >
           <input
             type="radio"
@@ -250,7 +250,7 @@
           />
           <div class="flex min-w-0 flex-col">
             <span class="font-medium text-foreground">{opt.label}</span>
-            <span class="text-[0.65rem] leading-tight text-muted-foreground">{opt.helper}</span>
+            <span class="text-[0.72rem] leading-snug text-muted-foreground">{opt.helper}</span>
           </div>
         </label>
       {/each}
@@ -285,7 +285,7 @@
       </label>
       <textarea
         id="suggestion-composer-text"
-        class="min-h-[3.5rem] resize-y rounded-sm border border-border bg-background px-2 py-1 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+        class="min-h-[4.5rem] resize-y rounded-sm border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
         placeholder="New text..."
         bind:value={replacementText}
         data-slot="suggestion-composer-text"
@@ -301,7 +301,7 @@
       </label>
       <textarea
         id="suggestion-composer-text"
-        class="min-h-[3.5rem] resize-y rounded-sm border border-border bg-background px-2 py-1 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+        class="min-h-[4.5rem] resize-y rounded-sm border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
         placeholder="Text to insert..."
         bind:value={insertText}
         data-slot="suggestion-composer-text"
@@ -318,7 +318,7 @@
     </label>
     <textarea
       id="suggestion-composer-note"
-      class="min-h-[2.5rem] resize-y rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+      class="min-h-[3.25rem] resize-y rounded-sm border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
       placeholder="Why this change?"
       bind:value={note}
       data-slot="suggestion-composer-note"

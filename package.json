@@ -1,6 +1,6 @@
 {
   "name": "attnmd",
-  "version": "0.6.11",
+  "version": "0.6.12",
   "description": "A beautiful markdown viewer that launches from the CLI",
   "license": "MIT",
   "repository": {

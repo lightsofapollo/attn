@@ -112,6 +112,13 @@ fn should_ignore_component(component: &str) -> bool {
     if component.starts_with('.') {
         return true;
     }
+    // Atomic-save temp files: `write_atomic` writes `<name>.attn-tmp` then
+    // renames it onto the target. These are internal save churn — surfacing
+    // them flickers the file tree and (via the rename) disturbed the active
+    // file's tab. Never report them.
+    if component.ends_with(".attn-tmp") {
+        return true;
+    }
     matches!(
         component,
         "node_modules" | "target" | "dist" | "build" | "out" | "coverage" | "__pycache__" | "venv"

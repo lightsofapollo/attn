@@ -20,6 +20,7 @@
   } from './lib/types';
   import { initKeyboard } from './lib/keyboard';
   import { checkForUpdate, upgradeHint } from './lib/update-check';
+  import { netRemovedPaths } from './lib/tree-ops';
   import {
     dragWindow,
     editSave,
@@ -1627,10 +1628,11 @@
       }
       if (data.treeOps) {
         applyTreeOps(data.treeOps);
-        const removedPaths = data.treeOps
-          .filter((op): op is Extract<TreeOp, { op: 'remove' }> => op.op === 'remove')
-          .map((op) => op.path);
-        pruneTabsForRemovedPaths(removedPaths);
+        // Only prune tabs for paths that are genuinely deleted — NOT for a
+        // remove+upsert pair, which is a replace/rename (e.g. the owner's atomic
+        // temp-file+rename save). Pruning those closed the file the owner was
+        // editing and unmounted the editor mid-collab.
+        pruneTabsForRemovedPaths(netRemovedPaths(data.treeOps));
       }
       if (detectFileType(data.filePath) === 'markdown' && typeof data.markdown !== 'string') {
         if (!wasFrontendNav && mode === 'edit' && data.filePath === activePath && editorDirty) {
@@ -1675,10 +1677,11 @@
       }
       if (data.treeOps) {
         applyTreeOps(data.treeOps);
-        const removedPaths = data.treeOps
-          .filter((op): op is Extract<TreeOp, { op: 'remove' }> => op.op === 'remove')
-          .map((op) => op.path);
-        pruneTabsForRemovedPaths(removedPaths);
+        // Only prune tabs for paths that are genuinely deleted — NOT for a
+        // remove+upsert pair, which is a replace/rename (e.g. the owner's atomic
+        // temp-file+rename save). Pruning those closed the file the owner was
+        // editing and unmounted the editor mid-collab.
+        pruneTabsForRemovedPaths(netRemovedPaths(data.treeOps));
       }
       if (data.changedPaths && data.changedPaths.length > 0) {
         invalidatePathCaches(data.changedPaths);

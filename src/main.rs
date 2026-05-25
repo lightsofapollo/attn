@@ -292,6 +292,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         "activeProjectPath": project_registry.active_project,
         "theme": theme,
         "diagMode": diag_mode,
+        "version": env!("CARGO_PKG_VERSION"),
         "contentMtimeMs": initial_mtime_ms,
         "contentBytes": initial_bytes,
         "reviewProfile": {

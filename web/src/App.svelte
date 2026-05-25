@@ -19,6 +19,7 @@
     UpdatePayload,
   } from './lib/types';
   import { initKeyboard } from './lib/keyboard';
+  import { checkForUpdate, upgradeHint } from './lib/update-check';
   import {
     dragWindow,
     editSave,
@@ -1464,6 +1465,19 @@
 
     // Seed the onboarding display name (chosen name + git/OS default).
     userProfile.hydrate(init.reviewProfile);
+
+    // Best-effort "update available" nudge: ping npm for the latest attnmd and
+    // toast if this build is behind. No auto-install; failures are silent.
+    void checkForUpdate(init.version).then((update) => {
+      if (!update) return;
+      // Homebrew is macOS-only — point Linux at npm only.
+      const isMacOS =
+        /Mac/i.test(navigator.platform) || /Macintosh|Mac OS X/i.test(navigator.userAgent);
+      toast(`attn ${update.latest} is available`, {
+        description: `You're on ${update.current}. ${upgradeHint(isMacOS)}`,
+        duration: 12000,
+      });
+    });
 
     rawMarkdown = init.markdown ?? '';
     structure = init.structure ?? emptyPlanStructure();

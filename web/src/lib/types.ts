@@ -299,6 +299,8 @@ export interface InitPayload {
   activeProjectPath?: string;
   theme: ThemeName;
   diagMode?: DiagMode;
+  /** The running attn version (CARGO_PKG_VERSION), for the update-available check. */
+  version?: string;
   contentMtimeMs?: number;
   contentBytes?: number;
   reviewProfile?: ReviewProfileInit;

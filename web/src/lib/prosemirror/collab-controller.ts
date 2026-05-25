@@ -41,26 +41,53 @@ export interface RemoteCursor {
   location?: CollabPeerLocation;
 }
 
-/** Tagged wire envelope carried inside a SignalingPayload::Collab payload. */
+/**
+ * Tagged wire envelope carried inside a SignalingPayload::Collab payload.
+ *
+ * Every document message (`submit`/`broadcast`) is scoped to a `fileId`: a
+ * folder share is a room with N independently co-edited files, each with its
+ * own authority on the owner. `resync` is a client→owner request for a file's
+ * full step log (sent when a participant opens/switches to a file): the owner
+ * replies with a `broadcast` at `startVersion: 0`, which the at-least-once
+ * `receive()` skip logic makes idempotent for peers already caught up. Cursors
+ * are presence and carry their file location inside the cursor itself.
+ */
 export type CollabWireMessage =
-  | { kind: 'submit'; submission: CollabSubmission }
-  | { kind: 'broadcast'; broadcast: CollabBroadcast }
+  | { kind: 'submit'; fileId: FileId; submission: CollabSubmission }
+  | { kind: 'broadcast'; fileId: FileId; broadcast: CollabBroadcast }
+  | { kind: 'resync'; fileId: FileId }
   | { kind: 'cursor'; cursor: RemoteCursor };
 
 /** Sends an already-serialized wire message to the room. */
 export type SendSignalFn = (payload: string) => void;
 
 /**
- * Drives one editor's participation in a live co-typing session. Construct
- * with the editor bridge, the local role, and a transport `send`; then call
- * {@link onLocalChange} after each local transaction and {@link onInbound}
- * for each `reviewCollab` payload from the daemon.
+ * Drives a participant's live co-typing across every file in a room. A room is
+ * a SET of files (a folder share is N files); each file is independently
+ * co-edited, so the owner hosts one {@link CollabAuthority} PER file and any
+ * participant can edit any file.
+ *
+ * The editor only ever shows ONE file at a time, so this controller binds the
+ * editor to the *active* file via {@link setActiveFile} (call it on first
+ * activation and on every file switch):
+ *   * Owner   → keeps a lazily-grown `Map<fileId, CollabHost>`. The active
+ *     file's host gets the owner's editor as its owner-client; inbound steps
+ *     for ANY file are routed to that file's host (created on demand from
+ *     {@link getSeedDoc}) even when the owner is looking elsewhere, so a
+ *     reviewer editing file B while the owner edits file A Just Works.
+ *   * Reviewer→ a single wire client for the active file; outgoing steps are
+ *     tagged with that fileId, inbound broadcasts for other files are ignored,
+ *     and a `resync` is requested whenever it (re)binds a file.
+ *
+ * Switching/joining always re-seeds the editor at v0 from the file's base
+ * snapshot under a FRESH clientID, then replays the file's full step log
+ * (locally for the owner, via `resync` for a reviewer) — so the owner's own
+ * past steps in the log rebase in as remote edits rather than colliding with
+ * non-existent unconfirmed steps.
  */
 export class CollabController {
   private readonly isOwner: boolean;
   private readonly send: SendSignalFn;
-  private readonly client: CollabClient;
-  private readonly host: CollabHost | null;
   private readonly selfClientId: string;
   private readonly selfLabel: string;
   private readonly selfColor: string;
@@ -72,17 +99,27 @@ export class CollabController {
   // (presence frames identify peers by deviceId, cursors by collab clientID).
   private readonly cursorDevice = new Map<string, string>();
 
+  // Owner: one authority/host per shared file, grown lazily. Reviewer: unused.
+  private readonly hosts = new Map<FileId, CollabHost>();
+  // Owner: seeds an authority for a file the owner hasn't opened (a reviewer
+  // submitted/resynced it first). Returns that file's base-snapshot doc.
+  private readonly getSeedDoc: ((fileId: FileId) => PmNode | null) | null;
+
+  // The file the editor currently shows + its client (owner: the active host's
+  // owner-client; reviewer: the wire client). Null until setActiveFile.
+  private activeFileId: FileId | null = null;
+  private activeClient: CollabClient | null = null;
+
   constructor(opts: {
-    bridge: EditorBridge;
     isOwner: boolean;
-    /** Seed doc for the authority (owner only) — must equal the editor's v0 doc. */
-    initialDoc: PmNode;
     send: SendSignalFn;
     /** This editor's collab clientID — stamped on outgoing cursor messages. */
     selfClientId: string;
     /** Label + color for this participant's caret as seen by others. */
     selfLabel: string;
     selfColor: string;
+    /** Owner only: base-snapshot doc for a file, to seed an authority lazily. */
+    getSeedDoc?: (fileId: FileId) => PmNode | null;
     /** Notified whenever the remote-cursor set changes (drives decorations). */
     onRemoteCursors?: (cursors: RemoteCursor[]) => void;
     /** Reads the current shared-file location when sending cursor presence. */
@@ -95,31 +132,67 @@ export class CollabController {
     this.selfClientId = opts.selfClientId;
     this.selfLabel = opts.selfLabel;
     this.selfColor = opts.selfColor;
+    this.getSeedDoc = opts.getSeedDoc ?? null;
     this.onRemoteCursors = opts.onRemoteCursors ?? null;
     this.getLocation = opts.getLocation ?? null;
     this.onPeerLocation = opts.onPeerLocation ?? null;
+  }
 
-    if (opts.isOwner) {
-      const authority = new CollabAuthority(opts.initialDoc);
-      this.host = new CollabHost(authority, (b) => this.broadcastOut(b));
-      // The owner's own editor submits straight to the local host (no wire).
-      this.client = new CollabClient(opts.bridge, (sub) => this.host!.onSubmission(sub));
-      this.host.attachOwnerClient(this.client);
+  /** The active file's authority/local version, for diagnostics. */
+  get version(): number {
+    if (this.isOwner) {
+      const host = this.activeFileId ? this.hosts.get(this.activeFileId) : undefined;
+      return host ? host.version : 0;
+    }
+    return this.activeClient ? this.activeClient.version : 0;
+  }
+
+  /**
+   * Bind the editor to `fileId`. Call on first activation and on every file
+   * switch. `bridge` wraps the editor, which the caller has just re-seeded at
+   * collab v0 with this file's base-snapshot doc under a fresh clientID.
+   *
+   * Owner: detaches the previously-active host's owner-client (its authority
+   * keeps running headless), then attaches a fresh owner-client to this file's
+   * host and replays the authority's full log so the v0 editor catches up to
+   * the current (possibly reviewer-advanced) document.
+   *
+   * Reviewer: drops the old client, makes a fresh wire client for this file,
+   * and requests a resync so the owner replays the file's full log to it.
+   */
+  setActiveFile(fileId: FileId, bridge: EditorBridge): void {
+    if (this.isOwner) {
+      if (this.activeFileId !== null && this.activeFileId !== fileId) {
+        this.hosts.get(this.activeFileId)?.attachOwnerClient(null);
+      }
+      const host = this.hostFor(fileId, () => bridge.getState().doc);
+      const client = new CollabClient(bridge, (sub) => host.onSubmission(sub));
+      host.attachOwnerClient(client);
+      this.activeFileId = fileId;
+      this.activeClient = client;
+      // Catch the freshly-seeded (v0) editor up to the authority's current doc.
+      client.receive(host.authority.stepsSince(0));
     } else {
-      this.host = null;
-      // A reviewer's submissions cross the wire to the owner.
-      this.client = new CollabClient(opts.bridge, (sub) => this.submitOut(sub));
+      const client = new CollabClient(bridge, (sub) => this.submitOut(fileId, sub));
+      this.activeFileId = fileId;
+      this.activeClient = client;
+      this.send(JSON.stringify({ kind: 'resync', fileId } satisfies CollabWireMessage));
     }
   }
 
-  /** Authority/local version, for diagnostics. */
-  get version(): number {
-    return this.host ? this.host.version : this.client.version;
+  /** Owner: the host for `fileId`, created from `seed()` (the v0 doc) if new. */
+  private hostFor(fileId: FileId, seed: () => PmNode): CollabHost {
+    let host = this.hosts.get(fileId);
+    if (host === undefined) {
+      host = new CollabHost(new CollabAuthority(seed()), (b) => this.broadcastOut(fileId, b));
+      this.hosts.set(fileId, host);
+    }
+    return host;
   }
 
   /** Call after every local editor transaction; ships unconfirmed steps. */
   onLocalChange(): void {
-    this.client.syncUp();
+    this.activeClient?.syncUp();
   }
 
   /**
@@ -171,10 +244,34 @@ export class CollabController {
       return;
     }
     if (this.isOwner) {
-      if (msg.kind === 'submit') this.host!.onSubmission(msg.submission);
+      // Route to the file's host, creating it on demand if a reviewer reached
+      // a file before the owner opened it. `getSeedDoc` yields its v0 base.
+      if (msg.kind === 'submit') {
+        this.ownerHostFor(msg.fileId)?.onSubmission(msg.submission);
+      } else if (msg.kind === 'resync') {
+        const host = this.ownerHostFor(msg.fileId);
+        if (host) this.broadcastOut(msg.fileId, host.authority.stepsSince(0));
+      }
     } else {
-      if (msg.kind === 'broadcast') this.client.receive(msg.broadcast);
+      // A reviewer only tracks the file in its editor; ignore other files'
+      // steps (it re-seeds + resyncs when it switches to them).
+      if (msg.kind === 'broadcast' && msg.fileId === this.activeFileId) {
+        this.activeClient?.receive(msg.broadcast);
+      }
     }
+  }
+
+  /**
+   * Owner: the existing host for `fileId`, or one freshly seeded from
+   * {@link getSeedDoc} (a reviewer reached this file first). `null` if we have
+   * no base snapshot for it yet — the sender will resync once we publish one.
+   */
+  private ownerHostFor(fileId: FileId): CollabHost | null {
+    const existing = this.hosts.get(fileId);
+    if (existing) return existing;
+    const seedDoc = this.getSeedDoc?.(fileId) ?? null;
+    if (seedDoc === null) return null;
+    return this.hostFor(fileId, () => seedDoc);
   }
 
   /** Drop a single peer's cursor by collab clientID. */
@@ -199,11 +296,11 @@ export class CollabController {
     if (changed) this.onRemoteCursors?.([...this.remoteCursors.values()]);
   }
 
-  private submitOut(submission: CollabSubmission): void {
-    this.send(JSON.stringify({ kind: 'submit', submission } satisfies CollabWireMessage));
+  private submitOut(fileId: FileId, submission: CollabSubmission): void {
+    this.send(JSON.stringify({ kind: 'submit', fileId, submission } satisfies CollabWireMessage));
   }
 
-  private broadcastOut(broadcast: CollabBroadcast): void {
-    this.send(JSON.stringify({ kind: 'broadcast', broadcast } satisfies CollabWireMessage));
+  private broadcastOut(fileId: FileId, broadcast: CollabBroadcast): void {
+    this.send(JSON.stringify({ kind: 'broadcast', fileId, broadcast } satisfies CollabWireMessage));
   }
 }

@@ -79,6 +79,17 @@
      * `undefined` = normal markdown-driven editor (unchanged behavior).
      */
     collabClientId?: string;
+    /**
+     * Bumped by the parent to force a full editor RE-CREATE at the current
+     * `markdown` + `collabClientId` — used to switch the live collab doc to a
+     * different file (a folder share is N independently co-edited files). A
+     * plugin reconfigure can't do this: `prosemirror-collab` keys its plugin
+     * state by a shared PluginKey, so reconfiguring preserves the old doc +
+     * version. Re-creating the view installs collab fresh at v0 on the new
+     * file's base doc. Changing it is the ONLY thing besides `editorEl` that
+     * tears down + rebuilds the view.
+     */
+    collabEpoch?: number;
     /** Fired after every local doc-changing transaction during a collab session. */
     onCollabDocChange?: () => void;
     /** Fired when the local selection (caret) moves during a collab session. */
@@ -109,6 +120,7 @@
     nodeViews: extraNodeViews,
     onReady,
     collabClientId,
+    collabEpoch = 0,
     onCollabDocChange,
     onCollabSelectionChange,
     suggesting = false,
@@ -623,6 +635,9 @@
   $effect(() => {
     if (!editorEl) return;
     const el = editorEl;
+    // Tracked: a `collabEpoch` bump forces a full teardown + rebuild so the
+    // live collab session re-seeds at v0 on a different file's base doc.
+    void collabEpoch;
     untrack(() => {
       const state = createState(markdown);
       view = new EditorView(el, {

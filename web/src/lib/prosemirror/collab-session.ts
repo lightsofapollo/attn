@@ -134,9 +134,13 @@ export class CollabHost {
   /**
    * Register the owner's own editor as a client so accepted batches are
    * applied locally (confirming the owner's own steps and surfacing reviewer
-   * edits in the owner's editor).
+   * edits in the owner's editor). Pass `null` to DETACH — used when the owner
+   * navigates away from this file: the authority keeps accepting reviewers'
+   * steps in the background, but there's no live editor to replay them into
+   * (replaying into a destroyed view would throw), so we drop the owner-client
+   * until the owner returns and re-attaches a fresh one.
    */
-  attachOwnerClient(client: CollabClient): void {
+  attachOwnerClient(client: CollabClient | null): void {
     this.ownerClient = client;
   }
 

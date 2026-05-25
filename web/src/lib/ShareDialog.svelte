@@ -115,9 +115,20 @@
       : '',
   );
 
-  // Auto-mint on first open when no share exists yet.
+  // Tracks which target we've already fired a mint for during this open, so an
+  // effect re-run (e.g. ShareReady flipping the existing-invite props) can't
+  // double-mint. Plain (non-reactive) on purpose. Reset when the dialog closes.
+  let mintingTarget: string | null = null;
+
+  // Auto-mint when the dialog's target isn't already shared. The parent only
+  // passes `existingRoomId`/`existingInviteUrl` when the target IS the current
+  // share — so a NEW target (sharing a folder while a file is shared, etc.)
+  // mints a fresh room and the owner switches over to it.
   $effect(() => {
-    if (!open) return;
+    if (!open) {
+      mintingTarget = null;
+      return;
+    }
     copiedUrl = false;
     copiedCli = false;
     copiedFingerprint = false;
@@ -125,9 +136,9 @@
       phase = 'ready';
       return;
     }
-    if (phase === 'idle') {
-      void autoMint();
-    }
+    if (mintingTarget === filePath) return;
+    mintingTarget = filePath;
+    void autoMint();
   });
 
   // Transition minting → ready when the daemon's ShareReady IPC lands.

@@ -36,6 +36,9 @@
   import { CollabController } from './lib/prosemirror/collab-controller';
   import type { EditorBridge } from './lib/prosemirror/collab-session';
   import { remoteCursorsKey } from './lib/prosemirror/remote-cursors';
+  import { markdownParser } from './lib/schema';
+  import type { Node as PmNode } from 'prosemirror-model';
+  import type { FileId } from './lib/types';
   import {
     decreaseFontScale as decreaseGlobalFontScale,
     increaseFontScale as increaseGlobalFontScale,
@@ -263,6 +266,22 @@
     }
     return set;
   });
+  // Whether the Share dialog's current target is the file/folder ALREADY shared
+  // in the active owned room. When it is, the dialog re-shows that room's
+  // invite; when it's a NEW target (e.g. sharing a folder while a single file is
+  // shared), the dialog mints a fresh room so the owner "switches over" to it.
+  let shareTargetIsCurrent = $derived.by(() => {
+    const roomId = reviewStore.currentShare?.roomId;
+    if (!roomId) return false;
+    const target = (shareTargetPath ?? activePath ?? '').replace(/\/+$/, '');
+    if (target.length === 0) return false;
+    return reviewStore.snapshots.some((s) => {
+      if (s.roomId !== roomId) return false;
+      const p = s.ownerDisplayPath;
+      if (!p) return false;
+      return p === target || p.startsWith(`${target}/`);
+    });
+  });
   const loadedMtimeByPath = new Map<string, number>();
   const markdownCacheByPath = new Map<string, string>();
   const deferredReloadMtimeByPath = new Map<string, number | null>();
@@ -332,7 +351,18 @@
   // mid-session and trigger a reset.
   let collabClientId = $state<string | null>(null);
   let collabSeedMarkdown = $state<string | null>(null);
-  let collabController: CollabController | null = null;
+  let collabController = $state<CollabController | null>(null);
+  // Per-file live collab: the editor shows one file at a time, so switching the
+  // active file re-seeds the editor at v0 from THAT file's base snapshot under a
+  // fresh clientId. `collabEpoch` forces the editor to fully re-create on each
+  // (re)seed (a plugin reconfigure would preserve the old collab doc/version);
+  // `collabSeededFileId` tracks which file the current seed is for so the seed
+  // effect knows when a switch happened. The bind vars below let the bind
+  // effect re-point the persistent controller at the new view+file exactly once.
+  let collabEpoch = $state(0);
+  let collabSeededFileId = $state<FileId | null>(null);
+  let collabBoundView: EditorView | undefined = undefined;
+  let collabBoundFileId: FileId | null = null;
 
   // Activate / tear down as `collabActive` flips. Capturing clientId + seed
   // here (not in render) keeps them stable for the whole session.
@@ -351,22 +381,26 @@
         clearTimeout(collabTeardownTimer);
         collabTeardownTimer = null;
       }
-      // Capture the seed ONCE, but only when we actually have the content to
-      // seed from. Grabbing a transient/empty `effectiveMarkdown` (a reconnect
-      // blip, or a reviewer whose shared snapshot hasn't landed yet) would lock
-      // the seed to '' — and because collab then owns the doc and stops
-      // resetting from the prop, the editor renders BLANK for the whole session
-      // (the "shared, then blank" bug). Require non-empty content, and for a
-      // reviewer require the shared snapshot so we never seed collab from the
-      // reviewer's own local file.
-      const seedReady = collabSeedReady({
-        effectiveMarkdown,
-        isReviewerInRoom,
-        isReviewerViewingSnapshot,
-      });
-      if (collabClientId === null && seedReady) {
+      // Seed from the ACTIVE file's BASE (earliest) snapshot — that is the v0
+      // every authority + resync replay is anchored to, so the editor lands at
+      // a doc the full step log rebases cleanly onto. (The owner of a just-
+      // shared file may not have its snapshot echoed back yet; fall back to the
+      // editor's current content so the first share never stalls. A reviewer
+      // must wait for the snapshot — never seed from their own local file.)
+      const fileId = reviewStore.currentFileId;
+      const base = collabBaseSnapshotMarkdown(fileId);
+      const seed = base ?? (collabRole === 'owner' ? effectiveMarkdown : null);
+      const seedReady =
+        seed !== null &&
+        collabSeedReady({ effectiveMarkdown: seed, isReviewerInRoom, isReviewerViewingSnapshot });
+      // (Re)seed on first activation OR whenever the active file changes — a
+      // file switch needs a fresh clientId (so the log's own past steps rebase
+      // in as remote edits) and an epoch bump (forces a full editor re-create).
+      if (seedReady && fileId !== null && (collabClientId === null || collabSeededFileId !== fileId)) {
         collabClientId = crypto.randomUUID();
-        collabSeedMarkdown = effectiveMarkdown;
+        collabSeedMarkdown = seed;
+        collabSeededFileId = fileId;
+        collabEpoch += 1;
       }
     } else if (collabClientId !== null && collabTeardownTimer === null) {
       collabTeardownTimer = setTimeout(() => {
@@ -375,6 +409,9 @@
           collabClientId = null;
           collabSeedMarkdown = null;
           collabController = null;
+          collabSeededFileId = null;
+          collabBoundView = undefined;
+          collabBoundFileId = null;
         }
       }, 4000);
     }
@@ -388,7 +425,43 @@
   $effect(() => {
     const view = pmViewForReview;
     if (collabActive && collabClientId !== null && view && collabController === null) {
-      maybeStartCollab(view);
+      maybeStartCollab();
+    }
+  });
+
+  // Bind the (persistent) controller to the active file's editor view. A file
+  // switch re-seeds + re-creates the editor (new `pmViewForReview`), so this
+  // re-points collab at the fresh view exactly once per view. `setActiveFile`
+  // re-attaches the owner's host (replaying its log into the v0 editor) or
+  // makes a reviewer wire-client + requests a resync. Gating on view identity
+  // is sufficient: every active-file change bumps the epoch → new view.
+  $effect(() => {
+    const view = pmViewForReview;
+    const fileId = reviewStore.currentFileId;
+    const controller = collabController;
+    if (!collabActive || controller === null || !view || fileId === null) return;
+    if (view === collabBoundView) return;
+    const bridge: EditorBridge = {
+      getState: () => view.state,
+      apply: (tr) => view.dispatch(tr),
+    };
+    controller.setActiveFile(fileId, bridge);
+    collabBoundView = view;
+    collabBoundFileId = fileId;
+  });
+
+  // Owner: keep the room's active file in sync with the file shown in the
+  // editor (the local file at `activePath`). Clicking a shared file in the
+  // sidebar switches the live collab doc to it; navigating to a non-shared
+  // file clears the scope so collab deactivates and the plain file renders.
+  // (Reviewers switch files via ReviewFileNav, which drives currentFileId
+  // directly; their editor shows the snapshot, not a local path.)
+  $effect(() => {
+    if (collabRole !== 'owner' || reviewStore.currentRoomId === null) return;
+    const path = activePath;
+    const fileId = path ? ownerFileIdForPath(path) : null;
+    if (fileId !== reviewStore.currentFileId) {
+      reviewStore.setCurrentFile(fileId);
     }
   });
 
@@ -452,24 +525,19 @@
     if (path) openShareDialogForPath(path, isDir);
   }
 
-  function maybeStartCollab(view: EditorView): void {
-    // onReady fires for every editor mount; only build a controller when the
-    // collab plugin is actually installed (collabClientId set at create time).
+  function maybeStartCollab(): void {
+    // Build the per-room controller ONCE; the bind effect points it at each
+    // file's editor as the active file changes. Only build when the collab
+    // plugin is actually installed (collabClientId set).
     if (!collabActive || collabClientId === null) {
       collabController = null;
       return;
     }
     const roomId = reviewStore.currentRoomId;
     if (!roomId) return;
-    const bridge: EditorBridge = {
-      getState: () => view.state,
-      apply: (tr) => view.dispatch(tr),
-    };
     const isOwner = collabRole === 'owner';
     collabController = new CollabController({
-      bridge,
       isOwner,
-      initialDoc: view.state.doc,
       send: (payload) => reviewCollabSend(roomId, payload),
       selfClientId: collabClientId,
       // Caret label is the user's chosen/resolved display name (falls back to
@@ -477,16 +545,60 @@
       selfLabel: userProfile.effectiveName || (isOwner ? 'Owner' : 'Reviewer'),
       // Caret colors mirror the presence chips: owner warm, reviewer cool.
       selfColor: isOwner ? '#d97706' : '#2563eb',
+      // Owner only: seed an authority for a file a reviewer reaches before the
+      // owner has opened it, from that file's base snapshot.
+      getSeedDoc: isOwner ? collabSeedDocFor : undefined,
       getLocation: currentCollabLocation,
       onPeerLocation: (deviceId, location) => {
         reviewStore.notePeerLocation(deviceId, location);
       },
       onRemoteCursors: (cursors) => {
-        // Push the remote-caret set into the editor as a meta transaction so
-        // the remoteCursorsPlugin re-renders its decorations.
-        view.dispatch(view.state.tr.setMeta(remoteCursorsKey, cursors));
+        // Push the remote-caret set into the CURRENT editor as a meta
+        // transaction so the remoteCursorsPlugin re-renders its decorations.
+        // Read the live view (a file switch re-creates it — a captured view
+        // would be destroyed).
+        const v = pmViewForReview;
+        if (v) v.dispatch(v.state.tr.setMeta(remoteCursorsKey, cursors));
       },
     });
+  }
+
+  // Base (earliest) snapshot markdown for a file in the current room. This is
+  // the v0 every authority + resync replay anchors to, so the live editor seeds
+  // from it (NOT the latest republished snapshot) and the full step log rebases
+  // cleanly. Returns null until that file's first snapshot has landed.
+  function collabBaseSnapshotMarkdown(fileId: FileId | null): string | null {
+    const roomId = reviewStore.currentRoomId;
+    if (!roomId || !fileId) return null;
+    let base: ReviewSnapshot | null = null;
+    for (const s of reviewStore.snapshots) {
+      if (s.roomId !== roomId || s.fileId !== fileId) continue;
+      if (typeof s.markdown !== 'string') continue;
+      if (base === null || s.createdAt < base.createdAt) base = s;
+    }
+    return base?.markdown ?? null;
+  }
+
+  // Owner's getSeedDoc: the v0 ProseMirror doc for a file, so the controller
+  // can stand up an authority for a file a reviewer edits before the owner
+  // opens it. Parsed from the same base snapshot every peer seeds from.
+  function collabSeedDocFor(fileId: FileId): PmNode | null {
+    const md = collabBaseSnapshotMarkdown(fileId);
+    if (md === null) return null;
+    return markdownParser.parse(md) ?? null;
+  }
+
+  // Owner: the room's snapshot fileId for a local display path (so navigating
+  // the sidebar can switch the live collab doc). Only our own shared rooms.
+  function ownerFileIdForPath(path: string): FileId | null {
+    const roomId = reviewStore.currentRoomId;
+    if (!roomId) return null;
+    for (const s of reviewStore.snapshots) {
+      if (s.roomId !== roomId) continue;
+      if (reviewStore.rooms[s.roomId]?.role !== 'owner') continue;
+      if (s.ownerDisplayPath === path) return s.fileId;
+    }
+    return null;
   }
 
   function handleCollabSelectionChange(head: number): void {
@@ -2214,6 +2326,7 @@
         plugins={editorPlugins}
         onReady={handleEditorReady}
         collabClientId={collabClientId ?? undefined}
+        {collabEpoch}
         onCollabDocChange={handleCollabDocChange}
         onCollabSelectionChange={handleCollabSelectionChange}
         suggesting={collabActive && collabRole === 'reviewer'}
@@ -2241,6 +2354,7 @@
         plugins={editorPlugins}
         onReady={handleEditorReady}
         collabClientId={collabClientId ?? undefined}
+        {collabEpoch}
         onCollabDocChange={handleCollabDocChange}
         onCollabSelectionChange={handleCollabSelectionChange}
         suggesting={collabActive && collabRole === 'reviewer'}
@@ -2417,9 +2531,9 @@
 <ShareDialog
   bind:open={shareDialogOpen}
   filePath={shareTargetPath ?? activePath}
-  existingInviteUrl={reviewStore.currentShare?.inviteUrl ?? ''}
-  ownerSigningKey={reviewStore.currentShare?.ownerSigningKey ?? ''}
-  existingRoomId={reviewStore.currentShare?.roomId ?? null}
+  existingInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.inviteUrl ?? '') : ''}
+  ownerSigningKey={shareTargetIsCurrent ? (reviewStore.currentShare?.ownerSigningKey ?? '') : ''}
+  existingRoomId={shareTargetIsCurrent ? (reviewStore.currentShare?.roomId ?? null) : null}
   shareErrorMessage={reviewStore.lastError?.message ?? ''}
   onClearError={() => reviewStore.clearLastError()}
 />

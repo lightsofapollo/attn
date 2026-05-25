@@ -38,6 +38,7 @@
   import { remoteCursorsKey } from './lib/prosemirror/remote-cursors';
   import { markdownParser } from './lib/schema';
   import type { Node as PmNode } from 'prosemirror-model';
+  import { getVersion } from 'prosemirror-collab';
   import type { FileId } from './lib/types';
   import {
     decreaseFontScale as decreaseGlobalFontScale,
@@ -441,6 +442,14 @@
     const controller = collabController;
     if (!collabActive || controller === null || !view || fileId === null) return;
     if (view === collabBoundView) return;
+    // Only bind a view that actually has the collab plugin installed. When
+    // collab activates (or the active file switches) the editor RE-CREATES with
+    // collab at v0, but this effect can fire first on the stale pre-collab view
+    // (collabActive flipped, new view not mounted yet). Binding that view would
+    // call getVersion() on a state without the collab plugin → throw, which
+    // aborts the Svelte flush and freezes all reactivity. Wait for the fresh
+    // collab view (its onReady updates pmViewForReview → this effect re-runs).
+    if (!viewHasCollab(view)) return;
     const bridge: EditorBridge = {
       getState: () => view.state,
       apply: (tr) => view.dispatch(tr),
@@ -599,6 +608,42 @@
       if (s.ownerDisplayPath === path) return s.fileId;
     }
     return null;
+  }
+
+  // Debug/E2E: mirror the live collab wiring onto `window` so `--eval` can see
+  // whether a session is active and which file it's bound to (the values are
+  // component-local otherwise). Cheap and harmless; kept for diagnosing the
+  // per-file folder-share flow.
+  $effect(() => {
+    (
+      window as Window & { __attn_collab_debug__?: Record<string, unknown> }
+    ).__attn_collab_debug__ = {
+      collabActive,
+      collabRole,
+      collabClientId,
+      collabSeededFileId,
+      collabEpoch,
+      currentRoomId: reviewStore.currentRoomId,
+      currentFileId: reviewStore.currentFileId,
+      connection: reviewStore.connection,
+      activeFileType,
+      isReviewerViewingSnapshot,
+      boundFileId: collabBoundFileId,
+      hasController: collabController !== null,
+      snapshotCount: reviewStore.snapshots.length,
+    };
+  });
+
+  // True iff the editor view has the prosemirror-collab plugin installed (its
+  // state carries a collab version). getVersion throws when the plugin is
+  // absent — that's exactly the pre-collab / torn-down view we must NOT bind.
+  function viewHasCollab(view: EditorView): boolean {
+    try {
+      getVersion(view.state);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function handleCollabSelectionChange(head: number): void {

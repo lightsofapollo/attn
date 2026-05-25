@@ -795,11 +795,31 @@ impl Bootstrapper {
                     p.mode = mode;
                     p
                 });
-            self.create_room(&existing.room_id, &policy, &identity, &keys.admission_key)
-                .await?;
-            self.register_device(&existing.room_id, &identity, "owner", &keys.admission_key)
-                .await?;
-            return Ok(existing);
+            // Re-establish the existing room (idempotent create + device
+            // register). If the relay rejects it — e.g. the room expired
+            // server-side while the local binding's TTL still looked live —
+            // the binding is stale: forget it and fall through to mint a FRESH
+            // room, so a re-Share always yields a working invite instead of
+            // hanging the dialog on "generated when the room is ready".
+            let create_res = self
+                .create_room(&existing.room_id, &policy, &identity, &keys.admission_key)
+                .await;
+            let reestablished = match create_res {
+                Ok(()) => self
+                    .register_device(&existing.room_id, &identity, "owner", &keys.admission_key)
+                    .await
+                    .is_ok(),
+                Err(_) => false,
+            };
+            if reestablished {
+                return Ok(existing);
+            }
+            tracing::warn!(
+                "re-establishing existing share room {} failed (likely expired on the relay); minting a fresh room",
+                existing.room_id.as_str()
+            );
+            let _ = self.store.delete_room(&existing.room_id);
+            // fall through to the fresh-mint path below
         }
 
         // 2. Mint room secret + derive room id and keys.

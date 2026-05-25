@@ -41,6 +41,7 @@
   } from './review/margin-layout';
   import { anchorTopY, hasTextSelection } from './review/popover-anchor';
   import { reviewStore } from './review/store.svelte';
+  import { isThreadActive } from './review/thread-visibility';
   import { reviewResolveComment, reviewCreateComment } from './ipc';
   import type {
     EventId,
@@ -144,10 +145,15 @@
   }
 
   // Anchored (non-orphan, non-resolved) threads — these get y-positioned cards.
+  // Locally-dismissed threads (Resolve clicked, or Reject which is UI-only) are
+  // hidden optimistically: `locallyDismissed` USED to only disable the buttons
+  // (pendingDismiss) while waiting for a CommentResolved echo — but if that echo
+  // never arrives (e.g. relay-only / offline), the card lingered with Reply and
+  // Resolve dead forever. Filtering it out here removes the card immediately.
   const anchoredThreads: Thread[] = $derived(
     threads.filter(
       (t) =>
-        !t.resolved
+        isThreadActive(t, locallyDismissed)
         && !orphanThreadIds.has(t.rootEvent.meta.eventId),
     ),
   );
@@ -162,7 +168,9 @@
   // it could never be dismissed.
   const orphanThreads: Thread[] = $derived(
     threads.filter(
-      (t) => !t.resolved && orphanThreadIds.has(t.rootEvent.meta.eventId),
+      (t) =>
+        isThreadActive(t, locallyDismissed)
+        && orphanThreadIds.has(t.rootEvent.meta.eventId),
     ),
   );
 

@@ -548,6 +548,15 @@ export class ReviewStore {
    * regular events over the encrypted channel, not via a distinct IPC.
    */
   applyEvent(event: ReviewEvent): void {
+    // De-dupe by eventId. The author of an event receives it TWICE — once as
+    // the immediate local echo, and again when the relay broadcasts the
+    // author's own posted envelope back over the websocket (a reconnect can
+    // also replay it). The Rust side delivers the double on purpose and relies
+    // on this frontend dedup (manager.rs / bootstrap.rs). Without it every owner
+    // comment/reply duplicated into a phantom reply (== the root body).
+    if (this.events.some((e) => e.meta.eventId === event.meta.eventId)) {
+      return;
+    }
     this.events = [...this.events, event];
     this.upsertRoom(event.meta.roomId, {});
 

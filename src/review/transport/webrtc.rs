@@ -293,6 +293,18 @@ impl PolicyMode {
 /// background workers internally. Clean shutdown is driven by [`close`],
 /// which closes the peer connection (which in turn cancels webrtc-rs's
 /// internal tasks).
+/// Inbound trickle-ICE buffer. webrtc-rs rejects `add_ice_candidate` before
+/// `set_remote_description`, and the relay can deliver candidates ahead of the
+/// SDP offer/answer, so candidates that arrive early are stashed here and
+/// flushed once the remote description lands.
+#[derive(Default)]
+struct PendingIce {
+    /// Whether `set_remote_description` has succeeded for this peer yet.
+    remote_set: bool,
+    /// Candidates received before the remote description was set.
+    candidates: Vec<String>,
+}
+
 pub struct WebRtcTransport {
     config: Arc<WebRtcConfig>,
     inbound: Arc<InboundPipeline>,
@@ -332,6 +344,10 @@ pub struct WebRtcTransport {
     /// to tests via `_attempts_for_test` so the recovery path's
     /// counting can be asserted without a live remote peer.
     ice_restart_attempts: Arc<std::sync::atomic::AtomicU32>,
+    /// Trickle-ICE candidates buffered until the remote description is set.
+    /// See [`PendingIce`]. A plain sync mutex — only ever held for the brief
+    /// buffer/flush decision, never across an `.await`.
+    pending_ice: Arc<std::sync::Mutex<PendingIce>>,
 }
 
 impl WebRtcTransport {
@@ -403,6 +419,7 @@ impl WebRtcTransport {
             policy: Arc::clone(&policy),
             ice_restart_enabled: Arc::clone(&ice_restart_enabled),
             ice_restart_attempts: Arc::clone(&ice_restart_attempts),
+            pending_ice: Arc::new(std::sync::Mutex::new(PendingIce::default())),
         };
 
         // Wire ICE-candidate trickle: every local candidate webrtc-rs gathers
@@ -540,6 +557,8 @@ impl WebRtcTransport {
             .set_remote_description(offer)
             .await
             .map_err(|e| TransportError::Io(format!("set_remote_description offer: {e}")))?;
+        // Remote description is now set — apply any candidates that arrived first.
+        self.flush_pending_ice().await;
 
         let answer = self
             .peer_connection
@@ -568,6 +587,8 @@ impl WebRtcTransport {
             .set_remote_description(answer)
             .await
             .map_err(|e| TransportError::Io(format!("set_remote_description answer: {e}")))?;
+        // Remote description is now set — apply any candidates that arrived first.
+        self.flush_pending_ice().await;
         Ok(())
     }
 
@@ -579,20 +600,56 @@ impl WebRtcTransport {
     /// the `a=` prefix (i.e. starting with `candidate:...`) — matches what
     /// `wire_on_ice_candidate` produces via `RTCIceCandidate::to_json`.
     pub async fn handle_ice(&self, candidates: Vec<String>) -> Result<(), TransportError> {
-        use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+        // Buffer until the remote description (offer/answer) is set: webrtc-rs
+        // rejects add_ice_candidate before set_remote_description, and the relay
+        // can deliver candidates ahead of the SDP (a trickle-ICE ordering race
+        // that otherwise drops candidates and starves the connection). The
+        // buffer/apply decision is made under the lock so a concurrent
+        // flush_pending_ice can't strand a candidate.
+        if let Ok(mut st) = self.pending_ice.lock()
+            && !st.remote_set
+        {
+            st.candidates.extend(candidates);
+            return Ok(());
+        }
         for candidate in candidates {
-            let init = RTCIceCandidateInit {
-                candidate,
-                sdp_mid: Some(String::new()),
-                sdp_mline_index: Some(0),
-                username_fragment: None,
-            };
-            self.peer_connection
-                .add_ice_candidate(init)
-                .await
-                .map_err(|e| TransportError::Io(format!("add_ice_candidate: {e}")))?;
+            self.add_one_ice(candidate).await?;
         }
         Ok(())
+    }
+
+    /// Apply a single trickle-ICE candidate to the peer connection.
+    async fn add_one_ice(&self, candidate: String) -> Result<(), TransportError> {
+        use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+        let init = RTCIceCandidateInit {
+            candidate,
+            sdp_mid: Some(String::new()),
+            sdp_mline_index: Some(0),
+            username_fragment: None,
+        };
+        self.peer_connection
+            .add_ice_candidate(init)
+            .await
+            .map_err(|e| TransportError::Io(format!("add_ice_candidate: {e}")))
+    }
+
+    /// Mark the remote description as set and apply every candidate that was
+    /// buffered before it arrived. Called from `handle_offer`/`handle_answer`
+    /// right after `set_remote_description` succeeds. A bad buffered candidate
+    /// is logged and skipped rather than aborting the handshake.
+    async fn flush_pending_ice(&self) {
+        let pending: Vec<String> = match self.pending_ice.lock() {
+            Ok(mut st) => {
+                st.remote_set = true;
+                std::mem::take(&mut st.candidates)
+            }
+            Err(_) => Vec::new(),
+        };
+        for candidate in pending {
+            if let Err(e) = self.add_one_ice(candidate).await {
+                tracing::warn!("flushing buffered ICE candidate failed: {e}");
+            }
+        }
     }
 
     /// Send an application envelope (event or snapshot blob) over the
@@ -1317,6 +1374,49 @@ mod tests {
         // Closing twice must not panic — webrtc-rs returns Ok on a second
         // close, but we exercise the path to lock down the contract.
         transport.close().await.expect("double close ok");
+    }
+
+    // -----------------------------------------------------------------
+    // Trickle-ICE ordering: candidates that arrive before the remote
+    // description are buffered (not rejected with "remote description is
+    // not set") and flushed once it lands.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_ice_buffers_candidates_until_remote_description_set() {
+        let config = fixture_config();
+        let (inbound, _tmp) = fixture_pipeline();
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let (signaling_tx, _signaling_rx) = mpsc::unbounded_channel();
+
+        let transport = WebRtcTransport::new(config, inbound, events_tx, signaling_tx)
+            .await
+            .expect("construct webrtc transport");
+
+        // Before any offer/answer, an inbound candidate must be buffered and
+        // return Ok — previously this hit add_ice_candidate and errored with
+        // "remote description is not set", dropping the candidate.
+        transport
+            .handle_ice(vec![
+                "candidate:1 1 udp 2113937151 192.0.2.1 50000 typ host".to_string(),
+            ])
+            .await
+            .expect("early candidate should buffer, not error");
+
+        {
+            let st = transport.pending_ice.lock().expect("pending_ice lock");
+            assert!(!st.remote_set, "remote description not set yet");
+            assert_eq!(st.candidates.len(), 1, "candidate should be buffered");
+        }
+
+        // Flushing (what handle_offer/handle_answer do after
+        // set_remote_description) marks the remote set and drains the buffer.
+        transport.flush_pending_ice().await;
+        {
+            let st = transport.pending_ice.lock().expect("pending_ice lock");
+            assert!(st.remote_set, "remote_set flips on flush");
+            assert!(st.candidates.is_empty(), "buffer drained on flush");
+        }
     }
 
     // -----------------------------------------------------------------

@@ -20,7 +20,17 @@ use tracing_subscriber::fmt::time::UtcTime;
 pub fn init() {
     let filter = EnvFilter::try_from_env("ATTN_LOG")
         .or_else(|_| EnvFilter::try_from_default_env())
-        .unwrap_or_else(|_| EnvFilter::new("warn,attn=info"));
+        // attn at info, deps at warn — but mute webrtc-rs's very chatty ICE/mDNS
+        // candidate-gathering WARNs ("pingAllCandidates" before any pairs exist,
+        // link-local UDP bind failures, STUN reflexive-address timeouts). Those
+        // are expected on networks without direct P2P connectivity (we fall back
+        // to the relay) and otherwise drown out attn's own logs.
+        .unwrap_or_else(|_| {
+            EnvFilter::new(
+                "warn,attn=info,webrtc=error,webrtc_ice=error,webrtc_mdns=error,\
+                 webrtc_sctp=error,webrtc_dtls=error,webrtc_srtp=error",
+            )
+        });
 
     let timer = UtcTime::new(time::format_description::well_known::Rfc3339);
 
@@ -32,11 +42,10 @@ pub fn init() {
         .with_writer(std::io::stderr)
         // attn.log is a file, not a TTY — color escape codes would be noise.
         .with_ansi(false)
-        // The messages already carry `attn:` / `review:` / `ws:` subsystem
-        // prefixes, so printing the module target too just doubles it up. We
-        // hide the target from the OUTPUT (filtering by target via ATTN_LOG,
-        // e.g. `attn::review=debug`, still works — that reads the event target,
-        // not the formatter).
-        .with_target(false)
+        // Show the module target (e.g. `attn::review::manager`,
+        // `attn::review::transport::mailbox::ws`) so each line names exactly
+        // which subsystem emitted it. This is more precise than the legacy
+        // `review:`/`ws:` message prefixes (which remain, slightly redundant).
+        .with_target(true)
         .try_init();
 }

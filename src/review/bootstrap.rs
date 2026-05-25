@@ -906,7 +906,7 @@ impl Bootstrapper {
                 Err(err) => {
                     publish_errors.push(format!("{}: {err}", doc_path.display()));
                     tracing::warn!(
-                        "review: publish_initial_snapshot failed (room={}, file={}): {err}",
+                        "publish_initial_snapshot failed (room={}, file={}): {err}",
                         room_id.as_str(),
                         doc_path.display()
                     );
@@ -1312,7 +1312,7 @@ impl Bootstrapper {
             record_share_file_id(self.store.root(), room_id, path, &file_id)?;
         }
         tracing::info!(
-            "review: published snapshot file={} snapshot={} bytes={} first={} room={}",
+            "published snapshot file={} snapshot={} bytes={} first={} room={}",
             file_id.as_str(),
             snapshot_id.as_str(),
             outcome.envelope.ciphertext_bytes,

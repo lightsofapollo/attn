@@ -154,11 +154,11 @@ impl MailboxWsClient {
                 match refresher.refresh().await {
                     Ok(n) => {
                         tracing::warn!(
-                            "ws: refreshed {n} device key(s) after unknown signer {signing_key_id}; retrying import"
+                            "refreshed {n} device key(s) after unknown signer {signing_key_id}; retrying import"
                         );
                     }
                     Err(e) => {
-                        tracing::warn!("ws: device-key refresh failed: {e}");
+                        tracing::warn!("device-key refresh failed: {e}");
                     }
                 }
                 // Retry once. A persistent UnknownSigner after refresh is a
@@ -489,14 +489,14 @@ impl MailboxWsClient {
     ) -> Result<(), TransportError> {
         let after_seq = self.load_after_seq();
         tracing::info!(
-            "ws: connecting room={} device={} after_seq={}",
+            "connecting room={} device={} after_seq={}",
             self.config.room_id.as_str(),
             id_to_string(&self.config.device_id),
             after_seq
         );
         let result = self.run_with_after_seq(after_seq, &mut cancel).await;
         tracing::info!(
-            "ws: run loop exited room={} result={:?}",
+            "run loop exited room={} result={:?}",
             self.config.room_id.as_str(),
             result.as_ref().err().map(|e| e.to_string())
         );
@@ -560,7 +560,7 @@ impl MailboxWsClient {
                             // loop. Caller is responsible for calling
                             // `run` again after the snapshot lands.
                             tracing::warn!(
-                                "review: P2P cursor-too-old recovery not yet wired (resync_from_seq={resync_from_seq}); returning to caller"
+                                "P2P cursor-too-old recovery not yet wired (resync_from_seq={resync_from_seq}); returning to caller"
                             );
                             return Err(TransportError::CursorTooOld(resync_from_seq));
                         }
@@ -634,7 +634,7 @@ impl MailboxWsClient {
             },
         );
 
-        tracing::info!("ws: dialing url={url} subprotocol={subprotocol}");
+        tracing::info!("dialing url={url} subprotocol={subprotocol}");
         let connect_fut = tokio_tungstenite::connect_async(request);
         let stream = tokio::select! {
             res = connect_fut => res,
@@ -644,7 +644,7 @@ impl MailboxWsClient {
         let (ws_stream, _resp) = match stream {
             Ok(pair) => pair,
             Err(e) => {
-                tracing::warn!("ws: dial failed url={url}: {e}");
+                tracing::warn!("dial failed url={url}: {e}");
                 // Some handshake failures expose the HTTP status inline. Classify
                 // the ones that can NEVER succeed by retrying as Terminal so the
                 // caller doesn't spin a guaranteed-failing reconnect loop:

@@ -255,7 +255,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let file_tree_nodes = count_tree_nodes(&file_tree);
     let file_tree_json = serde_json::to_string(&file_tree).unwrap_or_default();
     tracing::info!(
-        "attn: startup tree root={} nodes={} json_bytes={}",
+        "startup tree root={} nodes={} json_bytes={}",
         tree_root.display(),
         file_tree_nodes,
         file_tree_json.len()
@@ -303,16 +303,16 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     .to_string();
     let page_html = build_page_html(&init_payload_json, theme);
     let page_html_bytes = page_html.clone().into_bytes();
-    tracing::info!("attn: startup page_html_bytes={}", page_html.len());
+    tracing::info!("startup page_html_bytes={}", page_html.len());
     let dev_server_url = dev_server_url_from_env();
     let dev_server_origin = dev_server_url.as_deref().and_then(origin_from_url);
     let initialization_script =
         build_initialization_script(dev_server_url.is_some(), &init_payload_json);
 
     if let Some(url) = &dev_server_url {
-        tracing::info!("attn: loading UI from Vite dev server at {url}");
+        tracing::info!("loading UI from Vite dev server at {url}");
     } else {
-        tracing::info!("attn: loading embedded UI");
+        tracing::info!("loading embedded UI");
     }
 
     // Create window and webview with typed event loop
@@ -326,7 +326,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         match watcher::FileWatcher::new(&tree_root, watcher_proxy.clone()) {
             Ok(fw) => Some(fw),
             Err(e) => {
-                tracing::warn!("attn: could not watch project tree: {e}");
+                tracing::warn!("could not watch project tree: {e}");
                 None
             }
         }
@@ -361,7 +361,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let review_store = match crate::review::store::ReviewStore::open() {
         Ok(store) => Some(Arc::new(store)),
         Err(err) => {
-            tracing::warn!("attn: review store unavailable, revisions will not persist: {err}");
+            tracing::warn!("review store unavailable, revisions will not persist: {err}");
             None
         }
     };
@@ -402,7 +402,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             .unwrap_or_default();
         if relay_url.is_empty() {
             tracing::warn!(
-                "attn: no relay configured (set ATTN_RELAY_URL, or bake ATTN_DEFAULT_RELAY_URL at build time) — Share/Join will use the scaffold stub"
+                "no relay configured (set ATTN_RELAY_URL, or bake ATTN_DEFAULT_RELAY_URL at build time) — Share/Join will use the scaffold stub"
             );
             return Arc::new(base);
         }
@@ -410,12 +410,12 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         match base.with_bootstrap(relay_url.clone(), None, verifying_keys) {
             Ok(mgr) => {
-                tracing::info!("attn: review bootstrap attached (relay={})", relay_url);
+                tracing::info!("review bootstrap attached (relay={})", relay_url);
                 Arc::new(mgr)
             }
             Err(err) => {
                 tracing::warn!(
-                    "attn: failed to attach review bootstrap (relay={}): {} — \
+                    "failed to attach review bootstrap (relay={}): {} — \
                      falling back to stub",
                     relay_url, err
                 );
@@ -438,7 +438,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         }
     });
     if review_manager.is_none() {
-        tracing::warn!("attn: review manager unavailable, review commands will be no-ops");
+        tracing::warn!("review manager unavailable, review commands will be no-ops");
     }
 
     // Auto-resume any rooms the user already joined / shared in a prior
@@ -453,7 +453,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             .spawn(move || {
                 let resumed = mgr.resume_known_rooms();
                 if !resumed.is_empty() {
-                    tracing::info!("review: resumed {} known room(s) on boot", resumed.len());
+                    tracing::info!("resumed {} known room(s) on boot", resumed.len());
                 }
             })
             .ok();
@@ -556,7 +556,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             // misconfigured client cannot smuggle a file-serve request that
             // looks like an invite or vice versa.
             if is_reserved_localhost_review(&uri) {
-                tracing::warn!("attn: refusing reserved attn://localhost/review/... path: {uri}");
+                tracing::warn!("refusing reserved attn://localhost/review/... path: {uri}");
                 return wry::http::Response::builder()
                     .status(404)
                     .header("Content-Type", "text/plain; charset=utf-8")
@@ -607,7 +607,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let wsl = is_wsl();
     #[cfg(target_os = "linux")]
     if wsl {
-        tracing::info!("attn: WSL detected, disabling hardware acceleration");
+        tracing::info!("WSL detected, disabling hardware acceleration");
         // SAFETY: called before spawning any threads; single-threaded at this point.
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
     }
@@ -638,12 +638,12 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         }
     }
 
-    tracing::info!("attn: webview initialized");
+    tracing::info!("webview initialized");
 
     let mut current_tree_root = tree_root.clone();
 
     let mut modifiers = ModifiersState::default();
-    tracing::info!("attn: event loop running");
+    tracing::info!("event loop running");
 
     // Run event loop
     event_loop.run(move |event, _, control_flow| {
@@ -845,7 +845,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     Err(err) => {
                         let callback = update.callback_name();
                         tracing::warn!(
-                            "attn: failed to serialize ReviewUpdate for {callback}: {err}"
+                            "failed to serialize ReviewUpdate for {callback}: {err}"
                         );
                     }
                 }
@@ -960,10 +960,10 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             Event::UserEvent(UserEvent::InstallCliAlias) => match cli_alias::install_attn_cli_alias()
             {
                 Ok(cli_alias::InstallCliAliasResult::AlreadyInstalled(path)) => {
-                    tracing::info!("attn: CLI alias already installed at {}", path.display());
+                    tracing::info!("CLI alias already installed at {}", path.display());
                 }
                 Ok(cli_alias::InstallCliAliasResult::Installed { path, dir_on_path }) => {
-                    tracing::info!("attn: installed CLI alias at {}", path.display());
+                    tracing::info!("installed CLI alias at {}", path.display());
                     if !dir_on_path {
                         let message = format!(
                             "Installed attn at {}.\nThat directory is not on PATH for this app session.\nAdd it to your shell PATH to run `attn` from terminal.",
@@ -976,7 +976,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     }
                 }
                 Err(err) => {
-                    tracing::warn!("attn: failed to install CLI alias: {err:#}");
+                    tracing::warn!("failed to install CLI alias: {err:#}");
                 }
             },
             #[cfg(target_os = "macos")]
@@ -1018,7 +1018,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 if let Some(watcher) = file_watcher.as_mut() {
                     if let Err(e) = watcher.update_root(&current_tree_root) {
                         tracing::warn!(
-                            "attn: could not retarget watcher to {}: {}",
+                            "could not retarget watcher to {}: {}",
                             current_tree_root.display(),
                             e
                         );
@@ -1030,7 +1030,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "attn: could not start watcher for {}: {}",
+                                "could not start watcher for {}: {}",
                                 current_tree_root.display(),
                                 e
                             );
@@ -1265,7 +1265,7 @@ fn update_active_project_registry(tree_root: &Path) -> projects::ProjectRegistry
         Ok(registry) => registry,
         Err(e) => {
             eprintln!(
-                "attn: failed to persist project registry for {}: {}",
+                "failed to persist project registry for {}: {}",
                 tree_root.display(),
                 e
             );
@@ -1358,7 +1358,7 @@ fn diag_mode_from_env() -> String {
         "full" | "" => "full".to_string(),
         _ => {
             eprintln!(
-                "attn: unknown ATTN_DIAG_MODE='{}' (expected full|editor_only|minimal); using full",
+                "unknown ATTN_DIAG_MODE='{}' (expected full|editor_only|minimal); using full",
                 raw
             );
             "full".to_string()
@@ -1402,7 +1402,7 @@ fn classify_and_record_changes(paths: &[PathBuf], app_state: &Arc<Mutex<ipc::App
             Ok(h) => h,
             Err(err) => {
                 eprintln!(
-                    "attn: watcher could not hash {} for self-write classification: {}",
+                    "watcher could not hash {} for self-write classification: {}",
                     path.display(),
                     err
                 );
@@ -1433,7 +1433,7 @@ fn classify_and_record_changes(paths: &[PathBuf], app_state: &Arc<Mutex<ipc::App
             Ok(rev) => rev,
             Err(err) => {
                 eprintln!(
-                    "attn: watcher could not build external-change revision for {}: {}",
+                    "watcher could not build external-change revision for {}: {}",
                     path.display(),
                     err
                 );

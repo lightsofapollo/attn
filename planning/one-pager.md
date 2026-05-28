@@ -40,15 +40,19 @@ The protections that matter and the things we allow are governed independently:
 - **No silent theft of your local files:** the CSP's `connect-src` allows `https:`
   (remote APIs) but **not** `attn:`, so JavaScript cannot `fetch()` the *bytes* of
   any local file. Loading a font/image/script as a resource never exposes its
-  contents to JS. We also drop `Access-Control-Allow-Origin: *` on served files to
-  close a canvas-based image-read trick.
+  contents to JS. We also scope `Access-Control-Allow-Origin: *` to the
+  markdown/text the app itself fetches and omit it for HTML/image/font assets, so
+  the sandboxed iframe can't read local image bytes via a crossorigin
+  `<img>` + canvas.
 
 ```
-script-src  'self' 'unsafe-inline' https:;
-style-src   'self' 'unsafe-inline' https:;
-font-src    'self' https: data: attn:;
-img-src     'self' https: data: attn:;
-connect-src https:;        # remote APIs OK; JS cannot read local file bytes
+default-src 'self' attn: https: data:;
+script-src  'unsafe-inline' 'unsafe-eval' attn: https:;  # inline + relative + CDN libs
+style-src   'unsafe-inline' attn: https:;
+font-src    attn: https: data:;
+img-src     attn: https: data:;
+media-src   attn: https: data:;
+connect-src https:;        # remote APIs OK; attn: omitted -> JS can't read local file bytes
 base-uri 'none'; object-src 'none';
 ```
 

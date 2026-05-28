@@ -17,9 +17,28 @@ declare global {
   }
 }
 
+// Per-session capability token, injected only into the main app frame's init
+// payload. The daemon requires it on privileged messages, so scripts inside a
+// sandboxed HtmlViewer iframe — which never receives the token — cannot drive
+// the app. @see src/ipc.rs handle_message.
+//
+// Captured at module load AND settable via `setIpcToken`: App.svelte deletes
+// `window.__attn_init__` after reading it once, so we cannot rely on reading it
+// lazily inside `send()`. The setter makes this robust regardless of whether
+// this module evaluates before or after that delete.
+let ipcToken: string | undefined = (
+  window as unknown as { __attn_init__?: { ipcToken?: string } }
+).__attn_init__?.ipcToken;
+
+/** Capture the capability token before the init payload is cleared. */
+export function setIpcToken(token: string | undefined): void {
+  if (token) ipcToken = token;
+}
+
 function send(message: IpcMessage): void {
   if (window.ipc) {
-    window.ipc.postMessage(JSON.stringify(message));
+    const payload = ipcToken ? { ...message, token: ipcToken } : message;
+    window.ipc.postMessage(JSON.stringify(payload));
   }
 }
 

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>attn HTML viewer sample</title>
+    <!-- Remote web font: exercises the CSP font-src/style-src https: allowance. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: 'Inter', system-ui, sans-serif;
+        background: radial-gradient(circle at 30% 20%, #1e293b, #0f172a);
+        color: #e2e8f0;
+      }
+      .card {
+        text-align: center;
+        padding: 2.5rem 3rem;
+        border-radius: 1rem;
+        background: rgba(255, 255, 255, 0.04);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+      }
+      h1 { margin: 0 0 0.5rem; font-weight: 700; }
+      .dot {
+        width: 18px;
+        height: 18px;
+        margin: 1.5rem auto 0;
+        border-radius: 50%;
+        background: #38bdf8;
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { transform: scale(1); opacity: 0.6; }
+        50% { transform: scale(1.6); opacity: 1; }
+      }
+      #count { font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Hello from an HTML file</h1>
+      <!-- Inline JS: exercises sandbox="allow-scripts". -->
+      <p>Rendered in-app · script ran <span id="count">0</span>s ago</p>
+      <div class="dot" data-testid="anim-dot"></div>
+    </div>
+    <script>
+      // Self-contained inline JS — proves scripts run inside the sandbox.
+      let n = 0;
+      const el = document.getElementById('count');
+      setInterval(() => {
+        n += 1;
+        el.textContent = String(n);
+      }, 1000);
+      // Mark that script execution succeeded so E2E can assert it.
+      document.body.setAttribute('data-script-ran', 'true');
+    </script>
+  </body>
+</html>

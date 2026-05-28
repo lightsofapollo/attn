@@ -5,6 +5,7 @@ const EXTENSIONS_BY_TYPE: Record<FileType, string[]> = {
   image: ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico'],
   video: ['mp4', 'webm', 'mov', 'avi'],
   audio: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'],
+  html: ['html', 'htm'],
   unsupported: [],
   directory: [],
 };

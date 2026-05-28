@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import type {
     AppMode,
     ContentPayload,
@@ -31,6 +32,7 @@
     reviewCollabSend,
     reviewStop,
     searchFiles,
+    setIpcToken,
     switchProject,
   } from './lib/ipc';
   import { CollabController } from './lib/prosemirror/collab-controller';
@@ -53,6 +55,7 @@
   import TabBar from './lib/TabBar.svelte';
   import ImageViewer from './lib/ImageViewer.svelte';
   import MediaPlayer from './lib/MediaPlayer.svelte';
+  import HtmlViewer from './lib/HtmlViewer.svelte';
   import DirectoryOverview from './lib/DirectoryOverview.svelte';
   import CommandPalette from './lib/CommandPalette.svelte';
   import KeyboardShortcutsDialog from './lib/KeyboardShortcutsDialog.svelte';
@@ -284,6 +287,12 @@
     });
   });
   const loadedMtimeByPath = new Map<string, number>();
+  // Reactive map of disk mtimes for HTML files, keyed by path. Bumping an
+  // entry cache-busts the HtmlViewer iframe URL so on-disk edits live-reload.
+  // Must be a SvelteMap (not a plain Map under $state): $state does not deeply
+  // proxy Map, so plain `.set()` would not invalidate the template's `.get()`
+  // read and the iframe would never reload.
+  const htmlMtimeByPath = new SvelteMap<string, number>();
   const markdownCacheByPath = new Map<string, string>();
   const deferredReloadMtimeByPath = new Map<string, number | null>();
   const deferredReloadNoticeByPath = new Set<string>();
@@ -1631,6 +1640,10 @@
       if (appEl) appEl.style.display = '';
       return;
     }
+    // Capture the IPC capability token before we clear the payload — `send()`
+    // attaches it to privileged messages so the daemon accepts them.
+    setIpcToken(init.ipcToken);
+
     // Clear so we only process once (prevents $effect re-entry)
     delete (window as { __attn_init__?: InitPayload }).__attn_init__;
 
@@ -1748,6 +1761,16 @@
         }
       } else if (data.structure) {
         structure = data.structure;
+      }
+
+      // Seed the HTML viewer's mtime so its iframe src is stable across
+      // re-renders and gives live-reload a known baseline to diff against.
+      if (
+        data.filePath &&
+        detectFileType(data.filePath) === 'html' &&
+        typeof data.contentMtimeMs === 'number'
+      ) {
+        htmlMtimeByPath.set(data.filePath, data.contentMtimeMs);
       }
 
       const wasFrontendNav = pendingFrontendNav;
@@ -1879,6 +1902,25 @@
       if (data.structure) {
         structure = data.structure;
       }
+
+      // HTML live-reload: when the active html file changes on disk, record its
+      // new mtime so HtmlViewer cache-busts its iframe src and refetches. The
+      // watcher ships contentMtimeMs for any active file (type-agnostic);
+      // markdown is handled below via loadMarkdownForPath.
+      {
+        let htmlPath = data.filePath;
+        if (!htmlPath && data.changedPaths?.includes(activePath)) {
+          htmlPath = activePath;
+        }
+        if (
+          htmlPath &&
+          detectFileType(htmlPath) === 'html' &&
+          typeof data.contentMtimeMs === 'number'
+        ) {
+          htmlMtimeByPath.set(htmlPath, data.contentMtimeMs);
+        }
+      }
+
       let targetPath = data.filePath;
       if (!targetPath && data.changedPaths?.includes(activePath)) {
         targetPath = activePath;
@@ -2409,6 +2451,8 @@
       <ImageViewer src={markdownSourceUrl(activePath)} />
     {:else if activeFileType === 'video' || activeFileType === 'audio'}
       <MediaPlayer src={markdownSourceUrl(activePath)} fileType={activeFileType} />
+    {:else if activeFileType === 'html'}
+      <HtmlViewer path={activePath} mtime={htmlMtimeByPath.get(activePath)} />
     {:else if activeFileType === 'directory'}
       <DirectoryOverview
         path={activePath}

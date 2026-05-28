@@ -7,6 +7,7 @@
   import ImageIcon from '@lucide/svelte/icons/image';
   import VideoIcon from '@lucide/svelte/icons/video';
   import MusicIcon from '@lucide/svelte/icons/music';
+  import FileCodeIcon from '@lucide/svelte/icons/file-code';
 
   interface Props {
     open: boolean;
@@ -134,6 +135,7 @@
       case 'image': return ImageIcon;
       case 'video': return VideoIcon;
       case 'audio': return MusicIcon;
+      case 'html': return FileCodeIcon;
       default: return FileIcon;
     }
   }

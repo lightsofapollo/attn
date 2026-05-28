@@ -76,8 +76,11 @@
     if (videoCount > 0) parts.push(`${videoCount} video`);
     const audioCount = files.filter((n) => n.fileType === 'audio').length;
     if (audioCount > 0) parts.push(`${audioCount} audio`);
+    const htmlCount = files.filter((n) => n.fileType === 'html').length;
+    if (htmlCount > 0) parts.push(`${htmlCount} html`);
     const otherCount = files.filter((n) =>
-      n.fileType !== 'markdown' && n.fileType !== 'image' && n.fileType !== 'video' && n.fileType !== 'audio'
+      n.fileType !== 'markdown' && n.fileType !== 'image' && n.fileType !== 'video' &&
+      n.fileType !== 'audio' && n.fileType !== 'html'
     ).length;
     if (otherCount > 0) parts.push(`${otherCount} other`);
     if (dirCount > 0) parts.push(`${dirCount} subdirector${dirCount === 1 ? 'y' : 'ies'}`);

@@ -57,8 +57,10 @@ the viewer refetches via a `?v=<mtime>` cache-bust.
   - File-serve branch (`:573-579`): strip any `?…` query string before `fs::read`,
     **after** the review-invite / reserved-path checks. Enables `?v=` cache-bust.
   - **CSP header** for `.html`/`.htm` responses (see §5 for the exact policy).
-  - **Drop `Access-Control-Allow-Origin: *`** (`:587`) for files served to the
-    viewer, to close the canvas-based cross-origin image-read trick. (Relative
+  - **Scope `Access-Control-Allow-Origin: *`** to markdown/text only (the app
+    document cross-origin-fetches markdown; images/fonts/HTML load via tags that
+    need no CORS). Omitting it elsewhere closes the canvas-based image-read trick
+    while keeping the app's markdown fetch working. (Relative
     same-scheme subresource loads — `<img>`/`<link>`/`<script>` — do not need CORS,
     so this does not break asset loading.)
   - **IPC capability token:** generate a random per-session token; inject it into
@@ -121,10 +123,12 @@ Three independent controls:
    bytes:
 
    ```
-   script-src  'self' 'unsafe-inline' https:;
-   style-src   'self' 'unsafe-inline' https:;
-   font-src    'self' https: data: attn:;
-   img-src     'self' https: data: attn:;
+   default-src 'self' attn: https: data:;
+   script-src  'unsafe-inline' 'unsafe-eval' attn: https:;  # inline + relative + CDN libs
+   style-src   'unsafe-inline' attn: https:;
+   font-src    attn: https: data:;
+   img-src     attn: https: data:;
+   media-src   attn: https: data:;
    connect-src https:;        # remote APIs OK; attn: omitted -> no fetch() of local files
    base-uri 'none'; object-src 'none';
    ```
@@ -133,7 +137,8 @@ Three independent controls:
      Fonts) load → pages look polished.
    - `connect-src` excludes `attn:`, so JavaScript cannot `fetch()`/XHR the bytes
      of any local file. Loading a font/image/script as a resource never exposes its
-     contents to JS. With ACAO `*` dropped, the canvas-taint image-read trick is
+     contents to JS. With ACAO scoped to markdown/text only (omitted for image
+     assets), the canvas-taint image-read trick is
      also closed.
 
 **Net:** AI-generated HTML runs its JS, uses custom fonts and CDN animation
@@ -164,7 +169,7 @@ cover truly untrusted files.
    tree/search.
 2. **Frontend display** — `types.ts`, `markdown-layer.ts`, `HtmlViewer.svelte`
    (`sandbox="allow-scripts"`), `App.svelte` branch, icons.
-3. **Sandbox hardening** — CSP header + drop ACAO `*` + IPC capability token +
+3. **Sandbox hardening** — CSP header + scope ACAO `*` to text + IPC capability token +
    subframe guard. **Land together with enabling `allow-scripts`** so the iframe is
    never shipped with scripts enabled before the bridge is fenced.
 4. **Live reload** — query-string strip + `applyUpdateContent` html branch + `?v=`.

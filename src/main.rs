@@ -282,6 +282,21 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         .filter(|s| !s.is_empty());
     let review_display_name_set = review_display_name.is_some();
 
+    // Per-session IPC capability token. Injected only into the main app frame's
+    // payload below (never into an embedded HtmlViewer iframe) and required by
+    // the IPC handler on privileged messages, so scripts inside a sandboxed
+    // HTML file cannot drive the daemon. See `ipc::handle_message`.
+    let ipc_token = generate_ipc_token();
+    if ipc_token.is_empty() {
+        // getrandom failed (astronomically unlikely). We fail closed: every
+        // privileged IPC message is rejected, which also makes the legitimate
+        // app inert. Make that loud rather than a silent dead window.
+        tracing::error!(
+            "failed to mint IPC capability token (getrandom error) — privileged IPC will be \
+             rejected and the window will be non-interactive"
+        );
+    }
+
     let init_payload_json = serde_json::json!({
         "markdown": "",
         "structure": &initial_structure,
@@ -300,6 +315,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             "defaultDisplayName": review_default_name,
             "displayNameSet": review_display_name_set,
         },
+        "ipcToken": &ipc_token,
     })
     .to_string();
     let page_html = build_page_html(&init_payload_json, theme);
@@ -469,6 +485,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         review_store,
         self_write_tracker: Arc::clone(&self_write_tracker),
         review_manager: review_manager.clone(),
+        ipc_token: ipc_token.clone(),
     }));
 
     // Prune expired entries from the self-write tracker on a slow ticker.
@@ -505,6 +522,11 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let opened_review_manager = review_manager.clone();
     let mut webview_builder = WebViewBuilder::new()
         .with_initialization_script(&initialization_script)
+        // Runs in ALL frames (main_only = false) so it actually executes inside
+        // the sandboxed HtmlViewer iframe, where it neutralizes the native IPC
+        // bridge. The main app frame is exempted by the `window.self !==
+        // window.top` guard inside the script.
+        .with_initialization_script_for_main_only(SUBFRAME_BRIDGE_GUARD, false)
         .with_ipc_handler(move |msg| {
             ipc::handle_message(msg.body(), &ipc_state, &ipc_proxy);
         })
@@ -570,23 +592,67 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             }
 
             // URI format: attn://localhost/absolute/path/to/file
-            let path = uri
+            let raw_path = uri
                 .strip_prefix("attn://localhost")
                 .or_else(|| uri.strip_prefix("attn://"))
                 .unwrap_or(&uri);
 
-            let path = percent_decode_str(path).decode_utf8_lossy();
+            // Strip any query string / fragment before resolving the file. The
+            // HtmlViewer appends `?v=<mtime>` to cache-bust on live-reload;
+            // without this the query would be treated as part of the path and
+            // 404. This runs only on the file-serve branch — AFTER the review
+            // invite / reserved-path checks above — so invite `?`/`#` handling
+            // is unaffected.
+            let raw_path =
+                &raw_path[..raw_path.find(|c| c == '?' || c == '#').unwrap_or(raw_path.len())];
+
+            let path = percent_decode_str(raw_path).decode_utf8_lossy();
             let file_path = std::path::Path::new(path.as_ref());
 
             match std::fs::read(file_path) {
                 Ok(bytes) => {
                     let mime = mime_from_extension(file_path);
-                    wry::http::Response::builder()
+                    let ext = file_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(str::to_ascii_lowercase);
+                    let mut builder = wry::http::Response::builder()
                         .status(200)
-                        .header("Content-Type", mime)
-                        .header("Access-Control-Allow-Origin", "*")
-                        .body(bytes.into())
-                        .unwrap()
+                        .header("Content-Type", mime);
+
+                    // Grant cross-origin read access ONLY for the text the app
+                    // document (attn://app) fetches cross-origin — markdown.
+                    // Omitting it for images/fonts/html denies the sandboxed
+                    // HtmlViewer iframe (opaque origin) a CORS-clean read, so a
+                    // page there cannot pull local image bytes into a canvas and
+                    // exfiltrate them. @see planning/complete-plan.md §5.
+                    if matches!(ext.as_deref(), Some("md" | "markdown" | "txt")) {
+                        builder = builder.header("Access-Control-Allow-Origin", "*");
+                    }
+
+                    // HTML is rendered inside a sandboxed iframe (HtmlViewer).
+                    // Attach a CSP that lets the page pull remote fonts / CDN
+                    // libraries for aesthetics but cannot `fetch()` other local
+                    // files (no `attn:` in connect-src) — closing the
+                    // exfiltration vector. `'unsafe-eval'` is included because
+                    // many self-contained AI-generated pages (charting/animation
+                    // libraries) need it; the frame is sandboxed and the IPC
+                    // bridge is fenced off regardless. @see planning/complete-plan.md §5.
+                    if matches!(ext.as_deref(), Some("html" | "htm")) {
+                        builder = builder.header(
+                            "Content-Security-Policy",
+                            "default-src 'self' attn: https: data:; \
+                             script-src 'unsafe-inline' 'unsafe-eval' attn: https:; \
+                             style-src 'unsafe-inline' attn: https:; \
+                             font-src attn: https: data:; \
+                             img-src attn: https: data:; \
+                             media-src attn: https: data:; \
+                             connect-src https:; \
+                             base-uri 'none'; object-src 'none'",
+                        );
+                    }
+
+                    builder.body(bytes.into()).unwrap()
                 }
                 Err(_) => wry::http::Response::builder()
                     .status(404)
@@ -1240,15 +1306,7 @@ fn tree_node_for_path(path: &Path) -> Option<files::TreeNode> {
     if is_dir && !files::directory_has_previewable_descendant(path) {
         return None;
     }
-    if !is_dir
-        && !matches!(
-            file_type,
-            files::FileType::Markdown
-                | files::FileType::Image
-                | files::FileType::Video
-                | files::FileType::Audio
-        )
-    {
+    if !is_dir && !files::is_previewable(&file_type) {
         return None;
     }
 
@@ -1479,6 +1537,25 @@ fn absolutize_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Document-start script injected into ALL frames (including the sandboxed
+/// HtmlViewer iframe). In a subframe it strips the native WebKit message bridge
+/// (`window.webkit`) and the wry `window.ipc` wrapper before any page script
+/// runs, so embedded HTML cannot reach the daemon's IPC. This is defense in
+/// depth; the per-session capability token (see `ipc::handle_message`) is the
+/// robust backstop if a platform leaves the native bridge reachable anyway.
+///
+/// Must be injected with `with_initialization_script_for_main_only(_, false)` —
+/// the default `with_initialization_script` is main-frame-only and would never
+/// run here. The `window.self !== window.top` guard makes it a no-op in the
+/// main app frame, which legitimately needs `window.webkit`.
+const SUBFRAME_BRIDGE_GUARD: &str = r#"if (window.self !== window.top) {
+    try { delete window.webkit; } catch (_) {}
+    try { Object.defineProperty(window, 'webkit', { value: undefined, writable: false, configurable: false }); } catch (_) {}
+    try { delete window.ipc; } catch (_) {}
+    try { Object.defineProperty(window, 'ipc', { value: undefined, writable: false, configurable: false }); } catch (_) {}
+    try { delete window.__attn_init__; } catch (_) {}
+}"#;
+
 fn build_initialization_script(include_init_payload: bool, init_payload_json: &str) -> String {
     let base = r#"window.__attn_native_shortcuts__ = true;
 window.__attn_queue__ = window.__attn_queue__ || [];
@@ -1605,13 +1682,35 @@ fn is_reserved_localhost_review(uri: &str) -> bool {
     )
 }
 
+/// Mint a random per-session IPC capability token (hex-encoded 16 bytes).
+///
+/// `getrandom` is already a dependency (the review crypto stack). A draw
+/// failure is astronomically unlikely; we fail closed (empty token), which the
+/// IPC handler treats as "reject every privileged message".
+fn generate_ipc_token() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        return String::new();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn mime_from_extension(path: &std::path::Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()) {
+    // Lowercase the extension so `.HTML`, `.PNG`, etc. match (mirrors
+    // `files::detect_file_type`, which lowercases before matching).
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
         Some("svg") => "image/svg+xml",
         Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
+        Some("ico") => "image/x-icon",
         Some("mp4") => "video/mp4",
         Some("webm") => "video/webm",
         Some("mov") => "video/quicktime",
@@ -1620,8 +1719,14 @@ fn mime_from_extension(path: &std::path::Path) -> &'static str {
         Some("ogg") => "audio/ogg",
         Some("m4a") => "audio/mp4",
         Some("css") => "text/css",
-        Some("js") => "application/javascript",
+        Some("js" | "mjs") => "application/javascript",
         Some("json") => "application/json",
+        Some("wasm") => "application/wasm",
+        // Web fonts referenced by HTML/CSS being viewed in the HtmlViewer.
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("ttf") => "font/ttf",
+        Some("otf") => "font/otf",
         Some("html" | "htm") => "text/html",
         Some("txt" | "md") => "text/plain",
         _ => "application/octet-stream",
@@ -1752,6 +1857,7 @@ mod tests {
             review_store: Some(store),
             self_write_tracker: tracker,
             review_manager: None,
+            ipc_token: String::new(),
         }))
     }
 
@@ -1866,6 +1972,7 @@ mod tests {
             review_store: Some(store),
             self_write_tracker: tracker,
             review_manager: None,
+            ipc_token: String::new(),
         }));
 
         classify_and_record_changes(std::slice::from_ref(&path), &state);

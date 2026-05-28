@@ -2351,6 +2351,7 @@
       onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
       onShare={showBreadcrumbShare ? openShareDialog : undefined}
       shareEnabled={showBreadcrumbShare}
+      onOpenInBrowser={activeFileType === 'html' ? () => openExternal(activePath) : undefined}
     />
   </div>
   {#if !hasSidebar}

@@ -26,9 +26,12 @@ declare global {
 // `window.__attn_init__` after reading it once, so we cannot rely on reading it
 // lazily inside `send()`. The setter makes this robust regardless of whether
 // this module evaluates before or after that delete.
-let ipcToken: string | undefined = (
-  window as unknown as { __attn_init__?: { ipcToken?: string } }
-).__attn_init__?.ipcToken;
+// Guard the `window` read with `typeof` — this runs at module load, and the
+// module is imported in the Node test environment where `window` is undefined.
+let ipcToken: string | undefined =
+  typeof window !== 'undefined'
+    ? (window as unknown as { __attn_init__?: { ipcToken?: string } }).__attn_init__?.ipcToken
+    : undefined;
 
 /** Capture the capability token before the init payload is cleared. */
 export function setIpcToken(token: string | undefined): void {
@@ -36,7 +39,7 @@ export function setIpcToken(token: string | undefined): void {
 }
 
 function send(message: IpcMessage): void {
-  if (window.ipc) {
+  if (typeof window !== 'undefined' && window.ipc) {
     const payload = ipcToken ? { ...message, token: ipcToken } : message;
     window.ipc.postMessage(JSON.stringify(payload));
   }

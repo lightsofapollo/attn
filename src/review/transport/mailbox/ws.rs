@@ -654,7 +654,9 @@ impl MailboxWsClient {
                 //         session hits this and would otherwise retry forever.
                 if let tungstenite::Error::Http(resp) = &e {
                     match resp.status().as_u16() {
-                        401 => return ConnectionOutcome::Terminal(TransportError::AdmissionRejected),
+                        401 => {
+                            return ConnectionOutcome::Terminal(TransportError::AdmissionRejected);
+                        }
                         404 => return ConnectionOutcome::Terminal(TransportError::RoomNotFound),
                         _ => {}
                     }

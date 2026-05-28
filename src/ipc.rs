@@ -1065,11 +1065,23 @@ mod tests {
         // Write-class messages from an embedded (untrusted) frame carry no
         // token, or the wrong one — both must be rejected.
         assert!(!ipc_message_authorized("edit_save", "secret", None));
-        assert!(!ipc_message_authorized("edit_save", "secret", Some("wrong")));
+        assert!(!ipc_message_authorized(
+            "edit_save",
+            "secret",
+            Some("wrong")
+        ));
         assert!(!ipc_message_authorized("navigate", "secret", Some("")));
         // The legitimate main frame presents the exact session token.
-        assert!(ipc_message_authorized("edit_save", "secret", Some("secret")));
-        assert!(ipc_message_authorized("checkbox_toggle", "secret", Some("secret")));
+        assert!(ipc_message_authorized(
+            "edit_save",
+            "secret",
+            Some("secret")
+        ));
+        assert!(ipc_message_authorized(
+            "checkbox_toggle",
+            "secret",
+            Some("secret")
+        ));
     }
 
     #[test]

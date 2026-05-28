@@ -603,8 +603,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             // 404. This runs only on the file-serve branch — AFTER the review
             // invite / reserved-path checks above — so invite `?`/`#` handling
             // is unaffected.
-            let raw_path =
-                &raw_path[..raw_path.find(|c| c == '?' || c == '#').unwrap_or(raw_path.len())];
+            let raw_path = &raw_path[..raw_path.find(['?', '#']).unwrap_or(raw_path.len())];
 
             let path = percent_decode_str(raw_path).decode_utf8_lossy();
             let file_path = std::path::Path::new(path.as_ref());

@@ -14,6 +14,22 @@ last-touched
 # Must not be committed as paths would be wrong in other clones
 redirect
 
+# Dolt sql-server runtime state (per-machine; the server is auto-started)
+dolt-server.lock
+dolt-server.log
+dolt-server.pid
+dolt-server.port
+dolt-server.activity
+
+# Credential key — a SECRET; must never be committed
+.beads-credential-key
+
+# Local backups and transient runtime
+backup/
+*.corrupt.backup/
+bd.sock.startlock
+ephemeral.sqlite3
+
 # Sync state (local-only, per-machine)
 # These files are machine-specific and should not be shared across clones
 .sync.lock

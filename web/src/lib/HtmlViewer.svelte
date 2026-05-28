@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { markdownSourceUrl } from './markdown-layer';
 
   interface Props {
@@ -15,14 +16,29 @@
 
   let loading = $state(true);
 
+  // The iframe is a cross-origin, opaque-origin sandbox, so we can neither
+  // style its internal scrollbar nor scroll it from attn's ScrollArea (its
+  // content height isn't measurable across origins). To avoid the chunky native
+  // scrollbar at a hard edge — and match the app's clean, scrollbar-less look —
+  // we make the iframe wider than its clipping wrapper by exactly the platform
+  // scrollbar width, so the native vertical scrollbar falls in the clipped
+  // gutter. On overlay-scrollbar systems the width is 0 (no clip needed).
+  let scrollbarWidth = $state(0);
+  onMount(() => {
+    const probe = document.createElement('div');
+    probe.style.cssText =
+      'position:absolute;top:-9999px;width:50px;height:50px;overflow:scroll';
+    document.body.appendChild(probe);
+    scrollbarWidth = probe.offsetWidth - probe.clientWidth;
+    probe.remove();
+  });
+
   // The iframe loads the file through the `attn://` custom protocol — the same
-  // mechanism the image/media viewers use. We render it in a sandboxed frame
-  // (allow-scripts, NO allow-same-origin → opaque origin) so the page's own JS
-  // runs but cannot reach the app's DOM/storage or the native IPC bridge. The
-  // CSP served with the response (see src/main.rs) permits remote fonts/CDN
-  // libraries for aesthetics while blocking it from reading other local files.
-  // The header (breadcrumb + "Open in browser" button) is shared app chrome
-  // rendered by App.svelte, identical to every other file type.
+  // mechanism the image/media viewers use — in a sandboxed frame (allow-scripts,
+  // NO allow-same-origin → opaque origin). The CSP served with the response (see
+  // src/main.rs) permits remote fonts/CDN libraries for aesthetics while
+  // blocking it from reading other local files. The header (breadcrumb +
+  // "Open in browser" button) is shared app chrome rendered by App.svelte.
   let src = $derived(
     mtime !== undefined
       ? `${markdownSourceUrl(path)}?v=${mtime}`
@@ -37,7 +53,7 @@
   });
 </script>
 
-<div class="relative h-full w-full" data-slot="html-viewer">
+<div class="relative h-full w-full overflow-hidden" data-slot="html-viewer">
   {#if loading}
     <div
       class="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-muted-foreground"
@@ -49,12 +65,14 @@
   <!--
     sandbox="allow-scripts" WITHOUT allow-same-origin: the page runs its own
     JavaScript in a unique opaque origin and cannot touch the parent app,
-    navigate the top frame, open popups, or submit forms.
+    navigate the top frame, open popups, or submit forms. Width is padded by the
+    scrollbar width so the native scrollbar is clipped by the wrapper above.
   -->
   <iframe
     {src}
     title={fileName}
-    class="h-full w-full border-0 bg-white"
+    class="block h-full border-0 bg-white"
+    style="width: calc(100% + {scrollbarWidth}px);"
     sandbox="allow-scripts"
     referrerpolicy="no-referrer"
     onload={() => (loading = false)}

@@ -20,7 +20,7 @@ export interface PlanStructure {
   file_refs: string[];
 }
 
-export type FileType = 'markdown' | 'image' | 'video' | 'audio' | 'directory' | 'unsupported';
+export type FileType = 'markdown' | 'image' | 'video' | 'audio' | 'html' | 'directory' | 'unsupported';
 
 export interface TreeNode {
   name: string;
@@ -304,6 +304,13 @@ export interface InitPayload {
   contentMtimeMs?: number;
   contentBytes?: number;
   reviewProfile?: ReviewProfileInit;
+  /**
+   * Per-session capability token. Injected only into the main app frame's
+   * payload (never into an embedded HtmlViewer iframe). `ipc.send()` attaches
+   * it to privileged messages; the daemon rejects privileged IPC without it,
+   * so scripts in a sandboxed HTML file cannot drive the app. @see src/ipc.rs
+   */
+  ipcToken?: string;
 }
 
 /**

@@ -9,6 +9,7 @@
   } from '$lib/components/ui/breadcrumb';
   import { dragWindow } from './ipc';
   import Share2 from '@lucide/svelte/icons/share-2';
+  import ExternalLink from '@lucide/svelte/icons/external-link';
 
   interface Props {
     path: string;
@@ -16,6 +17,9 @@
     onNavigate?: (path: string) => void;
     onShare?: () => void;
     shareEnabled?: boolean;
+    /** When set, shows an "open in browser" icon button in the header cluster
+     *  (used for HTML files, which can't be shared but can be opened externally). */
+    onOpenInBrowser?: () => void;
     avoidWindowControls?: boolean;
     fixed?: boolean;
     topOffsetPx?: number;
@@ -28,6 +32,7 @@
     onNavigate,
     onShare,
     shareEnabled = false,
+    onOpenInBrowser,
     avoidWindowControls = false,
     fixed = false,
     topOffsetPx = 0,
@@ -110,10 +115,23 @@
   {:else}
     <div class="min-w-0 flex-1" aria-hidden="true"></div>
   {/if}
+  {#if onOpenInBrowser}
+    <button
+      type="button"
+      class="-mt-3 inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/50 bg-background/55 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+      style="-webkit-app-region: no-drag"
+      aria-label="Open in browser"
+      title="Open in browser"
+      onclick={() => onOpenInBrowser?.()}
+    >
+      <ExternalLink class="size-3.5" aria-hidden="true" />
+      <span class="sr-only">Open in browser</span>
+    </button>
+  {/if}
   {#if onShare}
     <button
       type="button"
-      class="mt-1.5 inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/50 bg-background/55 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-40"
+      class="-mt-3 inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/50 bg-background/55 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-40"
       style="-webkit-app-region: no-drag"
       aria-label="Share for review"
       title="Share for review"

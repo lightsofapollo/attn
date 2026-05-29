@@ -192,6 +192,13 @@ pub struct AppState {
     /// event loop. Review IPC handlers submit commands here instead of
     /// performing inline work.
     pub review_manager: Option<Arc<ReviewManager>>,
+    /// Per-session capability token. Minted at startup and injected ONLY into
+    /// the main app frame's init payload (`window.__attn_init__.ipcToken`).
+    /// `handle_message` requires it on every privileged (non-diagnostic) IPC
+    /// message, so scripts inside a sandboxed HtmlViewer iframe — which never
+    /// receives the token — cannot drive the daemon (write files, navigate,
+    /// quit, share, …) even if they reach the native IPC bridge.
+    pub ipc_token: String,
 }
 
 /// Lightweight handle for a live review room. `ReviewManager` owns the heavy
@@ -206,8 +213,56 @@ pub struct RoomRuntimeHandle {
     pub room_id: RoomId,
 }
 
+/// Whether a message of `msg_type` carrying `provided` is authorized against
+/// the session's `expected` capability token.
+///
+/// The read-only diagnostic channels (`js_log`/`js_error`) carry no authority
+/// and are tokenless — they are how a guard failure inside a sandboxed iframe
+/// would surface. Every other message is privileged and must present the exact
+/// session token. An empty `expected` (e.g. a `getrandom` failure that minted
+/// no token) fails closed: nothing privileged is authorized.
+fn ipc_message_authorized(msg_type: &str, expected: &str, provided: Option<&str>) -> bool {
+    const TOKENLESS: &[&str] = &["js_log", "js_error"];
+    if TOKENLESS.contains(&msg_type) {
+        return true;
+    }
+    matches!(provided, Some(p) if !expected.is_empty() && p == expected)
+}
+
 pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoopProxy<UserEvent>) {
-    match serde_json::from_str::<IpcMessage>(body) {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("invalid IPC message: {}", e);
+            return;
+        }
+    };
+
+    // Capability-token gate. Every privileged message must carry the
+    // per-session token injected only into the main app frame. This stops a
+    // script inside a sandboxed HtmlViewer iframe from driving the daemon even
+    // if it reaches the native IPC bridge. Only the read-only diagnostic
+    // channels (js_log/js_error) are tokenless — they carry no authority and
+    // are how a guard failure would surface.
+    let msg_type = value
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default();
+    let provided = value.get("token").and_then(|t| t.as_str());
+    let expected = state
+        .lock()
+        .ok()
+        .map(|s| s.ipc_token.clone())
+        .unwrap_or_default();
+    if !ipc_message_authorized(msg_type, &expected, provided) {
+        tracing::warn!(
+            "rejected privileged IPC '{}' without a valid token",
+            msg_type
+        );
+        return;
+    }
+
+    match serde_json::from_value::<IpcMessage>(value) {
         Ok(msg) => match msg {
             IpcMessage::Quit => {
                 std::process::exit(0);
@@ -593,6 +648,7 @@ mod tests {
             review_store,
             self_write_tracker: Arc::new(SelfWriteTracker::new()),
             review_manager,
+            ipc_token: "test-token".to_string(),
         }))
     }
 
@@ -1002,5 +1058,47 @@ mod tests {
         let body = r#"{"type":"review_share","path":"/tmp/plan.md","mode":"live"}"#;
         dispatch_review_ipc(body, &state);
         // No assertion — the test passes if we did not panic / poison locks.
+    }
+
+    #[test]
+    fn privileged_ipc_requires_matching_token() {
+        // Write-class messages from an embedded (untrusted) frame carry no
+        // token, or the wrong one — both must be rejected.
+        assert!(!ipc_message_authorized("edit_save", "secret", None));
+        assert!(!ipc_message_authorized(
+            "edit_save",
+            "secret",
+            Some("wrong")
+        ));
+        assert!(!ipc_message_authorized("navigate", "secret", Some("")));
+        // The legitimate main frame presents the exact session token.
+        assert!(ipc_message_authorized(
+            "edit_save",
+            "secret",
+            Some("secret")
+        ));
+        assert!(ipc_message_authorized(
+            "checkbox_toggle",
+            "secret",
+            Some("secret")
+        ));
+    }
+
+    #[test]
+    fn diagnostic_ipc_is_tokenless() {
+        // js_log / js_error carry no authority and must pass without a token so
+        // a guard failure inside a sandboxed iframe can still surface.
+        assert!(ipc_message_authorized("js_log", "secret", None));
+        assert!(ipc_message_authorized("js_error", "secret", None));
+    }
+
+    #[test]
+    fn empty_session_token_fails_closed() {
+        // If the daemon minted no token (getrandom failure), nothing privileged
+        // is authorized — even a message that echoes the empty token.
+        assert!(!ipc_message_authorized("edit_save", "", Some("")));
+        assert!(!ipc_message_authorized("navigate", "", None));
+        // Diagnostics remain allowed regardless.
+        assert!(ipc_message_authorized("js_error", "", None));
     }
 }

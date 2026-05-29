@@ -454,7 +454,10 @@ fn open_daemon_log() -> Option<(std::fs::File, std::path::PathBuf)> {
     // (before the store has created it).
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join("attn.log");
-    if std::fs::metadata(&path).map(|m| m.len() > MAX_LOG_BYTES).unwrap_or(false) {
+    if std::fs::metadata(&path)
+        .map(|m| m.len() > MAX_LOG_BYTES)
+        .unwrap_or(false)
+    {
         let _ = std::fs::rename(&path, dir.join("attn.log.1"));
     }
     let file = std::fs::OpenOptions::new()

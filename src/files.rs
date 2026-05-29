@@ -22,6 +22,7 @@ pub enum FileType {
     Image,
     Video,
     Audio,
+    Html,
     Directory,
     Unsupported,
 }
@@ -57,6 +58,7 @@ pub fn detect_file_type(path: &Path) -> FileType {
         Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp" | "ico") => FileType::Image,
         Some("mp4" | "webm" | "mov" | "avi") => FileType::Video,
         Some("mp3" | "wav" | "ogg" | "m4a" | "flac" | "aac") => FileType::Audio,
+        Some("html" | "htm") => FileType::Html,
         _ => FileType::Unsupported,
     }
 }
@@ -126,10 +128,10 @@ pub fn search_previewable_files(root: &Path, query: &str, max_results: usize) ->
         .collect()
 }
 
-fn is_previewable(file_type: &FileType) -> bool {
+pub fn is_previewable(file_type: &FileType) -> bool {
     matches!(
         file_type,
-        FileType::Markdown | FileType::Image | FileType::Video | FileType::Audio
+        FileType::Markdown | FileType::Image | FileType::Video | FileType::Audio | FileType::Html
     )
 }
 
@@ -360,6 +362,18 @@ mod tests {
         assert!(matches!(
             detect_file_type(Path::new("audio.mp3")),
             FileType::Audio
+        ));
+        assert!(matches!(
+            detect_file_type(Path::new("page.html")),
+            FileType::Html
+        ));
+        assert!(matches!(
+            detect_file_type(Path::new("page.htm")),
+            FileType::Html
+        ));
+        assert!(matches!(
+            detect_file_type(Path::new("PAGE.HTML")),
+            FileType::Html
         ));
         assert!(matches!(
             detect_file_type(Path::new("archive.zip")),

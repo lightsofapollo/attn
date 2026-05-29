@@ -685,10 +685,7 @@ impl ReviewManager {
             });
 
             if let Err(err) = self.store.delete_room(&room_id) {
-                tracing::warn!(
-                    "delete room state failed for {}: {err}",
-                    room_id.as_str()
-                );
+                tracing::warn!("delete room state failed for {}: {err}", room_id.as_str());
             }
 
             tracing::info!("stopped room runtime room={}", room_id.as_str());
@@ -1539,10 +1536,7 @@ impl ReviewManager {
         // against a healthy relay; failures are logged but non-fatal
         // (peer keys also arrive via ParticipantJoined events).
         match runtime.block_on(bootstrap.refresh_device_keys(room_id, &verifying_keys)) {
-            Ok(n) => tracing::info!(
-                "seeded {n} device key(s) for room={}",
-                room_id.as_str()
-            ),
+            Ok(n) => tracing::info!("seeded {n} device key(s) for room={}", room_id.as_str()),
             // The relay says this room no longer exists. The local store still
             // had it with a future TTL, so without this it would be resumed on
             // EVERY boot — each time blocking here on a 404 then dialing a dead
@@ -1965,10 +1959,7 @@ impl ReviewManager {
                 _ => {}
             }
             if let Err(err) = self.start_room_runtime(&room_id) {
-                tracing::warn!(
-                    "start_room_runtime failed for {}: {err}",
-                    room_id.as_str()
-                );
+                tracing::warn!("start_room_runtime failed for {}: {err}", room_id.as_str());
                 continue;
             }
             // Tell the frontend a known room is live so its review store

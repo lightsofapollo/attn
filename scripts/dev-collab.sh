@@ -36,6 +36,10 @@ cd "$PROJECT_DIR"
 
 : "${ATTN_RELAY_URL:=http://localhost:8787}"
 : "${FIXTURE_PATH:=tests/fixtures/basic.md}"
+# Reviewer opens a visually distinct fixture so the two identical windows can be
+# told apart: share from the owner window (this fixture); the reviewer window
+# switches to it on join.
+: "${REVIEWER_FIXTURE_PATH:=tests/fixtures/typography.md}"
 : "${ATTN_BIN:=$PROJECT_DIR/target/debug/attn}"
 
 # Pin the per-instance ATTN_HOMEs the task issue asks for, then forward
@@ -43,6 +47,7 @@ cd "$PROJECT_DIR"
 export ATTN_DUAL_OWNER="/tmp/attn-collab-owner"
 export ATTN_DUAL_REVIEWER="/tmp/attn-collab-reviewer"
 export ATTN_DUAL_FIXTURE="$PROJECT_DIR/$FIXTURE_PATH"
+export ATTN_DUAL_REVIEWER_FIXTURE="$PROJECT_DIR/$REVIEWER_FIXTURE_PATH"
 export ATTN_BIN
 # Export the relay URL so the daemons booted by start_dual inherit it; without
 # this they fall back to the scaffold stub and Share never reaches the relay.
@@ -144,7 +149,8 @@ join_reviewer() {
         return 0
     fi
 
-    log "Click [Share] in the owner window, copy the invite URL, then paste it here."
+    log "Click [Share] in the OWNER window — the one showing '$FIXTURE_PATH'."
+    log "(The reviewer window shows '$REVIEWER_FIXTURE_PATH' until it joins.) Copy the invite, then paste it here."
     log "(Empty line cancels and leaves the daemons running.)"
     printf 'Paste invite > '
     IFS= read -r invite || true
@@ -195,8 +201,8 @@ start_relay
 log "Booting owner + reviewer daemons (ATTN_HOME isolation)"
 start_dual
 wait_for_dual 'h1' 20000
-log "Owner window opened (fixture: $FIXTURE_PATH, ATTN_HOME=$ATTN_DUAL_OWNER)"
-log "Reviewer window opened (ATTN_HOME=$ATTN_DUAL_REVIEWER) — idle until join"
+log "Owner window opened — shows '$FIXTURE_PATH'; SHARE FROM THIS WINDOW. ATTN_HOME=$ATTN_DUAL_OWNER"
+log "Reviewer window opened — shows '$REVIEWER_FIXTURE_PATH' until it joins, then switches to the owner's doc. ATTN_HOME=$ATTN_DUAL_REVIEWER"
 
 join_reviewer
 

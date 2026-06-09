@@ -170,26 +170,6 @@ export class ReviewStore {
   } | null>(null);
 
   /**
-   * Path (file or folder) the owner just fired `reviewShare` for, captured the
-   * instant the IPC is sent and consumed by the async `applyShareReady`
-   * callback. `ReviewUpdate::ShareReady` (src/review/manager.rs) carries no
-   * path, and the owner never reliably receives their own snapshot back as a
-   * frontend event before the dialog times out, so this is the only reliable
-   * source for the shared path on the owner side. Cleared once `applyShareReady`
-   * consumes it.
-   */
-  pendingShareTargetPath = $state<string | null>(null);
-
-  /**
-   * Record the path the owner is about to share, just before the `reviewShare`
-   * IPC fires. `applyShareReady` reads this to stamp the resulting
-   * `currentShare`/room `share` record with its `ownerDisplayPath`.
-   */
-  noteShareIntent(path: string): void {
-    this.pendingShareTargetPath = path;
-  }
-
-  /**
    * Append-only buffer of imported review events. The thread selectors
    * below reconstruct typed `Thread[]` from this.
    */
@@ -440,13 +420,6 @@ export class ReviewStore {
       ...error,
       updatedAt: Date.now(),
     };
-    // A failed share emits a non-room-scoped error (room_id: None from
-    // emit_share_outcome's Err branch), so release the captured share-intent
-    // only for those. A room-scoped error on some OTHER live room must NOT
-    // discard an in-flight share intent for a different file.
-    if (error.roomId == null) {
-      this.pendingShareTargetPath = null;
-    }
   }
 
   clearLastError(): void {
@@ -543,6 +516,7 @@ export class ReviewStore {
   applyShareReady(payload: {
     roomId: RoomId;
     inviteUrl: string;
+    ownerDisplayPath: string;
     ownerSigningKey: string;
     mode: 'live' | 'async' | 'hybrid';
     expiresAt: number;
@@ -551,26 +525,14 @@ export class ReviewStore {
     const nextDismissed = new Set(this.dismissedRoomIds);
     nextDismissed.delete(payload.roomId);
     this.dismissedRoomIds = nextDismissed;
-    // The path the owner just shared, captured at `reviewShare`-fire time via
-    // `noteShareIntent`. Fall back to the room's previously-recorded path
-    // (idempotent re-share / reconnect re-emits ShareReady without a fresh
-    // noteShareIntent). NOTE: a CLI-initiated `attn review share <path>`
-    // (src/cli_review.rs) reaches here without ever calling noteShareIntent and,
-    // on a first-ever share, has no prior room record either — so it falls
-    // through to '' and the dialog will re-mint rather than re-show that invite.
-    // Benign (re-share is idempotent on the Rust side) and not a regression; to
-    // fully close it, thread the path through ReviewUpdate::ShareReady on the
-    // Rust side and stamp it here instead of relying on pendingShareTargetPath.
-    const ownerDisplayPath =
-      this.pendingShareTargetPath ??
-      this.rooms[payload.roomId]?.share?.ownerDisplayPath ??
-      '';
-    this.pendingShareTargetPath = null;
+    // `ownerDisplayPath` is the path the daemon actually shared, carried on the
+    // ShareReady payload — so the dialog's shareTargetMatches gate works for any
+    // share (GUI or `attn review share`) without a frontend-captured intent.
     const share = {
       roomId: payload.roomId,
       inviteUrl: payload.inviteUrl,
       ownerSigningKey: payload.ownerSigningKey,
-      ownerDisplayPath,
+      ownerDisplayPath: payload.ownerDisplayPath,
       mode: payload.mode,
       expiresAt: payload.expiresAt,
     };

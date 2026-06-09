@@ -659,6 +659,11 @@ impl BootstrapConfig {
 pub struct ShareOutcome {
     pub room_id: RoomId,
     pub invite: String,
+    /// Absolute path (file or folder) the owner shared, exactly as the frontend
+    /// passed it to `reviewShare` (`path.to_string_lossy()`). The Share dialog
+    /// matches this against the active target to recognise its own room (see
+    /// `shareTargetMatches`), so it must be the verbatim path string.
+    pub owner_display_path: String,
     /// `true` if the room was newly created, `false` if `Share` was a no-op
     /// because the bindings file already had an entry pointing at a live room.
     pub newly_created: bool,
@@ -953,6 +958,7 @@ impl Bootstrapper {
         Ok(ShareOutcome {
             room_id,
             invite,
+            owner_display_path: path.to_string_lossy().to_string(),
             newly_created: true,
             owner_signing_key: identity.public_signing_key.clone(),
             mode: room_mode_wire(policy.mode),
@@ -999,6 +1005,7 @@ impl Bootstrapper {
             return Ok(Some(ShareOutcome {
                 room_id,
                 invite,
+                owner_display_path: path.to_string_lossy().to_string(),
                 newly_created: false,
                 owner_signing_key: identity.public_signing_key.clone(),
                 mode: room_mode_wire(policy_mode),
@@ -2612,11 +2619,16 @@ mod tests {
             .await;
 
         let (_doc_tmp, path) = temp_markdown_file("x.md", "# X\n");
+        let expected_display_path = path.to_string_lossy().to_string();
         let outcome = boot
             .share(path, RoomMode::Async, None)
             .await
             .expect("share");
         assert!(outcome.invite.starts_with("attn://review/"));
+        assert_eq!(
+            outcome.owner_display_path, expected_display_path,
+            "ShareOutcome must carry the exact path the owner shared so the dialog recognises its own room",
+        );
         assert!(outcome.invite.contains("#key="));
         // The invite must round-trip through `parse_invite`.
         let parsed = parse_invite(&outcome.invite).expect("parse");

@@ -198,6 +198,13 @@ trap cleanup EXIT INT TERM
 
 start_relay
 
+# Warn if the two windows would be indistinguishable (e.g. FIXTURE_PATH was
+# overridden to the reviewer's default) — the whole point is to tell them apart
+# for the Share step.
+if [ "$REVIEWER_FIXTURE_PATH" = "$FIXTURE_PATH" ]; then
+    log "WARNING: owner and reviewer fixtures are identical ($FIXTURE_PATH) — the two windows will look the same. Set REVIEWER_FIXTURE_PATH to a different file to tell them apart."
+fi
+
 log "Booting owner + reviewer daemons (ATTN_HOME isolation)"
 start_dual
 wait_for_dual 'h1' 20000

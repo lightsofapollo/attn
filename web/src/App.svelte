@@ -281,6 +281,12 @@
     const target = shareTargetPath ?? activePath ?? '';
     return shareTargetMatches(share.ownerDisplayPath, target);
   });
+  // Reset the share target when the dialog closes so a stale path can't feed
+  // shareTargetIsCurrent on the next open; openShareDialogForPath always sets it
+  // fresh before reopening, so clearing here is safe.
+  $effect(() => {
+    if (!shareDialogOpen) shareTargetPath = null;
+  });
   const loadedMtimeByPath = new Map<string, number>();
   // Reactive map of disk mtimes for HTML files, keyed by path. Bumping an
   // entry cache-busts the HtmlViewer iframe URL so on-disk edits live-reload.
@@ -1961,6 +1967,7 @@
         reviewStore.applyShareReady({
           roomId: payload.roomId,
           inviteUrl: payload.inviteUrl,
+          ownerDisplayPath: payload.ownerDisplayPath,
           ownerSigningKey: payload.ownerSigningKey,
           mode: payload.mode,
           expiresAt: payload.expiresAt,
@@ -2620,7 +2627,6 @@
   ownerSigningKey={shareTargetIsCurrent ? (reviewStore.currentShare?.ownerSigningKey ?? '') : ''}
   existingRoomId={shareTargetIsCurrent ? (reviewStore.currentShare?.roomId ?? null) : null}
   shareErrorMessage={reviewStore.lastError?.message ?? ''}
-  onStart={(params) => reviewStore.noteShareIntent(params.filePath)}
   onClearError={() => reviewStore.clearLastError()}
 />
 <NamePrompt

@@ -44,6 +44,9 @@ export ATTN_DUAL_OWNER="/tmp/attn-collab-owner"
 export ATTN_DUAL_REVIEWER="/tmp/attn-collab-reviewer"
 export ATTN_DUAL_FIXTURE="$PROJECT_DIR/$FIXTURE_PATH"
 export ATTN_BIN
+# Export the relay URL so the daemons booted by start_dual inherit it; without
+# this they fall back to the scaffold stub and Share never reaches the relay.
+export ATTN_RELAY_URL
 
 # Relay process state.
 RELAY_PID=""

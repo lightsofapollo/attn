@@ -125,11 +125,14 @@ start_dual() {
     rm -rf "$ATTN_DUAL_OWNER" "$ATTN_DUAL_REVIEWER"
     mkdir -p "$ATTN_DUAL_OWNER" "$ATTN_DUAL_REVIEWER"
 
-    ATTN_HOME="$ATTN_DUAL_OWNER" "$ATTN_BIN" --no-fork "$ATTN_DUAL_FIXTURE" \
+    # Forward ATTN_RELAY_URL (if set) so the daemons attach the real relay
+    # instead of the scaffold stub — Share/Join/collab flows need it. Empty is
+    # treated as "unset" by the daemon, so this is safe when no relay is wanted.
+    ATTN_HOME="$ATTN_DUAL_OWNER" ATTN_RELAY_URL="${ATTN_RELAY_URL:-}" "$ATTN_BIN" --no-fork "$ATTN_DUAL_FIXTURE" \
         >"$ATTN_DUAL_OWNER/daemon.stdout.log" 2>"$ATTN_DUAL_OWNER/daemon.stderr.log" &
     ATTN_DUAL_OWNER_PID=$!
 
-    ATTN_HOME="$ATTN_DUAL_REVIEWER" "$ATTN_BIN" --no-fork "$ATTN_DUAL_FIXTURE" \
+    ATTN_HOME="$ATTN_DUAL_REVIEWER" ATTN_RELAY_URL="${ATTN_RELAY_URL:-}" "$ATTN_BIN" --no-fork "$ATTN_DUAL_FIXTURE" \
         >"$ATTN_DUAL_REVIEWER/daemon.stdout.log" 2>"$ATTN_DUAL_REVIEWER/daemon.stderr.log" &
     ATTN_DUAL_REVIEWER_PID=$!
 }

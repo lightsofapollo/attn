@@ -55,6 +55,9 @@
     shareErrorMessage?: string;
     writeToClipboard?: (text: string) => Promise<void>;
     onStart?: (params: ShareStartParams) => void;
+    /** Fired when the mint fails or times out, so the owner can release any
+     *  captured share-intent (see `reviewStore.clearShareIntent`). */
+    onAbort?: () => void;
     onClearError?: () => void;
   }
 
@@ -75,6 +78,7 @@
     shareErrorMessage = '',
     writeToClipboard,
     onStart,
+    onAbort,
     onClearError,
   }: Props = $props();
 
@@ -171,6 +175,15 @@
       mintTimeout = null;
     }
     phase = 'error';
+  });
+
+  // Release the captured share-intent whenever a mint ends in error (relay
+  // error OR the 15s relay-silent timeout, which emits no daemon error). Keeps
+  // a stale path from bleeding into a later, unrelated share (e.g. a CLI
+  // `attn review share` of a different file). The ready path already clears it
+  // via `applyShareReady`.
+  $effect(() => {
+    if (phase === 'error') onAbort?.();
   });
 
   // Recompute the fingerprint whenever the owner key changes.

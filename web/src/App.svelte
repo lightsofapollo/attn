@@ -96,6 +96,7 @@
     isReviewerView,
     collabRoleFor,
     collabSeedReady,
+    shareTargetMatches,
   } from './lib/review/room-ui';
   import {
     requestReviewDecorationsRebuild,
@@ -275,16 +276,10 @@
   // invite; when it's a NEW target (e.g. sharing a folder while a single file is
   // shared), the dialog mints a fresh room so the owner "switches over" to it.
   let shareTargetIsCurrent = $derived.by(() => {
-    const roomId = reviewStore.currentShare?.roomId;
-    if (!roomId) return false;
-    const target = (shareTargetPath ?? activePath ?? '').replace(/\/+$/, '');
-    if (target.length === 0) return false;
-    return reviewStore.snapshots.some((s) => {
-      if (s.roomId !== roomId) return false;
-      const p = s.ownerDisplayPath;
-      if (!p) return false;
-      return p === target || p.startsWith(`${target}/`);
-    });
+    const share = reviewStore.currentShare;
+    if (!share?.roomId) return false;
+    const target = shareTargetPath ?? activePath ?? '';
+    return shareTargetMatches(share.ownerDisplayPath, target);
   });
   const loadedMtimeByPath = new Map<string, number>();
   // Reactive map of disk mtimes for HTML files, keyed by path. Bumping an
@@ -2625,6 +2620,8 @@
   ownerSigningKey={shareTargetIsCurrent ? (reviewStore.currentShare?.ownerSigningKey ?? '') : ''}
   existingRoomId={shareTargetIsCurrent ? (reviewStore.currentShare?.roomId ?? null) : null}
   shareErrorMessage={reviewStore.lastError?.message ?? ''}
+  onStart={(params) => reviewStore.noteShareIntent(params.filePath)}
+  onAbort={() => reviewStore.clearShareIntent()}
   onClearError={() => reviewStore.clearLastError()}
 />
 <NamePrompt

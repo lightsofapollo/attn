@@ -9,6 +9,7 @@ import {
   collabSeedReady,
   isReviewerView,
   roomDisplayName,
+  shareTargetMatches,
   shouldActivateRoomStatus,
   shouldAutoSelectOnlyRoom,
   shouldForgetRoomStatus,
@@ -226,6 +227,66 @@ defineCase('roomDisplayName: dedupes repeated snapshots for one file', () => {
 defineCase('roomDisplayName: null when no snapshots for the room yet', () => {
   const snaps = [{ roomId: 'other' as RoomId, ownerDisplayPath: '/p/x.md' }];
   assert(roomDisplayName(snaps, 'r1' as RoomId) === null, 'no snapshots → null so the caller falls back to the short id');
+});
+
+// --- shareTargetMatches (owner-share path gate; replaces snapshot scan) -----
+
+defineCase('shareTargetMatches: single shared file matches itself', () => {
+  assert(
+    shareTargetMatches('/Users/me/plan.md', '/Users/me/plan.md') === true,
+    'the exact shared file must be recognized as current',
+  );
+});
+
+defineCase('shareTargetMatches: shared folder matches the folder itself', () => {
+  assert(
+    shareTargetMatches('/Users/me/planning', '/Users/me/planning') === true,
+    'the shared folder path must match itself',
+  );
+});
+
+defineCase('shareTargetMatches: child file under a shared folder matches', () => {
+  assert(
+    shareTargetMatches('/Users/me/planning', '/Users/me/planning/a.md') === true,
+    'a markdown file beneath the shared folder must be recognized as current',
+  );
+  assert(
+    shareTargetMatches('/Users/me/planning', '/Users/me/planning/sub/c.md') === true,
+    'a nested child of the shared folder must also match',
+  );
+});
+
+defineCase('shareTargetMatches: trailing slashes are tolerated on both sides', () => {
+  assert(
+    shareTargetMatches('/Users/me/planning/', '/Users/me/planning/a.md') === true,
+    'a folder share stored with a trailing slash must still match its children',
+  );
+  assert(
+    shareTargetMatches('/Users/me/plan.md', '/Users/me/plan.md/') === true,
+    'a stray trailing slash on the target must not break an exact match',
+  );
+});
+
+defineCase('shareTargetMatches: a different unshared file does NOT match', () => {
+  assert(
+    shareTargetMatches('/Users/me/plan.md', '/Users/me/other.md') === false,
+    'an unrelated file must not be treated as the current share',
+  );
+  assert(
+    shareTargetMatches('/Users/me/planning', '/Users/me/planningX/a.md') === false,
+    'a sibling whose name merely shares a prefix must not match (segment boundary required)',
+  );
+  assert(
+    shareTargetMatches('/Users/me/planning', '/Users/me/planning-notes.md') === false,
+    'a non-boundary prefix collision must not match',
+  );
+});
+
+defineCase('shareTargetMatches: empty / null inputs never match', () => {
+  assert(shareTargetMatches(null, '/Users/me/plan.md') === false, 'no active share → no match');
+  assert(shareTargetMatches('/Users/me/plan.md', null) === false, 'no target selected → no match');
+  assert(shareTargetMatches('', '') === false, 'both empty → no match');
+  assert(shareTargetMatches(undefined, undefined) === false, 'undefined inputs are safe → no match');
 });
 
 let failed = 0;

@@ -190,16 +190,6 @@ export class ReviewStore {
   }
 
   /**
-   * Release a captured but unconsumed share-intent. Called when a share mint
-   * fails or times out (the relay-silent timeout produces no `applyError`, so
-   * the dialog signals this directly via its `onAbort`) so the path can't be
-   * mis-stamped onto a later, unrelated `ShareReady`.
-   */
-  clearShareIntent(): void {
-    this.pendingShareTargetPath = null;
-  }
-
-  /**
    * Append-only buffer of imported review events. The thread selectors
    * below reconstruct typed `Thread[]` from this.
    */
@@ -450,10 +440,13 @@ export class ReviewStore {
       ...error,
       updatedAt: Date.now(),
     };
-    // A share that errors out must release any captured share-intent so a
-    // stale path can't be mis-stamped onto a later, unrelated ShareReady
-    // (e.g. a subsequent CLI `attn review share` of a different file).
-    this.pendingShareTargetPath = null;
+    // A failed share emits a non-room-scoped error (room_id: None from
+    // emit_share_outcome's Err branch), so release the captured share-intent
+    // only for those. A room-scoped error on some OTHER live room must NOT
+    // discard an in-flight share intent for a different file.
+    if (error.roomId == null) {
+      this.pendingShareTargetPath = null;
+    }
   }
 
   clearLastError(): void {

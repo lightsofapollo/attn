@@ -55,9 +55,6 @@
     shareErrorMessage?: string;
     writeToClipboard?: (text: string) => Promise<void>;
     onStart?: (params: ShareStartParams) => void;
-    /** Fired when the mint fails or times out, so the owner can release any
-     *  captured share-intent (see `reviewStore.clearShareIntent`). */
-    onAbort?: () => void;
     onClearError?: () => void;
   }
 
@@ -78,7 +75,6 @@
     shareErrorMessage = '',
     writeToClipboard,
     onStart,
-    onAbort,
     onClearError,
   }: Props = $props();
 
@@ -145,9 +141,13 @@
     void autoMint();
   });
 
-  // Transition minting → ready when the daemon's ShareReady IPC lands.
+  // Transition → ready when the daemon's ShareReady IPC lands. Recovers from a
+  // timed-out mint too: a slow relay can answer AFTER the 15s timeout already
+  // flipped phase to 'error', and the invite is still valid — so surface it
+  // rather than leaving a spurious error on screen. A genuine daemon failure
+  // never populates inviteUrl, so this can't paper over a real error.
   $effect(() => {
-    if (phase === 'minting' && inviteUrl.length > 0) {
+    if ((phase === 'minting' || phase === 'error') && inviteUrl.length > 0) {
       if (mintTimeout) {
         clearTimeout(mintTimeout);
         mintTimeout = null;
@@ -175,15 +175,6 @@
       mintTimeout = null;
     }
     phase = 'error';
-  });
-
-  // Release the captured share-intent whenever a mint ends in error (relay
-  // error OR the 15s relay-silent timeout, which emits no daemon error). Keeps
-  // a stale path from bleeding into a later, unrelated share (e.g. a CLI
-  // `attn review share` of a different file). The ready path already clears it
-  // via `applyShareReady`.
-  $effect(() => {
-    if (phase === 'error') onAbort?.();
   });
 
   // Recompute the fingerprint whenever the owner key changes.

@@ -2621,7 +2621,6 @@
   existingRoomId={shareTargetIsCurrent ? (reviewStore.currentShare?.roomId ?? null) : null}
   shareErrorMessage={reviewStore.lastError?.message ?? ''}
   onStart={(params) => reviewStore.noteShareIntent(params.filePath)}
-  onAbort={() => reviewStore.clearShareIntent()}
   onClearError={() => reviewStore.clearLastError()}
 />
 <NamePrompt

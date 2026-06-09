@@ -46,8 +46,8 @@ __attn_dual_lib_dir() {
 : "${ATTN_DUAL_FIXTURE:=$ATTN_DUAL_REPO/tests/fixtures/review/scenario-comment-survives-edit.md}"
 # The reviewer can open a DIFFERENT fixture than the owner so the two windows
 # are visually distinguishable until the reviewer joins (then it switches to the
-# owner's shared doc). Defaults to the owner's fixture for backward compat.
-: "${ATTN_DUAL_REVIEWER_FIXTURE:=$ATTN_DUAL_FIXTURE}"
+# owner's shared doc). Resolved at start_dual time (NOT here) so a caller that
+# sets ATTN_DUAL_FIXTURE *after* sourcing this lib still gets it as the default.
 
 # Stashed PIDs. Empty until start_dual sets them; cleared by stop_dual.
 ATTN_DUAL_OWNER_PID=""
@@ -120,12 +120,16 @@ attn_reviewer() {
 start_dual() {
     __attn_dual_require_bin || return 1
 
+    # Resolve the reviewer fixture at call time so a caller that sets
+    # ATTN_DUAL_FIXTURE after sourcing this lib still gets it as the default.
+    local reviewer_fixture="${ATTN_DUAL_REVIEWER_FIXTURE:-$ATTN_DUAL_FIXTURE}"
+
     if [ ! -f "$ATTN_DUAL_FIXTURE" ]; then
         echo "dual-instance: fixture missing at $ATTN_DUAL_FIXTURE" >&2
         return 1
     fi
-    if [ ! -f "$ATTN_DUAL_REVIEWER_FIXTURE" ]; then
-        echo "dual-instance: reviewer fixture missing at $ATTN_DUAL_REVIEWER_FIXTURE" >&2
+    if [ ! -f "$reviewer_fixture" ]; then
+        echo "dual-instance: reviewer fixture missing at $reviewer_fixture" >&2
         return 1
     fi
 
@@ -140,7 +144,7 @@ start_dual() {
         >"$ATTN_DUAL_OWNER/daemon.stdout.log" 2>"$ATTN_DUAL_OWNER/daemon.stderr.log" &
     ATTN_DUAL_OWNER_PID=$!
 
-    ATTN_HOME="$ATTN_DUAL_REVIEWER" ATTN_RELAY_URL="${ATTN_RELAY_URL:-}" "$ATTN_BIN" --no-fork "$ATTN_DUAL_REVIEWER_FIXTURE" \
+    ATTN_HOME="$ATTN_DUAL_REVIEWER" ATTN_RELAY_URL="${ATTN_RELAY_URL:-}" "$ATTN_BIN" --no-fork "$reviewer_fixture" \
         >"$ATTN_DUAL_REVIEWER/daemon.stdout.log" 2>"$ATTN_DUAL_REVIEWER/daemon.stderr.log" &
     ATTN_DUAL_REVIEWER_PID=$!
 }

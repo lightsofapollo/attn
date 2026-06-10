@@ -935,7 +935,10 @@ impl Bootstrapper {
         let mut published = 0usize;
         let mut publish_errors = Vec::new();
         for doc_path in doc_targets {
-            match self.publish_initial_snapshot(&room_id, &doc_path, now_ms).await {
+            match self
+                .publish_initial_snapshot(&room_id, &doc_path, now_ms)
+                .await
+            {
                 Ok(_) => published += 1,
                 Err(err) => {
                     publish_errors.push(format!("{}: {err}", doc_path.display()));
@@ -1406,12 +1409,9 @@ impl Bootstrapper {
                 expires_at as i64,
             )
             .map_err(|e| BootstrapError::Crypto(format!("assemble blob wrapper: {e}")))?;
-            let sealed_body = seal_snapshot_r2_body(
-                room_keys.snapshot_key.as_bytes(),
-                &blob_bytes,
-                &wrapper,
-            )
-            .map_err(|e| BootstrapError::Crypto(format!("seal R2 body: {e}")))?;
+            let sealed_body =
+                seal_snapshot_r2_body(room_keys.snapshot_key.as_bytes(), &blob_bytes, &wrapper)
+                    .map_err(|e| BootstrapError::Crypto(format!("seal R2 body: {e}")))?;
 
             let presigned = relay_blobs::presign_blob_upload(
                 &self.http,
@@ -1510,7 +1510,9 @@ impl Bootstrapper {
         let Some((room_id, file_id)) = find_room_for_path(self.store.root(), path)? else {
             return Ok(None);
         };
-        let (fid, sid) = self.publish_snapshot(&room_id, path, file_id, now_ms).await?;
+        let (fid, sid) = self
+            .publish_snapshot(&room_id, path, file_id, now_ms)
+            .await?;
         Ok(Some((room_id, fid, sid)))
     }
 

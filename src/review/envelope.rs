@@ -1179,8 +1179,8 @@ mod tests {
         )
         .expect("assemble wrapper");
 
-        let body = seal_snapshot_r2_body(&snapshot_key, &snapshot_bytes, &wrapper)
-            .expect("seal R2 body");
+        let body =
+            seal_snapshot_r2_body(&snapshot_key, &snapshot_bytes, &wrapper).expect("seal R2 body");
         assert_eq!(
             body.len(),
             24 + snapshot_bytes.len() + 16,

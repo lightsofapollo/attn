@@ -241,9 +241,6 @@ fn relay_error(op: &str, status: u16, body: &[u8]) -> TransportError {
             "{op}: relay {status} {}: {}",
             parsed.error.code, parsed.error.message
         )),
-        Err(_) => TransportError::Io(format!(
-            "{op}: relay {status} (body: {} bytes)",
-            body.len()
-        )),
+        Err(_) => TransportError::Io(format!("{op}: relay {status} (body: {} bytes)", body.len())),
     }
 }

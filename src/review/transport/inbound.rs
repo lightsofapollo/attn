@@ -832,10 +832,8 @@ mod tests {
             storage: crate::review::model::BlobStorage::R2,
             blob_id: "blob-1".to_string(),
             byte_length: 4096,
-            content_hash: serde_json::from_value(serde_json::Value::String(
-                "hash-1".to_string(),
-            ))
-            .expect("typed hash"),
+            content_hash: serde_json::from_value(serde_json::Value::String("hash-1".to_string()))
+                .expect("typed hash"),
         };
         let ref_bytes = serde_json::to_vec(&blob_ref).expect("serialize blob ref");
         let envelope = mint_blob_envelope(

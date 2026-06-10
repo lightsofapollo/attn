@@ -588,9 +588,9 @@ impl ReviewManager {
                 return;
             }
             (ReviewCommand::PublishSnapshot { path }, Some(bootstrapper), Some(runtime)) => {
-                match runtime
-                    .block_on(bootstrapper.republish_snapshot_for_path(path, unix_now_ms_for_manager()))
-                {
+                match runtime.block_on(
+                    bootstrapper.republish_snapshot_for_path(path, unix_now_ms_for_manager()),
+                ) {
                     Ok(Some((room_id, _file_id, snapshot_id))) => {
                         tracing::info!(
                             "republished snapshot {} for {} (room={})",

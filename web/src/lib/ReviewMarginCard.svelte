@@ -59,6 +59,11 @@
     /** Locally-set marker — true after the user clicked reject/resolve and
      *  the IPC is not yet acknowledged (or doesn't exist yet). */
     pendingDismiss?: boolean;
+    /** Resolved-card collapse control (attn-d7y). When set on a resolved
+     *  card the action row renders a single Collapse button (no
+     *  Reply/Resolve/Accept/Reject — the card is read-only) and Escape on
+     *  the focused card invokes it. */
+    onCollapse?: () => void;
     /** Fires when the embedded AmbiguousAnchorPicker has dispatched a
      *  reviewResolveAnchor IPC. The parent uses this for tests / for
      *  any optimistic local marking until the store gets the
@@ -93,6 +98,7 @@
     onResolve,
     onReply,
     pendingDismiss = false,
+    onCollapse,
     onCandidatePicked,
     onRequestReanchor,
     onDiscardStale,
@@ -304,6 +310,11 @@
     // up from child controls (e.g. the reply textarea) — otherwise this
     // swallowed the space bar and you couldn't type spaces in a reply.
     if (e.target !== e.currentTarget) return;
+    if (e.key === 'Escape' && cardState === 'resolved' && onCollapse) {
+      e.preventDefault();
+      onCollapse();
+      return;
+    }
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       onActivate();
@@ -450,7 +461,20 @@
   {/if}
 
   <footer class="rmc-actions">
-    {#if cardState === 'stale'}
+    {#if cardState === 'resolved' && onCollapse}
+      <!-- Read-only expanded resolved card (attn-d7y): no Reply/Resolve or
+           Accept/Reject — the only action is collapsing back to the chip. -->
+      <button
+        type="button"
+        class="rmc-btn"
+        data-action="collapse"
+        data-testid="review-margin-card-collapse"
+        aria-label="Collapse resolved {kind}"
+        onclick={(e) => { e.stopPropagation(); onCollapse(); }}
+      >
+        Collapse
+      </button>
+    {:else if cardState === 'stale'}
       {#if awaitingReanchor}
         <button
           type="button"

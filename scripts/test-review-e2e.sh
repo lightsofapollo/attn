@@ -232,11 +232,12 @@ for cb in reviewStatus reviewEvent reviewSnapshot reviewAnchorResolution; do
 done
 
 echo ""
-echo "--- Review store scaffold (from 12.10, pending) ---"
-# The review store module should be importable and expose a default shape.
-# Today the module does not exist — record as PEND.
+echo "--- Review store scaffold ---"
+# The review store singleton is exposed for E2E seeding (App.svelte wires
+# `window.__attn_review_store__` on mount). Hard assertion — the adaptive
+# rail suite below depends on it.
 result=$("$ATTN" --eval "typeof window.__attn_review_store__")
-expect_eq_soft "window.__attn_review_store__ exposed" "$result" '"object"' "attn-nnj.12.10"
+assert_eq "window.__attn_review_store__ exposed" "$result" '"object"'
 
 screenshot "02-shape-asserted"
 
@@ -320,6 +321,142 @@ echo "  NOTE: contract for the above lives in src/review/apply.rs ::e2e_* tests"
 echo "        (run scripts/test-apply-e2e.sh to verify the contract directly)"
 
 screenshot "03-apply-flow-pending"
+
+# ===================================================================
+# TEST SUITE: Adaptive rail + expandable resolved chips (attn-d7y)
+# ===================================================================
+#
+# Seeds the review store directly through `window.__attn_review_store__`
+# (no relay needed): one comment thread + its CommentResolved event. With
+# only resolved threads in the margin the rail must slim to the 48px icon
+# gutter; clicking the chip expands the rail to 320px with the full
+# read-only card; Collapse returns to slim; adding an unresolved comment
+# forces full mode with a labeled chip.
+
+echo ""
+echo "=== Review E2E: adaptive rail + resolved chips (attn-d7y) ==="
+
+# Poll an --eval expression until it returns the expected value (the aside
+# width animates over 200ms, so one-shot reads race the transition).
+poll_eval() {
+    local expr="$1" expected="$2" attempts=30
+    local result=""
+    while [ $attempts -gt 0 ]; do
+        result=$("$ATTN" --eval "$expr" 2>/dev/null || echo "")
+        if [ "$result" = "$expected" ]; then
+            echo "$result"
+            return 0
+        fi
+        sleep 0.1
+        attempts=$((attempts - 1))
+    done
+    echo "$result"
+}
+
+"$ATTN" --wait-for '.ProseMirror' --timeout 10000 >/dev/null 2>&1 || true
+
+seed_js=$(cat <<'EOF'
+(() => {
+  const s = window.__attn_review_store__;
+  if (!s) return 'no-store';
+  const anchor = {
+    v: 2, fileId: 'file-x', snapshotId: 'snap-x', baseHash: 'h-x',
+    position: { byteRange: [0, 10], lineRange: [1, 1] },
+  };
+  const meta = (id) => ({
+    v: 2, eventId: id, roomId: 'room-x', authorId: 'p-reviewer',
+    deviceId: 'd-x', createdAt: Date.now(), parentEventIds: [],
+    snapshotId: 'snap-x',
+  });
+  const auth = { signature: 'sig', signingKeyId: 'kid' };
+  s.applyEvent({ meta: meta('e-1'), body: { type: 'comment_created', threadId: 't-1', anchor, body: 'Consider tightening this wording.' }, auth });
+  s.applyEvent({ meta: meta('e-2'), body: { type: 'comment_resolved', threadId: 't-1', resolvedBy: 'p-owner' }, auth });
+  s.selectRoom('room-x');
+  s.setCurrentFile('file-x');
+  s.panelOpen = true;
+  return 'ok';
+})()
+EOF
+)
+result=$("$ATTN" --eval "$seed_js")
+assert_eq "Seeded resolved-only review thread" "$result" '"ok"'
+
+echo ""
+echo "--- Slim gutter (resolved-only margin) ---"
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"slim"')
+assert_eq "Rail data-mode is slim" "$result" '"slim"'
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth <= 60" 'true')
+assert_eq "Rail width collapsed to the gutter (≤60px)" "$result" "true"
+
+result=$("$ATTN" --query '[data-testid="review-margin-resolved-chip"]' | jq -r '.count' 2>/dev/null || echo "0")
+assert_eq "One resolved chip rendered" "$result" "1"
+
+result=$("$ATTN" --eval "document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.getAttribute('data-variant') ?? 'missing'")
+assert_eq "Chip is icon variant in slim mode" "$result" '"icon"'
+
+screenshot "04-resolved-slim-gutter"
+
+echo ""
+echo "--- Expand chip → full read-only card ---"
+"$ATTN" --click '[data-testid="review-margin-resolved-chip"]' >/dev/null 2>&1 || true
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"full"')
+assert_eq "Rail expands to full on chip click" "$result" '"full"'
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]') !== null" 'true')
+assert_eq "Resolved card rendered" "$result" "true"
+
+result=$("$ATTN" --eval "(() => { const c = document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]'); if (!c) return 'no-card'; return [c.querySelector('[data-action=\\\"resolve\\\"]') === null, c.querySelector('[data-action=\\\"reply\\\"]') === null, c.querySelector('[data-testid=\\\"review-margin-card-collapse\\\"]') !== null].join(','); })()")
+assert_eq "Card is read-only (no resolve/reply; collapse present)" "$result" '"true,true,true"'
+
+result=$("$ATTN" --eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]')?.textContent.includes('Consider tightening this wording.')")
+assert_eq "Card shows the resolved comment body" "$result" "true"
+
+screenshot "05-resolved-expanded-card"
+
+echo ""
+echo "--- Collapse → back to slim ---"
+"$ATTN" --click '[data-testid="review-margin-card-collapse"]' >/dev/null 2>&1 || true
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"slim"')
+assert_eq "Rail returns to slim after collapse" "$result" '"slim"'
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]') === null" 'true')
+assert_eq "Resolved card gone after collapse" "$result" "true"
+
+echo ""
+echo "--- Mixed margin (active + resolved) → full rail, labeled chip ---"
+mixed_js=$(cat <<'EOF'
+(() => {
+  const s = window.__attn_review_store__;
+  if (!s) return 'no-store';
+  const anchor = {
+    v: 2, fileId: 'file-x', snapshotId: 'snap-x', baseHash: 'h-x',
+    position: { byteRange: [20, 30], lineRange: [3, 3] },
+  };
+  s.applyEvent({
+    meta: { v: 2, eventId: 'e-3', roomId: 'room-x', authorId: 'p-reviewer', deviceId: 'd-x', createdAt: Date.now(), parentEventIds: [], snapshotId: 'snap-x' },
+    body: { type: 'comment_created', threadId: 't-2', anchor, body: 'An open question.' },
+    auth: { signature: 'sig', signingKeyId: 'kid' },
+  });
+  return 'ok';
+})()
+EOF
+)
+result=$("$ATTN" --eval "$mixed_js")
+assert_eq "Seeded an additional unresolved thread" "$result" '"ok"'
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"full"')
+assert_eq "Rail is full with an active thread present" "$result" '"full"'
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.getAttribute('data-variant') ?? 'missing'" '"label"')
+assert_eq "Chip flips to label variant in full mode" "$result" '"label"'
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"open\\\"]') !== null" 'true')
+assert_eq "Active card rendered alongside the chip" "$result" "true"
+
+screenshot "06-mixed-full-rail"
 
 # ===================================================================
 # Summary

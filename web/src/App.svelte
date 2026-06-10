@@ -87,6 +87,7 @@
     loadMarkdownFromPath,
     markdownSourceUrl,
   } from './lib/markdown-layer';
+  import { RAIL_WIDTH_PX } from './lib/review/rail-mode';
   import { reviewStore } from './lib/review/store.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
@@ -2349,7 +2350,7 @@
       avoidWindowControls={!hasSidebar}
       fixed={!hasSidebar}
       topOffsetPx={34}
-      rightInsetPx={showReviewChrome && !reviewStore.panelOpen ? 328 : 16}
+      rightInsetPx={showReviewChrome && reviewStore.railMode !== 'full' ? 328 : 16}
       onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
       onShare={showBreadcrumbShare ? openShareDialog : undefined}
       shareEnabled={showBreadcrumbShare}
@@ -2583,8 +2584,9 @@
       </div>
       <aside
         class="right-rail relative flex h-full shrink-0 flex-col overflow-y-auto overflow-x-hidden bg-background transition-[width] duration-200 ease-linear"
-        style="width: {reviewStore.panelOpen ? '320px' : '0px'};"
+        style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
         data-state={reviewStore.panelOpen ? 'open' : 'closed'}
+        data-mode={reviewStore.railMode}
         data-slot="right-rail"
         aria-hidden={!reviewStore.panelOpen}
       >

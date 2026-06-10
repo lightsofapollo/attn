@@ -28,7 +28,9 @@ import {
   type PeerSplit,
   type StaleAnchorEntry,
 } from './selectors';
+import { computeRailMode, type RailMode } from './rail-mode';
 import { shouldActivateRoomStatus, shouldForgetRoomStatus } from './room-ui';
+import { isThreadActive } from './thread-visibility';
 import type {
   EventId,
   FileId,
@@ -229,6 +231,56 @@ export class ReviewStore {
   threadsForCurrentFile: Thread[] = $derived(
     threadsForFile(this.threads, this.currentRoomId, this.currentFileId),
   );
+
+  /**
+   * Thread ids the user dismissed optimistically (Resolve clicked and the
+   * `CommentResolved` echo not yet landed, or Reject which is UI-only).
+   * Lives on the store — not in `ReviewMargin` — so `railMode` slims in
+   * the same tick the last active card is dismissed. Same immutable-Set
+   * pattern as `discardedStale`. Survives panel remounts for the session
+   * (intended); cleared with the room in `forgetRoom`.
+   */
+  locallyDismissed = $state<Set<string>>(new Set<string>());
+
+  /**
+   * Resolved thread currently expanded to a full read-only card in the
+   * margin (attn-d7y). One at a time, like `threeWayApply`. Forces
+   * `railMode` to `full` while set.
+   */
+  expandedResolvedThreadId = $state<string | null>(null);
+
+  /**
+   * Self-healing view of `expandedResolvedThreadId`: a stale id (thread
+   * gone, file switched, or thread no longer resolved) degrades to `null`
+   * so downstream consumers never render an orphaned card.
+   */
+  expandedResolvedThread: Thread | null = $derived.by(() => {
+    const id = this.expandedResolvedThreadId;
+    if (id === null) return null;
+    return this.threadsForCurrentFile.find((t) => t.id === id && t.resolved) ?? null;
+  });
+
+  /** Active (unresolved, not locally dismissed) threads in the margin. */
+  marginActiveThreadCount: number = $derived(
+    this.threadsForCurrentFile.filter((t) => isThreadActive(t, this.locallyDismissed)).length,
+  );
+
+  /** Resolved threads in the margin (rendered as chips). */
+  marginResolvedThreadCount: number = $derived(
+    this.threadsForCurrentFile.filter((t) => t.resolved).length,
+  );
+
+  /**
+   * Rail display mode: `closed` | `slim` | `full`. `App.svelte` maps this
+   * to the aside width; `ReviewMargin` maps it to the chip variant. See
+   * `./rail-mode.ts` for the rule.
+   */
+  railMode: RailMode = $derived(computeRailMode({
+    panelOpen: this.panelOpen,
+    activeThreadCount: this.marginActiveThreadCount,
+    resolvedThreadCount: this.marginResolvedThreadCount,
+    hasExpandedResolved: this.expandedResolvedThread !== null,
+  }));
 
   /**
    * Threads further scoped to `currentSnapshotId`. Drives the
@@ -669,6 +721,29 @@ export class ReviewStore {
   setCurrentFile(fileId: FileId | null): void {
     this.currentFileId = fileId;
     this.currentSnapshotId = null;
+    this.expandedResolvedThreadId = null;
+  }
+
+  /**
+   * Optimistically hide a thread's margin card (Resolve clicked, or
+   * UI-only Reject). The thread stays in the event log; this only drives
+   * `isThreadActive` filtering and the `railMode` derivation.
+   */
+  dismissThreadLocally(threadId: string): void {
+    if (this.locallyDismissed.has(threadId)) return;
+    const next = new Set(this.locallyDismissed);
+    next.add(threadId);
+    this.locallyDismissed = next;
+  }
+
+  /** Expand a resolved thread's chip into its full read-only card. */
+  expandResolvedThread(threadId: string): void {
+    this.expandedResolvedThreadId = threadId;
+  }
+
+  /** Collapse the expanded resolved card back to its chip. */
+  collapseResolvedThread(): void {
+    this.expandedResolvedThreadId = null;
   }
 
   /**
@@ -710,6 +785,7 @@ export class ReviewStore {
       this.currentFileId = latest?.fileId ?? null;
     }
     this.currentSnapshotId = null;
+    this.expandedResolvedThreadId = null;
   }
 
   leaveRoom(roomId: RoomId): void {
@@ -869,6 +945,8 @@ export class ReviewStore {
     this.focusEventId = null;
     this.hoveredEventId = null;
     this.panelOpen = false;
+    this.locallyDismissed = new Set<string>();
+    this.expandedResolvedThreadId = null;
   }
 }
 

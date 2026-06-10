@@ -81,6 +81,7 @@ export interface ReviewRoomSummary {
     roomId: RoomId;
     inviteUrl: string;
     ownerSigningKey: string;
+    ownerDisplayPath: string;
     mode: 'live' | 'async' | 'hybrid';
     expiresAt: number;
   };
@@ -163,6 +164,7 @@ export class ReviewStore {
     roomId: RoomId;
     inviteUrl: string;
     ownerSigningKey: string;
+    ownerDisplayPath: string;
     mode: 'live' | 'async' | 'hybrid';
     expiresAt: number;
   } | null>(null);
@@ -514,6 +516,7 @@ export class ReviewStore {
   applyShareReady(payload: {
     roomId: RoomId;
     inviteUrl: string;
+    ownerDisplayPath: string;
     ownerSigningKey: string;
     mode: 'live' | 'async' | 'hybrid';
     expiresAt: number;
@@ -522,10 +525,14 @@ export class ReviewStore {
     const nextDismissed = new Set(this.dismissedRoomIds);
     nextDismissed.delete(payload.roomId);
     this.dismissedRoomIds = nextDismissed;
+    // `ownerDisplayPath` is the path the daemon actually shared, carried on the
+    // ShareReady payload — so the dialog's shareTargetMatches gate works for any
+    // share (GUI or `attn review share`) without a frontend-captured intent.
     const share = {
       roomId: payload.roomId,
       inviteUrl: payload.inviteUrl,
       ownerSigningKey: payload.ownerSigningKey,
+      ownerDisplayPath: payload.ownerDisplayPath,
       mode: payload.mode,
       expiresAt: payload.expiresAt,
     };

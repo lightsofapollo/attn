@@ -155,6 +155,10 @@ pub enum ReviewUpdate {
     ShareReady {
         room_id: RoomId,
         invite_url: String,
+        /// Absolute path the owner shared, so the dialog can recognise its own
+        /// room without relying on a frontend-captured intent. Serialised as
+        /// `ownerDisplayPath`.
+        owner_display_path: String,
         owner_signing_key: String,
         mode: String,
         expires_at: u64,
@@ -1346,6 +1350,7 @@ impl ReviewManager {
                 (self.update_tx)(ReviewUpdate::ShareReady {
                     room_id: outcome.room_id,
                     invite_url: outcome.invite,
+                    owner_display_path: outcome.owner_display_path,
                     owner_signing_key: outcome.owner_signing_key,
                     mode: outcome.mode,
                     expires_at: outcome.expires_at,

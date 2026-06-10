@@ -122,3 +122,27 @@ export function roomDisplayName(
   const prefix = dir ? `${baseName(dir)}/ ` : '';
   return `${prefix}(${paths.length} files)`;
 }
+
+/**
+ * Does `target` fall under the path a room was shared for?
+ *
+ * The owner shares either a single file or a whole folder. A folder share is
+ * recognized for the folder itself AND for any markdown file beneath it, so
+ * opening the Share dialog on a child of a shared folder re-shows the existing
+ * invite instead of minting a fresh room. A different, unshared file (including
+ * a sibling whose name merely shares a prefix) does NOT match — the prefix test
+ * is path-segment aware (`P + '/'`).
+ *
+ * Both sides are trailing-slash-normalized so a folder share recorded as
+ * '/p/dir' or '/p/dir/' both match the child '/p/dir/child.md'. Empty/nullish
+ * inputs never match (no active share / no target selected).
+ */
+export function shareTargetMatches(
+  sharePath: string | null | undefined,
+  target: string | null | undefined,
+): boolean {
+  const p = (sharePath ?? '').replace(/\/+$/, '');
+  const t = (target ?? '').replace(/\/+$/, '');
+  if (p.length === 0 || t.length === 0) return false;
+  return t === p || t.startsWith(`${p}/`);
+}

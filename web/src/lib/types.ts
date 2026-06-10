@@ -875,6 +875,9 @@ export interface ReviewShareReady {
   kind: 'share_ready';
   roomId: RoomId;
   inviteUrl: string;
+  /** Absolute path the owner shared (file or folder); the dialog matches it
+   *  against the active target to recognise its own room. */
+  ownerDisplayPath: string;
   /** Base64url Ed25519 public signing key; fingerprint is sha256(this). */
   ownerSigningKey: string;
   mode: 'live' | 'async' | 'hybrid';

@@ -141,9 +141,13 @@
     void autoMint();
   });
 
-  // Transition minting → ready when the daemon's ShareReady IPC lands.
+  // Transition → ready when the daemon's ShareReady IPC lands. Recovers from a
+  // timed-out mint too: a slow relay can answer AFTER the 15s timeout already
+  // flipped phase to 'error', and the invite is still valid — so surface it
+  // rather than leaving a spurious error on screen. A genuine daemon failure
+  // never populates inviteUrl, so this can't paper over a real error.
   $effect(() => {
-    if (phase === 'minting' && inviteUrl.length > 0) {
+    if ((phase === 'minting' || phase === 'error') && inviteUrl.length > 0) {
       if (mintTimeout) {
         clearTimeout(mintTimeout);
         mintTimeout = null;

@@ -286,11 +286,19 @@ impl InboundPipeline {
     ///
     /// Returns the raw plaintext bytes — for inline snapshots these are the
     /// snapshot bytes; for R2 spillover the plaintext is a canonical-JSON
-    /// `BlobRef` that the caller resolves separately (issue 5.8). This
-    /// pipeline does NOT distinguish — both shapes decrypt the same way.
+    /// `BlobRef` that the caller resolves separately (the mailbox WS client
+    /// fetches + opens the R2 body; see `ws.rs::handle_snapshot_blob`).
+    ///
+    /// Inline snapshot bytes are persisted here via
+    /// `ReviewStore::save_snapshot_blob` (keyed by `envelopeId`) so every
+    /// transport that shares this pipeline — mailbox WS and the WebRTC
+    /// DataChannel — feeds the same blob store the manager's
+    /// `SnapshotCreated` rehydration reads from. R2 `BlobRef` plaintexts are
+    /// NOT persisted (they're an indirection, not the bytes); the resolving
+    /// caller persists the fetched bytes instead.
     pub async fn import_snapshot_envelope(
         &self,
-        _room_id: &RoomId,
+        room_id: &RoomId,
         envelope: &MailboxEnvelope,
     ) -> Result<(String, Vec<u8>), InboundError> {
         if envelope.kind != EnvelopeKind::SnapshotBlob {
@@ -300,7 +308,34 @@ impl InboundPipeline {
             });
         }
         let plaintext = self.open_blob(envelope, &self.snapshot_key)?;
+        let is_r2_ref = matches!(
+            serde_json::from_slice::<crate::review::model::BlobRef>(&plaintext),
+            Ok(blob_ref) if blob_ref.storage == crate::review::model::BlobStorage::R2
+        );
+        if !is_r2_ref {
+            self.store
+                .save_snapshot_blob(room_id, &envelope.envelope_id, &plaintext)
+                .map_err(|e| InboundError::Store(format!("save snapshot blob: {e}")))?;
+        }
         Ok((envelope.envelope_id.clone(), plaintext))
+    }
+
+    /// Open an R2 spillover object body (`nonce || ciphertext || tag` under
+    /// `snapshotKey`, AAD bound to the wrapper envelope — see
+    /// `envelope::seal_snapshot_r2_body`). The caller fetched `sealed_body`
+    /// from R2 via the relay's presigned download URL; `wrapper` is the
+    /// `kind=snapshot_blob` envelope whose plaintext was the `BlobRef`.
+    pub fn open_r2_snapshot_body(
+        &self,
+        wrapper: &MailboxEnvelope,
+        sealed_body: &[u8],
+    ) -> Result<Vec<u8>, InboundError> {
+        use crate::review::envelope::{EnvelopeError, open_snapshot_r2_body};
+        open_snapshot_r2_body(&self.snapshot_key, sealed_body, wrapper).map_err(|e| match e {
+            EnvelopeError::Aead(err) => InboundError::Aead(err),
+            EnvelopeError::InvalidNonce(s) => InboundError::InvalidNonce(s),
+            other => InboundError::Envelope(other),
+        })
     }
 
     /// Process one inbound `kind=signal` envelope. Returns the recovered
@@ -778,6 +813,52 @@ mod tests {
             .expect("snapshot decrypt");
         assert_eq!(envelope_id, envelope.envelope_id);
         assert_eq!(plaintext, snapshot_bytes);
+
+        // Inline snapshot bytes are persisted to the blob store so the
+        // manager's SnapshotCreated rehydration can find them.
+        let stored = _store
+            .load_snapshot_blob(&room_id, &envelope_id)
+            .expect("load blob")
+            .expect("blob persisted");
+        assert_eq!(stored, snapshot_bytes);
+    }
+
+    #[tokio::test]
+    async fn import_snapshot_envelope_does_not_persist_r2_blob_refs() {
+        // An R2 BlobRef plaintext is an indirection, not the bytes — the
+        // resolving caller (ws.rs) persists the fetched bytes instead.
+        let (pipeline, _store, _signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let blob_ref = crate::review::model::BlobRef {
+            storage: crate::review::model::BlobStorage::R2,
+            blob_id: "blob-1".to_string(),
+            byte_length: 4096,
+            content_hash: serde_json::from_value(serde_json::Value::String(
+                "hash-1".to_string(),
+            ))
+            .expect("typed hash"),
+        };
+        let ref_bytes = serde_json::to_vec(&blob_ref).expect("serialize blob ref");
+        let envelope = mint_blob_envelope(
+            &pipeline.snapshot_key,
+            &room_id,
+            EnvelopeKind::SnapshotBlob,
+            &ref_bytes,
+            [0x78u8; 16],
+            None,
+        );
+
+        let (envelope_id, plaintext) = pipeline
+            .import_snapshot_envelope(&room_id, &envelope)
+            .await
+            .expect("snapshot decrypt");
+        assert_eq!(plaintext, ref_bytes);
+        assert_eq!(
+            _store
+                .load_snapshot_blob(&room_id, &envelope_id)
+                .expect("load blob"),
+            None,
+            "R2 BlobRef plaintext must not be persisted as snapshot bytes"
+        );
     }
 
     // -----------------------------------------------------------------

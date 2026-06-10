@@ -330,7 +330,16 @@ export default {
         return handleBlobPut(request, env, url, roomId, envelopeId);
       }
       if (request.method === "GET") {
-        return handleBlobGet(request, env, url, roomId, envelopeId);
+        // Cap-bearing GET → serve bytes straight from R2. Cap-less GET →
+        // the DO's download-presign endpoint (admission-auth'd), which
+        // mints the cap this branch later consumes.
+        if (url.searchParams.has("cap")) {
+          return handleBlobGet(request, env, url, roomId, envelopeId);
+        }
+        const id = env.RELAY_ROOMS.idFromName(roomId);
+        const stub = env.RELAY_ROOMS.get(id);
+        const response = await stub.fetch(request);
+        return corsMiddleware(request, env, response);
       }
       return Response.json(
         { error: { code: "ATTN_METHOD_NOT_ALLOWED", message: `${request.method} not allowed on /blobs/:envelopeId` } },
@@ -474,9 +483,10 @@ async function handleBlobPut(
 /**
  * `GET /v2/rooms/:roomId/blobs/:envelopeId?cap=...`
  *
- * Download a previously-uploaded blob. The cap was minted by an explicit
- * (forthcoming) `GET /v2/rooms/:roomId/blobs/:envelopeId` DO endpoint — for
- * now tests mint the cap directly via the r2.ts helper.
+ * Download a previously-uploaded blob. The cap is minted by the cap-less
+ * form of the same route, which the Worker forwards to the DO's
+ * admission-auth'd download-presign endpoint (room-do.ts
+ * `handleBlobDownloadPresign`).
  */
 async function handleBlobGet(
   request: Request,

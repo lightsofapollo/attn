@@ -117,7 +117,7 @@
     bind:this={textareaEl}
     bind:value={body}
     rows={4}
-    class="w-full resize-none rounded border bg-background p-2 text-sm"
+    class="w-full resize-none rounded border bg-background p-2 text-sm focus:outline-none focus:border-ring focus:ring-[3px] focus:ring-ring/50"
     placeholder="Add a comment&hellip;"
     onkeydown={handleBodyKeydown}
   ></textarea>

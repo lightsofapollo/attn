@@ -853,6 +853,18 @@
     font-size: 12px;
   }
 
+  /* Theme-token focus instead of the native (blue) WebKit ring — mirrors
+     the shared Input component's border-ring + ring-ring/50 treatment.
+     Plain :focus (not :focus-visible): WebKit doesn't reliably match
+     focus-visible on textareas, and focusing a text field is always an
+     intentional act. */
+  .rmc-reply-input:focus {
+    outline: none;
+    border-color: var(--ring, rgba(0, 0, 0, 0.3));
+    box-shadow: 0 0 0 3px
+      color-mix(in oklch, var(--ring, rgba(0, 0, 0, 0.3)) 50%, transparent);
+  }
+
   .rmc-reply-actions {
     display: flex;
     justify-content: flex-end;

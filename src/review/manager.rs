@@ -116,6 +116,10 @@ pub enum ReviewCommand {
     /// broadcast) from this webview to the room over the encrypted signal
     /// channel. `payload` is opaque JSON the daemon doesn't parse.
     SendCollab { room_id: RoomId, payload: String },
+    /// The local display name changed: re-announce the identity into every
+    /// active room so existing comments resolve to the new name everywhere
+    /// (the original ParticipantJoined was frozen at share/join time).
+    ReannounceIdentity,
 }
 
 /// Updates the `ReviewManager` emits up to the tao event loop.
@@ -615,6 +619,43 @@ impl ReviewManager {
             // a Bootstrapper is attached (they no-op cleanly with no rooms).
             (ReviewCommand::Stop { room_id }, _, _) => {
                 self.stop_rooms(room_id.clone());
+                return;
+            }
+            (ReviewCommand::ReannounceIdentity, Some(bootstrapper), Some(runtime)) => {
+                // Display name changed: refresh the ParticipantJoined
+                // announce in every active room so existing comments resolve
+                // to the new name on all windows (frontends key names by
+                // participantId; last write wins). The onboarding NamePrompt
+                // fires AFTER a room is entered, so without this a name typed
+                // there never reached the already-joined room. Drain each
+                // room's outbox immediately so the rename lands without
+                // waiting for the next scheduled pass; a failed drain is fine
+                // (the envelope is durably queued).
+                let rooms: Vec<(
+                    RoomId,
+                    Arc<crate::review::transport::mailbox::OutboxProcessor>,
+                )> = self
+                    .outboxes
+                    .lock()
+                    .map(|m| m.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect())
+                    .unwrap_or_default();
+                for (room_id, outbox) in rooms {
+                    let kind = match crate::review::bootstrap::find_path_for_room(
+                        self.store.root(),
+                        &room_id,
+                    ) {
+                        Ok(Some(_)) => crate::review::model::ParticipantKind::Owner,
+                        _ => crate::review::model::ParticipantKind::Reviewer,
+                    };
+                    if let Err(e) = bootstrapper.reannounce_identity(&room_id, kind) {
+                        tracing::warn!(
+                            "reannounce into room {} failed: {e}",
+                            room_id.as_str()
+                        );
+                        continue;
+                    }
+                    let _ = runtime.block_on(outbox.process_once());
+                }
                 return;
             }
             (ReviewCommand::Pull { room_id }, _, _) => {
@@ -2586,6 +2627,7 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::ResolveComment { .. } => "ResolveComment",
         ReviewCommand::SendCollab { .. } => "SendCollab",
         ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
+        ReviewCommand::ReannounceIdentity => "ReannounceIdentity",
     }
 }
 
@@ -2721,6 +2763,12 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
         ReviewCommand::RejectSuggestion { .. } => ReviewUpdate::RoomStatusChanged {
             room_id: stub_room_id(),
             status: "Pending suggestion reject — no bootstrap attached".to_string(),
+        },
+        // ReannounceIdentity iterates active rooms in `submit`; without a
+        // bootstrap (smoke tests) it's a benign no-op surfaced as status.
+        ReviewCommand::ReannounceIdentity => ReviewUpdate::RoomStatusChanged {
+            room_id: stub_room_id(),
+            status: "Pending identity reannounce — no bootstrap attached".to_string(),
         },
     }
 }

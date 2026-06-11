@@ -2652,8 +2652,11 @@
              CSS transitions in occluded windows, which left the rail stuck
              mid-transition at ~1px (attn-23m), and an animating width also
              desyncs the breadcrumb inset. -->
+        <!-- No border-t: stacked above the rail header's border-b it read
+             as one thick line; the bg change + border-l delineate the top
+             edge well enough. -->
         <aside
-          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden border-l border-t border-border/60 data-[mode=hidden]:border-none bg-sidebar"
+          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden border-l border-border/60 data-[mode=hidden]:border-none bg-sidebar"
           style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={reviewStore.railMode}
@@ -2682,7 +2685,12 @@
                 {/if}
               </button>
             </div>
-            <div class="relative min-h-0 flex-1">
+            <!-- overflow-hidden + mb-2: cards/chips clip at this wrapper's
+                 bounds, keeping the rail's bottom 8px clear — the bottom
+                 counterpart of clampRailTop's breathing room (cards can't
+                 be pushed UP off their anchors, so the clip line is the
+                 only way to keep the bottom edge airy). -->
+            <div class="relative mb-2 min-h-0 flex-1 overflow-hidden">
               {#if rightRail}
                 {@render rightRail()}
               {:else}

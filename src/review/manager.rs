@@ -648,10 +648,7 @@ impl ReviewManager {
                         _ => crate::review::model::ParticipantKind::Reviewer,
                     };
                     if let Err(e) = bootstrapper.reannounce_identity(&room_id, kind) {
-                        tracing::warn!(
-                            "reannounce into room {} failed: {e}",
-                            room_id.as_str()
-                        );
+                        tracing::warn!("reannounce into room {} failed: {e}", room_id.as_str());
                         continue;
                     }
                     let _ = runtime.block_on(outbox.process_once());
@@ -3392,8 +3389,16 @@ mod tests {
             },
         );
         comment_event.meta.event_id = dummy_id("evt-comment-1");
-        assert!(store.append_event(&room_id, &snapshot_event).expect("append"));
-        assert!(store.append_event(&room_id, &comment_event).expect("append"));
+        assert!(
+            store
+                .append_event(&room_id, &snapshot_event)
+                .expect("append")
+        );
+        assert!(
+            store
+                .append_event(&room_id, &comment_event)
+                .expect("append")
+        );
 
         // "Session 2": replay must re-emit both events through the same
         // EventImported push the live inbound pipeline uses, in log order,
@@ -3422,10 +3427,7 @@ mod tests {
         match second {
             ReviewUpdate::EventImported { event, .. } => {
                 assert_eq!(event.meta.event_id, dummy_id::<EventId>("evt-comment-1"));
-                assert!(matches!(
-                    event.body,
-                    ReviewEventBody::CommentCreated { .. }
-                ));
+                assert!(matches!(event.body, ReviewEventBody::CommentCreated { .. }));
             }
             other => panic!("expected EventImported, got {other:?}"),
         }

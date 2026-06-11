@@ -832,7 +832,10 @@ impl Bootstrapper {
             client: DeviceClient::AttnNative,
             created_at: now_ms,
         };
-        let joined_body = ReviewEventBody::ParticipantJoined { participant, device };
+        let joined_body = ReviewEventBody::ParticipantJoined {
+            participant,
+            device,
+        };
         let joined_envelope = assemble_event_envelope(AssembleInput {
             event_key: *room_keys.event_key.as_bytes(),
             signing_key: identity.signing_key()?,
@@ -847,14 +850,10 @@ impl Bootstrapper {
             kind: EnvelopeKind::Event,
             client_nonce: None,
         })
-        .map_err(|e| {
-            BootstrapError::Crypto(format!("assemble ParticipantJoined envelope: {e}"))
-        })?;
+        .map_err(|e| BootstrapError::Crypto(format!("assemble ParticipantJoined envelope: {e}")))?;
         self.store
             .append_outbox(room_id, &joined_envelope)
-            .map_err(|e| {
-                BootstrapError::Store(format!("append ParticipantJoined outbox: {e}"))
-            })?;
+            .map_err(|e| BootstrapError::Store(format!("append ParticipantJoined outbox: {e}")))?;
         Ok(())
     }
 
@@ -3139,8 +3138,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_regex_for_devices())
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "devices": [] })),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "devices": [] })),
             )
             .mount(&server)
             .await;
@@ -3208,8 +3206,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path_regex_for_devices())
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "devices": [] })),
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "devices": [] })),
             )
             .mount(&server)
             .await;
@@ -3243,15 +3240,10 @@ mod tests {
         let ciphertext = URL_SAFE_NO_PAD
             .decode(env.ciphertext.as_bytes())
             .expect("ciphertext decodes");
-        let plaintext = crate::review::crypto::aead::open(
-            keys.event_key.as_bytes(),
-            &nonce,
-            &ciphertext,
-            &aad,
-        )
-        .expect("event opens under eventKey");
-        let event: serde_json::Value =
-            serde_json::from_slice(&plaintext).expect("event JSON");
+        let plaintext =
+            crate::review::crypto::aead::open(keys.event_key.as_bytes(), &nonce, &ciphertext, &aad)
+                .expect("event opens under eventKey");
+        let event: serde_json::Value = serde_json::from_slice(&plaintext).expect("event JSON");
         assert_eq!(event["body"]["type"], "participant_joined");
         assert_eq!(event["body"]["participant"]["displayName"], "Reader");
         assert_eq!(event["body"]["participant"]["kind"], "reviewer");

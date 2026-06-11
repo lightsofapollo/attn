@@ -17,6 +17,7 @@
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+pub mod blobs;
 pub mod inbound;
 pub mod mailbox;
 pub mod selector;

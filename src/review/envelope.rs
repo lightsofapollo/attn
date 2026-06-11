@@ -396,6 +396,127 @@ pub fn disassemble_event_envelope(input: DisassembleInput) -> Result<ReviewEvent
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot blob envelopes (kind: "snapshot_blob")
+// ---------------------------------------------------------------------------
+
+/// Assemble a `kind: "snapshot_blob"` envelope around opaque snapshot bytes.
+///
+/// Per `crypto-spec.md` §Nonce Discipline and `relay-spec.md` §R2 spillover,
+/// snapshot blobs are confidentiality-only: the plaintext is the snapshot
+/// bytes themselves (canonical-JSON `SnapshotPlaintext`) for the inline
+/// mailbox lane, or a canonical-JSON `BlobRef` for the R2 spillover lane.
+/// There is no embedded `ReviewEvent` / Ed25519 signature — authenticity
+/// comes indirectly from the signed `SnapshotCreated` event that references
+/// the blob via `encryptedBlobRef`.
+///
+/// `client_nonce` persists across retries so the relay dedups repeated send
+/// attempts (same EnvelopeId derivation as `kind: "signal"`). The AEAD key
+/// is the room's `snapshotKey` — `InboundPipeline::import_snapshot_envelope`
+/// opens with the same key.
+// Same rationale as assemble_signal_envelope: each argument is a distinct
+// crypto/wire input; a params struct buys no clarity.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_snapshot_blob_envelope(
+    plaintext: &[u8],
+    snapshot_key: &[u8; 32],
+    room_id: &RoomId,
+    author_id: &ParticipantId,
+    device_id: &DeviceId,
+    client_nonce: &[u8; 16],
+    created_at_ms: i64,
+    expires_at_ms: i64,
+) -> Result<MailboxEnvelope, EnvelopeError> {
+    let envelope_id =
+        derive_envelope_id_with_nonce(room_id, id_string(device_id).as_str(), client_nonce);
+
+    let aad = EnvelopeAad {
+        v: 2,
+        room_id: room_id.as_str().to_string(),
+        envelope_id: envelope_id.clone(),
+        kind: envelope_kind_wire(&EnvelopeKind::SnapshotBlob).to_string(),
+        author_id: id_string(author_id),
+        device_id: id_string(device_id),
+        created_at: created_at_ms,
+    };
+
+    let (aead_nonce, ciphertext) = aead::seal(snapshot_key, plaintext, &aad)?;
+
+    Ok(MailboxEnvelope {
+        v: 2,
+        room_id: room_id.clone(),
+        envelope_id,
+        server_seq: None,
+        author_id: author_id.clone(),
+        device_id: device_id.clone(),
+        created_at: created_at_ms as u64,
+        expires_at: expires_at_ms as u64,
+        kind: EnvelopeKind::SnapshotBlob,
+        target: None,
+        nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
+        ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
+        ciphertext_bytes: ciphertext.len() as u64,
+    })
+}
+
+/// Rebuild the `EnvelopeAad` from a wire envelope's cleartext header — the
+/// same construction `disassemble_event_envelope` and the inbound pipeline
+/// use. Public so the R2 blob body seal/open can bind the spilled bytes to
+/// their wrapper envelope.
+pub fn envelope_aad(envelope: &MailboxEnvelope) -> EnvelopeAad {
+    EnvelopeAad {
+        v: envelope.v,
+        room_id: envelope.room_id.as_str().to_string(),
+        envelope_id: envelope.envelope_id.clone(),
+        kind: envelope_kind_wire(&envelope.kind).to_string(),
+        author_id: id_string(&envelope.author_id),
+        device_id: id_string(&envelope.device_id),
+        created_at: envelope.created_at as i64,
+    }
+}
+
+/// Seal the R2 spillover object body for a snapshot blob.
+///
+/// Per `crypto-spec.md` §Nonce Discipline: the R2 object body is
+/// `nonce || ciphertext+tag` of the snapshot bytes under `snapshotKey`. The
+/// AAD is the wrapper envelope's header (the small `kind=snapshot_blob`
+/// envelope whose plaintext is the `BlobRef`), so the spilled bytes are
+/// cryptographically bound to exactly one envelope — R2 (or the relay)
+/// cannot swap blob bodies between envelopes without failing the MAC.
+pub fn seal_snapshot_r2_body(
+    snapshot_key: &[u8; 32],
+    plaintext: &[u8],
+    wrapper: &MailboxEnvelope,
+) -> Result<Vec<u8>, EnvelopeError> {
+    let aad = envelope_aad(wrapper);
+    let (nonce, ciphertext) = aead::seal(snapshot_key, plaintext, &aad)?;
+    let mut body = Vec::with_capacity(nonce.len() + ciphertext.len());
+    body.extend_from_slice(&nonce);
+    body.extend_from_slice(&ciphertext);
+    Ok(body)
+}
+
+/// Open an R2 spillover object body produced by [`seal_snapshot_r2_body`].
+pub fn open_snapshot_r2_body(
+    snapshot_key: &[u8; 32],
+    body: &[u8],
+    wrapper: &MailboxEnvelope,
+) -> Result<Vec<u8>, EnvelopeError> {
+    const NONCE_LEN: usize = 24;
+    if body.len() < NONCE_LEN {
+        return Err(EnvelopeError::InvalidNonce(format!(
+            "R2 blob body too short for nonce: {} bytes",
+            body.len()
+        )));
+    }
+    let (nonce_bytes, ciphertext) = body.split_at(NONCE_LEN);
+    let nonce: AeadNonce = nonce_bytes
+        .try_into()
+        .expect("split_at(NONCE_LEN) yields exactly NONCE_LEN bytes");
+    let aad = envelope_aad(wrapper);
+    Ok(aead::open(snapshot_key, &nonce, ciphertext, &aad)?)
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -968,6 +1089,130 @@ mod tests {
         })
         .expect("snapshot envelope opens under snapshotKey");
         assert_eq!(ok.meta.room_id, envelope.room_id);
+    }
+
+    // -----------------------------------------------------------------
+    // 11b. Snapshot blob envelopes + R2 spillover body.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn snapshot_blob_envelope_round_trips_raw_bytes() {
+        let keys = derive_room_keys(&TEST_ROOM_SECRET);
+        let snapshot_key = *keys.snapshot_key.as_bytes();
+        let plaintext = br##"{"markdown":"# hi\n","anchorIndex":{}}"##;
+
+        let envelope = assemble_snapshot_blob_envelope(
+            plaintext,
+            &snapshot_key,
+            &typed::<RoomId>("hjCfgOvsatNOUedgxhZpyw"),
+            &typed::<ParticipantId>("p-author-01"),
+            &typed::<DeviceId>("d-device-01"),
+            &[0x44u8; 16],
+            1_700_000_000_000,
+            1_700_000_000_000 + 86_400_000,
+        )
+        .expect("assemble snapshot blob envelope");
+
+        assert_eq!(envelope.kind, EnvelopeKind::SnapshotBlob);
+        assert_eq!(
+            envelope.ciphertext_bytes,
+            (plaintext.len() + 16) as u64,
+            "ciphertext = plaintext + 16-byte Poly1305 tag"
+        );
+
+        // Open exactly the way InboundPipeline::open_blob does.
+        let aad = envelope_aad(&envelope);
+        let nonce_bytes = URL_SAFE_NO_PAD.decode(envelope.nonce.as_bytes()).unwrap();
+        let nonce: AeadNonce = nonce_bytes.as_slice().try_into().unwrap();
+        let ciphertext = URL_SAFE_NO_PAD
+            .decode(envelope.ciphertext.as_bytes())
+            .unwrap();
+        let recovered = aead::open(&snapshot_key, &nonce, &ciphertext, &aad)
+            .expect("snapshot blob opens under snapshotKey");
+        assert_eq!(recovered, plaintext);
+
+        // Wrong key (eventKey) must fail.
+        let err = aead::open(keys.event_key.as_bytes(), &nonce, &ciphertext, &aad)
+            .expect_err("snapshot blob must not open under eventKey");
+        assert!(matches!(err, AeadError::Decrypt));
+    }
+
+    #[test]
+    fn snapshot_blob_envelope_id_is_client_nonce_stable() {
+        // Retries that persist the clientNonce must mint the same EnvelopeId
+        // so the relay dedups them — mirrors the kind=signal guarantee.
+        let keys = derive_room_keys(&TEST_ROOM_SECRET);
+        let snapshot_key = *keys.snapshot_key.as_bytes();
+        let mk = || {
+            assemble_snapshot_blob_envelope(
+                b"same bytes",
+                &snapshot_key,
+                &typed::<RoomId>("hjCfgOvsatNOUedgxhZpyw"),
+                &typed::<ParticipantId>("p-author-01"),
+                &typed::<DeviceId>("d-device-01"),
+                &[0x55u8; 16],
+                1_700_000_000_000,
+                1_700_000_000_000 + 86_400_000,
+            )
+            .expect("assemble")
+        };
+        assert_eq!(mk().envelope_id, mk().envelope_id);
+    }
+
+    #[test]
+    fn r2_blob_body_round_trips_and_binds_to_wrapper() {
+        let keys = derive_room_keys(&TEST_ROOM_SECRET);
+        let snapshot_key = *keys.snapshot_key.as_bytes();
+        let snapshot_bytes = vec![0xABu8; 4096];
+
+        // Wrapper envelope: plaintext would be the canonical-JSON BlobRef;
+        // its content is irrelevant to the body binding.
+        let wrapper = assemble_snapshot_blob_envelope(
+            br#"{"storage":"r2"}"#,
+            &snapshot_key,
+            &typed::<RoomId>("hjCfgOvsatNOUedgxhZpyw"),
+            &typed::<ParticipantId>("p-author-01"),
+            &typed::<DeviceId>("d-device-01"),
+            &[0x66u8; 16],
+            1_700_000_000_000,
+            1_700_000_000_000 + 86_400_000,
+        )
+        .expect("assemble wrapper");
+
+        let body =
+            seal_snapshot_r2_body(&snapshot_key, &snapshot_bytes, &wrapper).expect("seal R2 body");
+        assert_eq!(
+            body.len(),
+            24 + snapshot_bytes.len() + 16,
+            "body = 24-byte nonce || ciphertext || 16-byte tag"
+        );
+
+        let recovered =
+            open_snapshot_r2_body(&snapshot_key, &body, &wrapper).expect("open R2 body");
+        assert_eq!(recovered, snapshot_bytes);
+
+        // A different wrapper envelope (different clientNonce → different
+        // envelopeId → different AAD) must NOT open this body: blob bodies
+        // cannot be swapped between envelopes.
+        let other_wrapper = assemble_snapshot_blob_envelope(
+            br#"{"storage":"r2"}"#,
+            &snapshot_key,
+            &typed::<RoomId>("hjCfgOvsatNOUedgxhZpyw"),
+            &typed::<ParticipantId>("p-author-01"),
+            &typed::<DeviceId>("d-device-01"),
+            &[0x77u8; 16],
+            1_700_000_000_000,
+            1_700_000_000_000 + 86_400_000,
+        )
+        .expect("assemble other wrapper");
+        let err = open_snapshot_r2_body(&snapshot_key, &body, &other_wrapper)
+            .expect_err("body must be bound to its wrapper envelope");
+        assert!(matches!(err, EnvelopeError::Aead(AeadError::Decrypt)));
+
+        // Truncated body (shorter than the nonce) is a typed error, not a panic.
+        let err = open_snapshot_r2_body(&snapshot_key, &body[..10], &wrapper)
+            .expect_err("truncated body must error");
+        assert!(matches!(err, EnvelopeError::InvalidNonce(_)));
     }
 
     // -----------------------------------------------------------------

@@ -293,6 +293,50 @@ impl ReviewStore {
     }
 
     // ---------------------------------------------------------------------
+    // Snapshot blobs (decrypted plaintext bytes, keyed by envelopeId)
+    // ---------------------------------------------------------------------
+
+    fn blob_file(&self, room_id: &RoomId, envelope_id: &str) -> PathBuf {
+        self.room_dir(room_id)
+            .join("blobs")
+            .join(format!("{envelope_id}.bin"))
+    }
+
+    /// Persist the decrypted plaintext of a `kind=snapshot_blob` envelope,
+    /// keyed by the envelope's `envelopeId` — the wire-level identity the
+    /// matching `SnapshotCreated` event references via
+    /// `encryptedBlobRef.blobId`. Stored decrypted, consistent with
+    /// `events.jsonl` (the local store is plaintext-at-rest by design).
+    pub fn save_snapshot_blob(
+        &self,
+        room_id: &RoomId,
+        envelope_id: &str,
+        plaintext: &[u8],
+    ) -> Result<()> {
+        let path = self.blob_file(room_id, envelope_id);
+        let dir = path
+            .parent()
+            .expect("blob_file always has a parent dir")
+            .to_path_buf();
+        write_bytes_atomic(&dir, &path, plaintext)
+    }
+
+    /// Load a previously persisted snapshot blob. Returns `Ok(None)` if
+    /// absent — the blob envelope may not have arrived (yet).
+    pub fn load_snapshot_blob(
+        &self,
+        room_id: &RoomId,
+        envelope_id: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let path = self.blob_file(room_id, envelope_id);
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).with_context(|| format!("could not read {}", path.display())),
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Event log (append-only JSONL, dedup'd by EventId)
     // ---------------------------------------------------------------------
 
@@ -458,6 +502,23 @@ fn write_json_atomic<T: Serialize>(parent_dir: &Path, path: &Path, value: &T) ->
         let mut f =
             File::create(&tmp).with_context(|| format!("could not create {}", tmp.display()))?;
         f.write_all(&bytes)
+            .with_context(|| format!("could not write {}", tmp.display()))?;
+        f.flush()
+            .with_context(|| format!("could not flush {}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("could not rename {} -> {}", tmp.display(), path.display()))?;
+    Ok(())
+}
+
+fn write_bytes_atomic(parent_dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    std::fs::create_dir_all(parent_dir)
+        .with_context(|| format!("could not create {}", parent_dir.display()))?;
+    let tmp = with_tmp_suffix(path);
+    {
+        let mut f =
+            File::create(&tmp).with_context(|| format!("could not create {}", tmp.display()))?;
+        f.write_all(bytes)
             .with_context(|| format!("could not write {}", tmp.display()))?;
         f.flush()
             .with_context(|| format!("could not flush {}", tmp.display()))?;
@@ -806,6 +867,42 @@ mod tests {
 
         let tmp = store.room_file(&room.room_id).with_extension("json.tmp");
         assert!(!tmp.exists(), "tmp file must be cleaned up by rename");
+    }
+
+    #[test]
+    fn snapshot_blob_round_trips_and_missing_is_none() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-abc");
+
+        assert_eq!(
+            store
+                .load_snapshot_blob(&room_id, "env-missing")
+                .expect("load missing"),
+            None
+        );
+
+        let bytes = vec![0xCDu8; 2048];
+        store
+            .save_snapshot_blob(&room_id, "env-1", &bytes)
+            .expect("save blob");
+        assert_eq!(
+            store
+                .load_snapshot_blob(&room_id, "env-1")
+                .expect("load blob"),
+            Some(bytes.clone())
+        );
+
+        // Overwrite is atomic and replaces the content.
+        let bytes2 = vec![0xEFu8; 16];
+        store
+            .save_snapshot_blob(&room_id, "env-1", &bytes2)
+            .expect("rewrite blob");
+        assert_eq!(
+            store
+                .load_snapshot_blob(&room_id, "env-1")
+                .expect("reload blob"),
+            Some(bytes2)
+        );
     }
 
     #[test]

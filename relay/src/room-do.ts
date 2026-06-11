@@ -28,7 +28,7 @@ import { canonicalize, type CanonicalValue } from "./canonical";
 import type { Env } from "./env";
 import { OwnerSigError, verifyOwnerSignature } from "./owner-sig";
 import { parsePow, POW_MAX_LIFETIME_MS, PowError, verifyPow } from "./pow";
-import { presignBlobUpload, type PresignedUploadResult } from "./r2";
+import { blobObjectKey, presignBlobDownload, presignBlobUpload, type PresignedUploadResult } from "./r2";
 import { DurableObjectRateLimit, type RateLimitResult } from "./rate-limit";
 import {
   acksRequestSchema,
@@ -49,6 +49,7 @@ const ROOM_ENVELOPES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/envelopes\/?$/;
 const ROOM_ACKS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/acks\/?$/;
 const ROOM_SOCKET_PATH_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
 const ROOM_BLOBS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/?$/;
+const ROOM_BLOB_OBJECT_PATH_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
 /** Any path starting with `/v2/rooms/:roomId` (optionally followed by a subroute). */
 const ROOM_PATH_LOOSE_RE = /^\/v2\/rooms\/([^/]+)(?:\/.*)?$/;
 
@@ -341,6 +342,22 @@ export class RoomDO extends DurableObject<Env> {
         return this.handleAcks(request, roomId, url.pathname);
       }
       return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /acks`);
+    }
+
+    // Must precede ROOM_BLOBS_PATH_RE — `/blobs/:envelopeId` would otherwise
+    // never match (`/blobs` is a prefix of it only with the optional trailing
+    // slash, but ordering keeps the intent explicit).
+    const blobObjectMatch = url.pathname.match(ROOM_BLOB_OBJECT_PATH_RE);
+    if (blobObjectMatch) {
+      const roomId = blobObjectMatch[1];
+      const envelopeId = blobObjectMatch[2];
+      if (roomId === undefined || roomId === "" || envelopeId === undefined || envelopeId === "") {
+        return errorResponse(400, "ATTN_ROOM_ID_INVALID", "roomId and envelopeId required");
+      }
+      if (request.method === "GET") {
+        return this.handleBlobDownloadPresign(request, roomId, decodeURIComponent(envelopeId), url.pathname);
+      }
+      return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /blobs/:envelopeId`);
     }
 
     const blobsMatch = url.pathname.match(ROOM_BLOBS_PATH_RE);
@@ -1750,6 +1767,56 @@ export class RoomDO extends DurableObject<Env> {
     await this.ctx.storage.put<unknown>(writes);
 
     return Response.json(presigned, { status: 200 });
+  }
+
+  // -- GET /v2/rooms/:roomId/blobs/:envelopeId (download presign) ----------
+
+  /**
+   * Mint a download capability for a previously-uploaded R2 spillover blob,
+   * per relay-spec.md §R2 spillover: "Reads use a presigned GET URL fetched
+   * via GET /v2/rooms/:roomId/blobs/:envelopeId".
+   *
+   * The Worker routes a cap-less GET on this path here (a cap-bearing GET is
+   * served bytes directly from R2 — see index.ts `handleBlobGet`). Auth is
+   * admission-HMAC only: per crypto-spec.md §Hashcash Proof-of-Work, PoW
+   * does not apply to GETs (rate limits handle those).
+   *
+   * Existence is checked against R2 so clients get a 404 instead of a cap
+   * that will 404 at fetch time — distinguishing "blob not uploaded yet"
+   * (retry later) from "cap expired" (re-presign).
+   */
+  private async handleBlobDownloadPresign(
+    request: Request,
+    roomId: string,
+    envelopeId: string,
+    urlPath: string,
+  ): Promise<Response> {
+    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
+    if (storedAdmissionKey === undefined) {
+      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+    }
+    try {
+      // GET bodies are always empty; hand the original request straight to
+      // verifyAdmission (no double-read concern).
+      await verifyAdmission(request, urlPath, { roomId, admissionKey: storedAdmissionKey });
+    } catch (err) {
+      if (err instanceof AdmissionError) {
+        return errorResponse(401, err.code, err.message);
+      }
+      throw err;
+    }
+
+    const head = await this.env.RELAY_BLOBS.head(blobObjectKey(roomId, envelopeId));
+    if (head === null) {
+      return errorResponse(404, "ATTN_BLOB_NOT_FOUND", `blob for envelope ${envelopeId} not found`);
+    }
+
+    try {
+      const presigned = await presignBlobDownload(this.env, roomId, envelopeId);
+      return Response.json(presigned, { status: 200 });
+    } catch (err) {
+      return errorResponse(500, "ATTN_BLOB_PRESIGN_FAILED", `presign failed: ${(err as Error).message}`);
+    }
   }
 
   // -- DELETE /v2/rooms/:roomId -------------------------------------------

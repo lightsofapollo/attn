@@ -109,9 +109,9 @@ On the wire, the envelope stores `nonce`, `ciphertext`, and the AAD fields in cl
 
 - XChaCha20's 24-byte nonce space (192 bits) is large enough that random nonces are safe without coordination. Birthday-collision risk is negligible up to ~2^48 envelopes per key.
 - **Never** reuse a nonce with the same key.
-- For `snapshot_blob` with R2 spillover, the AEAD encrypts the *blob bytes themselves* (not the BlobRef). The envelope in the DO carries only the `BlobRef` (also encrypted, separately, with `eventKey` since it's metadata-shaped) — pin the convention:
-  - R2 object body = `nonce || ciphertext || tag` of the snapshot bytes under `snapshotKey`.
-  - DO envelope ciphertext = AEAD-encrypt of the canonical-JSON BlobRef under `eventKey`.
+- For `snapshot_blob` with R2 spillover, the AEAD encrypts the *blob bytes themselves* (not the BlobRef). The envelope in the DO carries only the `BlobRef` (also encrypted, separately) — pin the convention:
+  - R2 object body = `nonce || ciphertext || tag` of the snapshot bytes under `snapshotKey`, with the AAD bound to the wrapper envelope's cleartext header (same `EnvelopeAad` shape as the envelope itself) so a blob body cannot be swapped between envelopes.
+  - DO envelope ciphertext = AEAD-encrypt of the canonical-JSON BlobRef under `snapshotKey`. (Amended 2026-06-10 from the original `eventKey` choice: the inbound pipeline keys strictly by `kind`, and a receiver cannot know whether a `snapshot_blob` plaintext is bytes or a BlobRef until after decrypting — a per-shape key split would force trial decryption. One key per kind keeps the dispatch table total.)
   - The relay sees neither.
 
 ## Hashcash Proof-of-Work

@@ -85,6 +85,10 @@ pub struct MailboxWsClient {
     store: Arc<ReviewStore>,
     recovery_policy: CursorRecoveryPolicy,
     events_tx: mpsc::UnboundedSender<TransportEvent>,
+    /// HTTP client for resolving R2-spilled snapshot blobs (presign + GET
+    /// against the relay). Lazily unused unless an inbound `snapshot_blob`
+    /// envelope carries a `BlobRef` with `storage: "r2"`.
+    http: reqwest::Client,
     /// Optional device-key refresher. When an inbound event fails with
     /// `UnknownSigner` (a peer joined after our cache was seeded), we call
     /// this to re-fetch `GET /devices` + merge the roster, then retry the
@@ -111,6 +115,7 @@ impl MailboxWsClient {
             store,
             recovery_policy: CursorRecoveryPolicy::default(),
             events_tx,
+            http: reqwest::Client::new(),
             key_refresher: None,
         }
     }
@@ -167,6 +172,68 @@ impl MailboxWsClient {
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// Process one inbound `kind=snapshot_blob` envelope end-to-end: decrypt
+    /// it, resolve an R2 spillover indirection when present, and persist the
+    /// plaintext snapshot bytes keyed by `envelopeId` so the manager's
+    /// `SnapshotCreated` rehydration (and a later replay) can find them.
+    ///
+    /// Two plaintext shapes per `crypto-spec.md` §Nonce Discipline:
+    /// - the snapshot bytes themselves (inline mailbox lane, ≤ 1 MiB), or
+    /// - a canonical-JSON `BlobRef` with `storage: "r2"` — fetch the sealed
+    ///   body from R2 via the relay's download presign, open it bound to
+    ///   this envelope's AAD, and verify length + content hash against the
+    ///   `BlobRef` before persisting.
+    async fn handle_snapshot_blob(
+        &self,
+        room_id: &crate::review::ids::RoomId,
+        envelope: &crate::review::model::MailboxEnvelope,
+    ) -> Result<(), crate::review::transport::inbound::InboundError> {
+        use crate::review::crypto::ids::content_hash;
+        use crate::review::model::{BlobRef, BlobStorage};
+        use crate::review::transport::blobs as relay_blobs;
+        use crate::review::transport::inbound::InboundError;
+
+        let (envelope_id, plaintext) = self
+            .inbound
+            .import_snapshot_envelope(room_id, envelope)
+            .await?;
+
+        // Inline snapshot bytes were already persisted by the pipeline. The
+        // only work left here is the R2 indirection: a plaintext that parses
+        // as a `BlobRef` with `storage: "r2"` (a `SnapshotPlaintext` JSON
+        // never does — the required storage/blobId fields are absent).
+        let blob_ref = match serde_json::from_slice::<BlobRef>(&plaintext) {
+            Ok(blob_ref) if blob_ref.storage == BlobStorage::R2 => blob_ref,
+            _ => return Ok(()),
+        };
+
+        let presigned = relay_blobs::presign_blob_download(
+            &self.http,
+            &self.config.relay_url,
+            &self.config.admission_key,
+            room_id,
+            &envelope_id,
+        )
+        .await
+        .map_err(|e| InboundError::Store(format!("blob download presign: {e}")))?;
+        let sealed = relay_blobs::get_blob(&self.http, &self.config.relay_url, &presigned)
+            .await
+            .map_err(|e| InboundError::Store(format!("blob download: {e}")))?;
+        let bytes = self.inbound.open_r2_snapshot_body(envelope, &sealed)?;
+        if bytes.len() as u64 != blob_ref.byte_length
+            || content_hash(&bytes) != blob_ref.content_hash
+        {
+            return Err(InboundError::Store(format!(
+                "R2 blob {} failed BlobRef integrity check ({} bytes)",
+                envelope_id,
+                bytes.len()
+            )));
+        }
+        self.store
+            .save_snapshot_blob(room_id, &envelope_id, &bytes)
+            .map_err(|e| InboundError::Store(format!("save snapshot blob: {e}")))
     }
 
     /// Borrow the active config (matches `OutboxProcessor::config`).
@@ -813,11 +880,9 @@ impl MailboxWsClient {
                                 Err(err) => Err(err),
                             }
                         }
-                        EnvelopeKind::SnapshotBlob => self
-                            .inbound
-                            .import_snapshot_envelope(&room_id, &envelope)
-                            .await
-                            .map(|_| ()),
+                        EnvelopeKind::SnapshotBlob => {
+                            self.handle_snapshot_blob(&room_id, &envelope).await
+                        }
                         EnvelopeKind::Signal => match self
                             .inbound
                             .import_signal_envelope(&room_id, &envelope, &self.config.device_id)

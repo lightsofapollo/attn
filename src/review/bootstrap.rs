@@ -82,6 +82,15 @@ const BOOTSTRAP_POW_DIFFICULTY: u32 = 12;
 /// after PoW invalidation.
 const BOOTSTRAP_POW_TTL_MS: u64 = crate::review::crypto::pow::DEFAULT_TTL_MS;
 
+/// The relay's inline/R2 routing threshold for `kind=snapshot_blob`
+/// envelopes (relay-spec.md §R2 spillover, `BLOB_SPILLOVER_THRESHOLD_BYTES`
+/// in `relay/src/room-do.ts`). Ciphertexts at or below ride the mailbox
+/// outbox; above, the sealed bytes are PUT to R2 and the envelope carries an
+/// encrypted `BlobRef`. The relay rejects presigns at or below this value
+/// (`ATTN_BLOB_TOO_SMALL`) and DO storage rejects inline envelopes above it,
+/// so the constants MUST stay in lock-step.
+const RELAY_BLOB_SPILLOVER_THRESHOLD_BYTES: u64 = 1024 * 1024;
+
 /// Default `RoomPolicy` for newly shared rooms.
 ///
 /// Default mode is `Hybrid` — direct WebRTC when both peers are online,
@@ -926,7 +935,10 @@ impl Bootstrapper {
         let mut published = 0usize;
         let mut publish_errors = Vec::new();
         for doc_path in doc_targets {
-            match self.publish_initial_snapshot(&room_id, &doc_path, now_ms) {
+            match self
+                .publish_initial_snapshot(&room_id, &doc_path, now_ms)
+                .await
+            {
                 Ok(_) => published += 1,
                 Err(err) => {
                     publish_errors.push(format!("{}: {err}", doc_path.display()));
@@ -1263,13 +1275,13 @@ impl Bootstrapper {
     /// state, and append a `SnapshotCreated` event to the room's outbox.
     /// Returns the freshly minted `FileId` + `SnapshotId` so the caller
     /// can persist them into `ReviewRoom.documents` / `.snapshots`.
-    pub fn publish_initial_snapshot(
+    pub async fn publish_initial_snapshot(
         &self,
         room_id: &RoomId,
         path: &std::path::Path,
         now_ms: u64,
     ) -> Result<(FileId, SnapshotId), BootstrapError> {
-        self.publish_snapshot(room_id, path, None, now_ms)
+        self.publish_snapshot(room_id, path, None, now_ms).await
     }
 
     /// Read the file off disk and publish a `SnapshotCreated` event for it.
@@ -1283,7 +1295,16 @@ impl Bootstrapper {
     ///
     /// The new SnapshotId is always content-derived, so each edit produces a
     /// distinct snapshot that supersedes the prior one for the same FileId.
-    pub fn publish_snapshot(
+    ///
+    /// Wire shape (decision #14, `crypto-spec.md` §Nonce Discipline): the
+    /// snapshot bytes travel as a `kind=snapshot_blob` envelope sealed under
+    /// the room's `snapshotKey` — the relay caps those at
+    /// `policy.maxSnapshotBytes` (5 MiB) instead of `maxEventBytes`
+    /// (256 KiB). The `SnapshotCreated` event itself stays small and points
+    /// at the blob via `encryptedBlobRef`. Ciphertexts above the relay's
+    /// 1 MiB inline threshold spill to R2 (presign + PUT); at or below, the
+    /// blob envelope rides the normal outbox.
+    pub async fn publish_snapshot(
         &self,
         room_id: &RoomId,
         path: &std::path::Path,
@@ -1292,6 +1313,9 @@ impl Bootstrapper {
     ) -> Result<(FileId, SnapshotId), BootstrapError> {
         use crate::review::anchors::index::build_anchor_index;
         use crate::review::crypto::ids::{content_hash, derive_file_id, derive_snapshot_id};
+        use crate::review::envelope::{assemble_snapshot_blob_envelope, seal_snapshot_r2_body};
+        use crate::review::model::{BlobRef, BlobStorage, SnapshotNode};
+        use crate::review::transport::blobs as relay_blobs;
 
         let markdown_bytes = std::fs::read(path)
             .map_err(|e| BootstrapError::Store(format!("read {}: {e}", path.display())))?;
@@ -1317,19 +1341,143 @@ impl Bootstrapper {
             anchor_index,
         };
 
+        // ---- Seal the snapshot bytes as a `kind=snapshot_blob` envelope.
+        let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
+            .map_err(|e| BootstrapError::Crypto(format!("canonical snapshot: {e}")))?;
+        let blob_hash = content_hash(&blob_bytes);
+        let room_keys = derive_room_keys(&room_secret);
+        let identity_dir = self.config.identity_dir()?;
+        let identity = load_or_create_identity_in(&identity_dir)?;
+        let participant_id = identity.typed_participant_id();
+        let device_id = identity.typed_device_id();
+        let expires_at = match self
+            .store
+            .load_room(room_id)
+            .map_err(|e| BootstrapError::Store(format!("load_room: {e}")))?
+        {
+            Some(r) => r.policy.expires_at,
+            None => now_ms + 60 * 60 * 1000,
+        };
+        let mut client_nonce = [0u8; 16];
+        getrandom::getrandom(&mut client_nonce)
+            .map_err(|e| BootstrapError::Crypto(format!("client nonce: {e}")))?;
+
+        let blob_envelope = assemble_snapshot_blob_envelope(
+            &blob_bytes,
+            room_keys.snapshot_key.as_bytes(),
+            room_id,
+            &participant_id,
+            &device_id,
+            &client_nonce,
+            now_ms as i64,
+            expires_at as i64,
+        )
+        .map_err(|e| BootstrapError::Crypto(format!("assemble snapshot blob: {e}")))?;
+
+        // ---- Route by size: the relay stores inline envelopes in DO
+        //      storage only up to its 1 MiB spillover threshold; above
+        //      that, the sealed bytes go to R2 and the mailbox envelope
+        //      carries an encrypted BlobRef instead.
+        let storage = if blob_envelope.ciphertext_bytes <= RELAY_BLOB_SPILLOVER_THRESHOLD_BYTES {
+            // Enqueue the blob BEFORE the SnapshotCreated event so peers
+            // receive bytes-then-pointer in relay serverSeq order.
+            self.store
+                .append_outbox(room_id, &blob_envelope)
+                .map_err(|e| BootstrapError::Store(format!("append blob outbox: {e}")))?;
+            BlobStorage::Mailbox
+        } else {
+            // R2 spillover. The wrapper envelope reuses the blob's
+            // envelopeId (same clientNonce) and its plaintext is the
+            // canonical-JSON BlobRef; the sealed snapshot bytes are bound
+            // to the wrapper's AAD and PUT to R2.
+            let blob_ref = BlobRef {
+                storage: BlobStorage::R2,
+                blob_id: blob_envelope.envelope_id.clone(),
+                byte_length: blob_bytes.len() as u64,
+                content_hash: blob_hash.clone(),
+            };
+            let ref_bytes = crate::review::crypto::canonical::to_canonical_bytes(&blob_ref)
+                .map_err(|e| BootstrapError::Crypto(format!("canonical blob ref: {e}")))?;
+            let wrapper = assemble_snapshot_blob_envelope(
+                &ref_bytes,
+                room_keys.snapshot_key.as_bytes(),
+                room_id,
+                &participant_id,
+                &device_id,
+                &client_nonce,
+                now_ms as i64,
+                expires_at as i64,
+            )
+            .map_err(|e| BootstrapError::Crypto(format!("assemble blob wrapper: {e}")))?;
+            let sealed_body =
+                seal_snapshot_r2_body(room_keys.snapshot_key.as_bytes(), &blob_bytes, &wrapper)
+                    .map_err(|e| BootstrapError::Crypto(format!("seal R2 body: {e}")))?;
+
+            let presigned = relay_blobs::presign_blob_upload(
+                &self.http,
+                &self.config.relay_url,
+                room_keys.admission_key.as_bytes(),
+                room_id,
+                &wrapper.envelope_id,
+                &participant_id,
+                &device_id,
+                sealed_body.len() as u64,
+            )
+            .await
+            .map_err(|e| BootstrapError::Network(format!("blob presign: {e}")))?;
+            relay_blobs::put_blob(&self.http, &self.config.relay_url, &presigned, sealed_body)
+                .await
+                .map_err(|e| BootstrapError::Network(format!("blob upload: {e}")))?;
+
+            self.store
+                .append_outbox(room_id, &wrapper)
+                .map_err(|e| BootstrapError::Store(format!("append blob wrapper outbox: {e}")))?;
+            BlobStorage::R2
+        };
+
+        let blob_ref = BlobRef {
+            storage,
+            blob_id: blob_envelope.envelope_id.clone(),
+            byte_length: blob_bytes.len() as u64,
+            content_hash: blob_hash,
+        };
+
+        // ---- Persist locally: the decrypted blob (so the daemon can
+        //      rehydrate `inline_snapshot` when the relay echoes the event
+        //      back) and the SnapshotNode (so the WebRTC RequestSnapshot
+        //      recovery path can re-emit the latest snapshot).
+        self.store
+            .save_snapshot_blob(room_id, &blob_envelope.envelope_id, &blob_bytes)
+            .map_err(|e| BootstrapError::Store(format!("save snapshot blob: {e}")))?;
+        self.store
+            .save_snapshot(
+                room_id,
+                &SnapshotNode {
+                    snapshot_id: snapshot_id.clone(),
+                    file_id: file_id.clone(),
+                    parent_snapshot_id: None,
+                    supersedes_snapshot_id: None,
+                    created_at: now_ms,
+                    created_by: participant_id,
+                    base_hash: base_hash.clone(),
+                    byte_length: blob_bytes.len() as u64,
+                    encrypted_blob_ref: Some(blob_ref.clone()),
+                    plaintext: Some(plaintext),
+                },
+            )
+            .map_err(|e| BootstrapError::Store(format!("save snapshot node: {e}")))?;
+
         let body = ReviewEventBody::SnapshotCreated {
             file_id: file_id.clone(),
             snapshot_id: snapshot_id.clone(),
             owner_display_path: Some(display_path),
             parent_snapshot_id: None,
             base_hash,
-            encrypted_blob_ref: None,
-            // Inline the plaintext. The whole event body is AEAD-encrypted
-            // by `assemble_event_envelope`, so the markdown is still
-            // ciphertext on the wire — `decision #14` is preserved in
-            // spirit (no plaintext over HTTP) even though the field
-            // serializes through the event JSON.
-            inline_snapshot: Some(plaintext),
+            encrypted_blob_ref: Some(blob_ref),
+            // Decision #14: the wire form never inlines the plaintext — the
+            // bytes travel in the snapshot_blob envelope above. Receivers
+            // rehydrate this field locally at the IPC boundary.
+            inline_snapshot: None,
         };
 
         let outcome = self.send_event_sync(room_id, body, now_ms)?;
@@ -1339,9 +1487,11 @@ impl Bootstrapper {
             record_share_file_id(self.store.root(), room_id, path, &file_id)?;
         }
         tracing::info!(
-            "published snapshot file={} snapshot={} bytes={} first={} room={}",
+            "published snapshot file={} snapshot={} blob_bytes={} storage={:?} event_bytes={} first={} room={}",
             file_id.as_str(),
             snapshot_id.as_str(),
+            blob_envelope.ciphertext_bytes,
+            storage,
             outcome.envelope.ciphertext_bytes,
             is_first,
             room_id.as_str(),
@@ -1352,7 +1502,7 @@ impl Bootstrapper {
     /// Republish a snapshot for a file the owner just edited. Looks up the
     /// room + stable file_id for `path`; no-op (returns `Ok(None)`) when the
     /// path isn't shared. Called from the `PublishSnapshot` IPC on save.
-    pub fn republish_snapshot_for_path(
+    pub async fn republish_snapshot_for_path(
         &self,
         path: &std::path::Path,
         now_ms: u64,
@@ -1360,7 +1510,9 @@ impl Bootstrapper {
         let Some((room_id, file_id)) = find_room_for_path(self.store.root(), path)? else {
             return Ok(None);
         };
-        let (fid, sid) = self.publish_snapshot(&room_id, path, file_id, now_ms)?;
+        let (fid, sid) = self
+            .publish_snapshot(&room_id, path, file_id, now_ms)
+            .await?;
         Ok(Some((room_id, fid, sid)))
     }
 
@@ -2579,18 +2731,73 @@ mod tests {
         assert_eq!(loaded_room.event_heads.len(), 1);
         assert_eq!(loaded_room.policy.mode, RoomMode::Async);
 
-        // Outbox holds the RoomCreated event plus the first document snapshot.
+        // Outbox holds the RoomCreated event, the snapshot blob, and the
+        // SnapshotCreated event — with the blob enqueued BEFORE the event
+        // that references it, so peers receive bytes-then-pointer in relay
+        // serverSeq order.
         let envelopes: Vec<MailboxEnvelope> = store
             .iter_outbox(&outcome.room_id)
             .expect("iter")
             .collect::<anyhow::Result<_>>()
             .expect("decode");
-        assert_eq!(envelopes.len(), 2);
-        assert!(
-            envelopes
-                .iter()
-                .all(|envelope| envelope.kind == EnvelopeKind::Event)
+        assert_eq!(envelopes.len(), 3);
+        assert_eq!(envelopes[0].kind, EnvelopeKind::Event, "RoomCreated");
+        assert_eq!(
+            envelopes[1].kind,
+            EnvelopeKind::SnapshotBlob,
+            "snapshot bytes ride the snapshot_blob lane"
         );
+        assert_eq!(envelopes[2].kind, EnvelopeKind::Event, "SnapshotCreated");
+
+        // The blob envelope opens under the room's snapshotKey and carries
+        // the canonical SnapshotPlaintext bytes (markdown + anchor index).
+        let parsed = parse_invite(&outcome.invite).expect("parse invite");
+        let keys = derive_room_keys(&parsed.room_secret);
+        let aad = crate::review::envelope::envelope_aad(&envelopes[1]);
+        let nonce_bytes = URL_SAFE_NO_PAD
+            .decode(envelopes[1].nonce.as_bytes())
+            .expect("nonce decodes");
+        let nonce: crate::review::crypto::aead::AeadNonce =
+            nonce_bytes.as_slice().try_into().expect("24-byte nonce");
+        let ciphertext = URL_SAFE_NO_PAD
+            .decode(envelopes[1].ciphertext.as_bytes())
+            .expect("ciphertext decodes");
+        let blob_bytes = crate::review::crypto::aead::open(
+            keys.snapshot_key.as_bytes(),
+            &nonce,
+            &ciphertext,
+            &aad,
+        )
+        .expect("blob opens under snapshotKey");
+        let plaintext: SnapshotPlaintext =
+            serde_json::from_slice(&blob_bytes).expect("blob is a SnapshotPlaintext");
+        assert_eq!(plaintext.markdown, "# Plan\n");
+
+        // Locally: blob persisted by envelopeId, SnapshotNode references it.
+        let stored_blob = store
+            .load_snapshot_blob(&outcome.room_id, &envelopes[1].envelope_id)
+            .expect("load blob")
+            .expect("owner persisted its own blob");
+        assert_eq!(stored_blob, blob_bytes);
+        let snapshots = store
+            .iter_snapshots(&outcome.room_id)
+            .expect("iter snapshots");
+        assert_eq!(snapshots.len(), 1);
+        let node = snapshots
+            .into_iter()
+            .next()
+            .unwrap()
+            .expect("snapshot node decodes");
+        let node_ref = node
+            .encrypted_blob_ref
+            .expect("SnapshotNode carries the BlobRef");
+        assert_eq!(node_ref.blob_id, envelopes[1].envelope_id);
+        assert_eq!(
+            node_ref.storage,
+            crate::review::model::BlobStorage::Mailbox,
+            "small fixture stays on the inline mailbox lane"
+        );
+        assert_eq!(node_ref.byte_length, blob_bytes.len() as u64);
     }
 
     #[tokio::test]
@@ -3141,5 +3348,134 @@ mod tests {
     /// Path regex matching `/v2/rooms/<room>/devices`.
     fn path_regex_for_devices() -> wiremock::matchers::PathRegexMatcher {
         wiremock::matchers::path_regex(r"^/v2/rooms/[A-Za-z0-9_-]{20,32}/devices$")
+    }
+
+    // ----- R2 spillover lane (large snapshots) ----------------------------
+
+    #[tokio::test]
+    async fn publish_snapshot_spills_large_blobs_to_r2() {
+        let server = MockServer::start().await;
+        let id_dir = TempDir::new().expect("id tempdir");
+        let (_store_tmp, store, boot) =
+            make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
+
+        Mock::given(method("POST"))
+            .and(path_regex_for_room_create())
+            .respond_with(|req: &Request| {
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "roomId": req.url.path().rsplit('/').next().unwrap_or(""),
+                    "createdAt": 1_700_000_000_000u64,
+                    "expiresAt": 1_700_086_400_000u64,
+                    "policy": {},
+                    "ownerSigningKeyId": "k",
+                    "serverSeq": 0,
+                }))
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex_for_devices())
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        // Upload presign: echo back a relative cap URL for the requested
+        // envelopeId, exactly like relay r2.ts does.
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/v2/rooms/[A-Za-z0-9_-]{20,32}/blobs$",
+            ))
+            .and(header_exists("Attn-Admission"))
+            .and(header_exists("Attn-PoW"))
+            .respond_with(|req: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+                let envelope_id = body
+                    .get("envelopeId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("missing");
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "uploadUrl": format!("{}/{}?cap=test-cap", req.url.path(), envelope_id),
+                    "method": "PUT",
+                    "headers": {"Content-Type": "application/octet-stream"},
+                    "expiresAt": 1_700_086_400_000u64,
+                    "blobKey": format!("rooms/x/blobs/{envelope_id}"),
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(wiremock::matchers::path_regex(
+                r"^/v2/rooms/[A-Za-z0-9_-]{20,32}/blobs/[A-Za-z0-9_-]+$",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Big enough that the sealed SnapshotPlaintext ciphertext clears the
+        // relay's 1 MiB inline threshold even before the anchor index.
+        let big_markdown = format!("# Big\n\n{}\n", "x".repeat(1_200_000));
+        let (_doc_tmp, path) = temp_markdown_file("big.md", &big_markdown);
+        let outcome = boot
+            .share(path, RoomMode::Async, None)
+            .await
+            .expect("share large file");
+
+        let envelopes: Vec<MailboxEnvelope> = store
+            .iter_outbox(&outcome.room_id)
+            .expect("iter")
+            .collect::<anyhow::Result<_>>()
+            .expect("decode");
+        assert_eq!(envelopes.len(), 3);
+        assert_eq!(envelopes[1].kind, EnvelopeKind::SnapshotBlob);
+        assert!(
+            envelopes[1].ciphertext_bytes < 1024,
+            "outbox envelope must be the small BlobRef wrapper, got {} bytes",
+            envelopes[1].ciphertext_bytes
+        );
+
+        // The wrapper opens under snapshotKey to a BlobRef pointing at R2.
+        let parsed = parse_invite(&outcome.invite).expect("parse invite");
+        let keys = derive_room_keys(&parsed.room_secret);
+        let aad = crate::review::envelope::envelope_aad(&envelopes[1]);
+        let nonce_bytes = URL_SAFE_NO_PAD
+            .decode(envelopes[1].nonce.as_bytes())
+            .expect("nonce decodes");
+        let nonce: crate::review::crypto::aead::AeadNonce =
+            nonce_bytes.as_slice().try_into().expect("24-byte nonce");
+        let ciphertext = URL_SAFE_NO_PAD
+            .decode(envelopes[1].ciphertext.as_bytes())
+            .expect("ciphertext decodes");
+        let ref_bytes = crate::review::crypto::aead::open(
+            keys.snapshot_key.as_bytes(),
+            &nonce,
+            &ciphertext,
+            &aad,
+        )
+        .expect("wrapper opens under snapshotKey");
+        let blob_ref: crate::review::model::BlobRef =
+            serde_json::from_slice(&ref_bytes).expect("wrapper plaintext is a BlobRef");
+        assert_eq!(blob_ref.storage, crate::review::model::BlobStorage::R2);
+        assert_eq!(blob_ref.blob_id, envelopes[1].envelope_id);
+
+        // The owner still persists the decrypted bytes + node locally.
+        let stored_blob = store
+            .load_snapshot_blob(&outcome.room_id, &envelopes[1].envelope_id)
+            .expect("load blob")
+            .expect("blob persisted");
+        assert_eq!(stored_blob.len() as u64, blob_ref.byte_length);
+        let node = store
+            .iter_snapshots(&outcome.room_id)
+            .expect("iter snapshots")
+            .into_iter()
+            .next()
+            .expect("one snapshot")
+            .expect("node decodes");
+        assert_eq!(
+            node.encrypted_blob_ref.expect("node blob ref").storage,
+            crate::review::model::BlobStorage::R2
+        );
+        // wiremock `.expect(1)` on presign + PUT verifies the upload happened.
     }
 }

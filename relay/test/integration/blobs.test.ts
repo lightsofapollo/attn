@@ -319,6 +319,31 @@ interface PresignedUploadResponse {
   blobKey: string;
 }
 
+/** Cap-less GET on the blob object path → DO download-presign endpoint. */
+async function getBlobDownloadPresign(opts: {
+  roomId: string;
+  admissionKey: Uint8Array;
+  envelopeId: string;
+  omitAdmission?: boolean;
+}): Promise<Response> {
+  const url = `${URL_BASE}/v2/rooms/${opts.roomId}/blobs/${encodeURIComponent(opts.envelopeId)}`;
+  const headers: Record<string, string> = {};
+  if (!opts.omitAdmission) {
+    headers["Attn-Admission"] = await admissionHeaderFor({
+      method: "GET",
+      url,
+      admissionKey: opts.admissionKey,
+    });
+  }
+  return SELF.fetch(url, { method: "GET", headers });
+}
+
+interface PresignedDownloadResponse {
+  downloadUrl: string;
+  method: "GET";
+  expiresAt: number;
+}
+
 interface ErrorResponse {
   error: { code: string; message: string };
 }
@@ -396,9 +421,18 @@ describe("POST /v2/rooms/:roomId/blobs — happy path", () => {
     });
     expect(putRes.status).toBe(204);
 
-    // Mint a download cap (in v2 the GET endpoint owning this lives in 5.10/5.x;
-    // for now tests mint directly via the r2.ts helper).
-    const download = await presignBlobDownload(env, roomId, "blob-rt-1");
+    // Mint a download cap via the real endpoint: cap-less GET on the blob
+    // path routes to the DO's admission-auth'd download-presign handler.
+    const presignDlRes = await getBlobDownloadPresign({
+      roomId,
+      admissionKey,
+      envelopeId: "blob-rt-1",
+    });
+    expect(presignDlRes.status).toBe(200);
+    const download = (await presignDlRes.json()) as PresignedDownloadResponse;
+    expect(download.method).toBe("GET");
+    expect(download.downloadUrl).toContain("cap=");
+    expect(download.expiresAt).toBeGreaterThan(Date.now());
     const getRes = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, { method: "GET" });
     expect(getRes.status).toBe(200);
     const fetched = new Uint8Array(await getRes.arrayBuffer());
@@ -551,6 +585,46 @@ describe("GET /v2/rooms/:roomId/blobs/:envelopeId — missing object", () => {
     const roomId = uniqueRoomId("blob-missing");
     const download = await presignBlobDownload(env, roomId, "never-uploaded");
     const res = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, { method: "GET" });
+    expect(res.status).toBe(404);
+    const err = (await res.json()) as ErrorResponse;
+    expect(err.error.code).toBe("ATTN_BLOB_NOT_FOUND");
+  });
+});
+
+describe("GET /v2/rooms/:roomId/blobs/:envelopeId — download presign endpoint", () => {
+  it("rejects a cap-less GET without admission with 401", async () => {
+    const roomId = uniqueRoomId("blob-dl-noadm");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    const res = await getBlobDownloadPresign({
+      roomId,
+      admissionKey,
+      envelopeId: "whatever",
+      omitAdmission: true,
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 ATTN_ROOM_NOT_FOUND for a room that does not exist", async () => {
+    const res = await getBlobDownloadPresign({
+      roomId: uniqueRoomId("blob-dl-noroom"),
+      admissionKey: makeAdmissionKey(0x99),
+      envelopeId: "whatever",
+    });
+    expect(res.status).toBe(404);
+    const err = (await res.json()) as ErrorResponse;
+    expect(err.error.code).toBe("ATTN_ROOM_NOT_FOUND");
+  });
+
+  it("returns 404 ATTN_BLOB_NOT_FOUND when the blob was never uploaded", async () => {
+    const roomId = uniqueRoomId("blob-dl-noblob");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    const res = await getBlobDownloadPresign({
+      roomId,
+      admissionKey,
+      envelopeId: "never-uploaded",
+    });
     expect(res.status).toBe(404);
     const err = (await res.json()) as ErrorResponse;
     expect(err.error.code).toBe("ATTN_BLOB_NOT_FOUND");

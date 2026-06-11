@@ -587,8 +587,10 @@ impl ReviewManager {
                 self.send_collab(bootstrapper, room_id, payload);
                 return;
             }
-            (ReviewCommand::PublishSnapshot { path }, Some(bootstrapper), Some(_runtime)) => {
-                match bootstrapper.republish_snapshot_for_path(path, unix_now_ms_for_manager()) {
+            (ReviewCommand::PublishSnapshot { path }, Some(bootstrapper), Some(runtime)) => {
+                match runtime.block_on(
+                    bootstrapper.republish_snapshot_for_path(path, unix_now_ms_for_manager()),
+                ) {
                     Ok(Some((room_id, _file_id, snapshot_id))) => {
                         tracing::info!(
                             "republished snapshot {} for {} (room={})",
@@ -1066,8 +1068,14 @@ impl ReviewManager {
         self.emit_event_outcome(room_id.clone(), send);
 
         // 7. Republish the snapshot — the working copy changed, so reviewers
-        //    must get the new content.
-        if let Err(e) = bootstrapper.republish_snapshot_for_path(&path, now_ms) {
+        //    must get the new content. The accept arm only matches when a
+        //    runtime is attached (see `submit`), so the expect is structural.
+        let republish = self
+            .runtime
+            .as_ref()
+            .expect("accept_suggestion requires an attached runtime")
+            .block_on(bootstrapper.republish_snapshot_for_path(&path, now_ms));
+        if let Err(e) = republish {
             emit_err(
                 "ATTN_SNAPSHOT_PUBLISH",
                 format!("post-accept republish: {e}"),
@@ -1658,6 +1666,7 @@ impl ReviewManager {
         let update_tx = Arc::clone(&self.update_tx);
         let badge_update_tx = Arc::clone(&self.update_tx);
         let webrtc_live_map = Arc::clone(&self.live_webrtc);
+        let forward_store = Arc::clone(&self.store);
         let room_id_owned = room_id.clone();
         let self_device_id = device_id.as_str().to_string();
         let owner_participant_id: Option<String> = self
@@ -1907,6 +1916,7 @@ impl ReviewManager {
 
                 forward_transport_event(
                     &update_tx,
+                    &forward_store,
                     &room_id_owned,
                     &self_device_id,
                     owner_participant_id.as_deref(),
@@ -2740,12 +2750,84 @@ impl crate::review::transport::DeviceKeyRefresher for BootstrapKeyRefresher {
     }
 }
 
+/// Fill `inline_snapshot` on a `SnapshotCreated` event from the locally
+/// persisted snapshot blob before the event crosses the IPC boundary.
+///
+/// The wire form never inlines the plaintext (decision #14) — the bytes
+/// travel as a `kind=snapshot_blob` envelope which the WS client persists
+/// via `ReviewStore::save_snapshot_blob` (resolving R2 spillover when
+/// needed). The frontend, however, renders straight from
+/// `body.inlineSnapshot`, so this is where the two meet: load the blob the
+/// event references, verify it against the signed event's `BlobRef`
+/// (length + content hash), and inline it.
+///
+/// Missing blob is a soft failure — the event still surfaces (the reviewer
+/// sees the room; the snapshot fills in on a later replay) and we log the
+/// gap. The blob-before-event outbox ordering makes this rare: by the time
+/// the event arrives, the blob envelope has already been processed.
+fn rehydrate_snapshot_event(
+    store: &crate::review::store::ReviewStore,
+    room_id: &RoomId,
+    event: &mut crate::review::model::ReviewEvent,
+) {
+    use crate::review::crypto::ids::content_hash;
+    use crate::review::model::{ReviewEventBody, SnapshotPlaintext};
+
+    let ReviewEventBody::SnapshotCreated {
+        encrypted_blob_ref: Some(blob_ref),
+        inline_snapshot,
+        snapshot_id,
+        ..
+    } = &mut event.body
+    else {
+        return;
+    };
+    if inline_snapshot.is_some() {
+        return;
+    }
+    let bytes = match store.load_snapshot_blob(room_id, &blob_ref.blob_id) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            tracing::warn!(
+                "snapshot {} references blob {} not (yet) in local store; emitting without inline",
+                snapshot_id.as_str(),
+                blob_ref.blob_id,
+            );
+            return;
+        }
+        Err(err) => {
+            tracing::warn!("load snapshot blob {}: {err}", blob_ref.blob_id);
+            return;
+        }
+    };
+    // The BlobRef rides inside the Ed25519-signed event, so checking the
+    // stored bytes against it extends the signature's integrity to the
+    // blob lane (which is confidentiality-only on the wire).
+    if bytes.len() as u64 != blob_ref.byte_length || content_hash(&bytes) != blob_ref.content_hash {
+        tracing::warn!(
+            "snapshot blob {} failed BlobRef integrity check; dropping inline",
+            blob_ref.blob_id,
+        );
+        return;
+    }
+    match serde_json::from_slice::<SnapshotPlaintext>(&bytes) {
+        Ok(plaintext) => *inline_snapshot = Some(plaintext),
+        Err(err) => {
+            tracing::warn!(
+                "snapshot blob {} did not parse as SnapshotPlaintext: {err}",
+                blob_ref.blob_id,
+            );
+        }
+    }
+}
+
 /// Translate a `TransportEvent` from the mailbox WS subscriber into the
 /// matching `ReviewUpdate` so the frontend store reflects inbound events
 /// in real time. Lives outside `impl ReviewManager` so the spawned task
 /// only needs the `UpdateSink` clone (not the full manager).
 fn forward_transport_event(
     update_tx: &UpdateSink,
+    store: &crate::review::store::ReviewStore,
     room_id: &RoomId,
     self_device_id: &str,
     owner_participant_id: Option<&str>,
@@ -2755,8 +2837,9 @@ fn forward_transport_event(
     match event {
         TransportEvent::EventImported {
             room_id: rid,
-            event,
+            mut event,
         } => {
+            rehydrate_snapshot_event(store, &rid, &mut event);
             (update_tx)(ReviewUpdate::EventImported {
                 room_id: rid,
                 event,
@@ -2976,6 +3059,141 @@ mod tests {
         let r = decide_collab_routing(0, 0);
         assert!(!r.send_over_channels);
         assert!(r.use_relay);
+    }
+
+    // ----- snapshot rehydration at the IPC boundary -----------------------
+
+    #[test]
+    fn rehydrate_snapshot_event_inlines_persisted_blob_and_enforces_integrity() {
+        use crate::review::crypto::ids::content_hash;
+        use crate::review::model::{
+            AnchorIndex, BlobRef, BlobStorage, CanonicalEncoding, ReviewEventBody,
+            SnapshotPlaintext,
+        };
+
+        let tmp = TempDir::new().expect("tempdir");
+        let store = ReviewStore::open_at(tmp.path().join("reviews")).expect("open store");
+        let room_id: RoomId = dummy_id("room-rehydrate");
+
+        let plaintext = SnapshotPlaintext {
+            markdown: "# rehydrated\n".to_string(),
+            anchor_index: AnchorIndex {
+                doc_hash: dummy_id("hash-1"),
+                canonical_encoding: CanonicalEncoding::Utf8Bytes,
+                line_count: 1,
+                blocks: vec![],
+                headings: vec![],
+            },
+        };
+        let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
+            .expect("canonical snapshot");
+        store
+            .save_snapshot_blob(&room_id, "blob-env-1", &blob_bytes)
+            .expect("save blob");
+
+        let blob_ref = BlobRef {
+            storage: BlobStorage::Mailbox,
+            blob_id: "blob-env-1".to_string(),
+            byte_length: blob_bytes.len() as u64,
+            content_hash: content_hash(&blob_bytes),
+        };
+        let body = ReviewEventBody::SnapshotCreated {
+            file_id: dummy_id("file-1"),
+            snapshot_id: dummy_id("snap-1"),
+            owner_display_path: None,
+            parent_snapshot_id: None,
+            base_hash: dummy_id("hash-1"),
+            encrypted_blob_ref: Some(blob_ref.clone()),
+            inline_snapshot: None,
+        };
+
+        // Happy path: blob present + hash matches → inline filled.
+        let mut event = stub_review_event(&room_id, body.clone());
+        rehydrate_snapshot_event(&store, &room_id, &mut event);
+        match &event.body {
+            ReviewEventBody::SnapshotCreated {
+                inline_snapshot: Some(inline),
+                ..
+            } => assert_eq!(inline.markdown, "# rehydrated\n"),
+            other => panic!("expected inlined snapshot, got {other:?}"),
+        }
+
+        // Integrity mismatch: signed BlobRef hash differs from stored bytes
+        // → inline stays None (blob lane is confidentiality-only; the
+        // event signature is what vouches for the bytes).
+        let bad_ref = BlobRef {
+            content_hash: dummy_id("hash-wrong"),
+            ..blob_ref.clone()
+        };
+        let mut event = stub_review_event(
+            &room_id,
+            match body.clone() {
+                ReviewEventBody::SnapshotCreated {
+                    file_id,
+                    snapshot_id,
+                    owner_display_path,
+                    parent_snapshot_id,
+                    base_hash,
+                    ..
+                } => ReviewEventBody::SnapshotCreated {
+                    file_id,
+                    snapshot_id,
+                    owner_display_path,
+                    parent_snapshot_id,
+                    base_hash,
+                    encrypted_blob_ref: Some(bad_ref),
+                    inline_snapshot: None,
+                },
+                _ => unreachable!(),
+            },
+        );
+        rehydrate_snapshot_event(&store, &room_id, &mut event);
+        assert!(
+            matches!(
+                &event.body,
+                ReviewEventBody::SnapshotCreated {
+                    inline_snapshot: None,
+                    ..
+                }
+            ),
+            "hash mismatch must not inline"
+        );
+
+        // Missing blob: event passes through without inline (soft failure).
+        let missing_ref = BlobRef {
+            blob_id: "blob-missing".to_string(),
+            ..blob_ref
+        };
+        let mut event = stub_review_event(
+            &room_id,
+            match body {
+                ReviewEventBody::SnapshotCreated {
+                    file_id,
+                    snapshot_id,
+                    owner_display_path,
+                    parent_snapshot_id,
+                    base_hash,
+                    ..
+                } => ReviewEventBody::SnapshotCreated {
+                    file_id,
+                    snapshot_id,
+                    owner_display_path,
+                    parent_snapshot_id,
+                    base_hash,
+                    encrypted_blob_ref: Some(missing_ref),
+                    inline_snapshot: None,
+                },
+                _ => unreachable!(),
+            },
+        );
+        rehydrate_snapshot_event(&store, &room_id, &mut event);
+        assert!(matches!(
+            &event.body,
+            ReviewEventBody::SnapshotCreated {
+                inline_snapshot: None,
+                ..
+            }
+        ));
     }
 
     /// Build a `(ReviewManager, receiver)` pair backed by an std::mpsc channel

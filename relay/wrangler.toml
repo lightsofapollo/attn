@@ -56,13 +56,16 @@ ALLOWED_BROWSER_ORIGINS = "https://attn.sh,https://staging.attn.sh"
 
 # Staging deploys to a DISTINCT worker so `wrangler deploy --env staging` can
 # NEVER overwrite the production "attn-relay" worker or take its relay.attn.sh
-# route. Named-environment routes are not inherited from the top level, so
-# staging is workers.dev-only. Durable Object namespaces are per-worker, so
+# route. CAUTION: wrangler v3 DOES inherit top-level `routes` into named
+# environments (observed 2026-06-10: a staging deploy attached relay.attn.sh
+# to attn-relay-staging) — the explicit `routes = []` below opts staging out,
+# keeping it workers.dev-only. Durable Object namespaces are per-worker, so
 # staging rooms are isolated from prod. (The R2 bucket is shared by name, but
 # blobs are keyed by roomId, so staging + prod objects never collide.)
 [env.staging]
 name = "attn-relay-staging"
 workers_dev = true
+routes = []
 
 [env.staging.vars]
 # vars are NOT inherited by named environments, so the full set is repeated

@@ -19,6 +19,8 @@
 <script lang="ts">
   import AmbiguousAnchorPicker from './AmbiguousAnchorPicker.svelte';
   import { reviewAcceptSuggestion, reviewRejectSuggestion } from './ipc';
+  import { AGENT_GLYPH, monogramFor } from './peer-strip-format';
+  import { shouldSubmitOnEnter } from './review/composer-keys';
   import { reviewStore } from './review/store.svelte';
   import type { EventId, ResolvedAnchorCandidate, RoomId, Thread } from './types';
 
@@ -59,6 +61,10 @@
     /** Locally-set marker — true after the user clicked reject/resolve and
      *  the IPC is not yet acknowledged (or doesn't exist yet). */
     pendingDismiss?: boolean;
+    /** The initiating author's participant kind (attn-42y). Drives the
+     *  card's left-border color and the header avatar via the
+     *  `--peer-avatar-bg-*` tokens, matching carets and peer chips. */
+    authorKind?: 'owner' | 'reviewer' | 'agent';
     /** Fires when the embedded AmbiguousAnchorPicker has dispatched a
      *  reviewResolveAnchor IPC. The parent uses this for tests / for
      *  any optimistic local marking until the store gets the
@@ -93,6 +99,7 @@
     onResolve,
     onReply,
     pendingDismiss = false,
+    authorKind = 'reviewer',
     onCandidatePicked,
     onRequestReanchor,
     onDiscardStale,
@@ -273,12 +280,16 @@
   }
 
   function handleReplyKeydown(e: KeyboardEvent): void {
+    // Keys belonging to an in-flight IME composition (e.g. Escape closing
+    // the candidate list) are the IME's, not ours.
+    if (e.isComposing) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
       replying = false;
       replyBody = '';
-    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    } else if (shouldSubmitOnEnter(e)) {
+      // Enter submits; Shift+Enter inserts a newline (attn-2aj).
       e.preventDefault();
       e.stopPropagation();
       submitReply();
@@ -296,8 +307,26 @@
   }
 
   function handleCardClick(): void {
+    // A mouseup ending a text-selection drag inside the card dispatches a
+    // click on the card root. Activating then would be hostile: it moves
+    // the editor cursor for active cards and COLLAPSES expanded resolved
+    // cards — making comment text impossible to select/copy.
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;
     onActivate();
   }
+
+  // Author identity visuals (attn-42y): the card's left border and the
+  // header avatar carry the initiating author's presence color. Stale /
+  // ambiguous keep their state-colored border — those are alerts, not
+  // identity surfaces.
+  const authorColor = $derived(`var(--peer-avatar-bg-${authorKind})`);
+  const authorBorderColor = $derived(
+    cardState === 'stale' || cardState === 'ambiguous' ? undefined : authorColor,
+  );
+  const avatarGlyph = $derived(
+    authorKind === 'agent' ? AGENT_GLYPH : monogramFor(authorName),
+  );
 
   function handleKeydown(e: KeyboardEvent): void {
     // Only the card itself activates on Enter/Space. Ignore keydowns bubbling
@@ -348,6 +377,7 @@
   data-offset={offset ? 'true' : 'false'}
   data-pending-dismiss={pendingDismiss ? 'true' : 'false'}
   data-awaiting-reanchor={awaitingReanchor ? 'true' : 'false'}
+  style:border-left-color={authorBorderColor}
   onclick={handleCardClick}
   onkeydown={handleKeydown}
   onmouseenter={handleMouseEnter}
@@ -357,6 +387,12 @@
   aria-label={`${kind} by ${authorName}, ${cardState}`}
 >
   <header class="rmc-header">
+    <span
+      class="rmc-avatar"
+      style:background-color={authorColor}
+      data-author-kind={authorKind}
+      aria-hidden="true"
+    >{avatarGlyph}</span>
     <span class="rmc-author">{authorName}</span>
     {#if ageLabel}<span class="rmc-age">· {ageLabel}</span>{/if}
     <span class="rmc-spacer"></span>
@@ -450,7 +486,11 @@
   {/if}
 
   <footer class="rmc-actions">
-    {#if cardState === 'stale'}
+    {#if cardState === 'resolved'}
+      <!-- Read-only resolved card (attn-42y): no action row at all. The
+           rail collapses as a whole; clicking the card (or Escape)
+           shrinks it back to its chip. -->
+    {:else if cardState === 'stale'}
       {#if awaitingReanchor}
         <button
           type="button"
@@ -520,7 +560,7 @@
         class="rmc-btn"
         data-action="resolve"
         onclick={handleResolve}
-        disabled={pendingDismiss || cardState === 'resolved'}
+        disabled={pendingDismiss}
       >
         Resolve
       </button>
@@ -533,7 +573,7 @@
         bind:value={replyBody}
         class="rmc-reply-input"
         placeholder="Reply&hellip;"
-        rows="2"
+        rows="4"
         onkeydown={handleReplyKeydown}
         onclick={(e) => e.stopPropagation()}
       ></textarea>
@@ -557,7 +597,9 @@
 <style>
   .review-margin-card {
     display: block;
-    width: 320px;
+    /* Fluid: the margin slot (or orphan-tray list item) defines the
+       width, inset 12px from the rail edges (attn-42y). */
+    width: 100%;
     box-sizing: border-box;
     padding: 10px 12px;
     background: var(--review-card-surface, var(--popover, var(--background, #fff)));
@@ -619,15 +661,34 @@
 
   .rmc-header {
     display: flex;
-    align-items: baseline;
-    gap: 4px;
+    align-items: center;
+    gap: 5px;
     margin-bottom: 4px;
     font-size: 11px;
+  }
+
+  /* Author avatar — monogram on the author's presence color, matching
+     the collapsed-gutter chips and the peer strip (attn-42y). */
+  .rmc-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    border-radius: 9999px;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 1;
   }
 
   .rmc-author {
     font-weight: 600;
     color: var(--foreground, inherit);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .rmc-age {
@@ -781,7 +842,9 @@
   .rmc-reply-input {
     width: 100%;
     box-sizing: border-box;
-    resize: vertical;
+    /* No manual resize handle — rows=4 supplies the minimum height and
+       Enter/Shift+Enter handle the rest (attn-2aj). */
+    resize: none;
     border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
     border-radius: 4px;
     background: var(--background, #fff);

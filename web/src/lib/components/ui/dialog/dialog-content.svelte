@@ -21,13 +21,29 @@
 	} = $props();
 </script>
 
+<!--
+	Entry is a pure opacity fade via a CSS transition + @starting-style
+	(`starting:opacity-0`) instead of tw-animate-css keyframes: the
+	animate-in/zoom keyframes both LOOKED glitchy (the dialog scaled and
+	shifted while opening) and have two documented WKWebView failure modes
+	in this app (entry stuck at opacity 0; exit never firing animationend —
+	see the dialog notes in app.css). A transition's end state is the
+	specified value, so it cannot strand the dialog invisible, and bits-ui
+	does not gate unmount on transitions, so close stays instant.
+
+	The content is viewport-centered (user feedback: top-anchoring read as
+	"not centered"). Centering is safe against open-time jumps because the
+	dialogs render their final structure from open (ShareDialog's minting →
+	ready swap is height-stable); only user-initiated growth (e.g. the
+	Advanced disclosure) re-centers, which is conventional.
+-->
 <DialogPortal {...portalProps}>
 	<Dialog.Overlay />
 	<DialogPrimitive.Content
 		bind:ref
 		data-slot="dialog-content"
 		class={cn(
-			"bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg duration-200 sm:max-w-lg",
+			"bg-background fixed top-[50%] left-[50%] z-50 grid max-h-[85vh] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto rounded-lg border p-6 shadow-lg transition-opacity duration-150 ease-out starting:opacity-0 sm:max-w-lg",
 			className
 		)}
 		{...restProps}

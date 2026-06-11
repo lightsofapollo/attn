@@ -44,9 +44,11 @@ This boots three processes:
    user provides an invite.
 
 Interactive flow: click **[Share]** in the owner window, copy the invite URL,
-paste it at the script's prompt — it runs `attn review join <invite>
---as-agent reviewer` against the reviewer daemon and the second window joins
-the room. Ctrl+C cleans up all three processes.
+paste it at the script's prompt — it runs `attn review join <invite>` routed
+to the reviewer daemon (deliberately NOT `--as-agent`, which forks a separate
+headless agent process and leaves the reviewer window idle; the daemon-routed
+join flips the reviewer's own window onto the shared document). Ctrl+C cleans
+up all three processes.
 
 Env overrides:
 

@@ -233,31 +233,47 @@ spatial-align.
 
 ## 3. Resolved State
 
-Resolved threads do **not** disappear. They shrink to a **single-line grey
-strip** in place (same y-position as the active card would have had):
+> **Amended by attn-d7y** (shipped): the full-width strip became a
+> content-sized **chip**, the rail width adapts, and clicking a chip
+> expands a read-only card. The original strip spec is superseded by the
+> behavior below; the >5 "show all resolved" pill survives unchanged.
+
+Resolved threads do **not** disappear. They shrink to a **28px rounded
+chip** in place (same y-position as the active card would have had):
 
 ```text
-│ ─── ✓ rufus · resolved 2m · §Anchor resolver ─── │
+│ (✓ rufus · resolved)                │ ← content-sized pill, full rail
 ```
 
-The strip is 24px tall, uses the `--muted-foreground` color, and is dismissed
-from the document-order layout queue (it can be skipped over for collision
-purposes — newer active cards collapse past it).
+When the margin holds ONLY resolved threads (no active cards, no orphan
+tray, nothing expanded) the right-rail aside slims from 320px to a **48px
+gutter** and the chips render icon-only — `(✓)` centered in the gutter —
+so the document reclaims the width instead of facing a vacant column. The
+mode derivation lives in `web/src/lib/review/rail-mode.ts`
+(`closed`/`slim`/`full`), exposed as `reviewStore.railMode`, and drives
+both the aside width (App.svelte) and the chip variant (ReviewMargin).
 
-If there are more than 5 collapsed strips visible in the current viewport,
-the design collapses them further to a "show all resolved" pill at the
-**bottom of the margin** (still inside the overlay, after the last anchored
-card):
+Clicking a chip expands it **in place to the full card** in read-only
+resolved state (author, quote, body, replies, `resolved` badge) with a
+single `Collapse` action — no Reply/Resolve/Accept/Reject. Expanding
+forces the rail to full width; Collapse (or Escape) shrinks it back. The
+expanded card participates in the SAME collision pass as active cards
+(one unified `layoutCards` call), so it pushes neighbors instead of
+overlapping them.
+
+If there are more than 5 collapsed chips visible in full mode, they
+collapse further to a "show all resolved" pill at the **bottom of the
+margin** (still inside the overlay, after the last anchored card):
 
 ```text
 │ ─────────────────────────────────── │
-│       ⌃ 12 resolved · show          │ ← bottom pill, click to expand all strips
+│       ⌃ 12 resolved · show          │ ← bottom pill, click to expand all chips
 │ ─────────────────────────────────── │
 ```
 
-Clicking the pill expands all strips inline at their anchor positions.
-Clicking a strip pops it back to a full card for one cycle (until next focus
-change).
+Clicking the pill expands all chips inline at their anchor positions.
+Slim mode ignores the pill (the 48px gutter can't fit it; icon chips are
+cheap to render).
 
 ---
 

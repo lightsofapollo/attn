@@ -280,11 +280,15 @@
 </script>
 
 <Dialog.Root bind:open>
-  <Dialog.Content class="w-[min(36rem,calc(100%-2rem))] max-w-[36rem] overflow-hidden" data-slot="share-dialog">
+  <Dialog.Content class="w-[min(36rem,calc(100%-2rem))] max-w-[36rem] overflow-x-hidden" data-slot="share-dialog">
     <Dialog.Header>
       <Dialog.Title>Share for review</Dialog.Title>
       <Dialog.Description>
-        <span class="font-mono text-xs">{filePath || '(no file selected)'}</span>
+        <!-- break-all: an unbreakable mono path would otherwise drive the
+             dialog's grid track wider than its padding box on narrow
+             windows — every w-full child then runs into the right padding
+             and gets clipped flush to the border (attn-z46). -->
+        <span class="break-all font-mono text-xs">{filePath || '(no file selected)'}</span>
       </Dialog.Description>
     </Dialog.Header>
 
@@ -301,12 +305,7 @@
         <Terminal class="size-3.5" aria-hidden="true" />
         Send this command
       </div>
-      {#if isMinting}
-        <div class="flex items-center gap-2 py-1.5 text-sm text-muted-foreground" data-slot="share-minting">
-          <span class="inline-block size-3 animate-pulse rounded-full bg-primary/60" aria-hidden="true"></span>
-          Minting room…
-        </div>
-      {:else if isError}
+      {#if isError}
         <div class="flex flex-col gap-2 py-1.5 text-sm" data-slot="share-error">
           <span class="text-destructive">
             {shareErrorMessage || "Couldn't reach the review relay — the share didn't complete."}
@@ -320,16 +319,30 @@
             Try again
           </button>
         </div>
-      {:else if isReady && cliCommand.length > 0}
-        <button
-          type="button"
-          class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 text-left font-mono text-xs text-foreground hover:border-primary/60"
-          data-slot="share-cli-command"
-          onclick={handleCopyCli}
-          title="Click to copy"
-        >
-          <span class="block truncate">{cliCommand}</span>
-        </button>
+      {:else}
+        <!-- Stable-height swap (attn-0sv): minting and ready render the
+             SAME rows — only the command row's content changes — so the
+             ShareReady IPC landing never resizes the dialog. The minting
+             row copies the command row's box metrics exactly. -->
+        {#if isReady && cliCommand.length > 0}
+          <button
+            type="button"
+            class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 text-left font-mono text-xs text-foreground hover:border-primary/60"
+            data-slot="share-cli-command"
+            onclick={handleCopyCli}
+            title="Click to copy"
+          >
+            <span class="block truncate">{cliCommand}</span>
+          </button>
+        {:else}
+          <div
+            class="flex w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-muted-foreground"
+            data-slot="share-minting"
+          >
+            <span class="inline-block size-3 shrink-0 animate-pulse rounded-full bg-primary/60" aria-hidden="true"></span>
+            <span class="block truncate">Minting room…</span>
+          </div>
+        {/if}
         <Button
           type="button"
           variant="default"
@@ -337,6 +350,7 @@
           onclick={handleCopyCli}
           data-slot="share-copy-cli"
           class="w-full"
+          disabled={!isReady}
         >
           {#if copiedCli}
             <Check class="size-4" aria-hidden="true" />
@@ -351,15 +365,6 @@
           one, otherwise downloads it on first run — no account, no signup. They join
           over an end-to-end encrypted channel.
         </p>
-      {:else}
-        <input
-          type="text"
-          class="rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-muted-foreground"
-          readonly
-          value=""
-          placeholder="npx attnmd review join … (generated when the room is ready)"
-          data-slot="share-cli-command"
-        />
       {/if}
     </div>
 
@@ -368,31 +373,42 @@
          attn installed and want a clickable deep-link instead of a
          terminal command.
          ============================================================ -->
-    {#if isReady && inviteUrl.length > 0}
+    {#if !isError}
+      <!-- Rendered from the moment the dialog opens (attn-0sv): a
+           placeholder row holds the card's final size while minting so
+           the dialog never grows a whole card when ShareReady lands. -->
       <div class="flex w-full min-w-0 flex-col gap-2 overflow-hidden rounded-lg border border-border/60 bg-muted/30 p-4" data-slot="share-url-card">
         <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
           <Link class="size-3.5" aria-hidden="true" />
           Direct link
         </div>
-        <button
-          type="button"
-          class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 text-left font-mono text-xs text-foreground hover:border-primary/60"
-          data-slot="share-invite-url-button"
-          onclick={handleCopyUrl}
-          title="Click to copy"
-        >
-          <span class="block truncate">{inviteUrl}</span>
-        </button>
-        <!-- Hidden field with the same data-slot test selectors rely on. -->
-        <input
-          type="text"
-          class="sr-only"
-          readonly
-          tabindex="-1"
-          aria-hidden="true"
-          value={inviteUrl}
-          data-slot="share-invite-url"
-        />
+        {#if isReady && inviteUrl.length > 0}
+          <button
+            type="button"
+            class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 text-left font-mono text-xs text-foreground hover:border-primary/60"
+            data-slot="share-invite-url-button"
+            onclick={handleCopyUrl}
+            title="Click to copy"
+          >
+            <span class="block truncate">{inviteUrl}</span>
+          </button>
+          <!-- Hidden field with the same data-slot test selectors rely on.
+               Stays gated on `isReady`: E2E scripts treat this element's
+               APPEARANCE as the share-ready signal. -->
+          <input
+            type="text"
+            class="sr-only"
+            readonly
+            tabindex="-1"
+            aria-hidden="true"
+            value={inviteUrl}
+            data-slot="share-invite-url"
+          />
+        {:else}
+          <div class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-muted-foreground">
+            <span class="block truncate">attn://review/… (generated when the room is ready)</span>
+          </div>
+        {/if}
         <Button
           type="button"
           variant="outline"
@@ -400,6 +416,7 @@
           onclick={handleCopyUrl}
           data-slot="share-copy-url"
           class="w-full"
+          disabled={!isReady}
         >
           {#if copiedUrl}
             <Check class="size-4" aria-hidden="true" />

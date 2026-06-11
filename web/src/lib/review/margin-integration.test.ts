@@ -11,6 +11,7 @@
 //   cd web && npx tsx src/lib/review/margin-integration.test.ts
 
 import { layoutCards, visibleCards } from './margin-layout';
+import { RESOLVED_CHIP_HEIGHT, computeRailMode } from './rail-mode';
 import {
   ambiguousAnchors,
   reconstructThreads,
@@ -284,7 +285,7 @@ defineCase('remapped < 0.70 → orphan tray (panel-only per §10.2)', () => {
   assert(lowConfidenceIds.has(c1.meta.eventId), 'low-conf remap is orphan');
 });
 
-defineCase('resolved thread → collapsed strip (not in anchored set)', () => {
+defineCase('resolved thread → collapsed chip (not in anchored set)', () => {
   const c1 = makeComment('t1', 100, anchorAt(0, 10));
   const r1 = makeResolveEvent('t1', 200);
   const threads = reconstructThreads([c1, r1], {});
@@ -294,7 +295,57 @@ defineCase('resolved thread → collapsed strip (not in anchored set)', () => {
   const resolvedSet = scoped.filter((t) => t.resolved);
   const activeSet = scoped.filter((t) => !t.resolved);
   assert(resolvedSet.length === 1 && activeSet.length === 0,
-    'resolved → strip bucket, not anchored');
+    'resolved → chip bucket, not anchored');
+});
+
+defineCase('expanded resolved card participates in the unified collision pass', () => {
+  // attn-d7y: active cards and resolved threads share ONE layoutCards call,
+  // so an expanded resolved card (full card height) pushes its neighbors
+  // instead of overlapping them like the old two-pass layout allowed.
+  const placed = layoutCards([
+    { id: 'active-1', anchorY: 100, height: 96 },
+    { id: 'expanded-resolved', anchorY: 120, height: 96 },
+    { id: 'active-2', anchorY: 140, height: 96 },
+  ]);
+  const byId = new Map(placed.map((p) => [p.id, p]));
+  const a1 = byId.get('active-1')!;
+  const er = byId.get('expanded-resolved')!;
+  const a2 = byId.get('active-2')!;
+  assert(a1.top === 100 && a1.offset === false, 'first active stays at anchor');
+  assert(er.top === 100 + 96 + 8 && er.offset === true,
+    `expanded resolved pushed below first card: top=${er.top}`);
+  assert(a2.top === er.top + 96 + 8 && a2.offset === true,
+    `second active pushed below expanded resolved: top=${a2.top}`);
+});
+
+defineCase('clustered resolved chips stack at chip pitch (28px + gutter)', () => {
+  const placed = layoutCards([
+    { id: 'chip-a', anchorY: 0, height: RESOLVED_CHIP_HEIGHT },
+    { id: 'chip-b', anchorY: 0, height: RESOLVED_CHIP_HEIGHT },
+    { id: 'chip-c', anchorY: 0, height: RESOLVED_CHIP_HEIGHT },
+  ]);
+  const pitch = RESOLVED_CHIP_HEIGHT + 8;
+  assert(placed[0]!.top === 0 && placed[0]!.offset === false, 'first chip at anchor');
+  assert(placed[1]!.top === pitch && placed[1]!.offset === true,
+    `second chip at one pitch: top=${placed[1]!.top}`);
+  assert(placed[2]!.top === pitch * 2 && placed[2]!.offset === true,
+    `third chip at two pitches: top=${placed[2]!.top}`);
+});
+
+defineCase('expanded-rail chip visibility respects the >5 pill threshold', () => {
+  // Mirror ReviewMargin's `resolvedChipsVisible` rule (expanded rail only;
+  // the collapsed gutter always renders icon chips and never the pill):
+  // chips hide behind the count pill above the threshold until "show all".
+  const N = 8;
+  const threshold = 5;
+  const chipsVisible = (showAllResolved: boolean): boolean =>
+    showAllResolved || N <= threshold;
+  assert(chipsVisible(false) === false, 'expanded + 8 resolved → pill hides chips');
+  assert(chipsVisible(true) === true, 'expanded + show-all → chips visible');
+  // And the rail itself is collapsed-by-default in a room until the user
+  // (or the unresolved auto-open) expands it.
+  const mode = computeRailMode({ inReviewRoom: true, panelOpen: false });
+  assert(mode === 'collapsed', `room + closed panel is collapsed, got ${mode}`);
 });
 
 defineCase('51 threads → virtualized to ~10 in DOM at default 600px viewport', () => {

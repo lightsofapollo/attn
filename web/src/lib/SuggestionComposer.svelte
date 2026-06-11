@@ -35,6 +35,7 @@
   import { onMount } from 'svelte';
   import type { EditorView } from 'prosemirror-view';
   import type { ConstructAnchorContext } from './review/anchors';
+  import { shouldSubmitOnEnter } from './review/composer-keys';
   import { getPopoverAnchor } from './review/popover-anchor';
   import { reviewCreateSuggestion } from './ipc';
   import { Button } from './components/ui/button';
@@ -147,12 +148,22 @@
     return buildDraftFromForm(view, from, to, anchorContext, formSnapshot);
   }
 
+  // In-flight guard: IPC is fire-and-forget today, but the await spans a
+  // real daemon round-trip once acks land — without this, a double-tapped
+  // Enter or Submit click would send duplicate suggestions.
+  let submitting = $state(false);
+
   async function handleSubmit(): Promise<void> {
-    if (submitDisabled) return;
-    const draft = buildDraft();
-    await reviewCreateSuggestion(roomId, draft);
-    onSubmit?.(draft);
-    onClose();
+    if (submitting || submitDisabled) return;
+    submitting = true;
+    try {
+      const draft = buildDraft();
+      await reviewCreateSuggestion(roomId, draft);
+      onSubmit?.(draft);
+      onClose();
+    } finally {
+      submitting = false;
+    }
   }
 
   function handleCancel(): void {
@@ -160,6 +171,9 @@
   }
 
   function handleKeyDown(e: KeyboardEvent): void {
+    // Never act on keys belonging to an in-flight IME composition — e.g.
+    // Escape dismissing the candidate list must not close the composer.
+    if (e.isComposing) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -173,6 +187,20 @@
       e.stopPropagation();
       void handleSubmit();
     }
+  }
+
+  // Enter submits, Shift+Enter inserts a newline (attn-2aj). Attached to
+  // the AUTHORING textareas only (the readonly expected-text field keeps
+  // the dialog-level handler). While submit is disabled (e.g. replace mode
+  // with an empty replacement), Enter falls through to a plain newline —
+  // matching the disabled Submit button's mental model — instead of being
+  // preventDefault'd into a dead key.
+  function handleFieldKeydown(e: KeyboardEvent): void {
+    if (!shouldSubmitOnEnter(e)) return;
+    if (submitDisabled) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void handleSubmit();
   }
 
   // ---------------------------------------------------------------------------
@@ -285,10 +313,12 @@
       </label>
       <textarea
         id="suggestion-composer-text"
-        class="min-h-[4.5rem] resize-y rounded-sm border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+        rows={4}
+        class="resize-none rounded-sm border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
         placeholder="New text..."
         bind:value={replacementText}
         data-slot="suggestion-composer-text"
+        onkeydown={handleFieldKeydown}
       ></textarea>
     </div>
   {:else if kind === 'insert_before' || kind === 'insert_after'}
@@ -301,10 +331,12 @@
       </label>
       <textarea
         id="suggestion-composer-text"
-        class="min-h-[4.5rem] resize-y rounded-sm border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+        rows={4}
+        class="resize-none rounded-sm border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
         placeholder="Text to insert..."
         bind:value={insertText}
         data-slot="suggestion-composer-text"
+        onkeydown={handleFieldKeydown}
       ></textarea>
     </div>
   {/if}
@@ -318,10 +350,12 @@
     </label>
     <textarea
       id="suggestion-composer-note"
-      class="min-h-[3.25rem] resize-y rounded-sm border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+      rows={4}
+      class="resize-none rounded-sm border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
       placeholder="Why this change?"
       bind:value={note}
       data-slot="suggestion-composer-note"
+      onkeydown={handleFieldKeydown}
     ></textarea>
   </div>
 
@@ -339,7 +373,7 @@
       type="button"
       size="sm"
       onclick={handleSubmit}
-      disabled={submitDisabled}
+      disabled={submitting || submitDisabled}
       data-slot="suggestion-composer-submit"
     >
       Submit

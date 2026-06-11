@@ -47,7 +47,7 @@ use tokio::sync::RwLock;
 
 use crate::daemon::runtime_dir;
 use crate::review::crypto::ids::{derive_envelope_id_for_event, derive_event_id};
-use crate::review::crypto::kdf::{derive_room_id, derive_room_keys};
+use crate::review::crypto::kdf::{RoomKeys, derive_room_id, derive_room_keys};
 use crate::review::crypto::pow::TokenPool;
 use crate::review::crypto::signing::{DeviceSigningKey, DeviceVerifyingKey, SignError, sign_event};
 use crate::review::envelope::{AssembleInput, assemble_event_envelope};
@@ -777,6 +777,67 @@ impl Bootstrapper {
     /// records a `LocalFileBinding` whose room hasn't expired, we look up the
     /// room secret stashed on disk and re-emit the same invite without any
     /// network calls.
+    /// Sign + enqueue the owner's self `ParticipantJoined` announce
+    /// (attn-42y). Joiners emit one in `join_with_identity`, but the owner
+    /// historically never did — so owner-authored comments degraded to a
+    /// raw participant id on every window. Called on fresh mint AND on
+    /// re-Share: re-announcing is harmless (frontends key names by
+    /// participantId, last write wins), backfills rooms shared before this
+    /// landed, and refreshes a display name changed since the first share.
+    fn announce_owner(
+        &self,
+        room_id: &RoomId,
+        room_keys: &RoomKeys,
+        policy: &RoomPolicy,
+        identity: &DeviceIdentity,
+        now_ms: u64,
+    ) -> Result<(), BootstrapError> {
+        let participant_id = identity.typed_participant_id();
+        let device_id = identity.typed_device_id();
+        let owner_participant = Participant {
+            participant_id: participant_id.clone(),
+            display_name: identity.effective_display_name(),
+            kind: ParticipantKind::Owner,
+            public_signing_key: identity.public_signing_key.clone(),
+            capabilities: agent_capabilities(ParticipantKind::Owner),
+        };
+        let owner_device = Device {
+            device_id: device_id.clone(),
+            participant_id: participant_id.clone(),
+            public_encryption_key: identity.public_encryption_key.clone(),
+            public_signing_key: identity.public_signing_key.clone(),
+            client: DeviceClient::AttnNative,
+            created_at: now_ms,
+        };
+        let joined_body = ReviewEventBody::ParticipantJoined {
+            participant: owner_participant,
+            device: owner_device,
+        };
+        let joined_envelope = assemble_event_envelope(AssembleInput {
+            event_key: *room_keys.event_key.as_bytes(),
+            signing_key: identity.signing_key()?,
+            room_id: room_id.clone(),
+            author_id: participant_id,
+            device_id,
+            created_at_ms: now_ms,
+            expires_at_ms: policy.expires_at,
+            parent_event_ids: vec![],
+            snapshot_id: None,
+            body: joined_body,
+            kind: EnvelopeKind::Event,
+            client_nonce: None,
+        })
+        .map_err(|e| {
+            BootstrapError::Crypto(format!("assemble owner ParticipantJoined envelope: {e}"))
+        })?;
+        self.store
+            .append_outbox(room_id, &joined_envelope)
+            .map_err(|e| {
+                BootstrapError::Store(format!("append owner ParticipantJoined outbox: {e}"))
+            })?;
+        Ok(())
+    }
+
     pub async fn share(
         &self,
         path: PathBuf,
@@ -826,6 +887,10 @@ impl Bootstrapper {
                 Err(_) => false,
             };
             if reestablished {
+                // Re-announce the owner on every re-Share: backfills rooms
+                // shared before the owner self-announce existed and picks up
+                // a display name changed since the original share.
+                self.announce_owner(&existing.room_id, &keys, &policy, &identity, now_ms)?;
                 return Ok(existing);
             }
             tracing::warn!(
@@ -902,6 +967,9 @@ impl Bootstrapper {
         self.store
             .append_outbox(&room_id, &envelope)
             .map_err(|e| BootstrapError::Store(format!("append RoomCreated outbox: {e}")))?;
+
+        // 5b. Announce the owner identity (display name) into the room log.
+        self.announce_owner(&room_id, &room_keys, &policy, &identity, now_ms)?;
 
         // 6. Persist the room state on disk. We snapshot a `ReviewRoom` with
         //    no documents/snapshots yet — that wiring lands when SnapshotCreated
@@ -2731,36 +2799,43 @@ mod tests {
         assert_eq!(loaded_room.event_heads.len(), 1);
         assert_eq!(loaded_room.policy.mode, RoomMode::Async);
 
-        // Outbox holds the RoomCreated event, the snapshot blob, and the
-        // SnapshotCreated event — with the blob enqueued BEFORE the event
-        // that references it, so peers receive bytes-then-pointer in relay
-        // serverSeq order.
+        // Outbox holds: the RoomCreated event, the owner's self
+        // ParticipantJoined announce (attn-42y — carries the display name
+        // so owner-authored comments resolve to a real name on every
+        // window), the snapshot blob, and the SnapshotCreated event — with
+        // the blob enqueued BEFORE the event that references it, so peers
+        // receive bytes-then-pointer in relay serverSeq order.
         let envelopes: Vec<MailboxEnvelope> = store
             .iter_outbox(&outcome.room_id)
             .expect("iter")
             .collect::<anyhow::Result<_>>()
             .expect("decode");
-        assert_eq!(envelopes.len(), 3);
+        assert_eq!(envelopes.len(), 4);
         assert_eq!(envelopes[0].kind, EnvelopeKind::Event, "RoomCreated");
         assert_eq!(
             envelopes[1].kind,
+            EnvelopeKind::Event,
+            "owner ParticipantJoined announce"
+        );
+        assert_eq!(
+            envelopes[2].kind,
             EnvelopeKind::SnapshotBlob,
             "snapshot bytes ride the snapshot_blob lane"
         );
-        assert_eq!(envelopes[2].kind, EnvelopeKind::Event, "SnapshotCreated");
+        assert_eq!(envelopes[3].kind, EnvelopeKind::Event, "SnapshotCreated");
 
         // The blob envelope opens under the room's snapshotKey and carries
         // the canonical SnapshotPlaintext bytes (markdown + anchor index).
         let parsed = parse_invite(&outcome.invite).expect("parse invite");
         let keys = derive_room_keys(&parsed.room_secret);
-        let aad = crate::review::envelope::envelope_aad(&envelopes[1]);
+        let aad = crate::review::envelope::envelope_aad(&envelopes[2]);
         let nonce_bytes = URL_SAFE_NO_PAD
-            .decode(envelopes[1].nonce.as_bytes())
+            .decode(envelopes[2].nonce.as_bytes())
             .expect("nonce decodes");
         let nonce: crate::review::crypto::aead::AeadNonce =
             nonce_bytes.as_slice().try_into().expect("24-byte nonce");
         let ciphertext = URL_SAFE_NO_PAD
-            .decode(envelopes[1].ciphertext.as_bytes())
+            .decode(envelopes[2].ciphertext.as_bytes())
             .expect("ciphertext decodes");
         let blob_bytes = crate::review::crypto::aead::open(
             keys.snapshot_key.as_bytes(),
@@ -2775,7 +2850,7 @@ mod tests {
 
         // Locally: blob persisted by envelopeId, SnapshotNode references it.
         let stored_blob = store
-            .load_snapshot_blob(&outcome.room_id, &envelopes[1].envelope_id)
+            .load_snapshot_blob(&outcome.room_id, &envelopes[2].envelope_id)
             .expect("load blob")
             .expect("owner persisted its own blob");
         assert_eq!(stored_blob, blob_bytes);
@@ -2791,7 +2866,7 @@ mod tests {
         let node_ref = node
             .encrypted_blob_ref
             .expect("SnapshotNode carries the BlobRef");
-        assert_eq!(node_ref.blob_id, envelopes[1].envelope_id);
+        assert_eq!(node_ref.blob_id, envelopes[2].envelope_id);
         assert_eq!(
             node_ref.storage,
             crate::review::model::BlobStorage::Mailbox,
@@ -3427,25 +3502,27 @@ mod tests {
             .expect("iter")
             .collect::<anyhow::Result<_>>()
             .expect("decode");
-        assert_eq!(envelopes.len(), 3);
-        assert_eq!(envelopes[1].kind, EnvelopeKind::SnapshotBlob);
+        // RoomCreated, owner ParticipantJoined announce (attn-42y), blob
+        // wrapper, SnapshotCreated.
+        assert_eq!(envelopes.len(), 4);
+        assert_eq!(envelopes[2].kind, EnvelopeKind::SnapshotBlob);
         assert!(
-            envelopes[1].ciphertext_bytes < 1024,
+            envelopes[2].ciphertext_bytes < 1024,
             "outbox envelope must be the small BlobRef wrapper, got {} bytes",
-            envelopes[1].ciphertext_bytes
+            envelopes[2].ciphertext_bytes
         );
 
         // The wrapper opens under snapshotKey to a BlobRef pointing at R2.
         let parsed = parse_invite(&outcome.invite).expect("parse invite");
         let keys = derive_room_keys(&parsed.room_secret);
-        let aad = crate::review::envelope::envelope_aad(&envelopes[1]);
+        let aad = crate::review::envelope::envelope_aad(&envelopes[2]);
         let nonce_bytes = URL_SAFE_NO_PAD
-            .decode(envelopes[1].nonce.as_bytes())
+            .decode(envelopes[2].nonce.as_bytes())
             .expect("nonce decodes");
         let nonce: crate::review::crypto::aead::AeadNonce =
             nonce_bytes.as_slice().try_into().expect("24-byte nonce");
         let ciphertext = URL_SAFE_NO_PAD
-            .decode(envelopes[1].ciphertext.as_bytes())
+            .decode(envelopes[2].ciphertext.as_bytes())
             .expect("ciphertext decodes");
         let ref_bytes = crate::review::crypto::aead::open(
             keys.snapshot_key.as_bytes(),
@@ -3457,11 +3534,11 @@ mod tests {
         let blob_ref: crate::review::model::BlobRef =
             serde_json::from_slice(&ref_bytes).expect("wrapper plaintext is a BlobRef");
         assert_eq!(blob_ref.storage, crate::review::model::BlobStorage::R2);
-        assert_eq!(blob_ref.blob_id, envelopes[1].envelope_id);
+        assert_eq!(blob_ref.blob_id, envelopes[2].envelope_id);
 
         // The owner still persists the decrypted bytes + node locally.
         let stored_blob = store
-            .load_snapshot_blob(&outcome.room_id, &envelopes[1].envelope_id)
+            .load_snapshot_blob(&outcome.room_id, &envelopes[2].envelope_id)
             .expect("load blob")
             .expect("blob persisted");
         assert_eq!(stored_blob.len() as u64, blob_ref.byte_length);

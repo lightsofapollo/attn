@@ -457,10 +457,16 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 submit_review_command(state, ReviewCommand::SendCollab { room_id, payload });
             }
             IpcMessage::ReviewSetDisplayName { name } => {
-                // Direct identity write (not a ReviewManager command). The next
-                // Share/Join reads the updated identity. Don't log the name.
+                // Direct identity write, then a manager command to re-announce
+                // the new name into every ACTIVE room — the onboarding prompt
+                // fires after a room is entered, so without the re-announce a
+                // name typed there never reached the already-joined room and
+                // comments kept showing the stale identity. Don't log the name.
                 match crate::review::bootstrap::set_display_name(&name) {
-                    Ok(_) => tracing::info!("review display name updated"),
+                    Ok(_) => {
+                        tracing::info!("review display name updated");
+                        submit_review_command(state, ReviewCommand::ReannounceIdentity);
+                    }
                     Err(e) => tracing::warn!("failed to set display name: {e}"),
                 }
             }

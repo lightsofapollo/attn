@@ -314,7 +314,7 @@
       <textarea
         id="suggestion-composer-text"
         rows={4}
-        class="resize-none rounded-sm border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+        class="resize-none rounded-sm border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground focus:outline-none focus:border-ring focus:ring-[3px] focus:ring-ring/50"
         placeholder="New text..."
         bind:value={replacementText}
         data-slot="suggestion-composer-text"
@@ -332,7 +332,7 @@
       <textarea
         id="suggestion-composer-text"
         rows={4}
-        class="resize-none rounded-sm border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+        class="resize-none rounded-sm border border-border bg-background px-2 py-1.5 font-mono text-xs text-foreground focus:outline-none focus:border-ring focus:ring-[3px] focus:ring-ring/50"
         placeholder="Text to insert..."
         bind:value={insertText}
         data-slot="suggestion-composer-text"
@@ -351,7 +351,7 @@
     <textarea
       id="suggestion-composer-note"
       rows={4}
-      class="resize-none rounded-sm border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+      class="resize-none rounded-sm border border-border bg-background px-2 py-1.5 text-xs text-foreground focus:outline-none focus:border-ring focus:ring-[3px] focus:ring-ring/50"
       placeholder="Why this change?"
       bind:value={note}
       data-slot="suggestion-composer-note"

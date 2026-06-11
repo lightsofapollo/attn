@@ -80,6 +80,68 @@ export function layoutCards(
   });
 }
 
+export interface FitBottomOptions {
+  /** Height of the (non-scrolling) margin container in px. */
+  containerHeight: number;
+  /** Vertical gap kept between cascaded cards. Default 8. */
+  gutter?: number;
+  /** Gap kept between the lowest fitted card and the container bottom.
+   *  Default 0 — the rail's clip wrapper already supplies the visual gap. */
+  bottomClearance?: number;
+}
+
+/**
+ * Bottom-fit pass (attn user feedback: "comments are sometimes cut off at
+ * the bottom of the rail — they should always be completely visible").
+ *
+ * The down-pass (`layoutCards`) never places a card above its anchor, so a
+ * card whose anchored text sits near the viewport bottom extends past the
+ * rail and clips. This second pass walks placements bottom-up and shifts a
+ * card UP — above its anchor if necessary, Google-Docs style — so that any
+ * card whose ANCHOR is within the container stays fully visible, cascading
+ * the shift to the cards above so nothing overlaps. Cards whose anchors are
+ * below the fold are left alone: they belong off-screen with their text
+ * (attn-23m scroll tracking). Shifted cards are flagged `offset` so the
+ * connector layer draws their displacement line.
+ *
+ * Pure helper — no DOM access. Tests in `margin-layout.test.ts`.
+ */
+export function fitBottom(
+  placed: MarginCardPlacement[],
+  cardHeights: Map<string, number>,
+  opts: FitBottomOptions,
+): MarginCardPlacement[] {
+  if (placed.length === 0 || opts.containerHeight <= 0) return placed;
+  const gutter = opts.gutter ?? 8;
+  const limit = opts.containerHeight - (opts.bottomClearance ?? 0);
+
+  const sorted = [...placed].sort((a, b) => a.top - b.top);
+  const adjusted = new Map<string, MarginCardPlacement>();
+  // The top edge the card below this one ended up at (∞ for the last card).
+  let belowTop = Infinity;
+  for (let i = sorted.length - 1; i >= 0; i -= 1) {
+    const p = sorted[i];
+    const h = cardHeights.get(p.id) ?? 0;
+    let top = p.top;
+    if (p.anchorY < opts.containerHeight) {
+      // Anchor on screen → the whole card must be too.
+      top = Math.min(top, limit - h);
+    }
+    // Never overlap the (possibly shifted) card below. For unshifted
+    // neighbours this is a no-op: the down-pass already guaranteed the gap.
+    top = Math.min(top, belowTop - gutter - h);
+    belowTop = top;
+    adjusted.set(p.id, {
+      ...p,
+      top,
+      offset: p.offset || top !== p.top,
+    });
+  }
+
+  // Preserve caller order.
+  return placed.map((p) => adjusted.get(p.id) ?? p);
+}
+
 export interface VisibleBandOptions {
   /** Viewport top (scroll position) in px. */
   viewportTop: number;

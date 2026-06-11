@@ -89,8 +89,13 @@ export class CollabController {
   private readonly isOwner: boolean;
   private readonly send: SendSignalFn;
   private readonly selfClientId: string;
-  private readonly selfLabel: string;
+  /** Mutable: the NamePrompt can rename the user AFTER collab starts —
+   *  see `setSelfLabel`. */
+  private selfLabel: string;
   private readonly selfColor: string;
+  /** Last caret head broadcast, so a label change can re-announce the
+   *  caret in place instead of waiting for the next caret move. */
+  private lastCursorHead: number | null = null;
   private readonly onRemoteCursors: ((cursors: RemoteCursor[]) => void) | null;
   private readonly getLocation: (() => CollabPeerLocation | null) | null;
   private readonly onPeerLocation: ((deviceId: string, location: CollabPeerLocation) => void) | null;
@@ -202,6 +207,7 @@ export class CollabController {
    * and receives these.
    */
   broadcastCursor(head: number): void {
+    this.lastCursorHead = head;
     const location = this.getLocation?.() ?? undefined;
     this.send(
       JSON.stringify({
@@ -215,6 +221,23 @@ export class CollabController {
         },
       } satisfies CollabWireMessage),
     );
+  }
+
+  /**
+   * Update the caret label mid-session. The onboarding NamePrompt fires
+   * AFTER a room is entered, so the construction-time label (the git/OS
+   * default) goes stale the moment the user picks a real name — peers'
+   * caret chips kept showing the old name. Re-broadcasts the last caret
+   * position so the rename lands immediately instead of on the next
+   * caret move.
+   */
+  setSelfLabel(label: string): void {
+    const trimmed = label.trim();
+    if (trimmed.length === 0 || trimmed === this.selfLabel) return;
+    this.selfLabel = trimmed;
+    if (this.lastCursorHead !== null) {
+      this.broadcastCursor(this.lastCursorHead);
+    }
   }
 
   /**

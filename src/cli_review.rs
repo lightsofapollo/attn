@@ -247,6 +247,26 @@ fn run_agent(share: Option<&str>, mode: &str, relay_url_override: Option<&str>) 
     crate::review::agent::run(share, mode, relay_url_override)
 }
 
+/// Validate an invite client-side before shipping it to the daemon.
+///
+/// The daemon-routed join is fire-and-forget over the unix socket: the
+/// daemon parses the invite asynchronously and a malformed one fails
+/// *silently* from the CLI's perspective — `attn review join <garbage>`
+/// used to print "join request sent" and exit 0 (e.g. when a user pasted
+/// the ShareDialog's full `npx attnmd review join 'attn://…'` one-liner as
+/// the invite). Reuse the same `parse_invite` the daemon runs so the CLI
+/// rejects exactly what the daemon would.
+fn validate_invite_for_join(invite: &str) -> Result<()> {
+    crate::review::bootstrap::parse_invite(invite).map_err(|e| {
+        anyhow::anyhow!(
+            "invalid review invite ({e}).\n\
+             Expected an invite URL like attn://review/<roomId>#key=<secret> — \
+             copy the link from the owner's Share dialog."
+        )
+    })?;
+    Ok(())
+}
+
 /// Hand the invite to the running attn daemon so it joins as its OWN device
 /// identity (the same device the app window presents). This keeps the CLI join
 /// consistent with the daemon — a no-`--as-agent` join shows up in the app.
@@ -255,6 +275,7 @@ fn run_agent(share: Option<&str>, mode: &str, relay_url_override: Option<&str>) 
 /// socket, then deliver the invite. That keeps the invite one-liner useful for
 /// first-time reviewers instead of requiring a separate "open attn" step.
 fn run_join_via_daemon(invite: &str) -> Result<()> {
+    validate_invite_for_join(invite)?;
     crate::daemon::replace_stale_daemon().context("check running attn daemon")?;
     match crate::daemon::send_review_join(invite) {
         Ok(()) => {
@@ -485,6 +506,37 @@ mod tests {
             }
             other => panic!("expected Join, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn daemon_join_rejects_garbage_invites_before_sending() {
+        // A non-invite (here: the ShareDialog's full npx one-liner pasted as
+        // the invite) must fail loudly client-side instead of being shipped
+        // to the daemon, which parses it asynchronously and fails silently.
+        for garbage in [
+            "npx attnmd review join 'attn://review/abc#key=AAAA'",
+            "not-an-invite",
+            "",
+            "attn://wrong/abc#key=AAAA",
+        ] {
+            let err = validate_invite_for_join(garbage)
+                .expect_err(&format!("garbage invite must be rejected: {garbage:?}"));
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("attn://review/"),
+                "error should show the expected invite shape, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_join_accepts_a_well_formed_invite() {
+        // Build a real invite the same way the owner's Share path does, so
+        // this stays in lockstep with `parse_invite`.
+        let secret = [0x5Cu8; 32];
+        let room_id = crate::review::crypto::kdf::derive_room_id(&secret);
+        let invite = crate::review::bootstrap::build_invite_url(&room_id, &secret);
+        validate_invite_for_join(&invite).expect("well-formed invite must validate");
     }
 
     #[test]

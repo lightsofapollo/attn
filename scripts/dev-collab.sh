@@ -153,9 +153,21 @@ join_reviewer() {
     log "(The reviewer window shows '$REVIEWER_FIXTURE_PATH' until it joins.) Copy the invite, then paste it here."
     log "(Empty line cancels and leaves the daemons running.)"
     printf 'Paste invite > '
-    IFS= read -r invite || true
-    if [ -z "$invite" ]; then
+    IFS= read -r pasted || true
+    if [ -z "$pasted" ]; then
         log "No invite supplied — daemons remain up. Ctrl+C to stop."
+        return 0
+    fi
+
+    # The share dialog offers two copyable things: the bare attn:// URL and
+    # the full `npx attnmd review join 'attn://…'` one-liner. Accept either
+    # (plus stray quotes/whitespace) by extracting the invite URL from
+    # whatever was pasted — passing the npx command through verbatim used to
+    # send garbage to the daemon while this script still claimed success.
+    invite=$(printf '%s' "$pasted" | grep -oE "attn://review/[^'\"[:space:]]+" | head -1)
+    if [ -z "$invite" ]; then
+        err "no attn://review/… invite found in the pasted text — copy either the Direct link or the npx command from the Share dialog"
+        log "Daemons remain up. Ctrl+C to stop."
         return 0
     fi
 

@@ -792,16 +792,39 @@ impl Bootstrapper {
         identity: &DeviceIdentity,
         now_ms: u64,
     ) -> Result<(), BootstrapError> {
+        self.announce_participant(
+            room_id,
+            room_keys,
+            policy,
+            identity,
+            ParticipantKind::Owner,
+            now_ms,
+        )
+    }
+
+    /// Sign + enqueue a `ParticipantJoined` announce for the local identity
+    /// with the given kind. Shared by the owner's share-time announce and
+    /// `reannounce_identity` (display-name changes). Re-announcing is
+    /// harmless: frontends key names by participantId, last write wins.
+    fn announce_participant(
+        &self,
+        room_id: &RoomId,
+        room_keys: &RoomKeys,
+        policy: &RoomPolicy,
+        identity: &DeviceIdentity,
+        kind: ParticipantKind,
+        now_ms: u64,
+    ) -> Result<(), BootstrapError> {
         let participant_id = identity.typed_participant_id();
         let device_id = identity.typed_device_id();
-        let owner_participant = Participant {
+        let participant = Participant {
             participant_id: participant_id.clone(),
             display_name: identity.effective_display_name(),
-            kind: ParticipantKind::Owner,
+            kind,
             public_signing_key: identity.public_signing_key.clone(),
-            capabilities: agent_capabilities(ParticipantKind::Owner),
+            capabilities: agent_capabilities(kind),
         };
-        let owner_device = Device {
+        let device = Device {
             device_id: device_id.clone(),
             participant_id: participant_id.clone(),
             public_encryption_key: identity.public_encryption_key.clone(),
@@ -810,8 +833,8 @@ impl Bootstrapper {
             created_at: now_ms,
         };
         let joined_body = ReviewEventBody::ParticipantJoined {
-            participant: owner_participant,
-            device: owner_device,
+            participant,
+            device,
         };
         let joined_envelope = assemble_event_envelope(AssembleInput {
             event_key: *room_keys.event_key.as_bytes(),
@@ -827,15 +850,39 @@ impl Bootstrapper {
             kind: EnvelopeKind::Event,
             client_nonce: None,
         })
-        .map_err(|e| {
-            BootstrapError::Crypto(format!("assemble owner ParticipantJoined envelope: {e}"))
-        })?;
+        .map_err(|e| BootstrapError::Crypto(format!("assemble ParticipantJoined envelope: {e}")))?;
         self.store
             .append_outbox(room_id, &joined_envelope)
-            .map_err(|e| {
-                BootstrapError::Store(format!("append owner ParticipantJoined outbox: {e}"))
-            })?;
+            .map_err(|e| BootstrapError::Store(format!("append ParticipantJoined outbox: {e}")))?;
         Ok(())
+    }
+
+    /// Re-announce the local identity into an existing room — the fix for
+    /// "I renamed myself but my comments still show the old name": the
+    /// original `ParticipantJoined` is emitted at share/join time with the
+    /// then-current name, and the onboarding NamePrompt fires AFTER a room
+    /// is entered, so a name typed there never reached already-active
+    /// rooms. Reads the room secret + policy from disk; the caller supplies
+    /// the participant kind (owner for locally-shared rooms, reviewer
+    /// otherwise).
+    pub fn reannounce_identity(
+        &self,
+        room_id: &RoomId,
+        kind: ParticipantKind,
+    ) -> Result<(), BootstrapError> {
+        let identity_dir = self.config.identity_dir()?;
+        let identity = load_or_create_identity_in(&identity_dir)?;
+        let secret = load_room_secret(self.store.root(), room_id)?;
+        let keys = derive_room_keys(&secret);
+        let now_ms = unix_now_ms();
+        let policy = self
+            .store
+            .load_room(room_id)
+            .ok()
+            .flatten()
+            .map(|r| r.policy)
+            .unwrap_or_else(|| default_room_policy(now_ms));
+        self.announce_participant(room_id, &keys, &policy, &identity, kind, now_ms)
     }
 
     pub async fn share(
@@ -1276,19 +1323,31 @@ impl Bootstrapper {
 
         // 5. Persist a local `ReviewRoom`. The reviewer view starts empty —
         //    documents/snapshots fill in as snapshot envelopes arrive.
-        let review_room = ReviewRoom {
-            v: 2,
-            room_id: parsed.room_id.clone(),
-            created_at: now_ms,
-            created_by: participant_id.clone(),
-            policy,
-            documents: Default::default(),
-            snapshots: Default::default(),
-            event_heads: vec![],
-        };
-        self.store
-            .save_room(&review_room)
-            .map_err(|e| BootstrapError::Store(format!("save_room: {e}")))?;
+        //    Only on FIRST join though: a re-join over persisted state
+        //    (same invite pasted twice, daemon restart + join) must not
+        //    clobber the room.json that already accumulated
+        //    documents/snapshots/event_heads — overwriting it with this
+        //    empty shell orphaned the locally stored room state (attn-6dd).
+        let already_known = self
+            .store
+            .load_room(&parsed.room_id)
+            .map_err(|e| BootstrapError::Store(format!("load_room: {e}")))?
+            .is_some();
+        if !already_known {
+            let review_room = ReviewRoom {
+                v: 2,
+                room_id: parsed.room_id.clone(),
+                created_at: now_ms,
+                created_by: participant_id.clone(),
+                policy,
+                documents: Default::default(),
+                snapshots: Default::default(),
+                event_heads: vec![],
+            };
+            self.store
+                .save_room(&review_room)
+                .map_err(|e| BootstrapError::Store(format!("save_room: {e}")))?;
+        }
         save_room_secret(self.store.root(), &parsed.room_id, &parsed.room_secret)?;
 
         Ok(JoinOutcome {
@@ -3041,6 +3100,153 @@ mod tests {
             .collect::<anyhow::Result<_>>()
             .expect("decode");
         assert_eq!(envelopes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejoin_preserves_existing_room_state() {
+        // attn-6dd: step 5 of `join_with_identity` used to unconditionally
+        // overwrite room.json with a fresh empty `ReviewRoom`. On a RE-join
+        // (same invite pasted again, or a daemon restart followed by a join)
+        // that clobbered the documents/snapshots/event_heads the room had
+        // accumulated. Re-join must keep the existing room.json intact.
+        let server = MockServer::start().await;
+        let id_dir = TempDir::new().expect("id tempdir");
+        let (_store_tmp, store, boot) =
+            make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
+
+        let secret = [0x4Bu8; 32];
+        let room_id = derive_room_id(&secret);
+        let invite = build_invite_url(&room_id, &secret);
+
+        Mock::given(method("POST"))
+            .and(path_regex_for_room_create())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "roomId": "x",
+                "createdAt": 0u64,
+                "expiresAt": 0u64,
+                "policy": {},
+                "ownerSigningKeyId": "k",
+                "serverSeq": 0,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex_for_devices())
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex_for_devices())
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "devices": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        // First join persists the fresh empty room.
+        boot.join(&invite, None).await.expect("first join");
+        let mut room = store
+            .load_room(&room_id)
+            .expect("load")
+            .expect("room.json exists after first join");
+        assert!(room.event_heads.is_empty());
+
+        // Simulate accumulated state between sessions.
+        let head: crate::review::ids::EventId =
+            serde_json::from_value(serde_json::Value::String("evt-head-1".into()))
+                .expect("EventId deserializes");
+        room.event_heads = vec![head.clone()];
+        store.save_room(&room).expect("save mutated room");
+
+        // Re-join with the same invite must NOT reset the room.
+        boot.join(&invite, None).await.expect("re-join");
+        let room_after = store
+            .load_room(&room_id)
+            .expect("load")
+            .expect("room.json still exists");
+        assert_eq!(
+            room_after.event_heads,
+            vec![head],
+            "re-join must not clobber room.json with an empty ReviewRoom"
+        );
+    }
+
+    #[tokio::test]
+    async fn reannounce_identity_emits_participant_joined_with_fresh_name() {
+        // The onboarding NamePrompt fires AFTER a room is entered, so the
+        // join-time ParticipantJoined carries the stale default name.
+        // `reannounce_identity` must enqueue a fresh PJ with the renamed
+        // identity so all windows re-resolve the author.
+        let server = MockServer::start().await;
+        let id_dir = TempDir::new().expect("id tempdir");
+        let (_store_tmp, store, boot) =
+            make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
+
+        let secret = [0x5Cu8; 32];
+        let room_id = derive_room_id(&secret);
+        let invite = build_invite_url(&room_id, &secret);
+
+        Mock::given(method("POST"))
+            .and(path_regex_for_room_create())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "roomId": "x",
+                "createdAt": 0u64,
+                "expiresAt": 0u64,
+                "policy": {},
+                "ownerSigningKeyId": "k",
+                "serverSeq": 0,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex_for_devices())
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex_for_devices())
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "devices": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        boot.join(&invite, None).await.expect("join");
+
+        // Rename AFTER joining — the user's exact flow.
+        set_display_name_in(id_dir.path(), "Reader").expect("rename");
+        boot.reannounce_identity(&room_id, ParticipantKind::Reviewer)
+            .expect("reannounce");
+
+        let envelopes: Vec<MailboxEnvelope> = store
+            .iter_outbox(&room_id)
+            .expect("iter")
+            .collect::<anyhow::Result<_>>()
+            .expect("decode");
+        // Join-time PJ plus the re-announce.
+        assert_eq!(envelopes.len(), 2);
+        let env = &envelopes[1];
+        assert_eq!(env.kind, EnvelopeKind::Event);
+
+        // The re-announce decrypts to a participant_joined carrying the
+        // renamed identity.
+        let keys = derive_room_keys(&secret);
+        let aad = crate::review::envelope::envelope_aad(env);
+        let nonce_bytes = URL_SAFE_NO_PAD
+            .decode(env.nonce.as_bytes())
+            .expect("nonce decodes");
+        let nonce: crate::review::crypto::aead::AeadNonce =
+            nonce_bytes.as_slice().try_into().expect("24-byte nonce");
+        let ciphertext = URL_SAFE_NO_PAD
+            .decode(env.ciphertext.as_bytes())
+            .expect("ciphertext decodes");
+        let plaintext =
+            crate::review::crypto::aead::open(keys.event_key.as_bytes(), &nonce, &ciphertext, &aad)
+                .expect("event opens under eventKey");
+        let event: serde_json::Value = serde_json::from_slice(&plaintext).expect("event JSON");
+        assert_eq!(event["body"]["type"], "participant_joined");
+        assert_eq!(event["body"]["participant"]["displayName"], "Reader");
+        assert_eq!(event["body"]["participant"]["kind"], "reviewer");
     }
 
     #[tokio::test]

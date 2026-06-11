@@ -9,7 +9,7 @@
 // `planning/collab/ui/review-panel-design.md` §1.3. `visibleCards`
 // implements the §6 virtualization band.
 
-import { layoutCards, visibleCards } from './margin-layout';
+import { fitBottom, layoutCards, visibleCards } from './margin-layout';
 
 interface CaseResult {
   name: string;
@@ -154,6 +154,51 @@ defineCase('visibleCards: defaults bandPx=800 and includes near-viewport cards',
   const ids = out.map((p) => p.id);
   assert(ids.includes('near'), 'near should be included');
   assert(!ids.includes('far'), 'far should be excluded');
+});
+
+defineCase('fitBottom: an on-screen-anchored card never clips past the bottom', () => {
+  // Anchor at 540 in a 600px container; a 120px card would end at 660.
+  const placed = layoutCards([{ id: 'a', anchorY: 540, height: 120 }]);
+  const heights = new Map([['a', 120]]);
+  const fitted = fitBottom(placed, heights, { containerHeight: 600 });
+  assert(fitted[0]!.top === 480, `card lifted to fit: top=${fitted[0]!.top}`);
+  assert(fitted[0]!.offset === true, 'lifted card is flagged offset (connector)');
+});
+
+defineCase('fitBottom: cascading lift keeps the gutter between bottom cards', () => {
+  const inputs = [
+    { id: 'a', anchorY: 400, height: 120 },
+    { id: 'b', anchorY: 560, height: 120 },
+  ];
+  const heights = new Map(inputs.map((i) => [i.id, i.height]));
+  const fitted = fitBottom(layoutCards(inputs), heights, { containerHeight: 600 });
+  const b = fitted.find((p) => p.id === 'b')!;
+  const a = fitted.find((p) => p.id === 'a')!;
+  assert(b.top === 480, `bottom card fits: top=${b.top}`);
+  assert(a.top === 480 - 8 - 120, `upper card cascades up: top=${a.top}`);
+  assert(a.offset && b.offset, 'both lifted cards flagged offset');
+});
+
+defineCase('fitBottom: below-the-fold anchors keep tracking off-screen', () => {
+  // Anchor at 700 in a 600px container — its text is not visible, so the
+  // card must stay with it (attn-23m) instead of being yanked into view.
+  const placed = layoutCards([{ id: 'a', anchorY: 700, height: 120 }]);
+  const heights = new Map([['a', 120]]);
+  const fitted = fitBottom(placed, heights, { containerHeight: 600 });
+  assert(fitted[0]!.top === 700, 'off-screen card untouched');
+  assert(fitted[0]!.offset === false, 'not flagged offset');
+});
+
+defineCase('fitBottom: mid-viewport cards are untouched and order is preserved', () => {
+  const inputs = [
+    { id: 'mid', anchorY: 100, height: 96 },
+    { id: 'low', anchorY: 560, height: 96 },
+  ];
+  const heights = new Map(inputs.map((i) => [i.id, i.height]));
+  const fitted = fitBottom(layoutCards(inputs), heights, { containerHeight: 600 });
+  assert(fitted[0]!.id === 'mid' && fitted[1]!.id === 'low', 'caller order kept');
+  assert(fitted[0]!.top === 100 && fitted[0]!.offset === false, 'mid card untouched');
+  assert(fitted[1]!.top === 504, `low card fitted: top=${fitted[1]!.top}`);
 });
 
 // ---------------------------------------------------------------------------

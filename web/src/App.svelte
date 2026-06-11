@@ -589,6 +589,19 @@
     });
   }
 
+  // Keep the live caret label in sync with renames: the onboarding
+  // NamePrompt fires AFTER a room is entered, so the label captured when
+  // the CollabController was constructed (the git/OS default) goes stale
+  // the moment the user picks a real name — peers' caret chips kept
+  // showing the old name (attn-k1n follow-up). The controller
+  // re-broadcasts the caret so the rename lands immediately.
+  $effect(() => {
+    const name = userProfile.effectiveName;
+    collabController?.setSelfLabel(
+      name || (collabRole === 'owner' ? 'Owner' : 'Reviewer'),
+    );
+  });
+
   // Base (earliest) snapshot markdown for a file in the current room. This is
   // the v0 every authority + resync replay anchors to, so the live editor seeds
   // from it (NOT the latest republished snapshot) and the full step log rebases
@@ -1684,6 +1697,14 @@
     // Capture the IPC capability token before we clear the payload — `send()`
     // attaches it to privileged messages so the daemon accepts them.
     setIpcToken(init.ipcToken);
+    // DEBUG BUILDS ONLY (daemon sets `debugBuild` from cfg!(debug_assertions),
+    // never in release): expose the session token on the main frame so the
+    // automation bridge (`attn --eval`, E2E suites) can drive privileged raw
+    // `window.ipc.postMessage` calls past the capability gate. Sandboxed
+    // HtmlViewer iframes have their own `window` and still never see it.
+    if (init.debugBuild && init.ipcToken) {
+      (window as { __attn_ipc_token__?: string }).__attn_ipc_token__ = init.ipcToken;
+    }
 
     // Clear so we only process once (prevents $effect re-entry)
     delete (window as { __attn_init__?: InitPayload }).__attn_init__;
@@ -2644,13 +2665,22 @@
              CSS transitions in occluded windows, which left the rail stuck
              mid-transition at ~1px (attn-23m), and an animating width also
              desyncs the breadcrumb inset. -->
+        <!-- Top border at the hairline weight of the header divider (the
+             earlier /60 + header border-b combination read as one thick
+             line). onwheel: the rail never scrolls itself (attn-23m), so
+             wheel gestures over it forward to the document viewport —
+             otherwise reading flow dead-stops whenever the pointer crosses
+             the rail. No preventDefault needed: nothing else scrolls here. -->
         <aside
-          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden border-l border-t border-border/60 data-[mode=hidden]:border-none bg-sidebar"
+          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden rounded-tl-lg border-l border-t border-border/40 data-[mode=hidden]:border-none bg-sidebar"
           style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={reviewStore.railMode}
           data-slot="right-rail"
           aria-hidden={reviewStore.railMode === 'hidden'}
+          onwheel={(e) => {
+            if (contentViewport) contentViewport.scrollTop += e.deltaY;
+          }}
         >
           {#if reviewStore.railMode !== 'hidden'}
             <div
@@ -2674,7 +2704,12 @@
                 {/if}
               </button>
             </div>
-            <div class="relative min-h-0 flex-1">
+            <!-- overflow-hidden + mb-2: cards/chips clip at this wrapper's
+                 bounds, keeping the rail's bottom 8px clear — the bottom
+                 counterpart of clampRailTop's breathing room (cards can't
+                 be pushed UP off their anchors, so the clip line is the
+                 only way to keep the bottom edge airy). -->
+            <div class="relative mb-2 min-h-0 flex-1 overflow-hidden">
               {#if rightRail}
                 {@render rightRail()}
               {:else}

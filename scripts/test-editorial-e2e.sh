@@ -96,7 +96,10 @@ rv --eval "window.__attn_user_profile__.save('$RVNAME');'x'" >/dev/null 2>&1
 poll 5000 sh -c "grep -q 'Riley Reviewer' '$RV_HOME/identity.json'" && ok "onboarding: reviewer name persisted to identity" || bad "onboarding: reviewer name not persisted"
 
 log "reviewer joins"
-rv --eval "window.ipc&&window.ipc.postMessage(JSON.stringify({type:'review_join',invite:'$INVITE'}));'x'" >/dev/null 2>&1
+# Daemon-routed CLI join (same path dev-collab uses). A raw postMessage join
+# is rejected by the IPC capability-token gate; the CLI rides the unix socket
+# straight into the ReviewManager, no token needed.
+rv review join "$INVITE" >/dev/null 2>&1 || bad "review join CLI exited non-zero"
 pm_ready(){ [ -n "$("$1" --eval "window.__attnPmView?'y':''" 2>/dev/null | tr -d '\"')" ]; }
 poll 30000 pm_ready rv && ok "reviewer editor live" || { bad "reviewer editor never live"; exit 1; }
 if poll 20000 has rv '[data-slot=shared-doc-banner]'; then ok "reviewer shows shared-doc banner"; else bad "reviewer never entered shared-doc view"; fi
@@ -136,8 +139,10 @@ case "$rvauthor" in
 esac
 
 # attn-1rm — reply via the real IPC the button sends; verify grouping on owner.
+# Raw postMessage needs the session capability token — debug builds expose it
+# to the automation bridge as window.__attn_ipc_token__ (App.svelte).
 log "reviewer replies ($REPLY)"
-rv --eval "(function(){var s=window.__attn_review_store__;var t=s.threadsForCurrentFile[0];if(!t||t.rootEvent.body.type!=='comment_created')return 'no-thread';window.ipc.postMessage(JSON.stringify({type:'review_create_comment',roomId:s.currentRoomId,anchor:t.rootEvent.body.anchor,body:'$REPLY',parentThreadId:t.id}));return 'sent'})()" >/dev/null 2>&1
+rv --eval "(function(){var s=window.__attn_review_store__;var t=s.threadsForCurrentFile[0];if(!t||t.rootEvent.body.type!=='comment_created')return 'no-thread';window.ipc.postMessage(JSON.stringify({type:'review_create_comment',roomId:s.currentRoomId,anchor:t.rootEvent.body.anchor,body:'$REPLY',parentThreadId:t.id,token:window.__attn_ipc_token__}));return 'sent'})()" >/dev/null 2>&1
 owner_reply(){ grep -rqa "$REPLY" "$OWNER_HOME/reviews" 2>/dev/null; }
 if poll 20000 owner_reply; then ok "attn-1rm: reply imported by owner"; else bad "attn-1rm: reply not imported"; fi
 threads=$(grep -rhoa '"threadId":"[^"]*"' "$OWNER_HOME/reviews" 2>/dev/null | sort -u | wc -l | tr -d ' ')
@@ -146,7 +151,7 @@ cc=$(grep -rhoa '"type":"comment_created"' "$OWNER_HOME/reviews" 2>/dev/null | w
 
 # attn-zhr — resolve via the real IPC the button sends; verify event on owner.
 log "reviewer resolves the thread"
-rv --eval "(function(){var s=window.__attn_review_store__;var t=s.threadsForCurrentFile[0];if(!t)return 'no-thread';window.ipc.postMessage(JSON.stringify({type:'review_resolve_comment',roomId:s.currentRoomId,threadId:t.id}));return 'sent'})()" >/dev/null 2>&1
+rv --eval "(function(){var s=window.__attn_review_store__;var t=s.threadsForCurrentFile[0];if(!t)return 'no-thread';window.ipc.postMessage(JSON.stringify({type:'review_resolve_comment',roomId:s.currentRoomId,threadId:t.id,token:window.__attn_ipc_token__}));return 'sent'})()" >/dev/null 2>&1
 owner_resolved(){ grep -rqa '"type":"comment_resolved"' "$OWNER_HOME/reviews" 2>/dev/null; }
 if poll 20000 owner_resolved; then ok "attn-zhr: CommentResolved imported by owner"; else bad "attn-zhr: no comment_resolved event"; fi
 
@@ -158,7 +163,7 @@ log "attn-tqq: room controls (switch list + leave)"
 # switcher RENDERS and drive leave via the exact IPC the button sends
 # (review_stop). The daemon Stop emits "Stopped" -> forgetRoom -> back to local.
 if poll 6000 has rv '.room-menu-trigger'; then ok "attn-tqq: room switcher present (ReviewBar dropdown lists rooms)"; else bad "attn-tqq: no room switcher"; fi
-rv --eval "window.ipc.postMessage(JSON.stringify({type:'review_stop',roomId:window.__attn_review_store__.currentRoomId}));'sent'" >/dev/null 2>&1
+rv --eval "window.ipc.postMessage(JSON.stringify({type:'review_stop',roomId:window.__attn_review_store__.currentRoomId,token:window.__attn_ipc_token__}));'sent'" >/dev/null 2>&1
 # Authoritative "left the room" signal: currentRoomId cleared (the shared-doc
 # banner follows reactively). Allow time for the daemon's transport teardown.
 room_cleared(){ [ "$(rv --eval "String(window.__attn_review_store__.currentRoomId)" 2>/dev/null | tr -d '"')" = "null" ]; }

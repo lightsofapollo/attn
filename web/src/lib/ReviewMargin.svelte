@@ -264,9 +264,10 @@
         if (pos === null) continue;
         const y = anchorTopY(v, pos);
         if (y === null) continue;
-        // Convert viewport-relative coords into container-relative coords
-        // so cards stack inside the overlay (which sits inside the editor
-        // scroll container — see §1.4).
+        // Convert viewport-relative coords into container-relative coords.
+        // These are positions "as currently on screen" — the scroll effect
+        // below (attn-23m) recomputes them on every document scroll, which
+        // is what keeps cards tied to their anchor text.
         out.set(t.id, y - containerTop);
       }
     }
@@ -355,10 +356,14 @@
     const inputs: MarginCardInput[] = [];
     for (const t of threads) {
       if (!t.resolved && !isThreadActive(t, locallyDismissed)) continue;
-      const y = anchorYs.get(t.id) ?? 0;
+      // Position-less threads (orphans, unresolvable anchors) pin below the
+      // dock. Visible anchors clamp below it too, but anchors scrolled
+      // ABOVE the viewport keep their negative y so the chip clips out of
+      // view with its text instead of piling at the gutter top.
+      const y = anchorYs.get(t.id) ?? COLLAPSED_RAIL_TOP_CLEARANCE;
       inputs.push({
         id: t.id,
-        anchorY: Math.max(y, COLLAPSED_RAIL_TOP_CLEARANCE),
+        anchorY: y < 0 ? y : Math.max(y, COLLAPSED_RAIL_TOP_CLEARANCE),
         height: RESOLVED_CHIP_HEIGHT,
       });
     }
@@ -558,27 +563,48 @@
     bumpRecalc();
   });
 
-  // Bump _recalcTick on a scroll/resize within the editor's scroll container
-  // (which is also our positioning ancestor — the right-rail aside).
+  // Keep cards tied to their anchors while the DOCUMENT scrolls (attn-23m).
+  //
+  // The margin lives inside the right-rail aside — a SIBLING of the editor's
+  // scroll container — and `anchorYs` is built from `view.coordsAtPos`
+  // (viewport-relative), so every document scroll invalidates every card
+  // position. The old listener attached to `containerEl.closest(...)
+  // ?? containerEl.parentElement`, which resolved to the aside itself — an
+  // element that never scrolls — so cards were positioned once on store
+  // changes and then froze while the text moved underneath them.
+  //
+  // Attach to the EDITOR's scroll viewport (found from `view.dom`, which is
+  // robust to layout reshuffles) and recompute per scroll tick; coordsAtPos
+  // then yields fresh viewport coords and the cards track their anchors
+  // 1:1, Google-Docs style. A ResizeObserver on the editor DOM catches
+  // typing/content reflows that shift anchor positions without scrolling.
+  // The aside itself no longer scrolls (overflow-hidden in App.svelte), so
+  // document scroll is the single source of vertical movement.
   $effect(() => {
     if (!containerEl) return;
-    const scrollParent = containerEl.closest('[data-slot="scroll-area-viewport"]')
-      ?? containerEl.parentElement;
+    const v = view;
+    const editorViewport = v?.dom.closest<HTMLElement>(
+      '[data-slot="scroll-area-viewport"]',
+    ) ?? null;
     const handler = (): void => {
       bumpRecalc();
-      if (scrollParent) {
-        viewportTop = (scrollParent as HTMLElement).scrollTop;
-        viewportHeight = (scrollParent as HTMLElement).clientHeight;
-      }
+      // Card tops are viewport-anchored container coords now, so the
+      // virtualization band is simply the container's own box.
+      viewportTop = 0;
+      viewportHeight = containerEl?.clientHeight ?? 0;
     };
     handler();
-    if (scrollParent) {
-      scrollParent.addEventListener('scroll', handler, { passive: true });
-    }
+    editorViewport?.addEventListener('scroll', handler, { passive: true });
     window.addEventListener('resize', handler);
+    let resizeObserver: ResizeObserver | null = null;
+    if (v && typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(handler);
+      resizeObserver.observe(v.dom);
+    }
     return () => {
-      if (scrollParent) scrollParent.removeEventListener('scroll', handler);
+      editorViewport?.removeEventListener('scroll', handler);
       window.removeEventListener('resize', handler);
+      resizeObserver?.disconnect();
     };
   });
 
@@ -968,11 +994,11 @@
 </div>
 
 <style>
-  /* The overlay is positioned absolute *inside* the editor scroll container
-     (§1.4). The parent `<aside>` in App.svelte supplies the width slot —
-     320px in full mode, 48px in the slim resolved-only gutter — so this
-     container tracks it at 100% (a fixed 320px child inside the 48px aside
-     with overflow-x-hidden would push the chips out of view). */
+  /* The overlay fills the (non-scrolling) right-rail aside; card tops are
+     viewport-anchored and recomputed per document scroll (attn-23m). The
+     aside supplies the width slot — 320px expanded, 48px collapsed gutter —
+     so this container tracks it at 100% (a fixed 320px child inside the
+     48px aside with overflow hidden would push the chips out of view). */
   .review-margin {
     position: relative;
     width: 100%;
@@ -982,14 +1008,13 @@
     color: var(--foreground, inherit);
   }
 
-  /* Sticky-top orphan tray (§2). z-indexed above anchored cards so it
-     pins while the user scrolls past them. Inset from the rail edges
-     like the card slots, and cleared below the floating ReviewBar dock
-     (which overlays the rail's top ~46px) both at rest and when pinned
-     (attn-42y). */
+  /* Orphan tray (§2), pinned at the rail top. z-indexed above anchored
+     cards. Inset from the rail edges like the card slots and cleared
+     below the floating ReviewBar dock (attn-42y). The rail no longer
+     scrolls itself (the document's scroll drives card positions —
+     attn-23m), so plain flow position keeps it visible permanently. */
   .review-margin-tray {
-    position: sticky;
-    top: 56px;
+    position: relative;
     z-index: 2;
     background: var(--background, #fff);
     border: 1px solid var(--border, rgba(0, 0, 0, 0.10));
@@ -1106,12 +1131,15 @@
     filter: brightness(1.06);
   }
 
-  /* Bottom pill — shown when collapsed-resolved count exceeds threshold. */
+  /* Bottom pill — shown when collapsed-resolved count exceeds threshold.
+     Absolute (not sticky): the rail doesn't scroll, so sticky would
+     render at the static position near the rail top (attn-23m). */
   .review-margin-resolved-pill {
-    position: sticky;
+    position: absolute;
     bottom: 8px;
-    width: calc(100% - 24px);
-    margin: 0 12px;
+    left: 12px;
+    right: 12px;
+    width: auto;
     box-sizing: border-box;
     padding: 6px 12px;
     background: var(--muted, rgba(0, 0, 0, 0.04));
@@ -1138,10 +1166,12 @@
   }
 
   /* Floating overlay shown while a stale card waits for a new anchor. */
+  /* Absolute for the same non-scrolling-rail reason as the pill. */
   .review-margin-reanchor-overlay {
-    position: sticky;
+    position: absolute;
     bottom: 8px;
-    margin: 12px 12px 0;
+    left: 12px;
+    right: 12px;
     padding: 10px 12px;
     background: var(--popover, var(--background, #fff));
     border: 1px solid var(--destructive, #dc2626);

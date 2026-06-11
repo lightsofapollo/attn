@@ -386,8 +386,8 @@ echo "--- Collapsed gutter (resolved-only margin, default) ---"
 result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"collapsed"')
 assert_eq "Rail data-mode is collapsed (no unresolved threads)" "$result" '"collapsed"'
 
-result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth <= 60" 'true')
-assert_eq "Rail width collapsed to the gutter (≤60px)" "$result" "true"
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '48')
+assert_eq "Rail width is exactly the 48px gutter" "$result" "48"
 
 result=$("$ATTN" --query '[data-testid="review-margin-resolved-chip"]' | jq -r '.count' 2>/dev/null || echo "0")
 assert_eq "One resolved chip rendered" "$result" "1"
@@ -406,6 +406,9 @@ echo "--- Expand ✓ chip → rail expands with read-only card ---"
 
 result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"expanded"')
 assert_eq "Rail expands on chip click" "$result" '"expanded"'
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '320')
+assert_eq "Rail width is exactly 320px when expanded" "$result" "320"
 
 result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]') !== null" 'true')
 assert_eq "Resolved card rendered" "$result" "true"
@@ -490,6 +493,57 @@ result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\
 assert_eq "Thread card visible after avatar expand" "$result" "true"
 
 screenshot "08-avatar-expanded"
+
+echo ""
+echo "--- Cards track their anchors while the document scrolls (attn-23m) ---"
+# Scroll the EDITOR viewport and assert the card's on-screen top moves by
+# the same amount (opposite sign). Tolerance ±4px for rounding/collision.
+scroll_js=$(cat <<'EOF'
+(() => {
+  const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
+  const vp = document.querySelector('.attn-content-viewport [data-slot="scroll-area-viewport"]');
+  if (!card || !vp) return 'missing';
+  const before = card.getBoundingClientRect().top;
+  vp.scrollTop = 150;
+  const scrolled = vp.scrollTop;
+  window.__attn_scroll_probe__ = { before, scrolled };
+  return scrolled > 0 ? 'scrolled' : 'no-scroll';
+})()
+EOF
+)
+result=$("$ATTN" --eval "$scroll_js")
+assert_eq "Editor viewport scrolled" "$result" '"scrolled"'
+
+verify_js=$(cat <<'EOF'
+(() => {
+  const probe = window.__attn_scroll_probe__;
+  const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
+  if (!probe || !card) return 'missing';
+  const after = card.getBoundingClientRect().top;
+  const drift = Math.abs((probe.before - after) - probe.scrolled);
+  return drift <= 4 ? 'tracked' : `drifted by ${Math.round(drift)}px (before ${Math.round(probe.before)}, after ${Math.round(after)}, scrolled ${probe.scrolled})`;
+})()
+EOF
+)
+result=$(poll_eval "$verify_js" '"tracked"')
+assert_eq "Card moved 1:1 with the document scroll" "$result" '"tracked"'
+
+# Scroll back and confirm it returns to its original position.
+"$ATTN" --eval "document.querySelector('.attn-content-viewport [data-slot=\\\"scroll-area-viewport\\\"]').scrollTop = 0" >/dev/null
+restore_js=$(cat <<'EOF'
+(() => {
+  const probe = window.__attn_scroll_probe__;
+  const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
+  if (!probe || !card) return 'missing';
+  const drift = Math.abs(card.getBoundingClientRect().top - probe.before);
+  return drift <= 4 ? 'restored' : `off by ${Math.round(drift)}px`;
+})()
+EOF
+)
+result=$(poll_eval "$restore_js" '"restored"')
+assert_eq "Card returns to its anchor when scrolled back" "$result" '"restored"'
+
+screenshot "09-scroll-tracking"
 
 # ===================================================================
 # Summary

@@ -2598,8 +2598,15 @@
         <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
           {@render mainContent()}
         </div>
+        <!-- overflow-hidden (not auto): the rail must never scroll
+             independently — cards are repositioned per document scroll so
+             they stay tied to their anchors (attn-23m); off-screen cards
+             clip with their text. Width changes are INSTANT: WebKit pauses
+             CSS transitions in occluded windows, which left the rail stuck
+             mid-transition at ~1px (attn-23m), and an animating width also
+             desyncs the breadcrumb inset. -->
         <aside
-          class="right-rail relative flex h-full shrink-0 flex-col overflow-y-auto overflow-x-hidden border-l border-border/60 bg-sidebar transition-[width] duration-200 ease-linear data-[mode=hidden]:border-l-0"
+          class="right-rail relative flex h-full shrink-0 flex-col overflow-hidden border-l border-border/60 bg-sidebar data-[mode=hidden]:border-l-0"
           style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={reviewStore.railMode}

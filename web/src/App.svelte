@@ -2774,4 +2774,6 @@
   onSearchQuery={handleCommandPaletteSearchQuery}
   onSelect={(path) => openPath(path, detectFileType(path))}
 />
-<Toaster />
+<!-- closeButton: every toast (update nudge, file-changed, etc.) gets a
+     dismiss ✕ instead of forcing the user to wait out the timeout. -->
+<Toaster closeButton />

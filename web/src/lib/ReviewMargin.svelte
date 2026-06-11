@@ -252,12 +252,20 @@
     _recalcTick = untrack(() => _recalcTick) + 1;
   }
 
+  // Last-seen container top in viewport coords. Plain (non-reactive) on
+  // purpose: refreshed by the `anchorYs` derived (which every placement
+  // pass depends on), and read by the collapsed-chip clamp to tell
+  // "anchor is in the header band above the rail" (pin the chip) apart
+  // from "anchor scrolled above the window" (let the chip clip away).
+  let lastContainerTop = 0;
+
   const anchorYs: Map<string, number> = $derived.by(() => {
     void _recalcTick; // force recompute on tick bump
     const out = new Map<string, number>();
     const v = view;
     const containerRect = containerEl?.getBoundingClientRect();
     const containerTop = containerRect?.top ?? 0;
+    lastContainerTop = containerTop;
     if (v) {
       for (const t of anchoredThreads) {
         const pos = pmStartForThread(t);
@@ -356,14 +364,17 @@
     const inputs: MarginCardInput[] = [];
     for (const t of threads) {
       if (!t.resolved && !isThreadActive(t, locallyDismissed)) continue;
-      // Position-less threads (orphans, unresolvable anchors) pin below the
-      // dock. Visible anchors clamp below it too, but anchors scrolled
-      // ABOVE the viewport keep their negative y so the chip clips out of
-      // view with its text instead of piling at the gutter top.
+      // Position-less threads (orphans, unresolvable anchors) pin at the
+      // gutter top. Anchors that are still ON SCREEN — including the
+      // header band above the rail's own top — clamp into the gutter so
+      // a comment on the first visible line keeps its chip; only anchors
+      // scrolled above the WINDOW keep a negative y and clip away with
+      // their text.
       const y = anchorYs.get(t.id) ?? COLLAPSED_RAIL_TOP_CLEARANCE;
+      const viewportY = y + lastContainerTop;
       inputs.push({
         id: t.id,
-        anchorY: y < 0 ? y : Math.max(y, COLLAPSED_RAIL_TOP_CLEARANCE),
+        anchorY: viewportY < 0 ? y : Math.max(y, COLLAPSED_RAIL_TOP_CLEARANCE),
         height: RESOLVED_CHIP_HEIGHT,
       });
     }
@@ -1008,10 +1019,10 @@
     color: var(--foreground, inherit);
   }
 
-  /* Orphan tray (§2), pinned at the rail top. z-indexed above anchored
-     cards. Inset from the rail edges like the card slots and cleared
-     below the floating ReviewBar dock (attn-42y). The rail no longer
-     scrolls itself (the document's scroll drives card positions —
+  /* Orphan tray (§2), pinned at the rail top (below the rail header row,
+     which is structural in App.svelte now). z-indexed above anchored
+     cards, inset from the rail edges like the card slots. The rail
+     doesn't scroll itself (the document's scroll drives card positions —
      attn-23m), so plain flow position keeps it visible permanently. */
   .review-margin-tray {
     position: relative;
@@ -1020,7 +1031,7 @@
     border: 1px solid var(--border, rgba(0, 0, 0, 0.10));
     border-radius: 6px;
     padding: 6px;
-    margin: 56px 12px 8px;
+    margin: 8px 12px;
     max-height: 40vh;
     overflow: auto;
   }

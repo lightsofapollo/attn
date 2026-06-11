@@ -284,7 +284,11 @@
     <Dialog.Header>
       <Dialog.Title>Share for review</Dialog.Title>
       <Dialog.Description>
-        <span class="font-mono text-xs">{filePath || '(no file selected)'}</span>
+        <!-- break-all: an unbreakable mono path would otherwise drive the
+             dialog's grid track wider than its padding box on narrow
+             windows — every w-full child then runs into the right padding
+             and gets clipped flush to the border (attn-z46). -->
+        <span class="break-all font-mono text-xs">{filePath || '(no file selected)'}</span>
       </Dialog.Description>
     </Dialog.Header>
 

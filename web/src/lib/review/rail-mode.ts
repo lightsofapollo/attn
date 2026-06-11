@@ -25,9 +25,11 @@ export const RAIL_WIDTH_PX: Record<RailMode, number> = {
  *  collision layout pass in `ReviewMargin.svelte` and by its tests. */
 export const RESOLVED_CHIP_HEIGHT = 28;
 
-/** In collapsed mode, chips are pushed below the floating ReviewBar dock
- *  (absolute top-1.5, ~40px tall) so the gutter's top stays clear. */
-export const COLLAPSED_RAIL_TOP_CLEARANCE = 56;
+/** Minimum chip top inside the collapsed gutter. The rail now starts
+ *  below the app header and owns a toggle row (App.svelte), so this is
+ *  just breathing room — and the pin position for threads with no
+ *  resolvable anchor. */
+export const COLLAPSED_RAIL_TOP_CLEARANCE = 8;
 
 export function computeRailMode(input: {
   /** True when a review room is active (`currentRoomId !== null`). */

@@ -64,6 +64,8 @@
   import ShareDialog from './lib/ShareDialog.svelte';
   import NamePrompt from './lib/NamePrompt.svelte';
   import { userProfile } from './lib/review/profile.svelte';
+  import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import Users from '@lucide/svelte/icons/users';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
@@ -2598,7 +2600,11 @@
         <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
           {@render mainContent()}
         </div>
-        <!-- overflow-hidden (not auto): the rail must never scroll
+        <!-- The rail starts at the UNDERSIDE of the header strip (mt-12
+             clears the floating breadcrumb/ReviewBar row; flex-stretch
+             sizing absorbs the margin) and owns its toggle in a header row
+             — centered in the collapsed gutter, right-aligned expanded.
+             overflow-hidden (not auto): the rail must never scroll
              independently — cards are repositioned per document scroll so
              they stay tied to their anchors (attn-23m); off-screen cards
              clip with their text. Width changes are INSTANT: WebKit pauses
@@ -2606,7 +2612,7 @@
              mid-transition at ~1px (attn-23m), and an animating width also
              desyncs the breadcrumb inset. -->
         <aside
-          class="right-rail relative flex h-full shrink-0 flex-col overflow-hidden border-l border-border/60 bg-sidebar data-[mode=hidden]:border-l-0"
+          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden border-l border-t border-border/60 data-[mode=hidden]:border-none bg-sidebar"
           style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={reviewStore.railMode}
@@ -2614,11 +2620,34 @@
           aria-hidden={reviewStore.railMode === 'hidden'}
         >
           {#if reviewStore.railMode !== 'hidden'}
-            {#if rightRail}
-              {@render rightRail()}
-            {:else}
-              {@render rightRailPlaceholder()}
-            {/if}
+            <div
+              class="flex h-10 shrink-0 items-center border-b border-border/40 {reviewStore.panelOpen ? 'justify-end pr-2' : 'justify-center'}"
+              data-slot="rail-header"
+            >
+              <button
+                type="button"
+                class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                data-slot="rail-toggle"
+                data-state={reviewStore.panelOpen ? 'expanded' : 'collapsed'}
+                aria-label={reviewStore.panelOpen ? 'Collapse comments rail' : 'Expand comments rail'}
+                title="{reviewStore.panelOpen ? 'Collapse' : 'Expand'} comments (⌘J)"
+                aria-expanded={reviewStore.panelOpen}
+                onclick={() => reviewStore.togglePanel()}
+              >
+                {#if reviewStore.panelOpen}
+                  <PanelRightClose class="size-4" aria-hidden="true" />
+                {:else}
+                  <PanelRightOpen class="size-4" aria-hidden="true" />
+                {/if}
+              </button>
+            </div>
+            <div class="relative min-h-0 flex-1">
+              {#if rightRail}
+                {@render rightRail()}
+              {:else}
+                {@render rightRailPlaceholder()}
+              {/if}
+            </div>
           {/if}
         </aside>
       </div>

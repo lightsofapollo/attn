@@ -395,8 +395,11 @@ assert_eq "One resolved chip rendered" "$result" "1"
 result=$("$ATTN" --eval "document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.getAttribute('data-variant') ?? 'missing'")
 assert_eq "Chip is icon variant in the gutter" "$result" '"icon"'
 
-result=$("$ATTN" --eval "parseInt(document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.style.top ?? '0', 10) >= 56")
-assert_eq "Gutter chip clears the ReviewBar dock (top ≥ 56)" "$result" "true"
+result=$("$ATTN" --eval "parseInt(document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.style.top ?? '-1', 10) >= 8")
+assert_eq "Gutter chip respects the inner clearance (top ≥ 8)" "$result" "true"
+
+result=$("$ATTN" --eval "(() => { const t = document.querySelector('[data-slot=\\\"rail-toggle\\\"]'); const rail = document.querySelector('[data-slot=\\\"right-rail\\\"]'); if (!t || !rail) return 'missing'; const tr = t.getBoundingClientRect(); const rr = rail.getBoundingClientRect(); return Math.abs((tr.left + tr.width / 2) - (rr.left + rr.width / 2)) <= 2 ? 'centered' : 'off-center'; })()")
+assert_eq "Toggle is horizontally centered in the collapsed gutter" "$result" '"centered"'
 
 screenshot "04-resolved-collapsed-gutter"
 
@@ -465,11 +468,11 @@ assert_eq "Active card carries author avatar + colored border" "$result" '"true,
 screenshot "06-mixed-expanded-rail"
 
 echo ""
-echo "--- ReviewBar rail toggle → collapsed gutter with avatar chips ---"
-result=$("$ATTN" --query '[data-slot="review-bar-rail-toggle"]' | jq -r '.status' 2>/dev/null || echo "not_found")
-assert_eq "Rail toggle present in the ReviewBar dock" "$result" "found"
+echo "--- Rail-header toggle → collapsed gutter with avatar chips ---"
+result=$("$ATTN" --query '[data-slot="rail-toggle"]' | jq -r '.status' 2>/dev/null || echo "not_found")
+assert_eq "Rail toggle present in the rail header" "$result" "found"
 
-"$ATTN" --click '[data-slot="review-bar-rail-toggle"]' >/dev/null 2>&1 || true
+"$ATTN" --click '[data-slot="rail-toggle"]' >/dev/null 2>&1 || true
 
 result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"collapsed"')
 assert_eq "Toggle collapses the rail" "$result" '"collapsed"'

@@ -66,10 +66,14 @@ defineCase('width mapping: hidden 0, collapsed 48, expanded 320', () => {
   assert(RAIL_WIDTH_PX.expanded === 320, 'expanded → 320px');
 });
 
-defineCase('collapsed-gutter clearance leaves room for the ReviewBar dock', () => {
-  // The dock floats at top-1.5 (~6px) and is ~40px tall; chips must start
-  // below it. Exact value is a design constant — assert the invariant.
-  assert(COLLAPSED_RAIL_TOP_CLEARANCE >= 46, 'clearance covers the dock');
+defineCase('collapsed-gutter clearance is small breathing room (header is structural)', () => {
+  // The rail starts below the app header and owns its toggle row in
+  // App.svelte, so the chip clearance is only inner padding / the pin
+  // position for anchor-less threads — not dock avoidance.
+  assert(
+    COLLAPSED_RAIL_TOP_CLEARANCE > 0 && COLLAPSED_RAIL_TOP_CLEARANCE <= 16,
+    'clearance is breathing room, not dock clearance',
+  );
 });
 
 let failed = 0;

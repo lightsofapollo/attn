@@ -31,10 +31,11 @@
 	specified value, so it cannot strand the dialog invisible, and bits-ui
 	does not gate unmount on transitions, so close stays instant.
 
-	The content is anchored at a FIXED top (not 50%/translate -50%
-	centering) so async content arriving after open (e.g. ShareDialog's
-	minting → ready swap) grows the dialog downward instead of re-centering
-	it — the header must never jump.
+	The content is viewport-centered (user feedback: top-anchoring read as
+	"not centered"). Centering is safe against open-time jumps because the
+	dialogs render their final structure from open (ShareDialog's minting →
+	ready swap is height-stable); only user-initiated growth (e.g. the
+	Advanced disclosure) re-centers, which is conventional.
 -->
 <DialogPortal {...portalProps}>
 	<Dialog.Overlay />
@@ -42,7 +43,7 @@
 		bind:ref
 		data-slot="dialog-content"
 		class={cn(
-			"bg-background fixed top-[14vh] left-[50%] z-50 grid max-h-[80vh] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] gap-4 overflow-y-auto rounded-lg border p-6 shadow-lg transition-opacity duration-150 ease-out starting:opacity-0 sm:max-w-lg",
+			"bg-background fixed top-[50%] left-[50%] z-50 grid max-h-[85vh] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto rounded-lg border p-6 shadow-lg transition-opacity duration-150 ease-out starting:opacity-0 sm:max-w-lg",
 			className
 		)}
 		{...restProps}

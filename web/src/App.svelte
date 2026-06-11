@@ -589,6 +589,19 @@
     });
   }
 
+  // Keep the live caret label in sync with renames: the onboarding
+  // NamePrompt fires AFTER a room is entered, so the label captured when
+  // the CollabController was constructed (the git/OS default) goes stale
+  // the moment the user picks a real name — peers' caret chips kept
+  // showing the old name (attn-k1n follow-up). The controller
+  // re-broadcasts the caret so the rename lands immediately.
+  $effect(() => {
+    const name = userProfile.effectiveName;
+    collabController?.setSelfLabel(
+      name || (collabRole === 'owner' ? 'Owner' : 'Reviewer'),
+    );
+  });
+
   // Base (earliest) snapshot markdown for a file in the current room. This is
   // the v0 every authority + resync replay anchors to, so the live editor seeds
   // from it (NOT the latest republished snapshot) and the full step log rebases
@@ -2652,16 +2665,22 @@
              CSS transitions in occluded windows, which left the rail stuck
              mid-transition at ~1px (attn-23m), and an animating width also
              desyncs the breadcrumb inset. -->
-        <!-- No border-t: stacked above the rail header's border-b it read
-             as one thick line; the bg change + border-l delineate the top
-             edge well enough. -->
+        <!-- Top border at the hairline weight of the header divider (the
+             earlier /60 + header border-b combination read as one thick
+             line). onwheel: the rail never scrolls itself (attn-23m), so
+             wheel gestures over it forward to the document viewport —
+             otherwise reading flow dead-stops whenever the pointer crosses
+             the rail. No preventDefault needed: nothing else scrolls here. -->
         <aside
-          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden border-l border-border/60 data-[mode=hidden]:border-none bg-sidebar"
+          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden border-l border-t border-border/40 data-[mode=hidden]:border-none bg-sidebar"
           style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={reviewStore.railMode}
           data-slot="right-rail"
           aria-hidden={reviewStore.railMode === 'hidden'}
+          onwheel={(e) => {
+            if (contentViewport) contentViewport.scrollTop += e.deltaY;
+          }}
         >
           {#if reviewStore.railMode !== 'hidden'}
             <div

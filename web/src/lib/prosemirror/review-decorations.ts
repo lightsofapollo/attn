@@ -423,6 +423,11 @@ function handleClick(view: EditorView, event: Event): boolean {
   const eventId = target.getAttribute('data-event-id');
   if (!eventId) return false;
   reviewStore.setFocusEventId(eventId);
+  // Clicking a mark is explicit intent to view its thread — expand the
+  // rail if it is collapsed to the chip gutter (attn-42y), mirroring the
+  // chip-side expandToThread. ReviewMargin's focus effect then finds the
+  // freshly rendered card and scrolls/pulses it.
+  reviewStore.panelOpen = true;
   // Dispatch an immediate rebuild so the focused-mark class lands without
   // waiting on the host effect.
   requestReviewDecorationsRebuild(view);

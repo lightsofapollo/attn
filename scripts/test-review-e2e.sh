@@ -323,18 +323,19 @@ echo "        (run scripts/test-apply-e2e.sh to verify the contract directly)"
 screenshot "03-apply-flow-pending"
 
 # ===================================================================
-# TEST SUITE: Adaptive rail + expandable resolved chips (attn-d7y)
+# TEST SUITE: Collapsible rail + identity chips (attn-d7y / attn-42y)
 # ===================================================================
 #
 # Seeds the review store directly through `window.__attn_review_store__`
-# (no relay needed): one comment thread + its CommentResolved event. With
-# only resolved threads in the margin the rail must slim to the 48px icon
-# gutter; clicking the chip expands the rail to 320px with the full
-# read-only card; Collapse returns to slim; adding an unresolved comment
-# forces full mode with a labeled chip.
+# (no relay needed): one comment thread + its CommentResolved event. In a
+# review room the rail is always present: collapsed to a 48px gutter
+# (✓ chips for resolved, author-avatar chips for unresolved) unless
+# expanded by the user/auto-open. Clicking a ✓ chip expands the rail with
+# the full read-only card (no action buttons); clicking the card shrinks
+# it back to a labeled chip. The ReviewBar dock carries the rail toggle.
 
 echo ""
-echo "=== Review E2E: adaptive rail + resolved chips (attn-d7y) ==="
+echo "=== Review E2E: collapsible rail + identity chips (attn-d7y/attn-42y) ==="
 
 # Poll an --eval expression until it returns the expected value (the aside
 # width animates over 200ms, so one-shot reads race the transition).
@@ -373,7 +374,6 @@ seed_js=$(cat <<'EOF'
   s.applyEvent({ meta: meta('e-2'), body: { type: 'comment_resolved', threadId: 't-1', resolvedBy: 'p-owner' }, auth });
   s.selectRoom('room-x');
   s.setCurrentFile('file-x');
-  s.panelOpen = true;
   return 'ok';
 })()
 EOF
@@ -382,9 +382,9 @@ result=$("$ATTN" --eval "$seed_js")
 assert_eq "Seeded resolved-only review thread" "$result" '"ok"'
 
 echo ""
-echo "--- Slim gutter (resolved-only margin) ---"
-result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"slim"')
-assert_eq "Rail data-mode is slim" "$result" '"slim"'
+echo "--- Collapsed gutter (resolved-only margin, default) ---"
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"collapsed"')
+assert_eq "Rail data-mode is collapsed (no unresolved threads)" "$result" '"collapsed"'
 
 result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth <= 60" 'true')
 assert_eq "Rail width collapsed to the gutter (≤60px)" "$result" "true"
@@ -393,22 +393,25 @@ result=$("$ATTN" --query '[data-testid="review-margin-resolved-chip"]' | jq -r '
 assert_eq "One resolved chip rendered" "$result" "1"
 
 result=$("$ATTN" --eval "document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.getAttribute('data-variant') ?? 'missing'")
-assert_eq "Chip is icon variant in slim mode" "$result" '"icon"'
+assert_eq "Chip is icon variant in the gutter" "$result" '"icon"'
 
-screenshot "04-resolved-slim-gutter"
+result=$("$ATTN" --eval "parseInt(document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.style.top ?? '0', 10) >= 56")
+assert_eq "Gutter chip clears the ReviewBar dock (top ≥ 56)" "$result" "true"
+
+screenshot "04-resolved-collapsed-gutter"
 
 echo ""
-echo "--- Expand chip → full read-only card ---"
+echo "--- Expand ✓ chip → rail expands with read-only card ---"
 "$ATTN" --click '[data-testid="review-margin-resolved-chip"]' >/dev/null 2>&1 || true
 
-result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"full"')
-assert_eq "Rail expands to full on chip click" "$result" '"full"'
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"expanded"')
+assert_eq "Rail expands on chip click" "$result" '"expanded"'
 
 result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]') !== null" 'true')
 assert_eq "Resolved card rendered" "$result" "true"
 
-result=$("$ATTN" --eval "(() => { const c = document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]'); if (!c) return 'no-card'; return [c.querySelector('[data-action=\\\"resolve\\\"]') === null, c.querySelector('[data-action=\\\"reply\\\"]') === null, c.querySelector('[data-testid=\\\"review-margin-card-collapse\\\"]') !== null].join(','); })()")
-assert_eq "Card is read-only (no resolve/reply; collapse present)" "$result" '"true,true,true"'
+result=$("$ATTN" --eval "(() => { const c = document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]'); if (!c) return 'no-card'; return [c.querySelectorAll('[data-action]').length === 0, c.querySelector('.rmc-avatar') !== null].join(','); })()")
+assert_eq "Card is read-only (no action buttons) with an author avatar" "$result" '"true,true"'
 
 result=$("$ATTN" --eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]')?.textContent.includes('Consider tightening this wording.')")
 assert_eq "Card shows the resolved comment body" "$result" "true"
@@ -416,17 +419,20 @@ assert_eq "Card shows the resolved comment body" "$result" "true"
 screenshot "05-resolved-expanded-card"
 
 echo ""
-echo "--- Collapse → back to slim ---"
-"$ATTN" --click '[data-testid="review-margin-card-collapse"]' >/dev/null 2>&1 || true
-
-result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"slim"')
-assert_eq "Rail returns to slim after collapse" "$result" '"slim"'
+echo "--- Click card → shrinks back to labeled chip (rail stays expanded) ---"
+"$ATTN" --click '[data-testid="review-margin-card"][data-state="resolved"]' >/dev/null 2>&1 || true
 
 result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]') === null" 'true')
-assert_eq "Resolved card gone after collapse" "$result" "true"
+assert_eq "Resolved card gone after card click" "$result" "true"
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.getAttribute('data-variant') ?? 'missing'" '"label"')
+assert_eq "Labeled chip back in the expanded rail" "$result" '"label"'
+
+result=$("$ATTN" --eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode')")
+assert_eq "Rail stays expanded after card collapse" "$result" '"expanded"'
 
 echo ""
-echo "--- Mixed margin (active + resolved) → full rail, labeled chip ---"
+echo "--- Mixed margin (active + resolved) → cards + labeled chip ---"
 mixed_js=$(cat <<'EOF'
 (() => {
   const s = window.__attn_review_store__;
@@ -447,16 +453,43 @@ EOF
 result=$("$ATTN" --eval "$mixed_js")
 assert_eq "Seeded an additional unresolved thread" "$result" '"ok"'
 
-result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"full"')
-assert_eq "Rail is full with an active thread present" "$result" '"full"'
-
-result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.getAttribute('data-variant') ?? 'missing'" '"label"')
-assert_eq "Chip flips to label variant in full mode" "$result" '"label"'
-
 result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"open\\\"]') !== null" 'true')
 assert_eq "Active card rendered alongside the chip" "$result" "true"
 
-screenshot "06-mixed-full-rail"
+result=$("$ATTN" --eval "(() => { const c = document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"open\\\"]'); if (!c) return 'no-card'; const cs = getComputedStyle(c); return [c.querySelector('.rmc-avatar') !== null, cs.borderLeftColor.length > 0].join(','); })()")
+assert_eq "Active card carries author avatar + colored border" "$result" '"true,true"'
+
+screenshot "06-mixed-expanded-rail"
+
+echo ""
+echo "--- ReviewBar rail toggle → collapsed gutter with avatar chips ---"
+result=$("$ATTN" --query '[data-slot="review-bar-rail-toggle"]' | jq -r '.status' 2>/dev/null || echo "not_found")
+assert_eq "Rail toggle present in the ReviewBar dock" "$result" "found"
+
+"$ATTN" --click '[data-slot="review-bar-rail-toggle"]' >/dev/null 2>&1 || true
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"collapsed"')
+assert_eq "Toggle collapses the rail" "$result" '"collapsed"'
+
+result=$("$ATTN" --query '[data-testid="review-margin-avatar-chip"]' | jq -r '.count' 2>/dev/null || echo "0")
+assert_eq "Unresolved thread shows an author avatar chip in the gutter" "$result" "1"
+
+result=$("$ATTN" --query '[data-testid="review-margin-resolved-chip"][data-variant="icon"]' | jq -r '.count' 2>/dev/null || echo "0")
+assert_eq "Resolved thread shows a ✓ chip in the gutter" "$result" "1"
+
+screenshot "07-collapsed-gutter-chips"
+
+echo ""
+echo "--- Avatar chip click → rail expands onto the thread ---"
+"$ATTN" --click '[data-testid="review-margin-avatar-chip"]' >/dev/null 2>&1 || true
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"expanded"')
+assert_eq "Avatar chip expands the rail" "$result" '"expanded"'
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"open\\\"]') !== null" 'true')
+assert_eq "Thread card visible after avatar expand" "$result" "true"
+
+screenshot "08-avatar-expanded"
 
 # ===================================================================
 # Summary

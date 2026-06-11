@@ -28,6 +28,7 @@ import {
   type PeerSplit,
   type StaleAnchorEntry,
 } from './selectors';
+import { userProfile } from './profile.svelte';
 import { computeRailMode, type RailMode } from './rail-mode';
 import { shouldActivateRoomStatus, shouldForgetRoomStatus } from './room-ui';
 import { isThreadActive } from './thread-visibility';
@@ -271,15 +272,15 @@ export class ReviewStore {
   );
 
   /**
-   * Rail display mode: `closed` | `slim` | `full`. `App.svelte` maps this
-   * to the aside width; `ReviewMargin` maps it to the chip variant. See
+   * Rail display mode: `hidden` | `collapsed` | `expanded`. In a review
+   * room the rail is always at least a collapsed gutter; `panelOpen`
+   * (ReviewBar toggle / Cmd+J) expands it. `App.svelte` maps this to the
+   * aside width; `ReviewMargin` maps it to the chip variant. See
    * `./rail-mode.ts` for the rule.
    */
   railMode: RailMode = $derived(computeRailMode({
+    inReviewRoom: this.currentRoomId !== null,
     panelOpen: this.panelOpen,
-    activeThreadCount: this.marginActiveThreadCount,
-    resolvedThreadCount: this.marginResolvedThreadCount,
-    hasExpandedResolved: this.expandedResolvedThread !== null,
   }));
 
   /**
@@ -368,6 +369,9 @@ export class ReviewStore {
   participantNames: Record<string, string> = $derived.by(() => {
     const names: Record<string, string> = {};
     for (const ev of this.events) {
+      // Scope to the active room — without this, same-named ids from a
+      // previous room in the buffer could bleed names across rooms.
+      if (this.currentRoomId !== null && ev.meta.roomId !== this.currentRoomId) continue;
       if (ev.body.type === 'participant_joined') {
         const p = ev.body.participant;
         const name = p.displayName?.trim();
@@ -378,14 +382,57 @@ export class ReviewStore {
   });
 
   /**
+   * participantId → kind, harvested from `ParticipantJoined` events
+   * (room-scoped like `participantNames`). Memoized as a derived map —
+   * `participantKindFor` is called several times per thread per layout
+   * pass, so an O(events) scan per call would compound.
+   */
+  participantKinds: Record<string, 'owner' | 'reviewer' | 'agent'> = $derived.by(() => {
+    const kinds: Record<string, 'owner' | 'reviewer' | 'agent'> = {};
+    for (const ev of this.events) {
+      if (this.currentRoomId !== null && ev.meta.roomId !== this.currentRoomId) continue;
+      if (ev.body.type === 'participant_joined') {
+        const p = ev.body.participant;
+        kinds[p.participantId] = p.kind;
+      }
+    }
+    return kinds;
+  });
+
+  /**
+   * participantId → kind, from `ParticipantJoined` events first, then the
+   * presence roster, with the snapshot-derived owner id always winning.
+   * Drives the per-author card border color + avatar chips (attn-42y) via
+   * the existing `--peer-avatar-bg-*` tokens, so cards match the caret
+   * and peer-chip colors.
+   */
+  participantKindFor(participantId: string): 'owner' | 'reviewer' | 'agent' {
+    if (participantId === this.ownerParticipantId) return 'owner';
+    const fromEvents = this.participantKinds[participantId];
+    if (fromEvents) return fromEvents;
+    const peer = this.peersResolved.find((p) => p.participantId === participantId);
+    return peer?.kind ?? 'reviewer';
+  }
+
+  /**
    * Best display name for a participant id: the real name from a
-   * `ParticipantJoined` event, then the presence roster label, then the raw id.
+   * `ParticipantJoined` event, then the presence roster label, then —
+   * for the owner — the local profile name or role label, then the raw id.
    */
   displayNameFor(participantId: string): string {
     const fromEvents = this.participantNames[participantId];
     if (fromEvents) return fromEvents;
     const peer = this.peers.find((p) => p.participantId === participantId);
-    return peer?.displayName ?? participantId;
+    if (peer?.displayName) return peer.displayName;
+    // Rooms shared before the owner self-announce landed (attn-42y) have
+    // no ParticipantJoined for the owner, and presence excludes self — so
+    // owner-authored threads used to degrade to the raw participant id.
+    // On the owner's own window we know the profile name; elsewhere the
+    // role label still beats an opaque id.
+    if (participantId === this.ownerParticipantId) {
+      return this.activeRoom?.role === 'owner' ? userProfile.effectiveName : 'Owner';
+    }
+    return participantId;
   }
 
   /**
@@ -710,6 +757,15 @@ export class ReviewStore {
   /** Toggle the right-rail review panel open/closed. */
   togglePanel(): void {
     this.panelOpen = !this.panelOpen;
+    if (!this.panelOpen) {
+      // Collapsing the rail returns any expanded resolved card to its chip
+      // and cancels an in-flight manual reanchor — both flows render their
+      // UI only in the expanded rail, but their window-level capture key
+      // handlers in ReviewMargin would otherwise stay armed invisibly
+      // (Escape swallowed app-wide; Enter silently confirming a reanchor).
+      this.expandedResolvedThreadId = null;
+      this.manualReanchorState = null;
+    }
   }
 
   /**
@@ -736,9 +792,12 @@ export class ReviewStore {
     this.locallyDismissed = next;
   }
 
-  /** Expand a resolved thread's chip into its full read-only card. */
+  /** Expand a resolved thread's chip into its full read-only card. Also
+   *  expands the rail itself — clicking a chip in the collapsed gutter
+   *  must surface the card, not expand it into 48px of hidden space. */
   expandResolvedThread(threadId: string): void {
     this.expandedResolvedThreadId = threadId;
+    this.panelOpen = true;
   }
 
   /** Collapse the expanded resolved card back to its chip. */

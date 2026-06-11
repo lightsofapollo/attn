@@ -29,6 +29,8 @@
   import Check from '@lucide/svelte/icons/check';
   import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
   import LogOut from '@lucide/svelte/icons/log-out';
+  import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import Share2 from '@lucide/svelte/icons/share-2';
   import ConnectionBadge from './ConnectionBadge.svelte';
   import OutboxIndicator from './OutboxIndicator.svelte';
@@ -230,6 +232,27 @@
         >
           <OutboxIndicator {isOwner} onRetry={onOutboxRetry} />
         </div>
+
+        <!-- Rail toggle (attn-42y): the comments rail is always present in
+             a room (expanded ⇄ collapsed gutter); this is its visible
+             control, mirroring Cmd+J. Rightmost so it sits nearest the
+             rail it controls. -->
+        <button
+          type="button"
+          class="rail-toggle inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/50 bg-background/55 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          data-slot="review-bar-rail-toggle"
+          data-state={reviewStore.panelOpen ? 'expanded' : 'collapsed'}
+          aria-label={reviewStore.panelOpen ? 'Collapse comments rail' : 'Expand comments rail'}
+          title="{reviewStore.panelOpen ? 'Collapse' : 'Expand'} comments (⌘J)"
+          aria-expanded={reviewStore.panelOpen}
+          onclick={() => reviewStore.togglePanel()}
+        >
+          {#if reviewStore.panelOpen}
+            <PanelRightClose class="size-3.5" aria-hidden="true" />
+          {:else}
+            <PanelRightOpen class="size-3.5" aria-hidden="true" />
+          {/if}
+        </button>
       {/if}
     </div>
   </div>

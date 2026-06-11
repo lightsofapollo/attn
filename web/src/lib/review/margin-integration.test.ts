@@ -332,25 +332,20 @@ defineCase('clustered resolved chips stack at chip pitch (28px + gutter)', () =>
     `third chip at two pitches: top=${placed[2]!.top}`);
 });
 
-defineCase('slim-mode chip visibility ignores the >5 pill threshold', () => {
-  // Mirror ReviewMargin's `resolvedChipsVisible` rule: slim mode always
-  // shows icon chips (the 48px gutter can't fit the pill); full mode hides
-  // chips behind the pill above the threshold until "show all" is clicked.
+defineCase('expanded-rail chip visibility respects the >5 pill threshold', () => {
+  // Mirror ReviewMargin's `resolvedChipsVisible` rule (expanded rail only;
+  // the collapsed gutter always renders icon chips and never the pill):
+  // chips hide behind the count pill above the threshold until "show all".
   const N = 8;
   const threshold = 5;
-  const chipsVisible = (slim: boolean, showAllResolved: boolean): boolean =>
-    slim || showAllResolved || N <= threshold;
-  assert(chipsVisible(true, false) === true, 'slim → chips always visible');
-  assert(chipsVisible(false, false) === false, 'full + 8 resolved → pill hides chips');
-  assert(chipsVisible(false, true) === true, 'full + show-all → chips visible');
-  // And slim is what computeRailMode picks for a resolved-only margin.
-  const mode = computeRailMode({
-    panelOpen: true,
-    activeThreadCount: 0,
-    resolvedThreadCount: N,
-    hasExpandedResolved: false,
-  });
-  assert(mode === 'slim', `resolved-only margin is slim, got ${mode}`);
+  const chipsVisible = (showAllResolved: boolean): boolean =>
+    showAllResolved || N <= threshold;
+  assert(chipsVisible(false) === false, 'expanded + 8 resolved → pill hides chips');
+  assert(chipsVisible(true) === true, 'expanded + show-all → chips visible');
+  // And the rail itself is collapsed-by-default in a room until the user
+  // (or the unresolved auto-open) expands it.
+  const mode = computeRailMode({ inReviewRoom: true, panelOpen: false });
+  assert(mode === 'collapsed', `room + closed panel is collapsed, got ${mode}`);
 });
 
 defineCase('51 threads → virtualized to ~10 in DOM at default 600px viewport', () => {

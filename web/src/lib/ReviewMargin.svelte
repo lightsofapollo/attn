@@ -43,8 +43,12 @@
     type MarginCardInput,
     type MarginCardPlacement,
   } from './review/margin-layout';
+  import { AGENT_GLYPH, monogramFor, type PeerKind } from './peer-strip-format';
   import { anchorTopY, hasTextSelection } from './review/popover-anchor';
-  import { RESOLVED_CHIP_HEIGHT } from './review/rail-mode';
+  import {
+    COLLAPSED_RAIL_TOP_CLEARANCE,
+    RESOLVED_CHIP_HEIGHT,
+  } from './review/rail-mode';
   import { reviewStore } from './review/store.svelte';
   import { isThreadActive } from './review/thread-visibility';
   import { reviewResolveComment, reviewCreateComment } from './ipc';
@@ -109,13 +113,14 @@
   const focusEventId = $derived(reviewStore.focusEventId);
   const hoveredEventId = $derived(reviewStore.hoveredEventId);
 
-  // Rail mode (closed/slim/full) is derived on the store so App.svelte's
-  // aside width and our chip variant agree. `slim` means: only resolved
-  // chips exist, rendered icon-only in the 48px gutter.
-  const slim = $derived(reviewStore.railMode === 'slim');
+  // Rail mode (hidden/collapsed/expanded) is derived on the store so
+  // App.svelte's aside width and our rendering agree. `collapsed` is the
+  // 48px gutter: author-avatar chips for unresolved threads, ✓ chips for
+  // resolved ones (attn-42y).
+  const collapsed = $derived(reviewStore.railMode === 'collapsed');
 
   // The one resolved thread currently expanded to a full read-only card
-  // (attn-d7y). Store-owned so expanding forces railMode to `full`.
+  // (attn-d7y). Store-owned; expanding also expands the rail.
   const expandedResolvedId = $derived(reviewStore.expandedResolvedThread?.id ?? null);
 
   // Optimistic dismissals (Resolve/Reject clicked) — store-owned so the
@@ -181,18 +186,18 @@
   // Resolved threads — get the collapsed chip (or the expanded card).
   const resolvedThreads: Thread[] = $derived(threads.filter((t) => t.resolved));
 
-  // "Show all resolved" pill state (full mode only). When more than the
-  // threshold of chips would render and the user hasn't asked for them,
-  // the chips hide behind a count pill. Slim mode ignores the pill — the
-  // 48px gutter can't fit it, and icon chips are cheap.
+  // "Show all resolved" pill state (expanded mode only). When more than
+  // the threshold of chips would render and the user hasn't asked for
+  // them, the chips hide behind a count pill. The collapsed gutter
+  // ignores the pill — it can't fit one, and icon chips are cheap.
   let showAllResolved = $state(false);
   const COLLAPSED_RESOLVED_THRESHOLD = 5;
   const showResolvedPill = $derived(
-    !slim && !showAllResolved && resolvedThreads.length > COLLAPSED_RESOLVED_THRESHOLD,
+    !collapsed && !showAllResolved && resolvedThreads.length > COLLAPSED_RESOLVED_THRESHOLD,
   );
 
   const resolvedChipsVisible = $derived(
-    slim || showAllResolved || resolvedThreads.length <= COLLAPSED_RESOLVED_THRESHOLD,
+    showAllResolved || resolvedThreads.length <= COLLAPSED_RESOLVED_THRESHOLD,
   );
 
   // Resolved threads that take part in layout/render: chip-visible ones
@@ -339,6 +344,30 @@
     });
   });
 
+  // Collapsed-gutter chip placements (attn-42y): EVERY visible thread —
+  // unresolved (incl. orphan-tray ones, which have no anchor position and
+  // fall back to the top) as author-avatar chips, resolved as ✓ chips.
+  // Tops are clamped below the floating ReviewBar dock. Shares the
+  // expanded rail's virtualization band so a huge thread count doesn't
+  // bypass the §6 ~50-node DOM cap.
+  const collapsedChipPlacements: MarginCardPlacement[] = $derived.by(() => {
+    if (!collapsed) return [];
+    const inputs: MarginCardInput[] = [];
+    for (const t of threads) {
+      if (!t.resolved && !isThreadActive(t, locallyDismissed)) continue;
+      const y = anchorYs.get(t.id) ?? 0;
+      inputs.push({
+        id: t.id,
+        anchorY: Math.max(y, COLLAPSED_RAIL_TOP_CLEARANCE),
+        height: RESOLVED_CHIP_HEIGHT,
+      });
+    }
+    const placed = layoutCards(inputs);
+    if (placed.length <= maxRenderedCards) return placed;
+    const heights = new Map(inputs.map((i) => [i.id, i.height]));
+    return visibleCards(placed, heights, { viewportTop, viewportHeight, bandPx: 800 });
+  });
+
   // For the SVG connector layer: every offset placement gets a line drawn
   // from the card's left-mid back to the anchor's viewport y. The anchor
   // x is taken as the container's left edge (the cards live at right: 0
@@ -453,8 +482,13 @@
 
   // Global key listener: Enter confirms, Escape cancels. Only attached
   // while a stale card is in flight so we don't interfere with normal
-  // editor input.
+  // editor input. Never armed while the rail is collapsed — the stale
+  // card and confirm overlay only render in the expanded branch, and an
+  // invisible capture handler would hijack editor Enter/Escape
+  // (togglePanel cancels the flow on collapse; this guard covers direct
+  // panelOpen writes too).
   $effect(() => {
+    if (collapsed) return;
     if (!manualReanchorState) return;
     const handler = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
@@ -483,8 +517,11 @@
   // own keydown handler only fires while the card has focus). Yields to
   // the manual-reanchor flow — that listener owns Escape while a stale
   // card is in flight — and to editable targets so it never eats an
-  // Escape meant to cancel typing.
+  // Escape meant to cancel typing. Never armed while the rail is
+  // collapsed: the card isn't rendered there, and a stale handler would
+  // swallow the Escape that should close a dialog or dropdown.
   $effect(() => {
+    if (collapsed) return;
     const expanded = reviewStore.expandedResolvedThread;
     if (!expanded) return;
     const handler = (e: KeyboardEvent): void => {
@@ -603,6 +640,19 @@
     return t.rootEvent.body.type === 'suggestion_created' ? 'suggestion' : 'comment';
   }
 
+  /** The initiating author's participant kind — drives the per-user color
+   *  (card border + avatar chip) via the `--peer-avatar-bg-*` tokens. */
+  function authorKindFor(t: Thread): PeerKind {
+    return reviewStore.participantKindFor(t.rootEvent.meta.authorId);
+  }
+
+  /** Avatar glyph for the collapsed-gutter chip: monogram for humans, the
+   *  agent glyph for agents (peer-strip rule — agents never get a letter). */
+  function avatarGlyphFor(t: Thread): string {
+    if (authorKindFor(t) === 'agent') return AGENT_GLYPH;
+    return monogramFor(authorNameFor(t));
+  }
+
   function stateFor(t: Thread):
     | 'open'
     | 'resolved'
@@ -643,14 +693,15 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Resolved chip expand/collapse (attn-d7y)
+  // Chip expand/collapse (attn-d7y, reworked by attn-42y)
   // ---------------------------------------------------------------------------
 
   /**
-   * Expand a resolved chip to its full read-only card. Setting the store
-   * state flips `railMode` to `full` (the aside animates 48→320), the chip
-   * re-renders as a card, and focus moves onto it so Escape works
-   * immediately. Also focuses the anchor in the editor like any card click.
+   * Expand a resolved chip to its full read-only card. The store method
+   * also expands the rail (clicking a chip in the collapsed gutter must
+   * surface the card); the chip re-renders as a card and focus moves onto
+   * it so Escape works immediately. Also focuses the anchor in the editor
+   * like any card click.
    */
   async function expandResolved(t: Thread): Promise<void> {
     reviewStore.expandResolvedThread(t.id);
@@ -675,9 +726,65 @@
     );
     chip?.focus();
   }
+
+  /**
+   * Avatar chip click in the collapsed gutter: expand the rail and focus
+   * the thread's card (cursor + scroll + pulse via focusEventId).
+   */
+  async function expandToThread(t: Thread): Promise<void> {
+    reviewStore.panelOpen = true;
+    activateThread(t);
+    await tick();
+    const card = containerEl?.querySelector<HTMLElement>(
+      `[data-testid="review-margin-card"][data-thread-id="${CSS.escape(t.id)}"]`,
+    );
+    card?.focus();
+  }
 </script>
 
-<div bind:this={containerEl} class="review-margin" data-slot="review-margin">
+<div
+  bind:this={containerEl}
+  class="review-margin"
+  data-slot="review-margin"
+  data-rail-mode={collapsed ? 'collapsed' : 'expanded'}
+>
+  {#if collapsed}
+    <!-- Collapsed gutter (attn-42y): every thread shrinks to an icon chip
+         at its anchor Y — the author's avatar for unresolved threads, a ✓
+         for resolved ones. Clicking expands the rail onto that thread. -->
+    {#each collapsedChipPlacements as p (p.id)}
+      {@const t = threadById.get(p.id)}
+      {#if t && !t.resolved}
+        <button
+          type="button"
+          class="review-margin-avatar-chip"
+          data-testid="review-margin-avatar-chip"
+          data-thread-id={t.id}
+          data-author-kind={authorKindFor(t)}
+          style="top: {p.top}px; background-color: var(--peer-avatar-bg-{authorKindFor(t)});"
+          aria-label={`Unresolved ${kindFor(t)} by ${authorNameFor(t)} — open comments`}
+          title={`${authorNameFor(t)} — ${kindFor(t)}`}
+          onclick={() => { void expandToThread(t); }}
+        >
+          {avatarGlyphFor(t)}
+        </button>
+      {:else if t}
+        <button
+          type="button"
+          class="review-margin-resolved-chip"
+          data-testid="review-margin-resolved-chip"
+          data-variant="icon"
+          data-thread-id={t.id}
+          style="top: {p.top}px;"
+          aria-label={`Resolved ${kindFor(t)} by ${authorNameFor(t)} — view details`}
+          aria-expanded="false"
+          onclick={() => { void expandResolved(t); }}
+        >
+          ✓
+        </button>
+      {/if}
+    {/each}
+  {:else}
   <!-- Orphan tray: sticky-top per §2 -->
   {#if orphanThreads.length > 0}
     <section
@@ -699,6 +806,7 @@
               hovered={hoveredEventId === t.rootEvent.meta.eventId}
               offset={false}
               authorName={authorNameFor(t)}
+              authorKind={authorKindFor(t)}
               quotePreview={quotePreviewFor(t)}
               onActivate={() => activateThread(t)}
               onReject={() => dismissLocally(t.id)}
@@ -753,6 +861,7 @@
           hovered={hoveredEventId === t.rootEvent.meta.eventId}
           offset={p.offset}
           authorName={authorNameFor(t)}
+          authorKind={authorKindFor(t)}
           quotePreview={quotePreviewFor(t)}
           onActivate={() => activateThread(t)}
           onReject={() => dismissLocally(t.id)}
@@ -762,9 +871,10 @@
         />
       </div>
     {:else if t && t.id === expandedResolvedId}
-      <!-- Expanded resolved thread: full read-only card (attn-d7y). No
-           Reply/Resolve/Accept/Reject — `onCollapse` renders the only
-           action. -->
+      <!-- Expanded resolved thread: full read-only card. No action row
+           (attn-42y removed the Collapse button — the rail itself
+           collapses now); clicking the card or pressing Escape shrinks
+           it back to its chip. -->
       <div class="review-margin-slot" style="top: {p.top}px;">
         <ReviewMarginCard
           thread={t}
@@ -774,26 +884,26 @@
           hovered={hoveredEventId === t.rootEvent.meta.eventId}
           offset={p.offset}
           authorName={authorNameFor(t)}
+          authorKind={authorKindFor(t)}
           quotePreview={quotePreviewFor(t)}
-          onActivate={() => activateThread(t)}
-          onCollapse={() => { void collapseResolved(t); }}
+          onActivate={() => { void collapseResolved(t); }}
         />
       </div>
     {:else if t}
-      <!-- Collapsed resolved chip: icon-only in the slim gutter, labeled
-           in the full rail. Click to expand into the read-only card. -->
+      <!-- Resolved chip in the expanded rail: labeled pill at its anchor.
+           Click to expand into the read-only card. -->
       <button
         type="button"
         class="review-margin-resolved-chip"
         data-testid="review-margin-resolved-chip"
-        data-variant={slim ? 'icon' : 'label'}
+        data-variant="label"
         data-thread-id={t.id}
         style="top: {p.top}px;"
         aria-label={`Resolved ${kindFor(t)} by ${authorNameFor(t)} — view details`}
         aria-expanded="false"
         onclick={() => { void expandResolved(t); }}
       >
-        {#if slim}✓{:else}✓ {authorNameFor(t)} · resolved{/if}
+        ✓ {authorNameFor(t)} · resolved
       </button>
     {/if}
   {/each}
@@ -854,6 +964,7 @@
       </div>
     </div>
   {/if}
+  {/if}
 </div>
 
 <style>
@@ -872,16 +983,19 @@
   }
 
   /* Sticky-top orphan tray (§2). z-indexed above anchored cards so it
-     pins while the user scrolls past them. */
+     pins while the user scrolls past them. Inset from the rail edges
+     like the card slots, and cleared below the floating ReviewBar dock
+     (which overlays the rail's top ~46px) both at rest and when pinned
+     (attn-42y). */
   .review-margin-tray {
     position: sticky;
-    top: 0;
+    top: 56px;
     z-index: 2;
     background: var(--background, #fff);
     border: 1px solid var(--border, rgba(0, 0, 0, 0.10));
     border-radius: 6px;
     padding: 6px;
-    margin: 0 0 8px;
+    margin: 56px 12px 8px;
     max-height: 40vh;
     overflow: auto;
   }
@@ -913,26 +1027,30 @@
     z-index: 0;
   }
 
-  /* Each absolutely-positioned card slot. `top` is set inline per layout. */
+  /* Each absolutely-positioned card slot. `top` is set inline per layout.
+     Inset 12px from both rail edges (attn-42y: cards must not touch the
+     window edge); the card inside is width:100% of this slot. The insets
+     live HERE rather than as container padding because abs-positioned
+     children resolve against the padding box, not inside it. */
   .review-margin-slot {
     position: absolute;
-    right: 0;
+    right: 12px;
+    left: 12px;
     z-index: 1;
   }
 
-  /* Collapsed resolved chip (attn-d7y, replaces the §3 full-width strip).
-     Content-sized pill in the full rail; icon-only square centered in the
-     slim gutter. */
+  /* Resolved chip (attn-d7y). Labeled pill at its anchor in the expanded
+     rail; icon-only square centered in the collapsed gutter. */
   .review-margin-resolved-chip {
     position: absolute;
-    left: 0;
+    left: 12px;
     z-index: 1;
     display: inline-flex;
     align-items: center;
     gap: 4px;
     box-sizing: border-box;
     height: 28px;
-    max-width: 100%;
+    max-width: calc(100% - 24px);
     padding: 0 10px;
     background: var(--muted, rgba(0, 0, 0, 0.04));
     border: 1px solid var(--border, rgba(0, 0, 0, 0.10));
@@ -954,15 +1072,46 @@
     left: 50%;
     transform: translateX(-50%);
     width: 28px;
+    max-width: none;
     padding: 0;
     justify-content: center;
+  }
+
+  /* Collapsed-gutter avatar chip (attn-42y): the initiating author's
+     monogram on their presence color, marking an UNRESOLVED thread.
+     Background color is set inline from --peer-avatar-bg-{kind} so it
+     matches the caret labels and peer chips. */
+  .review-margin-avatar-chip {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    width: 28px;
+    height: 28px;
+    border: 2px solid var(--background, #fff);
+    border-radius: 9999px;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  }
+
+  .review-margin-avatar-chip:hover {
+    filter: brightness(1.06);
   }
 
   /* Bottom pill — shown when collapsed-resolved count exceeds threshold. */
   .review-margin-resolved-pill {
     position: sticky;
-    bottom: 0;
-    width: 100%;
+    bottom: 8px;
+    width: calc(100% - 24px);
+    margin: 0 12px;
     box-sizing: border-box;
     padding: 6px 12px;
     background: var(--muted, rgba(0, 0, 0, 0.04));
@@ -992,7 +1141,7 @@
   .review-margin-reanchor-overlay {
     position: sticky;
     bottom: 8px;
-    margin: 12px 0 0;
+    margin: 12px 12px 0;
     padding: 10px 12px;
     background: var(--popover, var(--background, #fff));
     border: 1px solid var(--destructive, #dc2626);

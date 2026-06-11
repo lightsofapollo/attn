@@ -485,15 +485,19 @@
     }
   });
 
-  // Auto-open the review rail the first time the current file has feedback (a
-  // comment or suggestion). Without this the rail stays collapsed and a
+  // Auto-expand the review rail the first time the current file has
+  // UNRESOLVED feedback (attn-42y: resolved-only history defaults to the
+  // collapsed gutter). Without this the rail stays collapsed and a
   // reviewer's notes are invisible until someone happens to press Cmd+J — so
-  // incoming review work silently disappears. Open only ONCE so a deliberate
-  // Cmd+J close stays closed.
-  let reviewRailAutoOpened = $state(false);
+  // incoming review work silently disappears. One-shot PER ROOM so a
+  // deliberate collapse (toggle / Cmd+J) stays collapsed, but a second room
+  // joined later in the session still opens by default on its feedback.
+  let reviewRailAutoOpenedRoom = $state<string | null>(null);
   $effect(() => {
-    if (reviewStore.threadsForCurrentFile.length > 0 && !reviewRailAutoOpened) {
-      reviewRailAutoOpened = true;
+    const roomId = reviewStore.currentRoomId;
+    if (roomId === null) return;
+    if (reviewStore.marginActiveThreadCount > 0 && reviewRailAutoOpenedRoom !== roomId) {
+      reviewRailAutoOpenedRoom = roomId;
       if (!reviewStore.panelOpen) reviewStore.panelOpen = true;
     }
   });
@@ -2350,7 +2354,9 @@
       avoidWindowControls={!hasSidebar}
       fixed={!hasSidebar}
       topOffsetPx={34}
-      rightInsetPx={showReviewChrome && reviewStore.railMode !== 'full' ? 328 : 16}
+      rightInsetPx={showReviewChrome && reviewStore.railMode !== 'expanded'
+        ? 328 - (hasSidebar ? RAIL_WIDTH_PX[reviewStore.railMode] : 0)
+        : 16}
       onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
       onShare={showBreadcrumbShare ? openShareDialog : undefined}
       shareEnabled={showBreadcrumbShare}
@@ -2359,25 +2365,6 @@
   </div>
   {#if !hasSidebar}
     <div class="h-[40px] shrink-0"></div>
-  {/if}
-
-  {#if isReviewerViewingSnapshot}
-    <!--
-      Shared-document banner. Keep this as quiet app chrome: it needs to
-      distinguish reviewer mode from a local file without adding a hard color
-      stripe through the reading surface.
-    -->
-    <div
-      class="shared-doc-banner flex h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-muted/25 px-4 text-xs font-medium text-muted-foreground"
-      data-slot="shared-doc-banner"
-    >
-      <Users class="size-3.5 shrink-0" aria-hidden="true" />
-      <span class="text-foreground/80">Shared document</span>
-      <span class="text-muted-foreground/45" aria-hidden="true">·</span>
-      <span class="font-normal text-muted-foreground">
-        {collabActive ? 'live editing' : 'read-only'} · end-to-end encrypted
-      </span>
-    </div>
   {/if}
 
   <ScrollArea
@@ -2471,6 +2458,29 @@
       </div>
     {/if}
   </ScrollArea>
+{/snippet}
+
+{#snippet sharedDocBanner()}
+  {#if isReviewerViewingSnapshot}
+    <!--
+      Shared-document banner. Keep this as quiet app chrome: it needs to
+      distinguish reviewer mode from a local file without adding a hard color
+      stripe through the reading surface. Rendered ABOVE the content+rail row
+      (attn-42y) so it spans the full window width and the rail starts
+      beneath it.
+    -->
+    <div
+      class="shared-doc-banner flex h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-muted/25 px-4 text-xs font-medium text-muted-foreground"
+      data-slot="shared-doc-banner"
+    >
+      <Users class="size-3.5 shrink-0" aria-hidden="true" />
+      <span class="text-foreground/80">Shared document</span>
+      <span class="text-muted-foreground/45" aria-hidden="true">·</span>
+      <span class="font-normal text-muted-foreground">
+        {collabActive ? 'live editing' : 'read-only'} · end-to-end encrypted
+      </span>
+    </div>
+  {/if}
 {/snippet}
 
 {#snippet rightRailPlaceholder()}
@@ -2577,27 +2587,34 @@
       onSearchQuery={handleSidebarSearchQuery}
       onOutlineNavigate={handleOutlineNavigate}
     />
-    <SidebarInset class="relative !flex-row overflow-hidden">
-      {@render reviewChrome()}
-      <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {@render mainContent()}
-      </div>
-      <aside
-        class="right-rail relative flex h-full shrink-0 flex-col overflow-y-auto overflow-x-hidden bg-background transition-[width] duration-200 ease-linear"
-        style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
-        data-state={reviewStore.panelOpen ? 'open' : 'closed'}
-        data-mode={reviewStore.railMode}
-        data-slot="right-rail"
-        aria-hidden={!reviewStore.panelOpen}
-      >
-        {#if reviewStore.panelOpen}
-          {#if rightRail}
-            {@render rightRail()}
-          {:else}
-            {@render rightRailPlaceholder()}
+    <SidebarInset class="overflow-hidden">
+      <!-- Full-width header row: the shared-doc banner spans the document
+           AND the rail (attn-42y). The content+rail row below it is the
+           `relative` anchor for the floating ReviewBar, so the bar keeps
+           its alignment over the breadcrumb regardless of the banner. -->
+      {@render sharedDocBanner()}
+      <div class="relative flex min-h-0 flex-1 flex-row overflow-hidden">
+        {@render reviewChrome()}
+        <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {@render mainContent()}
+        </div>
+        <aside
+          class="right-rail relative flex h-full shrink-0 flex-col overflow-y-auto overflow-x-hidden border-l border-border/60 bg-sidebar transition-[width] duration-200 ease-linear data-[mode=hidden]:border-l-0"
+          style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
+          data-state={reviewStore.panelOpen ? 'open' : 'closed'}
+          data-mode={reviewStore.railMode}
+          data-slot="right-rail"
+          aria-hidden={reviewStore.railMode === 'hidden'}
+        >
+          {#if reviewStore.railMode !== 'hidden'}
+            {#if rightRail}
+              {@render rightRail()}
+            {:else}
+              {@render rightRailPlaceholder()}
+            {/if}
           {/if}
-        {/if}
-      </aside>
+        </aside>
+      </div>
     </SidebarInset>
   </SidebarProvider>
 {:else}

@@ -19,6 +19,7 @@
 <script lang="ts">
   import AmbiguousAnchorPicker from './AmbiguousAnchorPicker.svelte';
   import { reviewAcceptSuggestion, reviewRejectSuggestion } from './ipc';
+  import { AGENT_GLYPH, monogramFor } from './peer-strip-format';
   import { reviewStore } from './review/store.svelte';
   import type { EventId, ResolvedAnchorCandidate, RoomId, Thread } from './types';
 
@@ -59,11 +60,10 @@
     /** Locally-set marker — true after the user clicked reject/resolve and
      *  the IPC is not yet acknowledged (or doesn't exist yet). */
     pendingDismiss?: boolean;
-    /** Resolved-card collapse control (attn-d7y). When set on a resolved
-     *  card the action row renders a single Collapse button (no
-     *  Reply/Resolve/Accept/Reject — the card is read-only) and Escape on
-     *  the focused card invokes it. */
-    onCollapse?: () => void;
+    /** The initiating author's participant kind (attn-42y). Drives the
+     *  card's left-border color and the header avatar via the
+     *  `--peer-avatar-bg-*` tokens, matching carets and peer chips. */
+    authorKind?: 'owner' | 'reviewer' | 'agent';
     /** Fires when the embedded AmbiguousAnchorPicker has dispatched a
      *  reviewResolveAnchor IPC. The parent uses this for tests / for
      *  any optimistic local marking until the store gets the
@@ -98,7 +98,7 @@
     onResolve,
     onReply,
     pendingDismiss = false,
-    onCollapse,
+    authorKind = 'reviewer',
     onCandidatePicked,
     onRequestReanchor,
     onDiscardStale,
@@ -302,19 +302,32 @@
   }
 
   function handleCardClick(): void {
+    // A mouseup ending a text-selection drag inside the card dispatches a
+    // click on the card root. Activating then would be hostile: it moves
+    // the editor cursor for active cards and COLLAPSES expanded resolved
+    // cards — making comment text impossible to select/copy.
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;
     onActivate();
   }
+
+  // Author identity visuals (attn-42y): the card's left border and the
+  // header avatar carry the initiating author's presence color. Stale /
+  // ambiguous keep their state-colored border — those are alerts, not
+  // identity surfaces.
+  const authorColor = $derived(`var(--peer-avatar-bg-${authorKind})`);
+  const authorBorderColor = $derived(
+    cardState === 'stale' || cardState === 'ambiguous' ? undefined : authorColor,
+  );
+  const avatarGlyph = $derived(
+    authorKind === 'agent' ? AGENT_GLYPH : monogramFor(authorName),
+  );
 
   function handleKeydown(e: KeyboardEvent): void {
     // Only the card itself activates on Enter/Space. Ignore keydowns bubbling
     // up from child controls (e.g. the reply textarea) — otherwise this
     // swallowed the space bar and you couldn't type spaces in a reply.
     if (e.target !== e.currentTarget) return;
-    if (e.key === 'Escape' && cardState === 'resolved' && onCollapse) {
-      e.preventDefault();
-      onCollapse();
-      return;
-    }
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       onActivate();
@@ -359,6 +372,7 @@
   data-offset={offset ? 'true' : 'false'}
   data-pending-dismiss={pendingDismiss ? 'true' : 'false'}
   data-awaiting-reanchor={awaitingReanchor ? 'true' : 'false'}
+  style:border-left-color={authorBorderColor}
   onclick={handleCardClick}
   onkeydown={handleKeydown}
   onmouseenter={handleMouseEnter}
@@ -368,6 +382,12 @@
   aria-label={`${kind} by ${authorName}, ${cardState}`}
 >
   <header class="rmc-header">
+    <span
+      class="rmc-avatar"
+      style:background-color={authorColor}
+      data-author-kind={authorKind}
+      aria-hidden="true"
+    >{avatarGlyph}</span>
     <span class="rmc-author">{authorName}</span>
     {#if ageLabel}<span class="rmc-age">· {ageLabel}</span>{/if}
     <span class="rmc-spacer"></span>
@@ -461,19 +481,10 @@
   {/if}
 
   <footer class="rmc-actions">
-    {#if cardState === 'resolved' && onCollapse}
-      <!-- Read-only expanded resolved card (attn-d7y): no Reply/Resolve or
-           Accept/Reject — the only action is collapsing back to the chip. -->
-      <button
-        type="button"
-        class="rmc-btn"
-        data-action="collapse"
-        data-testid="review-margin-card-collapse"
-        aria-label="Collapse resolved {kind}"
-        onclick={(e) => { e.stopPropagation(); onCollapse(); }}
-      >
-        Collapse
-      </button>
+    {#if cardState === 'resolved'}
+      <!-- Read-only resolved card (attn-42y): no action row at all. The
+           rail collapses as a whole; clicking the card (or Escape)
+           shrinks it back to its chip. -->
     {:else if cardState === 'stale'}
       {#if awaitingReanchor}
         <button
@@ -544,7 +555,7 @@
         class="rmc-btn"
         data-action="resolve"
         onclick={handleResolve}
-        disabled={pendingDismiss || cardState === 'resolved'}
+        disabled={pendingDismiss}
       >
         Resolve
       </button>
@@ -581,7 +592,9 @@
 <style>
   .review-margin-card {
     display: block;
-    width: 320px;
+    /* Fluid: the margin slot (or orphan-tray list item) defines the
+       width, inset 12px from the rail edges (attn-42y). */
+    width: 100%;
     box-sizing: border-box;
     padding: 10px 12px;
     background: var(--review-card-surface, var(--popover, var(--background, #fff)));
@@ -643,15 +656,34 @@
 
   .rmc-header {
     display: flex;
-    align-items: baseline;
-    gap: 4px;
+    align-items: center;
+    gap: 5px;
     margin-bottom: 4px;
     font-size: 11px;
+  }
+
+  /* Author avatar — monogram on the author's presence color, matching
+     the collapsed-gutter chips and the peer strip (attn-42y). */
+  .rmc-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    border-radius: 9999px;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 1;
   }
 
   .rmc-author {
     font-weight: 600;
     color: var(--foreground, inherit);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .rmc-age {

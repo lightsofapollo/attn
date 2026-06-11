@@ -463,7 +463,10 @@ export class ReviewStore {
 
   /**
    * Apply a transport/connection status payload pushed by Rust. Joined/Live
-   * statuses activate the room; Resumed only populates the switcher.
+   * statuses activate the room; anything else only populates the switcher.
+   * Daemon-resumed rooms arrive role-accurately as Live (we shared it) or
+   * Joined (we joined it) so a restarted reviewer re-enters the shared-doc
+   * view (attn-6dd); owners never flip regardless (role gate in room-ui).
    */
   applyStatus(status: ReviewStatus): void {
     const roomId = status.roomId;

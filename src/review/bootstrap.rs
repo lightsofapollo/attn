@@ -1276,19 +1276,31 @@ impl Bootstrapper {
 
         // 5. Persist a local `ReviewRoom`. The reviewer view starts empty —
         //    documents/snapshots fill in as snapshot envelopes arrive.
-        let review_room = ReviewRoom {
-            v: 2,
-            room_id: parsed.room_id.clone(),
-            created_at: now_ms,
-            created_by: participant_id.clone(),
-            policy,
-            documents: Default::default(),
-            snapshots: Default::default(),
-            event_heads: vec![],
-        };
-        self.store
-            .save_room(&review_room)
-            .map_err(|e| BootstrapError::Store(format!("save_room: {e}")))?;
+        //    Only on FIRST join though: a re-join over persisted state
+        //    (same invite pasted twice, daemon restart + join) must not
+        //    clobber the room.json that already accumulated
+        //    documents/snapshots/event_heads — overwriting it with this
+        //    empty shell orphaned the locally stored room state (attn-6dd).
+        let already_known = self
+            .store
+            .load_room(&parsed.room_id)
+            .map_err(|e| BootstrapError::Store(format!("load_room: {e}")))?
+            .is_some();
+        if !already_known {
+            let review_room = ReviewRoom {
+                v: 2,
+                room_id: parsed.room_id.clone(),
+                created_at: now_ms,
+                created_by: participant_id.clone(),
+                policy,
+                documents: Default::default(),
+                snapshots: Default::default(),
+                event_heads: vec![],
+            };
+            self.store
+                .save_room(&review_room)
+                .map_err(|e| BootstrapError::Store(format!("save_room: {e}")))?;
+        }
         save_room_secret(self.store.root(), &parsed.room_id, &parsed.room_secret)?;
 
         Ok(JoinOutcome {
@@ -3041,6 +3053,76 @@ mod tests {
             .collect::<anyhow::Result<_>>()
             .expect("decode");
         assert_eq!(envelopes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejoin_preserves_existing_room_state() {
+        // attn-6dd: step 5 of `join_with_identity` used to unconditionally
+        // overwrite room.json with a fresh empty `ReviewRoom`. On a RE-join
+        // (same invite pasted again, or a daemon restart followed by a join)
+        // that clobbered the documents/snapshots/event_heads the room had
+        // accumulated. Re-join must keep the existing room.json intact.
+        let server = MockServer::start().await;
+        let id_dir = TempDir::new().expect("id tempdir");
+        let (_store_tmp, store, boot) =
+            make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
+
+        let secret = [0x4Bu8; 32];
+        let room_id = derive_room_id(&secret);
+        let invite = build_invite_url(&room_id, &secret);
+
+        Mock::given(method("POST"))
+            .and(path_regex_for_room_create())
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "roomId": "x",
+                "createdAt": 0u64,
+                "expiresAt": 0u64,
+                "policy": {},
+                "ownerSigningKeyId": "k",
+                "serverSeq": 0,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex_for_devices())
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex_for_devices())
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "devices": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        // First join persists the fresh empty room.
+        boot.join(&invite, None).await.expect("first join");
+        let mut room = store
+            .load_room(&room_id)
+            .expect("load")
+            .expect("room.json exists after first join");
+        assert!(room.event_heads.is_empty());
+
+        // Simulate accumulated state between sessions.
+        let head: crate::review::ids::EventId =
+            serde_json::from_value(serde_json::Value::String("evt-head-1".into()))
+                .expect("EventId deserializes");
+        room.event_heads = vec![head.clone()];
+        store.save_room(&room).expect("save mutated room");
+
+        // Re-join with the same invite must NOT reset the room.
+        boot.join(&invite, None).await.expect("re-join");
+        let room_after = store
+            .load_room(&room_id)
+            .expect("load")
+            .expect("room.json still exists");
+        assert_eq!(
+            room_after.event_heads,
+            vec![head],
+            "re-join must not clobber room.json with an empty ReviewRoom"
+        );
     }
 
     #[tokio::test]

@@ -316,6 +316,12 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             "displayNameSet": review_display_name_set,
         },
         "ipcToken": &ipc_token,
+        // Debug builds only: lets the frontend expose the session IPC token
+        // to the automation bridge (`window.__attn_ipc_token__`) so E2E
+        // suites driving raw `window.ipc.postMessage` via `--eval` pass the
+        // capability gate. Release builds never set this, so the token stays
+        // confined to the init payload there. See web/src/App.svelte.
+        "debugBuild": cfg!(debug_assertions),
     })
     .to_string();
     let page_html = build_page_html(&init_payload_json, theme);

@@ -1684,6 +1684,14 @@
     // Capture the IPC capability token before we clear the payload — `send()`
     // attaches it to privileged messages so the daemon accepts them.
     setIpcToken(init.ipcToken);
+    // DEBUG BUILDS ONLY (daemon sets `debugBuild` from cfg!(debug_assertions),
+    // never in release): expose the session token on the main frame so the
+    // automation bridge (`attn --eval`, E2E suites) can drive privileged raw
+    // `window.ipc.postMessage` calls past the capability gate. Sandboxed
+    // HtmlViewer iframes have their own `window` and still never see it.
+    if (init.debugBuild && init.ipcToken) {
+      (window as { __attn_ipc_token__?: string }).__attn_ipc_token__ = init.ipcToken;
+    }
 
     // Clear so we only process once (prevents $effect re-entry)
     delete (window as { __attn_init__?: InitPayload }).__attn_init__;

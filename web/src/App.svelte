@@ -2672,7 +2672,7 @@
              otherwise reading flow dead-stops whenever the pointer crosses
              the rail. No preventDefault needed: nothing else scrolls here. -->
         <aside
-          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden border-l border-t border-border/40 data-[mode=hidden]:border-none bg-sidebar"
+          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden rounded-tl-lg border-l border-t border-border/40 data-[mode=hidden]:border-none bg-sidebar"
           style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={reviewStore.railMode}

@@ -506,17 +506,41 @@ screenshot "08-avatar-expanded"
 
 echo ""
 echo "--- Cards track their anchors while the document scrolls (attn-23m) ---"
-# Scroll the EDITOR viewport and assert the card's on-screen top moves by
-# the same amount (opposite sign). Tolerance ±4px for rounding/collision.
+# Position the card mid-container first (strict 1:1 tracking only holds
+# OUTSIDE the rail's top/bottom fit bands — fitBottom intentionally lifts
+# cards near the bottom edge), then scroll by a small delta and assert the
+# card's on-screen top moves the same amount. Tolerance ±4px.
+# Step 1: center the card in the margin container (the margin repositions
+# asynchronously on scroll, so measure only after a settle pause).
+center_js=$(cat <<'EOF'
+(() => {
+  const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
+  const vp = document.querySelector('.attn-content-viewport [data-slot="scroll-area-viewport"]');
+  const margin = document.querySelector('[data-slot="review-margin"]');
+  if (!card || !vp || !margin) return 'missing';
+  const mr = margin.getBoundingClientRect();
+  const cr = card.getBoundingClientRect();
+  const shift = (cr.top + cr.height / 2) - (mr.top + mr.height / 2);
+  vp.scrollTop = Math.max(0, vp.scrollTop + shift);
+  return 'centered';
+})()
+EOF
+)
+result=$("$ATTN" --eval "$center_js")
+assert_eq "Card centered in the rail for a clean sample" "$result" '"centered"'
+sleep 0.4
+
+# Step 2: record the settled position, then scroll +60.
 scroll_js=$(cat <<'EOF'
 (() => {
   const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
   const vp = document.querySelector('.attn-content-viewport [data-slot="scroll-area-viewport"]');
   if (!card || !vp) return 'missing';
+  const baseScroll = vp.scrollTop;
   const before = card.getBoundingClientRect().top;
-  vp.scrollTop = 150;
-  const scrolled = vp.scrollTop;
-  window.__attn_scroll_probe__ = { before, scrolled };
+  vp.scrollTop = baseScroll + 60;
+  const scrolled = vp.scrollTop - baseScroll;
+  window.__attn_scroll_probe__ = { before, scrolled, baseScroll };
   return scrolled > 0 ? 'scrolled' : 'no-scroll';
 })()
 EOF
@@ -539,7 +563,7 @@ result=$(poll_eval "$verify_js" '"tracked"')
 assert_eq "Card moved 1:1 with the document scroll" "$result" '"tracked"'
 
 # Scroll back and confirm it returns to its original position.
-"$ATTN" --eval "document.querySelector('.attn-content-viewport [data-slot=\\\"scroll-area-viewport\\\"]').scrollTop = 0" >/dev/null
+"$ATTN" --eval "(() => { const vp = document.querySelector('.attn-content-viewport [data-slot=\\\"scroll-area-viewport\\\"]'); vp.scrollTop = window.__attn_scroll_probe__.baseScroll; return vp.scrollTop; })()" >/dev/null
 restore_js=$(cat <<'EOF'
 (() => {
   const probe = window.__attn_scroll_probe__;
@@ -552,6 +576,32 @@ EOF
 )
 result=$(poll_eval "$restore_js" '"restored"')
 assert_eq "Card returns to its anchor when scrolled back" "$result" '"restored"'
+
+echo ""
+echo "--- Cards with on-screen anchors are never cut off at the rail bottom ---"
+# Scroll so the open card's anchor sits near the viewport bottom: the
+# fitBottom pass must lift the card fully into view instead of letting the
+# rail's clip line cut it.
+fit_js=$(cat <<'EOF'
+(() => {
+  const vp = document.querySelector('.attn-content-viewport [data-slot="scroll-area-viewport"]');
+  const margin = document.querySelector('[data-slot="review-margin"]');
+  const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
+  if (!vp || !margin || !card) return 'missing';
+  const mr = margin.getBoundingClientRect();
+  // Push the anchor toward the container bottom (40px above it).
+  const cr0 = card.getBoundingClientRect();
+  vp.scrollTop = Math.max(0, vp.scrollTop + (cr0.top - (mr.bottom - 40)));
+  const cr = card.getBoundingClientRect();
+  const mrNow = margin.getBoundingClientRect();
+  return cr.bottom <= mrNow.bottom + 1
+    ? 'fully-visible'
+    : `cut by ${Math.round(cr.bottom - mrNow.bottom)}px`;
+})()
+EOF
+)
+result=$(poll_eval "$fit_js" '"fully-visible"')
+assert_eq "Bottom-anchored card lifted fully into view" "$result" '"fully-visible"'
 
 screenshot "09-scroll-tracking"
 

@@ -38,6 +38,7 @@
   import ReviewMarginCard from './ReviewMarginCard.svelte';
   import { positionAnchorFromSelection } from './review/anchors';
   import {
+    fitBottom,
     layoutCards,
     visibleCards,
     type MarginCardInput,
@@ -334,6 +335,8 @@
   // expanded resolved card pushes its neighbors instead of overlapping
   // them (the previous two-pass layout let strips overlap active cards).
   // `layoutCards` sorts by anchorY internally, so input order is free.
+  // The fitBottom pass then lifts cards whose anchors are on screen so
+  // they are never cut off at the rail's bottom edge.
   const placements: MarginCardPlacement[] = $derived.by(() => {
     const inputs: MarginCardInput[] = [];
     for (const t of anchoredThreads) {
@@ -346,7 +349,11 @@
       if (y === undefined) continue;
       inputs.push({ id: t.id, anchorY: clampRailTop(y), height: heightFor(t) });
     }
-    return layoutCards(inputs);
+    const placed = layoutCards(inputs);
+    const containerH = containerEl?.clientHeight ?? 0;
+    if (containerH <= 0) return placed;
+    const heights = new Map(inputs.map((i) => [i.id, i.height]));
+    return fitBottom(placed, heights, { containerHeight: containerH });
   });
 
   // Virtualization band. Only render placements that fall within
@@ -387,9 +394,13 @@
         height: RESOLVED_CHIP_HEIGHT,
       });
     }
-    const placed = layoutCards(inputs);
-    if (placed.length <= maxRenderedCards) return placed;
     const heights = new Map(inputs.map((i) => [i.id, i.height]));
+    let placed = layoutCards(inputs);
+    const containerH = containerEl?.clientHeight ?? 0;
+    if (containerH > 0) {
+      placed = fitBottom(placed, heights, { containerHeight: containerH });
+    }
+    if (placed.length <= maxRenderedCards) return placed;
     return visibleCards(placed, heights, { viewportTop, viewportHeight, bandPx: 800 });
   });
 

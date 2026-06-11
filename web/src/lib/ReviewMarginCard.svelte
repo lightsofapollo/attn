@@ -20,6 +20,7 @@
   import AmbiguousAnchorPicker from './AmbiguousAnchorPicker.svelte';
   import { reviewAcceptSuggestion, reviewRejectSuggestion } from './ipc';
   import { AGENT_GLYPH, monogramFor } from './peer-strip-format';
+  import { shouldSubmitOnEnter } from './review/composer-keys';
   import { reviewStore } from './review/store.svelte';
   import type { EventId, ResolvedAnchorCandidate, RoomId, Thread } from './types';
 
@@ -279,12 +280,16 @@
   }
 
   function handleReplyKeydown(e: KeyboardEvent): void {
+    // Keys belonging to an in-flight IME composition (e.g. Escape closing
+    // the candidate list) are the IME's, not ours.
+    if (e.isComposing) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
       replying = false;
       replyBody = '';
-    } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    } else if (shouldSubmitOnEnter(e)) {
+      // Enter submits; Shift+Enter inserts a newline (attn-2aj).
       e.preventDefault();
       e.stopPropagation();
       submitReply();
@@ -568,7 +573,7 @@
         bind:value={replyBody}
         class="rmc-reply-input"
         placeholder="Reply&hellip;"
-        rows="2"
+        rows="4"
         onkeydown={handleReplyKeydown}
         onclick={(e) => e.stopPropagation()}
       ></textarea>
@@ -837,7 +842,9 @@
   .rmc-reply-input {
     width: 100%;
     box-sizing: border-box;
-    resize: vertical;
+    /* No manual resize handle — rows=4 supplies the minimum height and
+       Enter/Shift+Enter handle the rest (attn-2aj). */
+    resize: none;
     border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
     border-radius: 4px;
     background: var(--background, #fff);

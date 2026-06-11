@@ -416,6 +416,9 @@ assert_eq "Rail width is exactly 320px when expanded" "$result" "320"
 result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]') !== null" 'true')
 assert_eq "Resolved card rendered" "$result" "true"
 
+result=$("$ATTN" --eval "parseInt(document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]')?.parentElement?.style.top ?? '-1', 10) >= 8")
+assert_eq "Card keeps breathing room from the rail top (top ≥ 8)" "$result" "true"
+
 result=$("$ATTN" --eval "(() => { const c = document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]'); if (!c) return 'no-card'; return [c.querySelectorAll('[data-action]').length === 0, c.querySelector('.rmc-avatar') !== null].join(','); })()")
 assert_eq "Card is read-only (no action buttons) with an author avatar" "$result" '"true,true"'
 
@@ -443,9 +446,13 @@ mixed_js=$(cat <<'EOF'
 (() => {
   const s = window.__attn_review_store__;
   if (!s) return 'no-store';
+  // Anchored deep in the document (not the top band): the scroll-tracking
+  // suite below needs this card to move 1:1 with a 150px scroll, and the
+  // rail-top breathing-room clamp (attn-2aj) intentionally pins cards
+  // whose anchors sit near the viewport top.
   const anchor = {
     v: 2, fileId: 'file-x', snapshotId: 'snap-x', baseHash: 'h-x',
-    position: { byteRange: [20, 30], lineRange: [3, 3] },
+    position: { byteRange: [600, 640], lineRange: [20, 20] },
   };
   s.applyEvent({
     meta: { v: 2, eventId: 'e-3', roomId: 'room-x', authorId: 'p-reviewer', deviceId: 'd-x', createdAt: Date.now(), parentEventIds: [], snapshotId: 'snap-x' },

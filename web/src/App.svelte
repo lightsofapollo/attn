@@ -835,6 +835,39 @@
     suggestionComposer = null;
   }
 
+  /**
+   * Submit-only reset (attn-2aj): after a comment/suggestion is CREATED,
+   * collapse the editor selection so the floating Comment|Suggest toolbar
+   * doesn't resurrect over the just-annotated text the instant the
+   * composer unmounts. Collapsing the PM selection is the load-bearing
+   * part — clearing `toolbarSelection` alone gets re-derived from the
+   * still-live selection on the next scroll/selectionchange. Cancel paths
+   * deliberately do NOT call this, so Escape keeps the selection for a
+   * retry or a switch to the other composer.
+   */
+  function collapseComposeSelection(): void {
+    toolbarSelection = null;
+    const view = pmViewForReview;
+    if (!view) return;
+    // A mid-compose file switch re-creates the editor (collabEpoch bump);
+    // only collapse the view the composer was opened against — the old
+    // selection died with the old view, and the new file's selection is
+    // not ours to touch (a stray dispatch would also broadcast a caret
+    // move to peers).
+    const composerView = commentComposer?.view ?? suggestionComposer?.view;
+    if (composerView !== undefined && view !== composerView) return;
+    try {
+      view.dispatch(
+        view.state.tr.setSelection(
+          TextSelection.create(view.state.doc, view.state.selection.to),
+        ),
+      );
+    } catch {
+      // The view can be mid-teardown on a file/tab switch; the selection
+      // dies with it, which is exactly the outcome we wanted anyway.
+    }
+  }
+
   // Floating selection toolbar (attn-bit): the discoverable surface for the
   // otherwise keyboard-only comment/suggest actions. We track the live editor
   // selection and expose {from,to} when — and only when — composing is
@@ -2718,6 +2751,7 @@
     anchorContext={commentComposer.anchorContext}
     roomId={commentComposer.roomId}
     onClose={closeCommentComposer}
+    onSubmitted={collapseComposeSelection}
   />
 {/if}
 
@@ -2729,6 +2763,7 @@
     anchorContext={suggestionComposer.anchorContext}
     roomId={suggestionComposer.roomId}
     onClose={closeSuggestionComposer}
+    onSubmit={() => collapseComposeSelection()}
   />
 {/if}
 <CommandPalette

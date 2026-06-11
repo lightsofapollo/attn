@@ -316,6 +316,19 @@
     return null;
   }
 
+  /**
+   * Breathing room between the rail's top edge and any card/chip whose
+   * anchor is still ON SCREEN (attn-2aj — cards must not sit flush
+   * against the rail header). Anchors scrolled above the WINDOW keep
+   * their negative y so the card clips away with its text (attn-23m's
+   * 1:1 tracking is preserved everywhere except this top band, where
+   * Google-Docs-style pinning is the better behavior).
+   */
+  function clampRailTop(y: number): number {
+    const viewportY = y + lastContainerTop;
+    return viewportY < 0 ? y : Math.max(y, COLLAPSED_RAIL_TOP_CLEARANCE);
+  }
+
   // Build the layout inputs from anchored threads AND layout-visible
   // resolved threads, then run ONE collision pass. A single pass means an
   // expanded resolved card pushes its neighbors instead of overlapping
@@ -326,12 +339,12 @@
     for (const t of anchoredThreads) {
       const y = anchorYs.get(t.id);
       if (y === undefined) continue;
-      inputs.push({ id: t.id, anchorY: y, height: heightFor(t) });
+      inputs.push({ id: t.id, anchorY: clampRailTop(y), height: heightFor(t) });
     }
     for (const t of layoutResolvedThreads) {
       const y = anchorYs.get(t.id);
       if (y === undefined) continue;
-      inputs.push({ id: t.id, anchorY: y, height: heightFor(t) });
+      inputs.push({ id: t.id, anchorY: clampRailTop(y), height: heightFor(t) });
     }
     return layoutCards(inputs);
   });
@@ -365,16 +378,12 @@
     for (const t of threads) {
       if (!t.resolved && !isThreadActive(t, locallyDismissed)) continue;
       // Position-less threads (orphans, unresolvable anchors) pin at the
-      // gutter top. Anchors that are still ON SCREEN — including the
-      // header band above the rail's own top — clamp into the gutter so
-      // a comment on the first visible line keeps its chip; only anchors
-      // scrolled above the WINDOW keep a negative y and clip away with
-      // their text.
+      // gutter top; on-screen anchors clamp via clampRailTop, anchors
+      // scrolled above the window clip away with their text.
       const y = anchorYs.get(t.id) ?? COLLAPSED_RAIL_TOP_CLEARANCE;
-      const viewportY = y + lastContainerTop;
       inputs.push({
         id: t.id,
-        anchorY: viewportY < 0 ? y : Math.max(y, COLLAPSED_RAIL_TOP_CLEARANCE),
+        anchorY: clampRailTop(y),
         height: RESOLVED_CHIP_HEIGHT,
       });
     }
@@ -812,7 +821,7 @@
           data-testid="review-margin-resolved-chip"
           data-variant="icon"
           data-thread-id={t.id}
-          style="top: {p.top}px;"
+          style="top: {p.top}px; --chip-author-color: var(--peer-avatar-bg-{authorKindFor(t)});"
           aria-label={`Resolved ${kindFor(t)} by ${authorNameFor(t)} — view details`}
           aria-expanded="false"
           onclick={() => { void expandResolved(t); }}
@@ -927,19 +936,26 @@
         />
       </div>
     {:else if t}
-      <!-- Resolved chip in the expanded rail: labeled pill at its anchor.
-           Click to expand into the read-only card. -->
+      <!-- Resolved chip in the expanded rail: labeled pill at its anchor,
+           carrying the initiating author's presence color (border + mini
+           avatar) like the cards do (attn-2aj). Click to expand into the
+           read-only card. -->
       <button
         type="button"
         class="review-margin-resolved-chip"
         data-testid="review-margin-resolved-chip"
         data-variant="label"
         data-thread-id={t.id}
-        style="top: {p.top}px;"
+        style="top: {p.top}px; border-color: var(--peer-avatar-bg-{authorKindFor(t)});"
         aria-label={`Resolved ${kindFor(t)} by ${authorNameFor(t)} — view details`}
         aria-expanded="false"
         onclick={() => { void expandResolved(t); }}
       >
+        <span
+          class="rmrc-avatar"
+          style="background-color: var(--peer-avatar-bg-{authorKindFor(t)});"
+          aria-hidden="true"
+        >{avatarGlyphFor(t)}</span>
         ✓ {authorNameFor(t)} · resolved
       </button>
     {/if}
@@ -1104,6 +1120,25 @@
     color: var(--foreground, inherit);
   }
 
+  /* Mini author avatar inside the labeled resolved chip (attn-2aj) —
+     same monogram-on-presence-color treatment as the card header. */
+  .rmrc-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    border-radius: 9999px;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 600;
+    line-height: 1;
+  }
+
+  /* Icon variant takes the author's presence color via a custom property
+     (set inline) rather than inline color/border-color directly, so the
+     :hover foreground flip below can still win (attn-2aj). */
   .review-margin-resolved-chip[data-variant='icon'] {
     left: 50%;
     transform: translateX(-50%);
@@ -1111,6 +1146,12 @@
     max-width: none;
     padding: 0;
     justify-content: center;
+    border-color: var(--chip-author-color, var(--border, rgba(0, 0, 0, 0.10)));
+    color: var(--chip-author-color, var(--muted-foreground, rgba(0, 0, 0, 0.55)));
+  }
+
+  .review-margin-resolved-chip[data-variant='icon']:hover {
+    color: var(--foreground, inherit);
   }
 
   /* Collapsed-gutter avatar chip (attn-42y): the initiating author's

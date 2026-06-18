@@ -64,6 +64,8 @@
   import ShareDialog from './lib/ShareDialog.svelte';
   import NamePrompt from './lib/NamePrompt.svelte';
   import { userProfile } from './lib/review/profile.svelte';
+  import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import Users from '@lucide/svelte/icons/users';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
@@ -87,6 +89,7 @@
     loadMarkdownFromPath,
     markdownSourceUrl,
   } from './lib/markdown-layer';
+  import { RAIL_WIDTH_PX } from './lib/review/rail-mode';
   import { reviewStore } from './lib/review/store.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
@@ -499,15 +502,19 @@
     }
   });
 
-  // Auto-open the review rail the first time the current file has feedback (a
-  // comment or suggestion). Without this the rail stays collapsed and a
+  // Auto-expand the review rail the first time the current file has
+  // UNRESOLVED feedback (attn-42y: resolved-only history defaults to the
+  // collapsed gutter). Without this the rail stays collapsed and a
   // reviewer's notes are invisible until someone happens to press Cmd+J — so
-  // incoming review work silently disappears. Open only ONCE so a deliberate
-  // Cmd+J close stays closed.
-  let reviewRailAutoOpened = $state(false);
+  // incoming review work silently disappears. One-shot PER ROOM so a
+  // deliberate collapse (toggle / Cmd+J) stays collapsed, but a second room
+  // joined later in the session still opens by default on its feedback.
+  let reviewRailAutoOpenedRoom = $state<string | null>(null);
   $effect(() => {
-    if (reviewStore.threadsForCurrentFile.length > 0 && !reviewRailAutoOpened) {
-      reviewRailAutoOpened = true;
+    const roomId = reviewStore.currentRoomId;
+    if (roomId === null) return;
+    if (reviewStore.marginActiveThreadCount > 0 && reviewRailAutoOpenedRoom !== roomId) {
+      reviewRailAutoOpenedRoom = roomId;
       if (!reviewStore.panelOpen) reviewStore.panelOpen = true;
     }
   });
@@ -596,6 +603,19 @@
       },
     });
   }
+
+  // Keep the live caret label in sync with renames: the onboarding
+  // NamePrompt fires AFTER a room is entered, so the label captured when
+  // the CollabController was constructed (the git/OS default) goes stale
+  // the moment the user picks a real name — peers' caret chips kept
+  // showing the old name (attn-k1n follow-up). The controller
+  // re-broadcasts the caret so the rename lands immediately.
+  $effect(() => {
+    const name = userProfile.effectiveName;
+    collabController?.setSelfLabel(
+      name || (collabRole === 'owner' ? 'Owner' : 'Reviewer'),
+    );
+  });
 
   // Base (earliest) snapshot markdown for a file in the current room. This is
   // the v0 every authority + resync replay anchors to, so the live editor seeds
@@ -842,6 +862,39 @@
 
   function closeSuggestionComposer(): void {
     suggestionComposer = null;
+  }
+
+  /**
+   * Submit-only reset (attn-2aj): after a comment/suggestion is CREATED,
+   * collapse the editor selection so the floating Comment|Suggest toolbar
+   * doesn't resurrect over the just-annotated text the instant the
+   * composer unmounts. Collapsing the PM selection is the load-bearing
+   * part — clearing `toolbarSelection` alone gets re-derived from the
+   * still-live selection on the next scroll/selectionchange. Cancel paths
+   * deliberately do NOT call this, so Escape keeps the selection for a
+   * retry or a switch to the other composer.
+   */
+  function collapseComposeSelection(): void {
+    toolbarSelection = null;
+    const view = pmViewForReview;
+    if (!view) return;
+    // A mid-compose file switch re-creates the editor (collabEpoch bump);
+    // only collapse the view the composer was opened against — the old
+    // selection died with the old view, and the new file's selection is
+    // not ours to touch (a stray dispatch would also broadcast a caret
+    // move to peers).
+    const composerView = commentComposer?.view ?? suggestionComposer?.view;
+    if (composerView !== undefined && view !== composerView) return;
+    try {
+      view.dispatch(
+        view.state.tr.setSelection(
+          TextSelection.create(view.state.doc, view.state.selection.to),
+        ),
+      );
+    } catch {
+      // The view can be mid-teardown on a file/tab switch; the selection
+      // dies with it, which is exactly the outcome we wanted anyway.
+    }
   }
 
   // Floating selection toolbar (attn-bit): the discoverable surface for the
@@ -1660,6 +1713,14 @@
     // Capture the IPC capability token before we clear the payload — `send()`
     // attaches it to privileged messages so the daemon accepts them.
     setIpcToken(init.ipcToken);
+    // DEBUG BUILDS ONLY (daemon sets `debugBuild` from cfg!(debug_assertions),
+    // never in release): expose the session token on the main frame so the
+    // automation bridge (`attn --eval`, E2E suites) can drive privileged raw
+    // `window.ipc.postMessage` calls past the capability gate. Sandboxed
+    // HtmlViewer iframes have their own `window` and still never see it.
+    if (init.debugBuild && init.ipcToken) {
+      (window as { __attn_ipc_token__?: string }).__attn_ipc_token__ = init.ipcToken;
+    }
 
     // Clear so we only process once (prevents $effect re-entry)
     delete (window as { __attn_init__?: InitPayload }).__attn_init__;
@@ -2365,7 +2426,9 @@
       avoidWindowControls={!hasSidebar}
       fixed={!hasSidebar}
       topOffsetPx={34}
-      rightInsetPx={showReviewChrome && !reviewStore.panelOpen ? 328 : 16}
+      rightInsetPx={showReviewChrome && reviewStore.railMode !== 'expanded'
+        ? 328 - (hasSidebar ? RAIL_WIDTH_PX[reviewStore.railMode] : 0)
+        : 16}
       onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
       onShare={showBreadcrumbShare ? openShareDialog : undefined}
       shareEnabled={showBreadcrumbShare}
@@ -2374,25 +2437,6 @@
   </div>
   {#if !hasSidebar}
     <div class="h-[40px] shrink-0"></div>
-  {/if}
-
-  {#if isReviewerViewingSnapshot}
-    <!--
-      Shared-document banner. Keep this as quiet app chrome: it needs to
-      distinguish reviewer mode from a local file without adding a hard color
-      stripe through the reading surface.
-    -->
-    <div
-      class="shared-doc-banner flex h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-muted/25 px-4 text-xs font-medium text-muted-foreground"
-      data-slot="shared-doc-banner"
-    >
-      <Users class="size-3.5 shrink-0" aria-hidden="true" />
-      <span class="text-foreground/80">Shared document</span>
-      <span class="text-muted-foreground/45" aria-hidden="true">·</span>
-      <span class="font-normal text-muted-foreground">
-        {collabActive ? 'live editing' : 'read-only'} · end-to-end encrypted
-      </span>
-    </div>
   {/if}
 
   <ScrollArea
@@ -2492,6 +2536,29 @@
       </div>
     {/if}
   </ScrollArea>
+{/snippet}
+
+{#snippet sharedDocBanner()}
+  {#if isReviewerViewingSnapshot}
+    <!--
+      Shared-document banner. Keep this as quiet app chrome: it needs to
+      distinguish reviewer mode from a local file without adding a hard color
+      stripe through the reading surface. Rendered ABOVE the content+rail row
+      (attn-42y) so it spans the full window width and the rail starts
+      beneath it.
+    -->
+    <div
+      class="shared-doc-banner flex h-8 shrink-0 items-center gap-2 border-b border-border/60 bg-muted/25 px-4 text-xs font-medium text-muted-foreground"
+      data-slot="shared-doc-banner"
+    >
+      <Users class="size-3.5 shrink-0" aria-hidden="true" />
+      <span class="text-foreground/80">Shared document</span>
+      <span class="text-muted-foreground/45" aria-hidden="true">·</span>
+      <span class="font-normal text-muted-foreground">
+        {collabActive ? 'live editing' : 'read-only'} · end-to-end encrypted
+      </span>
+    </div>
+  {/if}
 {/snippet}
 
 {#snippet rightRailPlaceholder()}
@@ -2598,26 +2665,82 @@
       onSearchQuery={handleSidebarSearchQuery}
       onOutlineNavigate={handleOutlineNavigate}
     />
-    <SidebarInset class="relative !flex-row overflow-hidden">
-      {@render reviewChrome()}
-      <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {@render mainContent()}
-      </div>
-      <aside
-        class="right-rail relative flex h-full shrink-0 flex-col overflow-y-auto overflow-x-hidden bg-background transition-[width] duration-200 ease-linear"
-        style="width: {reviewStore.panelOpen ? '320px' : '0px'};"
-        data-state={reviewStore.panelOpen ? 'open' : 'closed'}
-        data-slot="right-rail"
-        aria-hidden={!reviewStore.panelOpen}
-      >
-        {#if reviewStore.panelOpen}
-          {#if rightRail}
-            {@render rightRail()}
-          {:else}
-            {@render rightRailPlaceholder()}
+    <SidebarInset class="overflow-hidden">
+      <!-- Full-width header row: the shared-doc banner spans the document
+           AND the rail (attn-42y). The content+rail row below it is the
+           `relative` anchor for the floating ReviewBar, so the bar keeps
+           its alignment over the breadcrumb regardless of the banner. -->
+      {@render sharedDocBanner()}
+      <div class="relative flex min-h-0 flex-1 flex-row overflow-hidden">
+        {@render reviewChrome()}
+        <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {@render mainContent()}
+        </div>
+        <!-- The rail starts at the UNDERSIDE of the header strip (mt-12
+             clears the floating breadcrumb/ReviewBar row; flex-stretch
+             sizing absorbs the margin) and owns its toggle in a header row
+             — centered in the collapsed gutter, right-aligned expanded.
+             overflow-hidden (not auto): the rail must never scroll
+             independently — cards are repositioned per document scroll so
+             they stay tied to their anchors (attn-23m); off-screen cards
+             clip with their text. Width changes are INSTANT: WebKit pauses
+             CSS transitions in occluded windows, which left the rail stuck
+             mid-transition at ~1px (attn-23m), and an animating width also
+             desyncs the breadcrumb inset. -->
+        <!-- Top border at the hairline weight of the header divider (the
+             earlier /60 + header border-b combination read as one thick
+             line). onwheel: the rail never scrolls itself (attn-23m), so
+             wheel gestures over it forward to the document viewport —
+             otherwise reading flow dead-stops whenever the pointer crosses
+             the rail. No preventDefault needed: nothing else scrolls here. -->
+        <aside
+          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden rounded-tl-lg border-l border-t border-border/40 data-[mode=hidden]:border-none bg-sidebar"
+          style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
+          data-state={reviewStore.panelOpen ? 'open' : 'closed'}
+          data-mode={reviewStore.railMode}
+          data-slot="right-rail"
+          aria-hidden={reviewStore.railMode === 'hidden'}
+          onwheel={(e) => {
+            if (contentViewport) contentViewport.scrollTop += e.deltaY;
+          }}
+        >
+          {#if reviewStore.railMode !== 'hidden'}
+            <div
+              class="flex h-10 shrink-0 items-center border-b border-border/40 {reviewStore.panelOpen ? 'justify-end pr-2' : 'justify-center'}"
+              data-slot="rail-header"
+            >
+              <button
+                type="button"
+                class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                data-slot="rail-toggle"
+                data-state={reviewStore.panelOpen ? 'expanded' : 'collapsed'}
+                aria-label={reviewStore.panelOpen ? 'Collapse comments rail' : 'Expand comments rail'}
+                title="{reviewStore.panelOpen ? 'Collapse' : 'Expand'} comments (⌘J)"
+                aria-expanded={reviewStore.panelOpen}
+                onclick={() => reviewStore.togglePanel()}
+              >
+                {#if reviewStore.panelOpen}
+                  <PanelRightClose class="size-4" aria-hidden="true" />
+                {:else}
+                  <PanelRightOpen class="size-4" aria-hidden="true" />
+                {/if}
+              </button>
+            </div>
+            <!-- overflow-hidden + mb-2: cards/chips clip at this wrapper's
+                 bounds, keeping the rail's bottom 8px clear — the bottom
+                 counterpart of clampRailTop's breathing room (cards can't
+                 be pushed UP off their anchors, so the clip line is the
+                 only way to keep the bottom edge airy). -->
+            <div class="relative mb-2 min-h-0 flex-1 overflow-hidden">
+              {#if rightRail}
+                {@render rightRail()}
+              {:else}
+                {@render rightRailPlaceholder()}
+              {/if}
+            </div>
           {/if}
-        {/if}
-      </aside>
+        </aside>
+      </div>
     </SidebarInset>
   </SidebarProvider>
 {:else}
@@ -2685,6 +2808,7 @@
     anchorContext={commentComposer.anchorContext}
     roomId={commentComposer.roomId}
     onClose={closeCommentComposer}
+    onSubmitted={collapseComposeSelection}
   />
 {/if}
 
@@ -2696,6 +2820,7 @@
     anchorContext={suggestionComposer.anchorContext}
     roomId={suggestionComposer.roomId}
     onClose={closeSuggestionComposer}
+    onSubmit={() => collapseComposeSelection()}
   />
 {/if}
 <CommandPalette
@@ -2706,4 +2831,6 @@
   onSearchQuery={handleCommandPaletteSearchQuery}
   onSelect={(path) => openPath(path, detectFileType(path))}
 />
-<Toaster />
+<!-- closeButton: every toast (update nudge, file-changed, etc.) gets a
+     dismiss ✕ instead of forcing the user to wait out the timeout. -->
+<Toaster closeButton />

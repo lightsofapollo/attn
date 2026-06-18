@@ -232,11 +232,12 @@ for cb in reviewStatus reviewEvent reviewSnapshot reviewAnchorResolution; do
 done
 
 echo ""
-echo "--- Review store scaffold (from 12.10, pending) ---"
-# The review store module should be importable and expose a default shape.
-# Today the module does not exist — record as PEND.
+echo "--- Review store scaffold ---"
+# The review store singleton is exposed for E2E seeding (App.svelte wires
+# `window.__attn_review_store__` on mount). Hard assertion — the adaptive
+# rail suite below depends on it.
 result=$("$ATTN" --eval "typeof window.__attn_review_store__")
-expect_eq_soft "window.__attn_review_store__ exposed" "$result" '"object"' "attn-nnj.12.10"
+assert_eq "window.__attn_review_store__ exposed" "$result" '"object"'
 
 screenshot "02-shape-asserted"
 
@@ -320,6 +321,289 @@ echo "  NOTE: contract for the above lives in src/review/apply.rs ::e2e_* tests"
 echo "        (run scripts/test-apply-e2e.sh to verify the contract directly)"
 
 screenshot "03-apply-flow-pending"
+
+# ===================================================================
+# TEST SUITE: Collapsible rail + identity chips (attn-d7y / attn-42y)
+# ===================================================================
+#
+# Seeds the review store directly through `window.__attn_review_store__`
+# (no relay needed): one comment thread + its CommentResolved event. In a
+# review room the rail is always present: collapsed to a 48px gutter
+# (✓ chips for resolved, author-avatar chips for unresolved) unless
+# expanded by the user/auto-open. Clicking a ✓ chip expands the rail with
+# the full read-only card (no action buttons); clicking the card shrinks
+# it back to a labeled chip. The ReviewBar dock carries the rail toggle.
+
+echo ""
+echo "=== Review E2E: collapsible rail + identity chips (attn-d7y/attn-42y) ==="
+
+# Poll an --eval expression until it returns the expected value (the aside
+# width animates over 200ms, so one-shot reads race the transition).
+poll_eval() {
+    local expr="$1" expected="$2" attempts=30
+    local result=""
+    while [ $attempts -gt 0 ]; do
+        result=$("$ATTN" --eval "$expr" 2>/dev/null || echo "")
+        if [ "$result" = "$expected" ]; then
+            echo "$result"
+            return 0
+        fi
+        sleep 0.1
+        attempts=$((attempts - 1))
+    done
+    echo "$result"
+}
+
+"$ATTN" --wait-for '.ProseMirror' --timeout 10000 >/dev/null 2>&1 || true
+
+seed_js=$(cat <<'EOF'
+(() => {
+  const s = window.__attn_review_store__;
+  if (!s) return 'no-store';
+  const anchor = {
+    v: 2, fileId: 'file-x', snapshotId: 'snap-x', baseHash: 'h-x',
+    position: { byteRange: [0, 10], lineRange: [1, 1] },
+  };
+  const meta = (id) => ({
+    v: 2, eventId: id, roomId: 'room-x', authorId: 'p-reviewer',
+    deviceId: 'd-x', createdAt: Date.now(), parentEventIds: [],
+    snapshotId: 'snap-x',
+  });
+  const auth = { signature: 'sig', signingKeyId: 'kid' };
+  s.applyEvent({ meta: meta('e-1'), body: { type: 'comment_created', threadId: 't-1', anchor, body: 'Consider tightening this wording.' }, auth });
+  s.applyEvent({ meta: meta('e-2'), body: { type: 'comment_resolved', threadId: 't-1', resolvedBy: 'p-owner' }, auth });
+  s.selectRoom('room-x');
+  s.setCurrentFile('file-x');
+  return 'ok';
+})()
+EOF
+)
+result=$("$ATTN" --eval "$seed_js")
+assert_eq "Seeded resolved-only review thread" "$result" '"ok"'
+
+echo ""
+echo "--- Collapsed gutter (resolved-only margin, default) ---"
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"collapsed"')
+assert_eq "Rail data-mode is collapsed (no unresolved threads)" "$result" '"collapsed"'
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '48')
+assert_eq "Rail width is exactly the 48px gutter" "$result" "48"
+
+result=$("$ATTN" --query '[data-testid="review-margin-resolved-chip"]' | jq -r '.count' 2>/dev/null || echo "0")
+assert_eq "One resolved chip rendered" "$result" "1"
+
+result=$("$ATTN" --eval "document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.getAttribute('data-variant') ?? 'missing'")
+assert_eq "Chip is icon variant in the gutter" "$result" '"icon"'
+
+result=$("$ATTN" --eval "parseInt(document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.style.top ?? '-1', 10) >= 8")
+assert_eq "Gutter chip respects the inner clearance (top ≥ 8)" "$result" "true"
+
+result=$("$ATTN" --eval "(() => { const t = document.querySelector('[data-slot=\\\"rail-toggle\\\"]'); const rail = document.querySelector('[data-slot=\\\"right-rail\\\"]'); if (!t || !rail) return 'missing'; const tr = t.getBoundingClientRect(); const rr = rail.getBoundingClientRect(); return Math.abs((tr.left + tr.width / 2) - (rr.left + rr.width / 2)) <= 2 ? 'centered' : 'off-center'; })()")
+assert_eq "Toggle is horizontally centered in the collapsed gutter" "$result" '"centered"'
+
+screenshot "04-resolved-collapsed-gutter"
+
+echo ""
+echo "--- Expand ✓ chip → rail expands with read-only card ---"
+"$ATTN" --click '[data-testid="review-margin-resolved-chip"]' >/dev/null 2>&1 || true
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"expanded"')
+assert_eq "Rail expands on chip click" "$result" '"expanded"'
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '320')
+assert_eq "Rail width is exactly 320px when expanded" "$result" "320"
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]') !== null" 'true')
+assert_eq "Resolved card rendered" "$result" "true"
+
+result=$("$ATTN" --eval "parseInt(document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]')?.parentElement?.style.top ?? '-1', 10) >= 8")
+assert_eq "Card keeps breathing room from the rail top (top ≥ 8)" "$result" "true"
+
+result=$("$ATTN" --eval "(() => { const c = document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]'); if (!c) return 'no-card'; return [c.querySelectorAll('[data-action]').length === 0, c.querySelector('.rmc-avatar') !== null].join(','); })()")
+assert_eq "Card is read-only (no action buttons) with an author avatar" "$result" '"true,true"'
+
+result=$("$ATTN" --eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]')?.textContent.includes('Consider tightening this wording.')")
+assert_eq "Card shows the resolved comment body" "$result" "true"
+
+screenshot "05-resolved-expanded-card"
+
+echo ""
+echo "--- Click card → shrinks back to labeled chip (rail stays expanded) ---"
+"$ATTN" --click '[data-testid="review-margin-card"][data-state="resolved"]' >/dev/null 2>&1 || true
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]') === null" 'true')
+assert_eq "Resolved card gone after card click" "$result" "true"
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-resolved-chip\\\"]')?.getAttribute('data-variant') ?? 'missing'" '"label"')
+assert_eq "Labeled chip back in the expanded rail" "$result" '"label"'
+
+result=$("$ATTN" --eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode')")
+assert_eq "Rail stays expanded after card collapse" "$result" '"expanded"'
+
+echo ""
+echo "--- Mixed margin (active + resolved) → cards + labeled chip ---"
+mixed_js=$(cat <<'EOF'
+(() => {
+  const s = window.__attn_review_store__;
+  if (!s) return 'no-store';
+  // Anchored deep in the document (not the top band): the scroll-tracking
+  // suite below needs this card to move 1:1 with a 150px scroll, and the
+  // rail-top breathing-room clamp (attn-2aj) intentionally pins cards
+  // whose anchors sit near the viewport top.
+  const anchor = {
+    v: 2, fileId: 'file-x', snapshotId: 'snap-x', baseHash: 'h-x',
+    position: { byteRange: [600, 640], lineRange: [20, 20] },
+  };
+  s.applyEvent({
+    meta: { v: 2, eventId: 'e-3', roomId: 'room-x', authorId: 'p-reviewer', deviceId: 'd-x', createdAt: Date.now(), parentEventIds: [], snapshotId: 'snap-x' },
+    body: { type: 'comment_created', threadId: 't-2', anchor, body: 'An open question.' },
+    auth: { signature: 'sig', signingKeyId: 'kid' },
+  });
+  return 'ok';
+})()
+EOF
+)
+result=$("$ATTN" --eval "$mixed_js")
+assert_eq "Seeded an additional unresolved thread" "$result" '"ok"'
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"open\\\"]') !== null" 'true')
+assert_eq "Active card rendered alongside the chip" "$result" "true"
+
+result=$("$ATTN" --eval "(() => { const c = document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"open\\\"]'); if (!c) return 'no-card'; const cs = getComputedStyle(c); return [c.querySelector('.rmc-avatar') !== null, cs.borderLeftColor.length > 0].join(','); })()")
+assert_eq "Active card carries author avatar + colored border" "$result" '"true,true"'
+
+screenshot "06-mixed-expanded-rail"
+
+echo ""
+echo "--- Rail-header toggle → collapsed gutter with avatar chips ---"
+result=$("$ATTN" --query '[data-slot="rail-toggle"]' | jq -r '.status' 2>/dev/null || echo "not_found")
+assert_eq "Rail toggle present in the rail header" "$result" "found"
+
+"$ATTN" --click '[data-slot="rail-toggle"]' >/dev/null 2>&1 || true
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"collapsed"')
+assert_eq "Toggle collapses the rail" "$result" '"collapsed"'
+
+result=$("$ATTN" --query '[data-testid="review-margin-avatar-chip"]' | jq -r '.count' 2>/dev/null || echo "0")
+assert_eq "Unresolved thread shows an author avatar chip in the gutter" "$result" "1"
+
+result=$("$ATTN" --query '[data-testid="review-margin-resolved-chip"][data-variant="icon"]' | jq -r '.count' 2>/dev/null || echo "0")
+assert_eq "Resolved thread shows a ✓ chip in the gutter" "$result" "1"
+
+screenshot "07-collapsed-gutter-chips"
+
+echo ""
+echo "--- Avatar chip click → rail expands onto the thread ---"
+"$ATTN" --click '[data-testid="review-margin-avatar-chip"]' >/dev/null 2>&1 || true
+
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"expanded"')
+assert_eq "Avatar chip expands the rail" "$result" '"expanded"'
+
+result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"open\\\"]') !== null" 'true')
+assert_eq "Thread card visible after avatar expand" "$result" "true"
+
+screenshot "08-avatar-expanded"
+
+echo ""
+echo "--- Cards track their anchors while the document scrolls (attn-23m) ---"
+# Position the card mid-container first (strict 1:1 tracking only holds
+# OUTSIDE the rail's top/bottom fit bands — fitBottom intentionally lifts
+# cards near the bottom edge), then scroll by a small delta and assert the
+# card's on-screen top moves the same amount. Tolerance ±4px.
+# Step 1: center the card in the margin container (the margin repositions
+# asynchronously on scroll, so measure only after a settle pause).
+center_js=$(cat <<'EOF'
+(() => {
+  const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
+  const vp = document.querySelector('.attn-content-viewport [data-slot="scroll-area-viewport"]');
+  const margin = document.querySelector('[data-slot="review-margin"]');
+  if (!card || !vp || !margin) return 'missing';
+  const mr = margin.getBoundingClientRect();
+  const cr = card.getBoundingClientRect();
+  const shift = (cr.top + cr.height / 2) - (mr.top + mr.height / 2);
+  vp.scrollTop = Math.max(0, vp.scrollTop + shift);
+  return 'centered';
+})()
+EOF
+)
+result=$("$ATTN" --eval "$center_js")
+assert_eq "Card centered in the rail for a clean sample" "$result" '"centered"'
+sleep 0.4
+
+# Step 2: record the settled position, then scroll +60.
+scroll_js=$(cat <<'EOF'
+(() => {
+  const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
+  const vp = document.querySelector('.attn-content-viewport [data-slot="scroll-area-viewport"]');
+  if (!card || !vp) return 'missing';
+  const baseScroll = vp.scrollTop;
+  const before = card.getBoundingClientRect().top;
+  vp.scrollTop = baseScroll + 60;
+  const scrolled = vp.scrollTop - baseScroll;
+  window.__attn_scroll_probe__ = { before, scrolled, baseScroll };
+  return scrolled > 0 ? 'scrolled' : 'no-scroll';
+})()
+EOF
+)
+result=$("$ATTN" --eval "$scroll_js")
+assert_eq "Editor viewport scrolled" "$result" '"scrolled"'
+
+verify_js=$(cat <<'EOF'
+(() => {
+  const probe = window.__attn_scroll_probe__;
+  const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
+  if (!probe || !card) return 'missing';
+  const after = card.getBoundingClientRect().top;
+  const drift = Math.abs((probe.before - after) - probe.scrolled);
+  return drift <= 4 ? 'tracked' : `drifted by ${Math.round(drift)}px (before ${Math.round(probe.before)}, after ${Math.round(after)}, scrolled ${probe.scrolled})`;
+})()
+EOF
+)
+result=$(poll_eval "$verify_js" '"tracked"')
+assert_eq "Card moved 1:1 with the document scroll" "$result" '"tracked"'
+
+# Scroll back and confirm it returns to its original position.
+"$ATTN" --eval "(() => { const vp = document.querySelector('.attn-content-viewport [data-slot=\\\"scroll-area-viewport\\\"]'); vp.scrollTop = window.__attn_scroll_probe__.baseScroll; return vp.scrollTop; })()" >/dev/null
+restore_js=$(cat <<'EOF'
+(() => {
+  const probe = window.__attn_scroll_probe__;
+  const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
+  if (!probe || !card) return 'missing';
+  const drift = Math.abs(card.getBoundingClientRect().top - probe.before);
+  return drift <= 4 ? 'restored' : `off by ${Math.round(drift)}px`;
+})()
+EOF
+)
+result=$(poll_eval "$restore_js" '"restored"')
+assert_eq "Card returns to its anchor when scrolled back" "$result" '"restored"'
+
+echo ""
+echo "--- Cards with on-screen anchors are never cut off at the rail bottom ---"
+# Scroll so the open card's anchor sits near the viewport bottom: the
+# fitBottom pass must lift the card fully into view instead of letting the
+# rail's clip line cut it.
+fit_js=$(cat <<'EOF'
+(() => {
+  const vp = document.querySelector('.attn-content-viewport [data-slot="scroll-area-viewport"]');
+  const margin = document.querySelector('[data-slot="review-margin"]');
+  const card = document.querySelector('[data-testid="review-margin-card"][data-state="open"]');
+  if (!vp || !margin || !card) return 'missing';
+  const mr = margin.getBoundingClientRect();
+  // Push the anchor toward the container bottom (40px above it).
+  const cr0 = card.getBoundingClientRect();
+  vp.scrollTop = Math.max(0, vp.scrollTop + (cr0.top - (mr.bottom - 40)));
+  const cr = card.getBoundingClientRect();
+  const mrNow = margin.getBoundingClientRect();
+  return cr.bottom <= mrNow.bottom + 1
+    ? 'fully-visible'
+    : `cut by ${Math.round(cr.bottom - mrNow.bottom)}px`;
+})()
+EOF
+)
+result=$(poll_eval "$fit_js" '"fully-visible"')
+assert_eq "Bottom-anchored card lifted fully into view" "$result" '"fully-visible"'
+
+screenshot "09-scroll-tracking"
 
 # ===================================================================
 # Summary

@@ -82,10 +82,13 @@
   --review-card-comment-accent: oklch(0.62 0.13 82);
   --review-card-suggestion-accent: oklch(0.58 0.15 150);
 
-  /* Peer avatar accents — owner uses primary, reviewer cool, agent distinct violet. */
-  --peer-avatar-bg-owner: oklch(0.62 0.14 32);
-  --peer-avatar-bg-reviewer: oklch(0.58 0.11 235);
-  --peer-avatar-bg-agent: oklch(0.60 0.13 295);
+  /* Peer avatar accents — owner uses primary, reviewer cool, agent distinct
+     violet. Lightness tuned so white monogram text clears WCAG AA 4.5:1
+     (these tokens back small-text chips: PeerStrip, margin avatar chips,
+     card avatars — attn-42y). */
+  --peer-avatar-bg-owner: oklch(0.58 0.14 32);
+  --peer-avatar-bg-reviewer: oklch(0.56 0.11 235);
+  --peer-avatar-bg-agent: oklch(0.57 0.13 295);
 
   /* Stale anchor — dimmed/desaturated foreground. */
   --stale-anchor-fg: oklch(0.55 0.008 55 / 65%);
@@ -167,10 +170,11 @@
   --review-card-comment-accent: oklch(0.78 0.13 86);
   --review-card-suggestion-accent: oklch(0.74 0.16 150);
 
-  /* Peer avatar accents. */
-  --peer-avatar-bg-owner: oklch(0.62 0.12 32);
-  --peer-avatar-bg-reviewer: oklch(0.62 0.10 230);
-  --peer-avatar-bg-agent: oklch(0.62 0.12 295);
+  /* Peer avatar accents. Lightness tuned for white text at WCAG AA 4.5:1
+     (see the light-block note). */
+  --peer-avatar-bg-owner: oklch(0.58 0.12 32);
+  --peer-avatar-bg-reviewer: oklch(0.56 0.10 230);
+  --peer-avatar-bg-agent: oklch(0.57 0.12 295);
 
   /* Stale anchor. */
   --stale-anchor-fg: oklch(0.60 0.010 250 / 60%);
@@ -939,34 +943,24 @@
 }
 
 /* ============================================
- * Dialog opacity override (WKWebView animation fix)
- *
- * `tw-animate-css`'s `animate-in fade-in-0` keyframe leaves
- * dialog contents at opacity:0 in this WKWebView build when the
- * dialog's child component mounts $effects on the same tick the
- * dialog opens. Forcing opacity to 1 once data-state=open removes
- * the regression without changing behavior in other dialog
- * surfaces — the slide / zoom transforms still run.
- *
- * Track: when the bits-ui dialog dependency upgrades, retest
- * by removing this rule.
- * ============================================ */
-[data-slot="share-dialog"][data-state="open"],
-[data-slot="dialog-overlay"][data-state="open"] {
-  opacity: 1;
-}
-
-/* ============================================
  * Dialog EXIT-animation override (WKWebView unmount fix)
  *
- * Same root cause, close path: `tw-animate-css`'s `animate-out fade-out-0`
- * keyframe runs but never fires `animationend` in this WKWebView build, so
- * bits-ui (which waits for the exit animation before unmounting) leaves the
- * dialog overlay + content MOUNTED FOREVER after close — a stuck full-screen
- * `z-50 pointer-events:auto` overlay (and a focus-trap) that blocks the rest of
+ * `tw-animate-css`'s `animate-out fade-out-0` keyframe runs but never fires
+ * `animationend` in this WKWebView build, so bits-ui (which waits for the
+ * exit animation before unmounting) leaves the dialog overlay + content
+ * MOUNTED FOREVER after close — a stuck full-screen `z-50
+ * pointer-events:auto` overlay (and a focus-trap) that blocks the rest of
  * the app: the comment composer can't be typed in, the owner can't reach the
- * composer after sharing, etc. Removing the exit animation makes bits-ui see no
- * animation (animationName: none) and unmount immediately on close.
+ * composer after sharing, etc. Removing the exit animation makes bits-ui see
+ * no animation (animationName: none) and unmount immediately on close.
+ *
+ * The plain Dialog surfaces (share dialog, name prompt, shortcuts) no longer
+ * use tw-animate keyframes at all — they fade in via a CSS transition +
+ * @starting-style in `components/ui/dialog/dialog-content.svelte` (a sibling
+ * entry-side WKWebView stall left dialogs stuck at opacity 0; the old
+ * `opacity: 1` override for it was removed with the keyframes). This rule
+ * still matters for the OTHER role=dialog surfaces that keep animate-out
+ * classes (sheet, command palette).
  *
  * Track: retest by removing this rule when the bits-ui dependency upgrades.
  * ============================================ */

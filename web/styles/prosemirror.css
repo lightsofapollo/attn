@@ -257,6 +257,22 @@
   color: var(--muted-foreground);
 }
 
+/* prosemirror-view's zero-size cursor-placement shim, inserted after
+   end-of-textblock widget decorations (e.g. the suggest-changes ¶). We
+   hand-roll this stylesheet instead of importing
+   prosemirror-view/style/prosemirror.css, so we must carry its guard
+   ourselves: without it, Tailwind preflight (img { display: block }) and
+   base.css's content-image rule (img { margin: 1rem 0 }) turn the shim
+   into a full-margin block image, inflating every paragraph that ends in
+   a widget by ~57px — the "huge gap on Enter while suggesting" bug
+   (attn-42y). !important mirrors the upstream rule. */
+.ProseMirror img.ProseMirror-separator {
+  display: inline !important;
+  border: none !important;
+  margin: 0 !important;
+  border-radius: 0;
+}
+
 /* First heading should have no top margin */
 .ProseMirror > h1:first-child,
 .ProseMirror > h2:first-child,

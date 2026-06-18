@@ -116,6 +116,10 @@ pub enum ReviewCommand {
     /// broadcast) from this webview to the room over the encrypted signal
     /// channel. `payload` is opaque JSON the daemon doesn't parse.
     SendCollab { room_id: RoomId, payload: String },
+    /// The local display name changed: re-announce the identity into every
+    /// active room so existing comments resolve to the new name everywhere
+    /// (the original ParticipantJoined was frozen at share/join time).
+    ReannounceIdentity,
 }
 
 /// Updates the `ReviewManager` emits up to the tao event loop.
@@ -615,6 +619,40 @@ impl ReviewManager {
             // a Bootstrapper is attached (they no-op cleanly with no rooms).
             (ReviewCommand::Stop { room_id }, _, _) => {
                 self.stop_rooms(room_id.clone());
+                return;
+            }
+            (ReviewCommand::ReannounceIdentity, Some(bootstrapper), Some(runtime)) => {
+                // Display name changed: refresh the ParticipantJoined
+                // announce in every active room so existing comments resolve
+                // to the new name on all windows (frontends key names by
+                // participantId; last write wins). The onboarding NamePrompt
+                // fires AFTER a room is entered, so without this a name typed
+                // there never reached the already-joined room. Drain each
+                // room's outbox immediately so the rename lands without
+                // waiting for the next scheduled pass; a failed drain is fine
+                // (the envelope is durably queued).
+                let rooms: Vec<(
+                    RoomId,
+                    Arc<crate::review::transport::mailbox::OutboxProcessor>,
+                )> = self
+                    .outboxes
+                    .lock()
+                    .map(|m| m.iter().map(|(k, v)| (k.clone(), Arc::clone(v))).collect())
+                    .unwrap_or_default();
+                for (room_id, outbox) in rooms {
+                    let kind = match crate::review::bootstrap::find_path_for_room(
+                        self.store.root(),
+                        &room_id,
+                    ) {
+                        Ok(Some(_)) => crate::review::model::ParticipantKind::Owner,
+                        _ => crate::review::model::ParticipantKind::Reviewer,
+                    };
+                    if let Err(e) = bootstrapper.reannounce_identity(&room_id, kind) {
+                        tracing::warn!("reannounce into room {} failed: {e}", room_id.as_str());
+                        continue;
+                    }
+                    let _ = runtime.block_on(outbox.process_once());
+                }
                 return;
             }
             (ReviewCommand::Pull { room_id }, _, _) => {
@@ -1396,9 +1434,9 @@ impl ReviewManager {
         &self,
         result: Result<JoinOutcome, crate::review::bootstrap::BootstrapError>,
     ) {
-        let update = match result {
+        match result {
             Ok(outcome) => {
-                let room_id = outcome.room_id.clone();
+                let room_id = outcome.room_id;
                 // Start the transport runtime BEFORE emitting status so
                 // by the time the frontend reacts to "Joined" the WS
                 // subscriber is already listening. If init fails we
@@ -1411,18 +1449,24 @@ impl ReviewManager {
                         message: format!("could not start room transports: {err}"),
                     });
                 }
-                ReviewUpdate::RoomStatusChanged {
-                    room_id: outcome.room_id,
+                (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                    room_id: room_id.clone(),
                     status: "Joined".to_string(),
-                }
+                });
+                // A RE-join over persisted state gets nothing re-delivered
+                // by the relay (the WS cursor already advanced past the
+                // session-1 envelopes), so replay the on-disk log. Fresh
+                // joins have an empty events.jsonl — a no-op (attn-6dd).
+                self.replay_room_to_webview(&room_id);
             }
-            Err(err) => ReviewUpdate::Error {
-                room_id: None,
-                code: error_code(&err),
-                message: err.to_string(),
-            },
-        };
-        (self.update_tx)(update);
+            Err(err) => {
+                (self.update_tx)(ReviewUpdate::Error {
+                    room_id: None,
+                    code: error_code(&err),
+                    message: err.to_string(),
+                });
+            }
+        }
     }
 
     /// Spawn the outbox drain + inbound WS subscriber for `room_id` onto the
@@ -1982,13 +2026,91 @@ impl ReviewManager {
             // surfaces appear. Without this push the reviewer's UI shows
             // only the local file tree even though the WS subscription
             // is already streaming inbound envelopes.
+            //
+            // The lifecycle string is role-accurate: a room WE shared (a
+            // local share binding exists) resumes as the owner's "Live"; a
+            // room we joined resumes as "Joined". The frontend activates the
+            // room on both and derives the role from the string — the old
+            // neutral "Resumed" was passive (switcher-only) and left the
+            // role 'unknown', so a restarted reviewer could never flip back
+            // into the shared-doc view even with the snapshot replayed
+            // (attn-6dd). Owners don't flip either way (isReviewerView
+            // requires role 'reviewer'), so a resumed share never hijacks
+            // the owner's local file view (attn-0wa).
+            let is_owner =
+                crate::review::bootstrap::find_path_for_room(self.store.root(), &room_id)
+                    .ok()
+                    .flatten()
+                    .is_some();
             (self.update_tx)(ReviewUpdate::RoomStatusChanged {
                 room_id: room_id.clone(),
-                status: "Resumed".to_string(),
+                status: if is_owner { "Live" } else { "Joined" }.to_string(),
             });
+            // Re-feed the webview everything the room already imported in
+            // earlier sessions. The WS mailbox resumes at its persisted
+            // cursor, so the relay never re-delivers the envelopes behind
+            // events.jsonl — without this replay a resumed reviewer (or a
+            // restarted owner) renders "Waiting for the shared document…"
+            // forever even though the snapshot sits on disk (attn-6dd).
+            self.replay_room_to_webview(&room_id);
             resumed.push(room_id);
         }
         resumed
+    }
+
+    /// Replay a room's persisted state to the webview using the SAME
+    /// `ReviewUpdate::EventImported` pushes the live inbound pipeline emits
+    /// on fresh import (see `forward_transport_event`), in `events.jsonl`
+    /// log order.
+    ///
+    /// `SnapshotCreated` events persist in wire form (`inline_snapshot:
+    /// None`, decision #14); `rehydrate_snapshot_event` fills the plaintext
+    /// from the local blob store at this IPC boundary exactly like the live
+    /// forwarder does, so the webview receives the shared document's
+    /// markdown and flips from "Waiting for the shared document…" to the
+    /// snapshot view. Snapshots therefore ride the `reviewEvent` lane here
+    /// too — that is the only snapshot delivery path the frontend store
+    /// consumes (`applyEvent` mirrors `snapshot_created` events into its
+    /// `snapshots` view).
+    ///
+    /// Safe to run before, after, or concurrently with live imports: the
+    /// frontend dedups events by `eventId` and snapshots by `snapshotId`
+    /// (`store.svelte.ts` `applyEvent`). Decode errors skip the bad line
+    /// instead of aborting so one corrupt entry can't hide the rest of the
+    /// log.
+    pub(crate) fn replay_room_to_webview(&self, room_id: &RoomId) {
+        let events = match self.store.iter_events(room_id) {
+            Ok(iter) => iter,
+            Err(err) => {
+                tracing::warn!("replay iter_events for {}: {err}", room_id.as_str());
+                return;
+            }
+        };
+        let mut replayed = 0usize;
+        for entry in events {
+            let mut event = match entry {
+                Ok(event) => event,
+                Err(err) => {
+                    tracing::warn!(
+                        "replay skipping undecodable event in {}: {err}",
+                        room_id.as_str()
+                    );
+                    continue;
+                }
+            };
+            rehydrate_snapshot_event(&self.store, room_id, &mut event);
+            (self.update_tx)(ReviewUpdate::EventImported {
+                room_id: room_id.clone(),
+                event,
+            });
+            replayed += 1;
+        }
+        if replayed > 0 {
+            tracing::info!(
+                "replayed {replayed} persisted event(s) to the webview for room={}",
+                room_id.as_str()
+            );
+        }
     }
 
     /// Push a freshly-resolved anchor to the frontend.
@@ -2502,6 +2624,7 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::ResolveComment { .. } => "ResolveComment",
         ReviewCommand::SendCollab { .. } => "SendCollab",
         ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
+        ReviewCommand::ReannounceIdentity => "ReannounceIdentity",
     }
 }
 
@@ -2637,6 +2760,12 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
         ReviewCommand::RejectSuggestion { .. } => ReviewUpdate::RoomStatusChanged {
             room_id: stub_room_id(),
             status: "Pending suggestion reject — no bootstrap attached".to_string(),
+        },
+        // ReannounceIdentity iterates active rooms in `submit`; without a
+        // bootstrap (smoke tests) it's a benign no-op surfaced as status.
+        ReviewCommand::ReannounceIdentity => ReviewUpdate::RoomStatusChanged {
+            room_id: stub_room_id(),
+            status: "Pending identity reannounce — no bootstrap attached".to_string(),
         },
     }
 }
@@ -3195,6 +3324,123 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // ----- replay of persisted room state on resume/re-join (attn-6dd) ----
+
+    #[test]
+    fn replay_room_to_webview_emits_persisted_events_with_rehydrated_snapshots() {
+        use crate::review::crypto::ids::content_hash;
+        use crate::review::model::{
+            AnchorIndex, BlobRef, BlobStorage, CanonicalEncoding, ReviewEventBody,
+            SnapshotPlaintext,
+        };
+
+        let (mgr, rx, tmp) = make_manager();
+        // Second handle onto the same on-disk store to seed "session 1" state.
+        let store = ReviewStore::open_at(tmp.path().join("reviews")).expect("open store");
+        let room_id: RoomId = dummy_id("room-replay");
+
+        // Persist the snapshot blob the SnapshotCreated event references —
+        // this is what the inbound pipeline leaves behind for a reviewer
+        // (events.jsonl + blobs/*.bin; no SnapshotNode on the reviewer side).
+        let plaintext = SnapshotPlaintext {
+            markdown: "# replayed doc\n".to_string(),
+            anchor_index: AnchorIndex {
+                doc_hash: dummy_id("hash-1"),
+                canonical_encoding: CanonicalEncoding::Utf8Bytes,
+                line_count: 1,
+                blocks: vec![],
+                headings: vec![],
+            },
+        };
+        let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
+            .expect("canonical snapshot");
+        store
+            .save_snapshot_blob(&room_id, "blob-env-replay", &blob_bytes)
+            .expect("save blob");
+        let blob_ref = BlobRef {
+            storage: BlobStorage::Mailbox,
+            blob_id: "blob-env-replay".to_string(),
+            byte_length: blob_bytes.len() as u64,
+            content_hash: content_hash(&blob_bytes),
+        };
+
+        // Seed events.jsonl in log order: snapshot first (wire form, no
+        // inline plaintext — decision #14), then a comment.
+        let mut snapshot_event = stub_review_event(
+            &room_id,
+            ReviewEventBody::SnapshotCreated {
+                file_id: dummy_id("file-1"),
+                snapshot_id: dummy_id("snap-1"),
+                owner_display_path: Some("/tmp/doc.md".to_string()),
+                parent_snapshot_id: None,
+                base_hash: dummy_id("hash-1"),
+                encrypted_blob_ref: Some(blob_ref),
+                inline_snapshot: None,
+            },
+        );
+        snapshot_event.meta.event_id = dummy_id("evt-snap-1");
+        let mut comment_event = stub_review_event(
+            &room_id,
+            ReviewEventBody::CommentCreated {
+                thread_id: "thr-1".to_string(),
+                anchor: dummy_anchor(),
+                body: "persisted comment".to_string(),
+            },
+        );
+        comment_event.meta.event_id = dummy_id("evt-comment-1");
+        assert!(
+            store
+                .append_event(&room_id, &snapshot_event)
+                .expect("append")
+        );
+        assert!(
+            store
+                .append_event(&room_id, &comment_event)
+                .expect("append")
+        );
+
+        // "Session 2": replay must re-emit both events through the same
+        // EventImported push the live inbound pipeline uses, in log order,
+        // with the snapshot's plaintext rehydrated from the blob store.
+        mgr.replay_room_to_webview(&room_id);
+
+        let first = rx.try_recv().expect("first replayed update");
+        match first {
+            ReviewUpdate::EventImported {
+                room_id: rid,
+                event,
+            } => {
+                assert_eq!(rid, room_id);
+                assert_eq!(event.meta.event_id, dummy_id::<EventId>("evt-snap-1"));
+                match event.body {
+                    ReviewEventBody::SnapshotCreated {
+                        inline_snapshot: Some(inline),
+                        ..
+                    } => assert_eq!(inline.markdown, "# replayed doc\n"),
+                    other => panic!("expected rehydrated SnapshotCreated, got {other:?}"),
+                }
+            }
+            other => panic!("expected EventImported, got {other:?}"),
+        }
+        let second = rx.try_recv().expect("second replayed update");
+        match second {
+            ReviewUpdate::EventImported { event, .. } => {
+                assert_eq!(event.meta.event_id, dummy_id::<EventId>("evt-comment-1"));
+                assert!(matches!(event.body, ReviewEventBody::CommentCreated { .. }));
+            }
+            other => panic!("expected EventImported, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "replay must emit exactly the persisted events"
+        );
+
+        // A room with no persisted log replays nothing (fresh join).
+        let empty_room: RoomId = dummy_id("room-empty");
+        mgr.replay_room_to_webview(&empty_room);
+        assert!(rx.try_recv().is_err(), "empty room must replay nothing");
     }
 
     /// Build a `(ReviewManager, receiver)` pair backed by an std::mpsc channel

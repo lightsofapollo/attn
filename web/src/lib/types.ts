@@ -319,6 +319,12 @@ export interface InitPayload {
    * so scripts in a sandboxed HTML file cannot drive the app. @see src/ipc.rs
    */
   ipcToken?: string;
+  /**
+   * True only when the daemon is a debug build (`cfg!(debug_assertions)`).
+   * Gates exposing the IPC token to the automation bridge
+   * (`window.__attn_ipc_token__`) for E2E suites; never set in release.
+   */
+  debugBuild?: boolean;
 }
 
 /**

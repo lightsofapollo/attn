@@ -1,0 +1,91 @@
+// Manual smoke harness for the review-rail mode derivation (attn-d7y,
+// reworked by attn-42y).
+//
+// Run with:
+//
+//   cd web && npx tsx src/lib/review/rail-mode.test.ts
+
+import {
+  COLLAPSED_RAIL_TOP_CLEARANCE,
+  RAIL_WIDTH_PX,
+  computeRailMode,
+} from './rail-mode';
+
+interface CaseResult {
+  name: string;
+  ok: boolean;
+  detail?: string;
+}
+
+const cases: Array<() => CaseResult> = [];
+
+function defineCase(name: string, fn: () => void): void {
+  cases.push(() => {
+    try {
+      fn();
+      return { name, ok: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { name, ok: false, detail: message };
+    }
+  });
+}
+
+function assert(cond: boolean, msg: string): asserts cond {
+  if (!cond) throw new Error(msg);
+}
+
+defineCase('expanded whenever the panel is open, in or out of a room', () => {
+  assert(
+    computeRailMode({ inReviewRoom: true, panelOpen: true }) === 'expanded',
+    'review room + open → expanded',
+  );
+  assert(
+    computeRailMode({ inReviewRoom: false, panelOpen: true }) === 'expanded',
+    'local file + open (Cmd+J) → expanded',
+  );
+});
+
+defineCase('collapsed gutter when in a review room with the panel closed', () => {
+  assert(
+    computeRailMode({ inReviewRoom: true, panelOpen: false }) === 'collapsed',
+    'review room + closed → collapsed (rail always present in a room)',
+  );
+});
+
+defineCase('hidden outside a review room with the panel closed', () => {
+  assert(
+    computeRailMode({ inReviewRoom: false, panelOpen: false }) === 'hidden',
+    'local file + closed → hidden (historical behavior)',
+  );
+});
+
+defineCase('width mapping: hidden 0, collapsed 48, expanded 320', () => {
+  assert(RAIL_WIDTH_PX.hidden === 0, 'hidden → 0px');
+  assert(RAIL_WIDTH_PX.collapsed === 48, 'collapsed → 48px');
+  assert(RAIL_WIDTH_PX.expanded === 320, 'expanded → 320px');
+});
+
+defineCase('collapsed-gutter clearance is small breathing room (header is structural)', () => {
+  // The rail starts below the app header and owns its toggle row in
+  // App.svelte, so the chip clearance is only inner padding / the pin
+  // position for anchor-less threads — not dock avoidance.
+  assert(
+    COLLAPSED_RAIL_TOP_CLEARANCE > 0 && COLLAPSED_RAIL_TOP_CLEARANCE <= 16,
+    'clearance is breathing room, not dock clearance',
+  );
+});
+
+let failed = 0;
+for (const run of cases) {
+  const result = run();
+  if (result.ok) {
+    console.log(`PASS ${result.name}`);
+  } else {
+    failed += 1;
+    console.error(`FAIL ${result.name}`);
+    if (result.detail) console.error(`  ${result.detail}`);
+  }
+}
+
+if (failed > 0) process.exit(1);

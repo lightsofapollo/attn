@@ -581,7 +581,10 @@
     padding: 8px;
     border: 1px solid var(--border, rgba(0, 0, 0, 0.16));
     border-radius: 4px;
-    resize: vertical;
+    /* No manual resize handle (attn-2aj). This pane edits multi-line
+       replacement text, so plain Enter stays a newline here — submit is
+       Cmd/Ctrl+Enter or the Confirm button. */
+    resize: none;
     background: var(--background, #fff);
     color: inherit;
   }

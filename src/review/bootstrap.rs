@@ -3009,18 +3009,24 @@ mod tests {
             .expect("iter")
             .collect::<anyhow::Result<_>>()
             .expect("decode");
-        assert_eq!(envelopes[1].kind, EnvelopeKind::SnapshotBlob);
+        // Locate the snapshot-blob envelope rather than assume its index — the
+        // share flow's envelope ordering has changed before (RoomCreated +
+        // ParticipantJoined precede it).
+        let blob_env = envelopes
+            .iter()
+            .find(|e| e.kind == EnvelopeKind::SnapshotBlob)
+            .expect("a snapshot_blob envelope is enqueued for the shared HTML doc");
 
         let parsed = parse_invite(&outcome.invite).expect("parse invite");
         let keys = derive_room_keys(&parsed.room_secret);
-        let aad = crate::review::envelope::envelope_aad(&envelopes[1]);
+        let aad = crate::review::envelope::envelope_aad(blob_env);
         let nonce_bytes = URL_SAFE_NO_PAD
-            .decode(envelopes[1].nonce.as_bytes())
+            .decode(blob_env.nonce.as_bytes())
             .expect("nonce decodes");
         let nonce: crate::review::crypto::aead::AeadNonce =
             nonce_bytes.as_slice().try_into().expect("24-byte nonce");
         let ciphertext = URL_SAFE_NO_PAD
-            .decode(envelopes[1].ciphertext.as_bytes())
+            .decode(blob_env.ciphertext.as_bytes())
             .expect("ciphertext decodes");
         let blob_bytes = crate::review::crypto::aead::open(
             keys.snapshot_key.as_bytes(),

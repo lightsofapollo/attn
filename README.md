@@ -81,6 +81,10 @@ attn's review flow is built for markdown that should stay private and local.
   and falls back to the encrypted relay when it cannot.
 - **Folder share** - share a directory to publish snapshots for every markdown
   file under it; newly added markdown files are picked up by the watcher.
+- **Read-only HTML sharing** *(new in 0.8.0)* - share an `.html`/`.htm` file
+  over the same encrypted transport. Reviewers open and read the rendered page
+  in a sandboxed viewer; there is no collaborative editing (commenting on HTML
+  is planned). Markdown sharing is unchanged.
 
 Owner flow:
 

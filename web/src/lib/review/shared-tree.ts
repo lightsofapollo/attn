@@ -124,7 +124,8 @@ export function deriveSharedFiles(
     const fallback = displayPath ? basename(displayPath) : `Document ${++headinglessCount}`;
     files.push({
       fileId: snap.fileId,
-      name: headingName(snap.markdown) ?? fallback,
+      // HTML docs have no markdown heading — use the filename fallback.
+      name: snap.docType === 'html' ? fallback : (headingName(snap.content) ?? fallback),
       displayPath,
       relPath: relPath || basename(displayPath),
       dir,

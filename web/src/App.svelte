@@ -191,7 +191,7 @@
   // even when they opened attn on an empty directory with no local files.
   let hasSidebar = $derived(fileTree.length > 0 || isReviewerInRoom);
   let showBreadcrumbShare = $derived(
-    activeFileType === 'markdown' &&
+    (activeFileType === 'markdown' || activeFileType === 'html') &&
       !shareDialogOpen &&
       reviewStore.currentRoomId === null,
   );
@@ -217,20 +217,29 @@
   // have a real tab + rawMarkdown). See store.applyEvent — SnapshotCreated
   // events are mirrored into `reviewStore.snapshots` and auto-set
   // `currentFileId`.
-  let reviewSnapshotMarkdown = $derived.by(() => {
+  // The LATEST snapshot for the focused file — owner edits republish a new
+  // snapshot per save, so several may exist for one fileId. Newest createdAt
+  // wins so the reviewer always sees the freshest content. Covers both
+  // markdown and read-only HTML docs.
+  let reviewSnapshot = $derived.by(() => {
     const roomId = reviewStore.currentRoomId;
     const fileId = reviewStore.currentFileId;
     if (!roomId || !fileId) return null;
-    // Pick the LATEST snapshot for this file — owner edits republish a new
-    // snapshot per save, so several may exist for one fileId. Newest
-    // createdAt wins so the reviewer always sees the freshest content.
     const candidates = reviewStore.snapshots.filter(
-      (s) => s.roomId === roomId && s.fileId === fileId && typeof s.markdown === 'string',
+      (s) => s.roomId === roomId && s.fileId === fileId && typeof s.content === 'string',
     );
     if (candidates.length === 0) return null;
-    const latest = candidates.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
-    return latest.markdown ?? null;
+    return candidates.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
   });
+  let reviewSnapshotContent = $derived(reviewSnapshot?.content ?? null);
+  let reviewSnapshotDocType = $derived(reviewSnapshot?.docType ?? 'markdown');
+  // Markdown snapshots seed the prosemirror editor (anchors/collab). HTML
+  // snapshots are read-only and render in HtmlViewer — never the editor — so
+  // markdown-only consumers (collab seed, anchor remap, effectiveMarkdown) key
+  // off this and naturally skip HTML.
+  let reviewSnapshotMarkdown = $derived(
+    reviewSnapshotDocType === 'markdown' ? reviewSnapshotContent : null,
+  );
   // A reviewer who has received the owner's snapshot for the focused file
   // renders the shared doc — regardless of whether they also have a local
   // tab open. Joining a room is an explicit "show me the shared content"
@@ -238,11 +247,17 @@
   let isReviewerViewingSnapshot = $derived(
     isReviewerInRoom && reviewSnapshotMarkdown !== null,
   );
+  // Read-only HTML shared doc — rendered in HtmlViewer (sandboxed iframe),
+  // never the editor.
+  let isReviewerViewingHtmlSnapshot = $derived(
+    isReviewerInRoom && reviewSnapshotDocType === 'html' && reviewSnapshotContent !== null,
+  );
   // Reviewer is in the room but the owner's snapshot for the focused file
   // hasn't arrived yet — show a "waiting for shared content" state instead
-  // of silently leaving them on whatever local file they had open.
+  // of silently leaving them on whatever local file they had open. Applies to
+  // any shared doc type.
   let isReviewerWaiting = $derived(
-    isReviewerInRoom && reviewSnapshotMarkdown === null,
+    isReviewerInRoom && reviewSnapshotContent === null,
   );
   // The markdown the editor actually renders: the shared snapshot for a
   // reviewer, otherwise the local file (or a received snapshot when no local
@@ -592,10 +607,11 @@
     let base: ReviewSnapshot | null = null;
     for (const s of reviewStore.snapshots) {
       if (s.roomId !== roomId || s.fileId !== fileId) continue;
-      if (typeof s.markdown !== 'string') continue;
+      // Collab/editor seed is markdown-only; HTML docs are read-only.
+      if (s.docType === 'html' || typeof s.content !== 'string') continue;
       if (base === null || s.createdAt < base.createdAt) base = s;
     }
-    return base?.markdown ?? null;
+    return base?.content ?? null;
   }
 
   // Owner's getSeedDoc: the v0 ProseMirror doc for a file, so the controller
@@ -942,10 +958,10 @@
     );
     if (snaps.length === 0) return;
     const snapshot = snaps.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
-    if (!snapshot.anchorIndex || typeof snapshot.markdown !== 'string') return;
+    if (!snapshot.anchorIndex || typeof snapshot.content !== 'string') return;
     const ctx = {
       currentIndex: snapshot.anchorIndex,
-      currentMarkdownBytes: new TextEncoder().encode(snapshot.markdown),
+      currentMarkdownBytes: new TextEncoder().encode(snapshot.content),
       currentHash: snapshot.baseHash,
     };
     for (const event of events) {
@@ -2397,6 +2413,12 @@
         <p class="text-sm font-medium text-foreground">Connected to the shared room</p>
         <p class="text-sm opacity-75">Waiting for the shared document…</p>
       </div>
+    {:else if isReviewerViewingHtmlSnapshot}
+      <!-- Reviewer mode, HTML doc: render the owner's shared HTML snapshot
+           read-only in a sandboxed iframe (srcdoc — the reviewer has no local
+           file on disk). No editor, no collab, no comment anchors yet. -->
+      <ReviewFileNav />
+      <HtmlViewer content={reviewSnapshotContent ?? ''} />
     {:else if isReviewerViewingSnapshot}
       <!-- Reviewer mode: render the owner's shared snapshot. Read-only
            normally; during a live session collab makes it editable so the

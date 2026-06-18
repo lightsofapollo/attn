@@ -791,14 +791,15 @@ mod tests {
             byte_length: 42,
             encrypted_blob_ref: None,
             plaintext: Some(SnapshotPlaintext {
-                markdown: "# hi\n".to_string(),
-                anchor_index: AnchorIndex {
+                doc_type: crate::review::model::DocType::Markdown,
+                content: "# hi\n".to_string(),
+                anchor_index: Some(AnchorIndex {
                     doc_hash: id::<ContentHash>("hash-1"),
                     canonical_encoding: CanonicalEncoding::Utf8Bytes,
                     line_count: 1,
                     blocks: vec![],
                     headings: vec![],
-                },
+                }),
             }),
         }
     }

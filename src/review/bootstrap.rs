@@ -1314,12 +1314,12 @@ impl Bootstrapper {
         use crate::review::anchors::index::build_anchor_index;
         use crate::review::crypto::ids::{content_hash, derive_file_id, derive_snapshot_id};
         use crate::review::envelope::{assemble_snapshot_blob_envelope, seal_snapshot_r2_body};
-        use crate::review::model::{BlobRef, BlobStorage, SnapshotNode};
+        use crate::review::model::{BlobRef, BlobStorage, DocType, SnapshotNode};
         use crate::review::transport::blobs as relay_blobs;
 
-        let markdown_bytes = std::fs::read(path)
+        let doc_bytes = std::fs::read(path)
             .map_err(|e| BootstrapError::Store(format!("read {}: {e}", path.display())))?;
-        let base_hash = content_hash(&markdown_bytes);
+        let base_hash = content_hash(&doc_bytes);
 
         let room_secret = load_room_secret(self.store.root(), room_id)?;
         let display_path = path.to_string_lossy().to_string();
@@ -1332,12 +1332,21 @@ impl Bootstrapper {
         };
         let snapshot_id = derive_snapshot_id(room_id, &file_id, &base_hash, now_ms as i64);
 
-        let markdown = String::from_utf8(markdown_bytes)
-            .map_err(|_| BootstrapError::Crypto("snapshot markdown must be utf-8".into()))?;
-        let anchor_index = build_anchor_index(markdown.as_bytes(), &snapshot_id)
-            .map_err(|e| BootstrapError::Crypto(format!("anchor index: {e}")))?;
+        let content = String::from_utf8(doc_bytes)
+            .map_err(|_| BootstrapError::Crypto("snapshot document must be utf-8".into()))?;
+        // HTML docs are shared read-only — no comment anchors (yet), so they
+        // carry no anchor index. Markdown docs anchor against rendered
+        // structure for comments/suggestions.
+        let (doc_type, anchor_index) = if is_html_path(path) {
+            (DocType::Html, None)
+        } else {
+            let index = build_anchor_index(content.as_bytes(), &snapshot_id)
+                .map_err(|e| BootstrapError::Crypto(format!("anchor index: {e}")))?;
+            (DocType::Markdown, Some(index))
+        };
         let plaintext = SnapshotPlaintext {
-            markdown,
+            doc_type,
+            content,
             anchor_index,
         };
 
@@ -2107,6 +2116,19 @@ fn is_markdown_path(path: &std::path::Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
+/// `true` if `path` ends in an HTML extension. HTML docs are shareable
+/// read-only (no collaborative editing, no comment anchors yet).
+fn is_html_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"))
+}
+
+/// `true` if `path` is a document attn can share — markdown (anchored,
+/// suggestable) or HTML (read-only).
+fn is_shareable_path(path: &std::path::Path) -> bool {
+    is_markdown_path(path) || is_html_path(path)
+}
+
 /// `true` if `path` is `dir` or sits underneath it (component-wise, so
 /// `/a/b` does NOT match `/a/bc`).
 fn path_within(dir: &str, path: &std::path::Path) -> bool {
@@ -2131,27 +2153,27 @@ fn is_ignored_dir_component(name: &str) -> bool {
 }
 
 /// The files to snapshot for a share. A regular file → just itself; a directory
-/// (folder-share) → every `*.md` under it (recursively), skipping ignored dirs.
-/// Sorted for stable ordering.
-fn markdown_targets(path: &std::path::Path) -> Vec<PathBuf> {
+/// (folder-share) → every shareable doc (`*.md`/`*.markdown`/`*.html`/`*.htm`)
+/// under it (recursively), skipping ignored dirs. Sorted for stable ordering.
+fn shareable_targets(path: &std::path::Path) -> Vec<PathBuf> {
     if !path.is_dir() {
-        return if is_markdown_path(path) {
+        return if is_shareable_path(path) {
             vec![path.to_path_buf()]
         } else {
             Vec::new()
         };
     }
     let mut out: Vec<PathBuf> = Vec::new();
-    collect_markdown(path, &mut out);
+    collect_shareable(path, &mut out);
     out.sort();
     out
 }
 
 fn validate_share_targets(path: &std::path::Path) -> Result<Vec<PathBuf>, BootstrapError> {
-    let targets = markdown_targets(path);
+    let targets = shareable_targets(path);
     if targets.is_empty() {
         return Err(BootstrapError::InvalidShare(format!(
-            "{} is not shareable; choose a markdown file or a folder containing .md/.markdown files",
+            "{} is not shareable; choose a markdown or HTML file, or a folder containing .md/.markdown/.html/.htm files",
             path.display()
         )));
     }
@@ -2162,7 +2184,7 @@ fn validate_share_targets(path: &std::path::Path) -> Result<Vec<PathBuf>, Bootst
         })?;
         if std::str::from_utf8(&bytes).is_err() {
             return Err(BootstrapError::InvalidShare(format!(
-                "{} is not UTF-8 markdown",
+                "{} is not UTF-8 text",
                 target.display()
             )));
         }
@@ -2171,7 +2193,7 @@ fn validate_share_targets(path: &std::path::Path) -> Result<Vec<PathBuf>, Bootst
     Ok(targets)
 }
 
-fn collect_markdown(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+fn collect_shareable(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -2182,8 +2204,8 @@ fn collect_markdown(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
         }
         let p = entry.path();
         if p.is_dir() {
-            collect_markdown(&p, out);
-        } else if is_markdown_path(&p) {
+            collect_shareable(&p, out);
+        } else if is_shareable_path(&p) {
             out.push(p);
         }
     }
@@ -2202,7 +2224,7 @@ fn find_room_for_path(
     let all = load_local_shares(root)?;
     for (room_id_str, record) in all {
         let matched: Option<Option<String>> = if record.is_dir {
-            if is_markdown_path(path) && path_within(&record.path, path) {
+            if is_shareable_path(path) && path_within(&record.path, path) {
                 Some(record.files.get(&target).cloned())
             } else {
                 None
@@ -2382,29 +2404,35 @@ mod tests {
         let docs = TempDir::new().expect("docs dir");
         fs::write(docs.path().join("a.md"), b"# A").unwrap();
         fs::write(docs.path().join("b.md"), b"# B").unwrap();
+        fs::write(docs.path().join("page.html"), b"<h1>P</h1>").unwrap();
         fs::write(docs.path().join("notes.txt"), b"x").unwrap();
         fs::create_dir(docs.path().join("node_modules")).unwrap();
         fs::write(docs.path().join("node_modules/c.md"), b"# C").unwrap();
         fs::create_dir(docs.path().join("sub")).unwrap();
         fs::write(docs.path().join("sub/d.md"), b"# D").unwrap();
 
-        // Directory → every *.md (recursive, sorted), skipping notes.txt +
-        // node_modules; a single file → just itself.
+        // Directory → every shareable doc (*.md + *.html, recursive, sorted),
+        // skipping notes.txt + node_modules; a single file → just itself.
         assert_eq!(
-            markdown_targets(docs.path()),
+            shareable_targets(docs.path()),
             vec![
                 docs.path().join("a.md"),
                 docs.path().join("b.md"),
+                docs.path().join("page.html"),
                 docs.path().join("sub").join("d.md"),
             ]
         );
         assert_eq!(
-            markdown_targets(&docs.path().join("a.md")),
+            shareable_targets(&docs.path().join("a.md")),
             vec![docs.path().join("a.md")]
         );
+        assert_eq!(
+            shareable_targets(&docs.path().join("page.html")),
+            vec![docs.path().join("page.html")]
+        );
         assert!(
-            markdown_targets(&docs.path().join("notes.txt")).is_empty(),
-            "single non-markdown files should not create empty review rooms"
+            shareable_targets(&docs.path().join("notes.txt")).is_empty(),
+            "single non-shareable files should not create empty review rooms"
         );
 
         // Folder-share binding round-trip.
@@ -2771,7 +2799,12 @@ mod tests {
         .expect("blob opens under snapshotKey");
         let plaintext: SnapshotPlaintext =
             serde_json::from_slice(&blob_bytes).expect("blob is a SnapshotPlaintext");
-        assert_eq!(plaintext.markdown, "# Plan\n");
+        assert_eq!(plaintext.content, "# Plan\n");
+        assert_eq!(plaintext.doc_type, crate::review::model::DocType::Markdown);
+        assert!(
+            plaintext.anchor_index.is_some(),
+            "markdown snapshots carry an anchor index"
+        );
 
         // Locally: blob persisted by envelopeId, SnapshotNode references it.
         let stored_blob = store
@@ -2798,6 +2831,78 @@ mod tests {
             "small fixture stays on the inline mailbox lane"
         );
         assert_eq!(node_ref.byte_length, blob_bytes.len() as u64);
+    }
+
+    /// Sharing an `.html` file publishes a read-only snapshot: the plaintext
+    /// carries `DocType::Html`, the raw HTML source as `content`, and NO anchor
+    /// index (HTML has no comment anchors yet).
+    #[tokio::test]
+    async fn share_html_file_publishes_read_only_snapshot() {
+        let server = MockServer::start().await;
+        let id_dir = TempDir::new().expect("id tempdir");
+        let (_store_tmp, store, boot) =
+            make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
+
+        Mock::given(method("POST"))
+            .and(path_regex_for_room_create())
+            .respond_with(|req: &Request| {
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "roomId": req.url.path().rsplit('/').next().unwrap_or(""),
+                    "createdAt": 1_700_000_000_000u64,
+                    "expiresAt": 1_700_086_400_000u64,
+                    "policy": {},
+                    "ownerSigningKeyId": "k",
+                    "serverSeq": 0,
+                }))
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex_for_devices())
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let html = "<!doctype html><h1>Hi</h1>\n";
+        let (_doc_tmp, path) = temp_markdown_file("page.html", html);
+        let outcome = boot
+            .share(path, RoomMode::Async, None)
+            .await
+            .expect("share html file");
+
+        let envelopes: Vec<MailboxEnvelope> = store
+            .iter_outbox(&outcome.room_id)
+            .expect("iter")
+            .collect::<anyhow::Result<_>>()
+            .expect("decode");
+        assert_eq!(envelopes[1].kind, EnvelopeKind::SnapshotBlob);
+
+        let parsed = parse_invite(&outcome.invite).expect("parse invite");
+        let keys = derive_room_keys(&parsed.room_secret);
+        let aad = crate::review::envelope::envelope_aad(&envelopes[1]);
+        let nonce_bytes = URL_SAFE_NO_PAD
+            .decode(envelopes[1].nonce.as_bytes())
+            .expect("nonce decodes");
+        let nonce: crate::review::crypto::aead::AeadNonce =
+            nonce_bytes.as_slice().try_into().expect("24-byte nonce");
+        let ciphertext = URL_SAFE_NO_PAD
+            .decode(envelopes[1].ciphertext.as_bytes())
+            .expect("ciphertext decodes");
+        let blob_bytes = crate::review::crypto::aead::open(
+            keys.snapshot_key.as_bytes(),
+            &nonce,
+            &ciphertext,
+            &aad,
+        )
+        .expect("blob opens under snapshotKey");
+        let plaintext: SnapshotPlaintext =
+            serde_json::from_slice(&blob_bytes).expect("blob is a SnapshotPlaintext");
+        assert_eq!(plaintext.doc_type, crate::review::model::DocType::Html);
+        assert_eq!(plaintext.content, html);
+        assert!(
+            plaintext.anchor_index.is_none(),
+            "read-only HTML snapshots carry no anchor index"
+        );
     }
 
     #[tokio::test]

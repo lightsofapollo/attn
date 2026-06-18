@@ -22,6 +22,14 @@ export interface PlanStructure {
 
 export type FileType = 'markdown' | 'image' | 'video' | 'audio' | 'html' | 'directory' | 'unsupported';
 
+/**
+ * The kind of document a shared snapshot carries. Mirrors the Rust `DocType`
+ * (src/review/model.rs). `markdown` docs are anchored + (eventually) suggestable;
+ * `html` docs are shared read-only — rendered in a sandboxed viewer with no
+ * comment anchors or collaborative editing (yet).
+ */
+export type DocType = 'markdown' | 'html';
+
 export interface TreeNode {
   name: string;
   path: string;
@@ -732,8 +740,11 @@ export interface SnapshotCreatedBody {
   baseHash: ContentHash;
   encryptedBlobRef?: BlobRef;
   inlineSnapshot?: {
-    markdown: string;
-    anchorIndex: AnchorIndex;
+    docType: DocType;
+    /** Raw UTF-8 source: markdown source for `markdown`, HTML for `html`. */
+    content: string;
+    /** Present only for markdown docs; HTML is read-only with no anchors. */
+    anchorIndex?: AnchorIndex;
   };
 }
 
@@ -985,7 +996,9 @@ export interface ReviewSnapshot {
   createdBy: ParticipantId;
   baseHash: ContentHash;
   byteLength: number;
-  markdown?: string;
+  docType?: DocType;
+  /** Raw UTF-8 source: markdown source for `markdown`, HTML for `html`. */
+  content?: string;
   anchorIndex?: AnchorIndex;
   encryptedBlobRef?: BlobRef;
 }

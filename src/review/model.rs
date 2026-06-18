@@ -220,15 +220,34 @@ pub struct SnapshotNode {
     pub plaintext: Option<SnapshotPlaintext>,
 }
 
-/// Local-only decrypted snapshot payload (markdown + anchor index). Kept off
-/// the wire per `amendments.md` decision #14.
+/// The kind of document a snapshot carries. Markdown docs are anchored and
+/// (eventually) suggestable; HTML docs are shared read-only — they render in a
+/// sandboxed viewer with no comment anchors or collaborative editing (yet).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DocType {
+    #[default]
+    Markdown,
+    Html,
+}
+
+/// Local-only decrypted snapshot payload (document content + optional anchor
+/// index). Kept off the wire per `amendments.md` decision #14.
+///
+/// `anchor_index` is present only for markdown docs (it positions comments and
+/// suggestions against the rendered structure). HTML docs are read-only, so
+/// they carry no anchor index — `anchor_index` is `None`.
 ///
 /// Spec: `data-model.md` §Snapshot Graph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotPlaintext {
-    pub markdown: String,
-    pub anchor_index: AnchorIndex,
+    pub doc_type: DocType,
+    /// The raw UTF-8 document source — markdown source for `Markdown`, HTML
+    /// source for `Html`.
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_index: Option<AnchorIndex>,
 }
 
 /// Reference to an encrypted blob — inline within an event, in the mailbox,

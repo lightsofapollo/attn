@@ -67,6 +67,7 @@ import {
   type RoomPolicy,
 } from './browser-ws';
 import type {
+  DocType,
   EventId,
   EventMeta,
   FileId,
@@ -143,11 +144,13 @@ export interface BrowserSessionState {
   status: BrowserSessionStatus;
   /** Non-null once the invite has been parsed (and stripped). */
   roomId: RoomId | null;
-  /** Markdown bytes recovered from the latest SnapshotCreated. */
-  snapshotMarkdown: string | null;
-  /** Snapshot id of the latest snapshot we have markdown for. */
+  /** Raw document source recovered from the latest SnapshotCreated. */
+  snapshotContent: string | null;
+  /** Kind of the latest snapshot — markdown (editor) or html (read-only). */
+  snapshotDocType: DocType;
+  /** Snapshot id of the latest snapshot we have content for. */
   snapshotId: SnapshotId | null;
-  /** File id of the latest snapshot we have markdown for. */
+  /** File id of the latest snapshot we have content for. */
   fileId: FileId | null;
   /** Tagged error, or null when status is healthy. */
   error: BrowserSessionError | null;
@@ -345,7 +348,8 @@ export class BrowserSession {
   private state: BrowserSessionState = {
     status: 'idle',
     roomId: null,
-    snapshotMarkdown: null,
+    snapshotContent: null,
+    snapshotDocType: 'markdown',
     snapshotId: null,
     fileId: null,
     error: null,
@@ -601,12 +605,13 @@ export class BrowserSession {
   ): void {
     const inline = body.inlineSnapshot;
     if (!inline) {
-      // R2-hosted snapshot — leave snapshotMarkdown null; UI shows
+      // R2-hosted snapshot — leave snapshotContent null; UI shows
       // "snapshot not available."
       return;
     }
     this.setState({
-      snapshotMarkdown: inline.markdown,
+      snapshotContent: inline.content,
+      snapshotDocType: inline.docType,
       snapshotId: body.snapshotId,
       fileId: body.fileId,
     });
@@ -620,8 +625,9 @@ export class BrowserSession {
       createdAt: meta.createdAt,
       createdBy: meta.authorId,
       baseHash: body.baseHash,
-      byteLength: new TextEncoder().encode(inline.markdown).length,
-      markdown: inline.markdown,
+      byteLength: new TextEncoder().encode(inline.content).length,
+      docType: inline.docType,
+      content: inline.content,
       anchorIndex: inline.anchorIndex,
     };
     store.applySnapshot(snapshot);

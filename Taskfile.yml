@@ -114,6 +114,11 @@ tasks:
     cmds:
       - scripts/test-dual-instance-smoke.sh
 
+  test:html-share:
+    desc: "Headless E2E for read-only HTML doc sharing (attn-qgd) — relay + owner shares .html + reviewer renders it read-only over the encrypted transport. Honors ATTN_SKIP_HTML_SHARE_E2E=1."
+    cmds:
+      - scripts/test-html-share-e2e.sh
+
   test:webrtc:
     desc: "Run the WebRTC end-to-end test (Rust transport + bash daemon shape). Honors ATTN_SKIP_WEBRTC_E2E=1 on flaky CI."
     cmds:

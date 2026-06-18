@@ -262,9 +262,10 @@ function mintSnapshotEnvelope(
   roomId: string,
   envelopeId: string,
   createdAt: number,
-  markdown: string,
+  content: string,
   fileId: string,
   snapshotId: string,
+  docType: 'markdown' | 'html' = 'markdown',
 ): MailboxEnvelope {
   const meta: SignableMetaShape = {
     v: 2,
@@ -280,7 +281,7 @@ function mintSnapshotEnvelope(
   const anchorIndex = {
     docHash: 'hash-' + snapshotId,
     canonicalEncoding: 'utf8-bytes' as const,
-    lineCount: markdown.split('\n').length,
+    lineCount: content.split('\n').length,
     blocks: [],
     headings: [],
   };
@@ -289,7 +290,11 @@ function mintSnapshotEnvelope(
     fileId,
     snapshotId,
     baseHash: 'hash-' + snapshotId,
-    inlineSnapshot: { markdown, anchorIndex },
+    // HTML docs are read-only and carry no anchor index.
+    inlineSnapshot:
+      docType === 'html'
+        ? { docType, content }
+        : { docType, content, anchorIndex },
   };
   const parents = (meta.parentEventIds ?? []).slice().sort();
   const signableMeta: Record<string, unknown> = {
@@ -479,7 +484,7 @@ defineCase('POST /devices 403 → status=error, kind=device_register', async () 
   }
 });
 
-defineCase('SnapshotCreated event populates state.snapshotMarkdown + store', async () => {
+defineCase('SnapshotCreated event populates state.snapshotContent + store', async () => {
   const store = makeStubStore();
   const server = await startMockServer();
   try {
@@ -523,14 +528,19 @@ defineCase('SnapshotCreated event populates state.snapshotMarkdown + store', asy
     });
 
     await session.start();
-    // Poll until markdown is populated.
-    for (let i = 0; i < 100 && session.getState().snapshotMarkdown === null; i++) {
+    // Poll until content is populated.
+    for (let i = 0; i < 100 && session.getState().snapshotContent === null; i++) {
       await delay(20);
     }
     assertEq(
-      session.getState().snapshotMarkdown,
+      session.getState().snapshotContent,
       markdown,
-      'snapshotMarkdown populated from event',
+      'snapshotContent populated from event',
+    );
+    assertEq(
+      session.getState().snapshotDocType,
+      'markdown',
+      'snapshotDocType defaults to markdown',
     );
     assertEq(session.getState().snapshotId, 'snap-1' as unknown as SnapshotId, 'snapshotId tracked');
     assertEq(session.getState().fileId, 'file-1' as unknown as FileId, 'fileId tracked');
@@ -544,6 +554,63 @@ defineCase('SnapshotCreated event populates state.snapshotMarkdown + store', asy
     // The event itself should also be in the append-only log so any
     // downstream selectors (threads, decorations) see it.
     assertEq(store.events.length, 1, 'event appended');
+    session.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('HTML SnapshotCreated populates content + docType=html (read-only)', async () => {
+  const store = makeStubStore();
+  const server = await startMockServer();
+  try {
+    const html = '<!doctype html><h1>Shared page</h1>';
+    server.onClient((ws) => {
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(String(raw));
+        if (msg.type === 'subscribe') {
+          ws.send(
+            JSON.stringify({
+              type: 'hello',
+              serverSeq: 0,
+              policy: POLICY,
+              devices: [OWNER_DEVICE],
+              missedSignalEnvelopeIds: [],
+            }),
+          );
+          const env = mintSnapshotEnvelope(
+            ROOM_ID,
+            'env-snap-html',
+            1_700_000_500_000,
+            html,
+            'file-html',
+            'snap-html',
+            'html',
+          );
+          ws.send(JSON.stringify({ type: 'envelope', envelope: env, serverSeq: 10 }));
+        }
+      });
+    });
+
+    const inviteUrl = composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET);
+    const session = new BrowserSession({
+      inviteUrl,
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      identity: deterministicIdentity(),
+      store,
+      fetchImpl: async () => ({ status: 204, text: async () => '' }),
+      webSocketFactory: nodeFactory,
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 200,
+    });
+
+    await session.start();
+    for (let i = 0; i < 100 && session.getState().snapshotContent === null; i++) {
+      await delay(20);
+    }
+    assertEq(session.getState().snapshotContent, html, 'html content populated');
+    assertEq(session.getState().snapshotDocType, 'html', 'docType is html');
+    assertEq(store.snapshots[0]!.docType, 'html', 'snapshot mirror records html docType');
     session.close();
   } finally {
     await server.close();

@@ -92,8 +92,18 @@ export function deriveFileEntries(
   const entries: ReviewFileEntry[] = [];
   let headinglessCount = 0;
   for (const [fileId, snap] of latestByFile) {
-    const heading = headingName(snap.markdown);
-    const name = heading ?? `Document ${++headinglessCount}`;
+    // HTML docs have no markdown heading to title them — use the shared
+    // filename, falling back to the generic counter.
+    let name: string;
+    if (snap.docType === 'html') {
+      const base =
+        typeof snap.ownerDisplayPath === 'string'
+          ? (snap.ownerDisplayPath.replace(/\\/g, '/').split('/').pop() ?? '')
+          : '';
+      name = base || `Document ${++headinglessCount}`;
+    } else {
+      name = headingName(snap.content) ?? `Document ${++headinglessCount}`;
+    }
     let dir = '';
     if (typeof snap.ownerDisplayPath === 'string' && snap.ownerDisplayPath.length > 0) {
       const rel = relativeToRoot(snap.ownerDisplayPath, root);

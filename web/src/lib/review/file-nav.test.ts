@@ -59,7 +59,8 @@ function snap(opts: {
     createdBy: 'author_1',
     baseHash: `hash:${opts.snapshotId}`,
     byteLength: opts.markdown ? opts.markdown.length : 0,
-    markdown: opts.markdown,
+    docType: 'markdown',
+    content: opts.markdown,
   };
 }
 

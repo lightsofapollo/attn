@@ -3205,14 +3205,15 @@ mod tests {
         let room_id: RoomId = dummy_id("room-rehydrate");
 
         let plaintext = SnapshotPlaintext {
-            markdown: "# rehydrated\n".to_string(),
-            anchor_index: AnchorIndex {
+            doc_type: crate::review::model::DocType::Markdown,
+            content: "# rehydrated\n".to_string(),
+            anchor_index: Some(AnchorIndex {
                 doc_hash: dummy_id("hash-1"),
                 canonical_encoding: CanonicalEncoding::Utf8Bytes,
                 line_count: 1,
                 blocks: vec![],
                 headings: vec![],
-            },
+            }),
         };
         let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
             .expect("canonical snapshot");
@@ -3243,7 +3244,7 @@ mod tests {
             ReviewEventBody::SnapshotCreated {
                 inline_snapshot: Some(inline),
                 ..
-            } => assert_eq!(inline.markdown, "# rehydrated\n"),
+            } => assert_eq!(inline.content, "# rehydrated\n"),
             other => panic!("expected inlined snapshot, got {other:?}"),
         }
 
@@ -3344,14 +3345,15 @@ mod tests {
         // this is what the inbound pipeline leaves behind for a reviewer
         // (events.jsonl + blobs/*.bin; no SnapshotNode on the reviewer side).
         let plaintext = SnapshotPlaintext {
-            markdown: "# replayed doc\n".to_string(),
-            anchor_index: AnchorIndex {
+            doc_type: crate::review::model::DocType::Markdown,
+            content: "# replayed doc\n".to_string(),
+            anchor_index: Some(AnchorIndex {
                 doc_hash: dummy_id("hash-1"),
                 canonical_encoding: CanonicalEncoding::Utf8Bytes,
                 line_count: 1,
                 blocks: vec![],
                 headings: vec![],
-            },
+            }),
         };
         let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
             .expect("canonical snapshot");
@@ -3417,7 +3419,7 @@ mod tests {
                     ReviewEventBody::SnapshotCreated {
                         inline_snapshot: Some(inline),
                         ..
-                    } => assert_eq!(inline.markdown, "# replayed doc\n"),
+                    } => assert_eq!(inline.content, "# replayed doc\n"),
                     other => panic!("expected rehydrated SnapshotCreated, got {other:?}"),
                 }
             }
@@ -4747,14 +4749,15 @@ mod request_snapshot_tests {
             byte_length: 5,
             encrypted_blob_ref: None,
             plaintext: Some(SnapshotPlaintext {
-                markdown: "# hi\n".to_string(),
-                anchor_index: AnchorIndex {
+                doc_type: crate::review::model::DocType::Markdown,
+                content: "# hi\n".to_string(),
+                anchor_index: Some(AnchorIndex {
                     doc_hash: id::<ContentHash>("hash-1"),
                     canonical_encoding: CanonicalEncoding::Utf8Bytes,
                     line_count: 1,
                     blocks: vec![],
                     headings: vec![],
-                },
+                }),
             }),
         }
     }

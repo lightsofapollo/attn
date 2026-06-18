@@ -35,6 +35,7 @@
   import type { EditorView } from 'prosemirror-view';
   import type { Plugin as PMPlugin } from 'prosemirror-state';
   import Editor from './lib/Editor.svelte';
+  import HtmlViewer from './lib/HtmlViewer.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
   import CommentComposer from './lib/CommentComposer.svelte';
@@ -66,7 +67,8 @@
   let sessionState = $state<BrowserSessionState>({
     status: 'idle',
     roomId: null,
-    snapshotMarkdown: null,
+    snapshotContent: null,
+    snapshotDocType: 'markdown',
     snapshotId: null,
     fileId: null,
     error: null,
@@ -218,7 +220,7 @@ interface CommentComposerState {
       sessionState.status === 'parsing_invite' ||
       sessionState.status === 'registering_device' ||
       sessionState.status === 'connecting' ||
-      (sessionState.status === 'connected' && sessionState.snapshotMarkdown === null),
+      (sessionState.status === 'connected' && sessionState.snapshotContent === null),
   );
 
   const errorMessage = $derived(formatError(sessionState.error));
@@ -267,18 +269,26 @@ interface CommentComposerState {
         <ReviewFileNav />
         <div class="browser-review-editor min-w-0 flex-1 overflow-auto"
           data-slot="browser-review-editor">
-          <Editor
-            markdown={sessionState.snapshotMarkdown ?? ''}
-            editable={false}
-            plugins={editorPlugins}
-            onReady={handleEditorReady}
-          />
+          {#if sessionState.snapshotDocType === 'html'}
+            <!-- Read-only HTML doc: render received bytes in a sandboxed iframe.
+                 No editor, no collab, no comment margin (yet). -->
+            <HtmlViewer content={sessionState.snapshotContent ?? ''} />
+          {:else}
+            <Editor
+              markdown={sessionState.snapshotContent ?? ''}
+              editable={false}
+              plugins={editorPlugins}
+              onReady={handleEditorReady}
+            />
+          {/if}
         </div>
       </div>
-      <aside class="browser-review-margin w-[320px] shrink-0 overflow-y-auto border-l border-border bg-background"
-        data-slot="browser-review-margin">
-        <ReviewMargin view={pmViewForReview} />
-      </aside>
+      {#if sessionState.snapshotDocType !== 'html'}
+        <aside class="browser-review-margin w-[320px] shrink-0 overflow-y-auto border-l border-border bg-background"
+          data-slot="browser-review-margin">
+          <ReviewMargin view={pmViewForReview} />
+        </aside>
+      {/if}
     </div>
   {/if}
 </main>

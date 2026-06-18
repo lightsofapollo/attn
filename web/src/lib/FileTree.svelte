@@ -370,7 +370,7 @@
           </ContextMenuItem>
           <ContextMenuSeparator />
           <ContextMenuItem
-            disabled={node.fileType !== 'markdown' || !onShare}
+            disabled={(node.fileType !== 'markdown' && node.fileType !== 'html') || !onShare}
             onSelect={() => handleShare(node.path)}
           >
             <Share2 class="size-4" aria-hidden="true" />

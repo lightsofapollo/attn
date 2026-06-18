@@ -3,16 +3,28 @@
   import { markdownSourceUrl } from './markdown-layer';
 
   interface Props {
-    /** Absolute path of the .html/.htm file to display. */
-    path: string;
+    /**
+     * Owner/local mode: absolute path of the .html/.htm file to display. The
+     * iframe loads it via the `attn://` custom protocol. Mutually exclusive
+     * with `content`.
+     */
+    path?: string;
+    /**
+     * Reviewer mode: raw HTML source to render directly via `srcdoc`. Used when
+     * displaying a shared read-only snapshot — the reviewer has no local file on
+     * disk, so the bytes received over the encrypted channel are rendered
+     * inline. Mutually exclusive with `path`.
+     */
+    content?: string;
     /**
      * Disk mtime (ms) of the active file. Bumping it cache-busts the iframe
      * URL so on-disk edits live-reload. Undefined on first open → no `?v=`.
+     * Path mode only.
      */
     mtime?: number;
   }
 
-  let { path, mtime }: Props = $props();
+  let { path, content, mtime }: Props = $props();
 
   let loading = $state(true);
 
@@ -39,16 +51,25 @@
   // src/main.rs) permits remote fonts/CDN libraries for aesthetics while
   // blocking it from reading other local files. The header (breadcrumb +
   // "Open in browser" button) is shared app chrome rendered by App.svelte.
+  // `content` (reviewer/srcdoc) wins when provided; otherwise load the local
+  // file via the attn:// protocol (owner/path mode).
+  let isContentMode = $derived(content !== undefined);
   let src = $derived(
-    mtime !== undefined
-      ? `${markdownSourceUrl(path)}?v=${mtime}`
-      : markdownSourceUrl(path),
+    !isContentMode && path !== undefined
+      ? mtime !== undefined
+        ? `${markdownSourceUrl(path)}?v=${mtime}`
+        : markdownSourceUrl(path)
+      : undefined,
   );
-  let fileName = $derived(path.split('/').pop() || path);
+  let fileName = $derived(
+    path !== undefined ? path.split('/').pop() || path : 'shared document',
+  );
 
-  // Reset the loading state whenever the source changes (open or live-reload).
+  // Reset the loading state whenever the source/content changes (open or
+  // live-reload).
   $effect(() => {
     void src;
+    void content;
     loading = true;
   });
 </script>
@@ -68,13 +89,28 @@
     navigate the top frame, open popups, or submit forms. Width is padded by the
     scrollbar width so the native scrollbar is clipped by the wrapper above.
   -->
-  <iframe
-    {src}
-    title={fileName}
-    class="block h-full border-0 bg-white"
-    style="width: calc(100% + {scrollbarWidth}px);"
-    sandbox="allow-scripts"
-    referrerpolicy="no-referrer"
-    onload={() => (loading = false)}
-  ></iframe>
+  {#if isContentMode}
+    <!-- Reviewer mode: render received HTML bytes directly. srcdoc runs in the
+         same opaque-origin sandbox as path mode (allow-scripts WITHOUT
+         allow-same-origin), so the shared page can't touch attn. -->
+    <iframe
+      srcdoc={content}
+      title={fileName}
+      class="block h-full border-0 bg-white"
+      style="width: calc(100% + {scrollbarWidth}px);"
+      sandbox="allow-scripts"
+      referrerpolicy="no-referrer"
+      onload={() => (loading = false)}
+    ></iframe>
+  {:else}
+    <iframe
+      {src}
+      title={fileName}
+      class="block h-full border-0 bg-white"
+      style="width: calc(100% + {scrollbarWidth}px);"
+      sandbox="allow-scripts"
+      referrerpolicy="no-referrer"
+      onload={() => (loading = false)}
+    ></iframe>
+  {/if}
 </div>

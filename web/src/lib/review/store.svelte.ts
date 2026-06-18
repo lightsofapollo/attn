@@ -681,8 +681,9 @@ export class ReviewStore {
         createdAt: event.meta.createdAt,
         createdBy: event.meta.authorId,
         baseHash: body.baseHash,
-        byteLength: inline ? inline.markdown.length : 0,
-        markdown: inline?.markdown,
+        byteLength: inline ? inline.content.length : 0,
+        docType: inline?.docType,
+        content: inline?.content,
         anchorIndex: inline?.anchorIndex,
         encryptedBlobRef: body.encryptedBlobRef,
       };

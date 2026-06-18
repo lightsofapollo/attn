@@ -306,7 +306,7 @@ defineCase('three-way-drift fires a suggestion whose expectedText drifts vs the 
 
   const latestSnapshot = stubStore.snapshots[stubStore.snapshots.length - 1];
   assert(latestSnapshot !== undefined, 'expected a current snapshot');
-  const currentMarkdown = latestSnapshot.markdown ?? '';
+  const currentMarkdown = latestSnapshot.content ?? '';
 
   if (op.kind === 'replace') {
     assert(

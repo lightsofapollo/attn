@@ -684,6 +684,40 @@ describe("POST /v2/rooms/:roomId/envelopes — room caps", () => {
     const err = (await res.json()) as ErrorResponse;
     expect(err.error.code).toBe("ATTN_ROOM_STORAGE_FULL");
   });
+
+  it("enforces HARD_MAX_ROOM_BYTES across R2 reservations plus inline ciphertext", async () => {
+    const roomId = uniqueRoomId("env-combined-cap");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-combined",
+      participantId: "combined",
+    });
+
+    const hardMax = Number(env.HARD_MAX_ROOM_BYTES);
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.put("meta:bytes_used_r2", hardMax - 1);
+    });
+
+    const response = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "combined-overflow",
+          authorId: "combined",
+          deviceId: "dev-combined",
+          ciphertextBytes: 2,
+        }),
+      ],
+    });
+    expect(response.status).toBe(507);
+    const error = (await response.json()) as ErrorResponse;
+    expect(error.error.code).toBe("ATTN_ROOM_STORAGE_FULL");
+  });
 });
 
 describe("POST /v2/rooms/:roomId/envelopes — protection layers", () => {

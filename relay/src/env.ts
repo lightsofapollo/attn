@@ -1,6 +1,7 @@
 /** Worker environment bindings as configured in wrangler.toml. */
 
 import type { RoomDO } from "./room-do";
+import type { QuotaDO } from "./quota-do";
 
 declare global {
   /** Optional build SHA injected at deploy time. */
@@ -11,6 +12,9 @@ declare global {
 export interface Env {
   // Durable Object namespace bound to the RoomDO class.
   RELAY_ROOMS: DurableObjectNamespace<RoomDO>;
+
+  // One account-wide quota coordinator, addressed as idFromName("quota:v1").
+  RELAY_QUOTAS: DurableObjectNamespace<QuotaDO>;
 
   // R2 bucket for blob spillover (encrypted snapshots > inline cap).
   RELAY_BLOBS: R2Bucket;
@@ -34,12 +38,26 @@ export interface Env {
   // Browser CORS allowlist (comma-separated origins).
   ALLOWED_BROWSER_ORIGINS: string;
 
+  // Durable first-create quota. All are required in deployed environments.
+  QUOTA_MAX_LIVE_ROOMS_PER_SOURCE: string;
+  QUOTA_MAX_ALLOCATED_BYTES_PER_SOURCE_24H: string;
+  QUOTA_GLOBAL_MAX_LIVE_ROOMS: string;
+  QUOTA_GLOBAL_MAX_RESERVED_BYTES: string;
+
+  /** HMAC secret used to pseudonymize canonical CF-Connecting-IP values. */
+  QUOTA_IP_HASH_KEY?: string;
+
+  /** Local/test escape hatch. Never enable in a public deployment. */
+  QUOTA_ALLOW_UNATTRIBUTED_CREATES?: string;
+
   /**
    * HMAC key for signing/verifying R2 blob-access caps. Set as a wrangler
    * SECRET in production: `wrangler secret put BLOB_CAP_SIGNING_KEY`. When unset
-   * (local dev / tests), r2.ts falls back to a deterministic derived key — but
-   * that fallback is forgeable from the public source, so any public deployment
-   * MUST set this secret.
+   * Public deployments fail closed when absent. Tests may explicitly opt in to
+   * a deterministic fallback with ALLOW_INSECURE_BLOB_CAP_KEY.
    */
   BLOB_CAP_SIGNING_KEY?: string;
+
+  /** Local/test-only opt-in to the public deterministic blob-cap key. */
+  ALLOW_INSECURE_BLOB_CAP_KEY?: string;
 }

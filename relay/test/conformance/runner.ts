@@ -512,6 +512,7 @@ interface BlobCtx {
   roomHandle: string;
   envelopeId: string;
   ciphertextBytes: number;
+  leaseId: string;
   /** Worker-side cap URL returned from POST /blobs (relative path). */
   uploadUrl: string;
 }
@@ -1527,6 +1528,7 @@ interface PresignedUploadResponse {
   headers: Record<string, string>;
   expiresAt: number;
   blobKey: string;
+  leaseId: string;
 }
 
 async function actPresignBlob(
@@ -1575,6 +1577,7 @@ async function actPresignBlob(
       envelopeId: step.params.envelopeId,
       ciphertextBytes: step.params.ciphertextBytes,
       uploadUrl: presigned.uploadUrl,
+      leaseId: presigned.leaseId,
     });
   }
 }
@@ -1618,7 +1621,7 @@ async function actGetBlob(
     expect.fail(`${label}: unknown blob handle '${step.as}' — call presignBlob first`);
   }
   const room = mustRoom(state, blob.roomHandle, label);
-  const download = await presignBlobDownload(env, room.roomId, blob.envelopeId);
+  const download = await presignBlobDownload(env, room.roomId, blob.leaseId, blob.envelopeId);
   const res = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, { method: "GET" });
   // The blob GET response is binary; call assertResponse-equivalent checks
   // inline so we can consume the body once via arrayBuffer().

@@ -21,14 +21,12 @@
  *   `blob-cap:v1:<base64url(payload)>:<base64url(hmac)>`
  *
  * Payload (canonical JSON, sorted keys):
- *   { method: "PUT"|"GET", roomId, envelopeId, expiresAt, [ciphertextBytes] }
+ *   { method, roomId, leaseId, envelopeId, expiresAt,
+ *     [uploadId], [ciphertextBytes] }
  *
  * HMAC is computed with SHA-256 over the payload bytes using a per-bucket
- * signing key. We derive the signing key from the R2 binding's own identifier
- * at first use; tests + prod both use SHA-256(env.RELAY_BLOBS.name || "attn-relay-blobs")
- * so the same Worker instance can verify a token it minted seconds earlier.
- * (Rotation: redeploy → new key → outstanding tokens become invalid, which is
- * fine for short-lived caps.)
+ * signing key supplied as a deployment secret. Missing production key material
+ * fails closed; local tests must opt in explicitly.
  */
 
 import type { Env } from "./env";
@@ -37,9 +35,15 @@ const DEFAULT_UPLOAD_TTL_SECONDS = 15 * 60;
 const DEFAULT_DOWNLOAD_TTL_SECONDS = 5 * 60;
 const TOKEN_PREFIX = "blob-cap:v1:";
 
-/** R2 object-key layout per relay-spec.md §R2 Integration. */
-export function blobObjectKey(roomId: string, envelopeId: string): string {
-  return `rooms/${roomId}/blobs/${envelopeId}`;
+/** Worker-to-RoomDO upload path; never routed from the public HTTP surface. */
+export const INTERNAL_BLOB_UPLOAD_PATH = "/__attn/internal/blob-upload";
+export const INTERNAL_BLOB_LEASE_HEADER = "X-Attn-Blob-Lease";
+export const INTERNAL_BLOB_UPLOAD_HEADER = "X-Attn-Blob-Upload";
+export const INTERNAL_BLOB_ENVELOPE_HEADER = "X-Attn-Blob-Envelope";
+
+/** Generation-bound R2 object key. Old caps cannot overwrite a recreated room. */
+export function blobObjectKey(roomId: string, leaseId: string, envelopeId: string): string {
+  return `rooms/${roomId}/generations/${leaseId}/blobs/${envelopeId}`;
 }
 
 export interface PresignedUploadResult {
@@ -48,6 +52,7 @@ export interface PresignedUploadResult {
   headers: Record<string, string>;
   expiresAt: number;
   blobKey: string;
+  leaseId: string;
 }
 
 export interface PresignedDownloadResult {
@@ -59,8 +64,11 @@ export interface PresignedDownloadResult {
 export interface BlobCapPayload {
   method: "PUT" | "GET";
   roomId: string;
+  leaseId: string;
   envelopeId: string;
   expiresAt: number;
+  /** One-time reservation claim, required only for PUT caps. */
+  uploadId?: string;
   /** Set only for PUT caps — pins the upload size so attackers can't grow the slot. */
   ciphertextBytes?: number;
 }
@@ -75,7 +83,9 @@ export interface BlobCapPayload {
 export async function presignBlobUpload(
   env: Env,
   roomId: string,
+  leaseId: string,
   envelopeId: string,
+  uploadId: string,
   ciphertextBytes: number,
   expiresInSeconds?: number,
 ): Promise<PresignedUploadResult> {
@@ -84,12 +94,14 @@ export async function presignBlobUpload(
   const payload: BlobCapPayload = {
     method: "PUT",
     roomId,
+    leaseId,
     envelopeId,
     expiresAt,
+    uploadId,
     ciphertextBytes,
   };
   const token = await signCap(payload, env);
-  const blobKey = blobObjectKey(roomId, envelopeId);
+  const blobKey = blobObjectKey(roomId, leaseId, envelopeId);
   // The path is the spec's `/v2/rooms/:roomId/blobs/:envelopeId`. The client
   // appends the token as a query parameter so the URL is fully self-contained
   // (no extra header coordination needed on the upload PUT).
@@ -100,6 +112,7 @@ export async function presignBlobUpload(
     headers: { "Content-Type": "application/octet-stream" },
     expiresAt,
     blobKey,
+    leaseId,
   };
 }
 
@@ -110,6 +123,7 @@ export async function presignBlobUpload(
 export async function presignBlobDownload(
   env: Env,
   roomId: string,
+  leaseId: string,
   envelopeId: string,
   expiresInSeconds?: number,
 ): Promise<PresignedDownloadResult> {
@@ -118,6 +132,7 @@ export async function presignBlobDownload(
   const payload: BlobCapPayload = {
     method: "GET",
     roomId,
+    leaseId,
     envelopeId,
     expiresAt,
   };
@@ -134,9 +149,10 @@ export async function presignBlobDownload(
 export async function deleteBlob(
   env: Env,
   roomId: string,
+  leaseId: string,
   envelopeId: string,
 ): Promise<void> {
-  const key = blobObjectKey(roomId, envelopeId);
+  const key = blobObjectKey(roomId, leaseId, envelopeId);
   await env.RELAY_BLOBS.delete(key);
 }
 
@@ -202,6 +218,10 @@ export async function verifyBlobCap(
   if (payload.method !== expect.method) return undefined;
   if (payload.roomId !== expect.roomId) return undefined;
   if (payload.envelopeId !== expect.envelopeId) return undefined;
+  if (typeof payload.leaseId !== "string" || payload.leaseId.length === 0) return undefined;
+  if (payload.method === "PUT" && (typeof payload.uploadId !== "string" || payload.uploadId.length === 0)) {
+    return undefined;
+  }
   const now = expect.now ?? Date.now();
   if (typeof payload.expiresAt !== "number" || payload.expiresAt < now) return undefined;
   return payload;
@@ -216,12 +236,18 @@ async function getSigningKey(env: Env): Promise<CryptoKey> {
   if (cachedSigningKey !== undefined) return cachedSigningKey;
   // Production: a wrangler SECRET (`BLOB_CAP_SIGNING_KEY`). We SHA-256 the
   // secret string into a fixed 32-byte HMAC key so any-length secret works.
-  // Dev/tests fall back to a deterministic derived key so the same isolate can
-  // verify its own tokens — but that fallback is forgeable from the (open)
-  // source, which is why production MUST set the secret (see env.ts).
+  // Public deployments fail closed when the secret is absent. Local tests may
+  // opt in explicitly to the deterministic fallback; there is no accidental
+  // production downgrade.
   const secret = env.BLOB_CAP_SIGNING_KEY;
-  const material =
-    typeof secret === "string" && secret.length > 0 ? secret : "attn-relay-blobs:v1:cap-signing";
+  let material: string;
+  if (typeof secret === "string" && secret.length >= 32) {
+    material = secret;
+  } else if (env.ALLOW_INSECURE_BLOB_CAP_KEY === "true") {
+    material = "attn-relay-blobs:v1:cap-signing";
+  } else {
+    throw new Error("BLOB_CAP_SIGNING_KEY must be at least 32 characters");
+  }
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(material)));
   cachedSigningKey = await crypto.subtle.importKey(
     "raw",
@@ -247,13 +273,17 @@ async function signCap(payload: BlobCapPayload, env: Env): Promise<string> {
 }
 
 function canonicalizePayload(p: BlobCapPayload): string {
-  // Keep field order stable: method, roomId, envelopeId, expiresAt, ciphertextBytes?
+  // Keep field order stable for HMAC reproduction.
   const ordered: Record<string, unknown> = {
     method: p.method,
     roomId: p.roomId,
+    leaseId: p.leaseId,
     envelopeId: p.envelopeId,
     expiresAt: p.expiresAt,
   };
+  if (typeof p.uploadId === "string") {
+    ordered.uploadId = p.uploadId;
+  }
   if (typeof p.ciphertextBytes === "number") {
     ordered.ciphertextBytes = p.ciphertextBytes;
   }

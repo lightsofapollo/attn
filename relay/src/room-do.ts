@@ -28,7 +28,17 @@ import { canonicalize, type CanonicalValue } from "./canonical";
 import type { Env } from "./env";
 import { OwnerSigError, verifyOwnerSignature } from "./owner-sig";
 import { parsePow, POW_MAX_LIFETIME_MS, PowError, verifyPow } from "./pow";
-import { blobObjectKey, presignBlobDownload, presignBlobUpload, type PresignedUploadResult } from "./r2";
+import { INTERNAL_QUOTA_SOURCE_HEADER } from "./quota-do";
+import {
+  blobObjectKey,
+  INTERNAL_BLOB_ENVELOPE_HEADER,
+  INTERNAL_BLOB_LEASE_HEADER,
+  INTERNAL_BLOB_UPLOAD_HEADER,
+  INTERNAL_BLOB_UPLOAD_PATH,
+  presignBlobDownload,
+  presignBlobUpload,
+  type PresignedUploadResult,
+} from "./r2";
 import { DurableObjectRateLimit, type RateLimitResult } from "./rate-limit";
 import {
   acksRequestSchema,
@@ -137,6 +147,10 @@ const META = {
   bytesUsedR2: "meta:bytes_used_r2",
   envelopeCount: "meta:envelope_count",
   oldestRetainedSeq: "meta:oldest_retained_seq",
+  /** Active generation reservation, retained for the full room lifetime. */
+  quotaLease: "meta:quota_lease",
+  /** Cleanup tombstone retained only while a quota release is retrying. */
+  quotaRelease: "cleanup:quota_release",
 } as const;
 
 /** Storage prefix for the pow-replay set. Walked by the alarm to prune. */
@@ -167,6 +181,13 @@ const PRE_EXPIRY_CLEANUP_WINDOW_MS = 60 * 60 * 1000;
  * tightly to deny a memory-amplification vector.
  */
 const ROOM_CREATE_MAX_BODY_BYTES = 4096;
+const DEVICE_BODY_MAX_BYTES = 4096;
+const BLOB_PRESIGN_BODY_MAX_BYTES = 4096;
+const ACK_BODY_MAX_BYTES = 32 * 1024;
+const DELETE_BODY_MAX_BYTES = 4096;
+const ENVELOPE_BODY_OVERHEAD_BYTES = 256 * 1024;
+/** Durable device-record cap; intentionally separate from concurrent WS peers. */
+const MAX_REGISTERED_DEVICES = 32;
 
 /**
  * Probation window for an UN-ACTIVATED room (abuse hardening). A legitimate
@@ -177,6 +198,19 @@ const ROOM_CREATE_MAX_BODY_BYTES = 4096;
  * full 24h–7d TTL. This is the primary bound on accumulated DO/R2 cost.
  */
 const ROOM_PROBATION_MS = 15 * 60 * 1000;
+const QUOTA_RELEASE_RETRY_MS = 60 * 1000;
+const QUOTA_SINGLETON_NAME = "quota:v1";
+
+interface RoomQuotaLease {
+  roomId: string;
+  leaseId: string;
+  sourceBucket: string;
+  reservedBytes: number;
+  ownerSigningKeyId: string;
+  createBodyHash: string;
+  /** Writes are admitted only after QuotaDO acknowledged this generation. */
+  confirmed: boolean;
+}
 
 interface ErrorBody {
   error: { code: string; message: string };
@@ -252,22 +286,54 @@ function parsePositiveInt(raw: string, name: string): number {
 }
 
 export class RoomDO extends DurableObject<Env> {
+  /**
+   * External QuotaDO/R2 awaits open the Durable Object input gate. Serialize
+   * room operations explicitly so a cleanup, first-create, or admitted write
+   * cannot resume into a different room generation.
+   */
+  private operationTail: Promise<void> = Promise.resolve();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
   }
 
   override async fetch(request: Request): Promise<Response> {
-    const response = await this.dispatch(request);
-    // CORS handshake (attn-nnj.9.5): every response from this DO is tagged with
-    // an `X-Attn-Allow-Browser` header reflecting the room's `policy.allowBrowser`
-    // setting. The Worker reads + strips this header on the response edge to
-    // decide whether to attach CORS headers. We tag at the DO boundary so the
-    // Worker doesn't need its own policy fetch round-trip on every request.
-    return this.tagAllowBrowserOnResponse(request, response);
+    return this.withOperationLock(async () => {
+      const response = await this.dispatch(request);
+      // CORS handshake (attn-nnj.9.5): every response from this DO is tagged with
+      // an `X-Attn-Allow-Browser` header reflecting the room's `policy.allowBrowser`
+      // setting. The Worker reads + strips this header on the response edge to
+      // decide whether to attach CORS headers. We tag at the DO boundary so the
+      // Worker doesn't need its own policy fetch round-trip on every request.
+      return this.tagAllowBrowserOnResponse(request, response);
+    });
+  }
+
+  private async withOperationLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.operationTail;
+    let release!: () => void;
+    this.operationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   private async dispatch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    if (
+      url.hostname === "room.internal" &&
+      url.pathname === INTERNAL_BLOB_UPLOAD_PATH &&
+      request.method === "PUT"
+    ) {
+      return this.handleInternalBlobUpload(request);
+    }
+
     const roomMatch = url.pathname.match(ROOM_PATH_RE);
 
     // CORS preflight (attn-nnj.9.5). Browser clients hit OPTIONS before any
@@ -300,6 +366,22 @@ export class RoomDO extends DurableObject<Env> {
         return errorResponse(400, "ATTN_ROOM_ID_INVALID", "roomId required");
       }
       return this.handleRoomDelete(request, roomId, url.pathname);
+    }
+
+    // Pre-quota rooms must rejoin once to adopt a generation reservation before
+    // accepting any new durable write. Reads and owner DELETE remain available
+    // so rollout can never trap user ciphertext in an unaccounted legacy room.
+    if (request.method === "POST" && ROOM_PATH_LOOSE_RE.test(url.pathname)) {
+      const [admissionKey, lease] = await Promise.all([
+        this.ctx.storage.get<Uint8Array>(META.admissionKey),
+        this.ctx.storage.get<RoomQuotaLease>(META.quotaLease),
+      ]);
+      if (
+        admissionKey !== undefined &&
+        (lease === undefined || !isRoomQuotaLease(lease) || lease.confirmed !== true)
+      ) {
+        return quotaUnavailableResponse("room must rejoin to acquire a quota generation");
+      }
     }
 
     const devicesMatch = url.pathname.match(ROOM_DEVICES_PATH_RE);
@@ -491,19 +573,22 @@ export class RoomDO extends DurableObject<Env> {
     // request stream half-read causes workerd to surface a post-response
     // "Can't read from request stream after response has been sent" error in
     // the DO→Worker boundary. Reading once into a buffer side-steps that.
-    let bodyBytes: Uint8Array;
-    try {
-      bodyBytes = new Uint8Array(await request.arrayBuffer());
-    } catch (err) {
-      return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
-    }
+    const bodyRead = await readBoundedBody(request, ROOM_CREATE_MAX_BODY_BYTES);
+    if (bodyRead instanceof Response) return bodyRead;
+    const bodyBytes = bodyRead;
     // Belt-and-braces: Content-Length may be absent (chunked) or lie. Reject
     // the actual buffered size too.
     if (bodyBytes.byteLength > ROOM_CREATE_MAX_BODY_BYTES) {
       return errorResponse(413, "ATTN_BODY_TOO_LARGE", `create body exceeds ${ROOM_CREATE_MAX_BODY_BYTES} bytes`);
     }
 
-    const existingCreatedAt = await this.ctx.storage.get<number>(META.createdAt);
+    const [existingCreatedAt, cleanupTombstone] = await Promise.all([
+      this.ctx.storage.get<number>(META.createdAt),
+      this.ctx.storage.get<RoomQuotaLease>(META.quotaRelease),
+    ]);
+    if (cleanupTombstone !== undefined) {
+      return quotaUnavailableResponse("room generation cleanup in progress");
+    }
     const isRejoin = typeof existingCreatedAt === "number";
 
     if (isRejoin) {
@@ -531,6 +616,50 @@ export class RoomDO extends DurableObject<Env> {
           return errorResponse(401, err.code, err.message);
         }
         throw err;
+      }
+
+      // Rollout adoption for rooms created before QuotaDO existed. This is the
+      // only legacy path that can create a lease; all subsequent writes require
+      // it at dispatch. New rooms already have a lease and keep the normal
+      // rejoin guarantee of never contacting the quota coordinator.
+      let existingLease = await this.ctx.storage.get<RoomQuotaLease>(META.quotaLease);
+      if (existingLease === undefined) {
+        const sourceBucket = request.headers.get(INTERNAL_QUOTA_SOURCE_HEADER);
+        const storedOwnerKeyId = await this.ctx.storage.get<string>(META.ownerSigningKeyId);
+        if (sourceBucket === null || sourceBucket === "" || storedOwnerKeyId === undefined) {
+          return quotaUnavailableResponse("legacy room quota adoption unavailable");
+        }
+        const legacyLease: RoomQuotaLease = {
+          roomId,
+          leaseId: crypto.randomUUID(),
+          sourceBucket,
+          reservedBytes: limits.maxRoomBytes,
+          ownerSigningKeyId: storedOwnerKeyId,
+          createBodyHash: await sha256B64Url(bodyBytes),
+          confirmed: false,
+        };
+        await this.ctx.storage.put(META.quotaLease, legacyLease);
+        existingLease = legacyLease;
+      }
+      if (!isRoomQuotaLease(existingLease)) {
+        return quotaUnavailableResponse("legacy room has invalid quota state");
+      }
+      if (existingLease.confirmed !== true) {
+        const quotaResponse = await this.acquireQuotaLease(existingLease);
+        if (!quotaResponse.ok) {
+          const code = await responseErrorCode(quotaResponse);
+          if (
+            code === "ATTN_SOURCE_ROOM_QUOTA" ||
+            code === "ATTN_SOURCE_BYTE_QUOTA" ||
+            code === "ATTN_RELAY_CAPACITY" ||
+            code === "ATTN_QUOTA_LEASE_CONFLICT"
+          ) {
+            await this.ctx.storage.delete(META.quotaLease);
+          }
+          return quotaResponse;
+        }
+        existingLease = { ...existingLease, confirmed: true };
+        await this.ctx.storage.put(META.quotaLease, existingLease);
       }
       return this.buildExistingRoomResponse(roomId);
     }
@@ -607,6 +736,7 @@ export class RoomDO extends DurableObject<Env> {
     const clamped = clampPolicy(body.policy, limits, createdAt);
 
     const ownerSigningKeyId = await sha256B64Url(ownerKeyBytes);
+    const createBodyHash = await sha256B64Url(bodyBytes);
 
     // PoW (abuse hardening). Other write/join/delete routes already gate on
     // Attn-PoW; create did not, making it the one cheap, unbounded entry point.
@@ -619,6 +749,7 @@ export class RoomDO extends DurableObject<Env> {
     if (powToken === null || powToken === "") {
       return errorResponse(400, "ATTN_POW_INVALID", "missing Attn-PoW header");
     }
+    let verifiedPow: { hash: string; expiresAt: number } | undefined;
     try {
       await verifyPow(powToken, {
         roomId,
@@ -628,7 +759,12 @@ export class RoomDO extends DurableObject<Env> {
         policyPowBits: limits.minPowBits,
         now: createdAt,
         isReplayed: (hash) => this.isPowSeen(hash),
-        markSeen: (hash, expiresAt) => this.markPowSeen(hash, expiresAt),
+        // Capture only. The marker is committed with the room metadata after
+        // quota succeeds, so a rejected first-create cannot strand a lone
+        // pow_seen key in an otherwise empty DO with no cleanup alarm.
+        markSeen: async (hash, expiresAt) => {
+          verifiedPow = { hash, expiresAt };
+        },
       });
     } catch (err) {
       if (err instanceof PowError) {
@@ -636,6 +772,72 @@ export class RoomDO extends DurableObject<Env> {
       }
       throw err;
     }
+
+    if (verifiedPow === undefined) {
+      return errorResponse(503, "ATTN_QUOTA_UNAVAILABLE", "create PoW verification did not produce a replay marker");
+    }
+
+    // Reserve the full HARD_MAX_ROOM_BYTES for the room generation. This is
+    // intentionally after schema + owner signature + PoW, but before any room
+    // metadata. A small pending lease marker is retained locally so an
+    // ambiguous lost response can retry the same random generation id rather
+    // than double-allocate or strand capacity.
+    const sourceBucket = request.headers.get(INTERNAL_QUOTA_SOURCE_HEADER);
+    if (sourceBucket === null || sourceBucket === "" || sourceBucket.length > 512) {
+      return quotaUnavailableResponse("durable create source attribution unavailable");
+    }
+    let quotaLease = await this.ctx.storage.get<RoomQuotaLease>(META.quotaLease);
+    if (quotaLease === undefined) {
+      quotaLease = {
+        roomId,
+        leaseId: crypto.randomUUID(),
+        sourceBucket,
+        reservedBytes: limits.maxRoomBytes,
+        ownerSigningKeyId,
+        createBodyHash,
+        confirmed: false,
+      };
+      await this.ctx.storage.put(META.quotaLease, quotaLease);
+    } else if (
+      !isRoomQuotaLease(quotaLease) ||
+      quotaLease.roomId !== roomId ||
+      quotaLease.sourceBucket !== sourceBucket ||
+      quotaLease.ownerSigningKeyId !== ownerSigningKeyId ||
+      quotaLease.createBodyHash !== createBodyHash ||
+      quotaLease.reservedBytes !== limits.maxRoomBytes
+    ) {
+      return quotaUnavailableResponse("invalid pending room quota lease");
+    }
+
+    // Ensure an acquired-but-not-yet-persisted generation eventually releases
+    // even if this request is interrupted between Durable Objects.
+    await this.ctx.storage.setAlarm(createdAt + ROOM_PROBATION_MS);
+
+    const quotaResponse = await this.acquireQuotaLease(quotaLease);
+    if (!quotaResponse.ok) {
+      const code = await responseErrorCode(quotaResponse);
+      if (
+        code === "ATTN_SOURCE_ROOM_QUOTA" ||
+        code === "ATTN_SOURCE_BYTE_QUOTA" ||
+        code === "ATTN_RELAY_CAPACITY" ||
+        code === "ATTN_QUOTA_LEASE_CONFLICT"
+      ) {
+        // A definitive denial allocated nothing for this generation. Remove
+        // the pending marker and alarm; importantly, verifiedPow was never
+        // written either.
+        await this.ctx.storage.delete(META.quotaLease);
+        try {
+          await this.ctx.storage.deleteAlarm();
+        } catch {
+          // no-op when the runtime reports no alarm
+        }
+      }
+      if (code === "ATTN_QUOTA_LEASE_CONFLICT") {
+        return quotaUnavailableResponse("room quota generation conflict");
+      }
+      return quotaResponse;
+    }
+    quotaLease = { ...quotaLease, confirmed: true };
 
     // Persist everything in one DO transaction. We use put-many so the writes
     // commit atomically — partial creates are observable as either fully-done
@@ -655,6 +857,8 @@ export class RoomDO extends DurableObject<Env> {
       [META.bytesUsedR2]: 0,
       [META.envelopeCount]: 0,
       [META.oldestRetainedSeq]: 0,
+      [META.quotaLease]: quotaLease,
+      [powSeenKey(verifiedPow.hash)]: verifiedPow.expiresAt,
     });
 
     // Schedule the TTL/idle alarm. The alarm() handler owns the actual
@@ -741,12 +945,9 @@ export class RoomDO extends DurableObject<Env> {
     // need to read it; the room-create handler ran into the same workerd
     // "Can't read from request stream after response has been sent" failure
     // when leaving the stream half-consumed.
-    let bodyBytes: Uint8Array;
-    try {
-      bodyBytes = new Uint8Array(await request.arrayBuffer());
-    } catch (err) {
-      return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
-    }
+    const bodyRead = await readBoundedBody(request, DEVICE_BODY_MAX_BYTES);
+    if (bodyRead instanceof Response) return bodyRead;
+    const bodyBytes = bodyRead;
 
     // 1. Admission — URL-as-bearer trust boundary.
     try {
@@ -855,6 +1056,19 @@ export class RoomDO extends DurableObject<Env> {
         `publicSigningKey for (${body.participantId}, ${body.deviceId}) does not match existing registration`,
       );
     }
+    if (existing === undefined) {
+      const registered = await this.ctx.storage.list({
+        prefix: DEVICE_ORDER_PREFIX,
+        limit: MAX_REGISTERED_DEVICES + 1,
+      });
+      if (registered.size >= MAX_REGISTERED_DEVICES) {
+        return errorResponse(
+          507,
+          "ATTN_ROOM_DEVICE_CAP",
+          `room ${roomId} already has ${registered.size} registered devices`,
+        );
+      }
+    }
 
     // 7. Build the record + write a single put-many so the order index and
     //    payload commit atomically. On re-register we preserve `registeredAt`
@@ -962,12 +1176,10 @@ export class RoomDO extends DurableObject<Env> {
 
     // Buffer the body up front — verifyAdmission, JSON.parse, and the bulk
     // decode all need a non-streamed copy.
-    let bodyBytes: Uint8Array;
-    try {
-      bodyBytes = new Uint8Array(await request.arrayBuffer());
-    } catch (err) {
-      return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
-    }
+    const maxEnvelopeBodyBytes = Math.ceil((limits.maxRoomBytes * 4) / 3) + ENVELOPE_BODY_OVERHEAD_BYTES;
+    const bodyRead = await readBoundedBody(request, maxEnvelopeBodyBytes);
+    if (bodyRead instanceof Response) return bodyRead;
+    const bodyBytes = bodyRead;
 
     // 1. Admission.
     try {
@@ -1137,13 +1349,15 @@ export class RoomDO extends DurableObject<Env> {
     }
 
     // Cap checks operate on the fresh subset (duplicates don't change totals).
-    const [curCount, curBytes, curServerSeq] = await Promise.all([
+    const [curCount, curBytes, curBytesR2, curServerSeq] = await Promise.all([
       this.ctx.storage.get<number>(META.envelopeCount),
       this.ctx.storage.get<number>(META.bytesUsed),
+      this.ctx.storage.get<number>(META.bytesUsedR2),
       this.ctx.storage.get<number>(META.serverSeq),
     ]);
     const runningCount = curCount ?? 0;
     const runningBytes = curBytes ?? 0;
+    const runningBytesR2 = curBytesR2 ?? 0;
     const runningSeq = curServerSeq ?? 0;
 
     const addedCount = fresh.length;
@@ -1157,11 +1371,12 @@ export class RoomDO extends DurableObject<Env> {
         `room ${roomId} event cap reached (have ${runningCount}, +${addedCount} > ${policy.maxEvents})`,
       );
     }
-    if (runningBytes + addedBytes > limits.maxRoomBytes) {
+    const combinedBytes = runningBytes + runningBytesR2 + addedBytes;
+    if (!Number.isSafeInteger(combinedBytes) || combinedBytes > limits.maxRoomBytes) {
       return errorResponse(
         507,
         "ATTN_ROOM_STORAGE_FULL",
-        `room ${roomId} storage cap reached (have ${runningBytes}, +${addedBytes} > ${limits.maxRoomBytes})`,
+        `room ${roomId} storage cap reached (inline ${runningBytes}, R2 ${runningBytesR2}, +${addedBytes} > ${limits.maxRoomBytes})`,
       );
     }
 
@@ -1375,12 +1590,9 @@ export class RoomDO extends DurableObject<Env> {
     }
 
     // Buffer body so admission/owner-sig + JSON.parse can both read it.
-    let bodyBytes: Uint8Array;
-    try {
-      bodyBytes = new Uint8Array(await request.arrayBuffer());
-    } catch (err) {
-      return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
-    }
+    const bodyRead = await readBoundedBody(request, ACK_BODY_MAX_BYTES);
+    if (bodyRead instanceof Response) return bodyRead;
+    const bodyBytes = bodyRead;
 
     // 1. Admission — URL-as-bearer trust boundary.
     try {
@@ -1489,18 +1701,16 @@ export class RoomDO extends DurableObject<Env> {
     // meta:oldest_retained_seq when a leading run drops away.
     let minDeletedPaddedSeq: string | undefined;
 
-    for (const envelopeId of body.ackedEnvelopeIds) {
-      // Per-device ACK slot. Always re-written with the latest timestamp so a
-      // re-ack noticeably updates the slot; idempotent in the count/bytes
-      // sense (we only debit storage when we actually delete the envelope).
+    for (const envelopeId of new Set(body.ackedEnvelopeIds)) {
+      // Lookup the env_idx to find the padded seq of this envelope's payload.
+      // Missing entry = already deleted (or never existed) → idempotent no-op
+      // without creating attacker-controlled durable ACK keys.
+      const paddedSeq = await this.ctx.storage.get<string>(envIndexKey(envelopeId));
+      if (paddedSeq === undefined) continue;
       writes[ackKey(body.deviceId, envelopeId)] = ackedAt;
 
       if (!mayDelete) continue;
 
-      // Lookup the env_idx to find the padded seq of this envelope's payload.
-      // Missing entry = already deleted (or never existed) → idempotent no-op.
-      const paddedSeq = await this.ctx.storage.get<string>(envIndexKey(envelopeId));
-      if (paddedSeq === undefined) continue;
       const payloadKey = envStorageKey(paddedSeq, envelopeId);
       const record = await this.ctx.storage.get<EnvelopeRecord>(payloadKey);
       if (record === undefined) {
@@ -1556,11 +1766,15 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
 
-    if (Object.keys(writes).length > 0) {
-      await this.ctx.storage.put<unknown>(writes);
-    }
-    if (keysToDelete.length > 0) {
-      await this.ctx.storage.delete(keysToDelete);
+    if (Object.keys(writes).length > 0 || keysToDelete.length > 0) {
+      // Counters, ACK markers, payloads, and indexes advance as one durable
+      // commit. A crash can therefore leave either the fully retained envelope
+      // with its original byte charge or the fully deleted envelope with the
+      // decremented charge—never an under-counted retained payload.
+      await this.ctx.storage.transaction(async (txn) => {
+        if (Object.keys(writes).length > 0) await txn.put<unknown>(writes);
+        if (keysToDelete.length > 0) await txn.delete(keysToDelete);
+      });
     }
 
     return new Response(null, { status: 204 });
@@ -1596,11 +1810,10 @@ export class RoomDO extends DurableObject<Env> {
    *
    * Reservation lifecycle:
    *   - Created here, debits `meta:bytes_used_r2` immediately.
-   *   - Cleared by the eventual POST /envelopes for the same envelopeId, or
-   *     when the underlying R2 object lands and the client confirms.
-   *   - Falls out via the bucket's 7-day lifecycle rule + DO alarm wipe if
-   *     the client never follows through. Acceptable: each room is capped at
-   *     25 MiB total so a runaway client can't pin large reservations indefinitely.
+   *   - Carries the room lease + one-time uploadId through reserved → uploading
+   *     → uploaded while RoomDO serializes the R2 write against cleanup.
+   *   - Falls out with room delete/expiry; the 7-day R2 lifecycle is only the
+   *     final physical-storage safety net.
    */
   private async handleBlobPresign(
     request: Request,
@@ -1614,12 +1827,9 @@ export class RoomDO extends DurableObject<Env> {
     }
 
     // Buffer body once — admission + JSON.parse both need it.
-    let bodyBytes: Uint8Array;
-    try {
-      bodyBytes = new Uint8Array(await request.arrayBuffer());
-    } catch (err) {
-      return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
-    }
+    const bodyRead = await readBoundedBody(request, BLOB_PRESIGN_BODY_MAX_BYTES);
+    if (bodyRead instanceof Response) return bodyRead;
+    const bodyBytes = bodyRead;
 
     // 1. Admission.
     try {
@@ -1741,10 +1951,29 @@ export class RoomDO extends DurableObject<Env> {
       );
     }
 
-    // 8. Mint upload cap. Default 15-min TTL per spec.
+    const activeLease = await this.ctx.storage.get<RoomQuotaLease>(META.quotaLease);
+    if (activeLease === undefined || !isRoomQuotaLease(activeLease) || activeLease.roomId !== roomId) {
+      return quotaUnavailableResponse("room has no active quota generation");
+    }
+    if (existing?.state === "uploaded") {
+      return errorResponse(409, "ATTN_BLOB_ALREADY_UPLOADED", `blob ${body.envelopeId} is already uploaded`);
+    }
+    if (existing?.state === "uploading") {
+      return errorResponse(409, "ATTN_BLOB_UPLOAD_IN_PROGRESS", `blob ${body.envelopeId} upload is in progress`);
+    }
+
+    // 8. Mint a generation-bound, one-time upload cap.
     let presigned: PresignedUploadResult;
+    const uploadId = crypto.randomUUID();
     try {
-      presigned = await presignBlobUpload(this.env, roomId, body.envelopeId, body.ciphertextBytes);
+      presigned = await presignBlobUpload(
+        this.env,
+        roomId,
+        activeLease.leaseId,
+        body.envelopeId,
+        uploadId,
+        body.ciphertextBytes,
+      );
     } catch (err) {
       return errorResponse(500, "ATTN_BLOB_PRESIGN_FAILED", `presign failed: ${(err as Error).message}`);
     }
@@ -1754,6 +1983,9 @@ export class RoomDO extends DurableObject<Env> {
       envelopeId: body.envelopeId,
       authorId: body.authorId,
       deviceId: body.deviceId,
+      leaseId: activeLease.leaseId,
+      uploadId,
+      state: "reserved",
       ciphertextBytes: body.ciphertextBytes,
       reservedAt: Date.now(),
       uploadExpiresAt: presigned.expiresAt,
@@ -1767,6 +1999,85 @@ export class RoomDO extends DurableObject<Env> {
     await this.ctx.storage.put<unknown>(writes);
 
     return Response.json(presigned, { status: 200 });
+  }
+
+  /**
+   * Consume a generation-bound upload claim and write R2 while holding the
+   * per-room operation lock. Delete/expiry cannot observe an empty prefix and
+   * release quota until this operation is either committed or failed.
+   */
+  private async handleInternalBlobUpload(request: Request): Promise<Response> {
+    const leaseId = request.headers.get(INTERNAL_BLOB_LEASE_HEADER);
+    const uploadId = request.headers.get(INTERNAL_BLOB_UPLOAD_HEADER);
+    const envelopeId = request.headers.get(INTERNAL_BLOB_ENVELOPE_HEADER);
+    if (leaseId === null || uploadId === null || envelopeId === null) {
+      return errorResponse(400, "ATTN_BLOB_CAP_INVALID", "internal upload metadata missing");
+    }
+
+    const [lease, tombstone, reservation] = await Promise.all([
+      this.ctx.storage.get<RoomQuotaLease>(META.quotaLease),
+      this.ctx.storage.get<RoomQuotaLease>(META.quotaRelease),
+      this.ctx.storage.get<BlobReservation>(blobReservationKey(envelopeId)),
+    ]);
+    if (
+      lease === undefined ||
+      tombstone !== undefined ||
+      !isRoomQuotaLease(lease) ||
+      lease.leaseId !== leaseId ||
+      reservation === undefined ||
+      !isBlobReservation(reservation) ||
+      reservation.leaseId !== leaseId ||
+      reservation.uploadId !== uploadId ||
+      reservation.uploadExpiresAt < Date.now()
+    ) {
+      return errorResponse(409, "ATTN_BLOB_UPLOAD_STALE", "blob upload reservation is stale");
+    }
+
+    let body: Uint8Array;
+    try {
+      body = new Uint8Array(await request.arrayBuffer());
+    } catch (error) {
+      return errorResponse(400, "ATTN_BODY_INVALID", `blob body read failed: ${(error as Error).message}`);
+    }
+    if (body.byteLength !== reservation.ciphertextBytes) {
+      return errorResponse(400, "ATTN_BLOB_LENGTH_MISMATCH", "blob body length does not match reservation");
+    }
+
+    const key = blobObjectKey(lease.roomId, leaseId, envelopeId);
+    if (reservation.state === "uploaded") {
+      return new Response(null, { status: 204 });
+    }
+    if (reservation.state === "uploading") {
+      const existing = await this.env.RELAY_BLOBS.head(key);
+      if (existing !== null && existing.size === reservation.ciphertextBytes) {
+        await this.ctx.storage.put(blobReservationKey(envelopeId), {
+          ...reservation,
+          state: "uploaded",
+        } satisfies BlobReservation);
+        return new Response(null, { status: 204 });
+      }
+    }
+
+    await this.ctx.storage.put(blobReservationKey(envelopeId), {
+      ...reservation,
+      state: "uploading",
+    } satisfies BlobReservation);
+    try {
+      await this.env.RELAY_BLOBS.put(key, body, {
+        httpMetadata: { contentType: "application/octet-stream" },
+      });
+    } catch (error) {
+      await this.ctx.storage.put(blobReservationKey(envelopeId), {
+        ...reservation,
+        state: "reserved",
+      } satisfies BlobReservation);
+      return errorResponse(500, "ATTN_BLOB_UPLOAD_FAILED", `R2 put failed: ${(error as Error).message}`);
+    }
+    await this.ctx.storage.put(blobReservationKey(envelopeId), {
+      ...reservation,
+      state: "uploaded",
+    } satisfies BlobReservation);
+    return new Response(null, { status: 204 });
   }
 
   // -- GET /v2/rooms/:roomId/blobs/:envelopeId (download presign) ----------
@@ -1806,13 +2117,27 @@ export class RoomDO extends DurableObject<Env> {
       throw err;
     }
 
-    const head = await this.env.RELAY_BLOBS.head(blobObjectKey(roomId, envelopeId));
+    const [lease, reservation] = await Promise.all([
+      this.ctx.storage.get<RoomQuotaLease>(META.quotaLease),
+      this.ctx.storage.get<BlobReservation>(blobReservationKey(envelopeId)),
+    ]);
+    if (
+      lease === undefined ||
+      !isRoomQuotaLease(lease) ||
+      reservation === undefined ||
+      !isBlobReservation(reservation) ||
+      reservation.leaseId !== lease.leaseId ||
+      reservation.state !== "uploaded"
+    ) {
+      return errorResponse(404, "ATTN_BLOB_NOT_FOUND", `blob ${envelopeId} not found`);
+    }
+    const head = await this.env.RELAY_BLOBS.head(blobObjectKey(roomId, lease.leaseId, envelopeId));
     if (head === null) {
       return errorResponse(404, "ATTN_BLOB_NOT_FOUND", `blob for envelope ${envelopeId} not found`);
     }
 
     try {
-      const presigned = await presignBlobDownload(this.env, roomId, envelopeId);
+      const presigned = await presignBlobDownload(this.env, roomId, lease.leaseId, envelopeId);
       return Response.json(presigned, { status: 200 });
     } catch (err) {
       return errorResponse(500, "ATTN_BLOB_PRESIGN_FAILED", `presign failed: ${(err as Error).message}`);
@@ -1862,12 +2187,9 @@ export class RoomDO extends DurableObject<Env> {
     // after response has been sent" warning on the early-404 path below. The
     // bytes get reused by admission + owner-sig verifiers (each needs to
     // re-clone the request to compute its own canonical SHA).
-    let bodyBytes: Uint8Array;
-    try {
-      bodyBytes = new Uint8Array(await request.arrayBuffer());
-    } catch (err) {
-      return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(err as Error).message}`);
-    }
+    const bodyRead = await readBoundedBody(request, DELETE_BODY_MAX_BYTES);
+    if (bodyRead instanceof Response) return bodyRead;
+    const bodyBytes = bodyRead;
 
     // 1. Existence check — without admissionKey we couldn't verify admission
     //    anyway, and every other endpoint surfaces unknown rooms as 404.
@@ -1963,23 +2285,11 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
 
-    // b. Wipe every DO storage key in a single transaction. deleteAll() also
-    //    drops pow_seen:*, the alarm map, etc. After this the DO is observably
-    //    indistinguishable from a never-created room.
-    await this.ctx.storage.deleteAll();
-    // Cancel any pending alarm too — without this the next alarm fire would
-    // try to broadcast 4002 to a now-empty DO and re-run idle cleanup.
-    try {
-      await this.ctx.storage.deleteAlarm();
-    } catch {
-      // deleteAlarm is a no-op when no alarm is set, but the API surface
-      // varies across workerd versions; swallow any "no alarm" error.
-    }
-
-    // c. Schedule R2 cleanup. Best-effort: anything we can't get to falls back
-    //    to the bucket's 7-day lifecycle rule (relay-spec.md §R2 Integration).
-    //    We loop in pages of 1000 (R2 list cap) and delete each page in batches.
-    await this.cleanupRoomBlobs(roomId);
+    // b/c. Clean ciphertext storage first, then release the generation's live
+    // reservation. If the singleton is unavailable, a cleanup-only tombstone
+    // and alarm remain so release is retried without restoring room content.
+    const quotaFailure = await this.cleanupRoomAndReleaseQuota(roomId);
+    if (quotaFailure !== undefined) return quotaFailure;
 
     return new Response(null, { status: 204 });
   }
@@ -1989,10 +2299,10 @@ export class RoomDO extends DurableObject<Env> {
    * cursor until truncated=false. Errors are swallowed (best-effort per spec);
    * the bucket lifecycle rule is the safety net.
    */
-  private async cleanupRoomBlobs(roomId: string): Promise<void> {
+  private async cleanupRoomBlobs(roomId: string): Promise<boolean> {
     const prefix = `rooms/${roomId}/`;
     const bucket = this.env.RELAY_BLOBS;
-    if (bucket === undefined) return;
+    if (bucket === undefined) return true;
     try {
       let cursor: string | undefined;
       // Bound the loop so a runaway list can't pin the DO event loop. In
@@ -2008,13 +2318,105 @@ export class RoomDO extends DurableObject<Env> {
           // R2.delete accepts an array of keys in a single round-trip.
           await bucket.delete(keys);
         }
-        if (!listed.truncated) return;
+        if (!listed.truncated) return true;
         cursor = listed.truncated ? listed.cursor : undefined;
-        if (cursor === undefined) return;
+        if (cursor === undefined) return false;
       }
+      return false;
     } catch {
-      // Best-effort: lifecycle rule (7d) catches anything we leave behind.
+      return false;
     }
+  }
+
+  private async acquireQuotaLease(lease: RoomQuotaLease): Promise<Response> {
+    try {
+      const id = this.env.RELAY_QUOTAS.idFromName(QUOTA_SINGLETON_NAME);
+      const stub = this.env.RELAY_QUOTAS.get(id);
+      return await stub.fetch("https://quota.internal/acquire", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roomId: lease.roomId,
+          leaseId: lease.leaseId,
+          sourceBucket: lease.sourceBucket,
+          reservedBytes: lease.reservedBytes,
+        }),
+      });
+    } catch {
+      return quotaUnavailableResponse("quota coordinator unavailable");
+    }
+  }
+
+  private async releaseQuotaLease(lease: RoomQuotaLease): Promise<Response> {
+    try {
+      const id = this.env.RELAY_QUOTAS.idFromName(QUOTA_SINGLETON_NAME);
+      const stub = this.env.RELAY_QUOTAS.get(id);
+      return await stub.fetch("https://quota.internal/release", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ roomId: lease.roomId, leaseId: lease.leaseId }),
+      });
+    } catch {
+      return quotaUnavailableResponse("quota coordinator unavailable");
+    }
+  }
+
+  /**
+   * Remove all user ciphertext/metadata, retain only a quota-release tombstone,
+   * then release the live reservation. The tombstone + alarm make release
+   * crash-safe and idempotent while keeping the deleted room unreadable.
+   */
+  private async cleanupRoomAndReleaseQuota(roomId: string): Promise<Response | undefined> {
+    const activeLease = await this.ctx.storage.get<RoomQuotaLease>(META.quotaLease);
+    const priorTombstone = await this.ctx.storage.get<RoomQuotaLease>(META.quotaRelease);
+    const lease = priorTombstone ?? activeLease;
+    if (lease === undefined) {
+      // Legacy/unreserved room: preserve historical cleanup behavior.
+      await this.cleanupRoomBlobs(roomId);
+      await this.ctx.storage.deleteAll();
+      try {
+        await this.ctx.storage.deleteAlarm();
+      } catch {
+        // no-op when the runtime reports no alarm
+      }
+      return undefined;
+    }
+    if (!isRoomQuotaLease(lease) || lease.roomId !== roomId) {
+      return quotaUnavailableResponse("invalid room quota release tombstone");
+    }
+
+    // Arm retry and remove local user content before any external I/O. This
+    // closes the interleaving window in which a delete/expiry could be cleaning
+    // R2 while the room still accepted writes.
+    await this.ctx.storage.setAlarm(Date.now() + QUOTA_RELEASE_RETRY_MS);
+    if (priorTombstone === undefined) {
+      await this.ctx.storage.transaction(async (txn) => {
+        const entries = await txn.list();
+        const keys = [...entries.keys()];
+        if (keys.length > 0) await txn.delete(keys);
+        await txn.put(META.quotaRelease, lease);
+      });
+    }
+
+    // Do not release reserved capacity until R2 confirms the generation prefix
+    // is empty. A failed cleanup therefore over-counts safely and retries by
+    // alarm instead of letting repeated create/delete cycles bypass the global
+    // byte ceiling. The bucket lifecycle remains only the final safety net.
+    const blobsCleaned = await this.cleanupRoomBlobs(roomId);
+    if (!blobsCleaned) {
+      return quotaUnavailableResponse("room blob cleanup incomplete");
+    }
+
+    const released = await this.releaseQuotaLease(lease);
+    if (!released.ok) return released;
+
+    await this.ctx.storage.deleteAll();
+    try {
+      await this.ctx.storage.deleteAlarm();
+    } catch {
+      // no-op when the runtime reports no alarm
+    }
+    return undefined;
   }
 
   /**
@@ -2545,14 +2947,41 @@ export class RoomDO extends DurableObject<Env> {
    * next_pow_prune_at)`.
    */
   override async alarm(): Promise<void> {
+    await this.withOperationLock(() => this.handleAlarm());
+  }
+
+  private async handleAlarm(): Promise<void> {
+    // A prior delete/expiry already removed every user-content key and is
+    // waiting only for an idempotent quota release retry.
+    const releaseTombstone = await this.ctx.storage.get<RoomQuotaLease>(META.quotaRelease);
+    if (releaseTombstone !== undefined) {
+      if (isRoomQuotaLease(releaseTombstone)) {
+        await this.cleanupRoomAndReleaseQuota(releaseTombstone.roomId);
+      } else {
+        // Corruption must remain fail-closed without silently disabling the
+        // retry loop. Keep the reservation over-counted and wake again so an
+        // operator repair does not require recreating the alarm manually.
+        await this.ctx.storage.setAlarm(Date.now() + QUOTA_RELEASE_RETRY_MS);
+      }
+      return;
+    }
+
     const now = Date.now();
-    const [hardMaxAt, lastEventAt, policy, createdAt, envelopeCount] = await Promise.all([
+    const [hardMaxAt, lastEventAt, policy, createdAt, envelopeCount, quotaLease] = await Promise.all([
       this.ctx.storage.get<number>(META.hardMaxAt),
       this.ctx.storage.get<number>(META.lastEventAt),
       this.ctx.storage.get<RoomPolicy>(META.policy),
       this.ctx.storage.get<number>(META.createdAt),
       this.ctx.storage.get<number>(META.envelopeCount),
+      this.ctx.storage.get<RoomQuotaLease>(META.quotaLease),
     ]);
+
+    // Interrupted first-create: there is no room metadata/content, only the
+    // pending generation marker. Release is safe even if acquire never landed.
+    if (createdAt === undefined && quotaLease !== undefined && isRoomQuotaLease(quotaLease)) {
+      await this.cleanupRoomAndReleaseQuota(quotaLease.roomId);
+      return;
+    }
 
     // Room state already wiped (e.g., raced with DELETE). Nothing to do.
     if (hardMaxAt === undefined || lastEventAt === undefined || policy === undefined) {
@@ -2633,22 +3062,14 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
 
-    // Schedule R2 cleanup. We do this BEFORE deleteAll() so we still have the
-    // room context available; the bucket lifecycle rule is the safety net.
-    // Derive the roomId by inspecting the env_by_target / device_order keys is
-    // overkill — we just walk the R2 prefix directly using the DO's own id.
-    // The DO has no direct handle on its roomId; we rely on the env_by_target
-    // prefix-walk pattern used by cleanupRoomBlobs by passing the roomId
-    // resolved from a stored helper key. For now we encode roomId implicitly
-    // by relying on the env_by_target index path being scoped per-DO.
-    // Simpler: persist the roomId at create time and read it here.
+    // Read roomId before cleanup converts the DO into a quota tombstone.
     const roomId = await this.ctx.storage.get<string>(META.roomId);
     if (roomId !== undefined) {
-      await this.cleanupRoomBlobs(roomId);
+      await this.cleanupRoomAndReleaseQuota(roomId);
+      return;
     }
 
-    // Wipe every DO storage key + cancel any other alarm we might have set
-    // mid-flight. deleteAll also drops pow_seen:*, env:*, device:*, etc.
+    // Corrupt/legacy state without a roomId: fail safe by wiping local data.
     await this.ctx.storage.deleteAll();
     try {
       await this.ctx.storage.deleteAlarm();
@@ -2673,7 +3094,7 @@ export class RoomDO extends DurableObject<Env> {
     if (expiresAt === undefined) return false;
     const now = Date.now();
     if (now <= expiresAt - PRE_EXPIRY_CLEANUP_WINDOW_MS) return false;
-    await this.alarm();
+    await this.handleAlarm();
     return true;
   }
 
@@ -2795,6 +3216,47 @@ async function sha256B64Url(bytes: Uint8Array): Promise<string> {
   return base64UrlEncode(digest);
 }
 
+function isRoomQuotaLease(value: RoomQuotaLease): boolean {
+  return (
+    typeof value.roomId === "string" &&
+    value.roomId.length > 0 &&
+    typeof value.leaseId === "string" &&
+    value.leaseId.length > 0 &&
+    typeof value.sourceBucket === "string" &&
+    value.sourceBucket.length > 0 &&
+    Number.isSafeInteger(value.reservedBytes) &&
+    value.reservedBytes > 0 &&
+    typeof value.ownerSigningKeyId === "string" &&
+    value.ownerSigningKeyId.length > 0 &&
+    typeof value.createBodyHash === "string" &&
+    value.createBodyHash.length > 0 &&
+    typeof value.confirmed === "boolean"
+  );
+}
+
+async function responseErrorCode(response: Response): Promise<string | undefined> {
+  try {
+    const parsed = (await response.clone().json()) as { error?: { code?: unknown } };
+    return typeof parsed.error?.code === "string" ? parsed.error.code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function quotaUnavailableResponse(message: string): Response {
+  return new Response(
+    JSON.stringify({ error: { code: "ATTN_QUOTA_UNAVAILABLE", message } }),
+    {
+      status: 503,
+      headers: {
+        "Content-Type": "application/json",
+        "Retry-After": "60",
+        "X-Attn-Retry-After-Ms": "60000",
+      },
+    },
+  );
+}
+
 // --- device-record storage keying ----------------------------------------
 
 const DEVICE_PREFIX = "device:";
@@ -2866,9 +3328,24 @@ interface BlobReservation {
   envelopeId: string;
   authorId: string;
   deviceId: string;
+  leaseId: string;
+  uploadId: string;
+  state: "reserved" | "uploading" | "uploaded";
   ciphertextBytes: number;
   reservedAt: number;
   uploadExpiresAt: number;
+}
+
+function isBlobReservation(value: BlobReservation): boolean {
+  return (
+    typeof value.envelopeId === "string" &&
+    typeof value.leaseId === "string" &&
+    typeof value.uploadId === "string" &&
+    (value.state === "reserved" || value.state === "uploading" || value.state === "uploaded") &&
+    Number.isSafeInteger(value.ciphertextBytes) &&
+    value.ciphertextBytes > 0 &&
+    Number.isSafeInteger(value.uploadExpiresAt)
+  );
 }
 
 function blobReservationKey(envelopeId: string): string {
@@ -2944,6 +3421,25 @@ function bufferedRequest(original: Request, bodyBytes: Uint8Array): Request {
     headers: original.headers,
     body: bodyBytes.byteLength === 0 ? null : bodyBytes,
   });
+}
+
+async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array | Response> {
+  const declared = request.headers.get("Content-Length");
+  if (declared !== null) {
+    const declaredBytes = Number(declared);
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+      return errorResponse(413, "ATTN_BODY_TOO_LARGE", `request body exceeds ${maxBytes} bytes`);
+    }
+  }
+  try {
+    const bytes = new Uint8Array(await request.arrayBuffer());
+    if (bytes.byteLength > maxBytes) {
+      return errorResponse(413, "ATTN_BODY_TOO_LARGE", `request body exceeds ${maxBytes} bytes`);
+    }
+    return bytes;
+  } catch (error) {
+    return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(error as Error).message}`);
+  }
 }
 
 // --- self-signature verification ----------------------------------------

@@ -767,9 +767,9 @@ describe("POST /v2/rooms/:roomId/acks — idempotency", () => {
       body: { ackedEnvelopeIds: ["env-never-existed"], deviceId: reviewer.deviceId },
     });
     expect(res.status).toBe(204);
-    // The per-device slot still gets written for unknown envelopeIds (the
-    // relay is content-agnostic; idempotent semantics dominate).
-    expect(await hasAckSlot(roomId, "dev-rev", "env-never-existed")).toBe(true);
+    // Unknown IDs remain a 204 no-op but do not create attacker-controlled
+    // durable keys outside the room's bounded envelope set.
+    expect(await hasAckSlot(roomId, "dev-rev", "env-never-existed")).toBe(false);
   });
 });
 

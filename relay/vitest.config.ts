@@ -11,6 +11,24 @@ export default defineWorkersConfig({
     poolOptions: {
       workers: {
         wrangler: { configPath: "./wrangler.toml" },
+        miniflare: {
+          bindings: {
+            // Tests do not receive Cloudflare edge headers by default. The
+            // explicit escape hatch creates a per-room development bucket;
+            // production/staging intentionally omit it.
+            QUOTA_IP_HASH_KEY: "vitest-only-quota-ip-hmac-key-material-32",
+            BLOB_CAP_SIGNING_KEY: "vitest-only-blob-cap-signing-key-32-bytes",
+            QUOTA_ALLOW_UNATTRIBUTED_CREATES: "true",
+            // Low source live cap makes Worker integration boundaries cheap;
+            // existing tests use per-room unattributed buckets and do not
+            // share it. Global ceilings are intentionally generous because
+            // isolatedStorage=false shares the singleton across the suite.
+            QUOTA_MAX_LIVE_ROOMS_PER_SOURCE: "2",
+            QUOTA_MAX_ALLOCATED_BYTES_PER_SOURCE_24H: "62914560",
+            QUOTA_GLOBAL_MAX_LIVE_ROOMS: "10000",
+            QUOTA_GLOBAL_MAX_RESERVED_BYTES: "1099511627776",
+          },
+        },
         // Default-on isolatedStorage incompatible with the new SQLite-backed
         // DO migration (new_sqlite_classes in wrangler.toml): the pool's
         // stack-frame cleanup expects only `.sqlite` files but workerd emits

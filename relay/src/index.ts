@@ -1,11 +1,19 @@
 /** Worker entry. Routes HTTP requests; delegates per-room state to RoomDO. */
 
-import { blobObjectKey, verifyBlobCap } from "./r2";
+import {
+  blobObjectKey,
+  INTERNAL_BLOB_ENVELOPE_HEADER,
+  INTERNAL_BLOB_LEASE_HEADER,
+  INTERNAL_BLOB_UPLOAD_HEADER,
+  INTERNAL_BLOB_UPLOAD_PATH,
+  verifyBlobCap,
+} from "./r2";
 import { WorkerEdgeRateLimit, type RateLimitResult } from "./rate-limit";
 import { RoomDO } from "./room-do";
+import { INTERNAL_QUOTA_SOURCE_HEADER, QuotaDO } from "./quota-do";
 import type { Env } from "./env";
 
-export { RoomDO };
+export { QuotaDO, RoomDO };
 
 /**
  * Per-Worker-isolate rate limiter. Persists for the lifetime of the
@@ -49,9 +57,6 @@ function rateLimitedResponse(result: RateLimitResult): Response {
 function clientIp(request: Request): string {
   const ip = request.headers.get("CF-Connecting-IP");
   if (ip !== null && ip !== "") return ip;
-  // x-forwarded-for is sometimes set by upstream proxies in dev.
-  const xff = request.headers.get("X-Forwarded-For");
-  if (xff !== null && xff !== "") return xff.split(",")[0]?.trim() ?? "unknown";
   return "unknown";
 }
 
@@ -196,6 +201,13 @@ const ROOM_BLOB_OBJECT_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // Never trust a client-supplied internal source bucket. Strip it on every
+    // route, then overwrite it only for a bare room-create POST using the
+    // canonical Cloudflare edge IP (never X-Forwarded-For). If attribution is
+    // unavailable we still forward: RoomDO checks existing state first, so a
+    // rejoin remains available while a first create fails closed.
+    request = await withPrivateQuotaSource(request, env, url.pathname);
 
     // GET /health is the only unauthenticated route. Every other route below
     // (when filled in by 5.5–5.11) must verify admission via:
@@ -375,6 +387,107 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+async function withPrivateQuotaSource(
+  request: Request,
+  env: Env,
+  pathname: string,
+): Promise<Request> {
+  const headers = new Headers(request.headers);
+  headers.delete(INTERNAL_QUOTA_SOURCE_HEADER);
+
+  const createMatch = request.method === "POST" ? pathname.match(ROOM_CREATE_RE) : null;
+  const roomId = createMatch?.[1];
+  if (roomId !== undefined) {
+    const sourceBucket = await durableQuotaSourceBucket(request, env, roomId);
+    if (sourceBucket !== undefined) headers.set(INTERNAL_QUOTA_SOURCE_HEADER, sourceBucket);
+  }
+  return new Request(request, { headers });
+}
+
+async function durableQuotaSourceBucket(
+  request: Request,
+  env: Env,
+  roomId: string,
+): Promise<string | undefined> {
+  const canonicalCfIp = canonicalQuotaSourceIp(request.headers.get("CF-Connecting-IP"));
+  const key = env.QUOTA_IP_HASH_KEY;
+  if (canonicalCfIp !== undefined && key !== undefined && key.length >= 32) {
+    try {
+      const cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(key),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      );
+      const digest = new Uint8Array(
+        await crypto.subtle.sign(
+          "HMAC",
+          cryptoKey,
+          new TextEncoder().encode(`attn-quota-source:v1\0${canonicalCfIp}`),
+        ),
+      );
+      return `ip:v1:${base64Url(digest)}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (env.QUOTA_ALLOW_UNATTRIBUTED_CREATES === "true") {
+    const digest = new Uint8Array(
+      await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(`attn-quota-development-room:v1:${roomId}`),
+      ),
+    );
+    return `dev-room:v1:${base64Url(digest)}`;
+  }
+  return undefined;
+}
+
+/**
+ * Canonical source identity used only as HMAC input. IPv4 is bucketed per
+ * address; IPv6 is bucketed per /64 so rotating privacy addresses cannot mint
+ * a fresh durable quota inside the same subscriber network. Invalid edge
+ * values fail closed instead of becoming attacker-selected storage keys.
+ */
+export function canonicalQuotaSourceIp(raw: string | null): string | undefined {
+  if (raw === null) return undefined;
+  const candidate = raw.trim();
+  if (candidate === "") return undefined;
+
+  const ipv4 = candidate.split(".");
+  if (ipv4.length === 4 && ipv4.every((part) => /^\d{1,3}$/.test(part))) {
+    const octets = ipv4.map(Number);
+    if (octets.every((octet) => octet >= 0 && octet <= 255)) {
+      return `ipv4:${octets.join(".")}/32`;
+    }
+    return undefined;
+  }
+
+  if (!/^[0-9a-f:]+$/i.test(candidate)) return undefined;
+  const halves = candidate.toLowerCase().split("::");
+  if (halves.length > 2) return undefined;
+  const left = halves[0] === "" ? [] : halves[0]?.split(":") ?? [];
+  const right = halves.length === 1 || halves[1] === "" ? [] : halves[1]?.split(":") ?? [];
+  const validHextet = (part: string): boolean => /^[0-9a-f]{1,4}$/.test(part);
+  if (!left.every(validHextet) || !right.every(validHextet)) return undefined;
+
+  const compressed = halves.length === 2;
+  const missing = 8 - left.length - right.length;
+  if ((compressed && missing < 1) || (!compressed && missing !== 0)) return undefined;
+  const expanded = [...left, ...Array.from({ length: missing }, () => "0"), ...right];
+  if (expanded.length !== 8) return undefined;
+  const prefix = expanded.slice(0, 4).map((part) => part.padStart(4, "0"));
+  return `ipv6:${prefix.join(":")}::/64`;
+}
+
+function base64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
 /**
  * Inspect a 404 DO response and, if the body carries `error.code ==
  * ATTN_ROOM_NOT_FOUND`, record an unknown-room probe in the
@@ -441,7 +554,12 @@ async function handleBlobPut(
   if (cap === null || cap === "") {
     return blobErrorResponse(401, "ATTN_BLOB_CAP_MISSING", "cap query parameter required");
   }
-  const verified = await verifyBlobCap(cap, { method: "PUT", roomId, envelopeId }, env);
+  let verified;
+  try {
+    verified = await verifyBlobCap(cap, { method: "PUT", roomId, envelopeId }, env);
+  } catch {
+    return blobErrorResponse(503, "ATTN_BLOB_CAP_UNAVAILABLE", "blob capability verifier unavailable");
+  }
   if (verified === undefined) {
     return blobErrorResponse(401, "ATTN_BLOB_CAP_INVALID", "invalid or expired blob cap");
   }
@@ -465,19 +583,25 @@ async function handleBlobPut(
     );
   }
 
-  const key = blobObjectKey(roomId, envelopeId);
   try {
-    await env.RELAY_BLOBS.put(key, bodyBytes, {
-      httpMetadata: { contentType: "application/octet-stream" },
+    const room = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    return await room.fetch(`https://room.internal${INTERNAL_BLOB_UPLOAD_PATH}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        [INTERNAL_BLOB_LEASE_HEADER]: verified.leaseId,
+        [INTERNAL_BLOB_UPLOAD_HEADER]: verified.uploadId ?? "",
+        [INTERNAL_BLOB_ENVELOPE_HEADER]: envelopeId,
+      },
+      body: bodyBytes,
     });
   } catch (err) {
     return blobErrorResponse(
       500,
       "ATTN_BLOB_UPLOAD_FAILED",
-      `R2 put failed: ${(err as Error).message}`,
+      `room upload failed: ${(err as Error).message}`,
     );
   }
-  return new Response(null, { status: 204 });
 }
 
 /**
@@ -499,11 +623,16 @@ async function handleBlobGet(
   if (cap === null || cap === "") {
     return blobErrorResponse(401, "ATTN_BLOB_CAP_MISSING", "cap query parameter required");
   }
-  const verified = await verifyBlobCap(cap, { method: "GET", roomId, envelopeId }, env);
+  let verified;
+  try {
+    verified = await verifyBlobCap(cap, { method: "GET", roomId, envelopeId }, env);
+  } catch {
+    return blobErrorResponse(503, "ATTN_BLOB_CAP_UNAVAILABLE", "blob capability verifier unavailable");
+  }
   if (verified === undefined) {
     return blobErrorResponse(401, "ATTN_BLOB_CAP_INVALID", "invalid or expired blob cap");
   }
-  const key = blobObjectKey(roomId, envelopeId);
+  const key = blobObjectKey(roomId, verified.leaseId, envelopeId);
   const obj = await env.RELAY_BLOBS.get(key);
   if (obj === null) {
     return blobErrorResponse(404, "ATTN_BLOB_NOT_FOUND", `blob ${key} not found`);

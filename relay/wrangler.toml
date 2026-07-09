@@ -25,9 +25,17 @@ head_sampling_rate = 1
 name = "RELAY_ROOMS"
 class_name = "RoomDO"
 
+[[durable_objects.bindings]]
+name = "RELAY_QUOTAS"
+class_name = "QuotaDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["QuotaDO"]
 
 [[r2_buckets]]
 binding = "RELAY_BLOBS"
@@ -53,6 +61,12 @@ MAX_POW_BITS = "24"
 # desktop app + npx CLI) send no Origin, so this only gates the (deferred)
 # in-browser reviewer served from the attn.sh apex + staging subdomain.
 ALLOWED_BROWSER_ORIGINS = "https://attn.sh,https://staging.attn.sh"
+# Conservative reserved-capacity admission. Every live room immediately
+# reserves HARD_MAX_ROOM_BYTES (25 MiB), regardless of current ciphertext use.
+QUOTA_MAX_LIVE_ROOMS_PER_SOURCE = "8"
+QUOTA_MAX_ALLOCATED_BYTES_PER_SOURCE_24H = "268435456" # 256 MiB, non-refundable
+QUOTA_GLOBAL_MAX_LIVE_ROOMS = "512"
+QUOTA_GLOBAL_MAX_RESERVED_BYTES = "6710886400" # 6.25 GiB / 256 full rooms
 
 # Staging deploys to a DISTINCT worker so `wrangler deploy --env staging` can
 # NEVER overwrite the production "attn-relay" worker or take its relay.attn.sh
@@ -83,6 +97,10 @@ DEFAULT_POW_BITS = "16"
 MIN_POW_BITS = "12"
 MAX_POW_BITS = "24"
 ALLOWED_BROWSER_ORIGINS = "https://staging.attn.sh,http://localhost:5173"
+QUOTA_MAX_LIVE_ROOMS_PER_SOURCE = "8"
+QUOTA_MAX_ALLOCATED_BYTES_PER_SOURCE_24H = "268435456"
+QUOTA_GLOBAL_MAX_LIVE_ROOMS = "512"
+QUOTA_GLOBAL_MAX_RESERVED_BYTES = "6710886400"
 
 # Named environments do NOT inherit durable_objects / r2_buckets / migrations
 # from the top level, so they're declared explicitly here. The DO namespace is
@@ -93,10 +111,18 @@ ALLOWED_BROWSER_ORIGINS = "https://staging.attn.sh,http://localhost:5173"
 name = "RELAY_ROOMS"
 class_name = "RoomDO"
 
+[[env.staging.durable_objects.bindings]]
+name = "RELAY_QUOTAS"
+class_name = "QuotaDO"
+
 [[env.staging.migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
 
+[[env.staging.migrations]]
+tag = "v2"
+new_sqlite_classes = ["QuotaDO"]
+
 [[env.staging.r2_buckets]]
 binding = "RELAY_BLOBS"
-bucket_name = "attn-relay-blobs"
+bucket_name = "attn-relay-blobs-staging"

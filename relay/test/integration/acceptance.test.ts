@@ -1415,8 +1415,11 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
       headers: Record<string, string>;
       expiresAt: number;
       blobKey: string;
+      leaseId: string;
     };
-    expect(presigned.blobKey).toBe(`rooms/${roomId}/blobs/s7-blob`);
+    expect(presigned.blobKey).toBe(
+      `rooms/${roomId}/generations/${presigned.leaseId}/blobs/s7-blob`,
+    );
 
     // PUT to the presigned URL.
     const putRes = await SELF.fetch(`${URL_BASE}${presigned.uploadUrl}`, {
@@ -1427,7 +1430,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     expect(putRes.status).toBe(204);
 
     // GET via download URL.
-    const download = await presignBlobDownload(env, roomId, "s7-blob");
+    const download = await presignBlobDownload(env, roomId, presigned.leaseId, "s7-blob");
     const getRes = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, {
       method: "GET",
       headers: { "CF-Connecting-IP": ip },

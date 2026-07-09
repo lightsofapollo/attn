@@ -335,11 +335,13 @@ Server response:
   "method": "PUT",
   "headers": { "Content-Type": "application/octet-stream" },
   "expiresAt": 1736012945678,
-  "blobKey": "rooms/<roomId>/blobs/<envelopeId>"
+  "blobKey": "rooms/<roomId>/generations/<leaseId>/blobs/<envelopeId>"
 }
 ```
 
-Client uploads the raw ciphertext bytes directly to R2 via the presigned URL.
+Client uploads the raw ciphertext bytes via the capability URL. The cap binds
+the active room generation and a one-time upload claim; RoomDO serializes the
+R2 write against delete/expiry before marking the claim committed.
 
 After successful upload, the client `POST /envelopes` with the **same** `envelopeId` and a small payload:
 
@@ -464,6 +466,10 @@ The server does not parse signal envelopes. It only routes by `target.deviceId`.
 
 One DO per room. Naming: `env.RELAY_ROOMS.idFromName(roomId)`.
 
+One SQLite-backed quota coordinator per deployment. Naming:
+`env.RELAY_QUOTAS.idFromName("quota:v1")`. It atomically admits first-create
+generation leases across all rooms; room rejoin never contacts it.
+
 ### Storage Layout (using DO Storage API + optional SQLite-backed DO)
 
 Keys (lexicographic ordering matters for range scans):
@@ -480,6 +486,7 @@ meta:bytes_used                 -> u64
 meta:bytes_used_r2              -> u64
 meta:envelope_count             -> u64
 meta:oldest_retained_seq        -> u64 (advances on TTL deletes)
+meta:quota_lease                -> { roomId, random leaseId, sourceBucket, reservedBytes }
 
 device:<deviceId>               -> DeviceRecord JSON
 device_order:<registeredAt>:<deviceId> -> "" (secondary index for ordered list)
@@ -495,6 +502,50 @@ pow_seen:<expiresAt>:<sha256(token)> -> "" (replay protection, alarm-cleaned)
 
 rate:<deviceId>:<windowStartMin> -> u32 count
 ```
+
+QuotaDO stores only HMAC-pseudonymized source identifiers and aggregate
+capacity state:
+
+```text
+lease:<roomId>                  -> { roomId, leaseId, sourceBucket, reservedBytes, acquiredAt }
+source:<sourceBucket>           -> { liveRooms, allocations: [{ at, bytes }] }
+global:v1                       -> { liveRooms, reservedBytes }
+```
+
+The Worker deletes any client-supplied internal quota-source header, then
+derives `sourceBucket = HMAC-SHA-256(QUOTA_IP_HASH_KEY,
+canonical CF-Connecting-IP)`. Raw IPs never enter durable storage, and
+`X-Forwarded-For` is never used for durable quota. If attribution, required
+configuration, or the singleton is unavailable, a first-create fails closed
+with `503 ATTN_QUOTA_UNAVAILABLE`; reads, deletes, and rejoin remain available.
+Tests/local development may explicitly set
+`QUOTA_ALLOW_UNATTRIBUTED_CREATES=true` to use a per-room development bucket;
+deployed production and staging configuration must omit it.
+
+### First-create reserved capacity
+
+After schema validation, the self-rooted owner signature, and PoW validation —
+but before room metadata persistence — RoomDO acquires a generation lease from
+QuotaDO. The lease reserves exactly `HARD_MAX_ROOM_BYTES`, not the room's
+current usage, so empty, pending, and full rooms have the same conservative
+capacity cost. QuotaDO performs checks and counter writes in one durable
+storage transaction:
+
+- per source: at most 8 live rooms and 256 MiB allocated in a rolling 24h;
+- global: at most 512 live rooms and 6.25 GiB reserved.
+
+The 24h allocation record is ingress accounting and is not refunded on early
+delete. Live-room and global reserved counters are released after ciphertext
+cleanup. Acquire of the same `(roomId, leaseId)` is idempotent; a different
+active generation conflicts. Release is idempotent, and includes both roomId
+and a cryptographically random leaseId so a stale release cannot affect a room
+recreated under the same roomId. Source live/byte denials return respectively
+`429 ATTN_SOURCE_ROOM_QUOTA` and `429 ATTN_SOURCE_BYTE_QUOTA`; global exhaustion
+returns `503 ATTN_RELAY_CAPACITY`; applicable responses include `Retry-After`.
+
+Quota admission only measures opaque ciphertext capacity and allocation
+metadata. It introduces no content-inspection path: document text, comments,
+signals, and snapshots remain E2E encrypted and unreadable by relay services.
 
 `paddedServerSeq` is `serverSeq.toString().padStart(20, '0')` to keep lexicographic ordering correct.
 
@@ -524,9 +575,10 @@ Two alarms govern room lifetime. First to fire wins.
 On hard-max or idle alarm fire:
 
 1. Send `4002 room expired` close frame to all WS clients.
-2. Delete all storage keys under this DO.
-3. Schedule R2 blob deletion via `list + delete` against the `rooms/<roomId>/` prefix.
-4. The DO becomes dormant; subsequent requests to the same `roomId` see no policy and `404`.
+2. Delete R2 ciphertext via `list + delete` against the `rooms/<roomId>/` prefix.
+3. Remove user content and metadata, retaining only a quota-release tombstone.
+4. Idempotently release the generation reservation; retry by alarm if the quota coordinator is temporarily unavailable.
+5. Delete the tombstone. The DO becomes dormant; subsequent requests to the same `roomId` see no policy and `404`.
 
 Cloudflare's DO API supports only one alarm at a time. The implementation maintains the two logical alarms by always scheduling the alarm to whichever target time is earlier (`min(hard_max_at, last_event_at + idleTimeoutMs)`), and re-evaluating on every envelope insert. The PoW-prune sweep runs as part of the same alarm handler when it fires, then re-schedules.
 
@@ -553,13 +605,18 @@ These clamp anything in `policy`:
 | PoW difficulty | 16 leading zero bits (default) | `policy.powBits`, clamped `[12, 24]`. See crypto-spec.md. |
 | Per-device request rate | 120/min | Sliding 60s window, counted per HTTP and WS frame |
 | Per-IP request rate (Worker edge) | 600/min | Pre-DO, prevents enumeration of room URLs |
+| Live rooms per source | 8 | Atomic QuotaDO first-create lease; rejoin excluded |
+| Allocated bytes per source / rolling 24h | 256 MiB | 25 MiB per accepted generation; non-refundable on release |
+| Global live rooms | 512 | Atomic across every RoomDO |
+| Global reserved room bytes | 6.25 GiB | 25 MiB per live generation; tighter than live-count default |
 
 Rate limit responses: `429` with `retryAfterMs` header AND in the JSON error body.
 
 ## R2 Integration
 
-- Bucket: one bucket, prefix per room: `rooms/<roomId>/blobs/<envelopeId>`.
-- Upload via presigned PUT URL (15-minute TTL).
+- Buckets: isolated production/staging buckets, prefix per generation:
+  `rooms/<roomId>/generations/<leaseId>/blobs/<envelopeId>`.
+- Upload via generation-bound, one-time PUT capability (15-minute TTL).
 - Read via presigned GET URL (5-minute TTL), fetched per access.
 - Lifecycle rule on the bucket: auto-delete objects older than **7 days** (matches the max wall-clock room TTL with `longSession=true`; ~7× headroom for default 24h rooms). Safety net only — DO alarm-driven deletion is primary. If the DO alarm slips by more than ~6 hours on a room near its TTL ceiling, blobs may disappear before the room itself; mitigation: every WS connect runs `if now > meta:expires_at - 1h: cleanup_check()` to belt-and-braces the alarm.
 - Byte accounting: the DO tracks total room bytes by counting *envelope* `ciphertextBytes`, which for R2-spilled envelopes is the small BlobRef wrapper. The *actual* R2 bytes are tracked separately in `meta:bytes_used_r2`. Both must stay under `maxRoomBytes` combined.
@@ -627,9 +684,17 @@ compatibility_flags = ["nodejs_compat"]
 name = "RELAY_ROOMS"
 class_name = "RoomDO"
 
+[[durable_objects.bindings]]
+name = "RELAY_QUOTAS"
+class_name = "QuotaDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["QuotaDO"]
 
 [[r2_buckets]]
 binding = "RELAY_BLOBS"
@@ -649,12 +714,19 @@ DEFAULT_POW_BITS = "16"
 MIN_POW_BITS = "12"
 MAX_POW_BITS = "24"
 ALLOWED_BROWSER_ORIGINS = "https://attn.dev"
+QUOTA_MAX_LIVE_ROOMS_PER_SOURCE = "8"
+QUOTA_MAX_ALLOCATED_BYTES_PER_SOURCE_24H = "268435456"
+QUOTA_GLOBAL_MAX_LIVE_ROOMS = "512"
+QUOTA_GLOBAL_MAX_RESERVED_BYTES = "6710886400"
 
 [env.staging.vars]
 ALLOWED_BROWSER_ORIGINS = "https://staging.attn.dev,http://localhost:5173"
 ```
 
-No secrets are required by the relay. (Admission keys are derived from `roomSecret` which only clients hold.)
+`QUOTA_IP_HASH_KEY` is a required deployment secret (set independently for
+production and staging) and must never be committed to `wrangler.toml`.
+Admission keys are still derived from `roomSecret` and held only by clients;
+the two operational HMAC secrets never grant access to document plaintext.
 
 ### Repo Layout
 

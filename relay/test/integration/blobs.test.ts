@@ -317,6 +317,7 @@ interface PresignedUploadResponse {
   headers: Record<string, string>;
   expiresAt: number;
   blobKey: string;
+  leaseId: string;
 }
 
 /** Cap-less GET on the blob object path → DO download-presign endpoint. */
@@ -383,7 +384,9 @@ describe("POST /v2/rooms/:roomId/blobs — happy path", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as PresignedUploadResponse;
     expect(body.method).toBe("PUT");
-    expect(body.blobKey).toBe(`rooms/${roomId}/blobs/blob-env-1`);
+    expect(body.blobKey).toBe(
+      `rooms/${roomId}/generations/${body.leaseId}/blobs/blob-env-1`,
+    );
     expect(body.uploadUrl).toContain("/v2/rooms/");
     expect(body.uploadUrl).toContain("cap=");
     expect(body.expiresAt).toBeGreaterThan(Date.now());
@@ -420,6 +423,16 @@ describe("POST /v2/rooms/:roomId/blobs — happy path", () => {
       body: ciphertext,
     });
     expect(putRes.status).toBe(204);
+
+    // The upload capability is one-shot. A replay is an idempotent 204 and
+    // cannot overwrite the committed ciphertext with different bytes.
+    const replayBytes = makeCiphertext(OVER_THRESHOLD_BYTES, 0x99);
+    const replay = await SELF.fetch(`${URL_BASE}${presigned.uploadUrl}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: replayBytes,
+    });
+    expect(replay.status).toBe(204);
 
     // Mint a download cap via the real endpoint: cap-less GET on the blob
     // path routes to the DO's admission-auth'd download-presign handler.
@@ -583,7 +596,7 @@ describe("PUT /v2/rooms/:roomId/blobs/:envelopeId — cap enforcement", () => {
 describe("GET /v2/rooms/:roomId/blobs/:envelopeId — missing object", () => {
   it("returns 404 ATTN_BLOB_NOT_FOUND for an envelopeId that was never uploaded", async () => {
     const roomId = uniqueRoomId("blob-missing");
-    const download = await presignBlobDownload(env, roomId, "never-uploaded");
+    const download = await presignBlobDownload(env, roomId, "missing-lease", "never-uploaded");
     const res = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, { method: "GET" });
     expect(res.status).toBe(404);
     const err = (await res.json()) as ErrorResponse;
@@ -726,5 +739,16 @@ describe("Room delete sweeps blobs (cross-check with 5.10)", () => {
     // R2 should now be empty under the room prefix.
     const afterListed = await env.RELAY_BLOBS.list({ prefix: `rooms/${roomId}/` });
     expect(afterListed.objects.length).toBe(0);
+
+    // A still-unexpired old-generation cap cannot resurrect bytes after the
+    // room reservation has been released.
+    const stalePut = await SELF.fetch(`${URL_BASE}${presigned.uploadUrl}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: ciphertext,
+    });
+    expect(stalePut.status).toBe(409);
+    const afterReplay = await env.RELAY_BLOBS.list({ prefix: `rooms/${roomId}/` });
+    expect(afterReplay.objects.length).toBe(0);
   });
 });

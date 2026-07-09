@@ -18,6 +18,15 @@ export const b64url = z
   .string()
   .regex(/^[A-Za-z0-9_-]*$/, "must be base64url without padding");
 
+/** Wire-size ceilings for fixed-size base64url-no-pad protocol fields. */
+export const BASE64URL_32_BYTE_MAX_CHARS = 43;
+export const BASE64URL_64_BYTE_MAX_CHARS = 86;
+export const XCHACHA20_NONCE_MAX_CHARS = 32;
+
+/** Durable-storage key components must remain small even when client-chosen. */
+export const ENVELOPE_ID_MAX_CHARS = 128;
+export const DEVICE_ID_MAX_CHARS = 64;
+
 /** Unix milliseconds, integer, non-negative. */
 export const unixMs = z.number().int().nonnegative();
 
@@ -69,8 +78,12 @@ export const policySchema = z.object({
 export const roomCreationSchema = z.object({
   v: z.literal(2),
   policy: policySchema,
-  ownerSigningKey: b64url.min(1, "ownerSigningKey required"),
-  admissionKey: b64url.min(1, "admissionKey required"),
+  ownerSigningKey: b64url
+    .min(1, "ownerSigningKey required")
+    .max(BASE64URL_32_BYTE_MAX_CHARS),
+  admissionKey: b64url
+    .min(1, "admissionKey required")
+    .max(BASE64URL_32_BYTE_MAX_CHARS),
 });
 
 export type RoomCreationRequest = z.infer<typeof roomCreationSchema>;
@@ -93,13 +106,19 @@ export type RoomPolicy = z.infer<typeof policySchema>;
  *   body MINUS selfSignature) lives in the handler, not the schema.
  */
 export const deviceRegistrationSchema = z.object({
-  deviceId: z.string().min(1).max(64),
+  deviceId: z.string().min(1).max(DEVICE_ID_MAX_CHARS),
   participantId: z.string().min(1).max(64),
-  publicSigningKey: b64url.min(1, "publicSigningKey required"),
-  publicEncryptionKey: b64url.min(1, "publicEncryptionKey required"),
+  publicSigningKey: b64url
+    .min(1, "publicSigningKey required")
+    .max(BASE64URL_32_BYTE_MAX_CHARS),
+  publicEncryptionKey: b64url
+    .min(1, "publicEncryptionKey required")
+    .max(BASE64URL_32_BYTE_MAX_CHARS),
   client: z.enum(["attn-native", "attn-browser", "agent-cli"]),
   kind: z.enum(["owner", "reviewer", "agent"]),
-  selfSignature: b64url.min(1, "selfSignature required"),
+  selfSignature: b64url
+    .min(1, "selfSignature required")
+    .max(BASE64URL_64_BYTE_MAX_CHARS),
 });
 
 export type DeviceRegistrationRequest = z.infer<typeof deviceRegistrationSchema>;
@@ -131,27 +150,27 @@ export interface DeviceRecord extends DeviceRegistrationRequest {
  *   `maxSignalEnvelopes=64` sub-cap per (authorId, targetDeviceId) pair.
  * - `ciphertextBytes` is asserted equal to the decoded `ciphertext` length so
  *   we can enforce per-kind size caps without a second decode round.
- * - `nonce` is opaque to the relay (per crypto-spec.md it's a 24-byte XChaCha
- *   nonce, base64url-encoded). We don't enforce its length here so we can
- *   round-trip future nonce schemes; the wire shape stays the same.
+ * - `nonce` is opaque to the relay, but v2 fixes it to a 24-byte XChaCha nonce
+ *   (32 base64url characters), so accepting a larger stored value is neither
+ *   useful nor forward-compatible within this protocol version.
  */
 export const envelopeTargetSchema = z.object({
-  deviceId: z.string().min(1).max(64),
+  deviceId: z.string().min(1).max(DEVICE_ID_MAX_CHARS),
 });
 
 export const envelopeKindSchema = z.enum(["event", "snapshot_blob", "signal"]);
 
 export const envelopeSchema = z.object({
-  envelopeId: z.string().min(1),
+  envelopeId: z.string().min(1).max(ENVELOPE_ID_MAX_CHARS),
   authorId: z.string().min(1).max(64),
-  deviceId: z.string().min(1).max(64),
+  deviceId: z.string().min(1).max(DEVICE_ID_MAX_CHARS),
   kind: envelopeKindSchema,
   // null is a valid wire value for "no target / broadcast". zod's optional()
   // also covers the omitted case so clients can leave the key off entirely.
   target: envelopeTargetSchema.nullable().optional(),
   createdAt: unixMs,
   expiresAt: unixMs,
-  nonce: b64url.min(1, "nonce required"),
+  nonce: b64url.min(1, "nonce required").max(XCHACHA20_NONCE_MAX_CHARS),
   ciphertext: b64url, // empty ciphertext is allowed at the schema layer; per-kind cap is enforced in handler
   ciphertextBytes: z.number().int().positive(),
 });
@@ -196,8 +215,11 @@ export interface EnvelopeRecord extends Omit<EnvelopeInput, "target"> {
  *   deviceId alone since the participantId isn't carried on the wire).
  */
 export const acksRequestSchema = z.object({
-  ackedEnvelopeIds: z.array(z.string()).min(1).max(100),
-  deviceId: z.string(),
+  ackedEnvelopeIds: z
+    .array(z.string().min(1).max(ENVELOPE_ID_MAX_CHARS))
+    .min(1)
+    .max(100),
+  deviceId: z.string().min(1).max(DEVICE_ID_MAX_CHARS),
 });
 
 export type AcksRequest = z.infer<typeof acksRequestSchema>;
@@ -214,8 +236,8 @@ export type AcksRequest = z.infer<typeof acksRequestSchema>;
  * to the uploaded object.
  *
  * - `envelopeId` must be the same one the eventual POST /envelopes will use
- *   (the relay keys R2 objects under `rooms/<roomId>/blobs/<envelopeId>` to
- *   make alarm-driven cleanup a single prefix sweep).
+ *   (the relay keys R2 objects under a generation-bound room prefix so
+ *   alarm-driven cleanup remains a single room-prefix sweep).
  * - `authorId` / `deviceId` must reference an already-registered device. The
  *   handler re-checks both before reserving R2 bytes.
  * - `ciphertextBytes` must be > 1 MiB; below that the spec requires the inline
@@ -223,9 +245,9 @@ export type AcksRequest = z.infer<typeof acksRequestSchema>;
  *   covers the upper bound via `policy.maxSnapshotBytes`).
  */
 export const blobPresignRequestSchema = z.object({
-  envelopeId: z.string().min(1),
+  envelopeId: z.string().min(1).max(ENVELOPE_ID_MAX_CHARS),
   authorId: z.string().min(1).max(64),
-  deviceId: z.string().min(1).max(64),
+  deviceId: z.string().min(1).max(DEVICE_ID_MAX_CHARS),
   ciphertextBytes: z.number().int().positive(),
 });
 

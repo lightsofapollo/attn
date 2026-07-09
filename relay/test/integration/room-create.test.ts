@@ -184,6 +184,34 @@ async function postCreate(opts: {
 }
 
 describe("POST /v2/rooms/:roomId — happy path", () => {
+  it("serializes concurrent first-create requests into one create and one rejoin", async () => {
+    const roomId = uniqueRoomId("concurrent-create");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+    const built = await buildCreate();
+    const headers = {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({
+        method: "POST",
+        url,
+        body: built.body,
+        privateKey: built.ownerKp.privateKey,
+      }),
+      "Attn-Admission": await admissionHeaderFor({
+        method: "POST",
+        url,
+        body: built.body,
+        admissionKey: built.admissionKeyBytes,
+      }),
+      "Attn-PoW": await createPowHeader(roomId, built.ownerKp.publicKeyBytes),
+    };
+
+    const responses = await Promise.all([
+      SELF.fetch(url, { method: "POST", headers, body: built.body }),
+      SELF.fetch(url, { method: "POST", headers, body: built.body }),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 201]);
+  });
+
   it("creates a room and returns 201 with the clamped policy", async () => {
     const roomId = uniqueRoomId("happy");
     const expiresAt = Date.now() + 60 * 60 * 1000;

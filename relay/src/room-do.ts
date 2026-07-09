@@ -1446,13 +1446,13 @@ export class RoomDO extends DurableObject<Env> {
       // Group by (authorId, targetDeviceId) so we only scan each bucket once.
       const buckets = new Map<string, PlannedSignal[]>();
       for (const s of newSignals) {
-        const bucketKey = `${s.authorId} ${s.targetDeviceId}`;
+        const bucketKey = `${s.authorId}\0${s.targetDeviceId}`;
         const arr = buckets.get(bucketKey) ?? [];
         arr.push(s);
         buckets.set(bucketKey, arr);
       }
       for (const bucketKey of buckets.keys()) {
-        const [authorId, targetDeviceId] = bucketKey.split(" ") as [string, string];
+        const [authorId, targetDeviceId] = bucketKey.split("\0") as [string, string];
         await this.evictExcessSignals(authorId, targetDeviceId, MAX_SIGNAL_ENVELOPES_PER_PAIR);
       }
     }

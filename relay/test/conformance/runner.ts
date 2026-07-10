@@ -323,6 +323,7 @@ interface ExpectStorageStateStep extends BaseStep {
     serverSeqAtLeast?: number;
     hasEnvIdx?: string[];
     missingEnvIdx?: string[];
+    missingEnvPayload?: string[];
     hasOwnerAckMarker?: string[];
     hasAckSlot?: Array<{ device: string; envelopeId: string }>;
   };
@@ -1450,6 +1451,12 @@ async function actExpectStorageState(
     for (const envId of step.expect.missingEnvIdx ?? []) {
       const v = await ctxStorage.storage.get<string>(`env_idx:${envId}`);
       expect(v, `${label}: env_idx:${envId} unexpectedly present`).toBeUndefined();
+    }
+    for (const envId of step.expect.missingEnvPayload ?? []) {
+      const paddedSeq = await ctxStorage.storage.get<string>(`env_idx:${envId}`);
+      expect(paddedSeq, `${label}: env_idx:${envId} tombstone missing`).toBeDefined();
+      const payload = await ctxStorage.storage.get(`env:${paddedSeq}:${envId}`);
+      expect(payload, `${label}: env payload ${envId} unexpectedly present`).toBeUndefined();
     }
     for (const envId of step.expect.hasOwnerAckMarker ?? []) {
       const v = await ctxStorage.storage.get<string>(`ack_owner:${envId}`);

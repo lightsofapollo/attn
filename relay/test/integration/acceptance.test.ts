@@ -691,6 +691,15 @@ async function hasEnvIdx(roomId: string, envelopeId: string): Promise<boolean> {
   });
 }
 
+async function hasEnvelopePayload(roomId: string, envelopeId: string): Promise<boolean> {
+  return runInDurableObject(getStub(roomId), async (_inst, state) => {
+    const paddedSeq = await state.storage.get<string>(`env_idx:${envelopeId}`);
+    if (paddedSeq === undefined) return false;
+    const payload = await state.storage.get(`env:${paddedSeq}:${envelopeId}`);
+    return payload !== undefined;
+  });
+}
+
 async function hasOwnerAckMarker(roomId: string, envelopeId: string): Promise<boolean> {
   return runInDurableObject(getStub(roomId), async (_inst, state) => {
     const v = await state.storage.get<string>(`ack_owner:${envelopeId}`);
@@ -1120,7 +1129,8 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
       ownerSig: { privateKey: ownerKp.privateKey },
     });
     expect(res.status).toBe(204);
-    expect(await hasEnvIdx(roomId, "s4b-env-1")).toBe(false);
+    expect(await hasEnvIdx(roomId, "s4b-env-1")).toBe(true);
+    expect(await hasEnvelopePayload(roomId, "s4b-env-1")).toBe(false);
     expect(await hasOwnerAckMarker(roomId, "s4b-env-1")).toBe(true);
     expect(await getEnvelopeCount(roomId)).toBe(0);
   });
@@ -1217,7 +1227,8 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
       ownerSig: { privateKey: ownerKp.privateKey },
     });
     expect(r1.status).toBe(204);
-    expect(await hasEnvIdx(roomId, "s5-env-1")).toBe(false);
+    expect(await hasEnvIdx(roomId, "s5-env-1")).toBe(true);
+    expect(await hasEnvelopePayload(roomId, "s5-env-1")).toBe(false);
     expect(await hasOwnerAckMarker(roomId, "s5-env-1")).toBe(true);
     expect(await getEnvelopeCount(roomId)).toBe(1);
 
@@ -1229,7 +1240,8 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
       ownerSig: { privateKey: ownerKp.privateKey },
     });
     expect(r2.status).toBe(204);
-    expect(await hasEnvIdx(roomId, "s5-env-2")).toBe(false);
+    expect(await hasEnvIdx(roomId, "s5-env-2")).toBe(true);
+    expect(await hasEnvelopePayload(roomId, "s5-env-2")).toBe(false);
     expect(await getEnvelopeCount(roomId)).toBe(0);
   });
 

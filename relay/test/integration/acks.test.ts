@@ -341,20 +341,22 @@ function buildEnvelope(input: BuildEnvelopeInput): EnvelopeInput {
   };
 }
 
-async function postEnvelope(opts: {
+async function postEnvelopes(opts: {
   roomId: string;
   admissionKey: Uint8Array;
-  envelope: EnvelopeInput;
-}): Promise<void> {
+  envelopes: EnvelopeInput[];
+}): Promise<Response> {
   const url = `${URL_BASE}/v2/rooms/${opts.roomId}/envelopes`;
-  const body = JSON.stringify({ envelopes: [opts.envelope] });
+  const body = JSON.stringify({ envelopes: opts.envelopes });
   const adm = await admissionHeaderFor({
     method: "POST",
     url,
     body,
     admissionKey: opts.admissionKey,
   });
-  const pow = await mintEnvelopePow(opts.roomId, opts.envelope.deviceId);
+  const first = opts.envelopes[0];
+  if (first === undefined) throw new Error("postEnvelopes requires a non-empty batch");
+  const pow = await mintEnvelopePow(opts.roomId, first.deviceId);
   const res = await SELF.fetch(url, {
     method: "POST",
     headers: {
@@ -367,6 +369,19 @@ async function postEnvelope(opts: {
   if (res.status !== 201) {
     throw new Error(`envelope post failed: ${res.status} ${await res.text()}`);
   }
+  return res;
+}
+
+async function postEnvelope(opts: {
+  roomId: string;
+  admissionKey: Uint8Array;
+  envelope: EnvelopeInput;
+}): Promise<void> {
+  await postEnvelopes({
+    roomId: opts.roomId,
+    admissionKey: opts.admissionKey,
+    envelopes: [opts.envelope],
+  });
 }
 
 // --- ACK request builder -------------------------------------------------
@@ -427,19 +442,22 @@ async function getMeta(roomId: string): Promise<{
   envelopeCount: number;
   bytesUsed: number;
   oldestRetainedSeq: number;
+  serverSeq: number;
 }> {
   const id = env.RELAY_ROOMS.idFromName(roomId);
   const stub = env.RELAY_ROOMS.get(id);
   return runInDurableObject(stub, async (_inst, state) => {
-    const [c, b, o] = await Promise.all([
+    const [c, b, o, s] = await Promise.all([
       state.storage.get<number>("meta:envelope_count"),
       state.storage.get<number>("meta:bytes_used"),
       state.storage.get<number>("meta:oldest_retained_seq"),
+      state.storage.get<number>("meta:server_seq"),
     ]);
     return {
       envelopeCount: c ?? 0,
       bytesUsed: b ?? 0,
       oldestRetainedSeq: o ?? 0,
+      serverSeq: s ?? 0,
     };
   });
 }
@@ -477,6 +495,71 @@ async function hasOwnerAckMarker(roomId: string, envelopeId: string): Promise<bo
 
 interface ErrorResponse {
   error: { code: string; message: string };
+}
+
+interface AcceptResponse {
+  accepted: Array<{ envelopeId: string; serverSeq: number }>;
+}
+
+async function getRoomStorageSnapshot(roomId: string): Promise<Map<string, unknown>> {
+  const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+  return runInDurableObject(stub, async (_inst, state) => {
+    return new Map(await state.storage.list<unknown>());
+  });
+}
+
+async function getAckContentSnapshot(roomId: string): Promise<Map<string, unknown>> {
+  const all = await getRoomStorageSnapshot(roomId);
+  const metadata = new Set([
+    "meta:envelope_count",
+    "meta:bytes_used",
+    "meta:bytes_used_r2",
+    "meta:server_seq",
+    "meta:oldest_retained_seq",
+    "meta:last_event_at",
+  ]);
+  return new Map(
+    [...all].filter(([key]) =>
+      metadata.has(key) ||
+      key.startsWith("env:") ||
+      key.startsWith("env_idx:") ||
+      key.startsWith("env_by_target_v2:") ||
+      key.startsWith("env_by_target:") ||
+      key.startsWith("ack:") ||
+      key.startsWith("ack_owner:"),
+    ),
+  );
+}
+
+async function getPayloadCount(roomId: string): Promise<number> {
+  const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+  return runInDurableObject(stub, async (_inst, state) => {
+    return (await state.storage.list({ prefix: "env:" })).size;
+  });
+}
+
+async function createDeletingOwnerRoom(label: string): Promise<{
+  roomId: string;
+  ownerKp: SubtleKeypair;
+  admissionKey: Uint8Array;
+  ownerDev: RegisteredDevice;
+}> {
+  const roomId = uniqueRoomId(label);
+  const ownerKp = await generateEd25519Keypair();
+  const admissionKey = await createRoom({
+    roomId,
+    ownerKp,
+    policy: { deleteEventsAfterOwnerAck: true },
+  });
+  const ownerDev = await registerDevice({
+    roomId,
+    admissionKey,
+    deviceId: "dev-own",
+    participantId: "owner",
+    kind: "owner",
+    keypair: ownerKp,
+  });
+  return { roomId, ownerKp, admissionKey, ownerDev };
 }
 
 // --- tests ---------------------------------------------------------------
@@ -635,13 +718,211 @@ describe("POST /v2/rooms/:roomId/acks — owner ack with delete-enabled policy",
     });
     expect(res.status).toBe(204);
 
-    // env_idx + payload gone; ack_owner marker present; counts decremented.
-    expect(await hasEnvIdx(roomId, "env-own-del")).toBe(false);
+    // Payload is gone while env_idx remains as the cross-request dedupe
+    // tombstone; owner marker and counters advance atomically.
+    expect(await hasEnvIdx(roomId, "env-own-del")).toBe(true);
     expect(await hasOwnerAckMarker(roomId, "env-own-del")).toBe(true);
     expect(await hasAckSlot(roomId, "dev-own", "env-own-del")).toBe(true);
     const after = await getMeta(roomId);
     expect(after.envelopeCount).toBe(0);
     expect(after.bytesUsed).toBe(0);
+  });
+});
+
+describe("POST /v2/rooms/:roomId/acks — exact post-delete cursor floor", () => {
+  it("rejects a mismatched earliest payload record before any ACK storage mutation", async () => {
+    const { roomId, ownerKp, admissionKey, ownerDev } =
+      await createDeletingOwnerRoom("ack-floor-corrupt-record");
+    await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "floor-corrupt-1",
+          authorId: "owner",
+          deviceId: ownerDev.deviceId,
+        }),
+        buildEnvelope({
+          envelopeId: "floor-corrupt-2",
+          authorId: "owner",
+          deviceId: ownerDev.deviceId,
+        }),
+      ],
+    });
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    const firstKey = "env:00000000000000000001:floor-corrupt-1";
+    await runInDurableObject(stub, async (_inst, state) => {
+      const record = await state.storage.get<EnvelopeInput & { serverSeq: number }>(firstKey);
+      if (record === undefined) throw new Error("missing corrupt-floor fixture");
+      await state.storage.put(firstKey, { ...record, envelopeId: "mismatched-record-id" });
+    });
+    const before = await getAckContentSnapshot(roomId);
+
+    const response = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: ["floor-corrupt-1"], deviceId: ownerDev.deviceId },
+      ownerSig: { privateKey: ownerKp.privateKey },
+    });
+    expect(response.status).toBe(500);
+    expect(((await response.json()) as ErrorResponse).error.code).toBe("ATTN_ROOM_CORRUPT");
+    expect(await getAckContentSnapshot(roomId)).toEqual(before);
+  });
+
+  it("deleting seq 1 and 2 leaves seq 3 as the exact floor with exact counters", async () => {
+    const { roomId, ownerKp, admissionKey, ownerDev } =
+      await createDeletingOwnerRoom("ack-floor-leading");
+    await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [10, 20, 30].map((ciphertextBytes, index) =>
+        buildEnvelope({
+          envelopeId: `floor-leading-${index + 1}`,
+          authorId: "owner",
+          deviceId: ownerDev.deviceId,
+          ciphertextBytes,
+        }),
+      ),
+    });
+
+    const response = await postAcks({
+      roomId,
+      admissionKey,
+      body: {
+        ackedEnvelopeIds: ["floor-leading-1", "floor-leading-2"],
+        deviceId: ownerDev.deviceId,
+      },
+      ownerSig: { privateKey: ownerKp.privateKey },
+    });
+    expect(response.status).toBe(204);
+    expect(await getMeta(roomId)).toEqual({
+      envelopeCount: 1,
+      bytesUsed: 30,
+      oldestRetainedSeq: 3,
+      serverSeq: 3,
+    });
+  });
+
+  it("deleting every payload pins the floor to the highest issued serverSeq", async () => {
+    const { roomId, ownerKp, admissionKey, ownerDev } =
+      await createDeletingOwnerRoom("ack-floor-empty");
+    const envelopeIds = ["floor-empty-1", "floor-empty-2", "floor-empty-3"];
+    await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: envelopeIds.map((envelopeId, index) =>
+        buildEnvelope({
+          envelopeId,
+          authorId: "owner",
+          deviceId: ownerDev.deviceId,
+          ciphertextBytes: 7 + index,
+        }),
+      ),
+    });
+
+    const response = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: envelopeIds, deviceId: ownerDev.deviceId },
+      ownerSig: { privateKey: ownerKp.privateKey },
+    });
+    expect(response.status).toBe(204);
+    expect(await getMeta(roomId)).toEqual({
+      envelopeCount: 0,
+      bytesUsed: 0,
+      oldestRetainedSeq: 3,
+      serverSeq: 3,
+    });
+  });
+
+  it("deleting seq 2 and then seq 1 skips the staged hole to seq 3", async () => {
+    const { roomId, ownerKp, admissionKey, ownerDev } =
+      await createDeletingOwnerRoom("ack-floor-hole");
+    await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [10, 20, 30].map((ciphertextBytes, index) =>
+        buildEnvelope({
+          envelopeId: `floor-hole-${index + 1}`,
+          authorId: "owner",
+          deviceId: ownerDev.deviceId,
+          ciphertextBytes,
+        }),
+      ),
+    });
+
+    const deleteMiddle = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: ["floor-hole-2"], deviceId: ownerDev.deviceId },
+      ownerSig: { privateKey: ownerKp.privateKey },
+    });
+    expect(deleteMiddle.status).toBe(204);
+    expect(await getMeta(roomId)).toEqual({
+      envelopeCount: 2,
+      bytesUsed: 40,
+      oldestRetainedSeq: 1,
+      serverSeq: 3,
+    });
+
+    const deleteFirst = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: ["floor-hole-1"], deviceId: ownerDev.deviceId },
+      ownerSig: { privateKey: ownerKp.privateKey },
+    });
+    expect(deleteFirst.status).toBe(204);
+    expect(await getMeta(roomId)).toEqual({
+      envelopeCount: 1,
+      bytesUsed: 30,
+      oldestRetainedSeq: 3,
+      serverSeq: 3,
+    });
+  });
+
+  it("atomically deletes a 100-envelope owner-ACK batch across storage chunks", async () => {
+    const { roomId, ownerKp, admissionKey, ownerDev } =
+      await createDeletingOwnerRoom("ack-delete-chunks");
+    const envelopes = Array.from({ length: 100 }, (_, index) =>
+      buildEnvelope({
+        envelopeId: `chunked-${String(index).padStart(3, "0")}`,
+        authorId: "owner",
+        deviceId: ownerDev.deviceId,
+        ciphertextBytes: index + 1,
+      }),
+    );
+    for (let start = 0; start < envelopes.length; start += 32) {
+      await postEnvelopes({
+        roomId,
+        admissionKey,
+        envelopes: envelopes.slice(start, start + 32),
+      });
+    }
+    expect(await getMeta(roomId)).toEqual({
+      envelopeCount: 100,
+      bytesUsed: 5_050,
+      oldestRetainedSeq: 0,
+      serverSeq: 100,
+    });
+
+    const response = await postAcks({
+      roomId,
+      admissionKey,
+      body: {
+        ackedEnvelopeIds: envelopes.map((envelope) => envelope.envelopeId),
+        deviceId: ownerDev.deviceId,
+      },
+      ownerSig: { privateKey: ownerKp.privateKey },
+    });
+    expect(response.status).toBe(204);
+    expect(await getMeta(roomId)).toEqual({
+      envelopeCount: 0,
+      bytesUsed: 0,
+      oldestRetainedSeq: 100,
+      serverSeq: 100,
+    });
+    expect(await hasAckSlot(roomId, ownerDev.deviceId, "chunked-000")).toBe(true);
+    expect(await hasOwnerAckMarker(roomId, "chunked-099")).toBe(true);
   });
 });
 
@@ -736,6 +1017,27 @@ describe("POST /v2/rooms/:roomId/acks — idempotency", () => {
     const mid = await getMeta(roomId);
     expect(mid.envelopeCount).toBe(0);
     expect(mid.bytesUsed).toBe(0);
+    expect(await hasEnvIdx(roomId, "env-idem")).toBe(true);
+    expect(await getPayloadCount(roomId)).toBe(0);
+
+    // A cross-request POST retry resolves through the retained env_idx
+    // tombstone. It must return the original seq without restoring payload or
+    // charging the room again.
+    const retryPost = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [envelope],
+    });
+    expect((await retryPost.json()) as AcceptResponse).toEqual({
+      accepted: [{ envelopeId: "env-idem", serverSeq: 1 }],
+    });
+    expect(await getPayloadCount(roomId)).toBe(0);
+    expect(await getMeta(roomId)).toEqual({
+      envelopeCount: 0,
+      bytesUsed: 0,
+      oldestRetainedSeq: 1,
+      serverSeq: 1,
+    });
 
     // Second ack of the now-deleted envelope → still 204, no double-debit.
     const r2 = await postAcks({
@@ -774,6 +1076,30 @@ describe("POST /v2/rooms/:roomId/acks — idempotency", () => {
 });
 
 describe("POST /v2/rooms/:roomId/acks — protection layers", () => {
+  it("rejects an unknown device before creating caller-selected rate, PoW, or ACK keys", async () => {
+    const roomId = uniqueRoomId("ack-unknown-device");
+    const ownerKp = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-known",
+      participantId: "known",
+    });
+    const before = await getRoomStorageSnapshot(roomId);
+
+    const response = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: ["attacker-chosen-envelope"], deviceId: "dev-unknown" },
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as ErrorResponse).error.code).toBe(
+      "ATTN_DEVICE_UNREGISTERED",
+    );
+    expect(await getRoomStorageSnapshot(roomId)).toEqual(before);
+  });
+
   it("rejects POST without Attn-Admission header (401)", async () => {
     const roomId = uniqueRoomId("ack-no-adm");
     const ownerKp = await generateEd25519Keypair();
@@ -806,11 +1132,28 @@ describe("POST /v2/rooms/:roomId/acks — protection layers", () => {
       deviceId: "dev-rev",
       participantId: "rev",
     });
+    const envelopeId = "ack-no-pow-envelope";
+    await postEnvelope({
+      roomId,
+      admissionKey,
+      envelope: buildEnvelope({
+        envelopeId,
+        authorId: "rev",
+        deviceId: reviewer.deviceId,
+      }),
+    });
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_inst, state) => {
+      const key = `env:00000000000000000001:${envelopeId}`;
+      const record = await state.storage.get<EnvelopeInput & { serverSeq: number }>(key);
+      if (record === undefined) throw new Error("missing no-PoW scan fixture");
+      await state.storage.put(key, { ...record, envelopeId: "mismatched-before-pow" });
+    });
 
     const res = await postAcks({
       roomId,
       admissionKey,
-      body: { ackedEnvelopeIds: ["env-anything"], deviceId: reviewer.deviceId },
+      body: { ackedEnvelopeIds: [envelopeId], deviceId: reviewer.deviceId },
       omitPow: true,
     });
     expect(res.status).toBe(400);

@@ -250,12 +250,14 @@ Behavior:
   - `ciphertextBytes` must equal `len(ciphertext bytes after base64url decode)`. Reject `400 ATTN_CIPHERTEXT_LENGTH_MISMATCH`.
   - `ciphertextBytes` must be ≤ `policy.maxEventBytes` for `kind == "event" | "signal"`, ≤ `policy.maxSnapshotBytes` for `kind == "snapshot_blob"`. Reject `413 ATTN_ENVELOPE_TOO_LARGE`.
   - `authorId` and `deviceId` must reference a published device record (call `POST /devices` first). Reject `400 ATTN_DEVICE_UNREGISTERED`.
-- Per-room running totals (envelope count, bytes) updated atomically.
+- The first unique envelope's `(authorId, deviceId)` is authenticated before the relay writes its device-rate or PoW replay key. An unregistered first device returns `400 ATTN_DEVICE_UNREGISTERED` without durable mutation, including for a conflicting same-ID batch.
+- Per-room running totals (envelope count, inline bytes, R2 bytes, and server sequence) must already exist as non-negative safe integers; missing, negative, or overflowed metadata is `500 ATTN_ROOM_CORRUPT`. Accepted count/byte/sequence additions are safe-integer checked and updated atomically.
 - Every accepted envelope resets `meta:last_event_at = now` and reschedules the idle alarm to `now + policy.idleTimeoutMs`.
 - If `running.envelopeCount + new > policy.maxEvents`, reject the *whole batch* `507 ATTN_ROOM_EVENT_CAP`.
 - If `running.bytes + sum > policy.maxRoomBytes`, reject the *whole batch* `507 ATTN_ROOM_STORAGE_FULL`. (Hard cap, not policy-overridable.)
 - Idempotency: if `envelopeId` already exists in the room, treat as success without storing a second copy. Response `serverSeq` for the duplicate is the previously assigned value.
-- `kind == "signal"` envelopes are short-lived. They are forwarded over the WebSocket to the target device (or broadcast if `target == null`) and **also** stored if the target is offline. Signal envelopes have their own sub-cap: `maxSignalEnvelopes = 64` per `(authorId, target.deviceId)` pair, FIFO-evicted.
+- Within one request, field-identical repeats of an `envelopeId` are collapsed in first-occurrence order after normalizing omitted `target` to `null`. If the same `envelopeId` has different `authorId`, `deviceId`, `kind`, normalized `target`, `createdAt`, `expiresAt`, `nonce`, `ciphertext`, or `ciphertextBytes`, the relay still applies admission, the first unique envelope's device-rate debit, and PoW verification before returning `400 ATTN_ENVELOPE_ID_CONFLICT`; envelope payloads and accounting remain unchanged.
+- `kind == "signal"` envelopes are short-lived. They are forwarded over the WebSocket to the target device (or broadcast if `target == null`) and **also** stored if the target is offline. Signal envelopes have their own sub-cap: `maxSignalEnvelopes = 64` per `(authorId, target.deviceId)` pair, FIFO-evicted. After first-device authentication and rate/PoW verification, only targets receiving a fresh signal are scanned, once per target; persisted-duplicate retries do not select an index scan. Exact target-index entries, payload storage keys, routing fields, victim accounting fields, and victim-key uniqueness are validated before content mutation, with corrupt state returning `500 ATTN_ROOM_CORRUPT`. Fresh payload/index insertion, all planned FIFO victim deletions, final count/byte totals, and the logical post-mutation cursor floor commit in one storage transaction with ≤128-key operations. The `env_idx` entry is retained as an idempotency tombstone, so retrying an evicted signal returns its original `serverSeq` without recharging it.
 - `kind == "snapshot_blob"` with `ciphertextBytes > 1 MiB`: see R2 spillover below.
 
 Response:
@@ -297,9 +299,11 @@ Headers:
 
 Behavior:
 
+- `deviceId` must resolve to a published device before the relay writes a per-device rate, PoW replay, or ACK key. Unknown devices return `400 ATTN_DEVICE_UNREGISTERED` without durable mutation.
 - Mark envelopes as ACKed by `deviceId`. Multiple devices may ACK independently.
 - If owner signature present and policy allows deletion:
   - Delete envelopes ACKed by *any* owner device. (Owner has multiple devices; once the owner has the bits anywhere, the server may drop them. Cross-device replication is the owner's problem — see `amendments.md` §Multi-device.)
+- Payload/target-index deletion, exact `meta:envelope_count` and `meta:bytes_used` debits, ACK markers, and `meta:oldest_retained_seq` are committed in one storage transaction. `env_idx` is retained as a cross-request idempotency tombstone, so a POST retry returns the original `serverSeq` without restoring or recharging the payload. After registered-device rate/PoW verification, an actual owner-deletion branch validates every current `env:<paddedSeq>:<envelopeId>` key against its `EnvelopeRecord` and requires its sequence not to exceed `meta:server_seq`; corruption is `500 ATTN_ROOM_CORRUPT`. ACK-only and missing/invalid-PoW requests never trigger this payload scan. The cursor floor is computed against the logical post-delete payload set: it is the smallest retained `serverSeq`, or `meta:server_seq` when no payload remains.
 - Idempotent. Acking a non-existent or already-deleted envelope is `204`.
 
 Response: `204 No Content`.
@@ -485,15 +489,16 @@ meta:server_seq                 -> u64 monotonic counter
 meta:bytes_used                 -> u64
 meta:bytes_used_r2              -> u64
 meta:envelope_count             -> u64
-meta:oldest_retained_seq        -> u64 (advances on TTL deletes)
+meta:oldest_retained_seq        -> u64 (0 before deletion; then lowest retained seq, or server_seq if empty)
 meta:quota_lease                -> { roomId, random leaseId, sourceBucket, reservedBytes }
 
 device:<deviceId>               -> DeviceRecord JSON
 device_order:<registeredAt>:<deviceId> -> "" (secondary index for ordered list)
 
 env:<paddedServerSeq>:<envelopeId> -> Envelope JSON
-env_idx:<envelopeId>            -> paddedServerSeq (for dedupe lookup)
-env_by_target:<deviceId>:<paddedServerSeq>:<envelopeId> -> "" (signal routing aid)
+env_idx:<envelopeId>            -> paddedServerSeq (durable dedupe tombstone; retained after payload deletion)
+env_by_target_v2:<base64url(UTF8 JSON.stringify(deviceId))>:<paddedServerSeq>:<envelopeId> -> "" (injective over exact JS UTF-16 strings)
+env_by_target:<colon-free deviceId>:<paddedServerSeq>:<envelopeId> -> "" (legacy dual-read/delete only)
 
 ack:<deviceId>:<envelopeId>     -> u64 ackedAt
 ack_owner:<envelopeId>          -> "" (presence indicates owner-acked)

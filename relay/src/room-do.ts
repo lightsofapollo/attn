@@ -212,6 +212,17 @@ interface RoomQuotaLease {
   confirmed: boolean;
 }
 
+interface EnvelopePayloadCandidate {
+  payloadKey: string;
+  record: EnvelopeRecord;
+}
+
+interface SignalEnvelopeCandidate extends EnvelopePayloadCandidate {
+  paddedSeq: string;
+  envelopeId: string;
+  byTargetKey: string;
+}
+
 interface ErrorBody {
   error: { code: string; message: string };
 }
@@ -1153,7 +1164,7 @@ export class RoomDO extends DurableObject<Env> {
    *   5. Running totals against policy.maxEvents + HARD_MAX_ROOM_BYTES
    *      (whole batch rejected on overflow — 507 ROOM_EVENT_CAP / ROOM_STORAGE_FULL).
    *   6. Atomic put-many: every accepted envelope writes
-   *        env:<seq>:<id>, env_idx:<id>, and (signal-only) env_by_target:<targetDeviceId>:<seq>:<id>
+   *        env:<seq>:<id>, env_idx:<id>, and (signal-only) env_by_target_v2:<encodedTarget>:<seq>:<id>
    *      plus meta updates (server_seq, envelope_count, bytes_used, last_event_at).
    *      Idempotency: env_idx:<id> hit → reuse prior serverSeq, skip storage write.
    *   7. Signal sub-cap: per (authorId, target.deviceId), evict oldest entries
@@ -1230,6 +1241,27 @@ export class RoomDO extends DurableObject<Env> {
       );
     }
 
+    // A client may repeat an envelopeId within one request. Normalize the
+    // optional routing target before comparing so omitted and explicit null
+    // are the same wire value. Field-identical repeats collapse to the first
+    // occurrence. We remember (rather than immediately return) a conflicting
+    // reuse so malformed batches still pay the normal device-rate + PoW cost.
+    const envelopes: EnvelopeInput[] = [];
+    const envelopeById = new Map<string, EnvelopeInput>();
+    let conflictingEnvelopeId: string | undefined;
+    for (const input of batch.envelopes) {
+      const normalized: EnvelopeInput = { ...input, target: input.target ?? null };
+      const prior = envelopeById.get(normalized.envelopeId);
+      if (prior === undefined) {
+        envelopeById.set(normalized.envelopeId, normalized);
+        envelopes.push(normalized);
+        continue;
+      }
+      if (!sameEnvelopeInput(prior, normalized) && conflictingEnvelopeId === undefined) {
+        conflictingEnvelopeId = normalized.envelopeId;
+      }
+    }
+
     // 2. PoW — bound to (roomId, first envelope's deviceId, POST, urlPath).
     //    Every envelope in a batch should share the author/device per the
     //    crypto-spec usage pattern; we don't enforce that here (the spec is
@@ -1239,48 +1271,72 @@ export class RoomDO extends DurableObject<Env> {
     if (policy === undefined) {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
     }
-    const powToken = request.headers.get("Attn-PoW");
-    if (powToken === null || powToken === "") {
-      return errorResponse(400, "ATTN_POW_INVALID", "missing Attn-PoW header");
-    }
-    const first = batch.envelopes[0];
+    const first = envelopes[0];
     if (first === undefined) {
       // zod's .min(1) makes this unreachable, but the type narrows for TS.
       return errorResponse(400, "ATTN_BODY_INVALID", "empty envelope batch");
     }
 
-    // 2a. Per-device rate limit (attn-nnj.5.13). Per relay-spec.md §Anti-Abuse,
-    //     all POST /envelopes traffic counts toward the per-device cap.
-    //     A batch is a single HTTP request so it bumps the counter once, not
-    //     N times; this matches the spec's "120/min/device" framing where
-    //     the unit is "request", not "envelope".
-    const rateRejection = await this.enforceDeviceRateLimit(first.deviceId);
-    if (rateRejection !== undefined) return rateRejection;
-
-    try {
-      await verifyPow(powToken, {
-        roomId,
-        deviceId: first.deviceId,
-        method: "POST",
-        urlPath,
-        policyPowBits: policy.powBits,
-        now: Date.now(),
-        isReplayed: (hash) => this.isPowSeen(hash),
-        markSeen: (hash, expiresAt) => this.markPowSeen(hash, expiresAt),
-      });
-    } catch (err) {
-      if (err instanceof PowError) {
-        return errorResponse(400, err.code, err.message);
-      }
-      throw err;
+    // Authenticate the PoW-bound first device before any caller-selected rate
+    // or replay key can be written. The full per-envelope pass below still
+    // authenticates every additional author/device pair in a mixed batch.
+    const firstDevice = await this.ctx.storage.get<DeviceRecord>(
+      deviceStorageKey(first.authorId, first.deviceId),
+    );
+    if (firstDevice === undefined) {
+      return errorResponse(
+        400,
+        "ATTN_DEVICE_UNREGISTERED",
+        `envelope ${first.envelopeId} (authorId=${first.authorId}, deviceId=${first.deviceId}) not registered`,
+      );
     }
+
+    const applyWriteAntiAbuse = async (): Promise<Response | undefined> => {
+      const rateRejection = await this.enforceDeviceRateLimit(first.deviceId);
+      if (rateRejection !== undefined) return rateRejection;
+
+      const powToken = request.headers.get("Attn-PoW");
+      if (powToken === null || powToken === "") {
+        return errorResponse(400, "ATTN_POW_INVALID", "missing Attn-PoW header");
+      }
+      try {
+        await verifyPow(powToken, {
+          roomId,
+          deviceId: first.deviceId,
+          method: "POST",
+          urlPath,
+          policyPowBits: policy.powBits,
+          now: Date.now(),
+          isReplayed: (hash) => this.isPowSeen(hash),
+          markSeen: (hash, expiresAt) => this.markPowSeen(hash, expiresAt),
+        });
+      } catch (err) {
+        if (err instanceof PowError) return errorResponse(400, err.code, err.message);
+        throw err;
+      }
+      return undefined;
+    };
+
+    if (conflictingEnvelopeId !== undefined) {
+      const antiAbuseFailure = await applyWriteAntiAbuse();
+      if (antiAbuseFailure !== undefined) return antiAbuseFailure;
+      return errorResponse(
+        400,
+        "ATTN_ENVELOPE_ID_CONFLICT",
+        `batch reuses envelopeId ${conflictingEnvelopeId} with different fields`,
+      );
+    }
+
+    // Valid-shape, authenticated batches pay their rate + PoW cost before any
+    // ciphertext decoding, idempotency reads, target scans, or cursor walks.
+    const antiAbuseFailure = await applyWriteAntiAbuse();
+    if (antiAbuseFailure !== undefined) return antiAbuseFailure;
 
     // 4. Per-envelope validation. We collect everything first and bail on the
     //    first error so the whole batch is rejected atomically (spec wording
     //    says "reject the *whole batch*" for cap overflow; per-envelope shape
     //    errors mirror that for symmetry — partial accepts are footguns).
-    const decodedLengths = new Map<string, number>();
-    for (const env of batch.envelopes) {
+    for (const env of envelopes) {
       let decodedLen: number;
       try {
         // We only need the length, not the bytes themselves.
@@ -1299,8 +1355,6 @@ export class RoomDO extends DurableObject<Env> {
           `envelope ${env.envelopeId} ciphertextBytes=${env.ciphertextBytes} != decoded=${decodedLen}`,
         );
       }
-      decodedLengths.set(env.envelopeId, decodedLen);
-
       const sizeCap =
         env.kind === "snapshot_blob" ? policy.maxSnapshotBytes : policy.maxEventBytes;
       if (env.ciphertextBytes > sizeCap) {
@@ -1330,7 +1384,7 @@ export class RoomDO extends DurableObject<Env> {
     const accepted: Array<{ envelopeId: string; serverSeq: number }> = [];
     const fresh: EnvelopeInput[] = [];
 
-    for (const env of batch.envelopes) {
+    for (const env of envelopes) {
       const idx = await this.ctx.storage.get<string>(envIndexKey(env.envelopeId));
       if (idx !== undefined) {
         // `idx` is the padded serverSeq string. Parse to surface in the response.
@@ -1349,30 +1403,58 @@ export class RoomDO extends DurableObject<Env> {
     }
 
     // Cap checks operate on the fresh subset (duplicates don't change totals).
-    const [curCount, curBytes, curBytesR2, curServerSeq] = await Promise.all([
+    const [curCount, curBytes, curBytesR2, curServerSeq, curOldestRetained] = await Promise.all([
       this.ctx.storage.get<number>(META.envelopeCount),
       this.ctx.storage.get<number>(META.bytesUsed),
       this.ctx.storage.get<number>(META.bytesUsedR2),
       this.ctx.storage.get<number>(META.serverSeq),
+      this.ctx.storage.get<number>(META.oldestRetainedSeq),
     ]);
-    const runningCount = curCount ?? 0;
-    const runningBytes = curBytes ?? 0;
-    const runningBytesR2 = curBytesR2 ?? 0;
-    const runningSeq = curServerSeq ?? 0;
+    if (
+      !isNonnegativeSafeInteger(curCount) ||
+      !isNonnegativeSafeInteger(curBytes) ||
+      !isNonnegativeSafeInteger(curBytesR2) ||
+      !isNonnegativeSafeInteger(curServerSeq) ||
+      !isNonnegativeSafeInteger(curOldestRetained)
+    ) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", "invalid envelope accounting metadata");
+    }
+    const runningCount = curCount;
+    const runningBytes = curBytes;
+    const runningBytesR2 = curBytesR2;
+    const runningSeq = curServerSeq;
+    const runningOldestRetained = curOldestRetained;
 
     const addedCount = fresh.length;
     let addedBytes = 0;
-    for (const env of fresh) addedBytes += env.ciphertextBytes;
+    for (const env of fresh) {
+      addedBytes += env.ciphertextBytes;
+      if (!Number.isSafeInteger(addedBytes)) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", "envelope byte addition overflow");
+      }
+    }
 
-    if (runningCount + addedCount > policy.maxEvents) {
+    const nextCount = runningCount + addedCount;
+    const nextInlineBytes = runningBytes + addedBytes;
+    const finalServerSeq = runningSeq + addedCount;
+    const combinedBytes = nextInlineBytes + runningBytesR2;
+    if (
+      !Number.isSafeInteger(nextCount) ||
+      !Number.isSafeInteger(nextInlineBytes) ||
+      !Number.isSafeInteger(finalServerSeq) ||
+      !Number.isSafeInteger(combinedBytes)
+    ) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", "envelope accounting overflow");
+    }
+
+    if (nextCount > policy.maxEvents) {
       return errorResponse(
         507,
         "ATTN_ROOM_EVENT_CAP",
         `room ${roomId} event cap reached (have ${runningCount}, +${addedCount} > ${policy.maxEvents})`,
       );
     }
-    const combinedBytes = runningBytes + runningBytesR2 + addedBytes;
-    if (!Number.isSafeInteger(combinedBytes) || combinedBytes > limits.maxRoomBytes) {
+    if (combinedBytes > limits.maxRoomBytes) {
       return errorResponse(
         507,
         "ATTN_ROOM_STORAGE_FULL",
@@ -1381,24 +1463,18 @@ export class RoomDO extends DurableObject<Env> {
     }
 
     // 6. Build the atomic write map. We compute the next serverSeq locally,
-    //    insert env: + env_idx: + (signal-only) env_by_target: keys, then commit
+    //    insert env: + env_idx: + (signal-only) env_by_target_v2: keys, then commit
     //    in a single put-many call. DO storage commits put-many atomically
     //    within one event (see relay-spec.md §serverSeq Allocation).
     const now = Date.now();
     const writeMap: Record<string, unknown> = {};
     let nextSeq = runningSeq;
 
-    // Signal evictions are computed up-front so the put-many includes the
-    // delete-equivalent (we'll handle deletes in a follow-up storage call;
-    // DO put-many doesn't support a `delete` set, so we batch the puts and
-    // then issue a delete-many for evicted keys).
-    interface PlannedSignal {
-      authorId: string;
-      targetDeviceId: string;
-      paddedSeq: string;
-      envelopeId: string;
-    }
-    const newSignals: PlannedSignal[] = [];
+    // Only fresh signals select a target index for reconciliation; persisted
+    // duplicates stay O(1) idempotency lookups rather than granting a caller a
+    // target-index scan primitive.
+    const freshSignalsByTarget = new Map<string, SignalEnvelopeCandidate[]>();
+    const freshPayloads: EnvelopePayloadCandidate[] = [];
 
     for (const env of fresh) {
       nextSeq += 1;
@@ -1408,16 +1484,22 @@ export class RoomDO extends DurableObject<Env> {
         target: env.target ?? null,
         serverSeq: nextSeq,
       };
-      writeMap[envStorageKey(paddedSeq, env.envelopeId)] = record;
+      const payloadKey = envStorageKey(paddedSeq, env.envelopeId);
+      writeMap[payloadKey] = record;
+      freshPayloads.push({ payloadKey, record });
       writeMap[envIndexKey(env.envelopeId)] = paddedSeq;
       if (env.kind === "signal" && env.target?.deviceId !== undefined) {
-        writeMap[envByTargetKey(env.target.deviceId, paddedSeq, env.envelopeId)] = "";
-        newSignals.push({
-          authorId: env.authorId,
-          targetDeviceId: env.target.deviceId,
+        const byTargetKey = envByTargetKey(env.target.deviceId, paddedSeq, env.envelopeId);
+        writeMap[byTargetKey] = "";
+        const candidates = freshSignalsByTarget.get(env.target.deviceId) ?? [];
+        candidates.push({
           paddedSeq,
           envelopeId: env.envelopeId,
+          byTargetKey,
+          payloadKey,
+          record,
         });
+        freshSignalsByTarget.set(env.target.deviceId, candidates);
       }
       accepted.push({ envelopeId: env.envelopeId, serverSeq: nextSeq });
     }
@@ -1427,34 +1509,96 @@ export class RoomDO extends DurableObject<Env> {
     // without touching meta so caps remain authoritative.
     if (fresh.length > 0) {
       writeMap[META.serverSeq] = nextSeq;
-      writeMap[META.envelopeCount] = runningCount + addedCount;
-      writeMap[META.bytesUsed] = runningBytes + addedBytes;
+      writeMap[META.envelopeCount] = nextCount;
+      writeMap[META.bytesUsed] = nextInlineBytes;
       writeMap[META.lastEventAt] = now;
     }
 
-    if (Object.keys(writeMap).length > 0) {
-      await this.ctx.storage.put<unknown>(writeMap);
+    if (nextSeq !== finalServerSeq) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", "server sequence allocation mismatch");
     }
 
-    // 7. Signal sub-cap — per (authorId, targetDeviceId) pair, FIFO-evict
-    //    anything past maxSignalEnvelopes=64. We do this AFTER the atomic put
-    //    so the cap operates on the post-insert state. Evictions delete both
-    //    the env: payload and the env_by_target: index entry; we leave
-    //    env_idx: in place so idempotent retries still resolve (the prior
-    //    serverSeq is still useful to clients even if the payload is gone).
-    if (newSignals.length > 0) {
-      // Group by (authorId, targetDeviceId) so we only scan each bucket once.
-      const buckets = new Map<string, PlannedSignal[]>();
-      for (const s of newSignals) {
-        const bucketKey = `${s.authorId}\0${s.targetDeviceId}`;
-        const arr = buckets.get(bucketKey) ?? [];
-        arr.push(s);
-        buckets.set(bucketKey, arr);
+    // Scan and validate each fresh target once before inserting anything. A
+    // corrupt exact index therefore cannot partially mutate envelope storage.
+    const signalVictims: SignalEnvelopeCandidate[] = [];
+    for (const [targetDeviceId, freshSignals] of freshSignalsByTarget) {
+      const authorIds = new Set(freshSignals.map((signal) => signal.record.authorId));
+      const plan = await this.planSignalEvictionsForTarget(
+        targetDeviceId,
+        authorIds,
+        freshSignals,
+        MAX_SIGNAL_ENVELOPES_PER_PAIR,
+      );
+      if (plan instanceof Response) return plan;
+      signalVictims.push(...plan);
+    }
+
+    // Validate the complete victim set before arithmetic or mutation. A
+    // duplicated payload/index victim would otherwise double-debit counters.
+    const victimPayloadKeys = new Set<string>();
+    const victimByTargetKeys = new Set<string>();
+    let victimBytes = 0;
+    for (const victim of signalVictims) {
+      if (
+        !isNonnegativeSafeInteger(victim.record.ciphertextBytes) ||
+        victim.record.ciphertextBytes === 0 ||
+        victimPayloadKeys.has(victim.payloadKey) ||
+        victimByTargetKeys.has(victim.byTargetKey)
+      ) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", "invalid or duplicate signal victim");
       }
-      for (const bucketKey of buckets.keys()) {
-        const [authorId, targetDeviceId] = bucketKey.split("\0") as [string, string];
-        await this.evictExcessSignals(authorId, targetDeviceId, MAX_SIGNAL_ENVELOPES_PER_PAIR);
+      victimPayloadKeys.add(victim.payloadKey);
+      victimByTargetKeys.add(victim.byTargetKey);
+      victimBytes += victim.record.ciphertextBytes;
+      if (!Number.isSafeInteger(victimBytes)) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", "signal victim byte overflow");
       }
+    }
+
+    if (nextCount < signalVictims.length || nextInlineBytes < victimBytes) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", "signal victim accounting underflow");
+    }
+    const finalCount = nextCount - signalVictims.length;
+    const finalInlineBytes = nextInlineBytes - victimBytes;
+    if (fresh.length > 0) {
+      writeMap[META.envelopeCount] = finalCount;
+      writeMap[META.bytesUsed] = finalInlineBytes;
+    }
+
+    // Any fresh signal mutation validates the complete current payload index
+    // plus all fresh records. When victims exist, persist the exact logical
+    // post-mutation cursor floor in the same transaction.
+    if (signalVictims.length > 0) {
+      const logicalOldest = await this.findOldestRetainedSeqAfterMutation({
+        stagedPayloadDeletes: victimPayloadKeys,
+        freshPayloads,
+        finalServerSeq,
+      });
+      if (logicalOldest === undefined || logicalOldest < runningOldestRetained) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", "invalid envelope cursor metadata");
+      }
+      writeMap[META.oldestRetainedSeq] = logicalOldest;
+    }
+
+    // Fresh payload/index insertion, all FIFO victim deletes, final counters,
+    // and cursor floor share one transaction—there is no insertion/eviction
+    // crash boundary. env_idx tombstones are never included in victim deletes.
+    const keysToDelete = signalVictims.flatMap((victim) => [
+      victim.payloadKey,
+      victim.byTargetKey,
+    ]);
+    if (Object.keys(writeMap).length > 0 || keysToDelete.length > 0) {
+      await this.ctx.storage.transaction(async (txn) => {
+        const writeEntries = Object.entries(writeMap);
+        for (let i = 0; i < writeEntries.length; i += STORAGE_BATCH_SIZE) {
+          await txn.put<unknown>(
+            Object.fromEntries(writeEntries.slice(i, i + STORAGE_BATCH_SIZE)),
+          );
+        }
+        for (let i = 0; i < keysToDelete.length; i += STORAGE_BATCH_SIZE) {
+          await txn.delete(keysToDelete.slice(i, i + STORAGE_BATCH_SIZE));
+        }
+      });
     }
 
     // 8. Reschedule alarm if anything was accepted (idle window advances).
@@ -1488,58 +1632,94 @@ export class RoomDO extends DurableObject<Env> {
   }
 
   /**
-   * Walk the `env_by_target:<targetDeviceId>:` index, find entries whose
-   * payload was authored by `authorId`, and FIFO-evict anything past `cap`.
-   *
-   * The env_by_target index doesn't carry authorId, so we have to load each
-   * payload to filter. For a 64-entry sub-cap this is bounded — at most ~65
-   * reads per insert that triggers eviction. Bigger sub-caps would need a
-   * dedicated `env_signal_by_pair:<authorId>:<targetDeviceId>:<seq>` index;
-   * we don't need that for v2.
+   * Scan one fresh target exactly once, batch-load its indexed payloads, and
+   * plan FIFO victims for every author that added a fresh signal in this
+   * request. Exact indexes are validated before ingest mutates envelope state.
    */
-  private async evictExcessSignals(
-    authorId: string,
+  private async planSignalEvictionsForTarget(
     targetDeviceId: string,
+    authorIds: ReadonlySet<string>,
+    freshSignals: readonly SignalEnvelopeCandidate[],
     cap: number,
-  ): Promise<void> {
-    const prefix = envByTargetPrefix(targetDeviceId);
-    const entries = await this.ctx.storage.list<string>({ prefix });
-    interface Found {
-      paddedSeq: string;
-      envelopeId: string;
-      byTargetKey: string;
+  ): Promise<SignalEnvelopeCandidate[] | Response> {
+    const indexed: Array<Omit<SignalEnvelopeCandidate, "record">> = [];
+    const v2Entries = await this.ctx.storage.list<string>({
+      prefix: envByTargetPrefix(targetDeviceId),
+    });
+    for (const orderKey of v2Entries.keys()) {
+      const parsed = parseEnvByTargetKey(orderKey, targetDeviceId);
+      if (parsed !== undefined) {
+        indexed.push({
+          paddedSeq: parsed.paddedSeq,
+          envelopeId: parsed.envelopeId,
+          byTargetKey: orderKey,
+          payloadKey: envStorageKey(parsed.paddedSeq, parsed.envelopeId),
+        });
+      }
     }
-    const matches: Found[] = [];
-    for (const orderKey of entries.keys()) {
-      const parsed = parseEnvByTargetKey(orderKey);
-      if (parsed === undefined) continue;
-      // We need the payload to filter on authorId. The payload key contains
-      // the seq + envelopeId so we can reconstruct it directly.
-      const payloadKey = envStorageKey(parsed.paddedSeq, parsed.envelopeId);
-      const record = await this.ctx.storage.get<EnvelopeRecord>(payloadKey);
-      if (record === undefined || record.authorId !== authorId) continue;
-      matches.push({
-        paddedSeq: parsed.paddedSeq,
-        envelopeId: parsed.envelopeId,
-        byTargetKey: orderKey,
+    if (!targetDeviceId.includes(":")) {
+      const legacyEntries = await this.ctx.storage.list<string>({
+        prefix: legacyEnvByTargetPrefix(targetDeviceId),
       });
+      for (const orderKey of legacyEntries.keys()) {
+        const parsed = parseLegacyEnvByTargetKey(orderKey, targetDeviceId);
+        if (parsed !== undefined) {
+          indexed.push({
+            paddedSeq: parsed.paddedSeq,
+            envelopeId: parsed.envelopeId,
+            byTargetKey: orderKey,
+            payloadKey: envStorageKey(parsed.paddedSeq, parsed.envelopeId),
+          });
+        }
+      }
     }
-    if (matches.length <= cap) return;
-    // entries.keys() iteration order is lex over the padded seq, which is
-    // chronological. Evict the oldest (lowest seq) entries first.
-    matches.sort((a, b) => (a.paddedSeq < b.paddedSeq ? -1 : a.paddedSeq > b.paddedSeq ? 1 : 0));
-    const toEvict = matches.slice(0, matches.length - cap);
-    const keysToDelete: string[] = [];
-    for (const ev of toEvict) {
-      keysToDelete.push(envStorageKey(ev.paddedSeq, ev.envelopeId));
-      keysToDelete.push(ev.byTargetKey);
-      // Leave env_idx alone so an idempotent re-upload still resolves to the
-      // (now-deleted) serverSeq. Clients can detect via list-style fetches if
-      // they care; for signal envelopes they normally don't re-fetch.
+
+    const records = new Map<string, EnvelopeRecord>();
+    const payloadKeys = indexed.map((entry) => entry.payloadKey);
+    for (let i = 0; i < payloadKeys.length; i += STORAGE_BATCH_SIZE) {
+      const loaded = await this.ctx.storage.get<EnvelopeRecord>(
+        payloadKeys.slice(i, i + STORAGE_BATCH_SIZE),
+      );
+      for (const [key, record] of loaded) records.set(key, record);
     }
-    if (keysToDelete.length > 0) {
-      await this.ctx.storage.delete(keysToDelete);
+
+    const byAuthor = new Map<string, SignalEnvelopeCandidate[]>();
+    for (const entry of indexed) {
+      const record = records.get(entry.payloadKey);
+      if (
+        record === undefined ||
+        record.kind !== "signal" ||
+        record.target?.deviceId !== targetDeviceId ||
+        record.envelopeId !== entry.envelopeId ||
+        !Number.isSafeInteger(record.serverSeq) ||
+        record.serverSeq <= 0 ||
+        padServerSeq(record.serverSeq) !== entry.paddedSeq
+      ) {
+        return errorResponse(
+          500,
+          "ATTN_ROOM_CORRUPT",
+          `invalid signal target index ${entry.byTargetKey}`,
+        );
+      }
+      if (!authorIds.has(record.authorId)) continue;
+      const matches = byAuthor.get(record.authorId) ?? [];
+      matches.push({ ...entry, record });
+      byAuthor.set(record.authorId, matches);
     }
+    for (const signal of freshSignals) {
+      const matches = byAuthor.get(signal.record.authorId) ?? [];
+      matches.push(signal);
+      byAuthor.set(signal.record.authorId, matches);
+    }
+
+    const victims: SignalEnvelopeCandidate[] = [];
+    for (const matches of byAuthor.values()) {
+      matches.sort((a, b) =>
+        a.paddedSeq < b.paddedSeq ? -1 : a.paddedSeq > b.paddedSeq ? 1 : 0,
+      );
+      if (matches.length > cap) victims.push(...matches.slice(0, matches.length - cap));
+    }
+    return victims;
   }
 
   // -- POST /v2/rooms/:roomId/acks ----------------------------------------
@@ -1570,10 +1750,11 @@ export class RoomDO extends DurableObject<Env> {
    *      policy; a signature mismatch is an attempted forgery.)
    *
    * Idempotency:
-   *   - Acking an envelope that no longer exists (already deleted) is 204.
+   *   - Acking an envelope whose payload no longer exists is 204; env_idx is
+   *     retained as a cross-request POST idempotency tombstone.
    *   - Re-acking an envelope only re-writes its `ack:<deviceId>:<envelopeId>`
    *     slot with the current timestamp; counts/bytes aren't double-decremented
-   *     because deletion is gated on env_idx existence.
+   *     because deletion is gated on payload existence.
    *   - Acking an unknown envelopeId is 204 (per spec: "Acking a non-existent
    *     or already-deleted envelope is `204`").
    *
@@ -1619,15 +1800,27 @@ export class RoomDO extends DurableObject<Env> {
     }
     const body = result.data;
 
-    // 3. Per-device rate limit (attn-nnj.5.13).
-    const rateRejection = await this.enforceDeviceRateLimit(body.deviceId);
-    if (rateRejection !== undefined) return rateRejection;
-
-    // 4. PoW — bound to (roomId, body.deviceId, POST, urlPath).
+    // 3. Cheap room-policy lookup, then authenticate the device identity before
+    // any caller-selected rate or PoW key can be persisted. Unknown device IDs
+    // are bounded no-ops.
     const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
     if (policy === undefined) {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
     }
+    const ackingDevice = await this.findDeviceByDeviceId(body.deviceId);
+    if (ackingDevice === undefined) {
+      return errorResponse(
+        400,
+        "ATTN_DEVICE_UNREGISTERED",
+        `ACK deviceId ${body.deviceId} is not registered`,
+      );
+    }
+
+    // 4. Per-device rate limit (attn-nnj.5.13).
+    const rateRejection = await this.enforceDeviceRateLimit(body.deviceId);
+    if (rateRejection !== undefined) return rateRejection;
+
+    // 5. PoW — bound to (roomId, body.deviceId, POST, urlPath).
     const powToken = request.headers.get("Attn-PoW");
     if (powToken === null || powToken === "") {
       return errorResponse(400, "ATTN_POW_INVALID", "missing Attn-PoW header");
@@ -1650,22 +1843,17 @@ export class RoomDO extends DurableObject<Env> {
       throw err;
     }
 
-    // 5. Deletion gating — see method docstring for layering rationale.
+    // 6. Deletion gating — see method docstring for layering rationale.
     //    `deleteIntent` is the caller asking for deletion (owner-sig header
     //    present). `mayDelete` only flips true if every layer below also
     //    holds (policy enabled, acking device is owner-kind, signature ok).
     const ownerSigHeader = request.headers.get("Attn-Owner-Signature");
     const deleteIntent = ownerSigHeader !== null && ownerSigHeader !== "";
 
-    // Look up the acking device's record. Used both for kind-gating the
-    // owner branch and for surfacing a clear 4xx if the device isn't known.
-    const ackingDevice = await this.findDeviceByDeviceId(body.deviceId);
-
     let mayDelete = false;
     if (
       deleteIntent &&
       policy.deleteEventsAfterOwnerAck === true &&
-      ackingDevice !== undefined &&
       ackingDevice.kind === "owner"
     ) {
       // Layer 4: verify the signature. A failure here is an attempted forgery
@@ -1694,17 +1882,15 @@ export class RoomDO extends DurableObject<Env> {
     //    leave the storage atomically advanced.
     const writes: Record<string, unknown> = {};
     const keysToDelete: string[] = [];
-    let bytesDelta = 0;
-    let countDelta = 0;
+    let bytesToDelete = 0;
+    let countToDelete = 0;
     const ackedAt = Date.now();
-    // Track the lowest paddedSeq we deleted so we can advance
-    // meta:oldest_retained_seq when a leading run drops away.
-    let minDeletedPaddedSeq: string | undefined;
+    const payloadKeysToDelete = new Set<string>();
 
     for (const envelopeId of new Set(body.ackedEnvelopeIds)) {
       // Lookup the env_idx to find the padded seq of this envelope's payload.
-      // Missing entry = already deleted (or never existed) → idempotent no-op
-      // without creating attacker-controlled durable ACK keys.
+      // Missing entry = never existed (or legacy state without a tombstone) →
+      // idempotent no-op without attacker-controlled durable ACK keys.
       const paddedSeq = await this.ctx.storage.get<string>(envIndexKey(envelopeId));
       if (paddedSeq === undefined) continue;
       writes[ackKey(body.deviceId, envelopeId)] = ackedAt;
@@ -1714,9 +1900,9 @@ export class RoomDO extends DurableObject<Env> {
       const payloadKey = envStorageKey(paddedSeq, envelopeId);
       const record = await this.ctx.storage.get<EnvelopeRecord>(payloadKey);
       if (record === undefined) {
-        // env_idx present but payload missing — corrupt state; drop the idx
-        // entry too so a retry doesn't re-trip this branch.
-        keysToDelete.push(envIndexKey(envelopeId));
+        // env_idx intentionally outlives owner-ACK and signal-FIFO payload
+        // deletion. The tombstone makes cross-request POST retries resolve to
+        // their original serverSeq without allocating or charging again.
         continue;
       }
 
@@ -1724,46 +1910,63 @@ export class RoomDO extends DurableObject<Env> {
       // tell that an owner ack happened even after the payload is gone.
       writes[ackOwnerKey(envelopeId)] = "";
 
-      // Stage the storage deletes. We hold env_idx around for retries to keep
-      // landing as no-ops; deleting the payload + env_by_target entries is
-      // enough to free the bytes.
+      // Stage payload and any target-index delete. Keep env_idx as the durable
+      // idempotency tombstone shared with signal FIFO eviction.
       keysToDelete.push(payloadKey);
-      keysToDelete.push(envIndexKey(envelopeId));
       if (record.kind === "signal" && record.target?.deviceId !== undefined) {
         keysToDelete.push(envByTargetKey(record.target.deviceId, paddedSeq, envelopeId));
+        if (!record.target.deviceId.includes(":")) {
+          keysToDelete.push(
+            legacyEnvByTargetKey(record.target.deviceId, paddedSeq, envelopeId),
+          );
+        }
       }
-      bytesDelta -= record.ciphertextBytes;
-      countDelta -= 1;
-
-      if (minDeletedPaddedSeq === undefined || paddedSeq < minDeletedPaddedSeq) {
-        minDeletedPaddedSeq = paddedSeq;
+      if (!isNonnegativeSafeInteger(record.ciphertextBytes) || record.ciphertextBytes === 0) {
+        return errorResponse(
+          500,
+          "ATTN_ROOM_CORRUPT",
+          `envelope ${envelopeId} has invalid ciphertextBytes`,
+        );
       }
+      bytesToDelete += record.ciphertextBytes;
+      if (!Number.isSafeInteger(bytesToDelete)) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", "ACK byte accounting overflow");
+      }
+      countToDelete += 1;
+      payloadKeysToDelete.add(payloadKey);
     }
 
     // 6. Meta updates on actual deletion. We re-read the current counters
     //    inside the same DO event so the writes commit on a consistent base.
-    if (mayDelete && (countDelta !== 0 || bytesDelta !== 0)) {
-      const [curCount, curBytes, curOldestRetained] = await Promise.all([
+    if (mayDelete && countToDelete > 0) {
+      const [curCount, curBytes, curOldestRetained, curServerSeq] = await Promise.all([
         this.ctx.storage.get<number>(META.envelopeCount),
         this.ctx.storage.get<number>(META.bytesUsed),
         this.ctx.storage.get<number>(META.oldestRetainedSeq),
+        this.ctx.storage.get<number>(META.serverSeq),
       ]);
-      const newCount = Math.max(0, (curCount ?? 0) + countDelta);
-      const newBytes = Math.max(0, (curBytes ?? 0) + bytesDelta);
-      writes[META.envelopeCount] = newCount;
-      writes[META.bytesUsed] = newBytes;
-
-      // Advance oldest_retained_seq if the lowest envelope still alive is
-      // beyond the previous mark. Scan env_idx forward from the prior mark to
-      // find the new floor; bounded by the number of deleted envelopes in this
-      // batch (worst case: 100).
-      if (minDeletedPaddedSeq !== undefined) {
-        const prevOldest = curOldestRetained ?? 0;
-        const newOldest = await this.findOldestRetainedSeq(prevOldest);
-        if (newOldest > prevOldest) {
-          writes[META.oldestRetainedSeq] = newOldest;
-        }
+      if (
+        !isNonnegativeSafeInteger(curCount) ||
+        !isNonnegativeSafeInteger(curBytes) ||
+        !isNonnegativeSafeInteger(curOldestRetained) ||
+        !isNonnegativeSafeInteger(curServerSeq)
+      ) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", "invalid ACK accounting metadata");
       }
+      if (curCount < countToDelete || curBytes < bytesToDelete) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", "ACK accounting underflow");
+      }
+      const newOldest = await this.findOldestRetainedSeqAfterMutation({
+        stagedPayloadDeletes: payloadKeysToDelete,
+        freshPayloads: [],
+        finalServerSeq: curServerSeq,
+      });
+      if (newOldest === undefined || newOldest < curOldestRetained) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", "invalid envelope cursor metadata");
+      }
+      writes[META.envelopeCount] = curCount - countToDelete;
+      writes[META.bytesUsed] = curBytes - bytesToDelete;
+      writes[META.oldestRetainedSeq] = newOldest;
     }
 
     if (Object.keys(writes).length > 0 || keysToDelete.length > 0) {
@@ -1772,8 +1975,15 @@ export class RoomDO extends DurableObject<Env> {
       // with its original byte charge or the fully deleted envelope with the
       // decremented charge—never an under-counted retained payload.
       await this.ctx.storage.transaction(async (txn) => {
-        if (Object.keys(writes).length > 0) await txn.put<unknown>(writes);
-        if (keysToDelete.length > 0) await txn.delete(keysToDelete);
+        const writeEntries = Object.entries(writes);
+        for (let i = 0; i < writeEntries.length; i += STORAGE_BATCH_SIZE) {
+          await txn.put<unknown>(
+            Object.fromEntries(writeEntries.slice(i, i + STORAGE_BATCH_SIZE)),
+          );
+        }
+        for (let i = 0; i < keysToDelete.length; i += STORAGE_BATCH_SIZE) {
+          await txn.delete(keysToDelete.slice(i, i + STORAGE_BATCH_SIZE));
+        }
       });
     }
 
@@ -2419,23 +2629,47 @@ export class RoomDO extends DurableObject<Env> {
     return undefined;
   }
 
-  /**
-   * Scan env:* forward from `prevOldest` (exclusive) and return the smallest
-   * remaining serverSeq. If no envelopes remain, returns the room's current
-   * meta:server_seq (so future replays still gate `after < oldest` correctly).
-   */
-  private async findOldestRetainedSeq(prevOldest: number): Promise<number> {
+  /** Validate current + fresh payload keys and compute the logical post-state floor. */
+  private async findOldestRetainedSeqAfterMutation(opts: {
+    stagedPayloadDeletes: ReadonlySet<string>;
+    freshPayloads: readonly EnvelopePayloadCandidate[];
+    finalServerSeq: number;
+  }): Promise<number | undefined> {
+    if (!isNonnegativeSafeInteger(opts.finalServerSeq)) return undefined;
     const entries = await this.ctx.storage.list<EnvelopeRecord>({
       prefix: ENV_PREFIX,
-      limit: 1,
     });
-    for (const record of entries.values()) {
-      return record.serverSeq;
+    const seenPayloadKeys = new Set<string>();
+    let oldest: number | undefined;
+    for (const [key, record] of entries) {
+      if (
+        seenPayloadKeys.has(key) ||
+        !envelopeRecordMatchesStorageKey(key, record, opts.finalServerSeq)
+      ) {
+        return undefined;
+      }
+      seenPayloadKeys.add(key);
+      if (opts.stagedPayloadDeletes.has(key)) continue;
+      oldest = oldest === undefined ? record.serverSeq : Math.min(oldest, record.serverSeq);
     }
-    // No envelopes left — pin to the highest seq we've ever issued so any
-    // subscriber with after=N (N <= max) still satisfies after >= oldest.
-    const serverSeq = await this.ctx.storage.get<number>(META.serverSeq);
-    return Math.max(prevOldest, serverSeq ?? 0);
+    for (const fresh of opts.freshPayloads) {
+      if (
+        seenPayloadKeys.has(fresh.payloadKey) ||
+        !envelopeRecordMatchesStorageKey(
+          fresh.payloadKey,
+          fresh.record,
+          opts.finalServerSeq,
+        )
+      ) {
+        return undefined;
+      }
+      seenPayloadKeys.add(fresh.payloadKey);
+      if (opts.stagedPayloadDeletes.has(fresh.payloadKey)) continue;
+      oldest = oldest === undefined
+        ? fresh.record.serverSeq
+        : Math.min(oldest, fresh.record.serverSeq);
+    }
+    return oldest ?? opts.finalServerSeq;
   }
 
   // -- WebSocket /v2/rooms/:roomId/socket --------------------------------
@@ -2882,18 +3116,34 @@ export class RoomDO extends DurableObject<Env> {
    * id list per the spec's `hello` shape.)
    */
   private async collectMissedSignalIds(myDeviceId: string, after: number): Promise<string[]> {
-    const prefix = envByTargetPrefix(myDeviceId);
-    const entries = await this.ctx.storage.list<string>({ prefix });
-    const ids: string[] = [];
-    for (const orderKey of entries.keys()) {
-      const parsed = parseEnvByTargetKey(orderKey);
-      if (parsed === undefined) continue;
-      const seqNum = Number(parsed.paddedSeq);
-      if (!Number.isSafeInteger(seqNum)) continue;
-      if (seqNum <= after) continue;
-      ids.push(parsed.envelopeId);
+    const found = new Map<string, number>();
+    const collect = (
+      entries: Map<string, string>,
+      parse: (key: string) => { paddedSeq: string; envelopeId: string } | undefined,
+    ): void => {
+      for (const orderKey of entries.keys()) {
+        const parsed = parse(orderKey);
+        if (parsed === undefined) continue;
+        const seqNum = Number(parsed.paddedSeq);
+        if (!Number.isSafeInteger(seqNum) || seqNum <= after) continue;
+        const prior = found.get(parsed.envelopeId);
+        if (prior === undefined || seqNum < prior) found.set(parsed.envelopeId, seqNum);
+      }
+    };
+
+    collect(
+      await this.ctx.storage.list<string>({ prefix: envByTargetPrefix(myDeviceId) }),
+      (key) => parseEnvByTargetKey(key, myDeviceId),
+    );
+    if (!myDeviceId.includes(":")) {
+      collect(
+        await this.ctx.storage.list<string>({ prefix: legacyEnvByTargetPrefix(myDeviceId) }),
+        (key) => parseLegacyEnvByTargetKey(key, myDeviceId),
+      );
     }
-    return ids;
+    return [...found.entries()]
+      .sort((a, b) => a[1] - b[1])
+      .map(([envelopeId]) => envelopeId);
   }
 
   // -- helpers for PoW replay + device ordering ---------------------------
@@ -3274,10 +3524,13 @@ const SERVER_SEQ_PAD = 20;
 
 /** Per-(authorId, targetDeviceId) signal sub-cap from relay-spec.md §Caps. */
 const MAX_SIGNAL_ENVELOPES_PER_PAIR = 64;
+/** Keep every Durable Object multi-key call at the platform batch limit. */
+const STORAGE_BATCH_SIZE = 128;
 
 const ENV_PREFIX = "env:";
 const ENV_IDX_PREFIX = "env_idx:";
-const ENV_BY_TARGET_PREFIX = "env_by_target:";
+const ENV_BY_TARGET_V2_PREFIX = "env_by_target_v2:";
+const LEGACY_ENV_BY_TARGET_PREFIX = "env_by_target:";
 const ACK_PREFIX = "ack:";
 const ACK_OWNER_PREFIX = "ack_owner:";
 
@@ -3298,11 +3551,49 @@ function envByTargetKey(
   paddedSeq: string,
   envelopeId: string,
 ): string {
-  return `${ENV_BY_TARGET_PREFIX}${targetDeviceId}:${paddedSeq}:${envelopeId}`;
+  return `${envByTargetPrefix(targetDeviceId)}${paddedSeq}:${envelopeId}`;
 }
 
 function envByTargetPrefix(targetDeviceId: string): string {
-  return `${ENV_BY_TARGET_PREFIX}${targetDeviceId}:`;
+  // JSON string escaping preserves exact UTF-16 code units (including lone
+  // surrogates) before UTF-8 encoding; TextEncoder(targetDeviceId) alone would
+  // normalize lone surrogates to U+FFFD and make distinct JS strings collide.
+  const encodedTarget = base64UrlEncode(
+    new TextEncoder().encode(JSON.stringify(targetDeviceId)),
+  );
+  return `${ENV_BY_TARGET_V2_PREFIX}${encodedTarget}:`;
+}
+
+function legacyEnvByTargetKey(
+  targetDeviceId: string,
+  paddedSeq: string,
+  envelopeId: string,
+): string {
+  return `${legacyEnvByTargetPrefix(targetDeviceId)}${paddedSeq}:${envelopeId}`;
+}
+
+function legacyEnvByTargetPrefix(targetDeviceId: string): string {
+  return `${LEGACY_ENV_BY_TARGET_PREFIX}${targetDeviceId}:`;
+}
+
+/** Exact same-request idempotency comparison after target normalization. */
+function sameEnvelopeInput(a: EnvelopeInput, b: EnvelopeInput): boolean {
+  return (
+    a.envelopeId === b.envelopeId &&
+    a.authorId === b.authorId &&
+    a.deviceId === b.deviceId &&
+    a.kind === b.kind &&
+    (a.target?.deviceId ?? null) === (b.target?.deviceId ?? null) &&
+    a.createdAt === b.createdAt &&
+    a.expiresAt === b.expiresAt &&
+    a.nonce === b.nonce &&
+    a.ciphertext === b.ciphertext &&
+    a.ciphertextBytes === b.ciphertextBytes
+  );
+}
+
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 /** Per-device ACK slot: `ack:<deviceId>:<envelopeId>` → ms-epoch ack time. */
@@ -3352,29 +3643,67 @@ function blobReservationKey(envelopeId: string): string {
   return `${BLOB_RESV_PREFIX}${envelopeId}`;
 }
 
-/**
- * Parse `env_by_target:<targetDeviceId>:<paddedSeq>:<envelopeId>`.
- * Returns undefined if the key shape doesn't match (defensive — should never
- * happen in production, but keeps the iterator robust to garbage).
- */
+function parseEnvelopeStorageKey(
+  key: string,
+): { paddedSeq: string; envelopeId: string } | undefined {
+  if (!key.startsWith(ENV_PREFIX)) return undefined;
+  const suffix = key.slice(ENV_PREFIX.length);
+  if (suffix.length < SERVER_SEQ_PAD + 2) return undefined;
+  const paddedSeq = suffix.slice(0, SERVER_SEQ_PAD);
+  if (!/^\d{20}$/.test(paddedSeq) || suffix[SERVER_SEQ_PAD] !== ":") return undefined;
+  const envelopeId = suffix.slice(SERVER_SEQ_PAD + 1);
+  return envelopeId.length > 0 ? { paddedSeq, envelopeId } : undefined;
+}
+
+function envelopeRecordMatchesStorageKey(
+  key: string,
+  record: EnvelopeRecord,
+  finalServerSeq: number,
+): boolean {
+  const parsed = parseEnvelopeStorageKey(key);
+  return (
+    parsed !== undefined &&
+    Number.isSafeInteger(record.serverSeq) &&
+    record.serverSeq > 0 &&
+    record.serverSeq <= finalServerSeq &&
+    parsed.paddedSeq === padServerSeq(record.serverSeq) &&
+    parsed.envelopeId === record.envelopeId
+  );
+}
+
+/** Parse an injective v2 target index relative to its encoded target prefix. */
 function parseEnvByTargetKey(
   key: string,
+  expectedTargetDeviceId: string,
 ): { targetDeviceId: string; paddedSeq: string; envelopeId: string } | undefined {
-  if (!key.startsWith(ENV_BY_TARGET_PREFIX)) return undefined;
-  const rest = key.slice(ENV_BY_TARGET_PREFIX.length);
-  // targetDeviceId is the segment before the first colon; paddedSeq is the
-  // SERVER_SEQ_PAD-wide block after that; envelopeId is everything after the
-  // second colon (envelopeIds may contain colons, so we don't split-3).
-  const firstColon = rest.indexOf(":");
-  if (firstColon < 0) return undefined;
-  const targetDeviceId = rest.slice(0, firstColon);
-  const afterTarget = rest.slice(firstColon + 1);
-  if (afterTarget.length < SERVER_SEQ_PAD + 1) return undefined;
-  const paddedSeq = afterTarget.slice(0, SERVER_SEQ_PAD);
-  if (afterTarget.charCodeAt(SERVER_SEQ_PAD) !== ":".charCodeAt(0)) return undefined;
-  const envelopeId = afterTarget.slice(SERVER_SEQ_PAD + 1);
+  const prefix = envByTargetPrefix(expectedTargetDeviceId);
+  if (!key.startsWith(prefix)) return undefined;
+  const suffix = key.slice(prefix.length);
+  if (suffix.length < SERVER_SEQ_PAD + 2) return undefined;
+  const paddedSeq = suffix.slice(0, SERVER_SEQ_PAD);
+  if (!/^\d{20}$/.test(paddedSeq)) return undefined;
+  if (suffix.charCodeAt(SERVER_SEQ_PAD) !== ":".charCodeAt(0)) return undefined;
+  const envelopeId = suffix.slice(SERVER_SEQ_PAD + 1);
   if (envelopeId.length === 0) return undefined;
-  return { targetDeviceId, paddedSeq, envelopeId };
+  return { targetDeviceId: expectedTargetDeviceId, paddedSeq, envelopeId };
+}
+
+/** Dual-read parser for the old format, limited to unambiguous colon-free targets. */
+function parseLegacyEnvByTargetKey(
+  key: string,
+  expectedTargetDeviceId: string,
+): { targetDeviceId: string; paddedSeq: string; envelopeId: string } | undefined {
+  if (expectedTargetDeviceId.includes(":")) return undefined;
+  const prefix = legacyEnvByTargetPrefix(expectedTargetDeviceId);
+  if (!key.startsWith(prefix)) return undefined;
+  const suffix = key.slice(prefix.length);
+  if (suffix.length < SERVER_SEQ_PAD + 2) return undefined;
+  const paddedSeq = suffix.slice(0, SERVER_SEQ_PAD);
+  if (!/^\d{20}$/.test(paddedSeq) || suffix[SERVER_SEQ_PAD] !== ":") return undefined;
+  const envelopeId = suffix.slice(SERVER_SEQ_PAD + 1);
+  return envelopeId.length > 0
+    ? { targetDeviceId: expectedTargetDeviceId, paddedSeq, envelopeId }
+    : undefined;
 }
 
 /**

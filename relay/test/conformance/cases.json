@@ -142,7 +142,10 @@
           "action": "expectStorageState",
           "in": "room",
           "expect": {
-            "missingEnvIdx": [
+            "hasEnvIdx": [
+              "env-lc-1"
+            ],
+            "missingEnvPayload": [
               "env-lc-1"
             ],
             "hasOwnerAckMarker": [
@@ -1036,7 +1039,10 @@
           "action": "expectStorageState",
           "in": "room",
           "expect": {
-            "missingEnvIdx": [
+            "hasEnvIdx": [
+              "ob-1"
+            ],
+            "missingEnvPayload": [
               "ob-1"
             ],
             "hasOwnerAckMarker": [

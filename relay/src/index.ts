@@ -4,6 +4,7 @@ import {
   blobObjectKey,
   INTERNAL_BLOB_ENVELOPE_HEADER,
   INTERNAL_BLOB_LEASE_HEADER,
+  INTERNAL_BLOB_OBJECT_KEY_VERSION_HEADER,
   INTERNAL_BLOB_UPLOAD_HEADER,
   INTERNAL_BLOB_UPLOAD_PATH,
   verifyBlobCap,
@@ -16,6 +17,11 @@ import { WorkerEdgeRateLimit, type RateLimitResult } from "./rate-limit";
 import { RoomDO } from "./room-do";
 import { INTERNAL_QUOTA_SOURCE_HEADER, QuotaDO } from "./quota-do";
 import type { Env } from "./env";
+import {
+  ENVELOPE_ID_MAX_CHARS,
+  isProtocolId,
+  ROOM_ID_MAX_CHARS,
+} from "./opaque-key";
 
 export { QuotaDO, RoomDO };
 
@@ -210,6 +216,30 @@ export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    // Reject unsafe room identifiers before quota attribution, edge-rate
+    // counters, Durable Object name allocation, or any other durable side
+    // effect. Protocol-v2 room IDs are base64url tokens, not path text.
+    const earlyRoomMatch = url.pathname.match(ROOM_ROUTE_RE);
+    if (url.pathname.startsWith("/v2/rooms/") && earlyRoomMatch?.[1] === undefined) {
+      return identifierError();
+    }
+    if (earlyRoomMatch?.[1] !== undefined && !isProtocolId(earlyRoomMatch[1], ROOM_ID_MAX_CHARS)) {
+      return identifierError();
+    }
+    // Decode blob object path segments before the edge-rate boundary so a
+    // malformed escape is a bounded no-op. Unsafe-but-well-formed IDs continue
+    // through the standard edge caps and can proceed only via the exact legacy
+    // capability/admission path below.
+    const earlyBlobObjectMatch = url.pathname.match(ROOM_BLOB_OBJECT_RE);
+    let earlyBlobEnvelopeId: string | undefined;
+    if (earlyBlobObjectMatch?.[2] !== undefined) {
+      try {
+        earlyBlobEnvelopeId = decodeURIComponent(earlyBlobObjectMatch[2]);
+      } catch {
+        return identifierError();
+      }
+    }
+
     // Never trust a client-supplied internal source bucket. Strip it on every
     // route, then overwrite it only for a bare room-create POST using the
     // canonical Cloudflare edge IP (never X-Forwarded-For). If attribution is
@@ -349,7 +379,14 @@ export default {
     const blobObjectMatch = url.pathname.match(ROOM_BLOB_OBJECT_RE);
     if (blobObjectMatch && blobObjectMatch[1] && blobObjectMatch[2]) {
       const roomId = blobObjectMatch[1];
-      const envelopeId = decodeURIComponent(blobObjectMatch[2]);
+      let envelopeId: string;
+      try {
+        envelopeId = decodeURIComponent(blobObjectMatch[2]);
+      } catch {
+        return identifierError();
+      }
+      const isUnsafeLegacyId = !isProtocolId(envelopeId, ENVELOPE_ID_MAX_CHARS);
+      if (isUnsafeLegacyId && earlyBlobEnvelopeId !== envelopeId) return identifierError();
       // Blob PUT/GET don't pass through the DO, so the Worker fetches policy
       // directly from the DO (via a GET on the room itself) only when we need
       // to emit CORS — for now, blob responses skip CORS entirely since the
@@ -369,8 +406,13 @@ export default {
         const id = env.RELAY_ROOMS.idFromName(roomId);
         const stub = env.RELAY_ROOMS.get(id);
         const response = await stub.fetch(request);
+        if (response.status === 404) {
+          const upgraded = await maybeUpgradeUnknownRoomTo429(response, ip, roomId);
+          if (upgraded !== undefined) return corsMiddleware(request, env, upgraded);
+        }
         return corsMiddleware(request, env, response);
       }
+      if (isUnsafeLegacyId) return identifierError();
       return Response.json(
         { error: { code: "ATTN_METHOD_NOT_ALLOWED", message: `${request.method} not allowed on /blobs/:envelopeId` } },
         { status: 405 },
@@ -404,6 +446,13 @@ export default {
     return new Response("not implemented yet", { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
+
+function identifierError(): Response {
+  return Response.json(
+    { error: { code: "ATTN_IDENTIFIER_INVALID", message: "invalid protocol identifier" } },
+    { status: 400 },
+  );
+}
 
 async function withPrivateQuotaSource(
   request: Request,
@@ -614,14 +663,15 @@ async function handleBlobPut(
         [INTERNAL_BLOB_LEASE_HEADER]: verified.leaseId,
         [INTERNAL_BLOB_UPLOAD_HEADER]: verified.uploadId ?? "",
         [INTERNAL_BLOB_ENVELOPE_HEADER]: envelopeId,
+        [INTERNAL_BLOB_OBJECT_KEY_VERSION_HEADER]: String(verified.objectKeyVersion ?? 1),
       },
       body: bodyBytes,
     });
-  } catch (err) {
+  } catch {
     return blobErrorResponse(
       500,
       "ATTN_BLOB_UPLOAD_FAILED",
-      `room upload failed: ${(err as Error).message}`,
+      "room upload failed",
     );
   }
 }
@@ -654,10 +704,10 @@ async function handleBlobGet(
   if (verified === undefined) {
     return blobErrorResponse(401, "ATTN_BLOB_CAP_INVALID", "invalid or expired blob cap");
   }
-  const key = blobObjectKey(roomId, verified.leaseId, envelopeId);
+  const key = blobObjectKey(roomId, verified.leaseId, envelopeId, verified.objectKeyVersion ?? 1);
   const obj = await env.RELAY_BLOBS.get(key);
   if (obj === null) {
-    return blobErrorResponse(404, "ATTN_BLOB_NOT_FOUND", `blob ${key} not found`);
+    return blobErrorResponse(404, "ATTN_BLOB_NOT_FOUND", "blob not found");
   }
   // Stream bytes back. Content-Length comes from the R2 object metadata.
   const headers = new Headers({

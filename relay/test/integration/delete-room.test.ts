@@ -562,7 +562,6 @@ describe("DELETE /v2/rooms/:roomId — admission required", () => {
       kind: "owner",
       keypair: ownerKp,
     });
-
     const res = await deleteRoom({
       roomId,
       admissionKey,
@@ -579,6 +578,38 @@ describe("DELETE /v2/rooms/:roomId — admission required", () => {
 });
 
 describe("DELETE /v2/rooms/:roomId — PoW required", () => {
+  it.each([
+    ["unsafe", "dev|unsafe", "ATTN_IDENTIFIER_INVALID"],
+    ["unknown", "dev-unknown", "ATTN_DEVICE_UNREGISTERED"],
+  ] as const)("rejects an %s PoW device before rate/replay mutation", async (_label, powDeviceId, code) => {
+    const roomId = uniqueRoomId("del-invalid-device");
+    const ownerKp = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-own",
+      participantId: "owner",
+      kind: "owner",
+      keypair: ownerKp,
+    });
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    const before = await runInDurableObject(stub, async (_instance, state) =>
+      new Map(await state.storage.list()),
+    );
+    const response = await deleteRoom({
+      roomId,
+      admissionKey,
+      ownerSig: ownerKp,
+      powDeviceId,
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe(code);
+    expect(await runInDurableObject(stub, async (_instance, state) =>
+      new Map(await state.storage.list()),
+    )).toEqual(before);
+  });
+
   it("returns 400 ATTN_POW_INVALID when Attn-PoW is missing", async () => {
     const roomId = uniqueRoomId("del-no-pow");
     const ownerKp = await generateEd25519Keypair();
@@ -616,6 +647,14 @@ describe("DELETE /v2/rooms/:roomId — owner signature required", () => {
       roomId,
       ownerKp,
     });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-own",
+      participantId: "owner",
+      kind: "owner",
+      keypair: ownerKp,
+    });
 
     const res = await deleteRoom({
       roomId,
@@ -635,6 +674,14 @@ describe("DELETE /v2/rooms/:roomId — owner signature required", () => {
     const admissionKey = await createRoom({
       roomId,
       ownerKp,
+    });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-own",
+      participantId: "owner",
+      kind: "owner",
+      keypair: ownerKp,
     });
     // Sign with reviewer's key — it has a valid Ed25519 sig shape but doesn't
     // match the stored ownerSigningKey.

@@ -10,12 +10,15 @@
 import { DurableObject } from "cloudflare:workers";
 
 import type { Env } from "./env";
+import { encodeOpaqueSegment } from "./opaque-key";
 
 const ROLLING_WINDOW_MS = 24 * 60 * 60 * 1000;
 const GLOBAL_STATE_KEY = "global:v1";
-const LEASE_PREFIX = "lease:";
+const LEASE_PREFIX = "lease_v2:";
+const LEGACY_LEASE_PREFIX = "lease:";
 const SOURCE_PREFIX = "source:";
-const SOURCE_EXPIRY_PREFIX = "source_expiry:";
+const SOURCE_EXPIRY_PREFIX = "source_expiry_v2:";
+const LEGACY_SOURCE_EXPIRY_PREFIX = "source_expiry:";
 const EXPIRY_TIMESTAMP_WIDTH = 16;
 /** Bound one alarm transaction's reads/writes even after a large burst. */
 const EXPIRY_ALARM_BATCH_SIZE = 128;
@@ -116,9 +119,24 @@ export class QuotaDO extends DurableObject<Env> {
     try {
       decision = await this.ctx.storage.transaction(async (txn) => {
         const leaseKey = quotaLeaseKey(body.roomId);
-        const existing = await txn.get<QuotaLease>(leaseKey);
+        const legacyLeaseKey = legacyQuotaLeaseKey(body.roomId);
+        const [versionedLease, legacyLease] = await Promise.all([
+          txn.get<QuotaLease>(leaseKey),
+          txn.get<QuotaLease>(legacyLeaseKey),
+        ]);
+        if (versionedLease !== undefined && legacyLease !== undefined &&
+          !sameQuotaLease(versionedLease, legacyLease)) {
+          return corruptDecision("inconsistent stored quota lease");
+        }
+        const existing = versionedLease ?? legacyLease;
         if (existing !== undefined) {
-          if (!isStoredLease(existing)) return corruptDecision("invalid stored quota lease");
+          if (!isStoredLease(existing) || existing.roomId !== body.roomId) {
+            return corruptDecision("invalid stored quota lease");
+          }
+          if (versionedLease === undefined) {
+            await txn.put(leaseKey, existing);
+            await txn.delete(legacyLeaseKey);
+          }
           if (
             existing.leaseId === body.leaseId &&
             existing.sourceBucket === body.sourceBucket &&
@@ -260,14 +278,25 @@ export class QuotaDO extends DurableObject<Env> {
     try {
       decision = await this.ctx.storage.transaction(async (txn) => {
         const leaseKey = quotaLeaseKey(body.roomId);
-        const existing = await txn.get<QuotaLease>(leaseKey);
+        const legacyLeaseKey = legacyQuotaLeaseKey(body.roomId);
+        const [versionedLease, legacyLease] = await Promise.all([
+          txn.get<QuotaLease>(leaseKey),
+          txn.get<QuotaLease>(legacyLeaseKey),
+        ]);
+        if (versionedLease !== undefined && legacyLease !== undefined &&
+          !sameQuotaLease(versionedLease, legacyLease)) {
+          return corruptDecision("inconsistent stored quota lease");
+        }
+        const existing = versionedLease ?? legacyLease;
         // Absent and stale-generation releases are both idempotent no-ops.
         // The random leaseId prevents a delayed release from decrementing a
         // newly recreated room that happens to reuse the same roomId.
         if (existing === undefined) {
           return { status: 204 };
         }
-        if (!isStoredLease(existing)) return corruptDecision("invalid stored quota lease");
+        if (!isStoredLease(existing) || existing.roomId !== body.roomId) {
+          return corruptDecision("invalid stored quota lease");
+        }
         if (existing.leaseId !== body.leaseId) return { status: 204 };
 
         const sourceKey = quotaSourceKey(existing.sourceBucket);
@@ -301,7 +330,7 @@ export class QuotaDO extends DurableObject<Env> {
           liveRooms: global.liveRooms - 1,
           reservedBytes: global.reservedBytes - existing.reservedBytes,
         });
-        await txn.delete(leaseKey);
+        await txn.delete([leaseKey, legacyLeaseKey]);
         return { status: 204 };
       });
     } catch {
@@ -325,10 +354,23 @@ export class QuotaDO extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     const now = Date.now();
     await this.ctx.storage.transaction(async (txn) => {
-      const indexed = await txn.list<SourceExpiryRecord>({
-        prefix: SOURCE_EXPIRY_PREFIX,
-        limit: EXPIRY_ALARM_BATCH_SIZE + 1,
-      });
+      const [versionedIndexed, legacyIndexed] = await Promise.all([
+        txn.list<SourceExpiryRecord>({
+          prefix: SOURCE_EXPIRY_PREFIX,
+          limit: EXPIRY_ALARM_BATCH_SIZE + 1,
+        }),
+        txn.list<SourceExpiryRecord>({
+          prefix: LEGACY_SOURCE_EXPIRY_PREFIX,
+          limit: EXPIRY_ALARM_BATCH_SIZE + 1,
+        }),
+      ]);
+      const indexed = [...versionedIndexed, ...legacyIndexed]
+        .sort((a, b) => {
+          const at = expiryTimestampFromKey(a[0]) ?? 0;
+          const bt = expiryTimestampFromKey(b[0]) ?? 0;
+          return at - bt || (a[0] < b[0] ? -1 : 1);
+        })
+        .slice(0, EXPIRY_ALARM_BATCH_SIZE + 1);
 
       const processed: Array<[string, SourceExpiryRecord]> = [];
       let nextAlarmAt: number | undefined;
@@ -427,7 +469,11 @@ function positiveInt(raw: string | undefined, name: string): number {
 }
 
 function quotaLeaseKey(roomId: string): string {
-  return `${LEASE_PREFIX}${roomId}`;
+  return `${LEASE_PREFIX}${encodeOpaqueSegment(roomId)}`;
+}
+
+function legacyQuotaLeaseKey(roomId: string): string {
+  return `${LEGACY_LEASE_PREFIX}${roomId}`;
 }
 
 function quotaSourceKey(sourceBucket: string): string {
@@ -435,14 +481,19 @@ function quotaSourceKey(sourceBucket: string): string {
 }
 
 function sourceExpiryKey(expiresAt: number, roomId: string, leaseId: string): string {
-  return `${SOURCE_EXPIRY_PREFIX}${String(expiresAt).padStart(EXPIRY_TIMESTAMP_WIDTH, "0")}:${roomId}:${leaseId}`;
+  return `${SOURCE_EXPIRY_PREFIX}${String(expiresAt).padStart(EXPIRY_TIMESTAMP_WIDTH, "0")}:${encodeOpaqueSegment(roomId)}:${encodeOpaqueSegment(leaseId)}`;
 }
 
 function expiryTimestampFromKey(key: string): number | undefined {
-  if (!key.startsWith(SOURCE_EXPIRY_PREFIX)) return undefined;
+  const prefix = key.startsWith(SOURCE_EXPIRY_PREFIX)
+    ? SOURCE_EXPIRY_PREFIX
+    : key.startsWith(LEGACY_SOURCE_EXPIRY_PREFIX)
+      ? LEGACY_SOURCE_EXPIRY_PREFIX
+      : undefined;
+  if (prefix === undefined) return undefined;
   const raw = key.slice(
-    SOURCE_EXPIRY_PREFIX.length,
-    SOURCE_EXPIRY_PREFIX.length + EXPIRY_TIMESTAMP_WIDTH,
+    prefix.length,
+    prefix.length + EXPIRY_TIMESTAMP_WIDTH,
   );
   if (raw.length !== EXPIRY_TIMESTAMP_WIDTH || !/^\d+$/.test(raw)) return undefined;
   const value = Number(raw);
@@ -470,6 +521,12 @@ function isStoredLease(value: QuotaLease): boolean {
     Number.isSafeInteger(value.acquiredAt) &&
     value.acquiredAt >= 0
   );
+}
+
+function sameQuotaLease(a: QuotaLease, b: QuotaLease): boolean {
+  return a.roomId === b.roomId && a.leaseId === b.leaseId &&
+    a.sourceBucket === b.sourceBucket && a.reservedBytes === b.reservedBytes &&
+    a.acquiredAt === b.acquiredAt;
 }
 
 function isSourceState(value: SourceState): boolean {

@@ -13,7 +13,7 @@
  *   - {@link DurableObjectRateLimit} — persisted in DO storage, scoped to
  *     a single room's blast radius. Tracks per-device request count
  *     (default 120/min). The per-(deviceId, minute) counter is stored
- *     at `rate:<deviceId>:<windowStartMin>` per relay-spec.md
+ *     at `rate_v2:<encodedDeviceId>:<windowStartMin>` per relay-spec.md
  *     §Storage Layout; entries past the current minute fall out of the
  *     sliding window read.
  *
@@ -66,6 +66,8 @@ export interface RateLimitResult {
   /** Canonical error code (`ATTN_RATE_LIMITED` or `ATTN_ENUM_LIMITED`). */
   code?: string;
 }
+
+import { encodeOpaqueSegment } from "./opaque-key";
 
 const MINUTE_MS = 60_000;
 const FIVE_MIN_MS = 5 * 60_000;
@@ -312,21 +314,45 @@ export class DurableObjectRateLimit {
     const now = this.nowFn();
     const windowStartMin = Math.floor(now / MINUTE_MS);
     const key = rateKey(deviceId, windowStartMin);
-    const current = (await this.storage.get<number>(key)) ?? 0;
+    const legacyKey = legacyRateKey(deviceId, windowStartMin);
+    const [versioned, legacy] = await Promise.all([
+      this.storage.get<number>(key),
+      this.storage.get<number>(legacyKey),
+    ]);
+    const valid = (value: number | undefined): value is number =>
+      value !== undefined && Number.isSafeInteger(value) && value >= 0;
+    if ((versioned !== undefined && !valid(versioned)) || (legacy !== undefined && !valid(legacy))) {
+      return { ok: false, code: "ATTN_RATE_LIMITED", retryAfterMs: MINUTE_MS };
+    }
+    // Migration is one storage transaction. Coexisting values must therefore
+    // agree; taking max would let a corrupted lower value survive as an
+    // alternate interpretation of the security counter.
+    if (versioned !== undefined && legacy !== undefined && versioned !== legacy) {
+      return { ok: false, code: "ATTN_RATE_LIMITED", retryAfterMs: MINUTE_MS };
+    }
+    const current = versioned ?? legacy ?? 0;
     const next = current + 1;
     if (next > this.config.perDevicePerMinute) {
       const retryAfterMs = Math.max(1, (windowStartMin + 1) * MINUTE_MS - now);
       return { ok: false, code: "ATTN_RATE_LIMITED", retryAfterMs };
     }
-    await this.storage.put(key, next);
+    await this.storage.transaction(async (txn) => {
+      await txn.put(key, next);
+      if (legacy !== undefined) await txn.delete(legacyKey);
+    });
     return { ok: true };
   }
 }
 
 /** Storage-key builder shared with the alarm sweep so they agree on the prefix. */
 export function rateKey(deviceId: string, windowStartMin: number): string {
+  return `rate_v2:${encodeOpaqueSegment(deviceId)}:${windowStartMin}`;
+}
+
+export function legacyRateKey(deviceId: string, windowStartMin: number): string {
   return `rate:${deviceId}:${windowStartMin}`;
 }
 
 /** Prefix used by the alarm sweep to walk + prune stale rate buckets. */
-export const RATE_KEY_PREFIX = "rate:";
+export const RATE_KEY_PREFIX = "rate_v2:";
+export const LEGACY_RATE_KEY_PREFIX = "rate:";

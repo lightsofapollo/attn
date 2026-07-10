@@ -38,6 +38,23 @@ The server must not:
 
 The relay does not issue identities. All identities are derived client-side from `roomSecret`.
 
+Protocol identifiers are nonempty base64url-without-padding strings. `roomId`
+and `envelopeId` are at most 128 characters; `participantId` and `deviceId` are
+at most 64. A fresh unsafe request-body identifier is rejected with the generic
+`400 ATTN_IDENTIFIER_INVALID` before quota, per-device rate, PoW-replay, or
+content-storage mutation. An unsafe blob URL is admitted only as an exact
+legacy compatibility path after the normal edge IP/anti-enumeration checks and
+capability or admission authentication. PoW v2 canonical bytes are unchanged.
+
+All fresh/new-layout writes encode client identifiers before composing a
+durable or R2 key. An authenticated exact legacy blob re-presign may update its
+existing raw `blob_resv:` row and `rooms/` object so already-stored ciphertext
+remains available; it cannot create a new unsafe identity. The storage segment
+codec is `base64url(UTF8(JSON.stringify(id)))`; decoding requires fatal UTF-8,
+a nonempty JSON string, and a canonical encode round-trip. JSON escaping
+preserves exact UTF-16 strings, including lone surrogates, and therefore keeps
+NFC/NFD and U+FFFD/lone-surrogate identifiers distinct.
+
 ### Admission Key
 
 ```text
@@ -190,6 +207,9 @@ Behavior:
 
 - Verify `selfSignature` against `publicSigningKey`. Reject `400 ATTN_DEVICE_SELF_SIG_INVALID` on failure.
 - If `kind == "owner"`, the `publicSigningKey` must equal `ownerSigningKey` stored at creation. Reject `403 ATTN_OWNER_KEY_MISMATCH` otherwise. This is what makes "owner" cryptographically meaningful.
+- `deviceId` is room-wide unique because ACK and WebSocket routes identify a
+  device without a participant tuple. Reject `409 ATTN_DEVICE_ID_CONFLICT` if
+  another participant already owns it; multiple stored owners are corruption.
 - Upsert by `(participantId, deviceId)`. Reject `409 ATTN_DEVICE_KEY_CHANGED` if an existing record has a different `publicSigningKey` for the same `(participantId, deviceId)` — the trust-on-first-use binding is immutable for the life of the room.
 - Requires admission HMAC.
 
@@ -303,7 +323,7 @@ Behavior:
 - Mark envelopes as ACKed by `deviceId`. Multiple devices may ACK independently.
 - If owner signature present and policy allows deletion:
   - Delete envelopes ACKed by *any* owner device. (Owner has multiple devices; once the owner has the bits anywhere, the server may drop them. Cross-device replication is the owner's problem — see `amendments.md` §Multi-device.)
-- Payload/target-index deletion, exact `meta:envelope_count` and `meta:bytes_used` debits, ACK markers, and `meta:oldest_retained_seq` are committed in one storage transaction. `env_idx` is retained as a cross-request idempotency tombstone, so a POST retry returns the original `serverSeq` without restoring or recharging the payload. After registered-device rate/PoW verification, an actual owner-deletion branch validates every current `env:<paddedSeq>:<envelopeId>` key against its `EnvelopeRecord` and requires its sequence not to exceed `meta:server_seq`; corruption is `500 ATTN_ROOM_CORRUPT`. ACK-only and missing/invalid-PoW requests never trigger this payload scan. The cursor floor is computed against the logical post-delete payload set: it is the smallest retained `serverSeq`, or `meta:server_seq` when no payload remains.
+- Payload/target-index deletion, exact `meta:envelope_count` and `meta:bytes_used` debits, ACK markers, and `meta:oldest_retained_seq` are committed in one storage transaction. The versioned index (or an exact legacy index during rollout) is retained as a cross-request idempotency tombstone, so a POST retry returns the original `serverSeq` without restoring or recharging the payload. After registered-device rate/PoW verification, an actual owner-deletion branch validates every current versioned or exact-legacy envelope key against its `EnvelopeRecord` and requires its sequence not to exceed `meta:server_seq`; corruption is `500 ATTN_ROOM_CORRUPT`. ACK-only and missing/invalid-PoW requests never trigger this payload scan. The cursor floor is computed against the merged logical post-delete payload set: it is the smallest retained `serverSeq`, or `meta:server_seq` when no payload remains.
 - Idempotent. Acking a non-existent or already-deleted envelope is `204`.
 
 Response: `204 No Content`.
@@ -339,7 +359,7 @@ Server response:
   "method": "PUT",
   "headers": { "Content-Type": "application/octet-stream" },
   "expiresAt": 1736012945678,
-  "blobKey": "rooms/<roomId>/generations/<leaseId>/blobs/<envelopeId>"
+  "blobKey": "rooms_v2/<enc(roomId)>/generations/<enc(leaseId)>/blobs/<enc(envelopeId)>"
 }
 ```
 
@@ -492,30 +512,45 @@ meta:envelope_count             -> u64
 meta:oldest_retained_seq        -> u64 (0 before deletion; then lowest retained seq, or server_seq if empty)
 meta:quota_lease                -> { roomId, random leaseId, sourceBucket, reservedBytes }
 
-device:<deviceId>               -> DeviceRecord JSON
-device_order:<registeredAt>:<deviceId> -> "" (secondary index for ordered list)
+device_v2:<enc(participantId)>:<enc(deviceId)> -> DeviceRecord JSON
+device_order_v2:<registeredAt>:<seq>:<enc(participantId)>:<enc(deviceId)> -> ""
 
-env:<paddedServerSeq>:<envelopeId> -> Envelope JSON
-env_idx:<envelopeId>            -> paddedServerSeq (durable dedupe tombstone; retained after payload deletion)
-env_by_target_v2:<base64url(UTF8 JSON.stringify(deviceId))>:<paddedServerSeq>:<envelopeId> -> "" (injective over exact JS UTF-16 strings)
+env_v2:<paddedServerSeq>:<enc(envelopeId)> -> Envelope JSON
+env_idx_v2:<enc(envelopeId)>    -> paddedServerSeq (durable dedupe tombstone; retained after payload deletion)
+env_by_target_v3:<enc(deviceId)>:<paddedServerSeq>:<enc(envelopeId)> -> ""
+env_by_target_v2:<enc(deviceId)>:<paddedServerSeq>:<raw envelopeId> -> "" (legacy dual-read/delete)
 env_by_target:<colon-free deviceId>:<paddedServerSeq>:<envelopeId> -> "" (legacy dual-read/delete only)
 
-ack:<deviceId>:<envelopeId>     -> u64 ackedAt
-ack_owner:<envelopeId>          -> "" (presence indicates owner-acked)
+ack_v2:<enc(deviceId)>:<enc(envelopeId)> -> u64 ackedAt
+ack_owner_v2:<enc(envelopeId)>  -> "" (presence indicates owner-acked)
+blob_resv_v2:<enc(envelopeId)>  -> generation/upload reservation + objectKeyVersion
 
 pow_seen:<expiresAt>:<sha256(token)> -> "" (replay protection, alarm-cleaned)
 
-rate:<deviceId>:<windowStartMin> -> u32 count
+rate_v2:<enc(deviceId)>:<windowStartMin> -> u32 count
 ```
 
 QuotaDO stores only HMAC-pseudonymized source identifiers and aggregate
 capacity state:
 
 ```text
-lease:<roomId>                  -> { roomId, leaseId, sourceBucket, reservedBytes, acquiredAt }
+lease_v2:<enc(roomId)>          -> { roomId, leaseId, sourceBucket, reservedBytes, acquiredAt }
 source:<sourceBucket>           -> { liveRooms, allocations: [{ at, bytes }] }
+source_expiry_v2:<expiresAt>:<enc(roomId)>:<enc(leaseId)> -> source allocation expiry record
 global:v1                       -> { liveRooms, reservedBytes }
 ```
+
+Readers are versioned-first with exact legacy fallback for `device:`,
+`device_order:`, `env:`, `env_idx:`, `blob_resv:`, `rate:`, `lease:`, and
+`source_expiry:` rollout state. Historical `ack:`/`ack_owner:` rows are not
+authorization, routing, deletion, or accounting inputs and are not consulted.
+Stored record fields
+must match the requested identifiers; ambiguous legacy delimiter parsing is
+never identity authority. If exact legacy and v2 rows coexist they must agree
+or the room fails closed as `ATTN_ROOM_CORRUPT`. Replay, cursor-floor, signal
+FIFO, ACK deletion, quota alarms, and device ordering merge both layouts and
+deduplicate logical records while treating ciphertext as opaque data; they do
+not decrypt or interpret it.
 
 The Worker deletes any client-supplied internal quota-source header, then
 derives `sourceBucket = HMAC-SHA-256(QUOTA_IP_HASH_KEY,
@@ -561,8 +596,8 @@ const next = (await this.state.storage.get("meta:server_seq")) ?? 0;
 const assigned = next + 1;
 await this.state.storage.put({
   "meta:server_seq": assigned,
-  [`env:${pad(assigned)}:${envelopeId}`]: envelope,
-  [`env_idx:${envelopeId}`]: pad(assigned),
+  [`env_v2:${pad(assigned)}:${enc(envelopeId)}`]: envelope,
+  [`env_idx_v2:${enc(envelopeId)}`]: pad(assigned),
 });
 return assigned;
 ```
@@ -580,7 +615,8 @@ Two alarms govern room lifetime. First to fire wins.
 On hard-max or idle alarm fire:
 
 1. Send `4002 room expired` close frame to all WS clients.
-2. Delete R2 ciphertext via `list + delete` against the `rooms/<roomId>/` prefix.
+2. Delete R2 ciphertext via bounded `list + delete` against both the encoded
+   `rooms_v2/<enc(roomId)>/` and exact legacy `rooms/<roomId>/` prefixes.
 3. Remove user content and metadata, retaining only a quota-release tombstone.
 4. Idempotently release the generation reservation; retry by alarm if the quota coordinator is temporarily unavailable.
 5. Delete the tombstone. The DO becomes dormant; subsequent requests to the same `roomId` see no policy and `404`.
@@ -589,7 +625,10 @@ Cloudflare's DO API supports only one alarm at a time. The implementation mainta
 
 ### Hibernation Tags
 
-Each accepted WebSocket gets `state.acceptWebSocket(ws, [deviceId, participantId])`. The hibernation handler reads the tags to route incoming envelopes without de-serializing peer maps.
+Each accepted WebSocket gets namespaced injective tags
+`["d2:" + enc(deviceId), "p2:" + enc(participantId)]`; raw identifiers remain
+only in the hibernation attachment/frame metadata. Exact legacy socket lookup
+uses stored device records rather than parsing delimiter-bearing tags.
 
 ## Caps (Server Hard Maxima)
 
@@ -619,8 +658,11 @@ Rate limit responses: `429` with `retryAfterMs` header AND in the JSON error bod
 
 ## R2 Integration
 
-- Buckets: isolated production/staging buckets, prefix per generation:
-  `rooms/<roomId>/generations/<leaseId>/blobs/<envelopeId>`.
+- Buckets: isolated production/staging buckets, encoded prefix per generation:
+  `rooms_v2/<enc(roomId)>/generations/<enc(leaseId)>/blobs/<enc(envelopeId)>`.
+- Blob capabilities sign `objectKeyVersion: 2` for new objects. Its absence is
+  the exact legacy raw-key layout, allowing old ciphertext to be fetched and
+  deleted without decrypting or copying it.
 - Upload via generation-bound, one-time PUT capability (15-minute TTL).
 - Read via presigned GET URL (5-minute TTL), fetched per access.
 - Lifecycle rule on the bucket: auto-delete objects older than **7 days** (matches the max wall-clock room TTL with `longSession=true`; ~7× headroom for default 24h rooms). Safety net only — DO alarm-driven deletion is primary. If the DO alarm slips by more than ~6 hours on a room near its TTL ceiling, blobs may disappear before the room itself; mitigation: every WS connect runs `if now > meta:expires_at - 1h: cleanup_check()` to belt-and-braces the alarm.
@@ -655,7 +697,9 @@ Per-room metrics emitted (Workers Analytics or similar):
 Logs:
 
 - Structured JSON, no ciphertext, no `nonce`, no envelopeId in the message body (only as a tag for correlation).
-- Fields allowed: `ts`, `roomId`, `deviceId`, `kind`, `serverSeq`, `bytes`, `code`, `latencyMs`.
+- Fields allowed: `ts`, validated protocol `roomId`/`deviceId` (or a one-way
+  correlation digest for legacy identifiers), `kind`, `serverSeq`, `bytes`,
+  `code`, `latencyMs`. Unsafe raw identifiers are never logged or echoed.
 - IP retained 24h then dropped.
 
 Alerts:

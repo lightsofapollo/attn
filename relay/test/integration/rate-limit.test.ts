@@ -430,6 +430,30 @@ describe("rate limit — per-IP room-create cap (Worker edge)", () => {
 // (5.6) which returns 404 ATTN_ROOM_NOT_FOUND on unknown rooms.
 
 describe("rate limit — anti-enumeration (GET /devices probes)", () => {
+  it("applies the same anti-enumeration budget to unsafe legacy blob paths", async () => {
+    const enumIp = `10.98.${(counter * 19) & 0xff}.1`;
+    const unsafeEnvelopeId = encodeURIComponent("legacy:blob");
+
+    for (let i = 0; i < 30; i++) {
+      const roomId = `unsafe-blob-probe-${counter}-${i}`;
+      const res = await SELF.fetch(
+        `${URL_BASE}/v2/rooms/${roomId}/blobs/${unsafeEnvelopeId}`,
+        { method: "GET", headers: { "CF-Connecting-IP": enumIp } },
+      );
+      expect(res.status).toBe(404);
+      const body = (await res.json()) as { error?: { code?: string } };
+      expect(body.error?.code).toBe("ATTN_ROOM_NOT_FOUND");
+    }
+
+    const overflow = await SELF.fetch(
+      `${URL_BASE}/v2/rooms/unsafe-blob-probe-${counter}-overflow/blobs/${unsafeEnvelopeId}`,
+      { method: "GET", headers: { "CF-Connecting-IP": enumIp } },
+    );
+    expect(overflow.status).toBe(429);
+    const body = (await overflow.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("ATTN_ENUM_LIMITED");
+  });
+
   it("31 distinct unknown roomIds from one IP → 31st returns 429 ATTN_ENUM_LIMITED", async () => {
     const enumIp = `10.99.${(counter * 17) & 0xff}.1`;
     const responses: number[] = [];

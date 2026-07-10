@@ -29,6 +29,7 @@ import { expect } from "vitest";
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
+import { encodeOpaqueSegment } from "../../src/opaque-key";
 import { presignBlobDownload } from "../../src/r2";
 import type {
   DeviceRecord,
@@ -1160,9 +1161,15 @@ async function actDeleteRoom(
     });
   }
   if (!(step.params.omitPow === true)) {
+    const powDevice = step.params.ownerSigFrom !== undefined
+      ? mustDevice(state, step.params.ownerSigFrom, label)
+      : [...state.devices.values()].find((device) => device.roomHandle === step.in);
+    if (powDevice === undefined) {
+      expect.fail(`${label}: DELETE PoW requires a registered device in room '${step.in}'`);
+    }
     headers["Attn-PoW"] = await mintPowForTests({
       roomId: room.roomId,
-      deviceId: "owner-delete", // PoW just needs to bind to *something*; the relay only checks the path
+      deviceId: powDevice.deviceId,
       method: "DELETE",
       path: `/v2/rooms/${room.roomId}`,
       difficulty: Math.max(12, room.policy.powBits),
@@ -1445,32 +1452,33 @@ async function actExpectStorageState(
       expect(s, label).toBeGreaterThanOrEqual(step.expect.serverSeqAtLeast);
     }
     for (const envId of step.expect.hasEnvIdx ?? []) {
-      const v = await ctxStorage.storage.get<string>(`env_idx:${envId}`);
-      expect(v, `${label}: env_idx:${envId} missing`).toBeDefined();
+      const key = `env_idx_v2:${encodeOpaqueSegment(envId)}`;
+      const v = await ctxStorage.storage.get<string>(key);
+      expect(v, `${label}: ${key} missing`).toBeDefined();
     }
     for (const envId of step.expect.missingEnvIdx ?? []) {
-      const v = await ctxStorage.storage.get<string>(`env_idx:${envId}`);
-      expect(v, `${label}: env_idx:${envId} unexpectedly present`).toBeUndefined();
+      const key = `env_idx_v2:${encodeOpaqueSegment(envId)}`;
+      const v = await ctxStorage.storage.get<string>(key);
+      expect(v, `${label}: ${key} unexpectedly present`).toBeUndefined();
     }
     for (const envId of step.expect.missingEnvPayload ?? []) {
-      const paddedSeq = await ctxStorage.storage.get<string>(`env_idx:${envId}`);
-      expect(paddedSeq, `${label}: env_idx:${envId} tombstone missing`).toBeDefined();
-      const payload = await ctxStorage.storage.get(`env:${paddedSeq}:${envId}`);
+      const indexKey = `env_idx_v2:${encodeOpaqueSegment(envId)}`;
+      const paddedSeq = await ctxStorage.storage.get<string>(indexKey);
+      expect(paddedSeq, `${label}: ${indexKey} tombstone missing`).toBeDefined();
+      const payloadKey = `env_v2:${paddedSeq}:${encodeOpaqueSegment(envId)}`;
+      const payload = await ctxStorage.storage.get(payloadKey);
       expect(payload, `${label}: env payload ${envId} unexpectedly present`).toBeUndefined();
     }
     for (const envId of step.expect.hasOwnerAckMarker ?? []) {
-      const v = await ctxStorage.storage.get<string>(`ack_owner:${envId}`);
-      expect(v, `${label}: ack_owner:${envId} missing`).toBeDefined();
+      const key = `ack_owner_v2:${encodeOpaqueSegment(envId)}`;
+      const v = await ctxStorage.storage.get<string>(key);
+      expect(v, `${label}: ${key} missing`).toBeDefined();
     }
     for (const { device, envelopeId } of step.expect.hasAckSlot ?? []) {
       const dev = mustDevice(state, device, label);
-      const v = await ctxStorage.storage.get<number>(
-        `ack:${dev.deviceId}:${envelopeId}`,
-      );
-      expect(
-        v,
-        `${label}: ack:${dev.deviceId}:${envelopeId} missing`,
-      ).toBeDefined();
+      const key = `ack_v2:${encodeOpaqueSegment(dev.deviceId)}:${encodeOpaqueSegment(envelopeId)}`;
+      const v = await ctxStorage.storage.get<number>(key);
+      expect(v, `${label}: ${key} missing`).toBeDefined();
     }
   });
 }

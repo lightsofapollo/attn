@@ -54,6 +54,14 @@ admissionKey:= HKDF-SHA-256(IKM=rootKey,    salt=empty, info="attn relay admissi
 
 `info` strings are byte-exact (UTF-8, no trailing newline). Two implementations must match these strings character-for-character.
 
+All derived wire identifiers use unpadded base64url. Relay protocol maxima are
+128 characters for `roomId`/`envelopeId` and 64 for `participantId`/`deviceId`.
+The relay's injective storage-key encoding is an indexing concern only and does
+not change KDF inputs, envelope AAD, signatures, or PoW v2 bytes. The relay may
+compare or forward stored ciphertext as opaque bytes during migration/replay;
+it never decrypts or interprets it, nor places ciphertext, nonces, or plaintext
+in storage keys, logs, or errors.
+
 Note: only `roomSecret` is shared by URL. All other keys are derived, never transmitted.
 
 ## Invite URLs

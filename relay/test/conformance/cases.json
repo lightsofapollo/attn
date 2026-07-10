@@ -501,6 +501,12 @@
         {
           "action": "bumpStorage",
           "in": "room",
+          "key": "meta:server_seq",
+          "value": 5
+        },
+        {
+          "action": "bumpStorage",
+          "in": "room",
           "key": "meta:oldest_retained_seq",
           "value": 5
         },

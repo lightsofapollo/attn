@@ -37,6 +37,7 @@ import {
   blobObjectKey,
   INTERNAL_BLOB_ENVELOPE_HEADER,
   INTERNAL_BLOB_LEASE_HEADER,
+  INTERNAL_BLOB_OBJECT_KEY_VERSION_HEADER,
   INTERNAL_BLOB_UPLOAD_HEADER,
   INTERNAL_BLOB_UPLOAD_PATH,
   presignBlobDownload,
@@ -44,6 +45,15 @@ import {
   type PresignedUploadResult,
 } from "./r2";
 import { DurableObjectRateLimit, type RateLimitResult } from "./rate-limit";
+import {
+  decodeOpaqueSegment,
+  DEVICE_ID_MAX_CHARS,
+  encodeOpaqueSegment,
+  ENVELOPE_ID_MAX_CHARS,
+  isProtocolId,
+  PARTICIPANT_ID_MAX_CHARS,
+  ROOM_ID_MAX_CHARS,
+} from "./opaque-key";
 import {
   acksRequestSchema,
   blobPresignRequestSchema,
@@ -218,6 +228,7 @@ interface RoomQuotaLease {
 
 interface EnvelopePayloadCandidate {
   payloadKey: string;
+  payloadKeys: string[];
   record: EnvelopeRecord;
 }
 
@@ -227,12 +238,33 @@ interface SignalEnvelopeCandidate extends EnvelopePayloadCandidate {
   byTargetKey: string;
 }
 
+interface EnvelopeLookup {
+  paddedSeq: string;
+  record?: EnvelopeRecord;
+  payloadKey: string;
+  payloadKeys: string[];
+}
+
+interface BlobReservationLookup {
+  key: string;
+  record: BlobReservation;
+  objectKeyVersion: 1 | 2;
+}
+
 interface ErrorBody {
   error: { code: string; message: string };
 }
 
 function errorResponse(status: number, code: string, message: string): Response {
   return Response.json({ error: { code, message } } satisfies ErrorBody, { status });
+}
+
+function identifierErrorResponse(): Response {
+  return errorResponse(400, "ATTN_IDENTIFIER_INVALID", "invalid protocol identifier");
+}
+
+function corruptRoomResponse(): Response {
+  return errorResponse(500, "ATTN_ROOM_CORRUPT", "inconsistent versioned storage state");
 }
 
 /**
@@ -349,6 +381,11 @@ export class RoomDO extends DurableObject<Env> {
       return this.handleInternalBlobUpload(request);
     }
 
+    const scopedRoomId = extractRoomIdAnyPath(url.pathname);
+    if (scopedRoomId !== undefined && !isProtocolId(scopedRoomId, ROOM_ID_MAX_CHARS)) {
+      return identifierErrorResponse();
+    }
+
     const roomMatch = url.pathname.match(ROOM_PATH_RE);
 
     // CORS preflight (attn-nnj.9.5). Browser clients hit OPTIONS before any
@@ -452,7 +489,13 @@ export class RoomDO extends DurableObject<Env> {
         return errorResponse(400, "ATTN_ROOM_ID_INVALID", "roomId and envelopeId required");
       }
       if (request.method === "GET") {
-        return this.handleBlobDownloadPresign(request, roomId, decodeURIComponent(envelopeId), url.pathname);
+        let decodedEnvelopeId: string;
+        try {
+          decodedEnvelopeId = decodeURIComponent(envelopeId);
+        } catch {
+          return identifierErrorResponse();
+        }
+        return this.handleBlobDownloadPresign(request, roomId, decodedEnvelopeId, url.pathname);
       }
       return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /blobs/:envelopeId`);
     }
@@ -991,6 +1034,29 @@ export class RoomDO extends DurableObject<Env> {
     }
     const body = result.data;
 
+    let earlyExistingDevice: DeviceRecord | undefined;
+    if (!isProtocolId(body.deviceId, DEVICE_ID_MAX_CHARS) ||
+      !isProtocolId(body.participantId, PARTICIPANT_ID_MAX_CHARS)) {
+      const exactLegacy = await this.loadDeviceExact(body.participantId, body.deviceId);
+      if (exactLegacy instanceof Response) return exactLegacy;
+      if (exactLegacy === undefined) return identifierErrorResponse();
+      earlyExistingDevice = exactLegacy;
+    }
+    const devicesBeforeRegistration = await this.listDevicesInOrder();
+    if (devicesBeforeRegistration instanceof Response) return devicesBeforeRegistration;
+    const sameDeviceId = devicesBeforeRegistration.filter(
+      (record) => record.deviceId === body.deviceId,
+    );
+    if (sameDeviceId.length > 1) return corruptRoomResponse();
+    if (sameDeviceId[0] !== undefined &&
+      sameDeviceId[0].participantId !== body.participantId) {
+      return errorResponse(
+        409,
+        "ATTN_DEVICE_ID_CONFLICT",
+        "device identifier is already bound to another participant",
+      );
+    }
+
     // 3. Per-device rate limit (attn-nnj.5.13). Sits between admission and
     //    PoW so admitted-but-noisy clients see a 429 immediately rather
     //    than burning PoW cycles only to be rate-rejected.
@@ -1063,24 +1129,32 @@ export class RoomDO extends DurableObject<Env> {
     //    key → 409. The (participantId, deviceId) → publicSigningKey binding is
     //    immutable per spec.
     const recordKey = deviceStorageKey(body.participantId, body.deviceId);
-    const existing = await this.ctx.storage.get<DeviceRecord>(recordKey);
+    const existingLookup = earlyExistingDevice ??
+      await this.loadDeviceExact(body.participantId, body.deviceId);
+    if (existingLookup instanceof Response) return existingLookup;
+    const existing = existingLookup;
     if (existing !== undefined && existing.publicSigningKey !== body.publicSigningKey) {
       return errorResponse(
         409,
         "ATTN_DEVICE_KEY_CHANGED",
-        `publicSigningKey for (${body.participantId}, ${body.deviceId}) does not match existing registration`,
+        "publicSigningKey does not match existing device registration",
+      );
+    }
+    if (existing !== undefined && !sameDeviceRegistration(existing, body)) {
+      return errorResponse(
+        409,
+        "ATTN_DEVICE_RECORD_CHANGED",
+        "device registration fields are immutable",
       );
     }
     if (existing === undefined) {
-      const registered = await this.ctx.storage.list({
-        prefix: DEVICE_ORDER_PREFIX,
-        limit: MAX_REGISTERED_DEVICES + 1,
-      });
-      if (registered.size >= MAX_REGISTERED_DEVICES) {
+      const registered = await this.listDevicesInOrder();
+      if (registered instanceof Response) return registered;
+      if (registered.length >= MAX_REGISTERED_DEVICES) {
         return errorResponse(
           507,
           "ATTN_ROOM_DEVICE_CAP",
-          `room ${roomId} already has ${registered.size} registered devices`,
+          `room ${roomId} already has ${registered.length} registered devices`,
         );
       }
     }
@@ -1099,9 +1173,30 @@ export class RoomDO extends DurableObject<Env> {
       orderKey = deviceOrderKey(registeredAt, seq, body.participantId, body.deviceId);
     }
     const record: DeviceRecord = { ...body, registeredAt };
-    await this.ctx.storage.put<unknown>({
-      [recordKey]: record,
-      [orderKey]: "",
+    const legacyRecordKey = legacyDeviceStorageKey(body.participantId, body.deviceId);
+    const [legacyRecord, legacyOrders] = await Promise.all([
+      this.ctx.storage.get<DeviceRecord>(legacyRecordKey),
+      this.ctx.storage.list<string>({ prefix: LEGACY_DEVICE_ORDER_PREFIX }),
+    ]);
+    const legacyKeysToDelete: string[] = [];
+    if (legacyRecord !== undefined && legacyRecord.participantId === body.participantId &&
+      legacyRecord.deviceId === body.deviceId) {
+      legacyKeysToDelete.push(legacyRecordKey);
+      for (const key of legacyOrders.keys()) {
+        const rest = key.slice(LEGACY_DEVICE_ORDER_PREFIX.length);
+        const first = rest.indexOf(":");
+        const second = first < 0 ? -1 : rest.indexOf(":", first + 1);
+        if (second >= 0 && rest.slice(second + 1) === `${body.participantId}:${body.deviceId}`) {
+          legacyKeysToDelete.push(key);
+        }
+      }
+    }
+    await this.ctx.storage.transaction(async (txn) => {
+      await txn.put<unknown>({
+        [recordKey]: record,
+        [orderKey]: "",
+      });
+      if (legacyKeysToDelete.length > 0) await txn.delete(legacyKeysToDelete);
     });
 
     return new Response(null, { status: 204 });
@@ -1133,17 +1228,8 @@ export class RoomDO extends DurableObject<Env> {
     // Range-scan the order index, then load each payload. We bound the scan
     // by HARD_MAX_PEERS — listing more devices than the policy allows would
     // indicate corrupt storage.
-    const orderEntries = await this.ctx.storage.list<string>({
-      prefix: DEVICE_ORDER_PREFIX,
-    });
-    const devices: DeviceRecord[] = [];
-    for (const orderKey of orderEntries.keys()) {
-      const { participantId, deviceId } = parseDeviceOrderKey(orderKey);
-      const record = await this.ctx.storage.get<DeviceRecord>(deviceStorageKey(participantId, deviceId));
-      if (record !== undefined) {
-        devices.push(record);
-      }
-    }
+    const devices = await this.listDevicesInOrder();
+    if (devices instanceof Response) return devices;
     return Response.json({ devices }, { status: 200 });
   }
 
@@ -1281,17 +1367,39 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(400, "ATTN_BODY_INVALID", "empty envelope batch");
     }
 
+    // Establish whether each identifier names an exact legacy/versioned row
+    // before caller-selected rate or PoW replay keys can mutate. Unsafe IDs
+    // are accepted only for an exact retry proven by a stored payload.
+    const preexistingById = new Map<string, EnvelopeLookup>();
+    for (const envelope of envelopes) {
+      const lookup = await this.resolveEnvelopeExact(envelope.envelopeId);
+      if (lookup instanceof Response) return lookup;
+      if (lookup !== undefined) preexistingById.set(envelope.envelopeId, lookup);
+      if (lookup?.record !== undefined &&
+        !sameEnvelopeInput(lookup.record, envelope) && conflictingEnvelopeId === undefined) {
+        conflictingEnvelopeId = envelope.envelopeId;
+      }
+      if (lookup === undefined && (
+        !isProtocolId(envelope.envelopeId, ENVELOPE_ID_MAX_CHARS) ||
+        !isProtocolId(envelope.authorId, PARTICIPANT_ID_MAX_CHARS) ||
+        !isProtocolId(envelope.deviceId, DEVICE_ID_MAX_CHARS) ||
+        (envelope.target?.deviceId !== undefined &&
+          !isProtocolId(envelope.target.deviceId, DEVICE_ID_MAX_CHARS))
+      )) {
+        return identifierErrorResponse();
+      }
+    }
+
     // Authenticate the PoW-bound first device before any caller-selected rate
     // or replay key can be written. The full per-envelope pass below still
     // authenticates every additional author/device pair in a mixed batch.
-    const firstDevice = await this.ctx.storage.get<DeviceRecord>(
-      deviceStorageKey(first.authorId, first.deviceId),
-    );
+    const firstDevice = await this.loadDeviceExact(first.authorId, first.deviceId);
+    if (firstDevice instanceof Response) return firstDevice;
     if (firstDevice === undefined) {
       return errorResponse(
         400,
         "ATTN_DEVICE_UNREGISTERED",
-        `envelope ${first.envelopeId} (authorId=${first.authorId}, deviceId=${first.deviceId}) not registered`,
+        "envelope author device is not registered",
       );
     }
 
@@ -1327,7 +1435,7 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(
         400,
         "ATTN_ENVELOPE_ID_CONFLICT",
-        `batch reuses envelopeId ${conflictingEnvelopeId} with different fields`,
+        "batch reuses an envelope identifier with different fields",
       );
     }
 
@@ -1349,14 +1457,14 @@ export class RoomDO extends DurableObject<Env> {
         return errorResponse(
           400,
           "ATTN_BODY_INVALID",
-          `envelope ${env.envelopeId} ciphertext base64url decode failed: ${(err as Error).message}`,
+          `envelope ciphertext base64url decode failed: ${(err as Error).message}`,
         );
       }
       if (decodedLen !== env.ciphertextBytes) {
         return errorResponse(
           400,
           "ATTN_CIPHERTEXT_LENGTH_MISMATCH",
-          `envelope ${env.envelopeId} ciphertextBytes=${env.ciphertextBytes} != decoded=${decodedLen}`,
+          `envelope ciphertextBytes=${env.ciphertextBytes} != decoded=${decodedLen}`,
         );
       }
       const sizeCap =
@@ -1365,19 +1473,19 @@ export class RoomDO extends DurableObject<Env> {
         return errorResponse(
           413,
           "ATTN_ENVELOPE_TOO_LARGE",
-          `envelope ${env.envelopeId} kind=${env.kind} ciphertextBytes=${env.ciphertextBytes} > cap ${sizeCap}`,
+          `envelope kind=${env.kind} ciphertextBytes=${env.ciphertextBytes} > cap ${sizeCap}`,
         );
       }
 
       // Device registration check. We look up by (authorId/participantId,
       // deviceId) — `authorId` is the participantId on the wire per the spec.
-      const deviceKey = deviceStorageKey(env.authorId, env.deviceId);
-      const deviceRecord = await this.ctx.storage.get<DeviceRecord>(deviceKey);
+      const deviceRecord = await this.loadDeviceExact(env.authorId, env.deviceId);
+      if (deviceRecord instanceof Response) return deviceRecord;
       if (deviceRecord === undefined) {
         return errorResponse(
           400,
           "ATTN_DEVICE_UNREGISTERED",
-          `envelope ${env.envelopeId} (authorId=${env.authorId}, deviceId=${env.deviceId}) not registered`,
+          "envelope author device is not registered",
         );
       }
     }
@@ -1389,15 +1497,15 @@ export class RoomDO extends DurableObject<Env> {
     const fresh: EnvelopeInput[] = [];
 
     for (const env of envelopes) {
-      const idx = await this.ctx.storage.get<string>(envIndexKey(env.envelopeId));
-      if (idx !== undefined) {
+      const lookup = preexistingById.get(env.envelopeId);
+      if (lookup !== undefined) {
         // `idx` is the padded serverSeq string. Parse to surface in the response.
-        const prevSeq = Number(idx);
+        const prevSeq = Number(lookup.paddedSeq);
         if (!Number.isSafeInteger(prevSeq) || prevSeq <= 0) {
           return errorResponse(
             500,
             "ATTN_ROOM_CORRUPT",
-            `env_idx for ${env.envelopeId} not a valid serverSeq: ${idx}`,
+            "stored envelope index is invalid",
           );
         }
         accepted.push({ envelopeId: env.envelopeId, serverSeq: prevSeq });
@@ -1490,7 +1598,7 @@ export class RoomDO extends DurableObject<Env> {
       };
       const payloadKey = envStorageKey(paddedSeq, env.envelopeId);
       writeMap[payloadKey] = record;
-      freshPayloads.push({ payloadKey, record });
+      freshPayloads.push({ payloadKey, payloadKeys: [payloadKey], record });
       writeMap[envIndexKey(env.envelopeId)] = paddedSeq;
       if (env.kind === "signal" && env.target?.deviceId !== undefined) {
         const byTargetKey = envByTargetKey(env.target.deviceId, paddedSeq, env.envelopeId);
@@ -1501,6 +1609,7 @@ export class RoomDO extends DurableObject<Env> {
           envelopeId: env.envelopeId,
           byTargetKey,
           payloadKey,
+          payloadKeys: [payloadKey],
           record,
         });
         freshSignalsByTarget.set(env.target.deviceId, candidates);
@@ -1540,18 +1649,26 @@ export class RoomDO extends DurableObject<Env> {
     // Validate the complete victim set before arithmetic or mutation. A
     // duplicated payload/index victim would otherwise double-debit counters.
     const victimPayloadKeys = new Set<string>();
+    const victimLogicalKeys = new Set<string>();
     const victimByTargetKeys = new Set<string>();
     let victimBytes = 0;
     for (const victim of signalVictims) {
       if (
         !isNonnegativeSafeInteger(victim.record.ciphertextBytes) ||
         victim.record.ciphertextBytes === 0 ||
-        victimPayloadKeys.has(victim.payloadKey) ||
         victimByTargetKeys.has(victim.byTargetKey)
       ) {
         return errorResponse(500, "ATTN_ROOM_CORRUPT", "invalid or duplicate signal victim");
       }
-      victimPayloadKeys.add(victim.payloadKey);
+      const logicalKey = `${victim.paddedSeq}:${encodeOpaqueSegment(victim.envelopeId)}`;
+      if (victimLogicalKeys.has(logicalKey) || victim.payloadKeys.length === 0) {
+        return corruptRoomResponse();
+      }
+      victimLogicalKeys.add(logicalKey);
+      for (const payloadKey of victim.payloadKeys) {
+        if (victimPayloadKeys.has(payloadKey)) return corruptRoomResponse();
+        victimPayloadKeys.add(payloadKey);
+      }
       victimByTargetKeys.add(victim.byTargetKey);
       victimBytes += victim.record.ciphertextBytes;
       if (!Number.isSafeInteger(victimBytes)) {
@@ -1575,6 +1692,7 @@ export class RoomDO extends DurableObject<Env> {
     if (signalVictims.length > 0) {
       const logicalOldest = await this.findOldestRetainedSeqAfterMutation({
         stagedPayloadDeletes: victimPayloadKeys,
+        stagedLogicalDeletes: victimLogicalKeys,
         freshPayloads,
         finalServerSeq,
       });
@@ -1588,8 +1706,13 @@ export class RoomDO extends DurableObject<Env> {
     // and cursor floor share one transaction—there is no insertion/eviction
     // crash boundary. env_idx tombstones are never included in victim deletes.
     const keysToDelete = signalVictims.flatMap((victim) => [
-      victim.payloadKey,
+      ...victim.payloadKeys,
       victim.byTargetKey,
+      envByTargetKey(victim.record.target?.deviceId ?? "", victim.paddedSeq, victim.envelopeId),
+      v2EnvByTargetKey(victim.record.target?.deviceId ?? "", victim.paddedSeq, victim.envelopeId),
+      ...(victim.record.target?.deviceId.includes(":") === false
+        ? [legacyEnvByTargetKey(victim.record.target.deviceId, victim.paddedSeq, victim.envelopeId)]
+        : []),
     ]);
     if (Object.keys(writeMap).length > 0 || keysToDelete.length > 0) {
       await this.ctx.storage.transaction(async (txn) => {
@@ -1652,14 +1775,30 @@ export class RoomDO extends DurableObject<Env> {
     });
     for (const orderKey of v2Entries.keys()) {
       const parsed = parseEnvByTargetKey(orderKey, targetDeviceId);
-      if (parsed !== undefined) {
-        indexed.push({
-          paddedSeq: parsed.paddedSeq,
-          envelopeId: parsed.envelopeId,
-          byTargetKey: orderKey,
-          payloadKey: envStorageKey(parsed.paddedSeq, parsed.envelopeId),
-        });
-      }
+      if (parsed === undefined) return corruptRoomResponse();
+      const payloadKey = envStorageKey(parsed.paddedSeq, parsed.envelopeId);
+      indexed.push({
+        paddedSeq: parsed.paddedSeq,
+        envelopeId: parsed.envelopeId,
+        byTargetKey: orderKey,
+        payloadKey,
+        payloadKeys: [payloadKey],
+      });
+    }
+    const priorV2Entries = await this.ctx.storage.list<string>({
+      prefix: v2EnvByTargetPrefix(targetDeviceId),
+    });
+    for (const orderKey of priorV2Entries.keys()) {
+      const parsed = parseV2EnvByTargetKey(orderKey, targetDeviceId);
+      if (parsed === undefined) return corruptRoomResponse();
+      const payloadKey = legacyEnvStorageKey(parsed.paddedSeq, parsed.envelopeId);
+      indexed.push({
+        paddedSeq: parsed.paddedSeq,
+        envelopeId: parsed.envelopeId,
+        byTargetKey: orderKey,
+        payloadKey,
+        payloadKeys: [payloadKey],
+      });
     }
     if (!targetDeviceId.includes(":")) {
       const legacyEntries = await this.ctx.storage.list<string>({
@@ -1667,29 +1806,28 @@ export class RoomDO extends DurableObject<Env> {
       });
       for (const orderKey of legacyEntries.keys()) {
         const parsed = parseLegacyEnvByTargetKey(orderKey, targetDeviceId);
-        if (parsed !== undefined) {
-          indexed.push({
-            paddedSeq: parsed.paddedSeq,
-            envelopeId: parsed.envelopeId,
-            byTargetKey: orderKey,
-            payloadKey: envStorageKey(parsed.paddedSeq, parsed.envelopeId),
-          });
-        }
+        if (parsed === undefined) return corruptRoomResponse();
+        const payloadKey = legacyEnvStorageKey(parsed.paddedSeq, parsed.envelopeId);
+        indexed.push({
+          paddedSeq: parsed.paddedSeq,
+          envelopeId: parsed.envelopeId,
+          byTargetKey: orderKey,
+          payloadKey,
+          payloadKeys: [payloadKey],
+        });
       }
     }
 
-    const records = new Map<string, EnvelopeRecord>();
-    const payloadKeys = indexed.map((entry) => entry.payloadKey);
-    for (let i = 0; i < payloadKeys.length; i += STORAGE_BATCH_SIZE) {
-      const loaded = await this.ctx.storage.get<EnvelopeRecord>(
-        payloadKeys.slice(i, i + STORAGE_BATCH_SIZE),
-      );
-      for (const [key, record] of loaded) records.set(key, record);
-    }
-
     const byAuthor = new Map<string, SignalEnvelopeCandidate[]>();
+    const seenLogical = new Set<string>();
     for (const entry of indexed) {
-      const record = records.get(entry.payloadKey);
+      const logical = `${entry.paddedSeq}:${encodeOpaqueSegment(entry.envelopeId)}`;
+      if (seenLogical.has(logical)) continue;
+      seenLogical.add(logical);
+      const lookup = await this.resolveEnvelopeExact(entry.envelopeId);
+      if (lookup instanceof Response) return lookup;
+      if (lookup === undefined) return corruptRoomResponse();
+      const record = lookup?.record;
       if (
         record === undefined ||
         record.kind !== "signal" ||
@@ -1702,12 +1840,17 @@ export class RoomDO extends DurableObject<Env> {
         return errorResponse(
           500,
           "ATTN_ROOM_CORRUPT",
-          `invalid signal target index ${entry.byTargetKey}`,
+          "invalid signal target index",
         );
       }
       if (!authorIds.has(record.authorId)) continue;
       const matches = byAuthor.get(record.authorId) ?? [];
-      matches.push({ ...entry, record });
+      matches.push({
+        ...entry,
+        payloadKey: lookup.payloadKey,
+        payloadKeys: lookup.payloadKeys,
+        record,
+      });
       byAuthor.set(record.authorId, matches);
     }
     for (const signal of freshSignals) {
@@ -1812,12 +1955,23 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
     }
     const ackingDevice = await this.findDeviceByDeviceId(body.deviceId);
+    if (ackingDevice instanceof Response) return ackingDevice;
     if (ackingDevice === undefined) {
       return errorResponse(
         400,
         "ATTN_DEVICE_UNREGISTERED",
-        `ACK deviceId ${body.deviceId} is not registered`,
+        "ACK device is not registered",
       );
+    }
+    const ackLookups = new Map<string, EnvelopeLookup>();
+    for (const envelopeId of new Set(body.ackedEnvelopeIds)) {
+      if (isProtocolId(envelopeId, ENVELOPE_ID_MAX_CHARS)) continue;
+      const lookup = await this.resolveEnvelopeExact(envelopeId);
+      if (lookup instanceof Response) return lookup;
+      if (lookup !== undefined) ackLookups.set(envelopeId, lookup);
+      if (!isProtocolId(envelopeId, ENVELOPE_ID_MAX_CHARS) && lookup === undefined) {
+        return identifierErrorResponse();
+      }
     }
 
     // 4. Per-device rate limit (attn-nnj.5.13).
@@ -1845,6 +1999,13 @@ export class RoomDO extends DurableObject<Env> {
         return errorResponse(400, err.code, err.message);
       }
       throw err;
+    }
+
+    for (const envelopeId of new Set(body.ackedEnvelopeIds)) {
+      if (ackLookups.has(envelopeId)) continue;
+      const lookup = await this.resolveEnvelopeExact(envelopeId);
+      if (lookup instanceof Response) return lookup;
+      if (lookup !== undefined) ackLookups.set(envelopeId, lookup);
     }
 
     // 6. Deletion gating — see method docstring for layering rationale.
@@ -1890,19 +2051,21 @@ export class RoomDO extends DurableObject<Env> {
     let countToDelete = 0;
     const ackedAt = Date.now();
     const payloadKeysToDelete = new Set<string>();
+    const logicalPayloadsToDelete = new Set<string>();
 
     for (const envelopeId of new Set(body.ackedEnvelopeIds)) {
       // Lookup the env_idx to find the padded seq of this envelope's payload.
       // Missing entry = never existed (or legacy state without a tombstone) →
       // idempotent no-op without attacker-controlled durable ACK keys.
-      const paddedSeq = await this.ctx.storage.get<string>(envIndexKey(envelopeId));
-      if (paddedSeq === undefined) continue;
+      const lookup = ackLookups.get(envelopeId);
+      if (lookup === undefined) continue;
+      const paddedSeq = lookup.paddedSeq;
       writes[ackKey(body.deviceId, envelopeId)] = ackedAt;
 
       if (!mayDelete) continue;
 
-      const payloadKey = envStorageKey(paddedSeq, envelopeId);
-      const record = await this.ctx.storage.get<EnvelopeRecord>(payloadKey);
+      const payloadKey = lookup.payloadKey;
+      const record = lookup.record;
       if (record === undefined) {
         // env_idx intentionally outlives owner-ACK and signal-FIFO payload
         // deletion. The tombstone makes cross-request POST retries resolve to
@@ -1916,9 +2079,10 @@ export class RoomDO extends DurableObject<Env> {
 
       // Stage payload and any target-index delete. Keep env_idx as the durable
       // idempotency tombstone shared with signal FIFO eviction.
-      keysToDelete.push(payloadKey);
+      keysToDelete.push(...lookup.payloadKeys);
       if (record.kind === "signal" && record.target?.deviceId !== undefined) {
         keysToDelete.push(envByTargetKey(record.target.deviceId, paddedSeq, envelopeId));
+        keysToDelete.push(v2EnvByTargetKey(record.target.deviceId, paddedSeq, envelopeId));
         if (!record.target.deviceId.includes(":")) {
           keysToDelete.push(
             legacyEnvByTargetKey(record.target.deviceId, paddedSeq, envelopeId),
@@ -1929,7 +2093,7 @@ export class RoomDO extends DurableObject<Env> {
         return errorResponse(
           500,
           "ATTN_ROOM_CORRUPT",
-          `envelope ${envelopeId} has invalid ciphertextBytes`,
+          "stored envelope has invalid ciphertextBytes",
         );
       }
       bytesToDelete += record.ciphertextBytes;
@@ -1937,7 +2101,8 @@ export class RoomDO extends DurableObject<Env> {
         return errorResponse(500, "ATTN_ROOM_CORRUPT", "ACK byte accounting overflow");
       }
       countToDelete += 1;
-      payloadKeysToDelete.add(payloadKey);
+      for (const key of lookup.payloadKeys) payloadKeysToDelete.add(key);
+      logicalPayloadsToDelete.add(`${paddedSeq}:${encodeOpaqueSegment(envelopeId)}`);
     }
 
     // 6. Meta updates on actual deletion. We re-read the current counters
@@ -1962,6 +2127,7 @@ export class RoomDO extends DurableObject<Env> {
       }
       const newOldest = await this.findOldestRetainedSeqAfterMutation({
         stagedPayloadDeletes: payloadKeysToDelete,
+        stagedLogicalDeletes: logicalPayloadsToDelete,
         freshPayloads: [],
         finalServerSeq: curServerSeq,
       });
@@ -2070,6 +2236,21 @@ export class RoomDO extends DurableObject<Env> {
     }
     const body = result.data;
 
+    const priorReservation = await this.loadBlobReservationExact(body.envelopeId);
+    if (priorReservation instanceof Response) return priorReservation;
+    if (priorReservation === undefined && (
+      !isProtocolId(body.envelopeId, ENVELOPE_ID_MAX_CHARS) ||
+      !isProtocolId(body.authorId, PARTICIPANT_ID_MAX_CHARS) ||
+      !isProtocolId(body.deviceId, DEVICE_ID_MAX_CHARS)
+    )) {
+      return identifierErrorResponse();
+    }
+    const deviceRecord = await this.loadDeviceExact(body.authorId, body.deviceId);
+    if (deviceRecord instanceof Response) return deviceRecord;
+    if (deviceRecord === undefined) {
+      return errorResponse(400, "ATTN_DEVICE_UNREGISTERED", "blob author device is not registered");
+    }
+
     // 3. Per-device rate limit (attn-nnj.5.13).
     const rateRejection = await this.enforceDeviceRateLimit(body.deviceId);
     if (rateRejection !== undefined) return rateRejection;
@@ -2120,27 +2301,20 @@ export class RoomDO extends DurableObject<Env> {
     }
 
     // 6. Device registration check.
-    const deviceKey = deviceStorageKey(body.authorId, body.deviceId);
-    const deviceRecord = await this.ctx.storage.get<DeviceRecord>(deviceKey);
-    if (deviceRecord === undefined) {
-      return errorResponse(
-        400,
-        "ATTN_DEVICE_UNREGISTERED",
-        `(authorId=${body.authorId}, deviceId=${body.deviceId}) not registered`,
-      );
-    }
-
     // 7. Room-bytes cap. Sum DO bytes + R2 bytes + outstanding reservations
     //    + this request's ask. Reservations are tracked in meta:bytes_used_r2
     //    so concurrent presigns cannot double-spend the budget.
     const resvKey = blobReservationKey(body.envelopeId);
-    const existing = await this.ctx.storage.get<BlobReservation>(resvKey);
+    const existing = priorReservation?.record;
     const [curBytes, curBytesR2] = await Promise.all([
       this.ctx.storage.get<number>(META.bytesUsed),
       this.ctx.storage.get<number>(META.bytesUsedR2),
     ]);
-    const runningBytes = curBytes ?? 0;
-    const runningBytesR2 = curBytesR2 ?? 0;
+    if (!isNonnegativeSafeInteger(curBytes) || !isNonnegativeSafeInteger(curBytesR2)) {
+      return corruptRoomResponse();
+    }
+    const runningBytes = curBytes;
+    const runningBytesR2 = curBytesR2;
 
     // Idempotent re-presign for the same envelopeId. We return a fresh token
     // but do NOT debit again — the prior reservation already counted toward
@@ -2152,12 +2326,17 @@ export class RoomDO extends DurableObject<Env> {
         return errorResponse(
           409,
           "ATTN_BLOB_RESERVATION_MISMATCH",
-          `envelopeId ${body.envelopeId} already reserved at ${existing.ciphertextBytes} bytes`,
+          `blob identifier is already reserved at ${existing.ciphertextBytes} bytes`,
         );
       }
       addedR2 = 0;
     }
-    if (runningBytes + runningBytesR2 + addedR2 > limits.maxRoomBytes) {
+    const runningTotal = safeNonnegativeAdd(runningBytes, runningBytesR2);
+    const requestedTotal = runningTotal === undefined
+      ? undefined
+      : safeNonnegativeAdd(runningTotal, addedR2);
+    if (requestedTotal === undefined) return corruptRoomResponse();
+    if (requestedTotal > limits.maxRoomBytes) {
       return errorResponse(
         507,
         "ATTN_ROOM_STORAGE_FULL",
@@ -2169,11 +2348,23 @@ export class RoomDO extends DurableObject<Env> {
     if (activeLease === undefined || !isRoomQuotaLease(activeLease) || activeLease.roomId !== roomId) {
       return quotaUnavailableResponse("room has no active quota generation");
     }
+    if (existing !== undefined && (
+      existing.authorId !== body.authorId ||
+      existing.deviceId !== body.deviceId ||
+      existing.leaseId !== activeLease.leaseId ||
+      priorReservation?.objectKeyVersion === undefined
+    )) {
+      return errorResponse(
+        409,
+        "ATTN_BLOB_RESERVATION_MISMATCH",
+        "blob reservation identity does not match",
+      );
+    }
     if (existing?.state === "uploaded") {
-      return errorResponse(409, "ATTN_BLOB_ALREADY_UPLOADED", `blob ${body.envelopeId} is already uploaded`);
+      return errorResponse(409, "ATTN_BLOB_ALREADY_UPLOADED", "blob is already uploaded");
     }
     if (existing?.state === "uploading") {
-      return errorResponse(409, "ATTN_BLOB_UPLOAD_IN_PROGRESS", `blob ${body.envelopeId} upload is in progress`);
+      return errorResponse(409, "ATTN_BLOB_UPLOAD_IN_PROGRESS", "blob upload is in progress");
     }
 
     // 8. Mint a generation-bound, one-time upload cap.
@@ -2187,12 +2378,15 @@ export class RoomDO extends DurableObject<Env> {
         body.envelopeId,
         uploadId,
         body.ciphertextBytes,
+        undefined,
+        priorReservation?.objectKeyVersion ?? 2,
       );
     } catch (err) {
       return errorResponse(500, "ATTN_BLOB_PRESIGN_FAILED", `presign failed: ${(err as Error).message}`);
     }
 
     // 9. Persist the reservation + update meta:bytes_used_r2 atomically.
+    const objectKeyVersion = priorReservation?.objectKeyVersion ?? 2;
     const reservation: BlobReservation = {
       envelopeId: body.envelopeId,
       authorId: body.authorId,
@@ -2201,16 +2395,20 @@ export class RoomDO extends DurableObject<Env> {
       uploadId,
       state: "reserved",
       ciphertextBytes: body.ciphertextBytes,
-      reservedAt: Date.now(),
+      reservedAt: existing?.reservedAt ?? Date.now(),
       uploadExpiresAt: presigned.expiresAt,
+      ...(objectKeyVersion === 2 ? { objectKeyVersion: 2 as const } : {}),
     };
+    const reservationKey = priorReservation?.key ?? resvKey;
     const writes: Record<string, unknown> = {
-      [resvKey]: reservation,
+      [reservationKey]: reservation,
     };
     if (addedR2 > 0) {
       writes[META.bytesUsedR2] = runningBytesR2 + addedR2;
     }
-    await this.ctx.storage.put<unknown>(writes);
+    await this.ctx.storage.transaction(async (txn) => {
+      await txn.put<unknown>(writes);
+    });
 
     return Response.json(presigned, { status: 200 });
   }
@@ -2224,14 +2422,19 @@ export class RoomDO extends DurableObject<Env> {
     const leaseId = request.headers.get(INTERNAL_BLOB_LEASE_HEADER);
     const uploadId = request.headers.get(INTERNAL_BLOB_UPLOAD_HEADER);
     const envelopeId = request.headers.get(INTERNAL_BLOB_ENVELOPE_HEADER);
-    if (leaseId === null || uploadId === null || envelopeId === null) {
+    const objectKeyVersionRaw = request.headers.get(INTERNAL_BLOB_OBJECT_KEY_VERSION_HEADER);
+    const objectKeyVersion = objectKeyVersionRaw === "1" ? 1 : objectKeyVersionRaw === "2" ? 2 : undefined;
+    if (leaseId === null || uploadId === null || envelopeId === null || objectKeyVersion === undefined) {
       return errorResponse(400, "ATTN_BLOB_CAP_INVALID", "internal upload metadata missing");
     }
+
+    const reservationLookup = await this.loadBlobReservationExact(envelopeId);
+    if (reservationLookup instanceof Response) return reservationLookup;
 
     const [lease, tombstone, reservation] = await Promise.all([
       this.ctx.storage.get<RoomQuotaLease>(META.quotaLease),
       this.ctx.storage.get<RoomQuotaLease>(META.quotaRelease),
-      this.ctx.storage.get<BlobReservation>(blobReservationKey(envelopeId)),
+      Promise.resolve(reservationLookup?.record),
     ]);
     if (
       lease === undefined ||
@@ -2239,9 +2442,10 @@ export class RoomDO extends DurableObject<Env> {
       !isRoomQuotaLease(lease) ||
       lease.leaseId !== leaseId ||
       reservation === undefined ||
-      !isBlobReservation(reservation) ||
+      !isBlobReservation(reservation, objectKeyVersion) ||
       reservation.leaseId !== leaseId ||
       reservation.uploadId !== uploadId ||
+      reservationLookup?.objectKeyVersion !== objectKeyVersion ||
       reservation.uploadExpiresAt < Date.now()
     ) {
       return errorResponse(409, "ATTN_BLOB_UPLOAD_STALE", "blob upload reservation is stale");
@@ -2257,14 +2461,15 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(400, "ATTN_BLOB_LENGTH_MISMATCH", "blob body length does not match reservation");
     }
 
-    const key = blobObjectKey(lease.roomId, leaseId, envelopeId);
+    const reservationKey = reservationLookup.key;
+    const key = blobObjectKey(lease.roomId, leaseId, envelopeId, objectKeyVersion);
     if (reservation.state === "uploaded") {
       return new Response(null, { status: 204 });
     }
     if (reservation.state === "uploading") {
       const existing = await this.env.RELAY_BLOBS.head(key);
       if (existing !== null && existing.size === reservation.ciphertextBytes) {
-        await this.ctx.storage.put(blobReservationKey(envelopeId), {
+        await this.ctx.storage.put(reservationKey, {
           ...reservation,
           state: "uploaded",
         } satisfies BlobReservation);
@@ -2272,7 +2477,7 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
 
-    await this.ctx.storage.put(blobReservationKey(envelopeId), {
+    await this.ctx.storage.put(reservationKey, {
       ...reservation,
       state: "uploading",
     } satisfies BlobReservation);
@@ -2280,14 +2485,14 @@ export class RoomDO extends DurableObject<Env> {
       await this.env.RELAY_BLOBS.put(key, body, {
         httpMetadata: { contentType: "application/octet-stream" },
       });
-    } catch (error) {
-      await this.ctx.storage.put(blobReservationKey(envelopeId), {
+    } catch {
+      await this.ctx.storage.put(reservationKey, {
         ...reservation,
         state: "reserved",
       } satisfies BlobReservation);
-      return errorResponse(500, "ATTN_BLOB_UPLOAD_FAILED", `R2 put failed: ${(error as Error).message}`);
+      return errorResponse(500, "ATTN_BLOB_UPLOAD_FAILED", "blob storage failed");
     }
-    await this.ctx.storage.put(blobReservationKey(envelopeId), {
+    await this.ctx.storage.put(reservationKey, {
       ...reservation,
       state: "uploaded",
     } satisfies BlobReservation);
@@ -2331,27 +2536,42 @@ export class RoomDO extends DurableObject<Env> {
       throw err;
     }
 
-    const [lease, reservation] = await Promise.all([
+    const [lease, reservationLookup] = await Promise.all([
       this.ctx.storage.get<RoomQuotaLease>(META.quotaLease),
-      this.ctx.storage.get<BlobReservation>(blobReservationKey(envelopeId)),
+      this.loadBlobReservationExact(envelopeId),
     ]);
+    if (reservationLookup instanceof Response) return reservationLookup;
+    if (!isProtocolId(envelopeId, ENVELOPE_ID_MAX_CHARS) && reservationLookup === undefined) {
+      return identifierErrorResponse();
+    }
+    const reservation = reservationLookup?.record;
     if (
       lease === undefined ||
       !isRoomQuotaLease(lease) ||
       reservation === undefined ||
-      !isBlobReservation(reservation) ||
+      !isBlobReservation(reservation, reservationLookup?.objectKeyVersion ?? 2) ||
       reservation.leaseId !== lease.leaseId ||
       reservation.state !== "uploaded"
     ) {
-      return errorResponse(404, "ATTN_BLOB_NOT_FOUND", `blob ${envelopeId} not found`);
+      return errorResponse(404, "ATTN_BLOB_NOT_FOUND", "blob not found");
     }
-    const head = await this.env.RELAY_BLOBS.head(blobObjectKey(roomId, lease.leaseId, envelopeId));
+    if (reservationLookup === undefined) return corruptRoomResponse();
+    const head = await this.env.RELAY_BLOBS.head(
+      blobObjectKey(roomId, lease.leaseId, envelopeId, reservationLookup.objectKeyVersion),
+    );
     if (head === null) {
-      return errorResponse(404, "ATTN_BLOB_NOT_FOUND", `blob for envelope ${envelopeId} not found`);
+      return errorResponse(404, "ATTN_BLOB_NOT_FOUND", "blob not found");
     }
 
     try {
-      const presigned = await presignBlobDownload(this.env, roomId, lease.leaseId, envelopeId);
+      const presigned = await presignBlobDownload(
+        this.env,
+        roomId,
+        lease.leaseId,
+        envelopeId,
+        undefined,
+        reservationLookup.objectKeyVersion,
+      );
       return Response.json(presigned, { status: 200 });
     } catch (err) {
       return errorResponse(500, "ATTN_BLOB_PRESIGN_FAILED", `presign failed: ${(err as Error).message}`);
@@ -2443,6 +2663,18 @@ export class RoomDO extends DurableObject<Env> {
       }
       throw err;
     }
+    if (!isProtocolId(powDeviceId, DEVICE_ID_MAX_CHARS)) {
+      return identifierErrorResponse();
+    }
+    const deletingDevice = await this.findDeviceByDeviceId(powDeviceId);
+    if (deletingDevice instanceof Response) return deletingDevice;
+    if (deletingDevice === undefined) {
+      return errorResponse(
+        400,
+        "ATTN_DEVICE_UNREGISTERED",
+        "delete device is not registered",
+      );
+    }
 
     // 3a. Per-device rate limit (attn-nnj.5.13). Uses the deviceId
     //     extracted from the PoW token since DELETE has no body.
@@ -2514,29 +2746,29 @@ export class RoomDO extends DurableObject<Env> {
    * the bucket lifecycle rule is the safety net.
    */
   private async cleanupRoomBlobs(roomId: string): Promise<boolean> {
-    const prefix = `rooms/${roomId}/`;
     const bucket = this.env.RELAY_BLOBS;
     if (bucket === undefined) return true;
     try {
-      let cursor: string | undefined;
-      // Bound the loop so a runaway list can't pin the DO event loop. In
-      // practice a single room never produces more than ~25 MiB / 5 MiB blobs,
-      // so 50 pages of 1000 is comfortable headroom.
-      for (let page = 0; page < 50; page++) {
-        const listed: R2Objects = await bucket.list({
-          prefix,
-          ...(cursor !== undefined ? { cursor } : {}),
-        });
-        const keys = listed.objects.map((obj) => obj.key);
-        if (keys.length > 0) {
-          // R2.delete accepts an array of keys in a single round-trip.
-          await bucket.delete(keys);
+      const prefixes = [
+        `rooms_v2/${encodeOpaqueSegment(roomId)}/`,
+        `rooms/${roomId}/`,
+      ];
+      for (const prefix of prefixes) {
+        let cursor: string | undefined;
+        for (let page = 0; page < 50; page++) {
+          const listed: R2Objects = await bucket.list({
+            prefix,
+            ...(cursor !== undefined ? { cursor } : {}),
+          });
+          const keys = listed.objects.map((obj) => obj.key);
+          if (keys.length > 0) await bucket.delete(keys);
+          if (!listed.truncated) break;
+          cursor = listed.cursor;
+          if (cursor === undefined) return false;
+          if (page === 49) return false;
         }
-        if (!listed.truncated) return true;
-        cursor = listed.truncated ? listed.cursor : undefined;
-        if (cursor === undefined) return false;
       }
-      return false;
+      return true;
     } catch {
       return false;
     }
@@ -2636,14 +2868,18 @@ export class RoomDO extends DurableObject<Env> {
   /** Validate current + fresh payload keys and compute the logical post-state floor. */
   private async findOldestRetainedSeqAfterMutation(opts: {
     stagedPayloadDeletes: ReadonlySet<string>;
+    stagedLogicalDeletes: ReadonlySet<string>;
     freshPayloads: readonly EnvelopePayloadCandidate[];
     finalServerSeq: number;
   }): Promise<number | undefined> {
     if (!isNonnegativeSafeInteger(opts.finalServerSeq)) return undefined;
-    const entries = await this.ctx.storage.list<EnvelopeRecord>({
-      prefix: ENV_PREFIX,
-    });
+    const [versionedEntries, legacyEntries] = await Promise.all([
+      this.ctx.storage.list<unknown>({ prefix: ENV_PREFIX }),
+      this.ctx.storage.list<unknown>({ prefix: LEGACY_ENV_PREFIX }),
+    ]);
+    const entries = [...legacyEntries, ...versionedEntries];
     const seenPayloadKeys = new Set<string>();
+    const seenLogical = new Map<string, EnvelopeRecord>();
     let oldest: number | undefined;
     for (const [key, record] of entries) {
       if (
@@ -2653,12 +2889,19 @@ export class RoomDO extends DurableObject<Env> {
         return undefined;
       }
       seenPayloadKeys.add(key);
+      const logical = `${padServerSeq(record.serverSeq)}:${encodeOpaqueSegment(record.envelopeId)}`;
+      const prior = seenLogical.get(logical);
+      if (prior !== undefined && !sameEnvelopeRecord(prior, record)) return undefined;
+      if (prior === undefined) seenLogical.set(logical, record);
+      if (opts.stagedLogicalDeletes.has(logical)) continue;
+      if (prior !== undefined) continue;
       if (opts.stagedPayloadDeletes.has(key)) continue;
       oldest = oldest === undefined ? record.serverSeq : Math.min(oldest, record.serverSeq);
     }
     for (const fresh of opts.freshPayloads) {
       if (
-        seenPayloadKeys.has(fresh.payloadKey) ||
+        fresh.payloadKeys.length === 0 ||
+        fresh.payloadKeys.some((key) => seenPayloadKeys.has(key)) ||
         !envelopeRecordMatchesStorageKey(
           fresh.payloadKey,
           fresh.record,
@@ -2667,8 +2910,12 @@ export class RoomDO extends DurableObject<Env> {
       ) {
         return undefined;
       }
-      seenPayloadKeys.add(fresh.payloadKey);
-      if (opts.stagedPayloadDeletes.has(fresh.payloadKey)) continue;
+      for (const key of fresh.payloadKeys) seenPayloadKeys.add(key);
+      const logical = `${padServerSeq(fresh.record.serverSeq)}:${encodeOpaqueSegment(fresh.record.envelopeId)}`;
+      if (opts.stagedLogicalDeletes.has(logical) ||
+        fresh.payloadKeys.some((key) => opts.stagedPayloadDeletes.has(key))) continue;
+      if (seenLogical.has(logical)) return undefined;
+      seenLogical.set(logical, fresh.record);
       oldest = oldest === undefined
         ? fresh.record.serverSeq
         : Math.min(oldest, fresh.record.serverSeq);
@@ -2826,11 +3073,12 @@ export class RoomDO extends DurableObject<Env> {
     // already-registered device; unknown deviceId → 404 so the client knows to
     // POST /devices first.
     const deviceRecord = await this.findDeviceByDeviceId(deviceId);
+    if (deviceRecord instanceof Response) return deviceRecord;
     if (deviceRecord === undefined) {
       return errorResponse(
         404,
         "ATTN_DEVICE_UNREGISTERED",
-        `device ${deviceId} not registered in room ${roomId}`,
+        "device is not registered in room",
       );
     }
     const participantId = deviceRecord.participantId;
@@ -2858,7 +3106,10 @@ export class RoomDO extends DurableObject<Env> {
 
     // Tag the server end with [deviceId, participantId] per the spec.
     // acceptWebSocket switches the runtime into hibernation mode.
-    this.ctx.acceptWebSocket(server, [deviceId, participantId]);
+    this.ctx.acceptWebSocket(server, [
+      `d2:${encodeOpaqueSegment(deviceId)}`,
+      `p2:${encodeOpaqueSegment(participantId)}`,
+    ]);
     writeAttachment(server, {
       deviceId,
       participantId,
@@ -2981,13 +3232,10 @@ export class RoomDO extends DurableObject<Env> {
       this.ctx.storage.get<number>(META.serverSeq),
       this.ctx.storage.get<number>(META.oldestRetainedSeq),
     ]);
-    if (policy === undefined || serverSeq === undefined) {
-      sendError(ws, "ATTN_ROOM_CORRUPT", "room metadata missing");
-      try {
-        ws.close(CLOSE_NORMAL, "corrupt");
-      } catch {
-        // ignore
-      }
+    if (policy === undefined || !isNonnegativeSafeInteger(serverSeq) ||
+      (oldestRetainedSeq !== undefined && !isNonnegativeSafeInteger(oldestRetainedSeq)) ||
+      (oldestRetainedSeq ?? 0) > serverSeq) {
+      failSocketCorrupt(ws);
       return;
     }
     const oldest = oldestRetainedSeq ?? 0;
@@ -3008,7 +3256,20 @@ export class RoomDO extends DurableObject<Env> {
 
     // Build the hello frame.
     const devices = await this.listDevicesInOrder();
+    if (devices instanceof Response) {
+      failSocketCorrupt(ws);
+      return;
+    }
     const missedSignalEnvelopeIds = await this.collectMissedSignalIds(att.deviceId, after);
+    if (missedSignalEnvelopeIds instanceof Response) {
+      failSocketCorrupt(ws);
+      return;
+    }
+    const orderedReplay = await this.loadValidatedEnvelopePayloads(serverSeq);
+    if (orderedReplay instanceof Response) {
+      failSocketCorrupt(ws);
+      return;
+    }
     const hello: ServerFrame = {
       type: "hello",
       serverSeq,
@@ -3020,8 +3281,7 @@ export class RoomDO extends DurableObject<Env> {
 
     // Replay env:* > after, in lex (== serverSeq) order. Per-target filtering
     // for signal envelopes — only deliver to the addressed deviceId.
-    const envEntries = await this.ctx.storage.list<EnvelopeRecord>({ prefix: ENV_PREFIX });
-    for (const record of envEntries.values()) {
+    for (const record of orderedReplay) {
       if (record.serverSeq <= after) continue;
       if (!deliverableTo(record, att.deviceId)) continue;
       const frame: ServerFrame = { type: "envelope", envelope: record, serverSeq: record.serverSeq };
@@ -3103,29 +3363,204 @@ export class RoomDO extends DurableObject<Env> {
    * don't have the participantId yet. Bounded by HARD_MAX_PEERS (8) in steady
    * state.
    */
-  private async findDeviceByDeviceId(deviceId: string): Promise<DeviceRecord | undefined> {
-    const orderEntries = await this.ctx.storage.list<string>({ prefix: DEVICE_ORDER_PREFIX });
-    const suffix = `:${deviceId}`;
-    for (const key of orderEntries.keys()) {
-      if (!key.endsWith(suffix)) continue;
-      const { participantId, deviceId: parsedDeviceId } = parseDeviceOrderKey(key);
-      if (parsedDeviceId !== deviceId) continue;
-      const record = await this.ctx.storage.get<DeviceRecord>(deviceStorageKey(participantId, deviceId));
-      if (record !== undefined) return record;
-    }
-    return undefined;
+  private async findDeviceByDeviceId(deviceId: string): Promise<DeviceRecord | undefined | Response> {
+    const records = await this.listDevicesInOrder();
+    if (records instanceof Response) return records;
+    const matches = records.filter((record) => record.deviceId === deviceId);
+    if (matches.length > 1) return corruptRoomResponse();
+    return matches[0];
   }
 
   /** Return device records in registration order. Used in `hello`. */
-  private async listDevicesInOrder(): Promise<DeviceRecord[]> {
-    const orderEntries = await this.ctx.storage.list<string>({ prefix: DEVICE_ORDER_PREFIX });
-    const records: DeviceRecord[] = [];
-    for (const orderKey of orderEntries.keys()) {
-      const { participantId, deviceId } = parseDeviceOrderKey(orderKey);
-      const record = await this.ctx.storage.get<DeviceRecord>(deviceStorageKey(participantId, deviceId));
-      if (record !== undefined) records.push(record);
+  private async listDevicesInOrder(): Promise<DeviceRecord[] | Response> {
+    const [versioned, legacy, versionedOrder, legacyOrder] = await Promise.all([
+      this.ctx.storage.list<unknown>({ prefix: DEVICE_PREFIX }),
+      this.ctx.storage.list<unknown>({ prefix: LEGACY_DEVICE_PREFIX }),
+      this.ctx.storage.list<string>({ prefix: DEVICE_ORDER_PREFIX }),
+      this.ctx.storage.list<string>({ prefix: LEGACY_DEVICE_ORDER_PREFIX }),
+    ]);
+    const records = new Map<string, DeviceRecord>();
+    let corrupt = false;
+    const add = (key: string, record: unknown, isLegacy: boolean): void => {
+      if (!isDeviceRecordIdentity(record)) return;
+      if (isLegacy) {
+        // Stored fields, never delimiter splitting, are identity authority.
+        if (key !== legacyDeviceStorageKey(record.participantId, record.deviceId)) return;
+      } else if (key !== deviceStorageKey(record.participantId, record.deviceId)) {
+        return;
+      }
+      const identity = `${encodeOpaqueSegment(record.participantId)}:${encodeOpaqueSegment(record.deviceId)}`;
+      const prior = records.get(identity);
+      if (prior !== undefined && !sameDeviceRecord(prior, record)) {
+        corrupt = true;
+        return;
+      }
+      if (prior === undefined || !isLegacy) {
+        records.set(identity, record);
+      }
+    };
+    for (const [key, record] of legacy) add(key, record, true);
+    for (const [key, record] of versioned) add(key, record, false);
+    if (corrupt) return corruptRoomResponse();
+    const orderRank = new Map<string, string>();
+    for (const key of versionedOrder.keys()) {
+      const parsed = parseDeviceOrderKey(key);
+      if (parsed === undefined) continue;
+      const identity = `${encodeOpaqueSegment(parsed.participantId)}:${encodeOpaqueSegment(parsed.deviceId)}`;
+      if (records.has(identity)) orderRank.set(identity, parsed.rank);
     }
-    return records;
+    for (const key of legacyOrder.keys()) {
+      const rest = key.slice(LEGACY_DEVICE_ORDER_PREFIX.length);
+      const first = rest.indexOf(":");
+      const second = first < 0 ? -1 : rest.indexOf(":", first + 1);
+      if (first < 0 || second < 0) continue;
+      const rank = rest.slice(0, second);
+      for (const record of records.values()) {
+        if (rest.slice(second + 1) !== `${record.participantId}:${record.deviceId}`) continue;
+        const identity = `${encodeOpaqueSegment(record.participantId)}:${encodeOpaqueSegment(record.deviceId)}`;
+        if (!orderRank.has(identity)) orderRank.set(identity, rank);
+      }
+    }
+    return [...records.values()].sort((a, b) => {
+      const ak = `${encodeOpaqueSegment(a.participantId)}:${encodeOpaqueSegment(a.deviceId)}`;
+      const bk = `${encodeOpaqueSegment(b.participantId)}:${encodeOpaqueSegment(b.deviceId)}`;
+      const ar = orderRank.get(ak) ?? `${String(a.registeredAt).padStart(REGISTERED_AT_PAD, "0")}:99999999`;
+      const br = orderRank.get(bk) ?? `${String(b.registeredAt).padStart(REGISTERED_AT_PAD, "0")}:99999999`;
+      if (ar !== br) return ar < br ? -1 : 1;
+      return ak < bk ? -1 : ak > bk ? 1 : 0;
+    });
+  }
+
+  /** Versioned-first exact legacy fallback with collision validation. */
+  private async loadDeviceExact(participantId: string, deviceId: string): Promise<DeviceRecord | undefined | Response> {
+    const versionedKey = deviceStorageKey(participantId, deviceId);
+    const legacyKey = legacyDeviceStorageKey(participantId, deviceId);
+    const [versioned, legacyCandidate] = await Promise.all([
+      this.ctx.storage.get<unknown>(versionedKey),
+      this.ctx.storage.get<unknown>(legacyKey),
+    ]);
+    const validVersioned = isDeviceRecordIdentity(versioned) &&
+      versioned.participantId === participantId && versioned.deviceId === deviceId;
+    const validLegacy = isDeviceRecordIdentity(legacyCandidate) &&
+      legacyCandidate.participantId === participantId && legacyCandidate.deviceId === deviceId;
+    if (versioned !== undefined && !validVersioned) return corruptRoomResponse();
+    if (legacyCandidate !== undefined && !isDeviceRecordIdentity(legacyCandidate)) {
+      return corruptRoomResponse();
+    }
+    if (validVersioned && validLegacy && !sameDeviceRecord(versioned, legacyCandidate)) {
+      return corruptRoomResponse();
+    }
+    if (validVersioned) return versioned;
+    if (!validLegacy) return undefined;
+    return legacyCandidate;
+  }
+
+  private async resolveEnvelopeExact(envelopeId: string): Promise<EnvelopeLookup | undefined | Response> {
+    const [versionedSeq, legacySeq] = await Promise.all([
+      this.ctx.storage.get<string>(envIndexKey(envelopeId)),
+      this.ctx.storage.get<string>(legacyEnvIndexKey(envelopeId)),
+    ]);
+    const validateSeq = (value: unknown): value is string => {
+      if (typeof value !== "string" || !/^\d{20}$/.test(value)) return false;
+      const parsed = Number(value);
+      return Number.isSafeInteger(parsed) && parsed > 0 && padServerSeq(parsed) === value;
+    };
+    if (versionedSeq !== undefined && !validateSeq(versionedSeq)) return corruptRoomResponse();
+    if (legacySeq !== undefined && !validateSeq(legacySeq)) return corruptRoomResponse();
+    if (versionedSeq !== undefined && legacySeq !== undefined && versionedSeq !== legacySeq) {
+      return corruptRoomResponse();
+    }
+    const paddedSeq = versionedSeq ?? legacySeq;
+    if (paddedSeq === undefined) return undefined;
+    const authoritativeServerSeq = await this.ctx.storage.get<unknown>(META.serverSeq);
+    const indexedServerSeq = Number(paddedSeq);
+    if (!isNonnegativeSafeInteger(authoritativeServerSeq) ||
+      indexedServerSeq > authoritativeServerSeq) {
+      return corruptRoomResponse();
+    }
+    const versionedKey = envStorageKey(paddedSeq, envelopeId);
+    const legacyKey = legacyEnvStorageKey(paddedSeq, envelopeId);
+    const [versionedRecord, legacyRecord] = await Promise.all([
+      this.ctx.storage.get<unknown>(versionedKey),
+      this.ctx.storage.get<unknown>(legacyKey),
+    ]);
+    const valid = (record: unknown): record is EnvelopeRecord =>
+      isStoredEnvelopeRecord(record) && record.envelopeId === envelopeId &&
+      padServerSeq(record.serverSeq) === paddedSeq;
+    if (versionedRecord !== undefined && !valid(versionedRecord)) return corruptRoomResponse();
+    if (legacyRecord !== undefined && !valid(legacyRecord)) return corruptRoomResponse();
+    if (valid(versionedRecord) && valid(legacyRecord) && !sameEnvelopeRecord(versionedRecord, legacyRecord)) {
+      return corruptRoomResponse();
+    }
+    const record = valid(versionedRecord) ? versionedRecord : valid(legacyRecord) ? legacyRecord : undefined;
+    // env_idx has one opaque suffix, so its fully-consumed key is exact even
+    // for a legacy unsafe identifier. A validated tombstone remains sufficient
+    // for retry idempotency after its payload was intentionally evicted.
+    return {
+      paddedSeq,
+      record,
+      payloadKey: valid(versionedRecord) ? versionedKey : valid(legacyRecord) ? legacyKey : versionedKey,
+      payloadKeys: [
+        ...(valid(versionedRecord) ? [versionedKey] : []),
+        ...(valid(legacyRecord) ? [legacyKey] : []),
+      ],
+    };
+  }
+
+  private async loadBlobReservationExact(envelopeId: string): Promise<BlobReservationLookup | undefined | Response> {
+    const versionedKey = blobReservationKey(envelopeId);
+    const legacyKey = legacyBlobReservationKey(envelopeId);
+    const [versioned, legacy] = await Promise.all([
+      this.ctx.storage.get<BlobReservation>(versionedKey),
+      this.ctx.storage.get<BlobReservation>(legacyKey),
+    ]);
+    const validVersioned = versioned !== undefined &&
+      isBlobReservation(versioned, 2) && versioned.envelopeId === envelopeId;
+    const validLegacy = legacy !== undefined &&
+      isBlobReservation(legacy, 1) && legacy.envelopeId === envelopeId;
+    if (versioned !== undefined && !validVersioned) return corruptRoomResponse();
+    if (legacy !== undefined && !validLegacy) return corruptRoomResponse();
+    if (validVersioned && validLegacy && !sameBlobReservation(versioned, legacy)) {
+      return corruptRoomResponse();
+    }
+    if (validVersioned) return { key: versionedKey, record: versioned, objectKeyVersion: 2 };
+    if (!validLegacy) return undefined;
+    return { key: legacyKey, record: legacy, objectKeyVersion: 1 };
+  }
+
+  private async loadValidatedEnvelopePayloads(finalServerSeq: number): Promise<EnvelopeRecord[] | Response> {
+    if (!isNonnegativeSafeInteger(finalServerSeq)) return corruptRoomResponse();
+    const [versioned, legacy] = await Promise.all([
+      this.ctx.storage.list<unknown>({ prefix: ENV_PREFIX }),
+      this.ctx.storage.list<unknown>({ prefix: LEGACY_ENV_PREFIX }),
+    ]);
+    const byLogical = new Map<string, EnvelopeRecord>();
+    const logicalBySeq = new Map<number, string>();
+    for (const [key, record] of [...legacy, ...versioned]) {
+      if (!envelopeRecordMatchesStorageKey(key, record, finalServerSeq)) {
+        return corruptRoomResponse();
+      }
+      const logical = `${padServerSeq(record.serverSeq)}:${encodeOpaqueSegment(record.envelopeId)}`;
+      const prior = byLogical.get(logical);
+      if (prior !== undefined && !sameEnvelopeRecord(prior, record)) {
+        return corruptRoomResponse();
+      }
+      const priorLogicalAtSeq = logicalBySeq.get(record.serverSeq);
+      if (priorLogicalAtSeq !== undefined && priorLogicalAtSeq !== logical) {
+        return corruptRoomResponse();
+      }
+      byLogical.set(logical, record);
+      logicalBySeq.set(record.serverSeq, logical);
+    }
+    for (const record of byLogical.values()) {
+      const lookup = await this.resolveEnvelopeExact(record.envelopeId);
+      if (lookup instanceof Response || lookup === undefined || lookup.record === undefined ||
+        lookup.paddedSeq !== padServerSeq(record.serverSeq) ||
+        !sameEnvelopeRecord(lookup.record, record)) {
+        return corruptRoomResponse();
+      }
+    }
+    return [...byLogical.values()].sort((a, b) => a.serverSeq - b.serverSeq);
   }
 
   /**
@@ -3135,31 +3570,53 @@ export class RoomDO extends DurableObject<Env> {
    * (In practice the replay below already includes them; we still surface the
    * id list per the spec's `hello` shape.)
    */
-  private async collectMissedSignalIds(myDeviceId: string, after: number): Promise<string[]> {
+  private async collectMissedSignalIds(myDeviceId: string, after: number): Promise<string[] | Response> {
     const found = new Map<string, number>();
-    const collect = (
+    const collect = async (
       entries: Map<string, string>,
       parse: (key: string) => { paddedSeq: string; envelopeId: string } | undefined,
-    ): void => {
+    ): Promise<Response | undefined> => {
       for (const orderKey of entries.keys()) {
         const parsed = parse(orderKey);
-        if (parsed === undefined) continue;
+        if (parsed === undefined) return corruptRoomResponse();
         const seqNum = Number(parsed.paddedSeq);
-        if (!Number.isSafeInteger(seqNum) || seqNum <= after) continue;
+        const lookup = await this.resolveEnvelopeExact(parsed.envelopeId);
+        if (lookup instanceof Response || lookup === undefined || lookup.record === undefined) {
+          return corruptRoomResponse();
+        }
+        const record = lookup.record;
+        if (!Number.isSafeInteger(seqNum) || seqNum <= 0 ||
+          lookup.paddedSeq !== parsed.paddedSeq ||
+          record.serverSeq !== seqNum ||
+          record.envelopeId !== parsed.envelopeId ||
+          record.kind !== "signal" ||
+          record.target?.deviceId !== myDeviceId) {
+          return corruptRoomResponse();
+        }
         const prior = found.get(parsed.envelopeId);
+        if (prior !== undefined && prior !== seqNum) return corruptRoomResponse();
+        if (seqNum <= after) continue;
         if (prior === undefined || seqNum < prior) found.set(parsed.envelopeId, seqNum);
       }
+      return undefined;
     };
 
-    collect(
+    const v3Failure = await collect(
       await this.ctx.storage.list<string>({ prefix: envByTargetPrefix(myDeviceId) }),
       (key) => parseEnvByTargetKey(key, myDeviceId),
     );
+    if (v3Failure !== undefined) return v3Failure;
+    const v2Failure = await collect(
+      await this.ctx.storage.list<string>({ prefix: v2EnvByTargetPrefix(myDeviceId) }),
+      (key) => parseV2EnvByTargetKey(key, myDeviceId),
+    );
+    if (v2Failure !== undefined) return v2Failure;
     if (!myDeviceId.includes(":")) {
-      collect(
+      const legacyFailure = await collect(
         await this.ctx.storage.list<string>({ prefix: legacyEnvByTargetPrefix(myDeviceId) }),
         (key) => parseLegacyEnvByTargetKey(key, myDeviceId),
       );
+      if (legacyFailure !== undefined) return legacyFailure;
     }
     return [...found.entries()]
       .sort((a, b) => a[1] - b[1])
@@ -3407,7 +3864,7 @@ export class RoomDO extends DurableObject<Env> {
     participantId: string,
     deviceId: string,
   ): Promise<string> {
-    const suffix = `:${participantId}:${deviceId}`;
+    const suffix = `:${encodeOpaqueSegment(participantId)}:${encodeOpaqueSegment(deviceId)}`;
     const entries = await this.ctx.storage.list<string>({ prefix: DEVICE_ORDER_PREFIX });
     for (const key of entries.keys()) {
       if (key.endsWith(suffix)) return key;
@@ -3529,11 +3986,17 @@ function quotaUnavailableResponse(message: string): Response {
 
 // --- device-record storage keying ----------------------------------------
 
-const DEVICE_PREFIX = "device:";
-const DEVICE_ORDER_PREFIX = "device_order:";
+const DEVICE_PREFIX = "device_v2:";
+const LEGACY_DEVICE_PREFIX = "device:";
+const DEVICE_ORDER_PREFIX = "device_order_v2:";
+const LEGACY_DEVICE_ORDER_PREFIX = "device_order:";
 
 function deviceStorageKey(participantId: string, deviceId: string): string {
-  return `${DEVICE_PREFIX}${participantId}:${deviceId}`;
+  return `${DEVICE_PREFIX}${encodeOpaqueSegment(participantId)}:${encodeOpaqueSegment(deviceId)}`;
+}
+
+function legacyDeviceStorageKey(participantId: string, deviceId: string): string {
+  return `${LEGACY_DEVICE_PREFIX}${participantId}:${deviceId}`;
 }
 
 // --- envelope storage keying ---------------------------------------------
@@ -3547,23 +4010,34 @@ const MAX_SIGNAL_ENVELOPES_PER_PAIR = 64;
 /** Keep every Durable Object multi-key call at the platform batch limit. */
 const STORAGE_BATCH_SIZE = 128;
 
-const ENV_PREFIX = "env:";
-const ENV_IDX_PREFIX = "env_idx:";
+const ENV_PREFIX = "env_v2:";
+const LEGACY_ENV_PREFIX = "env:";
+const ENV_IDX_PREFIX = "env_idx_v2:";
+const LEGACY_ENV_IDX_PREFIX = "env_idx:";
+const ENV_BY_TARGET_V3_PREFIX = "env_by_target_v3:";
 const ENV_BY_TARGET_V2_PREFIX = "env_by_target_v2:";
 const LEGACY_ENV_BY_TARGET_PREFIX = "env_by_target:";
-const ACK_PREFIX = "ack:";
-const ACK_OWNER_PREFIX = "ack_owner:";
+const ACK_PREFIX = "ack_v2:";
+const ACK_OWNER_PREFIX = "ack_owner_v2:";
 
 function padServerSeq(n: number): string {
   return String(n).padStart(SERVER_SEQ_PAD, "0");
 }
 
 function envStorageKey(paddedSeq: string, envelopeId: string): string {
-  return `${ENV_PREFIX}${paddedSeq}:${envelopeId}`;
+  return `${ENV_PREFIX}${paddedSeq}:${encodeOpaqueSegment(envelopeId)}`;
+}
+
+function legacyEnvStorageKey(paddedSeq: string, envelopeId: string): string {
+  return `${LEGACY_ENV_PREFIX}${paddedSeq}:${envelopeId}`;
 }
 
 function envIndexKey(envelopeId: string): string {
-  return `${ENV_IDX_PREFIX}${envelopeId}`;
+  return `${ENV_IDX_PREFIX}${encodeOpaqueSegment(envelopeId)}`;
+}
+
+function legacyEnvIndexKey(envelopeId: string): string {
+  return `${LEGACY_ENV_IDX_PREFIX}${envelopeId}`;
 }
 
 function envByTargetKey(
@@ -3571,17 +4045,19 @@ function envByTargetKey(
   paddedSeq: string,
   envelopeId: string,
 ): string {
-  return `${envByTargetPrefix(targetDeviceId)}${paddedSeq}:${envelopeId}`;
+  return `${envByTargetPrefix(targetDeviceId)}${paddedSeq}:${encodeOpaqueSegment(envelopeId)}`;
 }
 
 function envByTargetPrefix(targetDeviceId: string): string {
-  // JSON string escaping preserves exact UTF-16 code units (including lone
-  // surrogates) before UTF-8 encoding; TextEncoder(targetDeviceId) alone would
-  // normalize lone surrogates to U+FFFD and make distinct JS strings collide.
-  const encodedTarget = base64UrlEncode(
-    new TextEncoder().encode(JSON.stringify(targetDeviceId)),
-  );
-  return `${ENV_BY_TARGET_V2_PREFIX}${encodedTarget}:`;
+  return `${ENV_BY_TARGET_V3_PREFIX}${encodeOpaqueSegment(targetDeviceId)}:`;
+}
+
+function v2EnvByTargetPrefix(targetDeviceId: string): string {
+  return `${ENV_BY_TARGET_V2_PREFIX}${encodeOpaqueSegment(targetDeviceId)}:`;
+}
+
+function v2EnvByTargetKey(targetDeviceId: string, paddedSeq: string, envelopeId: string): string {
+  return `${v2EnvByTargetPrefix(targetDeviceId)}${paddedSeq}:${envelopeId}`;
 }
 
 function legacyEnvByTargetKey(
@@ -3612,23 +4088,65 @@ function sameEnvelopeInput(a: EnvelopeInput, b: EnvelopeInput): boolean {
   );
 }
 
+function sameEnvelopeRecord(a: EnvelopeRecord, b: EnvelopeRecord): boolean {
+  return a.serverSeq === b.serverSeq && sameEnvelopeInput(a, b);
+}
+
+function isDeviceRecordIdentity(value: unknown): value is DeviceRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Partial<DeviceRecord>;
+  return typeof record.participantId === "string" && record.participantId.length > 0 &&
+    typeof record.deviceId === "string" && record.deviceId.length > 0 &&
+    Number.isSafeInteger(record.registeredAt) && (record.registeredAt ?? -1) >= 0;
+}
+
+function sameDeviceRecord(a: DeviceRecord, b: DeviceRecord): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function sameDeviceRegistration(a: DeviceRecord, b: DeviceRegistrationRequest): boolean {
+  return a.deviceId === b.deviceId && a.participantId === b.participantId &&
+    a.publicSigningKey === b.publicSigningKey &&
+    a.publicEncryptionKey === b.publicEncryptionKey &&
+    a.client === b.client && a.kind === b.kind && a.selfSignature === b.selfSignature;
+}
+
+function sameBlobReservation(a: BlobReservation, b: BlobReservation): boolean {
+  return a.envelopeId === b.envelopeId &&
+    a.authorId === b.authorId &&
+    a.deviceId === b.deviceId &&
+    a.leaseId === b.leaseId &&
+    a.uploadId === b.uploadId &&
+    a.state === b.state &&
+    a.ciphertextBytes === b.ciphertextBytes &&
+    a.reservedAt === b.reservedAt &&
+    a.uploadExpiresAt === b.uploadExpiresAt &&
+    (a.objectKeyVersion ?? 1) === (b.objectKeyVersion ?? 1);
+}
+
 function isNonnegativeSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function safeNonnegativeAdd(left: number, right: number): number | undefined {
+  const total = left + right;
+  return Number.isSafeInteger(total) && total >= 0 ? total : undefined;
+}
+
 /** Per-device ACK slot: `ack:<deviceId>:<envelopeId>` → ms-epoch ack time. */
 function ackKey(deviceId: string, envelopeId: string): string {
-  return `${ACK_PREFIX}${deviceId}:${envelopeId}`;
+  return `${ACK_PREFIX}${encodeOpaqueSegment(deviceId)}:${encodeOpaqueSegment(envelopeId)}`;
 }
 
 /** Owner-ack marker: `ack_owner:<envelopeId>` → "" (presence-only). */
 function ackOwnerKey(envelopeId: string): string {
-  return `${ACK_OWNER_PREFIX}${envelopeId}`;
+  return `${ACK_OWNER_PREFIX}${encodeOpaqueSegment(envelopeId)}`;
 }
 
 // --- blob reservation keying ---------------------------------------------
 
-const BLOB_RESV_PREFIX = "blob_resv:";
+const BLOB_RESV_PREFIX = "blob_resv_v2:";
+const LEGACY_BLOB_RESV_PREFIX = "blob_resv:";
 
 /**
  * R2 reservation record stored at `blob_resv:<envelopeId>` while a client holds
@@ -3645,44 +4163,65 @@ interface BlobReservation {
   ciphertextBytes: number;
   reservedAt: number;
   uploadExpiresAt: number;
+  objectKeyVersion?: 1 | 2;
 }
 
-function isBlobReservation(value: BlobReservation): boolean {
+function isBlobReservation(value: unknown, objectKeyVersion: 1 | 2): value is BlobReservation {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Partial<BlobReservation>;
+  const nonempty = (input: unknown, max: number): input is string =>
+    typeof input === "string" && input.length > 0 && input.length <= max;
   return (
-    typeof value.envelopeId === "string" &&
-    typeof value.leaseId === "string" &&
-    typeof value.uploadId === "string" &&
-    (value.state === "reserved" || value.state === "uploading" || value.state === "uploaded") &&
-    Number.isSafeInteger(value.ciphertextBytes) &&
-    value.ciphertextBytes > 0 &&
-    Number.isSafeInteger(value.uploadExpiresAt)
+    nonempty(record.envelopeId, ENVELOPE_ID_MAX_CHARS) &&
+    nonempty(record.authorId, PARTICIPANT_ID_MAX_CHARS) &&
+    nonempty(record.deviceId, DEVICE_ID_MAX_CHARS) &&
+    nonempty(record.leaseId, 512) &&
+    nonempty(record.uploadId, 512) &&
+    (record.state === "reserved" || record.state === "uploading" || record.state === "uploaded") &&
+    Number.isSafeInteger(record.ciphertextBytes) &&
+    (record.ciphertextBytes ?? 0) > 0 &&
+    Number.isSafeInteger(record.reservedAt) &&
+    (record.reservedAt ?? -1) >= 0 &&
+    Number.isSafeInteger(record.uploadExpiresAt) &&
+    (record.uploadExpiresAt ?? -1) >= 0 &&
+    (objectKeyVersion === 2
+      ? record.objectKeyVersion === 2
+      : record.objectKeyVersion === undefined || record.objectKeyVersion === 1)
   );
 }
 
 function blobReservationKey(envelopeId: string): string {
-  return `${BLOB_RESV_PREFIX}${envelopeId}`;
+  return `${BLOB_RESV_PREFIX}${encodeOpaqueSegment(envelopeId)}`;
+}
+
+function legacyBlobReservationKey(envelopeId: string): string {
+  return `${LEGACY_BLOB_RESV_PREFIX}${envelopeId}`;
 }
 
 function parseEnvelopeStorageKey(
   key: string,
 ): { paddedSeq: string; envelopeId: string } | undefined {
-  if (!key.startsWith(ENV_PREFIX)) return undefined;
-  const suffix = key.slice(ENV_PREFIX.length);
+  const versioned = key.startsWith(ENV_PREFIX);
+  const prefix = versioned ? ENV_PREFIX : key.startsWith(LEGACY_ENV_PREFIX) ? LEGACY_ENV_PREFIX : undefined;
+  if (prefix === undefined) return undefined;
+  const suffix = key.slice(prefix.length);
   if (suffix.length < SERVER_SEQ_PAD + 2) return undefined;
   const paddedSeq = suffix.slice(0, SERVER_SEQ_PAD);
   if (!/^\d{20}$/.test(paddedSeq) || suffix[SERVER_SEQ_PAD] !== ":") return undefined;
-  const envelopeId = suffix.slice(SERVER_SEQ_PAD + 1);
-  return envelopeId.length > 0 ? { paddedSeq, envelopeId } : undefined;
+  const segment = suffix.slice(SERVER_SEQ_PAD + 1);
+  const envelopeId = versioned ? decodeOpaqueSegment(segment) : segment;
+  return envelopeId !== undefined && envelopeId.length > 0 ? { paddedSeq, envelopeId } : undefined;
 }
 
 function envelopeRecordMatchesStorageKey(
   key: string,
-  record: EnvelopeRecord,
+  record: unknown,
   finalServerSeq: number,
-): boolean {
+): record is EnvelopeRecord {
   const parsed = parseEnvelopeStorageKey(key);
   return (
     parsed !== undefined &&
+    isStoredEnvelopeRecord(record) &&
     Number.isSafeInteger(record.serverSeq) &&
     record.serverSeq > 0 &&
     record.serverSeq <= finalServerSeq &&
@@ -3691,7 +4230,25 @@ function envelopeRecordMatchesStorageKey(
   );
 }
 
-/** Parse an injective v2 target index relative to its encoded target prefix. */
+function isStoredEnvelopeRecord(value: unknown): value is EnvelopeRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Partial<EnvelopeRecord>;
+  const targetValid = record.target === null || (
+    typeof record.target === "object" && record.target !== null &&
+    typeof record.target.deviceId === "string" && record.target.deviceId.length > 0
+  );
+  return typeof record.envelopeId === "string" && record.envelopeId.length > 0 &&
+    typeof record.authorId === "string" && record.authorId.length > 0 &&
+    typeof record.deviceId === "string" && record.deviceId.length > 0 &&
+    (record.kind === "event" || record.kind === "snapshot_blob" || record.kind === "signal") &&
+    targetValid && Number.isSafeInteger(record.createdAt) && (record.createdAt ?? -1) >= 0 &&
+    Number.isSafeInteger(record.expiresAt) && (record.expiresAt ?? -1) >= 0 &&
+    typeof record.nonce === "string" && typeof record.ciphertext === "string" &&
+    Number.isSafeInteger(record.ciphertextBytes) && (record.ciphertextBytes ?? 0) > 0 &&
+    Number.isSafeInteger(record.serverSeq) && (record.serverSeq ?? 0) > 0;
+}
+
+/** Parse an injective v3 target index relative to its encoded target prefix. */
 function parseEnvByTargetKey(
   key: string,
   expectedTargetDeviceId: string,
@@ -3703,9 +4260,23 @@ function parseEnvByTargetKey(
   const paddedSeq = suffix.slice(0, SERVER_SEQ_PAD);
   if (!/^\d{20}$/.test(paddedSeq)) return undefined;
   if (suffix.charCodeAt(SERVER_SEQ_PAD) !== ":".charCodeAt(0)) return undefined;
-  const envelopeId = suffix.slice(SERVER_SEQ_PAD + 1);
-  if (envelopeId.length === 0) return undefined;
+  const envelopeId = decodeOpaqueSegment(suffix.slice(SERVER_SEQ_PAD + 1));
+  if (envelopeId === undefined) return undefined;
   return { targetDeviceId: expectedTargetDeviceId, paddedSeq, envelopeId };
+}
+
+function parseV2EnvByTargetKey(
+  key: string,
+  expectedTargetDeviceId: string,
+): { targetDeviceId: string; paddedSeq: string; envelopeId: string } | undefined {
+  const prefix = v2EnvByTargetPrefix(expectedTargetDeviceId);
+  if (!key.startsWith(prefix)) return undefined;
+  const suffix = key.slice(prefix.length);
+  if (suffix.length < SERVER_SEQ_PAD + 2) return undefined;
+  const paddedSeq = suffix.slice(0, SERVER_SEQ_PAD);
+  if (!/^\d{20}$/.test(paddedSeq) || suffix[SERVER_SEQ_PAD] !== ":") return undefined;
+  const envelopeId = suffix.slice(SERVER_SEQ_PAD + 1);
+  return envelopeId.length === 0 ? undefined : { targetDeviceId: expectedTargetDeviceId, paddedSeq, envelopeId };
 }
 
 /** Dual-read parser for the old format, limited to unambiguous colon-free targets. */
@@ -3739,23 +4310,18 @@ function deviceOrderKey(
 ): string {
   const ts = String(registeredAt).padStart(REGISTERED_AT_PAD, "0");
   const s = String(seq).padStart(8, "0");
-  return `${DEVICE_ORDER_PREFIX}${ts}:${s}:${participantId}:${deviceId}`;
+  return `${DEVICE_ORDER_PREFIX}${ts}:${s}:${encodeOpaqueSegment(participantId)}:${encodeOpaqueSegment(deviceId)}`;
 }
 
-function parseDeviceOrderKey(key: string): { participantId: string; deviceId: string } {
-  // Layout: device_order:<ts>:<seq>:<participantId>:<deviceId>. We only need
-  // the trailing pair — the timestamp + seq are encoded purely for sort order.
+function parseDeviceOrderKey(key: string): { participantId: string; deviceId: string; rank: string } | undefined {
   const rest = key.slice(DEVICE_ORDER_PREFIX.length);
   const parts = rest.split(":");
-  if (parts.length < 4) {
-    throw new Error(`malformed device_order key: ${key}`);
-  }
-  // Take the last two segments as (participantId, deviceId). We control the
-  // writer side so neither ever contains a colon (max 64 chars, the schema
-  // is permissive about content but tests + native client never embed `:`).
-  const deviceId = parts[parts.length - 1] ?? "";
-  const participantId = parts[parts.length - 2] ?? "";
-  return { participantId, deviceId };
+  if (parts.length !== 4) return undefined;
+  const participantId = decodeOpaqueSegment(parts[2] ?? "");
+  const deviceId = decodeOpaqueSegment(parts[3] ?? "");
+  return participantId === undefined || deviceId === undefined
+    ? undefined
+    : { participantId, deviceId, rank: `${parts[0]}:${parts[1]}` };
 }
 
 // --- request body buffering ----------------------------------------------
@@ -4052,6 +4618,15 @@ function sendError(
     ...(extras?.resyncFromSeq !== undefined ? { resyncFromSeq: extras.resyncFromSeq } : {}),
   };
   sendJson(ws, frame);
+}
+
+function failSocketCorrupt(ws: WebSocket): void {
+  sendError(ws, "ATTN_ROOM_CORRUPT", "room storage is inconsistent");
+  try {
+    ws.close(CLOSE_NORMAL, "corrupt");
+  } catch {
+    // best-effort close after the error frame
+  }
 }
 
 /**

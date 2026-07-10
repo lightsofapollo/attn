@@ -1,6 +1,11 @@
 /** zod request/response validators for HTTP API per relay-spec.md §HTTP API. */
 
 import { z } from "zod";
+import {
+  DEVICE_ID_MAX_CHARS,
+  ENVELOPE_ID_MAX_CHARS,
+  PARTICIPANT_ID_MAX_CHARS,
+} from "./opaque-key";
 
 /**
  * Schemas land here as endpoints are implemented:
@@ -24,8 +29,7 @@ export const BASE64URL_64_BYTE_MAX_CHARS = 86;
 export const XCHACHA20_NONCE_MAX_CHARS = 32;
 
 /** Durable-storage key components must remain small even when client-chosen. */
-export const ENVELOPE_ID_MAX_CHARS = 128;
-export const DEVICE_ID_MAX_CHARS = 64;
+export { DEVICE_ID_MAX_CHARS, ENVELOPE_ID_MAX_CHARS } from "./opaque-key";
 
 /** Unix milliseconds, integer, non-negative. */
 export const unixMs = z.number().int().nonnegative();
@@ -107,7 +111,7 @@ export type RoomPolicy = z.infer<typeof policySchema>;
  */
 export const deviceRegistrationSchema = z.object({
   deviceId: z.string().min(1).max(DEVICE_ID_MAX_CHARS),
-  participantId: z.string().min(1).max(64),
+  participantId: z.string().min(1).max(PARTICIPANT_ID_MAX_CHARS),
   publicSigningKey: b64url
     .min(1, "publicSigningKey required")
     .max(BASE64URL_32_BYTE_MAX_CHARS),

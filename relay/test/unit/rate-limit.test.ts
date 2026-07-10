@@ -5,7 +5,7 @@
  *   a plain class — no Miniflare/DO scaffolding needed.
  * - DurableObjectRateLimit is exercised against a real DO storage via
  *   `runInDurableObject`; the storage shape is observable through the
- *   spec key `rate:<deviceId>:<windowStartMin>`.
+ *   injective `rate_v2:<encodedDeviceId>:<windowStartMin>` key.
  *
  * Spec: relay-spec.md §Caps + §Anti-Abuse.
  */
@@ -19,6 +19,7 @@ import {
   DurableObjectRateLimit,
   RATE_KEY_PREFIX,
   WorkerEdgeRateLimit,
+  legacyRateKey,
   rateKey,
 } from "../../src/rate-limit";
 
@@ -279,7 +280,7 @@ describe("DurableObjectRateLimit — per-device cap (DO storage)", () => {
     expect(out.refreshed.ok).toBe(true);
   });
 
-  it("persists per-(deviceId, minute) counts under the rate:<id>:<windowMin> key", async () => {
+  it("persists per-(deviceId, minute) counts under the versioned encoded key", async () => {
     const { env } = await import("cloudflare:test");
     const id = env.RELAY_ROOMS.idFromName(uniqueId("rate-do-key-shape"));
     const stub = env.RELAY_ROOMS.get(id);
@@ -299,11 +300,65 @@ describe("DurableObjectRateLimit — per-device cap (DO storage)", () => {
     });
     expect(stored).toBe(3);
   });
+
+  it("migrates the current legacy minute without resetting or double-counting", async () => {
+    const { env } = await import("cloudflare:test");
+    const id = env.RELAY_ROOMS.idFromName(uniqueId("rate-legacy-migrate"));
+    const stub = env.RELAY_ROOMS.get(id);
+    const stored = await runInDurableObject(stub, async (_inst, ctx) => {
+      const deviceId = "device-legacy";
+      await ctx.storage.put(legacyRateKey(deviceId, 30), 119);
+      const limiter = new DurableObjectRateLimit(
+        ctx.storage,
+        DEFAULT_RATE_LIMIT_CONFIG,
+        () => 1_800_000,
+      );
+      const allowed = await limiter.check(deviceId);
+      const blocked = await limiter.check(deviceId);
+      return {
+        allowed,
+        blocked,
+        versioned: await ctx.storage.get(rateKey(deviceId, 30)),
+        legacy: await ctx.storage.get(legacyRateKey(deviceId, 30)),
+      };
+    });
+    expect(stored.allowed.ok).toBe(true);
+    expect(stored.blocked.ok).toBe(false);
+    expect(stored.versioned).toBe(120);
+    expect(stored.legacy).toBeUndefined();
+  });
+
+  it("fails closed when legacy and versioned counters diverge", async () => {
+    const { env } = await import("cloudflare:test");
+    const id = env.RELAY_ROOMS.idFromName(uniqueId("rate-divergent"));
+    const stub = env.RELAY_ROOMS.get(id);
+    const result = await runInDurableObject(stub, async (_inst, ctx) => {
+      const deviceId = "device-divergent";
+      await ctx.storage.put({
+        [rateKey(deviceId, 30)]: 4,
+        [legacyRateKey(deviceId, 30)]: 3,
+      });
+      const limiter = new DurableObjectRateLimit(
+        ctx.storage,
+        DEFAULT_RATE_LIMIT_CONFIG,
+        () => 1_800_000,
+      );
+      const decision = await limiter.check(deviceId);
+      return {
+        decision,
+        versioned: await ctx.storage.get(rateKey(deviceId, 30)),
+        legacy: await ctx.storage.get(legacyRateKey(deviceId, 30)),
+      };
+    });
+    expect(result.decision.ok).toBe(false);
+    expect(result.versioned).toBe(4);
+    expect(result.legacy).toBe(3);
+  });
 });
 
 describe("rate-limit module — invariants", () => {
   it("RATE_KEY_PREFIX is the literal storage prefix", () => {
-    expect(RATE_KEY_PREFIX).toBe("rate:");
+    expect(RATE_KEY_PREFIX).toBe("rate_v2:");
     expect(rateKey("dev", 42).startsWith(RATE_KEY_PREFIX)).toBe(true);
   });
 

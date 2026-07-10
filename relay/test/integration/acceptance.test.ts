@@ -49,7 +49,8 @@ import {
 } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
-import { presignBlobDownload } from "../../src/r2";
+import { encodeOpaqueSegment } from "../../src/opaque-key";
+import { blobObjectKey, presignBlobDownload } from "../../src/r2";
 import { rateKey } from "../../src/rate-limit";
 import type {
   DeviceRecord,
@@ -686,23 +687,25 @@ async function fireAlarmDirect(roomId: string): Promise<void> {
 
 async function hasEnvIdx(roomId: string, envelopeId: string): Promise<boolean> {
   return runInDurableObject(getStub(roomId), async (_inst, state) => {
-    const v = await state.storage.get<string>(`env_idx:${envelopeId}`);
+    const v = await state.storage.get<string>(`env_idx_v2:${encodeOpaqueSegment(envelopeId)}`);
     return v !== undefined;
   });
 }
 
 async function hasEnvelopePayload(roomId: string, envelopeId: string): Promise<boolean> {
   return runInDurableObject(getStub(roomId), async (_inst, state) => {
-    const paddedSeq = await state.storage.get<string>(`env_idx:${envelopeId}`);
+    const paddedSeq = await state.storage.get<string>(`env_idx_v2:${encodeOpaqueSegment(envelopeId)}`);
     if (paddedSeq === undefined) return false;
-    const payload = await state.storage.get(`env:${paddedSeq}:${envelopeId}`);
+    const payload = await state.storage.get(
+      `env_v2:${paddedSeq}:${encodeOpaqueSegment(envelopeId)}`,
+    );
     return payload !== undefined;
   });
 }
 
 async function hasOwnerAckMarker(roomId: string, envelopeId: string): Promise<boolean> {
   return runInDurableObject(getStub(roomId), async (_inst, state) => {
-    const v = await state.storage.get<string>(`ack_owner:${envelopeId}`);
+    const v = await state.storage.get<string>(`ack_owner_v2:${encodeOpaqueSegment(envelopeId)}`);
     return v !== undefined;
   });
 }
@@ -896,17 +899,13 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
       deviceId: "dev-co",
       participantId: "owen",
     });
-    await postEnvelopes({
-      roomId,
-      admissionKey,
-      envelopes: [
-        buildEnvelope({ envelopeId: "co-1", authorId: "owen", deviceId: "dev-co" }),
-      ],
-    });
-
-    // Advance oldest_retained_seq so the subscriber's cursor falls behind.
+    // Model a room whose first ten payloads have already been removed. The
+    // cursor floor remains bounded by the authoritative server sequence.
     await runInDurableObject(getStub(roomId), async (_inst, state) => {
-      await state.storage.put<number>("meta:oldest_retained_seq", 10);
+      await state.storage.put({
+        "meta:server_seq": 10,
+        "meta:oldest_retained_seq": 10,
+      });
     });
 
     const { ws } = await openSocket({ roomId, deviceId: "dev-co", admissionKey });
@@ -1429,9 +1428,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
       blobKey: string;
       leaseId: string;
     };
-    expect(presigned.blobKey).toBe(
-      `rooms/${roomId}/generations/${presigned.leaseId}/blobs/s7-blob`,
-    );
+    expect(presigned.blobKey).toBe(blobObjectKey(roomId, presigned.leaseId, "s7-blob", 2));
 
     // PUT to the presigned URL.
     const putRes = await SELF.fetch(`${URL_BASE}${presigned.uploadUrl}`, {

@@ -30,6 +30,7 @@
  */
 
 import type { Env } from "./env";
+import { encodeOpaqueSegment } from "./opaque-key";
 
 const DEFAULT_UPLOAD_TTL_SECONDS = 15 * 60;
 const DEFAULT_DOWNLOAD_TTL_SECONDS = 5 * 60;
@@ -40,10 +41,19 @@ export const INTERNAL_BLOB_UPLOAD_PATH = "/__attn/internal/blob-upload";
 export const INTERNAL_BLOB_LEASE_HEADER = "X-Attn-Blob-Lease";
 export const INTERNAL_BLOB_UPLOAD_HEADER = "X-Attn-Blob-Upload";
 export const INTERNAL_BLOB_ENVELOPE_HEADER = "X-Attn-Blob-Envelope";
+export const INTERNAL_BLOB_OBJECT_KEY_VERSION_HEADER = "X-Attn-Blob-Key-Version";
 
 /** Generation-bound R2 object key. Old caps cannot overwrite a recreated room. */
-export function blobObjectKey(roomId: string, leaseId: string, envelopeId: string): string {
-  return `rooms/${roomId}/generations/${leaseId}/blobs/${envelopeId}`;
+export function blobObjectKey(
+  roomId: string,
+  leaseId: string,
+  envelopeId: string,
+  objectKeyVersion: 1 | 2 = 2,
+): string {
+  if (objectKeyVersion === 1) {
+    return `rooms/${roomId}/generations/${leaseId}/blobs/${envelopeId}`;
+  }
+  return `rooms_v2/${encodeOpaqueSegment(roomId)}/generations/${encodeOpaqueSegment(leaseId)}/blobs/${encodeOpaqueSegment(envelopeId)}`;
 }
 
 export interface PresignedUploadResult {
@@ -67,6 +77,8 @@ export interface BlobCapPayload {
   leaseId: string;
   envelopeId: string;
   expiresAt: number;
+  /** Absent means the legacy raw-key layout; all newly minted caps use 2. */
+  objectKeyVersion?: 2;
   /** One-time reservation claim, required only for PUT caps. */
   uploadId?: string;
   /** Set only for PUT caps — pins the upload size so attackers can't grow the slot. */
@@ -88,6 +100,7 @@ export async function presignBlobUpload(
   uploadId: string,
   ciphertextBytes: number,
   expiresInSeconds?: number,
+  objectKeyVersion: 1 | 2 = 2,
 ): Promise<PresignedUploadResult> {
   const ttl = expiresInSeconds ?? DEFAULT_UPLOAD_TTL_SECONDS;
   const expiresAt = Date.now() + ttl * 1000;
@@ -97,11 +110,12 @@ export async function presignBlobUpload(
     leaseId,
     envelopeId,
     expiresAt,
+    ...(objectKeyVersion === 2 ? { objectKeyVersion: 2 as const } : {}),
     uploadId,
     ciphertextBytes,
   };
   const token = await signCap(payload, env);
-  const blobKey = blobObjectKey(roomId, leaseId, envelopeId);
+  const blobKey = blobObjectKey(roomId, leaseId, envelopeId, objectKeyVersion);
   // The path is the spec's `/v2/rooms/:roomId/blobs/:envelopeId`. The client
   // appends the token as a query parameter so the URL is fully self-contained
   // (no extra header coordination needed on the upload PUT).
@@ -126,6 +140,7 @@ export async function presignBlobDownload(
   leaseId: string,
   envelopeId: string,
   expiresInSeconds?: number,
+  objectKeyVersion: 1 | 2 = 2,
 ): Promise<PresignedDownloadResult> {
   const ttl = expiresInSeconds ?? DEFAULT_DOWNLOAD_TTL_SECONDS;
   const expiresAt = Date.now() + ttl * 1000;
@@ -135,6 +150,7 @@ export async function presignBlobDownload(
     leaseId,
     envelopeId,
     expiresAt,
+    ...(objectKeyVersion === 2 ? { objectKeyVersion: 2 as const } : {}),
   };
   const token = await signCap(payload, env);
   const downloadUrl = `/v2/rooms/${encodeURIComponent(roomId)}/blobs/${encodeURIComponent(envelopeId)}?cap=${encodeURIComponent(token)}`;
@@ -152,7 +168,7 @@ export async function deleteBlob(
   leaseId: string,
   envelopeId: string,
 ): Promise<void> {
-  const key = blobObjectKey(roomId, leaseId, envelopeId);
+  const key = blobObjectKey(roomId, leaseId, envelopeId, 2);
   await env.RELAY_BLOBS.delete(key);
 }
 
@@ -161,23 +177,29 @@ export async function deleteBlob(
  * keys deleted (rough metric; lifecycle rule is the final safety net).
  */
 export async function deleteRoomBlobs(env: Env, roomId: string): Promise<number> {
-  const prefix = `rooms/${roomId}/`;
   let total = 0;
-  let cursor: string | undefined;
-  // Bound the loop so a runaway list can't pin the Worker event loop.
-  for (let page = 0; page < 50; page++) {
-    const listed: R2Objects = await env.RELAY_BLOBS.list({
-      prefix,
-      ...(cursor !== undefined ? { cursor } : {}),
-    });
-    const keys = listed.objects.map((obj) => obj.key);
-    if (keys.length > 0) {
-      await env.RELAY_BLOBS.delete(keys);
-      total += keys.length;
+  const prefixes = [
+    `rooms_v2/${encodeOpaqueSegment(roomId)}/`,
+    `rooms/${roomId}/`,
+  ];
+  for (const prefix of prefixes) {
+    let cursor: string | undefined;
+    // Bound each layout independently so compatibility cleanup cannot starve
+    // either root.
+    for (let page = 0; page < 50; page++) {
+      const listed: R2Objects = await env.RELAY_BLOBS.list({
+        prefix,
+        ...(cursor !== undefined ? { cursor } : {}),
+      });
+      const keys = listed.objects.map((obj) => obj.key);
+      if (keys.length > 0) {
+        await env.RELAY_BLOBS.delete(keys);
+        total += keys.length;
+      }
+      if (!listed.truncated) break;
+      cursor = listed.cursor;
+      if (cursor === undefined) break;
     }
-    if (!listed.truncated) return total;
-    cursor = listed.truncated ? listed.cursor : undefined;
-    if (cursor === undefined) return total;
   }
   return total;
 }
@@ -219,6 +241,7 @@ export async function verifyBlobCap(
   if (payload.roomId !== expect.roomId) return undefined;
   if (payload.envelopeId !== expect.envelopeId) return undefined;
   if (typeof payload.leaseId !== "string" || payload.leaseId.length === 0) return undefined;
+  if (payload.objectKeyVersion !== undefined && payload.objectKeyVersion !== 2) return undefined;
   if (payload.method === "PUT" && (typeof payload.uploadId !== "string" || payload.uploadId.length === 0)) {
     return undefined;
   }
@@ -281,6 +304,9 @@ function canonicalizePayload(p: BlobCapPayload): string {
     envelopeId: p.envelopeId,
     expiresAt: p.expiresAt,
   };
+  if (p.objectKeyVersion === 2) {
+    ordered.objectKeyVersion = 2;
+  }
   if (typeof p.uploadId === "string") {
     ordered.uploadId = p.uploadId;
   }

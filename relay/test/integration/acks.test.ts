@@ -33,6 +33,7 @@ import {
 } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
+import { encodeOpaqueSegment } from "../../src/opaque-key";
 import type { EnvelopeInput, RoomPolicy } from "../../src/schema";
 import { FIXED_POW_RAND, createPowHeader, mintPowForTests } from "../helpers/pow";
 
@@ -466,7 +467,7 @@ async function hasEnvIdx(roomId: string, envelopeId: string): Promise<boolean> {
   const id = env.RELAY_ROOMS.idFromName(roomId);
   const stub = env.RELAY_ROOMS.get(id);
   return runInDurableObject(stub, async (_inst, state) => {
-    const v = await state.storage.get<string>(`env_idx:${envelopeId}`);
+    const v = await state.storage.get<string>(`env_idx_v2:${encodeOpaqueSegment(envelopeId)}`);
     return v !== undefined;
   });
 }
@@ -479,7 +480,9 @@ async function hasAckSlot(
   const id = env.RELAY_ROOMS.idFromName(roomId);
   const stub = env.RELAY_ROOMS.get(id);
   return runInDurableObject(stub, async (_inst, state) => {
-    const v = await state.storage.get<number>(`ack:${deviceId}:${envelopeId}`);
+    const v = await state.storage.get<number>(
+      `ack_v2:${encodeOpaqueSegment(deviceId)}:${encodeOpaqueSegment(envelopeId)}`,
+    );
     return v !== undefined;
   });
 }
@@ -488,7 +491,7 @@ async function hasOwnerAckMarker(roomId: string, envelopeId: string): Promise<bo
   const id = env.RELAY_ROOMS.idFromName(roomId);
   const stub = env.RELAY_ROOMS.get(id);
   return runInDurableObject(stub, async (_inst, state) => {
-    const v = await state.storage.get<string>(`ack_owner:${envelopeId}`);
+    const v = await state.storage.get<string>(`ack_owner_v2:${encodeOpaqueSegment(envelopeId)}`);
     return v !== undefined;
   });
 }
@@ -521,12 +524,12 @@ async function getAckContentSnapshot(roomId: string): Promise<Map<string, unknow
   return new Map(
     [...all].filter(([key]) =>
       metadata.has(key) ||
-      key.startsWith("env:") ||
-      key.startsWith("env_idx:") ||
-      key.startsWith("env_by_target_v2:") ||
+      key.startsWith("env_v2:") ||
+      key.startsWith("env_idx_v2:") ||
+      key.startsWith("env_by_target_v3:") ||
       key.startsWith("env_by_target:") ||
-      key.startsWith("ack:") ||
-      key.startsWith("ack_owner:"),
+      key.startsWith("ack_v2:") ||
+      key.startsWith("ack_owner_v2:"),
     ),
   );
 }
@@ -534,7 +537,7 @@ async function getAckContentSnapshot(roomId: string): Promise<Map<string, unknow
 async function getPayloadCount(roomId: string): Promise<number> {
   const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
   return runInDurableObject(stub, async (_inst, state) => {
-    return (await state.storage.list({ prefix: "env:" })).size;
+    return (await state.storage.list({ prefix: "env_v2:" })).size;
   });
 }
 
@@ -750,7 +753,7 @@ describe("POST /v2/rooms/:roomId/acks — exact post-delete cursor floor", () =>
       ],
     });
     const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
-    const firstKey = "env:00000000000000000001:floor-corrupt-1";
+    const firstKey = `env_v2:00000000000000000001:${encodeOpaqueSegment("floor-corrupt-1")}`;
     await runInDurableObject(stub, async (_inst, state) => {
       const record = await state.storage.get<EnvelopeInput & { serverSeq: number }>(firstKey);
       if (record === undefined) throw new Error("missing corrupt-floor fixture");
@@ -1076,6 +1079,88 @@ describe("POST /v2/rooms/:roomId/acks — idempotency", () => {
 });
 
 describe("POST /v2/rooms/:roomId/acks — protection layers", () => {
+  it.each([
+    ["oversized", "99999999999999999999"],
+    ["wrong-type", 1],
+  ] as const)("fails closed on a %s exact legacy env_idx value", async (_label, corruptSeq) => {
+    const roomId = uniqueRoomId("ack-corrupt-legacy-seq");
+    const ownerKp = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp });
+    const reviewer = await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-corrupt-seq",
+      participantId: "corrupt-seq",
+    });
+    const envelopeId = "corrupt-seq-envelope";
+    await postEnvelope({
+      roomId,
+      admissionKey,
+      envelope: buildEnvelope({
+        envelopeId,
+        authorId: reviewer.participantId,
+        deviceId: reviewer.deviceId,
+      }),
+    });
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.delete(`env_idx_v2:${encodeOpaqueSegment(envelopeId)}`);
+      await state.storage.put(`env_idx:${envelopeId}`, corruptSeq);
+    });
+    const response = await postAcks({
+      roomId,
+      admissionKey,
+      body: { ackedEnvelopeIds: [envelopeId], deviceId: reviewer.deviceId },
+    });
+    expect(response.status).toBe(500);
+    expect(((await response.json()) as ErrorResponse).error.code).toBe("ATTN_ROOM_CORRUPT");
+    expect(await hasAckSlot(roomId, reviewer.deviceId, envelopeId)).toBe(false);
+  });
+
+  it.each(["versioned", "legacy"] as const)(
+    "fails closed on a future %s env_idx tombstone before writing an ACK",
+    async (layout) => {
+      const roomId = uniqueRoomId(`ack-future-${layout}-seq`);
+      const ownerKp = await generateEd25519Keypair();
+      const admissionKey = await createRoom({ roomId, ownerKp });
+      const reviewer = await registerDevice({
+        roomId,
+        admissionKey,
+        deviceId: `dev-future-${layout}`,
+        participantId: `future-${layout}`,
+      });
+      const envelopeId = `future-${layout}-envelope`;
+      await postEnvelope({
+        roomId,
+        admissionKey,
+        envelope: buildEnvelope({
+          envelopeId,
+          authorId: reviewer.participantId,
+          deviceId: reviewer.deviceId,
+        }),
+      });
+      const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+      await runInDurableObject(stub, async (_instance, state) => {
+        const versionedKey = `env_idx_v2:${encodeOpaqueSegment(envelopeId)}`;
+        if (layout === "legacy") {
+          await state.storage.delete(versionedKey);
+          await state.storage.put(`env_idx:${envelopeId}`, "00000000000000000002");
+        } else {
+          await state.storage.put(versionedKey, "00000000000000000002");
+        }
+      });
+
+      const response = await postAcks({
+        roomId,
+        admissionKey,
+        body: { ackedEnvelopeIds: [envelopeId], deviceId: reviewer.deviceId },
+      });
+      expect(response.status).toBe(500);
+      expect(((await response.json()) as ErrorResponse).error.code).toBe("ATTN_ROOM_CORRUPT");
+      expect(await hasAckSlot(roomId, reviewer.deviceId, envelopeId)).toBe(false);
+    },
+  );
+
   it("rejects an unknown device before creating caller-selected rate, PoW, or ACK keys", async () => {
     const roomId = uniqueRoomId("ack-unknown-device");
     const ownerKp = await generateEd25519Keypair();
@@ -1144,7 +1229,7 @@ describe("POST /v2/rooms/:roomId/acks — protection layers", () => {
     });
     const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
     await runInDurableObject(stub, async (_inst, state) => {
-      const key = `env:00000000000000000001:${envelopeId}`;
+      const key = `env_v2:00000000000000000001:${encodeOpaqueSegment(envelopeId)}`;
       const record = await state.storage.get<EnvelopeInput & { serverSeq: number }>(key);
       if (record === undefined) throw new Error("missing no-PoW scan fixture");
       await state.storage.put(key, { ...record, envelopeId: "mismatched-before-pow" });

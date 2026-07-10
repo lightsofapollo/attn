@@ -10,12 +10,13 @@
  * the upsert/key-mismatch logic.
  */
 
-import { SELF } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
+import { encodeOpaqueSegment } from "../../src/opaque-key";
 import type { DeviceRecord, RoomPolicy } from "../../src/schema";
 import { FIXED_POW_RAND, createPowHeader, mintPowForTests } from "../helpers/pow";
 
@@ -282,6 +283,14 @@ describe("POST /v2/rooms/:roomId/devices — happy path", () => {
     expect(dev0.participantId).toBe("alice");
     expect(dev0.kind).toBe("reviewer");
     expect(typeof dev0.registeredAt).toBe("number");
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.get(
+        `device_v2:${encodeOpaqueSegment("alice")}:${encodeOpaqueSegment("dev-1")}`,
+      )).toBeDefined();
+      expect(await state.storage.get("device:alice:dev-1")).toBeUndefined();
+      expect((await state.storage.list({ prefix: "device_order_v2:" })).size).toBe(1);
+    });
   });
 
   it("registers an owner device when publicSigningKey matches stored ownerSigningKey", async () => {
@@ -401,6 +410,57 @@ describe("POST /v2/rooms/:roomId/devices — upsert + key-immutability", () => {
     expect(list.devices.length).toBe(1);
   });
 
+  it("atomically migrates an exact legacy device on authenticated idempotent re-registration", async () => {
+    const roomId = uniqueRoomId("legacy-reregister");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    const reviewer = await generateEd25519Keypair();
+    const body = await buildSignedDeviceBody({
+      deviceId: "legacy-device",
+      participantId: "legacy-user",
+      publicSigningKey: base64UrlEncode(reviewer.publicKeyBytes),
+    }, reviewer.privateKey);
+    const url = `${URL_BASE}/v2/rooms/${roomId}/devices`;
+    const post = async (offset: number): Promise<Response> => SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Attn-Admission": await admissionHeaderFor({ method: "POST", url, body, admissionKey }),
+        "Attn-PoW": await mintPowForTests({
+          roomId,
+          deviceId: "legacy-device",
+          method: "POST",
+          path: `/v2/rooms/${roomId}/devices`,
+          difficulty: 12,
+          expiresAt: Date.now() + 300_000 + offset,
+          rand: FIXED_POW_RAND,
+        }),
+      },
+      body,
+    });
+    expect((await post(0)).status).toBe(204);
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      const versionedKey = `device_v2:${encodeOpaqueSegment("legacy-user")}:${encodeOpaqueSegment("legacy-device")}`;
+      const record = await state.storage.get<DeviceRecord>(versionedKey);
+      if (record === undefined) throw new Error("missing device fixture");
+      const orderKeys = [...(await state.storage.list({ prefix: "device_order_v2:" })).keys()];
+      await state.storage.delete([versionedKey, ...orderKeys]);
+      await state.storage.put({
+        "device:legacy-user:legacy-device": record,
+        [`device_order:${String(record.registeredAt).padStart(16, "0")}:00000001:legacy-user:legacy-device`]: "",
+      });
+    });
+    expect((await post(1)).status).toBe(204);
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.get("device:legacy-user:legacy-device")).toBeUndefined();
+      expect((await state.storage.list({ prefix: "device_order:" })).size).toBe(0);
+      expect(await state.storage.get(
+        `device_v2:${encodeOpaqueSegment("legacy-user")}:${encodeOpaqueSegment("legacy-device")}`,
+      )).toBeDefined();
+    });
+  });
+
   it("re-registering same (participantId, deviceId) with a DIFFERENT key returns 409", async () => {
     const roomId = uniqueRoomId("key-changed");
     const owner = await generateEd25519Keypair();
@@ -453,6 +513,65 @@ describe("POST /v2/rooms/:roomId/devices — upsert + key-immutability", () => {
     expect(r2.status).toBe(409);
     const err = (await r2.json()) as ErrorResponse;
     expect(err.error.code).toBe("ATTN_DEVICE_KEY_CHANGED");
+  });
+
+  it("rejects binding one deviceId to a second participant before anti-abuse mutation", async () => {
+    const roomId = uniqueRoomId("duplicate-device-id");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    const url = `${URL_BASE}/v2/rooms/${roomId}/devices`;
+    const first = await generateEd25519Keypair();
+    const firstBody = await buildSignedDeviceBody({
+      deviceId: "shared-device",
+      participantId: "alice",
+      publicSigningKey: base64UrlEncode(first.publicKeyBytes),
+    }, first.privateKey);
+    expect((await SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Attn-Admission": await admissionHeaderFor({ method: "POST", url, body: firstBody, admissionKey }),
+        "Attn-PoW": await mintDevicePow(roomId, "shared-device"),
+      },
+      body: firstBody,
+    })).status).toBe(204);
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    const before = await runInDurableObject(stub, async (_instance, state) => ({
+      rate: [...(await state.storage.list<number>({ prefix: "rate_v2:" })).values()]
+        .reduce((sum, value) => sum + value, 0),
+      pow: (await state.storage.list({ prefix: "pow_seen:" })).size,
+    }));
+    const second = await generateEd25519Keypair();
+    const secondBody = await buildSignedDeviceBody({
+      deviceId: "shared-device",
+      participantId: "bob",
+      publicSigningKey: base64UrlEncode(second.publicKeyBytes),
+    }, second.privateKey);
+    const response = await SELF.fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Attn-Admission": await admissionHeaderFor({ method: "POST", url, body: secondBody, admissionKey }),
+        "Attn-PoW": await mintPowForTests({
+          roomId,
+          deviceId: "shared-device",
+          method: "POST",
+          path: `/v2/rooms/${roomId}/devices`,
+          difficulty: 12,
+          expiresAt: Date.now() + 300_001,
+          rand: FIXED_POW_RAND,
+        }),
+      },
+      body: secondBody,
+    });
+    expect(response.status).toBe(409);
+    expect(((await response.json()) as ErrorResponse).error.code).toBe("ATTN_DEVICE_ID_CONFLICT");
+    const after = await runInDurableObject(stub, async (_instance, state) => ({
+      rate: [...(await state.storage.list<number>({ prefix: "rate_v2:" })).values()]
+        .reduce((sum, value) => sum + value, 0),
+      pow: (await state.storage.list({ prefix: "pow_seen:" })).size,
+    }));
+    expect(after).toEqual(before);
   });
 });
 
@@ -530,6 +649,39 @@ describe("POST /v2/rooms/:roomId/devices — selfSignature validation", () => {
 });
 
 describe("POST /v2/rooms/:roomId/devices — protection layers", () => {
+  it("rejects fresh unsafe participant/device IDs before durable anti-abuse mutation", async () => {
+    const roomId = uniqueRoomId("unsafe-device-id");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    const reviewer = await generateEd25519Keypair();
+    const body = await buildSignedDeviceBody({
+      deviceId: "dev:unsafe",
+      participantId: "participant/unsafe",
+      publicSigningKey: base64UrlEncode(reviewer.publicKeyBytes),
+      kind: "reviewer",
+    }, reviewer.privateKey);
+    const url = `${URL_BASE}/v2/rooms/${roomId}/devices`;
+    const adm = await admissionHeaderFor({ method: "POST", url, body, admissionKey });
+    const pow = await mintDevicePow(roomId, "dev:unsafe");
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    const before = await runInDurableObject(stub, async (_instance, state) => ({
+      rate: (await state.storage.list({ prefix: "rate_v2:" })).size,
+      pow: (await state.storage.list({ prefix: "pow_seen:" })).size,
+    }));
+    const response = await SELF.fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Attn-Admission": adm, "Attn-PoW": pow },
+      body,
+    });
+    expect(response.status).toBe(400);
+    const after = await runInDurableObject(stub, async (_instance, state) => ({
+      rate: (await state.storage.list({ prefix: "rate_v2:" })).size,
+      pow: (await state.storage.list({ prefix: "pow_seen:" })).size,
+      devices: (await state.storage.list({ prefix: "device_v2:" })).size,
+    }));
+    expect(after).toEqual({ ...before, devices: 0 });
+  });
+
   it("rejects POST without admission header (401)", async () => {
     const roomId = uniqueRoomId("no-admission");
     const owner = await generateEd25519Keypair();

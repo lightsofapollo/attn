@@ -4,6 +4,7 @@ import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import type { Env } from "../../src/env";
+import { encodeOpaqueSegment } from "../../src/opaque-key";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -69,13 +70,13 @@ async function ageSourceAllocationAndIndex(
     const indexes = await state.storage.list<{
       sourceBucket: string;
       allocationAt: number;
-    }>({ prefix: "source_expiry:" });
+    }>({ prefix: "source_expiry_v2:" });
     let sequence = 0;
     for (const [key, record] of indexes) {
       if (record.sourceBucket !== sourceBucket) continue;
       await state.storage.delete(key);
       const expiredAt = Date.now() - 1;
-      const replacement = `source_expiry:${String(expiredAt).padStart(16, "0")}:aged:${sequence++}`;
+      const replacement = `source_expiry_v2:${String(expiredAt).padStart(16, "0")}:${encodeOpaqueSegment("aged")}:${encodeOpaqueSegment(String(sequence++))}`;
       await state.storage.put(replacement, { ...record, allocationAt: agedAt });
     }
     await state.storage.setAlarm(Date.now() - 1);
@@ -214,11 +215,38 @@ describe("QuotaDO", () => {
 
     expect((await release(stub, "room-same", "lease-old")).status).toBe(204);
     const state = await runInDurableObject(stub, async (_instance, durableState) => ({
-      lease: await durableState.storage.get<{ leaseId: string }>("lease:room-same"),
+      lease: await durableState.storage.get<{ leaseId: string }>(
+        `lease_v2:${encodeOpaqueSegment("room-same")}`,
+      ),
       global: await durableState.storage.get<{ liveRooms: number }>("global:v1"),
     }));
     expect(state.lease?.leaseId).toBe("lease-new");
     expect(state.global?.liveRooms).toBe(1);
+  });
+
+  it("dual-reads and atomically migrates an exact legacy singleton lease", async () => {
+    const stub = quotaStub("legacy-lease");
+    const roomId = "room-legacy";
+    const leaseId = "lease-legacy";
+    const sourceBucket = "ip:v1:legacy";
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put(`lease:${roomId}`, {
+        roomId,
+        leaseId,
+        sourceBucket,
+        reservedBytes: RESERVED,
+        acquiredAt: 123,
+      });
+    });
+    expect((await acquire(stub, roomId, leaseId, sourceBucket)).status).toBe(200);
+    const state = await runInDurableObject(stub, async (_instance, durableState) => ({
+      versioned: await durableState.storage.get(
+        `lease_v2:${encodeOpaqueSegment(roomId)}`,
+      ),
+      legacy: await durableState.storage.get(`lease:${roomId}`),
+    }));
+    expect(state.versioned).toBeDefined();
+    expect(state.legacy).toBeUndefined();
   });
 
   it("fails closed on mismatched reservation configuration", async () => {
@@ -248,7 +276,7 @@ describe("QuotaDO", () => {
 
     const stored = await runInDurableObject(stub, async (_instance, state) => ({
       source: await state.storage.get(`source:${source}`),
-      indexes: await state.storage.list({ prefix: "source_expiry:" }),
+      indexes: await state.storage.list({ prefix: "source_expiry_v2:" }),
       alarm: await state.storage.getAlarm(),
     }));
     expect(stored.source).toBeUndefined();
@@ -269,8 +297,8 @@ describe("QuotaDO", () => {
         liveRooms: number;
         allocations: Array<{ at: number; bytes: number }>;
       }>(`source:${source}`),
-      lease: await state.storage.get("lease:room-live"),
-      indexes: await state.storage.list({ prefix: "source_expiry:" }),
+      lease: await state.storage.get(`lease_v2:${encodeOpaqueSegment("room-live")}`),
+      indexes: await state.storage.list({ prefix: "source_expiry_v2:" }),
     }));
     expect(stored.source).toEqual({ liveRooms: 1, allocations: [] });
     expect(stored.lease).toBeDefined();

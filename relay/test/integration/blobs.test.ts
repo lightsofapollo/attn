@@ -23,7 +23,8 @@ import { describe, expect, it } from "vitest";
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
-import { presignBlobDownload } from "../../src/r2";
+import { blobObjectKey, presignBlobDownload } from "../../src/r2";
+import { encodeOpaqueSegment } from "../../src/opaque-key";
 import type { RoomPolicy } from "../../src/schema";
 import { FIXED_POW_RAND, createPowHeader, mintPowForTests } from "../helpers/pow";
 
@@ -384,13 +385,115 @@ describe("POST /v2/rooms/:roomId/blobs — happy path", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as PresignedUploadResponse;
     expect(body.method).toBe("PUT");
-    expect(body.blobKey).toBe(
-      `rooms/${roomId}/generations/${body.leaseId}/blobs/blob-env-1`,
-    );
+    expect(body.blobKey).toBe(blobObjectKey(roomId, body.leaseId, "blob-env-1", 2));
     expect(body.uploadUrl).toContain("/v2/rooms/");
     expect(body.uploadUrl).toContain("cap=");
     expect(body.expiresAt).toBeGreaterThan(Date.now());
     expect(body.headers["Content-Type"]).toBe("application/octet-stream");
+  });
+
+  it("does not let a second registered identity take over an existing reservation", async () => {
+    const roomId = uniqueRoomId("blob-reservation-takeover");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({ roomId, admissionKey, deviceId: "dev-alice", participantId: "alice" });
+    await registerDevice({ roomId, admissionKey, deviceId: "dev-bob", participantId: "bob" });
+    const envelopeId = "immutable-reservation";
+    expect((await postBlobPresign({
+      roomId,
+      admissionKey,
+      envelopeId,
+      authorId: "alice",
+      deviceId: "dev-alice",
+      ciphertextBytes: OVER_THRESHOLD_BYTES,
+    })).status).toBe(200);
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    const key = `blob_resv_v2:${encodeOpaqueSegment(envelopeId)}`;
+    const before = await runInDurableObject(stub, async (_instance, state) =>
+      state.storage.get(key),
+    );
+    const takeover = await postBlobPresign({
+      roomId,
+      admissionKey,
+      envelopeId,
+      authorId: "bob",
+      deviceId: "dev-bob",
+      ciphertextBytes: OVER_THRESHOLD_BYTES,
+    });
+    expect(takeover.status).toBe(409);
+    expect(((await takeover.json()) as ErrorResponse).error.code)
+      .toBe("ATTN_BLOB_RESERVATION_MISMATCH");
+    expect(await runInDurableObject(stub, async (_instance, state) => state.storage.get(key)))
+      .toEqual(before);
+    if (typeof before !== "object" || before === null) throw new Error("missing reservation fixture");
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put(key, { ...before, leaseId: "wrong-generation" });
+    });
+    const staleLease = await postBlobPresign({
+      roomId,
+      admissionKey,
+      envelopeId,
+      authorId: "alice",
+      deviceId: "dev-alice",
+      ciphertextBytes: OVER_THRESHOLD_BYTES,
+    });
+    expect(staleLease.status).toBe(409);
+    expect(((await staleLease.json()) as ErrorResponse).error.code)
+      .toBe("ATTN_BLOB_RESERVATION_MISMATCH");
+  });
+
+  it("re-presigns and round-trips an exact unsafe legacy reservation in its original R2 root", async () => {
+    const roomId = uniqueRoomId("blob-legacy-represign");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({ roomId, admissionKey, deviceId: "dev-legacy", participantId: "legacy-author" });
+    const envelopeId = "legacy:unsafe/blob";
+    const ciphertext = makeCiphertext(OVER_THRESHOLD_BYTES, 0x51);
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    const leaseId = await runInDurableObject(stub, async (_instance, state) => {
+      const lease = await state.storage.get<{ leaseId: string }>("meta:quota_lease");
+      if (lease === undefined) throw new Error("missing lease fixture");
+      await state.storage.put({
+        [`blob_resv:${envelopeId}`]: {
+          envelopeId,
+          authorId: "legacy-author",
+          deviceId: "dev-legacy",
+          leaseId: lease.leaseId,
+          uploadId: "old-upload",
+          state: "reserved",
+          ciphertextBytes: ciphertext.byteLength,
+          reservedAt: 1,
+          uploadExpiresAt: Date.now() + 60_000,
+        },
+        "meta:bytes_used_r2": ciphertext.byteLength,
+      });
+      return lease.leaseId;
+    });
+    const presign = await postBlobPresign({
+      roomId,
+      admissionKey,
+      envelopeId,
+      authorId: "legacy-author",
+      deviceId: "dev-legacy",
+      ciphertextBytes: ciphertext.byteLength,
+    });
+    expect(presign.status).toBe(200);
+    const upload = (await presign.json()) as PresignedUploadResponse;
+    expect(upload.blobKey).toBe(blobObjectKey(roomId, leaseId, envelopeId, 1));
+    expect((await SELF.fetch(`${URL_BASE}${upload.uploadUrl}`, {
+      method: "PUT",
+      body: ciphertext,
+    })).status).toBe(204);
+    const downloadPresign = await getBlobDownloadPresign({ roomId, admissionKey, envelopeId });
+    expect(downloadPresign.status).toBe(200);
+    const download = (await downloadPresign.json()) as PresignedDownloadResponse;
+    const fetched = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`);
+    expect(fetched.status).toBe(200);
+    expect(new Uint8Array(await fetched.arrayBuffer())).toEqual(ciphertext);
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.get(`blob_resv:${envelopeId}`)).toBeDefined();
+      expect(await state.storage.get(`blob_resv_v2:${encodeOpaqueSegment(envelopeId)}`)).toBeUndefined();
+    });
   });
 
   it("uploads bytes via PUT and retrieves them via GET (round-trip)", async () => {
@@ -484,6 +587,30 @@ describe("POST /v2/rooms/:roomId/blobs — threshold gate", () => {
 });
 
 describe("POST /v2/rooms/:roomId/blobs — room cap", () => {
+  it.each([
+    ["negative", -1, 0],
+    ["overflow", Number.MAX_SAFE_INTEGER, 1],
+  ] as const)("fails closed on %s blob accounting metadata", async (_label, inline, r2) => {
+    const roomId = uniqueRoomId("blob-corrupt-accounting");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({ roomId, admissionKey, deviceId: "dev-meta", participantId: "meta" });
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put({ "meta:bytes_used": inline, "meta:bytes_used_r2": r2 });
+    });
+    const response = await postBlobPresign({
+      roomId,
+      admissionKey,
+      envelopeId: `blob-meta-${_label}`,
+      authorId: "meta",
+      deviceId: "dev-meta",
+      ciphertextBytes: OVER_THRESHOLD_BYTES,
+    });
+    expect(response.status).toBe(500);
+    expect(((await response.json()) as ErrorResponse).error.code).toBe("ATTN_ROOM_CORRUPT");
+  });
+
   it("rejects when reservation would exceed HARD_MAX_ROOM_BYTES with 507 ATTN_ROOM_STORAGE_FULL", async () => {
     // HARD_MAX_ROOM_BYTES is 25 MiB. We seed meta:bytes_used_r2 close to the
     // cap so a single 2 MiB blob presign trips the overflow check — without
@@ -605,6 +732,76 @@ describe("GET /v2/rooms/:roomId/blobs/:envelopeId — missing object", () => {
 });
 
 describe("GET /v2/rooms/:roomId/blobs/:envelopeId — download presign endpoint", () => {
+  it("reads an exact legacy reservation and legacy R2 object without re-keying ciphertext", async () => {
+    const roomId = uniqueRoomId("blob-legacy-read");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    const envelopeId = "legacy:blob/unsafe";
+    const bytes = new Uint8Array([0, 255, 17, 99, 4]);
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    const leaseId = await runInDurableObject(stub, async (_instance, state) => {
+      const lease = await state.storage.get<{ leaseId: string }>("meta:quota_lease");
+      if (lease === undefined) throw new Error("missing quota lease fixture");
+      await state.storage.put(`blob_resv:${envelopeId}`, {
+        envelopeId,
+        authorId: "legacy-author",
+        deviceId: "legacy-device",
+        leaseId: lease.leaseId,
+        uploadId: "legacy-upload",
+        state: "uploaded",
+        ciphertextBytes: bytes.byteLength,
+        reservedAt: Date.now() - 1,
+        uploadExpiresAt: Date.now() + 60_000,
+      });
+      return lease.leaseId;
+    });
+    await env.RELAY_BLOBS.put(blobObjectKey(roomId, leaseId, envelopeId, 1), bytes);
+
+    const presign = await getBlobDownloadPresign({ roomId, admissionKey, envelopeId });
+    expect(presign.status).toBe(200);
+    const download = (await presign.json()) as PresignedDownloadResponse;
+    const fetched = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`);
+    expect(fetched.status).toBe(200);
+    expect(new Uint8Array(await fetched.arrayBuffer())).toEqual(bytes);
+  });
+
+  it("fails closed on malformed or root-divergent blob reservations", async () => {
+    const roomId = uniqueRoomId("blob-corrupt-reservation");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    const envelopeId = "corrupt-reservation";
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put(`blob_resv_v2:${encodeOpaqueSegment(envelopeId)}`, null);
+    });
+    const malformed = await getBlobDownloadPresign({ roomId, admissionKey, envelopeId });
+    expect(malformed.status).toBe(500);
+    expect(((await malformed.json()) as ErrorResponse).error.code).toBe("ATTN_ROOM_CORRUPT");
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const lease = await state.storage.get<{ leaseId: string }>("meta:quota_lease");
+      if (lease === undefined) throw new Error("missing lease fixture");
+      const base = {
+        envelopeId,
+        authorId: "author",
+        deviceId: "device",
+        leaseId: lease.leaseId,
+        uploadId: "upload",
+        state: "reserved" as const,
+        ciphertextBytes: OVER_THRESHOLD_BYTES,
+        reservedAt: 1,
+        uploadExpiresAt: Date.now() + 60_000,
+      };
+      await state.storage.put({
+        [`blob_resv_v2:${encodeOpaqueSegment(envelopeId)}`]: { ...base, objectKeyVersion: 2 },
+        [`blob_resv:${envelopeId}`]: base,
+      });
+    });
+    const divergent = await getBlobDownloadPresign({ roomId, admissionKey, envelopeId });
+    expect(divergent.status).toBe(500);
+    expect(((await divergent.json()) as ErrorResponse).error.code).toBe("ATTN_ROOM_CORRUPT");
+  });
+
   it("rejects a cap-less GET without admission with 401", async () => {
     const roomId = uniqueRoomId("blob-dl-noadm");
     const owner = await generateEd25519Keypair();
@@ -702,7 +899,8 @@ describe("Room delete sweeps blobs (cross-check with 5.10)", () => {
     expect(putRes.status).toBe(204);
 
     // Verify the blob is in R2 before deletion.
-    const beforeListed = await env.RELAY_BLOBS.list({ prefix: `rooms/${roomId}/` });
+    const roomPrefix = `rooms_v2/${encodeOpaqueSegment(roomId)}/`;
+    const beforeListed = await env.RELAY_BLOBS.list({ prefix: roomPrefix });
     expect(beforeListed.objects.length).toBeGreaterThan(0);
 
     // DELETE /v2/rooms/:roomId with admission + PoW + owner-sig (5.10 contract).
@@ -737,7 +935,7 @@ describe("Room delete sweeps blobs (cross-check with 5.10)", () => {
     expect(deleteRes.status).toBe(204);
 
     // R2 should now be empty under the room prefix.
-    const afterListed = await env.RELAY_BLOBS.list({ prefix: `rooms/${roomId}/` });
+    const afterListed = await env.RELAY_BLOBS.list({ prefix: roomPrefix });
     expect(afterListed.objects.length).toBe(0);
 
     // A still-unexpired old-generation cap cannot resurrect bytes after the
@@ -748,7 +946,7 @@ describe("Room delete sweeps blobs (cross-check with 5.10)", () => {
       body: ciphertext,
     });
     expect(stalePut.status).toBe(409);
-    const afterReplay = await env.RELAY_BLOBS.list({ prefix: `rooms/${roomId}/` });
+    const afterReplay = await env.RELAY_BLOBS.list({ prefix: roomPrefix });
     expect(afterReplay.objects.length).toBe(0);
   });
 });

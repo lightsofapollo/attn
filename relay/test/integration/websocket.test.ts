@@ -20,6 +20,7 @@ import {
 } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
+import { encodeOpaqueSegment } from "../../src/opaque-key";
 import type {
   DeviceRecord,
   EnvelopeInput,
@@ -478,6 +479,27 @@ function isPing(x: unknown): x is PingFrame {
 // --- tests ---------------------------------------------------------------
 
 describe("WS /socket — admission", () => {
+  it("fails closed when legacy state maps one deviceId to two participants", async () => {
+    const roomId = uniqueRoomId("ws-ambiguous-device");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({ roomId, admissionKey, deviceId: "ambiguous-device", participantId: "alice" });
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      const records = await state.storage.list<DeviceRecord>({ prefix: "device_v2:" });
+      const record = [...records.values()][0];
+      if (record === undefined) throw new Error("missing device fixture");
+      await state.storage.put(
+        `device_v2:${encodeOpaqueSegment("bob")}:${encodeOpaqueSegment("ambiguous-device")}`,
+        { ...record, participantId: "bob" },
+      );
+    });
+    const { response } = await openSocket({ roomId, deviceId: "ambiguous-device", admissionKey });
+    expect(response.status).toBe(500);
+    expect(((await response.json()) as { error: { code: string; message: string } }).error)
+      .toEqual({ code: "ATTN_ROOM_CORRUPT", message: "inconsistent versioned storage state" });
+  });
+
   it("returns 401 ATTN_ADMISSION_INVALID when Sec-WebSocket-Protocol is missing", async () => {
     const roomId = uniqueRoomId("ws-no-proto");
     const owner = await generateEd25519Keypair();
@@ -532,11 +554,155 @@ describe("WS /socket — admission", () => {
     expect(first.devices.length).toBe(1);
     expect(first.devices[0]?.deviceId).toBe("dev-h");
     expect(first.missedSignalEnvelopeIds).toEqual([]);
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(state.getWebSockets(`d2:${encodeOpaqueSegment("dev-h")}`).length).toBe(1);
+      expect(state.getWebSockets(`p2:${encodeOpaqueSegment("harriet")}`).length).toBe(1);
+      expect(state.getWebSockets("dev-h").length).toBe(0);
+    });
     ws.close(1000, "test done");
   });
 });
 
 describe("WS /socket — backfill", () => {
+  it.each([
+    ["negative server sequence", -1, 0],
+    ["fractional cursor floor", 1, 0.5],
+    ["cursor floor beyond server sequence", 1, 2],
+  ] as const)("fails before hello on %s metadata", async (_label, serverSeq, oldest) => {
+    const roomId = uniqueRoomId("ws-corrupt-replay-meta");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-corrupt-meta",
+      participantId: "peer-corrupt-meta",
+    });
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put({
+        "meta:server_seq": serverSeq,
+        "meta:oldest_retained_seq": oldest,
+      });
+    });
+    const { ws } = await openSocket({ roomId, deviceId: "dev-corrupt-meta", admissionKey });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(await q.next()).toMatchObject({ type: "error", code: "ATTN_ROOM_CORRUPT" });
+    await q.waitClosed(2_000);
+    expect(q.closed).toBe(true);
+  });
+
+  it("sends corruption and closes before hello when legacy/v2 payloads diverge", async () => {
+    const roomId = uniqueRoomId("ws-divergent-payload");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({ roomId, admissionKey, deviceId: "dev-diverge", participantId: "peer-diverge" });
+    const envelope = buildEnvelope({
+      envelopeId: "divergent-envelope",
+      authorId: "peer-diverge",
+      deviceId: "dev-diverge",
+    });
+    expect((await postEnvelopes({ roomId, admissionKey, envelopes: [envelope] })).status).toBe(201);
+    const padded = "00000000000000000001";
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      const current = await state.storage.get<EnvelopeRecord>(
+        `env_v2:${padded}:${encodeOpaqueSegment(envelope.envelopeId)}`,
+      );
+      if (current === undefined) throw new Error("missing payload fixture");
+      await state.storage.put({
+        [`env:${padded}:${envelope.envelopeId}`]: { ...current, ciphertext: "AA" },
+        [`env_idx:${envelope.envelopeId}`]: padded,
+      });
+    });
+    const { ws } = await openSocket({ roomId, deviceId: "dev-diverge", admissionKey });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(await q.next()).toMatchObject({ type: "error", code: "ATTN_ROOM_CORRUPT" });
+    await q.waitClosed(2_000);
+    expect(q.closed).toBe(true);
+  });
+
+  it("fails before hello on a stale missed-signal index", async () => {
+    const roomId = uniqueRoomId("ws-stale-signal-index");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({ roomId, admissionKey, deviceId: "dev-stale", participantId: "peer-stale" });
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put(
+        `env_by_target_v3:${encodeOpaqueSegment("dev-stale")}:00000000000000000001:${encodeOpaqueSegment("missing-signal")}`,
+        "",
+      );
+    });
+    const { ws } = await openSocket({ roomId, deviceId: "dev-stale", admissionKey });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(await q.next()).toMatchObject({ type: "error", code: "ATTN_ROOM_CORRUPT" });
+  });
+
+  it("fails before hello on a malformed envelope payload key", async () => {
+    const roomId = uniqueRoomId("ws-malformed-payload");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({ roomId, admissionKey, deviceId: "dev-malformed", participantId: "peer-malformed" });
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put("env_v2:malformed", null);
+    });
+    const { ws } = await openSocket({ roomId, deviceId: "dev-malformed", admissionKey });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(await q.next()).toMatchObject({ type: "error", code: "ATTN_ROOM_CORRUPT" });
+  });
+
+  it("merges an exact legacy payload and env_by_target_v2 index into hello/replay", async () => {
+    const roomId = uniqueRoomId("ws-legacy-target-v2");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({ roomId, admissionKey, deviceId: "dev-legacy", participantId: "legacy-peer" });
+    const envelopeId = "legacy-signal";
+    const padded = "00000000000000000001";
+    const record: EnvelopeRecord = {
+      envelopeId,
+      authorId: "legacy-peer",
+      deviceId: "dev-legacy",
+      kind: "signal",
+      target: { deviceId: "dev-legacy" },
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      nonce: base64UrlEncode(new Uint8Array(24)),
+      ciphertext: base64UrlEncode(new Uint8Array([9, 8, 7])),
+      ciphertextBytes: 3,
+      serverSeq: 1,
+    };
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.put({
+        [`env:${padded}:${envelopeId}`]: record,
+        [`env_idx:${envelopeId}`]: padded,
+        [`env_by_target_v2:${encodeOpaqueSegment("dev-legacy")}:${padded}:${envelopeId}`]: "",
+        "meta:server_seq": 1,
+        "meta:envelope_count": 1,
+        "meta:bytes_used": 3,
+      });
+    });
+
+    const { ws } = await openSocket({ roomId, deviceId: "dev-legacy", admissionKey });
+    const q = new FrameQueue(ws);
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    const hello = await q.next();
+    expect(isHello(hello)).toBe(true);
+    if (!isHello(hello)) throw new Error("unreachable");
+    expect(hello.missedSignalEnvelopeIds).toEqual([envelopeId]);
+    const replay = await q.next();
+    expect((replay as { type?: string; envelope?: { envelopeId?: string } }).type).toBe("envelope");
+    expect((replay as { envelope?: { envelopeId?: string } }).envelope?.envelopeId).toBe(envelopeId);
+    ws.close(1000, "test done");
+  });
+
   it("replays all stored envelopes when subscribe.after=0", async () => {
     const roomId = uniqueRoomId("ws-backfill-zero");
     const owner = await generateEd25519Keypair();
@@ -610,18 +776,15 @@ describe("WS /socket — backfill", () => {
     const owner = await generateEd25519Keypair();
     const admissionKey = await createRoom({ roomId, ownerKp: owner });
     await registerDevice({ roomId, admissionKey, deviceId: "dev-co", participantId: "owen" });
-    await postEnvelopes({
-      roomId,
-      admissionKey,
-      envelopes: [buildEnvelope({ envelopeId: "co-1", authorId: "owen", deviceId: "dev-co" })],
-    });
-
-    // Bump oldest_retained_seq to 5 so subscribing with after=2 trips the
-    // cursor-too-old branch.
+    // Model a room whose first five payloads were already removed. Both values
+    // are authoritative and the cursor floor does not exceed server_seq.
     const id = env.RELAY_ROOMS.idFromName(roomId);
     const stub = env.RELAY_ROOMS.get(id);
     await runInDurableObject(stub, async (_inst, state) => {
-      await state.storage.put<number>("meta:oldest_retained_seq", 5);
+      await state.storage.put({
+        "meta:server_seq": 5,
+        "meta:oldest_retained_seq": 5,
+      });
     });
 
     const { ws } = await openSocket({ roomId, deviceId: "dev-co", admissionKey });

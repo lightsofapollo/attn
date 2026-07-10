@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import { base64UrlDecode, base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
+import { encodeOpaqueSegment } from "../../src/opaque-key";
 import type { EnvelopeInput, EnvelopeRecord, RoomPolicy } from "../../src/schema";
 import { FIXED_POW_RAND, createPowHeader, mintPowForTests } from "../helpers/pow";
 
@@ -25,9 +26,11 @@ declare module "cloudflare:test" {
 const URL_BASE = "https://relay.example";
 
 function targetIndexPrefix(deviceId: string): string {
-  return `env_by_target_v2:${base64UrlEncode(
-    new TextEncoder().encode(JSON.stringify(deviceId)),
-  )}:`;
+  return `env_by_target_v3:${encodeOpaqueSegment(deviceId)}:`;
+}
+
+function payloadKey(seq: number, envelopeId: string): string {
+  return `env_v2:${String(seq).padStart(20, "0")}:${encodeOpaqueSegment(envelopeId)}`;
 }
 
 // --- shared builders -----------------------------------------------------
@@ -398,8 +401,8 @@ async function getEnvelopeStorageState(roomId: string): Promise<{
         state.storage.get<number>("meta:bytes_used"),
         state.storage.get<number>("meta:server_seq"),
         state.storage.get<number>("meta:oldest_retained_seq"),
-        state.storage.list({ prefix: "env:" }),
-        state.storage.list({ prefix: "env_idx:" }),
+        state.storage.list({ prefix: "env_v2:" }),
+        state.storage.list({ prefix: "env_idx_v2:" }),
       ]);
     return {
       envelopeCount: envelopeCount ?? 0,
@@ -415,9 +418,18 @@ async function getEnvelopeStorageState(roomId: string): Promise<{
 async function getDeviceRateTotal(roomId: string, deviceId: string): Promise<number> {
   const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
   return runInDurableObject(stub, async (_inst, state) => {
-    const entries = await state.storage.list<number>({ prefix: `rate:${deviceId}:` });
+    const entries = await state.storage.list<number>({
+      prefix: `rate_v2:${encodeOpaqueSegment(deviceId)}:`,
+    });
     return [...entries.values()].reduce((sum, count) => sum + count, 0);
   });
+}
+
+async function getPowReplayCount(roomId: string): Promise<number> {
+  const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+  return runInDurableObject(stub, async (_inst, state) =>
+    (await state.storage.list({ prefix: "pow_seen:" })).size,
+  );
 }
 
 async function getRawEnvelopeAccounting(roomId: string): Promise<{
@@ -438,8 +450,8 @@ async function getRawEnvelopeAccounting(roomId: string): Promise<{
         state.storage.get<number>("meta:bytes_used_r2"),
         state.storage.get<number>("meta:server_seq"),
         state.storage.get<number>("meta:last_event_at"),
-        state.storage.list({ prefix: "env:" }),
-        state.storage.list({ prefix: "env_idx:" }),
+        state.storage.list({ prefix: "env_v2:" }),
+        state.storage.list({ prefix: "env_idx_v2:" }),
       ]);
     return {
       envelopeCount,
@@ -473,9 +485,9 @@ async function getEnvelopeContentSnapshot(roomId: string): Promise<Map<string, u
   return new Map(
     [...all].filter(([key]) =>
       metadata.has(key) ||
-      key.startsWith("env:") ||
-      key.startsWith("env_idx:") ||
-      key.startsWith("env_by_target_v2:") ||
+      key.startsWith("env_v2:") ||
+      key.startsWith("env_idx_v2:") ||
+      key.startsWith("env_by_target_v3:") ||
       key.startsWith("env_by_target:"),
     ),
   );
@@ -948,7 +960,7 @@ describe("POST /v2/rooms/:roomId/envelopes — room caps", () => {
         admissionKey,
         envelopes: [
           buildEnvelope({
-            envelopeId: `corrupt-${corruption}`,
+            envelopeId: `corrupt-${corruption.replaceAll(" ", "-")}`,
             authorId: "corrupt",
             deviceId: "dev-corrupt",
           }),
@@ -1071,6 +1083,35 @@ describe("POST /v2/rooms/:roomId/envelopes — room caps", () => {
 });
 
 describe("POST /v2/rooms/:roomId/envelopes — protection layers", () => {
+  it("rejects a fresh unsafe identifier before durable rate, PoW, or envelope mutation", async () => {
+    const roomId = uniqueRoomId("env-unsafe-id");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-safe",
+      participantId: "participant-safe",
+    });
+    const beforeRate = await getDeviceRateTotal(roomId, "dev-safe");
+    const beforePow = await getPowReplayCount(roomId);
+    const beforeContent = await getEnvelopeContentSnapshot(roomId);
+    const response = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [buildEnvelope({
+        envelopeId: "unsafe:envelope",
+        authorId: "participant-safe",
+        deviceId: "dev-safe",
+      })],
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as ErrorResponse).error.code).toBe("ATTN_IDENTIFIER_INVALID");
+    expect(await getDeviceRateTotal(roomId, "dev-safe")).toBe(beforeRate);
+    expect(await getPowReplayCount(roomId)).toBe(beforePow);
+    expect(await getEnvelopeContentSnapshot(roomId)).toEqual(beforeContent);
+  });
+
   it("rejects POST without Attn-Admission header (401)", async () => {
     const roomId = uniqueRoomId("env-no-adm");
     const owner = await generateEd25519Keypair();
@@ -1164,7 +1205,7 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
       const keys = [...entries.keys()];
       const onlyKey = keys[0];
       if (onlyKey === undefined) throw new Error("unreachable");
-      expect(onlyKey.endsWith(":env-sig-1")).toBe(true);
+      expect(onlyKey.endsWith(`:${encodeOpaqueSegment("env-sig-1")}`)).toBe(true);
     });
   });
 
@@ -1228,7 +1269,8 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
         }),
       ],
     });
-    expect(response.status).toBe(201);
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as ErrorResponse).error.code).toBe("ATTN_IDENTIFIER_INVALID");
 
     const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
     await runInDurableObject(stub, async (_inst, state) => {
@@ -1240,14 +1282,12 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
       const replacementKeys = await state.storage.list({
         prefix: targetIndexPrefix(replacementTarget),
       });
-      const allV2 = await state.storage.list({ prefix: "env_by_target_v2:" });
-      expect(firstKeys.size).toBe(1);
-      expect(secondKeys.size).toBe(1);
-      expect(loneSurrogateKeys.size).toBe(1);
-      expect(replacementKeys.size).toBe(1);
-      expect(allV2.size).toBe(4);
-      expect([...firstKeys.keys()][0]).not.toBe([...secondKeys.keys()][0]);
-      expect([...loneSurrogateKeys.keys()][0]).not.toBe([...replacementKeys.keys()][0]);
+      const allV3 = await state.storage.list({ prefix: "env_by_target_v3:" });
+      expect(firstKeys.size).toBe(0);
+      expect(secondKeys.size).toBe(0);
+      expect(loneSurrogateKeys.size).toBe(0);
+      expect(replacementKeys.size).toBe(0);
+      expect(allV3.size).toBe(0);
     });
   });
 
@@ -1261,10 +1301,10 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
       deviceId: "dev-signal-author",
       participantId: "signal-author",
     });
-    await injectColonTargetDevice(roomId, "signal-target", "target:colon");
+    const targetId = "target-colon";
     const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
     const corruptKey =
-      `${targetIndexPrefix("target:colon")}00000000000000000077:missing:payload`;
+      `${targetIndexPrefix(targetId)}00000000000000000077:${encodeOpaqueSegment("missing-payload")}`;
     await runInDurableObject(stub, async (_inst, state) => {
       await state.storage.put(corruptKey, "");
     });
@@ -1276,23 +1316,65 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
       admissionKey,
       envelopes: [
         buildEnvelope({
-          envelopeId: "fresh:signal",
+          envelopeId: "fresh-signal",
           authorId: "signal-author",
           deviceId: "dev-signal-author",
           kind: "signal",
-          target: { deviceId: "target:colon" },
+          target: { deviceId: targetId },
         }),
       ],
     });
     expect(response.status).toBe(500);
-    expect(((await response.json()) as ErrorResponse).error.code).toBe("ATTN_ROOM_CORRUPT");
+    const corruptError = (await response.json()) as ErrorResponse;
+    expect(corruptError.error.code).toBe("ATTN_ROOM_CORRUPT");
+    expect(corruptError.error.message).not.toContain(corruptKey);
     expect(await getRawEnvelopeAccounting(roomId)).toEqual(before);
     expect(await getEnvelopeContentSnapshot(roomId)).toEqual(fullBefore);
     await runInDurableObject(stub, async (_inst, state) => {
       expect(await state.storage.get(corruptKey)).toBe("");
-      expect((await state.storage.list({ prefix: targetIndexPrefix("target:colon") })).size).toBe(1);
+      expect((await state.storage.list({ prefix: targetIndexPrefix(targetId) })).size).toBe(1);
     });
   });
+
+  it.each(["v3", "v2"] as const)(
+    "rejects a malformed %s target-index row without content mutation",
+    async (version) => {
+      const roomId = uniqueRoomId(`env-malformed-target-${version}`);
+      const owner = await generateEd25519Keypair();
+      const admissionKey = await createRoom({ roomId, ownerKp: owner });
+      await registerDevice({
+        roomId,
+        admissionKey,
+        deviceId: "dev-malformed-author",
+        participantId: "malformed-author",
+      });
+      const targetId = "malformed-target";
+      const prefix = version === "v3"
+        ? targetIndexPrefix(targetId)
+        : `env_by_target_v2:${encodeOpaqueSegment(targetId)}:`;
+      const malformedKey = `${prefix}not-an-index`;
+      const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+      await runInDurableObject(stub, async (_instance, state) => {
+        await state.storage.put(malformedKey, "");
+      });
+      const before = await getRawEnvelopeAccounting(roomId);
+      const response = await postEnvelopes({
+        roomId,
+        admissionKey,
+        envelopes: [buildEnvelope({
+          envelopeId: `malformed-${version}`,
+          authorId: "malformed-author",
+          deviceId: "dev-malformed-author",
+          kind: "signal",
+          target: { deviceId: targetId },
+        })],
+      });
+      expect(response.status).toBe(500);
+      expect(((await response.json()) as ErrorResponse).error)
+        .toEqual({ code: "ATTN_ROOM_CORRUPT", message: "inconsistent versioned storage state" });
+      expect(await getRawEnvelopeAccounting(roomId)).toEqual(before);
+    },
+  );
 
   it("FIFO-evicts signals with exact atomic count, byte, index, and cursor accounting", async () => {
     const roomId = uniqueRoomId("env-sigcap");
@@ -1309,7 +1391,7 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
       deviceId: "dev-sf",
       participantId: "pia",
     });
-    await injectColonTargetDevice(roomId, "quinn", "dev:st");
+    const targetId = "dev-st";
 
     // Send 64 signals one-per-batch so each gets its own padded seq. (Batching
     // would still increment seqs but I want one envelope per call for clarity
@@ -1320,7 +1402,7 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
         authorId: "pia",
         deviceId: "dev-sf",
         kind: "signal",
-        target: { deviceId: "dev:st" },
+        target: { deviceId: targetId },
         ciphertextBytes: 16 + i,
       });
       const r = await postEnvelopes({ roomId, admissionKey, envelopes: [e] });
@@ -1332,12 +1414,17 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
     // mutate—proving validation sits on the safe side of the one transaction.
     const id = env.RELAY_ROOMS.idFromName(roomId);
     const stub = env.RELAY_ROOMS.get(id);
-    const oldestPayloadKey = "env:00000000000000000001:sig-000";
+    const oldestPayloadKey = payloadKey(1, "sig-000");
     let oldestRecord: EnvelopeRecord | undefined;
     await runInDurableObject(stub, async (_inst, state) => {
       oldestRecord = await state.storage.get<EnvelopeRecord>(oldestPayloadKey);
       if (oldestRecord === undefined) throw new Error("missing oldest signal fixture");
-      await state.storage.put(oldestPayloadKey, { ...oldestRecord, ciphertextBytes: -1 });
+      await state.storage.put({
+        [`env:00000000000000000001:sig-000`]: oldestRecord,
+        "env_idx:sig-000": "00000000000000000001",
+        [`env_by_target_v2:${encodeOpaqueSegment(targetId)}:00000000000000000001:sig-000`]: "",
+        [oldestPayloadKey]: { ...oldestRecord, ciphertextBytes: -1 },
+      });
     });
     const corruptSnapshot = await getEnvelopeContentSnapshot(roomId);
     const sixtyFifth = buildEnvelope({
@@ -1345,7 +1432,7 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
       authorId: "pia",
       deviceId: "dev-sf",
       kind: "signal",
-      target: { deviceId: "dev:st" },
+      target: { deviceId: targetId },
       ciphertextBytes: 80,
     });
     const corruptResponse = await postEnvelopes({
@@ -1372,9 +1459,9 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
     // the evicted id intentionally remains as its idempotency tombstone.
     await runInDurableObject(stub, async (_inst, state) => {
       const [entries, payloads, indexes, count, bytes, serverSeq, oldest] = await Promise.all([
-        state.storage.list({ prefix: targetIndexPrefix("dev:st") }),
-        state.storage.list({ prefix: "env:" }),
-        state.storage.list({ prefix: "env_idx:" }),
+        state.storage.list({ prefix: targetIndexPrefix(targetId) }),
+        state.storage.list({ prefix: "env_v2:" }),
+        state.storage.list({ prefix: "env_idx_v2:" }),
         state.storage.get<number>("meta:envelope_count"),
         state.storage.get<number>("meta:bytes_used"),
         state.storage.get<number>("meta:server_seq"),
@@ -1387,11 +1474,16 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
       expect(bytes).toBe(Array.from({ length: 64 }, (_, i) => 17 + i).reduce((a, b) => a + b, 0));
       expect(serverSeq).toBe(65);
       expect(oldest).toBe(2);
+      expect(await state.storage.get(payloadKey(1, "sig-000"))).toBeUndefined();
       expect(await state.storage.get("env:00000000000000000001:sig-000")).toBeUndefined();
+      expect(await state.storage.get(`env_idx_v2:${encodeOpaqueSegment("sig-000")}`)).toBe("00000000000000000001");
       expect(await state.storage.get("env_idx:sig-000")).toBe("00000000000000000001");
+      expect(await state.storage.get(
+        `env_by_target_v2:${encodeOpaqueSegment(targetId)}:00000000000000000001:sig-000`,
+      )).toBeUndefined();
       // The evicted envelope id is `sig-000`; assert no remaining key ends with that.
       for (const key of entries.keys()) {
-        expect(key.endsWith(":sig-000")).toBe(false);
+        expect(key.endsWith(`:${encodeOpaqueSegment("sig-000")}`)).toBe(false);
       }
     });
 
@@ -1405,7 +1497,7 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
           authorId: "pia",
           deviceId: "dev-sf",
           kind: "signal",
-          target: { deviceId: "dev:st" },
+          target: { deviceId: targetId },
           ciphertextBytes: 16,
         }),
       ],
@@ -1425,7 +1517,7 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
         authorId: "pia",
         deviceId: "dev-sf",
         kind: "signal",
-        target: { deviceId: "dev:st" },
+        target: { deviceId: targetId },
         ciphertextBytes: 16 + i,
       });
     });

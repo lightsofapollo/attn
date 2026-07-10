@@ -119,15 +119,46 @@ Layered, cheapest-first:
    login item (launchd). The daemon already forks and idles cheaply; this is a
    lifecycle/packaging change, not new machinery. Windowless-resident is the
    default once opted in; opening a doc attaches to the same instance as today.
-4. **Deferred — content-free push.** Relay-originated Web Push / APNs
-   ("activity in a share you remember") is the only way to reach a fully-cold
-   client, but it needs push-subscription storage on the relay and a browser
-   service worker. Defer to after attn-7xl; note it in the share-record design
-   so the field can be added without migration.
+4. **Browser Web Push — first-class, not deferred.** The browser reviewer has
+   no daemon to be resident: without push, the browser side of a share is dead
+   the moment the tab closes. Since browser recipients are exactly who shares
+   are sent to, this is load-bearing for the category, not polish.
 
-Reviewer-in-browser gets layer 1 via remembered rooms (decision #13) on reopen;
-layer 4 is what would make the browser side proactive, hence deferred not
-dropped.
+### Browser Web Push design sketch
+
+The constraint is the same as everywhere else: the relay stays content-blind.
+The trick is that the push itself carries nothing — decryption happens locally
+in the service worker using capabilities the browser already holds.
+
+- **Prerequisite:** the room/share is **remembered** (decision #13). Push is
+  offered only alongside "Remember this room" — an invite-only session has no
+  persisted capability for a service worker to wake up with, by design.
+- **Subscribe:** service worker on `attn.sh` registers a Push API
+  subscription (relay holds the VAPID keypair). The client POSTs the
+  subscription endpoint to the relay bound to `(roomId|shareId, deviceId)`,
+  MAC'd with the admission key and PoW'd like every other write (decision #6).
+  Subscriptions expire with the room/share TTL; share renewal (Workstream A)
+  re-pins them. The share record grows a `pushSubscriptions` field.
+- **Notify:** on envelope arrival for a device with a subscription and no live
+  WS connection, the relay sends a **content-free ping** — no body, or at most
+  the opaque roomId it's already keyed by. No author, no event kind, no text
+  ever transits push infrastructure (Apple/Google relays see nothing).
+- **Wake and decrypt locally:** the ping wakes the service worker; it opens the
+  remembered-room capability from IndexedDB, pulls pending envelopes over WS,
+  decrypts + verifies locally, and shows a *locally-composed* rich notification
+  ("2 new comments on plan.md"). Click focuses/opens the room. Debounce
+  server-side per device (collapse bursts into one ping).
+- **iOS Safari caveat:** Web Push on iOS requires the site installed to the
+  Home Screen as a PWA (16.4+). This rides the attn-7xl iOS work
+  (`planning/web-authoring/05-ios-offline.md`) — the install prompt and the
+  push opt-in are the same UX moment. Desktop browsers have no such gate.
+- **Native side unchanged:** the daemon keeps its WS mailbox connection;
+  push is a browser-client concern. (APNs for a future native-mac cold-start
+  story stays out of scope.)
+
+Layer 1 covers reviewer-in-browser on reopen via remembered rooms; layer 4 is
+what makes the browser side *proactive* and closes the async loop for the
+no-install audience.
 
 ---
 
@@ -235,7 +266,8 @@ and the one that most directly serves the agentic-collab framing.
 | 1 | **D — acceptance gate** | Smallest; no protocol change; completes the agent story v2 was framed around. Parallelizable with everything. |
 | 2 | **C — permission tiers** | Protocol/crypto change; must precede public durable links. |
 | 3 | **A — durable shares** | The category-defining piece; depends on C for safe outward links. |
-| 4 | **B1/B2 — unread + native notifications** | Client-side; can interleave anytime. B3 (resident daemon) rides the packaging train; B4 (push) deferred post-attn-7xl. |
+| 4 | **B1/B2 — unread + native notifications** | Client-side; can interleave anytime. B3 (resident daemon) rides the packaging train. |
+| 5 | **B4 — browser Web Push** | First-class: the browser audience has no resident daemon, so push closes the async loop for exactly the people shares are sent to. Depends on remembered rooms (shipped) + relay subscription store; land alongside A so shares ship with push, not after it. iOS variant rides attn-7xl's PWA work. |
 
 Interaction with **attn-7xl (browser workspaces)**: independent — A's
 "read while owner offline" uses the already-shipped browser snapshot renderer.
@@ -252,3 +284,6 @@ record is owner-key-agnostic and works for a browser owner unchanged.
 4. D: should `--from-diff` granularity be per-hunk (proposed) or per-file?
 5. A: does the retained latest-snapshot-per-file cover folder shares fully, or
    do we cap durable shares at N files initially?
+6. B4: is push opt-in bundled into "Remember this room" as one consent, or a
+   separate second toggle? (One consent is less friction; two is more honest
+   about what's being granted.)

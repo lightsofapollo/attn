@@ -17,6 +17,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install native test dependencies
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev xvfb
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -27,24 +33,46 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: web-staging-e2e
+
       - name: Typecheck
         run: npm run check
 
       - name: Unit tests
         run: npm test
 
-      - name: Build hosted app
+      - name: Build native frontend and owner
+        working-directory: .
         env:
-          VITE_ATTN_RELAY_URL: https://relay-staging.attn.sh
-        run: npm run build:browser
+          ATTN_DEFAULT_RELAY_URL: https://relay-staging.attn.sh
+        run: |
+          npm --prefix web run build
+          cargo build --locked
 
-      - name: Deploy static app and security-header worker
+      - name: Build, verify, and deploy hosted app
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "::error::CLOUDFLARE_API_TOKEN secret is not set."
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::Cloudflare deployment credentials are not set."
             exit 1
           fi
-          npx wrangler deploy --config wrangler.jsonc
+          npm run deploy:staging
+
+      - name: Verify native-browser parity on staging
+        working-directory: .
+        run: |
+          xvfb-run -a env \
+            E2E_RELAY_URL=https://relay-staging.attn.sh \
+            E2E_WEB_ORIGIN=https://staging.attn.sh \
+            scripts/test-hosted-review-e2e.sh

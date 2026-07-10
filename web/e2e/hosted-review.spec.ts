@@ -36,15 +36,18 @@ function attachWireCapture(page: Page): {
   deviceStatuses: number[];
   browserErrors: string[];
   envelopePosts: EnvelopePost[];
+  requestUrls: string[];
   websocketUrls: string[];
 } {
   const wire: string[] = [];
   const deviceStatuses: number[] = [];
   const browserErrors: string[] = [];
   const envelopePosts: EnvelopePost[] = [];
+  const requestUrls: string[] = [];
   const websocketUrls: string[] = [];
 
   page.on('request', (request) => {
+    requestUrls.push(request.url());
     wire.push(`HTTP ${request.method()} ${wireUrl(request.url())}\n${request.postData() ?? ''}`);
     if (/\/v2\/rooms\/[^/]+\/envelopes$/.test(new URL(request.url()).pathname)) {
       envelopePosts.push({
@@ -73,7 +76,7 @@ function attachWireCapture(page: Page): {
     if (message.type() === 'error') browserErrors.push(message.text());
   });
 
-  return { wire, deviceStatuses, browserErrors, envelopePosts, websocketUrls };
+  return { wire, deviceStatuses, browserErrors, envelopePosts, requestUrls, websocketUrls };
 }
 
 async function selectEditorText(page: Page, needle: string): Promise<void> {
@@ -129,6 +132,48 @@ async function nativeEventBodies(): Promise<Array<Record<string, unknown>>> {
     'window.__attn_review_store__?.events.map(event => JSON.parse(JSON.stringify(event.body))) || []',
   );
 }
+
+test('missing, malformed, and wrong invite keys fail closed without relay contact', async ({ context }) => {
+  test.skip(!inviteUrl, 'ATTN_BROWSER_INVITE_URL is required');
+  test.skip(!secretCanary, 'ATTN_ROOM_SECRET_CANARY is required');
+
+  const valid = new URL(inviteUrl!);
+  const wrongSecret = `${secretCanary![0] === 'A' ? 'B' : 'A'}${secretCanary!.slice(1)}`;
+  const cases = [
+    { name: 'missing', url: `${valid.origin}${valid.pathname}` },
+    { name: 'malformed', url: `${valid.origin}${valid.pathname}#key=not-base64url!` },
+    { name: 'wrong', url: `${valid.origin}${valid.pathname}#key=${wrongSecret}` },
+  ];
+
+  for (const invalid of cases) {
+    const page = await context.newPage();
+    const capture = attachWireCapture(page);
+    await page.goto(invalid.url, { waitUntil: 'domcontentloaded' });
+    await expect.poll(() => new URL(page.url()).hash, { message: `${invalid.name} fragment stripped` })
+      .toBe('');
+    const error = page.locator('[data-slot="browser-review-error"]');
+    await expect(error).toHaveAttribute('data-error-kind', 'invite_invalid');
+    await expect(error.getByText('Invalid invite link', { exact: true })).toBeVisible();
+    // Negative network assertions need a bounded settle window so a future
+    // delayed bootstrap task cannot schedule relay work just after the error
+    // UI renders and escape the capture below.
+    await page.waitForTimeout(500);
+    const visible = await error.textContent();
+    expect(visible).not.toContain(secretCanary);
+    expect(visible).not.toContain(wrongSecret);
+    expect(
+      capture.requestUrls.filter((url) => new URL(url).pathname.startsWith('/v2/rooms/')),
+      `${invalid.name} invite must make no relay room request, including failed requests`,
+    ).toEqual([]);
+    expect(capture.deviceStatuses, `${invalid.name} invite must fail before relay registration`).toEqual([]);
+    expect(
+      capture.websocketUrls.filter((url) => /\/v2\/rooms\/[^/]+\/socket$/u.test(new URL(url).pathname)),
+      `${invalid.name} invite must fail before relay WebSocket`,
+    ).toEqual([]);
+    expect(capture.browserErrors, `${invalid.name} invite should use the normal error UI`).toEqual([]);
+    await page.close();
+  }
+});
 
 test('native share opens in hosted reviewer without leaking plaintext or keys', async ({
   page,
@@ -297,7 +342,13 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   );
   expect(nativeCommentSent).toBe(true);
   await expect(peerPage.locator('[data-testid="review-margin-card"]').filter({ hasText: nativeDirectCanary })).toBeVisible();
-  await peerPage.close();
+  // The direct-path proof is complete; keep this browser alive for the later
+  // browser-to-browser suggestion parity check, but restore its mailbox event
+  // stream so the intervening offline/reconnect sequence is not coupled to
+  // DataChannel recovery timing.
+  await peerPage.evaluate(() => {
+    (window as unknown as { __attnDropMailboxEvents: boolean }).__attnDropMailboxEvents = false;
+  });
   await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute('data-connection', 'live_direct');
 
   await page.getByRole('button', { name: 'Folder sibling canary' }).click();
@@ -402,6 +453,13 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   }).toBe(true);
   await expect.poll(async () => (await nativeEval<string>('document.body.innerText')).includes(suggestionCanary)).toBe(true);
   await expect.poll(async () => (await nativeEval<string>('document.body.innerText')).includes('Accept')).toBe(true);
+  const peerSuggestionCard = peerPage
+    .locator('[data-testid="review-margin-card"]')
+    .filter({ hasText: suggestionCanary });
+  await expect(peerSuggestionCard).toBeVisible();
+  await expect(peerSuggestionCard.getByRole('button', { name: 'Accept' })).toHaveCount(0);
+  await expect(peerSuggestionCard.getByRole('button', { name: 'Reject' })).toHaveCount(0);
+  await peerPage.close();
 
   await commentCard.getByRole('button', { name: 'Resolve' }).click();
   await expect.poll(async () => {

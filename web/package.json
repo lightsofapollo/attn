@@ -9,6 +9,7 @@
     "dev:browser": "npm run generate:icons && vite --config vite.browser.config.ts",
     "build": "npm run generate:icons && vite build",
     "build:browser": "npm run generate:icons && vite build --config vite.browser.config.ts",
+    "deploy:staging": "node scripts/deploy-browser-staging.mjs",
     "check": "npm run generate:icons && svelte-check --tsconfig ./tsconfig.json",
     "test": "node scripts/run-tests.mjs",
     "test:unit": "node scripts/run-tests.mjs",

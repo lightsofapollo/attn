@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Runs every web unit test (src/**/*.test.ts) in its own tsx child process.
+// Runs every web unit test (src/**/*.test.ts) in its own Node+tsx child process.
 //
 // The test files use a custom defineCase/runAllCases harness that prints
 // PASS/FAIL and calls process.exit(1) on failure — they are NOT vitest. Each
@@ -52,12 +52,15 @@ function collectTestFiles(dir) {
  */
 function runTestFile(file) {
   return new Promise((resolve) => {
-    const child = spawn('npx', ['tsx', file], {
+    // `node --import tsx` uses the locked local dependency directly. Besides
+    // avoiding registry access in CI, it avoids the tsx CLI's diagnostic IPC
+    // socket, which is unnecessary for these one-shot test files.
+    const child = spawn(process.execPath, ['--import', 'tsx', file], {
       cwd: projectRoot,
       stdio: 'inherit',
     });
     child.on('error', (err) => {
-      console.error(`failed to spawn tsx for ${file}: ${err.message}`);
+      console.error(`failed to spawn Node+tsx for ${file}: ${err.message}`);
       resolve(1);
     });
     child.on('close', (code) => resolve(code ?? 1));

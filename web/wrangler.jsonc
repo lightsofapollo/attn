@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "attn-web-staging",
+  "main": "worker.ts",
+  "compatibility_date": "2026-07-09",
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "staging.attn.sh",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist-browser",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  }
+}

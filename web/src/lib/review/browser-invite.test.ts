@@ -302,10 +302,13 @@ defineCase('parseAndStripInviteFromUrl returns null when no #key= fragment', () 
   assertEq(parsed, null, 'no fragment → null');
   assertEq(win.replaceStateCalls.length, 0, 'replaceState NOT called when nothing to do');
 
-  // Different fragment shape (e.g. an anchor link) also yields null.
+  // Different fragment shapes also yield null, but are stripped because the
+  // hosted review route never uses anchor navigation and future invite shapes
+  // may still carry secrets.
   const win2 = makeMockWindow({ hash: '#some-other-anchor' });
   assertEq(parseAndStripInviteFromUrl(win2), null, '#other → null');
-  assertEq(win2.replaceStateCalls.length, 0, 'replaceState NOT called for non-key fragment');
+  assertEq(win2.replaceStateCalls.length, 1, 'non-key fragment is stripped');
+  assertEq(win2.location!.hash ?? '', '', 'non-key location.hash cleared');
 });
 
 defineCase('parseAndStripInviteFromUrl propagates parse errors', () => {
@@ -315,6 +318,8 @@ defineCase('parseAndStripInviteFromUrl propagates parse errors', () => {
     (e) => e instanceof InviteParseError,
     'malformed key throws',
   );
+  assertEq(win.replaceStateCalls.length, 1, 'malformed fragment is stripped before throw');
+  assertEq(win.location!.hash ?? '', '', 'malformed location.hash cleared');
 });
 
 defineCase('stripFragment is a no-op when history.replaceState is unavailable', () => {

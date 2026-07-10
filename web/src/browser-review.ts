@@ -1,7 +1,7 @@
 // Browser entry point for the hosted review surface (attn-nnj.9.4).
 //
-// Loaded by a separate HTML page (e.g. `web/review.html`) rather than
-// `index.html`, so the production review URL `https://attn.dev/review/<roomId>`
+// Loaded by `hosted/index.html` rather than the native Wry `index.html`, so
+// the production review URL `https://attn.dev/review/<roomId>`
 // boots straight into a reviewer-only Svelte app with no sidebar, no tabs,
 // no share dialog, no editor write surface.
 //
@@ -12,25 +12,57 @@
 //     <script type="module" src="/src/browser-review.ts"></script>
 //   </body></html>
 //
-// `BrowserReviewApp` constructs its own `BrowserSession` from `window.location`
-// when no `session` prop is passed, so this file is just the mount.
+// Keep this bootstrap deliberately narrow: relay policy is validated before
+// loading the broad editor/UI graph. The invite itself is parsed and stripped
+// synchronously by BrowserSession as soon as the component is constructed.
 
-import { mount } from 'svelte';
-import BrowserReviewApp from './BrowserReviewApp.svelte';
-import '@fontsource-variable/source-serif-4';
-import '@fontsource-variable/source-serif-4/opsz-italic.css';
-import '@fontsource-variable/source-sans-3';
-import '@fontsource-variable/source-code-pro';
-import 'katex/dist/katex.min.css';
-import './app.css';
-import '../styles/base.css';
-import '../styles/prosemirror.css';
-import '../styles/syntax.css';
+import {
+  parseAndStripInviteFromUrl,
+  stripFragment,
+  zero,
+  type ParsedInvite,
+} from './lib/review/browser-invite';
+import { validateBrowserRelayUrl } from './lib/review/browser-relay-url';
 
-const target = document.getElementById('app');
-if (!target) {
-  throw new Error('attn-browser-review: missing #app mount element');
+async function bootstrapHostedReview(): Promise<void> {
+  let parsedInvite: ParsedInvite | undefined;
+  let inviteError: string | undefined;
+  try {
+    parsedInvite = parseAndStripInviteFromUrl(window) ?? undefined;
+    if (!parsedInvite) inviteError = 'no invite fragment in URL';
+  } catch (error) {
+    inviteError = error instanceof Error ? error.message : 'invalid invite';
+  }
+
+  try {
+    const relayUrl = validateBrowserRelayUrl(import.meta.env.VITE_ATTN_RELAY_URL);
+    const [svelte, appModule] = await Promise.all([
+      import('svelte'),
+      import('./BrowserReviewApp.svelte'),
+      import('./browser-review-styles'),
+    ]);
+    const target = document.getElementById('app');
+    if (!target) throw new Error('missing browser review mount element');
+    target.style.display = '';
+    svelte.mount(appModule.default, {
+      target,
+      props: { relayUrl, parsedInvite, inviteError },
+    });
+  } catch (error) {
+    if (parsedInvite) zero(parsedInvite.roomSecret);
+    throw error;
+  }
 }
 
-target.style.display = '';
-mount(BrowserReviewApp, { target });
+void bootstrapHostedReview().catch((error: unknown) => {
+  // If configuration or chunk loading fails before BrowserSession starts, do
+  // not leave a room secret in the address bar. Keep the visible error generic.
+  const diagnostic = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
+  console.error('[attn] hosted bootstrap failed', diagnostic);
+  stripFragment(window);
+  const target = document.getElementById('app');
+  if (!target) return;
+  target.style.display = '';
+  target.textContent = 'This review link could not be opened.';
+  target.setAttribute('role', 'alert');
+});

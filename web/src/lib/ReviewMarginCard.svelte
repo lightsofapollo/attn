@@ -83,6 +83,8 @@
     awaitingReanchor?: boolean;
     /** Cancel the in-flight reanchor for this card. */
     onCancelReanchor?: () => void;
+    /** Hosted receiver mode: render content/navigation but no mutations. */
+    readOnly?: boolean;
   }
 
   let {
@@ -105,6 +107,7 @@
     onDiscardStale,
     awaitingReanchor = false,
     onCancelReanchor,
+    readOnly = false,
   }: Props = $props();
 
   // ---------------------------------------------------------------------------
@@ -215,20 +218,24 @@
 
   function handleRequestReanchor(e: MouseEvent): void {
     e.stopPropagation();
+    if (readOnly) return;
     if (onRequestReanchor) onRequestReanchor();
   }
 
   function handleDiscardStale(e: MouseEvent): void {
     e.stopPropagation();
+    if (readOnly) return;
     if (onDiscardStale) onDiscardStale();
   }
 
   function handleCancelReanchor(e: MouseEvent): void {
     e.stopPropagation();
+    if (readOnly) return;
     if (onCancelReanchor) onCancelReanchor();
   }
 
   function handleAccept(): void {
+    if (readOnly) return;
     if (kind !== 'suggestion') return;
     // For now, the suggestion event id IS the suggestionId (the body
     // carries it; we round-trip through the meta.eventId). The Rust apply
@@ -242,6 +249,7 @@
 
   function handleReject(e: MouseEvent): void {
     e.stopPropagation();
+    if (readOnly) return;
     // Suggestions: persist + propagate the rejection (mirror handleAccept) so
     // every participant's log records it and the ghost text stops rendering.
     // Comments have no rejection event, so they only dismiss locally.
@@ -258,6 +266,7 @@
 
   function handleResolve(e: MouseEvent): void {
     e.stopPropagation();
+    if (readOnly) return;
     if (onResolve) onResolve();
   }
 
@@ -267,11 +276,13 @@
 
   function toggleReply(e: MouseEvent): void {
     e.stopPropagation();
+    if (readOnly) return;
     replying = !replying;
     if (!replying) replyBody = '';
   }
 
   function submitReply(): void {
+    if (readOnly) return;
     const trimmed = replyBody.trim();
     if (trimmed.length === 0 || !onReply) return;
     onReply(trimmed);
@@ -465,7 +476,7 @@
     {/if}
   {/if}
 
-  {#if cardState === 'ambiguous' && ambiguousCandidates.length > 0}
+  {#if !readOnly && cardState === 'ambiguous' && ambiguousCandidates.length > 0}
     <AmbiguousAnchorPicker
       roomId={thread.rootEvent.meta.roomId}
       eventId={thread.rootEvent.meta.eventId}
@@ -477,7 +488,7 @@
     />
   {/if}
 
-  {#if cardState === 'stale' && awaitingReanchor}
+  {#if !readOnly && cardState === 'stale' && awaitingReanchor}
     <p
       class="rmc-stale-hint"
       data-testid="review-margin-card-stale-hint"
@@ -486,6 +497,7 @@
     </p>
   {/if}
 
+  {#if !readOnly}
   <footer class="rmc-actions">
     {#if cardState === 'resolved'}
       <!-- Read-only resolved card (attn-42y): no action row at all. The
@@ -567,8 +579,9 @@
       </button>
     {/if}
   </footer>
+  {/if}
 
-  {#if replying}
+  {#if replying && !readOnly}
     <div class="rmc-reply-composer" data-slot="review-reply-composer">
       <textarea
         bind:value={replyBody}

@@ -2044,6 +2044,7 @@
         reviewStore.applyShareReady({
           roomId: payload.roomId,
           inviteUrl: payload.inviteUrl,
+          browserInviteUrl: payload.browserInviteUrl,
           ownerDisplayPath: payload.ownerDisplayPath,
           ownerSigningKey: payload.ownerSigningKey,
           mode: payload.mode,
@@ -2769,6 +2770,7 @@
   bind:open={shareDialogOpen}
   filePath={shareTargetPath ?? activePath}
   existingInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.inviteUrl ?? '') : ''}
+  existingBrowserInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.browserInviteUrl ?? '') : ''}
   ownerSigningKey={shareTargetIsCurrent ? (reviewStore.currentShare?.ownerSigningKey ?? '') : ''}
   existingRoomId={shareTargetIsCurrent ? (reviewStore.currentShare?.roomId ?? null) : null}
   shareErrorMessage={reviewStore.lastError?.message ?? ''}

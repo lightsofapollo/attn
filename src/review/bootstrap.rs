@@ -91,6 +91,11 @@ const BOOTSTRAP_POW_TTL_MS: u64 = crate::review::crypto::pow::DEFAULT_TTL_MS;
 /// so the constants MUST stay in lock-step.
 const RELAY_BLOB_SPILLOVER_THRESHOLD_BYTES: u64 = 1024 * 1024;
 
+/// Hosted review entry used when `ATTN_BROWSER_REVIEW_URL` is unset. Runtime
+/// overrides are useful for staging/local builds, but production must not
+/// silently default to the staging origin.
+const DEFAULT_BROWSER_REVIEW_URL: &str = "https://attn.sh/review";
+
 /// Default `RoomPolicy` for newly shared rooms.
 ///
 /// Default mode is `Hybrid` — direct WebRTC when both peers are online,
@@ -100,10 +105,9 @@ const RELAY_BLOB_SPILLOVER_THRESHOLD_BYTES: u64 = 1024 * 1024;
 /// envelope mode it should seamlessly do both"); only power-user CLI
 /// paths can override.
 ///
-/// `allow_remote_agents` defaults to `true` because the only way to
-/// reach the doc as a reviewer today is `attn review join --as-agent`
-/// (the UI's paste-invite flow isn't built yet), so leaving this `false`
-/// would silently block every reviewer at the relay.
+/// Browser and remote-agent admission are enabled for shared rooms. Both still
+/// require possession of the room secret and the normal relay admission proof;
+/// these flags only permit the corresponding authenticated clients.
 fn default_room_policy(created_at_ms: u64) -> RoomPolicy {
     RoomPolicy {
         mode: RoomMode::Hybrid,
@@ -115,7 +119,7 @@ fn default_room_policy(created_at_ms: u64) -> RoomPolicy {
         // `createdAt + 24h` unless `longSession`).
         expires_at: created_at_ms + 24 * 60 * 60 * 1000,
         delete_events_after_owner_ack: false,
-        allow_browser: false,
+        allow_browser: true,
         allow_remote_agents: true,
     }
 }
@@ -449,6 +453,73 @@ pub fn build_invite_url(room_id: &RoomId, room_secret: &[u8; 32]) -> String {
     )
 }
 
+/// Build the HTTPS invite for the hosted reviewer. The room secret is carried
+/// exclusively in the URL fragment, which browsers do not send to the server.
+/// `ATTN_BROWSER_REVIEW_URL` may override the production base for staging or
+/// local development.
+pub fn build_browser_invite_url(
+    room_id: &RoomId,
+    room_secret: &[u8; 32],
+) -> Result<String, BootstrapError> {
+    let base = browser_review_base_url()?;
+    Ok(build_browser_invite_url_from_base(
+        &base,
+        room_id,
+        room_secret,
+    ))
+}
+
+fn browser_review_base_url() -> Result<reqwest::Url, BootstrapError> {
+    let configured = std::env::var("ATTN_BROWSER_REVIEW_URL").ok();
+    parse_browser_review_base_url(configured.as_deref())
+}
+
+fn parse_browser_review_base_url(configured: Option<&str>) -> Result<reqwest::Url, BootstrapError> {
+    let raw = configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_BROWSER_REVIEW_URL);
+    let url = reqwest::Url::parse(raw).map_err(|_| {
+        BootstrapError::InvalidShare(
+            "ATTN_BROWSER_REVIEW_URL must be an absolute HTTP(S) URL".into(),
+        )
+    })?;
+    let secure_transport = url.scheme() == "https"
+        || (url.scheme() == "http"
+            && matches!(
+                url.host_str(),
+                Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+            ));
+    if !secure_transport
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(BootstrapError::InvalidShare(
+            "ATTN_BROWSER_REVIEW_URL must use HTTPS (or exact loopback HTTP) without credentials, query, or fragment"
+                .into(),
+        ));
+    }
+    Ok(url)
+}
+
+fn build_browser_invite_url_from_base(
+    base: &reqwest::Url,
+    room_id: &RoomId,
+    room_secret: &[u8; 32],
+) -> String {
+    let mut invite = base.clone();
+    let base_path = invite.path().trim_end_matches('/').to_string();
+    invite.set_path(&format!("{base_path}/{}", room_id.as_str()));
+    invite.set_fragment(Some(&format!(
+        "key={}",
+        URL_SAFE_NO_PAD.encode(room_secret)
+    )));
+    invite.to_string()
+}
+
 /// Parse an `attn://review/<roomId>#key=<base64url>` invite. Strict: the
 /// scheme, host segment, and fragment shape must all match; anything else is
 /// surfaced as a `BootstrapError::InviteParse`.
@@ -663,11 +734,14 @@ impl BootstrapConfig {
     }
 }
 
-/// Successful Share outcome — carries the freshly minted invite + the room id.
+/// Successful Share outcome — carries native/browser invites plus the room id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShareOutcome {
     pub room_id: RoomId,
+    /// Native deep link retained for desktop/CLI compatibility.
     pub invite: String,
+    /// HTTPS link for the hosted reviewer. The secret remains fragment-only.
+    pub browser_invite: String,
     /// Absolute path (file or folder) the owner shared, exactly as the frontend
     /// passed it to `reviewShare` (`path.to_string_lossy()`). The Share dialog
     /// matches this against the active target to recognise its own room (see
@@ -892,6 +966,9 @@ impl Bootstrapper {
         _ttl: Option<String>,
     ) -> Result<ShareOutcome, BootstrapError> {
         let now_ms = unix_now_ms();
+        // Validate deployment configuration before creating any relay or local
+        // state. The parsed base contains no room secret and is safe to retain.
+        let browser_review_base = browser_review_base_url()?;
         let identity_dir = self.config.identity_dir()?;
         let identity = load_or_create_identity_in(&identity_dir)?;
         let doc_targets = validate_share_targets(&path)?;
@@ -903,7 +980,7 @@ impl Bootstrapper {
         //    which left the owner endlessly dialing a dead room (404 storm).
         //    create_room is idempotent on roomId — a no-op when the room exists,
         //    a clean re-create (same id, derived from the secret) when it's gone.
-        if let Some(existing) = self.find_existing_share(&path, now_ms)? {
+        if let Some(existing) = self.find_existing_share(&path, now_ms, &browser_review_base)? {
             let secret = load_room_secret(self.store.root(), &existing.room_id)?;
             let keys = derive_room_keys(&secret);
             let policy = self
@@ -1081,10 +1158,13 @@ impl Bootstrapper {
         //    URL — after this point it only lives encrypted in the room file
         //    cache + on the relay (in the admissionKey form).
         let invite = build_invite_url(&room_id, &room_secret);
+        let browser_invite =
+            build_browser_invite_url_from_base(&browser_review_base, &room_id, &room_secret);
 
         Ok(ShareOutcome {
             room_id,
             invite,
+            browser_invite,
             owner_display_path: path.to_string_lossy().to_string(),
             newly_created: true,
             owner_signing_key: identity.public_signing_key.clone(),
@@ -1100,6 +1180,7 @@ impl Bootstrapper {
         &self,
         path: &std::path::Path,
         now_ms: u64,
+        browser_review_base: &reqwest::Url,
     ) -> Result<Option<ShareOutcome>, BootstrapError> {
         let shares = load_local_shares(self.store.root())?;
         for (room_id_str, record) in shares {
@@ -1121,6 +1202,8 @@ impl Bootstrapper {
             };
             let secret = load_room_secret(self.store.root(), &room_id)?;
             let invite = build_invite_url(&room_id, &secret);
+            let browser_invite =
+                build_browser_invite_url_from_base(browser_review_base, &room_id, &secret);
             // For the re-Share path we don't have the owner identity in
             // scope, so resolve it the same way `share()` does. The dialog
             // needs the signing key to render the fingerprint regardless of
@@ -1132,6 +1215,7 @@ impl Bootstrapper {
             return Ok(Some(ShareOutcome {
                 room_id,
                 invite,
+                browser_invite,
                 owner_display_path: path.to_string_lossy().to_string(),
                 newly_created: false,
                 owner_signing_key: identity.public_signing_key.clone(),
@@ -2670,6 +2754,62 @@ mod tests {
     }
 
     #[test]
+    fn browser_invite_uses_configured_path_and_fragment_only_secret() {
+        let secret = [0x5Au8; 32];
+        let secret_b64 = URL_SAFE_NO_PAD.encode(secret);
+        let room_id = derive_room_id(&secret);
+        let base = parse_browser_review_base_url(Some("https://staging.attn.sh/review/"))
+            .expect("valid staging base");
+        let invite = build_browser_invite_url_from_base(&base, &room_id, &secret);
+        let parsed = reqwest::Url::parse(&invite).expect("browser invite URL");
+
+        assert_eq!(parsed.scheme(), "https");
+        assert_eq!(parsed.host_str(), Some("staging.attn.sh"));
+        assert_eq!(parsed.path(), format!("/review/{}", room_id.as_str()));
+        assert_eq!(parsed.query(), None, "room secret must never enter query");
+        let expected_fragment = format!("key={secret_b64}");
+        assert_eq!(parsed.fragment(), Some(expected_fragment.as_str()));
+        assert!(!parsed.path().contains(&secret_b64));
+    }
+
+    #[test]
+    fn browser_invite_base_rejects_query_fragment_and_credentials() {
+        for invalid in [
+            "https://attn.sh/review?key=leak",
+            "https://attn.sh/review#key=leak",
+            "https://user:pass@attn.sh/review",
+            "http://staging.attn.sh/review",
+            "http://192.168.1.10/review",
+            "file:///tmp/review",
+        ] {
+            assert!(
+                parse_browser_review_base_url(Some(invalid)).is_err(),
+                "unsafe browser review base must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_invite_base_allows_exact_loopback_http_for_development() {
+        for valid in [
+            "http://localhost:5173/review",
+            "http://127.0.0.1:5173/review",
+            "http://[::1]:5173/review",
+        ] {
+            assert!(
+                parse_browser_review_base_url(Some(valid)).is_ok(),
+                "loopback development base must be accepted: {valid}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_invite_base_defaults_to_production_review() {
+        let base = parse_browser_review_base_url(None).expect("default base");
+        assert_eq!(base.as_str(), DEFAULT_BROWSER_REVIEW_URL);
+    }
+
+    #[test]
     fn parse_invite_rejects_missing_prefix() {
         let err = parse_invite("not-an-invite").expect_err("malformed");
         match err {
@@ -2885,6 +3025,10 @@ mod tests {
             .expect("room present");
         assert_eq!(loaded_room.event_heads.len(), 1);
         assert_eq!(loaded_room.policy.mode, RoomMode::Async);
+        assert!(
+            loaded_room.policy.allow_browser,
+            "new native shares must admit authenticated browser reviewers"
+        );
 
         // Outbox holds: the RoomCreated event, the owner's self
         // ParticipantJoined announce (attn-42y — carries the display name
@@ -3077,11 +3221,21 @@ mod tests {
             .await
             .expect("share");
         assert!(outcome.invite.starts_with("attn://review/"));
+        assert!(
+            outcome
+                .browser_invite
+                .starts_with("https://attn.sh/review/"),
+            "ShareOutcome must expose the hosted-reviewer invite"
+        );
         assert_eq!(
             outcome.owner_display_path, expected_display_path,
             "ShareOutcome must carry the exact path the owner shared so the dialog recognises its own room",
         );
         assert!(outcome.invite.contains("#key="));
+        let native_fragment = outcome.invite.split_once('#').expect("native fragment").1;
+        let browser_url = reqwest::Url::parse(&outcome.browser_invite).expect("browser invite");
+        assert_eq!(browser_url.query(), None);
+        assert_eq!(browser_url.fragment(), Some(native_fragment));
         // The invite must round-trip through `parse_invite`.
         let parsed = parse_invite(&outcome.invite).expect("parse");
         assert_eq!(parsed.room_id, outcome.room_id);
@@ -3133,6 +3287,7 @@ mod tests {
         assert!(!second.newly_created, "second share must short-circuit");
         assert_eq!(first.room_id, second.room_id);
         assert_eq!(first.invite, second.invite);
+        assert_eq!(first.browser_invite, second.browser_invite);
     }
 
     // --- Join flow --------------------------------------------------------

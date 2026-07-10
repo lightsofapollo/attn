@@ -118,7 +118,9 @@ export function parseInviteUrl(url: string): ParsedInvite {
 /**
  * Parse the current page URL on load, strip the fragment via
  * `history.replaceState`, and return the parsed invite. Returns `null` when
- * there is no `#key=` fragment (e.g. a normal landing page visit).
+ * there is no `#key=` fragment (e.g. a normal landing page visit). Every
+ * non-empty fragment is stripped before inspection so malformed or future
+ * secret-bearing shapes cannot linger in browser history or the URL bar.
  *
  * Per amendments #13: the caller is responsible for keeping the returned
  * `roomSecret` strictly in memory. No persistence anywhere. Reload requires
@@ -136,6 +138,7 @@ export function parseAndStripInviteFromUrl(
   // `location.hash` includes the leading `#`. Strip it so `parseInviteUrl`
   // sees the same fragment shape `splitInvite` produces.
   const fragment = hash.startsWith('#') ? hash.slice(1) : hash;
+  stripFragment(win);
   if (!fragment.startsWith(FRAGMENT_KEY_PREFIX)) return null;
 
   // Reconstruct the full URL so `parseInviteUrl` validates the path shape
@@ -145,18 +148,7 @@ export function parseAndStripInviteFromUrl(
   const search = loc.search ?? '';
   const fullUrl = `${origin}${pathname}${search}#${fragment}`;
 
-  const parsed = parseInviteUrl(fullUrl);
-
-  // Strip the fragment IMMEDIATELY after parse so the secret leaves the
-  // visible URL bar even if downstream code throws. We call replaceState
-  // first regardless of parse success so a malformed invite still gets
-  // sanitized — but `parseInviteUrl` above already threw if invalid, so
-  // we only reach here on success. If parse failed, the caller (which
-  // wraps in try/catch) should still want the fragment gone; we surface
-  // the strip via a separate helper for that flow.
-  stripFragment(win);
-
-  return parsed;
+  return parseInviteUrl(fullUrl);
 }
 
 /**
@@ -233,6 +225,8 @@ interface BrowserHistoryLike {
 export interface BrowserWindowLike {
   location?: BrowserLocationLike;
   history?: BrowserHistoryLike;
+  addEventListener?: (type: string, listener: () => void) => void;
+  removeEventListener?: (type: string, listener: () => void) => void;
 }
 
 interface SplitResult {

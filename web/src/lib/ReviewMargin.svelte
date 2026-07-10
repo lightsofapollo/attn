@@ -65,10 +65,12 @@
     view?: EditorView | undefined;
     /** Cap for in-DOM card rendering before virtualization kicks in. */
     maxRenderedCards?: number;
+    /** Hide every mutation surface while keeping thread navigation readable. */
+    readOnly?: boolean;
   }
 
   // Default cap is 50 per the task spec / §6 performance rule.
-  let { view, maxRenderedCards = 50 }: Props = $props();
+  let { view, maxRenderedCards = 50, readOnly = false }: Props = $props();
 
   // ---------------------------------------------------------------------------
   // Container refs + layout state
@@ -856,6 +858,7 @@
         {#each orphanThreads as t (t.id)}
           <li>
             <ReviewMarginCard
+              {readOnly}
               thread={t}
               kind={kindFor(t)}
               cardState={stateFor(t)}
@@ -911,6 +914,7 @@
     {#if t && !t.resolved}
       <div class="review-margin-slot" style="top: {p.top}px;">
         <ReviewMarginCard
+          {readOnly}
           thread={t}
           kind={kindFor(t)}
           cardState={stateFor(t)}
@@ -934,6 +938,7 @@
            it back to its chip. -->
       <div class="review-margin-slot" style="top: {p.top}px;">
         <ReviewMarginCard
+          {readOnly}
           thread={t}
           kind={kindFor(t)}
           cardState={stateFor(t)}
@@ -996,7 +1001,7 @@
     overlay is rendered at the bottom of the margin so it doesn't fight
     with sticky-top orphan-tray scroll behavior.
   -->
-  {#if manualReanchorState}
+  {#if manualReanchorState && !readOnly}
     <div
       class="review-margin-reanchor-overlay"
       data-testid="review-margin-reanchor-overlay"

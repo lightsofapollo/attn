@@ -49,6 +49,8 @@
     ownerSigningKey?: string;
     /** Empty until the daemon's ShareReady callback populates it. */
     existingInviteUrl?: string;
+    /** Hosted HTTPS invite; preferred for the human-facing copy-link action. */
+    existingBrowserInviteUrl?: string;
     /** Non-null when a share already exists for this file. Suppresses re-mint. */
     existingRoomId?: RoomId | null;
     /** Latest daemon-side share failure while this dialog is open. */
@@ -71,6 +73,7 @@
     filePath,
     ownerSigningKey = '',
     existingInviteUrl = '',
+    existingBrowserInviteUrl = '',
     existingRoomId = null,
     shareErrorMessage = '',
     writeToClipboard,
@@ -100,7 +103,7 @@
   let mintTimeout: ReturnType<typeof setTimeout> | null = null;
   const MINT_TIMEOUT_MS = 15000;
 
-  const inviteUrl = $derived(existingInviteUrl);
+  const inviteUrl = $derived(existingBrowserInviteUrl || existingInviteUrl);
   /**
    * Zero-install one-liner for reviewers without `attn` on their PATH.
    * `npx attnmd` is the published npm package's bin entrypoint — the
@@ -110,8 +113,8 @@
    * isn't eaten by the shell.
    */
   const cliCommand = $derived(
-    inviteUrl.length > 0
-      ? `npx attnmd review join '${inviteUrl}'`
+    existingInviteUrl.length > 0
+      ? `npx attnmd review join '${existingInviteUrl}'`
       : '',
   );
 
@@ -153,13 +156,19 @@
         mintTimeout = null;
       }
       phase = 'ready';
-      // Auto-copy the URL — the entire point of this dialog is "click,
-      // get URL". The user expects it on their clipboard the second they
-      // see it.
-      void copyToClipboard(inviteUrl).then((ok) => {
+      // Keep the backwards-compatible join command as the automatic clipboard
+      // value until the production hosted origin is deployed. The staging-
+      // configured HTTPS link remains available in the browser card below.
+      const automaticShare = cliCommand || inviteUrl;
+      void copyToClipboard(automaticShare).then((ok) => {
         if (ok) {
-          copiedUrl = true;
-          setTimeout(() => (copiedUrl = false), 1600);
+          if (cliCommand) {
+            copiedCli = true;
+            setTimeout(() => (copiedCli = false), 1600);
+          } else {
+            copiedUrl = true;
+            setTimeout(() => (copiedUrl = false), 1600);
+          }
         }
       });
     }
@@ -369,9 +378,8 @@
     </div>
 
     <!-- ============================================================
-         Secondary card: the raw attn:// link — for reviewers who have
-         attn installed and want a clickable deep-link instead of a
-         terminal command.
+         Secondary card: the hosted HTTPS link. The room secret remains in the
+         fragment and is stripped by the trusted browser client immediately.
          ============================================================ -->
     {#if !isError}
       <!-- Rendered from the moment the dialog opens (attn-0sv): a
@@ -380,7 +388,7 @@
       <div class="flex w-full min-w-0 flex-col gap-2 overflow-hidden rounded-lg border border-border/60 bg-muted/30 p-4" data-slot="share-url-card">
         <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
           <Link class="size-3.5" aria-hidden="true" />
-          Direct link
+          Open in browser
         </div>
         {#if isReady && inviteUrl.length > 0}
           <button
@@ -406,7 +414,7 @@
           />
         {:else}
           <div class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-muted-foreground">
-            <span class="block truncate">attn://review/… (generated when the room is ready)</span>
+            <span class="block truncate">https://attn.sh/review/… (generated when the room is ready)</span>
           </div>
         {/if}
         <Button
@@ -427,7 +435,7 @@
           {/if}
         </Button>
         <p class="text-xs text-muted-foreground">
-          Opens directly in attn for reviewers who already have it installed.
+          Opens the read-only hosted reviewer. The relay and static host only receive encrypted envelopes.
         </p>
       </div>
     {/if}

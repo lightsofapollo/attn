@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { markdownSourceUrl } from './markdown-layer';
+  import { htmlViewerSandbox } from './html-viewer-sandbox';
 
   interface Props {
     /**
@@ -22,9 +23,11 @@
      * Path mode only.
      */
     mtime?: number;
+    /** Native/local pages retain script support; hosted snapshots disable it. */
+    allowScripts?: boolean;
   }
 
-  let { path, content, mtime }: Props = $props();
+  let { path, content, mtime, allowScripts = true }: Props = $props();
 
   let loading = $state(true);
 
@@ -54,6 +57,7 @@
   // `content` (reviewer/srcdoc) wins when provided; otherwise load the local
   // file via the attn:// protocol (owner/path mode).
   let isContentMode = $derived(content !== undefined);
+  let sandbox = $derived(htmlViewerSandbox(allowScripts));
   let src = $derived(
     !isContentMode && path !== undefined
       ? mtime !== undefined
@@ -90,15 +94,15 @@
     scrollbar width so the native scrollbar is clipped by the wrapper above.
   -->
   {#if isContentMode}
-    <!-- Reviewer mode: render received HTML bytes directly. srcdoc runs in the
-         same opaque-origin sandbox as path mode (allow-scripts WITHOUT
-         allow-same-origin), so the shared page can't touch attn. -->
+    <!-- Reviewer mode: the hosted app passes allowScripts=false, producing an
+         empty sandbox token list. Native callers retain the historical
+         allow-scripts opaque-origin behavior by default. -->
     <iframe
       srcdoc={content}
       title={fileName}
       class="block h-full border-0 bg-white"
       style="width: calc(100% + {scrollbarWidth}px);"
-      sandbox="allow-scripts"
+      {sandbox}
       referrerpolicy="no-referrer"
       onload={() => (loading = false)}
     ></iframe>

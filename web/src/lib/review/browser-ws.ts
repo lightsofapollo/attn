@@ -32,6 +32,7 @@ import {
   aeadOpen,
   base64UrlDecode,
   decodePublicSigningKey,
+  deriveEventId,
   signingKeyId,
   verifyEventSignature,
   type EnvelopeAad,
@@ -46,8 +47,13 @@ import {
 export type EnvelopeKind = 'event' | 'snapshot_blob' | 'signal';
 
 export interface MailboxEnvelope {
-  v: number;
-  roomId: string;
+  /**
+   * The relay omits protocol version and room id because both are implicit in
+   * the v2 room subscription. Test fixtures and direct callers may still
+   * provide them, so keep the fields as optional wire metadata.
+   */
+  v?: number;
+  roomId?: string;
   envelopeId: string;
   serverSeq?: number;
   authorId: string;
@@ -181,6 +187,12 @@ export interface BrowserWsCallbacks {
    * surface via `onError` instead.
    */
   onEnvelope?: (decoded: DecodedEnvelope) => void;
+  /** Allows the session to refresh GET /devices and retry an unknown signer. */
+  onUnknownSigner?: (
+    envelope: MailboxEnvelope,
+    serverSeq: number,
+    signingKeyId: string,
+  ) => void;
   /** Called when the relay or our parser surfaces a non-terminal error. */
   onError?: (code: string, message: string) => void;
   /** Called on every socket close — terminal or transient. */
@@ -194,6 +206,8 @@ export interface BrowserWsCallbacks {
 }
 
 export interface BrowserWsOptions {
+  /** Room bound to this subscription; restores relay-implicit AAD metadata. */
+  roomId: string;
   /** Full WS URL including scheme (`wss://…/v2/rooms/<roomId>/socket?…`). */
   url: string;
   /** Admission subprotocol value (`"attn.v2, hmac.<…>"`). */
@@ -264,6 +278,7 @@ export class BrowserWsClient {
   private readonly devices: Map<string, Device>;
 
   constructor(opts: BrowserWsOptions) {
+    if (opts.roomId.length === 0) throw new Error('roomId must not be empty');
     if (opts.eventKey.length !== 32) throw new Error('eventKey must be 32 bytes');
     if (opts.snapshotKey.length !== 32) throw new Error('snapshotKey must be 32 bytes');
     if (opts.signalingKey.length !== 32) throw new Error('signalingKey must be 32 bytes');
@@ -293,6 +308,17 @@ export class BrowserWsClient {
   /** Cached device records keyed by signingKeyId. */
   getDevices(): ReadonlyMap<string, Device> {
     return this.devices;
+  }
+
+  /** Merge an authenticated GET /devices response into the signer cache. */
+  mergeDevices(devices: Device[]): void {
+    this.ingestDevices(devices);
+  }
+
+  /** Retry a previously rejected ciphertext after its signer directory refresh. */
+  retryEnvelope(envelope: MailboxEnvelope, serverSeq: number): void {
+    if (this.cancelled) return;
+    this.ingestEnvelope(envelope, serverSeq);
   }
 
   /** Start the connection loop. Idempotent; safe to call once. */
@@ -457,6 +483,15 @@ export class BrowserWsClient {
    * the connection — matches `ws.rs::handle_text_frame`.
    */
   private ingestEnvelope(envelope: MailboxEnvelope, serverSeq: number): void {
+    if (envelope.v !== undefined && envelope.v !== 2) {
+      this.callbacks.onError?.('ATTN_INBOUND', `unsupported envelope version ${envelope.v}`);
+      return;
+    }
+    if (envelope.roomId !== undefined && envelope.roomId !== this.opts.roomId) {
+      this.callbacks.onError?.('ATTN_INBOUND', 'envelope room does not match subscription');
+      return;
+    }
+
     // Pick the AEAD key based on the envelope kind.
     const key =
       envelope.kind === 'event'
@@ -467,8 +502,8 @@ export class BrowserWsClient {
 
     // Reconstruct the AAD bytes from the cleartext routing metadata.
     const aad: EnvelopeAad = {
-      v: envelope.v,
-      roomId: envelope.roomId,
+      v: 2,
+      roomId: this.opts.roomId,
       envelopeId: envelope.envelopeId,
       kind: envelope.kind,
       authorId: envelope.authorId,
@@ -503,8 +538,11 @@ export class BrowserWsClient {
     // consumer parses. We verify event signatures here so a bad envelope is
     // dropped before it reaches UI state.
     if (envelope.kind === 'event') {
-      const verified = this.verifyEventPlaintext(envelope.envelopeId, plaintext);
-      if (!verified) return;
+      const verified = this.verifyEventPlaintext(envelope, serverSeq, plaintext);
+      if (!verified) {
+        plaintext.fill(0);
+        return;
+      }
     }
 
     // Advance the cursor floor — caller persists if/when it wants to.
@@ -520,7 +558,12 @@ export class BrowserWsClient {
    * Returns `true` on success; emits an `ATTN_INBOUND` error and returns
    * `false` on any failure (drops the envelope, keeps the socket up).
    */
-  private verifyEventPlaintext(envelopeId: string, plaintext: Uint8Array): boolean {
+  private verifyEventPlaintext(
+    envelope: MailboxEnvelope,
+    serverSeq: number,
+    plaintext: Uint8Array,
+  ): boolean {
+    const envelopeId = envelope.envelopeId;
     let event: { meta?: SignableMetaShape; body?: unknown; auth?: { signature: string; signingKeyId: string } };
     try {
       event = JSON.parse(new TextDecoder().decode(plaintext)) as typeof event;
@@ -535,12 +578,28 @@ export class BrowserWsClient {
       this.callbacks.onError?.('ATTN_INBOUND', `event missing meta/auth (${envelopeId})`);
       return false;
     }
+    if (
+      meta.v !== 2 ||
+      typeof meta.eventId !== 'string' ||
+      meta.roomId !== this.opts.roomId ||
+      meta.authorId !== envelope.authorId ||
+      meta.deviceId !== envelope.deviceId ||
+      meta.createdAt !== envelope.createdAt
+    ) {
+      this.callbacks.onError?.('ATTN_INBOUND', `event metadata binding failed (${envelopeId})`);
+      return false;
+    }
     const device = this.devices.get(auth.signingKeyId);
     if (!device) {
       this.callbacks.onError?.(
         'ATTN_INBOUND',
         `unknown signer for ${envelopeId} (signingKeyId=${auth.signingKeyId})`,
       );
+      this.callbacks.onUnknownSigner?.(envelope, serverSeq, auth.signingKeyId);
+      return false;
+    }
+    if (device.deviceId !== meta.deviceId || device.participantId !== meta.authorId) {
+      this.callbacks.onError?.('ATTN_INBOUND', `event signer identity binding failed (${envelopeId})`);
       return false;
     }
     let pubKey: Uint8Array;
@@ -559,6 +618,17 @@ export class BrowserWsClient {
         return false;
       }
       throw err;
+    }
+    let recomputedEventId: string;
+    try {
+      recomputedEventId = deriveEventId(meta, event.body);
+    } catch {
+      this.callbacks.onError?.('ATTN_INBOUND', `event id derivation failed (${envelopeId})`);
+      return false;
+    }
+    if (recomputedEventId !== meta.eventId) {
+      this.callbacks.onError?.('ATTN_INBOUND', `event id mismatch (${envelopeId})`);
+      return false;
     }
     return true;
   }

@@ -19,6 +19,21 @@
   import { deriveFileEntries } from './review/file-nav';
 
   const files = $derived(deriveFileEntries(reviewStore.snapshots, reviewStore.currentRoomId));
+
+  function selectFile(fileId: (typeof files)[number]['fileId']): void {
+    reviewStore.setCurrentFile(fileId);
+    let latest = null;
+    for (const snapshot of reviewStore.snapshots) {
+      if (
+        snapshot.roomId === reviewStore.currentRoomId &&
+        snapshot.fileId === fileId &&
+        (latest === null || snapshot.createdAt > latest.createdAt)
+      ) {
+        latest = snapshot;
+      }
+    }
+    reviewStore.setCurrentSnapshot(latest?.snapshotId ?? null);
+  }
 </script>
 
 {#if files.length >= 2}
@@ -34,7 +49,7 @@
         class:active={f.fileId === reviewStore.currentFileId}
         data-file-id={f.fileId}
         title={f.dir ? `${f.dir}/${f.name}` : f.name}
-        onclick={() => reviewStore.setCurrentFile(f.fileId)}
+        onclick={() => selectFile(f.fileId)}
       >
         {#if f.dir}
           <span class="review-file-dir text-muted-foreground/60" data-slot="review-file-dir">{f.dir}/</span>

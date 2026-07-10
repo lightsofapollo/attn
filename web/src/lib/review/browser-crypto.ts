@@ -402,6 +402,16 @@ export function canonicalSignedBytes(meta: SignableMetaShape, body: unknown): Ui
   return toCanonicalBytes({ body, meta: signableMeta });
 }
 
+/** `EventId = base64url(SHA-256(canonicalJSON({ meta-without-eventId, body })))`. */
+export function deriveEventId(meta: SignableMetaShape, body: unknown): string {
+  return base64UrlEncode(sha256(canonicalSignedBytes(meta, body)));
+}
+
+/** `ContentHash = base64url(SHA-256(canonical snapshot plaintext bytes))`. */
+export function contentHash(bytes: Uint8Array): string {
+  return base64UrlEncode(sha256(bytes));
+}
+
 /**
  * Verify an event signature against a known public key.
  *

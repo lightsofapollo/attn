@@ -12,12 +12,8 @@
        markdown bytes and the `ReviewMargin` overlay surfaces comments +
        suggestion threads via the existing `reviewStore`.
 
-  Comments / suggestions: the existing Svelte composers are mounted with the
-  Cmd+. / Cmd+Shift+. shortcuts via the imperative `open()` API. Their submit
-  handlers dispatch `reviewCreateComment` / `reviewCreateSuggestion` via the
-  existing IPC bridge, which in the browser context is a no-op until 9.5
-  wires the POST /envelopes upload path. The UX still composes locally — the
-  outbox upload lands in the follow-up.
+  This slice is an explicitly read-only receiver. Authoring and mutation
+  controls stay hidden until the browser outbox can durably POST envelopes.
 
   Error states map straight off `session.state.error.kind`:
     - invite_invalid    → "Invalid invite link"
@@ -38,14 +34,13 @@
   import HtmlViewer from './lib/HtmlViewer.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
-  import CommentComposer from './lib/CommentComposer.svelte';
-  import { hasTextSelection } from './lib/review/popover-anchor';
   import { reviewStore } from './lib/review/store.svelte';
   import {
     reviewDecorationsPlugin,
     requestReviewDecorationsRebuild,
   } from './lib/prosemirror/review-decorations';
   import { BrowserSession, type BrowserSessionState } from './lib/review/browser-session';
+  import type { ParsedInvite } from './lib/review/browser-invite';
 
   interface Props {
     /**
@@ -56,9 +51,13 @@
     session?: BrowserSession;
     /** Forwarded to `BrowserSession` when `session` is not provided. */
     relayUrl?: string;
+    /** Parsed synchronously by the hosted bootstrap before UI chunks load. */
+    parsedInvite?: ParsedInvite;
+    /** Parse failure captured by the narrow bootstrap. */
+    inviteError?: string;
   }
 
-  let { session: injectedSession, relayUrl }: Props = $props();
+  let { session: injectedSession, relayUrl, parsedInvite, inviteError }: Props = $props();
 
   // ---------------------------------------------------------------------------
   // Session boot.
@@ -80,11 +79,15 @@
   // `state_referenced_locally` warning at module-init scope.
   const initialInjected = untrack(() => injectedSession);
   const initialRelayUrl = untrack(() => relayUrl);
+  const initialParsedInvite = untrack(() => parsedInvite);
+  const initialInviteError = untrack(() => inviteError);
 
   function buildSession(): BrowserSession {
     if (initialInjected) return initialInjected;
     return new BrowserSession({
       relayUrl: initialRelayUrl,
+      parsedInvite: initialParsedInvite,
+      inviteError: initialInviteError,
       onState: (s) => {
         sessionState = s;
       },
@@ -102,6 +105,7 @@
 
   void session.start().catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
+    session.close();
     // start() should never throw — but if it does, surface a network error
     // so the UI is not stuck in `connecting`.
     sessionState = {
@@ -141,86 +145,34 @@
   });
 
   // ---------------------------------------------------------------------------
-  // Comment composer (Cmd+. on a selection).
-  //
-  // Suggestion composer is deferred — the SuggestionComposer component takes
-  // props rather than the imperative `open()` API and would need either
-  // a refactor or a separate mounting wrapper. CommentComposer is enough for
-  // the 9.4 acceptance criteria ("comment + suggestion creation via
-  // composers"); we expose the suggestion entry point via a stub that just
-  // checks selection state so the test harness can drive the same path.
-  // ---------------------------------------------------------------------------
-
-interface CommentComposerState {
-    view: import('prosemirror-view').EditorView;
-    from: number;
-    to: number;
-    anchorContext: import('./lib/review/anchors').ConstructAnchorContext;
-    roomId: import('./lib/types').RoomId;
-  }
-  let commentComposer = $state<CommentComposerState | null>(null);
-  function closeCommentComposer() { commentComposer = null; }
-
-  function resolveActiveSnapshotForCompose() {
-    const fileId = reviewStore.currentFileId;
-    const roomId = reviewStore.currentRoomId;
-    if (!fileId || !roomId) return null;
-    const lockedId = reviewStore.currentSnapshotId;
-    const candidates = reviewStore.snapshots.filter(
-      (s) => s.roomId === roomId && s.fileId === fileId,
-    );
-    if (candidates.length === 0) return null;
-    if (lockedId) {
-      const locked = candidates.find((s) => s.snapshotId === lockedId);
-      if (locked) return locked;
-    }
-    return [...candidates].sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
-  }
-
-  function openCommentComposer(): void {
-    const view = pmViewForReview;
-    if (!view) return;
-    if (!hasTextSelection(view)) return;
-    const roomId = reviewStore.currentRoomId;
-    if (!roomId) return;
-    const snapshot = resolveActiveSnapshotForCompose();
-    if (!snapshot || !snapshot.anchorIndex) return;
-    const { from, to } = view.state.selection;
-    commentComposer = {
-      view,
-      from,
-      to,
-      roomId,
-      anchorContext: {
-        index: snapshot.anchorIndex,
-        fileId: snapshot.fileId,
-        snapshotId: snapshot.snapshotId,
-        baseHash: snapshot.baseHash,
-      },
-    };
-  }
-
-  function handleGlobalKeydown(e: KeyboardEvent): void {
-    if (e.repeat) return;
-    const meta = e.metaKey || e.ctrlKey;
-    if (!meta) return;
-    if (e.altKey) return;
-    if (e.key === '.') {
-      e.preventDefault();
-      openCommentComposer();
-    }
-  }
-
-  // ---------------------------------------------------------------------------
   // Derived view state.
   // ---------------------------------------------------------------------------
+
+  const displayedSnapshot = $derived.by(() => {
+    const roomId = sessionState.roomId;
+    const fileId = reviewStore.currentFileId ?? sessionState.fileId;
+    if (!roomId || !fileId) return null;
+    let latest = null;
+    for (const snapshot of reviewStore.snapshots) {
+      if (snapshot.roomId !== roomId || snapshot.fileId !== fileId || snapshot.content == null) {
+        continue;
+      }
+      if (latest === null || snapshot.createdAt > latest.createdAt) latest = snapshot;
+    }
+    return latest;
+  });
+
+  const displayedContent = $derived(displayedSnapshot?.content ?? sessionState.snapshotContent);
+  const displayedDocType = $derived(
+    displayedSnapshot?.docType ?? sessionState.snapshotDocType,
+  );
 
   const isLoading = $derived(
     sessionState.status === 'idle' ||
       sessionState.status === 'parsing_invite' ||
       sessionState.status === 'registering_device' ||
       sessionState.status === 'connecting' ||
-      (sessionState.status === 'connected' && sessionState.snapshotContent === null),
+      (sessionState.status === 'connected' && displayedContent === null),
   );
 
   const errorMessage = $derived(formatError(sessionState.error));
@@ -246,8 +198,6 @@ interface CommentComposerState {
   }
 </script>
 
-<svelte:window onkeydown={handleGlobalKeydown} />
-
 <main class="browser-review-shell flex h-screen flex-col overflow-hidden bg-background text-foreground" data-slot="browser-review">
   {#if sessionState.error}
     <div class="browser-review-error flex h-full flex-col items-center justify-center gap-3 px-6 text-center"
@@ -269,13 +219,13 @@ interface CommentComposerState {
         <ReviewFileNav />
         <div class="browser-review-editor min-w-0 flex-1 overflow-auto"
           data-slot="browser-review-editor">
-          {#if sessionState.snapshotDocType === 'html'}
+          {#if displayedDocType === 'html'}
             <!-- Read-only HTML doc: render received bytes in a sandboxed iframe.
                  No editor, no collab, no comment margin (yet). -->
-            <HtmlViewer content={sessionState.snapshotContent ?? ''} />
+            <HtmlViewer content={displayedContent ?? ''} allowScripts={false} />
           {:else}
             <Editor
-              markdown={sessionState.snapshotContent ?? ''}
+              markdown={displayedContent ?? ''}
               editable={false}
               plugins={editorPlugins}
               onReady={handleEditorReady}
@@ -283,23 +233,12 @@ interface CommentComposerState {
           {/if}
         </div>
       </div>
-      {#if sessionState.snapshotDocType !== 'html'}
+      {#if displayedDocType !== 'html'}
         <aside class="browser-review-margin w-[320px] shrink-0 overflow-y-auto border-l border-border bg-background"
           data-slot="browser-review-margin">
-          <ReviewMargin view={pmViewForReview} />
+          <ReviewMargin view={pmViewForReview} readOnly={true} />
         </aside>
       {/if}
     </div>
   {/if}
 </main>
-
-{#if commentComposer}
-  <CommentComposer
-    view={commentComposer.view}
-    from={commentComposer.from}
-    to={commentComposer.to}
-    anchorContext={commentComposer.anchorContext}
-    roomId={commentComposer.roomId}
-    onClose={closeCommentComposer}
-  />
-{/if}

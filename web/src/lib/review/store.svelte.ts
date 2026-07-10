@@ -83,6 +83,7 @@ export interface ReviewRoomSummary {
   share?: {
     roomId: RoomId;
     inviteUrl: string;
+    browserInviteUrl: string;
     ownerSigningKey: string;
     ownerDisplayPath: string;
     mode: 'live' | 'async' | 'hybrid';
@@ -166,6 +167,7 @@ export class ReviewStore {
   currentShare = $state<{
     roomId: RoomId;
     inviteUrl: string;
+    browserInviteUrl: string;
     ownerSigningKey: string;
     ownerDisplayPath: string;
     mode: 'live' | 'async' | 'hybrid';
@@ -618,6 +620,7 @@ export class ReviewStore {
   applyShareReady(payload: {
     roomId: RoomId;
     inviteUrl: string;
+    browserInviteUrl: string;
     ownerDisplayPath: string;
     ownerSigningKey: string;
     mode: 'live' | 'async' | 'hybrid';
@@ -633,6 +636,7 @@ export class ReviewStore {
     const share = {
       roomId: payload.roomId,
       inviteUrl: payload.inviteUrl,
+      browserInviteUrl: payload.browserInviteUrl,
       ownerSigningKey: payload.ownerSigningKey,
       ownerDisplayPath: payload.ownerDisplayPath,
       mode: payload.mode,

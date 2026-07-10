@@ -358,9 +358,11 @@
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.checked = node.attrs.checked;
-    // Checkbox is always clickable (both read-only and edit mode)
+    checkbox.disabled = !editable;
+    checkbox.setAttribute('aria-disabled', String(!editable));
     checkbox.addEventListener('mousedown', (e) => {
       e.preventDefault();
+      if (!editable) return;
       const pos = getPos();
       if (pos === undefined) return;
       const tr = editorView.state.tr.setNodeMarkup(pos, undefined, {
@@ -736,6 +738,12 @@
   $effect(() => {
     if (view) {
       view.setProps({ editable: () => editable });
+      for (const checkbox of view.dom.querySelectorAll<HTMLInputElement>(
+        '.task-checkbox input[type="checkbox"]',
+      )) {
+        checkbox.disabled = !editable;
+        checkbox.setAttribute('aria-disabled', String(!editable));
+      }
     }
   });
 

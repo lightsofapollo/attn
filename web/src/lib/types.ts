@@ -891,7 +891,10 @@ export interface ReviewEvent {
 export interface ReviewShareReady {
   kind: 'share_ready';
   roomId: RoomId;
+  /** Native deep link retained for installed desktop/CLI reviewers. */
   inviteUrl: string;
+  /** HTTPS invite for the hosted reviewer; the secret is fragment-only. */
+  browserInviteUrl: string;
   /** Absolute path the owner shared (file or folder); the dialog matches it
    *  against the active target to recognise its own room. */
   ownerDisplayPath: string;

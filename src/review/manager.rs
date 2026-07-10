@@ -158,7 +158,11 @@ pub enum ReviewUpdate {
     /// expiry timer, etc. without parsing strings.
     ShareReady {
         room_id: RoomId,
+        /// Native deep link retained for desktop and CLI reviewers.
         invite_url: String,
+        /// HTTPS invite for the hosted reviewer. The room secret remains in
+        /// the URL fragment and is never sent to the static host.
+        browser_invite_url: String,
         /// Absolute path the owner shared, so the dialog can recognise its own
         /// room without relying on a frontend-captured intent. Serialised as
         /// `ownerDisplayPath`.
@@ -1396,6 +1400,7 @@ impl ReviewManager {
                 (self.update_tx)(ReviewUpdate::ShareReady {
                     room_id: outcome.room_id,
                     invite_url: outcome.invite,
+                    browser_invite_url: outcome.browser_invite,
                     owner_display_path: outcome.owner_display_path,
                     owner_signing_key: outcome.owner_signing_key,
                     mode: outcome.mode,
@@ -4175,6 +4180,7 @@ mod bootstrap_integration_tests {
         let invite = match first {
             ReviewUpdate::ShareReady {
                 invite_url,
+                browser_invite_url,
                 owner_signing_key,
                 mode,
                 expires_at,
@@ -4183,6 +4189,10 @@ mod bootstrap_integration_tests {
                 assert!(
                     invite_url.starts_with("attn://review/"),
                     "ShareReady invite_url shape, got: {invite_url}"
+                );
+                assert!(
+                    browser_invite_url.starts_with("https://attn.sh/review/"),
+                    "ShareReady browser_invite_url shape, got: {browser_invite_url}"
                 );
                 assert_eq!(mode, "async", "wire mode string round-trips");
                 assert!(!owner_signing_key.is_empty(), "owner key surfaced");

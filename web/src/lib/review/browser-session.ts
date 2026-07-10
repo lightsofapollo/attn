@@ -12,9 +12,7 @@
 //   3. Generate an in-memory `(deviceId, signingKeyPair, encryptionKeyPair)`.
 //      No persistence whatsoever — reload requires re-paste.
 //   4. POST `/v2/rooms/:roomId/devices` with `kind: "reviewer"` + admission HMAC
-//      + selfSignature + PoW. The PoW miner lives in `browser-pow.ts`; we
-//      stub a simple synchronous miner here as a placeholder for 9.4. The
-//      real Web-Worker miner lands in a follow-up issue.
+//      + selfSignature + a Web-Worker-minted PoW token.
 //   5. Open the `BrowserWsClient` and pump decoded envelopes into the global
 //      `reviewStore`. The store already knows how to render comments,
 //      suggestions, ambiguous/stale anchors, and snapshots via the existing
@@ -22,14 +20,10 @@
 //
 // What this module deliberately leaves out:
 //
-//   - Outbound comment / suggestion authoring. The composer components do the
-//     anchor build + IPC dispatch in native; we'll layer browser POST
-//     `/envelopes` on top via a separate `browser-outbox.ts` once 9.5 lands.
-//     For now the Svelte composers stay mounted but their submit handlers
-//     route through a no-op in the browser shell.
-//   - Snapshot R2 download. We surface `SnapshotCreated` envelopes inline
-//     (`inlineSnapshot`); R2-hosted snapshots show "snapshot not available"
-//     in the UI until 9.x wires `GET /blobs/:id`.
+//   - Outbound comment / suggestion authoring. The hosted shell is explicitly
+//     read-only until browser POST `/envelopes` lands.
+//   - Snapshot R2 download. Mailbox snapshot blobs are rehydrated here; R2
+//     references remain unavailable until the authenticated blob fetch lands.
 //   - Reconnect cursor persistence. The WS client tracks `afterSeq` in
 //     memory only — reload restarts at 0.
 //
@@ -43,6 +37,7 @@ import { hmac } from '@noble/hashes/hmac.js';
 import {
   base64UrlEncode,
   buildAdmissionSubprotocol,
+  contentHash,
   deriveRoomId,
   deriveRoomKeys,
   signingKeyId,
@@ -62,11 +57,15 @@ import {
   socketPath,
   type Device,
   type DecodedEnvelope,
+  type MailboxEnvelope,
   type WebSocketLike,
   type WsTerminalError,
   type RoomPolicy,
 } from './browser-ws';
+import { BROWSER_POW_DIFFICULTY, mintBrowserPowInWorker } from './browser-pow';
+import { validateBrowserRelayUrl } from './browser-relay-url';
 import type {
+  AnchorIndex,
   DocType,
   EventId,
   EventMeta,
@@ -166,6 +165,8 @@ export interface ReviewStoreSink {
   applySnapshot(snapshot: ReviewSnapshot): void;
   setCurrentFile(fileId: FileId | null): void;
   setCurrentSnapshot(snapshotId: SnapshotId | null): void;
+  /** Remove room-scoped plaintext and selection state on close/failure. */
+  leaveRoom?(roomId: RoomId): void;
   /** Plain field write — runes proxy intercepts this in production. */
   currentRoomId: RoomId | null;
 }
@@ -178,7 +179,11 @@ export interface BrowserSessionOptions {
    * window fragment when provided.
    */
   inviteUrl?: string;
-  /** Relay base URL (default `https://attn.dev`). */
+  /** Already-parsed hosted invite; avoids reconstructing a secret-bearing URL. */
+  parsedInvite?: ParsedInvite;
+  /** Narrow-bootstrap parse failure to surface through the normal error state. */
+  inviteError?: string;
+  /** Relay base URL. Required before any network operation. */
   relayUrl?: string;
   /**
    * Override `fetch` for the `POST /devices` call. Tests inject a stub.
@@ -358,10 +363,19 @@ export class BrowserSession {
   private wsClient: BrowserWsClient | null = null;
   private keys: RoomKeys | null = null;
   private store: ReviewStoreSink | null;
+  private powAbortController: AbortController | null = null;
+  private readonly snapshotBlobs = new Map<string, CachedSnapshotBlob>();
+  private readonly invalidSnapshotBlobIds = new Set<string>();
+  private readonly pendingSnapshots = new Map<string, PendingSnapshot[]>();
+  private readonly signerRefreshAttempts = new Set<string>();
+  private readonly pagehideTarget: BrowserWindowLike | null;
+  private readonly pagehideHandler = (): void => this.close();
 
   constructor(opts: BrowserSessionOptions = {}) {
     this.opts = opts;
     this.store = opts.store ?? null;
+    this.pagehideTarget = opts.window ?? (globalThis as unknown as BrowserWindowLike);
+    this.pagehideTarget.addEventListener?.('pagehide', this.pagehideHandler);
   }
 
   /**
@@ -394,7 +408,11 @@ export class BrowserSession {
     // 1. Parse the invite (override > location.hash).
     let invite: ParsedInvite;
     try {
-      if (this.opts.inviteUrl) {
+      if (this.opts.inviteError) {
+        throw new Error(this.opts.inviteError);
+      } else if (this.opts.parsedInvite) {
+        invite = this.opts.parsedInvite;
+      } else if (this.opts.inviteUrl) {
         invite = parseInviteUrl(this.opts.inviteUrl);
       } else {
         const win = this.opts.window ?? (globalThis as unknown as BrowserWindowLike);
@@ -447,27 +465,34 @@ export class BrowserSession {
     try {
       await this.registerDevice(invite.roomId, roomKeys);
     } catch (err) {
+      if (this.isTerminated()) return;
       const m = err instanceof Error ? err.message : String(err);
       this.fail('device_register', m);
       return;
     }
 
     // 5. Open the WS.
+    if (this.isTerminated()) return;
     this.setState({ status: 'connecting' });
     this.openWs(invite.roomId, roomKeys);
   }
 
-  /** Tear down the WS and stop reconnecting. Safe to call multiple times. */
+  /** Tear down transports and clobber in-memory keys. Safe to call repeatedly. */
   close(): void {
-    if (this.wsClient) {
-      try {
-        this.wsClient.close();
-      } catch {
-        // ignore
-      }
-      this.wsClient = null;
-    }
-    this.setState({ status: 'terminated' });
+    this.detachPagehide();
+    this.stopTransport();
+    this.releaseSensitiveState();
+    this.snapshotBlobs.clear();
+    this.invalidSnapshotBlobIds.clear();
+    this.pendingSnapshots.clear();
+    this.signerRefreshAttempts.clear();
+    this.clearStorePlaintext();
+    this.setState({
+      status: 'terminated',
+      snapshotContent: null,
+      snapshotId: null,
+      fileId: null,
+    });
   }
 
   // -----------------------------------------------------------------
@@ -479,8 +504,71 @@ export class BrowserSession {
     this.opts.onState?.(this.state);
   }
 
+  private isTerminated(): boolean {
+    return this.state.status === 'terminated';
+  }
+
   private fail(kind: BrowserSessionError['kind'], message: string): void {
-    this.setState({ status: 'error', error: { kind, message } });
+    this.detachPagehide();
+    this.stopTransport();
+    this.releaseSensitiveState();
+    this.snapshotBlobs.clear();
+    this.invalidSnapshotBlobIds.clear();
+    this.pendingSnapshots.clear();
+    this.signerRefreshAttempts.clear();
+    this.clearStorePlaintext();
+    this.setState({
+      status: 'error',
+      snapshotContent: null,
+      snapshotId: null,
+      fileId: null,
+      error: { kind, message },
+    });
+  }
+
+  private clearStorePlaintext(): void {
+    const roomId = this.state.roomId;
+    if (!this.store) return;
+    if (roomId && this.store.leaveRoom) {
+      this.store.leaveRoom(roomId);
+      return;
+    }
+    this.store.setCurrentSnapshot(null);
+    this.store.setCurrentFile(null);
+    this.store.currentRoomId = null;
+  }
+
+  private detachPagehide(): void {
+    this.pagehideTarget?.removeEventListener?.('pagehide', this.pagehideHandler);
+  }
+
+  private stopTransport(): void {
+    this.powAbortController?.abort();
+    this.powAbortController = null;
+    if (!this.wsClient) return;
+    try {
+      this.wsClient.close();
+    } catch {
+      // Best-effort teardown; key clobbering must still continue.
+    }
+    this.wsClient = null;
+  }
+
+  private releaseSensitiveState(): void {
+    if (this.keys) {
+      zero(this.keys.rootKey);
+      zero(this.keys.eventKey);
+      zero(this.keys.snapshotKey);
+      zero(this.keys.signalingKey);
+      zero(this.keys.admissionKey);
+      this.keys = null;
+    }
+    if (this.identity) {
+      zero(this.identity.signingSecret);
+      zero(this.identity.signingPublic);
+      zero(this.identity.publicEncryptionKey);
+      this.identity = null;
+    }
   }
 
   private async registerDevice(roomId: string, keys: RoomKeys): Promise<void> {
@@ -490,24 +578,28 @@ export class BrowserSession {
     const bodyBytes = new TextEncoder().encode(bodyJson);
     const path = `/v2/rooms/${roomId}/devices`;
     const admission = admissionHeaderValue(keys.admissionKey, 'POST', path, bodyBytes);
-    const relay = (this.opts.relayUrl ?? 'https://attn.dev').replace(/\/+$/, '');
+    const relay = validateBrowserRelayUrl(this.opts.relayUrl);
     const url = `${relay}${path}`;
+    this.powAbortController = new AbortController();
+    const pow =
+      this.opts.powToken ??
+      (await mintBrowserPowInWorker(
+        {
+          roomId,
+          deviceId: this.identity.deviceId,
+          method: 'POST',
+          path,
+          difficulty: BROWSER_POW_DIFFICULTY,
+        },
+        { signal: this.powAbortController.signal },
+      ));
+    this.powAbortController = null;
     const headers: Record<string, string> = {
       'content-type': 'application/json; charset=utf-8',
       'Attn-Admission': admission,
-      // 9.4 placeholder — the real Web-Worker PoW miner lands later. The
-      // relay rejects with 403 `ATTN_POW_REQUIRED` if the token is missing
-      // or invalid; tests inject their own value via `powToken`.
-      'Attn-PoW': this.opts.powToken ?? 'v2.placeholder.0.0',
+      'Attn-PoW': pow,
     };
-    const fetchImpl =
-      this.opts.fetchImpl ??
-      (async (u, init) => {
-        const r = await (globalThis as unknown as {
-          fetch: (u: string, i: FetchLikeInit) => Promise<{ status: number; text: () => Promise<string> }>;
-        }).fetch(u, init);
-        return r as FetchLikeResponse;
-      });
+    const fetchImpl = this.fetchImpl();
     const resp = await fetchImpl(url, {
       method: 'POST',
       headers,
@@ -521,7 +613,7 @@ export class BrowserSession {
 
   private openWs(roomId: string, keys: RoomKeys): void {
     if (!this.identity) throw new Error('identity missing');
-    const relay = (this.opts.relayUrl ?? 'https://attn.dev').replace(/\/+$/, '');
+    const relay = validateBrowserRelayUrl(this.opts.relayUrl);
     const url = buildWsUrl(relay, roomId, this.identity.deviceId);
     const path = socketPath(roomId);
     // The WS handshake admission HMAC is over METHOD=GET, path, empty body —
@@ -532,6 +624,7 @@ export class BrowserSession {
       ['device_id', this.identity.deviceId],
     ]);
     this.wsClient = new BrowserWsClient({
+      roomId,
       url,
       subprotocol,
       afterSeq: 0,
@@ -546,6 +639,9 @@ export class BrowserSession {
           this.setState({ status: 'connected' });
         },
         onEnvelope: (decoded) => this.handleEnvelope(decoded),
+        onUnknownSigner: (envelope, serverSeq) => {
+          void this.refreshSignerAndRetry(roomId, keys, envelope, serverSeq);
+        },
         onTerminal: (err) => this.handleTerminal(err),
         onError: (_code, _msg) => {
           // Non-fatal — keep status as-is. Could surface as a toast later.
@@ -553,6 +649,55 @@ export class BrowserSession {
       },
     });
     this.wsClient.start();
+  }
+
+  private fetchImpl(): (url: string, init: FetchLikeInit) => Promise<FetchLikeResponse> {
+    return (
+      this.opts.fetchImpl ??
+      (async (url, init) => {
+        const response = await (globalThis as unknown as {
+          fetch: (
+            url: string,
+            init: FetchLikeInit,
+          ) => Promise<{ status: number; text: () => Promise<string> }>;
+        }).fetch(url, init);
+        return response as FetchLikeResponse;
+      })
+    );
+  }
+
+  private async refreshSignerAndRetry(
+    roomId: string,
+    keys: RoomKeys,
+    envelope: MailboxEnvelope,
+    serverSeq: number,
+  ): Promise<void> {
+    if (this.signerRefreshAttempts.has(envelope.envelopeId)) {
+      if (this.state.snapshotContent === null) {
+        this.fail('network', 'Could not verify the snapshot signer');
+      }
+      return;
+    }
+    this.signerRefreshAttempts.add(envelope.envelopeId);
+    try {
+      const path = `/v2/rooms/${roomId}/devices`;
+      const relay = validateBrowserRelayUrl(this.opts.relayUrl);
+      const admission = admissionHeaderValue(keys.admissionKey, 'GET', path, new Uint8Array());
+      const response = await this.fetchImpl()(`${relay}${path}`, {
+        method: 'GET',
+        headers: { 'Attn-Admission': admission },
+      });
+      const raw = await response.text();
+      if (response.status !== 200) throw new Error(`GET /devices failed: ${response.status}`);
+      const parsed = JSON.parse(raw) as { devices?: Device[] };
+      if (!Array.isArray(parsed.devices)) throw new Error('GET /devices returned invalid body');
+      this.wsClient?.mergeDevices(parsed.devices);
+      this.wsClient?.retryEnvelope(envelope, serverSeq);
+    } catch {
+      if (this.state.snapshotContent === null) {
+        this.fail('network', 'Could not refresh participant signing keys');
+      }
+    }
   }
 
   private handleEnvelope(decoded: DecodedEnvelope): void {
@@ -567,6 +712,8 @@ export class BrowserSession {
         parsed = JSON.parse(new TextDecoder().decode(plaintext));
       } catch {
         return;
+      } finally {
+        zero(plaintext);
       }
       const meta = parsed.meta;
       const body = parsed.body;
@@ -585,14 +732,40 @@ export class BrowserSession {
       // reviewStore.snapshots so the existing UI can scope by snapshot.
       if (body.type === 'snapshot_created') {
         this.absorbSnapshotCreated(store, meta as EventMeta, body);
+        if (this.state.status === 'error') return;
       }
       store.applyEvent(event);
       return;
     }
     if (envelope.kind === 'snapshot_blob') {
-      // R2-hosted snapshots arrive here as the decrypted blob bytes. The
-      // 9.4 surface treats them as inline markdown for the latest known
-      // snapshot. The full inline/R2 routing lands later.
+      // Native bootstrap enqueues mailbox bytes before the pointer event, but
+      // cache + pending queues make the receiver defensive to either order.
+      const blobId = envelope.envelopeId;
+      const waiting = this.pendingSnapshots.get(blobId);
+      const snapshot = parseSnapshotPlaintext(plaintext);
+      const cached = snapshot
+        ? {
+            snapshot,
+            byteLength: plaintext.length,
+            contentHash: contentHash(plaintext),
+          }
+        : null;
+      zero(plaintext);
+      if (!cached) {
+        this.invalidSnapshotBlobIds.add(blobId);
+        if (waiting && waiting.length > 0) {
+          this.fail('network', 'Snapshot payload failed integrity validation');
+        }
+        return; // R2 wrappers contain a BlobRef, not plaintext.
+      }
+      if (!waiting || waiting.length === 0) {
+        this.snapshotBlobs.set(blobId, cached);
+        return;
+      }
+      this.pendingSnapshots.delete(blobId);
+      for (const pending of waiting) {
+        this.hydrateSnapshotBlob(pending.store, pending.meta, pending.body, cached);
+      }
       return;
     }
     // Signal envelopes are out of scope for the browser reviewer surface.
@@ -603,12 +776,54 @@ export class BrowserSession {
     meta: EventMeta,
     body: Extract<ReviewEventBody, { type: 'snapshot_created' }>,
   ): void {
-    const inline = body.inlineSnapshot;
-    if (!inline) {
-      // R2-hosted snapshot — leave snapshotContent null; UI shows
-      // "snapshot not available."
+    if (body.inlineSnapshot) {
+      this.hydrateSnapshot(store, meta, body, body.inlineSnapshot);
       return;
     }
+    const blobRef = body.encryptedBlobRef;
+    if (!blobRef || blobRef.storage !== 'mailbox') return;
+    if (this.invalidSnapshotBlobIds.delete(blobRef.blobId)) {
+      this.fail('network', 'Snapshot payload failed integrity validation');
+      return;
+    }
+    const cached = this.snapshotBlobs.get(blobRef.blobId);
+    if (cached) {
+      this.snapshotBlobs.delete(blobRef.blobId);
+      this.hydrateSnapshotBlob(store, meta, body, cached);
+      return;
+    }
+    const waiting = this.pendingSnapshots.get(blobRef.blobId) ?? [];
+    if (!waiting.some((pending) => pending.body.snapshotId === body.snapshotId)) {
+      waiting.push({ store, meta, body });
+      this.pendingSnapshots.set(blobRef.blobId, waiting);
+    }
+  }
+
+  private hydrateSnapshotBlob(
+    store: ReviewStoreSink,
+    meta: EventMeta,
+    body: Extract<ReviewEventBody, { type: 'snapshot_created' }>,
+    cached: CachedSnapshotBlob,
+  ): void {
+    const blobRef = body.encryptedBlobRef;
+    if (
+      !blobRef ||
+      blobRef.storage !== 'mailbox' ||
+      blobRef.byteLength !== cached.byteLength ||
+      blobRef.contentHash !== cached.contentHash
+    ) {
+      this.fail('network', 'Snapshot payload does not match its signed reference');
+      return;
+    }
+    this.hydrateSnapshot(store, meta, body, cached.snapshot);
+  }
+
+  private hydrateSnapshot(
+    store: ReviewStoreSink,
+    meta: EventMeta,
+    body: Extract<ReviewEventBody, { type: 'snapshot_created' }>,
+    inline: SnapshotPlaintext,
+  ): void {
     this.setState({
       snapshotContent: inline.content,
       snapshotDocType: inline.docType,
@@ -629,6 +844,7 @@ export class BrowserSession {
       docType: inline.docType,
       content: inline.content,
       anchorIndex: inline.anchorIndex,
+      encryptedBlobRef: body.encryptedBlobRef,
     };
     store.applySnapshot(snapshot);
     store.setCurrentFile(body.fileId);
@@ -653,8 +869,52 @@ export class BrowserSession {
       default:
         kind = 'network';
     }
-    this.setState({ status: 'error', error: { kind, message: err.message } });
+    this.fail(kind, err.message);
   }
+}
+
+interface SnapshotPlaintext {
+  docType: DocType;
+  content: string;
+  anchorIndex?: AnchorIndex;
+}
+
+interface PendingSnapshot {
+  store: ReviewStoreSink;
+  meta: EventMeta;
+  body: Extract<ReviewEventBody, { type: 'snapshot_created' }>;
+}
+
+interface CachedSnapshotBlob {
+  snapshot: SnapshotPlaintext;
+  byteLength: number;
+  contentHash: string;
+}
+
+function parseSnapshotPlaintext(bytes: Uint8Array): SnapshotPlaintext | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+  if (typeof value !== 'object' || value === null) return null;
+  const candidate = value as { docType?: unknown; content?: unknown; anchorIndex?: unknown };
+  if (candidate.docType !== 'markdown' && candidate.docType !== 'html') return null;
+  if (typeof candidate.content !== 'string') return null;
+  if (
+    candidate.anchorIndex !== undefined &&
+    (typeof candidate.anchorIndex !== 'object' || candidate.anchorIndex === null)
+  ) {
+    return null;
+  }
+  return {
+    docType: candidate.docType,
+    content: candidate.content,
+    ...(candidate.anchorIndex === undefined
+      ? {}
+      : { anchorIndex: candidate.anchorIndex as AnchorIndex }),
+  };
 }
 
 // Re-exports so the entry point and tests have one import location.

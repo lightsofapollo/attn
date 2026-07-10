@@ -175,6 +175,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Build hosted browser app
+        env:
+          VITE_ATTN_RELAY_URL: http://127.0.0.1:8787
+        run: npm run build:browser
+
   relay-tests:
     name: Relay Tests (Ubuntu)
     runs-on: ubuntu-latest

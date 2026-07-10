@@ -27,6 +27,7 @@ import {
   aeadSeal,
   base64UrlDecode,
   base64UrlEncode,
+  deriveEventId,
   deriveRoomKeys,
   signingKeyId,
   toCanonicalBytes,
@@ -222,12 +223,17 @@ const TEST_POLICY: RoomPolicy = {
  * Build a signed+encrypted Event envelope identical to what the Rust mailbox
  * pipeline would produce. The plaintext is canonical JSON of `{meta, body, auth}`.
  */
-function mintEventEnvelope(roomId: string, envelopeId: string, createdAt: number): MailboxEnvelope {
+function mintEventEnvelope(
+  roomId: string,
+  envelopeId: string,
+  createdAt: number,
+  overrides: { eventId?: string; metaAuthorId?: string } = {},
+): MailboxEnvelope {
   const meta: SignableMetaShape = {
     v: 2,
     eventId: envelopeId, // not signed; just present on the wire
     roomId,
-    authorId: TEST_DEVICE.participantId,
+    authorId: overrides.metaAuthorId ?? TEST_DEVICE.participantId,
     deviceId: TEST_DEVICE.deviceId,
     createdAt,
     parentEventIds: [],
@@ -244,6 +250,7 @@ function mintEventEnvelope(roomId: string, envelopeId: string, createdAt: number
     },
     body: 'hello from mock server',
   };
+  meta.eventId = overrides.eventId ?? deriveEventId(meta, body);
   // Build canonical signed bytes manually (matches Rust signing.rs).
   const parents = (meta.parentEventIds ?? []).slice().sort();
   const signableMeta: Record<string, unknown> = {
@@ -296,6 +303,7 @@ function mintEventEnvelope(roomId: string, envelopeId: string, createdAt: number
 function clientOptions(port: number) {
   const url = `ws://127.0.0.1:${port}/v2/rooms/room-test/socket?device_id=d-test`;
   return {
+    roomId: 'room-test',
     url,
     subprotocol: 'attn.v2, hmac.dGVzdA',
     afterSeq: 0,
@@ -404,6 +412,166 @@ defineCase('envelope frame decrypts + verifies + dispatches to onEnvelope', asyn
     const pt = new TextDecoder().decode(d.plaintext);
     assert(pt.includes('"hello from mock server"'), `plaintext recovered: ${pt}`);
     assertEq(errors.length, 0, 'no errors during happy path');
+    client.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('relay envelope without implicit v or roomId decrypts with subscription AAD', async () => {
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(String(raw));
+        if (msg.type !== 'subscribe') return;
+        ws.send(
+          JSON.stringify({
+            type: 'hello',
+            serverSeq: 0,
+            policy: TEST_POLICY,
+            devices: [TEST_DEVICE],
+            missedSignalEnvelopeIds: [],
+          }),
+        );
+        const envelope = mintEventEnvelope('room-test', 'env-relay-wire', 1_700_000_150_000);
+        delete envelope.v;
+        delete envelope.roomId;
+        ws.send(JSON.stringify({ type: 'envelope', envelope, serverSeq: 8 }));
+      });
+    });
+
+    const inbound: DecodedEnvelope[] = [];
+    const errors: Array<[string, string]> = [];
+    const client = new BrowserWsClient({
+      ...clientOptions(server.port),
+      callbacks: {
+        onEnvelope: (decoded) => inbound.push(decoded),
+        onError: (code, message) => errors.push([code, message]),
+      },
+    });
+    client.start();
+    for (let i = 0; i < 60 && inbound.length === 0; i++) await delay(20);
+    assertEq(inbound.length, 1, `relay-shaped envelope should decrypt; errors=${JSON.stringify(errors)}`);
+    assertEq(errors.length, 0, 'relay-shaped envelope should not emit errors');
+    client.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('event id and plaintext metadata must remain bound to signed envelope routing', async () => {
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(String(raw));
+        if (msg.type !== 'subscribe') return;
+        ws.send(
+          JSON.stringify({
+            type: 'hello',
+            serverSeq: 0,
+            policy: TEST_POLICY,
+            devices: [TEST_DEVICE],
+            missedSignalEnvelopeIds: [],
+          }),
+        );
+        ws.send(
+          JSON.stringify({
+            type: 'envelope',
+            envelope: mintEventEnvelope('room-test', 'env-bad-id', 1_700_000_160_000, {
+              eventId: 'forged-event-id',
+            }),
+            serverSeq: 9,
+          }),
+        );
+        ws.send(
+          JSON.stringify({
+            type: 'envelope',
+            envelope: mintEventEnvelope('room-test', 'env-bad-meta', 1_700_000_170_000, {
+              metaAuthorId: 'p-spoofed-author',
+            }),
+            serverSeq: 10,
+          }),
+        );
+        ws.send(
+          JSON.stringify({
+            type: 'envelope',
+            envelope: mintEventEnvelope('room-test', 'env-after-rejects', 1_700_000_180_000),
+            serverSeq: 11,
+          }),
+        );
+      });
+    });
+
+    const inbound: DecodedEnvelope[] = [];
+    const errors: string[] = [];
+    const client = new BrowserWsClient({
+      ...clientOptions(server.port),
+      callbacks: {
+        onEnvelope: (decoded) => inbound.push(decoded),
+        onError: (_code, message) => errors.push(message),
+      },
+    });
+    client.start();
+    for (let i = 0; i < 80 && inbound.length === 0; i++) await delay(20);
+    assertEq(inbound.length, 1, 'only the valid event is dispatched');
+    assertEq(inbound[0]!.envelope.envelopeId, 'env-after-rejects', 'valid event survives rejects');
+    assert(errors.some((message) => message.includes('event id mismatch')), 'event id reject surfaced');
+    assert(
+      errors.some((message) => message.includes('metadata binding failed')),
+      'metadata binding reject surfaced',
+    );
+    client.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('unknown signer can refresh the device cache and retry the ciphertext once', async () => {
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(String(raw));
+        if (msg.type !== 'subscribe') return;
+        ws.send(
+          JSON.stringify({
+            type: 'hello',
+            serverSeq: 0,
+            policy: TEST_POLICY,
+            devices: [],
+            missedSignalEnvelopeIds: [],
+          }),
+        );
+        ws.send(
+          JSON.stringify({
+            type: 'envelope',
+            envelope: mintEventEnvelope('room-test', 'env-late-signer', 1_700_000_190_000),
+            serverSeq: 12,
+          }),
+        );
+      });
+    });
+
+    const inbound: DecodedEnvelope[] = [];
+    let refreshes = 0;
+    let client!: BrowserWsClient;
+    client = new BrowserWsClient({
+      ...clientOptions(server.port),
+      callbacks: {
+        onEnvelope: (decoded) => inbound.push(decoded),
+        onUnknownSigner: (envelope, serverSeq) => {
+          refreshes += 1;
+          client.mergeDevices([TEST_DEVICE]);
+          client.retryEnvelope(envelope, serverSeq);
+        },
+      },
+    });
+    client.start();
+    for (let i = 0; i < 80 && inbound.length === 0; i++) await delay(20);
+    assertEq(refreshes, 1, 'one directory refresh requested');
+    assertEq(inbound.length, 1, 'retried envelope dispatches');
     client.close();
   } finally {
     await server.close();

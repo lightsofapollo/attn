@@ -8,6 +8,10 @@ import {
   INTERNAL_BLOB_UPLOAD_PATH,
   verifyBlobCap,
 } from "./r2";
+import {
+  encodeEdgeOriginContext,
+  INTERNAL_EDGE_ORIGIN_HEADER,
+} from "./browser-origin";
 import { WorkerEdgeRateLimit, type RateLimitResult } from "./rate-limit";
 import { RoomDO } from "./room-do";
 import { INTERNAL_QUOTA_SOURCE_HEADER, QuotaDO } from "./quota-do";
@@ -128,6 +132,10 @@ function corsMiddleware(request: Request, env: Env, response: Response): Respons
   // the (often immutable) original. We don't read body to keep streaming intact.
   const newHeaders = new Headers(response.headers);
   newHeaders.delete(INTERNAL_ALLOW_BROWSER_HEADER);
+  // Defense in depth: private Worker -> DO request context is never part of
+  // the public wire protocol, even if a future DO response accidentally
+  // copies it.
+  newHeaders.delete(INTERNAL_EDGE_ORIGIN_HEADER);
 
   if (allowBrowser) {
     const origin = originIfAllowed(request, env);
@@ -306,7 +314,11 @@ export default {
     // selected subprotocol and the upgraded peer.
     //
     // Browser-policy Origin check happens inside the DO (where the room policy
-    // is loaded). The DO also signals allowBrowser back via the internal
+    // is loaded). Cloudflare rewrites the standard Origin header during the
+    // Worker -> DO fetch, so snapshot the edge value into a private context
+    // header. This SET is unconditional: a client-supplied private header is
+    // always overwritten, including for native requests with no Origin.
+    // The DO also signals allowBrowser back via the internal
     // X-Attn-Allow-Browser header so corsMiddleware can attach CORS to the
     // 101 response when appropriate.
     const socketMatch = url.pathname.match(ROOM_SOCKET_RE);
@@ -318,7 +330,13 @@ export default {
       const roomId = socketMatch[1];
       const id = env.RELAY_ROOMS.idFromName(roomId);
       const stub = env.RELAY_ROOMS.get(id);
-      const response = await stub.fetch(request);
+      const forwardedHeaders = new Headers(request.headers);
+      forwardedHeaders.set(
+        INTERNAL_EDGE_ORIGIN_HEADER,
+        encodeEdgeOriginContext(request.headers.get("Origin")),
+      );
+      const forwardedRequest = new Request(request, { headers: forwardedHeaders });
+      const response = await stub.fetch(forwardedRequest);
       return corsMiddleware(request, env, response);
     }
 
@@ -394,6 +412,10 @@ async function withPrivateQuotaSource(
 ): Promise<Request> {
   const headers = new Headers(request.headers);
   headers.delete(INTERNAL_QUOTA_SOURCE_HEADER);
+  // This header is private to the Worker -> RoomDO socket hop. Strip it at
+  // the public edge on every route so future DO handlers cannot accidentally
+  // trust a client-supplied value; the socket route overwrites it explicitly.
+  headers.delete(INTERNAL_EDGE_ORIGIN_HEADER);
 
   const createMatch = request.method === "POST" ? pathname.match(ROOM_CREATE_RE) : null;
   const roomId = createMatch?.[1];

@@ -18,14 +18,21 @@
  *   - The ALLOWED_BROWSER_ORIGINS env var is comma-separated; multiple
  *     entries must all be honoured; non-listed origins are still 403'd.
  *
- * All tests go through SELF.fetch so they exercise the full Worker → DO
- * pipeline (corsMiddleware + tagAllowBrowserOnResponse + WS Origin check).
+ * Public-path tests go through SELF.fetch so they exercise the Worker → DO
+ * pipeline (private origin-context overwrite + RoomDO policy check + response
+ * stripping). The real workerd Origin rewrite is covered separately by the
+ * local Wrangler + Playwright regression because SELF preserves the standard
+ * header and cannot reproduce that runtime behavior by itself.
  */
 
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
+import {
+  encodeEdgeOriginContext,
+  INTERNAL_EDGE_ORIGIN_HEADER,
+} from "../../src/browser-origin";
 import type { Env } from "../../src/env";
 import type { RoomPolicy } from "../../src/schema";
 import { createPowHeader } from "../helpers/pow";
@@ -328,10 +335,9 @@ describe("CORS — WebSocket upgrade Origin check", () => {
     const roomId = uniqueRoomId("ws-good-origin");
     await createRoom({ roomId, allowBrowser: true });
 
-    // The HMAC isn't valid (we'd need to mint one), so the upgrade itself
-    // fails further down with `ATTN_ADMISSION_INVALID` (returned as 101 +
-    // close 4000 per spec). The point of this test is that the Origin check
-    // did NOT short-circuit with 403 — we got past it to admission verify.
+    // The deliberately short HMAC is not parseable, so admission later returns
+    // 401. The point of this test is that the edge-origin policy did not
+    // short-circuit with 403: the request reached admission parsing.
     const res = await SELF.fetch(
       `${URL_BASE}/v2/rooms/${roomId}/socket?device_id=d1`,
       {
@@ -342,9 +348,162 @@ describe("CORS — WebSocket upgrade Origin check", () => {
         },
       },
     );
-    // Either 101 (admission proceeds via close-frame) or any non-403 admission
-    // failure — we just need to confirm Origin didn't get us 403'd.
-    expect(res.status).not.toBe(403);
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("ATTN_ADMISSION_INVALID");
+    expect(res.headers.get(INTERNAL_EDGE_ORIGIN_HEADER)).toBeNull();
+  });
+
+  it("ignores the rewritten standard Origin when RoomDO has preserved edge context", async () => {
+    const roomId = uniqueRoomId("ws-rewritten-origin");
+    await createRoom({ roomId, allowBrowser: true });
+
+    // Directly model the runtime boundary: the private context retains the
+    // allowlisted browser origin while the standard header has become the
+    // relay's internal request origin. RoomDO must authorize only the former.
+    const id = env.RELAY_ROOMS.idFromName(roomId);
+    const stub = env.RELAY_ROOMS.get(id);
+    const res = await stub.fetch(
+      new Request(`${URL_BASE}/v2/rooms/${roomId}/socket?device_id=d1`, {
+        headers: {
+          Upgrade: "websocket",
+          Origin: "http://relay.attn.sh",
+          [INTERNAL_EDGE_ORIGIN_HEADER]: encodeEdgeOriginContext("https://attn.sh"),
+          "Sec-WebSocket-Protocol": "attn.v2, hmac.AAAA",
+        },
+      }),
+    );
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("ATTN_ADMISSION_INVALID");
+  });
+
+  it("overwrites a spoofed private context with the real disallowed edge Origin", async () => {
+    const roomId = uniqueRoomId("ws-spoof-real-bad");
+    await createRoom({ roomId, allowBrowser: true });
+
+    const res = await SELF.fetch(
+      `${URL_BASE}/v2/rooms/${roomId}/socket?device_id=d1`,
+      {
+        headers: {
+          Upgrade: "websocket",
+          Origin: "https://evil.example",
+          [INTERNAL_EDGE_ORIGIN_HEADER]: encodeEdgeOriginContext("https://attn.sh"),
+          "Sec-WebSocket-Protocol": "attn.v2, hmac.AAAA",
+        },
+      },
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: { code?: string; message?: string } };
+    expect(body.error?.code).toBe("ATTN_ORIGIN_FORBIDDEN");
+    expect(body.error?.message).toBe("browser origin is not allowed");
+    expect(res.headers.get(INTERNAL_EDGE_ORIGIN_HEADER)).toBeNull();
+  });
+
+  it("overwrites a spoofed invalid context with the real allowlisted edge Origin", async () => {
+    const roomId = uniqueRoomId("ws-spoof-real-good");
+    await createRoom({ roomId, allowBrowser: true });
+
+    const res = await SELF.fetch(
+      `${URL_BASE}/v2/rooms/${roomId}/socket?device_id=d1`,
+      {
+        headers: {
+          Upgrade: "websocket",
+          Origin: "https://attn.sh",
+          [INTERNAL_EDGE_ORIGIN_HEADER]: "v1.invalid",
+          "Sec-WebSocket-Protocol": "attn.v2, hmac.AAAA",
+        },
+      },
+    );
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("ATTN_ADMISSION_INVALID");
+    expect(res.headers.get(INTERNAL_EDGE_ORIGIN_HEADER)).toBeNull();
+  });
+
+  it("overwrites a spoofed browser context with native when edge Origin is absent", async () => {
+    const roomId = uniqueRoomId("ws-spoof-native");
+    await createRoom({ roomId, allowBrowser: false });
+
+    const res = await SELF.fetch(
+      `${URL_BASE}/v2/rooms/${roomId}/socket?device_id=d1`,
+      {
+        headers: {
+          Upgrade: "websocket",
+          [INTERNAL_EDGE_ORIGIN_HEADER]: encodeEdgeOriginContext("https://attn.sh"),
+          "Sec-WebSocket-Protocol": "attn.v2, hmac.AAAA",
+        },
+      },
+    );
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("ATTN_ADMISSION_INVALID");
+    expect(res.headers.get(INTERNAL_EDGE_ORIGIN_HEADER)).toBeNull();
+  });
+
+  it("classifies a malformed edge Origin as browser without reflecting it", async () => {
+    const roomId = uniqueRoomId("ws-invalid-origin");
+    await createRoom({ roomId, allowBrowser: true });
+
+    const res = await SELF.fetch(
+      `${URL_BASE}/v2/rooms/${roomId}/socket?device_id=d1`,
+      {
+        headers: {
+          Upgrade: "websocket",
+          Origin: "null",
+          [INTERNAL_EDGE_ORIGIN_HEADER]: encodeEdgeOriginContext("https://attn.sh"),
+          "Sec-WebSocket-Protocol": "attn.v2, hmac.AAAA",
+        },
+      },
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: { code?: string; message?: string } };
+    expect(body.error).toEqual({
+      code: "ATTN_ORIGIN_FORBIDDEN",
+      message: "browser origin is not allowed",
+    });
+    expect(res.headers.get(INTERNAL_EDGE_ORIGIN_HEADER)).toBeNull();
+  });
+
+  it("applies browser-disabled policy before rejecting an invalid browser Origin", async () => {
+    const roomId = uniqueRoomId("ws-invalid-origin-disabled");
+    await createRoom({ roomId, allowBrowser: false });
+
+    const res = await SELF.fetch(
+      `${URL_BASE}/v2/rooms/${roomId}/socket?device_id=d1`,
+      {
+        headers: {
+          Upgrade: "websocket",
+          Origin: "null",
+          "Sec-WebSocket-Protocol": "attn.v2, hmac.AAAA",
+        },
+      },
+    );
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("ATTN_BROWSER_DISALLOWED");
+    expect(res.headers.get(INTERNAL_EDGE_ORIGIN_HEADER)).toBeNull();
+  });
+
+  it("fails closed when RoomDO is called directly without Worker origin context", async () => {
+    const roomId = uniqueRoomId("ws-missing-context");
+    await createRoom({ roomId, allowBrowser: true });
+
+    const id = env.RELAY_ROOMS.idFromName(roomId);
+    const stub = env.RELAY_ROOMS.get(id);
+    const res = await stub.fetch(
+      new Request(`${URL_BASE}/v2/rooms/${roomId}/socket?device_id=d1`, {
+        headers: {
+          Upgrade: "websocket",
+          Origin: "https://attn.sh",
+          "Sec-WebSocket-Protocol": "attn.v2, hmac.AAAA",
+        },
+      }),
+    );
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: { code?: string } };
+    expect(body.error?.code).toBe("ATTN_INTERNAL_CONTEXT_INVALID");
+    expect(res.headers.get(INTERNAL_EDGE_ORIGIN_HEADER)).toBeNull();
   });
 });
 

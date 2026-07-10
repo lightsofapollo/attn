@@ -55,11 +55,12 @@ DEFAULT_POW_BITS = "16"
 MIN_POW_BITS = "12"
 MAX_POW_BITS = "24"
 # Comma-separated allowlist consumed by relay/src/index.ts `corsMiddleware` and
-# relay/src/room-do.ts `handleSocketUpgrade` (Origin check). Browsers must
-# match one of these origins when `policy.allowBrowser == true`; native
-# clients (no Origin header) bypass the check entirely. Native clients (the
-# desktop app + npx CLI) send no Origin, so this only gates the (deferred)
-# in-browser reviewer served from the attn.sh apex + staging subdomain.
+# relay/src/room-do.ts `handleSocketUpgrade`. For WebSockets, the public Worker
+# snapshots the edge Origin into a private, overwrite-only context because the
+# standard header is rewritten during Worker -> DO forwarding. Browsers must
+# match one of these origins when `policy.allowBrowser == true`; native clients
+# are represented by an explicit no-Origin sentinel and bypass the allowlist.
+# This gates the in-browser reviewer served from attn.sh + staging.
 ALLOWED_BROWSER_ORIGINS = "https://attn.sh,https://staging.attn.sh"
 # Conservative reserved-capacity admission. Every live room immediately
 # reserves HARD_MAX_ROOM_BYTES (25 MiB), regardless of current ciphertext use.

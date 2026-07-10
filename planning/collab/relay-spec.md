@@ -668,10 +668,22 @@ Alerts:
 
 When `policy.allowBrowser == true`:
 
-- CORS: `Access-Control-Allow-Origin: https://attn.dev` (and configured staging origins).
-- `Access-Control-Allow-Headers: Content-Type, Attn-Admission, Attn-Owner-Signature`.
+- CORS: `Access-Control-Allow-Origin: https://attn.sh` (and configured staging origins).
+- `Access-Control-Allow-Headers: Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW`.
 - WS subprotocol negotiation as described above (HMAC piggybacks on `Sec-WebSocket-Protocol`).
-- `Origin` header is checked on WS upgrade; non-allowlisted origins get `403`.
+- The public edge `Origin` header is checked on WS upgrade; non-allowlisted or
+  malformed origins get `403`. Accepted origins are canonical HTTP(S) origins
+  exactly matching `ALLOWED_BROWSER_ORIGINS`.
+
+Cloudflare may rewrite the standard `Origin` header while forwarding a
+WebSocket upgrade from the Worker to RoomDO. The Worker therefore validates
+and snapshots the edge value into the private `X-Attn-Edge-Origin` context
+(`v1.native`, `v1.browser.<base64url UTF-8 canonical origin>`, or
+`v1.invalid`) before `stub.fetch`. It unconditionally overwrites any
+client-supplied value. RoomDO ignores the standard `Origin` header, fails
+closed if the private context is missing or malformed, and treats
+`v1.invalid` as a browser request so it cannot bypass `allowBrowser`. This
+private header is never returned to a client.
 
 When `false`, no CORS headers are emitted (native client doesn't need them).
 
@@ -718,14 +730,14 @@ DEFAULT_IDLE_TIMEOUT_MS = "3600000"   # 1h
 DEFAULT_POW_BITS = "16"
 MIN_POW_BITS = "12"
 MAX_POW_BITS = "24"
-ALLOWED_BROWSER_ORIGINS = "https://attn.dev"
+ALLOWED_BROWSER_ORIGINS = "https://attn.sh"
 QUOTA_MAX_LIVE_ROOMS_PER_SOURCE = "8"
 QUOTA_MAX_ALLOCATED_BYTES_PER_SOURCE_24H = "268435456"
 QUOTA_GLOBAL_MAX_LIVE_ROOMS = "512"
 QUOTA_GLOBAL_MAX_RESERVED_BYTES = "6710886400"
 
 [env.staging.vars]
-ALLOWED_BROWSER_ORIGINS = "https://staging.attn.dev,http://localhost:5173"
+ALLOWED_BROWSER_ORIGINS = "https://staging.attn.sh,http://localhost:5173"
 ```
 
 `QUOTA_IP_HASH_KEY` is a required deployment secret (set independently for

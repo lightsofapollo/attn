@@ -25,6 +25,10 @@ import {
   constantTimeEquals,
 } from "./admission";
 import { canonicalize, type CanonicalValue } from "./canonical";
+import {
+  INTERNAL_EDGE_ORIGIN_HEADER,
+  parseEdgeOriginContext,
+} from "./browser-origin";
 import type { Env } from "./env";
 import { OwnerSigError, verifyOwnerSignature } from "./owner-sig";
 import { parsePow, POW_MAX_LIFETIME_MS, PowError, verifyPow } from "./pow";
@@ -2715,13 +2719,22 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
     }
 
-    // Browser-policy Origin allowlist check (attn-nnj.9.5, relay-spec.md
-    // §Browser Considerations). A WebSocket upgrade with an `Origin` header
-    // signals a browser client; enforce the room's allow-browser policy +
-    // the ALLOWED_BROWSER_ORIGINS env var allowlist. Native clients omit
-    // the Origin header and pass straight through.
-    const origin = request.headers.get("Origin");
-    if (origin !== null && origin !== "") {
+    // Browser-policy allowlist check (attn-ask, relay-spec.md §Browser
+    // Considerations). The standard Origin header is not trustworthy here:
+    // Cloudflare rewrites it during Worker -> DO forwarding. The public Worker
+    // snapshots and validates the edge Origin into a private versioned context,
+    // unconditionally overwriting any client-supplied value.
+    const edgeOrigin = parseEdgeOriginContext(
+      request.headers.get(INTERNAL_EDGE_ORIGIN_HEADER),
+    );
+    if (edgeOrigin === undefined) {
+      return errorResponse(
+        500,
+        "ATTN_INTERNAL_CONTEXT_INVALID",
+        "missing or malformed internal browser-origin context",
+      );
+    }
+    if (edgeOrigin.kind !== "native") {
       const policyForOrigin = await this.ctx.storage.get<RoomPolicy>(META.policy);
       if (policyForOrigin === undefined) {
         return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
@@ -2733,12 +2746,19 @@ export class RoomDO extends DurableObject<Env> {
           `room ${roomId} does not allow browser clients`,
         );
       }
-      const allowed = parseEnvAllowedOrigins(this.env);
-      if (!allowed.has(origin)) {
+      if (edgeOrigin.kind === "invalid") {
         return errorResponse(
           403,
           "ATTN_ORIGIN_FORBIDDEN",
-          `origin ${origin} not in ALLOWED_BROWSER_ORIGINS`,
+          "browser origin is not allowed",
+        );
+      }
+      const allowed = parseEnvAllowedOrigins(this.env);
+      if (!allowed.has(edgeOrigin.origin)) {
+        return errorResponse(
+          403,
+          "ATTN_ORIGIN_FORBIDDEN",
+          "browser origin is not allowed",
         );
       }
     }

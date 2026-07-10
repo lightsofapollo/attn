@@ -50,7 +50,7 @@ objects with TTL/cap limits. Browser-owned source files remain origin-local.
 
 | Route | Page | Purpose |
 |---|---|---|
-| `/` | Web/native landing | Reframe attn as “write here or open local”; primary CTA opens the local desk, secondary CTA installs native. |
+| `/` | Web/native landing | Reframe attn as “write here or open local”; primary CTA creates a workspace in one click, secondary CTA opens the desk, and native install remains first-class below. |
 | `/app` | Local workspace home | Create blank Markdown, import files, resume recent workspaces, join a review link, and see storage health. |
 | `/app/w/:workspaceId/:fileId` | Browser authoring workspace | Local file tree, editor/view surface, review rail, save state, connection state, and Share. |
 | `/app/storage` | Storage & recovery | Persistence status, usage/quota, workspace export/import, room-link recovery, and delete-local-data controls. |
@@ -75,6 +75,8 @@ See:
 - [page designs](00-web-presence.md)
 - [architecture](architecture.md)
 - [interactive static prototype](prototype.html)
+- [iOS experience specification](ios-ux.md)
+- [interactive iPhone prototype](ios-experience.html)
 
 ## Dependency graph
 
@@ -112,6 +114,9 @@ parallel after local authoring lands.
   plus referenced images/assets without flattening paths or dropping bytes.
 - Reload restores the local workspace on current iOS Safari, including an
   installed Home Screen Web App.
+- iPhone Safari provides a first-class reader/reviewer for nested Markdown,
+  safe media, file navigation, anchored threads, and native handoff even when
+  editing or local workspace storage is unavailable.
 - A browser owner can share a document and produce browser, native-app, and CLI
   invite forms backed by the existing E2EE room protocol.
 - Browser and native recipients can comment and suggest; live co-editing works

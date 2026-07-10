@@ -65,11 +65,17 @@ Desktop composition:
 
 Mobile/iPhone composition:
 
-- file switcher in a top sheet
+- reader is the default for existing local/shared documents
+- file switcher in a bottom sheet that preserves reading position
 - document fills the viewport
 - comments/suggestions open in a bottom sheet
-- Share and save state remain visible in the compact header
+- thumb dock provides Files, Review, Edit/Open native, and Share
+- Share and literal save/room state remain visible in the compact header
 - safe-area insets and virtual-keyboard resizing are explicit requirements
+- capability loss removes only unsafe actions; the full reader remains useful
+
+See [the iOS experience specification](ios-ux.md) and
+[interactive iPhone prototype](ios-experience.html).
 
 Status language:
 

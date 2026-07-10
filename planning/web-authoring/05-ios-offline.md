@@ -5,8 +5,9 @@ Depends on: Phase 00 and Phase 01
 ## Purpose
 
 Make iOS Safari a release platform, not an assumed by-product of desktop WebKit
-support. Add offline launch and capability-specific degradation without relying
-on background execution.
+support. Preserve the reader/reviewer defined in `ios-ux.md` through offline,
+capability-loss, address-bar, safe-area, and process-lifecycle states without
+relying on background execution.
 
 ## Implementation steps
 
@@ -26,7 +27,9 @@ Never cache user content, room APIs, invite/capability URLs, or error payloads.
 
 Exercise IndexedDB, CryptoKey cloning, OPFS, estimate, and persistence. Map
 Private Browsing, Lockdown Mode, unavailable OPFS, and quota errors into the
-typed storage modes and designed UI.
+typed storage modes and designed UI. Capability loss removes unsafe ownership
+or edit actions while retaining the shared in-memory reader/reviewer whenever
+WebCrypto and transport permit it.
 
 ### Step 4 — Harden lifecycle and memory behavior
 
@@ -51,3 +54,6 @@ clear, and low-storage tests. Record release evidence in the Bead validation.
 - Kill Safari after typing, reopen, and verify the last committed revision.
 - Private Browsing exit/reopen shows accurate data-loss behavior and preserves
   exported backup usability.
+- Every capability mode matches the action matrix in `ios-ux.md`; view-only
+  retains files, safe media, anchored review, export, and native handoff where
+  their independent capabilities are available.

@@ -38,10 +38,21 @@ workspace zip export. Accept multi-select everywhere, folder selection where
 available, and zip as the iOS-compatible folder path. Reject traversal,
 media-type spoofing, oversize input, and unsafe HTML/active-content execution.
 
-### Step 5 — Add mobile authoring behavior
+### Step 5 — Build iOS reader, file, and review surfaces
 
-Implement iPhone/iPad safe-area, virtual keyboard, file-sheet, review-sheet,
-selection toolbar, and touch-target behavior without hiding local save state.
+Implement the reader-first iPhone/iPad surface from `ios-ux.md`: compact literal
+state header, legible document canvas, safe media, per-file reading position,
+thumb action dock, file/asset sheet, inline review anchors, thread/index sheets,
+and useful view-only/native-handoff degradation. Preserve reader position and
+focus across every sheet.
+
+### Step 6 — Add iOS editing and keyboard behavior
+
+Implement explicit edit mode, title/body edit targets, selection/comment bar,
+`visualViewport`-positioned formatting controls, save state above the keyboard,
+dictation/autocorrect/undo/hardware-keyboard compatibility, safe-area/rotation,
+and return to the retained reader position. Editing capability may be absent
+without reducing reader/reviewer quality.
 
 ## Validation
 
@@ -53,5 +64,8 @@ selection toolbar, and touch-target behavior without hiding local save state.
 - Nested multi-file plus raster/unknown asset and 1+ MiB body cases through both
   OPFS and IDB fallback; export/reimport preserves paths and bytes.
 - Two-tab writer lease/takeover test; secondary tab cannot silently overwrite.
-- Mobile Chromium/WebKit viewport suite plus real iPhone/iPad Safari editing,
-  rotation, keyboard, selection, and share-sheet export.
+- Mobile Chromium/WebKit viewport suite for reader/files/review/edit/share and
+  view-only at 320–430 px plus iPad/Split View widths.
+- Real iPhone/iPad Safari reader, VoiceOver, safe area/address bar, rotation,
+  file/review sheets, selection, keyboard/dictation, media, Web Share,
+  background/kill, and browser/native handoff matrix from `ios-ux.md`.

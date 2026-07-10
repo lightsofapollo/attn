@@ -210,6 +210,12 @@ honest placeholder rather than fetching an arbitrary network URL.
 
 ## 8. iOS Safari contract
 
+The product contract is reader-first. Existing local or shared workspaces open
+in a full document reader; editing is an explicit capability, not a prerequisite
+for mobile usefulness. File navigation, safe asset viewing, anchored review,
+export, and native handoff are independently capability-gated. See
+`ios-ux.md` for the interaction and accessibility contract.
+
 Capability-test the actual operations at startup:
 
 1. Open/migrate IndexedDB and round-trip a temporary record.

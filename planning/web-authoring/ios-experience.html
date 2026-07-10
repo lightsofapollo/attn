@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>attn — iOS web experience</title>
+  <style>
+    @font-face {
+      font-family: "Source Serif";
+      src: url("/site/node_modules/@fontsource-variable/source-serif-4/files/source-serif-4-latin-wght-normal.woff2") format("woff2");
+      font-weight: 200 900;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: "Source Sans";
+      src: url("/site/node_modules/@fontsource-variable/source-sans-3/files/source-sans-3-latin-wght-normal.woff2") format("woff2");
+      font-weight: 200 900;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: "Source Code";
+      src: url("/site/node_modules/@fontsource-variable/source-code-pro/files/source-code-pro-latin-wght-normal.woff2") format("woff2");
+      font-weight: 200 900;
+      font-display: swap;
+    }
+
+    :root {
+      --paper: #e9e4da;
+      --paper-deep: #d8d0c3;
+      --sheet: #f8f4ec;
+      --sheet-warm: #fff9ef;
+      --ink: #221f1b;
+      --muted: #6a645c;
+      --faint: #958d82;
+      --rule: rgba(34, 31, 27, .17);
+      --rust: #a93f2d;
+      --rust-deep: #7f2d22;
+      --green: #286b59;
+      --blue: #386b85;
+      --serif: "Source Serif", Georgia, serif;
+      --sans: "Source Sans", sans-serif;
+      --mono: "Source Code", monospace;
+      color-scheme: light;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: #24211d;
+      font-family: var(--sans);
+      -webkit-font-smoothing: antialiased;
+    }
+    button { color: inherit; font: inherit; }
+
+    .prototype {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: minmax(330px, 420px) minmax(430px, 520px);
+      justify-content: center;
+      gap: clamp(2rem, 6vw, 7rem);
+      padding: clamp(2rem, 5vh, 4.5rem) 2rem;
+      background:
+        radial-gradient(circle at 75% 25%, rgba(169,63,45,.11), transparent 32rem),
+        #24211d;
+    }
+
+    .notes { align-self: center; color: #eee9df; }
+    .notes .kicker { color: #c7897c; font: 700 .69rem var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+    .notes h1 { max-width: 8ch; margin: 1rem 0 1.2rem; font: 750 clamp(3.6rem, 6vw, 6.2rem)/.88 var(--serif); letter-spacing: -.055em; }
+    .notes > p { max-width: 38ch; color: #bcb5aa; font: 1.02rem/1.6 var(--sans); }
+    .principles { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin-top: 2.2rem; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.12); }
+    .principle { min-height: 105px; padding: 1rem; background: #2b2824; }
+    .principle strong { display: block; font: 700 .82rem var(--sans); }
+    .principle span { display: block; margin-top: .45rem; color: #aaa399; font: .72rem/1.45 var(--mono); }
+    .state-nav { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: 1.5rem; }
+    .state-nav button {
+      min-height: 38px;
+      padding: .5rem .72rem;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 999px;
+      background: transparent;
+      color: #cec7bc;
+      font: 650 .75rem var(--sans);
+      cursor: pointer;
+    }
+    .state-nav button[aria-pressed="true"] { border-color: #c7897c; background: #a93f2d; color: white; }
+    .hint { margin-top: 1rem; color: #8f887e; font: .68rem/1.5 var(--mono); }
+
+    .device-wrap { align-self: center; justify-self: center; position: relative; }
+    .device {
+      position: relative;
+      width: 430px;
+      height: min(890px, calc(100vh - 4rem));
+      min-height: 720px;
+      overflow: hidden;
+      border: 9px solid #090807;
+      border-radius: 52px;
+      background: var(--paper);
+      box-shadow: 0 30px 90px rgba(0,0,0,.42), inset 0 0 0 1px rgba(255,255,255,.18);
+    }
+    .device::before {
+      content: "";
+      position: absolute;
+      z-index: 50;
+      top: 10px;
+      left: 50%;
+      width: 112px;
+      height: 29px;
+      border-radius: 18px;
+      background: #090807;
+      transform: translateX(-50%);
+    }
+    .screen { position: absolute; inset: 0; display: none; background: var(--paper); }
+    .screen.active { display: block; animation: enter .22s ease-out both; }
+    @keyframes enter { from { opacity: .65; transform: translateY(4px); } }
+
+    .ios-status {
+      position: absolute;
+      z-index: 40;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 21px;
+      pointer-events: none;
+      font: 700 .7rem var(--sans);
+    }
+    .ios-status span:last-child { letter-spacing: .12em; }
+
+    .app-header {
+      position: absolute;
+      z-index: 20;
+      top: 48px;
+      left: 0;
+      right: 0;
+      height: 62px;
+      display: grid;
+      grid-template-columns: 42px minmax(0,1fr) 42px;
+      align-items: center;
+      gap: .4rem;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--rule);
+      background: rgba(233,228,218,.93);
+      backdrop-filter: blur(18px);
+    }
+    .icon-button {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 12px;
+      background: transparent;
+      font-size: 1.1rem;
+      cursor: pointer;
+    }
+    .icon-button:active { background: rgba(34,31,27,.08); }
+    .doc-identity { min-width: 0; text-align: center; }
+    .doc-identity strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 700 .93rem var(--serif); }
+    .doc-identity span { display: block; margin-top: .15rem; color: var(--green); font: 650 .61rem var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+    .doc-identity span.shared { color: var(--rust-deep); }
+
+    .reader-scroll {
+      position: absolute;
+      inset: 110px 0 78px;
+      overflow: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+      background: var(--sheet);
+    }
+    .reader-scroll::-webkit-scrollbar { display: none; }
+    .reader {
+      min-height: 100%;
+      padding: 38px 25px 80px;
+      font-family: var(--serif);
+    }
+    .doc-meta { color: var(--rust-deep); font: 700 .66rem var(--sans); letter-spacing: .11em; text-transform: uppercase; }
+    .reader h1 { margin: .85rem 0 1.5rem; font-size: 2.85rem; line-height: .96; letter-spacing: -.045em; }
+    .reader h2 { margin: 2.1rem 0 .75rem; font-size: 1.65rem; line-height: 1.08; }
+    .reader p, .reader li { font-size: 1.13rem; line-height: 1.68; }
+    .reader p { margin: 1rem 0; }
+    .reader ul { padding-left: 1.35rem; }
+    .anchor {
+      padding: 0 .08em;
+      border-bottom: 2px solid rgba(169,63,45,.55);
+      background: rgba(169,63,45,.11);
+      cursor: pointer;
+    }
+    .anchor sup {
+      display: inline-grid;
+      width: 17px;
+      height: 17px;
+      place-items: center;
+      margin-left: .18rem;
+      border-radius: 99px;
+      background: var(--rust);
+      color: white;
+      font: 700 .58rem var(--sans);
+      vertical-align: text-top;
+    }
+    .doc-image { margin: 1.7rem -9px; }
+    .doc-image img { display: block; width: 100%; border: 1px solid var(--rule); border-radius: 8px; }
+    .doc-image figcaption { margin: .6rem .5rem 0; color: var(--muted); font: .7rem/1.4 var(--mono); }
+    .readonly-banner {
+      display: none;
+      margin: -12px 0 27px;
+      padding: .8rem .9rem;
+      border-left: 3px solid var(--blue);
+      background: #edf3f4;
+      color: #315865;
+      font: .77rem/1.45 var(--sans);
+    }
+    .reader-screen.readonly .readonly-banner { display: block; }
+
+    .action-dock {
+      position: absolute;
+      z-index: 22;
+      left: 12px;
+      right: 12px;
+      bottom: 10px;
+      height: 62px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      padding: 5px;
+      border: 1px solid rgba(34,31,27,.14);
+      border-radius: 20px;
+      background: rgba(248,244,236,.94);
+      box-shadow: 0 8px 28px rgba(39,33,27,.18);
+      backdrop-filter: blur(20px);
+    }
+    .dock-action {
+      min-width: 0;
+      border: 0;
+      border-radius: 15px;
+      background: transparent;
+      font: 650 .65rem var(--sans);
+      cursor: pointer;
+    }
+    .dock-action b { display: block; margin-bottom: .18rem; font-size: 1.05rem; line-height: 1; }
+    .dock-action:active { background: rgba(34,31,27,.08); }
+    .dock-action.primary { color: white; background: var(--rust); }
+    .reader-screen.readonly .edit-normal { display: none; }
+    .edit-fallback { display: none; }
+    .reader-screen.readonly .edit-fallback { display: block; }
+
+    .scrim {
+      position: absolute;
+      z-index: 29;
+      inset: 0;
+      display: none;
+      border: 0;
+      background: rgba(20,17,14,.42);
+      backdrop-filter: blur(2px);
+    }
+    .scrim.active { display: block; }
+    .bottom-sheet {
+      position: absolute;
+      z-index: 30;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      max-height: 82%;
+      display: none;
+      overflow: hidden;
+      border-radius: 28px 28px 0 0;
+      background: var(--sheet);
+      box-shadow: 0 -12px 45px rgba(24,20,17,.2);
+    }
+    .bottom-sheet.active { display: block; animation: sheet-up .28s cubic-bezier(.2,.8,.2,1) both; }
+    @keyframes sheet-up { from { transform: translateY(35%); opacity: .6; } }
+    .grabber { width: 38px; height: 5px; margin: 9px auto 4px; border-radius: 99px; background: #cbc4ba; }
+    .sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 15px 20px 14px; border-bottom: 1px solid var(--rule); }
+    .sheet-head h2 { margin: 0; font: 750 1.55rem var(--serif); }
+    .sheet-head p { margin: .25rem 0 0; color: var(--muted); font: .72rem var(--mono); }
+    .close-button { width: 34px; height: 34px; border: 0; border-radius: 99px; background: var(--paper-deep); font-weight: 700; cursor: pointer; }
+    .sheet-body { max-height: calc(82vh - 78px); overflow: auto; padding: 12px 20px 28px; }
+
+    .file-group { padding: .65rem 0; }
+    .group-label { margin-bottom: .4rem; color: var(--faint); font: 700 .62rem var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .file-row { width: 100%; min-height: 52px; display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: .55rem; padding: .45rem .4rem; border: 0; border-radius: 10px; background: transparent; text-align: left; cursor: pointer; }
+    .file-row.active { background: #eee8dd; box-shadow: inset 3px 0 var(--rust); }
+    .file-row .file-icon { color: var(--rust-deep); font: 700 .72rem var(--mono); }
+    .file-row strong { display: block; font: 650 .87rem var(--sans); }
+    .file-row small { display: block; color: var(--muted); font: .67rem var(--mono); }
+    .file-row > small { white-space: nowrap; }
+    .add-row { width: 100%; min-height: 48px; border: 1px dashed var(--rule); border-radius: 10px; color: var(--muted); background: transparent; font-weight: 650; }
+
+    .anchor-quote { margin: .4rem 0 1rem; padding: .8rem .9rem; border-left: 3px solid var(--rust); background: #f0e9df; font: .87rem/1.45 var(--serif); }
+    .comment-card { padding: .9rem 0; border-bottom: 1px solid var(--rule); }
+    .comment-card header { display: flex; align-items: center; justify-content: space-between; }
+    .person { display: flex; align-items: center; gap: .6rem; font: 700 .76rem var(--sans); }
+    .avatar { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 99px; background: var(--ink); color: white; font: 700 .65rem var(--sans); }
+    .comment-card time { color: var(--faint); font: .62rem var(--mono); }
+    .comment-card p { margin: .65rem 0 .4rem; font: .88rem/1.5 var(--sans); }
+    .reply-box { display: flex; gap: .5rem; margin-top: 1rem; }
+    .reply-box input { min-width: 0; flex: 1; min-height: 46px; border: 1px solid var(--rule); border-radius: 12px; padding: 0 .8rem; background: white; font: .86rem var(--sans); }
+    .reply-box button { min-width: 64px; border: 0; border-radius: 12px; background: var(--ink); color: white; font-weight: 700; }
+
+    .scope-tabs { display: grid; grid-template-columns: repeat(3,1fr); gap: 3px; padding: 4px; border-radius: 12px; background: var(--paper-deep); }
+    .scope-tabs button { min-height: 38px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: 650 .7rem var(--sans); }
+    .scope-tabs button.active { background: var(--sheet); color: var(--ink); box-shadow: 0 1px 6px rgba(34,31,27,.12); }
+    .share-summary { margin: 1rem 0; padding: 1rem; border: 1px solid var(--rule); border-radius: 12px; }
+    .share-summary strong { display: block; font: 700 .9rem var(--sans); }
+    .share-summary p { margin: .35rem 0 0; color: var(--muted); font: .72rem/1.45 var(--mono); }
+    .share-link { padding: .75rem; overflow: hidden; border: 1px solid var(--rule); background: var(--paper); font: .69rem/1.4 var(--mono); white-space: nowrap; text-overflow: ellipsis; }
+    .sheet-actions { display: grid; grid-template-columns: 1fr 1.3fr; gap: .55rem; margin-top: .75rem; }
+    .sheet-actions button { min-height: 49px; border: 1px solid var(--rule); border-radius: 12px; background: transparent; font-weight: 700; }
+    .sheet-actions .share-primary { border-color: var(--rust); background: var(--rust); color: white; }
+
+    .desk-scroll { position: absolute; inset: 48px 0 0; overflow: auto; padding: 48px 20px 50px; }
+    .desk-brand { display: flex; align-items: center; justify-content: space-between; }
+    .brand { display: flex; align-items: center; gap: .55rem; font: 750 1.2rem var(--serif); }
+    .brand-mark { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: var(--ink); color: white; font: 700 .7rem var(--mono); }
+    .storage-ok { color: var(--green); font: 650 .63rem var(--mono); }
+    .desk-scroll h1 { margin: 3.2rem 0 .4rem; font: 750 3.4rem/.92 var(--serif); letter-spacing: -.05em; }
+    .desk-sub { color: var(--muted); font: .85rem/1.5 var(--sans); }
+    .new-workspace { width: 100%; min-height: 114px; margin-top: 1.7rem; padding: 1rem; border: 0; border-radius: 16px; background: var(--rust); color: white; text-align: left; }
+    .new-workspace small { font: .67rem var(--mono); opacity: .78; }
+    .new-workspace strong { display: block; margin-top: 1.7rem; font: 750 1.45rem var(--serif); }
+    .desk-actions { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin-top: .6rem; }
+    .desk-actions button { min-height: 66px; padding: .75rem; border: 1px solid var(--rule); border-radius: 14px; background: var(--sheet); text-align: left; font: 700 .83rem var(--sans); }
+    .recent-label { margin: 2.7rem 0 .6rem; color: var(--faint); font: 700 .63rem var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+    .recent-row { width: 100%; min-height: 72px; display: grid; grid-template-columns: 1fr auto; align-items: center; padding: .6rem 0; border: 0; border-bottom: 1px solid var(--rule); background: transparent; text-align: left; }
+    .recent-row strong { display: block; font: 700 1rem var(--serif); }
+    .recent-row span { color: var(--muted); font: .69rem var(--mono); }
+    .recent-row > span { color: var(--green); }
+
+    .edit-header-status { color: var(--green); }
+    .edit-scroll { position: absolute; inset: 110px 0 72px; overflow: auto; padding: 31px 23px 120px; background: var(--sheet); }
+    .edit-title { width: 100%; border: 0; outline: 0; background: transparent; font: 750 2.5rem/1 var(--serif); letter-spacing: -.04em; }
+    .editable { margin-top: 1.5rem; outline: 0; font: 1.08rem/1.7 var(--serif); }
+    .editable h2 { margin-top: 2rem; font-size: 1.55rem; }
+    .keyboard-bar { position: absolute; z-index: 21; left: 0; right: 0; bottom: 0; height: 72px; display: flex; align-items: flex-start; gap: .35rem; overflow-x: auto; padding: 9px 12px 0; border-top: 1px solid var(--rule); background: rgba(233,228,218,.97); }
+    .keyboard-bar button { flex: 0 0 42px; height: 42px; border: 1px solid var(--rule); border-radius: 10px; background: var(--sheet); font: 700 .86rem var(--serif); }
+    .done { margin-left: auto; color: white; background: var(--rust) !important; border-color: var(--rust) !important; font-family: var(--sans) !important; }
+
+    .desktop-caption { margin-top: .8rem; color: #756f66; text-align: center; font: .65rem var(--mono); }
+
+    @media (max-width: 780px) {
+      body { background: var(--paper); }
+      .prototype { display: block; min-height: 100dvh; padding: 0; background: var(--paper); }
+      .notes { display: none; }
+      .device-wrap { width: 100%; }
+      .device { width: 100%; height: 100dvh; min-height: 0; border: 0; border-radius: 0; box-shadow: none; }
+      .device::before { top: max(10px, env(safe-area-inset-top)); }
+      .desktop-caption { display: none; }
+      .ios-status { padding-top: env(safe-area-inset-top); height: calc(48px + env(safe-area-inset-top)); }
+      .app-header { top: calc(48px + env(safe-area-inset-top)); }
+      .reader-scroll, .edit-scroll { top: calc(110px + env(safe-area-inset-top)); }
+      .action-dock { bottom: max(10px, env(safe-area-inset-bottom)); }
+      .keyboard-bar { height: calc(72px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); }
+      .desk-scroll { top: env(safe-area-inset-top); padding-bottom: calc(50px + env(safe-area-inset-bottom)); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; scroll-behavior: auto !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="prototype">
+    <aside class="notes">
+      <p class="kicker">iOS web · interaction concept</p>
+      <h1>The document is the app.</h1>
+      <p>Mobile opens in a generous reader, not a miniature desktop workspace. Files, comments, editing, and sharing stay one thumb away without competing with the words.</p>
+      <div class="principles">
+        <div class="principle"><strong>Reader first</strong><span>19px text · 1.68 line-height · no side rails</span></div>
+        <div class="principle"><strong>Sheets, not panels</strong><span>Files and review preserve reading position</span></div>
+        <div class="principle"><strong>Useful view-only</strong><span>Only Edit disappears when capability fails</span></div>
+        <div class="principle"><strong>Native handoff</strong><span>Same room, same path, explicit open action</span></div>
+      </div>
+      <nav class="state-nav" aria-label="Prototype states">
+        <button aria-pressed="false" data-state="desk">Desk</button>
+        <button aria-pressed="true" data-state="reader">Reader</button>
+        <button aria-pressed="false" data-state="files">Files sheet</button>
+        <button aria-pressed="false" data-state="review">Review sheet</button>
+        <button aria-pressed="false" data-state="edit">Edit</button>
+        <button aria-pressed="false" data-state="share">Share</button>
+        <button aria-pressed="false" data-state="readonly">View-only</button>
+      </nav>
+      <p class="hint">The phone is interactive: tap the bottom dock, inline comment marker, sheet controls, or state buttons.</p>
+    </aside>
+
+    <div class="device-wrap">
+      <div class="device" aria-label="Interactive iPhone prototype">
+        <div class="ios-status"><span>9:41</span><span>▮▮▮ ᯤ 􀙇</span></div>
+
+        <section class="screen reader-screen active" data-screen="reader">
+          <header class="app-header">
+            <button class="icon-button" data-screen-go="desk" aria-label="Back to desk">‹</button>
+            <div class="doc-identity"><strong>Product direction</strong><span>Saved on this device</span></div>
+            <button class="icon-button" data-sheet="share" aria-label="Share">↗</button>
+          </header>
+          <div class="reader-scroll">
+            <article class="reader">
+              <div class="readonly-banner"><strong>Viewing safely.</strong> Editing is unavailable in this browser mode. You can still read, navigate files, review, export, or open native attn.</div>
+              <div class="doc-meta">direction.md · 6 min read</div>
+              <h1>Product direction</h1>
+              <p>Attn should feel like a private writing desk, not a cloud drive with the login form removed.</p>
+              <h2>The source stays here</h2>
+              <p>A local workspace is the source of truth. Sharing creates a review room around a revision; it does not move ownership to the relay.</p>
+              <p>The mobile experience should make the document feel <span class="anchor" data-sheet="review">quiet, legible, and close to the conversation<sup>2</sup></span> without copying a desktop sidebar into a narrow screen.</p>
+              <figure class="doc-image">
+                <img src="/site/static/screenshots/editor-light.png" alt="An attn workspace shown inside the document" />
+                <figcaption>FIG 01 · images/editor.png · 184 KB</figcaption>
+              </figure>
+              <h2>One workspace, many files</h2>
+              <p>Markdown, images, and supporting assets retain their paths. The reader resolves local references from the encrypted workspace manifest.</p>
+              <ul><li>Create without a network request.</li><li>Share selected files or the whole workspace.</li><li>Open the same room in browser or native.</li></ul>
+            </article>
+          </div>
+          <nav class="action-dock" aria-label="Document actions">
+            <button class="dock-action" data-sheet="files"><b>☰</b>Files · 5</button>
+            <button class="dock-action" data-sheet="review"><b>◌</b>Review · 3</button>
+            <button class="dock-action edit-normal" data-screen-go="edit"><b>✎</b>Edit</button>
+            <button class="dock-action edit-fallback"><b>↗</b>Open native</button>
+            <button class="dock-action primary" data-sheet="share"><b>↑</b>Share</button>
+          </nav>
+        </section>
+
+        <section class="screen" data-screen="desk">
+          <div class="desk-scroll">
+            <div class="desk-brand"><div class="brand"><span class="brand-mark">a.</span>attn</div><span class="storage-ok">● ON THIS DEVICE</span></div>
+            <h1>Your desk</h1>
+            <p class="desk-sub">Local workspaces in this Safari profile. No account.</p>
+            <button class="new-workspace" data-screen-go="edit"><small>ONE CLICK · CREATES UNTITLED.MD</small><strong>＋ New workspace</strong></button>
+            <div class="desk-actions"><button>↥ Import workspace</button><button>↗ Join a review</button></div>
+            <div class="recent-label">Recently on this device</div>
+            <button class="recent-row" data-screen-go="reader"><div><strong>Product direction</strong><span>3 Markdown · 2 assets · 8 min ago</span></div><span>Shared</span></button>
+            <button class="recent-row" data-screen-go="reader"><div><strong>Launch notes</strong><span>1 Markdown · yesterday</span></div><span>Local</span></button>
+            <button class="recent-row" data-screen-go="reader"><div><strong>Research folio</strong><span>12 files · Jun 28</span></div><span>Backed up</span></button>
+          </div>
+        </section>
+
+        <section class="screen" data-screen="edit">
+          <header class="app-header">
+            <button class="icon-button" data-screen-go="reader" aria-label="Return to reader">‹</button>
+            <div class="doc-identity"><strong>direction.md</strong><span class="edit-header-status">Saved on this device</span></div>
+            <button class="icon-button" data-sheet="share" aria-label="Share">↗</button>
+          </header>
+          <div class="edit-scroll">
+            <input class="edit-title" value="Product direction" aria-label="Document title" />
+            <article class="editable" contenteditable="true" aria-label="Markdown editor">
+              <p>Attn should feel like a private writing desk, not a cloud drive with the login form removed.</p>
+              <h2>The source stays here</h2>
+              <p>A local workspace is the source of truth. Sharing creates a review room around a revision; it does not move ownership to the relay.</p>
+              <p>Tap here to continue writing. Formatting stays above the iOS keyboard; save state never disappears.</p>
+            </article>
+          </div>
+          <nav class="keyboard-bar" aria-label="Formatting toolbar">
+            <button aria-label="Heading">H</button><button aria-label="Bold">B</button><button aria-label="Italic"><i>I</i></button><button aria-label="Link">↗</button><button aria-label="List">☷</button><button aria-label="Add asset">＋</button><button class="done" data-screen-go="reader">Done</button>
+          </nav>
+        </section>
+
+        <button class="scrim" aria-label="Close sheet"></button>
+
+        <section class="bottom-sheet" data-sheet-name="files" role="dialog" aria-modal="true" aria-label="Workspace files">
+          <div class="grabber"></div>
+          <header class="sheet-head"><div><h2>Workspace</h2><p>3 Markdown · 2 assets</p></div><button class="close-button" aria-label="Close">×</button></header>
+          <div class="sheet-body">
+            <div class="file-group"><div class="group-label">Markdown</div>
+              <button class="file-row active"><span class="file-icon">MD</span><span><strong>direction.md</strong><small>Edited 8 min ago</small></span><small>12 KB</small></button>
+              <button class="file-row"><span class="file-icon">MD</span><span><strong>principles.md</strong><small>Edited yesterday</small></span><small>4 KB</small></button>
+              <button class="file-row"><span class="file-icon">MD</span><span><strong>open-questions.md</strong><small>Edited Jun 28</small></span><small>8 KB</small></button>
+            </div>
+            <div class="file-group"><div class="group-label">Assets</div>
+              <button class="file-row"><span class="file-icon">IMG</span><span><strong>images/editor.png</strong><small>Preview inline</small></span><small>184 KB</small></button>
+              <button class="file-row"><span class="file-icon">BIN</span><span><strong>data/notes.json</strong><small>Download only</small></span><small>22 KB</small></button>
+            </div>
+            <button class="add-row">＋ Add file or asset</button>
+          </div>
+        </section>
+
+        <section class="bottom-sheet" data-sheet-name="review" role="dialog" aria-modal="true" aria-label="Review thread">
+          <div class="grabber"></div>
+          <header class="sheet-head"><div><h2>Review</h2><p>Thread 2 of 3 · direction.md</p></div><button class="close-button" aria-label="Close">×</button></header>
+          <div class="sheet-body">
+            <div class="anchor-quote">“…quiet, legible, and close to the conversation…”</div>
+            <article class="comment-card"><header><div class="person"><span class="avatar">M</span>Mara</div><time>2 MIN</time></header><p>“Close to the conversation” feels like the mobile principle. Could this lead the section?</p></article>
+            <article class="comment-card"><header><div class="person"><span class="avatar" style="background:var(--green)">Y</span>You</div><time>NOW</time></header><p>Yes. I’ll keep the reader primary and let the tools arrive from the bottom.</p></article>
+            <div class="reply-box"><input placeholder="Reply to this thread" aria-label="Reply" /><button>Send</button></div>
+          </div>
+        </section>
+
+        <section class="bottom-sheet" data-sheet-name="share" role="dialog" aria-modal="true" aria-label="Share workspace">
+          <div class="grabber"></div>
+          <header class="sheet-head"><div><h2>Share for review</h2><p>End-to-end encrypted</p></div><button class="close-button" aria-label="Close">×</button></header>
+          <div class="sheet-body">
+            <div class="scope-tabs" aria-label="Share scope"><button>This file</button><button>Selected · 3</button><button class="active">Workspace · 5</button></div>
+            <div class="share-summary"><strong>Product direction · whole workspace</strong><p>3 Markdown · 1 previewable image · 1 download-only asset · relative paths preserved</p></div>
+            <div class="share-link">https://attn.sh/review/7pmH1MwiTfQt#key=••••••••••••••</div>
+            <div class="sheet-actions"><button>Native options</button><button class="share-primary">Share link…</button></div>
+          </div>
+        </section>
+      </div>
+      <div class="desktop-caption">430 × responsive iPhone canvas · safe-area aware · sheets preserve reader position</div>
+    </div>
+  </main>
+
+  <script>
+    const device = document.querySelector('.device');
+    const reader = document.querySelector('.reader-screen');
+    const scrim = document.querySelector('.scrim');
+    const navButtons = [...document.querySelectorAll('[data-state]')];
+
+    function closeSheets() {
+      document.querySelectorAll('.bottom-sheet').forEach((sheet) => sheet.classList.remove('active'));
+      scrim.classList.remove('active');
+    }
+
+    function showScreen(name) {
+      closeSheets();
+      document.querySelectorAll('[data-screen]').forEach((screen) => screen.classList.toggle('active', screen.dataset.screen === name));
+      reader.classList.remove('readonly');
+    }
+
+    function openSheet(name) {
+      closeSheets();
+      const sheet = document.querySelector(`[data-sheet-name="${name}"]`);
+      if (sheet) {
+        sheet.classList.add('active');
+        scrim.classList.add('active');
+      }
+    }
+
+    function setState(state) {
+      navButtons.forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.state === state)));
+      if (state === 'desk' || state === 'edit' || state === 'reader') {
+        showScreen(state);
+      } else if (state === 'readonly') {
+        showScreen('reader');
+        reader.classList.add('readonly');
+      } else {
+        showScreen('reader');
+        openSheet(state);
+      }
+    }
+
+    document.addEventListener('click', (event) => {
+      const state = event.target.closest('[data-state]');
+      const screen = event.target.closest('[data-screen-go]');
+      const sheet = event.target.closest('[data-sheet]');
+      const close = event.target.closest('.close-button, .scrim');
+      if (state) setState(state.dataset.state);
+      else if (screen) setState(screen.dataset.screenGo);
+      else if (sheet) { setState(sheet.dataset.sheet); }
+      else if (close) closeSheets();
+    });
+  </script>
+</body>
+</html>

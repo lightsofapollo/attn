@@ -198,13 +198,30 @@ const SIGNING_KEYPAIR = (() => {
 })();
 const SIGNING_KEY_ID = base64UrlEncode(sha256(SIGNING_KEYPAIR.publicKey));
 
-const TEST_DEVICE: Device = {
+const TEST_DEVICE_UNSIGNED: Omit<Device, 'selfSignature'> = {
   deviceId: 'd-author-01',
   participantId: 'p-author-01',
   publicEncryptionKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
   publicSigningKey: base64UrlEncode(SIGNING_KEYPAIR.publicKey),
   client: 'attn-native',
-  createdAt: 1_700_000_000_000,
+  kind: 'reviewer',
+  registeredAt: 1_700_000_000_000,
+};
+const TEST_DEVICE: Device = {
+  ...TEST_DEVICE_UNSIGNED,
+  selfSignature: base64UrlEncode(
+    ed25519.sign(
+      toCanonicalBytes({
+        client: TEST_DEVICE_UNSIGNED.client,
+        deviceId: TEST_DEVICE_UNSIGNED.deviceId,
+        kind: TEST_DEVICE_UNSIGNED.kind,
+        participantId: TEST_DEVICE_UNSIGNED.participantId,
+        publicEncryptionKey: TEST_DEVICE_UNSIGNED.publicEncryptionKey,
+        publicSigningKey: TEST_DEVICE_UNSIGNED.publicSigningKey,
+      }),
+      SIGNING_KEYPAIR.secret,
+    ),
+  ),
 };
 
 const TEST_POLICY: RoomPolicy = {
@@ -214,6 +231,7 @@ const TEST_POLICY: RoomPolicy = {
   maxEventBytes: 256 * 1024,
   maxEvents: 1000,
   expiresAt: 1_900_000_000_000,
+  powBits: 12,
   deleteEventsAfterOwnerAck: false,
   allowBrowser: true,
   allowRemoteAgents: false,
@@ -227,7 +245,7 @@ function mintEventEnvelope(
   roomId: string,
   envelopeId: string,
   createdAt: number,
-  overrides: { eventId?: string; metaAuthorId?: string } = {},
+  overrides: { eventId?: string; metaAuthorId?: string; body?: Record<string, unknown> } = {},
 ): MailboxEnvelope {
   const meta: SignableMetaShape = {
     v: 2,
@@ -238,7 +256,7 @@ function mintEventEnvelope(
     createdAt,
     parentEventIds: [],
   };
-  const body = {
+  const body = overrides.body ?? {
     type: 'comment_created',
     threadId: 'thr-test-1',
     anchor: {
@@ -298,6 +316,29 @@ function mintEventEnvelope(
     ciphertextBytes: ct.length,
   };
   return env;
+}
+
+function mintParticipantJoinedEnvelope(envelopeId: string, createdAt: number): MailboxEnvelope {
+  return mintEventEnvelope('room-test', envelopeId, createdAt, {
+    body: {
+      type: 'participant_joined',
+      participant: {
+        participantId: TEST_DEVICE.participantId,
+        displayName: 'Test reviewer',
+        kind: TEST_DEVICE.kind,
+        publicSigningKey: TEST_DEVICE.publicSigningKey,
+        capabilities: ['read_snapshot', 'write_comment', 'write_suggestion', 'resolve_comment'],
+      },
+      device: {
+        deviceId: TEST_DEVICE.deviceId,
+        participantId: TEST_DEVICE.participantId,
+        publicEncryptionKey: TEST_DEVICE.publicEncryptionKey,
+        publicSigningKey: TEST_DEVICE.publicSigningKey,
+        client: TEST_DEVICE.client,
+        createdAt,
+      },
+    },
+  });
 }
 
 function clientOptions(port: number) {
@@ -386,6 +427,11 @@ defineCase('envelope frame decrypts + verifies + dispatches to onEnvelope', asyn
               missedSignalEnvelopeIds: [],
             }),
           );
+          ws.send(JSON.stringify({
+            type: 'envelope',
+            envelope: mintParticipantJoinedEnvelope('env-attest-happy', 1_700_000_099_000),
+            serverSeq: 6,
+          }));
           const env = mintEventEnvelope('room-test', 'env-001', 1_700_000_100_000);
           ws.send(JSON.stringify({ type: 'envelope', envelope: env, serverSeq: 7 }));
         }
@@ -397,7 +443,7 @@ defineCase('envelope frame decrypts + verifies + dispatches to onEnvelope', asyn
     const client = new BrowserWsClient({
       ...clientOptions(server.port),
       callbacks: {
-        onEnvelope: (d) => inbound.push(d),
+        onEnvelope: (d) => { if (!d.envelope.envelopeId.startsWith('env-attest')) inbound.push(d); },
         onError: (code, msg) => errors.push([code, msg]),
       },
     });
@@ -434,6 +480,11 @@ defineCase('relay envelope without implicit v or roomId decrypts with subscripti
             missedSignalEnvelopeIds: [],
           }),
         );
+        ws.send(JSON.stringify({
+          type: 'envelope',
+          envelope: mintParticipantJoinedEnvelope('env-attest-wire', 1_700_000_149_000),
+          serverSeq: 7,
+        }));
         const envelope = mintEventEnvelope('room-test', 'env-relay-wire', 1_700_000_150_000);
         delete envelope.v;
         delete envelope.roomId;
@@ -446,7 +497,7 @@ defineCase('relay envelope without implicit v or roomId decrypts with subscripti
     const client = new BrowserWsClient({
       ...clientOptions(server.port),
       callbacks: {
-        onEnvelope: (decoded) => inbound.push(decoded),
+        onEnvelope: (decoded) => { if (!decoded.envelope.envelopeId.startsWith('env-attest')) inbound.push(decoded); },
         onError: (code, message) => errors.push([code, message]),
       },
     });
@@ -476,6 +527,11 @@ defineCase('event id and plaintext metadata must remain bound to signed envelope
             missedSignalEnvelopeIds: [],
           }),
         );
+        ws.send(JSON.stringify({
+          type: 'envelope',
+          envelope: mintParticipantJoinedEnvelope('env-attest-binding', 1_700_000_159_000),
+          serverSeq: 8,
+        }));
         ws.send(
           JSON.stringify({
             type: 'envelope',
@@ -509,7 +565,7 @@ defineCase('event id and plaintext metadata must remain bound to signed envelope
     const client = new BrowserWsClient({
       ...clientOptions(server.port),
       callbacks: {
-        onEnvelope: (decoded) => inbound.push(decoded),
+        onEnvelope: (decoded) => { if (!decoded.envelope.envelopeId.startsWith('env-attest')) inbound.push(decoded); },
         onError: (_code, message) => errors.push(message),
       },
     });
@@ -547,7 +603,7 @@ defineCase('unknown signer can refresh the device cache and retry the ciphertext
         ws.send(
           JSON.stringify({
             type: 'envelope',
-            envelope: mintEventEnvelope('room-test', 'env-late-signer', 1_700_000_190_000),
+            envelope: mintParticipantJoinedEnvelope('env-late-signer', 1_700_000_190_000),
             serverSeq: 12,
           }),
         );
@@ -594,6 +650,11 @@ defineCase('tampered ciphertext is dropped via ATTN_INBOUND, socket stays up', a
               missedSignalEnvelopeIds: [],
             }),
           );
+          ws.send(JSON.stringify({
+            type: 'envelope',
+            envelope: mintParticipantJoinedEnvelope('env-attest-tamper', 1_700_000_199_000),
+            serverSeq: 7,
+          }));
           const env = mintEventEnvelope('room-test', 'env-bad', 1_700_000_200_000);
           // Flip a byte in the ciphertext base64url.
           const ct = base64UrlDecode(env.ciphertext);
@@ -612,7 +673,7 @@ defineCase('tampered ciphertext is dropped via ATTN_INBOUND, socket stays up', a
     const client = new BrowserWsClient({
       ...clientOptions(server.port),
       callbacks: {
-        onEnvelope: (d) => inbound.push(d),
+        onEnvelope: (d) => { if (!d.envelope.envelopeId.startsWith('env-attest')) inbound.push(d); },
         onError: (code, msg) => errors.push([code, msg]),
       },
     });
@@ -621,6 +682,74 @@ defineCase('tampered ciphertext is dropped via ATTN_INBOUND, socket stays up', a
     assert(inbound.length === 1, `expected 1 good envelope, got ${inbound.length}`);
     assertEq(inbound[0]!.envelope.envelopeId, 'env-good', 'good envelope passed through');
     assert(errors.some(([c]) => c === 'ATTN_INBOUND'), `expected ATTN_INBOUND error, got ${JSON.stringify(errors)}`);
+    client.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('registered reviewer cannot inject owner-only snapshot events', async () => {
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      ws.on('message', (raw) => {
+        if (JSON.parse(String(raw)).type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello',
+          serverSeq: 0,
+          policy: TEST_POLICY,
+          devices: [TEST_DEVICE],
+          missedSignalEnvelopeIds: [],
+        }));
+        ws.send(JSON.stringify({
+          type: 'envelope',
+          envelope: mintParticipantJoinedEnvelope('env-attest-forged-snapshot', 1_700_000_390_000),
+          serverSeq: 1,
+        }));
+        ws.send(JSON.stringify({
+          type: 'envelope',
+          envelope: mintEventEnvelope('room-test', 'env-forged-snapshot', 1_700_000_400_000, {
+            body: {
+              type: 'snapshot_created',
+              fileId: 'file-forged',
+              snapshotId: 'snapshot-forged',
+              baseHash: 'hash-forged',
+              inlineSnapshot: {
+                docType: 'markdown',
+                content: '# forged',
+                anchorIndex: {
+                  docHash: 'hash-forged',
+                  canonicalEncoding: 'utf8-bytes',
+                  lineCount: 1,
+                  blocks: [],
+                  headings: [],
+                },
+              },
+            },
+          }),
+          serverSeq: 2,
+        }));
+      });
+    });
+
+    const inbound: DecodedEnvelope[] = [];
+    const errors: string[] = [];
+    const client = new BrowserWsClient({
+      ...clientOptions(server.port),
+      callbacks: {
+        onEnvelope: (decoded) => {
+          if (decoded.envelope.envelopeId === 'env-forged-snapshot') inbound.push(decoded);
+        },
+        onError: (_code, message) => errors.push(message),
+      },
+    });
+    client.start();
+    for (let i = 0; i < 40 && errors.length === 0; i++) await delay(20);
+    assertEq(inbound.length, 0, 'owner-only event never reaches the consumer');
+    assert(
+      errors.some((message) => message.includes('capability authorization failed')),
+      `capability reject surfaced: ${JSON.stringify(errors)}`,
+    );
     client.close();
   } finally {
     await server.close();

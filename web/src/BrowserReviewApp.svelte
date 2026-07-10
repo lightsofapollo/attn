@@ -27,13 +27,17 @@
 -->
 
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import type { EditorView } from 'prosemirror-view';
-  import type { Plugin as PMPlugin } from 'prosemirror-state';
+  import { TextSelection, type Plugin as PMPlugin } from 'prosemirror-state';
   import Editor from './lib/Editor.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
+  import CommentComposer from './lib/CommentComposer.svelte';
+  import SuggestionComposer from './lib/SuggestionComposer.svelte';
+  import SelectionToolbar from './lib/SelectionToolbar.svelte';
+  import OutboxIndicator from './lib/OutboxIndicator.svelte';
   import { reviewStore } from './lib/review/store.svelte';
   import {
     reviewDecorationsPlugin,
@@ -41,6 +45,10 @@
   } from './lib/prosemirror/review-decorations';
   import { BrowserSession, type BrowserSessionState } from './lib/review/browser-session';
   import type { ParsedInvite } from './lib/review/browser-invite';
+  import { hasTextSelection } from './lib/review/popover-anchor';
+  import { resolveAnchor } from './lib/review/resolver';
+  import type { ConstructAnchorContext } from './lib/review/anchors';
+  import type { Anchor, RoomId, SuggestionDraft } from './lib/types';
 
   interface Props {
     /**
@@ -71,6 +79,9 @@
     snapshotId: null,
     fileId: null,
     error: null,
+    authoringReady: false,
+    outboxPending: 0,
+    authoringError: null,
   });
 
   // Capture once at construction — both props are stable for the lifetime of
@@ -95,6 +106,10 @@
   }
 
   const session: BrowserSession = buildSession();
+  // The hosted shell dedicates a permanent 320px rail to review threads, so
+  // keep the shared margin in its expanded/card mode instead of the native
+  // app's collapsed 48px avatar-gutter mode.
+  reviewStore.panelOpen = true;
 
   // For injected sessions: bridge their state into ours. The test pattern is
   // to construct the session with an `onState` that updates a shared variable;
@@ -131,7 +146,14 @@
 
   function handleEditorReady(view: EditorView): void {
     pmViewForReview = view;
+    (window as unknown as { __attnPmView?: EditorView }).__attnPmView = view;
+    refreshSelectionToolbar();
   }
+
+  onDestroy(() => {
+    const target = window as unknown as { __attnPmView?: EditorView };
+    if (target.__attnPmView === pmViewForReview) delete target.__attnPmView;
+  });
 
   // Touch reactive store reads so Svelte schedules a rebuild whenever the
   // anchor resolution map, event log, or focus target changes.
@@ -167,6 +189,142 @@
     displayedSnapshot?.docType ?? sessionState.snapshotDocType,
   );
 
+  // Resolve arrived and locally-authored anchors against the active snapshot.
+  $effect(() => {
+    const roomId = reviewStore.currentRoomId;
+    const fileId = reviewStore.currentFileId;
+    const events = reviewStore.events;
+    if (!roomId || !fileId) return;
+    const snapshots = reviewStore.snapshots.filter(
+      (snapshot) =>
+        snapshot.roomId === roomId && snapshot.fileId === fileId && snapshot.anchorIndex,
+    );
+    if (snapshots.length === 0) return;
+    const snapshot = snapshots.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
+    if (!snapshot.anchorIndex || typeof snapshot.content !== 'string') return;
+    const context = {
+      currentIndex: snapshot.anchorIndex,
+      currentMarkdownBytes: new TextEncoder().encode(snapshot.content),
+      currentHash: snapshot.baseHash,
+    };
+    for (const event of events) {
+      if (event.meta.roomId !== roomId) continue;
+      const body = event.body;
+      const anchor =
+        body.type === 'comment_created' || body.type === 'suggestion_created'
+          ? body.anchor
+          : null;
+      if (
+        !anchor ||
+        anchor.fileId !== fileId ||
+        reviewStore.anchorResolutions[event.meta.eventId]
+      ) continue;
+      reviewStore.applyAnchorResolution({
+        roomId,
+        fileId,
+        eventId: event.meta.eventId,
+        resolved: resolveAnchor(anchor, context),
+      });
+    }
+  });
+
+  interface ComposerState {
+    view: EditorView;
+    from: number;
+    to: number;
+    roomId: RoomId;
+    anchorContext: ConstructAnchorContext;
+  }
+
+  let commentComposer = $state<ComposerState | null>(null);
+  let suggestionComposer = $state<ComposerState | null>(null);
+  let toolbarSelection = $state<{ from: number; to: number } | null>(null);
+
+  function activeSnapshotForCompose() {
+    const snapshot = displayedSnapshot;
+    if (!snapshot?.anchorIndex) return null;
+    return snapshot;
+  }
+
+  function refreshSelectionToolbar(): void {
+    const view = pmViewForReview;
+    if (!sessionState.authoringReady || !view || !hasTextSelection(view)) {
+      toolbarSelection = null;
+      return;
+    }
+    if (!activeSnapshotForCompose()) {
+      toolbarSelection = null;
+      return;
+    }
+    toolbarSelection = { from: view.state.selection.from, to: view.state.selection.to };
+  }
+
+  $effect(() => {
+    void sessionState.authoringReady;
+    refreshSelectionToolbar();
+  });
+
+  function openComposer(kind: 'comment' | 'suggestion'): void {
+    const view = pmViewForReview;
+    const roomId = sessionState.roomId;
+    const snapshot = activeSnapshotForCompose();
+    if (!view || !roomId || !snapshot?.anchorIndex || !hasTextSelection(view)) return;
+    const state: ComposerState = {
+      view,
+      from: view.state.selection.from,
+      to: view.state.selection.to,
+      roomId,
+      anchorContext: {
+        index: snapshot.anchorIndex,
+        fileId: snapshot.fileId,
+        snapshotId: snapshot.snapshotId,
+        baseHash: snapshot.baseHash,
+      },
+    };
+    if (kind === 'comment') commentComposer = state;
+    else suggestionComposer = state;
+  }
+
+  function collapseComposeSelection(): void {
+    toolbarSelection = null;
+    const view = pmViewForReview;
+    const composerView = commentComposer?.view ?? suggestionComposer?.view;
+    if (!view || (composerView && composerView !== view)) return;
+    try {
+      view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.selection.to)));
+    } catch {
+      // The selection disappears with a view that is being replaced.
+    }
+  }
+
+  async function createBrowserComment(anchor: Anchor, body: string): Promise<void> {
+    await session.createComment(anchor, body);
+  }
+
+  async function createBrowserSuggestion(draft: SuggestionDraft): Promise<void> {
+    await session.createSuggestion(draft);
+  }
+
+  async function replyBrowserComment(anchor: Anchor, body: string, threadId: string): Promise<void> {
+    await session.replyToComment(anchor, body, threadId);
+  }
+
+  async function resolveBrowserComment(threadId: string): Promise<void> {
+    await session.resolveComment(threadId);
+  }
+
+  onMount(() => {
+    const refresh = (): void => refreshSelectionToolbar();
+    document.addEventListener('selectionchange', refresh);
+    window.addEventListener('scroll', refresh, true);
+    window.addEventListener('resize', refresh);
+    return () => {
+      document.removeEventListener('selectionchange', refresh);
+      window.removeEventListener('scroll', refresh, true);
+      window.removeEventListener('resize', refresh);
+    };
+  });
+
   const isLoading = $derived(
     sessionState.status === 'idle' ||
       sessionState.status === 'parsing_invite' ||
@@ -198,7 +356,12 @@
   }
 </script>
 
-<main class="browser-review-shell flex h-screen flex-col overflow-hidden bg-background text-foreground" data-slot="browser-review">
+<main
+  class="browser-review-shell flex h-screen flex-col overflow-hidden bg-background text-foreground"
+  data-slot="browser-review"
+  data-authoring-ready={sessionState.authoringReady ? 'true' : 'false'}
+  data-outbox-pending={sessionState.outboxPending}
+>
   {#if sessionState.error}
     <div class="browser-review-error flex h-full flex-col items-center justify-center gap-3 px-6 text-center"
       data-slot="browser-review-error"
@@ -217,6 +380,25 @@
       <div class="browser-review-editor-col flex min-w-0 flex-1 flex-col overflow-hidden">
         <!-- Folder-share file switcher; renders nothing for single-file shares. -->
         <ReviewFileNav />
+        <div
+          class="flex min-h-8 items-center justify-end gap-2 border-b border-border px-3 text-xs text-muted-foreground"
+          data-slot="browser-authoring-status"
+        >
+          {#if !sessionState.authoringReady}
+            <span>Preparing encrypted authoring…</span>
+          {/if}
+          {#if sessionState.authoringError}
+            <span class="text-destructive" role="status">{sessionState.authoringError}</span>
+            <button
+              type="button"
+              class="rounded border border-border px-2 py-0.5 text-foreground hover:bg-muted"
+              onclick={() => { void session.retryOutbox(); }}
+            >
+              Retry
+            </button>
+          {/if}
+          <OutboxIndicator isOwner={false} onRetry={() => { void session.retryOutbox(); }} />
+        </div>
         <div class="browser-review-editor min-w-0 flex-1 overflow-auto"
           data-slot="browser-review-editor">
           {#if displayedDocType === 'html'}
@@ -236,9 +418,51 @@
       {#if displayedDocType !== 'html'}
         <aside class="browser-review-margin w-[320px] shrink-0 overflow-y-auto border-l border-border bg-background"
           data-slot="browser-review-margin">
-          <ReviewMargin view={pmViewForReview} readOnly={true} />
+          <ReviewMargin
+            view={pmViewForReview}
+            readOnly={true}
+            reviewerAuthoring={sessionState.authoringReady}
+            onResolveComment={resolveBrowserComment}
+            onReplyComment={replyBrowserComment}
+          />
         </aside>
       {/if}
     </div>
   {/if}
 </main>
+
+{#if toolbarSelection && pmViewForReview && !commentComposer && !suggestionComposer}
+  <SelectionToolbar
+    view={pmViewForReview}
+    from={toolbarSelection.from}
+    to={toolbarSelection.to}
+    onComment={() => openComposer('comment')}
+    onSuggest={() => openComposer('suggestion')}
+  />
+{/if}
+
+{#if commentComposer}
+  <CommentComposer
+    view={commentComposer.view}
+    from={commentComposer.from}
+    to={commentComposer.to}
+    anchorContext={commentComposer.anchorContext}
+    roomId={commentComposer.roomId}
+    onCreateComment={createBrowserComment}
+    onClose={() => { commentComposer = null; }}
+    onSubmitted={collapseComposeSelection}
+  />
+{/if}
+
+{#if suggestionComposer}
+  <SuggestionComposer
+    view={suggestionComposer.view}
+    from={suggestionComposer.from}
+    to={suggestionComposer.to}
+    anchorContext={suggestionComposer.anchorContext}
+    roomId={suggestionComposer.roomId}
+    onCreateSuggestion={createBrowserSuggestion}
+    onClose={() => { suggestionComposer = null; }}
+    onSubmit={collapseComposeSelection}
+  />
+{/if}

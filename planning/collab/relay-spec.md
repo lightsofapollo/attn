@@ -221,6 +221,7 @@ Returns the peer list with published keys.
 
 ```json
 {
+  "policy": { /* current server-clamped room policy, including powBits */ },
   "devices": [
     {
       "deviceId": "...",
@@ -229,6 +230,7 @@ Returns the peer list with published keys.
       "publicEncryptionKey": "...",
       "client": "attn-native",
       "kind": "owner",
+      "selfSignature": "...",
       "registeredAt": 1736012345678
     }
   ]

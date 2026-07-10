@@ -12,7 +12,7 @@
   import { shouldSubmitOnEnter } from './review/composer-keys';
   import { getPopoverAnchor, type PopoverAnchor } from './review/popover-anchor';
   import { reviewCreateComment } from './ipc';
-  import type { RoomId } from './types';
+  import type { Anchor, RoomId } from './types';
 
   interface Props {
     view: EditorView;
@@ -20,6 +20,8 @@
     to: number;
     anchorContext: ConstructAnchorContext;
     roomId: RoomId;
+    /** Hosted transport injection. Native callers omit this and use IPC. */
+    onCreateComment?: (anchor: Anchor, body: string) => Promise<void> | void;
     onClose: () => void;
     /** Fired on SUCCESSFUL submit, before onClose (attn-2aj). The parent
      *  collapses the editor selection here so the selection toolbar does
@@ -28,7 +30,16 @@
     onSubmitted?: () => void;
   }
 
-  const { view, from, to, anchorContext, roomId, onClose, onSubmitted }: Props = $props();
+  const {
+    view,
+    from,
+    to,
+    anchorContext,
+    roomId,
+    onCreateComment,
+    onClose,
+    onSubmitted,
+  }: Props = $props();
 
   const quote = $derived(view.state.doc.textBetween(from, to, '\n', '​'));
   const anchorPos = $derived<PopoverAnchor>(getPopoverAnchor(view, from, to));
@@ -44,17 +55,22 @@
   // spans a daemon round-trip once acks land — double-tapped Enter or a
   // double-clicked Submit must not duplicate the comment.
   let submitting = $state(false);
+  let submitError = $state<string | null>(null);
 
   async function handleSubmit(): Promise<void> {
     if (submitting) return;
     const trimmed = body.trim();
     if (trimmed.length === 0) return;
     submitting = true;
+    submitError = null;
     try {
       const anchor = anchorFromSelection(view, from, to, anchorContext);
-      await reviewCreateComment(roomId, anchor, trimmed);
+      if (onCreateComment) await onCreateComment(anchor, trimmed);
+      else await reviewCreateComment(roomId, anchor, trimmed);
       onSubmitted?.();
       onClose();
+    } catch (error) {
+      submitError = error instanceof Error ? error.message : 'Could not send comment';
     } finally {
       submitting = false;
     }
@@ -121,6 +137,11 @@
     placeholder="Add a comment&hellip;"
     onkeydown={handleBodyKeydown}
   ></textarea>
+  {#if submitError}
+    <p class="mt-2 text-xs text-destructive" role="alert" data-slot="comment-composer-error">
+      {submitError}
+    </p>
+  {/if}
   <div class="flex justify-end gap-2 mt-2">
     <button
       type="button"

@@ -26,6 +26,7 @@
 //
 //   cd web && npx tsx src/lib/review/browser-ws.test.ts
 
+import { ed25519 } from '@noble/curves/ed25519.js';
 import {
   AeadError,
   SignatureError,
@@ -34,6 +35,7 @@ import {
   decodePublicSigningKey,
   deriveEventId,
   signingKeyId,
+  toCanonicalBytes,
   verifyEventSignature,
   type EnvelopeAad,
   type SignableMetaShape,
@@ -76,6 +78,7 @@ export interface RoomPolicy {
   maxEventBytes: number;
   maxEvents: number;
   expiresAt: number;
+  powBits: number;
   deleteEventsAfterOwnerAck: boolean;
   allowBrowser: boolean;
   allowRemoteAgents: boolean;
@@ -87,7 +90,10 @@ export interface Device {
   publicEncryptionKey: string;
   publicSigningKey: string;
   client: 'attn-native' | 'attn-browser' | 'agent-cli';
-  createdAt: number;
+  kind: 'owner' | 'reviewer' | 'agent';
+  selfSignature: string;
+  registeredAt?: number;
+  createdAt?: number;
 }
 
 export type ServerFrame =
@@ -276,6 +282,8 @@ export class BrowserWsClient {
   private afterSeq: number;
   /** Map keyed by `signingKeyId(publicSigningKey)` → Device. */
   private readonly devices: Map<string, Device>;
+  private readonly deviceKeyIds = new Map<string, string>();
+  private readonly attestedSigners = new Set<string>();
 
   constructor(opts: BrowserWsOptions) {
     if (opts.roomId.length === 0) throw new Error('roomId must not be empty');
@@ -288,7 +296,7 @@ export class BrowserWsClient {
     this.maxMs = opts.reconnectMaxMs ?? RECONNECT_MAX_MS;
     this.backoffMs = this.initialMs;
     this.afterSeq = opts.afterSeq;
-    this.devices = new Map(opts.initialDevices ?? []);
+    this.devices = new Map();
     this.factory =
       opts.webSocketFactory ??
       ((url, protocols) => {
@@ -298,6 +306,7 @@ export class BrowserWsClient {
           WebSocket: new (url: string, protocols: string | string[]) => WebSocketLike;
         }).WebSocket(url, protocols);
       });
+    if (opts.initialDevices) this.ingestDevices([...opts.initialDevices.values()]);
   }
 
   /** Current connection state — useful for tests and UI status. */
@@ -465,8 +474,21 @@ export class BrowserWsClient {
     for (const d of list) {
       try {
         const pk = decodePublicSigningKey(d.publicSigningKey);
+        const signature = base64UrlDecode(d.selfSignature);
+        if (signature.length !== 64 || !ed25519.verify(signature, registrationBytes(d), pk)) {
+          throw new Error('selfSignature does not match the registered device');
+        }
         const kid = signingKeyId(pk);
+        const boundKeyId = this.deviceKeyIds.get(d.deviceId);
+        if (boundKeyId && boundKeyId !== kid) {
+          throw new Error('deviceId is already bound to another signing key');
+        }
+        const existing = this.devices.get(kid);
+        if (existing && !sameRegistration(existing, d)) {
+          throw new Error('immutable device registration changed');
+        }
         this.devices.set(kid, d);
+        this.deviceKeyIds.set(d.deviceId, kid);
       } catch (err) {
         const m = err instanceof Error ? err.message : String(err);
         this.callbacks.onError?.(
@@ -630,7 +652,38 @@ export class BrowserWsClient {
       this.callbacks.onError?.('ATTN_INBOUND', `event id mismatch (${envelopeId})`);
       return false;
     }
+    if (!this.authorizeEvent(auth.signingKeyId, meta, event.body, device)) {
+      this.callbacks.onError?.('ATTN_INBOUND', `event capability authorization failed (${envelopeId})`);
+      return false;
+    }
     return true;
+  }
+
+  private authorizeEvent(
+    signingKeyId: string,
+    meta: SignableMetaShape,
+    body: unknown,
+    registered: Device,
+  ): boolean {
+    if (!isRecord(body) || typeof body.type !== 'string') return false;
+    if (body.type === 'participant_joined') {
+      if (!validParticipantAttestation(meta, body, registered)) return false;
+      this.attestedSigners.add(signingKeyId);
+      return true;
+    }
+    if (body.type === 'room_created') {
+      return (
+        registered.kind === 'owner' &&
+        body.roomId === meta.roomId &&
+        body.createdBy === meta.authorId
+      );
+    }
+    // The relay only grants kind=owner when the registration key matches the
+    // room-creation key. That signed directory record is sufficient owner
+    // attestation; reviewers/agents must first publish their encrypted
+    // ParticipantJoined self-attestation before authoring findings.
+    if (registered.kind !== 'owner' && !this.attestedSigners.has(signingKeyId)) return false;
+    return eventAllowedForRole(body, registered, meta);
   }
 
   private handleClose(code: number, reason: string): void {
@@ -697,6 +750,106 @@ function mapTerminalCode(code: number, reason: string): WsTerminalError | null {
       return new WsTerminalError('cursor_too_old', code, reason || 'cursor too old', 0);
     default:
       return null;
+  }
+}
+
+function registrationBytes(device: Device): Uint8Array {
+  return toCanonicalBytes({
+    client: device.client,
+    deviceId: device.deviceId,
+    kind: device.kind,
+    participantId: device.participantId,
+    publicEncryptionKey: device.publicEncryptionKey,
+    publicSigningKey: device.publicSigningKey,
+  });
+}
+
+function sameRegistration(a: Device, b: Device): boolean {
+  return (
+    a.deviceId === b.deviceId &&
+    a.participantId === b.participantId &&
+    a.publicEncryptionKey === b.publicEncryptionKey &&
+    a.publicSigningKey === b.publicSigningKey &&
+    a.client === b.client &&
+    a.kind === b.kind &&
+    a.selfSignature === b.selfSignature
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function exactCapabilities(value: unknown, kind: Device['kind']): boolean {
+  if (!Array.isArray(value) || value.some((cap) => typeof cap !== 'string')) return false;
+  const expected: Record<Device['kind'], string[]> = {
+    owner: [
+      'room_admin',
+      'read_snapshot',
+      'write_comment',
+      'write_suggestion',
+      'resolve_comment',
+      'accept_suggestion',
+      'publish_snapshot',
+    ],
+    reviewer: ['read_snapshot', 'write_comment', 'write_suggestion', 'resolve_comment'],
+    agent: ['read_snapshot', 'write_comment', 'write_suggestion'],
+  };
+  const actual = [...value].sort();
+  const grants = [...expected[kind]].sort();
+  return actual.length === grants.length && actual.every((cap, index) => cap === grants[index]);
+}
+
+function validParticipantAttestation(
+  meta: SignableMetaShape,
+  body: Record<string, unknown>,
+  registered: Device,
+): boolean {
+  const participant = body.participant;
+  const device = body.device;
+  if (!isRecord(participant) || !isRecord(device)) return false;
+  return (
+    meta.authorId === registered.participantId &&
+    meta.deviceId === registered.deviceId &&
+    participant.participantId === registered.participantId &&
+    typeof participant.displayName === 'string' &&
+    participant.kind === registered.kind &&
+    participant.publicSigningKey === registered.publicSigningKey &&
+    exactCapabilities(participant.capabilities, registered.kind) &&
+    device.deviceId === registered.deviceId &&
+    device.participantId === registered.participantId &&
+    device.publicEncryptionKey === registered.publicEncryptionKey &&
+    device.publicSigningKey === registered.publicSigningKey &&
+    device.client === registered.client &&
+    Number.isSafeInteger(device.createdAt)
+  );
+}
+
+function eventAllowedForRole(
+  body: Record<string, unknown>,
+  registered: Device,
+  meta: SignableMetaShape,
+): boolean {
+  switch (body.type) {
+    case 'comment_created':
+      return true;
+    case 'suggestion_created':
+      return true;
+    case 'comment_resolved':
+      return (registered.kind === 'owner' || registered.kind === 'reviewer')
+        && body.resolvedBy === meta.authorId;
+    case 'snapshot_created':
+    case 'snapshot_superseded':
+    case 'suggestion_accepted':
+    case 'suggestion_rejected':
+    case 'session_ended':
+      return registered.kind === 'owner';
+    case 'anchor_manually_resolved':
+      return registered.kind === 'owner' && body.resolvedBy === meta.authorId;
+    case 'presence_updated':
+      return body.participantId === meta.authorId && body.deviceId === meta.deviceId;
+    default:
+      return false;
   }
 }
 

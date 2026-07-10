@@ -201,9 +201,12 @@ fn run_scenario(relay_url: &str, mode: &str) -> (bool, bool) {
         mode: mode.to_string(),
         ttl: Some("24h".to_string()),
     });
-    let invite = owner
-        .invite_url()
-        .expect("owner must emit a ShareReady invite");
+    let invite = owner.invite_url().unwrap_or_else(|| {
+        panic!(
+            "owner must emit a ShareReady invite; updates={:#?}",
+            owner.snapshot()
+        )
+    });
     let room_id = owner.room_id().expect("owner must know the room id");
     eprintln!(
         "[{mode}] owner shared room={} invite={}",

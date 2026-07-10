@@ -58,6 +58,9 @@ use crate::review::model::{
     ParticipantKind, ReviewEvent, ReviewEventBody, ReviewRoom, RoomMode, RoomPolicy,
 };
 use crate::review::store::ReviewStore;
+use crate::review::transport::inbound::{
+    AuthorizationCache, RegisteredDeviceAuthorization, VerifyingKeyCache,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -684,11 +687,10 @@ struct DirectoryDevice {
     device_id: String,
     participant_id: String,
     public_signing_key: String,
-    #[allow(dead_code)]
     public_encryption_key: String,
-    #[allow(dead_code)]
     client: String,
     kind: String,
+    self_signature: String,
     #[allow(dead_code)]
     registered_at: u64,
 }
@@ -1461,12 +1463,36 @@ impl Bootstrapper {
     pub async fn refresh_device_keys(
         &self,
         room_id: &RoomId,
-        cache: &Arc<RwLock<std::collections::HashMap<String, DeviceVerifyingKey>>>,
+        cache: &VerifyingKeyCache,
+    ) -> Result<usize, BootstrapError> {
+        self.refresh_device_directory(room_id, cache, None).await
+    }
+
+    pub async fn refresh_device_authorizations(
+        &self,
+        room_id: &RoomId,
+        cache: &VerifyingKeyCache,
+        authorizations: &AuthorizationCache,
+    ) -> Result<usize, BootstrapError> {
+        self.refresh_device_directory(room_id, cache, Some(authorizations))
+            .await
+    }
+
+    async fn refresh_device_directory(
+        &self,
+        room_id: &RoomId,
+        cache: &VerifyingKeyCache,
+        authorizations: Option<&AuthorizationCache>,
     ) -> Result<usize, BootstrapError> {
         let room_secret = load_room_secret(self.store.root(), room_id)?;
         let room_keys = derive_room_keys(&room_secret);
         let directory = self.list_devices(room_id, &room_keys.admission_key).await?;
+        let persisted_device_keys = self.persisted_device_key_bindings(room_id)?;
         let mut guard = cache.write().await;
+        let mut authorization_guard = match authorizations {
+            Some(records) => Some(records.write().await),
+            None => None,
+        };
         let mut added = 0usize;
         for dev in &directory {
             let raw = URL_SAFE_NO_PAD
@@ -1476,10 +1502,157 @@ impl Bootstrapper {
                 BootstrapError::Crypto("directory key must decode to 32 bytes".into())
             })?;
             let vk = DeviceVerifyingKey::from_bytes(&bytes)?;
-            guard.insert(vk.signing_key_id_base64url(), vk);
+            let registration = RegisterDeviceBody {
+                device_id: dev.device_id.clone(),
+                participant_id: dev.participant_id.clone(),
+                public_signing_key: dev.public_signing_key.clone(),
+                public_encryption_key: dev.public_encryption_key.clone(),
+                client: dev.client.clone(),
+                kind: dev.kind.clone(),
+                self_signature: String::new(),
+            };
+            let canonical = canonical_register_device_bytes(&registration)?;
+            let signature_bytes = URL_SAFE_NO_PAD
+                .decode(dev.self_signature.as_bytes())
+                .map_err(|e| {
+                    BootstrapError::Crypto(format!("directory self signature decode: {e}"))
+                })?;
+            let signature = ed25519_dalek::Signature::from_slice(&signature_bytes)
+                .map_err(|e| BootstrapError::Crypto(format!("directory self signature: {e}")))?;
+            use ed25519_dalek::Verifier as _;
+            let verifier = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                .map_err(|e| BootstrapError::Crypto(format!("directory verifying key: {e}")))?;
+            verifier.verify(&canonical, &signature).map_err(|_| {
+                BootstrapError::Crypto(
+                    "directory self signature does not match registration".into(),
+                )
+            })?;
+            let key_id = vk.signing_key_id_base64url();
+            if let Some(pinned_key_id) = persisted_device_keys.get(&dev.device_id)
+                && pinned_key_id != &key_id
+            {
+                return Err(BootstrapError::Crypto(
+                    "directory key conflicts with persisted device trust binding".into(),
+                ));
+            }
+            guard.insert(key_id.clone(), vk);
+            if let Some(records) = authorization_guard.as_mut() {
+                let participant_id =
+                    serde_json::from_value(serde_json::Value::String(dev.participant_id.clone()))
+                        .map_err(|e| {
+                        BootstrapError::Crypto(format!("directory participant id: {e}"))
+                    })?;
+                let device_id =
+                    serde_json::from_value(serde_json::Value::String(dev.device_id.clone()))
+                        .map_err(|e| BootstrapError::Crypto(format!("directory device id: {e}")))?;
+                let kind = serde_json::from_value(serde_json::Value::String(dev.kind.clone()))
+                    .map_err(|e| {
+                        BootstrapError::Crypto(format!("directory participant kind: {e}"))
+                    })?;
+                let client = serde_json::from_value(serde_json::Value::String(dev.client.clone()))
+                    .map_err(|e| BootstrapError::Crypto(format!("directory client: {e}")))?;
+                let mut incoming = RegisteredDeviceAuthorization {
+                    participant_id,
+                    device_id,
+                    public_encryption_key: dev.public_encryption_key.clone(),
+                    public_signing_key: dev.public_signing_key.clone(),
+                    client,
+                    kind,
+                    attested: false,
+                };
+                incoming.attested = self
+                    .store
+                    .iter_events(room_id)
+                    .map_err(|e| BootstrapError::Store(format!("read participant roster: {e}")))?
+                    .filter_map(Result::ok)
+                    .any(|event| {
+                        event.auth.signing_key_id == key_id
+                            && incoming.validates_attestation(&event)
+                    });
+                if let Some(existing) = records.get(&key_id)
+                    && (existing.participant_id != incoming.participant_id
+                        || existing.device_id != incoming.device_id
+                        || existing.public_encryption_key != incoming.public_encryption_key
+                        || existing.public_signing_key != incoming.public_signing_key
+                        || existing.client != incoming.client
+                        || existing.kind != incoming.kind)
+                {
+                    return Err(BootstrapError::Crypto(
+                        "immutable directory registration changed".into(),
+                    ));
+                }
+                if records.iter().any(|(existing_key_id, existing)| {
+                    existing.device_id == incoming.device_id && existing_key_id != &key_id
+                }) {
+                    return Err(BootstrapError::Crypto(
+                        "device id is already bound to another signing key".into(),
+                    ));
+                }
+                match records.entry(key_id) {
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        if incoming.attested {
+                            entry.get_mut().attested = true;
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(incoming);
+                    }
+                }
+            }
             added += 1;
         }
         Ok(added)
+    }
+
+    fn persisted_device_key_bindings(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<std::collections::HashMap<String, String>, BootstrapError> {
+        let mut bindings = std::collections::HashMap::new();
+        for event in self
+            .store
+            .iter_events(room_id)
+            .map_err(|e| BootstrapError::Store(format!("read participant roster: {e}")))?
+            .filter_map(Result::ok)
+        {
+            let ReviewEventBody::ParticipantJoined {
+                participant,
+                device,
+            } = &event.body
+            else {
+                continue;
+            };
+            if participant.participant_id != event.meta.author_id
+                || device.device_id != event.meta.device_id
+                || device.participant_id != event.meta.author_id
+                || participant.public_signing_key != device.public_signing_key
+            {
+                continue;
+            }
+            let Ok(raw) = URL_SAFE_NO_PAD.decode(device.public_signing_key.as_bytes()) else {
+                continue;
+            };
+            let Ok(bytes) = raw.as_slice().try_into() else {
+                continue;
+            };
+            let Ok(verifier) = DeviceVerifyingKey::from_bytes(&bytes) else {
+                continue;
+            };
+            let key_id = verifier.signing_key_id_base64url();
+            if event.auth.signing_key_id != key_id {
+                continue;
+            }
+            let device_id = device.device_id.as_str().to_string();
+            if let Some(existing) = bindings.get(&device_id)
+                && existing != &key_id
+            {
+                return Err(BootstrapError::Crypto(
+                    "persisted device has conflicting signing keys".into(),
+                ));
+            }
+            bindings.insert(device_id, key_id);
+        }
+        Ok(bindings)
     }
 
     /// Read the shared file off disk, build a snapshot of its current
@@ -2142,12 +2315,12 @@ fn relay_error(status: u16, body: &[u8]) -> BootstrapError {
 }
 
 /// Capability set granted to a newly-joined participant. Mirrors
-/// `data-model.md` §Participant And Device — reviewers and agents share the
-/// "write findings" capability set today; agents additionally do *not* get
-/// `RoomAdmin` or `AcceptSuggestion` (only the owner accepts on their own
-/// behalf). The owner branch is unreachable today (Share owns owner creation)
-/// but is kept exhaustive so a future `ParticipantKind` variant doesn't
-/// silently fall through.
+/// `data-model.md` §Participant And Device — human reviewers may resolve
+/// comment threads in addition to writing findings, while agents only get the
+/// read/write-finding capabilities. Neither role gets `RoomAdmin`,
+/// `AcceptSuggestion`, or `PublishSnapshot`. The owner branch is unreachable
+/// today (Share owns owner creation) but is kept exhaustive so a future
+/// `ParticipantKind` variant doesn't silently fall through.
 fn agent_capabilities(kind: ParticipantKind) -> Vec<Capability> {
     match kind {
         ParticipantKind::Owner => vec![
@@ -2159,7 +2332,13 @@ fn agent_capabilities(kind: ParticipantKind) -> Vec<Capability> {
             Capability::AcceptSuggestion,
             Capability::PublishSnapshot,
         ],
-        ParticipantKind::Reviewer | ParticipantKind::Agent => vec![
+        ParticipantKind::Reviewer => vec![
+            Capability::ReadSnapshot,
+            Capability::WriteComment,
+            Capability::WriteSuggestion,
+            Capability::ResolveComment,
+        ],
+        ParticipantKind::Agent => vec![
             Capability::ReadSnapshot,
             Capability::WriteComment,
             Capability::WriteSuggestion,
@@ -3339,6 +3518,7 @@ mod tests {
                         "publicEncryptionKey": directory_public,
                         "client": "attn-native",
                         "kind": "owner",
+                        "selfSignature": "test-fixture-signature",
                         "registeredAt": 1_700_000_000_000u64,
                     }
                 ]
@@ -3740,24 +3920,91 @@ mod tests {
     }
 
     #[test]
-    fn agent_capabilities_match_data_model_spec() {
-        // Spec: data-model.md §Participant And Device. Agents get the
-        // read/write-finding capabilities but NOT room admin / accept-
-        // suggestion (those are owner-only). This is the canonical place
-        // the policy is enforced for join_as_agent.
+    fn participant_capabilities_match_data_model_spec() {
+        // Spec: data-model.md §Participant And Device. Agents get only the
+        // read/write-finding capabilities. In particular, they cannot close a
+        // human discussion by resolving its thread.
         let caps = agent_capabilities(ParticipantKind::Agent);
-        assert!(caps.contains(&Capability::ReadSnapshot));
-        assert!(caps.contains(&Capability::WriteComment));
-        assert!(caps.contains(&Capability::WriteSuggestion));
-        assert!(!caps.contains(&Capability::RoomAdmin));
-        assert!(!caps.contains(&Capability::AcceptSuggestion));
-        assert!(!caps.contains(&Capability::PublishSnapshot));
+        assert_eq!(
+            caps,
+            vec![
+                Capability::ReadSnapshot,
+                Capability::WriteComment,
+                Capability::WriteSuggestion,
+            ]
+        );
 
-        // Reviewer parity — sanity that we didn't accidentally differentiate
-        // agents below reviewers; the kind distinction is on the wire
-        // (`kind` field), not the capability set.
+        // A human reviewer may resolve comment threads, but still cannot
+        // administer the room, accept a suggestion on the owner's behalf, or
+        // publish owner snapshots.
         let reviewer_caps = agent_capabilities(ParticipantKind::Reviewer);
-        assert_eq!(caps, reviewer_caps);
+        assert_eq!(
+            reviewer_caps,
+            vec![
+                Capability::ReadSnapshot,
+                Capability::WriteComment,
+                Capability::WriteSuggestion,
+                Capability::ResolveComment,
+            ]
+        );
+    }
+
+    #[test]
+    fn persisted_participant_join_pins_device_signing_key_across_restart() {
+        let id_dir = TempDir::new().expect("identity dir");
+        let (_tmp, store, boot) = make_bootstrapper(
+            "http://127.0.0.1:9".to_string(),
+            id_dir.path().to_path_buf(),
+        );
+        let identity = DeviceIdentity::generate().expect("identity");
+        let room_id = derive_room_id(&[0x6Cu8; 32]);
+        let participant_id = identity.typed_participant_id();
+        let device_id = identity.typed_device_id();
+        let key_id = identity
+            .verifying_key()
+            .expect("verifying key")
+            .signing_key_id_base64url();
+        let event = ReviewEvent {
+            meta: EventMeta {
+                v: 2,
+                event_id: placeholder_event_id(),
+                room_id: room_id.clone(),
+                author_id: participant_id.clone(),
+                device_id: device_id.clone(),
+                created_at: 1_700_000_000_000,
+                parent_event_ids: vec![],
+                snapshot_id: None,
+            },
+            body: ReviewEventBody::ParticipantJoined {
+                participant: Participant {
+                    participant_id: participant_id.clone(),
+                    display_name: "Pinned reviewer".into(),
+                    kind: ParticipantKind::Reviewer,
+                    public_signing_key: identity.public_signing_key.clone(),
+                    capabilities: agent_capabilities(ParticipantKind::Reviewer),
+                },
+                device: Device {
+                    device_id: device_id.clone(),
+                    participant_id,
+                    public_encryption_key: identity.public_encryption_key.clone(),
+                    public_signing_key: identity.public_signing_key.clone(),
+                    client: DeviceClient::AttnNative,
+                    created_at: 1_700_000_000_000,
+                },
+            },
+            auth: crate::review::model::EventAuth {
+                signature: "already-verified-fixture".into(),
+                signing_key_id: key_id.clone(),
+            },
+        };
+        store
+            .append_event(&room_id, &event)
+            .expect("persist participant join");
+
+        let bindings = boot
+            .persisted_device_key_bindings(&room_id)
+            .expect("load trust bindings");
+        assert_eq!(bindings.get(device_id.as_str()), Some(&key_id));
     }
 
     // --- attn-nnj.5.17 (H1) — Attn-Owner-Signature on first room create ---

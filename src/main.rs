@@ -912,7 +912,16 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 // `reviewAnchorResolution`.
                 match build_review_dispatch_js(&update) {
                     Ok(js) => {
-                        let _ = webview.evaluate_script(&js);
+                        tracing::debug!(
+                            callback = update.callback_name(),
+                            "dispatching review update to webview"
+                        );
+                        if let Err(err) = webview.evaluate_script(&js) {
+                            tracing::warn!(
+                                callback = update.callback_name(),
+                                "failed to evaluate review update: {err}"
+                            );
+                        }
                     }
                     Err(err) => {
                         let callback = update.callback_name();

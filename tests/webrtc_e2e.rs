@@ -60,10 +60,15 @@ use attn::review::envelope::{AssembleInput, assemble_event_envelope};
 use attn::review::ids::{
     ContentHash, DeviceId, EventId, FileId, ParticipantId, RoomId, SnapshotId,
 };
-use attn::review::model::{Anchor, EnvelopeKind, MailboxEnvelope, PositionAnchor, ReviewEventBody};
+use attn::review::model::{
+    Anchor, DeviceClient, EnvelopeKind, MailboxEnvelope, ParticipantKind, PositionAnchor,
+    ReviewEventBody,
+};
 use attn::review::store::ReviewStore;
 use attn::review::transport::TransportEvent;
-use attn::review::transport::inbound::{InboundPipeline, VerifyingKeyCache};
+use attn::review::transport::inbound::{
+    AuthorizationCache, InboundPipeline, RegisteredDeviceAuthorization, VerifyingKeyCache,
+};
 use attn::review::transport::signaling::{SignalingPayload, disassemble_signal_envelope};
 use attn::review::transport::webrtc::{WebRtcConfig, WebRtcConnectionState, WebRtcTransport};
 
@@ -105,6 +110,21 @@ fn skip_requested() -> bool {
 /// helper used in every other test in this crate.
 fn id<T: for<'de> serde::Deserialize<'de>>(s: &str) -> T {
     serde_json::from_value(serde_json::Value::String(s.to_string())).expect("typed id deserializes")
+}
+
+fn reviewer_authorizations(key_id: String) -> AuthorizationCache {
+    Arc::new(RwLock::new(HashMap::from([(
+        key_id,
+        RegisteredDeviceAuthorization {
+            participant_id: id("p-reviewer-01"),
+            device_id: id("d-reviewer-01"),
+            public_encryption_key: "test-reviewer-key".into(),
+            public_signing_key: "test-reviewer-key".into(),
+            client: DeviceClient::AttnNative,
+            kind: ParticipantKind::Reviewer,
+            attested: true,
+        },
+    )])))
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +262,7 @@ impl E2eHarness {
         let owner_pipeline = Arc::new(InboundPipeline::new(
             Arc::clone(&owner_store),
             owner_keys,
+            reviewer_authorizations(reviewer_keyid.clone()),
             event_key,
             snapshot_key,
             signaling_key,
@@ -258,6 +279,7 @@ impl E2eHarness {
         let reviewer_pipeline = Arc::new(InboundPipeline::new(
             reviewer_store,
             reviewer_keys_empty,
+            Arc::new(RwLock::new(HashMap::new())),
             event_key,
             snapshot_key,
             signaling_key,
@@ -647,10 +669,11 @@ async fn webrtc_happy_path_delivers_comment_envelope_to_owner_store() {
     let signer = DeviceSigningKey::from_bytes(&REVIEWER_SIGNING_SEED).expect("derive reviewer key");
     let reviewer_keyid = signer.verifying_key().signing_key_id_base64url();
     let mut verify_map = HashMap::new();
-    verify_map.insert(reviewer_keyid, signer.verifying_key());
+    verify_map.insert(reviewer_keyid.clone(), signer.verifying_key());
     let probe_pipeline = InboundPipeline::new(
         Arc::clone(&harness.owner_store),
         Arc::new(RwLock::new(verify_map)),
+        reviewer_authorizations(reviewer_keyid),
         *keys.event_key.as_bytes(),
         *keys.snapshot_key.as_bytes(),
         *keys.signaling_key.as_bytes(),

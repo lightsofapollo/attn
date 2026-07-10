@@ -60,6 +60,8 @@
     anchorContext: ConstructAnchorContext;
     /** Active review room id (target of the IPC call). */
     roomId: RoomId;
+    /** Hosted transport injection. Native callers omit this and use IPC. */
+    onCreateSuggestion?: (draft: SuggestionDraft) => Promise<void> | void;
     /** Close handler — fired on submit, cancel, Esc, and outside click. */
     onClose: () => void;
     /**
@@ -70,7 +72,16 @@
     onSubmit?: (draft: SuggestionDraft) => void;
   }
 
-  const { view, from, to, anchorContext, roomId, onClose, onSubmit }: Props = $props();
+  const {
+    view,
+    from,
+    to,
+    anchorContext,
+    roomId,
+    onCreateSuggestion,
+    onClose,
+    onSubmit,
+  }: Props = $props();
 
   // ---------------------------------------------------------------------------
   // Selection-derived state (the captured quote stays stable for the lifetime
@@ -124,7 +135,10 @@
 
   function recomputePosition(): void {
     try {
-      const anchor = getPopoverAnchor(view, from, to, { width: 420, height: 320 });
+      const anchor = getPopoverAnchor(view, from, to, {
+        width: 420,
+        height: Math.min(640, Math.max(320, window.innerHeight - 32)),
+      });
       top = anchor.recommendedPosition.top;
       left = anchor.recommendedPosition.left;
     } catch {
@@ -152,15 +166,20 @@
   // real daemon round-trip once acks land — without this, a double-tapped
   // Enter or Submit click would send duplicate suggestions.
   let submitting = $state(false);
+  let submitError = $state<string | null>(null);
 
   async function handleSubmit(): Promise<void> {
     if (submitting || submitDisabled) return;
     submitting = true;
+    submitError = null;
     try {
       const draft = buildDraft();
-      await reviewCreateSuggestion(roomId, draft);
+      if (onCreateSuggestion) await onCreateSuggestion(draft);
+      else await reviewCreateSuggestion(roomId, draft);
       onSubmit?.(draft);
       onClose();
+    } catch (error) {
+      submitError = error instanceof Error ? error.message : 'Could not send suggestion';
     } finally {
       submitting = false;
     }
@@ -239,7 +258,7 @@
 
 <div
   bind:this={rootEl}
-  class="suggestion-composer fixed z-50 flex w-[420px] flex-col gap-4 rounded-md border border-border bg-popover p-4 text-popover-foreground shadow-md"
+  class="suggestion-composer fixed z-50 flex max-h-[calc(100vh-2rem)] w-[420px] flex-col gap-4 overflow-y-auto rounded-md border border-border bg-popover p-4 text-popover-foreground shadow-md"
   style="top: {top}px; left: {left}px;"
   role="dialog"
   tabindex="-1"
@@ -358,6 +377,12 @@
       onkeydown={handleFieldKeydown}
     ></textarea>
   </div>
+
+  {#if submitError}
+    <p class="text-xs text-destructive" role="alert" data-slot="suggestion-composer-error">
+      {submitError}
+    </p>
+  {/if}
 
   <footer class="flex justify-end gap-2" data-slot="suggestion-composer-footer">
     <Button

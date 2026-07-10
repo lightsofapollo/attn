@@ -42,7 +42,10 @@ use crate::review::crypto::aead::{self, AeadError, AeadNonce, EnvelopeAad};
 use crate::review::crypto::signing::DeviceVerifyingKey;
 use crate::review::envelope::{DisassembleInput, EnvelopeError, disassemble_event_envelope};
 use crate::review::ids::{DeviceId, RoomId};
-use crate::review::model::{EnvelopeKind, MailboxEnvelope, ReviewEvent};
+use crate::review::model::{
+    Capability, DeviceClient, EnvelopeKind, MailboxEnvelope, ParticipantKind, ReviewEvent,
+    ReviewEventBody,
+};
 use crate::review::store::ReviewStore;
 
 use base64::Engine as _;
@@ -103,6 +106,11 @@ pub enum InboundError {
         expected: EnvelopeKind,
         actual: EnvelopeKind,
     },
+    /// The signer is registered, but its role does not grant this event body,
+    /// or its ParticipantJoined self-attestation conflicts with the immutable
+    /// registration record.
+    #[error("event is not authorized for the registered participant/device")]
+    UnauthorizedEvent,
     /// Signal envelope's cleartext `target.deviceId` does not match the
     /// receiver's local `deviceId`. Per `planning/collab/security-review.md`
     /// §H2 (v2 mitigation): `target.deviceId` is not AAD-bound, so a malicious
@@ -156,6 +164,42 @@ pub struct ImportOutcome {
 /// adds keys from device-directory updates without juggling two clones.
 pub type VerifyingKeyCache = Arc<RwLock<HashMap<String, DeviceVerifyingKey>>>;
 
+#[derive(Debug, Clone)]
+pub struct RegisteredDeviceAuthorization {
+    pub participant_id: crate::review::ids::ParticipantId,
+    pub device_id: DeviceId,
+    pub public_encryption_key: String,
+    pub public_signing_key: String,
+    pub client: DeviceClient,
+    pub kind: ParticipantKind,
+    pub attested: bool,
+}
+
+impl RegisteredDeviceAuthorization {
+    pub fn validates_attestation(&self, event: &ReviewEvent) -> bool {
+        let ReviewEventBody::ParticipantJoined {
+            participant,
+            device,
+        } = &event.body
+        else {
+            return false;
+        };
+        participant.participant_id == event.meta.author_id
+            && participant.participant_id == self.participant_id
+            && participant.kind == self.kind
+            && participant.public_signing_key == self.public_signing_key
+            && exact_capabilities(&participant.capabilities, self.kind)
+            && device.device_id == event.meta.device_id
+            && device.device_id == self.device_id
+            && device.participant_id == self.participant_id
+            && device.public_encryption_key == self.public_encryption_key
+            && device.public_signing_key == self.public_signing_key
+            && device.client == self.client
+    }
+}
+
+pub type AuthorizationCache = Arc<RwLock<HashMap<String, RegisteredDeviceAuthorization>>>;
+
 /// Inbound envelope processing pipeline.
 ///
 /// Owns:
@@ -172,6 +216,7 @@ pub type VerifyingKeyCache = Arc<RwLock<HashMap<String, DeviceVerifyingKey>>>;
 pub struct InboundPipeline {
     store: Arc<ReviewStore>,
     keys: VerifyingKeyCache,
+    authorizations: AuthorizationCache,
     /// AEAD key for `kind=event` envelopes. 32 bytes.
     event_key: [u8; 32],
     /// AEAD key for `kind=snapshot_blob` envelopes. 32 bytes.
@@ -187,6 +232,7 @@ impl InboundPipeline {
     pub fn new(
         store: Arc<ReviewStore>,
         keys: VerifyingKeyCache,
+        authorizations: AuthorizationCache,
         event_key: [u8; 32],
         snapshot_key: [u8; 32],
         signaling_key: [u8; 32],
@@ -194,6 +240,7 @@ impl InboundPipeline {
         Self {
             store,
             keys,
+            authorizations,
             event_key,
             snapshot_key,
             signaling_key,
@@ -258,6 +305,9 @@ impl InboundPipeline {
             }
             Err(other) => return Err(InboundError::Envelope(other)),
         };
+
+        let mut authorizations = self.authorizations.write().await;
+        authorize_event(&event, &mut authorizations)?;
 
         let newly_imported = self
             .store
@@ -430,6 +480,101 @@ impl InboundPipeline {
     }
 }
 
+fn authorize_event(
+    event: &ReviewEvent,
+    authorizations: &mut HashMap<String, RegisteredDeviceAuthorization>,
+) -> Result<(), InboundError> {
+    let Some(registered) = authorizations.get_mut(&event.auth.signing_key_id) else {
+        return Err(InboundError::UnauthorizedEvent);
+    };
+    if registered.participant_id != event.meta.author_id
+        || registered.device_id != event.meta.device_id
+    {
+        return Err(InboundError::UnauthorizedEvent);
+    }
+
+    match &event.body {
+        ReviewEventBody::ParticipantJoined { .. } => {
+            if !registered.validates_attestation(event) {
+                return Err(InboundError::UnauthorizedEvent);
+            }
+            registered.attested = true;
+            Ok(())
+        }
+        ReviewEventBody::RoomCreated {
+            room_id,
+            created_by,
+            ..
+        } if registered.kind == ParticipantKind::Owner
+            && room_id == &event.meta.room_id
+            && created_by == &event.meta.author_id =>
+        {
+            Ok(())
+        }
+        _ if registered.kind != ParticipantKind::Owner && !registered.attested => {
+            Err(InboundError::UnauthorizedEvent)
+        }
+        ReviewEventBody::CommentCreated { .. } | ReviewEventBody::SuggestionCreated { .. } => {
+            Ok(())
+        }
+        ReviewEventBody::CommentResolved { resolved_by, .. }
+            if registered.kind != ParticipantKind::Agent
+                && resolved_by == &event.meta.author_id =>
+        {
+            Ok(())
+        }
+        ReviewEventBody::PresenceUpdated {
+            participant_id,
+            device_id,
+            ..
+        } if participant_id == &event.meta.author_id && device_id == &event.meta.device_id => {
+            Ok(())
+        }
+        ReviewEventBody::SnapshotCreated { .. }
+        | ReviewEventBody::SnapshotSuperseded { .. }
+        | ReviewEventBody::SuggestionAccepted { .. }
+        | ReviewEventBody::SuggestionRejected { .. }
+        | ReviewEventBody::SessionEnded { .. }
+            if registered.kind == ParticipantKind::Owner =>
+        {
+            Ok(())
+        }
+        ReviewEventBody::AnchorManuallyResolved { resolved_by, .. }
+            if registered.kind == ParticipantKind::Owner
+                && resolved_by == &event.meta.author_id =>
+        {
+            Ok(())
+        }
+        _ => Err(InboundError::UnauthorizedEvent),
+    }
+}
+
+fn exact_capabilities(actual: &[Capability], kind: ParticipantKind) -> bool {
+    let expected: &[Capability] = match kind {
+        ParticipantKind::Owner => &[
+            Capability::RoomAdmin,
+            Capability::ReadSnapshot,
+            Capability::WriteComment,
+            Capability::WriteSuggestion,
+            Capability::ResolveComment,
+            Capability::AcceptSuggestion,
+            Capability::PublishSnapshot,
+        ],
+        ParticipantKind::Reviewer => &[
+            Capability::ReadSnapshot,
+            Capability::WriteComment,
+            Capability::WriteSuggestion,
+            Capability::ResolveComment,
+        ],
+        ParticipantKind::Agent => &[
+            Capability::ReadSnapshot,
+            Capability::WriteComment,
+            Capability::WriteSuggestion,
+        ],
+    };
+    actual.len() == expected.len() && expected.iter().all(|cap| actual.contains(cap))
+}
+
 // ---------------------------------------------------------------------------
 // Helpers — mirror those in envelope.rs (kept private so the wire-string
 // representation stays in lock-step with the AAD construction there).
@@ -495,6 +640,19 @@ mod tests {
         (tmp, store)
     }
 
+    fn test_authorizations(key_id: String, public_signing_key: String) -> AuthorizationCache {
+        let record = RegisteredDeviceAuthorization {
+            participant_id: id("p-author-01"),
+            device_id: id("d-device-01"),
+            public_encryption_key: public_signing_key.clone(),
+            public_signing_key,
+            client: DeviceClient::AttnNative,
+            kind: ParticipantKind::Reviewer,
+            attested: true,
+        };
+        Arc::new(RwLock::new(HashMap::from([(key_id, record)])))
+    }
+
     /// Build a pipeline + the verifying-keys cache pre-populated with the
     /// signer's pubkey. Returns (pipeline, store, signing-seed, room_id, tmp).
     fn fresh_pipeline_with_signer() -> (
@@ -513,12 +671,20 @@ mod tests {
         let signer = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
         let signer_keyid = signer.verifying_key().signing_key_id_base64url();
         let mut map: HashMap<String, DeviceVerifyingKey> = HashMap::new();
-        map.insert(signer_keyid, signer.verifying_key());
+        map.insert(signer_keyid.clone(), signer.verifying_key());
         let cache: VerifyingKeyCache = Arc::new(RwLock::new(map));
+        let public_signing_key = URL_SAFE_NO_PAD.encode(signer.verifying_key().to_bytes());
+        let authorizations = test_authorizations(signer_keyid, public_signing_key);
 
         let room_id: RoomId = id("hjCfgOvsatNOUedgxhZpyw");
-        let pipeline =
-            InboundPipeline::new(store.clone(), cache, event_key, snapshot_key, signaling_key);
+        let pipeline = InboundPipeline::new(
+            store.clone(),
+            cache,
+            authorizations,
+            event_key,
+            snapshot_key,
+            signaling_key,
+        );
         (pipeline, store, signer, room_id, tmp)
     }
 
@@ -531,17 +697,11 @@ mod tests {
         signing_key: DeviceSigningKey,
         room_id: &RoomId,
     ) -> MailboxEnvelope {
-        let input = AssembleInput {
+        mint_event_envelope_with_body(
             event_key,
             signing_key,
-            room_id: room_id.clone(),
-            author_id: id::<ParticipantId>("p-author-01"),
-            device_id: id::<DeviceId>("d-device-01"),
-            created_at_ms: 1_700_000_000_000,
-            expires_at_ms: 1_700_000_000_000 + 7 * 24 * 60 * 60 * 1000,
-            parent_event_ids: vec![],
-            snapshot_id: None,
-            body: ReviewEventBody::CommentCreated {
+            room_id,
+            ReviewEventBody::CommentCreated {
                 thread_id: "thread-1".to_string(),
                 anchor: Anchor {
                     v: 2,
@@ -560,6 +720,26 @@ mod tests {
                 },
                 body: "hello".to_string(),
             },
+        )
+    }
+
+    fn mint_event_envelope_with_body(
+        event_key: [u8; 32],
+        signing_key: DeviceSigningKey,
+        room_id: &RoomId,
+        body: ReviewEventBody,
+    ) -> MailboxEnvelope {
+        let input = AssembleInput {
+            event_key,
+            signing_key,
+            room_id: room_id.clone(),
+            author_id: id::<ParticipantId>("p-author-01"),
+            device_id: id::<DeviceId>("d-device-01"),
+            created_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_000_000_000 + 7 * 24 * 60 * 60 * 1000,
+            parent_event_ids: vec![],
+            snapshot_id: None,
+            body,
             kind: EnvelopeKind::Event,
             client_nonce: None,
         };
@@ -654,6 +834,32 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn reviewer_cannot_import_owner_only_snapshot_event() {
+        let (pipeline, store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let envelope = mint_event_envelope_with_body(
+            pipeline.event_key,
+            signer,
+            &room_id,
+            ReviewEventBody::SnapshotCreated {
+                file_id: id("f-file-01"),
+                snapshot_id: id("eQ7pDCC-mekpz-we7gDYag"),
+                owner_display_path: Some("secret.md".into()),
+                parent_snapshot_id: None,
+                base_hash: id("fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y"),
+                encrypted_blob_ref: None,
+                inline_snapshot: None,
+            },
+        );
+
+        let error = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect_err("reviewer snapshot must be rejected before persistence");
+        assert!(matches!(error, InboundError::UnauthorizedEvent));
+        assert_eq!(store.iter_events(&room_id).expect("events").count(), 0);
+    }
+
     // -----------------------------------------------------------------
     // 2. Dedup: re-importing the same envelope -> newly_imported=false
     // -----------------------------------------------------------------
@@ -725,7 +931,14 @@ mod tests {
         // Deliberately leave the verifying-keys cache empty so the assembler's
         // signingKeyId is not in the map.
         let empty: VerifyingKeyCache = Arc::new(RwLock::new(HashMap::new()));
-        let pipeline = InboundPipeline::new(store, empty, event_key, snapshot_key, signaling_key);
+        let pipeline = InboundPipeline::new(
+            store,
+            empty,
+            Arc::new(RwLock::new(HashMap::new())),
+            event_key,
+            snapshot_key,
+            signaling_key,
+        );
 
         let room_id: RoomId = id("hjCfgOvsatNOUedgxhZpyw");
         let signer = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
@@ -762,7 +975,17 @@ mod tests {
         let signaling_key = *keys.signaling_key.as_bytes();
 
         let empty: VerifyingKeyCache = Arc::new(RwLock::new(HashMap::new()));
-        let pipeline = InboundPipeline::new(store, empty, event_key, snapshot_key, signaling_key);
+        let signer_for_auth = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
+        let auth_key_id = signer_for_auth.verifying_key().signing_key_id_base64url();
+        let auth_public = URL_SAFE_NO_PAD.encode(signer_for_auth.verifying_key().to_bytes());
+        let pipeline = InboundPipeline::new(
+            store,
+            empty,
+            test_authorizations(auth_key_id, auth_public),
+            event_key,
+            snapshot_key,
+            signaling_key,
+        );
 
         let room_id: RoomId = id("hjCfgOvsatNOUedgxhZpyw");
         let signer = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
@@ -1088,11 +1311,13 @@ mod tests {
             let vk = DeviceVerifyingKey::from_bytes(&vk_bytes).unwrap();
             let keyid = vk.signing_key_id_base64url();
             let mut map: HashMap<String, DeviceVerifyingKey> = HashMap::new();
-            map.insert(keyid, vk);
+            map.insert(keyid.clone(), vk);
             let cache: VerifyingKeyCache = Arc::new(RwLock::new(map));
+            let authorizations = test_authorizations(keyid, URL_SAFE_NO_PAD.encode(vk_bytes));
             let pipeline = InboundPipeline::new(
                 store,
                 cache,
+                authorizations,
                 *room_keys.event_key.as_bytes(),
                 *room_keys.snapshot_key.as_bytes(),
                 *room_keys.signaling_key.as_bytes(),

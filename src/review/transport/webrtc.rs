@@ -1202,6 +1202,7 @@ mod tests {
         let pipeline = InboundPipeline::new(
             store,
             cache,
+            Arc::new(RwLock::new(HashMap::new())),
             *keys.event_key.as_bytes(),
             *keys.snapshot_key.as_bytes(),
             *keys.signaling_key.as_bytes(),

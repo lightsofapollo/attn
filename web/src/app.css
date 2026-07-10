@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* The hosted Vite build is rooted at `web/hosted`, while the Svelte UI lives
+   here under `web/src`. Make that source boundary explicit so browser builds
+   generate the same utility classes as the native app (flex, h-screen,
+   w-[320px], etc.) instead of shipping only component-scoped CSS. */
+@source "./**/*.{svelte,ts}";
+
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));

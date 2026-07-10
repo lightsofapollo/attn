@@ -33,7 +33,7 @@ use crate::review::model::{
     RoomMode, SuggestionDraft,
 };
 use crate::review::store::ReviewStore;
-use crate::review::transport::inbound::VerifyingKeyCache;
+use crate::review::transport::inbound::{AuthorizationCache, VerifyingKeyCache};
 use crate::review::transport::selector::{self, RoomTransports, TransportConfig, TransportMode};
 use crate::review::transport::signaling::{SignalingPayload, assemble_signal_envelope};
 use crate::review::transport::{EnvelopeAck, TransportError};
@@ -1517,6 +1517,7 @@ impl ReviewManager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("verifying-key cache absent"))?
             .clone();
+        let authorizations: AuthorizationCache = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
         // Idempotency guard: a room with a live cancel handle already has its
         // outbox/WS/forwarder tasks running. Re-running here would insert a
@@ -1597,7 +1598,11 @@ impl ReviewManager {
         // before the directory fetch completes. The GET is ~milliseconds
         // against a healthy relay; failures are logged but non-fatal
         // (peer keys also arrive via ParticipantJoined events).
-        match runtime.block_on(bootstrap.refresh_device_keys(room_id, &verifying_keys)) {
+        match runtime.block_on(bootstrap.refresh_device_authorizations(
+            room_id,
+            &verifying_keys,
+            &authorizations,
+        )) {
             Ok(n) => tracing::info!("seeded {n} device key(s) for room={}", room_id.as_str()),
             // The relay says this room no longer exists. The local store still
             // had it with a future TTL, so without this it would be resumed on
@@ -1641,6 +1646,7 @@ impl ReviewManager {
         let inbound = Arc::new(InboundPipeline::new(
             Arc::clone(&self.store),
             verifying_keys.clone(),
+            authorizations.clone(),
             *room_keys.event_key.as_bytes(),
             *room_keys.snapshot_key.as_bytes(),
             *room_keys.signaling_key.as_bytes(),
@@ -1656,6 +1662,7 @@ impl ReviewManager {
                 bootstrap: Arc::clone(bootstrap),
                 room_id: room_id.clone(),
                 cache: verifying_keys,
+                authorizations,
             });
 
         // WS subscriber — long-lived task that auto-reconnects.
@@ -1737,6 +1744,18 @@ impl ReviewManager {
             // into the manager's live_webrtc map for send_collab's fan-out.
             let mut transports: HashMap<crate::review::ids::DeviceId, Arc<WebRtcTransport>> =
                 HashMap::new();
+            // Only native devices can negotiate the current WebRTC data plane.
+            // Hosted browsers stay on the encrypted mailbox until attn-egi.4
+            // lands browser signaling/ICE; trying to build a native transport
+            // on their Presence::Join blocks this event loop and starves the
+            // mailbox EventImported updates that make browser comments render.
+            let mut webrtc_eligible_peers: std::collections::HashSet<crate::review::ids::DeviceId> =
+                std::collections::HashSet::new();
+            // Device registration is immutable for a room, while online
+            // membership is not. Preserve the native classification across a
+            // leave so a later Presence::Join can rebuild its transport.
+            let mut known_native_peers: std::collections::HashSet<crate::review::ids::DeviceId> =
+                std::collections::HashSet::new();
             // Non-self peer count, kept current from Hello (absolute) + Presence
             // (delta). The mesh is "complete" when transports.len() == peer_count.
             let mut peer_count: usize = 0;
@@ -1745,22 +1764,51 @@ impl ReviewManager {
                 // Maintain the peer count + mirror it into the live map.
                 match &event {
                     TransportEvent::Hello { devices, .. } => {
-                        peer_count = devices
+                        known_native_peers = devices
                             .iter()
-                            .filter(|d| d.device_id.as_str() != self_device_id)
-                            .count();
+                            .filter(|d| {
+                                d.device_id.as_str() != self_device_id
+                                    && matches!(
+                                        d.client,
+                                        crate::review::model::DeviceClient::AttnNative
+                                    )
+                            })
+                            .map(|d| d.device_id.clone())
+                            .collect();
+                        webrtc_eligible_peers = known_native_peers.clone();
+                        peer_count = webrtc_eligible_peers.len();
                     }
-                    TransportEvent::Presence {
-                        event: PresenceEvent::Join,
-                        device_id: peer,
-                        ..
-                    } if peer.as_str() != self_device_id => peer_count += 1,
+                    TransportEvent::EventImported { event, .. } => {
+                        if let crate::review::model::ReviewEventBody::ParticipantJoined {
+                            device,
+                            ..
+                        } = &event.body
+                            && device.device_id.as_str() != self_device_id
+                            && matches!(
+                                device.client,
+                                crate::review::model::DeviceClient::AttnNative
+                            )
+                        {
+                            known_native_peers.insert(device.device_id.clone());
+                            webrtc_eligible_peers.insert(device.device_id.clone());
+                            peer_count = webrtc_eligible_peers.len();
+                        }
+                    }
                     TransportEvent::Presence {
                         event: PresenceEvent::Leave,
                         device_id: peer,
                         ..
                     } if peer.as_str() != self_device_id => {
-                        peer_count = peer_count.saturating_sub(1)
+                        webrtc_eligible_peers.remove(peer);
+                        peer_count = webrtc_eligible_peers.len();
+                    }
+                    TransportEvent::Presence {
+                        event: PresenceEvent::Join,
+                        device_id: peer,
+                        ..
+                    } if peer.as_str() != self_device_id && known_native_peers.contains(peer) => {
+                        webrtc_eligible_peers.insert(peer.clone());
+                        peer_count = webrtc_eligible_peers.len();
                     }
                     _ => {}
                 }
@@ -1778,16 +1826,43 @@ impl ReviewManager {
                         TransportEvent::Hello { devices, .. } => (
                             devices
                                 .iter()
+                                .filter(|d| {
+                                    d.device_id.as_str() != self_device_id
+                                        && matches!(
+                                            d.client,
+                                            crate::review::model::DeviceClient::AttnNative
+                                        )
+                                })
                                 .map(|d| d.device_id.clone())
-                                .filter(|d| d.as_str() != self_device_id)
                                 .collect(),
                             true,
                         ),
+                        TransportEvent::EventImported { event, .. } => {
+                            let peer = match &event.body {
+                                crate::review::model::ReviewEventBody::ParticipantJoined {
+                                    device,
+                                    ..
+                                } if device.device_id.as_str() != self_device_id
+                                    && matches!(
+                                        device.client,
+                                        crate::review::model::DeviceClient::AttnNative
+                                    ) =>
+                                {
+                                    Some(device.device_id.clone())
+                                }
+                                _ => None,
+                            };
+                            (peer.into_iter().collect(), true)
+                        }
                         TransportEvent::Presence {
                             event: PresenceEvent::Join,
                             device_id: peer,
                             ..
-                        } if peer.as_str() != self_device_id => (vec![peer.clone()], true),
+                        } if peer.as_str() != self_device_id
+                            && known_native_peers.contains(peer) =>
+                        {
+                            (vec![peer.clone()], true)
+                        }
                         TransportEvent::Signaling { payload, .. } => {
                             let from = match payload {
                                 SignalingPayload::Offer { from, .. }
@@ -2872,13 +2947,14 @@ struct BootstrapKeyRefresher {
     bootstrap: Arc<Bootstrapper>,
     room_id: RoomId,
     cache: VerifyingKeyCache,
+    authorizations: AuthorizationCache,
 }
 
 #[async_trait::async_trait]
 impl crate::review::transport::DeviceKeyRefresher for BootstrapKeyRefresher {
     async fn refresh(&self) -> Result<usize, String> {
         self.bootstrap
-            .refresh_device_keys(&self.room_id, &self.cache)
+            .refresh_device_authorizations(&self.room_id, &self.cache, &self.authorizations)
             .await
             .map_err(|e| e.to_string())
     }
@@ -2973,6 +3049,11 @@ fn forward_transport_event(
             room_id: rid,
             mut event,
         } => {
+            tracing::debug!(
+                event_id = event.meta.event_id.as_str(),
+                body_type = review_event_body_name(&event.body),
+                "forwarding imported review event to webview"
+            );
             rehydrate_snapshot_event(store, &rid, &mut event);
             (update_tx)(ReviewUpdate::EventImported {
                 room_id: rid,
@@ -3080,6 +3161,24 @@ fn forward_transport_event(
                 message,
             });
         }
+    }
+}
+
+fn review_event_body_name(body: &crate::review::model::ReviewEventBody) -> &'static str {
+    use crate::review::model::ReviewEventBody;
+    match body {
+        ReviewEventBody::RoomCreated { .. } => "room_created",
+        ReviewEventBody::ParticipantJoined { .. } => "participant_joined",
+        ReviewEventBody::SnapshotCreated { .. } => "snapshot_created",
+        ReviewEventBody::SnapshotSuperseded { .. } => "snapshot_superseded",
+        ReviewEventBody::CommentCreated { .. } => "comment_created",
+        ReviewEventBody::CommentResolved { .. } => "comment_resolved",
+        ReviewEventBody::SuggestionCreated { .. } => "suggestion_created",
+        ReviewEventBody::SuggestionAccepted { .. } => "suggestion_accepted",
+        ReviewEventBody::SuggestionRejected { .. } => "suggestion_rejected",
+        ReviewEventBody::AnchorManuallyResolved { .. } => "anchor_manually_resolved",
+        ReviewEventBody::PresenceUpdated { .. } => "presence_updated",
+        ReviewEventBody::SessionEnded { .. } => "session_ended",
     }
 }
 

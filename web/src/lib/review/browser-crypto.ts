@@ -334,7 +334,7 @@ export function randomAeadNonce(): Uint8Array {
 }
 
 // ---------------------------------------------------------------------------
-// Ed25519 signature verification.
+// Ed25519 event signing + verification.
 //
 // Mirrors the receive half of `src/review/crypto/signing.rs`:
 //   signedBytes = canonicalJSON({ meta: <EventMeta WITHOUT eventId,
@@ -343,10 +343,7 @@ export function randomAeadNonce(): Uint8Array {
 //   signature   = base64url(Ed25519.sign(signingKey, signedBytes))
 //   signingKeyId= base64url(SHA-256(publicSigningKey))
 //
-// We only implement VERIFY in this module — the browser client never signs
-// events in attn-nnj.9.3 (signing lands in attn-nnj.9.4 alongside PoW). The
-// hand-rolled sign path uses the same canonical-bytes function, so adding
-// it later is a one-liner.
+// Hosted reviewers use the same canonical signed bytes as native clients.
 // ---------------------------------------------------------------------------
 
 /** Pulled from `web/src/lib/types.ts` shapes so callers don't need to import. */
@@ -405,6 +402,49 @@ export function canonicalSignedBytes(meta: SignableMetaShape, body: unknown): Ui
 /** `EventId = base64url(SHA-256(canonicalJSON({ meta-without-eventId, body })))`. */
 export function deriveEventId(meta: SignableMetaShape, body: unknown): string {
   return base64UrlEncode(sha256(canonicalSignedBytes(meta, body)));
+}
+
+/** Sign a review event over its canonical `(meta-without-eventId, body)` bytes. */
+export function signEvent(
+  meta: SignableMetaShape,
+  body: unknown,
+  secretKey: Uint8Array,
+  publicKey?: Uint8Array,
+): { signature: string; signingKeyId: string } {
+  if (secretKey.length !== 32) {
+    throw new SignatureError('Ed25519 secret key must be a 32-byte seed');
+  }
+  const resolvedPublicKey = publicKey ?? ed25519.getPublicKey(secretKey);
+  if (resolvedPublicKey.length !== 32) {
+    throw new SignatureError('Ed25519 public key must be 32 bytes');
+  }
+  const signed = canonicalSignedBytes(meta, body);
+  try {
+    return {
+      signature: base64UrlEncode(ed25519.sign(signed, secretKey)),
+      signingKeyId: signingKeyId(resolvedPublicKey),
+    };
+  } finally {
+    signed.fill(0);
+  }
+}
+
+const ENVELOPE_ID_PREFIX = new TextEncoder().encode('envelope v2');
+
+/** Deterministic event envelope id used for relay dedupe across retries. */
+export function deriveEventEnvelopeId(roomId: string, eventId: string): string {
+  if (roomId.length === 0 || eventId.length === 0) {
+    throw new Error('roomId and eventId must be non-empty');
+  }
+  const room = new TextEncoder().encode(roomId);
+  const event = new TextEncoder().encode(eventId);
+  const input = new Uint8Array(ENVELOPE_ID_PREFIX.length + room.length + event.length);
+  input.set(ENVELOPE_ID_PREFIX, 0);
+  input.set(room, ENVELOPE_ID_PREFIX.length);
+  input.set(event, ENVELOPE_ID_PREFIX.length + room.length);
+  const digest = sha256(input);
+  input.fill(0);
+  return base64UrlEncode(digest.subarray(0, 16));
 }
 
 /** `ContentHash = base64url(SHA-256(canonical snapshot plaintext bytes))`. */
@@ -547,6 +587,22 @@ function canonicalRequestBytes(
   out[off++] = 0x0a;
   out.set(bodyHash, off);
   return out;
+}
+
+/** Build `Attn-Admission: v2.<base64url HMAC>` for an HTTP request. */
+export function buildAdmissionHeader(
+  admissionKey: Uint8Array,
+  method: string,
+  urlPath: string,
+  body: Uint8Array,
+): string {
+  if (admissionKey.length !== 32) {
+    throw new Error('admissionKey must be 32 bytes');
+  }
+  const canon = canonicalRequestBytes(method, urlPath, [], body);
+  const tag = hmac(sha256, admissionKey, canon);
+  canon.fill(0);
+  return `v2.${base64UrlEncode(tag)}`;
 }
 
 /**

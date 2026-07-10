@@ -1230,7 +1230,11 @@ export class RoomDO extends DurableObject<Env> {
     // indicate corrupt storage.
     const devices = await this.listDevicesInOrder();
     if (devices instanceof Response) return devices;
-    return Response.json({ devices }, { status: 200 });
+    const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+    if (policy === undefined) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
+    }
+    return Response.json({ devices, policy }, { status: 200 });
   }
 
   // -- POST /v2/rooms/:roomId/envelopes -----------------------------------

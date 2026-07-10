@@ -1115,9 +1115,11 @@ mod tests {
     use crate::review::crypto::kdf::derive_room_keys;
     use crate::review::crypto::signing::{DeviceSigningKey, DeviceVerifyingKey};
     use crate::review::ids::{DeviceId, RoomId};
-    use crate::review::model::EnvelopeKind;
+    use crate::review::model::{DeviceClient, EnvelopeKind, ParticipantKind};
     use crate::review::store::ReviewStore;
-    use crate::review::transport::inbound::{InboundPipeline, VerifyingKeyCache};
+    use crate::review::transport::inbound::{
+        AuthorizationCache, InboundPipeline, RegisteredDeviceAuthorization, VerifyingKeyCache,
+    };
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use futures_util::{SinkExt, StreamExt};
     use serde::Deserialize;
@@ -1162,12 +1164,25 @@ mod tests {
         let vk = signer.verifying_key();
         let keyid = vk.signing_key_id_base64url();
         let mut map: HashMap<String, DeviceVerifyingKey> = HashMap::new();
-        map.insert(keyid, vk.clone());
+        map.insert(keyid.clone(), vk.clone());
         let cache: VerifyingKeyCache = Arc::new(RwLock::new(map));
+        let authorizations: AuthorizationCache = Arc::new(RwLock::new(HashMap::from([(
+            keyid,
+            RegisteredDeviceAuthorization {
+                participant_id: id("p-author-01"),
+                device_id: id("d-device-01"),
+                public_encryption_key: URL_SAFE_NO_PAD.encode(vk.to_bytes()),
+                public_signing_key: URL_SAFE_NO_PAD.encode(vk.to_bytes()),
+                client: DeviceClient::AttnNative,
+                kind: ParticipantKind::Reviewer,
+                attested: true,
+            },
+        )])));
 
         let pipeline = Arc::new(InboundPipeline::new(
             store.clone(),
             cache,
+            authorizations,
             event_key,
             snapshot_key,
             signaling_key,

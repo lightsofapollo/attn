@@ -15,7 +15,7 @@
 //   cd web && npx tsx src/lib/review/browser-session.test.ts
 
 import { WebSocket as NodeWebSocket, WebSocketServer, type WebSocket } from 'ws';
-import { ed25519 } from '@noble/curves/ed25519.js';
+import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import {
   BrowserSession,
@@ -31,6 +31,8 @@ import {
 } from './browser-session';
 import {
   aeadSeal,
+  aeadOpen,
+  base64UrlDecode,
   base64UrlEncode,
   contentHash,
   deriveEventId,
@@ -40,9 +42,11 @@ import {
   toCanonicalBytes,
   type EnvelopeAad,
   type SignableMetaShape,
+  verifyEventSignature,
 } from './browser-crypto';
 import { composeInviteUrl } from './browser-invite';
 import type {
+  Anchor,
   ReviewEvent,
   ReviewSnapshot,
   FileId,
@@ -72,6 +76,7 @@ function makeStubStore(): StubStore {
     currentSnapshotId: null,
     currentRoomId: null,
     applyEvent(event: ReviewEvent) {
+      if (s.events.some((existing) => existing.meta.eventId === event.meta.eventId)) return;
       s.events = [...s.events, event];
     },
     applySnapshot(snapshot: ReviewSnapshot) {
@@ -134,6 +139,34 @@ function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function registrationAndOutboxFetch(
+  url: string,
+  init: FetchLikeInit,
+): Promise<FetchLikeResponse> {
+  if (init.method === 'GET') {
+    return {
+      status: 200,
+      text: async () => JSON.stringify({ policy: POLICY, devices: [OWNER_DEVICE] }),
+    };
+  }
+  if (url.endsWith('/envelopes')) {
+    const parsed = JSON.parse(init.body ?? '{}') as {
+      envelopes?: Array<{ envelopeId: string }>;
+    };
+    return {
+      status: 201,
+      text: async () =>
+        JSON.stringify({
+          accepted: (parsed.envelopes ?? []).map((item, index) => ({
+            envelopeId: item.envelopeId,
+            serverSeq: index + 1,
+          })),
+        }),
+    };
+  }
+  return { status: 204, text: async () => '' };
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -149,14 +182,30 @@ const OWNER_KEYPAIR = (() => {
 })();
 const OWNER_SIGNING_KEY_ID = base64UrlEncode(sha256(OWNER_KEYPAIR.publicKey));
 
-const OWNER_DEVICE: Device = {
+function signedDirectoryDevice(
+  unsigned: Omit<Device, 'selfSignature'>,
+  signingSecret: Uint8Array,
+): Device {
+  const canonical = toCanonicalBytes({
+    client: unsigned.client,
+    deviceId: unsigned.deviceId,
+    kind: unsigned.kind,
+    participantId: unsigned.participantId,
+    publicEncryptionKey: unsigned.publicEncryptionKey,
+    publicSigningKey: unsigned.publicSigningKey,
+  });
+  return { ...unsigned, selfSignature: base64UrlEncode(ed25519.sign(canonical, signingSecret)) };
+}
+
+const OWNER_DEVICE: Device = signedDirectoryDevice({
   deviceId: 'd-owner-01',
   participantId: 'p-owner-01',
   publicEncryptionKey: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
   publicSigningKey: base64UrlEncode(OWNER_KEYPAIR.publicKey),
   client: 'attn-native',
-  createdAt: 1_700_000_000_000,
-};
+  kind: 'owner',
+  registeredAt: 1_700_000_000_000,
+}, OWNER_KEYPAIR.secret);
 
 const POLICY: RoomPolicy = {
   mode: 'live',
@@ -165,6 +214,7 @@ const POLICY: RoomPolicy = {
   maxEventBytes: 256 * 1024,
   maxEvents: 1000,
   expiresAt: 1_900_000_000_000,
+  powBits: 12,
   deleteEventsAfterOwnerAck: false,
   allowBrowser: true,
   allowRemoteAgents: false,
@@ -478,7 +528,7 @@ async function assertInvalidBlobRefRejected(
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
       store,
-      fetchImpl: async () => ({ status: 204, text: async () => '' }),
+      fetchImpl: registrationAndOutboxFetch,
       webSocketFactory: nodeFactory,
       reconnectInitialMs: 50,
       reconnectMaxMs: 200,
@@ -554,6 +604,8 @@ defineCase('happy path: invite → POST /devices → WS hello → connected', as
       powToken: 'test-pow-token',
       store,
       fetchImpl: async (url: string, init: FetchLikeInit): Promise<FetchLikeResponse> => {
+        if (init.method === 'GET') return registrationAndOutboxFetch(url, init);
+        if (url.endsWith('/envelopes')) return registrationAndOutboxFetch(url, init);
         devicePosts += 1;
         assert(
           url.endsWith(`/v2/rooms/${ROOM_ID}/devices`),
@@ -574,6 +626,8 @@ defineCase('happy path: invite → POST /devices → WS hello → connected', as
     // Poll until connected
     for (let i = 0; i < 80 && session.getState().status !== 'connected'; i++) await delay(20);
     assertEq(session.getState().status, 'connected', 'reaches connected after hello');
+    for (let i = 0; i < 80 && !session.getState().authoringReady; i++) await delay(20);
+    assertEq(session.getState().authoringReady, true, 'ParticipantJoined acknowledged');
     assertEq(devicePosts, 1, 'POST /devices called exactly once');
     const orderedStatuses = states.map((s) => s.status);
     assert(
@@ -599,9 +653,151 @@ defineCase('happy path: invite → POST /devices → WS hello → connected', as
       signalingKey: internalKeys.signalingKey,
       admissionKey: internalKeys.admissionKey,
       signingSecret: identity.signingSecret,
+      encryptionSecret: identity.encryptionSecret,
     })) {
       assert(bytes.every((byte) => byte === 0), `${label} zeroed on close`);
     }
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('browser authoring posts signed ciphertext, echoes locally, and preserves event order', async () => {
+  const store = makeStubStore();
+  const server = await startMockServer();
+  const identity = deterministicIdentity();
+  const browserDevice: Device = signedDirectoryDevice({
+    deviceId: identity.deviceId,
+    participantId: identity.participantId,
+    publicEncryptionKey: base64UrlEncode(identity.publicEncryptionKey),
+    publicSigningKey: base64UrlEncode(identity.signingPublic),
+    client: 'attn-browser',
+    kind: 'reviewer',
+    registeredAt: 1_700_000_000_100,
+  }, identity.signingSecret);
+  const postedEvents: ReviewEvent[] = [];
+  const rawBodies: string[] = [];
+  let connected: WebSocket | null = null;
+  let serverSeq = 30;
+  try {
+    server.onClient((ws) => {
+      connected = ws;
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(String(raw));
+        if (msg.type !== 'subscribe') return;
+        ws.send(
+          JSON.stringify({
+            type: 'hello',
+            serverSeq: 0,
+            policy: POLICY,
+            devices: [OWNER_DEVICE, browserDevice],
+            missedSignalEnvelopeIds: [],
+          }),
+        );
+      });
+    });
+    const session = new BrowserSession({
+      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      identity,
+      powToken: 'test-registration-pow',
+      outboxMintPow: async () => `test-event-pow-${postedEvents.length + 1}`,
+      store,
+      fetchImpl: async (url, init) => {
+        if (init.method === 'GET') {
+          return {
+            status: 200,
+            text: async () => JSON.stringify({ policy: POLICY, devices: [OWNER_DEVICE] }),
+          };
+        }
+        if (!url.endsWith('/envelopes')) return { status: 204, text: async () => '' };
+        const rawBody = init.body ?? '';
+        rawBodies.push(rawBody);
+        const parsed = JSON.parse(rawBody) as { envelopes: MailboxEnvelope[] };
+        const accepted: Array<{ envelopeId: string; serverSeq: number }> = [];
+        for (const envelope of parsed.envelopes) {
+          const aad: EnvelopeAad = {
+            v: 2,
+            roomId: ROOM_ID,
+            envelopeId: envelope.envelopeId,
+            kind: 'event',
+            authorId: envelope.authorId,
+            deviceId: envelope.deviceId,
+            createdAt: envelope.createdAt,
+          };
+          const plaintext = aeadOpen(
+            KEYS.eventKey,
+            base64UrlDecode(envelope.nonce),
+            base64UrlDecode(envelope.ciphertext),
+            aad,
+          );
+          const event = JSON.parse(new TextDecoder().decode(plaintext)) as ReviewEvent;
+          plaintext.fill(0);
+          verifyEventSignature(event.meta, event.body, event.auth, identity.signingPublic);
+          postedEvents.push(event);
+          serverSeq += 1;
+          accepted.push({ envelopeId: envelope.envelopeId, serverSeq });
+          connected?.send(
+            JSON.stringify({ type: 'envelope', envelope, serverSeq }),
+          );
+        }
+        return { status: 201, text: async () => JSON.stringify({ accepted }) };
+      },
+      webSocketFactory: nodeFactory,
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 200,
+    });
+
+    await session.start();
+    for (let i = 0; i < 100 && !session.getState().authoringReady; i++) await delay(20);
+    assertEq(session.getState().authoringReady, true, 'join acknowledged before authoring');
+    const anchor: Anchor = {
+      v: 2,
+      fileId: 'file-browser-authoring',
+      snapshotId: 'snapshot-browser-authoring',
+      baseHash: 'hash-browser-authoring',
+      position: { byteRange: [0, 5], lineRange: [1, 1], pmRange: [1, 6] },
+    };
+    const root = await session.createComment(anchor, 'comment alpha');
+    assertEq(root.body.type, 'comment_created', 'root comment body');
+    const threadId = root.body.type === 'comment_created' ? root.body.threadId : '';
+    await session.replyToComment(anchor, 'reply beta', threadId);
+    await session.resolveComment(threadId);
+    await session.createSuggestion({
+      anchor,
+      operation: { kind: 'replace', expectedText: 'alpha', replacement: 'gamma' },
+      note: 'suggestion delta',
+    });
+    for (let i = 0; i < 100 && (postedEvents.length < 5 || session.getState().outboxPending > 0); i++) {
+      await delay(20);
+    }
+
+    const eventTypes = postedEvents.map((event) => event.body.type);
+    assertEq(
+      JSON.stringify(eventTypes),
+      JSON.stringify([
+        'participant_joined',
+        'comment_created',
+        'comment_created',
+        'comment_resolved',
+        'suggestion_created',
+      ]),
+      'native-compatible event order',
+    );
+    const joined = postedEvents[0]?.body;
+    assert(joined?.type === 'participant_joined', 'first event is ParticipantJoined');
+    assert(
+      joined.device.publicEncryptionKey !== 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      'ParticipantJoined publishes a real X25519 key',
+    );
+    const wire = rawBodies.join('\n');
+    for (const secret of ['comment alpha', 'reply beta', 'gamma', 'suggestion delta']) {
+      assert(!wire.includes(secret), `relay body does not expose ${secret}`);
+    }
+    assertEq(store.events.length, 5, 'optimistic and WebSocket echoes dedupe by eventId');
+    assert(store.events.every((event) => event.auth.signature.length > 0), 'store keeps real auth');
+    assertEq(session.getState().outboxPending, 0, 'outbox fully acknowledged');
+    session.close();
   } finally {
     await server.close();
   }
@@ -643,15 +839,54 @@ defineCase('POST /devices 403 → status=error, kind=device_register', async () 
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
       store,
-      fetchImpl: async () => ({
-        status: 403,
-        text: async () => '{"error":{"code":"ATTN_POW_REQUIRED"}}',
-      }),
+      fetchImpl: async (_url, init) =>
+        init.method === 'GET'
+          ? {
+              status: 200,
+              text: async () => JSON.stringify({ policy: POLICY, devices: [OWNER_DEVICE] }),
+            }
+          : {
+              status: 403,
+              text: async () => '{"error":{"code":"ATTN_POW_REQUIRED"}}',
+            },
       webSocketFactory: nodeFactory,
     });
     await session.start();
     assertEq(session.getState().status, 'error', 'error state');
     assertEq(session.getState().error?.kind, 'device_register', 'device_register tag');
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('registration PoW uses authenticated room policy difficulty', async () => {
+  const store = makeStubStore();
+  const server = await startMockServer();
+  let difficulty = 0;
+  try {
+    server.onClient(() => undefined);
+    const highPowPolicy = { ...POLICY, powBits: 19 };
+    const session = new BrowserSession({
+      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      identity: deterministicIdentity(),
+      store,
+      registrationMintPow: async (input) => {
+        difficulty = input.difficulty;
+        return 'policy-registration-pow';
+      },
+      fetchImpl: async (_url, init) =>
+        init.method === 'GET'
+          ? {
+              status: 200,
+              text: async () => JSON.stringify({ policy: highPowPolicy, devices: [OWNER_DEVICE] }),
+            }
+          : { status: 204, text: async () => '' },
+      webSocketFactory: nodeFactory,
+    });
+    await session.start();
+    assertEq(difficulty, 19, 'registration difficulty');
+    session.close();
   } finally {
     await server.close();
   }
@@ -695,7 +930,7 @@ defineCase('SnapshotCreated event populates state.snapshotContent + store', asyn
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
       store,
-      fetchImpl: async () => ({ status: 204, text: async () => '' }),
+      fetchImpl: registrationAndOutboxFetch,
       webSocketFactory: nodeFactory,
       reconnectInitialMs: 50,
       reconnectMaxMs: 200,
@@ -727,7 +962,9 @@ defineCase('SnapshotCreated event populates state.snapshotContent + store', asyn
     assertEq(store.currentSnapshotId, 'snap-1' as unknown as SnapshotId, 'currentSnapshotId set');
     // The event itself should also be in the append-only log so any
     // downstream selectors (threads, decorations) see it.
-    assertEq(store.events.length, 1, 'event appended');
+    assertEq(store.events.length, 2, 'ParticipantJoined and snapshot appended');
+    assertEq(store.events[0]?.body.type, 'participant_joined', 'join is first browser event');
+    assertEq(store.events[1]?.body.type, 'snapshot_created', 'snapshot follows join');
     session.close();
   } finally {
     await server.close();
@@ -791,7 +1028,7 @@ defineCase('mailbox snapshot_blob rehydrates a native SnapshotCreated pointer', 
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
       store,
-      fetchImpl: async () => ({ status: 204, text: async () => '' }),
+      fetchImpl: registrationAndOutboxFetch,
       webSocketFactory: nodeFactory,
       reconnectInitialMs: 50,
       reconnectMaxMs: 200,
@@ -805,7 +1042,8 @@ defineCase('mailbox snapshot_blob rehydrates a native SnapshotCreated pointer', 
     assertEq(session.getState().snapshotId, 'snap-mailbox-1' as SnapshotId, 'snapshot pointer');
     assertEq(store.snapshots.length, 1, 'rehydrated snapshot imported once');
     assertEq(store.snapshots[0]!.anchorIndex?.lineCount, 4, 'anchor index imported');
-    assertEq(store.events.length, 1, 'pointer event remains in event log');
+    assertEq(store.events.length, 2, 'join and pointer remain in event log');
+    assertEq(store.events[0]?.body.type, 'participant_joined', 'join precedes pointer');
     session.close();
   } finally {
     await server.close();
@@ -861,9 +1099,15 @@ defineCase('unknown snapshot signer refreshes GET /devices and retries once', as
       fetchImpl: async (_url, init) => {
         if (init.method === 'GET') {
           deviceGets += 1;
-          return { status: 200, text: async () => JSON.stringify({ devices: [OWNER_DEVICE] }) };
+          return {
+            status: 200,
+            text: async () => JSON.stringify({
+              policy: POLICY,
+              devices: deviceGets === 1 ? [] : [OWNER_DEVICE],
+            }),
+          };
         }
-        return { status: 204, text: async () => '' };
+        return registrationAndOutboxFetch(_url, init);
       },
       webSocketFactory: nodeFactory,
       reconnectInitialMs: 50,
@@ -871,7 +1115,7 @@ defineCase('unknown snapshot signer refreshes GET /devices and retries once', as
     });
     await session.start();
     for (let i = 0; i < 100 && session.getState().snapshotContent === null; i++) await delay(20);
-    assertEq(deviceGets, 1, 'one authenticated directory refresh');
+    assertEq(deviceGets, 2, 'bootstrap plus one authenticated directory refresh');
     assertEq(session.getState().snapshotContent, markdown, 'retried snapshot renders');
     session.close();
   } finally {
@@ -918,7 +1162,7 @@ defineCase('HTML SnapshotCreated populates content + docType=html (read-only)', 
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
       store,
-      fetchImpl: async () => ({ status: 204, text: async () => '' }),
+      fetchImpl: registrationAndOutboxFetch,
       webSocketFactory: nodeFactory,
       reconnectInitialMs: 50,
       reconnectMaxMs: 200,
@@ -977,7 +1221,7 @@ defineCase('terminal close after hydration clears session and store plaintext', 
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
       store,
-      fetchImpl: async () => ({ status: 204, text: async () => '' }),
+      fetchImpl: registrationAndOutboxFetch,
       webSocketFactory: nodeFactory,
       reconnectInitialMs: 50,
       reconnectMaxMs: 200,
@@ -1014,7 +1258,7 @@ defineCase('Admission rejected (WS close 4000) → kind=admission_rejected', asy
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
       store,
-      fetchImpl: async () => ({ status: 204, text: async () => '' }),
+      fetchImpl: registrationAndOutboxFetch,
       webSocketFactory: nodeFactory,
       reconnectInitialMs: 30,
       reconnectMaxMs: 60,
@@ -1037,6 +1281,9 @@ defineCase('generateBrowserIdentity produces 32-byte secret + 32-byte public', (
   const id = generateBrowserIdentity();
   assertEq(id.signingSecret.length, 32, 'ed25519 secret seed 32 bytes');
   assertEq(id.signingPublic.length, 32, 'ed25519 public key 32 bytes');
+  assertEq(id.encryptionSecret.length, 32, 'x25519 secret key 32 bytes');
+  assertEq(id.publicEncryptionKey.length, 32, 'x25519 public key 32 bytes');
+  assert(id.publicEncryptionKey.some((byte) => byte !== 0), 'x25519 public key is not a placeholder');
   assert(id.deviceId.startsWith('br-'), `deviceId has br- prefix: ${id.deviceId}`);
   assert(id.participantId.startsWith('br-'), `participantId has br- prefix`);
   // signingKeyId should match the SHA-256 of the public key.
@@ -1051,12 +1298,14 @@ defineCase('generateBrowserIdentity produces 32-byte secret + 32-byte public', (
 function deterministicIdentity(): BrowserDeviceIdentity {
   const seed = new Uint8Array(32).fill(0x77);
   const { secretKey, publicKey } = ed25519.keygen(seed);
+  const encryption = x25519.keygen(new Uint8Array(32).fill(0x55));
   return {
     deviceId: 'br-test-device',
     participantId: 'br-test-participant',
     signingSecret: secretKey,
     signingPublic: publicKey,
-    publicEncryptionKey: new Uint8Array(32),
+    encryptionSecret: encryption.secretKey,
+    publicEncryptionKey: encryption.publicKey,
   };
 }
 

@@ -57,7 +57,7 @@
     onResolve?: () => void;
     /** Post a reply to this thread (attn-1rm). Parent wires it to
      *  reviewCreateComment with the root anchor + this thread id. */
-    onReply?: (body: string) => void;
+    onReply?: (body: string) => Promise<void> | void;
     /** Locally-set marker — true after the user clicked reject/resolve and
      *  the IPC is not yet acknowledged (or doesn't exist yet). */
     pendingDismiss?: boolean;
@@ -85,6 +85,8 @@
     onCancelReanchor?: () => void;
     /** Hosted receiver mode: render content/navigation but no mutations. */
     readOnly?: boolean;
+    /** Hosted reviewer may reply/resolve comments, but never apply/re-anchor. */
+    reviewerAuthoring?: boolean;
   }
 
   let {
@@ -108,6 +110,7 @@
     awaitingReanchor = false,
     onCancelReanchor,
     readOnly = false,
+    reviewerAuthoring = false,
   }: Props = $props();
 
   // ---------------------------------------------------------------------------
@@ -266,28 +269,38 @@
 
   function handleResolve(e: MouseEvent): void {
     e.stopPropagation();
-    if (readOnly) return;
+    if (readOnly && !reviewerAuthoring) return;
     if (onResolve) onResolve();
   }
 
   // --- Replies (attn-1rm) -----------------------------------------------------
   let replying = $state(false);
   let replyBody = $state('');
+  let replySubmitting = $state(false);
+  let replyError = $state('');
 
   function toggleReply(e: MouseEvent): void {
     e.stopPropagation();
-    if (readOnly) return;
+    if (readOnly && !reviewerAuthoring) return;
     replying = !replying;
     if (!replying) replyBody = '';
   }
 
-  function submitReply(): void {
-    if (readOnly) return;
+  async function submitReply(): Promise<void> {
+    if (readOnly && !reviewerAuthoring) return;
     const trimmed = replyBody.trim();
-    if (trimmed.length === 0 || !onReply) return;
-    onReply(trimmed);
-    replyBody = '';
-    replying = false;
+    if (trimmed.length === 0 || !onReply || replySubmitting) return;
+    replySubmitting = true;
+    replyError = '';
+    try {
+      await onReply(trimmed);
+      replyBody = '';
+      replying = false;
+    } catch (error) {
+      replyError = error instanceof Error ? error.message : 'Could not post reply';
+    } finally {
+      replySubmitting = false;
+    }
   }
 
   function handleReplyKeydown(e: KeyboardEvent): void {
@@ -303,7 +316,7 @@
       // Enter submits; Shift+Enter inserts a newline (attn-2aj).
       e.preventDefault();
       e.stopPropagation();
-      submitReply();
+      void submitReply();
     }
   }
 
@@ -497,13 +510,13 @@
     </p>
   {/if}
 
-  {#if !readOnly}
+  {#if !readOnly || reviewerAuthoring}
   <footer class="rmc-actions">
     {#if cardState === 'resolved'}
       <!-- Read-only resolved card (attn-42y): no action row at all. The
            rail collapses as a whole; clicking the card (or Escape)
            shrinks it back to its chip. -->
-    {:else if cardState === 'stale'}
+    {:else if cardState === 'stale' && !readOnly}
       {#if awaitingReanchor}
         <button
           type="button"
@@ -536,7 +549,7 @@
           Discard
         </button>
       {/if}
-    {:else if kind === 'suggestion'}
+    {:else if kind === 'suggestion' && !readOnly}
       <button
         type="button"
         class="rmc-btn rmc-btn-primary"
@@ -555,7 +568,7 @@
       >
         Reject
       </button>
-    {:else}
+    {:else if kind === 'comment'}
       {#if onReply}
         <button
           type="button"
@@ -568,20 +581,22 @@
           Reply
         </button>
       {/if}
-      <button
-        type="button"
-        class="rmc-btn"
-        data-action="resolve"
-        onclick={handleResolve}
-        disabled={pendingDismiss}
-      >
-        Resolve
-      </button>
+      {#if onResolve}
+        <button
+          type="button"
+          class="rmc-btn"
+          data-action="resolve"
+          onclick={handleResolve}
+          disabled={pendingDismiss}
+        >
+          Resolve
+        </button>
+      {/if}
     {/if}
   </footer>
   {/if}
 
-  {#if replying && !readOnly}
+  {#if replying && (!readOnly || reviewerAuthoring)}
     <div class="rmc-reply-composer" data-slot="review-reply-composer">
       <textarea
         bind:value={replyBody}
@@ -590,18 +605,22 @@
         rows="4"
         onkeydown={handleReplyKeydown}
         onclick={(e) => e.stopPropagation()}
+        disabled={replySubmitting}
       ></textarea>
+      {#if replyError}
+        <p class="rmc-reply-error" role="alert">{replyError}</p>
+      {/if}
       <div class="rmc-reply-actions">
-        <button type="button" class="rmc-btn" onclick={(e) => { e.stopPropagation(); replying = false; replyBody = ''; }}>
+        <button type="button" class="rmc-btn" onclick={(e) => { e.stopPropagation(); replying = false; replyBody = ''; replyError = ''; }} disabled={replySubmitting}>
           Cancel
         </button>
         <button
           type="button"
           class="rmc-btn rmc-btn-primary"
-          onclick={(e) => { e.stopPropagation(); submitReply(); }}
-          disabled={replyBody.trim().length === 0}
+          onclick={(e) => { e.stopPropagation(); void submitReply(); }}
+          disabled={replyBody.trim().length === 0 || replySubmitting}
         >
-          Send
+          {replySubmitting ? 'Sending…' : 'Send'}
         </button>
       </div>
     </div>
@@ -889,6 +908,13 @@
     border-color: var(--ring, rgba(0, 0, 0, 0.3));
     box-shadow: 0 0 0 3px
       color-mix(in oklch, var(--ring, rgba(0, 0, 0, 0.3)) 50%, transparent);
+  }
+
+  .rmc-reply-error {
+    margin: 0;
+    color: var(--color-danger, #b42318);
+    font-size: 0.75rem;
+    line-height: 1.25;
   }
 
   .rmc-reply-actions {

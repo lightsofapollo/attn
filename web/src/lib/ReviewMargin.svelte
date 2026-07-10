@@ -54,6 +54,7 @@
   import { isThreadActive } from './review/thread-visibility';
   import { reviewResolveComment, reviewCreateComment } from './ipc';
   import type {
+    Anchor,
     EventId,
     PositionAnchor,
     ResolvedAnchor,
@@ -67,10 +68,21 @@
     maxRenderedCards?: number;
     /** Hide every mutation surface while keeping thread navigation readable. */
     readOnly?: boolean;
+    /** Allow only reviewer comment reply/resolve actions in hosted mode. */
+    reviewerAuthoring?: boolean;
+    onResolveComment?: (threadId: string) => Promise<void> | void;
+    onReplyComment?: (anchor: Anchor, body: string, threadId: string) => Promise<void> | void;
   }
 
   // Default cap is 50 per the task spec / §6 performance rule.
-  let { view, maxRenderedCards = 50, readOnly = false }: Props = $props();
+  let {
+    view,
+    maxRenderedCards = 50,
+    readOnly = false,
+    reviewerAuthoring = false,
+    onResolveComment,
+    onReplyComment,
+  }: Props = $props();
 
   // ---------------------------------------------------------------------------
   // Container refs + layout state
@@ -445,11 +457,17 @@
   // `railMode` slims the rail in the same tick (attn-d7y).
   // ---------------------------------------------------------------------------
 
-  function resolveThread(threadId: string): void {
+  async function resolveThread(threadId: string): Promise<void> {
     const roomId = reviewStore.currentRoomId;
     if (!roomId) return;
-    reviewStore.dismissThreadLocally(threadId);
-    void reviewResolveComment(roomId, threadId);
+    try {
+      if (onResolveComment) await onResolveComment(threadId);
+      else await reviewResolveComment(roomId, threadId);
+      reviewStore.dismissThreadLocally(threadId);
+    } catch {
+      // The injected browser session exposes the transport error beside its
+      // outbox indicator; keep the thread visible so the user can retry.
+    }
   }
 
   // Reject is UI-only for now (no reject IPC yet — see ReviewMarginCard's
@@ -461,12 +479,13 @@
 
   // Post a reply (attn-1rm): a CommentCreated carrying the thread's existing id
   // and the root comment's anchor, so reconstructThreads groups it as a reply.
-  function replyToThread(thread: Thread, body: string): void {
+  async function replyToThread(thread: Thread, body: string): Promise<void> {
     const roomId = reviewStore.currentRoomId;
     if (!roomId) return;
     const root = thread.rootEvent.body;
     if (root.type !== 'comment_created') return; // replies only on comment threads
-    void reviewCreateComment(roomId, root.anchor, body, thread.id);
+    if (onReplyComment) await onReplyComment(root.anchor, body, thread.id);
+    else await reviewCreateComment(roomId, root.anchor, body, thread.id);
   }
 
   // ---------------------------------------------------------------------------
@@ -645,23 +664,33 @@
   // the next layout pass uses real numbers. If anything changed, bump the
   // tick to re-run layout.
   $effect(() => {
+    void visiblePlacements;
     if (!containerEl) return;
-    let dirty = false;
-    const cardEls = containerEl.querySelectorAll<HTMLElement>(
-      '[data-testid="review-margin-card"]',
-    );
-    for (const el of cardEls) {
-      const threadId = el.dataset.threadId;
-      if (!threadId) continue;
-      const h = el.offsetHeight;
-      if (h > 0 && measuredHeights.get(threadId) !== h) {
-        measuredHeights.set(threadId, h);
-        dirty = true;
+    const measure = (): void => {
+      let dirty = false;
+      const cardEls = containerEl?.querySelectorAll<HTMLElement>(
+        '[data-testid="review-margin-card"]',
+      );
+      for (const el of cardEls ?? []) {
+        const threadId = el.dataset.threadId;
+        if (!threadId) continue;
+        const h = el.offsetHeight;
+        if (h > 0 && measuredHeights.get(threadId) !== h) {
+          measuredHeights.set(threadId, h);
+          dirty = true;
+        }
       }
+      if (dirty) bumpRecalc();
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(measure);
+    for (const card of containerEl.querySelectorAll<HTMLElement>(
+      '[data-testid="review-margin-card"]',
+    )) {
+      observer.observe(card);
     }
-    if (dirty) {
-      bumpRecalc();
-    }
+    return () => observer.disconnect();
   });
 
   // Focus card on focusEventId change — scroll into view + pulse.
@@ -859,6 +888,7 @@
           <li>
             <ReviewMarginCard
               {readOnly}
+              {reviewerAuthoring}
               thread={t}
               kind={kindFor(t)}
               cardState={stateFor(t)}
@@ -870,7 +900,7 @@
               quotePreview={quotePreviewFor(t)}
               onActivate={() => activateThread(t)}
               onReject={() => dismissLocally(t.id)}
-              onResolve={() => resolveThread(t.id)}
+              onResolve={() => { void resolveThread(t.id); }}
               onReply={(body) => replyToThread(t, body)}
               pendingDismiss={locallyDismissed.has(t.id)}
               onRequestReanchor={() => handleRequestReanchor(t.rootEvent.meta.eventId)}
@@ -915,6 +945,7 @@
       <div class="review-margin-slot" style="top: {p.top}px;">
         <ReviewMarginCard
           {readOnly}
+          {reviewerAuthoring}
           thread={t}
           kind={kindFor(t)}
           cardState={stateFor(t)}
@@ -926,7 +957,7 @@
           quotePreview={quotePreviewFor(t)}
           onActivate={() => activateThread(t)}
           onReject={() => dismissLocally(t.id)}
-          onResolve={() => resolveThread(t.id)}
+          onResolve={() => { void resolveThread(t.id); }}
           onReply={(body) => replyToThread(t, body)}
           pendingDismiss={locallyDismissed.has(t.id)}
         />
@@ -939,6 +970,7 @@
       <div class="review-margin-slot" style="top: {p.top}px;">
         <ReviewMarginCard
           {readOnly}
+          {reviewerAuthoring}
           thread={t}
           kind={kindFor(t)}
           cardState={stateFor(t)}

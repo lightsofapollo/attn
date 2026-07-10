@@ -25,8 +25,12 @@ SHARE_DIR="$WORK/shared"
 DOC="$SHARE_DIR/hosted.md"
 SIBLING_DOC="$SHARE_DIR/sibling.md"
 RELAY_LOG="$WORK/relay.log"
+RELAY_STATE="$WORK/relay-state"
 WEB_LOG="$WORK/web.log"
 OWNER_LOG="$WORK/owner.log"
+COMMENT_CANARY="BROWSER-COMMENT-8127"
+REPLY_CANARY="BROWSER-REPLY-4631"
+SUGGESTION_CANARY="BROWSER-SUGGEST-9054"
 RELAY_PID=""
 WEB_PID=""
 OWNER_PID=""
@@ -54,7 +58,7 @@ wait_http() {
   return 1
 }
 
-mkdir -p "$ATTN_HOME" "$SHARE_DIR"
+mkdir -p "$ATTN_HOME" "$SHARE_DIR" "$RELAY_STATE"
 printf '# Hosted review canary\n\n- [ ] Read-only browser task\n\nCiphertext boundary marker: NARWHAL-TEAK-7429.\n\nShared by native, rendered in the hosted reviewer.\n' >"$DOC"
 printf '# Folder sibling canary\n\nSwitching files must switch decrypted document content.\n' >"$SIBLING_DOC"
 
@@ -72,6 +76,7 @@ if [ -z "${E2E_RELAY_URL:-}" ]; then
   (
     cd "$PROJECT_DIR/relay"
     exec npx wrangler dev --env staging --local --port "$RELAY_PORT" \
+      --persist-to "$RELAY_STATE" \
       --var QUOTA_ALLOW_UNATTRIBUTED_CREATES:true
   ) >"$RELAY_LOG" 2>&1 &
   RELAY_PID=$!
@@ -120,15 +125,31 @@ SECRET="${INVITE#*#key=}"
 ATTN_BROWSER_INVITE_URL="$INVITE" \
 ATTN_ROOM_SECRET_CANARY="$SECRET" \
 ATTN_EXPECTED_CANARY="NARWHAL-TEAK-7429" \
+ATTN_COMMENT_CANARY="$COMMENT_CANARY" \
+ATTN_REPLY_CANARY="$REPLY_CANARY" \
+ATTN_SUGGESTION_CANARY="$SUGGESTION_CANARY" \
+ATTN_OWNER_HOME="$ATTN_HOME" \
+ATTN_BIN="$ATTN_BIN" \
   npm --prefix "$PROJECT_DIR/web" run test:e2e:hosted
 
-if [ -z "${E2E_RELAY_URL:-}" ] && grep -Fq 'NARWHAL-TEAK-7429' "$RELAY_LOG"; then
-  echo 'hosted E2E failed: relay log contained plaintext canary' >&2
-  exit 1
-fi
-if [ -z "${E2E_RELAY_URL:-}" ] && grep -Fq -- "$SECRET" "$RELAY_LOG"; then
-  echo 'hosted E2E failed: relay log contained room secret' >&2
-  exit 1
+if [ -z "${E2E_RELAY_URL:-}" ]; then
+  for canary in \
+    'NARWHAL-TEAK-7429' \
+    "$COMMENT_CANARY" \
+    "$REPLY_CANARY" \
+    "$SUGGESTION_CANARY" \
+    'encrypted browser suggestion' \
+    "$SECRET"
+  do
+    if grep -aFq -- "$canary" "$RELAY_LOG"; then
+      echo 'hosted E2E failed: relay log contained plaintext or secret material' >&2
+      exit 1
+    fi
+    if grep -aRFq -- "$canary" "$RELAY_STATE"; then
+      echo 'hosted E2E failed: persisted relay state contained plaintext or secret material' >&2
+      exit 1
+    fi
+  done
 fi
 
 echo 'hosted review E2E passed'

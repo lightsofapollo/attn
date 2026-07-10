@@ -170,7 +170,28 @@ type Capability =
   | "publish_snapshot";
 ```
 
+Role grants are fixed for v2:
+
+- owners receive every capability;
+- human reviewers receive `read_snapshot`, `write_comment`,
+  `write_suggestion`, and `resolve_comment`;
+- agents receive `read_snapshot`, `write_comment`, and `write_suggestion`.
+
+Resolving a comment closes a review discussion without mutating the owner's
+working tree, so a human reviewer may resolve a thread. Agents cannot resolve
+threads, accept suggestions, administer rooms, or publish snapshots.
+
 The invite secret grants initial room access. After joining, the participant should create a signing keypair so events can be authenticated and replayed safely.
+
+Inbound clients MUST authorize the decrypted event body before persistence or
+UI application. They validate the device directory's Ed25519 `selfSignature`,
+keep the `(participantId, deviceId, keys, client, kind)` registration immutable,
+and derive grants from `kind` rather than trusting capabilities supplied by the
+sender. A `ParticipantJoined` event must bind its participant and device fields
+to the signing event metadata and that immutable registration, and its
+capability set must exactly match the v2 role grants above. In particular, only
+an owner registration may publish/supersede snapshots, accept/reject
+suggestions, manually re-anchor, or end the session.
 
 ### Shared Document
 

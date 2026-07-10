@@ -6,7 +6,7 @@
 //   - `browser-crypto.ts`  — HKDF + admission HMAC + AAD AEAD + signature verify.
 //   - `browser-ws.ts`      — encrypted mailbox WebSocket transport.
 //
-// The session is a thin reviewer-only surface:
+// The session is a reviewer surface with encrypted mailbox authoring:
 //   1. Parse + strip the invite fragment from `location.hash`.
 //   2. Derive `RoomKeys` and `roomId` from `roomSecret`.
 //   3. Generate an in-memory `(deviceId, signingKeyPair, encryptionKeyPair)`.
@@ -20,8 +20,7 @@
 //
 // What this module deliberately leaves out:
 //
-//   - Outbound comment / suggestion authoring. The hosted shell is explicitly
-//     read-only until browser POST `/envelopes` lands.
+//   - Owner-only mutations such as applying suggestions or publishing snapshots.
 //   - Snapshot R2 download. Mailbox snapshot blobs are rehydrated here; R2
 //     references remain unavailable until the authenticated blob fetch lands.
 //   - Reconnect cursor persistence. The WS client tracks `afterSeq` in
@@ -31,19 +30,24 @@
 //
 //   cd web && npx tsx src/lib/review/browser-session.test.ts
 
-import { ed25519 } from '@noble/curves/ed25519.js';
-import { sha256 } from '@noble/hashes/sha2.js';
-import { hmac } from '@noble/hashes/hmac.js';
+import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
   base64UrlEncode,
+  buildAdmissionHeader,
   buildAdmissionSubprotocol,
   contentHash,
   deriveRoomId,
   deriveRoomKeys,
-  signingKeyId,
   toCanonicalBytes,
   type RoomKeys,
 } from './browser-crypto';
+import { assembleBrowserEvent } from './browser-envelope';
+import {
+  BrowserOutbox,
+  type BrowserOutboxError,
+  type BrowserOutboxOptions,
+  type BrowserOutboxResponse,
+} from './browser-outbox';
 import {
   parseAndStripInviteFromUrl,
   parseInviteUrl,
@@ -66,6 +70,8 @@ import { BROWSER_POW_DIFFICULTY, mintBrowserPowInWorker } from './browser-pow';
 import { validateBrowserRelayUrl } from './browser-relay-url';
 import type {
   AnchorIndex,
+  Anchor,
+  Capability,
   DocType,
   EventId,
   EventMeta,
@@ -75,6 +81,7 @@ import type {
   ReviewSnapshot,
   SnapshotId,
   RoomId,
+  SuggestionDraft,
 } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -131,7 +138,9 @@ export interface BrowserDeviceIdentity {
   signingSecret: Uint8Array;
   /** Ed25519 public key bytes (32). */
   signingPublic: Uint8Array;
-  /** Placeholder X25519 public key (32 bytes of zeros for now). */
+  /** X25519 secret key bytes (32). Held only in JS memory. */
+  encryptionSecret: Uint8Array;
+  /** X25519 public key bytes (32). */
   publicEncryptionKey: Uint8Array;
 }
 
@@ -153,6 +162,12 @@ export interface BrowserSessionState {
   fileId: FileId | null;
   /** Tagged error, or null when status is healthy. */
   error: BrowserSessionError | null;
+  /** True only after the signed ParticipantJoined envelope is acknowledged. */
+  authoringReady: boolean;
+  /** Number of sealed event envelopes waiting for relay acknowledgement. */
+  outboxPending: number;
+  /** Last authoring transport error. Reading remains available. */
+  authoringError: string | null;
 }
 
 /**
@@ -169,6 +184,8 @@ export interface ReviewStoreSink {
   leaveRoom?(roomId: RoomId): void;
   /** Plain field write — runes proxy intercepts this in production. */
   currentRoomId: RoomId | null;
+  /** Sealed browser envelopes awaiting relay acknowledgement. */
+  pendingOutbox?: unknown[];
 }
 
 export interface BrowserSessionOptions {
@@ -197,6 +214,12 @@ export interface BrowserSessionOptions {
   reconnectMaxMs?: number;
   /** Override the PoW token (tests skip the miner). */
   powToken?: string;
+  /** Override registration PoW minting (tests assert authenticated policy use). */
+  registrationMintPow?: BrowserOutboxOptions['mintPow'];
+  /** Override browser outbox PoW minting independently from registration. */
+  outboxMintPow?: BrowserOutboxOptions['mintPow'];
+  /** Human-readable encrypted ParticipantJoined display name. */
+  displayName?: string;
   /** Inject a pre-built identity (tests want deterministic keys). */
   identity?: BrowserDeviceIdentity;
   /** Optional state observer — called on every state mutation. */
@@ -214,12 +237,14 @@ export interface FetchLikeInit {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+  signal?: AbortSignal;
 }
 
 export interface FetchLikeResponse {
   status: number;
   /** Read the body as text. */
   text(): Promise<string>;
+  headers?: { get(name: string): string | null };
 }
 
 // ---------------------------------------------------------------------------
@@ -240,16 +265,15 @@ export function generateBrowserIdentity(): BrowserDeviceIdentity {
   crypto.getRandomValues(idBytes);
   const partBytes = new Uint8Array(16);
   crypto.getRandomValues(partBytes);
+  const encryption = x25519.keygen();
 
   return {
     deviceId: 'br-' + base64UrlEncode(idBytes),
     participantId: 'br-' + base64UrlEncode(partBytes),
     signingSecret: secretKey,
     signingPublic: publicKey,
-    // Placeholder for X25519 — browser-side encrypted DataChannel is out of
-    // scope for 9.4. Spec only requires a publicEncryptionKey field for
-    // `POST /devices`; the relay does not verify it for `kind="reviewer"`.
-    publicEncryptionKey: new Uint8Array(32),
+    encryptionSecret: encryption.secretKey,
+    publicEncryptionKey: encryption.publicKey,
   };
 }
 
@@ -318,27 +342,7 @@ export function admissionHeaderValue(
   urlPath: string,
   body: Uint8Array,
 ): string {
-  // Canonical request bytes: METHOD || "\n" || PATH || "\n" || "" || "\n" || SHA-256(body)
-  const bodyHash = sha256(body);
-  const enc = new TextEncoder();
-  const m = enc.encode(method.toUpperCase());
-  const p = enc.encode(urlPath);
-  const canon = new Uint8Array(m.length + 1 + p.length + 1 + 1 + bodyHash.length);
-  let off = 0;
-  canon.set(m, off);
-  off += m.length;
-  canon[off++] = 0x0a;
-  canon.set(p, off);
-  off += p.length;
-  canon[off++] = 0x0a;
-  // Empty query line
-  canon[off++] = 0x0a;
-  canon.set(bodyHash, off);
-  // Use hmac-sha256 via the same noble path as buildAdmissionSubprotocol.
-  // The shape is identical to the WS subprotocol HMAC (just packaged in an
-  // HTTP header rather than a comma-separated subprotocol token).
-  const tag = hmac(sha256, admissionKey, canon);
-  return `v2.${base64UrlEncode(tag)}`;
+  return buildAdmissionHeader(admissionKey, method, urlPath, body);
 }
 
 // ---------------------------------------------------------------------------
@@ -358,12 +362,20 @@ export class BrowserSession {
     snapshotId: null,
     fileId: null,
     error: null,
+    authoringReady: false,
+    outboxPending: 0,
+    authoringError: null,
   };
   private identity: BrowserDeviceIdentity | null = null;
   private wsClient: BrowserWsClient | null = null;
   private keys: RoomKeys | null = null;
   private store: ReviewStoreSink | null;
   private powAbortController: AbortController | null = null;
+  private outbox: BrowserOutbox | null = null;
+  private joinEnvelopeId: string | null = null;
+  private lastCreatedAt = 0;
+  private roomPolicy: RoomPolicy | null = null;
+  private bootstrapDevices: Device[] = [];
   private readonly snapshotBlobs = new Map<string, CachedSnapshotBlob>();
   private readonly invalidSnapshotBlobIds = new Set<string>();
   private readonly pendingSnapshots = new Map<string, PendingSnapshot[]>();
@@ -394,6 +406,45 @@ export class BrowserSession {
   /** Current state snapshot — UI binds against this. */
   getState(): BrowserSessionState {
     return this.state;
+  }
+
+  async createComment(anchor: Anchor, body: string, threadId?: string): Promise<ReviewEvent> {
+    const text = body.trim();
+    if (text.length === 0) throw new Error('comment body cannot be empty');
+    return this.authorEvent({
+      type: 'comment_created',
+      threadId: threadId ?? randomOpaqueId(),
+      anchor,
+      body: text,
+    });
+  }
+
+  async replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent> {
+    return this.createComment(anchor, body, threadId);
+  }
+
+  async resolveComment(threadId: string): Promise<ReviewEvent> {
+    if (threadId.length === 0) throw new Error('threadId cannot be empty');
+    const identity = this.requireIdentity();
+    return this.authorEvent({
+      type: 'comment_resolved',
+      threadId,
+      resolvedBy: identity.participantId,
+    });
+  }
+
+  async createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent> {
+    return this.authorEvent({
+      type: 'suggestion_created',
+      suggestionId: randomOpaqueId(),
+      anchor: draft.anchor,
+      operation: draft.operation,
+      ...(draft.note === undefined || draft.note.length === 0 ? {} : { note: draft.note }),
+    });
+  }
+
+  async retryOutbox(): Promise<void> {
+    await this.outbox?.flushNow();
   }
 
   /**
@@ -460,10 +511,14 @@ export class BrowserSession {
     // 3. Identity (injected or freshly generated).
     this.identity = this.opts.identity ?? generateBrowserIdentity();
 
-    // 4. POST /devices.
+    // 4. Fetch the authenticated policy before mining registration PoW. Room
+    // policy may require more than the protocol floor of 12 bits.
     this.setState({ status: 'registering_device' });
     try {
-      await this.registerDevice(invite.roomId, roomKeys);
+      const bootstrap = await this.fetchRoomBootstrap(invite.roomId, roomKeys);
+      this.roomPolicy = bootstrap.policy;
+      this.bootstrapDevices = bootstrap.devices;
+      await this.registerDevice(invite.roomId, roomKeys, bootstrap.policy.powBits);
     } catch (err) {
       if (this.isTerminated()) return;
       const m = err instanceof Error ? err.message : String(err);
@@ -492,6 +547,9 @@ export class BrowserSession {
       snapshotContent: null,
       snapshotId: null,
       fileId: null,
+      authoringReady: false,
+      outboxPending: 0,
+      authoringError: null,
     });
   }
 
@@ -508,6 +566,151 @@ export class BrowserSession {
     return this.state.status === 'terminated';
   }
 
+  private requireIdentity(): BrowserDeviceIdentity {
+    if (!this.identity) throw new Error('browser identity is unavailable');
+    return this.identity;
+  }
+
+  private nextCreatedAt(): number {
+    const now = Date.now();
+    const createdAt = Math.max(now, this.lastCreatedAt + 1);
+    if (!Number.isSafeInteger(createdAt)) throw new Error('authoring clock is outside safe range');
+    if (this.roomPolicy && createdAt > this.roomPolicy.expiresAt) {
+      throw new Error('review room has expired');
+    }
+    this.lastCreatedAt = createdAt;
+    return createdAt;
+  }
+
+  private async authorEvent(body: ReviewEventBody): Promise<ReviewEvent> {
+    if (!this.state.authoringReady) {
+      throw new Error('encrypted authoring is not ready yet');
+    }
+    return this.enqueueEvent(body);
+  }
+
+  private async enqueueEvent(body: ReviewEventBody): Promise<ReviewEvent> {
+    const identity = this.requireIdentity();
+    const keys = this.keys;
+    const policy = this.roomPolicy;
+    const outbox = this.outbox;
+    const roomId = this.state.roomId;
+    if (!keys || !policy || !outbox || !roomId) throw new Error('browser session is unavailable');
+    const assembled = assembleBrowserEvent({
+      eventKey: keys.eventKey,
+      signingSecret: identity.signingSecret,
+      signingPublic: identity.signingPublic,
+      roomId,
+      authorId: identity.participantId,
+      deviceId: identity.deviceId,
+      createdAt: this.nextCreatedAt(),
+      expiresAt: policy.expiresAt,
+      body,
+    });
+    outbox.enqueue(assembled.envelope);
+    const store = await this.ensureStore();
+    store.applyEvent(assembled.event);
+    void outbox.flushNow().catch(() => undefined);
+    return assembled.event;
+  }
+
+  private async initializeAuthoring(policy: RoomPolicy): Promise<void> {
+    this.roomPolicy = policy;
+    if (this.outbox) {
+      try {
+        this.outbox.updatePolicy({
+          powBits: policy.powBits,
+          maxEventBytes: policy.maxEventBytes,
+        });
+      } catch (error) {
+        this.setState({
+          authoringReady: false,
+          authoringError: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+      void this.outbox.flushNow().catch(() => undefined);
+      return;
+    }
+    const keys = this.keys;
+    const identity = this.identity;
+    const roomId = this.state.roomId;
+    if (!keys || !identity || !roomId || policy.expiresAt <= Date.now()) {
+      this.setState({ authoringError: 'This review room is no longer writable.' });
+      return;
+    }
+    const relayUrl = validateBrowserRelayUrl(this.opts.relayUrl);
+    const mintPow =
+      this.opts.outboxMintPow ??
+      (this.opts.powToken === undefined ? undefined : async () => this.opts.powToken!);
+    this.outbox = new BrowserOutbox({
+      relayUrl,
+      roomId,
+      deviceId: identity.deviceId,
+      admissionKey: keys.admissionKey,
+      powBits: policy.powBits,
+      maxEventBytes: policy.maxEventBytes,
+      fetchImpl: async (url, init): Promise<BrowserOutboxResponse> =>
+        this.fetchImpl()(url, init),
+      ...(mintPow === undefined ? {} : { mintPow }),
+      onlineTarget: this.pagehideTarget ?? undefined,
+      onState: (outboxState) => {
+        if (this.store) this.store.pendingOutbox = Array.from(this.outbox?.pendingEnvelopes() ?? []);
+        this.setState({
+          outboxPending: outboxState.pendingCount,
+          authoringError: outboxState.lastError,
+        });
+        if (this.joinEnvelopeId && outboxState.pendingCount === 0) {
+          this.joinEnvelopeId = null;
+          this.setState({ authoringReady: true, authoringError: null });
+        }
+      },
+      onTerminal: (error) => this.handleOutboxTerminal(error),
+    });
+
+    const createdAt = this.nextCreatedAt();
+    const capabilities: Capability[] = [
+      'read_snapshot',
+      'write_comment',
+      'write_suggestion',
+      'resolve_comment',
+    ];
+    const joined: ReviewEventBody = {
+      type: 'participant_joined',
+      participant: {
+        participantId: identity.participantId,
+        displayName: this.opts.displayName?.trim() || 'Browser reviewer',
+        kind: 'reviewer',
+        publicSigningKey: base64UrlEncode(identity.signingPublic),
+        capabilities,
+      },
+      device: {
+        deviceId: identity.deviceId,
+        participantId: identity.participantId,
+        publicEncryptionKey: base64UrlEncode(identity.publicEncryptionKey),
+        publicSigningKey: base64UrlEncode(identity.signingPublic),
+        client: 'attn-browser',
+        createdAt,
+      },
+    };
+    const assembled = assembleBrowserEvent({
+      eventKey: keys.eventKey,
+      signingSecret: identity.signingSecret,
+      signingPublic: identity.signingPublic,
+      roomId,
+      authorId: identity.participantId,
+      deviceId: identity.deviceId,
+      createdAt,
+      expiresAt: policy.expiresAt,
+      body: joined,
+    });
+    this.joinEnvelopeId = assembled.envelope.envelopeId;
+    this.outbox.enqueue(assembled.envelope);
+    const store = await this.ensureStore();
+    store.applyEvent(assembled.event);
+    void this.outbox.flushNow().catch(() => undefined);
+  }
+
   private fail(kind: BrowserSessionError['kind'], message: string): void {
     this.detachPagehide();
     this.stopTransport();
@@ -522,6 +725,9 @@ export class BrowserSession {
       snapshotContent: null,
       snapshotId: null,
       fileId: null,
+      authoringReady: false,
+      outboxPending: 0,
+      authoringError: null,
       error: { kind, message },
     });
   }
@@ -543,6 +749,11 @@ export class BrowserSession {
   }
 
   private stopTransport(): void {
+    this.outbox?.close();
+    this.outbox = null;
+    this.joinEnvelopeId = null;
+    this.roomPolicy = null;
+    this.bootstrapDevices = [];
     this.powAbortController?.abort();
     this.powAbortController = null;
     if (!this.wsClient) return;
@@ -566,12 +777,38 @@ export class BrowserSession {
     if (this.identity) {
       zero(this.identity.signingSecret);
       zero(this.identity.signingPublic);
+      zero(this.identity.encryptionSecret);
       zero(this.identity.publicEncryptionKey);
       this.identity = null;
     }
   }
 
-  private async registerDevice(roomId: string, keys: RoomKeys): Promise<void> {
+  private async fetchRoomBootstrap(
+    roomId: string,
+    keys: RoomKeys,
+  ): Promise<{ policy: RoomPolicy; devices: Device[] }> {
+    const path = `/v2/rooms/${roomId}/devices`;
+    const relay = validateBrowserRelayUrl(this.opts.relayUrl);
+    const admission = admissionHeaderValue(keys.admissionKey, 'GET', path, new Uint8Array());
+    const response = await this.fetchImpl()(`${relay}${path}`, {
+      method: 'GET',
+      headers: { 'Attn-Admission': admission },
+    });
+    const raw = await response.text();
+    if (response.status !== 200) {
+      throw new Error(`GET /devices failed: status=${response.status} body=${raw.slice(0, 200)}`);
+    }
+    const parsed = JSON.parse(raw) as { policy?: RoomPolicy; devices?: Device[] };
+    if (!parsed.policy || !Array.isArray(parsed.devices)) {
+      throw new Error('GET /devices omitted authenticated room policy or device directory');
+    }
+    if (!Number.isInteger(parsed.policy.powBits) || parsed.policy.powBits < 12 || parsed.policy.powBits > 24) {
+      throw new Error('GET /devices returned invalid policy powBits');
+    }
+    return { policy: parsed.policy, devices: parsed.devices };
+  }
+
+  private async registerDevice(roomId: string, keys: RoomKeys, powBits: number): Promise<void> {
     if (!this.identity) throw new Error('identity missing');
     const body = buildRegisterDeviceBody(this.identity);
     const bodyJson = JSON.stringify(body);
@@ -581,18 +818,18 @@ export class BrowserSession {
     const relay = validateBrowserRelayUrl(this.opts.relayUrl);
     const url = `${relay}${path}`;
     this.powAbortController = new AbortController();
+    const powInput = {
+      roomId,
+      deviceId: this.identity.deviceId,
+      method: 'POST' as const,
+      path,
+      difficulty: Math.max(BROWSER_POW_DIFFICULTY, powBits),
+    };
     const pow =
       this.opts.powToken ??
-      (await mintBrowserPowInWorker(
-        {
-          roomId,
-          deviceId: this.identity.deviceId,
-          method: 'POST',
-          path,
-          difficulty: BROWSER_POW_DIFFICULTY,
-        },
-        { signal: this.powAbortController.signal },
-      ));
+      (this.opts.registrationMintPow
+        ? await this.opts.registrationMintPow(powInput, this.powAbortController.signal)
+        : await mintBrowserPowInWorker(powInput, { signal: this.powAbortController.signal }));
     this.powAbortController = null;
     const headers: Record<string, string> = {
       'content-type': 'application/json; charset=utf-8',
@@ -631,12 +868,16 @@ export class BrowserSession {
       eventKey: keys.eventKey,
       snapshotKey: keys.snapshotKey,
       signalingKey: keys.signalingKey,
+      initialDevices: new Map(
+        this.bootstrapDevices.map((device, index) => [`bootstrap-${index}`, device]),
+      ),
       webSocketFactory: this.opts.webSocketFactory,
       reconnectInitialMs: this.opts.reconnectInitialMs,
       reconnectMaxMs: this.opts.reconnectMaxMs,
       callbacks: {
-        onHello: () => {
+        onHello: (frame) => {
           this.setState({ status: 'connected' });
+          void this.initializeAuthoring(frame.policy);
         },
         onEnvelope: (decoded) => this.handleEnvelope(decoded),
         onUnknownSigner: (envelope, serverSeq) => {
@@ -645,6 +886,10 @@ export class BrowserSession {
         onTerminal: (err) => this.handleTerminal(err),
         onError: (_code, _msg) => {
           // Non-fatal — keep status as-is. Could surface as a toast later.
+        },
+        onPolicyChanged: (policy) => {
+          this.roomPolicy = policy;
+          void this.initializeAuthoring(policy);
         },
       },
     });
@@ -707,7 +952,7 @@ export class BrowserSession {
   private async handleEnvelopeAsync(decoded: DecodedEnvelope): Promise<void> {
     const { envelope, plaintext } = decoded;
     if (envelope.kind === 'event') {
-      let parsed: { meta?: EventMeta; body?: ReviewEventBody };
+      let parsed: { meta?: EventMeta; body?: ReviewEventBody; auth?: ReviewEvent['auth'] };
       try {
         parsed = JSON.parse(new TextDecoder().decode(plaintext));
       } catch {
@@ -717,15 +962,12 @@ export class BrowserSession {
       }
       const meta = parsed.meta;
       const body = parsed.body;
-      if (!meta || !body) return;
-      // Build a minimal ReviewEvent (auth omitted from the local store copy —
-      // the WS client already verified the signature before dispatch).
+      const auth = parsed.auth;
+      if (!meta || !body || !auth) return;
       const event: ReviewEvent = {
         meta: meta as EventMeta,
         body: body as ReviewEventBody,
-        // `auth` is required by the type. We synthesize a placeholder; the
-        // store doesn't read it but TS does.
-        auth: { signature: '', signingKeyId: '' },
+        auth,
       };
       const store = await this.ensureStore();
       // Snapshot path — surface markdown for the editor + populate
@@ -871,6 +1113,23 @@ export class BrowserSession {
     }
     this.fail(kind, err.message);
   }
+
+  private handleOutboxTerminal(err: BrowserOutboxError): void {
+    const code = err.code.toUpperCase();
+    if (code.includes('ADMISSION') || code.includes('UNAUTHORIZED')) {
+      queueMicrotask(() => this.fail('admission_rejected', err.message));
+      return;
+    }
+    if (code.includes('NOT_FOUND') || code.includes('DELETED')) {
+      queueMicrotask(() => this.fail('room_deleted', err.message));
+      return;
+    }
+    if (code.includes('EXPIRED')) {
+      queueMicrotask(() => this.fail('room_expired', err.message));
+      return;
+    }
+    this.setState({ authoringReady: false, authoringError: err.message });
+  }
 }
 
 interface SnapshotPlaintext {
@@ -915,6 +1174,12 @@ function parseSnapshotPlaintext(bytes: Uint8Array): SnapshotPlaintext | null {
       ? {}
       : { anchorIndex: candidate.anchorIndex as AnchorIndex }),
   };
+}
+
+function randomOpaqueId(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return base64UrlEncode(bytes);
 }
 
 // Re-exports so the entry point and tests have one import location.

@@ -211,6 +211,11 @@ impl WranglerHandle {
             .arg("127.0.0.1")
             .arg("--port")
             .arg(port.to_string())
+            // Local conformance clients have no edge-derived source
+            // attribution. Production keeps this fail-closed; the isolated
+            // Miniflare process must explicitly allow test room creation.
+            .arg("--var")
+            .arg("QUOTA_ALLOW_UNATTRIBUTED_CREATES:true")
             .current_dir(&relay)
             // wrangler scrapes the terminal width from stderr to decide
             // whether to spew its dashboard — piping both to null keeps the

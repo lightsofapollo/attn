@@ -118,6 +118,26 @@ pub enum SignalingPayload {
     Collab { from: DeviceId, payload: String },
 }
 
+impl SignalingPayload {
+    /// AAD-bound outer device id must match this inner sender before routing.
+    pub fn from(&self) -> &DeviceId {
+        match self {
+            Self::Offer { from, .. }
+            | Self::Answer { from, .. }
+            | Self::Ice { from, .. }
+            | Self::RequestSnapshot { from, .. }
+            | Self::Collab { from, .. } => from,
+        }
+    }
+
+    pub fn is_webrtc_control(&self) -> bool {
+        matches!(
+            self,
+            Self::Offer { .. } | Self::Answer { .. } | Self::Ice { .. }
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Assemble / disassemble
 // ---------------------------------------------------------------------------
@@ -173,8 +193,8 @@ pub fn assemble_signal_envelope(
     //
     //         Note: target_device_id is NOT part of the AAD (matching the
     //         crypto-spec.md §Envelope Encryption AAD shape). Receivers
-    //         validate origin via the signed `from` field inside the
-    //         plaintext payload instead.
+    //         cross-check the AEAD-protected `from` field against the
+    //         AAD-bound outer device id after decrypt.
     let aad = EnvelopeAad {
         v: 2,
         room_id: room_id.as_str().to_string(),

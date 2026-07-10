@@ -29,8 +29,8 @@ use crate::review::crypto::signing::DeviceSigningKey;
 use crate::review::envelope::{AssembleInput, assemble_event_envelope};
 use crate::review::ids::{DeviceId, EventId, FileId, ParticipantId, RoomId, SnapshotId};
 use crate::review::model::{
-    Anchor, EnvelopeKind, MailboxEnvelope, PositionAnchor, ResolvedAnchor, ReviewEventBody,
-    RoomMode, SuggestionDraft,
+    Anchor, DeviceClient, EnvelopeKind, MailboxEnvelope, PositionAnchor, ResolvedAnchor,
+    ReviewEventBody, RoomMode, SuggestionDraft,
 };
 use crate::review::store::ReviewStore;
 use crate::review::transport::inbound::{AuthorizationCache, VerifyingKeyCache};
@@ -38,6 +38,10 @@ use crate::review::transport::selector::{self, RoomTransports, TransportConfig, 
 use crate::review::transport::signaling::{SignalingPayload, assemble_signal_envelope};
 use crate::review::transport::{EnvelopeAck, TransportError};
 use crate::review::working_copy::WorkingCopyService;
+
+fn device_supports_webrtc(client: DeviceClient) -> bool {
+    matches!(client, DeviceClient::AttnNative | DeviceClient::AttnBrowser)
+}
 
 // ---------------------------------------------------------------------------
 // Command + Update types
@@ -1744,17 +1748,18 @@ impl ReviewManager {
             // into the manager's live_webrtc map for send_collab's fan-out.
             let mut transports: HashMap<crate::review::ids::DeviceId, Arc<WebRtcTransport>> =
                 HashMap::new();
-            // Only native devices can negotiate the current WebRTC data plane.
-            // Hosted browsers stay on the encrypted mailbox until attn-egi.4
-            // lands browser signaling/ICE; trying to build a native transport
-            // on their Presence::Join blocks this event loop and starves the
-            // mailbox EventImported updates that make browser comments render.
+            // Native and hosted-browser devices share the same encrypted
+            // signaling/DataChannel wire. Agent CLI devices remain mailbox-only.
             let mut webrtc_eligible_peers: std::collections::HashSet<crate::review::ids::DeviceId> =
                 std::collections::HashSet::new();
             // Device registration is immutable for a room, while online
             // membership is not. Preserve the native classification across a
             // leave so a later Presence::Join can rebuild its transport.
-            let mut known_native_peers: std::collections::HashSet<crate::review::ids::DeviceId> =
+            let mut known_webrtc_peers: std::collections::HashSet<crate::review::ids::DeviceId> =
+                std::collections::HashSet::new();
+            let mut known_webrtc_clients: HashMap<crate::review::ids::DeviceId, DeviceClient> =
+                HashMap::new();
+            let mut online_peers: std::collections::HashSet<crate::review::ids::DeviceId> =
                 std::collections::HashSet::new();
             // Non-self peer count, kept current from Hello (absolute) + Presence
             // (delta). The mesh is "complete" when transports.len() == peer_count.
@@ -1763,19 +1768,29 @@ impl ReviewManager {
             while let Some(event) = events_rx.recv().await {
                 // Maintain the peer count + mirror it into the live map.
                 match &event {
-                    TransportEvent::Hello { devices, .. } => {
-                        known_native_peers = devices
+                    TransportEvent::Hello {
+                        devices,
+                        online_device_ids,
+                        ..
+                    } => {
+                        known_webrtc_clients = devices
                             .iter()
                             .filter(|d| {
                                 d.device_id.as_str() != self_device_id
-                                    && matches!(
-                                        d.client,
-                                        crate::review::model::DeviceClient::AttnNative
-                                    )
+                                    && device_supports_webrtc(d.client)
                             })
-                            .map(|d| d.device_id.clone())
+                            .map(|d| (d.device_id.clone(), d.client))
                             .collect();
-                        webrtc_eligible_peers = known_native_peers.clone();
+                        known_webrtc_peers = known_webrtc_clients.keys().cloned().collect();
+                        online_peers = online_device_ids
+                            .iter()
+                            .filter(|device_id| device_id.as_str() != self_device_id)
+                            .cloned()
+                            .collect();
+                        webrtc_eligible_peers = known_webrtc_peers
+                            .intersection(&online_peers)
+                            .cloned()
+                            .collect();
                         peer_count = webrtc_eligible_peers.len();
                     }
                     TransportEvent::EventImported { event, .. } => {
@@ -1784,13 +1799,13 @@ impl ReviewManager {
                             ..
                         } = &event.body
                             && device.device_id.as_str() != self_device_id
-                            && matches!(
-                                device.client,
-                                crate::review::model::DeviceClient::AttnNative
-                            )
+                            && device_supports_webrtc(device.client)
                         {
-                            known_native_peers.insert(device.device_id.clone());
-                            webrtc_eligible_peers.insert(device.device_id.clone());
+                            known_webrtc_peers.insert(device.device_id.clone());
+                            known_webrtc_clients.insert(device.device_id.clone(), device.client);
+                            if online_peers.contains(&device.device_id) {
+                                webrtc_eligible_peers.insert(device.device_id.clone());
+                            }
                             peer_count = webrtc_eligible_peers.len();
                         }
                     }
@@ -1799,6 +1814,7 @@ impl ReviewManager {
                         device_id: peer,
                         ..
                     } if peer.as_str() != self_device_id => {
+                        online_peers.remove(peer);
                         webrtc_eligible_peers.remove(peer);
                         peer_count = webrtc_eligible_peers.len();
                     }
@@ -1806,11 +1822,37 @@ impl ReviewManager {
                         event: PresenceEvent::Join,
                         device_id: peer,
                         ..
-                    } if peer.as_str() != self_device_id && known_native_peers.contains(peer) => {
-                        webrtc_eligible_peers.insert(peer.clone());
+                    } if peer.as_str() != self_device_id => {
+                        online_peers.insert(peer.clone());
+                        if known_webrtc_peers.contains(peer) {
+                            webrtc_eligible_peers.insert(peer.clone());
+                        }
                         peer_count = webrtc_eligible_peers.len();
                     }
                     _ => {}
+                }
+                let stale_peers: Vec<_> = match &event {
+                    TransportEvent::Hello { .. } => transports
+                        .keys()
+                        .filter(|peer| !webrtc_eligible_peers.contains(*peer))
+                        .cloned()
+                        .collect(),
+                    TransportEvent::Presence {
+                        event: PresenceEvent::Leave,
+                        device_id: peer,
+                        ..
+                    } => vec![peer.clone()],
+                    _ => Vec::new(),
+                };
+                for peer in stale_peers {
+                    if let Some(transport) = transports.remove(&peer) {
+                        let _ = transport.close().await;
+                        if let Ok(mut map) = webrtc_live_map.lock()
+                            && let Some(live) = map.get_mut(&webrtc_room_id)
+                        {
+                            live.transports.remove(&peer);
+                        }
+                    }
                 }
                 if let Ok(mut map) = webrtc_live_map.lock()
                     && let Some(live) = map.get_mut(&webrtc_room_id)
@@ -1823,15 +1865,17 @@ impl ReviewManager {
                 // an inbound signal → its sender (and we only answer, not offer).
                 let (peers_to_build, may_offer): (Vec<crate::review::ids::DeviceId>, bool) =
                     match &event {
-                        TransportEvent::Hello { devices, .. } => (
+                        TransportEvent::Hello {
+                            devices,
+                            online_device_ids,
+                            ..
+                        } => (
                             devices
                                 .iter()
                                 .filter(|d| {
                                     d.device_id.as_str() != self_device_id
-                                        && matches!(
-                                            d.client,
-                                            crate::review::model::DeviceClient::AttnNative
-                                        )
+                                        && device_supports_webrtc(d.client)
+                                        && online_device_ids.contains(&d.device_id)
                                 })
                                 .map(|d| d.device_id.clone())
                                 .collect(),
@@ -1843,10 +1887,8 @@ impl ReviewManager {
                                     device,
                                     ..
                                 } if device.device_id.as_str() != self_device_id
-                                    && matches!(
-                                        device.client,
-                                        crate::review::model::DeviceClient::AttnNative
-                                    ) =>
+                                    && device_supports_webrtc(device.client)
+                                    && online_peers.contains(&device.device_id) =>
                                 {
                                     Some(device.device_id.clone())
                                 }
@@ -1859,7 +1901,7 @@ impl ReviewManager {
                             device_id: peer,
                             ..
                         } if peer.as_str() != self_device_id
-                            && known_native_peers.contains(peer) =>
+                            && known_webrtc_peers.contains(peer) =>
                         {
                             (vec![peer.clone()], true)
                         }
@@ -1871,9 +1913,12 @@ impl ReviewManager {
                                 _ => None,
                             };
                             (
-                                from.filter(|d| d.as_str() != self_device_id)
-                                    .into_iter()
-                                    .collect(),
+                                from.filter(|d| {
+                                    d.as_str() != self_device_id
+                                        && webrtc_eligible_peers.contains(d)
+                                })
+                                .into_iter()
+                                .collect(),
                                 false,
                             )
                         }
@@ -1907,6 +1952,15 @@ impl ReviewManager {
                         event_key: webrtc_event_key,
                         snapshot_key: webrtc_snapshot_key,
                         signaling_key: webrtc_signaling_key,
+                        // The browser is the designated offerer for
+                        // native-browser pairs, including ICE restarts.
+                        // Keeping native passive avoids glare and prevents an
+                        // unsignaled native restart offer from replacing the
+                        // active local description.
+                        allow_local_ice_restart: !matches!(
+                            known_webrtc_clients.get(&remote),
+                            Some(DeviceClient::AttnBrowser)
+                        ),
                         stun_servers: Vec::new(),
                     });
                     match WebRtcTransport::new(
@@ -1996,9 +2050,14 @@ impl ReviewManager {
                                     }
                                 }
                             });
-                            // Deterministic initiator tie-break: the smaller
-                            // deviceId offers, the other answers (glare-free).
+                            // Cross-client rule: browser offers to native for
+                            // reliable Chromium↔webrtc-rs DTLS setup. Native
+                            // pairs retain the lexical glare-free tie-break.
                             if may_offer
+                                && !matches!(
+                                    known_webrtc_clients.get(&remote),
+                                    Some(DeviceClient::AttnBrowser)
+                                )
                                 && webrtc_local_device.as_str() < remote.as_str()
                                 && let Err(err) = transport.create_offer().await
                             {
@@ -3066,7 +3125,11 @@ fn forward_transport_event(
             // ReviewUpdate variant in the snapshot pipeline; today they
             // just persist via the InboundPipeline.
         }
-        TransportEvent::Hello { devices, .. } => {
+        TransportEvent::Hello {
+            devices,
+            online_device_ids,
+            ..
+        } => {
             // A Hello means our relay socket subscribed — we're live on the
             // mailbox transport. Surface that to the connection badge first.
             (update_tx)(ReviewUpdate::ConnectionChanged {
@@ -3077,7 +3140,10 @@ fn forward_transport_event(
             // peer list with everyone the relay reports, minus ourselves.
             let peers = devices
                 .iter()
-                .filter(|d| d.device_id.as_str() != self_device_id)
+                .filter(|d| {
+                    d.device_id.as_str() != self_device_id
+                        && online_device_ids.contains(&d.device_id)
+                })
                 .map(|d| peer_presence_from_device(d, owner_participant_id))
                 .collect::<Vec<_>>();
             (update_tx)(ReviewUpdate::PresenceChanged {
@@ -3253,6 +3319,13 @@ mod tests {
     use tempfile::TempDir;
 
     // --- attn-7qv: per-peer collab routing decision -------------------------
+
+    #[test]
+    fn webrtc_eligibility_includes_native_and_browser_but_not_agents() {
+        assert!(device_supports_webrtc(DeviceClient::AttnNative));
+        assert!(device_supports_webrtc(DeviceClient::AttnBrowser));
+        assert!(!device_supports_webrtc(DeviceClient::AgentCli));
+    }
 
     #[test]
     fn collab_routing_complete_mesh_sends_channels_only_no_relay() {

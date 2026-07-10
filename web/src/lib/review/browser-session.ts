@@ -75,6 +75,15 @@ import {
 import { BROWSER_POW_DIFFICULTY, mintBrowserPowInWorker } from './browser-pow';
 import { validateBrowserRelayUrl } from './browser-relay-url';
 import { resolveBrowserR2Snapshot } from './browser-snapshot-r2';
+import {
+  assembleBrowserSignal,
+  parseBrowserSignalingPayload,
+  type BrowserSignalingPayload,
+} from './browser-signaling';
+import {
+  BrowserPeerMesh,
+  type BrowserDirectState,
+} from './browser-webrtc';
 import type {
   AnchorIndex,
   Anchor,
@@ -158,6 +167,10 @@ export interface BrowserDeviceIdentity {
  */
 export interface BrowserSessionState {
   status: BrowserSessionStatus;
+  /** Honest hybrid transport state; mailbox remains durable in every online state. */
+  connection: BrowserDirectState | 'offline';
+  /** Opaque diagnostic for direct setup only; never contains SDP or ICE. */
+  directError: string | null;
   /** Non-null once the invite has been parsed (and stripped). */
   roomId: RoomId | null;
   /** Raw document source recovered from the latest SnapshotCreated. */
@@ -225,6 +238,12 @@ export interface BrowserSessionOptions {
   r2FetchImpl?: (input: string, init: RequestInit) => Promise<Response>;
   /** Override the WebSocket factory (used by tests with Node `ws`). */
   webSocketFactory?: (url: string, protocols: string | string[]) => WebSocketLike;
+  /** WebRTC factory/test seam. Production uses the browser constructor. */
+  peerConnectionFactory?: (configuration: RTCConfiguration) => RTCPeerConnection;
+  /** Optional STUN-only override. TURN/TURNS values are rejected. */
+  stunServers?: string[];
+  /** Explicitly disable the opportunistic direct path. */
+  disableWebRtc?: boolean;
   /** Override reconnect timing — tests want fast retries. */
   reconnectInitialMs?: number;
   reconnectMaxMs?: number;
@@ -378,6 +397,8 @@ export class BrowserSession {
   private readonly opts: BrowserSessionOptions;
   private state: BrowserSessionState = {
     status: 'idle',
+    connection: 'offline',
+    directError: null,
     roomId: null,
     snapshotContent: null,
     snapshotDocType: 'markdown',
@@ -396,10 +417,12 @@ export class BrowserSession {
   private store: ReviewStoreSink | null;
   private powAbortController: AbortController | null = null;
   private outbox: BrowserOutbox | null = null;
+  private peerMesh: BrowserPeerMesh | null = null;
   private joinEnvelopeId: string | null = null;
   private lastCreatedAt = 0;
   private roomPolicy: RoomPolicy | null = null;
   private bootstrapDevices: Device[] = [];
+  private readonly onlineDeviceIds = new Set<string>();
   private storage: BrowserStorage | null;
   private persistedCursor = 0;
   private localAttestationRestored = false;
@@ -409,8 +432,11 @@ export class BrowserSession {
   private readonly invalidSnapshotBlobIds = new Set<string>();
   private readonly pendingSnapshots = new Map<string, PendingSnapshot[]>();
   private readonly signerRefreshAttempts = new Set<string>();
+  private readonly dispatchedEnvelopeIds = new Set<string>();
+  private readonly pendingSignals: BrowserSignalingPayload[] = [];
   private readonly pagehideTarget: BrowserWindowLike | null;
   private readonly pagehideHandler = (): void => this.close();
+  private transportGeneration = 0;
 
   constructor(opts: BrowserSessionOptions = {}) {
     this.opts = opts;
@@ -491,6 +517,7 @@ export class BrowserSession {
     this.setState({
       roomId: roomId as RoomId,
       status: 'connecting',
+      connection: 'offline',
       persistence: room.storagePersisted ? 'remembered' : 'degraded',
       storagePersisted: room.storagePersisted,
     });
@@ -505,9 +532,13 @@ export class BrowserSession {
     ]);
     const replayById = new Map<string, { envelope: MailboxEnvelope; serverSeq: number }>();
     for (const item of [...inbound, ...history]) {
+      // SDP/ICE/collab is negotiation-generation scoped. Never resurrect
+      // sealed signaling plaintext from an earlier page lifetime.
+      if (item.envelope.kind === 'signal') continue;
       replayById.set(item.envelope.envelopeId, item);
     }
     for (const envelope of pending) {
+      if (envelope.kind === 'signal') continue;
       if (!replayById.has(envelope.envelopeId)) replayById.set(envelope.envelopeId, { envelope, serverSeq: 0 });
     }
     const replay = [...replayById.values()].sort((a, b) => {
@@ -652,6 +683,7 @@ export class BrowserSession {
       persistence: 'ephemeral',
       storagePersisted: null,
       status: 'offline',
+      connection: 'offline',
       authoringReady: false,
       outboxPending: 0,
     });
@@ -762,6 +794,7 @@ export class BrowserSession {
     this.clearStorePlaintext();
     this.setState({
       status: 'terminated',
+      connection: 'offline',
       snapshotContent: null,
       snapshotId: null,
       fileId: null,
@@ -867,7 +900,7 @@ export class BrowserSession {
     const mintPow =
       this.opts.outboxMintPow ??
       (this.opts.powToken === undefined ? undefined : async () => this.opts.powToken!);
-    this.outbox = new BrowserOutbox({
+    const outbox = new BrowserOutbox({
       relayUrl,
       roomId,
       deviceId: identity.deviceId,
@@ -893,16 +926,23 @@ export class BrowserSession {
         }
       },
       onTerminal: (error) => this.handleOutboxTerminal(error),
+      onAccepted: (batch) => {
+        for (const envelope of batch) {
+          if (envelope.kind !== 'signal') this.peerMesh?.broadcastEnvelope(envelope);
+        }
+      },
     });
-    await this.outbox.initialize();
+    this.outbox = outbox;
+    await outbox.initialize();
+    if (this.outbox !== outbox || this.isTerminated()) return;
 
     if (skipJoin) {
       this.setState({
         authoringReady: true,
-        outboxPending: this.outbox.getState().pendingCount,
-        authoringError: this.outbox.getState().lastError,
+        outboxPending: outbox.getState().pendingCount,
+        authoringError: outbox.getState().lastError,
       });
-      void this.outbox.flushNow().catch(() => undefined);
+      void outbox.flushNow().catch(() => undefined);
       return;
     }
 
@@ -943,14 +983,89 @@ export class BrowserSession {
       body: joined,
     });
     this.joinEnvelopeId = assembled.envelope.envelopeId;
-    if (this.storage) await this.outbox.enqueueDurably(assembled.envelope);
-    else this.outbox.enqueue(assembled.envelope);
+    if (this.storage) await outbox.enqueueDurably(assembled.envelope);
+    else outbox.enqueue(assembled.envelope);
+    if (this.outbox !== outbox || this.isTerminated()) return;
     const store = await this.ensureStore();
+    if (this.outbox !== outbox || this.isTerminated()) return;
     store.applyEvent(assembled.event);
     if (durableOffline) {
       this.setState({ authoringReady: true, authoringError: null });
     }
-    void this.outbox.flushNow().catch(() => undefined);
+    void outbox.flushNow().catch(() => undefined);
+  }
+
+  private async sendSignal(
+    targetDeviceId: string,
+    payload: BrowserSignalingPayload,
+  ): Promise<void> {
+    const identity = this.requireIdentity();
+    const keys = this.keys;
+    const policy = this.roomPolicy;
+    const outbox = this.outbox;
+    const roomId = this.state.roomId;
+    if (!keys || !policy || !outbox || !roomId) throw new Error('browser session is unavailable');
+    const target = this.bootstrapDevices.find((device) => device.deviceId === targetDeviceId);
+    if (!target || (target.client !== 'attn-native' && target.client !== 'attn-browser')) {
+      throw new Error('signal target is not an authenticated WebRTC peer');
+    }
+    const envelope = assembleBrowserSignal({
+      signalingKey: keys.signalingKey,
+      roomId,
+      authorId: identity.participantId,
+      deviceId: identity.deviceId,
+      targetDeviceId,
+      createdAt: this.nextCreatedAt(),
+      expiresAt: policy.expiresAt,
+      payload,
+    });
+    if (this.storage) await outbox.enqueueDurably(envelope);
+    else outbox.enqueue(envelope);
+    void outbox.flushNow().catch(() => undefined);
+  }
+
+  private async startPeerMesh(policy: RoomPolicy, devices: Device[]): Promise<void> {
+    if (
+      this.opts.disableWebRtc ||
+      policy.mode === 'async' ||
+      !policy.allowBrowser ||
+      (!this.opts.peerConnectionFactory && typeof RTCPeerConnection === 'undefined')
+    ) {
+      this.peerMesh?.close();
+      this.peerMesh = null;
+      this.setState({ connection: this.state.status === 'connected' ? 'mailbox' : 'offline' });
+      return;
+    }
+    const identity = this.requireIdentity();
+    if (!this.peerMesh) {
+      this.peerMesh = new BrowserPeerMesh({
+        localDeviceId: identity.deviceId,
+        maxEnvelopeBytes: Math.max(4_096, policy.maxEventBytes * 2 + 4_096),
+        ...(this.opts.stunServers === undefined ? {} : { stunServers: this.opts.stunServers }),
+        ...(this.opts.peerConnectionFactory === undefined
+          ? {}
+          : { createPeerConnection: this.opts.peerConnectionFactory }),
+        onSignal: (targetDeviceId, payload) => this.sendSignal(targetDeviceId, payload),
+        onEnvelope: async (envelope) => {
+          if (envelope.roomId !== this.state.roomId) throw new Error('direct envelope room mismatch');
+          await this.wsClient?.ingestDirectEnvelope(envelope);
+        },
+        onState: (connection) => {
+          if (this.state.status === 'connected') {
+            this.setState({ connection, ...(connection === 'live_direct' ? { directError: null } : {}) });
+          }
+        },
+        onError: (message) => this.setState({ directError: message }),
+      });
+    }
+    this.peerMesh.syncDevices(devices.filter((device) => this.onlineDeviceIds.has(device.deviceId)));
+    if (this.state.status === 'connected') this.setState({ connection: this.peerMesh.getState() });
+    const pending = this.pendingSignals.splice(0);
+    for (const payload of pending) await this.peerMesh.handleSignal(payload);
+  }
+
+  private activeWebRtcDevices(): Device[] {
+    return this.bootstrapDevices.filter((device) => this.onlineDeviceIds.has(device.deviceId));
   }
 
   private localDeviceRecord(identity: BrowserDeviceIdentity): Device {
@@ -970,7 +1085,9 @@ export class BrowserSession {
     return {
       loadPending: () => storage.listOutbox(roomId, deviceId),
       putPending: async (envelope) => {
-        await storage.putOutbox(roomId, envelope);
+        // Signaling is ephemeral negotiation state. It is relay-durable but
+        // intentionally not recovered across browser lifetimes.
+        if (envelope.kind !== 'signal') await storage.putOutbox(roomId, envelope);
       },
       acknowledge: async (batch, accepted) => {
         await storage.acknowledge(roomId, batch, accepted);
@@ -1006,6 +1123,7 @@ export class BrowserSession {
     this.clearStorePlaintext();
     this.setState({
       status: 'error',
+      connection: 'offline',
       snapshotContent: null,
       snapshotId: null,
       fileId: null,
@@ -1033,11 +1151,17 @@ export class BrowserSession {
   }
 
   private stopTransport(): void {
+    this.transportGeneration += 1;
+    this.peerMesh?.close();
+    this.peerMesh = null;
     this.outbox?.close();
     this.outbox = null;
     this.joinEnvelopeId = null;
     this.roomPolicy = null;
     this.bootstrapDevices = [];
+    this.onlineDeviceIds.clear();
+    this.pendingSignals.length = 0;
+    this.dispatchedEnvelopeIds.clear();
     this.powAbortController?.abort();
     this.powAbortController = null;
     if (!this.wsClient) return;
@@ -1151,6 +1275,7 @@ export class BrowserSession {
     ]);
     const client = new BrowserWsClient({
       roomId,
+      localDeviceId: this.identity.deviceId,
       url,
       subprotocol,
       afterSeq: this.persistedCursor,
@@ -1165,10 +1290,25 @@ export class BrowserSession {
       reconnectMaxMs: this.opts.reconnectMaxMs,
       callbacks: {
         onHello: (frame, verifiedDevices) => {
-          this.setState({ status: 'connected' });
+          this.setState({ status: 'connected', connection: 'mailbox' });
           this.bootstrapDevices = [...verifiedDevices.values()];
+          this.onlineDeviceIds.clear();
+          for (const deviceId of frame.onlineDeviceIds ?? this.bootstrapDevices.map((device) => device.deviceId)) {
+            this.onlineDeviceIds.add(deviceId);
+          }
           void this.persistDirectoryAndRoom(this.bootstrapDevices, frame.policy).catch(() => undefined);
-          void this.initializeAuthoring(frame.policy);
+          const generation = this.transportGeneration;
+          void (async () => {
+            await this.initializeAuthoring(frame.policy);
+            if (generation !== this.transportGeneration || this.isTerminated()) return;
+            await this.startPeerMesh(frame.policy, this.bootstrapDevices);
+          })().catch(() => {
+            if (generation !== this.transportGeneration || this.isTerminated()) return;
+            this.setState({
+              connection: 'direct_failed',
+              directError: 'direct_start_failed',
+            });
+          });
         },
         onEnvelope: (decoded) => this.handleEnvelopeAsync(decoded),
         onUnknownSigner: (envelope) => this.refreshSignerAndRetry(roomId, keys, envelope),
@@ -1176,6 +1316,7 @@ export class BrowserSession {
           if (code < 4000 && this.state.status !== 'error' && this.state.status !== 'terminated') {
             this.setState({
               status: this.state.snapshotContent === null ? 'connecting' : 'offline',
+              connection: 'offline',
             });
           }
         },
@@ -1185,7 +1326,25 @@ export class BrowserSession {
         },
         onPolicyChanged: (policy) => {
           this.roomPolicy = policy;
-          void this.initializeAuthoring(policy);
+          const generation = this.transportGeneration;
+          void (async () => {
+            await this.initializeAuthoring(policy);
+            if (generation !== this.transportGeneration || this.isTerminated()) return;
+            await this.startPeerMesh(policy, this.bootstrapDevices);
+          })().catch(() => {
+            if (generation === this.transportGeneration && !this.isTerminated()) {
+              this.setState({ connection: 'direct_failed', directError: 'direct_policy_update_failed' });
+            }
+          });
+        },
+        onPresence: (event, deviceId) => {
+          if (event === 'leave') {
+            this.onlineDeviceIds.delete(deviceId);
+            this.peerMesh?.removePeer(deviceId);
+          } else {
+            this.onlineDeviceIds.add(deviceId);
+            this.peerMesh?.syncDevices(this.activeWebRtcDevices());
+          }
         },
       },
     });
@@ -1234,6 +1393,7 @@ export class BrowserSession {
       if (!Array.isArray(parsed.devices)) throw new Error('GET /devices returned invalid body');
       this.wsClient?.mergeDevices(parsed.devices);
       this.bootstrapDevices = [...(this.wsClient?.getDevices().values() ?? [])];
+      this.peerMesh?.syncDevices(this.activeWebRtcDevices());
       if (this.roomPolicy) await this.persistDirectoryAndRoom(this.bootstrapDevices, this.roomPolicy);
     } catch (error) {
       this.signerRefreshAttempts.delete(envelope.envelopeId);
@@ -1262,6 +1422,13 @@ export class BrowserSession {
         });
       }
     }
+    // Direct-first delivery must not suppress the later network durability
+    // commit above. Only UI/control-plane dispatch is deduplicated here.
+    if (this.dispatchedEnvelopeIds.has(envelope.envelopeId)) {
+      zero(plaintext);
+      return;
+    }
+    this.rememberDispatchedEnvelope(envelope.envelopeId);
     if (envelope.kind === 'event') {
       let parsed: { meta?: EventMeta; body?: ReviewEventBody; auth?: ReviewEvent['auth'] };
       try {
@@ -1373,8 +1540,44 @@ export class BrowserSession {
       }
       return;
     }
-    // Signal envelopes land with browser WebRTC; never retain their plaintext.
+    if (envelope.kind === 'signal') {
+      let payload: BrowserSignalingPayload;
+      try {
+        payload = parseBrowserSignalingPayload(plaintext, envelope.deviceId);
+      } catch {
+        return;
+      } finally {
+        zero(plaintext);
+      }
+      if (decoded.source === 'direct' && payload.kind !== 'collab') return;
+      if (
+        payload.kind !== 'collab' &&
+        envelope.target?.deviceId !== this.identity?.deviceId
+      ) {
+        return;
+      }
+      const sender = this.bootstrapDevices.find((device) => device.deviceId === envelope.deviceId);
+      if (!sender || sender.participantId !== envelope.authorId) return;
+      if (sender.client !== 'attn-native' && sender.client !== 'attn-browser') return;
+      if (!this.peerMesh) {
+        if (this.pendingSignals.length < 64) this.pendingSignals.push(payload);
+        return;
+      }
+      try {
+        await this.peerMesh.handleSignal(payload);
+      } catch {
+        this.setState({ directError: 'direct_signal_rejected' });
+      }
+      return;
+    }
     zero(plaintext);
+  }
+
+  private rememberDispatchedEnvelope(envelopeId: string): void {
+    this.dispatchedEnvelopeIds.add(envelopeId);
+    if (this.dispatchedEnvelopeIds.size <= 4_096) return;
+    const oldest = this.dispatchedEnvelopeIds.values().next().value as string | undefined;
+    if (oldest !== undefined) this.dispatchedEnvelopeIds.delete(oldest);
   }
 
   private absorbSnapshotCreated(

@@ -33,6 +33,9 @@ COMMENT_CANARY="BROWSER-COMMENT-8127"
 REPLY_CANARY="BROWSER-REPLY-4631"
 SUGGESTION_CANARY="BROWSER-SUGGEST-9054"
 R2_CANARY="R2-BROWSER-SEALED-2048"
+DIRECT_CANARY="BROWSER-DIRECT-2718"
+NATIVE_DIRECT_CANARY="NATIVE-DIRECT-1618"
+FALLBACK_CANARY="BROWSER-FALLBACK-3141"
 RELAY_PID=""
 WEB_PID=""
 OWNER_PID=""
@@ -137,6 +140,9 @@ ATTN_COMMENT_CANARY="$COMMENT_CANARY" \
 ATTN_REPLY_CANARY="$REPLY_CANARY" \
 ATTN_SUGGESTION_CANARY="$SUGGESTION_CANARY" \
 ATTN_R2_CANARY="$R2_CANARY" \
+ATTN_DIRECT_CANARY="$DIRECT_CANARY" \
+ATTN_NATIVE_DIRECT_CANARY="$NATIVE_DIRECT_CANARY" \
+ATTN_FALLBACK_CANARY="$FALLBACK_CANARY" \
 ATTN_OWNER_HOME="$ATTN_HOME" \
 ATTN_BIN="$ATTN_BIN" \
   npm --prefix "$PROJECT_DIR/web" run test:e2e:hosted
@@ -148,6 +154,9 @@ if [ -z "${E2E_RELAY_URL:-}" ]; then
     "$REPLY_CANARY" \
     "$SUGGESTION_CANARY" \
     "$R2_CANARY" \
+    "$DIRECT_CANARY" \
+    "$NATIVE_DIRECT_CANARY" \
+    "$FALLBACK_CANARY" \
     'encrypted browser suggestion' \
     "$SECRET"
   do
@@ -157,6 +166,13 @@ if [ -z "${E2E_RELAY_URL:-}" ]; then
     fi
     if grep -aRFq -- "$canary" "$RELAY_STATE"; then
       echo 'hosted E2E failed: persisted relay state contained plaintext or secret material' >&2
+      exit 1
+    fi
+  done
+  for signaling_plaintext in '"sdp"' 'candidate:' 'a=ice-ufrag:'; do
+    if grep -aFq -- "$signaling_plaintext" "$RELAY_LOG" ||
+       grep -aRFq -- "$signaling_plaintext" "$RELAY_STATE"; then
+      echo 'hosted E2E failed: relay persisted plaintext WebRTC signaling' >&2
       exit 1
     fi
   done

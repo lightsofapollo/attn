@@ -408,6 +408,7 @@ type ServerFrame =
       serverSeq: number;
       policy: RoomPolicy;
       devices: DeviceRecord[];
+      onlineDeviceIds: string[];
       missedSignalEnvelopeIds: string[];
     }
   | {
@@ -463,7 +464,7 @@ type ClientFrame =
 ### Flow
 
 1. Client opens WS, sends `subscribe { after: lastSeenServerSeq }`.
-2. Server sends `hello { serverSeq, policy, devices, missedSignalEnvelopeIds }`. If `after < meta:oldest_retained_seq`, instead sends `error { code: "ATTN_CURSOR_TOO_OLD", resyncFromSeq: <oldest_retained_seq> }` and closes `4005`. Client responds by discarding its cursor and either requesting a snapshot from a peer or re-subscribing from `resyncFromSeq`.
+2. Server sends `hello { serverSeq, policy, devices, onlineDeviceIds, missedSignalEnvelopeIds }`. `devices` is the immutable registered directory; `onlineDeviceIds` is the authoritative active-socket snapshot used to build the live WebRTC mesh without resurrecting departed registrations. If `after < meta:oldest_retained_seq`, instead sends `error { code: "ATTN_CURSOR_TOO_OLD", resyncFromSeq: <oldest_retained_seq> }` and closes `4005`. Client responds by discarding its cursor and either requesting a snapshot from a peer or re-subscribing from `resyncFromSeq`.
 3. Server pushes `envelope` and `presence` frames as they happen. Each accepted envelope upload also resets the idle alarm.
 4. Server sends `ping` every 30s; if no `pong` within 60s, close `1001`.
 5. The DO uses WebSocket Hibernation: when no traffic for 60s, the DO hibernates, and frames are resumed transparently on the next event.

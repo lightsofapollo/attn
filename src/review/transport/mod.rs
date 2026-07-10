@@ -85,6 +85,7 @@ pub enum TransportEvent {
         server_seq: u64,
         policy: RoomPolicy,
         devices: Vec<Device>,
+        online_device_ids: Vec<DeviceId>,
         missed_signal_envelope_ids: Vec<String>,
     },
     /// A `MailboxEnvelope` delivered from the relay along with the server

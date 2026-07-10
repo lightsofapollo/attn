@@ -432,6 +432,7 @@ interface HelloFrame {
   serverSeq: number;
   policy: RoomPolicy;
   devices: DeviceRecord[];
+  onlineDeviceIds: string[];
   missedSignalEnvelopeIds: string[];
 }
 
@@ -554,6 +555,7 @@ describe("WS /socket — admission", () => {
     expect(first.devices.length).toBe(1);
     expect(first.devices[0]?.deviceId).toBe("dev-h");
     expect(first.missedSignalEnvelopeIds).toEqual([]);
+    expect(first.onlineDeviceIds).toEqual(['dev-h']);
     const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
     await runInDurableObject(stub, async (_instance, state) => {
       expect(state.getWebSockets(`d2:${encodeOpaqueSegment("dev-h")}`).length).toBe(1);

@@ -3274,11 +3274,17 @@ export class RoomDO extends DurableObject<Env> {
       failSocketCorrupt(ws);
       return;
     }
+    const onlineDeviceIds = [...new Set(
+      this.ctx.getWebSockets()
+        .map((socket) => readAttachment(socket)?.deviceId)
+        .filter((deviceId): deviceId is string => deviceId !== undefined),
+    )].sort();
     const hello: ServerFrame = {
       type: "hello",
       serverSeq,
       policy,
       devices,
+      onlineDeviceIds,
       missedSignalEnvelopeIds,
     };
     sendJson(ws, hello);
@@ -4469,6 +4475,7 @@ type ServerFrame =
       serverSeq: number;
       policy: RoomPolicy;
       devices: DeviceRecord[];
+      onlineDeviceIds: string[];
       missedSignalEnvelopeIds: string[];
     }
   | {

@@ -843,9 +843,9 @@ pub struct MailboxEnvelope {
 /// the target is the *only* routing information it can use to direct signal
 /// envelopes at a specific peer. The field is NOT bound into the AEAD AAD
 /// (which would force the sender to know who they're addressing for every
-/// retry); instead the signed signaling payload carries `from: deviceId`
-/// and the receiver decides whether it is the intended recipient by the
-/// content of the inner SDP/ICE/RequestSnapshot blob.
+/// retry). The AEAD-authenticated payload carries `from: deviceId`; receivers
+/// cross-check it against the AAD-bound outer device id. Signaling is
+/// confidentiality/integrity-only in v2 and is not Ed25519-signed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvelopeTarget {

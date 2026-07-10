@@ -523,6 +523,7 @@ interface HelloFrame {
   serverSeq: number;
   policy: RoomPolicy;
   devices: DeviceRecord[];
+  onlineDeviceIds: string[];
   missedSignalEnvelopeIds: string[];
 }
 

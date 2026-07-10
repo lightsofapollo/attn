@@ -9,6 +9,9 @@ const commentCanary = process.env.ATTN_COMMENT_CANARY ?? 'BROWSER-COMMENT-8127';
 const replyCanary = process.env.ATTN_REPLY_CANARY ?? 'BROWSER-REPLY-4631';
 const suggestionCanary = process.env.ATTN_SUGGESTION_CANARY ?? 'BROWSER-SUGGEST-9054';
 const r2Canary = process.env.ATTN_R2_CANARY ?? 'R2-BROWSER-SEALED-2048';
+const directCanary = process.env.ATTN_DIRECT_CANARY ?? 'BROWSER-DIRECT-2718';
+const nativeDirectCanary = process.env.ATTN_NATIVE_DIRECT_CANARY ?? 'NATIVE-DIRECT-1618';
+const fallbackCanary = process.env.ATTN_FALLBACK_CANARY ?? 'BROWSER-FALLBACK-3141';
 const ownerHome = process.env.ATTN_OWNER_HOME;
 const attnBin = process.env.ATTN_BIN;
 const execFileAsync = promisify(execFile);
@@ -142,6 +145,16 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
       configurable: true,
       value: { postMessage: (payload: string) => calls.push(payload) },
     });
+    const NativePeerConnection = window.RTCPeerConnection;
+    const peerConnections: RTCPeerConnection[] = [];
+    const TrackedPeerConnection = function (configuration?: RTCConfiguration) {
+      const peer = new NativePeerConnection(configuration);
+      peerConnections.push(peer);
+      return peer;
+    } as unknown as typeof RTCPeerConnection;
+    TrackedPeerConnection.prototype = NativePeerConnection.prototype;
+    Object.defineProperty(window, 'RTCPeerConnection', { configurable: true, value: TrackedPeerConnection });
+    (window as unknown as { __attnPeerConnections: RTCPeerConnection[] }).__attnPeerConnections = peerConnections;
   });
   const capture = attachWireCapture(page);
   await page.goto(inviteUrl!, { waitUntil: 'domcontentloaded' });
@@ -161,6 +174,50 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   await expect.poll(() => capture.deviceStatuses.some((status) => status === 200 || status === 204)).toBe(true);
   await expect.poll(() => capture.wire.some((line) => line.startsWith('WS< '))).toBe(true);
   await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute('data-authoring-ready', 'true');
+  let browserDirectState: string | null = null;
+  try {
+    await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute(
+      'data-connection',
+      'live_direct',
+    );
+    browserDirectState = 'live_direct';
+  } catch (error) {
+    browserDirectState = await page.locator('[data-slot="browser-review"]').getAttribute('data-connection');
+    const diagnostics = await page.evaluate(async () => {
+      const peers = (window as unknown as { __attnPeerConnections?: RTCPeerConnection[] })
+        .__attnPeerConnections ?? [];
+      return Promise.all(peers.map(async (peer) => {
+        const stats = [...(await peer.getStats()).values()]
+          .filter((stat) => ['candidate-pair', 'local-candidate', 'remote-candidate', 'transport'].includes(stat.type))
+          .map((stat) => ({
+            type: stat.type,
+            state: stat.state,
+            candidateType: stat.candidateType,
+            protocol: stat.protocol,
+            localCandidateId: stat.localCandidateId,
+            remoteCandidateId: stat.remoteCandidateId,
+          }));
+        return {
+          connectionState: peer.connectionState,
+          iceConnectionState: peer.iceConnectionState,
+          iceGatheringState: peer.iceGatheringState,
+          signalingState: peer.signalingState,
+          stats,
+        };
+      }));
+    });
+    await test.info().attach('webrtc-diagnostics.json', {
+      body: Buffer.from(JSON.stringify(diagnostics), 'utf8'),
+      contentType: 'application/json',
+    });
+    console.log(`WebRTC diagnostics: ${JSON.stringify(diagnostics)}`);
+    console.log(`WebRTC error: ${await page.locator('[data-slot="browser-review"]').getAttribute('data-direct-error')}`);
+    throw error;
+  }
+  expect(browserDirectState).toBe('live_direct');
+  await expect.poll(() => nativeEval<string>(
+    'window.__attn_review_store__?.connection || "offline"',
+  )).toBe('live_direct');
   await page.getByRole('button', { name: 'Hosted review canary' }).click();
   await expect(page.getByRole('heading', { name: 'Hosted review canary' })).toBeVisible();
   await expect(page.getByText(contentCanary, { exact: false })).toBeVisible();
@@ -169,6 +226,79 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   await expect(taskCheckbox).toBeDisabled();
   await taskCheckbox.click({ force: true });
   await expect(taskCheckbox).not.toBeChecked();
+
+  // A second ephemeral browser joins the same native-owned room. Its relay
+  // WebSocket intentionally drops event frames after the direct mesh opens;
+  // receiving the comment therefore proves the exact encrypted envelope also
+  // traversed the `attn-review` DataChannel.
+  const peerPage = await context.newPage();
+  await peerPage.addInitScript(() => {
+    let dropMailboxEvents = false;
+    Object.defineProperty(window, '__attnDropMailboxEvents', {
+      configurable: true,
+      get: () => dropMailboxEvents,
+      set: (value: boolean) => { dropMailboxEvents = value; },
+    });
+    const NativeWebSocket = window.WebSocket;
+    class FilteringWebSocket extends NativeWebSocket {
+      private forwardedMessage: ((this: WebSocket, ev: MessageEvent) => unknown) | null = null;
+      override set onmessage(handler: ((this: WebSocket, ev: MessageEvent) => unknown) | null) {
+        this.forwardedMessage = handler;
+        super.onmessage = (event) => {
+          if (dropMailboxEvents && typeof event.data === 'string') {
+            try {
+              const frame = JSON.parse(event.data) as { type?: string; envelope?: { kind?: string } };
+              if (frame.type === 'envelope' && frame.envelope?.kind === 'event') return;
+            } catch {
+              // Non-JSON HMR/control traffic is forwarded unchanged.
+            }
+          }
+          this.forwardedMessage?.call(this, event);
+        };
+      }
+      override get onmessage(): ((this: WebSocket, ev: MessageEvent) => unknown) | null {
+        return this.forwardedMessage;
+      }
+    }
+    Object.defineProperty(window, 'WebSocket', { configurable: true, value: FilteringWebSocket });
+  });
+  await peerPage.goto(inviteUrl!, { waitUntil: 'domcontentloaded' });
+  await expect(peerPage.locator('[data-slot="browser-review"]')).toHaveAttribute('data-authoring-ready', 'true');
+  await peerPage.getByRole('button', { name: 'Hosted review canary' }).click();
+  await expect(peerPage.getByText(contentCanary, { exact: false })).toBeVisible();
+  await expect(peerPage.locator('[data-slot="browser-review"]')).toHaveAttribute('data-connection', 'live_direct');
+  await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute('data-connection', 'live_direct');
+  await peerPage.evaluate(() => {
+    (window as unknown as { __attnDropMailboxEvents: boolean }).__attnDropMailboxEvents = true;
+  });
+  await selectEditorText(page, 'Read-only browser task');
+  await page.locator('[data-slot="selection-toolbar-comment"]').click();
+  await page.locator('.comment-composer textarea').fill(directCanary);
+  await page.getByRole('button', { name: 'Submit' }).click();
+  await expect(peerPage.locator('[data-testid="review-margin-card"]').filter({ hasText: directCanary })).toBeVisible();
+  await expect.poll(async () => {
+    const bodies = await nativeEventBodies();
+    return bodies.some((body) => body.type === 'comment_created' && body.body === directCanary);
+  }).toBe(true);
+  const nativeCommentSent = await nativeEval<boolean>(
+    `(() => {
+      const store = window.__attn_review_store__;
+      const root = store?.events.find(item => item.body?.type === 'comment_created' && item.body?.body === ${JSON.stringify(directCanary)});
+      if (!root?.body?.anchor || !window.ipc?.postMessage) return false;
+      window.ipc.postMessage(JSON.stringify({
+        type: 'review_create_comment',
+        token: window.__attn_ipc_token__,
+        roomId: root.meta.roomId,
+        anchor: root.body.anchor,
+        body: ${JSON.stringify(nativeDirectCanary)}
+      }));
+      return true;
+    })()`,
+  );
+  expect(nativeCommentSent).toBe(true);
+  await expect(peerPage.locator('[data-testid="review-margin-card"]').filter({ hasText: nativeDirectCanary })).toBeVisible();
+  await peerPage.close();
+  await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute('data-connection', 'live_direct');
 
   await page.getByRole('button', { name: 'Folder sibling canary' }).click();
   await expect(page.getByRole('heading', { name: 'Folder sibling canary' })).toBeVisible();
@@ -203,6 +333,7 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   await expect.poll(
     () => capture.wire.filter((line) => line.startsWith('WS< ')).length,
   ).toBeGreaterThan(receivedFramesBeforeOffline);
+  await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute('data-connection', 'live_direct');
 
   const commentCard = page
     .locator('[data-testid="review-margin-card"]')
@@ -292,6 +423,8 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   expect(observedWire).not.toContain(commentCanary);
   expect(observedWire).not.toContain(replyCanary);
   expect(observedWire).not.toContain(suggestionCanary);
+  expect(observedWire).not.toContain(directCanary);
+  expect(observedWire).not.toContain(nativeDirectCanary);
   expect(observedWire).not.toContain('encrypted browser suggestion');
   expect(capture.envelopePosts.every((post) => post.pow.length > 0)).toBe(true);
   await test.info().attach('captured-wire.txt', {
@@ -383,6 +516,8 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   expect(rememberedAudit.sessionStorageKeys).toEqual([]);
   for (const plaintext of [
     contentCanary,
+    directCanary,
+    nativeDirectCanary,
     commentCanary,
     replyCanary,
     suggestionCanary,
@@ -420,11 +555,88 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   ).toBeGreaterThan(subscribeCountBeforeReload);
 
   const allObservedWire = capture.wire.join('\n');
-  for (const plaintext of [contentCanary, commentCanary, replyCanary, suggestionCanary, r2Canary, secretCanary!]) {
+  for (const plaintext of [contentCanary, directCanary, nativeDirectCanary, commentCanary, replyCanary, suggestionCanary, r2Canary, secretCanary!]) {
     expect(allObservedWire).not.toContain(plaintext);
   }
   const unexpectedBrowserErrors = capture.browserErrors.filter(
     (message) => !message.includes('net::ERR_INTERNET_DISCONNECTED'),
   );
   expect(unexpectedBrowserErrors).toEqual([]);
+});
+
+test('forced WebRTC failure stays honest and converges through encrypted mailbox', async ({ page }) => {
+  test.skip(!inviteUrl, 'ATTN_BROWSER_INVITE_URL is required');
+  test.skip(!ownerHome || !attnBin, 'ATTN_OWNER_HOME and ATTN_BIN are required');
+  await page.addInitScript(() => {
+    class FailedDataChannel {
+      readonly label = 'attn-review';
+      readyState: RTCDataChannelState = 'connecting';
+      binaryType: BinaryType = 'arraybuffer';
+      onopen: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      close(): void { this.readyState = 'closed'; this.onclose?.(); }
+      send(): void {}
+    }
+    class FailedPeerConnection {
+      localDescription: RTCSessionDescriptionInit | null = null;
+      remoteDescription: RTCSessionDescriptionInit | null = null;
+      connectionState: RTCPeerConnectionState = 'new';
+      iceConnectionState: RTCIceConnectionState = 'new';
+      onicecandidate: ((event: RTCPeerConnectionIceEvent) => void) | null = null;
+      ondatachannel: ((event: RTCDataChannelEvent) => void) | null = null;
+      onconnectionstatechange: (() => void) | null = null;
+      oniceconnectionstatechange: (() => void) | null = null;
+      constructor() {
+        setTimeout(() => this.failIce(), 10);
+      }
+      async createOffer(): Promise<RTCSessionDescriptionInit> { return { type: 'offer', sdp: 'v=0\r\n' }; }
+      async createAnswer(): Promise<RTCSessionDescriptionInit> { return { type: 'answer', sdp: 'v=0\r\n' }; }
+      async setLocalDescription(description: RTCSessionDescriptionInit): Promise<void> {
+        this.localDescription = description;
+      }
+      async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+        this.remoteDescription = description;
+      }
+      async addIceCandidate(): Promise<void> {}
+      createDataChannel(): RTCDataChannel {
+        return new FailedDataChannel() as unknown as RTCDataChannel;
+      }
+      restartIce(): void { setTimeout(() => this.failIce(), 10); }
+      close(): void { this.connectionState = 'closed'; }
+      private failIce(): void {
+        if (this.connectionState === 'closed') return;
+        this.iceConnectionState = 'failed';
+        this.connectionState = 'failed';
+        this.oniceconnectionstatechange?.();
+        this.onconnectionstatechange?.();
+      }
+    }
+    Object.defineProperty(window, 'RTCPeerConnection', {
+      configurable: true,
+      value: FailedPeerConnection,
+    });
+  });
+  const capture = attachWireCapture(page);
+  await page.goto(inviteUrl!, { waitUntil: 'domcontentloaded' });
+  const shell = page.locator('[data-slot="browser-review"]');
+  await expect(shell).toHaveAttribute('data-authoring-ready', 'true');
+  await expect(shell).toHaveAttribute('data-connection', 'direct_failed');
+  await page.getByRole('button', { name: 'Hosted review canary' }).click();
+  await expect(page.getByText(contentCanary, { exact: false })).toBeVisible();
+  await selectEditorText(page, 'Shared by native');
+  await page.locator('[data-slot="selection-toolbar-comment"]').click();
+  await page.locator('.comment-composer textarea').fill(fallbackCanary);
+  await page.getByRole('button', { name: 'Submit' }).click();
+  await expect(shell).toHaveAttribute('data-outbox-pending', '0');
+  await expect(page.locator('[data-testid="review-margin-card"]').filter({ hasText: fallbackCanary })).toBeVisible();
+  await expect.poll(async () => {
+    const bodies = await nativeEventBodies();
+    return bodies.some((body) => body.type === 'comment_created' && body.body === fallbackCanary);
+  }).toBe(true);
+  const observedWire = capture.wire.join('\n');
+  expect(observedWire).not.toContain(fallbackCanary);
+  expect(capture.envelopePosts.some((post) => post.body.includes('"kind":"signal"'))).toBe(true);
+  expect(capture.envelopePosts.some((post) => post.body.includes('"kind":"event"'))).toBe(true);
 });

@@ -46,6 +46,8 @@ export interface BrowserOutboxOptions {
   now?: () => number;
   onState?: (state: BrowserOutboxState) => void;
   onTerminal?: (error: BrowserOutboxError) => void;
+  /** Best-effort hook after relay acknowledgement and durable queue removal. */
+  onAccepted?: (batch: readonly MailboxEnvelope[]) => void;
   onlineTarget?: BrowserOutboxOnlineTarget;
   backoffInitialMs?: number;
   backoffMaxMs?: number;
@@ -281,6 +283,11 @@ export class BrowserOutbox {
       await this.persistence?.acknowledge(batch, accepted);
       const acknowledged = new Set(batch.map((item) => item.envelopeId));
       while (this.queue[0] && acknowledged.has(this.queue[0]!.envelopeId)) this.queue.shift();
+      try {
+        this.opts.onAccepted?.(batch);
+      } catch {
+        // Direct transport is opportunistic; mailbox acknowledgement wins.
+      }
       this.backoffMs = this.opts.backoffInitialMs ?? BROWSER_OUTBOX_BACKOFF_INITIAL_MS;
       this.publish({ pendingCount: this.queue.length, lastError: null, terminal: false });
     }
@@ -393,7 +400,9 @@ export class BrowserOutbox {
   }
 
   private validateEnvelope(envelope: MailboxEnvelope): void {
-    if (envelope.kind !== 'event') throw new Error('browser outbox only accepts event envelopes');
+    if (envelope.kind !== 'event' && envelope.kind !== 'signal') {
+      throw new Error('browser outbox only accepts event or signal envelopes');
+    }
     if (envelope.roomId !== this.opts.roomId) throw new Error('envelope room does not match outbox');
     if (envelope.deviceId !== this.opts.deviceId) throw new Error('envelope device does not match outbox');
     if (envelope.ciphertextBytes > this.maxEventBytes) {

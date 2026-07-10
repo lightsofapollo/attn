@@ -304,6 +304,7 @@ impl E2eHarness {
             event_key,
             snapshot_key,
             signaling_key,
+            allow_local_ice_restart: true,
             // Empty stun_servers list -> default Google STUN. For
             // pure-loopback CI we'd swap this for an empty mock, but the
             // public STUN endpoint is fine for a developer machine and
@@ -318,6 +319,7 @@ impl E2eHarness {
             event_key,
             snapshot_key,
             signaling_key,
+            allow_local_ice_restart: true,
             stun_servers: vec![],
         });
 

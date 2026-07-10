@@ -108,6 +108,11 @@ pub struct WebRtcConfig {
     /// `assemble_signal_envelope` when minting outbound offer/answer/ICE
     /// signal envelopes that we push onto `signaling_tx`.
     pub signaling_key: [u8; 32],
+    /// Whether this transport may create an automatic local ICE-restart
+    /// offer after a disconnect. Browser peers own cross-client restart
+    /// offers, so native transports bound to a browser set this to `false`
+    /// to avoid SDP glare and unsignaled native restart offers.
+    pub allow_local_ice_restart: bool,
     /// STUN server URLs. Empty -> default to `DEFAULT_STUN_SERVER`. TURN
     /// servers can be added here too (same format), but per `data-model.md`
     /// §WebRTC DataChannel we ship STUN-only by default.
@@ -404,7 +409,9 @@ impl WebRtcTransport {
         // calls `set_policy` once it learns the room mode.
         let policy = Arc::new(Mutex::new(PolicyMode::Hybrid));
 
-        let ice_restart_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let ice_restart_enabled = Arc::new(std::sync::atomic::AtomicBool::new(
+            config.allow_local_ice_restart,
+        ));
         let ice_restart_attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
         let transport = Self {
@@ -826,13 +833,22 @@ impl WebRtcTransport {
             let slot = Arc::clone(&slot);
             let config = Arc::clone(&config);
             Box::pin(async move {
+                if dc.label() != DATA_CHANNEL_LABEL {
+                    let _ = dc.close().await;
+                    return;
+                }
+                let mut guard = slot.lock().await;
+                if guard.is_some() {
+                    let _ = dc.close().await;
+                    return;
+                }
                 wire_data_channel_handlers(
                     Arc::clone(&dc),
                     Arc::clone(&inbound),
                     events_tx,
                     Arc::clone(&config),
                 );
-                *slot.lock().await = Some(dc);
+                *guard = Some(dc);
             })
         }));
     }
@@ -1033,6 +1049,15 @@ async fn dispatch_inbound_message(
         Ok(env) => env,
         Err(_) => return, // bad bytes from peer; drop
     };
+    // The DTLS association is already bound to one registered remote device.
+    // Do not let that peer inject another room/device's otherwise-valid
+    // group-key envelope through the shared inbound pipeline.
+    if envelope.v != 2
+        || envelope.room_id != config.room_id
+        || envelope.device_id != config.remote_device_id
+    {
+        return;
+    }
 
     use crate::review::model::EnvelopeKind;
     match envelope.kind {
@@ -1081,6 +1106,8 @@ async fn dispatch_inbound_message(
                 .await
                 && let Ok(SignalingPayload::Collab { from, payload }) =
                     serde_json::from_slice::<SignalingPayload>(&plaintext)
+                && from == envelope.device_id
+                && from == config.remote_device_id
             {
                 let _ = events_tx.send(TransportEvent::CollabSignal {
                     room_id: config.room_id.clone(),
@@ -1190,6 +1217,7 @@ mod tests {
             event_key: *keys.event_key.as_bytes(),
             snapshot_key: *keys.snapshot_key.as_bytes(),
             signaling_key: *keys.signaling_key.as_bytes(),
+            allow_local_ice_restart: true,
             stun_servers: vec![],
         })
     }
@@ -1239,6 +1267,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn constructor_respects_disabled_local_ice_restart() {
+        let mut config = fixture_config();
+        Arc::get_mut(&mut config)
+            .expect("fixture config is uniquely owned")
+            .allow_local_ice_restart = false;
+        let (inbound, _tmp) = fixture_pipeline();
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let (signaling_tx, _signaling_rx) = mpsc::unbounded_channel();
+
+        let transport = WebRtcTransport::new(config, inbound, events_tx, signaling_tx)
+            .await
+            .expect("construct webrtc transport");
+
+        assert!(
+            !transport
+                .ice_restart_enabled
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "browser-bound native transports must remain passive during ICE restart"
+        );
+    }
+
     // -----------------------------------------------------------------
     // 2. Default STUN server fallback fires when stun_servers is empty.
     //    Locks down amendment-relevant default ("STUN only, configurable"
@@ -1256,6 +1306,7 @@ mod tests {
             event_key: [0u8; 32],
             snapshot_key: [0u8; 32],
             signaling_key: [0u8; 32],
+            allow_local_ice_restart: true,
             stun_servers: vec![],
         };
         let servers = cfg.ice_servers();

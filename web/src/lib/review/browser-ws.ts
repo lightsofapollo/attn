@@ -40,6 +40,7 @@ import {
   type EnvelopeAad,
   type SignableMetaShape,
 } from './browser-crypto';
+import { validateSignalTarget } from './browser-signaling';
 
 // ---------------------------------------------------------------------------
 // Wire types (mirror `ws.rs::ServerFrame` / `ClientFrame` and
@@ -103,6 +104,7 @@ export type ServerFrame =
       serverSeq: number;
       policy: RoomPolicy;
       devices: Device[];
+      onlineDeviceIds?: string[];
       missedSignalEnvelopeIds?: string[];
     }
   | {
@@ -174,7 +176,7 @@ export interface DecodedEnvelope {
   envelope: MailboxEnvelope;
   serverSeq: number;
   /** Network delivery advances the cursor after commit; replay never does. */
-  source: 'network' | 'replay';
+  source: 'network' | 'replay' | 'direct';
   /** Plaintext bytes recovered from `aeadOpen`. */
   plaintext: Uint8Array;
 }
@@ -217,6 +219,8 @@ export interface BrowserWsCallbacks {
 export interface BrowserWsOptions {
   /** Room bound to this subscription; restores relay-implicit AAD metadata. */
   roomId: string;
+  /** Local device identity used for pre-decrypt signal anti-redirect checks. */
+  localDeviceId: string;
   /** Full WS URL including scheme (`wss://…/v2/rooms/<roomId>/socket?…`). */
   url: string;
   /** Admission subprotocol value (`"attn.v2, hmac.<…>"`). */
@@ -293,6 +297,7 @@ export class BrowserWsClient {
 
   constructor(opts: BrowserWsOptions) {
     if (opts.roomId.length === 0) throw new Error('roomId must not be empty');
+    if (opts.localDeviceId.length === 0) throw new Error('localDeviceId must not be empty');
     if (opts.eventKey.length !== 32) throw new Error('eventKey must be 32 bytes');
     if (opts.snapshotKey.length !== 32) throw new Error('snapshotKey must be 32 bytes');
     if (opts.signalingKey.length !== 32) throw new Error('signalingKey must be 32 bytes');
@@ -350,6 +355,18 @@ export class BrowserWsClient {
   replayEnvelope(envelope: MailboxEnvelope, serverSeq: number): Promise<void> {
     if (this.cancelled) throw new Error('client already closed');
     const run = this.inboundQueue.then(() => this.ingestEnvelope(envelope, serverSeq, 'replay'));
+    this.inboundQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * Verify/decrypt an exact encrypted envelope received over the bound
+   * DataChannel. It shares this client's signer cache and serialized inbound
+   * boundary, but never advances the relay cursor.
+   */
+  ingestDirectEnvelope(envelope: MailboxEnvelope): Promise<void> {
+    if (this.cancelled) throw new Error('client already closed');
+    const run = this.inboundQueue.then(() => this.ingestEnvelope(envelope, 0, 'direct'));
     this.inboundQueue = run.catch(() => undefined);
     return run;
   }
@@ -562,6 +579,13 @@ export class BrowserWsClient {
       this.callbacks.onError?.('ATTN_INBOUND', 'envelope room does not match subscription');
       return;
     }
+    // `target` is intentionally excluded from AEAD AAD. Reject any signal
+    // that is not explicitly addressed to this browser before decoding its
+    // nonce/ciphertext, preventing relay target rewrite or fan-out.
+    if (envelope.kind === 'signal' && !validateSignalTarget(envelope, this.opts.localDeviceId)) {
+      this.callbacks.onError?.('ATTN_INBOUND', 'signal target does not match local device');
+      return;
+    }
 
     // Pick the AEAD key based on the envelope kind.
     const key =
@@ -590,6 +614,12 @@ export class BrowserWsClient {
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       this.callbacks.onError?.('ATTN_INBOUND', `envelope decode: ${m}`);
+      return;
+    }
+    if (nonceBytes.length !== 24 || ctBytes.length !== envelope.ciphertextBytes) {
+      nonceBytes.fill(0);
+      ctBytes.fill(0);
+      this.callbacks.onError?.('ATTN_INBOUND', 'envelope encoded length does not match metadata');
       return;
     }
 

@@ -395,6 +395,40 @@ test('persistence waits for an already in-flight memory drain before becoming au
   }
 });
 
+test('targeted signal is relay-acked before the opportunistic accepted hook', async () => {
+  const order: string[] = [];
+  const signal: MailboxEnvelope = {
+    ...envelope('signal-accepted'),
+    kind: 'signal',
+    target: { deviceId: 'remote-device' },
+  };
+  const outbox = new BrowserOutbox({
+    relayUrl: 'https://relay.example.test',
+    roomId: ROOM,
+    deviceId: DEVICE,
+    admissionKey: new Uint8Array(32).fill(0x42),
+    powBits: 12,
+    maxEventBytes: 1024,
+    now: () => NOW,
+    mintPow: async () => 'pow-signal',
+    fetchImpl: async (_url, init) => {
+      order.push('relay');
+      return acceptedFromBody(init.body);
+    },
+    onAccepted: (batch) => {
+      assert(batch[0]?.kind === 'signal', 'accepted hook received wrong envelope');
+      order.push('accepted');
+    },
+  });
+  try {
+    outbox.enqueue(signal);
+    await outbox.flushNow();
+    equal(order, ['relay', 'accepted'], 'mailbox-before-direct ordering');
+  } finally {
+    outbox.close();
+  }
+});
+
 for (const item of cases) {
   try {
     await item.run();

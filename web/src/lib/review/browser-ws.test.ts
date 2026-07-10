@@ -36,6 +36,7 @@ import {
 } from './browser-crypto';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { assembleBrowserSignal } from './browser-signaling';
 
 // ---------------------------------------------------------------------------
 // Tiny async test harness — runs each case sequentially, prints results,
@@ -345,6 +346,7 @@ function clientOptions(port: number) {
   const url = `ws://127.0.0.1:${port}/v2/rooms/room-test/socket?device_id=d-test`;
   return {
     roomId: 'room-test',
+    localDeviceId: 'd-test',
     url,
     subprotocol: 'attn.v2, hmac.dGVzdA',
     afterSeq: 0,
@@ -1142,6 +1144,46 @@ defineCase('buildWsUrl + scheme translation', () => {
     'ws://127.0.0.1:9999/v2/rooms/rid/socket?device_id=did',
     'preserves explicit ws://',
   );
+});
+
+defineCase('signal target is rejected before ciphertext decode and matching target dispatches', async () => {
+  const errors: string[] = [];
+  const inbound: DecodedEnvelope[] = [];
+  const client = new BrowserWsClient({
+    ...clientOptions(0),
+    callbacks: {
+      onEnvelope: (decoded) => { inbound.push(decoded); },
+      onError: (_code, message) => { errors.push(message); },
+    },
+  });
+  const base = {
+    signalingKey: KEYS.signalingKey,
+    roomId: 'room-test',
+    authorId: TEST_DEVICE.participantId,
+    deviceId: TEST_DEVICE.deviceId,
+    createdAt: 1_700_000_000_000,
+    expiresAt: 1_700_086_400_000,
+    payload: { kind: 'offer', sdp: 'v=0', from: TEST_DEVICE.deviceId } as const,
+    clientNonce: new Uint8Array(16).fill(1),
+    aeadNonce: new Uint8Array(24).fill(2),
+  };
+  const redirected = assembleBrowserSignal({ ...base, targetDeviceId: 'some-other-device' });
+  redirected.nonce = '!not-base64';
+  redirected.ciphertext = '!not-base64';
+  await client.replayEnvelope(redirected, 1);
+  assertEq(inbound.length, 0, 'redirected signal dropped');
+  assert(errors.some((message) => message.includes('target')), 'target failure reported before decode');
+
+  const matching = assembleBrowserSignal({
+    ...base,
+    targetDeviceId: 'd-test',
+    clientNonce: new Uint8Array(16).fill(3),
+  });
+  await client.replayEnvelope(matching, 2);
+  assertEq(inbound.length, 1, 'matching signal dispatched');
+  assertEq(inbound[0]!.source, 'replay', 'source preserved');
+  inbound[0]!.plaintext.fill(0);
+  client.close();
 });
 
 defineCase('constructor rejects bad-length keys', () => {

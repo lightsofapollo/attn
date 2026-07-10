@@ -35,6 +35,7 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
+use crate::review::ids::DeviceId;
 use crate::review::model::{Device, MailboxEnvelope, RoomPolicy, SyncCursor};
 use crate::review::store::ReviewStore;
 use crate::review::transport::inbound::InboundPipeline;
@@ -319,6 +320,8 @@ enum ServerFrame {
         server_seq: u64,
         policy: RoomPolicy,
         devices: Vec<Device>,
+        #[serde(rename = "onlineDeviceIds", default)]
+        online_device_ids: Vec<DeviceId>,
         #[serde(rename = "missedSignalEnvelopeIds", default)]
         missed_signal_envelope_ids: Vec<String>,
     },
@@ -837,12 +840,14 @@ impl MailboxWsClient {
                 server_seq,
                 policy,
                 devices,
+                online_device_ids,
                 missed_signal_envelope_ids,
             } => {
                 let _ = self.events_tx.send(TransportEvent::Hello {
                     server_seq,
                     policy,
                     devices,
+                    online_device_ids,
                     missed_signal_envelope_ids,
                 });
                 None
@@ -891,6 +896,17 @@ impl MailboxWsClient {
                             Ok(plaintext) => {
                                 use crate::review::transport::signaling::SignalingPayload;
                                 match serde_json::from_slice::<SignalingPayload>(&plaintext) {
+                                    // Every room member has signalingKey, so bind
+                                    // the decrypted sender back to the AAD-bound
+                                    // outer device before manager peer selection.
+                                    Ok(p) if p.from() != &envelope.device_id => {}
+                                    // SDP/ICE is always directed. Reject a relay
+                                    // rewrite from target=self to broadcast; target
+                                    // is intentionally not part of the AEAD AAD.
+                                    Ok(p)
+                                        if p.is_webrtc_control()
+                                            && envelope.target.as_ref().map(|t| &t.device_id)
+                                                != Some(&self.config.device_id) => {}
                                     // High-frequency live co-typing steps.
                                     Ok(SignalingPayload::Collab { from, payload }) => {
                                         decoded_collab = Some((from, payload));

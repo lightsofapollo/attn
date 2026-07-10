@@ -81,6 +81,8 @@
 
   let sessionState = $state<BrowserSessionState>({
     status: 'idle',
+    connection: 'offline',
+    directError: null,
     roomId: null,
     snapshotContent: null,
     snapshotDocType: 'markdown',
@@ -381,6 +383,8 @@
   data-slot="browser-review"
   data-authoring-ready={sessionState.authoringReady ? 'true' : 'false'}
   data-outbox-pending={sessionState.outboxPending}
+  data-connection={sessionState.connection}
+  data-direct-error={sessionState.directError ?? ''}
 >
   {#if sessionState.error}
     <div class="browser-review-error flex h-full flex-col items-center justify-center gap-3 px-6 text-center"
@@ -435,6 +439,15 @@
             {/if}
           </div>
           <div class="flex min-w-0 items-center justify-end gap-2">
+            <span data-slot="browser-connection-status">
+              {sessionState.connection === 'live_direct'
+                ? 'Direct encrypted link'
+                : sessionState.connection === 'direct_failed'
+                  ? 'Direct unavailable; encrypted mailbox active'
+                  : sessionState.connection === 'mailbox'
+                    ? 'Encrypted mailbox'
+                    : 'Offline'}
+            </span>
             {#if !sessionState.authoringReady}
               <span>Preparing encrypted authoring…</span>
             {/if}

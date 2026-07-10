@@ -447,6 +447,38 @@ export function deriveEventEnvelopeId(roomId: string, eventId: string): string {
   return base64UrlEncode(digest.subarray(0, 16));
 }
 
+/**
+ * Deterministic envelope id for signal/snapshot payloads.
+ * Mirrors Rust `derive_envelope_id_with_nonce`: first 16 bytes of
+ * SHA-256("envelope v2" || roomId || deviceId || clientNonce).
+ */
+export function deriveNonceEnvelopeId(
+  roomId: string,
+  deviceId: string,
+  clientNonce: Uint8Array,
+): string {
+  if (roomId.length === 0 || deviceId.length === 0) {
+    throw new Error('roomId and deviceId must be non-empty');
+  }
+  if (clientNonce.length !== 16) throw new Error('clientNonce must be 16 bytes');
+  const room = new TextEncoder().encode(roomId);
+  const device = new TextEncoder().encode(deviceId);
+  const input = new Uint8Array(
+    ENVELOPE_ID_PREFIX.length + room.length + device.length + clientNonce.length,
+  );
+  let offset = 0;
+  input.set(ENVELOPE_ID_PREFIX, offset);
+  offset += ENVELOPE_ID_PREFIX.length;
+  input.set(room, offset);
+  offset += room.length;
+  input.set(device, offset);
+  offset += device.length;
+  input.set(clientNonce, offset);
+  const digest = sha256(input);
+  input.fill(0);
+  return base64UrlEncode(digest.subarray(0, 16));
+}
+
 /** `ContentHash = base64url(SHA-256(canonical snapshot plaintext bytes))`. */
 export function contentHash(bytes: Uint8Array): string {
   return base64UrlEncode(sha256(bytes));

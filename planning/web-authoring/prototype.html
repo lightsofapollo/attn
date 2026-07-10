@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>attn web presence — page design prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #eee9df;
+      --paper-2: #e5ded1;
+      --ink: #211d19;
+      --muted: #6e665e;
+      --rule: rgba(33, 29, 25, .18);
+      --rust: #a93f2d;
+      --rust-dark: #7b2b20;
+      --green: #2f6956;
+      --sheet: #f8f4eb;
+      --shadow: 0 24px 80px rgba(54, 43, 32, .12);
+      --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      --sans: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+      --mono: "SFMono-Regular", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { background: var(--paper); }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 0%, rgba(255,255,255,.72), transparent 34rem),
+        var(--paper);
+      font-family: var(--serif);
+      min-height: 100vh;
+    }
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .04;
+      z-index: 99;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.92' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    .prototype-bar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      gap: .45rem;
+      padding: .6rem .9rem;
+      border-bottom: 1px solid var(--rule);
+      background: rgba(238,233,223,.92);
+      backdrop-filter: blur(16px);
+      font-family: var(--sans);
+    }
+    .prototype-bar strong { margin-right: .5rem; font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; }
+    .prototype-bar button {
+      border: 1px solid transparent;
+      background: transparent;
+      border-radius: 999px;
+      padding: .42rem .72rem;
+      cursor: pointer;
+      font-size: .78rem;
+    }
+    .prototype-bar button:hover,
+    .prototype-bar button[aria-pressed="true"] { border-color: var(--rule); background: var(--sheet); }
+    .screen { display: none; min-height: calc(100vh - 49px); }
+    .screen.active { display: block; animation: enter .35s ease-out both; }
+    @keyframes enter { from { opacity: 0; transform: translateY(4px); } }
+    .site-nav {
+      height: 74px;
+      padding: 0 clamp(1.2rem, 4vw, 4.5rem);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--rule);
+      font-family: var(--sans);
+    }
+    .brand { display: flex; align-items: center; gap: .65rem; font-family: var(--serif); font-weight: 800; font-size: 1.35rem; }
+    .brand-mark { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 8px; color: white; background: var(--ink); font-family: var(--mono); font-size: .78rem; }
+    .nav-links { display: flex; align-items: center; gap: 1.4rem; font-size: .88rem; }
+    .text-link { color: var(--muted); }
+    .button {
+      border: 1px solid var(--ink);
+      border-radius: 8px;
+      padding: .72rem 1rem;
+      background: transparent;
+      cursor: pointer;
+      font-family: var(--sans);
+      font-weight: 650;
+    }
+    .button.primary { background: var(--rust); border-color: var(--rust); color: #fff9f1; }
+    .button.quiet { border-color: var(--rule); background: rgba(255,255,255,.22); }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, .85fr) minmax(520px, 1.15fr);
+      gap: clamp(2rem, 5vw, 7rem);
+      align-items: center;
+      max-width: 1500px;
+      margin: 0 auto;
+      padding: clamp(4rem, 8vw, 8rem) clamp(1.2rem, 5vw, 5rem) 5rem;
+    }
+    .eyebrow { font: 700 .76rem/1 var(--sans); letter-spacing: .13em; text-transform: uppercase; color: var(--rust-dark); }
+    .hero h1 { margin: 1rem 0 1.3rem; font-size: clamp(3.6rem, 6vw, 7rem); line-height: .91; letter-spacing: -.055em; max-width: 760px; }
+    .hero-copy { color: var(--muted); font: 1.2rem/1.55 var(--sans); max-width: 610px; }
+    .hero-actions { display: flex; gap: .7rem; margin-top: 2rem; }
+    .privacy-line { margin-top: 1.25rem; color: var(--muted); font: .8rem/1.4 var(--mono); }
+    .document-stage { position: relative; min-height: 650px; }
+    .doc-sheet {
+      position: absolute;
+      inset: 0 105px 0 0;
+      background: var(--sheet);
+      border: 1px solid var(--rule);
+      box-shadow: var(--shadow);
+      padding: 4rem clamp(2rem, 5vw, 5.3rem);
+      transform: rotate(-.35deg);
+    }
+    .doc-sheet .meta { font: .72rem var(--mono); color: var(--muted); border-bottom: 1px solid var(--rule); padding-bottom: 1rem; }
+    .doc-sheet h2 { font-size: clamp(2.5rem, 4vw, 4.4rem); line-height: 1; letter-spacing: -.035em; margin: 3.6rem 0 1.7rem; }
+    .doc-sheet p { font-size: 1.16rem; line-height: 1.7; max-width: 600px; }
+    .selection { background: rgba(169,63,45,.13); border-bottom: 2px solid rgba(169,63,45,.5); }
+    .comment {
+      position: absolute;
+      right: 0;
+      top: 36%;
+      width: 245px;
+      padding: 1.1rem;
+      border: 1px solid rgba(169,63,45,.45);
+      background: #fff9ef;
+      box-shadow: 0 14px 40px rgba(54,43,32,.14);
+      font: .86rem/1.45 var(--sans);
+    }
+    .comment strong { display: block; font-size: .75rem; color: var(--rust-dark); margin-bottom: .45rem; }
+    .three-part { max-width: 1200px; margin: 0 auto; padding: 4rem 1.5rem 8rem; display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--rule); }
+    .part { padding: 1.5rem 2rem; border-right: 1px solid var(--rule); }
+    .part:last-child { border-right: 0; }
+    .part .num { font: .75rem var(--mono); color: var(--rust); }
+    .part h3 { margin: 1.7rem 0 .6rem; font-size: 1.65rem; }
+    .part p { margin: 0; color: var(--muted); font: .95rem/1.55 var(--sans); }
+
+    .app-shell { min-height: calc(100vh - 49px); display: grid; grid-template-rows: 64px 1fr; }
+    .app-header { display: flex; align-items: center; justify-content: space-between; padding: 0 1.4rem; border-bottom: 1px solid var(--rule); font-family: var(--sans); }
+    .app-header .right { display: flex; align-items: center; gap: .7rem; }
+    .local-badge { font: .73rem var(--mono); color: var(--green); display: flex; align-items: center; gap: .45rem; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .desk { padding: clamp(2rem, 6vw, 6rem); max-width: 1300px; margin: 0 auto; width: 100%; }
+    .desk-title { display: flex; justify-content: space-between; align-items: end; border-bottom: 1px solid var(--ink); padding-bottom: 1.3rem; }
+    .desk-title h1 { font-size: clamp(2.8rem, 5vw, 5rem); margin: 0; letter-spacing: -.045em; }
+    .desk-title p { color: var(--muted); font: .85rem var(--mono); }
+    .quick-actions { display: grid; grid-template-columns: 1.6fr 1fr 1fr; gap: 1px; background: var(--rule); margin: 2.5rem 0 4rem; border: 1px solid var(--rule); }
+    .quick {
+      min-height: 155px;
+      border: 0;
+      padding: 1.4rem;
+      text-align: left;
+      background: var(--sheet);
+      cursor: pointer;
+    }
+    .quick:hover { background: #fffaf1; }
+    .quick big { display: block; font-size: 1.55rem; margin-top: 2.2rem; }
+    .quick span { color: var(--muted); font: .82rem var(--sans); }
+    .folio-label { font: .72rem var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
+    .workspace-row { display: grid; grid-template-columns: 1.2fr .65fr .65fr auto; align-items: center; gap: 1rem; padding: 1.25rem .25rem; border-bottom: 1px solid var(--rule); font-family: var(--sans); }
+    .workspace-row strong { font-family: var(--serif); font-size: 1.18rem; }
+    .workspace-row span { color: var(--muted); font-size: .82rem; }
+
+    .editor-shell { min-height: calc(100vh - 49px); display: grid; grid-template-rows: 58px 1fr; background: var(--paper-2); }
+    .editor-top { display: grid; grid-template-columns: 240px 1fr 320px; align-items: center; border-bottom: 1px solid var(--rule); background: var(--paper); font-family: var(--sans); }
+    .editor-top > div { padding: 0 1rem; }
+    .editor-top .doc-name { text-align: center; font-family: var(--serif); font-weight: 700; }
+    .editor-top .share-action { text-align: right; }
+    .editor-grid { display: grid; grid-template-columns: 240px minmax(0,1fr) 320px; min-height: 0; }
+    .file-rail { border-right: 1px solid var(--rule); padding: 1.2rem; font-family: var(--sans); background: rgba(238,233,223,.65); }
+    .rail-title { font: .68rem var(--mono); text-transform: uppercase; color: var(--muted); margin: .4rem 0 1.1rem; }
+    .file { padding: .55rem .65rem; border-radius: 5px; font-size: .88rem; margin-bottom: .2rem; }
+    .file.active { background: var(--sheet); box-shadow: inset 3px 0 var(--rust); }
+    .editor-canvas { overflow: auto; padding: 3rem clamp(1.2rem,5vw,6rem); }
+    .writing-sheet { max-width: 760px; min-height: 780px; margin: 0 auto; background: var(--sheet); border: 1px solid var(--rule); box-shadow: 0 10px 45px rgba(54,43,32,.08); padding: clamp(2.2rem,6vw,5.5rem); }
+    .writing-sheet h1 { font-size: 3.4rem; line-height: 1; letter-spacing: -.035em; }
+    .writing-sheet p, .writing-sheet li { font-size: 1.08rem; line-height: 1.7; }
+    .review-rail { border-left: 1px solid var(--rule); background: var(--paper); padding: 1rem; font-family: var(--sans); }
+    .review-card { background: var(--sheet); border: 1px solid var(--rule); padding: .9rem; margin-top: 7rem; box-shadow: 0 8px 24px rgba(54,43,32,.07); font-size: .84rem; line-height: 1.45; }
+    .review-card strong { display: block; color: var(--rust-dark); font-size: .75rem; margin-bottom: .4rem; }
+
+    .overlay-stage { min-height: calc(100vh - 49px); display: grid; place-items: center; padding: 2rem; background: rgba(33,29,25,.38); }
+    .share-sheet { width: min(690px, 100%); min-width: 0; background: var(--sheet); border: 1px solid var(--ink); box-shadow: var(--shadow); }
+    .share-head { padding: 1.8rem 2rem; border-bottom: 1px solid var(--rule); display: flex; justify-content: space-between; align-items: start; }
+    .share-head h1 { margin: 0; font-size: 2.3rem; }
+    .share-body { padding: 1.6rem 2rem 2rem; }
+    .step { display: grid; grid-template-columns: 28px 1fr; gap: .8rem; padding: 1rem 0; border-bottom: 1px solid var(--rule); }
+    .step-num { width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid var(--rule); border-radius: 50%; font: .7rem var(--mono); }
+    .step strong { display: block; font-family: var(--sans); }
+    .step p { margin: .25rem 0 0; color: var(--muted); font: .87rem/1.45 var(--sans); }
+    .link-box { min-width: 0; margin-top: 1.4rem; border: 1px solid var(--rule); background: var(--paper); padding: .85rem; font: .75rem/1.5 var(--mono); overflow: hidden; overflow-wrap: anywhere; }
+    .share-foot { display: flex; justify-content: space-between; gap: .7rem; margin-top: 1rem; }
+
+    .storage-grid { display: grid; grid-template-columns: minmax(0,1.3fr) minmax(280px,.7fr); gap: 3rem; margin-top: 3rem; }
+    .storage-panel { border-top: 1px solid var(--ink); padding-top: 1rem; }
+    .meter { height: 8px; background: var(--paper-2); margin: 1rem 0 .6rem; }
+    .meter span { display: block; width: 18%; height: 100%; background: var(--green); }
+    .status-box { background: var(--sheet); border: 1px solid var(--rule); padding: 1.2rem; font-family: var(--sans); }
+    .status-box strong { color: var(--green); }
+
+    @media (max-width: 900px) {
+      .prototype-bar { overflow-x: auto; }
+      .hero { grid-template-columns: 1fr; padding-top: 3.5rem; }
+      .document-stage { min-height: 540px; }
+      .doc-sheet { right: 40px; padding: 2.5rem 2rem; }
+      .comment { width: 210px; top: 55%; }
+      .three-part { grid-template-columns: 1fr; }
+      .part { border-right: 0; border-bottom: 1px solid var(--rule); }
+      .nav-links .text-link { display: none; }
+      .quick-actions { grid-template-columns: 1fr; }
+      .workspace-row { grid-template-columns: 1fr auto; }
+      .workspace-row span:nth-of-type(-n+2) { display: none; }
+      .editor-top { grid-template-columns: 1fr auto; }
+      .editor-top > div:first-child { display: none; }
+      .editor-top .doc-name { text-align: left; }
+      .editor-grid { grid-template-columns: 1fr; }
+      .file-rail, .review-rail { display: none; }
+      .editor-canvas { padding: 0; }
+      .writing-sheet { border: 0; min-height: calc(100vh - 107px); box-shadow: none; }
+      .storage-grid { grid-template-columns: 1fr; }
+      .desk-title { display: block; }
+      .desk-title p { margin: 1rem 0 0; max-width: 32ch; line-height: 1.45; }
+      .overlay-stage { padding: 1rem; place-items: start center; }
+      .share-sheet { width: 100%; max-width: calc(100vw - 2rem); margin-top: 4.5rem; }
+      .share-head { gap: 1rem; padding: 1.4rem 1.25rem; }
+      .share-head > div { min-width: 0; }
+      .share-head h1 { font-size: clamp(1.85rem, 9vw, 2.3rem); }
+      .share-body { padding: 1.1rem 1.25rem 1.4rem; }
+      .share-foot { flex-wrap: wrap; }
+      .share-foot .button { flex: 1 1 12rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="prototype-bar" aria-label="Prototype page switcher">
+    <strong>Page designs</strong>
+    <button aria-pressed="true" data-target="landing">Landing</button>
+    <button aria-pressed="false" data-target="home">Local desk</button>
+    <button aria-pressed="false" data-target="editor">Editor</button>
+    <button aria-pressed="false" data-target="share">Share</button>
+    <button aria-pressed="false" data-target="storage">Storage</button>
+  </div>
+
+  <section class="screen active" data-screen="landing">
+    <nav class="site-nav">
+      <div class="brand"><span class="brand-mark">a.</span> attn</div>
+      <div class="nav-links">
+        <span class="text-link">How it works</span>
+        <span class="text-link">Install native</span>
+        <button class="button primary" data-go="home">Open your desk</button>
+      </div>
+    </nav>
+    <main class="hero">
+      <div>
+        <div class="eyebrow">No account. No readable cloud copy.</div>
+        <h1>A private desk for working documents.</h1>
+        <p class="hero-copy">Write in the browser or open local Markdown in native attn. Share a link when it needs another pair of eyes. Your source stays with you; our services only see encrypted envelopes.</p>
+        <div class="hero-actions">
+          <button class="button primary" data-go="home">Open your desk</button>
+          <button class="button quiet">Install native attn</button>
+        </div>
+        <p class="privacy-line">Stored on this device · E2EE when shared · WebRTC when reachable</p>
+      </div>
+      <div class="document-stage" aria-label="A shared document with a margin comment">
+        <article class="doc-sheet">
+          <div class="meta">BRIEF.MD&nbsp;&nbsp; / &nbsp;&nbsp;SAVED ON THIS DEVICE</div>
+          <h2>What deserves our attention?</h2>
+          <p>The strongest review is close to the work. It keeps the words in context, the source in your hands, and the discussion <span class="selection">anchored to the exact sentence that needs it.</span></p>
+          <p>That should not require an account—or a readable copy on somebody else’s server.</p>
+        </article>
+        <aside class="comment"><strong>MARA · JUST NOW</strong>Could we make this the opening line? It feels like the whole argument.</aside>
+      </div>
+    </main>
+    <div class="three-part">
+      <div class="part"><span class="num">01</span><h3>Create locally</h3><p>A blank document becomes a device-local workspace. Nothing is uploaded and no account is minted.</p></div>
+      <div class="part"><span class="num">02</span><h3>Share deliberately</h3><p>Share creates an encrypted, expiring room and gives you browser and native invite links.</p></div>
+      <div class="part"><span class="num">03</span><h3>Work anywhere</h3><p>Direct peer-to-peer when possible; the same ciphertext through the mailbox when it is not.</p></div>
+    </div>
+  </section>
+
+  <section class="screen" data-screen="home">
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="brand"><span class="brand-mark">a.</span> attn</div>
+        <div class="right"><span class="local-badge"><span class="dot"></span> Stored on this device</span><button class="button quiet" data-go="storage">Storage</button></div>
+      </header>
+      <main class="desk">
+        <div class="desk-title"><div><div class="eyebrow">Local workspaces</div><h1>Your desk</h1></div><p>No account · 84 MB available</p></div>
+        <div class="quick-actions">
+          <button class="quick" data-go="editor"><span>One click · starts with untitled.md</span><big>＋ New workspace</big></button>
+          <button class="quick"><span>Markdown, images, folders, or zip</span><big>↥ Import workspace</big></button>
+          <button class="quick"><span>Browser or native link</span><big>↗ Join a review</big></button>
+        </div>
+        <div class="folio-label">Recently on this device</div>
+        <div class="workspace-row"><strong>Product direction</strong><span>3 files</span><span>Edited 8 min ago</span><span class="local-badge"><span class="dot"></span> Shared</span></div>
+        <div class="workspace-row"><strong>Launch notes</strong><span>1 file</span><span>Yesterday</span><span>Local only</span></div>
+        <div class="workspace-row"><strong>Research folio</strong><span>12 files</span><span>Jun 28</span><span>Backed up</span></div>
+      </main>
+    </div>
+  </section>
+
+  <section class="screen" data-screen="editor">
+    <div class="editor-shell">
+      <header class="editor-top">
+        <div class="brand"><span class="brand-mark">a.</span> attn</div>
+        <div class="doc-name">Product direction <span style="color:var(--muted);font: .72rem var(--mono)">· SAVED</span></div>
+        <div class="share-action"><button class="button primary" data-go="share">Share</button></div>
+      </header>
+      <div class="editor-grid">
+        <aside class="file-rail"><div class="rail-title">On this device · 5 entries</div><div class="file active">direction.md</div><div class="file">principles.md</div><div class="file">open-questions.md</div><div class="file" style="color:var(--muted)">▧ images/desk.png</div><div class="file" style="color:var(--muted)">◇ data/notes.json</div><div class="file" style="color:var(--muted);margin-top:1rem">＋ Add file or asset</div></aside>
+        <main class="editor-canvas"><article class="writing-sheet"><div class="eyebrow">Working draft</div><h1>Product direction</h1><p>Attn should feel like a private writing desk, not a cloud drive with the login form removed.</p><h2>The source stays here</h2><p>A local workspace is the source of truth. Sharing creates a review room around a revision; it does not move ownership to the relay.</p><ul><li>Create without a network request.</li><li>Autosave to the browser before showing “Saved.”</li><li>Export ordinary Markdown at any time.</li></ul></article></main>
+        <aside class="review-rail"><div class="rail-title">Review margin · 1</div><div class="review-card"><strong>JULES · 2 MIN</strong>“Around a revision” is important. Can we show that directly in the Share copy?</div></aside>
+      </div>
+    </div>
+  </section>
+
+  <section class="screen" data-screen="share">
+    <div class="overlay-stage">
+      <article class="share-sheet">
+        <header class="share-head"><div><div class="eyebrow">End-to-end encrypted</div><h1>Share for review</h1></div><button class="button quiet" data-go="editor">Close</button></header>
+        <div class="share-body">
+          <div class="step"><span class="step-num">1</span><div><strong>Keep your source safe</strong><p>Persistent storage is active. Download a normal Markdown backup before sharing from another device.</p></div></div>
+          <div class="step"><span class="step-num">2</span><div><strong>Available for 24 hours · Hybrid</strong><p>Direct when peers can connect; encrypted relay otherwise. Advanced limits are available but stay out of the primary flow.</p></div></div>
+          <div class="step"><span class="step-num">3</span><div><strong>Share the whole workspace · 5 entries</strong><p>Three Markdown files and two referenced assets keep their relative paths. Choose current file or selected entries instead.</p></div></div>
+          <div class="step"><span class="step-num">4</span><div><strong>Link ready</strong><p>The room key stays in the fragment. Attn services cannot recover this link or read the workspace.</p></div></div>
+          <div class="link-box">https://attn.sh/review/7pmH1MwiTfQt9gecnT4HIA#key=••••••••••••••••••••</div>
+          <div class="share-foot"><button class="button quiet">Native & CLI options</button><button class="button primary">Copy browser link</button></div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="screen" data-screen="storage">
+    <div class="app-shell">
+      <header class="app-header"><div class="brand"><span class="brand-mark">a.</span> attn</div><button class="button quiet" data-go="home">Back to your desk</button></header>
+      <main class="desk">
+        <div class="desk-title"><div><div class="eyebrow">This browser profile</div><h1>Storage & recovery</h1></div><p>Nothing here is stored in an attn account</p></div>
+        <div class="storage-grid">
+          <section class="storage-panel"><h2>Local workspaces</h2><div class="workspace-row"><strong>Product direction</strong><span>2.4 MB</span><span>Backed up today</span><button class="button quiet">Export</button></div><div class="workspace-row"><strong>Launch notes</strong><span>48 KB</span><span>Never backed up</span><button class="button quiet">Export</button></div><div style="display:flex;gap:.7rem;margin-top:1.5rem"><button class="button primary">Export all Markdown</button><button class="button quiet">Import backup</button></div></section>
+          <aside class="storage-panel"><div class="status-box"><strong>● Protected from automatic cleanup</strong><p style="color:var(--muted);font-size:.88rem;line-height:1.5">This origin has persistent storage. Clearing Safari website data still removes it.</p><div class="meter"><span></span></div><small>18.7 MB used of about 104 MB available</small></div><button class="button quiet" style="margin-top:1rem;color:var(--rust-dark)">Clear all local attn data</button></aside>
+        </div>
+      </main>
+    </div>
+  </section>
+
+  <script>
+    const show = (name) => {
+      document.querySelectorAll('[data-screen]').forEach((screen) => screen.classList.toggle('active', screen.dataset.screen === name));
+      document.querySelectorAll('[data-target]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.target === name)));
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    };
+    document.addEventListener('click', (event) => {
+      const target = event.target.closest('[data-target], [data-go]');
+      if (target) show(target.dataset.target || target.dataset.go);
+    });
+    if (location.hash === '#new') {
+      document.querySelector('.doc-name').innerHTML = 'Untitled <span style="color:var(--muted);font: .72rem var(--mono)">· SAVED ON THIS DEVICE</span>';
+      document.querySelector('.file.active').textContent = 'untitled.md';
+      document.querySelector('.writing-sheet').innerHTML = '<div class="eyebrow">New workspace</div><h1>Untitled</h1><p style="color:var(--muted)">Start writing…</p>';
+      show('editor');
+    } else if (location.hash === '#home') {
+      show('home');
+    }
+  </script>
+</body>
+</html>

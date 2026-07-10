@@ -27,9 +27,10 @@ import { validateBrowserRelayUrl } from './lib/review/browser-relay-url';
 async function bootstrapHostedReview(): Promise<void> {
   let parsedInvite: ParsedInvite | undefined;
   let inviteError: string | undefined;
+  const hadFragment = window.location.hash.length > 1;
   try {
     parsedInvite = parseAndStripInviteFromUrl(window) ?? undefined;
-    if (!parsedInvite) inviteError = 'no invite fragment in URL';
+    if (!parsedInvite && hadFragment) inviteError = 'invalid invite fragment';
   } catch (error) {
     inviteError = error instanceof Error ? error.message : 'invalid invite';
   }
@@ -46,12 +47,22 @@ async function bootstrapHostedReview(): Promise<void> {
     target.style.display = '';
     svelte.mount(appModule.default, {
       target,
-      props: { relayUrl, parsedInvite, inviteError },
+      props: {
+        relayUrl,
+        parsedInvite,
+        inviteError,
+        rememberedRoomId: roomIdFromReviewPath(window.location.pathname),
+      },
     });
   } catch (error) {
     if (parsedInvite) zero(parsedInvite.roomSecret);
     throw error;
   }
+}
+
+function roomIdFromReviewPath(pathname: string): string | undefined {
+  const match = pathname.match(/^\/review\/([A-Za-z0-9_-]+)\/?$/u);
+  return match?.[1];
 }
 
 void bootstrapHostedReview().catch((error: unknown) => {

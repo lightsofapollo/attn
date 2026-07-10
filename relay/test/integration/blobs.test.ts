@@ -558,6 +558,128 @@ describe("POST /v2/rooms/:roomId/blobs — happy path", () => {
     expect(fetched[1024]).toBe(ciphertext[1024]);
     expect(fetched[ciphertext.byteLength - 1]).toBe(ciphertext[ciphertext.byteLength - 1]);
   });
+
+  it("allows an allowlisted hosted origin to read a cap-bearing blob only when browser policy is enabled", async () => {
+    const roomId = uniqueRoomId("blob-browser-cors");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({
+      roomId,
+      ownerKp: owner,
+      policy: { allowBrowser: true },
+    });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-browser-cors",
+      participantId: "browser-cors",
+    });
+
+    const ciphertext = makeCiphertext(OVER_THRESHOLD_BYTES, 0x63);
+    const uploadRes = await postBlobPresign({
+      roomId,
+      admissionKey,
+      envelopeId: "blob-browser-cors-1",
+      authorId: "browser-cors",
+      deviceId: "dev-browser-cors",
+      ciphertextBytes: ciphertext.byteLength,
+    });
+    expect(uploadRes.status).toBe(200);
+    const upload = (await uploadRes.json()) as PresignedUploadResponse;
+    expect((await SELF.fetch(`${URL_BASE}${upload.uploadUrl}`, {
+      method: "PUT",
+      body: ciphertext,
+    })).status).toBe(204);
+
+    const downloadRes = await getBlobDownloadPresign({
+      roomId,
+      admissionKey,
+      envelopeId: "blob-browser-cors-1",
+    });
+    expect(downloadRes.status).toBe(200);
+    const download = (await downloadRes.json()) as PresignedDownloadResponse;
+
+    const preflight = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://staging.attn.sh",
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "attn-admission",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("Access-Control-Allow-Origin")).toBe("https://staging.attn.sh");
+    expect(preflight.headers.get("Access-Control-Allow-Methods")).toContain("GET");
+    expect(preflight.headers.get("Access-Control-Allow-Headers")).toContain("Attn-Admission");
+    expect(preflight.headers.get("Cache-Control")).toBe("private, no-store");
+
+    const allowed = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, {
+      headers: { Origin: "https://staging.attn.sh" },
+    });
+    expect(allowed.status).toBe(200);
+    expect(allowed.headers.get("Access-Control-Allow-Origin")).toBe("https://staging.attn.sh");
+    expect(allowed.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(allowed.headers.get("Vary")?.split(/,\s*/)).toContain("Origin");
+    expect(allowed.headers.get("X-Attn-Allow-Browser")).toBeNull();
+    await allowed.arrayBuffer();
+
+    const disallowed = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, {
+      headers: { Origin: "https://evil.example" },
+    });
+    expect(disallowed.status).toBe(200);
+    expect(disallowed.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(disallowed.headers.get("X-Attn-Allow-Browser")).toBeNull();
+    await disallowed.arrayBuffer();
+  });
+
+  it("does not attach blob CORS for a browser-disabled room", async () => {
+    const roomId = uniqueRoomId("blob-native-cors");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-native-cors",
+      participantId: "native-cors",
+    });
+
+    const ciphertext = makeCiphertext(OVER_THRESHOLD_BYTES, 0x73);
+    const uploadRes = await postBlobPresign({
+      roomId,
+      admissionKey,
+      envelopeId: "blob-native-cors-1",
+      authorId: "native-cors",
+      deviceId: "dev-native-cors",
+      ciphertextBytes: ciphertext.byteLength,
+    });
+    expect(uploadRes.status).toBe(200);
+    const upload = (await uploadRes.json()) as PresignedUploadResponse;
+    expect((await SELF.fetch(`${URL_BASE}${upload.uploadUrl}`, {
+      method: "PUT",
+      body: ciphertext,
+    })).status).toBe(204);
+    const downloadRes = await getBlobDownloadPresign({
+      roomId,
+      admissionKey,
+      envelopeId: "blob-native-cors-1",
+    });
+    const download = (await downloadRes.json()) as PresignedDownloadResponse;
+    const preflight = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://staging.attn.sh",
+        "Access-Control-Request-Method": "GET",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    const response = await SELF.fetch(`${URL_BASE}${download.downloadUrl}`, {
+      headers: { Origin: "https://staging.attn.sh" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    await response.arrayBuffer();
+  });
 });
 
 describe("POST /v2/rooms/:roomId/blobs — threshold gate", () => {

@@ -1,4 +1,9 @@
-import { BrowserOutbox, type BrowserOutboxResponse } from './browser-outbox';
+import {
+  BrowserOutbox,
+  type BrowserOutboxAccepted,
+  type BrowserOutboxPersistence,
+  type BrowserOutboxResponse,
+} from './browser-outbox';
 import type { MailboxEnvelope } from './browser-ws';
 
 const ROOM = 'room-outbox-test';
@@ -245,6 +250,147 @@ test('authenticated policy updates change PoW difficulty for the queued envelope
     await outbox.flushNow();
     equal(difficulties, [19], 'new policy difficulty');
   } finally {
+    outbox.close();
+  }
+});
+
+test('remembered outbox survives reconstruction and removes exact ciphertext only after durable ACK', async () => {
+  const pending = new Map<string, MailboxEnvelope>();
+  const history = new Map<string, { envelope: MailboxEnvelope; serverSeq: number }>();
+  const persistence: BrowserOutboxPersistence = {
+    loadPending: async () => [...pending.values()],
+    putPending: async (item) => {
+      const existing = pending.get(item.envelopeId);
+      if (existing && JSON.stringify(existing) !== JSON.stringify(item)) {
+        throw new Error('conflicting durable envelope');
+      }
+      pending.set(item.envelopeId, structuredClone(item));
+    },
+    acknowledge: async (batch, accepted: BrowserOutboxAccepted[]) => {
+      for (const ack of accepted) {
+        const item = batch.find((candidate) => candidate.envelopeId === ack.envelopeId);
+        if (!item) throw new Error('ack did not match batch');
+        history.set(ack.envelopeId, { envelope: structuredClone(item), serverSeq: ack.serverSeq });
+        pending.delete(ack.envelopeId);
+      }
+    },
+  };
+  const first = new BrowserOutbox({
+    relayUrl: 'https://relay.example.test',
+    roomId: ROOM,
+    deviceId: DEVICE,
+    admissionKey: new Uint8Array(32).fill(0x42),
+    powBits: 12,
+    maxEventBytes: 1024,
+    now: () => NOW,
+    fetchImpl: async (_url, init) => acceptedFromBody(init.body),
+    mintPow: async () => 'pow-first',
+    persistence,
+  });
+  const original = envelope('env-durable-reload');
+  await first.initialize();
+  await first.enqueueDurably(original);
+  equal(pending.get(original.envelopeId), original, 'exact ciphertext committed before close');
+  first.close();
+
+  let sentBody = '';
+  const resumed = new BrowserOutbox({
+    relayUrl: 'https://relay.example.test',
+    roomId: ROOM,
+    deviceId: DEVICE,
+    admissionKey: new Uint8Array(32).fill(0x42),
+    powBits: 12,
+    maxEventBytes: 1024,
+    now: () => NOW,
+    fetchImpl: async (_url, init) => {
+      sentBody = init.body;
+      return acceptedFromBody(init.body);
+    },
+    mintPow: async () => 'pow-resumed',
+    persistence,
+  });
+  try {
+    await resumed.initialize();
+    equal(resumed.getState().pendingCount, 1, 'sealed queue restored');
+    await resumed.flushNow();
+    const wire = (JSON.parse(sentBody) as { envelopes: Array<{ ciphertext: string; nonce: string }> }).envelopes[0]!;
+    equal(wire.ciphertext, original.ciphertext, 'ciphertext unchanged across reconstruction');
+    equal(wire.nonce, original.nonce, 'nonce unchanged across reconstruction');
+    equal(pending.size, 0, 'pending row removed after durable ack journal');
+    equal(history.get(original.envelopeId)?.envelope, original, 'acked history keeps exact sealed envelope');
+  } finally {
+    resumed.close();
+  }
+});
+
+test('envelopes authored while persistence is enabling are durably migrated', async () => {
+  const pending = new Map<string, MailboxEnvelope>();
+  let releaseFirst!: () => void;
+  let announceFirst!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { announceFirst = resolve; });
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let firstBlocked = false;
+  const persistence: BrowserOutboxPersistence = {
+    loadPending: async () => [...pending.values()],
+    putPending: async (item) => {
+      if (!firstBlocked && item.envelopeId === 'env-before-enable') {
+        firstBlocked = true;
+        announceFirst();
+        await firstGate;
+      }
+      pending.set(item.envelopeId, structuredClone(item));
+    },
+    acknowledge: async () => undefined,
+  };
+  const outbox = makeOutbox(async (_url, init) => acceptedFromBody(init.body), []);
+  try {
+    outbox.enqueue(envelope('env-before-enable'));
+    const enabling = outbox.enablePersistence(persistence);
+    await firstStarted;
+    await outbox.enqueueDurably(envelope('env-during-enable'));
+    releaseFirst();
+    await enabling;
+    equal([...pending.keys()].sort(), ['env-before-enable', 'env-during-enable'], 'both envelopes durable');
+    equal(outbox.getState().pendingCount, 2, 'both envelopes remain queued');
+  } finally {
+    releaseFirst();
+    outbox.close();
+  }
+});
+
+test('persistence waits for an already in-flight memory drain before becoming authoritative', async () => {
+  let announceFetch!: () => void;
+  let releaseFetch!: () => void;
+  const fetchStarted = new Promise<void>((resolve) => { announceFetch = resolve; });
+  const fetchGate = new Promise<void>((resolve) => { releaseFetch = resolve; });
+  const pending = new Map<string, MailboxEnvelope>();
+  let durableAcks = 0;
+  const persistence: BrowserOutboxPersistence = {
+    loadPending: async () => [...pending.values()],
+    putPending: async (item) => { pending.set(item.envelopeId, structuredClone(item)); },
+    acknowledge: async (batch) => {
+      durableAcks += 1;
+      assert(batch.every((item) => pending.has(item.envelopeId)), 'durable ack requires pending rows');
+    },
+  };
+  const outbox = makeOutbox(async (_url, init) => {
+    announceFetch();
+    await fetchGate;
+    return acceptedFromBody(init.body);
+  }, []);
+  try {
+    outbox.enqueue(envelope('env-in-flight-before-enable'));
+    const flushing = outbox.flushNow();
+    await fetchStarted;
+    const enabling = outbox.enablePersistence(persistence);
+    releaseFetch();
+    await flushing;
+    await enabling;
+    equal(durableAcks, 0, 'memory-mode acknowledgement completes before adapter install');
+    equal(pending.size, 0, 'accepted envelope is not resurrected during migration');
+    equal(outbox.getState().pendingCount, 0, 'accepted queue remains empty');
+  } finally {
+    releaseFetch();
     outbox.close();
   }
 });

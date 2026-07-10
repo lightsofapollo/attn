@@ -8,6 +8,7 @@ const secretCanary = process.env.ATTN_ROOM_SECRET_CANARY;
 const commentCanary = process.env.ATTN_COMMENT_CANARY ?? 'BROWSER-COMMENT-8127';
 const replyCanary = process.env.ATTN_REPLY_CANARY ?? 'BROWSER-REPLY-4631';
 const suggestionCanary = process.env.ATTN_SUGGESTION_CANARY ?? 'BROWSER-SUGGEST-9054';
+const r2Canary = process.env.ATTN_R2_CANARY ?? 'R2-BROWSER-SEALED-2048';
 const ownerHome = process.env.ATTN_OWNER_HOME;
 const attnBin = process.env.ATTN_BIN;
 const execFileAsync = promisify(execFile);
@@ -19,6 +20,12 @@ interface EnvelopePost {
 
 function frameText(payload: string | Buffer): string {
   return typeof payload === 'string' ? payload : payload.toString('utf8');
+}
+
+function wireUrl(raw: string): string {
+  const url = new URL(raw);
+  if (url.searchParams.has('cap')) url.searchParams.set('cap', '[redacted]');
+  return url.href;
 }
 
 function attachWireCapture(page: Page): {
@@ -35,7 +42,7 @@ function attachWireCapture(page: Page): {
   const websocketUrls: string[] = [];
 
   page.on('request', (request) => {
-    wire.push(`HTTP ${request.method()} ${request.url()}\n${request.postData() ?? ''}`);
+    wire.push(`HTTP ${request.method()} ${wireUrl(request.url())}\n${request.postData() ?? ''}`);
     if (/\/v2\/rooms\/[^/]+\/envelopes$/.test(new URL(request.url()).pathname)) {
       envelopePosts.push({
         body: request.postData() ?? '',
@@ -44,13 +51,13 @@ function attachWireCapture(page: Page): {
     }
   });
   page.on('response', (response) => {
-    wire.push(`HTTP< ${response.status()} ${response.url()}`);
+    wire.push(`HTTP< ${response.status()} ${wireUrl(response.url())}`);
     if (/\/v2\/rooms\/[^/]+\/devices$/.test(new URL(response.url()).pathname)) {
       deviceStatuses.push(response.status());
     }
   });
   page.on('requestfailed', (request) => {
-    wire.push(`HTTP! ${request.url()} ${request.failure()?.errorText ?? 'request failed'}`);
+    wire.push(`HTTP! ${wireUrl(request.url())} ${request.failure()?.errorText ?? 'request failed'}`);
   });
   page.on('websocket', (socket) => {
     websocketUrls.push(socket.url());
@@ -166,8 +173,19 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   await page.getByRole('button', { name: 'Folder sibling canary' }).click();
   await expect(page.getByRole('heading', { name: 'Folder sibling canary' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Hosted review canary' })).toHaveCount(0);
+  if (process.env.E2E_DEBUG_WIRE === '1') {
+    await page.waitForTimeout(1_000);
+    console.log(`R2 diagnostics:\n${capture.wire.filter((line) => line.includes('/blobs/')).join('\n')}\n${capture.browserErrors.join('\n')}`);
+  }
+  await page.getByRole('button', { name: 'R2 snapshot canary' }).click();
+  await expect(page.getByText(/Large document loaded in safe mode/)).toBeVisible();
+  await expect(page.getByText(r2Canary, { exact: false })).toBeVisible();
+  await expect.poll(() => capture.wire.some((line) => /\/blobs\/[^?]+\?cap=/.test(line))).toBe(true);
   await page.getByRole('button', { name: 'Hosted review canary' }).click();
   await expect(page.getByRole('heading', { name: 'Hosted review canary' })).toBeVisible();
+  await page.getByRole('button', { name: 'R2 snapshot canary' }).click();
+  await expect(page.getByText(r2Canary, { exact: false })).toBeVisible();
+  await page.getByRole('button', { name: 'Hosted review canary' }).click();
 
   // Queue a comment while offline. The browser must keep only its sealed
   // envelope, recover transport delivery, and receive the encrypted echo.
@@ -301,6 +319,110 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.getByText('Invalid invite link')).toBeVisible();
   await expect(page.getByText(contentCanary, { exact: false })).toHaveCount(0);
+
+  // Re-open the invite and explicitly opt into encrypted local recovery.
+  // This is intentionally separate from the default-mode proof above.
+  await page.goto('about:blank');
+  await page.goto(inviteUrl!, { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute(
+    'data-authoring-ready',
+    'true',
+  );
+  await page.getByRole('button', { name: 'Hosted review canary' }).click();
+  await expect(page.getByText(contentCanary, { exact: false })).toBeVisible();
+  await page.locator('[data-slot="browser-remember-room"]').click();
+  if (process.env.E2E_DEBUG_WIRE === '1') {
+    await page.waitForTimeout(500);
+    console.log(`Remember errors:\n${capture.browserErrors.join('\n')}`);
+  }
+  await expect(page.getByText(/^Remembered(?: on this browser|; browser may evict local data)$/)).toBeVisible();
+
+  const rememberedAudit = await page.evaluate(async () => {
+    const databaseName = 'attn-browser-review';
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(databaseName);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    try {
+      const names = Array.from(db.objectStoreNames);
+      const transaction = db.transaction(names, 'readonly');
+      const records: Record<string, unknown[]> = {};
+      await Promise.all(names.map(async (name) => {
+        records[name] = await new Promise<unknown[]>((resolve, reject) => {
+          const request = transaction.objectStore(name).getAll();
+          request.onsuccess = () => resolve(request.result as unknown[]);
+          request.onerror = () => reject(request.error);
+        });
+      }));
+      const rootRecord = (records.room_keys?.[0] ?? null) as { rootKey?: CryptoKey } | null;
+      let exportRejected = false;
+      if (rootRecord?.rootKey) {
+        try {
+          await crypto.subtle.exportKey('raw', rootRecord.rootKey);
+        } catch {
+          exportRejected = true;
+        }
+      }
+      return {
+        names,
+        serialized: JSON.stringify(records),
+        rootExtractable: rootRecord?.rootKey?.extractable ?? null,
+        exportRejected,
+        localStorageKeys: Object.keys(localStorage),
+        sessionStorageKeys: Object.keys(sessionStorage),
+      };
+    } finally {
+      db.close();
+    }
+  });
+  expect(rememberedAudit.names).toContain('room_keys');
+  expect(rememberedAudit.rootExtractable).toBe(false);
+  expect(rememberedAudit.exportRejected).toBe(true);
+  expect(rememberedAudit.localStorageKeys).toEqual([]);
+  expect(rememberedAudit.sessionStorageKeys).toEqual([]);
+  for (const plaintext of [
+    contentCanary,
+    commentCanary,
+    replyCanary,
+    suggestionCanary,
+    r2Canary,
+    'encrypted browser suggestion',
+    secretCanary!,
+  ]) {
+    expect(rememberedAudit.serialized).not.toContain(plaintext);
+  }
+
+  // The fragment is gone, so this reload can succeed only through the
+  // non-extractable remembered key plus exact sealed envelope replay.
+  const subscribeCountBeforeReload = capture.wire.filter((line) => line.startsWith('WS> ')).length;
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.getByText(/^Remembered(?: on this browser|; browser may evict local data)$/)).toBeVisible();
+  await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute(
+    'data-authoring-ready',
+    'true',
+  );
+  await page.getByRole('button', { name: 'Hosted review canary' }).click();
+  await expect(page.getByText(contentCanary, { exact: false })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Folder sibling canary' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'R2 snapshot canary' })).toBeVisible();
+  const recoveredSuggestion = page
+    .locator('[data-testid="review-margin-card"]')
+    .filter({ hasText: suggestionCanary });
+  await expect(recoveredSuggestion).toBeVisible();
+  await page.getByRole('button', { name: /Resolved comment by .* — view details/ }).click();
+  const recoveredComment = page
+    .locator('[data-testid="review-margin-card"][data-state="resolved"]')
+    .filter({ hasText: commentCanary });
+  await expect(recoveredComment).toContainText(replyCanary);
+  await expect.poll(
+    () => capture.wire.filter((line) => line.startsWith('WS> ')).length,
+  ).toBeGreaterThan(subscribeCountBeforeReload);
+
+  const allObservedWire = capture.wire.join('\n');
+  for (const plaintext of [contentCanary, commentCanary, replyCanary, suggestionCanary, r2Canary, secretCanary!]) {
+    expect(allObservedWire).not.toContain(plaintext);
+  }
   const unexpectedBrowserErrors = capture.browserErrors.filter(
     (message) => !message.includes('net::ERR_INTERNET_DISCONNECTED'),
   );

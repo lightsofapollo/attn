@@ -667,7 +667,11 @@ export class ReviewStore {
     // also replay it). The Rust side delivers the double on purpose and relies
     // on this frontend dedup (manager.rs / bootstrap.rs). Without it every owner
     // comment/reply duplicated into a phantom reply (== the root body).
-    if (this.events.some((e) => e.meta.eventId === event.meta.eventId)) {
+    if (
+      this.events.some(
+        (e) => e.meta.roomId === event.meta.roomId && e.meta.eventId === event.meta.eventId,
+      )
+    ) {
       return;
     }
     this.events = [...this.events, event];
@@ -693,7 +697,11 @@ export class ReviewStore {
       };
       // De-dupe by snapshotId — the relay echoes the owner's own snapshot
       // back to them, and a reconnect can replay it.
-      if (!this.snapshots.some((s) => s.snapshotId === snapshot.snapshotId)) {
+      if (
+        !this.snapshots.some(
+          (s) => s.roomId === snapshot.roomId && s.snapshotId === snapshot.snapshotId,
+        )
+      ) {
         this.snapshots = [...this.snapshots, snapshot];
       }
       // Auto-focus the file the snapshot belongs to when nothing is
@@ -710,6 +718,27 @@ export class ReviewStore {
    * snapshots into the resolver / panel selection model.
    */
   applySnapshot(snapshot: ReviewSnapshot): void {
+    const existingIndex = this.snapshots.findIndex(
+      (item) => item.roomId === snapshot.roomId && item.snapshotId === snapshot.snapshotId,
+    );
+    if (existingIndex >= 0) {
+      const existing = this.snapshots[existingIndex]!;
+      // Pointer events intentionally create a content-less placeholder before
+      // the separately delivered mailbox/R2 blob arrives. Replace only that
+      // exact authenticated placeholder; ordinary duplicate replays stay
+      // idempotent and conflicting snapshot identities are never merged.
+      if (
+        existing.content === undefined &&
+        snapshot.content !== undefined &&
+        existing.fileId === snapshot.fileId &&
+        existing.baseHash === snapshot.baseHash
+      ) {
+        const next = [...this.snapshots];
+        next[existingIndex] = snapshot;
+        this.snapshots = next;
+      }
+      return;
+    }
     this.snapshots = [...this.snapshots, snapshot];
     this.upsertRoom(snapshot.roomId, {});
     if (this.currentRoomId === snapshot.roomId && this.currentFileId === null) {

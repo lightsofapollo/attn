@@ -464,6 +464,104 @@ defineCase('envelope frame decrypts + verifies + dispatches to onEnvelope', asyn
   }
 });
 
+defineCase('cursor advances only after the async durable consumer commit resolves', async () => {
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(String(raw));
+        if (msg.type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello',
+          serverSeq: 0,
+          policy: TEST_POLICY,
+          devices: [TEST_DEVICE],
+          missedSignalEnvelopeIds: [],
+        }));
+        ws.send(JSON.stringify({
+          type: 'envelope',
+          envelope: mintParticipantJoinedEnvelope('env-attest-commit-order', 1_700_000_120_000),
+          serverSeq: 6,
+        }));
+        ws.send(JSON.stringify({
+          type: 'envelope',
+          envelope: mintEventEnvelope('room-test', 'env-commit-order', 1_700_000_120_001),
+          serverSeq: 7,
+        }));
+      });
+    });
+
+    let releaseCommit!: () => void;
+    let commitStarted = false;
+    const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
+    const client = new BrowserWsClient({
+      ...clientOptions(server.port),
+      callbacks: {
+        onEnvelope: async (decoded) => {
+          if (decoded.envelope.envelopeId !== 'env-commit-order') return;
+          commitStarted = true;
+          await commitGate;
+        },
+      },
+    });
+    client.start();
+    for (let i = 0; i < 60 && !commitStarted; i++) await delay(20);
+    assert(commitStarted, 'event reached durable consumer');
+    assertEq(client.getAfterSeq(), 6, 'cursor remains at prior committed attestation');
+    releaseCommit();
+    for (let i = 0; i < 60 && client.getAfterSeq() !== 7; i++) await delay(20);
+    assertEq(client.getAfterSeq(), 7, 'cursor advances after commit resolves');
+    client.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('sealed replay rebuilds authorization without raising the network cursor', async () => {
+  const server = await startMockServer();
+  try {
+    const subscribeAfter: number[] = [];
+    server.onClient((ws) => {
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(String(raw));
+        if (msg.type !== 'subscribe') return;
+        subscribeAfter.push(msg.after as number);
+        ws.send(JSON.stringify({
+          type: 'hello',
+          serverSeq: 9,
+          policy: TEST_POLICY,
+          devices: [TEST_DEVICE],
+          missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    const replayed: DecodedEnvelope[] = [];
+    const client = new BrowserWsClient({
+      ...clientOptions(server.port),
+      afterSeq: 4,
+      initialDevices: new Map([['stored-device', TEST_DEVICE]]),
+      callbacks: { onEnvelope: (decoded) => { replayed.push(decoded); } },
+    });
+    await client.replayEnvelope(
+      mintParticipantJoinedEnvelope('env-attest-stored', 1_700_000_125_000),
+      8,
+    );
+    await client.replayEnvelope(
+      mintEventEnvelope('room-test', 'env-event-stored', 1_700_000_125_001),
+      9,
+    );
+    assert(replayed.every((item) => item.source === 'replay'), 'replay source is explicit');
+    assertEq(client.getAfterSeq(), 4, 'stored history does not widen contiguous cursor');
+    client.start();
+    for (let i = 0; i < 50 && subscribeAfter.length === 0; i++) await delay(20);
+    assertEq(subscribeAfter.length, 1, 'one subscribe sent');
+    assertEq(subscribeAfter[0], 4, 'subscribe uses separately persisted cursor');
+    client.close();
+  } finally {
+    await server.close();
+  }
+});
+
 defineCase('relay envelope without implicit v or roomId decrypts with subscription AAD', async () => {
   const server = await startMockServer();
   try {
@@ -607,6 +705,13 @@ defineCase('unknown signer can refresh the device cache and retry the ciphertext
             serverSeq: 12,
           }),
         );
+        ws.send(
+          JSON.stringify({
+            type: 'envelope',
+            envelope: mintEventEnvelope('room-test', 'env-after-late-signer', 1_700_000_191_000),
+            serverSeq: 13,
+          }),
+        );
       });
     });
 
@@ -616,18 +721,23 @@ defineCase('unknown signer can refresh the device cache and retry the ciphertext
     client = new BrowserWsClient({
       ...clientOptions(server.port),
       callbacks: {
-        onEnvelope: (decoded) => inbound.push(decoded),
-        onUnknownSigner: (envelope, serverSeq) => {
+        onEnvelope: (decoded) => { inbound.push(decoded); },
+        onUnknownSigner: async () => {
           refreshes += 1;
+          await delay(40);
           client.mergeDevices([TEST_DEVICE]);
-          client.retryEnvelope(envelope, serverSeq);
         },
       },
     });
     client.start();
-    for (let i = 0; i < 80 && inbound.length === 0; i++) await delay(20);
+    for (let i = 0; i < 80 && inbound.length < 2; i++) await delay(20);
     assertEq(refreshes, 1, 'one directory refresh requested');
-    assertEq(inbound.length, 1, 'retried envelope dispatches');
+    assert(
+      JSON.stringify(inbound.map((item) => item.envelope.envelopeId)) ===
+        JSON.stringify(['env-late-signer', 'env-after-late-signer']),
+      'refresh blocks later cursor commits and preserves order',
+    );
+    assertEq(client.getAfterSeq(), 13, 'cursor advances contiguously after refresh');
     client.close();
   } finally {
     await server.close();

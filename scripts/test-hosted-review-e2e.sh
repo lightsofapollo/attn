@@ -5,8 +5,8 @@
 # owner. Set E2E_RELAY_URL and E2E_WEB_ORIGIN together to run the same proof
 # against an already-deployed staging environment. The owner shares a canary
 # document; Chromium joins through the generated browser invite and verifies
-# document rendering, fragment stripping, real PoW registration, no browser
-# persistence, and content-blind HTTP/WebSocket wire.
+# document rendering (including an oversized R2 snapshot), fragment stripping,
+# real PoW registration, explicit encrypted recovery, and content-blind wire.
 
 set -euo pipefail
 
@@ -24,6 +24,7 @@ ATTN_HOME="$WORK/owner-home"
 SHARE_DIR="$WORK/shared"
 DOC="$SHARE_DIR/hosted.md"
 SIBLING_DOC="$SHARE_DIR/sibling.md"
+R2_DOC="$SHARE_DIR/r2-large.md"
 RELAY_LOG="$WORK/relay.log"
 RELAY_STATE="$WORK/relay-state"
 WEB_LOG="$WORK/web.log"
@@ -31,6 +32,7 @@ OWNER_LOG="$WORK/owner.log"
 COMMENT_CANARY="BROWSER-COMMENT-8127"
 REPLY_CANARY="BROWSER-REPLY-4631"
 SUGGESTION_CANARY="BROWSER-SUGGEST-9054"
+R2_CANARY="R2-BROWSER-SEALED-2048"
 RELAY_PID=""
 WEB_PID=""
 OWNER_PID=""
@@ -61,6 +63,11 @@ wait_http() {
 mkdir -p "$ATTN_HOME" "$SHARE_DIR" "$RELAY_STATE"
 printf '# Hosted review canary\n\n- [ ] Read-only browser task\n\nCiphertext boundary marker: NARWHAL-TEAK-7429.\n\nShared by native, rendered in the hosted reviewer.\n' >"$DOC"
 printf '# Folder sibling canary\n\nSwitching files must switch decrypted document content.\n' >"$SIBLING_DOC"
+{
+  printf '# R2 snapshot canary\n\n%s\n\n<!--\n' "$R2_CANARY"
+  dd if=/dev/zero bs=1200000 count=1 2>/dev/null | tr '\0' 'x'
+  printf '\n-->\n'
+} >"$R2_DOC"
 
 if { [ -n "${E2E_RELAY_URL:-}" ] && [ -z "${E2E_WEB_ORIGIN:-}" ]; } ||
    { [ -z "${E2E_RELAY_URL:-}" ] && [ -n "${E2E_WEB_ORIGIN:-}" ]; }; then
@@ -77,7 +84,8 @@ if [ -z "${E2E_RELAY_URL:-}" ]; then
     cd "$PROJECT_DIR/relay"
     exec npx wrangler dev --env staging --local --port "$RELAY_PORT" \
       --persist-to "$RELAY_STATE" \
-      --var QUOTA_ALLOW_UNATTRIBUTED_CREATES:true
+      --var QUOTA_ALLOW_UNATTRIBUTED_CREATES:true \
+      --var BLOB_CAP_SIGNING_KEY:local-e2e-blob-cap-signing-key-32bytes
   ) >"$RELAY_LOG" 2>&1 &
   RELAY_PID=$!
 fi
@@ -128,6 +136,7 @@ ATTN_EXPECTED_CANARY="NARWHAL-TEAK-7429" \
 ATTN_COMMENT_CANARY="$COMMENT_CANARY" \
 ATTN_REPLY_CANARY="$REPLY_CANARY" \
 ATTN_SUGGESTION_CANARY="$SUGGESTION_CANARY" \
+ATTN_R2_CANARY="$R2_CANARY" \
 ATTN_OWNER_HOME="$ATTN_HOME" \
 ATTN_BIN="$ATTN_BIN" \
   npm --prefix "$PROJECT_DIR/web" run test:e2e:hosted
@@ -138,6 +147,7 @@ if [ -z "${E2E_RELAY_URL:-}" ]; then
     "$COMMENT_CANARY" \
     "$REPLY_CANARY" \
     "$SUGGESTION_CANARY" \
+    "$R2_CANARY" \
     'encrypted browser suggestion' \
     "$SECRET"
   do

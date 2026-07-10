@@ -63,9 +63,17 @@
     parsedInvite?: ParsedInvite;
     /** Parse failure captured by the narrow bootstrap. */
     inviteError?: string;
+    /** Clean fragmentless `/review/:roomId` candidate for explicit recovery. */
+    rememberedRoomId?: string;
   }
 
-  let { session: injectedSession, relayUrl, parsedInvite, inviteError }: Props = $props();
+  let {
+    session: injectedSession,
+    relayUrl,
+    parsedInvite,
+    inviteError,
+    rememberedRoomId,
+  }: Props = $props();
 
   // ---------------------------------------------------------------------------
   // Session boot.
@@ -82,6 +90,8 @@
     authoringReady: false,
     outboxPending: 0,
     authoringError: null,
+    persistence: 'ephemeral',
+    storagePersisted: null,
   });
 
   // Capture once at construction — both props are stable for the lifetime of
@@ -92,6 +102,7 @@
   const initialRelayUrl = untrack(() => relayUrl);
   const initialParsedInvite = untrack(() => parsedInvite);
   const initialInviteError = untrack(() => inviteError);
+  const initialRememberedRoomId = untrack(() => rememberedRoomId);
 
   function buildSession(): BrowserSession {
     if (initialInjected) return initialInjected;
@@ -99,6 +110,7 @@
       relayUrl: initialRelayUrl,
       parsedInvite: initialParsedInvite,
       inviteError: initialInviteError,
+      rememberedRoomId: initialRememberedRoomId,
       onState: (s) => {
         sessionState = s;
       },
@@ -313,6 +325,14 @@
     await session.resolveComment(threadId);
   }
 
+  async function rememberBrowserRoom(): Promise<void> {
+    await session.rememberRoom();
+  }
+
+  async function forgetBrowserRoom(): Promise<void> {
+    await session.forgetRoom();
+  }
+
   onMount(() => {
     const refresh = (): void => refreshSelectionToolbar();
     document.addEventListener('selectionchange', refresh);
@@ -381,23 +401,55 @@
         <!-- Folder-share file switcher; renders nothing for single-file shares. -->
         <ReviewFileNav />
         <div
-          class="flex min-h-8 items-center justify-end gap-2 border-b border-border px-3 text-xs text-muted-foreground"
+          class="flex min-h-8 items-center justify-between gap-3 border-b border-border px-3 text-xs text-muted-foreground"
           data-slot="browser-authoring-status"
         >
-          {#if !sessionState.authoringReady}
-            <span>Preparing encrypted authoring…</span>
-          {/if}
-          {#if sessionState.authoringError}
-            <span class="text-destructive" role="status">{sessionState.authoringError}</span>
-            <button
-              type="button"
-              class="rounded border border-border px-2 py-0.5 text-foreground hover:bg-muted"
-              onclick={() => { void session.retryOutbox(); }}
-            >
-              Retry
-            </button>
-          {/if}
-          <OutboxIndicator isOwner={false} onRetry={() => { void session.retryOutbox(); }} />
+          <div class="flex min-w-0 items-center gap-2" data-slot="browser-persistence-status">
+            {#if sessionState.persistence === 'ephemeral'}
+              <span>Temporary on this browser</span>
+              <button
+                type="button"
+                class="rounded border border-border px-2 py-0.5 text-foreground hover:bg-muted"
+                data-slot="browser-remember-room"
+                title="Store a non-extractable room key and encrypted recovery state in this browser profile"
+                onclick={() => { void rememberBrowserRoom(); }}
+              >
+                Remember this room
+              </button>
+            {:else if sessionState.persistence === 'saving'}
+              <span role="status">Securing local recovery…</span>
+            {:else}
+              <span>
+                {sessionState.persistence === 'degraded'
+                  ? 'Remembered; browser may evict local data'
+                  : 'Remembered on this browser'}
+              </span>
+              <button
+                type="button"
+                class="rounded border border-border px-2 py-0.5 text-foreground hover:bg-muted"
+                data-slot="browser-forget-room"
+                onclick={() => { void forgetBrowserRoom(); }}
+              >
+                Forget
+              </button>
+            {/if}
+          </div>
+          <div class="flex min-w-0 items-center justify-end gap-2">
+            {#if !sessionState.authoringReady}
+              <span>Preparing encrypted authoring…</span>
+            {/if}
+            {#if sessionState.authoringError}
+              <span class="text-destructive" role="status">{sessionState.authoringError}</span>
+              <button
+                type="button"
+                class="rounded border border-border px-2 py-0.5 text-foreground hover:bg-muted"
+                onclick={() => { void session.retryOutbox(); }}
+              >
+                Retry
+              </button>
+            {/if}
+            <OutboxIndicator isOwner={false} onRetry={() => { void session.retryOutbox(); }} />
+          </div>
         </div>
         <div class="browser-review-editor min-w-0 flex-1 overflow-auto"
           data-slot="browser-review-editor">

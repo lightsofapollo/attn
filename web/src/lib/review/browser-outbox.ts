@@ -49,6 +49,19 @@ export interface BrowserOutboxOptions {
   onlineTarget?: BrowserOutboxOnlineTarget;
   backoffInitialMs?: number;
   backoffMaxMs?: number;
+  /** Optional exact-ciphertext durability used only after explicit remember. */
+  persistence?: BrowserOutboxPersistence;
+}
+
+export interface BrowserOutboxAccepted {
+  envelopeId: string;
+  serverSeq: number;
+}
+
+export interface BrowserOutboxPersistence {
+  loadPending(): Promise<MailboxEnvelope[]>;
+  putPending(envelope: MailboxEnvelope): Promise<void>;
+  acknowledge(batch: MailboxEnvelope[], accepted: BrowserOutboxAccepted[]): Promise<void>;
 }
 
 export class BrowserOutboxError extends Error {
@@ -65,7 +78,7 @@ export class BrowserOutboxError extends Error {
   }
 }
 
-/** Memory-only sealed-envelope outbox. Durable storage lands in attn-egi.3. */
+/** Sealed-envelope outbox; persistence is opt-in through `BrowserOutboxPersistence`. */
 export class BrowserOutbox {
   private readonly opts: BrowserOutboxOptions;
   private powBits: number;
@@ -73,10 +86,13 @@ export class BrowserOutbox {
   private readonly queue: MailboxEnvelope[] = [];
   private closed = false;
   private inFlight: Promise<void> | null = null;
+  private persistenceTransition: Promise<void> | null = null;
   private requestAbort: AbortController | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private backoffMs: number;
   private readonly maxBackoffMs: number;
+  private persistence: BrowserOutboxPersistence | null;
+  private initialized = false;
   private state: BrowserOutboxState = {
     pendingCount: 0,
     sending: false,
@@ -100,7 +116,64 @@ export class BrowserOutbox {
     this.maxEventBytes = opts.maxEventBytes;
     this.backoffMs = opts.backoffInitialMs ?? BROWSER_OUTBOX_BACKOFF_INITIAL_MS;
     this.maxBackoffMs = opts.backoffMaxMs ?? BROWSER_OUTBOX_BACKOFF_MAX_MS;
+    this.persistence = opts.persistence ?? null;
     opts.onlineTarget?.addEventListener?.('online', this.onlineHandler);
+  }
+
+  /** Load exact sealed pending envelopes before authoring or flushing. */
+  async initialize(): Promise<void> {
+    if (this.initialized) return;
+    this.initialized = true;
+    if (!this.persistence) return;
+    const stored = await this.persistence.loadPending();
+    for (const envelope of stored) this.enqueueMemory(envelope);
+    this.publish({ pendingCount: this.queue.length });
+  }
+
+  /**
+   * Turn an already-running invite-only queue into a remembered-room queue.
+   * The adapter becomes authoritative before the first await. Envelopes
+   * authored during migration therefore take the durable path; the bounded
+   * queue scan also catches anything appended between individual writes.
+   */
+  async enablePersistence(persistence: BrowserOutboxPersistence): Promise<void> {
+    if (this.persistenceTransition) await this.persistenceTransition;
+    if (this.persistence === persistence) return;
+    if (this.persistence) throw new Error('outbox persistence is already configured');
+    const transition = this.enablePersistenceAfterDrain(persistence);
+    this.persistenceTransition = transition;
+    try {
+      await transition;
+    } finally {
+      if (this.persistenceTransition === transition) this.persistenceTransition = null;
+    }
+  }
+
+  private async enablePersistenceAfterDrain(persistence: BrowserOutboxPersistence): Promise<void> {
+    if (this.persistence === persistence) return;
+    if (this.persistence) throw new Error('outbox persistence is already configured');
+    // A batch already accepted by the relay must finish its memory-only drain
+    // before the durable adapter becomes visible. Otherwise acknowledge()
+    // could run against pending rows that migration has not written yet.
+    await this.inFlight?.catch(() => undefined);
+    this.persistence = persistence;
+    this.initialized = true;
+    try {
+      for (let index = 0; index < this.queue.length; index += 1) {
+        await persistence.putPending(this.queue[index]!);
+      }
+      const stored = await persistence.loadPending();
+      for (const envelope of stored) this.enqueueMemory(envelope);
+      this.publish({ pendingCount: this.queue.length });
+    } catch (error) {
+      if (this.persistence === persistence) this.persistence = null;
+      throw error;
+    }
+  }
+
+  /** Stop future durable writes while retaining the live in-memory queue. */
+  disablePersistence(): void {
+    this.persistence = null;
   }
 
   getState(): BrowserOutboxState {
@@ -126,25 +199,47 @@ export class BrowserOutbox {
   }
 
   enqueue(envelope: MailboxEnvelope): boolean {
+    if (this.persistence) {
+      throw new Error('remembered-room outbox requires enqueueDurably()');
+    }
+    return this.enqueueMemory(envelope);
+  }
+
+  /** Persist the immutable sealed envelope before optimistic UI echo. */
+  async enqueueDurably(envelope: MailboxEnvelope): Promise<boolean> {
+    if (this.closed) throw new Error('outbox is closed');
+    if (!this.initialized) await this.initialize();
+    this.validateEnvelope(envelope);
+    const existing = this.queue.find((item) => item.envelopeId === envelope.envelopeId);
+    if (existing) return this.sameOrConflict(existing, envelope);
+    await this.persistence?.putPending(envelope);
+    return this.enqueueMemory(envelope);
+  }
+
+  private enqueueMemory(envelope: MailboxEnvelope): boolean {
     if (this.closed) throw new Error('outbox is closed');
     this.validateEnvelope(envelope);
     const existing = this.queue.find((item) => item.envelopeId === envelope.envelopeId);
-    if (existing) {
-      if (JSON.stringify(existing) !== JSON.stringify(envelope)) {
-        throw new BrowserOutboxError(
-          'ATTN_ENVELOPE_ID_CONFLICT',
-          'envelope id is already queued with different sealed fields',
-          true,
-        );
-      }
-      return false;
-    }
+    if (existing) return this.sameOrConflict(existing, envelope);
     this.queue.push(Object.freeze({ ...envelope }));
     this.publish({ pendingCount: this.queue.length, lastError: null, terminal: false });
     return true;
   }
 
+  private sameOrConflict(existing: MailboxEnvelope, envelope: MailboxEnvelope): false {
+    if (JSON.stringify(existing) !== JSON.stringify(envelope)) {
+      throw new BrowserOutboxError(
+        'ATTN_ENVELOPE_ID_CONFLICT',
+        'envelope id is already queued with different sealed fields',
+        true,
+      );
+    }
+    return false;
+  }
+
   async flushNow(): Promise<void> {
+    if (!this.initialized) await this.initialize();
+    await this.persistenceTransition;
     if (this.closed || this.state.terminal || this.queue.length === 0) return;
     if (this.inFlight) return this.inFlight;
     this.clearRetry();
@@ -182,7 +277,8 @@ export class BrowserOutbox {
   private async drain(): Promise<void> {
     while (!this.closed && this.queue.length > 0) {
       const batch = this.queue.slice(0, BROWSER_OUTBOX_BATCH_SIZE);
-      await this.sendBatch(batch);
+      const accepted = await this.sendBatch(batch);
+      await this.persistence?.acknowledge(batch, accepted);
       const acknowledged = new Set(batch.map((item) => item.envelopeId));
       while (this.queue[0] && acknowledged.has(this.queue[0]!.envelopeId)) this.queue.shift();
       this.backoffMs = this.opts.backoffInitialMs ?? BROWSER_OUTBOX_BACKOFF_INITIAL_MS;
@@ -190,7 +286,7 @@ export class BrowserOutbox {
     }
   }
 
-  private async sendBatch(batch: MailboxEnvelope[]): Promise<void> {
+  private async sendBatch(batch: MailboxEnvelope[]): Promise<BrowserOutboxAccepted[]> {
     const wire = batch.map(toRelayEnvelope);
     const body = JSON.stringify({ envelopes: wire });
     const bodyBytes = new TextEncoder().encode(body);
@@ -205,10 +301,9 @@ export class BrowserOutbox {
             false,
           );
         }
-        validateAcknowledgements(second.accepted, batch);
-        return;
+        return validateAcknowledgements(second.accepted, batch);
       }
-      validateAcknowledgements(first.accepted, batch);
+      return validateAcknowledgements(first.accepted, batch);
     } finally {
       bodyBytes.fill(0);
     }
@@ -350,10 +445,14 @@ function toRelayEnvelope(envelope: MailboxEnvelope): Record<string, unknown> {
   };
 }
 
-function validateAcknowledgements(accepted: unknown, batch: MailboxEnvelope[]): void {
+function validateAcknowledgements(
+  accepted: unknown,
+  batch: MailboxEnvelope[],
+): BrowserOutboxAccepted[] {
   if (!Array.isArray(accepted)) throw transientProtocolError('relay response omitted accepted list');
   const expected = new Set(batch.map((item) => item.envelopeId));
   const seen = new Set<string>();
+  const parsed: BrowserOutboxAccepted[] = [];
   for (const item of accepted) {
     if (
       typeof item !== 'object' ||
@@ -368,10 +467,15 @@ function validateAcknowledgements(accepted: unknown, batch: MailboxEnvelope[]): 
       throw transientProtocolError('relay returned unexpected or duplicate acknowledgements');
     }
     seen.add(id);
+    parsed.push({
+      envelopeId: id,
+      serverSeq: (item as { serverSeq: number }).serverSeq,
+    });
   }
   if (seen.size !== expected.size) {
     throw transientProtocolError('relay returned a partial acknowledgement set');
   }
+  return parsed;
 }
 
 function transientProtocolError(message: string): BrowserOutboxError {

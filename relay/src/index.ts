@@ -387,12 +387,20 @@ export default {
       }
       const isUnsafeLegacyId = !isProtocolId(envelopeId, ENVELOPE_ID_MAX_CHARS);
       if (isUnsafeLegacyId && earlyBlobEnvelopeId !== envelopeId) return identifierError();
-      // Blob PUT/GET don't pass through the DO, so the Worker fetches policy
-      // directly from the DO (via a GET on the room itself) only when we need
-      // to emit CORS — for now, blob responses skip CORS entirely since the
-      // browser allowBrowser flow uses POST /blobs (which routes to the DO) +
-      // a server-mediated upload. PUT/GET cap-bearing routes are native-style.
-      // Preflight OPTIONS is still answered (via the DO ROUTE_RE handler below).
+      // Blob PUT/GET don't pass through the DO, so cap-bearing responses need
+      // an explicit policy probe before the Worker can attach browser CORS.
+      // `withBlobObjectCors` asks the room for its allowBrowser bit and then
+      // reuses the same exact-origin middleware as every DO-backed route. The
+      // short-lived capability remains the data authorization boundary; CORS
+      // only controls whether an allowlisted hosted origin may read the result.
+      if (request.method === "OPTIONS") {
+        return withBlobObjectCors(
+          request,
+          env,
+          roomId,
+          new Response(null, { status: 204 }),
+        );
+      }
       if (request.method === "PUT") {
         return handleBlobPut(request, env, url, roomId, envelopeId);
       }
@@ -401,7 +409,8 @@ export default {
         // the DO's download-presign endpoint (admission-auth'd), which
         // mints the cap this branch later consumes.
         if (url.searchParams.has("cap")) {
-          return handleBlobGet(request, env, url, roomId, envelopeId);
+          const response = await handleBlobGet(request, env, url, roomId, envelopeId);
+          return withBlobObjectCors(request, env, roomId, response);
         }
         const id = env.RELAY_ROOMS.idFromName(roomId);
         const stub = env.RELAY_ROOMS.get(id);
@@ -715,6 +724,48 @@ async function handleBlobGet(
     "Content-Length": String(obj.size),
   });
   return new Response(obj.body as unknown as ReadableStream, { status: 200, headers });
+}
+
+/**
+ * Attach policy-gated CORS to a Worker-owned blob-object response.
+ *
+ * The response bytes cannot be routed through the RoomDO without defeating the
+ * R2 fast path, so we make a body-less OPTIONS probe solely to recover the
+ * room's `allowBrowser` bit. Any probe failure fails closed (no CORS header),
+ * while native clients without an Origin continue to receive the cap-authorized
+ * response. Capability URLs and their responses are never cacheable.
+ */
+async function withBlobObjectCors(
+  request: Request,
+  env: Env,
+  roomId: string,
+  response: Response,
+): Promise<Response> {
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", "private, no-store");
+
+  if (request.headers.get("Origin") !== null) {
+    try {
+      const room = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+      const probe = await room.fetch(`https://room.internal/v2/rooms/${roomId}/blobs`, {
+        method: "OPTIONS",
+      });
+      const allowBrowser = probe.headers.get(INTERNAL_ALLOW_BROWSER_HEADER);
+      if (allowBrowser !== null) headers.set(INTERNAL_ALLOW_BROWSER_HEADER, allowBrowser);
+    } catch {
+      // Fail closed: corsMiddleware sees no allowBrowser handshake header.
+    }
+  }
+
+  return corsMiddleware(
+    request,
+    env,
+    new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    }),
+  );
 }
 
 function blobErrorResponse(status: number, code: string, message: string): Response {

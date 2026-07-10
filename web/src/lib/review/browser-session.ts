@@ -9,8 +9,9 @@
 // The session is a reviewer surface with encrypted mailbox authoring:
 //   1. Parse + strip the invite fragment from `location.hash`.
 //   2. Derive `RoomKeys` and `roomId` from `roomSecret`.
-//   3. Generate an in-memory `(deviceId, signingKeyPair, encryptionKeyPair)`.
-//      No persistence whatsoever — reload requires re-paste.
+//   3. Generate an in-memory `(deviceId, signingKeyPair, encryptionKeyPair)` by
+//      default, or explicitly recover a remembered room from encrypted local
+//      state. Invite-only mode still performs no durable writes.
 //   4. POST `/v2/rooms/:roomId/devices` with `kind: "reviewer"` + admission HMAC
 //      + selfSignature + a Web-Worker-minted PoW token.
 //   5. Open the `BrowserWsClient` and pump decoded envelopes into the global
@@ -21,10 +22,9 @@
 // What this module deliberately leaves out:
 //
 //   - Owner-only mutations such as applying suggestions or publishing snapshots.
-//   - Snapshot R2 download. Mailbox snapshot blobs are rehydrated here; R2
-//     references remain unavailable until the authenticated blob fetch lands.
-//   - Reconnect cursor persistence. The WS client tracks `afterSeq` in
-//     memory only — reload restarts at 0.
+//   - Browser ownership and native working-copy mutation.
+//   - Plaintext offline workspaces. Remembered rooms persist only keys and
+//     exact encrypted envelopes / sealed snapshot blobs.
 //
 // Tests: `browser-session.test.ts`. Run with:
 //
@@ -46,8 +46,14 @@ import {
   BrowserOutbox,
   type BrowserOutboxError,
   type BrowserOutboxOptions,
+  type BrowserOutboxPersistence,
   type BrowserOutboxResponse,
 } from './browser-outbox';
+import {
+  BrowserStorage,
+  type BrowserStorageRoom,
+  type StoredInboundEnvelope,
+} from './browser-storage';
 import {
   parseAndStripInviteFromUrl,
   parseInviteUrl,
@@ -68,6 +74,7 @@ import {
 } from './browser-ws';
 import { BROWSER_POW_DIFFICULTY, mintBrowserPowInWorker } from './browser-pow';
 import { validateBrowserRelayUrl } from './browser-relay-url';
+import { resolveBrowserR2Snapshot } from './browser-snapshot-r2';
 import type {
   AnchorIndex,
   Anchor,
@@ -96,6 +103,7 @@ export type BrowserSessionStatus =
   | 'registering_device'
   | 'connecting'
   | 'connected'
+  | 'offline'
   | 'error'
   | 'terminated';
 
@@ -168,6 +176,10 @@ export interface BrowserSessionState {
   outboxPending: number;
   /** Last authoring transport error. Reading remains available. */
   authoringError: string | null;
+  /** Local recovery is always opt-in; degraded means browser persistence was denied. */
+  persistence: 'ephemeral' | 'saving' | 'remembered' | 'degraded';
+  /** Result of navigator.storage.persist(); null before an explicit request. */
+  storagePersisted: boolean | null;
 }
 
 /**
@@ -200,6 +212,8 @@ export interface BrowserSessionOptions {
   parsedInvite?: ParsedInvite;
   /** Narrow-bootstrap parse failure to surface through the normal error state. */
   inviteError?: string;
+  /** Clean fragmentless path candidate; malformed fragments never reach this fallback. */
+  rememberedRoomId?: string;
   /** Relay base URL. Required before any network operation. */
   relayUrl?: string;
   /**
@@ -207,6 +221,8 @@ export interface BrowserSessionOptions {
    * Receives the full URL + RequestInit shape (browser-compatible).
    */
   fetchImpl?: (url: string, init: FetchLikeInit) => Promise<FetchLikeResponse>;
+  /** Binary fetch override for authenticated R2 snapshot resolution. */
+  r2FetchImpl?: (input: string, init: RequestInit) => Promise<Response>;
   /** Override the WebSocket factory (used by tests with Node `ws`). */
   webSocketFactory?: (url: string, protocols: string | string[]) => WebSocketLike;
   /** Override reconnect timing — tests want fast retries. */
@@ -230,6 +246,10 @@ export interface BrowserSessionOptions {
    * run under tsx without loading `.svelte.ts` modules.
    */
   store?: ReviewStoreSink;
+  /** Injected durable store for tests; production opens IndexedDB lazily. */
+  storage?: BrowserStorage;
+  /** Override the production IndexedDB opener. */
+  storageFactory?: (createIfMissing: boolean) => Promise<BrowserStorage | null>;
 }
 
 /** Minimal fetch shape — avoids depending on lib.dom.d.ts in TS tests. */
@@ -246,6 +266,8 @@ export interface FetchLikeResponse {
   text(): Promise<string>;
   headers?: { get(name: string): string | null };
 }
+
+type ActiveRoomKeys = Omit<RoomKeys, 'rootKey'> & { rootKey?: Uint8Array };
 
 // ---------------------------------------------------------------------------
 // Identity generation
@@ -365,10 +387,12 @@ export class BrowserSession {
     authoringReady: false,
     outboxPending: 0,
     authoringError: null,
+    persistence: 'ephemeral',
+    storagePersisted: null,
   };
   private identity: BrowserDeviceIdentity | null = null;
   private wsClient: BrowserWsClient | null = null;
-  private keys: RoomKeys | null = null;
+  private keys: ActiveRoomKeys | null = null;
   private store: ReviewStoreSink | null;
   private powAbortController: AbortController | null = null;
   private outbox: BrowserOutbox | null = null;
@@ -376,6 +400,11 @@ export class BrowserSession {
   private lastCreatedAt = 0;
   private roomPolicy: RoomPolicy | null = null;
   private bootstrapDevices: Device[] = [];
+  private storage: BrowserStorage | null;
+  private persistedCursor = 0;
+  private localAttestationRestored = false;
+  private storageWritesEnabled = true;
+  private readonly volatileInbound = new Map<string, StoredInboundEnvelope>();
   private readonly snapshotBlobs = new Map<string, CachedSnapshotBlob>();
   private readonly invalidSnapshotBlobIds = new Set<string>();
   private readonly pendingSnapshots = new Map<string, PendingSnapshot[]>();
@@ -386,6 +415,7 @@ export class BrowserSession {
   constructor(opts: BrowserSessionOptions = {}) {
     this.opts = opts;
     this.store = opts.store ?? null;
+    this.storage = opts.storage ?? null;
     this.pagehideTarget = opts.window ?? (globalThis as unknown as BrowserWindowLike);
     this.pagehideTarget.addEventListener?.('pagehide', this.pagehideHandler);
   }
@@ -401,6 +431,97 @@ export class BrowserSession {
     const mod = await import('./store.svelte.js');
     this.store = mod.reviewStore as unknown as ReviewStoreSink;
     return this.store;
+  }
+
+  private async openStorage(createIfMissing: boolean): Promise<BrowserStorage | null> {
+    if (this.storage) return this.storage;
+    try {
+      const storage = this.opts.storageFactory
+        ? await this.opts.storageFactory(createIfMissing)
+        : await BrowserStorage.open({ createIfMissing });
+      this.storage = storage;
+      return storage;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Recover only state that was explicitly remembered under this exact room id. */
+  private async resumeRememberedRoom(roomId: string): Promise<boolean> {
+    const storage = await this.openStorage(false);
+    if (!storage) return false;
+    const room = await storage.getRoom(roomId);
+    if (!room) {
+      storage.close();
+      this.storage = null;
+      return false;
+    }
+    if (room.policy.expiresAt <= Date.now()) {
+      await storage.forgetRoom(roomId);
+      storage.close();
+      this.storage = null;
+      return false;
+    }
+    let keys: ActiveRoomKeys;
+    let identity: BrowserDeviceIdentity | null;
+    try {
+      [keys, identity] = await Promise.all([
+        storage.deriveRoomKeys(roomId),
+        storage.loadIdentity(roomId),
+      ]);
+    } catch {
+      await storage.forgetRoom(roomId).catch(() => undefined);
+      storage.close();
+      this.storage = null;
+      return false;
+    }
+    if (!identity) {
+      await storage.forgetRoom(roomId);
+      storage.close();
+      this.storage = null;
+      return false;
+    }
+
+    this.keys = keys;
+    this.identity = identity;
+    this.roomPolicy = room.policy;
+    this.lastCreatedAt = room.lastCreatedAt;
+    this.bootstrapDevices = await storage.listDevices(roomId);
+    this.persistedCursor = await storage.getCursor(roomId, identity.deviceId);
+    this.setState({
+      roomId: roomId as RoomId,
+      status: 'connecting',
+      persistence: room.storagePersisted ? 'remembered' : 'degraded',
+      storagePersisted: room.storagePersisted,
+    });
+    const store = await this.ensureStore();
+    store.currentRoomId = roomId as RoomId;
+
+    const client = this.buildWsClient(roomId, keys);
+    const [inbound, history, pending] = await Promise.all([
+      storage.replayInbound(roomId),
+      storage.listHistory(roomId),
+      storage.listOutbox(roomId, identity.deviceId),
+    ]);
+    const replayById = new Map<string, { envelope: MailboxEnvelope; serverSeq: number }>();
+    for (const item of [...inbound, ...history]) {
+      replayById.set(item.envelope.envelopeId, item);
+    }
+    for (const envelope of pending) {
+      if (!replayById.has(envelope.envelopeId)) replayById.set(envelope.envelopeId, { envelope, serverSeq: 0 });
+    }
+    const replay = [...replayById.values()].sort((a, b) => {
+      if (a.serverSeq > 0 && b.serverSeq > 0) return a.serverSeq - b.serverSeq;
+      if (a.serverSeq > 0) return -1;
+      if (b.serverSeq > 0) return 1;
+      return a.envelope.createdAt - b.envelope.createdAt;
+    });
+    for (const item of replay) await client.replayEnvelope(item.envelope, item.serverSeq);
+
+    await this.initializeAuthoring(room.policy, this.localAttestationRestored, true);
+    this.setState({ status: this.state.snapshotContent === null ? 'connecting' : 'connected' });
+    client.start();
+    return true;
   }
 
   /** Current state snapshot — UI binds against this. */
@@ -447,6 +568,95 @@ export class BrowserSession {
     await this.outbox?.flushNow();
   }
 
+  /** Explicitly persist a non-extractable room capability and sealed recovery state. */
+  async rememberRoom(): Promise<void> {
+    if (this.state.persistence === 'remembered' || this.state.persistence === 'degraded') return;
+    const roomId = this.state.roomId;
+    const keys = this.keys;
+    const identity = this.identity;
+    const policy = this.roomPolicy;
+    if (!roomId || !keys?.rootKey || !identity || !policy) {
+      throw new Error('room is not ready to remember');
+    }
+    this.setState({ persistence: 'saving', authoringError: null });
+    let durableStorage: BrowserStorage | null = null;
+    let rollbackNewState = false;
+    const rememberClaimId = randomOpaqueId();
+    try {
+      this.storageWritesEnabled = true;
+      const storage = this.storage ?? await this.openStorage(true);
+      if (!storage) throw new Error('durable browser storage is unavailable');
+      durableStorage = storage;
+      this.storage = storage;
+      const room: BrowserStorageRoom = {
+        roomId,
+        policy,
+        lastCreatedAt: this.lastCreatedAt,
+        storagePersisted: false,
+      };
+      rollbackNewState = await storage.claimRoom(room, rememberClaimId);
+      if (!rollbackNewState) {
+        throw new Error('this room is already remembered; reload without the invite to resume it');
+      }
+      await storage.putRoom(room);
+      await storage.installRoomKey(roomId, keys.rootKey);
+      await storage.saveIdentity(roomId, identity);
+      for (const device of this.bootstrapDevices) await storage.putDevice(roomId, device);
+      await storage.putDevice(roomId, this.localDeviceRecord(identity));
+      for (const stored of [...this.volatileInbound.values()].sort(
+        (a, b) => a.serverSeq - b.serverSeq,
+      )) {
+        await storage.commitInbound(roomId, identity.deviceId, stored.envelope, stored.serverSeq);
+      }
+      this.persistedCursor = await storage.getCursor(roomId, identity.deviceId);
+      const persistence = this.makeOutboxPersistence(storage, roomId, identity.deviceId);
+      await this.outbox?.enablePersistence(persistence);
+      const storagePersisted = (await storage.requestPersistence()) ?? false;
+      await storage.putRoom({ ...room, storagePersisted, lastCreatedAt: this.lastCreatedAt });
+      await storage.completeRoomClaim(roomId, rememberClaimId);
+      this.setState({
+        persistence: storagePersisted ? 'remembered' : 'degraded',
+        storagePersisted,
+      });
+    } catch (error) {
+      this.storageWritesEnabled = false;
+      this.outbox?.disablePersistence();
+      if (durableStorage && rollbackNewState) {
+        await durableStorage.forgetClaimedRoom(roomId, rememberClaimId).catch(() => undefined);
+      }
+      if (durableStorage) {
+        durableStorage.close();
+        if (this.storage === durableStorage) this.storage = null;
+      }
+      this.setState({
+        persistence: 'ephemeral',
+        storagePersisted: null,
+        authoringError: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }
+
+  /** Delete the recoverable key first, then all room-scoped ciphertext/cache state. */
+  async forgetRoom(): Promise<void> {
+    const roomId = this.state.roomId;
+    if (!roomId || !this.storage) return;
+    this.storageWritesEnabled = false;
+    this.outbox?.disablePersistence();
+    this.stopTransport();
+    await this.storage.forgetRoom(roomId);
+    this.storage.close();
+    this.storage = null;
+    this.persistedCursor = 0;
+    this.setState({
+      persistence: 'ephemeral',
+      storagePersisted: null,
+      status: 'offline',
+      authoringReady: false,
+      outboxPending: 0,
+    });
+  }
+
   /**
    * Bring the session up. Returns when the WS is in `connected` state OR a
    * terminal error has been emitted. The state observer is called along the
@@ -456,8 +666,9 @@ export class BrowserSession {
     if (this.state.status !== 'idle') return;
     this.setState({ status: 'parsing_invite' });
 
-    // 1. Parse the invite (override > location.hash).
-    let invite: ParsedInvite;
+    // 1. Parse the invite (override > location.hash). A clean fragmentless
+    // `/review/:roomId` may recover only an explicitly remembered room.
+    let invite: ParsedInvite | null = null;
     try {
       if (this.opts.inviteError) {
         throw new Error(this.opts.inviteError);
@@ -468,15 +679,18 @@ export class BrowserSession {
       } else {
         const win = this.opts.window ?? (globalThis as unknown as BrowserWindowLike);
         const parsed = parseAndStripInviteFromUrl(win);
-        if (!parsed) {
-          this.fail('invite_invalid', 'no invite fragment in URL');
-          return;
-        }
         invite = parsed;
       }
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       this.fail('invite_invalid', m);
+      return;
+    }
+
+    if (!invite) {
+      const rememberedRoomId = this.opts.rememberedRoomId;
+      if (rememberedRoomId && await this.resumeRememberedRoom(rememberedRoomId)) return;
+      this.fail('invite_invalid', 'no invite fragment or remembered room');
       return;
     }
 
@@ -508,7 +722,8 @@ export class BrowserSession {
     const store = await this.ensureStore();
     store.currentRoomId = invite.roomId;
 
-    // 3. Identity (injected or freshly generated).
+    // 3. Identity (injected or freshly generated). It remains memory-only
+    // unless the user later invokes rememberRoom().
     this.identity = this.opts.identity ?? generateBrowserIdentity();
 
     // 4. Fetch the authenticated policy before mining registration PoW. Room
@@ -536,11 +751,14 @@ export class BrowserSession {
   close(): void {
     this.detachPagehide();
     this.stopTransport();
+    this.storage?.close();
+    this.storage = null;
     this.releaseSensitiveState();
     this.snapshotBlobs.clear();
     this.invalidSnapshotBlobIds.clear();
     this.pendingSnapshots.clear();
     this.signerRefreshAttempts.clear();
+    this.volatileInbound.clear();
     this.clearStorePlaintext();
     this.setState({
       status: 'terminated',
@@ -607,14 +825,20 @@ export class BrowserSession {
       expiresAt: policy.expiresAt,
       body,
     });
-    outbox.enqueue(assembled.envelope);
+    if (this.storage) await outbox.enqueueDurably(assembled.envelope);
+    else outbox.enqueue(assembled.envelope);
+    if (this.storage) await this.persistDirectoryAndRoom(this.bootstrapDevices, policy);
     const store = await this.ensureStore();
     store.applyEvent(assembled.event);
     void outbox.flushNow().catch(() => undefined);
     return assembled.event;
   }
 
-  private async initializeAuthoring(policy: RoomPolicy): Promise<void> {
+  private async initializeAuthoring(
+    policy: RoomPolicy,
+    skipJoin = false,
+    durableOffline = false,
+  ): Promise<void> {
     this.roomPolicy = policy;
     if (this.outbox) {
       try {
@@ -654,6 +878,9 @@ export class BrowserSession {
         this.fetchImpl()(url, init),
       ...(mintPow === undefined ? {} : { mintPow }),
       onlineTarget: this.pagehideTarget ?? undefined,
+      ...(this.storage
+        ? { persistence: this.makeOutboxPersistence(this.storage, roomId, identity.deviceId) }
+        : {}),
       onState: (outboxState) => {
         if (this.store) this.store.pendingOutbox = Array.from(this.outbox?.pendingEnvelopes() ?? []);
         this.setState({
@@ -667,6 +894,17 @@ export class BrowserSession {
       },
       onTerminal: (error) => this.handleOutboxTerminal(error),
     });
+    await this.outbox.initialize();
+
+    if (skipJoin) {
+      this.setState({
+        authoringReady: true,
+        outboxPending: this.outbox.getState().pendingCount,
+        authoringError: this.outbox.getState().lastError,
+      });
+      void this.outbox.flushNow().catch(() => undefined);
+      return;
+    }
 
     const createdAt = this.nextCreatedAt();
     const capabilities: Capability[] = [
@@ -705,20 +943,66 @@ export class BrowserSession {
       body: joined,
     });
     this.joinEnvelopeId = assembled.envelope.envelopeId;
-    this.outbox.enqueue(assembled.envelope);
+    if (this.storage) await this.outbox.enqueueDurably(assembled.envelope);
+    else this.outbox.enqueue(assembled.envelope);
     const store = await this.ensureStore();
     store.applyEvent(assembled.event);
+    if (durableOffline) {
+      this.setState({ authoringReady: true, authoringError: null });
+    }
     void this.outbox.flushNow().catch(() => undefined);
+  }
+
+  private localDeviceRecord(identity: BrowserDeviceIdentity): Device {
+    const registration = buildRegisterDeviceBody(identity);
+    return {
+      ...registration,
+      kind: 'reviewer',
+      client: 'attn-browser',
+    };
+  }
+
+  private makeOutboxPersistence(
+    storage: BrowserStorage,
+    roomId: string,
+    deviceId: string,
+  ): BrowserOutboxPersistence {
+    return {
+      loadPending: () => storage.listOutbox(roomId, deviceId),
+      putPending: async (envelope) => {
+        await storage.putOutbox(roomId, envelope);
+      },
+      acknowledge: async (batch, accepted) => {
+        await storage.acknowledge(roomId, batch, accepted);
+      },
+    };
+  }
+
+  private async persistDirectoryAndRoom(devices: Device[], policy: RoomPolicy): Promise<void> {
+    const storage = this.storage;
+    const roomId = this.state.roomId;
+    if (!storage || !roomId || !this.storageWritesEnabled) return;
+    for (const device of devices) await storage.putDevice(roomId, device);
+    if (!this.storageWritesEnabled) return;
+    await storage.putRoom({
+      roomId,
+      policy,
+      lastCreatedAt: this.lastCreatedAt,
+      storagePersisted: this.state.storagePersisted ?? false,
+    });
   }
 
   private fail(kind: BrowserSessionError['kind'], message: string): void {
     this.detachPagehide();
     this.stopTransport();
+    this.storage?.close();
+    this.storage = null;
     this.releaseSensitiveState();
     this.snapshotBlobs.clear();
     this.invalidSnapshotBlobIds.clear();
     this.pendingSnapshots.clear();
     this.signerRefreshAttempts.clear();
+    this.volatileInbound.clear();
     this.clearStorePlaintext();
     this.setState({
       status: 'error',
@@ -766,8 +1050,9 @@ export class BrowserSession {
   }
 
   private releaseSensitiveState(): void {
+    this.localAttestationRestored = false;
     if (this.keys) {
-      zero(this.keys.rootKey);
+      if (this.keys.rootKey) zero(this.keys.rootKey);
       zero(this.keys.eventKey);
       zero(this.keys.snapshotKey);
       zero(this.keys.signalingKey);
@@ -848,7 +1133,11 @@ export class BrowserSession {
     }
   }
 
-  private openWs(roomId: string, keys: RoomKeys): void {
+  private openWs(roomId: string, keys: ActiveRoomKeys): void {
+    this.buildWsClient(roomId, keys).start();
+  }
+
+  private buildWsClient(roomId: string, keys: ActiveRoomKeys): BrowserWsClient {
     if (!this.identity) throw new Error('identity missing');
     const relay = validateBrowserRelayUrl(this.opts.relayUrl);
     const url = buildWsUrl(relay, roomId, this.identity.deviceId);
@@ -860,11 +1149,11 @@ export class BrowserSession {
     const subprotocol = buildAdmissionSubprotocol(keys.admissionKey, 'GET', path, [
       ['device_id', this.identity.deviceId],
     ]);
-    this.wsClient = new BrowserWsClient({
+    const client = new BrowserWsClient({
       roomId,
       url,
       subprotocol,
-      afterSeq: 0,
+      afterSeq: this.persistedCursor,
       eventKey: keys.eventKey,
       snapshotKey: keys.snapshotKey,
       signalingKey: keys.signalingKey,
@@ -875,13 +1164,20 @@ export class BrowserSession {
       reconnectInitialMs: this.opts.reconnectInitialMs,
       reconnectMaxMs: this.opts.reconnectMaxMs,
       callbacks: {
-        onHello: (frame) => {
+        onHello: (frame, verifiedDevices) => {
           this.setState({ status: 'connected' });
+          this.bootstrapDevices = [...verifiedDevices.values()];
+          void this.persistDirectoryAndRoom(this.bootstrapDevices, frame.policy).catch(() => undefined);
           void this.initializeAuthoring(frame.policy);
         },
-        onEnvelope: (decoded) => this.handleEnvelope(decoded),
-        onUnknownSigner: (envelope, serverSeq) => {
-          void this.refreshSignerAndRetry(roomId, keys, envelope, serverSeq);
+        onEnvelope: (decoded) => this.handleEnvelopeAsync(decoded),
+        onUnknownSigner: (envelope) => this.refreshSignerAndRetry(roomId, keys, envelope),
+        onClose: (code) => {
+          if (code < 4000 && this.state.status !== 'error' && this.state.status !== 'terminated') {
+            this.setState({
+              status: this.state.snapshotContent === null ? 'connecting' : 'offline',
+            });
+          }
         },
         onTerminal: (err) => this.handleTerminal(err),
         onError: (_code, _msg) => {
@@ -893,7 +1189,8 @@ export class BrowserSession {
         },
       },
     });
-    this.wsClient.start();
+    this.wsClient = client;
+    return client;
   }
 
   private fetchImpl(): (url: string, init: FetchLikeInit) => Promise<FetchLikeResponse> {
@@ -913,9 +1210,8 @@ export class BrowserSession {
 
   private async refreshSignerAndRetry(
     roomId: string,
-    keys: RoomKeys,
+    keys: ActiveRoomKeys,
     envelope: MailboxEnvelope,
-    serverSeq: number,
   ): Promise<void> {
     if (this.signerRefreshAttempts.has(envelope.envelopeId)) {
       if (this.state.snapshotContent === null) {
@@ -937,20 +1233,35 @@ export class BrowserSession {
       const parsed = JSON.parse(raw) as { devices?: Device[] };
       if (!Array.isArray(parsed.devices)) throw new Error('GET /devices returned invalid body');
       this.wsClient?.mergeDevices(parsed.devices);
-      this.wsClient?.retryEnvelope(envelope, serverSeq);
-    } catch {
+      this.bootstrapDevices = [...(this.wsClient?.getDevices().values() ?? [])];
+      if (this.roomPolicy) await this.persistDirectoryAndRoom(this.bootstrapDevices, this.roomPolicy);
+    } catch (error) {
+      this.signerRefreshAttempts.delete(envelope.envelopeId);
       if (this.state.snapshotContent === null) {
         this.fail('network', 'Could not refresh participant signing keys');
       }
+      throw error;
     }
-  }
-
-  private handleEnvelope(decoded: DecodedEnvelope): void {
-    void this.handleEnvelopeAsync(decoded);
   }
 
   private async handleEnvelopeAsync(decoded: DecodedEnvelope): Promise<void> {
     const { envelope, plaintext } = decoded;
+    if (decoded.source === 'network') {
+      if (this.storage && this.identity && this.storageWritesEnabled) {
+        await this.storage.commitInbound(
+          this.state.roomId!,
+          this.identity.deviceId,
+          envelope,
+          decoded.serverSeq,
+        );
+        this.persistedCursor = Math.max(this.persistedCursor, decoded.serverSeq);
+      } else {
+        this.volatileInbound.set(envelope.envelopeId, {
+          envelope: structuredClone(envelope),
+          serverSeq: decoded.serverSeq,
+        });
+      }
+    }
     if (envelope.kind === 'event') {
       let parsed: { meta?: EventMeta; body?: ReviewEventBody; auth?: ReviewEvent['auth'] };
       try {
@@ -969,6 +1280,14 @@ export class BrowserSession {
         body: body as ReviewEventBody,
         auth,
       };
+      if (
+        body.type === 'participant_joined' &&
+        this.identity &&
+        body.device.deviceId === this.identity.deviceId &&
+        body.participant.participantId === this.identity.participantId
+      ) {
+        this.localAttestationRestored = true;
+      }
       const store = await this.ensureStore();
       // Snapshot path — surface markdown for the editor + populate
       // reviewStore.snapshots so the existing UI can scope by snapshot.
@@ -984,21 +1303,65 @@ export class BrowserSession {
       // cache + pending queues make the receiver defensive to either order.
       const blobId = envelope.envelopeId;
       const waiting = this.pendingSnapshots.get(blobId);
-      const snapshot = parseSnapshotPlaintext(plaintext);
+      let snapshot = parseSnapshotPlaintext(plaintext);
+      let snapshotBytes = snapshot ? new Uint8Array(plaintext) : null;
+      const wrapperIsR2 = snapshot === null && parseR2BlobRefPlaintext(plaintext, envelope.envelopeId);
+      zero(plaintext);
+      if (wrapperIsR2) {
+        const keys = this.keys;
+        const roomId = this.state.roomId;
+        if (!keys || !roomId) return;
+        let recovered: Uint8Array | null = null;
+        try {
+          recovered = await resolveBrowserR2Snapshot({
+            relayUrl: validateBrowserRelayUrl(this.opts.relayUrl),
+            roomId,
+            admissionKey: keys.admissionKey,
+            snapshotKey: keys.snapshotKey,
+            wrapper: envelope,
+            fetchImpl: this.opts.r2FetchImpl ?? ((input, init) => fetch(input, init)),
+            ...(this.storage
+              ? {
+                  sealedCache: {
+                    getSealed: (storedRoomId: string, blobId: string) =>
+                      this.storage?.getSealedBlob(storedRoomId, blobId),
+                    putSealed: async (storedRoomId: string, blobId: string, sealed: Uint8Array) => {
+                      await this.storage?.putSealedBlob(storedRoomId, blobId, sealed);
+                    },
+                  },
+                }
+              : {}),
+          });
+          snapshot = parseSnapshotPlaintext(recovered);
+          if (snapshot) snapshotBytes = new Uint8Array(recovered);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'R2 snapshot recovery failed';
+          if (this.state.snapshotContent === null) {
+            this.fail('network', message);
+          } else {
+            // Keep already-rendered files usable, but do not silently turn the
+            // failed large snapshot into a permanent content-less placeholder.
+            this.setState({ authoringError: message });
+          }
+          return;
+        } finally {
+          if (recovered) zero(recovered);
+        }
+      }
       const cached = snapshot
         ? {
             snapshot,
-            byteLength: plaintext.length,
-            contentHash: contentHash(plaintext),
+            byteLength: snapshotBytes!.length,
+            contentHash: contentHash(snapshotBytes!),
           }
         : null;
-      zero(plaintext);
+      snapshotBytes?.fill(0);
       if (!cached) {
         this.invalidSnapshotBlobIds.add(blobId);
         if (waiting && waiting.length > 0) {
           this.fail('network', 'Snapshot payload failed integrity validation');
         }
-        return; // R2 wrappers contain a BlobRef, not plaintext.
+        return;
       }
       if (!waiting || waiting.length === 0) {
         this.snapshotBlobs.set(blobId, cached);
@@ -1010,7 +1373,8 @@ export class BrowserSession {
       }
       return;
     }
-    // Signal envelopes are out of scope for the browser reviewer surface.
+    // Signal envelopes land with browser WebRTC; never retain their plaintext.
+    zero(plaintext);
   }
 
   private absorbSnapshotCreated(
@@ -1023,7 +1387,7 @@ export class BrowserSession {
       return;
     }
     const blobRef = body.encryptedBlobRef;
-    if (!blobRef || blobRef.storage !== 'mailbox') return;
+    if (!blobRef || (blobRef.storage !== 'mailbox' && blobRef.storage !== 'r2')) return;
     if (this.invalidSnapshotBlobIds.delete(blobRef.blobId)) {
       this.fail('network', 'Snapshot payload failed integrity validation');
       return;
@@ -1050,7 +1414,7 @@ export class BrowserSession {
     const blobRef = body.encryptedBlobRef;
     if (
       !blobRef ||
-      blobRef.storage !== 'mailbox' ||
+      (blobRef.storage !== 'mailbox' && blobRef.storage !== 'r2') ||
       blobRef.byteLength !== cached.byteLength ||
       blobRef.contentHash !== cached.contentHash
     ) {
@@ -1110,6 +1474,9 @@ export class BrowserSession {
         break;
       default:
         kind = 'network';
+    }
+    if ((kind === 'room_deleted' || kind === 'room_expired') && this.storage && this.state.roomId) {
+      void this.storage.forgetRoom(this.state.roomId).catch(() => undefined);
     }
     this.fail(kind, err.message);
   }
@@ -1174,6 +1541,29 @@ function parseSnapshotPlaintext(bytes: Uint8Array): SnapshotPlaintext | null {
       ? {}
       : { anchorIndex: candidate.anchorIndex as AnchorIndex }),
   };
+}
+
+function parseR2BlobRefPlaintext(bytes: Uint8Array, envelopeId: string): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    return false;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const candidate = value as {
+    storage?: unknown;
+    blobId?: unknown;
+    byteLength?: unknown;
+    contentHash?: unknown;
+  };
+  return (
+    candidate.storage === 'r2' &&
+    candidate.blobId === envelopeId &&
+    Number.isSafeInteger(candidate.byteLength) &&
+    (candidate.byteLength as number) >= 0 &&
+    typeof candidate.contentHash === 'string'
+  );
 }
 
 function randomOpaqueId(): string {

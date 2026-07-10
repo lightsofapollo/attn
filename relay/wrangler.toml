@@ -94,8 +94,13 @@ DEFAULT_POW_BITS = "16"
 MIN_POW_BITS = "12"
 MAX_POW_BITS = "24"
 ALLOWED_BROWSER_ORIGINS = "https://staging.attn.sh,http://localhost:5173"
-QUOTA_MAX_LIVE_ROOMS_PER_SOURCE = "8"
-QUOTA_MAX_ALLOCATED_BYTES_PER_SOURCE_24H = "268435456"
+# Staging deploy/E2E runs create short-lived isolated rooms repeatedly from one
+# CI/developer edge IP. Keep production at 8 while allowing verification runs
+# to coexist until their normal idle alarms reap them.
+QUOTA_MAX_LIVE_ROOMS_PER_SOURCE = "32"
+# Each room reserves 25 MiB; repeated staging verification from one CI IP
+# needs more than production's 256 MiB non-refundable daily allowance.
+QUOTA_MAX_ALLOCATED_BYTES_PER_SOURCE_24H = "1073741824"
 QUOTA_GLOBAL_MAX_LIVE_ROOMS = "512"
 QUOTA_GLOBAL_MAX_RESERVED_BYTES = "6710886400"
 

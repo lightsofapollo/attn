@@ -53,6 +53,7 @@
     "catppuccin-vsc-icons": "github:catppuccin/vscode-icons",
     "clsx": "^2.1.1",
     "eyecons": "github:azat-io/eyecons",
+    "fake-indexeddb": "^6.2.5",
     "material-icon-theme": "^5.31.0",
     "mode-watcher": "^1.1.0",
     "seti-file-icons": "^0.0.8",

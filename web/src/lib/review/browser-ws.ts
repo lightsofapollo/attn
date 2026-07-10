@@ -63,7 +63,8 @@ export interface MailboxEnvelope {
   createdAt: number;
   expiresAt: number;
   kind: EnvelopeKind;
-  target?: { deviceId: string };
+  /** Relay-normalized broadcast envelopes use an explicit null target. */
+  target?: { deviceId: string } | null;
   /** base64url-no-pad. */
   nonce: string;
   /** base64url-no-pad of `ciphertext || 16-byte Poly1305 tag`. */
@@ -172,6 +173,8 @@ export class WsTerminalError extends Error {
 export interface DecodedEnvelope {
   envelope: MailboxEnvelope;
   serverSeq: number;
+  /** Network delivery advances the cursor after commit; replay never does. */
+  source: 'network' | 'replay';
   /** Plaintext bytes recovered from `aeadOpen`. */
   plaintext: Uint8Array;
 }
@@ -192,13 +195,13 @@ export interface BrowserWsCallbacks {
    * signal). Skipped envelopes (decrypt fail, signature fail, unknown signer)
    * surface via `onError` instead.
    */
-  onEnvelope?: (decoded: DecodedEnvelope) => void;
+  onEnvelope?: (decoded: DecodedEnvelope) => void | Promise<void>;
   /** Allows the session to refresh GET /devices and retry an unknown signer. */
   onUnknownSigner?: (
     envelope: MailboxEnvelope,
     serverSeq: number,
     signingKeyId: string,
-  ) => void;
+  ) => void | Promise<void>;
   /** Called when the relay or our parser surfaces a non-terminal error. */
   onError?: (code: string, message: string) => void;
   /** Called on every socket close — terminal or transient. */
@@ -284,6 +287,9 @@ export class BrowserWsClient {
   private readonly devices: Map<string, Device>;
   private readonly deviceKeyIds = new Map<string, string>();
   private readonly attestedSigners = new Set<string>();
+  /** Serial import boundary: ciphertext commit + UI dispatch stay serverSeq ordered. */
+  private inboundQueue: Promise<void> = Promise.resolve();
+  private inboundBlocked = false;
 
   constructor(opts: BrowserWsOptions) {
     if (opts.roomId.length === 0) throw new Error('roomId must not be empty');
@@ -319,6 +325,11 @@ export class BrowserWsClient {
     return this.devices;
   }
 
+  /** Last network sequence whose consumer commit completed successfully. */
+  getAfterSeq(): number {
+    return this.afterSeq;
+  }
+
   /** Merge an authenticated GET /devices response into the signer cache. */
   mergeDevices(devices: Device[]): void {
     this.ingestDevices(devices);
@@ -327,7 +338,20 @@ export class BrowserWsClient {
   /** Retry a previously rejected ciphertext after its signer directory refresh. */
   retryEnvelope(envelope: MailboxEnvelope, serverSeq: number): void {
     if (this.cancelled) return;
-    this.ingestEnvelope(envelope, serverSeq);
+    this.enqueueEnvelope(envelope, serverSeq, 'network');
+  }
+
+  /**
+   * Rebuild UI/auth state from a previously committed sealed envelope.
+   * Replays pass through the exact decrypt/signature/authorization pipeline,
+   * but never raise the subscription cursor above the separately persisted
+   * contiguous cursor floor.
+   */
+  replayEnvelope(envelope: MailboxEnvelope, serverSeq: number): Promise<void> {
+    if (this.cancelled) throw new Error('client already closed');
+    const run = this.inboundQueue.then(() => this.ingestEnvelope(envelope, serverSeq, 'replay'));
+    this.inboundQueue = run.catch(() => undefined);
+    return run;
   }
 
   /** Start the connection loop. Idempotent; safe to call once. */
@@ -421,7 +445,7 @@ export class BrowserWsClient {
         this.callbacks.onHello?.(frame, this.devices);
         return;
       case 'envelope':
-        this.ingestEnvelope(frame.envelope, frame.serverSeq);
+        this.enqueueEnvelope(frame.envelope, frame.serverSeq, 'network');
         return;
       case 'presence':
         this.callbacks.onPresence?.(frame.event, frame.deviceId, frame.participantId);
@@ -504,7 +528,32 @@ export class BrowserWsClient {
    * Per-envelope failures surface as `ATTN_INBOUND` errors and do NOT drop
    * the connection — matches `ws.rs::handle_text_frame`.
    */
-  private ingestEnvelope(envelope: MailboxEnvelope, serverSeq: number): void {
+  private enqueueEnvelope(
+    envelope: MailboxEnvelope,
+    serverSeq: number,
+    source: DecodedEnvelope['source'],
+  ): void {
+    if (this.inboundBlocked || this.cancelled) return;
+    const run = this.inboundQueue.then(() => this.ingestEnvelope(envelope, serverSeq, source));
+    this.inboundQueue = run.catch((error: unknown) => {
+      this.inboundBlocked = true;
+      const message = error instanceof Error ? error.message : String(error);
+      this.callbacks.onError?.('ATTN_INBOUND_COMMIT', `durable inbound commit failed: ${message}`);
+      // Force a transient reconnect. The cursor was deliberately not advanced,
+      // so the same encrypted frame is replayed after local durability recovers.
+      try {
+        this.socket?.close(1011, 'inbound commit failed');
+      } catch {
+        // The transport may already be closing; its normal close path retries.
+      }
+    });
+  }
+
+  private async ingestEnvelope(
+    envelope: MailboxEnvelope,
+    serverSeq: number,
+    source: DecodedEnvelope['source'],
+  ): Promise<void> {
     if (envelope.v !== undefined && envelope.v !== 2) {
       this.callbacks.onError?.('ATTN_INBOUND', `unsupported envelope version ${envelope.v}`);
       return;
@@ -560,17 +609,23 @@ export class BrowserWsClient {
     // consumer parses. We verify event signatures here so a bad envelope is
     // dropped before it reaches UI state.
     if (envelope.kind === 'event') {
-      const verified = this.verifyEventPlaintext(envelope, serverSeq, plaintext);
+      const verified = await this.verifyEventPlaintext(envelope, serverSeq, plaintext);
       if (!verified) {
         plaintext.fill(0);
         return;
       }
     }
 
-    // Advance the cursor floor — caller persists if/when it wants to.
-    if (serverSeq > this.afterSeq) this.afterSeq = serverSeq;
+    try {
+      await this.callbacks.onEnvelope?.({ envelope, serverSeq, source, plaintext });
+    } catch (error) {
+      plaintext.fill(0);
+      throw error;
+    }
 
-    this.callbacks.onEnvelope?.({ envelope, serverSeq, plaintext });
+    // Network frames advance only after the consumer's durable commit + UI
+    // dispatch resolves. Stored replays are intentionally cursor-neutral.
+    if (source === 'network' && serverSeq > this.afterSeq) this.afterSeq = serverSeq;
   }
 
   /**
@@ -580,11 +635,11 @@ export class BrowserWsClient {
    * Returns `true` on success; emits an `ATTN_INBOUND` error and returns
    * `false` on any failure (drops the envelope, keeps the socket up).
    */
-  private verifyEventPlaintext(
+  private async verifyEventPlaintext(
     envelope: MailboxEnvelope,
     serverSeq: number,
     plaintext: Uint8Array,
-  ): boolean {
+  ): Promise<boolean> {
     const envelopeId = envelope.envelopeId;
     let event: { meta?: SignableMetaShape; body?: unknown; auth?: { signature: string; signingKeyId: string } };
     try {
@@ -611,14 +666,18 @@ export class BrowserWsClient {
       this.callbacks.onError?.('ATTN_INBOUND', `event metadata binding failed (${envelopeId})`);
       return false;
     }
-    const device = this.devices.get(auth.signingKeyId);
+    let device = this.devices.get(auth.signingKeyId);
     if (!device) {
       this.callbacks.onError?.(
         'ATTN_INBOUND',
         `unknown signer for ${envelopeId} (signingKeyId=${auth.signingKeyId})`,
       );
-      this.callbacks.onUnknownSigner?.(envelope, serverSeq, auth.signingKeyId);
-      return false;
+      await this.callbacks.onUnknownSigner?.(envelope, serverSeq, auth.signingKeyId);
+      device = this.devices.get(auth.signingKeyId);
+      // A successful authenticated refresh that still omits the signer proves
+      // the envelope invalid. A transient refresh must reject so the ordered
+      // queue reconnects without advancing beyond this sequence.
+      if (!device) return false;
     }
     if (device.deviceId !== meta.deviceId || device.participantId !== meta.authorId) {
       this.callbacks.onError?.('ATTN_INBOUND', `event signer identity binding failed (${envelopeId})`);
@@ -687,6 +746,7 @@ export class BrowserWsClient {
   }
 
   private handleClose(code: number, reason: string): void {
+    this.inboundBlocked = false;
     const wasCancelled = this.cancelled;
     this.callbacks.onClose?.(code, reason);
 

@@ -227,11 +227,12 @@ Use three web storage layers:
   - pending signal retries
   - peer connection state diagnostics
 
-- OPFS for larger file/blob content:
-  - snapshot plaintext/cache by room/file/snapshot
-  - encrypted downloaded R2 blobs if useful
-  - browser-owned workspace file contents
-  - draft/co-typing recovery buffers
+- OPFS for larger sealed file/blob content:
+  - exact encrypted downloaded R2 snapshot bodies
+  - encrypted mailbox snapshot cache entries when useful
+  - locally sealed draft/co-typing recovery buffers
+  - browser-owned plaintext workspace files only after a separate explicit
+    `plaintext_workspace` policy opt-in
 
 - Cache Storage for app shell and static assets through a service worker.
 
@@ -245,8 +246,8 @@ Persistence policy:
 Secret policy:
 
 - Default safest mode: keep `roomSecret` and derived room keys memory-only. Reload requires invite re-entry, but leaked browser storage does not expose old room contents.
-- Usable mode: "Remember this room" stores device identity, cursor, and enough key material to rejoin. This must be explicit because anyone with the browser profile can re-open the room.
-- If keys are stored, prefer IndexedDB. WebCrypto non-extractable CryptoKeys are helpful for signing, but the existing noble Ed25519 path uses raw keys, so this needs a deliberate migration if we want non-extractable keys.
+- Usable mode: "Remember this room" stores a non-extractable HKDF root-key capability, encrypted device identity, ciphertext history/outbox, and cursor state. This must be explicit because anyone with the browser profile or same-origin application code can re-open the room.
+- Persist the WebCrypto root key as non-extractable. Seal the existing noble Ed25519/X25519 private bytes under a root-derived local-storage AEAD key; never store those raw private bytes.
 - Never store room secrets in URL, localStorage, cookies, or service worker cache.
 
 File/workspace policy:

@@ -83,6 +83,7 @@ The fragment (`#key=...`) is never sent over the network by browsers and is not 
 1. Parse the fragment.
 2. **Immediately** call `history.replaceState(null, "", location.pathname + location.search)` to strip the fragment from the visible URL bar (browser) or the in-process equivalent (native).
 3. Hold `roomSecret` only in memory. Derive `rootKey`, then derive `eventKey`/`snapshotKey`/`signalingKey`/`admissionKey` and zero `roomSecret` if the language allows.
+4. By default, persist none of that recoverable key material. If and only if the user explicitly selects **Remember this room**, import `rootKey` as a non-extractable WebCrypto HKDF `CryptoKey` and structured-clone that capability into IndexedDB. Persist private device identity only after AEAD-sealing it under a root-derived local-storage key with room- and record-bound AAD. Never persist the raw `roomSecret`, raw derived room keys, the fragment, admission headers, or plaintext collaboration content. Anyone who controls the browser profile or same-origin application code can still reopen a remembered room; the opt-in is a local usability choice, not a defense against a compromised hosted frontend.
 
 ## Envelope Encryption (AEAD)
 

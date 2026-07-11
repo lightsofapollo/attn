@@ -1,0 +1,57 @@
+/* Placeholder landing styles (attn-7xl.1.1). attn-7xl.1.2 replaces this with
+   the migrated site/ design language (Source Serif/Sans/Code, paper & ink). */
+
+:root {
+  color-scheme: light dark;
+  --paper: #faf7f2;
+  --ink: #1c1a17;
+  --rust: #b3402a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #191713;
+    --ink: #ece7de;
+    --rust: #d96a52;
+  }
+}
+
+body[data-route='landing'] {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: Georgia, 'Times New Roman', serif;
+  line-height: 1.5;
+}
+
+.landing {
+  max-width: 38rem;
+  margin: 0 auto;
+  padding: 6rem 1.5rem 4rem;
+}
+
+.landing h1 {
+  font-size: 2.25rem;
+  line-height: 1.15;
+  margin: 0 0 1rem;
+}
+
+.landing-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  margin-top: 2.5rem;
+}
+
+.landing-actions a {
+  color: var(--ink);
+}
+
+.landing-cta {
+  background: var(--rust);
+  color: var(--paper) !important;
+  text-decoration: none;
+  padding: 0.65rem 1.25rem;
+  border: 1px solid var(--ink);
+}

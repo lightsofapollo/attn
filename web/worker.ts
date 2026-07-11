@@ -1,3 +1,5 @@
+import { entryRequestPath, hostedEntryForPath } from './src/lib/hosted/routes';
+
 interface StaticAssets {
   fetch(request: Request): Promise<Response>;
 }
@@ -25,9 +27,25 @@ const CONTENT_SECURITY_POLICY = [
 
 const IMMUTABLE_ASSET = /\/[\w-]+-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/;
 
+// Deep paths (`/app/w/:workspaceId/:filePath`, `/review/:roomId`) must serve
+// their entry's HTML document rather than fall through the SPA handler, which
+// only knows about the landing `index.html`. Hashed build assets live under
+// `/assets/` and are never shadowed by these route prefixes.
+function rewriteToEntryDocument(request: Request): Request {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return request;
+  const url = new URL(request.url);
+  const entry = hostedEntryForPath(url.pathname);
+  if (entry === 'landing') return request;
+  const canonical = entryRequestPath(entry);
+  if (url.pathname === canonical) return request;
+  url.pathname = canonical;
+  url.search = '';
+  return new Request(url.toString(), request);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const response = await env.ASSETS.fetch(request);
+    const response = await env.ASSETS.fetch(rewriteToEntryDocument(request));
     const headers = new Headers(response.headers);
 
     headers.set('Content-Security-Policy', CONTENT_SECURITY_POLICY);

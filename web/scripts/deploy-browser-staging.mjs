@@ -43,10 +43,14 @@ function validateWranglerArgs(args) {
 }
 
 async function verifyBuild(expectedRelayOrigin) {
-  const indexPath = path.join(webRoot, 'dist-browser', 'index.html');
-  const indexHtml = await readFile(indexPath, 'utf8');
-  const entryMatch = indexHtml.match(/<script[^>]+src="(\/assets\/index-[A-Za-z0-9_-]+\.js)"/u);
-  if (!entryMatch) throw new Error('hosted build is missing its hashed entry script');
+  // Landing must exist and must not reference the review/editor graph; the
+  // full boundary walk lives in check-route-bundles.mjs, run before deploy.
+  await run(process.execPath, [path.join(webRoot, 'scripts', 'check-route-bundles.mjs')], process.env);
+
+  const reviewIndexPath = path.join(webRoot, 'dist-browser', 'review', 'index.html');
+  const reviewHtml = await readFile(reviewIndexPath, 'utf8');
+  const entryMatch = reviewHtml.match(/<script[^>]+src="(\/assets\/review-[A-Za-z0-9_-]+\.js)"/u);
+  if (!entryMatch) throw new Error('hosted build is missing its hashed review entry script');
   const entryPath = entryMatch[1];
   const entrySource = await readFile(path.join(webRoot, 'dist-browser', entryPath), 'utf8');
   if (!entrySource.includes(expectedRelayOrigin)) {

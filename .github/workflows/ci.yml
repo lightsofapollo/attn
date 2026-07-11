@@ -180,6 +180,11 @@ jobs:
           VITE_ATTN_RELAY_URL: http://127.0.0.1:8787
         run: npm run build:browser
 
+      # Landing/app entries must never statically preload the editor or
+      # room-crypto graphs (attn-7xl.1.1).
+      - name: Check hosted route bundle boundaries
+        run: npm run check:route-bundles
+
   relay-tests:
     name: Relay Tests (Ubuntu)
     runs-on: ubuntu-latest

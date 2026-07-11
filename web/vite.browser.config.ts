@@ -1,23 +1,51 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { defineConfig } from 'vite';
+import { defineConfig, type Connect, type Plugin } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
+import { entryHtmlPath, hostedEntryForPath } from './src/lib/hosted/routes';
 
 const webRoot = fileURLToPath(new URL('.', import.meta.url));
 const hostedRoot = path.join(webRoot, 'hosted');
+
+// Mirror the Cloudflare worker's deep-path rewrites (worker.ts) in dev and
+// preview so `/app/w/:workspaceId/:filePath` and `/review/:roomId` resolve to
+// the right HTML entry locally. Only document navigations are rewritten:
+// module, asset, and Vite-internal requests never send `Accept: text/html`.
+function hostedEntryRewrites(): Plugin {
+  const rewrite: Connect.NextHandleFunction = (req, _res, next) => {
+    const accept = req.headers.accept ?? '';
+    if ((req.method === 'GET' || req.method === 'HEAD') && accept.includes('text/html')) {
+      const pathname = (req.url ?? '/').split(/[?#]/u)[0];
+      const entry = hostedEntryForPath(pathname);
+      if (entry !== 'landing') req.url = entryHtmlPath(entry);
+      else if (!pathname.slice(1).includes('.')) req.url = entryHtmlPath('landing');
+    }
+    next();
+  };
+  return {
+    name: 'attn-hosted-entry-rewrites',
+    configureServer(server) {
+      server.middlewares.use(rewrite);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(rewrite);
+    },
+  };
+}
 
 export default defineConfig({
   root: hostedRoot,
   envDir: webRoot,
   publicDir: false,
-  plugins: [svelte(), tailwindcss()],
+  appType: 'mpa',
+  plugins: [hostedEntryRewrites(), svelte(), tailwindcss()],
   resolve: {
     alias: {
       $lib: path.join(webRoot, 'src/lib'),
     },
   },
-  // The hosted entry loads BrowserReviewApp through a guarded dynamic import.
+  // The review entry loads BrowserReviewApp through a guarded dynamic import.
   // Prebundle its UI-only dependencies up front so Vite never performs a
   // first-navigation dependency-optimization reload after the invite fragment
   // has already been stripped from the address bar.
@@ -39,5 +67,15 @@ export default defineConfig({
     outDir: path.join(webRoot, 'dist-browser'),
     emptyOutDir: true,
     target: 'es2022',
+    // scripts/check-route-bundles.mjs walks the manifest to prove the landing
+    // entry never preloads editor/markdown/crypto chunks.
+    manifest: true,
+    rollupOptions: {
+      input: {
+        landing: path.join(hostedRoot, 'index.html'),
+        app: path.join(hostedRoot, 'app/index.html'),
+        review: path.join(hostedRoot, 'review/index.html'),
+      },
+    },
   },
 });

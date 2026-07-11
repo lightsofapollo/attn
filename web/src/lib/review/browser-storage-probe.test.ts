@@ -189,7 +189,8 @@ defineCase('extractable-key crypto reports unsupported via the clone probe', asy
       importKey: async (...args: Parameters<SubtleCrypto['importKey']>) => {
         // A broken WebCrypto that ignores the extractable=false request.
         const [format, material, algorithm, , usages] = args;
-        return crypto.subtle.importKey(format as 'raw', material as Uint8Array, algorithm, true, usages);
+        const copy = new Uint8Array(material as Uint8Array);
+        return crypto.subtle.importKey(format as 'raw', copy, algorithm, true, usages);
       },
       deriveBits: crypto.subtle.deriveBits.bind(crypto.subtle),
     },

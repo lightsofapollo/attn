@@ -168,6 +168,7 @@ export interface BrowserStorageEstimate {
 export interface BrowserStorageNavigator {
   storage?: {
     persist?: () => Promise<boolean>;
+    persisted?: () => Promise<boolean>;
     estimate?: () => Promise<BrowserStorageEstimate>;
     getDirectory?: () => Promise<OpfsDirectoryHandle>;
   };

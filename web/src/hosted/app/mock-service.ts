@@ -15,9 +15,17 @@ import type {
   StorageHealth,
   WorkspaceAppService,
   WorkspaceDetail,
+  WorkspaceShareView,
   WorkspaceSummary,
 } from './types';
 import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
+
+const MOCK_INVITE = {
+  roomId: 'yPJpJifC1HUQgHsJ_7speQ',
+  browserUrl: 'https://attn.sh/review/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
+  nativeUrl: 'attn://review/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
+  cliCommand: "npx attnmd review join 'attn://review/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc'",
+} as const;
 
 /** 'real' (no ?shell= param) boots the storage-backed service; every other
  * scenario runs this mock so degraded states stay directly reachable. */
@@ -43,11 +51,11 @@ const PRODUCT_DIRECTION: WorkspaceDetail = {
   backupLabel: 'Backed up today',
   saveState: 'Saved on this device',
   entries: [
-    { path: 'direction.md', presentation: 'editable', sizeLabel: '18 KB' },
-    { path: 'principles.md', presentation: 'editable', sizeLabel: '11 KB' },
-    { path: 'open-questions.md', presentation: 'editable', sizeLabel: '6 KB' },
-    { path: 'images/desk.png', presentation: 'preview', sizeLabel: '1.9 MB' },
-    { path: 'data/notes.json', presentation: 'download-only', sizeLabel: '4 KB' },
+    { path: 'direction.md', kind: 'markdown', presentation: 'editable', sizeBytes: 18_432, sizeLabel: '18 KB' },
+    { path: 'principles.md', kind: 'markdown', presentation: 'editable', sizeBytes: 11_264, sizeLabel: '11 KB' },
+    { path: 'open-questions.md', kind: 'markdown', presentation: 'editable', sizeBytes: 6_144, sizeLabel: '6 KB' },
+    { path: 'images/desk.png', kind: 'asset', presentation: 'preview', sizeBytes: 1_992_294, sizeLabel: '1.9 MB', mediaType: 'image/png' },
+    { path: 'data/notes.json', kind: 'asset', presentation: 'download-only', sizeBytes: 4_096, sizeLabel: '4 KB', mediaType: 'application/json' },
   ],
   reviewCards: [
     {
@@ -69,7 +77,7 @@ const LAUNCH_NOTES: WorkspaceDetail = {
   sizeLabel: '48 KB',
   backupLabel: 'Never backed up',
   saveState: 'Saved on this device',
-  entries: [{ path: 'launch-notes.md', presentation: 'editable', sizeLabel: '48 KB' }],
+  entries: [{ path: 'launch-notes.md', kind: 'markdown', presentation: 'editable', sizeBytes: 49_152, sizeLabel: '48 KB' }],
   reviewCards: [],
 };
 
@@ -85,9 +93,9 @@ const RESEARCH_FOLIO: WorkspaceDetail = {
   backupLabel: 'Backed up Jun 28',
   saveState: 'Saved on this device',
   entries: [
-    { path: 'index.md', presentation: 'editable', sizeLabel: '9 KB' },
-    { path: 'interviews/mara.md', presentation: 'editable', sizeLabel: '22 KB' },
-    { path: 'figures/latency.png', presentation: 'preview', sizeLabel: '2.2 MB' },
+    { path: 'index.md', kind: 'markdown', presentation: 'editable', sizeBytes: 9_216, sizeLabel: '9 KB' },
+    { path: 'interviews/mara.md', kind: 'markdown', presentation: 'editable', sizeBytes: 22_528, sizeLabel: '22 KB' },
+    { path: 'figures/latency.png', kind: 'asset', presentation: 'preview', sizeBytes: 2_306_867, sizeLabel: '2.2 MB', mediaType: 'image/png' },
   ],
   reviewCards: [],
 };
@@ -95,6 +103,7 @@ const RESEARCH_FOLIO: WorkspaceDetail = {
 export class MockWorkspaceService implements WorkspaceAppService {
   private readonly scenario: ShellScenario;
   private readonly workspaces: WorkspaceDetail[];
+  private mockShare: WorkspaceShareView | null = null;
 
   constructor(scenario: ShellScenario) {
     this.scenario = scenario;
@@ -177,8 +186,11 @@ export class MockWorkspaceService implements WorkspaceAppService {
       saveState: 'Saved on this device',
       entries: files.map((file) => ({
         path: file.path,
+        kind: file.kind,
         presentation: file.kind === 'markdown' ? 'editable' : 'preview',
+        sizeBytes: file.bytes.length,
         sizeLabel: `${file.bytes.length} B`,
+        ...(file.mediaType === undefined ? {} : { mediaType: file.mediaType }),
       })),
       reviewCards: [],
     };
@@ -198,7 +210,13 @@ export class MockWorkspaceService implements WorkspaceAppService {
 
   async createMarkdownEntry(workspaceId: string, path: string): Promise<void> {
     const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
-    workspace?.entries.push({ path, presentation: 'editable', sizeLabel: '0 B' });
+    workspace?.entries.push({
+      path,
+      kind: 'markdown',
+      presentation: 'editable',
+      sizeBytes: 0,
+      sizeLabel: '0 B',
+    });
   }
 
   async addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void> {
@@ -206,8 +224,11 @@ export class MockWorkspaceService implements WorkspaceAppService {
     for (const file of files) {
       workspace?.entries.push({
         path: file.path,
+        kind: file.kind,
         presentation: file.kind === 'markdown' ? 'editable' : 'preview',
+        sizeBytes: file.bytes.length,
         sizeLabel: `${file.bytes.length} B`,
+        ...(file.mediaType === undefined ? {} : { mediaType: file.mediaType }),
       });
     }
   }
@@ -310,6 +331,32 @@ export class MockWorkspaceService implements WorkspaceAppService {
       replyToComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
       resolveComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
       retryReviewOutbox: async () => undefined,
+      inspectShare: async () => this.mockShare ? structuredClone(this.mockShare) : null,
+      ensureShare: async (input) => {
+        const invite = MOCK_INVITE;
+        const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
+        const selection = input.selection;
+        const paths = selection.kind === 'workspace'
+          ? workspace?.entries.map((entry) => entry.path) ?? []
+          : selection.kind === 'file'
+            ? [selection.path]
+            : selection.paths;
+        this.mockShare = {
+          workspaceId,
+          capId: 'BwcHBwcHBwcHBwcHBwcHBw',
+          roomId: invite.roomId,
+          scopeKind: selection.kind,
+          paths,
+          publication: 'published',
+          mode: input.mode,
+          expiresAt: Date.now() + input.ttlMs,
+          expired: false,
+          resumable: false,
+          invite,
+        };
+        return structuredClone(this.mockShare);
+      },
+      stopShare: async () => { this.mockShare = null; },
       release: async () => undefined,
     };
   }
@@ -327,7 +374,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
       sizeLabel: '0 B',
       backupLabel: 'Never backed up',
       saveState,
-      entries: [{ path: 'untitled.md', presentation: 'editable', sizeLabel: '0 B' }],
+      entries: [{ path: 'untitled.md', kind: 'markdown', presentation: 'editable', sizeBytes: 0, sizeLabel: '0 B' }],
       reviewCards: [],
     };
   }

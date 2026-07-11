@@ -3522,9 +3522,9 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
         },
         // TODO(attn-nnj.3b): parse invite, open transport, fetch snapshot, emit
         // RoomStatus + SnapshotCreated as data arrives.
-        ReviewCommand::Join { invite } => ReviewUpdate::RoomStatusChanged {
+        ReviewCommand::Join { invite: _ } => ReviewUpdate::RoomStatusChanged {
             room_id: stub_room_id(),
-            status: format!("Pending join — not yet implemented (invite={invite})"),
+            status: "Pending join — invite accepted for processing".to_string(),
         },
         // Pull / Stop / Inbox are handled for real in `submit` (they drive the
         // per-room runtime registries) and always return before reaching here.
@@ -5948,7 +5948,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_join_emits_room_status_changed_with_invite() {
+    fn submit_join_status_never_exposes_invite_fragment() {
         let (mgr, rx, _tmp) = make_manager();
         let invite = "attn://review/abc#key=xyz".to_string();
         mgr.submit(ReviewCommand::Join {
@@ -5957,7 +5957,9 @@ mod tests {
         let update = rx.try_recv().expect("expected one update");
         match update {
             ReviewUpdate::RoomStatusChanged { status, .. } => {
-                assert!(status.contains(&invite));
+                assert!(status.contains("Pending join"));
+                assert!(!status.contains(&invite));
+                assert!(!status.contains("key=xyz"));
             }
             other => panic!("expected RoomStatusChanged, got {other:?}"),
         }

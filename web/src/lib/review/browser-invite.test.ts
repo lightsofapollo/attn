@@ -8,6 +8,7 @@
 import {
   parseInviteUrl,
   composeInviteUrl,
+  composeInviteForms,
   parseAndStripInviteFromUrl,
   stripFragment,
   zero,
@@ -21,6 +22,7 @@ import {
 import {
   aeadOpen,
   aeadSeal,
+  deriveRoomId,
   deriveReadKeysV3,
   deriveRoomKeys,
   deriveRoomKeyTreeV3,
@@ -254,26 +256,28 @@ defineCase('parseInviteUrl rejects non-/review path on https host', () => {
 
 defineCase('composeInviteUrl roundtrips through parseInviteUrl', () => {
   const secret = fixtureSecret();
-  const composed = composeInviteUrl('attn://review', 'room-rt', secret);
+  const roomId = deriveRoomId(secret);
+  const composed = composeInviteUrl('attn://review', roomId, secret);
   assertEq(
     composed,
-    `attn://review/room-rt#key=${FIXTURE_KEY_B64URL}`,
+    `attn://review/${roomId}#key=${FIXTURE_KEY_B64URL}`,
     'composed native shape',
   );
   const parsed = parseInviteUrl(composed);
-  assertEq(parsed.roomId, 'room-rt', 'parsed roomId');
+  assertEq(parsed.roomId, roomId, 'parsed roomId');
   assertBytesEq(legacySecret(parsed), secret, 'parsed secret');
 
-  const composedHttps = composeInviteUrl('https://attn.dev/review', 'room-rt', secret);
+  const composedHttps = composeInviteUrl('https://attn.dev/review', roomId, secret);
   const parsedHttps = parseInviteUrl(composedHttps);
-  assertEq(parsedHttps.roomId, 'room-rt', 'browser parsed roomId');
+  assertEq(parsedHttps.roomId, roomId, 'browser parsed roomId');
   assertBytesEq(legacySecret(parsedHttps), secret, 'browser parsed secret');
 });
 
 defineCase('composeInviteUrl normalizes trailing slash on base', () => {
   const secret = fixtureSecret();
-  const a = composeInviteUrl('attn://review', 'room-a', secret);
-  const b = composeInviteUrl('attn://review/', 'room-a', secret);
+  const roomId = deriveRoomId(secret);
+  const a = composeInviteUrl('attn://review', roomId, secret);
+  const b = composeInviteUrl('attn://review/', roomId, secret);
   assertEq(a, b, 'trailing slash normalized');
 });
 
@@ -288,6 +292,92 @@ defineCase('composeInviteUrl rejects wrong-length roomSecret', () => {
     (e) => e instanceof InviteParseError && /32-byte/.test(e.message),
     'long secret rejected',
   );
+});
+
+defineCase('composeInviteForms produces equivalent browser, native, and CLI forms', () => {
+  const secret = fixtureSecret();
+  const forms = composeInviteForms(secret);
+  assertEq(forms.roomId, deriveRoomId(secret), 'room id derived once');
+  assertEq(
+    forms.browserUrl,
+    `https://attn.sh/review/${forms.roomId}#key=${FIXTURE_KEY_B64URL}`,
+    'production browser form',
+  );
+  assertEq(
+    forms.nativeUrl,
+    `attn://review/${forms.roomId}#key=${FIXTURE_KEY_B64URL}`,
+    'native form',
+  );
+  assertEq(
+    forms.cliCommand,
+    `npx attnmd review join '${forms.nativeUrl}'`,
+    'CLI form shell-quotes the native invite',
+  );
+  const browser = parseInviteUrl(forms.browserUrl);
+  const native = parseInviteUrl(forms.nativeUrl);
+  assertEq(browser.roomId, native.roomId, 'forms bind the same room');
+  assertBytesEq(browser.roomSecret, native.roomSecret, 'forms carry the same secret');
+});
+
+defineCase('composeInviteForms accepts staging HTTPS and exact loopback HTTP', () => {
+  const secret = fixtureSecret();
+  assert(
+    composeInviteForms(secret, 'https://staging.attn.sh/review').browserUrl
+      .startsWith('https://staging.attn.sh/review/'),
+    'staging base accepted',
+  );
+  for (const base of [
+    'http://localhost:5197/review',
+    'http://127.0.0.1:5197/review',
+    'http://[::1]:5197/review',
+  ]) {
+    assert(composeInviteForms(secret, base).browserUrl.startsWith(base), `${base} accepted`);
+  }
+});
+
+defineCase('invite composition rejects unsafe bases, paths, ids, and mismatched secrets', () => {
+  const secret = fixtureSecret();
+  const roomId = deriveRoomId(secret);
+  for (const base of [
+    'http://attn.sh/review',
+    'http://localhost.evil/review',
+    'https://user:pass@attn.sh/review',
+    'https://attn.sh/review?cap=x',
+    'https://attn.sh/review#key=x',
+    'https://attn.sh/other',
+    'javascript:alert(1)',
+  ]) {
+    assertThrows(
+      () => composeInviteForms(secret, base),
+      (error) => error instanceof InviteParseError && !error.message.includes(FIXTURE_KEY_B64URL),
+      `unsafe base rejected: ${base}`,
+    );
+  }
+  assertThrows(
+    () => composeInviteUrl('attn://review', `${roomId}/extra`, secret),
+    (error) => error instanceof InviteParseError,
+    'path-injected room id rejected',
+  );
+  assertThrows(
+    () => composeInviteUrl('attn://review', 'different-room', secret),
+    (error) => error instanceof InviteParseError && /does not match/.test(error.message),
+    'room id/secret mismatch rejected',
+  );
+});
+
+defineCase('invite parse diagnostics never echo fragment-bearing input', () => {
+  const canary = `SECRET-${FIXTURE_KEY_B64URL}`;
+  for (const input of [
+    `ftp://example.test/review/room#key=${canary}`,
+    `https://[invalid#key=${canary}`,
+    `https://attn.sh/${canary}/room#key=${FIXTURE_KEY_B64URL}`,
+  ]) {
+    assertThrows(
+      () => parseInviteUrl(input),
+      (error) => error instanceof InviteParseError && !error.message.includes(canary),
+      'secret-free parse error',
+    );
+  }
 });
 
 defineCase('parseAndStripInviteFromUrl strips the fragment via replaceState', () => {

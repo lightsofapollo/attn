@@ -16,8 +16,11 @@ export type WorkspaceEntryKind = 'markdown' | 'asset';
 export interface WorkspaceEntry {
   /** Normalized relative path within the workspace, e.g. `docs/notes.md`. */
   path: string;
+  kind: WorkspaceEntryKind;
   presentation: EntryPresentation;
+  sizeBytes: number;
   sizeLabel: string;
+  mediaType?: string;
 }
 
 /** Literal status language from planning/web-authoring/00-web-presence.md. */
@@ -100,6 +103,41 @@ import type {
   RejectBrowserSuggestionResult,
 } from '../../lib/review/browser-review-actions';
 import type { Anchor, ReviewEvent } from '../../lib/types';
+export type WorkspaceShareMode = 'live' | 'async' | 'hybrid';
+export type WorkspaceShareTtlMs = 3_600_000 | 86_400_000 | 604_800_000;
+
+export interface WorkspaceShareInvite {
+  roomId: string;
+  browserUrl: string;
+  nativeUrl: string;
+  cliCommand: string;
+}
+
+export interface WorkspaceShareView {
+  workspaceId: string;
+  capId: string;
+  roomId: string;
+  scopeKind: 'file' | 'entries' | 'workspace';
+  paths: string[];
+  publication: 'pending' | 'published' | 'stopped';
+  mode: WorkspaceShareMode;
+  expiresAt: number;
+  expired: boolean;
+  resumable: boolean;
+  invite: WorkspaceShareInvite | null;
+}
+
+export type WorkspaceShareSelection =
+  | { kind: 'file'; path: string }
+  | { kind: 'entries'; paths: string[] }
+  | { kind: 'workspace' };
+
+export interface WorkspaceShareRequest {
+  selection: WorkspaceShareSelection;
+  mode: WorkspaceShareMode;
+  ttlMs: WorkspaceShareTtlMs;
+  riskAcknowledged: boolean;
+}
 
 /**
  * Injected async view-service the shells render from (attn-7xl.3.2). The
@@ -124,6 +162,9 @@ export interface EditingSession {
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
   retryReviewOutbox(): Promise<void>;
+  inspectShare(): Promise<WorkspaceShareView | null>;
+  ensureShare(input: WorkspaceShareRequest): Promise<WorkspaceShareView>;
+  stopShare(): Promise<void>;
   /** Leaves edit mode; the route-lifetime owner lease remains held. */
   release(): Promise<void>;
 }

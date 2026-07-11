@@ -852,7 +852,7 @@ fn build_browser_invite_url_from_base(
 pub fn parse_invite(invite: &str) -> Result<ParsedInvite, BootstrapError> {
     let rest = invite
         .strip_prefix("attn://review/")
-        .ok_or_else(|| BootstrapError::InviteParse(format!("missing prefix: {invite}")))?;
+        .ok_or_else(|| BootstrapError::InviteParse("missing attn review prefix".into()))?;
     let (room_id_str, fragment) = rest
         .split_once('#')
         .ok_or_else(|| BootstrapError::InviteParse("missing key fragment".into()))?;
@@ -4801,10 +4801,13 @@ mod tests {
 
     #[test]
     fn parse_invite_rejects_missing_prefix() {
-        let err = parse_invite("not-an-invite").expect_err("malformed");
+        let raw = "https://attn.sh/review/room#key=SECRET-CANARY";
+        let err = parse_invite(raw).expect_err("malformed");
         match err {
             BootstrapError::InviteParse(msg) => {
-                assert!(msg.contains("missing prefix"), "got: {msg}");
+                assert!(msg.contains("missing attn review prefix"), "got: {msg}");
+                assert!(!msg.contains(raw), "input leaked: {msg}");
+                assert!(!msg.contains("SECRET-CANARY"), "secret leaked: {msg}");
             }
             other => panic!("expected InviteParse, got {other:?}"),
         }

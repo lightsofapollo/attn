@@ -22,6 +22,7 @@ import {
   type BrowserWorkspaceServiceOptions,
 } from './workspace-service';
 import { quotaPressure } from '../../lib/review/browser-storage-probe';
+import { validateBrowserRelayUrl } from '../../lib/review/browser-relay-url';
 import type { WorkspaceEntryRecord } from '../../lib/review/browser-workspace-schema';
 
 /** Safe raster types that may render inline (epic scope note 2026-07-10). */
@@ -245,6 +246,30 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
       replyToComment: (anchor, body, threadId) => runtime.replyToComment(anchor, body, threadId),
       resolveComment: (threadId) => runtime.resolveComment(threadId),
       retryReviewOutbox: () => runtime.retryOutbox(),
+      inspectShare: () => runtime.inspectShare(browserReviewBase()),
+      ensureShare: async (input) => {
+        const mode = this.storageHealth().mode;
+        if (mode === 'unavailable' || mode === 'quota-pressure') {
+          throw new Error('Local storage must be writable before creating a review room.');
+        }
+        if (mode !== 'persistent' && !input.riskAcknowledged) {
+          throw new Error('Acknowledge the local recovery risk before sharing.');
+        }
+        const selection = input.selection;
+        return runtime.ensureShare({
+          relayUrl: validateBrowserRelayUrl(import.meta.env.VITE_ATTN_RELAY_URL),
+          browserReviewBase: browserReviewBase(),
+          scopeKind: selection.kind,
+          paths: selection.kind === 'workspace'
+            ? []
+            : selection.kind === 'file'
+              ? [selection.path]
+              : selection.paths,
+          mode: input.mode,
+          ttlMs: input.ttlMs,
+        });
+      },
+      stopShare: () => runtime.stopShare(),
       async release(): Promise<void> {},
     };
   }
@@ -320,12 +345,20 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
 function toViewEntry(entry: WorkspaceEntryRecord): WorkspaceEntry {
   return {
     path: entry.path,
+    kind: entry.kind,
     presentation:
       entry.kind === 'markdown'
         ? 'editable'
         : entry.mediaType !== undefined && INLINE_SAFE_MEDIA.test(entry.mediaType)
           ? 'preview'
           : 'download-only',
+    sizeBytes: entry.sizeBytes,
     sizeLabel: sizeLabel(entry.sizeBytes),
+    ...(entry.mediaType === undefined ? {} : { mediaType: entry.mediaType }),
   };
+}
+
+function browserReviewBase(): string {
+  if (typeof window === 'undefined') return 'https://attn.sh/review';
+  return `${window.location.origin}/review`;
 }

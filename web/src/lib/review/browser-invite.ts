@@ -28,6 +28,8 @@
 //
 //   cd web && npx tsx src/lib/review/browser-invite.test.ts
 
+import { deriveRoomId } from './browser-crypto';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -57,6 +59,13 @@ export interface ParsedInviteV3 extends ParsedInviteFragmentV3 {
 
 export type ParsedInvite = ParsedInviteV2 | ParsedInviteV3;
 
+export interface InviteForms {
+  roomId: string;
+  browserUrl: string;
+  nativeUrl: string;
+  cliCommand: string;
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -83,6 +92,8 @@ const NATIVE_PREFIX = 'attn://review/';
 const BROWSER_PATH_PREFIX = '/review/';
 const FRAGMENT_KEY_PREFIX = 'key=';
 const ROOM_SECRET_LEN = 32;
+const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
+export const DEFAULT_BROWSER_INVITE_BASE = 'https://attn.sh/review';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -206,12 +217,18 @@ export function composeInviteUrl(
   if (typeof roomId !== 'string' || roomId.length === 0) {
     throw new InviteParseError('roomId must be a non-empty string');
   }
+  if (!ROOM_ID_PATTERN.test(roomId)) {
+    throw new InviteParseError('roomId must contain only base64url characters');
+  }
   if (!(roomSecret instanceof Uint8Array) || roomSecret.length !== ROOM_SECRET_LEN) {
     throw new InviteParseError(
       `roomSecret must be a ${ROOM_SECRET_LEN}-byte Uint8Array`,
     );
   }
-  const trimmedBase = base.endsWith('/') ? base.slice(0, -1) : base;
+  if (deriveRoomId(roomSecret) !== roomId) {
+    throw new InviteParseError('roomId does not match roomSecret');
+  }
+  const trimmedBase = validateInviteBase(base);
   const encodedKey = base64UrlEncode(roomSecret);
   return `${trimmedBase}/${roomId}#${FRAGMENT_KEY_PREFIX}${encodedKey}`;
 }
@@ -312,6 +329,24 @@ function decodeGrant(value: string): Uint8Array {
   return decoded;
 }
 
+/** Build every public invite representation from one room secret. */
+export function composeInviteForms(
+  roomSecret: Uint8Array,
+  browserBase = DEFAULT_BROWSER_INVITE_BASE,
+): InviteForms {
+  if (!(roomSecret instanceof Uint8Array) || roomSecret.length !== ROOM_SECRET_LEN) {
+    throw new InviteParseError(`roomSecret must be a ${ROOM_SECRET_LEN}-byte Uint8Array`);
+  }
+  const roomId = deriveRoomId(roomSecret);
+  const nativeUrl = composeInviteUrl('attn://review', roomId, roomSecret);
+  const browserUrl = composeInviteUrl(browserBase, roomId, roomSecret);
+  return {
+    roomId,
+    browserUrl,
+    nativeUrl,
+    cliCommand: `npx attnmd review join '${nativeUrl}'`,
+  };
+}
 /**
  * Overwrite a secret buffer with zeros. JS has no real way to guarantee a
  * value is purged from memory (the runtime may have copied it), but
@@ -391,12 +426,10 @@ function splitInvite(url: string): SplitResult {
     try {
       parsed = new URL(url);
     } catch {
-      throw new InviteParseError(`malformed URL: ${url}`);
+      throw new InviteParseError('malformed invite URL');
     }
     if (!parsed.pathname.startsWith(BROWSER_PATH_PREFIX)) {
-      throw new InviteParseError(
-        `path must start with ${BROWSER_PATH_PREFIX} (got ${parsed.pathname})`,
-      );
+      throw new InviteParseError(`path must start with ${BROWSER_PATH_PREFIX}`);
     }
     const rest = parsed.pathname.slice(BROWSER_PATH_PREFIX.length);
     // `URL.hash` includes the leading `#` (or is empty). Normalize to match
@@ -411,7 +444,7 @@ function splitInvite(url: string): SplitResult {
   }
 
   throw new InviteParseError(
-    `unsupported scheme — expected attn://review/ or https://…/review/ (got: ${truncate(url, 40)})`,
+    'unsupported scheme — expected attn://review/ or https://…/review/',
   );
 }
 
@@ -426,8 +459,36 @@ function splitFragment(rest: string): SplitResult {
   };
 }
 
-function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n)}…` : s;
+function validateInviteBase(base: string): string {
+  const trimmed = base.endsWith('/') ? base.slice(0, -1) : base;
+  if (trimmed === 'attn://review') return trimmed;
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new InviteParseError('browser invite base must be an absolute URL');
+  }
+  const loopback =
+    parsed.hostname === 'localhost'
+    || parsed.hostname === '127.0.0.1'
+    || parsed.hostname === '[::1]';
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
+    throw new InviteParseError('browser invite base must use HTTPS or exact loopback HTTP');
+  }
+  if (
+    parsed.username.length > 0
+    || parsed.password.length > 0
+    || parsed.search.length > 0
+    || parsed.hash.length > 0
+  ) {
+    throw new InviteParseError('browser invite base cannot contain credentials, query, or fragment');
+  }
+  if (parsed.pathname.replace(/\/+$/u, '') !== '/review') {
+    throw new InviteParseError('browser invite base path must be /review');
+  }
+  parsed.pathname = '/review';
+  return parsed.toString().replace(/\/$/u, '');
 }
 
 // ---------------------------------------------------------------------------

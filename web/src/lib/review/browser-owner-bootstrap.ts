@@ -71,7 +71,7 @@ export function defaultOwnerPolicy(createdAtMs: number): RoomPolicy {
 }
 
 /** Wire policy exactly as bootstrap.rs::WirePolicy serializes it. */
-function wirePolicy(policy: RoomPolicy): Record<string, unknown> {
+function wirePolicy(policy: RoomPolicy, longSession: boolean): Record<string, unknown> {
   return {
     mode: policy.mode,
     maxPeers: policy.maxPeers,
@@ -80,7 +80,7 @@ function wirePolicy(policy: RoomPolicy): Record<string, unknown> {
     maxEvents: policy.maxEvents,
     expiresAt: policy.expiresAt,
     idleTimeoutMs: 60 * 60 * 1000,
-    longSession: false,
+    longSession,
     powBits: OWNER_BOOTSTRAP_POW_DIFFICULTY,
     deleteEventsAfterOwnerAck: policy.deleteEventsAfterOwnerAck,
     allowBrowser: policy.allowBrowser,
@@ -102,6 +102,8 @@ export interface OwnedRoomBootstrap {
 export interface CreateOwnedRoomOptions {
   relayUrl: string;
   policy?: RoomPolicy;
+  /** Relay 7-day tier. Must be explicit; ordinary rooms remain bounded to 24h. */
+  longSession?: boolean;
   now?: () => number;
   fetchImpl?: typeof fetch;
   /** Injectable PoW minter (tests); defaults to the worker miner. */
@@ -130,7 +132,7 @@ export async function createOwnedRoom(options: CreateOwnedRoomOptions): Promise<
   const path = `/v2/rooms/${roomId}`;
   const body = {
     v: 2,
-    policy: wirePolicy(policy),
+    policy: wirePolicy(policy, options.longSession === true),
     ownerSigningKey: base64UrlEncode(identity.signingPublic),
     admissionKey: base64UrlEncode(keys.admissionKey),
   };
@@ -275,5 +277,10 @@ export async function deleteOwnedRoom(input: {
       ),
     },
   });
-  return response.status === 200 || response.status === 204;
+  // Stop is idempotent: an authenticated owner asking to delete a room that
+  // is already absent/expired has reached the same authoritative outcome.
+  return response.status === 200
+    || response.status === 204
+    || response.status === 404
+    || response.status === 410;
 }

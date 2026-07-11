@@ -166,6 +166,24 @@ defineCase('create sends the exact native wire shape with verifiable headers', a
   assertEqual(result.created, true, '201 => created');
 });
 
+defineCase('explicit long session carries the relay 7-day opt-in', async () => {
+  const now = 1_700_000_000_000;
+  const { fetchImpl, requests } = stubRelay({});
+  const policy = defaultOwnerPolicy(now);
+  policy.expiresAt = now + 7 * 24 * 60 * 60 * 1000;
+  await createOwnedRoom({
+    relayUrl: RELAY,
+    fetchImpl,
+    mintPow,
+    now: () => now,
+    policy,
+    longSession: true,
+  });
+  const body = JSON.parse(requests[0]!.body);
+  assertEqual(body.policy.longSession, true, 'long-session wire flag');
+  assertEqual(body.policy.expiresAt, policy.expiresAt, '7-day expiry request');
+});
+
 defineCase('rejoin (200) is idempotent and does not roll back', async () => {
   const { fetchImpl, requests } = stubRelay({ createStatus: 200 });
   const result = await createOwnedRoom({ relayUrl: RELAY, fetchImpl, mintPow });
@@ -245,6 +263,22 @@ defineCase('deleteOwnedRoom signs the canonical DELETE verifiably', async () => 
     ed25519.verify(signature, canonical, identity.signingPublic),
     'signature verifies against the owner public key over canonical bytes',
   );
+});
+
+defineCase('deleteOwnedRoom treats already absent or expired rooms as stopped', async () => {
+  for (const status of [404, 410]) {
+    const { fetchImpl } = stubRelay({ deleteStatus: status });
+    const identity = generateBrowserIdentity();
+    const deleted = await deleteOwnedRoom({
+      relayUrl: RELAY,
+      roomId: deriveRoomId(new Uint8Array(32).fill(status)),
+      identity,
+      admissionKey: new Uint8Array(32).fill(3),
+      fetchImpl,
+      mintPow,
+    });
+    assertEqual(deleted, true, `${status} is idempotently stopped`);
+  }
 });
 
 defineCase('default policy mirrors the native defaults', () => {

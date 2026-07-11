@@ -59,6 +59,8 @@ export interface InviteCapability {
   ownerParticipantId: string;
   /** Snapshot of the room policy at share time. */
   policy: unknown;
+  /** Exact normalized scope paths retained before the first network request. */
+  sharePaths?: string[];
   /** Published-revision pointer (attn-7xl.4.3 updates it). */
   publishedRevisionId?: string;
   /** Last fully-acknowledged manifest and stable per-entry identities. */
@@ -195,6 +197,86 @@ export class WorkspaceShareStore {
       }
       throw error;
     }
+    return toView(record);
+  }
+
+  /**
+   * Prepare one active share under the route's live fence before contacting
+   * the relay. This closes the create→bind crash window and prevents two tabs
+   * from minting different active rooms for one workspace.
+   */
+  async bindShareFenced(
+    rootKey: CryptoKey,
+    input: BindShareInput,
+    fence: WorkspaceFence,
+  ): Promise<ShareRecordView> {
+    validateWorkspaceRootKey(rootKey);
+    requireId(input.workspaceId, 'workspaceId');
+    requireId(input.capId, 'capId');
+    requireId(input.roomId, 'roomId');
+    requireRelay(input.relayUrl);
+
+    const plaintext = new TextEncoder().encode(
+      JSON.stringify({ ...input.capability, v: CAPABILITY_VERSION }),
+    );
+    const meta = {
+      workspaceId: input.workspaceId,
+      capId: input.capId,
+      roomId: input.roomId,
+      scopeKind: input.scopeKind,
+    } as const;
+    let sealed: { nonce: string; ciphertext: string };
+    try {
+      sealed = await sealCapability(this.cryptoImpl, rootKey, meta, plaintext);
+    } finally {
+      plaintext.fill(0);
+    }
+    const record: StoredShareRecord = {
+      v: WORKSPACE_RECORD_VERSION,
+      workspaceId: input.workspaceId,
+      capId: input.capId,
+      roomId: input.roomId,
+      scopeKind: input.scopeKind,
+      createdAt: this.timestamp(),
+      nonce: sealed.nonce,
+      ciphertext: sealed.ciphertext,
+      relayUrl: input.relayUrl,
+      publication: 'pending',
+      generation: 0,
+    };
+    validateWorkspaceShareCapRecord(record);
+
+    const tx = this.db.transaction(
+      [STORE_WORKSPACE_SHARE_CAPS, STORE_WORKSPACE_LEASES],
+      'readwrite',
+    );
+    const done = transactionDone(tx);
+    await this.assertActiveFenceInTransaction(tx, input.workspaceId, fence);
+    const store = tx.objectStore(STORE_WORKSPACE_SHARE_CAPS);
+    const records = await requestValue<StoredShareRecord[]>(
+      store.index(WORKSPACE_INDEX).getAll(IDBKeyRange.only(input.workspaceId)),
+    );
+    const existing = records.find((candidate) => candidate.capId === input.capId);
+    if (existing) {
+      if (
+        existing.roomId !== input.roomId
+        || existing.scopeKind !== input.scopeKind
+        || existing.relayUrl !== input.relayUrl
+      ) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('share capId already belongs to different ownership');
+      }
+      await done;
+      return toView(existing);
+    }
+    if (records.some((candidate) => candidate.publication !== 'stopped')) {
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new StorageConflictError('workspace already has an active share');
+    }
+    store.add(record);
+    await done;
     return toView(record);
   }
 
@@ -740,6 +822,27 @@ export class WorkspaceShareStore {
     return existing !== undefined;
   }
 
+  /** Crypto-erase a stopped capability only while this route still owns it. */
+  async forgetShareFenced(
+    workspaceId: string,
+    capId: string,
+    fence: WorkspaceFence,
+  ): Promise<boolean> {
+    const tx = this.db.transaction(
+      [STORE_WORKSPACE_SHARE_CAPS, STORE_WORKSPACE_LEASES],
+      'readwrite',
+    );
+    const done = transactionDone(tx);
+    await this.assertActiveFenceInTransaction(tx, workspaceId, fence);
+    const store = tx.objectStore(STORE_WORKSPACE_SHARE_CAPS);
+    const existing = await requestValue<StoredShareRecord | undefined>(
+      store.get([workspaceId, capId]),
+    );
+    if (existing) store.delete([workspaceId, capId]);
+    await done;
+    return existing !== undefined;
+  }
+
   private async getRaw(workspaceId: string, capId: string): Promise<StoredShareRecord | null> {
     const tx = this.db.transaction(STORE_WORKSPACE_SHARE_CAPS, 'readonly');
     const done = transactionDone(tx);
@@ -767,6 +870,7 @@ export function inviteCapabilityFrom(input: {
   ownerDeviceId: string;
   ownerParticipantId: string;
   policy: unknown;
+  sharePaths?: string[];
   publishedRevisionId?: string;
   publishedManifest?: PublishedManifestPointer;
 }): InviteCapability {
@@ -778,6 +882,7 @@ export function inviteCapabilityFrom(input: {
     ownerDeviceId: input.ownerDeviceId,
     ownerParticipantId: input.ownerParticipantId,
     policy: input.policy,
+    ...(input.sharePaths === undefined ? {} : { sharePaths: validateSharePaths(input.sharePaths) }),
     ...(input.publishedRevisionId === undefined
       ? {}
       : { publishedRevisionId: input.publishedRevisionId }),
@@ -823,8 +928,12 @@ function validateInviteCapability(value: unknown): InviteCapability {
   if (parsed.publishedRevisionId !== undefined && typeof parsed.publishedRevisionId !== 'string') {
     throw new BrowserStorageError('sealed published revision is invalid');
   }
+  const sharePaths = parsed.sharePaths === undefined
+    ? undefined
+    : validateSharePaths(parsed.sharePaths);
   return {
     ...(parsed as InviteCapability),
+    ...(sharePaths === undefined ? {} : { sharePaths }),
     ...(parsed.publishedManifest === undefined
       ? {}
       : { publishedManifest: validatePublishedManifest(parsed.publishedManifest) }),
@@ -832,6 +941,22 @@ function validateInviteCapability(value: unknown): InviteCapability {
       ? {}
       : { pendingPublication: validatePendingPublication(parsed.pendingPublication) }),
   };
+}
+
+function validateSharePaths(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new BrowserStorageError('sealed share paths are invalid');
+  }
+  const paths = value.map((path) => {
+    if (typeof path !== 'string') throw new BrowserStorageError('sealed share path is invalid');
+    const normalized = normalizeEntryPath(path);
+    if (normalized !== path) throw new BrowserStorageError('sealed share path is not normalized');
+    return normalized;
+  });
+  if (new Set(paths).size !== paths.length) {
+    throw new BrowserStorageError('sealed share paths contain duplicates');
+  }
+  return paths;
 }
 
 function validatePendingPublication(

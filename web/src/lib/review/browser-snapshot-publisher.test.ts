@@ -205,6 +205,58 @@ test('mailbox publishes blob before signed pointer and marks only after ACK', as
   equal(((manifest.manifest as Record<string, unknown>).entries as unknown[]).length, 1, 'manifest lists entry');
 });
 
+test('owner genesis prefix is journaled and flushed before initial snapshots', async () => {
+  const outbox = new FakeOutbox();
+  const sink = new FakePublicationSink();
+  const roomId = 'room-prefix';
+  const prefix: MailboxEnvelope[] = [1, 2].map((fill) => ({
+    v: 2,
+    roomId,
+    envelopeId: base64UrlEncode(new Uint8Array(16).fill(fill)),
+    authorId: identity.participantId,
+    deviceId: identity.deviceId,
+    createdAt: now - 3 + fill,
+    expiresAt: policy.expiresAt,
+    kind: 'event',
+    nonce: base64UrlEncode(new Uint8Array(24).fill(fill)),
+    ciphertext: base64UrlEncode(new Uint8Array(32).fill(fill)),
+    ciphertextBytes: 32,
+  }));
+  const source = {
+    path: 'genesis.md',
+    bytes: new TextEncoder().encode('# Initial publication'),
+    docType: 'markdown' as const,
+    revisionId: revisionId(62),
+  };
+  await publishBrowserSnapshots({
+    relayUrl: 'https://relay.example',
+    roomId,
+    roomSecret,
+    keys,
+    identity,
+    policy,
+    entries: [source],
+    prefixEnvelopes: prefix,
+    indexBuilder,
+    outbox,
+    now: () => now,
+    randomBytes,
+    publication: {
+      workspaceId: 'ws-prefix',
+      capId: 'cap-prefix',
+      sink,
+      fence,
+      revisionSource: matchingRevisionSource([source]),
+    },
+  });
+  equal(
+    outbox.envelopes.slice(0, 2).map((envelope) => envelope.envelopeId),
+    prefix.map((envelope) => envelope.envelopeId),
+    'RoomCreated and owner ParticipantJoined retain prefix order',
+  );
+  equal(sink.commits, 1, 'prefix is inside the acknowledged publication boundary');
+});
+
 test('fenced publication requires an exact source revision', async () => {
   const sink = new FakePublicationSink();
   sink.published = {

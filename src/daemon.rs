@@ -881,7 +881,11 @@ fn parse_room_id(raw: String) -> crate::review::ids::RoomId {
 /// `Bootstrapper::join`, which subscribes the daemon's own window to the
 /// room (a windowed join — NOT the headless `--as-agent` path).
 pub fn log_review_join_intent(invite: &str) {
-    tracing::info!("review join — routing invite to ReviewManager: {invite}");
+    tracing::info!("{}", review_join_log_message(invite));
+}
+
+fn review_join_log_message(_invite: &str) -> &'static str {
+    "review join — routing redacted invite to ReviewManager"
 }
 
 /// Dispatch a `ReviewJoin` from the in-process custom-protocol handler.
@@ -1445,6 +1449,15 @@ mod tests {
         });
         let mgr = Arc::new(ReviewManager::new(store, working_copy, sink));
         (mgr, rx, tmp)
+    }
+
+    #[test]
+    fn review_join_log_message_never_contains_invite_secret() {
+        let invite = "attn://review/room-canary#key=SECRET-CANARY";
+        let message = review_join_log_message(invite);
+        assert!(!message.contains(invite));
+        assert!(!message.contains("SECRET-CANARY"));
+        assert!(!message.contains("#key="));
     }
 
     #[test]

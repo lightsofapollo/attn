@@ -28,7 +28,34 @@ export type FileType = 'markdown' | 'image' | 'video' | 'audio' | 'html' | 'dire
  * `html` docs are shared read-only — rendered in a sandboxed viewer with no
  * comment anchors or collaborative editing (yet).
  */
-export type DocType = 'markdown' | 'html';
+export type DocType = 'markdown' | 'html' | 'asset' | 'workspace_manifest';
+
+export type WorkspaceManifestScope = 'file' | 'entries' | 'workspace';
+export type WorkspaceManifestEntryKind = 'markdown' | 'html' | 'asset';
+
+export interface WorkspaceManifestEntry {
+  fileId: FileId;
+  snapshotId: SnapshotId;
+  path: string;
+  kind: WorkspaceManifestEntryKind;
+  mediaType?: string;
+  byteLength: number;
+  contentHash: ContentHash;
+}
+
+export interface WorkspaceSnapshotManifest {
+  v: 1;
+  kind: 'attn_workspace_snapshot';
+  scope: WorkspaceManifestScope;
+  entries: WorkspaceManifestEntry[];
+}
+
+/** Canonical decrypted bytes carried by a snapshot_blob envelope. */
+export type SnapshotPlaintext =
+  | { docType: 'markdown'; content: string; anchorIndex?: AnchorIndex }
+  | { docType: 'html'; content: string }
+  | { docType: 'asset'; content: string; mediaType: string; encoding: 'base64url' }
+  | { docType: 'workspace_manifest'; manifest: WorkspaceSnapshotManifest };
 
 export interface TreeNode {
   name: string;
@@ -745,13 +772,7 @@ export interface SnapshotCreatedBody {
   parentSnapshotId?: SnapshotId;
   baseHash: ContentHash;
   encryptedBlobRef?: BlobRef;
-  inlineSnapshot?: {
-    docType: DocType;
-    /** Raw UTF-8 source: markdown source for `markdown`, HTML for `html`. */
-    content: string;
-    /** Present only for markdown docs; HTML is read-only with no anchors. */
-    anchorIndex?: AnchorIndex;
-  };
+  inlineSnapshot?: SnapshotPlaintext;
 }
 
 /**
@@ -1008,6 +1029,10 @@ export interface ReviewSnapshot {
   docType?: DocType;
   /** Raw UTF-8 source: markdown source for `markdown`, HTML for `html`. */
   content?: string;
+  /** Validated, inert metadata for binary assets. Asset bytes are never rendered here. */
+  mediaType?: string;
+  /** Validated, inert workspace topology. It contains no entry bodies. */
+  workspaceManifest?: WorkspaceSnapshotManifest;
   anchorIndex?: AnchorIndex;
   encryptedBlobRef?: BlobRef;
 }

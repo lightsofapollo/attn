@@ -46,6 +46,7 @@
     formatSnapshotClock,
   } from './snapshot-badge-format';
   import { reviewStore } from './review/store.svelte';
+  import { isRenderableReviewSnapshot } from './review/snapshot-kind';
   import type { ReviewSnapshot, ReviewStatusPeer, SnapshotId } from './types';
 
   type LocalKind = 'owner' | 'reviewer' | 'agent';
@@ -79,7 +80,7 @@
   // and sort newest-first by `createdAt`.
   const fileSnapshots: ReviewSnapshot[] = $derived(
     reviewStore.snapshots
-      .filter((s) => s.fileId === reviewStore.currentFileId)
+      .filter((s) => s.fileId === reviewStore.currentFileId && isRenderableReviewSnapshot(s))
       .sort((a, b) => b.createdAt - a.createdAt),
   );
 

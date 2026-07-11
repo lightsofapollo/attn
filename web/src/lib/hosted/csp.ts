@@ -24,7 +24,10 @@ export function buildContentSecurityPolicy(relayOrigin: string): string {
     "manifest-src 'self'",
     "media-src 'self' blob: data:",
     "object-src 'none'",
-    "script-src 'self'",
+    // The checked-in Rust/comrak anchor index is loaded as WebAssembly when a
+    // browser owner publishes Markdown. Permit only Wasm compilation; keep
+    // string-to-code JavaScript evaluation disabled.
+    "script-src 'self' 'wasm-unsafe-eval'",
     "style-src 'self' 'unsafe-inline'",
     "worker-src 'self'",
   ].join('; ');

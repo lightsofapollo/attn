@@ -334,10 +334,12 @@ The product is reframed as **agentic collaboration** — primary use case is an 
 
   - **Implementation note (Phase 1, attn-nnj.3.1 / 3.2):** the `math` kind is only emitted from `comrak` when math appears at the document AST's block level. In practice that means a ```` ```math ```` fenced code block. Comrak emits both inline math (`$x$`) and *display math* (`$$ ... $$`) as `NodeValue::Math` **inline** nodes nested inside a `Paragraph`, so a display-math run on its own line is currently absorbed into a `paragraph` block (its literal still flows through `extract_text` into the paragraph's normalized text, so the resolver still has something stable to fingerprint). Authors who need math addressable as its own anchorable block must use the ```` ```math ```` fence today. Promoting bare `$$ ... $$` into a first-class block kind would require either a comrak patch or a post-parse rewrite and is intentionally out of scope for v2.
 
+**17. Workspace sharing uses canonical entry snapshots plus a final manifest snapshot.** `SnapshotPlaintext` is additively extended with `asset` (canonical unpadded base64url raw bytes and a parameter-free MIME type) and `workspace_manifest` payloads. A manifest contains unique NFC root-relative paths sorted by UTF-8 bytes and binds each entry's stable `fileId`, `snapshotId`, kind, raw byte length, raw content hash, and asset media type. Entry snapshots are published first; the manifest is published last under a domain-separated stable synthetic file identity; sealed local publication state advances only after durable acknowledgement. Existing Markdown/HTML canonical bytes remain unchanged, and browser-owned Markdown uses the exact Rust/comrak anchor builder through checked-in WASM rather than a JavaScript approximation. Pins: `data-model.md` Snapshot Graph, `crypto-spec.md` domain separation, `relay-spec.md` content-blind envelopes/R2.
+
 ### Inconsistencies Fixed
 
 - `data-model.md` line 202: `"attn file"` → `"attn file v2"` to match the v2-suffix convention used everywhere else in the key derivation tree (`crypto-spec.md` uses the v2 form).
 
 ---
 
-**Total: 16 decisions, all previously-open questions closed.** Open implementation work is now bounded by the work itself, not by undecided design.
+**Total: 17 decisions, all previously-open questions closed.** Open implementation work is now bounded by the work itself, not by undecided design.

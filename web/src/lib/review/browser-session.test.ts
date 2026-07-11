@@ -23,6 +23,7 @@ import {
   buildRegisterDeviceBody,
   canonicalRegisterDeviceBytes,
   generateBrowserIdentity,
+  parseBrowserSnapshotPlaintext,
   admissionHeaderValue,
   type BrowserDeviceIdentity,
   type BrowserSessionState,
@@ -48,8 +49,12 @@ import {
 import { composeInviteUrl } from './browser-invite';
 import type {
   Anchor,
+  AnchorIndex,
+  EventMeta,
   ReviewEvent,
+  ReviewEventBody,
   ReviewSnapshot,
+  SnapshotPlaintext,
   FileId,
   SnapshotId,
   RoomId,
@@ -346,21 +351,12 @@ function mintSnapshotEnvelope(
     createdAt,
     parentEventIds: [],
   };
-  // Minimal but valid AnchorIndex — the snapshot path doesn't render the
-  // index in the editor (read-only) but the type demands it.
-  const anchorIndex = {
-    docHash: 'hash-' + snapshotId,
-    canonicalEncoding: 'utf8-bytes' as const,
-    lineCount: content.split('\n').length,
-    blocks: [],
-    headings: [],
-  };
-  const blobBytes = snapshotPlaintextBytes(content, snapshotId, docType);
+  const blobBytes = snapshotPlaintextBytes(content, docType);
   const body = {
     type: 'snapshot_created',
     fileId,
     snapshotId,
-    baseHash: 'hash-' + snapshotId,
+    baseHash: contentHash(new TextEncoder().encode(content)),
     // HTML docs are read-only and carry no anchor index.
     ...(mailboxBlobId
       ? {
@@ -376,7 +372,7 @@ function mintSnapshotEnvelope(
           inlineSnapshot:
             docType === 'html'
               ? { docType, content }
-              : { docType, content, anchorIndex },
+              : { docType, content },
         }),
   };
   meta.eventId = deriveEventId(meta, body);
@@ -428,7 +424,7 @@ function mintSnapshotBlobEnvelope(
   content: string,
   snapshotId: string,
 ): MailboxEnvelope {
-  const plaintext = snapshotPlaintextBytes(content, snapshotId, 'markdown');
+  const plaintext = snapshotPlaintextBytes(content, 'markdown');
   const nonce = new Uint8Array(24);
   for (let i = 0; i < nonce.length; i++) nonce[i] = 0x70 + i;
   const aad: EnvelopeAad = {
@@ -463,7 +459,7 @@ function mintR2SnapshotBlobEnvelope(
   content: string,
   snapshotId: string,
 ): { wrapper: MailboxEnvelope; sealedBody: Uint8Array } {
-  const snapshotBytes = snapshotPlaintextBytes(content, snapshotId, 'markdown');
+  const snapshotBytes = snapshotPlaintextBytes(content, 'markdown');
   const aad: EnvelopeAad = {
     v: 2,
     roomId,
@@ -510,23 +506,11 @@ function mintR2SnapshotBlobEnvelope(
 
 function snapshotPlaintextBytes(
   content: string,
-  snapshotId: string,
   docType: 'markdown' | 'html',
 ): Uint8Array {
   return toCanonicalBytes({
     docType,
     content,
-    ...(docType === 'markdown'
-      ? {
-          anchorIndex: {
-            docHash: 'hash-' + snapshotId,
-            canonicalEncoding: 'utf8-bytes',
-            lineCount: content.split('\n').length,
-            blocks: [],
-            headings: [],
-          },
-        }
-      : {}),
   });
 }
 
@@ -1102,7 +1086,7 @@ defineCase('mailbox snapshot_blob rehydrates a native SnapshotCreated pointer', 
     assertEq(session.getState().snapshotContent, markdown, 'mailbox content rehydrated');
     assertEq(session.getState().snapshotId, 'snap-mailbox-1' as SnapshotId, 'snapshot pointer');
     assertEq(store.snapshots.length, 1, 'rehydrated snapshot imported once');
-    assertEq(store.snapshots[0]!.anchorIndex?.lineCount, 4, 'anchor index imported');
+    assertEq(store.snapshots[0]!.anchorIndex, undefined, 'legacy omitted anchor index remains accepted');
     assertEq(store.events.length, 2, 'join and pointer remain in event log');
     assertEq(store.events[0]?.body.type, 'participant_joined', 'join precedes pointer');
     session.close();
@@ -1672,6 +1656,233 @@ defineCase('generateBrowserIdentity produces 32-byte secret + 32-byte public', (
   // signingKeyId should match the SHA-256 of the public key.
   const expectedKid = signingKeyId(id.signingPublic);
   assert(expectedKid.length > 0, 'signingKeyId derives without throwing');
+});
+
+defineCase('snapshot parser accepts inert binary/manifest metadata and rejects active or tampered shapes', () => {
+  const asset = parseBrowserSnapshotPlaintext(toCanonicalBytes({
+    docType: 'asset', content: 'AP8AQQ', encoding: 'base64url', mediaType: 'application/octet-stream',
+  }));
+  assertEq(asset?.docType, 'asset', 'binary asset accepted without UTF-8 decoding');
+  assert(
+    parseBrowserSnapshotPlaintext(toCanonicalBytes({
+      docType: 'asset', content: 'AP8AQQ', encoding: 'base64url', mediaType: 'text/html; charset=utf-8',
+    })) === null,
+    'parameterized/active asset metadata rejected',
+  );
+  const id = (length: number, fill: number) => base64UrlEncode(new Uint8Array(length).fill(fill));
+  const manifest = parseBrowserSnapshotPlaintext(toCanonicalBytes({
+    docType: 'workspace_manifest',
+    manifest: {
+      v: 1, kind: 'attn_workspace_snapshot', scope: 'file',
+      entries: [{
+        fileId: id(16, 1), snapshotId: id(16, 2), path: 'safe/file.bin', kind: 'asset',
+        mediaType: 'application/octet-stream', byteLength: 5, contentHash: id(32, 3),
+      }],
+    },
+  }));
+  assertEq(manifest?.docType, 'workspace_manifest', 'strict inert manifest accepted');
+  assert(
+    parseBrowserSnapshotPlaintext(toCanonicalBytes({ docType: 'html', content: '<script>x</script>', executable: true })) === null,
+    'extra active-content flag rejected',
+  );
+});
+
+type SnapshotCreatedBody = Extract<ReviewEventBody, { type: 'snapshot_created' }>;
+interface HydrationTestSession {
+  hydrateSnapshot(
+    store: ReviewStoreSink,
+    meta: EventMeta,
+    body: SnapshotCreatedBody,
+    inline: SnapshotPlaintext,
+  ): Promise<void>;
+  hydrateSnapshotBlob(
+    store: ReviewStoreSink,
+    meta: EventMeta,
+    body: SnapshotCreatedBody,
+    cached: { snapshot: SnapshotPlaintext; byteLength: number; contentHash: string },
+  ): Promise<void>;
+}
+
+function hydrationMeta(createdAt: number): EventMeta {
+  return {
+    v: 2,
+    eventId: `evt-hydration-${createdAt}`,
+    roomId: ROOM_ID,
+    authorId: OWNER_DEVICE.participantId,
+    deviceId: OWNER_DEVICE.deviceId,
+    createdAt,
+    parentEventIds: [],
+  };
+}
+
+defineCase('asset-first hydration remains inert and absent from current selection', async () => {
+  const store = makeStubStore();
+  store.currentRoomId = ROOM_ID as RoomId;
+  const session = new BrowserSession({ store });
+  const raw = new Uint8Array([0, 255, 7, 42]);
+  const asset: SnapshotPlaintext = {
+    docType: 'asset',
+    content: base64UrlEncode(raw),
+    encoding: 'base64url',
+    mediaType: 'application/octet-stream',
+  };
+  const body: SnapshotCreatedBody = {
+    type: 'snapshot_created',
+    fileId: base64UrlEncode(new Uint8Array(16).fill(1)),
+    snapshotId: base64UrlEncode(new Uint8Array(16).fill(2)),
+    ownerDisplayPath: 'assets/first.bin',
+    baseHash: contentHash(raw),
+    inlineSnapshot: asset,
+  };
+  await (session as unknown as HydrationTestSession).hydrateSnapshot(
+    store,
+    hydrationMeta(1),
+    body,
+    asset,
+  );
+  assertEq(store.snapshots.length, 1, 'asset metadata retained');
+  assertEq(store.snapshots[0]?.docType, 'asset', 'asset remains tagged inert');
+  assertEq(store.currentFileId, null, 'asset never becomes current file');
+  assertEq(store.currentSnapshotId, null, 'asset never becomes current snapshot');
+  assertEq(session.getState().snapshotContent, null, 'asset never reaches renderer state');
+  session.close();
+});
+
+defineCase('manifest waits for an out-of-order recovered R2 entry, then validates and hydrates', async () => {
+  const store = makeStubStore();
+  store.currentRoomId = ROOM_ID as RoomId;
+  const session = new BrowserSession({ store });
+  const ids = (length: number, fill: number) => base64UrlEncode(new Uint8Array(length).fill(fill));
+  const raw = new Uint8Array([0, 1, 255, 9]);
+  const assetSnapshotId = ids(16, 12);
+  const assetFileId = ids(16, 11);
+  const asset: SnapshotPlaintext = {
+    docType: 'asset',
+    content: base64UrlEncode(raw),
+    encoding: 'base64url',
+    mediaType: 'application/octet-stream',
+  };
+  const manifest: SnapshotPlaintext = {
+    docType: 'workspace_manifest',
+    manifest: {
+      v: 1,
+      kind: 'attn_workspace_snapshot',
+      scope: 'file',
+      entries: [{
+        fileId: assetFileId,
+        snapshotId: assetSnapshotId,
+        path: 'assets/deferred.bin',
+        kind: 'asset',
+        mediaType: 'application/octet-stream',
+        byteLength: raw.length,
+        contentHash: contentHash(raw),
+      }],
+    },
+  };
+  const manifestBody: SnapshotCreatedBody = {
+    type: 'snapshot_created',
+    fileId: ids(16, 13),
+    snapshotId: ids(16, 14),
+    baseHash: contentHash(toCanonicalBytes(manifest.manifest)),
+    inlineSnapshot: manifest,
+  };
+  const hydrate = session as unknown as HydrationTestSession;
+  await hydrate.hydrateSnapshot(store, hydrationMeta(2), manifestBody, manifest);
+  assertEq(store.snapshots.length, 0, 'unbound manifest is deferred, not accepted');
+
+  const assetBytes = toCanonicalBytes(asset);
+  const assetBody: SnapshotCreatedBody = {
+    type: 'snapshot_created',
+    fileId: assetFileId,
+    snapshotId: assetSnapshotId,
+    ownerDisplayPath: 'assets/deferred.bin',
+    baseHash: contentHash(raw),
+    encryptedBlobRef: {
+      storage: 'r2',
+      blobId: 'r2-deferred-asset',
+      byteLength: assetBytes.length,
+      contentHash: contentHash(assetBytes),
+    },
+  };
+  await hydrate.hydrateSnapshotBlob(store, hydrationMeta(3), assetBody, {
+    snapshot: asset,
+    byteLength: assetBytes.length,
+    contentHash: contentHash(assetBytes),
+  });
+  assertEq(store.snapshots.length, 2, 'asset then validated manifest hydrate exactly once');
+  assertEq(store.snapshots[0]?.docType, 'asset', 'recovered entry retained as inert asset');
+  assertEq(store.snapshots[1]?.docType, 'workspace_manifest', 'manifest accepted after binding');
+  assertEq(store.currentFileId, null, 'deferred inert records never alter file selection');
+  assertEq(store.currentSnapshotId, null, 'deferred inert records never alter snapshot selection');
+  session.close();
+});
+
+defineCase('manifest rejects a hydrated entry whose signed binding differs', async () => {
+  const store = makeStubStore();
+  store.currentRoomId = ROOM_ID as RoomId;
+  const session = new BrowserSession({ store });
+  const ids = (length: number, fill: number) => base64UrlEncode(new Uint8Array(length).fill(fill));
+  const raw = new Uint8Array([4, 5, 6]);
+  const assetSnapshotId = ids(16, 22);
+  const assetFileId = ids(16, 21);
+  const asset: SnapshotPlaintext = {
+    docType: 'asset', content: base64UrlEncode(raw), encoding: 'base64url', mediaType: 'image/png',
+  };
+  const hydrate = session as unknown as HydrationTestSession;
+  await hydrate.hydrateSnapshot(store, hydrationMeta(4), {
+    type: 'snapshot_created', fileId: assetFileId, snapshotId: assetSnapshotId,
+    ownerDisplayPath: 'actual.png', baseHash: contentHash(raw), inlineSnapshot: asset,
+  }, asset);
+  const manifest: Extract<SnapshotPlaintext, { docType: 'workspace_manifest' }> = {
+    docType: 'workspace_manifest',
+    manifest: {
+      v: 1, kind: 'attn_workspace_snapshot', scope: 'file', entries: [{
+        fileId: assetFileId, snapshotId: assetSnapshotId, path: 'forged.png', kind: 'asset',
+        mediaType: 'image/png', byteLength: raw.length, contentHash: contentHash(raw),
+      }],
+    },
+  };
+  await hydrate.hydrateSnapshot(store, hydrationMeta(5), {
+    type: 'snapshot_created', fileId: ids(16, 23), snapshotId: ids(16, 24),
+    baseHash: contentHash(toCanonicalBytes(manifest.manifest)), inlineSnapshot: manifest,
+  }, manifest);
+  assertEq(session.getState().error?.kind, 'network', 'binding mismatch fails closed');
+  assert(!store.snapshots.some((snapshot) => snapshot.docType === 'workspace_manifest'), 'bad manifest never accepted');
+});
+
+defineCase('inbound markdown verifies a present anchor index against the lazy canonical builder', async () => {
+  const canonical: AnchorIndex = {
+    docHash: 'canonical-doc-hash', canonicalEncoding: 'utf8-bytes', lineCount: 2,
+    blocks: [], headings: [],
+  };
+  const markdown = '# Verified\n';
+  const body: SnapshotCreatedBody = {
+    type: 'snapshot_created', fileId: 'file-anchor', snapshotId: 'snap-anchor',
+    baseHash: contentHash(new TextEncoder().encode(markdown)),
+    inlineSnapshot: { docType: 'markdown', content: markdown, anchorIndex: canonical },
+  };
+  const accepted = makeStubStore();
+  const good = new BrowserSession({
+    store: accepted,
+    anchorIndexBuilder: async () => structuredClone(canonical),
+  });
+  await (good as unknown as HydrationTestSession).hydrateSnapshot(
+    accepted, hydrationMeta(6), body, body.inlineSnapshot!,
+  );
+  assertEq(accepted.snapshots.length, 1, 'matching canonical anchor index accepted');
+  assertEq(accepted.currentSnapshotId, 'snap-anchor' as SnapshotId, 'verified document selected');
+  good.close();
+
+  const rejected = makeStubStore();
+  const bad = new BrowserSession({
+    store: rejected,
+    anchorIndexBuilder: async () => ({ ...canonical, lineCount: 99 }),
+  });
+  await (bad as unknown as HydrationTestSession).hydrateSnapshot(
+    rejected, hydrationMeta(7), body, body.inlineSnapshot!,
+  );
+  assertEq(bad.getState().error?.kind, 'network', 'mismatched canonical anchor index rejected');
+  assertEq(rejected.snapshots.length, 0, 'tampered document never reaches store');
 });
 
 // ---------------------------------------------------------------------------

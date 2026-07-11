@@ -17,6 +17,7 @@
 <script lang="ts">
   import { reviewStore } from './review/store.svelte';
   import { deriveFileEntries } from './review/file-nav';
+  import { isRenderableReviewSnapshot } from './review/snapshot-kind';
 
   const files = $derived(deriveFileEntries(reviewStore.snapshots, reviewStore.currentRoomId));
 
@@ -27,6 +28,7 @@
       if (
         snapshot.roomId === reviewStore.currentRoomId &&
         snapshot.fileId === fileId &&
+        isRenderableReviewSnapshot(snapshot) &&
         (latest === null || snapshot.createdAt > latest.createdAt)
       ) {
         latest = snapshot;

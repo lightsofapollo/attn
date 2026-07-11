@@ -1,0 +1,72 @@
+{
+  "v": 1,
+  "description": "Canonical cross-client workspace snapshot payloads. canonicalJson uses attn JCS control-character escaping; canonicalBytesBase64url is its exact UTF-8 byte sequence. Asset raw bytes include NUL and invalid UTF-8.",
+  "manifestFileId": {
+    "roomSecretBase64url": "ERERERERERERERERERERERERERERERERERERERERERE",
+    "fileId": "B5oaDs7_sHZ73Vuoxibfjg"
+  },
+  "cases": [
+    {
+      "name": "markdown legacy wire bytes",
+      "value": {
+        "docType": "markdown",
+        "content": "# Workspace\n\nHello 🌲\n"
+      },
+      "canonicalJson": "{\"content\":\"# Workspace\\u000a\\u000aHello 🌲\\u000a\",\"docType\":\"markdown\"}",
+      "canonicalBytesBase64url": "eyJjb250ZW50IjoiIyBXb3Jrc3BhY2VcdTAwMGFcdTAwMGFIZWxsbyDwn4yyXHUwMDBhIiwiZG9jVHlwZSI6Im1hcmtkb3duIn0"
+    },
+    {
+      "name": "html legacy wire bytes",
+      "value": {
+        "docType": "html",
+        "content": "<article>Hi</article>\n"
+      },
+      "canonicalJson": "{\"content\":\"<article>Hi</article>\\u000a\",\"docType\":\"html\"}",
+      "canonicalBytesBase64url": "eyJjb250ZW50IjoiPGFydGljbGU-SGk8L2FydGljbGU-XHUwMDBhIiwiZG9jVHlwZSI6Imh0bWwifQ"
+    },
+    {
+      "name": "binary asset with NUL and invalid UTF-8",
+      "rawBytesBase64url": "AP-AQQAvKw",
+      "value": {
+        "docType": "asset",
+        "content": "AP-AQQAvKw",
+        "encoding": "base64url",
+        "mediaType": "application/octet-stream"
+      },
+      "canonicalJson": "{\"content\":\"AP-AQQAvKw\",\"docType\":\"asset\",\"encoding\":\"base64url\",\"mediaType\":\"application/octet-stream\"}",
+      "canonicalBytesBase64url": "eyJjb250ZW50IjoiQVAtQVFRQXZLdyIsImRvY1R5cGUiOiJhc3NldCIsImVuY29kaW5nIjoiYmFzZTY0dXJsIiwibWVkaWFUeXBlIjoiYXBwbGljYXRpb24vb2N0ZXQtc3RyZWFtIn0"
+    },
+    {
+      "name": "workspace manifest nested markdown and binary asset",
+      "value": {
+        "docType": "workspace_manifest",
+        "manifest": {
+          "v": 1,
+          "kind": "attn_workspace_snapshot",
+          "scope": "workspace",
+          "entries": [
+            {
+              "fileId": "AQEBAQEBAQEBAQEBAQEBAQ",
+              "snapshotId": "AgICAgICAgICAgICAgICAg",
+              "path": "assets/raw.bin",
+              "kind": "asset",
+              "mediaType": "application/octet-stream",
+              "byteLength": 7,
+              "contentHash": "kNyT26aSw68jku_BDfoWNBCspGsGWf7kf-OTdrVJAkg"
+            },
+            {
+              "fileId": "AwMDAwMDAwMDAwMDAwMDAw",
+              "snapshotId": "BAQEBAQEBAQEBAQEBAQEBA",
+              "path": "notes/readme.md",
+              "kind": "markdown",
+              "byteLength": 24,
+              "contentHash": "lRwf5VFrCYwLe_T3G8FwziILXiHjXjwW4GpOZkvsWpo"
+            }
+          ]
+        }
+      },
+      "canonicalJson": "{\"docType\":\"workspace_manifest\",\"manifest\":{\"entries\":[{\"byteLength\":7,\"contentHash\":\"kNyT26aSw68jku_BDfoWNBCspGsGWf7kf-OTdrVJAkg\",\"fileId\":\"AQEBAQEBAQEBAQEBAQEBAQ\",\"kind\":\"asset\",\"mediaType\":\"application/octet-stream\",\"path\":\"assets/raw.bin\",\"snapshotId\":\"AgICAgICAgICAgICAgICAg\"},{\"byteLength\":24,\"contentHash\":\"lRwf5VFrCYwLe_T3G8FwziILXiHjXjwW4GpOZkvsWpo\",\"fileId\":\"AwMDAwMDAwMDAwMDAwMDAw\",\"kind\":\"markdown\",\"path\":\"notes/readme.md\",\"snapshotId\":\"BAQEBAQEBAQEBAQEBAQEBA\"}],\"kind\":\"attn_workspace_snapshot\",\"scope\":\"workspace\",\"v\":1}}",
+      "canonicalBytesBase64url": "eyJkb2NUeXBlIjoid29ya3NwYWNlX21hbmlmZXN0IiwibWFuaWZlc3QiOnsiZW50cmllcyI6W3siYnl0ZUxlbmd0aCI6NywiY29udGVudEhhc2giOiJrTnlUMjZhU3c2OGprdV9CRGZvV05CQ3NwR3NHV2Y3a2YtT1RkclZKQWtnIiwiZmlsZUlkIjoiQVFFQkFRRUJBUUVCQVFFQkFRRUJBUSIsImtpbmQiOiJhc3NldCIsIm1lZGlhVHlwZSI6ImFwcGxpY2F0aW9uL29jdGV0LXN0cmVhbSIsInBhdGgiOiJhc3NldHMvcmF3LmJpbiIsInNuYXBzaG90SWQiOiJBZ0lDQWdJQ0FnSUNBZ0lDQWdJQ0FnIn0seyJieXRlTGVuZ3RoIjoyNCwiY29udGVudEhhc2giOiJsUndmNVZGckNZd0xlX1QzRzhGd3ppSUxYaUhqWGp3VzRHcE9aa3ZzV3BvIiwiZmlsZUlkIjoiQXdNREF3TURBd01EQXdNREF3TURBdyIsImtpbmQiOiJtYXJrZG93biIsInBhdGgiOiJub3Rlcy9yZWFkbWUubWQiLCJzbmFwc2hvdElkIjoiQkFRRUJBUUVCQVFFQkFRRUJBUUVCQSJ9XSwia2luZCI6ImF0dG5fd29ya3NwYWNlX3NuYXBzaG90Iiwic2NvcGUiOiJ3b3Jrc3BhY2UiLCJ2IjoxfX0"
+    }
+  ]
+}

@@ -31,6 +31,7 @@ import {
   STORE_WORKSPACE_SHARE_CAPS,
   WORKSPACE_INDEX,
   WORKSPACE_UPDATED_INDEX,
+  type WorkspaceShareCapRecord,
 } from './browser-workspace-schema';
 
 import {
@@ -148,6 +149,7 @@ export interface BrowserInboxPersistence {
 /** Narrow contract consumed by BrowserOutbox; all values remain sealed. */
 export interface BrowserOutboxPersistence {
   putOutbox(roomId: string, envelope: MailboxEnvelope): Promise<boolean>;
+  putOutboxBatch(roomId: string, envelopes: readonly MailboxEnvelope[]): Promise<number>;
   listOutbox(roomId: string, deviceId: string): Promise<MailboxEnvelope[]>;
   acknowledge(
     roomId: string,
@@ -234,6 +236,16 @@ interface OutboxRecord {
 interface HistoryRecord extends OutboxRecord {
   serverSeq: number;
   ackedAt: number;
+}
+
+interface PublicationShareRecord extends WorkspaceShareCapRecord {
+  publication?: 'pending' | 'published' | 'stopped';
+  generation?: number;
+  publicationCommit?: {
+    envelopeIds: string[];
+    nonce: string;
+    ciphertext: string;
+  };
 }
 
 interface PrivateIdentityPayload {
@@ -662,35 +674,53 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
   }
 
   async putOutbox(roomId: string, envelope: MailboxEnvelope): Promise<boolean> {
-    validateEnvelope(roomId, envelope);
-    const record: OutboxRecord = {
-      roomId,
-      envelopeId: envelope.envelopeId,
-      createdAt: envelope.createdAt,
-      envelope: structuredClone(envelope),
-    };
+    return (await this.putOutboxBatch(roomId, [envelope])) === 1;
+  }
+
+  /** Atomically persist a sealed batch, or persist none of it on conflict/failure. */
+  async putOutboxBatch(roomId: string, envelopes: readonly MailboxEnvelope[]): Promise<number> {
+    requireId(roomId, 'roomId');
+    const records = envelopes.map((envelope) => {
+      validateEnvelope(roomId, envelope);
+      return {
+        roomId,
+        envelopeId: envelope.envelopeId,
+        createdAt: envelope.createdAt,
+        envelope: structuredClone(envelope),
+      } satisfies OutboxRecord;
+    });
+    const ids = new Set<string>();
+    for (const record of records) {
+      if (ids.has(record.envelopeId)) {
+        throw new BrowserStorageError('outbox batch contains a duplicate envelope id');
+      }
+      ids.add(record.envelopeId);
+    }
     const tx = this.db.transaction([STORE_OUTBOX, STORE_HISTORY], 'readwrite');
     const done = transactionDone(tx);
     const outbox = tx.objectStore(STORE_OUTBOX);
-    const existing = await requestValue<OutboxRecord | undefined>(
-      outbox.get([roomId, envelope.envelopeId]),
-    );
-    const historical = await requestValue<HistoryRecord | undefined>(
-      tx.objectStore(STORE_HISTORY).get([roomId, envelope.envelopeId]),
-    );
-    const prior = existing ?? historical;
-    if (prior) {
-      if (!sameEnvelope(prior.envelope, envelope)) {
+    const history = tx.objectStore(STORE_HISTORY);
+    let inserted = 0;
+    for (const record of records) {
+      const existing = await requestValue<OutboxRecord | undefined>(
+        outbox.get([roomId, record.envelopeId]),
+      );
+      const historical = await requestValue<HistoryRecord | undefined>(
+        history.get([roomId, record.envelopeId]),
+      );
+      const prior = existing ?? historical;
+      if (prior && !sameEnvelope(prior.envelope, record.envelope)) {
         tx.abort();
         await done.catch(() => undefined);
         throw new StorageConflictError('outbox envelope id conflicts with stored sealed bytes');
       }
-      await done;
-      return false;
+      if (!prior) {
+        outbox.add(record);
+        inserted += 1;
+      }
     }
-    outbox.add(record);
     await done;
-    return true;
+    return inserted;
   }
 
   async listOutbox(roomId: string, deviceId: string): Promise<MailboxEnvelope[]> {
@@ -740,7 +770,10 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
     }
     const ackedAt = this.now();
     requireTimestamp(ackedAt, 'ackedAt');
-    const tx = this.db.transaction([STORE_OUTBOX, STORE_HISTORY], 'readwrite');
+    const tx = this.db.transaction(
+      [STORE_OUTBOX, STORE_HISTORY, STORE_WORKSPACE_SHARE_CAPS],
+      'readwrite',
+    );
     const done = transactionDone(tx);
     const outbox = tx.objectStore(STORE_OUTBOX);
     const history = tx.objectStore(STORE_HISTORY);
@@ -776,6 +809,49 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
       }
       outbox.delete([roomId, item.envelopeId]);
       moved += 1;
+    }
+    // Browser-owned publications pre-seal their final capability. The ACK
+    // transaction promotes it when (and only when) every journaled envelope
+    // is in sent history, eliminating an ACK->published crash window.
+    const shares = tx.objectStore(STORE_WORKSPACE_SHARE_CAPS);
+    const shareRecords = await requestValue<PublicationShareRecord[]>(shares.getAll());
+    for (const share of shareRecords) {
+      const promotion = share.publicationCommit;
+      if (share.roomId !== roomId || share.publication !== 'pending' || !promotion) continue;
+      if (!Array.isArray(promotion.envelopeIds) || promotion.envelopeIds.length === 0) {
+        throw new BrowserStorageError('publication promotion journal is invalid');
+      }
+      const promotionIds = new Set<string>();
+      for (const envelopeId of promotion.envelopeIds) {
+        decodeLength(envelopeId, 16, 'publication envelope id').fill(0);
+        if (promotionIds.has(envelopeId)) {
+          throw new BrowserStorageError('publication promotion journal has duplicate envelopes');
+        }
+        promotionIds.add(envelopeId);
+      }
+      decodeLength(promotion.nonce, 24, 'publication promotion nonce').fill(0);
+      decodeAtLeast(promotion.ciphertext, 16, 'publication promotion ciphertext').fill(0);
+      let fullyAcknowledged = true;
+      for (const envelopeId of promotion.envelopeIds) {
+        const [stillQueued, sent] = await Promise.all([
+          requestValue<OutboxRecord | undefined>(outbox.get([roomId, envelopeId])),
+          requestValue<HistoryRecord | undefined>(history.get([roomId, envelopeId])),
+        ]);
+        if (stillQueued || !sent) {
+          fullyAcknowledged = false;
+          break;
+        }
+      }
+      if (!fullyAcknowledged) continue;
+      const next: PublicationShareRecord = {
+        ...share,
+        nonce: promotion.nonce,
+        ciphertext: promotion.ciphertext,
+        publication: 'published',
+        generation: (Number.isSafeInteger(share.generation) ? share.generation! : 0) + 1,
+        publicationCommit: undefined,
+      };
+      shares.put(next);
     }
     await done;
     // Deliberately does not touch STORE_CURSORS: sent serverSeq is not a

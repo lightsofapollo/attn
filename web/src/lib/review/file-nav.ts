@@ -13,6 +13,7 @@
 
 import type { FileId, RoomId, ReviewSnapshot } from '../types';
 import { commonRootDir, relativeToRoot } from './shared-tree';
+import { isRenderableReviewSnapshot } from './snapshot-kind';
 
 /** One row in the reviewer's file switcher. */
 export interface ReviewFileEntry {
@@ -69,7 +70,7 @@ export function deriveFileEntries(
   // headingless fallback numbering is deterministic.
   const latestByFile = new Map<FileId, ReviewSnapshot>();
   for (const snap of snapshots) {
-    if (snap.roomId !== currentRoomId) continue;
+    if (snap.roomId !== currentRoomId || !isRenderableReviewSnapshot(snap)) continue;
     const existing = latestByFile.get(snap.fileId);
     if (existing === undefined || snap.createdAt > existing.createdAt) {
       latestByFile.set(snap.fileId, snap);

@@ -78,7 +78,7 @@ async function verifyLiveDeployment(expectedWebOrigin, expectedRelayOrigin, expe
     "manifest-src 'self'",
     "media-src 'self' blob: data:",
     "object-src 'none'",
-    "script-src 'self'",
+    "script-src 'self' 'wasm-unsafe-eval'",
     "style-src 'self' 'unsafe-inline'",
     "worker-src 'self'",
   ]);

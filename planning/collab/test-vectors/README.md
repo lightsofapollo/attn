@@ -39,6 +39,7 @@ Vector counts after the attn-nnj.11.6 corpus expansion pass (May 2026):
 | `event-signature.json`   |    5    | covers 5 distinct ReviewEventBody variants     |
 | `event-id.json`          |    5    | parent-count edges (0, 1, 2, 3, 10)            |
 | `envelope.json`          |    4    | event + 2 × signal + snapshot_blob             |
+| `workspace-snapshot.json`|    4    | legacy text + asset + workspace manifest       |
 | `pow.json`               |    6    | one vector per (method, path) the relay accepts |
 
 `anchor-cases/` is a directory of hand-curated `(original.md, edited.md,

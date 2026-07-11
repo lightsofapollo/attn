@@ -1730,8 +1730,11 @@ impl Bootstrapper {
         };
         let plaintext = SnapshotPlaintext {
             doc_type,
-            content,
+            content: Some(content),
             anchor_index,
+            media_type: None,
+            encoding: None,
+            manifest: None,
         };
 
         // ---- Seal the snapshot bytes as a `kind=snapshot_blob` envelope.
@@ -3256,7 +3259,7 @@ mod tests {
         .expect("blob opens under snapshotKey");
         let plaintext: SnapshotPlaintext =
             serde_json::from_slice(&blob_bytes).expect("blob is a SnapshotPlaintext");
-        assert_eq!(plaintext.content, "# Plan\n");
+        assert_eq!(plaintext.content.as_deref(), Some("# Plan\n"));
         assert_eq!(plaintext.doc_type, crate::review::model::DocType::Markdown);
         assert!(
             plaintext.anchor_index.is_some(),
@@ -3361,7 +3364,7 @@ mod tests {
         let plaintext: SnapshotPlaintext =
             serde_json::from_slice(&blob_bytes).expect("blob is a SnapshotPlaintext");
         assert_eq!(plaintext.doc_type, crate::review::model::DocType::Html);
-        assert_eq!(plaintext.content, html);
+        assert_eq!(plaintext.content.as_deref(), Some(html));
         assert!(
             plaintext.anchor_index.is_none(),
             "read-only HTML snapshots carry no anchor index"

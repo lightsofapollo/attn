@@ -41,6 +41,10 @@ import {
   toCanonicalBytes,
   type RoomKeys,
 } from './browser-crypto';
+import {
+  decodeCanonicalBase64Url,
+  validateSnapshotPlaintext,
+} from './browser-workspace-manifest';
 import { assembleBrowserEvent } from './browser-envelope';
 import {
   BrowserOutbox,
@@ -85,8 +89,8 @@ import {
   type BrowserDirectState,
 } from './browser-webrtc';
 import type {
-  AnchorIndex,
   Anchor,
+  AnchorIndex,
   Capability,
   DocType,
   EventId,
@@ -96,8 +100,10 @@ import type {
   ReviewEventBody,
   ReviewSnapshot,
   SnapshotId,
+  SnapshotPlaintext,
   RoomId,
   SuggestionDraft,
+  WorkspaceManifestEntry,
 } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -253,6 +259,8 @@ export interface BrowserSessionOptions {
   registrationMintPow?: BrowserOutboxOptions['mintPow'];
   /** Override browser outbox PoW minting independently from registration. */
   outboxMintPow?: BrowserOutboxOptions['mintPow'];
+  /** Canonical Rust/WASM anchor builder seam; loaded lazily in production. */
+  anchorIndexBuilder?: (markdown: Uint8Array, snapshotId: string) => Promise<AnchorIndex>;
   /** Human-readable encrypted ParticipantJoined display name. */
   displayName?: string;
   /** Inject a pre-built identity (tests want deterministic keys). */
@@ -432,6 +440,8 @@ export class BrowserSession {
   private readonly snapshotBlobs = new Map<string, CachedSnapshotBlob>();
   private readonly invalidSnapshotBlobIds = new Set<string>();
   private readonly pendingSnapshots = new Map<string, PendingSnapshot[]>();
+  private readonly hydratedEntries = new Map<string, HydratedEntryMetadata>();
+  private readonly pendingWorkspaceManifests = new Map<string, PendingWorkspaceManifest>();
   private readonly signerRefreshAttempts = new Set<string>();
   private readonly dispatchedEnvelopeIds = new Set<string>();
   private readonly pendingSignals: BrowserSignalingPayload[] = [];
@@ -790,6 +800,8 @@ export class BrowserSession {
     this.snapshotBlobs.clear();
     this.invalidSnapshotBlobIds.clear();
     this.pendingSnapshots.clear();
+    this.hydratedEntries.clear();
+    this.pendingWorkspaceManifests.clear();
     this.signerRefreshAttempts.clear();
     this.volatileInbound.clear();
     this.clearStorePlaintext();
@@ -1090,6 +1102,10 @@ export class BrowserSession {
         // intentionally not recovered across browser lifetimes.
         if (envelope.kind !== 'signal') await storage.putOutbox(roomId, envelope);
       },
+      putPendingBatch: async (envelopes) => {
+        const durable = envelopes.filter((envelope) => envelope.kind !== 'signal');
+        if (durable.length > 0) await storage.putOutboxBatch(roomId, durable);
+      },
       acknowledge: async (batch, accepted) => {
         await storage.acknowledge(roomId, batch, accepted);
       },
@@ -1119,6 +1135,8 @@ export class BrowserSession {
     this.snapshotBlobs.clear();
     this.invalidSnapshotBlobIds.clear();
     this.pendingSnapshots.clear();
+    this.hydratedEntries.clear();
+    this.pendingWorkspaceManifests.clear();
     this.signerRefreshAttempts.clear();
     this.volatileInbound.clear();
     this.clearStorePlaintext();
@@ -1460,7 +1478,7 @@ export class BrowserSession {
       // Snapshot path — surface markdown for the editor + populate
       // reviewStore.snapshots so the existing UI can scope by snapshot.
       if (body.type === 'snapshot_created') {
-        this.absorbSnapshotCreated(store, meta as EventMeta, body);
+        await this.absorbSnapshotCreated(store, meta as EventMeta, body);
         if (this.state.status === 'error') return;
       }
       store.applyEvent(event);
@@ -1471,7 +1489,7 @@ export class BrowserSession {
       // cache + pending queues make the receiver defensive to either order.
       const blobId = envelope.envelopeId;
       const waiting = this.pendingSnapshots.get(blobId);
-      let snapshot = parseSnapshotPlaintext(plaintext);
+      let snapshot = parseBrowserSnapshotPlaintext(plaintext);
       let snapshotBytes = snapshot ? new Uint8Array(plaintext) : null;
       const wrapperIsR2 = snapshot === null && parseR2BlobRefPlaintext(plaintext, envelope.envelopeId);
       zero(plaintext);
@@ -1500,7 +1518,7 @@ export class BrowserSession {
                 }
               : {}),
           });
-          snapshot = parseSnapshotPlaintext(recovered);
+          snapshot = parseBrowserSnapshotPlaintext(recovered);
           if (snapshot) snapshotBytes = new Uint8Array(recovered);
         } catch (error) {
           const message = error instanceof Error ? error.message : 'R2 snapshot recovery failed';
@@ -1537,7 +1555,7 @@ export class BrowserSession {
       }
       this.pendingSnapshots.delete(blobId);
       for (const pending of waiting) {
-        this.hydrateSnapshotBlob(pending.store, pending.meta, pending.body, cached);
+        await this.hydrateSnapshotBlob(pending.store, pending.meta, pending.body, cached);
       }
       return;
     }
@@ -1581,13 +1599,17 @@ export class BrowserSession {
     if (oldest !== undefined) this.dispatchedEnvelopeIds.delete(oldest);
   }
 
-  private absorbSnapshotCreated(
+  private async absorbSnapshotCreated(
     store: ReviewStoreSink,
     meta: EventMeta,
     body: Extract<ReviewEventBody, { type: 'snapshot_created' }>,
-  ): void {
+  ): Promise<void> {
     if (body.inlineSnapshot) {
-      this.hydrateSnapshot(store, meta, body, body.inlineSnapshot);
+      try {
+        await this.hydrateSnapshot(store, meta, body, validateSnapshotPlaintext(body.inlineSnapshot));
+      } catch {
+        this.fail('network', 'Snapshot payload failed schema validation');
+      }
       return;
     }
     const blobRef = body.encryptedBlobRef;
@@ -1599,7 +1621,7 @@ export class BrowserSession {
     const cached = this.snapshotBlobs.get(blobRef.blobId);
     if (cached) {
       this.snapshotBlobs.delete(blobRef.blobId);
-      this.hydrateSnapshotBlob(store, meta, body, cached);
+      await this.hydrateSnapshotBlob(store, meta, body, cached);
       return;
     }
     const waiting = this.pendingSnapshots.get(blobRef.blobId) ?? [];
@@ -1609,12 +1631,12 @@ export class BrowserSession {
     }
   }
 
-  private hydrateSnapshotBlob(
+  private async hydrateSnapshotBlob(
     store: ReviewStoreSink,
     meta: EventMeta,
     body: Extract<ReviewEventBody, { type: 'snapshot_created' }>,
     cached: CachedSnapshotBlob,
-  ): void {
+  ): Promise<void> {
     const blobRef = body.encryptedBlobRef;
     if (
       !blobRef ||
@@ -1625,23 +1647,15 @@ export class BrowserSession {
       this.fail('network', 'Snapshot payload does not match its signed reference');
       return;
     }
-    this.hydrateSnapshot(store, meta, body, cached.snapshot);
+    await this.hydrateSnapshot(store, meta, body, cached.snapshot);
   }
 
-  private hydrateSnapshot(
+  private async hydrateSnapshot(
     store: ReviewStoreSink,
     meta: EventMeta,
     body: Extract<ReviewEventBody, { type: 'snapshot_created' }>,
     inline: SnapshotPlaintext,
-  ): void {
-    this.setState({
-      snapshotContent: inline.content,
-      snapshotDocType: inline.docType,
-      snapshotId: body.snapshotId,
-      fileId: body.fileId,
-    });
-    // Mirror the snapshot into the reviewStore so the existing UI can
-    // scope-by-snapshot.
+  ): Promise<void> {
     const snapshot: ReviewSnapshot = {
       roomId: meta.roomId,
       fileId: body.fileId,
@@ -1650,15 +1664,131 @@ export class BrowserSession {
       createdAt: meta.createdAt,
       createdBy: meta.authorId,
       baseHash: body.baseHash,
-      byteLength: new TextEncoder().encode(inline.content).length,
+      byteLength: body.encryptedBlobRef?.byteLength ?? 0,
       docType: inline.docType,
-      content: inline.content,
-      anchorIndex: inline.anchorIndex,
       encryptedBlobRef: body.encryptedBlobRef,
     };
+    if (inline.docType === 'markdown' || inline.docType === 'html') {
+      const raw = new TextEncoder().encode(inline.content);
+      if (contentHash(raw) !== body.baseHash) {
+        raw.fill(0);
+        this.fail('network', 'Snapshot document content does not match its signed base hash');
+        return;
+      }
+      if (inline.docType === 'markdown' && inline.anchorIndex !== undefined) {
+        try {
+          const builder = this.opts.anchorIndexBuilder
+            ?? (await import('./browser-anchor-index')).buildCanonicalAnchorIndex;
+          const rebuilt = await builder(raw, body.snapshotId);
+          if (!canonicalValuesEqual(rebuilt, inline.anchorIndex)) {
+            raw.fill(0);
+            this.fail('network', 'Snapshot anchor index does not match canonical document anchors');
+            return;
+          }
+        } catch {
+          raw.fill(0);
+          this.fail('network', 'Snapshot anchor index could not be verified');
+          return;
+        }
+      }
+      snapshot.byteLength = raw.length;
+      raw.fill(0);
+      snapshot.content = inline.content;
+      if (inline.docType === 'markdown') snapshot.anchorIndex = inline.anchorIndex;
+      this.setState({
+        snapshotContent: inline.content,
+        snapshotDocType: inline.docType,
+        snapshotId: body.snapshotId,
+        fileId: body.fileId,
+      });
+    } else if (inline.docType === 'asset') {
+      const raw = decodeCanonicalBase64Url(inline.content);
+      if (contentHash(raw) !== body.baseHash) {
+        raw.fill(0);
+        this.fail('network', 'Snapshot asset content does not match its signed base hash');
+        return;
+      }
+      snapshot.byteLength = raw.length;
+      snapshot.mediaType = inline.mediaType;
+      raw.fill(0);
+    } else {
+      const canonical = toCanonicalBytes(inline.manifest);
+      if (contentHash(canonical) !== body.baseHash) {
+        canonical.fill(0);
+        this.fail('network', 'Workspace manifest does not match its signed base hash');
+        return;
+      }
+      snapshot.byteLength = canonical.length;
+      canonical.fill(0);
+      const bindings = this.workspaceManifestBindingStatus(inline.manifest.entries);
+      if (bindings.invalidPath !== undefined) {
+        this.fail(
+          'network',
+          `Workspace manifest entry failed integrity validation: ${bindings.invalidPath}`,
+        );
+        return;
+      }
+      if (bindings.missing) {
+        this.pendingWorkspaceManifests.set(body.snapshotId, { store, meta, body, inline });
+        return;
+      }
+      this.pendingWorkspaceManifests.delete(body.snapshotId);
+      snapshot.workspaceManifest = inline.manifest;
+    }
     store.applySnapshot(snapshot);
-    store.setCurrentFile(body.fileId);
-    store.setCurrentSnapshot(body.snapshotId);
+    if (inline.docType !== 'workspace_manifest') {
+      this.hydratedEntries.set(body.snapshotId, {
+        fileId: body.fileId,
+        path: body.ownerDisplayPath ?? '',
+        kind: inline.docType,
+        mediaType: inline.docType === 'asset' ? inline.mediaType : undefined,
+        byteLength: snapshot.byteLength,
+        contentHash: body.baseHash,
+      });
+      await this.retryPendingWorkspaceManifests();
+      if (this.state.status === 'error') return;
+    }
+    // Assets/manifests are retained as inert metadata and never selected for rendering.
+    if (inline.docType === 'markdown' || inline.docType === 'html') {
+      store.setCurrentFile(body.fileId);
+      store.setCurrentSnapshot(body.snapshotId);
+    }
+  }
+
+  private workspaceManifestBindingStatus(
+    entries: readonly WorkspaceManifestEntry[],
+  ): { missing: boolean; invalidPath?: string } {
+    let missing = false;
+    for (const entry of entries) {
+      const hydrated = this.hydratedEntries.get(entry.snapshotId);
+      if (!hydrated) {
+        missing = true;
+        continue;
+      }
+      if (
+        hydrated.fileId !== entry.fileId ||
+        hydrated.path !== entry.path ||
+        hydrated.kind !== entry.kind ||
+        hydrated.byteLength !== entry.byteLength ||
+        hydrated.contentHash !== entry.contentHash ||
+        hydrated.mediaType !== entry.mediaType
+      ) {
+        return { missing, invalidPath: entry.path };
+      }
+    }
+    return { missing };
+  }
+
+  private async retryPendingWorkspaceManifests(): Promise<void> {
+    const pending = [...this.pendingWorkspaceManifests.values()].sort((left, right) =>
+      left.meta.createdAt - right.meta.createdAt ||
+      left.body.snapshotId.localeCompare(right.body.snapshotId),
+    );
+    for (const item of pending) {
+      if (!this.pendingWorkspaceManifests.has(item.body.snapshotId)) continue;
+      await this.hydrateSnapshot(item.store, item.meta, item.body, item.inline);
+      if (this.state.status === 'error') return;
+    }
   }
 
   private handleTerminal(err: WsTerminalError): void {
@@ -1703,16 +1833,14 @@ export class BrowserSession {
   }
 }
 
-interface SnapshotPlaintext {
-  docType: DocType;
-  content: string;
-  anchorIndex?: AnchorIndex;
-}
-
 interface PendingSnapshot {
   store: ReviewStoreSink;
   meta: EventMeta;
   body: Extract<ReviewEventBody, { type: 'snapshot_created' }>;
+}
+
+interface PendingWorkspaceManifest extends PendingSnapshot {
+  inline: Extract<SnapshotPlaintext, { docType: 'workspace_manifest' }>;
 }
 
 interface CachedSnapshotBlob {
@@ -1721,30 +1849,35 @@ interface CachedSnapshotBlob {
   contentHash: string;
 }
 
-function parseSnapshotPlaintext(bytes: Uint8Array): SnapshotPlaintext | null {
+/** Strict wire parser exported for native/browser protocol conformance tests. */
+export function parseBrowserSnapshotPlaintext(bytes: Uint8Array): SnapshotPlaintext | null {
   let value: unknown;
   try {
-    value = JSON.parse(new TextDecoder().decode(bytes));
+    value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
   } catch {
     return null;
   }
-  if (typeof value !== 'object' || value === null) return null;
-  const candidate = value as { docType?: unknown; content?: unknown; anchorIndex?: unknown };
-  if (candidate.docType !== 'markdown' && candidate.docType !== 'html') return null;
-  if (typeof candidate.content !== 'string') return null;
-  if (
-    candidate.anchorIndex !== undefined &&
-    (typeof candidate.anchorIndex !== 'object' || candidate.anchorIndex === null)
-  ) {
+  try {
+    return validateSnapshotPlaintext(value);
+  } catch {
     return null;
   }
-  return {
-    docType: candidate.docType,
-    content: candidate.content,
-    ...(candidate.anchorIndex === undefined
-      ? {}
-      : { anchorIndex: candidate.anchorIndex as AnchorIndex }),
-  };
+}
+
+interface HydratedEntryMetadata {
+  fileId: string;
+  path: string;
+  kind: 'markdown' | 'html' | 'asset';
+  mediaType?: string;
+  byteLength: number;
+  contentHash: string;
+}
+
+function canonicalValuesEqual(left: unknown, right: unknown): boolean {
+  const leftBytes = toCanonicalBytes(left);
+  const rightBytes = toCanonicalBytes(right);
+  if (leftBytes.length !== rightBytes.length) return false;
+  return leftBytes.every((byte, index) => byte === rightBytes[index]);
 }
 
 function parseR2BlobRefPlaintext(bytes: Uint8Array, envelopeId: string): boolean {

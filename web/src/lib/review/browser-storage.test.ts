@@ -428,10 +428,19 @@ defineCase('recovers exact outbox bytes and atomically moves acknowledgements to
       (error) => error instanceof StorageConflictError,
       'conflicting envelope id',
     );
+    const batchOnly = envelope('room-outbox', 'env-batch-only', undefined, 'sender-a');
+    await assertRejects(
+      () => storage.putOutboxBatch('room-outbox', [
+        batchOnly,
+        { ...first, ciphertext: base64UrlEncode(new Uint8Array(32).fill(8)) },
+      ]),
+      (error) => error instanceof StorageConflictError,
+      'batch conflict aborts every insertion',
+    );
     assertDeepEqual(
       await storage.listOutbox('room-outbox', 'sender-a'),
       [first, second],
-      'exact recovery',
+      'exact recovery with no partial durable batch',
     );
 
     await storage.commitInbound('room-outbox', 'receiver-a', envelope('room-outbox', 'inbound', 4), 4);

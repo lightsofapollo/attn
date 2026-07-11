@@ -119,6 +119,19 @@ pub fn derive_file_id(
     id_from_string(b64url(&digest[..16]))
 }
 
+/// Stable identity for the single synthetic manifest document in a room.
+/// It is deliberately independent of manifest content so republishing a
+/// different scope or entry set advances one linear snapshot history.
+///
+/// `FileId = base64url(SHA-256("attn workspace manifest v1" || roomSecret)[:16])`
+pub fn derive_workspace_manifest_file_id(room_secret: &[u8; 32]) -> FileId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"attn workspace manifest v1");
+    hasher.update(room_secret);
+    let digest = hasher.finalize();
+    id_from_string(b64url(&digest[..16]))
+}
+
 /// `SnapshotId = base64url(first 16 bytes of SHA-256("snapshot v2" || roomId`
 /// `|| fileId || baseHash || createdAt-as-string))`
 ///
@@ -437,6 +450,19 @@ mod tests {
             id_to_string(&bad),
             "derive_file_id MUST use 'attn file v2' prefix (amendments.md fix)"
         );
+    }
+
+    #[test]
+    fn workspace_manifest_file_id_is_domain_separated_and_stable() {
+        let secret = [0x11; 32];
+        let first = derive_workspace_manifest_file_id(&secret);
+        let retry = derive_workspace_manifest_file_id(&secret);
+        assert_eq!(first, retry);
+        assert_eq!(first.as_str(), "B5oaDs7_sHZ73Vuoxibfjg");
+
+        let ordinary = derive_file_id(&secret, "workspace-manifest", &content_hash(b"manifest"));
+        assert_ne!(first, ordinary, "synthetic manifest uses its own domain");
+        assert_ne!(first, derive_workspace_manifest_file_id(&[0x12; 32]));
     }
 
     // ---- snapshotId -----------------------------------------------------

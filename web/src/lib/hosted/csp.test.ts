@@ -21,8 +21,16 @@ assertEq(
   true,
   'staging connect-src',
 );
-assertEq(staging.includes("script-src 'self'"), true, 'script-src pinned');
-assertEq(staging.includes('unsafe-eval'), false, 'no unsafe-eval');
+assertEq(
+  staging.includes("script-src 'self' 'wasm-unsafe-eval'"),
+  true,
+  'script-src permits only WebAssembly compilation',
+);
+assertEq(
+  staging.split(/\s|;/u).includes("'unsafe-eval'"),
+  false,
+  'JavaScript unsafe-eval remains disabled',
+);
 
 const production = buildContentSecurityPolicy('https://relay.attn.sh');
 assertEq(

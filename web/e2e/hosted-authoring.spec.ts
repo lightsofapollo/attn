@@ -214,3 +214,69 @@ test('zip import expands into a nested multi-file workspace', async ({ page }) =
   await expect(page.locator('[data-body-text]')).toContainText('Folio index');
   await expect(page.locator('.file-rail .file.asset')).toContainText('folio/img/dot.png');
 });
+
+test('phase gate: create → type → reload → edit → export → reimport with zero relay traffic', async ({ page }) => {
+  test.slow();
+  const offOrigin: string[] = [];
+  page.on('request', (request) => {
+    if (!request.url().startsWith('http://127.0.0.1:8797')) offOrigin.push(request.url());
+  });
+
+  // From the landing, one click into a real editor.
+  await page.goto('/');
+  await page.locator('.hero a[data-action="new-workspace"]').click();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+
+  // Type through the real editor; wait for the durable commit.
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const editor = page.locator('.writing-sheet .ProseMirror');
+  await expect(editor).toBeVisible({ timeout: 60_000 });
+  await editor.click();
+  await page.keyboard.type('Journey body survives everything.');
+  await expect(page.locator('.save-state[data-commits]')).not.toHaveAttribute('data-commits', '0', {
+    timeout: 15_000,
+  });
+  await page.getByRole('button', { name: 'Done' }).click();
+
+  // Reload: the committed head recovers.
+  await page.reload();
+  await expect(page.locator('[data-body-text]')).toContainText('Journey body survives everything.');
+
+  // Add a >1 MiB asset (exercises the large-body tier), then export a zip.
+  const bigAsset = Buffer.alloc(1_200_000);
+  for (let index = 0; index < bigAsset.length; index += 1) bigAsset[index] = index % 251;
+  const chooser = page.waitForEvent('filechooser');
+  await page.locator('[data-action="add-assets"]').click();
+  await (await chooser).setFiles([
+    { name: 'big.bin', mimeType: 'application/octet-stream', buffer: bigAsset },
+  ]);
+  await expect(page.locator('.file-rail .file.asset')).toContainText('big.bin');
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.locator('[data-action="export-zip"]').click();
+  const download = await downloadPromise;
+  const zipPath = await download.path();
+  const { unzipSync } = await import('fflate');
+  const fs = await import('node:fs');
+  const exported = unzipSync(new Uint8Array(fs.readFileSync(zipPath!)));
+  expect(Object.keys(exported).sort()).toEqual(['big.bin', 'untitled.md']);
+  expect(new TextDecoder().decode(exported['untitled.md']!)).toContain(
+    'Journey body survives everything.',
+  );
+  expect(exported['big.bin']!.length).toBe(bigAsset.length);
+  expect(exported['big.bin']![777_777]).toBe(777_777 % 251);
+
+  // Reimport the exported zip as a fresh workspace: bytes and paths hold.
+  await page.goto('/app');
+  const reimportChooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: /Import workspace/u }).click();
+  await (await reimportChooser).setFiles([
+    { name: 'journey.zip', mimeType: 'application/zip', buffer: fs.readFileSync(zipPath!) },
+  ]);
+  await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\//u);
+  await expect(page.locator('[data-body-text]')).toContainText('Journey body survives everything.');
+  await expect(page.locator('.file-rail .file.asset')).toContainText('big.bin');
+
+  // The entire journey — creation to reimport — touched no non-origin host.
+  expect(offOrigin).toEqual([]);
+});

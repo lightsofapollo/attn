@@ -223,6 +223,12 @@ export class BrowserWorkspaceService {
           body: file.bytes,
         });
       }
+      // Open on the first Markdown entry: an import that happens to lead
+      // with an asset should still land the reader in prose.
+      const firstMarkdown = files.find((file) => file.kind === 'markdown');
+      if (firstMarkdown && firstMarkdown.path !== first!.path) {
+        await this.storage.workspaces.selectEntry({ workspaceId, path: firstMarkdown.path });
+      }
       const loaded = await this.loadWorkspace(workspaceId);
       if (!loaded) throw new BrowserStorageError('imported workspace vanished');
       return loaded;

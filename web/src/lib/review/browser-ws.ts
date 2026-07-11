@@ -237,6 +237,8 @@ export interface BrowserWsOptions {
   signalingKey: Uint8Array;
   /** Pre-seeded device cache (e.g. from a prior session). Empty Map by default. */
   initialDevices?: Map<string, Device>;
+  /** Previously verified ParticipantJoined signer ids from durable replay. */
+  initialAttestedSigningKeyIds?: readonly string[];
   /** Callback bundle. */
   callbacks?: BrowserWsCallbacks;
   /**
@@ -320,6 +322,12 @@ export class BrowserWsClient {
         }).WebSocket(url, protocols);
       });
     if (opts.initialDevices) this.ingestDevices([...opts.initialDevices.values()]);
+    for (const keyId of opts.initialAttestedSigningKeyIds ?? []) {
+      // The matching immutable signed registration may arrive in the same
+      // durable mailbox item after construction. Authorization still looks
+      // up that verified registration before consulting this checkpoint.
+      if (/^[A-Za-z0-9_-]{43}$/u.test(keyId)) this.attestedSigners.add(keyId);
+    }
   }
 
   /** Current connection state — useful for tests and UI status. */
@@ -330,6 +338,11 @@ export class BrowserWsClient {
   /** Cached device records keyed by signingKeyId. */
   getDevices(): ReadonlyMap<string, Device> {
     return this.devices;
+  }
+
+  /** Durable consumers may checkpoint only ids proven by ParticipantJoined. */
+  getAttestedSigningKeyIds(): readonly string[] {
+    return [...this.attestedSigners].sort();
   }
 
   /** Last network sequence whose consumer commit completed successfully. */
@@ -565,6 +578,9 @@ export class BrowserWsClient {
         const hasSignature = d.grantSignature !== undefined;
         if (d.kind !== 'owner' && hasTier !== hasSignature) {
           throw new Error('grantTier and grantSignature must be provided together');
+        }
+        if (d.kind !== 'owner' && this.opts.subprotocol.trim().startsWith('attn.v3') && !hasTier) {
+          throw new Error('v3 non-owner registration requires an owner grant');
         }
         if (d.kind !== 'owner' && hasTier) {
           if (!owner) throw new Error('v3 grant requires one room owner');

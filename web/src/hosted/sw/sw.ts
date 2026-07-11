@@ -16,6 +16,10 @@ import {
   mayCacheAssetResponse,
   mayCacheShellResponse,
 } from '../../lib/hosted/sw-policy';
+import {
+  pullRememberedPushBindings,
+  type PushNotificationSummary,
+} from '../../lib/review/browser-push-worker';
 
 declare const self: ServiceWorkerGlobalScope & typeof globalThis;
 
@@ -122,3 +126,57 @@ self.addEventListener('fetch', (event: FetchEvent) => {
     })(),
   );
 });
+
+self.addEventListener('push', (event: PushEvent) => {
+  // The relay contract is deliberately payloadless. Refuse future payloads
+  // rather than accidentally letting push infrastructure become a content
+  // transport.
+  if (event.data !== null) return;
+  event.waitUntil(
+    (async () => {
+      const summaries = await pullRememberedPushBindings();
+      await Promise.all(summaries.map(showReviewNotification));
+    })(),
+  );
+});
+
+self.addEventListener('notificationclick', (event: NotificationEvent) => {
+  event.notification.close();
+  const path = notificationPath(event.notification.data);
+  if (path === null) return;
+  event.waitUntil(openOrFocus(path));
+});
+
+async function showReviewNotification(summary: PushNotificationSummary): Promise<void> {
+  const total = summary.comments + summary.suggestions + summary.verdicts;
+  if (total < 1) return;
+  const kinds = [
+    summary.comments > 0 ? `${summary.comments} comment${summary.comments === 1 ? '' : 's'}` : '',
+    summary.suggestions > 0 ? `${summary.suggestions} suggestion${summary.suggestions === 1 ? '' : 's'}` : '',
+    summary.verdicts > 0 ? `${summary.verdicts} verdict${summary.verdicts === 1 ? '' : 's'}` : '',
+  ].filter(Boolean);
+  await self.registration.showNotification('attn review', {
+    body: `${kinds.join(', ')} on ${summary.fileName}`,
+    tag: `attn-review-${summary.bindingId}`,
+    data: { path: summary.deepLinkPath },
+  });
+}
+
+function notificationPath(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const path = (value as { path?: unknown }).path;
+  if (typeof path !== 'string' || path.includes('?') || path.includes('#')) return null;
+  return /^\/(?:review|s)\/[A-Za-z0-9_%~-]{1,384}$/u.test(path) ? path : null;
+}
+
+async function openOrFocus(path: string): Promise<void> {
+  const target = new URL(path, self.location.origin).href;
+  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const client of windows) {
+    if (new URL(client.url).pathname === path) {
+      await client.focus();
+      return;
+    }
+  }
+  await self.clients.openWindow(target);
+}

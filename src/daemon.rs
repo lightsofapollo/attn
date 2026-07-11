@@ -197,6 +197,12 @@ pub enum SocketResponse {
     ReviewVerdictsWait { outcome: VerdictWaitOutcome },
     #[serde(rename = "review_suggestions_submitted", rename_all = "camelCase")]
     ReviewSuggestionsSubmitted { submitted_count: usize },
+    #[serde(rename = "durable_shares", rename_all = "camelCase")]
+    DurableShares {
+        shares: Vec<crate::review::share_lifecycle::DurableShareLinks>,
+    },
+    #[serde(rename = "durable_share_revoked", rename_all = "camelCase")]
+    DurableShareRevoked { target: String },
 }
 
 /// Runtime directory for daemon state (socket, fingerprint, log, future reviews/).
@@ -458,26 +464,45 @@ pub fn send_durable_share_create(path: &std::path::Path) -> Result<()> {
     let msg = SocketMessage::DurableShareCreate {
         path: path.to_owned(),
     };
-    expect_socket_ok(send_command(&msg)?, "durable_share_create")
+    print_durable_links(send_command(&msg)?, "durable_share_create")
 }
 
 pub fn send_durable_share_renew(target: Option<&str>) -> Result<()> {
     let msg = SocketMessage::DurableShareRenew {
         target: target.map(str::to_owned),
     };
-    expect_socket_ok(send_command(&msg)?, "durable_share_renew")
+    print_durable_links(send_command(&msg)?, "durable_share_renew")
 }
 
 pub fn send_durable_share_revoke(target: &str) -> Result<()> {
     let msg = SocketMessage::DurableShareRevoke {
         target: target.to_owned(),
     };
-    expect_socket_ok(send_command(&msg)?, "durable_share_revoke")
+    match send_command(&msg)? {
+        Some(SocketResponse::DurableShareRevoked { target }) => {
+            println!("revoked {target}");
+            Ok(())
+        }
+        Some(SocketResponse::Error { message }) => bail!("durable_share_revoke failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
 }
 
-fn expect_socket_ok(response: Option<SocketResponse>, operation: &str) -> Result<()> {
+fn print_durable_links(response: Option<SocketResponse>, operation: &str) -> Result<()> {
     match response {
-        Some(SocketResponse::Ok) => Ok(()),
+        Some(SocketResponse::DurableShares { shares }) => {
+            for share in shares {
+                println!("share {}", share.share_id);
+                println!("view: {}", share.view_native);
+                println!("view (browser): {}", share.view_browser);
+                println!("comment: {}", share.comment_native);
+                println!("comment (browser): {}", share.comment_browser);
+                println!("suggest: {}", share.suggest_native);
+                println!("suggest (browser): {}", share.suggest_browser);
+            }
+            Ok(())
+        }
         Some(SocketResponse::Error { message }) => bail!("{operation} failed: {message}"),
         Some(other) => bail!("unexpected response: {other:?}"),
         None => bail!("no daemon running"),
@@ -687,18 +712,30 @@ fn submit_review_socket_command(review_manager: Option<&Arc<ReviewManager>>, cmd
     }
 }
 
-fn reject_unimplemented_durable_command(
+fn execute_durable_command(
     review_manager: Option<&Arc<ReviewManager>>,
     command: ReviewCommand,
 ) -> SocketResponse {
-    let message = if let Some(manager) = review_manager {
-        manager.submit(command);
-        "ATTN_NOT_IMPLEMENTED: durable share lifecycle adapter is not wired"
-    } else {
-        "ATTN_NOT_IMPLEMENTED: durable shares are unavailable because ReviewManager did not start"
+    let Some(manager) = review_manager else {
+        return SocketResponse::Error {
+            message: "durable shares are unavailable because ReviewManager did not start".into(),
+        };
     };
-    SocketResponse::Error {
-        message: message.to_string(),
+    let revoked_target = match &command {
+        ReviewCommand::RevokeDurableShare { target } => Some(target.clone()),
+        _ => None,
+    };
+    match manager.run_durable_command(&command) {
+        Ok(shares) => {
+            manager.emit_durable_command_result(&command, &shares);
+            match revoked_target {
+                Some(target) => SocketResponse::DurableShareRevoked { target },
+                None => SocketResponse::DurableShares { shares },
+            }
+        }
+        Err(error) => SocketResponse::Error {
+            message: format!("ATTN_DURABLE_SHARE: {error}"),
+        },
     }
 }
 
@@ -1039,7 +1076,7 @@ fn handle_client(
                 );
             }
             Ok(SocketMessage::DurableShareCreate { path }) => {
-                let response = reject_unimplemented_durable_command(
+                let response = execute_durable_command(
                     review_manager,
                     ReviewCommand::CreateDurableShare {
                         path: PathBuf::from(path),
@@ -1052,7 +1089,7 @@ fn handle_client(
                 );
             }
             Ok(SocketMessage::DurableShareRenew { target }) => {
-                let response = reject_unimplemented_durable_command(
+                let response = execute_durable_command(
                     review_manager,
                     ReviewCommand::RenewDurableShare { target },
                 );
@@ -1063,7 +1100,7 @@ fn handle_client(
                 );
             }
             Ok(SocketMessage::DurableShareRevoke { target }) => {
-                let response = reject_unimplemented_durable_command(
+                let response = execute_durable_command(
                     review_manager,
                     ReviewCommand::RevokeDurableShare { target },
                 );
@@ -1388,7 +1425,7 @@ mod tests {
         let create = rx.try_recv().expect("create update");
         assert!(matches!(
             create,
-            ReviewUpdate::Error { ref code, .. } if code == "ATTN_NOT_IMPLEMENTED"
+            ReviewUpdate::Error { ref code, .. } if code == "ATTN_DURABLE_SHARE_UNAVAILABLE"
         ));
 
         submit_review_socket_command(
@@ -1398,7 +1435,7 @@ mod tests {
         let renew = rx.try_recv().expect("renew update");
         assert!(matches!(
             renew,
-            ReviewUpdate::Error { ref code, .. } if code == "ATTN_NOT_IMPLEMENTED"
+            ReviewUpdate::Error { ref code, .. } if code == "ATTN_DURABLE_SHARE_UNAVAILABLE"
         ));
 
         submit_review_socket_command(
@@ -1410,7 +1447,7 @@ mod tests {
         let revoke = rx.try_recv().expect("revoke update");
         assert!(matches!(
             revoke,
-            ReviewUpdate::Error { ref code, .. } if code == "ATTN_NOT_IMPLEMENTED"
+            ReviewUpdate::Error { ref code, .. } if code == "ATTN_DURABLE_SHARE_UNAVAILABLE"
         ));
 
         let encoded_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42; 32]);
@@ -1436,21 +1473,18 @@ mod tests {
     }
 
     #[test]
-    fn durable_commands_return_not_implemented_with_or_without_manager() {
+    fn durable_commands_return_real_unavailable_errors_without_a_service() {
         let (manager, _rx, _tmp) = make_test_manager();
         for response in [
-            reject_unimplemented_durable_command(
+            execute_durable_command(
                 Some(&manager),
                 ReviewCommand::RenewDurableShare { target: None },
             ),
-            reject_unimplemented_durable_command(
-                None,
-                ReviewCommand::RenewDurableShare { target: None },
-            ),
+            execute_durable_command(None, ReviewCommand::RenewDurableShare { target: None }),
         ] {
             assert!(matches!(
                 response,
-                SocketResponse::Error { message } if message.starts_with("ATTN_NOT_IMPLEMENTED:")
+                SocketResponse::Error { message } if !message.contains("NOT_IMPLEMENTED")
             ));
         }
     }

@@ -71,6 +71,8 @@ export type Step =
   | DurableShareMatrixStep
   | ShareArtifactMatrixStep
   | ShareTierBundleMatrixStep
+  | ShareWatchMatrixStep
+  | WebPushMatrixStep
   | CreateRoomStep
   | RecreateRoomStep
   | RegisterDeviceStep
@@ -114,6 +116,14 @@ interface ShareArtifactMatrixStep extends BaseStep {
 
 interface ShareTierBundleMatrixStep extends BaseStep {
   action: "shareTierBundleMatrix";
+}
+
+interface ShareWatchMatrixStep extends BaseStep {
+  action: "shareWatchMatrix";
+}
+
+interface WebPushMatrixStep extends BaseStep {
+  action: "webPushMatrix";
 }
 
 interface CreateRoomStep extends BaseStep {
@@ -1026,6 +1036,20 @@ async function actShareArtifactMatrix(scenarioId: string, stepIdx: number): Prom
   await assertResponse(fetched.clone(), { status: 200 }, `${scenarioId} step #${stepIdx} artifact read`);
   expect(new Uint8Array(await fetched.arrayBuffer())).toEqual(new Uint8Array([9]));
 
+  const deleteArtifact = async (rand: string): Promise<Response> => SELF.fetch(artifactUrl, { method: "DELETE", headers: {
+    "Attn-Device-Id": shareId,
+    "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "DELETE", url: artifactUrl, privateKey: owner.privateKey }),
+    "Attn-PoW": await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "DELETE", path: `/v3/shares/${shareId}/snapshots/readme`, difficulty: 12, expiresAt: Date.now() + 300_000, rand }),
+  } });
+  const deleted = await deleteArtifact(`${FIXED_POW_RAND}a-delete`);
+  await assertResponse(deleted, { status: 204 }, `${scenarioId} step #${stepIdx} artifact manifest delete`);
+  expect(deleted.headers.get("Attn-Share-Revision")).toBe("3");
+  expect(deleted.headers.get("Attn-Manifest-Digest")).toBe("T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU");
+  expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(0);
+  const absent = await deleteArtifact(`${FIXED_POW_RAND}a-delete-again`);
+  await assertResponse(absent, { status: 204 }, `${scenarioId} step #${stepIdx} absent artifact delete`);
+  expect(absent.headers.get("Attn-Share-Revision")).toBe("3");
+
   const revokePow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "DELETE", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}a3` });
   await assertResponse(await SELF.fetch(shareUrl, { method: "DELETE", headers: {
     "Attn-Device-Id": shareId,
@@ -1136,6 +1160,135 @@ async function actShareTierBundleMatrix(scenarioId: string, stepIdx: number): Pr
   } });
   const suggestBody = await assertResponse(suggestRead, { status: 200 }, `${scenarioId} step #${stepIdx} suggest mailbox isolation`) as { items: unknown[] };
   expect(suggestBody.items).toEqual([]);
+}
+
+async function actShareWatchMatrix(scenarioId: string, stepIdx: number): Promise<void> {
+  const shareId = uniqueRoomId(scenarioId, "watch-share");
+  const url = `${URL_BASE}/v3/shares/${shareId}`;
+  const watchUrl = `${url}/watch`;
+  const owner = await generateEd25519Keypair();
+  const bundleId = base64UrlEncode(new Uint8Array(16).fill(0x71));
+  const readKey = new Uint8Array(32).fill(0x72);
+  const sealedBundle = base64UrlEncode(new Uint8Array(80).fill(0x73));
+  const body = JSON.stringify({
+    v: 3, epoch: 0, revision: 0,
+    ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+    bundles: [{ bundleId, tier: "view", readAdmissionKey: base64UrlEncode(readKey), sealedBundle }],
+    snapshots: [], placeholders: [],
+  });
+  await assertResponse(await SELF.fetch(url, { method: "POST", body, headers: {
+    "Content-Type": "application/json",
+    "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "POST", url, body, privateKey: owner.privateKey }),
+    "Attn-PoW": await createPowHeader(shareId, owner.publicKeyBytes, `/v3/shares/${shareId}`),
+  } }), { status: 201 }, `${scenarioId} step #${stepIdx} watch share create`);
+
+  const protocol = async (selector: string, keyBytes: Uint8Array): Promise<string> => {
+    const canonical = await canonicalRequest(new Request(watchUrl), new URL(watchUrl).pathname);
+    const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const mac = base64UrlEncode(new Uint8Array(await crypto.subtle.sign("HMAC", key, canonical)));
+    return `attn.v3, bundle.${selector}, read-hmac.${mac}`;
+  };
+  await assertResponse(await SELF.fetch(watchUrl, { headers: {
+    Upgrade: "websocket",
+    "Sec-WebSocket-Protocol": await protocol(base64UrlEncode(new Uint8Array(16).fill(0x7f)), readKey),
+  } }), { status: 401, errorCode: "ATTN_SHARE_BUNDLE_INVALID" }, `${scenarioId} step #${stepIdx} wrong watch selector`);
+
+  const response = await SELF.fetch(watchUrl, { headers: {
+    Upgrade: "websocket", Origin: "https://attn.sh",
+    "Sec-WebSocket-Protocol": await protocol(bundleId, readKey),
+  } });
+  expect(response.status).toBe(101);
+  const socket = response.webSocket;
+  if (socket === null) expect.fail("watch upgrade did not return a socket");
+  socket.accept();
+  const events: Array<{ kind: "message"; value: unknown } | { kind: "close"; value: number }> = [];
+  const waiters: Array<(event: { kind: "message"; value: unknown } | { kind: "close"; value: number }) => void> = [];
+  const push = (event: { kind: "message"; value: unknown } | { kind: "close"; value: number }): void => {
+    const waiter = waiters.shift(); if (waiter) waiter(event); else events.push(event);
+  };
+  socket.addEventListener("message", event => push({ kind: "message", value: JSON.parse(String(event.data)) }));
+  socket.addEventListener("close", event => push({ kind: "close", value: event.code }));
+  const next = (): Promise<{ kind: "message"; value: unknown } | { kind: "close"; value: number }> => {
+    const event = events.shift(); return event ? Promise.resolve(event) : new Promise(resolve => waiters.push(resolve));
+  };
+  expect((await next()).value).toMatchObject({ type: "ping" });
+
+  const ownerId = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", owner.publicKeyBytes)));
+  const updateBody = JSON.stringify({ v: 3, epoch: 1, revision: 1, ownerSigningKey: base64UrlEncode(owner.publicKeyBytes) });
+  const updatePow = await mintPowForTests({ roomId: shareId, deviceId: ownerId, method: "POST", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}swu` });
+  await assertResponse(await SELF.fetch(url, { method: "POST", body: updateBody, headers: {
+    "Content-Type": "application/json",
+    "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "POST", url, body: updateBody, privateKey: owner.privateKey }),
+    "Attn-PoW": updatePow,
+  } }), { status: 200 }, `${scenarioId} step #${stepIdx} watched update`);
+  expect((await next()).value).toEqual({ type: "share_changed", epoch: 1, revision: 1 });
+
+  const revokePow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "DELETE", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}swr` });
+  await assertResponse(await SELF.fetch(url, { method: "DELETE", headers: {
+    "Attn-Device-Id": shareId,
+    "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "DELETE", url, privateKey: owner.privateKey }),
+    "Attn-PoW": revokePow,
+  } }), { status: 204 }, `${scenarioId} step #${stepIdx} watched revoke`);
+  expect((await next()).value).toEqual({ type: "share_changed", epoch: 1, revision: 1 });
+  expect(await next()).toEqual({ kind: "close", value: 4001 });
+}
+
+async function actWebPushMatrix(scenarioId: string, stepIdx: number): Promise<void> {
+  const shareId = uniqueRoomId(scenarioId, "push-share");
+  const url = `${URL_BASE}/v3/shares/${shareId}`;
+  const owner = await generateEd25519Keypair();
+  const bundleId = base64UrlEncode(new Uint8Array(16).fill(0x81));
+  const readKey = new Uint8Array(32).fill(0x82);
+  const writeKey = new Uint8Array(32).fill(0x83);
+  const createBody = JSON.stringify({
+    v: 3, epoch: 0, revision: 0, ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+    bundles: [{
+      bundleId, tier: "comment", readAdmissionKey: base64UrlEncode(readKey),
+      writeAdmissionKey: base64UrlEncode(writeKey), sealedBundle: base64UrlEncode(new Uint8Array(80).fill(0x84)),
+    }],
+    snapshots: [], placeholders: [],
+  });
+  await assertResponse(await SELF.fetch(url, { method: "POST", body: createBody, headers: {
+    "Content-Type": "application/json",
+    "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "POST", url, body: createBody, privateKey: owner.privateKey }),
+    "Attn-PoW": await createPowHeader(shareId, owner.publicKeyBytes, `/v3/shares/${shareId}`),
+  } }), { status: 201 }, `${scenarioId} step #${stepIdx} push share create`);
+
+  const scoped = async (scope: "read" | "write", keyBytes: Uint8Array, method: string, target: string, body?: string): Promise<string> => {
+    const canonical = await canonicalRequest(new Request(target, { method, body }), new URL(target).pathname);
+    const imported = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    return `v3.${scope}.${base64UrlEncode(new Uint8Array(await crypto.subtle.sign("HMAC", imported, canonical)))}`;
+  };
+  const deviceId = "push-corpus-device";
+  const path = `/v3/shares/${shareId}/push-subscriptions/${deviceId}`;
+  const pushUrl = `${URL_BASE}${path}`;
+  const pushBody = JSON.stringify({
+    v: 3, endpoint: "https://fcm.googleapis.com/fcm/send/conformance", expirationTime: null,
+    keys: {
+      p256dh: "BKOaMoQCJMzoFLApwG1J8FvD2rB3JECjlJ_ZU2qhp4tUGJSfB2Z-5OI6wxAVDd2DilYJoXLRkN0bOSDRA32s7HI",
+      auth: base64UrlEncode(new Uint8Array(16).fill(0x85)),
+    },
+  });
+  const mutate = async (method: "POST" | "DELETE", suffix: string, body?: string): Promise<Response> => SELF.fetch(pushUrl, {
+    method, body, headers: {
+      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      "Attn-Device-Id": deviceId, "Attn-Share-Bundle": bundleId,
+      "Attn-Admission": await scoped("write", writeKey, method, pushUrl, body),
+      "Attn-PoW": await mintPowForTests({
+        roomId: shareId, deviceId, method, path, difficulty: 12,
+        expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}${suffix}`,
+      }),
+    },
+  });
+  await assertResponse(await mutate("POST", "wp1", pushBody), { status: 201 }, `${scenarioId} step #${stepIdx} subscribe`);
+  await assertResponse(await mutate("POST", "wp2", pushBody), { status: 200 }, `${scenarioId} step #${stepIdx} idempotent subscribe`);
+  const got = await assertResponse(await SELF.fetch(pushUrl, { headers: {
+    "Attn-Device-Id": deviceId, "Attn-Share-Bundle": bundleId,
+    "Attn-Admission": await scoped("read", readKey, "GET", pushUrl),
+  } }), { status: 200 }, `${scenarioId} step #${stepIdx} get subscription`) as { deviceId: string; bundleId: string };
+  expect(got).toMatchObject({ deviceId, bundleId });
+  await assertResponse(await mutate("DELETE", "wp3"), { status: 204 }, `${scenarioId} step #${stepIdx} unsubscribe`);
+  await assertResponse(await mutate("DELETE", "wp4"), { status: 204 }, `${scenarioId} step #${stepIdx} idempotent unsubscribe`);
 }
 
 async function actRecreateRoom(
@@ -1998,6 +2151,12 @@ export async function runScenario(scenario: Scenario): Promise<void> {
           break;
         case "shareTierBundleMatrix":
           await actShareTierBundleMatrix(scenario.id, i);
+          break;
+        case "shareWatchMatrix":
+          await actShareWatchMatrix(scenario.id, i);
+          break;
+        case "webPushMatrix":
+          await actWebPushMatrix(scenario.id, i);
           break;
         case "v3AdmissionMatrix":
           await actV3AdmissionMatrix(scenario.id, i);

@@ -64,4 +64,13 @@ export interface Env {
 
   /** Local/test-only opt-in to the public deterministic blob-cap key. */
   ALLOW_INSECURE_BLOB_CAP_KEY?: string;
+
+  /** Uncompressed P-256 VAPID public key (65-byte canonical base64url). */
+  VAPID_PUBLIC_KEY?: string;
+
+  /** Contact URI placed in VAPID JWTs (`mailto:` or `https:`). */
+  VAPID_SUBJECT?: string;
+
+  /** Private P-256 JWK. Configure only through `wrangler secret put`. */
+  VAPID_PRIVATE_JWK?: string;
 }

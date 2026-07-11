@@ -114,6 +114,14 @@ export interface BrowserShareResolverOptions<TCapability = unknown> {
     sealedBundle: Uint8Array;
     capability: TCapability;
   }): Promise<DecodedDurableShareBundle> | DecodedDurableShareBundle;
+  /** Authenticated liveness check for an otherwise matching room pointer. */
+  isRoomLive?(input: {
+    shareId: string;
+    record: DurableShareRecord;
+    bundle: DecodedDurableShareBundle;
+    capability: TCapability;
+    signal?: AbortSignal;
+  }): Promise<boolean> | boolean;
   digestManifest(canonicalManifest: Uint8Array): Promise<string> | string;
   fetchSnapshot(input: {
     shareId: string;
@@ -209,7 +217,17 @@ export class BrowserShareResolver<TCapability = unknown> {
     const snapshots: DurableShareSnapshot[] = [];
     try {
       const bundle = validateAndConstructBundle(record, decoded, manifestDigest);
-      const source = record.currentRoomId === bundle.roomId ? 'room' : 'share_snapshot';
+      let source: ResolvedDurableShare['source'] = 'share_snapshot';
+      if (record.currentRoomId === bundle.roomId) {
+        const live = this.options.isRoomLive === undefined || await this.options.isRoomLive({
+          shareId: record.shareId,
+          record,
+          bundle,
+          capability: this.options.capability,
+          ...(signal === undefined ? {} : { signal }),
+        });
+        if (live) source = 'room';
+      }
       if (source === 'share_snapshot') {
         for (const ref of refs) snapshots.push(await this.resolveSnapshot(record, bundle, ref, signal));
       }

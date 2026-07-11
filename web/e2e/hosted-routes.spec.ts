@@ -109,3 +109,10 @@ test('review entry serves deep room paths without redirecting', async ({ page })
   expect(requests.some((url) => /\/assets\/review-/u.test(url))).toBe(true);
   expect(requests.some((url) => /\/assets\/landing-/u.test(url))).toBe(false);
 });
+
+test('review entry serves durable share paths without redirecting', async ({ page }) => {
+  const response = await page.goto('/s/AAAAAAAAAAAAAAAAAAAAAA');
+  expect(response?.status()).toBe(200);
+  await expect(page).toHaveTitle('Attn review');
+  expect(new URL(page.url()).pathname).toBe('/s/AAAAAAAAAAAAAAAAAAAAAA');
+});

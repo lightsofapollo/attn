@@ -14,6 +14,19 @@ export interface ParsedShareInvite {
   linkSecret: Uint8Array;
 }
 
+export interface ShareInviteWindowLike {
+  location: { href: string; pathname: string; search: string; hash: string };
+  history: { state?: unknown; replaceState(data: unknown, unused: string, url?: string | URL | null): void };
+}
+
+/** Parse and synchronously strip a durable-share fragment before any network work. */
+export function parseAndStripShareInvite(windowLike: ShareInviteWindowLike): ParsedShareInvite {
+  const invite = parseShareInvite(windowLike.location.href);
+  windowLike.history.replaceState(windowLike.history.state ?? null, '',
+    `${windowLike.location.pathname}${windowLike.location.search}`);
+  return invite;
+}
+
 export class ShareInviteParseError extends Error {
   constructor(message: string) {
     super(message);

@@ -32,6 +32,7 @@ use crate::review::model::{
     Anchor, DeviceClient, EnvelopeKind, MailboxEnvelope, PositionAnchor, ResolvedAnchor,
     ReviewEventBody, RoomMode, SuggestionDraft,
 };
+use crate::review::share_lifecycle::{DurableShareLinks, DurableShareService};
 use crate::review::store::ReviewStore;
 use crate::review::transport::inbound::{AuthorizationCache, GrantTier, VerifyingKeyCache};
 use crate::review::transport::selector::{self, RoomTransports, TransportConfig, TransportMode};
@@ -334,6 +335,7 @@ pub struct ReviewManager {
     /// fall back to the scaffold stub status messages — keeps unit tests
     /// that don't care about networking trivially constructable.
     bootstrap: Option<Arc<Bootstrapper>>,
+    durable_shares: Option<Arc<DurableShareService>>,
     /// Tokio runtime used to drive bootstrap calls from the synchronous
     /// `submit` dispatch. Lazy-instantiated alongside `bootstrap`; only
     /// present when the manager was built via `with_bootstrap`.
@@ -666,6 +668,7 @@ impl ReviewManager {
             working_copy,
             update_tx,
             bootstrap: None,
+            durable_shares: None,
             runtime: None,
             verifying_keys: None,
             rooms: Arc::new(AsyncMutex::new(HashMap::new())),
@@ -702,7 +705,37 @@ impl ReviewManager {
             .enable_all()
             .thread_name("attn-review-bootstrap")
             .build()?;
-        self.bootstrap = Some(Arc::new(bootstrapper));
+        let bootstrapper = Arc::new(bootstrapper);
+        let share_store = Arc::new(
+            match &bootstrapper.config().identity_dir {
+                Some(directory) => crate::review::share_lifecycle::DurableShareStore::open_at(
+                    directory.join("shares"),
+                ),
+                None => crate::review::share_lifecycle::DurableShareStore::open(),
+            }
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        );
+        let identity = crate::review::bootstrap::load_or_create_identity_in(
+            &bootstrapper
+                .config()
+                .identity_dir()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let share_relay = Arc::new(
+            crate::review::share_lifecycle::HttpShareRelayClient::new(
+                bootstrapper.config().relay_url.clone(),
+                &identity,
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        );
+        self.durable_shares = Some(Arc::new(DurableShareService::new(
+            share_store,
+            Arc::clone(&self.store),
+            share_relay,
+            Arc::clone(&bootstrapper),
+        )));
+        self.bootstrap = Some(bootstrapper);
         self.runtime = Some(Arc::new(runtime));
         self.verifying_keys = Some(verifying_keys);
         Ok(self)
@@ -749,6 +782,77 @@ impl ReviewManager {
         // Bootstrap pipeline owns Share + Join when wired in. Everything else
         // still goes through `stub_update_for` (filled in by follow-up issues).
         match (&cmd, self.bootstrap.as_ref(), self.runtime.as_ref()) {
+            (ReviewCommand::CreateDurableShare { path }, _, Some(runtime)) => {
+                let result = self
+                    .durable_shares
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("durable share service unavailable"))
+                    .and_then(|service| {
+                        runtime
+                            .block_on(service.create(path))
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    });
+                let result = result.and_then(|link| {
+                    self.start_room_runtime(&link.room_id)?;
+                    Ok(link)
+                });
+                self.emit_durable_share_result(result, true);
+                return;
+            }
+            (ReviewCommand::RenewDurableShare { target }, _, Some(runtime)) => {
+                let result = self
+                    .durable_shares
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("durable share service unavailable"))
+                    .and_then(|service| {
+                        runtime
+                            .block_on(service.renew(target.as_deref()))
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    });
+                match result {
+                    Ok(links) => {
+                        for link in links {
+                            match self.start_room_runtime(&link.room_id) {
+                                Ok(()) => self.emit_durable_share_ready(link, false),
+                                Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                                    room_id: Some(link.room_id.clone()),
+                                    code: "ATTN_DURABLE_SHARE".into(),
+                                    message: error.to_string(),
+                                }),
+                            }
+                        }
+                    }
+                    Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                        room_id: None,
+                        code: "ATTN_DURABLE_SHARE".into(),
+                        message: error.to_string(),
+                    }),
+                }
+                return;
+            }
+            (ReviewCommand::RevokeDurableShare { target }, _, Some(runtime)) => {
+                let result = self
+                    .durable_shares
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("durable share service unavailable"))
+                    .and_then(|service| {
+                        runtime
+                            .block_on(service.revoke(target))
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    });
+                match result {
+                    Ok(()) => (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                        room_id: stub_room_id(),
+                        status: format!("Durable share revoked: {target}"),
+                    }),
+                    Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                        room_id: None,
+                        code: "ATTN_DURABLE_SHARE".into(),
+                        message: error.to_string(),
+                    }),
+                }
+                return;
+            }
             (ReviewCommand::Share { path, mode, ttl }, Some(bootstrapper), Some(runtime)) => {
                 let mode = mode_from_str(mode);
                 let result = runtime.block_on(bootstrapper.share(path.clone(), mode, ttl.clone()));
@@ -928,6 +1032,113 @@ impl ReviewManager {
 
         let update = stub_update_for(&cmd);
         (self.update_tx)(update);
+    }
+
+    fn emit_durable_share_result(
+        &self,
+        result: anyhow::Result<DurableShareLinks>,
+        newly_created: bool,
+    ) {
+        match result {
+            Ok(links) => self.emit_durable_share_ready(links, newly_created),
+            Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                room_id: None,
+                code: "ATTN_DURABLE_SHARE".into(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    fn emit_durable_share_ready(&self, links: DurableShareLinks, newly_created: bool) {
+        (self.update_tx)(ReviewUpdate::ShareReady {
+            room_id: links.room_id.clone(),
+            invite_url: links.comment_native.clone(),
+            browser_invite_url: links.comment_browser.clone(),
+            view_invite_url: links.view_native.clone(),
+            suggest_invite_url: links.suggest_native.clone(),
+            browser_view_invite_url: links.view_browser.clone(),
+            browser_suggest_invite_url: links.suggest_browser.clone(),
+            owner_display_path: links.owner_display_path.clone(),
+            owner_signing_key: links.owner_signing_key.clone(),
+            mode: "hybrid".into(),
+            expires_at: links.expires_at,
+            newly_created,
+        });
+    }
+
+    pub fn reconcile_durable_shares(&self) -> anyhow::Result<Vec<DurableShareLinks>> {
+        let service = self
+            .durable_shares
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("durable share service unavailable"))?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review runtime unavailable"))?;
+        runtime
+            .block_on(service.renew(None))
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    /// Synchronous daemon/socket boundary for owner durable-share commands.
+    /// The caller receives the actual relay/persistence result; UI command
+    /// dispatch may additionally emit the returned links as updates.
+    pub fn run_durable_command(
+        &self,
+        command: &ReviewCommand,
+    ) -> anyhow::Result<Vec<DurableShareLinks>> {
+        let service = self
+            .durable_shares
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("durable share service unavailable"))?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review runtime unavailable"))?;
+        let links = match command {
+            ReviewCommand::CreateDurableShare { path } => runtime
+                .block_on(service.create(path))
+                .map(|link| vec![link])
+                .map_err(|error| anyhow::anyhow!(error.to_string())),
+            ReviewCommand::RenewDurableShare { target } => runtime
+                .block_on(service.renew(target.as_deref()))
+                .map_err(|error| anyhow::anyhow!(error.to_string())),
+            ReviewCommand::RevokeDurableShare { target } => runtime
+                .block_on(service.revoke(target))
+                .map(|()| vec![])
+                .map_err(|error| anyhow::anyhow!(error.to_string())),
+            _ => anyhow::bail!("not a durable-share owner command"),
+        }?;
+        for link in &links {
+            self.start_room_runtime(&link.room_id)?;
+        }
+        Ok(links)
+    }
+
+    pub fn emit_durable_command_result(
+        &self,
+        command: &ReviewCommand,
+        links: &[DurableShareLinks],
+    ) {
+        match command {
+            ReviewCommand::CreateDurableShare { .. } => {
+                for link in links.iter().cloned() {
+                    self.emit_durable_share_ready(link, true);
+                }
+            }
+            ReviewCommand::RenewDurableShare { .. } => {
+                for link in links.iter().cloned() {
+                    self.emit_durable_share_ready(link, false);
+                }
+            }
+            ReviewCommand::RevokeDurableShare { target } => {
+                (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                    room_id: stub_room_id(),
+                    status: format!("Durable share revoked: {target}"),
+                })
+            }
+            _ => {}
+        }
     }
 
     /// Stop hosting/participating in `target` (every active room when `None`).
@@ -3088,24 +3299,24 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
         },
         ReviewCommand::CreateDurableShare { path } => ReviewUpdate::Error {
             room_id: None,
-            code: "ATTN_NOT_IMPLEMENTED".into(),
+            code: "ATTN_DURABLE_SHARE_UNAVAILABLE".into(),
             message: format!(
-                "durable share creation is not wired yet (path={})",
+                "durable share service is unavailable (path={})",
                 path.display()
             ),
         },
         ReviewCommand::RenewDurableShare { target } => ReviewUpdate::Error {
             room_id: None,
-            code: "ATTN_NOT_IMPLEMENTED".into(),
+            code: "ATTN_DURABLE_SHARE_UNAVAILABLE".into(),
             message: format!(
-                "durable share renewal is not wired yet (target={})",
+                "durable share service is unavailable (target={})",
                 target.as_deref().unwrap_or("all")
             ),
         },
         ReviewCommand::RevokeDurableShare { target } => ReviewUpdate::Error {
             room_id: None,
-            code: "ATTN_NOT_IMPLEMENTED".into(),
-            message: format!("durable share revocation is not wired yet (target={target})"),
+            code: "ATTN_DURABLE_SHARE_UNAVAILABLE".into(),
+            message: format!("durable share service is unavailable (target={target})"),
         },
         ReviewCommand::OpenDurableShare { share_id, .. } => ReviewUpdate::Error {
             room_id: None,

@@ -69,6 +69,17 @@ import {
   type EnvelopeRecord,
   type RoomPolicy,
 } from "./schema";
+import {
+  MAX_PUSH_SUBSCRIPTIONS,
+  parsePushSubscriptionInput,
+  PUSH_DEBOUNCE_MS,
+  PUSH_SUBSCRIPTION_PREFIX,
+  pushLastSentKey,
+  publicPushSubscription,
+  pushSubscriptionKey,
+  sendPayloadlessPush,
+  type StoredPushSubscription,
+} from "./web-push";
 
 const ROOM_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/?$/;
 const ROOM_DEVICES_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/devices\/?$/;
@@ -77,6 +88,7 @@ const ROOM_ACKS_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/acks\/?$/;
 const ROOM_SOCKET_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/socket\/?$/;
 const ROOM_BLOBS_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/blobs\/?$/;
 const ROOM_BLOB_OBJECT_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
+const ROOM_PUSH_SUBSCRIPTION_PATH_RE = /^\/v3\/rooms\/([^/]+)\/push-subscriptions\/([^/]+)\/?$/;
 /** Any path starting with `/v2/rooms/:roomId` (optionally followed by a subroute). */
 const ROOM_PATH_LOOSE_RE = /^\/v(?:2|3)\/rooms\/([^/]+)(?:\/.*)?$/;
 
@@ -479,6 +491,16 @@ export class RoomDO extends DurableObject<Env> {
         return this.handleEnvelopesIngest(request, roomId, url.pathname);
       }
       return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /envelopes`);
+    }
+
+    const pushMatch = url.pathname.match(ROOM_PUSH_SUBSCRIPTION_PATH_RE);
+    if (pushMatch) {
+      const roomId = pushMatch[1];
+      const deviceId = pushMatch[2];
+      if (roomId === undefined || roomId === "" || deviceId === undefined || deviceId === "") {
+        return identifierErrorResponse();
+      }
+      return this.handlePushSubscription(request, roomId, deviceId, url.pathname);
     }
 
     const acksMatch = url.pathname.match(ROOM_ACKS_PATH_RE);
@@ -1843,6 +1865,7 @@ export class RoomDO extends DurableObject<Env> {
     // filtering: kind=signal envelopes only deliver to target.deviceId.
     if (fresh.length > 0) {
       this.broadcastFreshEnvelopes(fresh, nextSeq);
+      await this.notifyOfflineRoomSubscribers(fresh);
     }
 
     // Sort accepted by serverSeq so clients see a stable order matching
@@ -1851,6 +1874,132 @@ export class RoomDO extends DurableObject<Env> {
     accepted.sort((a, b) => a.serverSeq - b.serverSeq);
 
     return Response.json({ accepted }, { status: 201 });
+  }
+
+  private async handlePushSubscription(
+    request: Request,
+    roomId: string,
+    deviceId: string,
+    urlPath: string,
+  ): Promise<Response> {
+    if (!isProtocolId(deviceId, DEVICE_ID_MAX_CHARS) || request.headers.get("Attn-Device-Id") !== deviceId) {
+      return errorResponse(400, "ATTN_DEVICE_ID_INVALID", "path and Attn-Device-Id must name the same protocol device");
+    }
+    const bodyRead = await readBoundedBody(request, DEVICE_BODY_MAX_BYTES);
+    if (bodyRead instanceof Response) return bodyRead;
+    const bodyBytes = bodyRead;
+    const required = request.method === "GET" ? "read" : "write";
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, required,
+    );
+    if (admissionError !== undefined) return admissionError;
+
+    const [device, policy] = await Promise.all([
+      this.findDeviceByDeviceId(deviceId),
+      this.ctx.storage.get<RoomPolicy>(META.policy),
+    ]);
+    if (device instanceof Response) return device;
+    if (device === undefined) return errorResponse(400, "ATTN_DEVICE_UNREGISTERED", "push device is not registered");
+    if (policy === undefined) return corruptRoomResponse();
+    const key = pushSubscriptionKey(deviceId);
+
+    if (request.method === "GET") {
+      const stored = await this.ctx.storage.get<StoredPushSubscription>(key);
+      if (stored === undefined || stored.expiresAt <= Date.now()) {
+        return errorResponse(404, "ATTN_PUSH_SUBSCRIPTION_NOT_FOUND", "push subscription not found");
+      }
+      return Response.json(publicPushSubscription(stored));
+    }
+    if (request.method !== "POST" && request.method !== "DELETE") {
+      return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", "method not allowed");
+    }
+    let parsedSubscription: ReturnType<typeof parsePushSubscriptionInput>;
+    if (request.method === "POST") {
+      try {
+        parsedSubscription = parsePushSubscriptionInput(JSON.parse(new TextDecoder().decode(bodyBytes)));
+      } catch {
+        parsedSubscription = undefined;
+      }
+      if (parsedSubscription === undefined) return errorResponse(400, "ATTN_BODY_INVALID", "push subscription body is invalid");
+    }
+    const rateRejection = await this.enforceDeviceRateLimit(deviceId);
+    if (rateRejection !== undefined) return rateRejection;
+    const powToken = request.headers.get("Attn-PoW") ?? "";
+    try {
+      await verifyPow(powToken, {
+        roomId,
+        deviceId,
+        method: request.method,
+        urlPath,
+        policyPowBits: policy.powBits,
+        now: Date.now(),
+        isReplayed: hash => this.isPowSeen(hash),
+        markSeen: (hash, expiresAt) => this.markPowSeen(hash, expiresAt),
+      });
+    } catch (error) {
+      if (error instanceof PowError) return errorResponse(400, error.code, error.message);
+      throw error;
+    }
+    if (request.method === "DELETE") {
+      await this.ctx.storage.delete([key, pushLastSentKey(deviceId)]);
+      return new Response(null, { status: 204 });
+    }
+
+    const parsed = parsedSubscription!;
+    const now = Date.now();
+    const existing = await this.ctx.storage.get<StoredPushSubscription>(key);
+    const entries = await this.ctx.storage.list<StoredPushSubscription>({ prefix: PUSH_SUBSCRIPTION_PREFIX });
+    const active = [...entries.values()].filter(value => value.expiresAt > now);
+    const existingActive = existing !== undefined && existing.expiresAt > now;
+    if (!existingActive && active.length >= MAX_PUSH_SUBSCRIPTIONS) {
+      return errorResponse(413, "ATTN_PUSH_SUBSCRIPTION_CAP", "push subscription cap reached");
+    }
+    if (active.some(value => value.deviceId !== deviceId && value.endpoint === parsed.endpoint)) {
+      return errorResponse(409, "ATTN_PUSH_ENDPOINT_CONFLICT", "push endpoint is already bound to another device");
+    }
+    const stored: StoredPushSubscription = {
+      ...parsed,
+      deviceId,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      expiresAt: Math.min(policy.expiresAt, parsed.expirationTime ?? policy.expiresAt),
+    };
+    const unchanged = existing !== undefined && JSON.stringify({ ...existing, updatedAt: 0 }) === JSON.stringify({ ...stored, updatedAt: 0 });
+    await this.ctx.storage.put(key, unchanged ? existing : stored);
+    return Response.json(publicPushSubscription(unchanged ? existing : stored), { status: unchanged ? 200 : 201 });
+  }
+
+  private async notifyOfflineRoomSubscribers(fresh: readonly EnvelopeInput[]): Promise<void> {
+    const now = Date.now();
+    const entries = await this.ctx.storage.list<StoredPushSubscription>({ prefix: PUSH_SUBSCRIPTION_PREFIX });
+    const sockets = this.ctx.getWebSockets();
+    const deliveries: Array<Promise<void>> = [];
+    for (const [key, subscription] of entries) {
+      if (subscription.expiresAt <= now) {
+        await this.ctx.storage.delete([key, pushLastSentKey(subscription.deviceId)]);
+        continue;
+      }
+      const hasDeliverableNonSelfEnvelope = fresh.some(envelope =>
+        envelope.deviceId !== subscription.deviceId
+        && (envelope.kind !== "signal" || envelope.target?.deviceId === subscription.deviceId)
+      );
+      if (!hasDeliverableNonSelfEnvelope) continue;
+      const live = sockets.some(socket => {
+        const attachment = readAttachment(socket);
+        return attachment?.kind === "device" && attachment.deviceId === subscription.deviceId;
+      });
+      if (live) continue;
+      const debounceKey = pushLastSentKey(subscription.deviceId);
+      const lastSent = await this.ctx.storage.get<number>(debounceKey) ?? 0;
+      if (now - lastSent < PUSH_DEBOUNCE_MS) continue;
+      await this.ctx.storage.put(debounceKey, now);
+      deliveries.push((async () => {
+        const result = await sendPayloadlessPush(this.env, subscription.endpoint, now);
+        if (result === "gone") await this.ctx.storage.delete([key, debounceKey]);
+        if (result === "disabled") await this.ctx.storage.delete(debounceKey);
+      })());
+    }
+    await Promise.all(deliveries);
   }
 
   /**

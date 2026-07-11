@@ -1984,7 +1984,7 @@
     },
     {
       "id": "share-artifacts-017",
-      "name": "Durable share artifacts — pin across room sweep, supersede, fetch, and revoke",
+      "name": "Durable share artifacts — pin, supersede, fetch, idempotent file delete, and revoke",
       "spec": "relay-spec.md §Durable share snapshot retention (v3)",
       "tags": ["v3", "share", "r2", "snapshot", "revocation"],
       "requires": ["share-artifact-matrix"],
@@ -2000,6 +2000,26 @@
       "requires": ["share-tier-bundle-matrix"],
       "steps": [
         { "action": "shareTierBundleMatrix" }
+      ]
+    },
+    {
+      "id": "share-watch-019",
+      "name": "Durable share watch — selected read proof, content-blind changes, terminal revoke",
+      "spec": "relay-spec.md §Poll-free share watch",
+      "tags": ["v3", "share", "websocket", "revocation"],
+      "requires": ["share-watch-matrix"],
+      "steps": [
+        { "action": "shareWatchMatrix" }
+      ]
+    },
+    {
+      "id": "web-push-020",
+      "name": "Payloadless Web Push — selected subscription CRUD and idempotent unsubscribe",
+      "spec": "relay-spec.md §Payloadless browser Web Push",
+      "tags": ["v3", "share", "push", "capabilities"],
+      "requires": ["web-push-matrix"],
+      "steps": [
+        { "action": "webPushMatrix" }
       ]
     },
     {

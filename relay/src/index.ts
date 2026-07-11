@@ -215,6 +215,7 @@ const ROOM_SOCKET_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/socket\/?$/;
  */
 const ROOM_BLOB_OBJECT_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
 const SHARE_ROUTE_RE = /^\/v3\/shares\/([^/]+)(?:\/.*)?$/;
+const SHARE_WATCH_RE = /^\/v3\/shares\/([^/]+)\/watch\/?$/;
 const SHARE_CREATE_RE = /^\/v3\/shares\/([^/]+)\/?$/;
 
 export default {
@@ -358,9 +359,18 @@ export default {
     }
 
     if (shareMatch?.[1]) {
+      let forwardedRequest = request;
+      if (SHARE_WATCH_RE.test(url.pathname)) {
+        const forwardedHeaders = new Headers(request.headers);
+        forwardedHeaders.set(
+          INTERNAL_EDGE_ORIGIN_HEADER,
+          encodeEdgeOriginContext(request.headers.get("Origin")),
+        );
+        forwardedRequest = new Request(request, { headers: forwardedHeaders });
+      }
       const response = await env.RELAY_SHARES
         .get(env.RELAY_SHARES.idFromName(shareMatch[1]))
-        .fetch(request);
+        .fetch(forwardedRequest);
       return corsMiddleware(request, env, response);
     }
 

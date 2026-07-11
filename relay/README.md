@@ -98,6 +98,40 @@ wrangler secret put QUOTA_IP_HASH_KEY         # independent high-entropy string
 Local tests set explicit non-production keys. Public deployments have no
 fallback for either secret.
 
+### Browser Web Push (VAPID)
+
+Web Push is disabled unless all three VAPID settings are present and valid.
+Generate one P-256 keypair per environment, then configure the values only as
+Worker secrets:
+
+```bash
+wrangler secret put VAPID_PRIVATE_JWK
+wrangler secret put VAPID_PUBLIC_KEY
+wrangler secret put VAPID_SUBJECT
+
+# Repeat with --env staging for the isolated staging Worker.
+```
+
+`VAPID_PUBLIC_KEY` is the canonical base64url uncompressed 65-byte P-256 public
+key and `VAPID_SUBJECT` is a `mailto:` or HTTPS contact URI. The relay verifies
+that the private JWK's public coordinates match `VAPID_PUBLIC_KEY`; there is no
+fallback. Validation also requires a canonical 32-byte private scalar and a
+sign/verify proof that it belongs to the configured public key. Although the public key is safe to expose, keeping all three values
+in Worker secrets avoids committing environment key material and makes the
+production/staging boundary explicit.
+
+The subscription endpoints are
+`/v3/rooms/:roomId/push-subscriptions/:deviceId` and
+`/v3/shares/:shareId/push-subscriptions/:deviceId`. They require scoped v3
+admission, a matching `Attn-Device-Id`, and PoW on POST/DELETE. Stored
+subscriptions are capped at 32 per room/share, expire with the resource, and
+are deleted when a push service returns 404/410. Notification requests are
+payloadless: no room/share ID, author, event kind, ciphertext, or text is sent
+to the browser vendor. A 300-second push TTL tolerates a briefly offline user
+agent without retaining stale wake-ups. Only accepted fresh envelopes can trigger a ping;
+self-authored events, live target sockets, and a 30-second per-device debounce
+suppress it.
+
 `QUOTA_IP_HASH_KEY` has no production fallback: first-create fails closed with
 `503 ATTN_QUOTA_UNAVAILABLE` when it is absent, while reads, deletes, and room
 rejoins continue to use existing room state. Set the staging secret separately

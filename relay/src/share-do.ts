@@ -1,9 +1,23 @@
 import { DurableObject } from "cloudflare:workers";
-import { base64UrlDecode, base64UrlEncode, verifyAdmissionV3 } from "./admission";
+import { base64UrlDecode, base64UrlEncode, canonicalRequest, constantTimeEquals, verifyAdmissionV3 } from "./admission";
+import { INTERNAL_EDGE_ORIGIN_HEADER, parseEdgeOriginContext } from "./browser-origin";
 import type { Env } from "./env";
+import { encodeOpaqueSegment } from "./opaque-key";
 import { verifyOwnerSignature } from "./owner-sig";
 import { verifyPow } from "./pow";
 import { deleteShareArtifacts, shareArtifactObjectKey } from "./r2";
+import {
+  MAX_PUSH_SUBSCRIPTIONS,
+  parsePushSubscriptionInput,
+  PUSH_DEBOUNCE_MS,
+  PUSH_SUBSCRIPTION_PREFIX,
+  pushLastSentKey,
+  pushPublicConfig,
+  publicPushSubscription,
+  pushSubscriptionKey,
+  sendPayloadlessPush,
+  type StoredPushSubscription,
+} from "./web-push";
 
 const LIFETIME_MS = 90 * 24 * 60 * 60 * 1000;
 const MAX_MAILBOX_ITEMS = 500;
@@ -13,7 +27,15 @@ const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_SNAPSHOT_FILES = 64;
 const MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024;
 const MAX_SHARE_SNAPSHOT_BYTES = 25 * 1024 * 1024;
+const PUSH_SUBSCRIPTION_BODY_MAX_BYTES = 4096;
 const CLEANUP_RETRY_MS = 60 * 1000;
+const WATCH_PING_INTERVAL_MS = 30 * 1000;
+const WATCH_IDLE_TIMEOUT_MS = 90 * 1000;
+const WATCH_CLOSE_ADMISSION_INVALID = 4000;
+const WATCH_CLOSE_REVOKED = 4001;
+const WATCH_CLOSE_IDLE = 4002;
+const WATCH_CLOSE_CAP = 4003;
+const MAX_WATCH_FRAME_BYTES = 1024;
 
 interface ShareSnapshotRef {
   fileId: string;
@@ -32,6 +54,8 @@ interface ShareCleanup {
   shareId: string;
   reason: "revoked" | "expired";
   startedAt: number;
+  epoch: number;
+  revision: number;
 }
 
 type ShareTier = "view" | "comment" | "suggest";
@@ -69,12 +93,14 @@ type PublicShareRecord = Omit<ShareRecord, "readAdmissionKey" | "writeAdmissionK
   manifestDigest: string;
   bundle?: Pick<ShareBundleEntry, "bundleId" | "tier" | "sealedBundle">;
   mailbox: { count: number; bytes: number; latestSeq: number };
-  features: { push: false };
+  features: { push: boolean; vapidPublicKey?: string };
 };
 type ShareMutationBody = Omit<Partial<ShareRecord>, "currentRoomId"> & {
   currentRoomId?: string | null;
   deviceId?: string;
 };
+
+interface WatchAttachment { v: 1; bundleId: string; lastPongTs: number }
 
 function jsonError(status: number, code: string, message: string): Response {
   return Response.json({ error: { code, message } }, { status, headers: { "X-Attn-Allow-Browser": "true" } });
@@ -97,13 +123,17 @@ export class ShareDO extends DurableObject<Env> {
 
   private async fetchSerialized(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const match = url.pathname.match(/^\/v3\/shares\/([^/]+)(?:\/(mailbox)|\/snapshots\/([^/]+)(?:\/([^/]+))?)?\/?$/);
+    const match = url.pathname.match(/^\/v3\/shares\/([^/]+)(?:\/(mailbox|watch)|\/push-subscriptions\/([^/]+)|\/snapshots\/([^/]+)(?:\/([^/]+))?)?\/?$/);
     if (!match?.[1]) return jsonError(404, "ATTN_SHARE_NOT_FOUND", "share not found");
     const shareId = match[1];
     const mailbox = match[2] === "mailbox";
-    const snapshotFileId = match[3];
-    const snapshotId = match[4];
+    const watch = match[2] === "watch";
+    const pushDeviceId = match[3];
+    const snapshotFileId = match[4];
+    const snapshotId = match[5];
     try {
+      if (watch) return await this.handleWatch(request, url, shareId);
+      if (pushDeviceId !== undefined) return await this.handlePushSubscription(request, url.pathname, shareId, pushDeviceId);
       if (snapshotFileId !== undefined) return await this.handleSnapshot(request, url.pathname, shareId, snapshotFileId, snapshotId);
       if (mailbox) return await this.handleMailbox(request, url.pathname, shareId);
       if (request.method === "POST") return await this.upsert(request, url.pathname, shareId);
@@ -144,6 +174,7 @@ export class ShareDO extends DurableObject<Env> {
 
   private async publicRecord(record: ShareRecord, selected?: ShareBundleEntry): Promise<PublicShareRecord> {
     const { readAdmissionKey: _read, writeAdmissionKey: _write, bundles: _bundles, snapshots, ...safe } = record;
+    const push = await pushPublicConfig(this.env);
     return {
       ...safe,
       snapshots: snapshots.map(({ artifactId: _artifactId, ...snapshot }) => snapshot),
@@ -160,7 +191,12 @@ export class ShareDO extends DurableObject<Env> {
         bytes: await this.ctx.storage.get<number>("mail:bytes") ?? 0,
         latestSeq: await this.ctx.storage.get<number>("mail:seq") ?? 0,
       },
-      features: { push: false },
+      features: {
+        push: push.enabled,
+        ...(push.vapidPublicKey === undefined
+          ? {}
+          : { vapidPublicKey: push.vapidPublicKey }),
+      },
     };
   }
 
@@ -232,18 +268,22 @@ export class ShareDO extends DurableObject<Env> {
   private async pruneMarkersAndSchedule(record: ShareRecord | undefined, now = Date.now()): Promise<void> {
     const pow = await this.ctx.storage.list<number>({ prefix: "pow:" });
     const ids = await this.ctx.storage.list<MailIndex>({ prefix: "mail:id:" });
+    const subscriptions = await this.ctx.storage.list<StoredPushSubscription>({ prefix: PUSH_SUBSCRIPTION_PREFIX });
     const expired = [
       ...[...pow.entries()].filter(([, expiresAt]) => expiresAt <= now).map(([key]) => key),
       ...[...ids.entries()].filter(([, value]) => value.expiresAt <= now).map(([key]) => key),
+      ...[...subscriptions.entries()].filter(([, value]) => value.expiresAt <= now).flatMap(([key, value]) => [key, pushLastSentKey(value.deviceId)]),
     ];
     await this.deleteKeysChunked(expired);
     const deadlines = [
       ...(record === undefined ? [] : [record.expiresAt]),
       ...[...pow.values()].filter(expiresAt => expiresAt > now),
       ...[...ids.values()].map(value => value.expiresAt).filter(expiresAt => expiresAt > now),
+      ...[...subscriptions.values()].map(value => value.expiresAt).filter(expiresAt => expiresAt > now),
     ];
     const superseded = await this.ctx.storage.list<string>({ prefix: "artifact:delete:" });
     if (superseded.size > 0) deadlines.push(now + CLEANUP_RETRY_MS);
+    if (this.ctx.getWebSockets().length > 0) deadlines.push(now + WATCH_PING_INTERVAL_MS);
     if (deadlines.length > 0) await this.ctx.storage.setAlarm(Math.min(...deadlines));
   }
 
@@ -367,6 +407,8 @@ export class ShareDO extends DurableObject<Env> {
       expiresAt: now + LIFETIME_MS,
     };
     await this.ctx.storage.put("share:record", record);
+    await this.repinPushSubscriptions(record.expiresAt, now);
+    if (existing !== undefined) this.broadcastShareChanged(record);
     await this.pruneMarkersAndSchedule(record, now);
     return shareJson(await this.publicRecord(record), existing ? 200 : 201);
   }
@@ -480,7 +522,59 @@ export class ShareDO extends DurableObject<Env> {
     if (!record || record.expiresAt <= Date.now()) return jsonError(404, "ATTN_SHARE_NOT_FOUND", "share not found");
     if (request.method === "PUT" && snapshotId !== undefined) return this.uploadSnapshot(request, path, shareId, fileId, snapshotId, record);
     if (request.method === "GET" && snapshotId === undefined) return this.readSnapshot(request, path, shareId, fileId, record);
+    if (request.method === "DELETE" && snapshotId === undefined) return this.deleteSnapshot(request, path, shareId, fileId, record);
     return jsonError(405, "ATTN_METHOD_NOT_ALLOWED", "method not allowed");
+  }
+
+  private async deleteSnapshot(
+    request: Request,
+    path: string,
+    shareId: string,
+    fileId: string,
+    record: ShareRecord,
+  ): Promise<Response> {
+    await this.verifyOwner(request, path, record);
+    if ((record.bundles ?? []).length > 0 && (await this.ctx.storage.get<number>("mail:count") ?? 0) > 0) {
+      return jsonError(409, "ATTN_SHARE_MAIL_PENDING", "drain the durable mailbox before changing the snapshot manifest");
+    }
+    await this.verifyWritePow(request, shareId, request.headers.get("Attn-Device-Id") ?? shareId);
+    const existing = record.snapshots.find(snapshot => snapshot.fileId === fileId);
+    if (existing === undefined) {
+      const headers = new Headers({
+        "X-Attn-Allow-Browser": "true",
+        "Attn-Share-Revision": String(record.revision),
+        "Attn-Manifest-Digest": await this.manifestDigest(record.snapshots),
+      });
+      return new Response(null, { status: 204, headers });
+    }
+    if (record.revision >= Number.MAX_SAFE_INTEGER) {
+      return jsonError(409, "ATTN_SHARE_REVISION_INVALID", "share revision is exhausted");
+    }
+    const now = Date.now();
+    const updatedRecord: ShareRecord = {
+      ...record,
+      snapshots: record.snapshots.filter(snapshot => snapshot.fileId !== fileId),
+      revision: record.revision + 1,
+      updatedAt: now,
+      expiresAt: now + LIFETIME_MS,
+    };
+    // Manifest removal and its R2 cleanup intent are one durable commit. The
+    // alarm is armed in that transaction so a crash before the best-effort
+    // delete below cannot strand ciphertext or resurrect the manifest ref.
+    await this.ctx.storage.transaction(async transaction => {
+      await transaction.put("share:record", updatedRecord);
+      await transaction.put(`artifact:delete:${existing.artifactId}`, shareId);
+      await transaction.setAlarm(now + CLEANUP_RETRY_MS);
+    });
+    await this.repinPushSubscriptions(updatedRecord.expiresAt, now);
+    this.broadcastShareChanged(updatedRecord);
+    await this.deleteQueuedArtifact(shareId, existing.artifactId);
+    await this.pruneMarkersAndSchedule(await this.record(), now);
+    return new Response(null, { status: 204, headers: {
+      "X-Attn-Allow-Browser": "true",
+      "Attn-Share-Revision": String(updatedRecord.revision),
+      "Attn-Manifest-Digest": await this.manifestDigest(updatedRecord.snapshots),
+    } });
   }
 
   private async uploadSnapshot(
@@ -564,19 +658,24 @@ export class ShareDO extends DurableObject<Env> {
     const snapshots = [...record.snapshots];
     if (previousIndex < 0) snapshots.push(next); else snapshots[previousIndex] = next;
     snapshots.sort((left, right) => left.fileId.localeCompare(right.fileId));
+    const updatedRecord: ShareRecord = {
+      ...record,
+      snapshots,
+      revision: record.revision + 1,
+      updatedAt: now,
+      expiresAt: now + LIFETIME_MS,
+    };
     await this.ctx.storage.transaction(async transaction => {
       await transaction.put("share:record", {
-        ...record,
-        snapshots,
-        revision: record.revision + 1,
-        updatedAt: now,
-        expiresAt: now + LIFETIME_MS,
+        ...updatedRecord,
       } satisfies ShareRecord);
       await transaction.delete(uploadIntentKey);
       if (previous !== undefined) {
         await transaction.put(`artifact:delete:${previous.artifactId}`, shareId);
       }
     });
+    await this.repinPushSubscriptions(updatedRecord.expiresAt, now);
+    this.broadcastShareChanged(updatedRecord);
     if (previous !== undefined) await this.deleteQueuedArtifact(shareId, previous.artifactId);
     await this.pruneMarkersAndSchedule(await this.record(), now);
     const { artifactId: _artifactId, ...publicRef } = next;
@@ -704,19 +803,30 @@ export class ShareDO extends DurableObject<Env> {
    * share and the alarm can safely retry the same prefix deletion.
    */
   private async beginShareCleanup(record: ShareRecord, reason: ShareCleanup["reason"]): Promise<void> {
-    const cleanup: ShareCleanup = { shareId: record.shareId, reason, startedAt: Date.now() };
+    const cleanup: ShareCleanup = {
+      shareId: record.shareId,
+      reason,
+      startedAt: Date.now(),
+      epoch: record.epoch,
+      revision: record.revision,
+    };
     await this.ctx.storage.transaction(async transaction => {
       const keys = [...(await transaction.list()).keys()].filter(key => key !== "share:cleanup");
       for (let index = 0; index < keys.length; index += 128) {
         await transaction.delete(keys.slice(index, index + 128));
       }
       await transaction.put("share:cleanup", cleanup);
+      // The logical deletion and its recovery wake-up commit together. An
+      // isolate loss after this transaction can never leave a reconnectable
+      // record or live sockets without an alarm-owned terminal close.
+      await transaction.setAlarm(Date.now());
     });
   }
 
   private async finishShareCleanup(): Promise<void> {
     const cleanup = await this.ctx.storage.get<ShareCleanup>("share:cleanup");
     if (cleanup === undefined) return;
+    this.broadcastTerminalCleanup(cleanup);
     try {
       await deleteShareArtifacts(this.env, cleanup.shareId);
       await this.ctx.storage.deleteAll();
@@ -877,6 +987,9 @@ export class ShareDO extends DurableObject<Env> {
     }
     writes["mail:seq"] = seq; writes["mail:bytes"] = bytes; writes["mail:count"] = count + newItems.length;
     await this.ctx.storage.put(writes);
+    if (newItems.length > 0 && selected !== undefined && typeof body.deviceId === "string") {
+      await this.notifyOfflineShareSubscribers(selected.bundleId, body.deviceId, record);
+    }
     if (newItems.length > 0) {
       const nextIdExpiry = Math.min(...newItems.map(item => pendingIds.get(item.envelopeId)!.expiresAt));
       const alarm = await this.ctx.storage.getAlarm();
@@ -892,6 +1005,164 @@ export class ShareDO extends DurableObject<Env> {
         sealedBundle: selected.sealedBundle,
       } }),
     }, newItems.length > 0 ? 201 : 200);
+  }
+
+  private async handlePushSubscription(
+    request: Request,
+    path: string,
+    shareId: string,
+    deviceId: string,
+  ): Promise<Response> {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(deviceId) || request.headers.get("Attn-Device-Id") !== deviceId) {
+      return jsonError(400, "ATTN_DEVICE_ID_INVALID", "path and Attn-Device-Id must name the same protocol device");
+    }
+    let authenticatedRequest = request;
+    let postBody: Uint8Array | undefined;
+    if (request.method === "POST") {
+      const bounded = await this.readBoundedPushBody(request);
+      if (bounded instanceof Response) return bounded;
+      postBody = bounded;
+      authenticatedRequest = new Request(request.url, { method: request.method, headers: request.headers, body: postBody });
+    }
+    const record = await this.record();
+    if (!record || record.expiresAt <= Date.now()) return jsonError(404, "ATTN_SHARE_NOT_FOUND", "share not found");
+    const required = request.method === "GET" ? "read" : "write";
+    const selected = await this.verifyBundleAdmission(authenticatedRequest, path, record, required);
+    if (selected instanceof Response) return selected;
+    if (selected === undefined) return jsonError(400, "ATTN_SHARE_BUNDLE_REQUIRED", "push subscriptions require a tiered share bundle");
+    const key = pushSubscriptionKey(deviceId);
+    const existing = await this.ctx.storage.get<StoredPushSubscription>(key);
+
+    if (request.method === "GET") {
+      if (existing === undefined || existing.bundleId !== selected.bundleId || existing.expiresAt <= Date.now()) {
+        return jsonError(404, "ATTN_PUSH_SUBSCRIPTION_NOT_FOUND", "push subscription not found");
+      }
+      return shareJson(publicPushSubscription(existing));
+    }
+    if (request.method === "DELETE") {
+      await this.verifyWritePow(authenticatedRequest, shareId, deviceId);
+      // DELETE is deliberately existence-oblivious across sibling bundles.
+      // PoW is always consumed first, and storage changes only when the
+      // selected bundle owns the existing device binding.
+      if (existing?.bundleId === selected.bundleId) {
+        await this.ctx.storage.delete([key, pushLastSentKey(deviceId)]);
+      }
+      return new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } });
+    }
+    if (request.method !== "POST") return jsonError(405, "ATTN_METHOD_NOT_ALLOWED", "method not allowed");
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(new TextDecoder().decode(postBody));
+    } catch {
+      return jsonError(400, "ATTN_BODY_INVALID", "push subscription body is invalid JSON");
+    }
+    const parsed = parsePushSubscriptionInput(parsedJson);
+    if (parsed === undefined) return jsonError(400, "ATTN_BODY_INVALID", "push subscription body is invalid");
+    if (existing !== undefined && existing.bundleId !== selected.bundleId) {
+      return jsonError(409, "ATTN_PUSH_SUBSCRIPTION_BINDING_CONFLICT", "push device is bound to another share bundle");
+    }
+    await this.verifyWritePow(authenticatedRequest, shareId, deviceId);
+    const now = Date.now();
+    const all = await this.ctx.storage.list<StoredPushSubscription>({ prefix: PUSH_SUBSCRIPTION_PREFIX });
+    const active = [...all.values()].filter(value => value.expiresAt > now);
+    const existingActive = existing !== undefined && existing.expiresAt > now;
+    if (!existingActive && active.length >= MAX_PUSH_SUBSCRIPTIONS) {
+      return jsonError(413, "ATTN_PUSH_SUBSCRIPTION_CAP", "push subscription cap reached");
+    }
+    if (active.some(value => value.deviceId !== deviceId && value.endpoint === parsed.endpoint)) {
+      return jsonError(409, "ATTN_PUSH_ENDPOINT_CONFLICT", "push endpoint is already bound to another device");
+    }
+    const stored: StoredPushSubscription = {
+      ...parsed,
+      deviceId,
+      bundleId: selected.bundleId,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      expiresAt: Math.min(record.expiresAt, parsed.expirationTime ?? record.expiresAt),
+    };
+    const unchanged = existing !== undefined && JSON.stringify({ ...existing, updatedAt: 0 }) === JSON.stringify({ ...stored, updatedAt: 0 });
+    await this.ctx.storage.put(key, unchanged ? existing : stored);
+    await this.pruneMarkersAndSchedule(record, now);
+    return shareJson(publicPushSubscription(unchanged ? existing : stored), unchanged ? 200 : 201);
+  }
+
+  private async readBoundedPushBody(request: Request): Promise<Uint8Array | Response> {
+    if (request.body === null) return jsonError(400, "ATTN_BODY_INVALID", "push subscription body is required");
+    const declared = request.headers.get("Content-Length");
+    if (declared !== null) {
+      const length = Number(declared);
+      if (!Number.isSafeInteger(length) || length < 1 || length > PUSH_SUBSCRIPTION_BODY_MAX_BYTES) {
+        return jsonError(413, "ATTN_BODY_TOO_LARGE", "push subscription body exceeds 4 KiB");
+      }
+    }
+    const reader = request.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > PUSH_SUBSCRIPTION_BODY_MAX_BYTES) {
+          await reader.cancel().catch(() => undefined);
+          return jsonError(413, "ATTN_BODY_TOO_LARGE", "push subscription body exceeds 4 KiB");
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (total === 0) return jsonError(400, "ATTN_BODY_INVALID", "push subscription body is required");
+    const body = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+    return body;
+  }
+
+  private async repinPushSubscriptions(resourceExpiresAt: number, now: number): Promise<void> {
+    const entries = await this.ctx.storage.list<StoredPushSubscription>({ prefix: PUSH_SUBSCRIPTION_PREFIX });
+    const writes: Record<string, StoredPushSubscription> = {};
+    const deletes: string[] = [];
+    for (const [key, value] of entries) {
+      if (value.expirationTime !== null && value.expirationTime <= now) {
+        deletes.push(key, pushLastSentKey(value.deviceId));
+        continue;
+      }
+      const expiresAt = Math.min(resourceExpiresAt, value.expirationTime ?? resourceExpiresAt);
+      if (expiresAt !== value.expiresAt) writes[key] = { ...value, expiresAt };
+    }
+    if (Object.keys(writes).length > 0) await this.ctx.storage.put(writes);
+    if (deletes.length > 0) await this.deleteKeysChunked(deletes);
+  }
+
+  private async notifyOfflineShareSubscribers(bundleId: string, senderDeviceId: string, record: ShareRecord): Promise<void> {
+    // The exact three-token watch protocol intentionally carries no device ID.
+    // A live watch for the selected bundle therefore suppresses bundle-local
+    // push conservatively; it never suppresses or reveals sibling tiers.
+    const hasLiveBundleWatch = this.ctx.getWebSockets().some(socket => this.readWatchAttachment(socket)?.bundleId === bundleId);
+    if (hasLiveBundleWatch) return;
+    const now = Date.now();
+    const entries = await this.ctx.storage.list<StoredPushSubscription>({ prefix: PUSH_SUBSCRIPTION_PREFIX });
+    const deliveries: Array<Promise<void>> = [];
+    for (const [key, subscription] of entries) {
+      if (subscription.bundleId !== bundleId || subscription.deviceId === senderDeviceId) continue;
+      if (subscription.expiresAt <= now) {
+        await this.ctx.storage.delete([key, pushLastSentKey(subscription.deviceId)]);
+        continue;
+      }
+      const debounceKey = pushLastSentKey(subscription.deviceId);
+      const lastSent = await this.ctx.storage.get<number>(debounceKey) ?? 0;
+      if (now - lastSent < PUSH_DEBOUNCE_MS) continue;
+      await this.ctx.storage.put(debounceKey, now);
+      deliveries.push((async () => {
+        const result = await sendPayloadlessPush(this.env, subscription.endpoint, now);
+        if (result === "gone") await this.ctx.storage.delete([key, debounceKey]);
+        if (result === "disabled") await this.ctx.storage.delete(debounceKey);
+      })());
+    }
+    await Promise.all(deliveries);
+    await this.pruneMarkersAndSchedule(record, now);
   }
 
   override async alarm(): Promise<void> {
@@ -910,7 +1181,146 @@ export class ShareDO extends DurableObject<Env> {
       await this.finishShareCleanup();
       return;
     }
+    this.pingAndPruneWatchers(now);
     await this.retrySupersededArtifacts();
     await this.pruneMarkersAndSchedule(record, now);
+  }
+
+  private async handleWatch(request: Request, url: URL, shareId: string): Promise<Response> {
+    if (request.method !== "GET") return jsonError(405, "ATTN_METHOD_NOT_ALLOWED", "method not allowed");
+    const upgrade = request.headers.get("Upgrade");
+    if (upgrade !== "websocket" && upgrade !== "WebSocket") {
+      return new Response("expected websocket upgrade", { status: 426 });
+    }
+    const record = await this.record();
+    if (!record || record.expiresAt <= Date.now()) return jsonError(404, "ATTN_SHARE_NOT_FOUND", "share not found");
+    const edgeOrigin = parseEdgeOriginContext(request.headers.get(INTERNAL_EDGE_ORIGIN_HEADER));
+    if (edgeOrigin === undefined) return jsonError(500, "ATTN_INTERNAL_CONTEXT_INVALID", "missing or malformed internal browser-origin context");
+    if (edgeOrigin.kind !== "native") {
+      if (edgeOrigin.kind === "invalid" || !this.allowedBrowserOrigins().has(edgeOrigin.origin)) {
+        return jsonError(403, "ATTN_ORIGIN_FORBIDDEN", "browser origin is not allowed");
+      }
+    }
+
+    const protocol = this.parseWatchProtocol(request.headers.get("Sec-WebSocket-Protocol"));
+    if (protocol === undefined) {
+      return jsonError(401, "ATTN_ADMISSION_INVALID", "watch protocol must be exactly 'attn.v3, bundle.<base64url>, read-hmac.<base64url>'");
+    }
+    const selected = record.bundles?.find(bundle => bundle.bundleId === protocol.bundleId);
+    if (selected === undefined) return jsonError(401, "ATTN_SHARE_BUNDLE_INVALID", "share bundle selector is invalid");
+    const canonical = await canonicalRequest(new Request(url.toString(), { method: "GET" }), url.pathname);
+    const key = await crypto.subtle.importKey("raw", base64UrlDecode(selected.readAdmissionKey), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const expected = new Uint8Array(await crypto.subtle.sign("HMAC", key, canonical));
+    if (!constantTimeEquals(expected, protocol.readHmac)) {
+      return this.closedUpgrade(WATCH_CLOSE_ADMISSION_INVALID, "admission HMAC invalid");
+    }
+
+    const sockets = this.ctx.getWebSockets();
+    const totalCap = Math.max(1, Number.parseInt(this.env.HARD_MAX_VIEWER_SOCKETS, 10) || 32);
+    const bundleCap = Math.max(1, Math.ceil(totalCap / Math.max(1, record.bundles?.length ?? 1)));
+    const bundleCount = sockets.reduce((count, socket) => count + (this.readWatchAttachment(socket)?.bundleId === selected.bundleId ? 1 : 0), 0);
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    this.ctx.acceptWebSocket(server, [`sb3:${encodeOpaqueSegment(selected.bundleId)}`]);
+    this.writeWatchAttachment(server, { v: 1, bundleId: selected.bundleId, lastPongTs: Date.now() });
+    if (sockets.length >= totalCap || bundleCount >= bundleCap) {
+      try { server.close(WATCH_CLOSE_CAP, "share watch socket limit reached"); } catch { /* best effort */ }
+    } else {
+      try { server.send(JSON.stringify({ type: "ping", ts: Date.now() })); } catch { /* best effort */ }
+      await this.pruneMarkersAndSchedule(record);
+    }
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      headers: { "Sec-WebSocket-Protocol": "attn.v3", "X-Attn-Allow-Browser": "true" },
+    });
+  }
+
+  override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (typeof message !== "string") return;
+    if (new TextEncoder().encode(message).byteLength > MAX_WATCH_FRAME_BYTES) {
+      try { ws.close(1009, "share watch frame too large"); } catch { /* best effort */ }
+      return;
+    }
+    try {
+      const frame = JSON.parse(message) as Record<string, unknown>;
+      const attachment = this.readWatchAttachment(ws);
+      if (attachment !== undefined && frame.type === "pong") {
+        this.writeWatchAttachment(ws, { ...attachment, lastPongTs: Date.now() });
+      }
+    } catch { /* malformed watch frames are ignored */ }
+  }
+
+  override async webSocketClose(_ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {}
+
+  private parseWatchProtocol(header: string | null): { bundleId: string; readHmac: Uint8Array } | undefined {
+    // Preserve empty components: `attn.v3,,bundle...`, a trailing comma, or
+    // any other empty extra is not the exact three-token browser protocol.
+    const tokens = header?.split(",").map(token => token.trim());
+    if (tokens?.length !== 3 || tokens[0] !== "attn.v3" || !tokens[1]?.startsWith("bundle.") || !tokens[2]?.startsWith("read-hmac.")) return undefined;
+    try {
+      const bundleId = tokens[1].slice("bundle.".length);
+      const bundleBytes = base64UrlDecode(bundleId);
+      const readHmac = base64UrlDecode(tokens[2].slice("read-hmac.".length));
+      return bundleBytes.length === 16 && base64UrlEncode(bundleBytes) === bundleId && readHmac.length === 32
+        ? { bundleId, readHmac }
+        : undefined;
+    } catch { return undefined; }
+  }
+
+  private allowedBrowserOrigins(): Set<string> {
+    return new Set((this.env.ALLOWED_BROWSER_ORIGINS ?? "").split(",").map(origin => origin.trim()).filter(Boolean));
+  }
+
+  private closedUpgrade(code: number, reason: string): Response {
+    const pair = new WebSocketPair();
+    const server = pair[1];
+    server.accept();
+    try { server.close(code, reason); } catch { /* best effort */ }
+    return new Response(null, {
+      status: 101,
+      webSocket: pair[0],
+      headers: { "Sec-WebSocket-Protocol": "attn.v3", "X-Attn-Allow-Browser": "true" },
+    });
+  }
+
+  private readWatchAttachment(ws: WebSocket): WatchAttachment | undefined {
+    const raw = ws.deserializeAttachment() as Partial<WatchAttachment> | null;
+    return raw?.v === 1 && typeof raw.bundleId === "string" && typeof raw.lastPongTs === "number"
+      ? raw as WatchAttachment
+      : undefined;
+  }
+
+  private writeWatchAttachment(ws: WebSocket, attachment: WatchAttachment): void { ws.serializeAttachment(attachment); }
+
+  private broadcastShareChanged(record: Pick<ShareRecord, "epoch" | "revision">, terminal = false): void {
+    const frame = JSON.stringify({ type: "share_changed", epoch: record.epoch, revision: record.revision });
+    for (const socket of this.ctx.getWebSockets()) {
+      if (this.readWatchAttachment(socket) === undefined) continue;
+      try { socket.send(frame); } catch { /* terminal close still must run */ }
+      if (terminal) {
+        try { socket.close(WATCH_CLOSE_REVOKED, "share unavailable"); } catch { /* best effort */ }
+      }
+    }
+  }
+
+  private broadcastTerminalCleanup(cleanup: ShareCleanup): void {
+    this.broadcastShareChanged({
+      epoch: Number.isSafeInteger(cleanup.epoch) ? cleanup.epoch : 0,
+      revision: Number.isSafeInteger(cleanup.revision) ? cleanup.revision : 0,
+    }, true);
+  }
+
+  private pingAndPruneWatchers(now: number): void {
+    for (const socket of this.ctx.getWebSockets()) {
+      const attachment = this.readWatchAttachment(socket);
+      if (attachment === undefined) continue;
+      if (now - attachment.lastPongTs >= WATCH_IDLE_TIMEOUT_MS) {
+        try { socket.close(WATCH_CLOSE_IDLE, "share watch idle timeout"); } catch { /* best effort */ }
+      } else {
+        try { socket.send(JSON.stringify({ type: "ping", ts: now })); } catch { /* best effort */ }
+      }
+    }
   }
 }

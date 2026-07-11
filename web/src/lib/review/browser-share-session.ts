@@ -225,7 +225,11 @@ export class BrowserShareSession {
             if (this.isCurrent(generation)) this.patch({ error: safeMessage(error) });
           });
         },
-        onError: (error) => { if (this.isCurrent(generation)) this.patch({ error: safeMessage(error) }); },
+        onError: (error) => {
+          if (!this.isCurrent(generation)) return;
+          if (isTerminalSubscriptionError(error)) this.close();
+          else this.patch({ error: safeMessage(error) });
+        },
       });
       if (!this.isCurrent(generation)) { subscription.close(); return; }
       this.subscription = subscription;
@@ -674,3 +678,6 @@ function range(value: unknown): [number, number] {
 }
 function randomId(): string { const bytes = new Uint8Array(16); crypto.getRandomValues(bytes); return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(''); }
 function safeMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function isTerminalSubscriptionError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { terminal?: unknown }).terminal === true;
+}

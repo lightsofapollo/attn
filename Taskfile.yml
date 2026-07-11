@@ -104,6 +104,11 @@ tasks:
     cmds:
       - scripts/test-folder-share-e2e.sh
 
+  test:share-v3:
+    desc: "Durable share v3 lifecycle — real relay stack plus native owner, browser visitor, and conformance gates"
+    cmds:
+      - scripts/test-share-e2e.sh
+
   test:apply:
     desc: Run the apply E2E test suite — Rust cargo tests + optional daemon flow (attn-nnj.8.6)
     cmds:

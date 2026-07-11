@@ -4,7 +4,7 @@
 //
 //   landing  /               → /index.html
 //   app      /app, /open     → /app/index.html
-//   review   /review/:roomId → /review/index.html
+//   review   /review/:roomId, /s/:shareId → /review/index.html
 //
 // This module is the single source of truth consumed by the Cloudflare
 // worker (production rewrites), the Vite dev/preview middleware (local
@@ -13,7 +13,7 @@
 
 export type HostedEntry = 'landing' | 'app' | 'review';
 
-const REVIEW_PATH = /^\/review(?:\/|$)/u;
+const REVIEW_PATH = /^\/(?:review|s)(?:\/|$)/u;
 const APP_PATH = /^\/(?:app|open)(?:\/|$)/u;
 
 /** Which HTML entry owns a request path. Unknown paths fall to the landing. */

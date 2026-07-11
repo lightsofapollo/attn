@@ -1,27 +1,44 @@
 //! Owner-side durable-share state and relay boundary.
 //!
-//! This module deliberately owns no HTTP implementation. The durable local
-//! record and the typed relay trait are stable seams while the exact share
-//! mailbox protocol evolves. `ReviewManager` remains the daemon authority and
-//! will drive this interface from its existing Tokio runtime.
+//! The durable local record, concrete authenticated HTTP client, and owner
+//! orchestration live together so crash ordering is explicit. `ReviewManager`
+//! remains the daemon authority and drives this interface from its existing
+//! Tokio runtime; public-link resolution stays in the browser/native visitor
+//! adapters.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use chacha20poly1305::XChaCha20Poly1305;
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::review::crypto::kdf::{derive_room_id_v3, derive_share_epoch_room_secret};
+use crate::review::bootstrap::{
+    BOOTSTRAP_POW_DIFFICULTY, BOOTSTRAP_POW_TTL_MS, Bootstrapper, DeviceIdentity,
+    admission_header_value_v3_with_query, owner_sig_header_value_with_query,
+};
+use crate::review::crypto::kdf::{
+    ShareLinkTier, derive_room_id_v3, derive_room_key_tree_v3, derive_share_epoch_room_secret,
+    derive_share_link_keys,
+};
+use crate::review::crypto::pow::TokenPool;
 use crate::review::ids::RoomId;
+use crate::review::share::{
+    ShareCapabilityBundle, build_browser_share_invite, build_native_share_invite,
+    seal_capability_bundle_with_nonce,
+};
 
 const RECORD_VERSION: u32 = 3;
 const RECORD_FILENAME: &str = "share.json";
+const EMPTY_MANIFEST_DIGEST: &str = "T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ShareLifecycleError {
@@ -194,6 +211,10 @@ pub struct DurableShareRecord {
     pub epoch_rooms: BTreeMap<u64, RoomId>,
     #[serde(default)]
     pub drain_cursor: u64,
+    /// Highest sequence durably imported into the local room. This can lead
+    /// `drain_cursor` while the public pointer update is being retried.
+    #[serde(default)]
+    pub imported_cursor: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
 }
@@ -215,6 +236,7 @@ impl fmt::Debug for DurableShareRecord {
             .field("current_room_id", &self.current_room_id)
             .field("epoch_rooms", &self.epoch_rooms)
             .field("drain_cursor", &self.drain_cursor)
+            .field("imported_cursor", &self.imported_cursor)
             .field("expires_at", &self.expires_at)
             .finish()
     }
@@ -250,6 +272,7 @@ impl DurableShareRecord {
             current_room_id: None,
             epoch_rooms: BTreeMap::new(),
             drain_cursor: 0,
+            imported_cursor: 0,
             expires_at: None,
         };
         record.validate_invariants()?;
@@ -303,6 +326,7 @@ impl DurableShareRecord {
         self.epoch = next_epoch;
         self.current_room_id = Some(room_id.clone());
         self.drain_cursor = drained_through;
+        self.imported_cursor = self.imported_cursor.max(drained_through);
         self.validate_invariants()?;
         Ok(room_id)
     }
@@ -373,6 +397,11 @@ impl DurableShareRecord {
             )));
         }
         validate_share_id(&self.share_id)?;
+        if self.drain_cursor > self.imported_cursor {
+            return Err(ShareLifecycleError::Invalid(
+                "ACKable drain cursor exceeds the imported cursor".into(),
+            ));
+        }
         if !self.owner_path.is_absolute() || self.owner_path.to_str().is_none() {
             return Err(ShareLifecycleError::Invalid(
                 "owner path must be absolute UTF-8".into(),
@@ -482,10 +511,22 @@ impl DurableShareStore {
                 ShareLifecycleError::Store(format!("read {}: {error}", path.display()))
             }
         })?);
-        let record =
+        let legacy_without_imported_cursor =
+            serde_json::from_slice::<serde_json::Value>(bytes.as_slice())
+                .ok()
+                .and_then(|value| {
+                    value
+                        .as_object()
+                        .map(|object| !object.contains_key("importedCursor"))
+                })
+                .unwrap_or(false);
+        let mut record =
             serde_json::from_slice::<DurableShareRecord>(bytes.as_slice()).map_err(|error| {
                 ShareLifecycleError::Store(format!("decode {}: {error}", path.display()))
             })?;
+        if legacy_without_imported_cursor {
+            record.imported_cursor = record.drain_cursor;
+        }
         record.validate_invariants()?;
         if record.share_id != share_id {
             return Err(ShareLifecycleError::Invalid(
@@ -873,6 +914,7 @@ pub struct ManagedShareSnapshotRef {
 pub struct ShareUpsertRequest {
     pub v: u8,
     pub owner_signing_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bundles: Vec<ShareBundleMutation>,
     pub epoch: u64,
     pub revision: u64,
@@ -964,6 +1006,35 @@ pub struct ShareMailboxPage {
     pub bundle: Option<SelectedShareBundle>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReviewSubmission {
+    v: u8,
+    envelope_id: String,
+    #[serde(rename = "type")]
+    submission_type: String,
+    share_id: String,
+    epoch: u64,
+    room_id: String,
+    tier: ShareTier,
+    device_registration: ShareDeviceRegistration,
+    envelopes: Vec<crate::review::model::MailboxEnvelope>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareDeviceRegistration {
+    device_id: String,
+    participant_id: String,
+    public_signing_key: String,
+    public_encryption_key: String,
+    client: crate::review::model::DeviceClient,
+    kind: crate::review::model::ParticipantKind,
+    grant_tier: crate::review::transport::inbound::GrantTier,
+    grant_signature: String,
+    self_signature: String,
+}
+
 pub struct ManagedSnapshotCiphertext {
     pub snapshot_id: String,
     pub ciphertext_sha256: String,
@@ -986,6 +1057,7 @@ impl fmt::Debug for ManagedSnapshotCiphertext {
 
 #[async_trait]
 pub trait ShareRelayClient: Send + Sync {
+    fn device_id(&self) -> &str;
     async fn fetch_share(
         &self,
         share_id: &str,
@@ -1018,6 +1090,12 @@ pub trait ShareRelayClient: Send + Sync {
         ciphertext: &[u8],
     ) -> Result<ManagedShareSnapshotRef, ShareLifecycleError>;
 
+    async fn delete_snapshot(
+        &self,
+        share_id: &str,
+        file_id: &str,
+    ) -> Result<(), ShareLifecycleError>;
+
     async fn fetch_snapshot(
         &self,
         share_id: &str,
@@ -1026,9 +1104,1418 @@ pub trait ShareRelayClient: Send + Sync {
     ) -> Result<ManagedSnapshotCiphertext, ShareLifecycleError>;
 }
 
+/// Concrete owner/share HTTP client. Canonical request bytes, scoped
+/// admission HMACs, owner signatures, and PoW all reuse the room bootstrap
+/// primitives so share endpoints cannot drift onto a second auth scheme.
+pub struct HttpShareRelayClient {
+    relay_url: String,
+    http: reqwest::Client,
+    signing_key: crate::review::crypto::signing::DeviceSigningKey,
+    device_id: String,
+}
+
+impl HttpShareRelayClient {
+    pub fn new(relay_url: String, identity: &DeviceIdentity) -> Result<Self, ShareLifecycleError> {
+        let signing_key = identity
+            .signing_key()
+            .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?;
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|error| ShareLifecycleError::Relay(error.to_string()))?;
+        Ok(Self {
+            relay_url: relay_url.trim_end_matches('/').to_owned(),
+            http,
+            signing_key,
+            device_id: identity.device_id.clone(),
+        })
+    }
+
+    #[cfg(test)]
+    fn with_http_client(
+        relay_url: String,
+        identity: &DeviceIdentity,
+        http: reqwest::Client,
+    ) -> Result<Self, ShareLifecycleError> {
+        let mut client = Self::new(relay_url, identity)?;
+        client.http = http;
+        Ok(client)
+    }
+
+    async fn pow(
+        &self,
+        share_id: &str,
+        method: &str,
+        path: &str,
+    ) -> Result<String, ShareLifecycleError> {
+        TokenPool::new(
+            share_id.to_owned(),
+            self.device_id.clone(),
+            BOOTSTRAP_POW_DIFFICULTY,
+            BOOTSTRAP_POW_TTL_MS,
+        )
+        .take(method, path)
+        .await
+        .map_err(|error| ShareLifecycleError::Relay(format!("share PoW: {error}")))
+    }
+
+    async fn owner_response(
+        &self,
+        share_id: &str,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Vec<u8>,
+    ) -> Result<reqwest::Response, ShareLifecycleError> {
+        let method_wire = method.as_str();
+        let mut request = self
+            .http
+            .request(method.clone(), format!("{}{}", self.relay_url, path))
+            .header(
+                "Attn-Owner-Signature",
+                owner_sig_header_value_with_query(
+                    &self.signing_key,
+                    method_wire,
+                    path,
+                    query,
+                    &body,
+                ),
+            )
+            .header("Attn-PoW", self.pow(share_id, method_wire, path).await?)
+            .header("Attn-Device-Id", &self.device_id);
+        if !query.is_empty() {
+            request = request.query(query);
+        }
+        if !body.is_empty() {
+            request = request
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    if method == reqwest::Method::PUT {
+                        "application/octet-stream"
+                    } else {
+                        "application/json; charset=utf-8"
+                    },
+                )
+                .body(body);
+        }
+        request
+            .send()
+            .await
+            .map_err(|error| ShareLifecycleError::Relay(format!("{method_wire} {path}: {error}")))
+    }
+
+    async fn decode_json<T: serde::de::DeserializeOwned>(
+        response: reqwest::Response,
+    ) -> Result<T, ShareLifecycleError> {
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| ShareLifecycleError::Relay(format!("read relay response: {error}")))?;
+        if !status.is_success() {
+            return Err(relay_failure(status.as_u16(), &bytes));
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|error| ShareLifecycleError::Relay(format!("decode relay response: {error}")))
+    }
+}
+
+#[derive(Deserialize)]
+struct ShareRelayErrorBody {
+    error: ShareRelayError,
+}
+#[derive(Deserialize)]
+struct ShareRelayError {
+    code: String,
+    #[serde(default)]
+    message: String,
+}
+
+fn relay_failure(status: u16, bytes: &[u8]) -> ShareLifecycleError {
+    let parsed = serde_json::from_slice::<ShareRelayErrorBody>(bytes).ok();
+    let code = parsed
+        .as_ref()
+        .map(|value| value.error.code.as_str())
+        .unwrap_or("ATTN_UNKNOWN");
+    let message = parsed
+        .as_ref()
+        .map(|value| value.error.message.as_str())
+        .unwrap_or("relay rejected durable share request");
+    if status == 404 {
+        ShareLifecycleError::NotFound(format!("{code}: {message}"))
+    } else {
+        ShareLifecycleError::Relay(format!("http {status}: {code}: {message}"))
+    }
+}
+
+#[async_trait]
+impl ShareRelayClient for HttpShareRelayClient {
+    fn device_id(&self) -> &str {
+        &self.device_id
+    }
+    async fn fetch_share(
+        &self,
+        share_id: &str,
+        access: &ShareBundleAccess,
+    ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+        let path = format!("/v3/shares/{share_id}");
+        let key = decode_key(access.read_admission_key.expose(), "share read admission")?;
+        let response = self
+            .http
+            .get(format!("{}{}", self.relay_url, path))
+            .header("Attn-Share-Bundle", &access.bundle_id)
+            .header(
+                "Attn-Admission",
+                admission_header_value_v3_with_query(&key, "read", "GET", &path, &[], &[]),
+            )
+            .send()
+            .await
+            .map_err(|error| ShareLifecycleError::Relay(error.to_string()))?;
+        let record: ShareRelayRecord = Self::decode_json(response).await?;
+        if record.v != 3
+            || record.share_id != share_id
+            || record.bundle.as_ref().is_none_or(|bundle| {
+                bundle.bundle_id != access.bundle_id || bundle.tier != access.tier
+            })
+        {
+            return Err(ShareLifecycleError::Relay(
+                "share GET returned a mismatched selected bundle".into(),
+            ));
+        }
+        Ok(record)
+    }
+
+    async fn create_or_renew(
+        &self,
+        share_id: &str,
+        request: &ShareUpsertRequest,
+    ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+        let path = format!("/v3/shares/{share_id}");
+        let body = serde_json::to_vec(request)
+            .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?;
+        let response = self
+            .owner_response(share_id, reqwest::Method::POST, &path, &[], body)
+            .await?;
+        Self::decode_json(response).await
+    }
+
+    async fn fetch_mailbox(
+        &self,
+        share_id: &str,
+        access: &ShareBundleAccess,
+        after: u64,
+        limit: u16,
+    ) -> Result<ShareMailboxPage, ShareLifecycleError> {
+        let path = format!("/v3/shares/{share_id}/mailbox");
+        let query = vec![
+            ("after".into(), after.to_string()),
+            ("limit".into(), limit.to_string()),
+        ];
+        let key = decode_key(access.read_admission_key.expose(), "share read admission")?;
+        let response = self
+            .http
+            .get(format!("{}{}", self.relay_url, path))
+            .query(&query)
+            .header("Attn-Share-Bundle", &access.bundle_id)
+            .header(
+                "Attn-Admission",
+                admission_header_value_v3_with_query(&key, "read", "GET", &path, &query, &[]),
+            )
+            .send()
+            .await
+            .map_err(|error| ShareLifecycleError::Relay(error.to_string()))?;
+        let page: ShareMailboxPage = Self::decode_json(response).await?;
+        if page
+            .bundle
+            .as_ref()
+            .is_none_or(|bundle| bundle.bundle_id != access.bundle_id || bundle.tier != access.tier)
+        {
+            return Err(ShareLifecycleError::Relay(
+                "mailbox GET returned a mismatched selected bundle".into(),
+            ));
+        }
+        Ok(page)
+    }
+
+    async fn ack_mailbox(&self, share_id: &str, through: u64) -> Result<(), ShareLifecycleError> {
+        let path = format!("/v3/shares/{share_id}/mailbox");
+        let query = vec![("through".into(), through.to_string())];
+        let response = self
+            .owner_response(share_id, reqwest::Method::DELETE, &path, &query, vec![])
+            .await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status().as_u16();
+            let bytes = response.bytes().await.unwrap_or_default();
+            Err(relay_failure(status, &bytes))
+        }
+    }
+
+    async fn revoke_share(&self, share_id: &str) -> Result<(), ShareLifecycleError> {
+        let path = format!("/v3/shares/{share_id}");
+        let response = self
+            .owner_response(share_id, reqwest::Method::DELETE, &path, &[], vec![])
+            .await?;
+        if response.status().is_success() || response.status().as_u16() == 404 {
+            Ok(())
+        } else {
+            let status = response.status().as_u16();
+            let bytes = response.bytes().await.unwrap_or_default();
+            Err(relay_failure(status, &bytes))
+        }
+    }
+
+    async fn upload_snapshot(
+        &self,
+        share_id: &str,
+        file_id: &str,
+        snapshot_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<ManagedShareSnapshotRef, ShareLifecycleError> {
+        let path = format!("/v3/shares/{share_id}/snapshots/{file_id}/{snapshot_id}");
+        let response = self
+            .owner_response(
+                share_id,
+                reqwest::Method::PUT,
+                &path,
+                &[],
+                ciphertext.to_vec(),
+            )
+            .await?;
+        Self::decode_json(response).await
+    }
+
+    async fn delete_snapshot(
+        &self,
+        share_id: &str,
+        file_id: &str,
+    ) -> Result<(), ShareLifecycleError> {
+        let path = format!("/v3/shares/{share_id}/snapshots/{file_id}");
+        let response = self
+            .owner_response(share_id, reqwest::Method::DELETE, &path, &[], vec![])
+            .await?;
+        if response.status().is_success() || response.status().as_u16() == 404 {
+            Ok(())
+        } else {
+            let status = response.status().as_u16();
+            let bytes = response.bytes().await.unwrap_or_default();
+            Err(relay_failure(status, &bytes))
+        }
+    }
+
+    async fn fetch_snapshot(
+        &self,
+        share_id: &str,
+        file_id: &str,
+        access: &ShareBundleAccess,
+    ) -> Result<ManagedSnapshotCiphertext, ShareLifecycleError> {
+        let path = format!("/v3/shares/{share_id}/snapshots/{file_id}");
+        let key = decode_key(access.read_admission_key.expose(), "share read admission")?;
+        let response = self
+            .http
+            .get(format!("{}{}", self.relay_url, path))
+            .header("Attn-Share-Bundle", &access.bundle_id)
+            .header(
+                "Attn-Admission",
+                admission_header_value_v3_with_query(&key, "read", "GET", &path, &[], &[]),
+            )
+            .send()
+            .await
+            .map_err(|error| ShareLifecycleError::Relay(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let bytes = response.bytes().await.unwrap_or_default();
+            return Err(relay_failure(status.as_u16(), &bytes));
+        }
+        let selected_bundle = response
+            .headers()
+            .get("Attn-Share-Bundle")
+            .and_then(|value| value.to_str().ok());
+        let selected_tier = response
+            .headers()
+            .get("Attn-Share-Tier")
+            .and_then(|value| value.to_str().ok());
+        let expected_tier = match access.tier {
+            ShareTier::View => "view",
+            ShareTier::Comment => "comment",
+            ShareTier::Suggest => "suggest",
+        };
+        if selected_bundle != Some(access.bundle_id.as_str())
+            || selected_tier != Some(expected_tier)
+        {
+            return Err(ShareLifecycleError::Relay(
+                "snapshot GET returned a mismatched selected bundle".into(),
+            ));
+        }
+        let snapshot_id = response
+            .headers()
+            .get("Attn-Snapshot-Id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let ciphertext_sha256 = response
+            .headers()
+            .get("Attn-Ciphertext-Sha256")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let ciphertext = Zeroizing::new(
+            response
+                .bytes()
+                .await
+                .map_err(|error| ShareLifecycleError::Relay(error.to_string()))?
+                .to_vec(),
+        );
+        Ok(ManagedSnapshotCiphertext {
+            snapshot_id,
+            ciphertext_sha256,
+            ciphertext,
+        })
+    }
+}
+
+fn decode_key(value: &str, label: &str) -> Result<[u8; 32], ShareLifecycleError> {
+    let decoded = Zeroizing::new(
+        URL_SAFE_NO_PAD
+            .decode(value)
+            .map_err(|_| ShareLifecycleError::Invalid(format!("{label} is not base64url")))?,
+    );
+    decoded
+        .as_slice()
+        .try_into()
+        .map_err(|_| ShareLifecycleError::Invalid(format!("{label} must be 32 bytes")))
+}
+
+fn decode_signature(value: &str, label: &str) -> Result<[u8; 64], ShareLifecycleError> {
+    let decoded = Zeroizing::new(
+        URL_SAFE_NO_PAD
+            .decode(value)
+            .map_err(|_| ShareLifecycleError::Invalid(format!("{label} is not base64url")))?,
+    );
+    decoded
+        .as_slice()
+        .try_into()
+        .map_err(|_| ShareLifecycleError::Invalid(format!("{label} must be 64 bytes")))
+}
+
+fn root_for(record: &DurableShareRecord) -> Result<&[u8; 32], ShareLifecycleError> {
+    record
+        .share_secret
+        .as_ref()
+        .map(ShareSecret::expose)
+        .ok_or_else(|| ShareLifecycleError::Invalid("active share lost root".into()))
+}
+
+fn submission_bundle_id(root: &[u8; 32], tier: ShareTier) -> String {
+    derive_share_link_keys(
+        root,
+        match tier {
+            ShareTier::View => ShareLinkTier::View,
+            ShareTier::Comment => ShareLinkTier::Comment,
+            ShareTier::Suggest => ShareLinkTier::Suggest,
+        },
+    )
+    .bundle_id
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DurableShareLinks {
+    pub share_id: String,
+    pub room_id: RoomId,
+    pub owner_display_path: String,
+    pub owner_signing_key: String,
+    pub view_native: String,
+    pub view_browser: String,
+    pub comment_native: String,
+    pub comment_browser: String,
+    pub suggest_native: String,
+    pub suggest_browser: String,
+    pub expires_at: u64,
+}
+
+impl fmt::Debug for DurableShareLinks {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DurableShareLinks")
+            .field("share_id", &self.share_id)
+            .field("room_id", &self.room_id)
+            .field("owner_display_path", &self.owner_display_path)
+            .field("owner_signing_key", &self.owner_signing_key)
+            .field("view_native", &"[REDACTED]")
+            .field("view_browser", &"[REDACTED]")
+            .field("comment_native", &"[REDACTED]")
+            .field("comment_browser", &"[REDACTED]")
+            .field("suggest_native", &"[REDACTED]")
+            .field("suggest_browser", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl Drop for DurableShareLinks {
+    fn drop(&mut self) {
+        self.view_native.zeroize();
+        self.view_browser.zeroize();
+        self.comment_native.zeroize();
+        self.comment_browser.zeroize();
+        self.suggest_native.zeroize();
+        self.suggest_browser.zeroize();
+    }
+}
+
+pub struct DurableShareService {
+    store: Arc<DurableShareStore>,
+    review_store: Arc<crate::review::store::ReviewStore>,
+    relay: Arc<dyn ShareRelayClient>,
+    bootstrap: Arc<Bootstrapper>,
+    operation_lock: tokio::sync::Mutex<()>,
+}
+
+impl DurableShareService {
+    pub fn new(
+        store: Arc<DurableShareStore>,
+        review_store: Arc<crate::review::store::ReviewStore>,
+        relay: Arc<dyn ShareRelayClient>,
+        bootstrap: Arc<Bootstrapper>,
+    ) -> Self {
+        Self {
+            store,
+            review_store,
+            relay,
+            bootstrap,
+            operation_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    pub async fn create(&self, path: &Path) -> Result<DurableShareLinks, ShareLifecycleError> {
+        let _operation = self.operation_lock.lock().await;
+        self.create_locked(path).await
+    }
+
+    async fn create_locked(&self, path: &Path) -> Result<DurableShareLinks, ShareLifecycleError> {
+        let (canonical, is_dir) = canonical_share_target(path)?;
+        if self.store.list()?.iter().any(|record| {
+            record.owner_path == canonical && record.state != DurableShareState::Revoked
+        }) {
+            return Err(ShareLifecycleError::Invalid(
+                "owner target already has a durable share".into(),
+            ));
+        }
+        let mut share_id_bytes = [0u8; 16];
+        let mut share_secret = [0u8; 32];
+        getrandom::getrandom(&mut share_id_bytes)
+            .map_err(|error| ShareLifecycleError::Invalid(format!("share id rng: {error}")))?;
+        getrandom::getrandom(&mut share_secret)
+            .map_err(|error| ShareLifecycleError::Invalid(format!("share root rng: {error}")))?;
+        let share_id = URL_SAFE_NO_PAD.encode(share_id_bytes);
+        share_id_bytes.zeroize();
+        let record = DurableShareRecord::new(share_id, share_secret, canonical, is_dir)?;
+        share_secret.zeroize();
+        // Intent first: a crash can only leave a locally recoverable active
+        // record with no public pointer, never an untracked remote share.
+        self.store.save(&record)?;
+
+        self.complete_create(record).await
+    }
+
+    async fn complete_create(
+        &self,
+        mut record: DurableShareRecord,
+    ) -> Result<DurableShareLinks, ShareLifecycleError> {
+        let share_id = record.share_id.clone();
+        let secret = record
+            .share_secret
+            .as_ref()
+            .ok_or_else(|| ShareLifecycleError::Invalid("share intent lost its root".into()))?;
+        let epoch_secret = derive_share_epoch_room_secret(secret.expose(), 0);
+        let epoch = self
+            .bootstrap
+            .create_durable_epoch_room(record.owner_path.clone(), *epoch_secret.as_bytes())
+            .await
+            .map_err(bootstrap_failure)?;
+        let access = bundle_access(secret.expose(), ShareLinkTier::View);
+        let existing = self.relay.fetch_share(&share_id, &access).await;
+        let initial = match existing {
+            Ok(remote) => remote,
+            Err(ShareLifecycleError::NotFound(_)) => {
+                let empty_bundles = build_bundles(
+                    secret.expose(),
+                    &share_id,
+                    0,
+                    0,
+                    EMPTY_MANIFEST_DIGEST,
+                    &epoch,
+                )?;
+                let request = ShareUpsertRequest {
+                    v: 3,
+                    owner_signing_key: epoch.owner_signing_key.clone(),
+                    bundles: empty_bundles,
+                    epoch: 0,
+                    revision: 0,
+                    // Keep the public pointer dark until every retained
+                    // snapshot is uploaded and the final sealed bundles bind
+                    // the server-authoritative manifest.
+                    current_room_id: None,
+                    snapshots: vec![],
+                    placeholders: vec![],
+                    device_id: epoch.device_id.clone(),
+                };
+                self.relay.create_or_renew(&share_id, &request).await?
+            }
+            Err(error) => return Err(error),
+        };
+
+        let desired_snapshots = epoch
+            .snapshots
+            .iter()
+            .map(|snapshot| (snapshot.file_id.as_str(), snapshot.snapshot_id.as_str()))
+            .collect::<std::collections::HashSet<_>>();
+        let manifest_is_exact = retained_manifest_is_exact(&initial.snapshots, &desired_snapshots);
+        if initial.current_room_id.as_deref() == Some(epoch.room_id.as_str()) && manifest_is_exact {
+            // Crash after the final remote pointer flip but before the local
+            // active save. Only an exact current-source manifest may take the
+            // no-op shortcut; offline edits/deletes must reconcile first.
+            record.current_room_id = Some(epoch.room_id.clone());
+            record.epoch_rooms.insert(0, epoch.room_id);
+            record.expires_at = Some(initial.expires_at);
+            self.store.save(&record)?;
+            return links_for(&record, initial.expires_at, initial.owner_signing_key);
+        }
+
+        let snapshot_key = derive_room_key_tree_v3(epoch_secret.as_bytes())
+            .read_keys
+            .snapshot_key;
+        let stale_file_ids = stale_retained_file_ids(&initial.snapshots, &desired_snapshots);
+        for file_id in &stale_file_ids {
+            self.relay.delete_snapshot(&share_id, file_id).await?;
+        }
+        let uploaded_files = initial
+            .snapshots
+            .iter()
+            .filter(|snapshot| !stale_file_ids.contains(&snapshot.file_id))
+            .map(|snapshot| (snapshot.file_id.as_str(), snapshot.snapshot_id.as_str()))
+            .collect::<std::collections::HashSet<_>>();
+        for snapshot in &epoch.snapshots {
+            if uploaded_files.contains(&(snapshot.file_id.as_str(), snapshot.snapshot_id.as_str()))
+            {
+                continue;
+            }
+            let sealed = seal_managed_snapshot(&share_id, 0, snapshot, snapshot_key.as_bytes())?;
+            self.relay
+                .upload_snapshot(
+                    &share_id,
+                    snapshot.file_id.as_str(),
+                    snapshot.snapshot_id.as_str(),
+                    &sealed,
+                )
+                .await?;
+        }
+        let current = self.relay.fetch_share(&share_id, &access).await?;
+        if current.snapshots.len() != desired_snapshots.len()
+            || current.snapshots.iter().any(|snapshot| {
+                !desired_snapshots
+                    .contains(&(snapshot.file_id.as_str(), snapshot.snapshot_id.as_str()))
+            })
+        {
+            return Err(ShareLifecycleError::Relay(
+                "retained snapshot manifest did not reconcile exactly before pointer flip".into(),
+            ));
+        }
+        let final_revision = current.revision.checked_add(1).ok_or_else(|| {
+            ShareLifecycleError::Invalid("share revision exhausted during create".into())
+        })?;
+        let synced_bundles = build_bundles(
+            secret.expose(),
+            &share_id,
+            0,
+            final_revision,
+            &current.manifest_digest,
+            &epoch,
+        )?;
+        let synced = ShareUpsertRequest {
+            v: 3,
+            owner_signing_key: epoch.owner_signing_key,
+            bundles: synced_bundles,
+            epoch: 0,
+            revision: final_revision,
+            current_room_id: Some(epoch.room_id.as_str().to_owned()),
+            snapshots: current.snapshots.clone(),
+            placeholders: current.placeholders.clone(),
+            device_id: epoch.device_id,
+        };
+        let active = self.relay.create_or_renew(&share_id, &synced).await?;
+        record.current_room_id = Some(epoch.room_id.clone());
+        record.epoch_rooms.insert(0, epoch.room_id);
+        record.expires_at = Some(active.expires_at);
+        self.store.save(&record)?;
+        links_for(&record, active.expires_at, active.owner_signing_key)
+    }
+
+    pub async fn renew(
+        &self,
+        target: Option<&str>,
+    ) -> Result<Vec<DurableShareLinks>, ShareLifecycleError> {
+        let _operation = self.operation_lock.lock().await;
+        self.renew_locked(target).await
+    }
+
+    async fn renew_locked(
+        &self,
+        target: Option<&str>,
+    ) -> Result<Vec<DurableShareLinks>, ShareLifecycleError> {
+        let records = match target {
+            Some(value) => vec![self.store.resolve(value)?],
+            None => self.store.list()?,
+        };
+        let mut links = Vec::new();
+        for mut record in records {
+            match record.state {
+                DurableShareState::Revoked => continue,
+                DurableShareState::RevokePending => {
+                    self.finish_pending_revoke(&record.share_id).await?;
+                    continue;
+                }
+                DurableShareState::Active => {}
+            }
+            record.revalidate_owner_target()?;
+            if record.current_room_id.is_none() {
+                links.push(self.complete_create(record).await?);
+                continue;
+            }
+            if record.drain_cursor > 0 {
+                // Retry a crash after cursor persistence/pointer update but
+                // before the prior prefix ACK, before taking a fresh summary.
+                self.relay
+                    .ack_mailbox(&record.share_id, record.drain_cursor)
+                    .await?;
+            }
+            let secret = record
+                .share_secret
+                .as_ref()
+                .ok_or_else(|| ShareLifecycleError::Invalid("active share lost root".into()))?;
+            let epoch_secret = derive_share_epoch_room_secret(secret.expose(), record.epoch);
+            let room_was_missing = self
+                .bootstrap
+                .touch_durable_epoch_room(*epoch_secret.as_bytes())
+                .await
+                .map_err(bootstrap_failure)?;
+            if room_was_missing {
+                self.republish_same_epoch(&mut record, *epoch_secret.as_bytes())
+                    .await?;
+            } else {
+                let access = bundle_access(secret.expose(), ShareLinkTier::View);
+                let remote = self.relay.fetch_share(&record.share_id, &access).await?;
+                if remote.share_id != record.share_id
+                    || remote.epoch != record.epoch
+                    || remote.current_room_id.as_deref()
+                        != record.current_room_id.as_ref().map(RoomId::as_str)
+                {
+                    return Err(ShareLifecycleError::Invalid(
+                        "relay share routing does not match durable owner state".into(),
+                    ));
+                }
+                let drained = self.drain_mailbox(&record, &remote).await?;
+                if let Some(through) = drained {
+                    record.imported_cursor = record.imported_cursor.max(through);
+                    self.store.save(&record)?;
+                }
+                if drained.is_none() && remote.mailbox.count > 0 {
+                    return Err(ShareLifecycleError::Invalid(
+                        "durable mailbox count could not be reconciled across tier selectors"
+                            .into(),
+                    ));
+                }
+                let touched = if drained.is_none() {
+                    self.sync_latest_snapshots(&record, &remote, *epoch_secret.as_bytes())
+                        .await?
+                } else {
+                    let request = ShareUpsertRequest {
+                        v: 3,
+                        owner_signing_key: remote.owner_signing_key.clone(),
+                        bundles: vec![],
+                        epoch: record.epoch,
+                        revision: remote.revision,
+                        current_room_id: remote.current_room_id.clone(),
+                        snapshots: remote.snapshots.clone(),
+                        placeholders: remote.placeholders.clone(),
+                        device_id: self.relay.device_id().to_owned(),
+                    };
+                    self.relay
+                        .create_or_renew(&record.share_id, &request)
+                        .await?
+                };
+                record.expires_at = Some(touched.expires_at);
+                if let Some(through) = drained {
+                    // Only the public pointer/touch success makes this prefix
+                    // ACKable. A crash before here deliberately replays the
+                    // idempotent local/room imports on the next renewal.
+                    record.drain_cursor = through;
+                }
+                self.store.save(&record)?;
+                if let Some(through) = drained {
+                    self.relay.ack_mailbox(&record.share_id, through).await?;
+                }
+            }
+            let remote = self
+                .relay
+                .fetch_share(
+                    &record.share_id,
+                    &bundle_access(
+                        record
+                            .share_secret
+                            .as_ref()
+                            .expect("active checked")
+                            .expose(),
+                        ShareLinkTier::View,
+                    ),
+                )
+                .await?;
+            links.push(links_for(
+                &record,
+                record.expires_at.unwrap_or_default(),
+                remote.owner_signing_key,
+            )?);
+        }
+        Ok(links)
+    }
+
+    async fn sync_latest_snapshots(
+        &self,
+        record: &DurableShareRecord,
+        remote: &ShareRelayRecord,
+        epoch_secret: [u8; 32],
+    ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+        let snapshot_key = derive_room_key_tree_v3(&epoch_secret)
+            .read_keys
+            .snapshot_key;
+        let outcome = self
+            .bootstrap
+            .create_durable_epoch_room(record.owner_path.clone(), epoch_secret)
+            .await
+            .map_err(bootstrap_failure)?;
+        let mut changed = false;
+        let desired_files = outcome
+            .snapshots
+            .iter()
+            .map(|snapshot| snapshot.file_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        for retained in &remote.snapshots {
+            if !desired_files.contains(retained.file_id.as_str()) {
+                self.relay
+                    .delete_snapshot(&record.share_id, &retained.file_id)
+                    .await?;
+                changed = true;
+            }
+        }
+        for snapshot in &outcome.snapshots {
+            if remote.snapshots.iter().any(|candidate| {
+                candidate.file_id == snapshot.file_id.as_str()
+                    && candidate.snapshot_id == snapshot.snapshot_id.as_str()
+            }) {
+                continue;
+            }
+            let sealed = seal_managed_snapshot(
+                &record.share_id,
+                record.epoch,
+                snapshot,
+                snapshot_key.as_bytes(),
+            )?;
+            self.relay
+                .upload_snapshot(
+                    &record.share_id,
+                    snapshot.file_id.as_str(),
+                    snapshot.snapshot_id.as_str(),
+                    &sealed,
+                )
+                .await?;
+            changed = true;
+        }
+        let current = if changed {
+            self.relay
+                .fetch_share(
+                    &record.share_id,
+                    &bundle_access(root_for(record)?, ShareLinkTier::View),
+                )
+                .await?
+        } else {
+            remote.clone()
+        };
+        let request = ShareUpsertRequest {
+            v: 3,
+            owner_signing_key: current.owner_signing_key.clone(),
+            bundles: if changed {
+                build_bundles(
+                    root_for(record)?,
+                    &record.share_id,
+                    record.epoch,
+                    current.revision,
+                    &current.manifest_digest,
+                    &outcome,
+                )?
+            } else {
+                vec![]
+            },
+            epoch: record.epoch,
+            revision: current.revision,
+            current_room_id: current.current_room_id.clone(),
+            snapshots: current.snapshots.clone(),
+            placeholders: current.placeholders.clone(),
+            device_id: outcome.device_id,
+        };
+        self.relay.create_or_renew(&record.share_id, &request).await
+    }
+
+    async fn republish_same_epoch(
+        &self,
+        record: &mut DurableShareRecord,
+        epoch_secret: [u8; 32],
+    ) -> Result<(), ShareLifecycleError> {
+        let outcome = self
+            .bootstrap
+            .create_durable_epoch_room(record.owner_path.clone(), epoch_secret)
+            .await
+            .map_err(bootstrap_failure)?;
+        let secret = record
+            .share_secret
+            .as_ref()
+            .ok_or_else(|| ShareLifecycleError::Invalid("active share lost root".into()))?;
+        let access = bundle_access(secret.expose(), ShareLinkTier::View);
+        let remote = self.relay.fetch_share(&record.share_id, &access).await?;
+        let drained = self.drain_mailbox(record, &remote).await?;
+        if let Some(through) = drained {
+            record.imported_cursor = record.imported_cursor.max(through);
+            self.store.save(record)?;
+        }
+        // Same epoch means retained snapshots and the already-published
+        // sealed capability projection remain valid. Re-sealing introduces a
+        // fresh nonce and would look like a projection change to ShareDO,
+        // which is intentionally fenced while mail awaits ACK.
+        let current = self.relay.fetch_share(&record.share_id, &access).await?;
+        let request = ShareUpsertRequest {
+            v: 3,
+            owner_signing_key: remote.owner_signing_key,
+            bundles: vec![],
+            epoch: record.epoch,
+            revision: current.revision,
+            current_room_id: Some(outcome.room_id.as_str().to_owned()),
+            snapshots: current.snapshots,
+            placeholders: current.placeholders,
+            device_id: outcome.device_id,
+        };
+        let live = self
+            .relay
+            .create_or_renew(&record.share_id, &request)
+            .await?;
+        record.current_room_id = Some(outcome.room_id.clone());
+        record.epoch_rooms.insert(record.epoch, outcome.room_id);
+        record.expires_at = Some(live.expires_at);
+        if let Some(through) = drained {
+            record.drain_cursor = through;
+        }
+        self.store.save(record)?;
+        if let Some(through) = drained {
+            self.relay.ack_mailbox(&record.share_id, through).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn revoke(&self, target: &str) -> Result<(), ShareLifecycleError> {
+        let _operation = self.operation_lock.lock().await;
+        let pending = self.store.begin_revoke(target)?;
+        self.finish_pending_revoke(&pending.share_id).await
+    }
+
+    async fn finish_pending_revoke(&self, share_id: &str) -> Result<(), ShareLifecycleError> {
+        self.relay.revoke_share(share_id).await?;
+        self.store.finish_revoke(share_id)?;
+        Ok(())
+    }
+
+    async fn drain_mailbox(
+        &self,
+        record: &DurableShareRecord,
+        remote: &ShareRelayRecord,
+    ) -> Result<Option<u64>, ShareLifecycleError> {
+        let root = record
+            .share_secret
+            .as_ref()
+            .ok_or_else(|| ShareLifecycleError::Invalid("active share lost root".into()))?;
+        let mut items = BTreeMap::<u64, ShareMailboxItem>::new();
+        for tier in [ShareLinkTier::Comment, ShareLinkTier::Suggest] {
+            let access = bundle_access(root.expose(), tier);
+            let mut after = record.drain_cursor;
+            loop {
+                let page = self
+                    .relay
+                    .fetch_mailbox(&record.share_id, &access, after, 100)
+                    .await?;
+                if page.items.is_empty() {
+                    break;
+                }
+                if page.next_after <= after {
+                    return Err(ShareLifecycleError::Relay(
+                        "mailbox page cursor did not advance".into(),
+                    ));
+                }
+                for item in page.items {
+                    if items.insert(item.seq, item).is_some() {
+                        return Err(ShareLifecycleError::Invalid(
+                            "mailbox returned duplicate sequence".into(),
+                        ));
+                    }
+                }
+                after = page.next_after;
+            }
+        }
+        if items.is_empty() {
+            return Ok(None);
+        }
+        if items.len() as u64 != remote.mailbox.count {
+            return Err(ShareLifecycleError::Invalid(
+                "durable mailbox paging did not cover every retained item".into(),
+            ));
+        }
+        let mut expected = record.drain_cursor.saturating_add(1);
+        for seq in items.keys().copied() {
+            if seq != expected {
+                return Err(ShareLifecycleError::Invalid(format!(
+                    "durable mailbox is not contiguous at sequence {expected}"
+                )));
+            }
+            expected = expected.saturating_add(1);
+        }
+        let epoch_secret = derive_share_epoch_room_secret(root.expose(), record.epoch);
+        // Validate/decrypt/authorize the entire retained prefix before any
+        // registration, relay forward, or local append becomes observable.
+        for item in items.values() {
+            self.import_submission(record, remote, item, epoch_secret.as_bytes(), false)
+                .await?;
+        }
+        for item in items.values() {
+            self.import_submission(record, remote, item, epoch_secret.as_bytes(), true)
+                .await?;
+        }
+        Ok(items.keys().next_back().copied())
+    }
+
+    async fn import_submission(
+        &self,
+        record: &DurableShareRecord,
+        remote: &ShareRelayRecord,
+        item: &ShareMailboxItem,
+        room_secret: &[u8; 32],
+        commit: bool,
+    ) -> Result<(), ShareLifecycleError> {
+        use crate::review::transport::inbound::{
+            AuthorizationCache, InboundPipeline, RegisteredDeviceAuthorization, VerifyingKeyCache,
+        };
+        use ed25519_dalek::Verifier as _;
+
+        let submission: ReviewSubmission =
+            serde_json::from_value(item.payload.clone()).map_err(|error| {
+                ShareLifecycleError::Invalid(format!("review_submission shape: {error}"))
+            })?;
+        let room_id = record.current_room_id.as_ref().ok_or_else(|| {
+            ShareLifecycleError::Invalid("mail arrived without current epoch room".into())
+        })?;
+        let expected_bundle_id = submission_bundle_id(root_for(record)?, submission.tier);
+        if submission.v != 3
+            || submission.submission_type != "review_submission"
+            || submission.envelope_id != item.envelope_id
+            || submission.share_id != record.share_id
+            || submission.epoch != record.epoch
+            || submission.room_id != room_id.as_str()
+            || item.epoch != Some(record.epoch)
+            || item.bundle_id.as_deref() != Some(expected_bundle_id.as_str())
+            || item.tier != Some(submission.tier)
+            || !matches!(submission.tier, ShareTier::Comment | ShareTier::Suggest)
+            || submission.envelopes.len() < 2
+            || submission.envelopes.len() > 8
+        {
+            return Err(ShareLifecycleError::Invalid(
+                "review_submission routing/context mismatch".into(),
+            ));
+        }
+        let registration = &submission.device_registration;
+        let expected_grant = match submission.tier {
+            ShareTier::Comment => crate::review::transport::inbound::GrantTier::Comment,
+            ShareTier::Suggest => crate::review::transport::inbound::GrantTier::Suggest,
+            ShareTier::View => unreachable!(),
+        };
+        if registration.grant_tier != expected_grant
+            || registration.kind == crate::review::model::ParticipantKind::Owner
+        {
+            return Err(ShareLifecycleError::Invalid(
+                "review_submission device grant mismatch".into(),
+            ));
+        }
+        let public_key = decode_key(
+            &registration.public_signing_key,
+            "device public signing key",
+        )?;
+        let verifier = ed25519_dalek::VerifyingKey::from_bytes(&public_key)
+            .map_err(|_| ShareLifecycleError::Invalid("device signing key invalid".into()))?;
+        let self_signature =
+            decode_signature(&registration.self_signature, "device self signature")?;
+        let mut unsigned = serde_json::to_value(registration)
+            .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?;
+        unsigned
+            .as_object_mut()
+            .expect("registration object")
+            .remove("selfSignature");
+        let canonical = crate::review::crypto::canonical::to_canonical_bytes(&unsigned)
+            .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?;
+        verifier
+            .verify(
+                &canonical,
+                &ed25519_dalek::Signature::from_bytes(&self_signature),
+            )
+            .map_err(|_| ShareLifecycleError::Invalid("device self signature invalid".into()))?;
+        let owner_key = decode_key(&remote.owner_signing_key, "owner public signing key")?;
+        let owner = ed25519_dalek::VerifyingKey::from_bytes(&owner_key)
+            .map_err(|_| ShareLifecycleError::Invalid("owner signing key invalid".into()))?;
+        let grant = decode_signature(&registration.grant_signature, "owner grant signature")?;
+        let invite_tier = match submission.tier {
+            ShareTier::Comment => crate::review::bootstrap::InviteTierV3::Comment,
+            ShareTier::Suggest => crate::review::bootstrap::InviteTierV3::Suggest,
+            ShareTier::View => unreachable!(),
+        };
+        owner
+            .verify(
+                &crate::review::bootstrap::canonical_device_grant_v3(room_id, invite_tier)
+                    .map_err(bootstrap_failure)?,
+                &ed25519_dalek::Signature::from_bytes(&grant),
+            )
+            .map_err(|_| ShareLifecycleError::Invalid("owner device grant invalid".into()))?;
+
+        let tree = derive_room_key_tree_v3(room_secret);
+        let typed_device: crate::review::ids::DeviceId =
+            serde_json::from_value(serde_json::Value::String(registration.device_id.clone()))
+                .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?;
+        let typed_participant: crate::review::ids::ParticipantId = serde_json::from_value(
+            serde_json::Value::String(registration.participant_id.clone()),
+        )
+        .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?;
+        let device_key =
+            crate::review::crypto::signing::DeviceVerifyingKey::from_bytes(&public_key)
+                .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?;
+        let key_id = device_key.signing_key_id_base64url();
+        let keys: VerifyingKeyCache =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::from([
+                (key_id.clone(), device_key),
+            ])));
+        let authorizations: AuthorizationCache =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::from([
+                (
+                    key_id,
+                    RegisteredDeviceAuthorization {
+                        participant_id: typed_participant.clone(),
+                        device_id: typed_device.clone(),
+                        public_encryption_key: registration.public_encryption_key.clone(),
+                        public_signing_key: registration.public_signing_key.clone(),
+                        client: registration.client,
+                        kind: registration.kind,
+                        grant_tier: Some(expected_grant),
+                        grant_signature: Some(registration.grant_signature.clone()),
+                        attested: false,
+                    },
+                ),
+            ])));
+        let pipeline = InboundPipeline::new(
+            Arc::clone(&self.review_store),
+            keys,
+            authorizations,
+            *tree.read_keys.event_key.as_bytes(),
+            *tree.read_keys.snapshot_key.as_bytes(),
+            *tree.read_keys.signaling_key.as_bytes(),
+        );
+        for envelope in &submission.envelopes {
+            // V3 names the room/admission transport. Review event envelopes
+            // retain the canonical v2 event/AAD schema used by live v3 rooms.
+            if envelope.v != 2
+                || envelope.room_id != *room_id
+                || envelope.device_id != typed_device
+                || envelope.author_id != typed_participant
+            {
+                return Err(ShareLifecycleError::Invalid(
+                    "frozen envelope attribution mismatch".into(),
+                ));
+            }
+        }
+        let events = pipeline
+            .preflight_event_envelopes(&submission.envelopes, |index, event| {
+                match (&event.body, index) {
+                    (crate::review::model::ReviewEventBody::ParticipantJoined { .. }, 0) => true,
+                    (crate::review::model::ReviewEventBody::CommentCreated { .. }, value)
+                        if value > 0 =>
+                    {
+                        true
+                    }
+                    _ => false,
+                }
+            })
+            .await
+            .map_err(|error| {
+                ShareLifecycleError::Invalid(format!("review_submission envelope: {error}"))
+            })?;
+        if !commit {
+            return Ok(());
+        }
+        self.bootstrap
+            .register_frozen_device_v3(
+                room_id,
+                &serde_json::to_value(registration)
+                    .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?,
+                tree.write_admission_key.as_bytes(),
+            )
+            .await
+            .map_err(bootstrap_failure)?;
+        pipeline
+            .commit_preflighted_events(room_id, &events)
+            .await
+            .map_err(|error| {
+                ShareLifecycleError::Invalid(format!("review_submission commit: {error}"))
+            })?;
+        self.bootstrap
+            .post_frozen_envelopes_v3(
+                room_id,
+                &registration.device_id,
+                &submission.envelopes,
+                tree.write_admission_key.as_bytes(),
+            )
+            .await
+            .map_err(bootstrap_failure)?;
+        Ok(())
+    }
+}
+
+fn stale_retained_file_ids(
+    remote: &[ManagedShareSnapshotRef],
+    desired: &std::collections::HashSet<(&str, &str)>,
+) -> std::collections::BTreeSet<String> {
+    remote
+        .iter()
+        .filter(|snapshot| {
+            !desired.contains(&(snapshot.file_id.as_str(), snapshot.snapshot_id.as_str()))
+        })
+        .map(|snapshot| snapshot.file_id.clone())
+        .collect()
+}
+
+fn retained_manifest_is_exact(
+    remote: &[ManagedShareSnapshotRef],
+    desired: &std::collections::HashSet<(&str, &str)>,
+) -> bool {
+    remote.len() == desired.len()
+        && remote.iter().all(|snapshot| {
+            desired.contains(&(snapshot.file_id.as_str(), snapshot.snapshot_id.as_str()))
+        })
+}
+
+fn bootstrap_failure(error: crate::review::bootstrap::BootstrapError) -> ShareLifecycleError {
+    ShareLifecycleError::Relay(error.to_string())
+}
+
+fn bundle_access(secret: &[u8; 32], tier: ShareLinkTier) -> ShareBundleAccess {
+    let keys = derive_share_link_keys(secret, tier);
+    ShareBundleAccess {
+        bundle_id: keys.bundle_id,
+        tier: share_tier(tier),
+        read_admission_key: SecretString::new(
+            URL_SAFE_NO_PAD.encode(keys.read_admission_key.as_bytes()),
+        ),
+        write_admission_key: keys
+            .write_admission_key
+            .map(|key| SecretString::new(URL_SAFE_NO_PAD.encode(key.as_bytes()))),
+    }
+}
+
+fn share_tier(tier: ShareLinkTier) -> ShareTier {
+    match tier {
+        ShareLinkTier::View => ShareTier::View,
+        ShareLinkTier::Comment => ShareTier::Comment,
+        ShareLinkTier::Suggest => ShareTier::Suggest,
+    }
+}
+
+fn build_bundles(
+    root: &[u8; 32],
+    share_id: &str,
+    epoch: u64,
+    revision: u64,
+    manifest_digest: &str,
+    room: &crate::review::bootstrap::DurableEpochRoomOutcome,
+) -> Result<Vec<ShareBundleMutation>, ShareLifecycleError> {
+    let mut bundles = Vec::new();
+    for tier in [
+        ShareLinkTier::View,
+        ShareLinkTier::Comment,
+        ShareLinkTier::Suggest,
+    ] {
+        let keys = derive_share_link_keys(root, tier);
+        let grant = match tier {
+            ShareLinkTier::View => None,
+            ShareLinkTier::Comment => Some(room.comment_grant_signature),
+            ShareLinkTier::Suggest => Some(room.suggest_grant_signature),
+        };
+        let bundle = ShareCapabilityBundle {
+            v: 3,
+            purpose: "attn share capability bundle v3".into(),
+            bundle_id: keys.bundle_id.clone(),
+            owner_signing_key: room.owner_signing_key.clone(),
+            share_id: share_id.to_owned(),
+            epoch,
+            revision,
+            manifest_digest: manifest_digest.to_owned(),
+            tier,
+            room_id: room.room_id.as_str().to_owned(),
+            read_capability_key: URL_SAFE_NO_PAD.encode(room.read_capability_key.as_ref()),
+            write_admission_key: (tier != ShareLinkTier::View)
+                .then(|| URL_SAFE_NO_PAD.encode(room.write_admission_key.as_ref())),
+            grant_signature: grant.map(|signature| URL_SAFE_NO_PAD.encode(signature)),
+        };
+        let mut nonce = [0u8; 24];
+        getrandom::getrandom(&mut nonce)
+            .map_err(|error| ShareLifecycleError::Invalid(format!("bundle nonce rng: {error}")))?;
+        let sealed_bundle = seal_capability_bundle_with_nonce(
+            keys.bundle_key.as_bytes(),
+            &keys.bundle_id,
+            &bundle,
+            &nonce,
+        )
+        .map_err(ShareLifecycleError::Invalid)?;
+        nonce.zeroize();
+        bundles.push(ShareBundleMutation {
+            bundle_id: keys.bundle_id,
+            tier: share_tier(tier),
+            read_admission_key: SecretString::new(
+                URL_SAFE_NO_PAD.encode(keys.read_admission_key.as_bytes()),
+            ),
+            write_admission_key: keys
+                .write_admission_key
+                .map(|key| SecretString::new(URL_SAFE_NO_PAD.encode(key.as_bytes()))),
+            sealed_bundle,
+        });
+    }
+    Ok(bundles)
+}
+
+fn links_for(
+    record: &DurableShareRecord,
+    expires_at: u64,
+    owner_signing_key: String,
+) -> Result<DurableShareLinks, ShareLifecycleError> {
+    let root = record
+        .share_secret
+        .as_ref()
+        .ok_or_else(|| ShareLifecycleError::Invalid("active share is missing its root".into()))?;
+    let view = derive_share_link_keys(root.expose(), ShareLinkTier::View);
+    let comment = derive_share_link_keys(root.expose(), ShareLinkTier::Comment);
+    let suggest = derive_share_link_keys(root.expose(), ShareLinkTier::Suggest);
+    let native = |secret: &[u8; 32]| {
+        build_native_share_invite(&record.share_id, secret).map_err(ShareLifecycleError::Invalid)
+    };
+    let browser = |secret: &[u8; 32]| {
+        build_browser_share_invite("https://attn.sh", &record.share_id, secret)
+            .map_err(ShareLifecycleError::Invalid)
+    };
+    Ok(DurableShareLinks {
+        share_id: record.share_id.clone(),
+        room_id: record.current_room_id.clone().ok_or_else(|| {
+            ShareLifecycleError::Invalid("active share has no room pointer".into())
+        })?,
+        owner_display_path: record.owner_path.to_string_lossy().into_owned(),
+        owner_signing_key,
+        view_native: native(view.link_secret.as_bytes())?,
+        view_browser: browser(view.link_secret.as_bytes())?,
+        comment_native: native(comment.link_secret.as_bytes())?,
+        comment_browser: browser(comment.link_secret.as_bytes())?,
+        suggest_native: native(suggest.link_secret.as_bytes())?,
+        suggest_browser: browser(suggest.link_secret.as_bytes())?,
+        expires_at,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedSnapshotAad<'a> {
+    v: u8,
+    purpose: &'static str,
+    share_id: &'a str,
+    epoch: u64,
+    file_id: &'a str,
+    snapshot_id: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedSnapshotPlaintext<'a> {
+    v: u8,
+    file_id: &'a str,
+    snapshot_id: &'a str,
+    doc_type: crate::review::model::DocType,
+    content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<&'a crate::review::model::AnchorIndex>,
+}
+
+fn seal_managed_snapshot(
+    share_id: &str,
+    epoch: u64,
+    snapshot: &crate::review::bootstrap::DurableEpochSnapshot,
+    snapshot_key: &[u8; 32],
+) -> Result<Zeroizing<Vec<u8>>, ShareLifecycleError> {
+    let aad = crate::review::crypto::canonical::to_canonical_bytes(&ManagedSnapshotAad {
+        v: 3,
+        purpose: "attn durable share snapshot v3",
+        share_id,
+        epoch,
+        file_id: snapshot.file_id.as_str(),
+        snapshot_id: snapshot.snapshot_id.as_str(),
+    })
+    .map_err(|error| ShareLifecycleError::Invalid(format!("canonical snapshot AAD: {error}")))?;
+    let plaintext = Zeroizing::new(
+        crate::review::crypto::canonical::to_canonical_bytes(&ManagedSnapshotPlaintext {
+            v: 3,
+            file_id: snapshot.file_id.as_str(),
+            snapshot_id: snapshot.snapshot_id.as_str(),
+            doc_type: snapshot.plaintext.doc_type,
+            content: &snapshot.plaintext.content,
+            metadata: snapshot.plaintext.anchor_index.as_ref(),
+        })
+        .map_err(|error| {
+            ShareLifecycleError::Invalid(format!("canonical managed snapshot: {error}"))
+        })?,
+    );
+    let mut nonce = [0u8; 24];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|error| ShareLifecycleError::Invalid(format!("snapshot nonce rng: {error}")))?;
+    let cipher = XChaCha20Poly1305::new(snapshot_key.into());
+    let ciphertext = cipher
+        .encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: &plaintext,
+                aad: &aad,
+            },
+        )
+        .map_err(|_| ShareLifecycleError::Invalid("managed snapshot encryption failed".into()))?;
+    let mut sealed = Zeroizing::new(Vec::with_capacity(24 + ciphertext.len()));
+    sealed.extend_from_slice(&nonce);
+    sealed.extend_from_slice(&ciphertext);
+    nonce.zeroize();
+    Ok(sealed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use wiremock::matchers::{header, header_exists, method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const SHARE_ID: &str = "AAECAwQFBgcICQoLDA0ODw";
 
@@ -1037,6 +2524,201 @@ mod tests {
         std::fs::write(&owner, "# Owner\n").expect("write owner");
         let owner = std::fs::canonicalize(owner).expect("canonical owner");
         DurableShareRecord::new(SHARE_ID.into(), [0x42; 32], owner, false).expect("record")
+    }
+
+    fn snapshot_ref(file_id: &str, snapshot_id: &str) -> ManagedShareSnapshotRef {
+        ManagedShareSnapshotRef {
+            file_id: file_id.into(),
+            snapshot_id: snapshot_id.into(),
+            ciphertext_bytes: 1,
+            ciphertext_sha256: "digest".into(),
+            uploaded_at: 1,
+        }
+    }
+
+    struct DarkPointerRelay {
+        remote: std::sync::Mutex<ShareRelayRecord>,
+        operations: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ShareRelayClient for DarkPointerRelay {
+        fn device_id(&self) -> &str {
+            "owner-device"
+        }
+        async fn fetch_share(
+            &self,
+            _: &str,
+            _: &ShareBundleAccess,
+        ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+            Ok(self.remote.lock().unwrap().clone())
+        }
+        async fn create_or_renew(
+            &self,
+            _: &str,
+            request: &ShareUpsertRequest,
+        ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+            self.operations.lock().unwrap().push("pointer".into());
+            let mut remote = self.remote.lock().unwrap();
+            remote.current_room_id = request.current_room_id.clone();
+            remote.revision = request.revision;
+            remote.owner_signing_key = request.owner_signing_key.clone();
+            Ok(remote.clone())
+        }
+        async fn fetch_mailbox(
+            &self,
+            _: &str,
+            _: &ShareBundleAccess,
+            _: u64,
+            _: u16,
+        ) -> Result<ShareMailboxPage, ShareLifecycleError> {
+            unreachable!()
+        }
+        async fn ack_mailbox(&self, _: &str, _: u64) -> Result<(), ShareLifecycleError> {
+            unreachable!()
+        }
+        async fn revoke_share(&self, _: &str) -> Result<(), ShareLifecycleError> {
+            unreachable!()
+        }
+        async fn upload_snapshot(
+            &self,
+            _: &str,
+            file_id: &str,
+            snapshot_id: &str,
+            ciphertext: &[u8],
+        ) -> Result<ManagedShareSnapshotRef, ShareLifecycleError> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(format!("upload:{file_id}"));
+            let retained = ManagedShareSnapshotRef {
+                file_id: file_id.into(),
+                snapshot_id: snapshot_id.into(),
+                ciphertext_bytes: ciphertext.len() as u64,
+                ciphertext_sha256: "new-digest".into(),
+                uploaded_at: 2,
+            };
+            self.remote.lock().unwrap().snapshots.push(retained.clone());
+            Ok(retained)
+        }
+        async fn delete_snapshot(&self, _: &str, file_id: &str) -> Result<(), ShareLifecycleError> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(format!("delete:{file_id}"));
+            self.remote
+                .lock()
+                .unwrap()
+                .snapshots
+                .retain(|snapshot| snapshot.file_id != file_id);
+            Ok(())
+        }
+        async fn fetch_snapshot(
+            &self,
+            _: &str,
+            _: &str,
+            _: &ShareBundleAccess,
+        ) -> Result<ManagedSnapshotCiphertext, ShareLifecycleError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn dark_pointer_recovery_deletes_removed_and_obsolete_retained_snapshots() {
+        let remote = vec![
+            snapshot_ref("edited-file", "old-snapshot"),
+            snapshot_ref("deleted-file", "deleted-snapshot"),
+        ];
+        let desired = std::collections::HashSet::from([("edited-file", "new-snapshot")]);
+        assert!(
+            !retained_manifest_is_exact(&remote, &desired),
+            "a live-pointer shortcut must reject stale offline content"
+        );
+        assert_eq!(
+            stale_retained_file_ids(&remote, &desired),
+            std::collections::BTreeSet::from([
+                "deleted-file".to_string(),
+                "edited-file".to_string(),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_create_deletes_stale_dark_pointer_artifact_before_flip() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/v3/rooms/[^/]+$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "roomId": "x", "createdAt": 0, "expiresAt": 0, "policy": {},
+                "ownerSigningKeyId": "k", "serverSeq": 0
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/v3/rooms/[^/]+/devices$"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let owner = temporary.path().join("current.md");
+        std::fs::write(&owner, "# Current\n").expect("current source");
+        let owner = std::fs::canonicalize(owner).expect("canonical owner");
+        let share_store = Arc::new(
+            DurableShareStore::open_at(temporary.path().join("shares")).expect("share store"),
+        );
+        let review_store = Arc::new(
+            crate::review::store::ReviewStore::open_at(temporary.path().join("reviews"))
+                .expect("review store"),
+        );
+        let bootstrap = Arc::new(
+            Bootstrapper::new(
+                Arc::clone(&review_store),
+                Arc::new(crate::review::bootstrap::BootstrapConfig {
+                    relay_url: server.uri(),
+                    identity_dir: Some(temporary.path().join("identity")),
+                }),
+            )
+            .expect("bootstrap"),
+        );
+        let relay = Arc::new(DarkPointerRelay {
+            remote: std::sync::Mutex::new(ShareRelayRecord {
+                v: 3,
+                share_id: SHARE_ID.into(),
+                owner_signing_key: URL_SAFE_NO_PAD.encode([9u8; 32]),
+                epoch: 0,
+                revision: 1,
+                current_room_id: None,
+                snapshots: vec![snapshot_ref("deleted-file", "partial-snapshot")],
+                placeholders: vec![],
+                manifest_digest: EMPTY_MANIFEST_DIGEST.into(),
+                bundle: None,
+                updated_at: 1,
+                expires_at: 2,
+                mailbox: ShareMailboxSummary {
+                    count: 0,
+                    bytes: 0,
+                    latest_seq: 0,
+                },
+                features: ShareFeatures { push: false },
+            }),
+            operations: std::sync::Mutex::new(Vec::new()),
+        });
+        let service = DurableShareService::new(share_store, review_store, relay.clone(), bootstrap);
+        let intent =
+            DurableShareRecord::new(SHARE_ID.into(), [0x42; 32], owner, false).expect("intent");
+        service.complete_create(intent).await.expect("recovery");
+
+        let operations = relay.operations.lock().unwrap().clone();
+        assert_eq!(operations[0], "delete:deleted-file");
+        assert!(operations[1].starts_with("upload:"));
+        assert_eq!(operations[2], "pointer");
+        let remote = relay.remote.lock().unwrap();
+        assert_eq!(remote.snapshots.len(), 1);
+        assert_ne!(remote.snapshots[0].file_id, "deleted-file");
+        assert!(remote.current_room_id.is_some());
     }
 
     #[test]
@@ -1292,5 +2974,224 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".tmp")
         }));
+    }
+
+    struct RevokeRelay {
+        fail: AtomicBool,
+    }
+
+    #[async_trait]
+    impl ShareRelayClient for RevokeRelay {
+        fn device_id(&self) -> &str {
+            "owner-device"
+        }
+        async fn fetch_share(
+            &self,
+            _: &str,
+            _: &ShareBundleAccess,
+        ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+            unreachable!()
+        }
+        async fn create_or_renew(
+            &self,
+            _: &str,
+            _: &ShareUpsertRequest,
+        ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+            unreachable!()
+        }
+        async fn fetch_mailbox(
+            &self,
+            _: &str,
+            _: &ShareBundleAccess,
+            _: u64,
+            _: u16,
+        ) -> Result<ShareMailboxPage, ShareLifecycleError> {
+            unreachable!()
+        }
+        async fn ack_mailbox(&self, _: &str, _: u64) -> Result<(), ShareLifecycleError> {
+            unreachable!()
+        }
+        async fn revoke_share(&self, _: &str) -> Result<(), ShareLifecycleError> {
+            if self.fail.load(Ordering::SeqCst) {
+                Err(ShareLifecycleError::Relay("injected delete crash".into()))
+            } else {
+                Ok(())
+            }
+        }
+        async fn upload_snapshot(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[u8],
+        ) -> Result<ManagedShareSnapshotRef, ShareLifecycleError> {
+            unreachable!()
+        }
+        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), ShareLifecycleError> {
+            unreachable!()
+        }
+        async fn fetch_snapshot(
+            &self,
+            _: &str,
+            _: &str,
+            _: &ShareBundleAccess,
+        ) -> Result<ManagedSnapshotCiphertext, ShareLifecycleError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn revoke_persists_pending_before_remote_delete_and_retries_to_tombstone() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let share_store =
+            Arc::new(DurableShareStore::open_at(temporary.path().join("shares")).expect("shares"));
+        share_store.save(&record(temporary.path())).expect("intent");
+        let review_store = Arc::new(
+            crate::review::store::ReviewStore::open_at(temporary.path().join("reviews"))
+                .expect("reviews"),
+        );
+        let config = Arc::new(crate::review::bootstrap::BootstrapConfig {
+            relay_url: "http://127.0.0.1:9".into(),
+            identity_dir: Some(temporary.path().join("identity")),
+        });
+        let bootstrap =
+            Arc::new(Bootstrapper::new(Arc::clone(&review_store), config).expect("bootstrap"));
+        let relay = Arc::new(RevokeRelay {
+            fail: AtomicBool::new(true),
+        });
+        let service = DurableShareService::new(
+            Arc::clone(&share_store),
+            review_store,
+            relay.clone(),
+            bootstrap,
+        );
+
+        assert!(service.revoke(SHARE_ID).await.is_err());
+        let pending = share_store.load(SHARE_ID).expect("pending");
+        assert_eq!(pending.state, DurableShareState::RevokePending);
+        assert!(
+            pending.share_secret.is_some(),
+            "retry capability cleared before remote delete"
+        );
+
+        relay.fail.store(false, Ordering::SeqCst);
+        service.revoke(SHARE_ID).await.expect("retry revoke");
+        let revoked = share_store.load(SHARE_ID).expect("tombstone");
+        assert_eq!(revoked.state, DurableShareState::Revoked);
+        assert!(revoked.share_secret.is_none());
+    }
+
+    #[test]
+    fn managed_snapshot_wire_is_nonce_ciphertext_and_exact_context_bound() {
+        let snapshot = crate::review::bootstrap::DurableEpochSnapshot {
+            file_id: serde_json::from_value(serde_json::Value::String("file-a".into())).unwrap(),
+            snapshot_id: serde_json::from_value(serde_json::Value::String("snapshot-a".into()))
+                .unwrap(),
+            plaintext: crate::review::model::SnapshotPlaintext {
+                doc_type: crate::review::model::DocType::Markdown,
+                content: "# secret\n".into(),
+                anchor_index: None,
+            },
+        };
+        let key = [0x55; 32];
+        let sealed = seal_managed_snapshot(SHARE_ID, 4, &snapshot, &key).expect("seal");
+        assert!(sealed.len() > 24 + 16);
+        let aad = crate::review::crypto::canonical::to_canonical_bytes(&ManagedSnapshotAad {
+            v: 3,
+            purpose: "attn durable share snapshot v3",
+            share_id: SHARE_ID,
+            epoch: 4,
+            file_id: "file-a",
+            snapshot_id: "snapshot-a",
+        })
+        .unwrap();
+        let plaintext = XChaCha20Poly1305::new((&key).into())
+            .decrypt(
+                (&sealed[..24]).into(),
+                Payload {
+                    msg: &sealed[24..],
+                    aad: &aad,
+                },
+            )
+            .expect("open");
+        let value: serde_json::Value = serde_json::from_slice(&plaintext).expect("json");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "v": 3, "fileId": "file-a", "snapshotId": "snapshot-a", "docType": "markdown", "content": "# secret\n"
+            })
+        );
+        let wrong_aad = crate::review::crypto::canonical::to_canonical_bytes(&ManagedSnapshotAad {
+            v: 3,
+            purpose: "attn durable share snapshot v3",
+            share_id: SHARE_ID,
+            epoch: 5,
+            file_id: "file-a",
+            snapshot_id: "snapshot-a",
+        })
+        .unwrap();
+        assert!(
+            XChaCha20Poly1305::new((&key).into())
+                .decrypt(
+                    (&sealed[..24]).into(),
+                    Payload {
+                        msg: &sealed[24..],
+                        aad: &wrong_aad
+                    },
+                )
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn http_client_scopes_bundle_read_and_owner_revoke_headers() {
+        let server = MockServer::start().await;
+        let identity = DeviceIdentity::generate().expect("identity");
+        let client =
+            HttpShareRelayClient::with_http_client(server.uri(), &identity, reqwest::Client::new())
+                .expect("client");
+        let bundle_id = "B".repeat(22);
+        let record_json = serde_json::json!({
+            "v": 3, "shareId": SHARE_ID, "ownerSigningKey": identity.public_signing_key,
+            "epoch": 0, "revision": 0, "currentRoomId": "room-id", "snapshots": [],
+            "placeholders": [], "manifestDigest": EMPTY_MANIFEST_DIGEST,
+            "bundle": { "bundleId": bundle_id, "tier": "view", "sealedBundle": "sealed" },
+            "updatedAt": 1, "expiresAt": 2,
+            "mailbox": { "count": 0, "bytes": 0, "latestSeq": 0 }, "features": { "push": false }
+        });
+        Mock::given(method("GET"))
+            .and(path(format!("/v3/shares/{SHARE_ID}")))
+            .and(header("Attn-Share-Bundle", bundle_id.as_str()))
+            .and(header_exists("Attn-Admission"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(record_json))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let access = ShareBundleAccess {
+            bundle_id,
+            tier: ShareTier::View,
+            read_admission_key: SecretString::new(URL_SAFE_NO_PAD.encode([7u8; 32])),
+            write_admission_key: None,
+        };
+        assert_eq!(
+            client.fetch_share(SHARE_ID, &access).await.unwrap().epoch,
+            0
+        );
+
+        Mock::given(method("DELETE"))
+            .and(path(format!("/v3/shares/{SHARE_ID}")))
+            .and(header_exists("Attn-Owner-Signature"))
+            .and(header_exists("Attn-PoW"))
+            .and(header("Attn-Device-Id", identity.device_id.as_str()))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": { "code": "ATTN_SHARE_NOT_FOUND", "message": "already gone" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        client
+            .revoke_share(SHARE_ID)
+            .await
+            .expect("404 revoke is success");
     }
 }

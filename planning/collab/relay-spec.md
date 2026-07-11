@@ -1002,6 +1002,89 @@ For the same reason, an owner-authenticated bundle-mode snapshot PUT returns
 `409 ATTN_SHARE_MAIL_PENDING` before PoW, R2 upload, renewal, revision, or
 manifest mutation whenever retained mail exists; the owner drains first.
 
+### Poll-free share watch
+
+`GET /v3/shares/:shareId/watch` is a hibernatable WebSocket notification
+channel for bundle-enabled shares. Because the browser WebSocket constructor
+cannot set custom request headers, selection and read admission use one exact,
+ordered subprotocol list:
+
+```
+attn.v3, bundle.<16-byte-base64url-bundle-id>, read-hmac.<32-byte-base64url-mac>
+```
+
+The MAC uses the selected bundle's read admission key and the canonical empty-
+body `GET` request for the watch URL. Missing, duplicated, reordered, or extra
+tokens are rejected; the upgrade response selects only `attn.v3`. Unknown
+selectors return `401`; a parseable but incorrect MAC upgrades and immediately
+closes with `4000`, matching v3 room admission. Legacy single-key shares do not
+support watch. The edge snapshots Origin into the private Worker-to-DO context;
+native clients and allowlisted browser origins are accepted, while malformed
+or non-allowlisted browser origins fail closed.
+
+Accepted server sockets hibernate with a tag derived only from the selected
+bundle ID. Concurrent watches are bounded by `HARD_MAX_VIEWER_SOCKETS` both in
+total and proportionally across configured bundles; excess upgrades close
+with `4003`. The server sends JSON ping frames and requires pong activity,
+closing idle sockets after 90 seconds. A successful owner upsert or snapshot
+manifest commit broadcasts exactly
+`{"type":"share_changed","epoch":N,"revision":N}` to every selected tier.
+The frame contains no bundle ID, tier, sealed bundle, mailbox item, snapshot,
+room pointer, or ciphertext. Revocation sends that final frame before closing
+all watch sockets with `4001`; expiry follows the same terminal behavior.
+The cleanup tombstone, including the last epoch/revision and its recovery
+alarm, commits before terminal notification. Normal cleanup and alarm recovery
+therefore use the same terminal broadcast/close path: an isolate failure can
+delay notification but cannot leave the deleted share reconnectable. Terminal
+close is attempted even when sending the final frame fails. Incoming text
+frames are bounded to 1 KiB before JSON parsing.
+
+### Payloadless browser Web Push
+
+V3 rooms and tiered durable shares expose strict subscription resources at
+`/v3/rooms/:roomId/push-subscriptions/:deviceId` and
+`/v3/shares/:shareId/push-subscriptions/:deviceId`. `POST` accepts exactly
+`{v:3,endpoint,expirationTime,keys:{p256dh,auth}}`; `GET` returns the selected
+device binding; `DELETE` is idempotent. The path device must exactly match
+`Attn-Device-Id`. GET uses v3 read admission. POST and DELETE use v3 write
+admission and PoW bound to the same device, method, and canonical path. Share
+requests additionally require `Attn-Share-Bundle` and store only that selected
+bundle ID; view bundles cannot create subscriptions. Room subscriptions require
+an existing registered device. Endpoints are HTTPS-only, bounded, restricted
+to recognized browser push services, unique within a resource, and the store is
+capped at 32 active entries. A share device key already stored for one bundle
+cannot be overwritten or deleted through a sibling bundle. An expired stored
+entry counts as a new activation for cap enforcement, so it cannot be revived
+while all 32 active slots are occupied.
+
+Subscriptions expire no later than their room policy/share. Room subscription
+expiry is the minimum of `policy.expiresAt` and the browser expiry, never the
+room's broader hard-max alarm. A pre-expiry share renewal
+re-pins subscriptions to the renewed share expiry (still capped by a browser-
+supplied `expirationTime`); an expired share remains non-renewable. Revocation,
+expiry, and room deletion remove the subscription store with the resource.
+
+After an accepted *fresh* event envelope, RoomDO sends a push only to subscribed
+deliverable devices other than the authoring device and only when that target
+has no live room WebSocket. Signal envelopes target only their named device.
+After accepted fresh share mailbox items, ShareDO considers only subscriptions
+in the selected bundle, excludes the posting device, and suppresses delivery
+while that bundle has a live share watch. The share watch deliberately carries
+no device identity, so suppression is conservatively bundle-wide rather than
+allowing an unauthenticated claimed device ID to silence another recipient.
+Retries that add no new envelope never push. Both paths durably debounce each
+device for 30 seconds and delete the binding after a push endpoint returns 404
+or 410.
+
+Push delivery is an empty HTTP POST authenticated with a 12-hour ES256 VAPID
+JWT and a bounded 300-second push-service TTL, allowing a temporarily offline
+user agent to wake without retaining stale pings for long. It has no body and includes no room/share ID, author, event kind, text,
+room secret, bundle, or ciphertext. The private P-256 JWK is an environment
+secret, is never persisted in a DO, and must match the separately configured
+public VAPID key. Startup/runtime validation requires a canonical 32-byte
+private scalar and proves it signs for that public key; missing, malformed, or
+inconsistent config disables push without a fallback.
+
 Snapshot refs are a strict latest-per-file server-managed manifest. The owner
 uploads opaque ciphertext with an owner-signed, PoW-protected
 `PUT /v3/shares/:shareId/snapshots/:fileId/:snapshotId`. Both identifiers are
@@ -1019,3 +1102,14 @@ the superseded object is deleted (with durable retry on failure). Reads use
 per ciphertext, and 25 MiB across current refs. The generic share `POST` may
 only create an empty manifest or echo the current public manifest, preventing
 arbitrary R2 pinning.
+
+The owner removes a latest-per-file ref with an owner-signed, PoW-protected
+`DELETE /v3/shares/:shareId/snapshots/:fileId`. Bundle shares apply the same
+pending-mail fence as snapshot upload before consuming PoW. For a present ref,
+one atomic transaction removes it from the manifest, increments revision
+exactly once, renews the share, stores an artifact cleanup intent, and arms the
+cleanup alarm before R2 deletion is attempted. Watchers receive the resulting
+content-blind revision notification. Alarm retry makes the ciphertext deletion
+crash-safe. Deleting an absent file is an authenticated, PoW-consuming `204`
+no-op: revision and digest remain unchanged. Both successful forms return
+`Attn-Share-Revision` and `Attn-Manifest-Digest` response headers.

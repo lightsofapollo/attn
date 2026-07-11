@@ -239,6 +239,77 @@ pub struct InboundPipeline {
 }
 
 impl InboundPipeline {
+    /// Decrypt, verify, authorize, and policy-check a complete event batch
+    /// without mutating device attestation state or the event store. Callers
+    /// use this before any external registration or durable append.
+    pub async fn preflight_event_envelopes<F>(
+        &self,
+        envelopes: &[MailboxEnvelope],
+        allow: F,
+    ) -> Result<Vec<ReviewEvent>, InboundError>
+    where
+        F: Fn(usize, &ReviewEvent) -> bool,
+    {
+        let keys = self.keys.read().await.clone();
+        let mut authorizations = self.authorizations.read().await.clone();
+        let mut events = Vec::with_capacity(envelopes.len());
+        for (index, envelope) in envelopes.iter().enumerate() {
+            if envelope.kind != EnvelopeKind::Event {
+                return Err(InboundError::KindMismatch {
+                    expected: EnvelopeKind::Event,
+                    actual: envelope.kind,
+                });
+            }
+            let event = match disassemble_event_envelope(DisassembleInput {
+                envelope,
+                event_key: self.event_key,
+                verifying_keys: &keys,
+            }) {
+                Ok(event) => event,
+                Err(EnvelopeError::UnknownSigner(keyid)) => {
+                    return Err(InboundError::UnknownSigner {
+                        signing_key_id: keyid,
+                    });
+                }
+                Err(error) => return Err(InboundError::Envelope(error)),
+            };
+            authorize_event(&event, &mut authorizations)?;
+            if !allow(index, &event) {
+                return Err(InboundError::UnauthorizedEvent);
+            }
+            events.push(event);
+        }
+        Ok(events)
+    }
+
+    /// Commit an already-preflighted batch. Authorization state is staged for
+    /// the whole batch before the first append, preventing a partial
+    /// attestation from becoming observable when a later event is invalid.
+    pub async fn commit_preflighted_events(
+        &self,
+        room_id: &RoomId,
+        events: &[ReviewEvent],
+    ) -> Result<Vec<ImportOutcome>, InboundError> {
+        let mut guard = self.authorizations.write().await;
+        let mut staged = guard.clone();
+        for event in events {
+            authorize_event(event, &mut staged)?;
+        }
+        let mut outcomes = Vec::with_capacity(events.len());
+        for event in events {
+            let newly_imported = self
+                .store
+                .append_event(room_id, event)
+                .map_err(|error| InboundError::Store(error.to_string()))?;
+            outcomes.push(ImportOutcome {
+                event: event.clone(),
+                newly_imported,
+            });
+        }
+        *guard = staged;
+        Ok(outcomes)
+    }
+
     /// Construct a new pipeline. The three AEAD keys must be derived from the
     /// same `rootKey` via `crypto::kdf::derive_room_keys` so the kind/key
     /// mapping (see crypto-spec.md data-classification table) is consistent.
@@ -291,6 +362,24 @@ impl InboundPipeline {
         room_id: &RoomId,
         envelope: &MailboxEnvelope,
     ) -> Result<ImportOutcome, InboundError> {
+        self.import_event_envelope_if(room_id, envelope, |_| true)
+            .await
+    }
+
+    /// Import through the full crypto/authorization pipeline while applying
+    /// one caller policy immediately before persistence. Durable-share
+    /// offline intake uses this to admit only its frozen attestation followed
+    /// by comments; checking after `import_event_envelope` would be too late
+    /// because the event log append has already happened.
+    pub async fn import_event_envelope_if<F>(
+        &self,
+        room_id: &RoomId,
+        envelope: &MailboxEnvelope,
+        allow: F,
+    ) -> Result<ImportOutcome, InboundError>
+    where
+        F: FnOnce(&ReviewEvent) -> bool,
+    {
         if envelope.kind != EnvelopeKind::Event {
             return Err(InboundError::KindMismatch {
                 expected: EnvelopeKind::Event,
@@ -321,6 +410,9 @@ impl InboundPipeline {
 
         let mut authorizations = self.authorizations.write().await;
         authorize_event(&event, &mut authorizations)?;
+        if !allow(&event) {
+            return Err(InboundError::UnauthorizedEvent);
+        }
 
         let newly_imported = self
             .store
@@ -870,6 +962,18 @@ mod tests {
             }
             other => panic!("expected CommentCreated, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn caller_policy_rejects_before_event_log_append() {
+        let (pipeline, store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let envelope = mint_event_envelope(pipeline.event_key, signer, &room_id);
+        let error = pipeline
+            .import_event_envelope_if(&room_id, &envelope, |_| false)
+            .await
+            .expect_err("caller policy must reject");
+        assert!(matches!(error, InboundError::UnauthorizedEvent));
+        assert_eq!(store.iter_events(&room_id).expect("events").count(), 0);
     }
 
     #[tokio::test]

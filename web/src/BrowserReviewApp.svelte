@@ -44,6 +44,7 @@
     requestReviewDecorationsRebuild,
   } from './lib/prosemirror/review-decorations';
   import { BrowserSession, type BrowserSessionState } from './lib/review/browser-session';
+  import type { DurableShareBrowserSessionFacade } from './lib/review/browser-share-production';
   import type { ParsedInvite } from './lib/review/browser-invite';
   import { hasTextSelection } from './lib/review/popover-anchor';
   import { resolveAnchor } from './lib/review/resolver';
@@ -56,7 +57,7 @@
      * WebSocketLike factory. Production callers leave this undefined and the
      * component constructs its own session from `window.location`.
      */
-    session?: BrowserSession;
+    session?: BrowserSession | DurableShareBrowserSessionFacade;
     /** Forwarded to `BrowserSession` when `session` is not provided. */
     relayUrl?: string;
     /** Parsed synchronously by the hosted bootstrap before UI chunks load. */
@@ -108,7 +109,7 @@
   const initialInviteError = untrack(() => inviteError);
   const initialRememberedRoomId = untrack(() => rememberedRoomId);
 
-  function buildSession(): BrowserSession {
+  function buildSession(): BrowserSession | DurableShareBrowserSessionFacade {
     if (initialInjected) return initialInjected;
     return new BrowserSession({
       relayUrl: initialRelayUrl,
@@ -121,7 +122,7 @@
     });
   }
 
-  const session: BrowserSession = buildSession();
+  const session = buildSession();
   // The hosted shell dedicates a permanent 320px rail to review threads, so
   // keep the shared margin in its expanded/card mode instead of the native
   // app's collapsed 48px avatar-gutter mode.
@@ -131,6 +132,7 @@
   // to construct the session with an `onState` that updates a shared variable;
   // we also read the current state here so the initial render is correct.
   if (initialInjected) {
+    if ('setStateObserver' in initialInjected) initialInjected.setStateObserver((next) => { sessionState = next; });
     sessionState = initialInjected.getState();
   }
 
@@ -147,7 +149,7 @@
   });
 
   onDestroy(() => {
-    if (!initialInjected) {
+    if (!initialInjected || ('closeOnDestroy' in initialInjected && initialInjected.closeOnDestroy === true)) {
       session.close();
     }
   });

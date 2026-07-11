@@ -228,6 +228,13 @@ describe("durable v3 shares", () => {
     } });
     expect(blockedSnapshot.status).toBe(409);
     expect((await blockedSnapshot.json() as { error: { code: string } }).error.code).toBe("ATTN_SHARE_MAIL_PENDING");
+    const blockedDeleteUrl = `${url}/snapshots/readme`;
+    const blockedDelete = await SELF.fetch(blockedDeleteUrl, { method: "DELETE", headers: {
+      "Attn-Device-Id": shareId,
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "DELETE", url: blockedDeleteUrl, privateKey: owner.privateKey }),
+    } });
+    expect(blockedDelete.status).toBe(409);
+    expect((await blockedDelete.json() as { error: { code: string } }).error.code).toBe("ATTN_SHARE_MAIL_PENDING");
     expect((await env.RELAY_BLOBS.list({ prefix: shareArtifactPrefix(shareId) })).objects).toHaveLength(0);
     const unchanged = await SELF.fetch(url, { headers: {
       "Attn-Share-Bundle": bundles[0].bundleId,
@@ -360,6 +367,33 @@ describe("durable v3 shares", () => {
     expect(manifest[0]).toMatchObject({ fileId: "readme", snapshotId: "snapshot-two", ciphertextBytes: 2 });
     expect(manifest[0]).not.toHaveProperty("artifactId");
 
+    const snapshotDeletePow = await mintPowForTests({
+      roomId: fixture.shareId, deviceId: fixture.shareId, method: "DELETE",
+      path: `/v3/shares/${fixture.shareId}/snapshots/readme`, difficulty: 12,
+      expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}p-delete`,
+    });
+    const deletedSnapshot = await SELF.fetch(snapshotUrl, { method: "DELETE", headers: {
+      "Attn-Device-Id": fixture.shareId,
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "DELETE", url: snapshotUrl, privateKey: fixture.owner.privateKey }),
+      "Attn-PoW": snapshotDeletePow,
+    } });
+    expect(deletedSnapshot.status).toBe(204);
+    expect(deletedSnapshot.headers.get("Attn-Share-Revision")).toBe("3");
+    expect(deletedSnapshot.headers.get("Attn-Manifest-Digest")).toBe("T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU");
+    expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(0);
+    const absentDeletePow = await mintPowForTests({
+      roomId: fixture.shareId, deviceId: fixture.shareId, method: "DELETE",
+      path: `/v3/shares/${fixture.shareId}/snapshots/readme`, difficulty: 12,
+      expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}p-delete-again`,
+    });
+    const absentDelete = await SELF.fetch(snapshotUrl, { method: "DELETE", headers: {
+      "Attn-Device-Id": fixture.shareId,
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "DELETE", url: snapshotUrl, privateKey: fixture.owner.privateKey }),
+      "Attn-PoW": absentDeletePow,
+    } });
+    expect(absentDelete.status).toBe(204);
+    expect(absentDelete.headers.get("Attn-Share-Revision")).toBe("3");
+
     const deletePow = await mintPowForTests({
       roomId: fixture.shareId,
       deviceId: fixture.shareId,
@@ -454,6 +488,40 @@ describe("durable v3 shares", () => {
       await state.storage.put(`artifact:delete:${artifactId}`, fixture.shareId);
       await instance.alarm();
     });
+    expect(await env.RELAY_BLOBS.head(objectKey)).toBeNull();
+  });
+
+  it("recovers snapshot-delete ciphertext cleanup after the manifest transaction committed", async () => {
+    const fixture = await createShare("share-artifact-delete-recovery");
+    expect((await uploadSnapshot(
+      fixture,
+      "removed-file",
+      "removed-snapshot",
+      new Uint8Array([2, 7, 1, 8]),
+      `${FIXED_POW_RAND}delete-recovery`,
+    )).status).toBe(201);
+    const stub = env.RELAY_SHARES.get(env.RELAY_SHARES.idFromName(fixture.shareId));
+    let objectKey = "";
+    await runInDurableObject(stub, async (_instance, state) => {
+      const record = await state.storage.get<{
+        revision: number;
+        snapshots: Array<{ artifactId: string }>;
+      } & Record<string, unknown>>("share:record");
+      const artifactId = record?.snapshots[0]?.artifactId;
+      if (record === undefined || artifactId === undefined) throw new Error("missing stored snapshot");
+      objectKey = shareArtifactObjectKey(fixture.shareId, artifactId);
+      await state.storage.transaction(async transaction => {
+        await transaction.put("share:record", { ...record, snapshots: [], revision: record.revision + 1 });
+        await transaction.put(`artifact:delete:${artifactId}`, fixture.shareId);
+        await transaction.setAlarm(Date.now());
+      });
+    });
+    expect(await env.RELAY_BLOBS.head(objectKey)).not.toBeNull();
+    const manifest = await SELF.fetch(fixture.url, {
+      headers: { "Attn-Admission": await admission("read", fixture.read, "GET", fixture.url) },
+    });
+    expect(await manifest.json()).toMatchObject({ revision: 2, snapshots: [] });
+    await runInDurableObject(stub, async instance => instance.alarm());
     expect(await env.RELAY_BLOBS.head(objectKey)).toBeNull();
   });
 

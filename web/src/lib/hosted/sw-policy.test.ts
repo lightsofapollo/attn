@@ -43,6 +43,11 @@ assertEq(
   'review navigation',
 );
 assertEq(
+  decideFetch({ ...base, mode: 'navigate', url: `${ORIGIN}/s/share-1` }),
+  { kind: 'navigation-network-first', shellPath: '/review/' },
+  'durable share navigation',
+);
+assertEq(
   decideFetch({ ...base, mode: 'navigate', url: `${ORIGIN}/anything` }),
   { kind: 'navigation-network-first', shellPath: '/' },
   'landing fallback',

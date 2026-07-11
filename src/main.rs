@@ -478,6 +478,14 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         std::thread::Builder::new()
             .name("review-resume-known".to_string())
             .spawn(move || {
+                // Durable shares are reconciled before ordinary room resume:
+                // retry revoke-pending tombstones, revalidate owner paths,
+                // restore any deterministic epoch room, and owner-touch the
+                // 90-day share. This prevents a stale public pointer from
+                // racing the room runtime back online.
+                if let Err(error) = mgr.reconcile_durable_shares() {
+                    tracing::warn!("durable share boot reconciliation failed: {error:#}");
+                }
                 let resumed = mgr.resume_known_rooms();
                 if !resumed.is_empty() {
                     tracing::info!("resumed {} known room(s) on boot", resumed.len());

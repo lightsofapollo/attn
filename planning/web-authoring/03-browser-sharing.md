@@ -34,7 +34,10 @@ changes the browser-local workspace source of truth.
 
 Run the existing collab owner authority and owner-only accept/reject/apply paths
 in the browser tab. When the owner tab is absent, comments/suggestions remain
-mailbox-capable while live editing and owner actions show as paused.
+mailbox-capable while live editing and owner actions show as paused. Bind live
+steps to the current published snapshot epoch, accept broadcasts only from the
+authenticated owner device, and seal a lease-fenced/version-CASed authority
+checkpoint before commit and broadcast so reload cannot apply a step twice.
 
 ### Step 5 — Build the Share sheet
 

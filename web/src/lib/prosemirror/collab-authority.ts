@@ -50,6 +50,28 @@ export interface CollabBroadcast {
   clientIDs: Array<string | number>;
 }
 
+/**
+ * Workspace-key-sealed persistence payload for one file authority. The base
+ * document is deliberately omitted: callers already bind it to `epoch` via
+ * the published snapshot, and restore must supply that authenticated base.
+ */
+export interface CollabCheckpoint {
+  v: 1;
+  epoch: string;
+  version: number;
+  steps: unknown[];
+  clientIDs: Array<string | number>;
+}
+
+/** Candidate state produced without mutating the live authority. */
+export interface PreparedCollabBatch {
+  readonly expectedVersion: number;
+  readonly nextDoc: PmNode;
+  readonly steps: readonly Step[];
+  readonly clientIDs: ReadonlyArray<string | number>;
+  readonly checkpoint: CollabCheckpoint;
+}
+
 /** Serialize an array of steps for the wire. */
 export function serializeSteps(steps: readonly Step[]): unknown[] {
   return steps.map((step) => step.toJSON());
@@ -83,12 +105,52 @@ export interface ReceiveResult {
  * submissions and broadcasts {@link stepsSince} back out.
  */
 export class CollabAuthority {
+  readonly epoch: string;
   private currentDoc: PmNode;
   private readonly steps: Step[] = [];
   private readonly stepClientIDs: Array<string | number> = [];
 
-  constructor(doc: PmNode) {
+  constructor(doc: PmNode, epoch = 'legacy') {
+    if (epoch.length === 0)
+      throw new Error('collab authority epoch is required');
+    this.epoch = epoch;
     this.currentDoc = doc;
+  }
+
+  /**
+   * Restore an authority by replaying every checkpoint step against the
+   * authenticated base document. Validation is all-or-nothing: malformed
+   * metadata, an epoch mismatch, or any non-applying step throws before an
+   * authority is returned.
+   */
+  static fromCheckpoint(
+    doc: PmNode,
+    epoch: string,
+    checkpoint: CollabCheckpoint,
+  ): CollabAuthority {
+    validateCheckpoint(checkpoint, epoch);
+    const restored = new CollabAuthority(doc, epoch);
+    const steps = deserializeSteps(checkpoint.steps);
+    let nextDoc = doc;
+    for (const step of steps) {
+      let applied;
+      try {
+        applied = step.apply(nextDoc);
+      } catch {
+        throw new Error(
+          'collab checkpoint step does not apply to base document',
+        );
+      }
+      if (!applied.doc)
+        throw new Error(
+          'collab checkpoint step does not apply to base document',
+        );
+      nextDoc = applied.doc;
+    }
+    restored.currentDoc = nextDoc;
+    restored.steps.push(...steps);
+    restored.stepClientIDs.push(...checkpoint.clientIDs);
+    return restored;
   }
 
   /** The canonical document at the latest version. */
@@ -99,6 +161,67 @@ export class CollabAuthority {
   /** Monotonic version — equal to the number of accepted steps. */
   get version(): number {
     return this.steps.length;
+  }
+
+  /** Immutable serialized state suitable for workspace-key sealing. */
+  exportCheckpoint(): CollabCheckpoint {
+    return {
+      v: 1,
+      epoch: this.epoch,
+      version: this.version,
+      steps: serializeSteps(this.steps),
+      clientIDs: [...this.stepClientIDs],
+    };
+  }
+
+  /**
+   * Validate and apply a complete batch against a temporary document. The
+   * live document/log are untouched until {@link commitPrepared} is called.
+   */
+  prepareSteps(
+    version: number,
+    steps: readonly Step[],
+    clientID: string | number,
+  ): PreparedCollabBatch | null {
+    if (version !== this.version) return null;
+    if (steps.length === 0) return null;
+    if (!validClientId(clientID)) return null;
+    let nextDoc = this.currentDoc;
+    for (const step of steps) {
+      let applied;
+      try {
+        applied = step.apply(nextDoc);
+      } catch {
+        return null;
+      }
+      if (!applied.doc) return null;
+      nextDoc = applied.doc;
+    }
+    const nextSteps = [...this.steps, ...steps];
+    const nextClientIDs = [...this.stepClientIDs, ...steps.map(() => clientID)];
+    return {
+      expectedVersion: version,
+      nextDoc,
+      steps: [...steps],
+      clientIDs: steps.map(() => clientID),
+      checkpoint: {
+        v: 1,
+        epoch: this.epoch,
+        version: nextSteps.length,
+        steps: serializeSteps(nextSteps),
+        clientIDs: nextClientIDs,
+      },
+    };
+  }
+
+  /** Commit a previously prepared batch, failing closed if state advanced. */
+  commitPrepared(prepared: PreparedCollabBatch): void {
+    if (prepared.expectedVersion !== this.version) {
+      throw new Error('collab authority advanced before prepared batch commit');
+    }
+    this.currentDoc = prepared.nextDoc;
+    this.steps.push(...prepared.steps);
+    this.stepClientIDs.push(...prepared.clientIDs);
   }
 
   /**
@@ -112,21 +235,9 @@ export class CollabAuthority {
     steps: readonly Step[],
     clientID: string | number,
   ): ReceiveResult {
-    if (version !== this.version) {
-      return { accepted: false, version: this.version };
-    }
-    for (const step of steps) {
-      const applied = step.apply(this.currentDoc);
-      if (!applied.doc) {
-        // A step that doesn't apply cleanly against the canonical doc is a
-        // protocol violation (corruption / schema drift). Reject the whole
-        // batch rather than persist a partial, divergent state.
-        return { accepted: false, version: this.version };
-      }
-      this.currentDoc = applied.doc;
-      this.steps.push(step);
-      this.stepClientIDs.push(clientID);
-    }
+    const prepared = this.prepareSteps(version, steps, clientID);
+    if (!prepared) return { accepted: false, version: this.version };
+    this.commitPrepared(prepared);
     return { accepted: true, version: this.version };
   }
 
@@ -142,4 +253,51 @@ export class CollabAuthority {
       clientIDs: this.stepClientIDs.slice(version),
     };
   }
+}
+
+function validateCheckpoint(checkpoint: CollabCheckpoint, epoch: string): void {
+  if (!checkpoint || checkpoint.v !== 1)
+    throw new Error('invalid collab checkpoint version');
+  if (checkpoint.epoch !== epoch)
+    throw new Error('collab checkpoint epoch mismatch');
+  if (!Number.isSafeInteger(checkpoint.version) || checkpoint.version < 0) {
+    throw new Error('invalid collab checkpoint version counter');
+  }
+  if (
+    !Array.isArray(checkpoint.steps) ||
+    !Array.isArray(checkpoint.clientIDs)
+  ) {
+    throw new Error('invalid collab checkpoint arrays');
+  }
+  if (
+    checkpoint.steps.length !== checkpoint.clientIDs.length ||
+    checkpoint.version !== checkpoint.steps.length
+  ) {
+    throw new Error('collab checkpoint log lengths do not match');
+  }
+  for (const clientID of checkpoint.clientIDs) {
+    if (
+      !(
+        (typeof clientID === 'string' &&
+          clientID.length > 0 &&
+          new TextEncoder().encode(clientID).length <= 256) ||
+        (typeof clientID === 'number' &&
+          Number.isSafeInteger(clientID) &&
+          clientID >= 0)
+      )
+    ) {
+      throw new Error('invalid collab checkpoint client id');
+    }
+  }
+}
+
+function validClientId(clientID: string | number): boolean {
+  return (
+    (typeof clientID === 'string' &&
+      clientID.length > 0 &&
+      new TextEncoder().encode(clientID).length <= 256) ||
+    (typeof clientID === 'number' &&
+      Number.isSafeInteger(clientID) &&
+      clientID >= 0)
+  );
 }

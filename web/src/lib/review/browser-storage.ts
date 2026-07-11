@@ -20,6 +20,7 @@ import {
 import { isConstraintError, requestValue, transactionDone } from './browser-idb';
 import {
   GC_CREATED_INDEX,
+  MAX_SEALED_RECOVERY_BYTES,
   REVISION_HISTORY_INDEX,
   STORE_WORKSPACES,
   STORE_WORKSPACE_ENTRIES,
@@ -30,15 +31,31 @@ import {
   STORE_WORKSPACE_REVISIONS,
   STORE_WORKSPACE_SHARE_CAPS,
   WORKSPACE_INDEX,
+  WORKSPACE_RECORD_VERSION,
   WORKSPACE_UPDATED_INDEX,
+  validateWorkspaceLeaseRecord,
+  validateWorkspaceRecoveryRecord,
+  type WorkspaceLeaseRecord,
+  type WorkspaceRecoveryRecord,
   type WorkspaceShareCapRecord,
 } from './browser-workspace-schema';
 
 import {
   generateWorkspaceRootKey,
+  openRecovery,
+  sealRecovery,
   validateWorkspaceRootKey,
 } from './browser-workspace-crypto';
-import { WorkspaceStore } from './browser-workspace-store';
+import {
+  collabCheckpointRecoveryId,
+  decodeBrowserCollabCheckpoint,
+  encodeBrowserCollabCheckpoint,
+  isCollabCheckpointRecoveryId,
+  validateBrowserCollabCheckpoint,
+  validateCollabCheckpointRoomId,
+  type BrowserCollabCheckpoint,
+} from './browser-collab-checkpoint';
+import { WorkspaceStore, type WorkspaceFence } from './browser-workspace-store';
 import { WorkspaceShareStore } from './browser-workspace-share';
 import {
   WorkspaceLeaseManager,
@@ -132,6 +149,12 @@ export interface OutboxAcceptedEnvelope {
 
 export interface StoredSentEnvelope extends StoredInboundEnvelope {
   ackedAt: number;
+}
+
+export interface WorkspaceRecoverySummary {
+  workspaceId: string;
+  recoveryId: string;
+  createdAt: number;
 }
 
 /** Narrow contract consumed by a durable BrowserWs integration. */
@@ -246,6 +269,11 @@ interface PublicationShareRecord extends WorkspaceShareCapRecord {
     nonce: string;
     ciphertext: string;
   };
+}
+
+interface CollabRecoveryRecord extends WorkspaceRecoveryRecord {
+  collabEpoch: string;
+  collabVersion: number;
 }
 
 interface PrivateIdentityPayload {
@@ -1019,6 +1047,268 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
     if (!record) return null;
     validateWorkspaceRootKey(record.rootKey);
     return record.rootKey;
+  }
+
+  /** Seal an opaque recovery payload under this workspace's non-extractable key. */
+  async putWorkspaceRecovery(
+    workspaceId: string,
+    recoveryId: string,
+    plaintext: Uint8Array,
+  ): Promise<WorkspaceRecoverySummary> {
+    requireId(workspaceId, 'workspaceId');
+    requireId(recoveryId, 'recoveryId');
+    if (!(plaintext instanceof Uint8Array)) {
+      throw new BrowserStorageError('workspace recovery plaintext must be Uint8Array');
+    }
+    if (plaintext.length > MAX_SEALED_RECOVERY_BYTES - 16) {
+      throw new BrowserStorageError('workspace recovery plaintext exceeds its sealed size cap');
+    }
+    const rootKey = await this.getWorkspaceRootKey(workspaceId);
+    if (!rootKey) throw new BrowserStorageError(`workspace key is unavailable: ${workspaceId}`);
+    const copy = new Uint8Array(plaintext);
+    let sealed: { nonce: string; ciphertext: string };
+    try {
+      sealed = await sealRecovery(
+        this.cryptoImpl,
+        rootKey,
+        { workspaceId, recoveryId },
+        copy,
+      );
+    } finally {
+      copy.fill(0);
+    }
+    const createdAt = this.now();
+    requireTimestamp(createdAt, 'createdAt');
+    const record: WorkspaceRecoveryRecord = {
+      v: WORKSPACE_RECORD_VERSION,
+      workspaceId,
+      recoveryId,
+      createdAt,
+      nonce: sealed.nonce,
+      ciphertext: sealed.ciphertext,
+    };
+    validateWorkspaceRecoveryRecord(record);
+    const tx = this.db.transaction(STORE_WORKSPACE_RECOVERY, 'readwrite');
+    const done = transactionDone(tx);
+    tx.objectStore(STORE_WORKSPACE_RECOVERY).put(record);
+    await done;
+    return { workspaceId, recoveryId, createdAt };
+  }
+
+  /** Open an opaque recovery payload. Returned plaintext belongs to the caller. */
+  async getWorkspaceRecovery(
+    workspaceId: string,
+    recoveryId: string,
+  ): Promise<Uint8Array | null> {
+    requireId(workspaceId, 'workspaceId');
+    requireId(recoveryId, 'recoveryId');
+    const record = await this.get<WorkspaceRecoveryRecord>(STORE_WORKSPACE_RECOVERY, [
+      workspaceId,
+      recoveryId,
+    ]);
+    if (!record) return null;
+    validateWorkspaceRecoveryRecord(record);
+    if (record.workspaceId !== workspaceId || record.recoveryId !== recoveryId) {
+      throw new BrowserStorageError('workspace recovery routing metadata is invalid');
+    }
+    const rootKey = await this.getWorkspaceRootKey(workspaceId);
+    if (!rootKey) throw new BrowserStorageError(`workspace key is unavailable: ${workspaceId}`);
+    return openRecovery(
+      this.cryptoImpl,
+      rootKey,
+      { workspaceId, recoveryId },
+      { nonce: record.nonce, ciphertext: record.ciphertext },
+    );
+  }
+
+  async deleteWorkspaceRecovery(workspaceId: string, recoveryId: string): Promise<boolean> {
+    requireId(workspaceId, 'workspaceId');
+    requireId(recoveryId, 'recoveryId');
+    const tx = this.db.transaction(STORE_WORKSPACE_RECOVERY, 'readwrite');
+    const done = transactionDone(tx);
+    const store = tx.objectStore(STORE_WORKSPACE_RECOVERY);
+    const existing = await requestValue<unknown>(store.get([workspaceId, recoveryId]));
+    if (existing !== undefined) store.delete([workspaceId, recoveryId]);
+    await done;
+    return existing !== undefined;
+  }
+
+  async listWorkspaceRecoveries(workspaceId: string): Promise<WorkspaceRecoverySummary[]> {
+    requireId(workspaceId, 'workspaceId');
+    const tx = this.db.transaction(STORE_WORKSPACE_RECOVERY, 'readonly');
+    const done = transactionDone(tx);
+    const records = await requestValue<WorkspaceRecoveryRecord[]>(
+      tx
+        .objectStore(STORE_WORKSPACE_RECOVERY)
+        .index(WORKSPACE_INDEX)
+        .getAll(IDBKeyRange.only(workspaceId)),
+    );
+    await done;
+    for (const record of records) validateWorkspaceRecoveryRecord(record);
+    return records
+      .map(({ recoveryId, createdAt }) => ({ workspaceId, recoveryId, createdAt }))
+      .sort((left, right) =>
+        left.createdAt === right.createdAt
+          ? left.recoveryId.localeCompare(right.recoveryId)
+          : left.createdAt - right.createdAt,
+      );
+  }
+
+  /** Validate, canonicalize, and seal one transport-neutral authority checkpoint. */
+  async putCollabCheckpoint(
+    workspaceId: string,
+    checkpoint: BrowserCollabCheckpoint,
+    options: { fence: WorkspaceFence; expectedVersion: number },
+  ): Promise<WorkspaceRecoverySummary> {
+    validateBrowserCollabCheckpoint(checkpoint);
+    if (
+      !Number.isSafeInteger(options.expectedVersion) ||
+      options.expectedVersion < 0 ||
+      options.expectedVersion >= checkpoint.version
+    ) {
+      throw new BrowserStorageError('collab checkpoint expectedVersion is invalid');
+    }
+    const recoveryId = collabCheckpointRecoveryId(
+      checkpoint.roomId,
+      checkpoint.fileId,
+      checkpoint.epoch,
+    );
+    const rootKey = await this.getWorkspaceRootKey(workspaceId);
+    if (!rootKey) throw new BrowserStorageError(`workspace key is unavailable: ${workspaceId}`);
+    const bytes = encodeBrowserCollabCheckpoint(checkpoint);
+    let sealed: { nonce: string; ciphertext: string };
+    try {
+      sealed = await sealRecovery(
+        this.cryptoImpl,
+        rootKey,
+        { workspaceId, recoveryId },
+        bytes,
+      );
+    } finally {
+      bytes.fill(0);
+    }
+    const createdAt = this.now();
+    requireTimestamp(createdAt, 'createdAt');
+    const tx = this.db.transaction(
+      [STORE_WORKSPACE_RECOVERY, STORE_WORKSPACE_LEASES],
+      'readwrite',
+    );
+    const done = transactionDone(tx);
+    const lease = await requestValue<WorkspaceLeaseRecord | undefined>(
+      tx.objectStore(STORE_WORKSPACE_LEASES).get(workspaceId),
+    );
+    if (lease) validateWorkspaceLeaseRecord(lease);
+    if (
+      !lease ||
+      lease.holderId !== options.fence.holderId ||
+      lease.fencingToken !== options.fence.fencingToken
+    ) {
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new StorageConflictError('collab checkpoint write was fenced off');
+    }
+    const store = tx.objectStore(STORE_WORKSPACE_RECOVERY);
+    const existing = await requestValue<CollabRecoveryRecord | undefined>(
+      store.get([workspaceId, recoveryId]),
+    );
+    if (existing) {
+      validateWorkspaceRecoveryRecord(existing);
+      if (
+        existing.collabEpoch !== checkpoint.epoch ||
+        existing.collabVersion !== options.expectedVersion
+      ) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('collab checkpoint version moved');
+      }
+    } else if (options.expectedVersion !== 0) {
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new StorageConflictError('collab checkpoint base version is missing');
+    }
+    const record: CollabRecoveryRecord = {
+      v: WORKSPACE_RECORD_VERSION,
+      workspaceId,
+      recoveryId,
+      createdAt,
+      nonce: sealed.nonce,
+      ciphertext: sealed.ciphertext,
+      collabEpoch: checkpoint.epoch,
+      collabVersion: checkpoint.version,
+    };
+    validateWorkspaceRecoveryRecord(record);
+    store.put(record);
+    await done;
+    return { workspaceId, recoveryId, createdAt };
+  }
+
+  async getCollabCheckpoint(
+    workspaceId: string,
+    roomId: string,
+    fileId: string,
+    epoch: string,
+  ): Promise<BrowserCollabCheckpoint | null> {
+    const recoveryId = collabCheckpointRecoveryId(roomId, fileId, epoch);
+    const bytes = await this.getWorkspaceRecovery(workspaceId, recoveryId);
+    if (!bytes) return null;
+    try {
+      const checkpoint = decodeBrowserCollabCheckpoint(bytes);
+      if (
+        checkpoint.roomId !== roomId ||
+        checkpoint.fileId !== fileId ||
+        checkpoint.epoch !== epoch
+      ) {
+        throw new BrowserStorageError('collab checkpoint routing metadata is invalid');
+      }
+      return checkpoint;
+    } finally {
+      bytes.fill(0);
+    }
+  }
+
+  async deleteCollabCheckpoint(
+    workspaceId: string,
+    roomId: string,
+    fileId: string,
+    epoch: string,
+  ): Promise<boolean> {
+    return this.deleteWorkspaceRecovery(
+      workspaceId,
+      collabCheckpointRecoveryId(roomId, fileId, epoch),
+    );
+  }
+
+  async listCollabCheckpoints(
+    workspaceId: string,
+    roomId?: string,
+  ): Promise<BrowserCollabCheckpoint[]> {
+    if (roomId !== undefined) validateCollabCheckpointRoomId(roomId);
+    const summaries = await this.listWorkspaceRecoveries(workspaceId);
+    const checkpoints: BrowserCollabCheckpoint[] = [];
+    for (const summary of summaries) {
+      if (!isCollabCheckpointRecoveryId(summary.recoveryId)) continue;
+      const bytes = await this.getWorkspaceRecovery(workspaceId, summary.recoveryId);
+      if (!bytes) continue;
+      try {
+        const checkpoint = decodeBrowserCollabCheckpoint(bytes);
+        const expected = collabCheckpointRecoveryId(
+          checkpoint.roomId,
+          checkpoint.fileId,
+          checkpoint.epoch,
+        );
+        if (expected !== summary.recoveryId) {
+          throw new BrowserStorageError('collab checkpoint recovery id does not match its payload');
+        }
+        if (roomId === undefined || checkpoint.roomId === roomId) checkpoints.push(checkpoint);
+      } finally {
+        bytes.fill(0);
+      }
+    }
+    return checkpoints.sort((left, right) =>
+      left.roomId === right.roomId
+        ? left.fileId.localeCompare(right.fileId)
+        : left.roomId.localeCompare(right.roomId),
+    );
   }
 
   /**

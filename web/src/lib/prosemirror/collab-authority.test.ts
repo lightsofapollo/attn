@@ -8,8 +8,15 @@
 //
 // Run: npx tsx src/lib/prosemirror/collab-authority.test.ts
 
-import { collab, getVersion, receiveTransaction, sendableSteps } from 'prosemirror-collab';
+import {
+  collab,
+  getVersion,
+  receiveTransaction,
+  sendableSteps,
+} from 'prosemirror-collab';
+import { Slice } from 'prosemirror-model';
 import { EditorState } from 'prosemirror-state';
+import { ReplaceStep } from 'prosemirror-transform';
 
 import { schema } from '../schema';
 import {
@@ -40,7 +47,9 @@ function assert(cond: boolean, msg: string): void {
 
 /** Build a single-paragraph doc from text. */
 function docWithText(text: string) {
-  return schema.node('doc', null, [schema.node('paragraph', null, text ? [schema.text(text)] : [])]);
+  return schema.node('doc', null, [
+    schema.node('paragraph', null, text ? [schema.text(text)] : []),
+  ]);
 }
 
 /** A simulated participant editor with the collab plugin installed. */
@@ -135,7 +144,10 @@ defineCase('serialize → deserialize round-trips a step exactly', () => {
   const steps = deserializeSteps(sub!.steps);
   assert(steps.length === 1, `expected 1 step, got ${steps.length}`);
   const applied = steps[0].apply(start);
-  assert(applied.doc?.textContent === 'Xhello', `round-trip wrong: ${applied.doc?.textContent}`);
+  assert(
+    applied.doc?.textContent === 'Xhello',
+    `round-trip wrong: ${applied.doc?.textContent}`,
+  );
 });
 
 defineCase('authority rejects a stale-version submission', () => {
@@ -146,28 +158,135 @@ defineCase('authority rejects a stale-version submission', () => {
   b.type(6, 'B');
   // A submits first at version 0 → accepted.
   const subA = a.submission()!;
-  assert(authority.receiveSteps(subA.version, deserializeSteps(subA.steps), subA.clientID).accepted,
-    'A should be accepted at v0');
+  assert(
+    authority.receiveSteps(
+      subA.version,
+      deserializeSteps(subA.steps),
+      subA.clientID,
+    ).accepted,
+    'A should be accepted at v0',
+  );
   // B submits, still at version 0, but authority moved on → rejected.
   const subB = b.submission()!;
-  assert(!authority.receiveSteps(subB.version, deserializeSteps(subB.steps), subB.clientID).accepted,
-    'B should be rejected as stale');
+  assert(
+    !authority.receiveSteps(
+      subB.version,
+      deserializeSteps(subB.steps),
+      subB.clientID,
+    ).accepted,
+    'B should be rejected as stale',
+  );
 });
 
-defineCase('two concurrent editors converge to the same doc as the authority', () => {
-  const authority = new CollabAuthority(docWithText('hello'));
-  const a = makeClient('A');
-  const b = makeClient('B');
-  // Concurrent edits from the SAME base version (0): A prepends, B appends.
-  a.type(1, 'AAA'); // "AAAhello"
-  b.type(6, 'BBB'); // "helloBBB"
-  syncToQuiescence(authority, [a, b]);
-  assert(a.text === b.text, `A (${a.text}) != B (${b.text})`);
-  assert(a.text === authority.doc.textContent, `A (${a.text}) != authority (${authority.doc.textContent})`);
-  assert(a.version === authority.version, `version mismatch A=${a.version} auth=${authority.version}`);
-  // Both edits survived (order is authority-decided but both substrings present).
-  assert(a.text.includes('AAA') && a.text.includes('BBB'), `lost an edit: ${a.text}`);
+defineCase('multi-step failure is batch-atomic', () => {
+  const authority = new CollabAuthority(docWithText('hello'), 'snapshot-1');
+  const client = makeClient('A');
+  client.type(1, 'valid');
+  const valid = deserializeSteps(client.submission()!.steps)[0]!;
+  const invalid = new ReplaceStep(999, 1_000, Slice.empty);
+  const result = authority.receiveSteps(0, [valid, invalid], 'A');
+  assert(
+    !result.accepted,
+    'batch containing an invalid second step must be rejected',
+  );
+  assert(
+    authority.version === 0,
+    `rejected batch advanced version to ${authority.version}`,
+  );
+  assert(
+    authority.doc.textContent === 'hello',
+    `rejected batch mutated doc to ${authority.doc.textContent}`,
+  );
 });
+
+defineCase(
+  'checkpoint restores the exact version and log against its base epoch',
+  () => {
+    const base = docWithText('hello');
+    const authority = new CollabAuthority(base, 'snapshot-1');
+    const client = makeClient('A');
+    client.type(1, 'one');
+    const first = client.submission()!;
+    assert(
+      authority.receiveSteps(
+        first.version,
+        deserializeSteps(first.steps),
+        first.clientID,
+      ).accepted,
+      'first batch accepted',
+    );
+    const checkpoint = authority.exportCheckpoint();
+    const restored = CollabAuthority.fromCheckpoint(
+      base,
+      'snapshot-1',
+      checkpoint,
+    );
+    assert(restored.version === authority.version, 'restored version differs');
+    assert(restored.doc.eq(authority.doc), 'restored document differs');
+    assert(
+      JSON.stringify(restored.stepsSince(0)) ===
+        JSON.stringify(authority.stepsSince(0)),
+      'restored log differs',
+    );
+  },
+);
+
+defineCase(
+  'checkpoint restore fails closed on epoch and log-length mismatches',
+  () => {
+    const base = docWithText('hello');
+    const checkpoint = new CollabAuthority(
+      base,
+      'snapshot-1',
+    ).exportCheckpoint();
+    let epochRejected = false;
+    try {
+      CollabAuthority.fromCheckpoint(base, 'snapshot-2', checkpoint);
+    } catch {
+      epochRejected = true;
+    }
+    assert(epochRejected, 'wrong checkpoint epoch was accepted');
+    let lengthRejected = false;
+    try {
+      CollabAuthority.fromCheckpoint(base, 'snapshot-1', {
+        ...checkpoint,
+        version: 1,
+        steps: [{ stepType: 'replace', from: 1, to: 1 }],
+        clientIDs: [],
+      });
+    } catch {
+      lengthRejected = true;
+    }
+    assert(lengthRejected, 'mismatched checkpoint arrays were accepted');
+  },
+);
+
+defineCase(
+  'two concurrent editors converge to the same doc as the authority',
+  () => {
+    const authority = new CollabAuthority(docWithText('hello'));
+    const a = makeClient('A');
+    const b = makeClient('B');
+    // Concurrent edits from the SAME base version (0): A prepends, B appends.
+    a.type(1, 'AAA'); // "AAAhello"
+    b.type(6, 'BBB'); // "helloBBB"
+    syncToQuiescence(authority, [a, b]);
+    assert(a.text === b.text, `A (${a.text}) != B (${b.text})`);
+    assert(
+      a.text === authority.doc.textContent,
+      `A (${a.text}) != authority (${authority.doc.textContent})`,
+    );
+    assert(
+      a.version === authority.version,
+      `version mismatch A=${a.version} auth=${authority.version}`,
+    );
+    // Both edits survived (order is authority-decided but both substrings present).
+    assert(
+      a.text.includes('AAA') && a.text.includes('BBB'),
+      `lost an edit: ${a.text}`,
+    );
+  },
+);
 
 defineCase('three editors with interleaved edits all converge', () => {
   const authority = new CollabAuthority(docWithText('start'));
@@ -179,15 +298,19 @@ defineCase('three editors with interleaved edits all converge', () => {
   c.type(3, '3');
   syncToQuiescence(authority, [a, b, c]);
   const auth = authority.doc.textContent;
-  assert(a.text === auth && b.text === auth && c.text === auth,
-    `divergence: A=${a.text} B=${b.text} C=${c.text} auth=${auth}`);
+  assert(
+    a.text === auth && b.text === auth && c.text === auth,
+    `divergence: A=${a.text} B=${b.text} C=${c.text} auth=${auth}`,
+  );
   // A second round of concurrent edits on the now-shared doc.
   a.type(1, 'x');
   c.type(2, 'y');
   syncToQuiescence(authority, [a, b, c]);
   const auth2 = authority.doc.textContent;
-  assert(a.text === auth2 && b.text === auth2 && c.text === auth2,
-    `round 2 divergence: A=${a.text} B=${b.text} C=${c.text} auth=${auth2}`);
+  assert(
+    a.text === auth2 && b.text === auth2 && c.text === auth2,
+    `round 2 divergence: A=${a.text} B=${b.text} C=${c.text} auth=${auth2}`,
+  );
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

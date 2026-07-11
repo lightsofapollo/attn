@@ -7,6 +7,8 @@ import {
 } from './browser-crypto';
 import {
   resolveBrowserR2Snapshot,
+  sealSnapshotR2Body,
+  uploadBrowserR2Snapshot,
   type BrowserSnapshotSealedCache,
   type ResolveBrowserR2SnapshotOptions,
 } from './browser-snapshot-r2';
@@ -296,6 +298,51 @@ test('never reflects a capability URL from fetch failures', async () => {
   ));
   equal(message, 'R2 snapshot download failed', 'opaque download error');
   assert(!message.includes(CAP), 'capability must not appear in fetch error');
+});
+
+test('publisher seal matches the native R2 body construction', async () => {
+  const vector = makeVector({ envelopeId: 'env-r2-seal', bodyNonceByte: 0x55 });
+  const sealed = sealSnapshotR2Body({
+    snapshotKey: SNAPSHOT_KEY,
+    plaintext: vector.plaintext,
+    wrapper: vector.wrapper,
+    nonce: new Uint8Array(24).fill(0x55),
+  });
+  equal(base64UrlEncode(sealed), base64UrlEncode(vector.sealed), 'sealed body bytes');
+  sealed.fill(0);
+});
+
+test('upload presign is authenticated and the capability stays same-origin and opaque', async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  await uploadBrowserR2Snapshot({
+    relayUrl: RELAY,
+    roomId: ROOM,
+    admissionKey: ADMISSION_KEY,
+    envelopeId: 'env-upload',
+    authorId: 'participant-owner',
+    deviceId: 'device-owner',
+    sealedBody: new Uint8Array(64).fill(9),
+    powBits: 12,
+    now: () => NOW,
+    mintPow: async () => 'pow-token',
+    fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      if (calls.length === 1) {
+        return Response.json({
+          uploadUrl: `/v2/rooms/${ROOM}/blobs/env-upload?cap=${CAP}`,
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          expiresAt: NOW + 15 * 60_000,
+          blobKey: 'opaque-object-key',
+          leaseId: 'opaque-lease',
+        });
+      }
+      return new Response(null, { status: 204 });
+    }) as typeof fetch,
+  });
+  equal(calls.length, 2, 'presign then PUT');
+  assert(Boolean((calls[0]!.init.headers as Record<string, string>)['Attn-Admission']), 'admission header');
+  equal(calls[1]!.url, `${RELAY}/v2/rooms/${ROOM}/blobs/env-upload?cap=${CAP}`, 'same-origin PUT');
 });
 
 for (const item of cases) {

@@ -430,6 +430,84 @@ export function signEvent(
 }
 
 const ENVELOPE_ID_PREFIX = new TextEncoder().encode('envelope v2');
+const FILE_ID_PREFIX = new TextEncoder().encode('attn file v2');
+const SNAPSHOT_ID_PREFIX = new TextEncoder().encode('snapshot v2');
+
+/**
+ * Stable room-private file identity. The first snapshot hash is deliberately
+ * part of the derivation only for the initial publish; republish callers must
+ * retain and reuse the returned FileId.
+ */
+export function deriveFileId(
+  roomSecret: Uint8Array,
+  path: string,
+  firstSnapshotHash: string,
+): string {
+  if (!(roomSecret instanceof Uint8Array) || roomSecret.length !== 32) {
+    throw new Error('roomSecret must be a 32-byte Uint8Array');
+  }
+  if (typeof path !== 'string' || path.length === 0) throw new Error('path must be non-empty');
+  if (typeof firstSnapshotHash !== 'string' || firstSnapshotHash.length === 0) {
+    throw new Error('firstSnapshotHash must be non-empty');
+  }
+  const pathBytes = new TextEncoder().encode(path);
+  const hashBytes = new TextEncoder().encode(firstSnapshotHash);
+  const input = new Uint8Array(
+    FILE_ID_PREFIX.length + roomSecret.length + pathBytes.length + hashBytes.length,
+  );
+  let offset = 0;
+  input.set(FILE_ID_PREFIX, offset);
+  offset += FILE_ID_PREFIX.length;
+  input.set(roomSecret, offset);
+  offset += roomSecret.length;
+  input.set(pathBytes, offset);
+  offset += pathBytes.length;
+  input.set(hashBytes, offset);
+  const digest = sha256(input);
+  input.fill(0);
+  return base64UrlEncode(digest.subarray(0, 16));
+}
+
+/** Native-compatible SnapshotId using decimal ASCII for createdAt. */
+export function deriveSnapshotId(
+  roomId: string,
+  fileId: string,
+  baseHash: string,
+  createdAt: number,
+): string {
+  for (const [label, value] of [
+    ['roomId', roomId],
+    ['fileId', fileId],
+    ['baseHash', baseHash],
+  ] as const) {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`${label} must be non-empty`);
+    }
+  }
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0) {
+    throw new Error('createdAt must be a non-negative safe integer');
+  }
+  const encoder = new TextEncoder();
+  const parts = [
+    encoder.encode(roomId),
+    encoder.encode(fileId),
+    encoder.encode(baseHash),
+    encoder.encode(createdAt.toString(10)),
+  ];
+  const input = new Uint8Array(
+    SNAPSHOT_ID_PREFIX.length + parts.reduce((total, part) => total + part.length, 0),
+  );
+  let offset = 0;
+  input.set(SNAPSHOT_ID_PREFIX, offset);
+  offset += SNAPSHOT_ID_PREFIX.length;
+  for (const part of parts) {
+    input.set(part, offset);
+    offset += part.length;
+  }
+  const digest = sha256(input);
+  input.fill(0);
+  return base64UrlEncode(digest.subarray(0, 16));
+}
 
 /** Deterministic event envelope id used for relay dedupe across retries. */
 export function deriveEventEnvelopeId(roomId: string, eventId: string): string {

@@ -38,6 +38,8 @@ export interface BrowserOutboxOptions {
   admissionKey: Uint8Array;
   powBits: number;
   maxEventBytes: number;
+  /** Relay policy cap for `snapshot_blob`; defaults to maxEventBytes. */
+  maxSnapshotBytes?: number;
   fetchImpl?: (url: string, init: BrowserOutboxFetchInit) => Promise<BrowserOutboxResponse>;
   mintPow?: (
     input: { roomId: string; deviceId: string; method: 'POST'; path: string; difficulty: number },
@@ -85,6 +87,7 @@ export class BrowserOutbox {
   private readonly opts: BrowserOutboxOptions;
   private powBits: number;
   private maxEventBytes: number;
+  private maxSnapshotBytes: number;
   private readonly queue: MailboxEnvelope[] = [];
   private closed = false;
   private inFlight: Promise<void> | null = null;
@@ -113,9 +116,16 @@ export class BrowserOutbox {
     if (!Number.isSafeInteger(opts.maxEventBytes) || opts.maxEventBytes <= 0) {
       throw new Error('maxEventBytes must be a positive safe integer');
     }
+    if (
+      opts.maxSnapshotBytes !== undefined &&
+      (!Number.isSafeInteger(opts.maxSnapshotBytes) || opts.maxSnapshotBytes <= 0)
+    ) {
+      throw new Error('maxSnapshotBytes must be a positive safe integer');
+    }
     this.opts = opts;
     this.powBits = opts.powBits;
     this.maxEventBytes = opts.maxEventBytes;
+    this.maxSnapshotBytes = opts.maxSnapshotBytes ?? opts.maxEventBytes;
     this.backoffMs = opts.backoffInitialMs ?? BROWSER_OUTBOX_BACKOFF_INITIAL_MS;
     this.maxBackoffMs = opts.backoffMaxMs ?? BROWSER_OUTBOX_BACKOFF_MAX_MS;
     this.persistence = opts.persistence ?? null;
@@ -188,15 +198,22 @@ export class BrowserOutbox {
   }
 
   /** Apply an authenticated relay policy update without rebuilding the queue. */
-  updatePolicy(policy: { powBits: number; maxEventBytes: number }): void {
+  updatePolicy(policy: { powBits: number; maxEventBytes: number; maxSnapshotBytes?: number }): void {
     if (!Number.isInteger(policy.powBits) || policy.powBits < 12 || policy.powBits > 24) {
       throw new Error('powBits must be an integer in [12, 24]');
     }
     if (!Number.isSafeInteger(policy.maxEventBytes) || policy.maxEventBytes <= 0) {
       throw new Error('maxEventBytes must be a positive safe integer');
     }
+    if (
+      policy.maxSnapshotBytes !== undefined &&
+      (!Number.isSafeInteger(policy.maxSnapshotBytes) || policy.maxSnapshotBytes <= 0)
+    ) {
+      throw new Error('maxSnapshotBytes must be a positive safe integer');
+    }
     this.powBits = policy.powBits;
     this.maxEventBytes = policy.maxEventBytes;
+    if (policy.maxSnapshotBytes !== undefined) this.maxSnapshotBytes = policy.maxSnapshotBytes;
     for (const envelope of this.queue) this.validateEnvelope(envelope);
   }
 
@@ -400,15 +417,20 @@ export class BrowserOutbox {
   }
 
   private validateEnvelope(envelope: MailboxEnvelope): void {
-    if (envelope.kind !== 'event' && envelope.kind !== 'signal') {
-      throw new Error('browser outbox only accepts event or signal envelopes');
+    if (
+      envelope.kind !== 'event' &&
+      envelope.kind !== 'signal' &&
+      envelope.kind !== 'snapshot_blob'
+    ) {
+      throw new Error('browser outbox received an unsupported envelope kind');
     }
     if (envelope.roomId !== this.opts.roomId) throw new Error('envelope room does not match outbox');
     if (envelope.deviceId !== this.opts.deviceId) throw new Error('envelope device does not match outbox');
-    if (envelope.ciphertextBytes > this.maxEventBytes) {
+    const maxBytes = envelope.kind === 'snapshot_blob' ? this.maxSnapshotBytes : this.maxEventBytes;
+    if (envelope.ciphertextBytes > maxBytes) {
       throw new BrowserOutboxError(
         'ATTN_ENVELOPE_TOO_LARGE',
-        `encrypted event is ${envelope.ciphertextBytes} bytes; room limit is ${this.maxEventBytes}`,
+        `encrypted ${envelope.kind} is ${envelope.ciphertextBytes} bytes; room limit is ${maxBytes}`,
         true,
       );
     }

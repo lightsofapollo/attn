@@ -3,6 +3,7 @@ import {
   base64UrlEncode,
   deriveEventEnvelopeId,
   deriveEventId,
+  deriveNonceEnvelopeId,
   randomAeadNonce,
   signEvent,
   toCanonicalBytes,
@@ -37,6 +38,56 @@ export interface AssembleBrowserEventInput {
 export interface AssembledBrowserEvent {
   event: ReviewEvent;
   envelope: MailboxEnvelope;
+}
+
+export interface AssembleSnapshotBlobEnvelopeInput {
+  plaintext: Uint8Array;
+  snapshotKey: Uint8Array;
+  roomId: RoomId;
+  authorId: string;
+  deviceId: string;
+  /** Durable 16-byte nonce used only for EnvelopeId derivation. */
+  clientNonce: Uint8Array;
+  createdAt: number;
+  expiresAt: number;
+  /** Deterministic AEAD nonce override. Production callers must omit this. */
+  nonce?: Uint8Array;
+}
+
+/** Assemble native `kind: snapshot_blob` bytes without an embedded signature. */
+export function assembleSnapshotBlobEnvelope(
+  input: AssembleSnapshotBlobEnvelopeInput,
+): MailboxEnvelope {
+  validateSnapshotBlobInput(input);
+  const envelopeId = deriveNonceEnvelopeId(input.roomId, input.deviceId, input.clientNonce);
+  const aad: EnvelopeAad = {
+    v: 2,
+    roomId: input.roomId,
+    envelopeId,
+    kind: 'snapshot_blob',
+    authorId: input.authorId,
+    deviceId: input.deviceId,
+    createdAt: input.createdAt,
+  };
+  const nonce = input.nonce ? new Uint8Array(input.nonce) : randomAeadNonce();
+  try {
+    const ciphertext = aeadSeal(input.snapshotKey, nonce, input.plaintext, aad);
+    return {
+      v: 2,
+      roomId: input.roomId,
+      envelopeId,
+      authorId: input.authorId,
+      deviceId: input.deviceId,
+      createdAt: input.createdAt,
+      expiresAt: input.expiresAt,
+      kind: 'snapshot_blob',
+      nonce: base64UrlEncode(nonce),
+      ciphertext: base64UrlEncode(ciphertext),
+      ciphertextBytes: ciphertext.length,
+    };
+  } finally {
+    nonce.fill(0);
+  }
 }
 
 /**
@@ -106,6 +157,32 @@ function validateInput(input: AssembleBrowserEventInput): void {
   }
   if (input.nonce !== undefined && input.nonce.length !== 24) {
     throw new Error('nonce must be 24 bytes');
+  }
+  for (const [label, value] of [
+    ['roomId', input.roomId],
+    ['authorId', input.authorId],
+    ['deviceId', input.deviceId],
+  ] as const) {
+    if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} is required`);
+  }
+}
+
+function validateSnapshotBlobInput(input: AssembleSnapshotBlobEnvelopeInput): void {
+  if (!(input.plaintext instanceof Uint8Array)) throw new Error('plaintext must be Uint8Array');
+  if (!(input.snapshotKey instanceof Uint8Array) || input.snapshotKey.length !== 32) {
+    throw new Error('snapshotKey must be 32 bytes');
+  }
+  if (!(input.clientNonce instanceof Uint8Array) || input.clientNonce.length !== 16) {
+    throw new Error('clientNonce must be 16 bytes');
+  }
+  if (input.nonce !== undefined && input.nonce.length !== 24) {
+    throw new Error('nonce must be 24 bytes');
+  }
+  if (!Number.isSafeInteger(input.createdAt) || input.createdAt < 0) {
+    throw new Error('createdAt must be a non-negative safe integer');
+  }
+  if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt < input.createdAt) {
+    throw new Error('expiresAt must be a safe integer at or after createdAt');
   }
   for (const [label, value] of [
     ['roomId', input.roomId],

@@ -1,10 +1,13 @@
 import {
+  aeadSeal,
   aeadOpen,
   base64UrlDecode,
   buildAdmissionHeader,
   contentHash,
+  randomAeadNonce,
   type EnvelopeAad,
 } from './browser-crypto';
+import { mintBrowserPowInWorker, type BrowserPowInputs } from './browser-pow';
 import type { MailboxEnvelope } from './browser-ws';
 
 const EMPTY_BODY = new Uint8Array(0);
@@ -16,6 +19,158 @@ const R2_BODY_OVERHEAD_BYTES = 24 + 16;
  * attacker-supplied capabilities.
  */
 export const MAX_R2_DOWNLOAD_EXPIRY_MS = 6 * 60 * 1_000;
+export const MAX_R2_UPLOAD_EXPIRY_MS = 16 * 60 * 1_000;
+
+export interface SealSnapshotR2BodyOptions {
+  snapshotKey: Uint8Array;
+  plaintext: Uint8Array;
+  wrapper: MailboxEnvelope;
+  /** Deterministic test override. Production callers must omit this. */
+  nonce?: Uint8Array;
+}
+
+export type SnapshotUploadPowRequest = Omit<
+  BrowserPowInputs,
+  'expiresAt' | 'rand' | 'counterStart'
+>;
+
+export interface UploadBrowserR2SnapshotOptions {
+  relayUrl: string;
+  roomId: string;
+  admissionKey: Uint8Array;
+  envelopeId: string;
+  authorId: string;
+  deviceId: string;
+  sealedBody: Uint8Array;
+  powBits: number;
+  fetchImpl?: typeof fetch;
+  mintPow?: (input: SnapshotUploadPowRequest, signal: AbortSignal) => Promise<string>;
+  signal?: AbortSignal;
+  now?: () => number;
+}
+
+/** Seal `nonce || ciphertext || tag` using the wrapper's exact cleartext AAD. */
+export function sealSnapshotR2Body(options: SealSnapshotR2BodyOptions): Uint8Array {
+  if (!(options.snapshotKey instanceof Uint8Array) || options.snapshotKey.length !== 32) {
+    throw new Error('snapshotKey must be 32 bytes');
+  }
+  if (!(options.plaintext instanceof Uint8Array)) throw new Error('plaintext must be Uint8Array');
+  validateWrapper(options.wrapper);
+  if (options.nonce !== undefined && options.nonce.length !== 24) {
+    throw new Error('nonce must be 24 bytes');
+  }
+  const nonce = options.nonce ? new Uint8Array(options.nonce) : randomAeadNonce();
+  let ciphertext: Uint8Array | null = null;
+  try {
+    ciphertext = aeadSeal(
+      options.snapshotKey,
+      nonce,
+      options.plaintext,
+      wrapperAad(options.wrapper.roomId!, options.wrapper),
+    );
+    const body = new Uint8Array(nonce.length + ciphertext.length);
+    body.set(nonce, 0);
+    body.set(ciphertext, nonce.length);
+    return body;
+  } finally {
+    nonce.fill(0);
+    ciphertext?.fill(0);
+  }
+}
+
+/**
+ * Authenticated native-compatible presign + same-origin capability PUT.
+ * The capability is never returned, persisted, or included in an error.
+ */
+export async function uploadBrowserR2Snapshot(
+  options: UploadBrowserR2SnapshotOptions,
+): Promise<void> {
+  validateUploadInputs(options);
+  const relay = parseRelayOrigin(options.relayUrl);
+  const path = `/v2/rooms/${encodeURIComponent(options.roomId)}/blobs`;
+  const bodyJson = JSON.stringify({
+    envelopeId: options.envelopeId,
+    authorId: options.authorId,
+    deviceId: options.deviceId,
+    ciphertextBytes: options.sealedBody.length,
+  });
+  const bodyBytes = new TextEncoder().encode(bodyJson);
+  const signal = options.signal ?? new AbortController().signal;
+  const mint =
+    options.mintPow ??
+    ((input: SnapshotUploadPowRequest, abortSignal: AbortSignal) =>
+      mintBrowserPowInWorker(input, { signal: abortSignal }));
+  const fetchImpl = options.fetchImpl ?? fetch;
+  let presignResponse: Response;
+  try {
+    const pow = await mint(
+      {
+        roomId: options.roomId,
+        deviceId: options.deviceId,
+        method: 'POST',
+        path,
+        difficulty: options.powBits,
+      },
+      signal,
+    );
+    presignResponse = await fetchImpl(`${relay.origin}${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'Attn-Admission': buildAdmissionHeader(options.admissionKey, 'POST', path, bodyBytes),
+        'Attn-PoW': pow,
+      },
+      body: bodyJson,
+      signal,
+      credentials: 'omit',
+      cache: 'no-store',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+    });
+  } catch {
+    throw new Error('R2 snapshot upload presign request failed');
+  } finally {
+    bodyBytes.fill(0);
+  }
+  if (presignResponse.status !== 200) {
+    throw new Error(`R2 snapshot upload presign request failed (${presignResponse.status})`);
+  }
+
+  let value: unknown;
+  try {
+    value = await presignResponse.json();
+  } catch {
+    throw new Error('R2 snapshot upload presign response is invalid');
+  }
+  const uploadUrl = parsePresignedUpload(
+    value,
+    relay,
+    options.roomId,
+    options.envelopeId,
+    options.now?.() ?? Date.now(),
+  );
+  const uploadBody = new Uint8Array(options.sealedBody);
+  let uploadResponse: Response;
+  try {
+    uploadResponse = await fetchImpl(uploadUrl.href, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: uploadBody,
+      signal,
+      credentials: 'omit',
+      cache: 'no-store',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+    });
+  } catch {
+    throw new Error('R2 snapshot upload failed');
+  } finally {
+    uploadBody.fill(0);
+  }
+  if (uploadResponse.status !== 204) {
+    throw new Error(`R2 snapshot upload failed (${uploadResponse.status})`);
+  }
+}
 
 export interface BrowserSnapshotSealedCache {
   getSealed(
@@ -169,6 +324,41 @@ function validateInputs(options: ResolveBrowserR2SnapshotOptions): void {
   }
 }
 
+function validateWrapper(wrapper: MailboxEnvelope): void {
+  if (wrapper.v !== 2 || typeof wrapper.roomId !== 'string' || wrapper.roomId.length === 0) {
+    throw new Error('R2 snapshot wrapper metadata is invalid');
+  }
+  if (wrapper.kind !== 'snapshot_blob') throw new Error('R2 snapshot wrapper kind mismatch');
+  for (const value of [wrapper.envelopeId, wrapper.authorId, wrapper.deviceId]) {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error('R2 snapshot wrapper metadata is invalid');
+    }
+  }
+  if (!Number.isSafeInteger(wrapper.createdAt) || wrapper.createdAt < 0) {
+    throw new Error('R2 snapshot wrapper metadata is invalid');
+  }
+}
+
+function validateUploadInputs(options: UploadBrowserR2SnapshotOptions): void {
+  if (!(options.admissionKey instanceof Uint8Array) || options.admissionKey.length !== 32) {
+    throw new Error('admissionKey must be 32 bytes');
+  }
+  if (!(options.sealedBody instanceof Uint8Array) || options.sealedBody.length < R2_BODY_OVERHEAD_BYTES) {
+    throw new Error('sealedBody must contain an R2 nonce and authentication tag');
+  }
+  for (const [label, value] of [
+    ['roomId', options.roomId],
+    ['envelopeId', options.envelopeId],
+    ['authorId', options.authorId],
+    ['deviceId', options.deviceId],
+  ] as const) {
+    if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} is required`);
+  }
+  if (!Number.isInteger(options.powBits) || options.powBits < 12 || options.powBits > 24) {
+    throw new Error('powBits must be an integer in [12, 24]');
+  }
+}
+
 function parseRelayOrigin(relayUrl: string): URL {
   let relay: URL;
   try {
@@ -187,6 +377,60 @@ function parseRelayOrigin(relayUrl: string): URL {
     throw new Error('relayUrl must be an absolute HTTP(S) origin');
   }
   return relay;
+}
+
+function parsePresignedUpload(
+  value: unknown,
+  relay: URL,
+  roomId: string,
+  envelopeId: string,
+  now: number,
+): URL {
+  if (!isPlainRecord(value)) throw new Error('R2 snapshot upload presign response is invalid');
+  const keys = Object.keys(value).sort();
+  const expected = ['blobKey', 'expiresAt', 'headers', 'leaseId', 'method', 'uploadUrl'];
+  if (
+    keys.length !== expected.length ||
+    keys.some((key, index) => key !== expected[index]) ||
+    typeof value.uploadUrl !== 'string' ||
+    value.method !== 'PUT' ||
+    !isPlainRecord(value.headers) ||
+    Object.keys(value.headers).length !== 1 ||
+    value.headers['Content-Type'] !== 'application/octet-stream' ||
+    typeof value.blobKey !== 'string' ||
+    value.blobKey.length === 0 ||
+    typeof value.leaseId !== 'string' ||
+    value.leaseId.length === 0 ||
+    !Number.isSafeInteger(value.expiresAt) ||
+    !Number.isSafeInteger(now) ||
+    (value.expiresAt as number) <= now ||
+    (value.expiresAt as number) > now + MAX_R2_UPLOAD_EXPIRY_MS
+  ) {
+    throw new Error('R2 snapshot upload presign response is invalid');
+  }
+  let resolved: URL;
+  try {
+    resolved = new URL(value.uploadUrl, relay);
+  } catch {
+    throw new Error('R2 snapshot upload capability is invalid');
+  }
+  const expectedPath = blobPath(roomId, envelopeId);
+  const caps = resolved.searchParams.getAll('cap');
+  const queryKeys = [...resolved.searchParams.keys()];
+  if (
+    resolved.origin !== relay.origin ||
+    resolved.username !== '' ||
+    resolved.password !== '' ||
+    resolved.pathname !== expectedPath ||
+    resolved.hash !== '' ||
+    queryKeys.length !== 1 ||
+    queryKeys[0] !== 'cap' ||
+    caps.length !== 1 ||
+    caps[0] === ''
+  ) {
+    throw new Error('R2 snapshot upload capability is invalid');
+  }
+  return resolved;
 }
 
 function blobPath(roomId: string, envelopeId: string): string {

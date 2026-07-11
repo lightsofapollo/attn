@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { base64UrlDecode, toCanonicalString } from './browser-crypto';
-import { assembleBrowserEvent } from './browser-envelope';
+import { assembleBrowserEvent, assembleSnapshotBlobEnvelope } from './browser-envelope';
 import type { ReviewEventBody } from '../types';
 
 interface EnvelopeVector {
@@ -19,7 +19,8 @@ interface EnvelopeVector {
       };
       body: ReviewEventBody;
     };
-    keys: { eventKey: string };
+    keys: { eventKey?: string; snapshotKey?: string };
+    clientNonce?: string;
     signingKey: { private: string; public: string };
   };
   expected: {
@@ -58,7 +59,7 @@ function assertEqual(actual: unknown, expected: unknown, label: string): void {
 test('assembles the Rust event envelope corpus byte-for-byte', () => {
   const vector = corpus.vectors[0]!;
   const assembled = assembleBrowserEvent({
-    eventKey: base64UrlDecode(vector.inputs.keys.eventKey),
+    eventKey: base64UrlDecode(vector.inputs.keys.eventKey!),
     signingSecret: base64UrlDecode(vector.inputs.signingKey.private),
     signingPublic: base64UrlDecode(vector.inputs.signingKey.public),
     roomId: vector.inputs.event.meta.roomId,
@@ -81,7 +82,7 @@ test('assembles the Rust event envelope corpus byte-for-byte', () => {
 test('rejects unsafe timestamps and invalid nonce lengths', () => {
   const vector = corpus.vectors[0]!;
   const base = {
-    eventKey: base64UrlDecode(vector.inputs.keys.eventKey),
+    eventKey: base64UrlDecode(vector.inputs.keys.eventKey!),
     signingSecret: base64UrlDecode(vector.inputs.signingKey.private),
     signingPublic: base64UrlDecode(vector.inputs.signingKey.public),
     roomId: vector.inputs.event.meta.roomId,
@@ -105,6 +106,39 @@ test('rejects unsafe timestamps and invalid nonce lengths', () => {
   }
   assertEqual(unsafeRejected, true, 'unsafe createdAt rejected');
   assertEqual(nonceRejected, true, 'invalid nonce rejected');
+});
+
+test('assembles the Rust snapshot_blob corpus byte-for-byte', () => {
+  const vector = corpus.vectors.find((candidate) => candidate.expected.envelope.kind === 'snapshot_blob')!;
+  // The corpus ciphertext's plaintext is the canonical signed event assembled
+  // by the vector generator, so rebuild those exact event bytes first.
+  const event = assembleBrowserEvent({
+    eventKey: new Uint8Array(32),
+    signingSecret: base64UrlDecode(vector.inputs.signingKey.private),
+    signingPublic: base64UrlDecode(vector.inputs.signingKey.public),
+    roomId: vector.inputs.event.meta.roomId,
+    authorId: vector.inputs.event.meta.authorId,
+    deviceId: vector.inputs.event.meta.deviceId,
+    createdAt: vector.inputs.createdAt,
+    expiresAt: vector.expected.envelope.expiresAt as number,
+    parentEventIds: vector.inputs.event.meta.parentEventIds,
+    body: vector.inputs.event.body,
+    nonce: new Uint8Array(24),
+  }).event;
+  const exactPlaintext = new TextEncoder().encode(toCanonicalString(event));
+  const envelope = assembleSnapshotBlobEnvelope({
+    plaintext: exactPlaintext,
+    snapshotKey: base64UrlDecode(vector.inputs.keys.snapshotKey!),
+    roomId: vector.inputs.event.meta.roomId,
+    authorId: vector.inputs.event.meta.authorId,
+    deviceId: vector.inputs.event.meta.deviceId,
+    clientNonce: base64UrlDecode(vector.inputs.clientNonce!),
+    createdAt: vector.inputs.createdAt,
+    expiresAt: vector.expected.envelope.expiresAt as number,
+    nonce: base64UrlDecode(vector.inputs.aeadNonce),
+  });
+  assertEqual(toCanonicalString(envelope), toCanonicalString(vector.expected.envelope), 'snapshot envelope');
+  exactPlaintext.fill(0);
 });
 
 console.log(`browser-envelope: ${passed} passed, ${failures.length} failed`);

@@ -104,6 +104,29 @@ The hosted service must not see:
 
 Every user-visible collaboration payload is encrypted on the client before leaving `attn` or the browser client.
 
+### Capability tiers and their limits
+
+V3 invites separate relay read admission from write admission. `view` carries
+only the read capability; `comment` and `suggest` additionally carry the write
+admission key plus an owner signature binding the exact room and tier. The
+relay enforces route-level read/write possession and verifies device grants;
+native and browser clients independently enforce event vocabulary
+(`comment` cannot author `SuggestionCreated`). These are capability controls,
+not DRM: anyone who receives a writable invite can copy its bearer material,
+and a compromised client can reveal decrypted content.
+
+The hosted browser remains a weaker endpoint than native `attn`: JavaScript in
+the served origin receives the read capability and plaintext in memory. A
+view-only native runtime is deliberately not implemented; native view links
+direct users to the browser instead of silently registering a writable device.
+
+Local Miniflare integration coverage exercises native comment propagation,
+an opaque hostile comment-tier suggestion followed by a valid-event barrier,
+and suggest/owner apply. The hosted Playwright stack drives Chromium against
+that same relay contract and proves all three browser URLs render with their
+explicit tier vocabulary; view uses anonymous read-only transport with zero
+mutations, comment round-trips, and suggest reaches the native owner.
+
 ## Terms
 
 ### Review Room
@@ -1290,5 +1313,8 @@ explicit tier default to `suggest` for compatibility.
 not an authority source. Native and browser import pipelines reject out-of-tier
 events before persistence even though the relay cannot inspect encrypted event
 bodies. This is policy enforcement at authenticated peers, not cryptographic
-content enforcement by the relay. Anonymous view-only WebSocket identity is
-deferred and device registration remains write-authorized.
+content enforcement by the relay: a hostile comment-tier client can upload a
+valid signed and encrypted `SuggestionCreated`, but conformant peers discard it.
+Anonymous view-only WebSockets use a fresh `viewer_id` plus the read proof;
+they never register a device, signal, announce presence, acknowledge, or write.
+Registered v3 device sockets require both read and write proofs.

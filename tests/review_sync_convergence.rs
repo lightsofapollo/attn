@@ -51,7 +51,9 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 use attn::review::manager::{ReviewCommand, ReviewManager, ReviewUpdate, UpdateSink};
-use attn::review::model::{Anchor, PositionAnchor, ReviewEventBody};
+use attn::review::model::{
+    Anchor, PositionAnchor, ReviewEventBody, SuggestionDraft, SuggestionOperation,
+};
 use attn::review::store::ReviewStore;
 use attn::review::working_copy::WorkingCopyService;
 
@@ -64,6 +66,7 @@ struct Peer {
     name: &'static str,
     mgr: ReviewManager,
     updates: Arc<StdMutex<Vec<ReviewUpdate>>>,
+    store: Arc<ReviewStore>,
     // Held for lifetime — dropping these wipes the store/identity on disk.
     _store_tmp: TempDir,
     _id_tmp: TempDir,
@@ -88,7 +91,7 @@ impl Peer {
         });
 
         let cache = Arc::new(RwLock::new(HashMap::new()));
-        let mgr = ReviewManager::new(store, working_copy, sink)
+        let mgr = ReviewManager::new(Arc::clone(&store), working_copy, sink)
             .with_bootstrap(
                 relay_url.to_string(),
                 Some(id_tmp.path().to_path_buf()),
@@ -100,6 +103,7 @@ impl Peer {
             name,
             mgr,
             updates,
+            store,
             _store_tmp: store_tmp,
             _id_tmp: id_tmp,
         }
@@ -127,6 +131,42 @@ impl Peer {
         self.snapshot().into_iter().find_map(|u| match u {
             ReviewUpdate::ShareReady { invite_url, .. } => Some(invite_url),
             _ => None,
+        })
+    }
+
+    fn tier_invite(&self, tier: &str) -> Option<String> {
+        self.snapshot().into_iter().find_map(|update| match update {
+            ReviewUpdate::ShareReady {
+                invite_url,
+                view_invite_url,
+                suggest_invite_url,
+                ..
+            } => match tier {
+                "view" => Some(view_invite_url),
+                "comment" => Some(invite_url),
+                "suggest" => Some(suggest_invite_url),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    fn saw_suggestion(&self, replacement: &str) -> bool {
+        self.snapshot().iter().any(|update| match update {
+            ReviewUpdate::EventImported { event, .. } => matches!(
+                &event.body,
+                ReviewEventBody::SuggestionCreated {
+                    operation: SuggestionOperation::Replace { replacement: value, .. },
+                    ..
+                } if value == replacement
+            ),
+            _ => false,
+        })
+    }
+
+    fn saw_grant_forbidden(&self) -> bool {
+        self.snapshot().iter().any(|update| {
+            matches!(update, ReviewUpdate::Error { code, .. } if code == "ATTN_GRANT_FORBIDDEN")
         })
     }
 
@@ -365,4 +405,203 @@ fn three_peer_comment_converges_async() {
         rvc_saw,
         "reviewerC must receive reviewerB's comment (async, relay-only fan-out)"
     );
+}
+
+/// Real local relay tier matrix. Native view-only joins intentionally stop
+/// with the product's browser-required diagnostic; comment and suggest tiers
+/// then exercise authoring and owner apply through Miniflare.
+#[test]
+fn v3_tiers_enforce_comment_and_suggestion_end_to_end() {
+    if skip_requested() || !is_wrangler_available() {
+        eprintln!("(skip) v3 tier convergence: wrangler unavailable or skip requested");
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("relay runtime");
+    let relay = match runtime.block_on(WranglerHandle::start()) {
+        Ok(relay) => relay,
+        Err(error) => {
+            eprintln!("(skip) could not start Miniflare relay: {error}");
+            return;
+        }
+    };
+
+    let owner = Peer::build("owner", &relay.base_url);
+    let commenter = Peer::build("commenter", &relay.base_url);
+    let suggester = Peer::build("suggester", &relay.base_url);
+    let viewer = Peer::build("viewer", &relay.base_url);
+    let (_doc, path) = temp_markdown();
+    owner.mgr.submit(ReviewCommand::Share {
+        path: path.clone(),
+        mode: "async".into(),
+        ttl: Some("24h".into()),
+    });
+    let room_id = owner.room_id().expect("shared room");
+
+    viewer.mgr.submit(ReviewCommand::Join {
+        invite: owner.tier_invite("view").expect("view invite"),
+    });
+    assert!(viewer.snapshot().iter().any(|update| matches!(
+        update,
+        ReviewUpdate::Error { message, .. } if message.contains("open this invite in the browser")
+    )));
+
+    let comment_invite = owner.tier_invite("comment").expect("comment invite");
+    commenter.mgr.submit(ReviewCommand::Join {
+        invite: comment_invite.clone(),
+    });
+    let marker = "TIER_COMMENT_ROUNDTRIP";
+    commenter.mgr.submit(ReviewCommand::CreateComment {
+        room_id: room_id.clone(),
+        anchor: placeholder_anchor(),
+        body: marker.into(),
+        parent_thread_id: None,
+    });
+    assert!(poll_until(Duration::from_secs(20), || owner.saw_comment(marker)));
+    commenter.mgr.submit(ReviewCommand::CreateSuggestion {
+        room_id: room_id.clone(),
+        draft: SuggestionDraft {
+            anchor: placeholder_anchor(),
+            operation: SuggestionOperation::Replace {
+                expected_text: "seed line".into(),
+                replacement: "forbidden".into(),
+            },
+            note: None,
+        },
+    });
+    assert!(commenter.saw_grant_forbidden());
+    assert!(!owner.saw_suggestion("forbidden"));
+
+    // Bypass the manager authoring guard and enqueue a correctly signed,
+    // correctly encrypted SuggestionCreated from the comment-granted device.
+    // A following valid comment is our deterministic barrier: once the owner
+    // imports it, the hostile envelope was delivered earlier and rejected by
+    // the inbound grant vocabulary check rather than merely delayed.
+    let attn::review::bootstrap::ParsedInviteAny::V3(comment_capability) =
+        attn::review::bootstrap::parse_invite_any(&comment_invite).expect("parse comment invite")
+    else {
+        panic!("comment invite must be v3")
+    };
+    let read_keys = attn::review::crypto::kdf::derive_read_keys_v3(
+        &comment_capability.fragment.read_capability_key,
+    );
+    let identity = attn::review::bootstrap::load_identity_from(commenter._id_tmp.path())
+        .expect("load hostile identity")
+        .expect("hostile identity exists");
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let hostile =
+        attn::review::envelope::assemble_event_envelope(attn::review::envelope::AssembleInput {
+            event_key: *read_keys.event_key.as_bytes(),
+            signing_key: identity.signing_key().expect("signing key"),
+            room_id: room_id.clone(),
+            author_id: identity.typed_participant_id(),
+            device_id: identity.typed_device_id(),
+            created_at_ms: now_ms,
+            expires_at_ms: now_ms + 60_000,
+            parent_event_ids: vec![],
+            snapshot_id: None,
+            body: ReviewEventBody::SuggestionCreated {
+                suggestion_id: "hostile-comment-tier-suggestion".into(),
+                anchor: placeholder_anchor(),
+                operation: SuggestionOperation::Replace {
+                    expected_text: "seed line".into(),
+                    replacement: "hostile-wire".into(),
+                },
+                note: None,
+            },
+            kind: attn::review::model::EnvelopeKind::Event,
+            client_nonce: None,
+        })
+        .expect("assemble hostile signed envelope");
+    commenter
+        .store
+        .append_outbox(&room_id, &hostile)
+        .expect("enqueue hostile envelope");
+    let barrier = "POST_HOSTILE_VALID_COMMENT";
+    commenter.mgr.submit(ReviewCommand::CreateComment {
+        room_id: room_id.clone(),
+        anchor: placeholder_anchor(),
+        body: barrier.into(),
+        parent_thread_id: None,
+    });
+    assert!(poll_until(Duration::from_secs(20), || owner.saw_comment(barrier)));
+    assert!(!owner.saw_suggestion("hostile-wire"));
+
+    suggester.mgr.submit(ReviewCommand::Join {
+        invite: owner.tier_invite("suggest").expect("suggest invite"),
+    });
+    let snapshot = owner
+        .store
+        .iter_snapshots(&room_id)
+        .expect("snapshots")
+        .into_iter()
+        .next()
+        .expect("initial snapshot")
+        .expect("snapshot decodes");
+    let anchor = Anchor {
+        v: 2,
+        file_id: snapshot.file_id,
+        snapshot_id: snapshot.snapshot_id,
+        base_hash: snapshot.base_hash,
+        position: PositionAnchor {
+            byte_range: [10, 19],
+            line_range: [3, 3],
+            pm_range: None,
+        },
+        quote: None,
+        block: None,
+        context: None,
+        structure: None,
+    };
+    let replacement = "accepted line";
+    suggester.mgr.submit(ReviewCommand::CreateSuggestion {
+        room_id: room_id.clone(),
+        draft: SuggestionDraft {
+            anchor,
+            operation: SuggestionOperation::Replace {
+                expected_text: "seed line".into(),
+                replacement: replacement.into(),
+            },
+            note: Some("tier e2e".into()),
+        },
+    });
+    assert!(poll_until(Duration::from_secs(20), || owner
+        .saw_suggestion(replacement)));
+    let suggestion_id = owner
+        .store
+        .iter_events(&room_id)
+        .expect("events")
+        .filter_map(Result::ok)
+        .find_map(|event| match event.body {
+            ReviewEventBody::SuggestionCreated {
+                suggestion_id,
+                operation:
+                    SuggestionOperation::Replace {
+                        ref replacement, ..
+                    },
+                ..
+            } if replacement == "accepted line" => {
+                serde_json::from_value(serde_json::Value::String(suggestion_id)).ok()
+            }
+            _ => None,
+        })
+        .expect("suggestion id");
+    owner.mgr.submit(ReviewCommand::AcceptSuggestion {
+        room_id: room_id.clone(),
+        suggestion_id,
+    });
+    assert!(poll_until(Duration::from_secs(10), || {
+        std::fs::read_to_string(&path).is_ok_and(|content| content.contains(replacement))
+    }));
+
+    for peer in [&owner, &commenter, &suggester] {
+        peer.mgr.submit(ReviewCommand::Stop {
+            room_id: Some(room_id.clone()),
+        });
+    }
 }

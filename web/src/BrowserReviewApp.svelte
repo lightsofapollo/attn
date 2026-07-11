@@ -389,6 +389,7 @@
   data-outbox-pending={sessionState.outboxPending}
   data-connection={sessionState.connection}
   data-direct-error={sessionState.directError ?? ''}
+  data-grant-tier={sessionState.grantTier}
 >
   {#if sessionState.error}
     <div class="browser-review-error flex h-full flex-col items-center justify-center gap-3 px-6 text-center"
@@ -413,12 +414,16 @@
           data-slot="browser-authoring-status"
         >
           <div class="flex min-w-0 items-center gap-2" data-slot="browser-persistence-status">
-            {#if sessionState.grantTier === 'view'}
-              <span class="font-medium text-foreground" data-slot="browser-view-only">View only</span>
-            {:else if !sessionState.canRemember}
+            <span class="font-medium text-foreground" data-slot="browser-grant-tier">
+              {sessionState.grantTier === 'view'
+                ? 'View only'
+                : sessionState.grantTier === 'comment'
+                  ? 'Can comment'
+                  : 'Can suggest'}
+            </span>
+            {#if sessionState.grantTier !== 'view' && !sessionState.canRemember}
               <span>Temporary link session</span>
-            {:else}
-            {#if sessionState.persistence === 'ephemeral'}
+            {:else if sessionState.grantTier !== 'view' && sessionState.persistence === 'ephemeral'}
               <span>Temporary on this browser</span>
               <button
                 type="button"
@@ -429,9 +434,9 @@
               >
                 Remember this room
               </button>
-            {:else if sessionState.persistence === 'saving'}
+            {:else if sessionState.grantTier !== 'view' && sessionState.persistence === 'saving'}
               <span role="status">Securing local recovery…</span>
-            {:else}
+            {:else if sessionState.grantTier !== 'view'}
               <span>
                 {sessionState.persistence === 'degraded'
                   ? 'Remembered; browser may evict local data'
@@ -445,7 +450,6 @@
               >
                 Forget
               </button>
-            {/if}
             {/if}
           </div>
           <div class="flex min-w-0 items-center justify-end gap-2">

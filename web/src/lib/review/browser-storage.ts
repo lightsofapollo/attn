@@ -38,6 +38,10 @@ import {
   validateWorkspaceRootKey,
 } from './browser-workspace-crypto';
 import { WorkspaceStore } from './browser-workspace-store';
+import {
+  WorkspaceLeaseManager,
+  type WorkspaceLeaseManagerOptions,
+} from './browser-workspace-lease';
 
 export { BrowserStorageError, MissingBrowserStorageError, StorageConflictError };
 
@@ -299,6 +303,11 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
 
   close(): void {
     this.db.close();
+  }
+
+  /** Cross-tab writer leases over this database (attn-7xl.2.6). */
+  leases(options: WorkspaceLeaseManagerOptions = {}): WorkspaceLeaseManager {
+    return new WorkspaceLeaseManager(this.db, { now: this.now, ...options });
   }
 
   /** Atomic workspace/file transaction APIs (attn-7xl.2.3/.2.4). */

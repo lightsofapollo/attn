@@ -586,6 +586,37 @@ export class WorkspaceStore {
     return committed.workspace;
   }
 
+  async renameWorkspace(input: {
+    workspaceId: string;
+    name: string;
+    fence?: WorkspaceFence;
+  }): Promise<WorkspaceRecord> {
+    requireId(input.workspaceId, 'workspaceId');
+    requireName(input.name);
+    const committed = await this.retryCommit(input.workspaceId, input.fence, async (workspace) => {
+      const at = this.timestamp(workspace.updatedAt);
+      const clock = workspace.clock + 1;
+      const nextWorkspace: WorkspaceRecord = {
+        ...workspace,
+        name: input.name,
+        clock,
+        updatedAt: at,
+      };
+      return {
+        expectedClock: workspace.clock,
+        apply: (tx) => {
+          tx.objectStore(STORE_WORKSPACES).put(nextWorkspace);
+        },
+        result: {
+          workspace: nextWorkspace,
+          entry: undefined as unknown as WorkspaceEntryRecord,
+          revision: undefined,
+        },
+      };
+    });
+    return committed.workspace;
+  }
+
   /**
    * Crypto-erasure first: the root key dies in its own committed transaction
    * before any record cleanup, so interrupted cleanup leaves only opaque

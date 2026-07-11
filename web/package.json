@@ -15,7 +15,8 @@
     "test:unit": "node scripts/run-tests.mjs",
     "test:e2e:hosted": "playwright test e2e/hosted-review.spec.ts",
     "check:route-bundles": "node scripts/check-route-bundles.mjs",
-    "test:e2e:routes": "npm run build:browser && npm run check:route-bundles && playwright test --config playwright.routes.config.ts"
+    "test:e2e:routes": "npm run build:browser && npm run check:route-bundles && playwright test --config playwright.routes.config.ts",
+    "test:e2e:storage": "playwright test --config playwright.storage.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/source-code-pro": "^5.2.7",

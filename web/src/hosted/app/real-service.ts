@@ -6,6 +6,7 @@
 // from the static graph.
 
 import type {
+  EditingSession,
   ImportFileInput,
   PersistenceMode,
   ShareScope,
@@ -114,6 +115,44 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
 
   async deleteWorkspace(workspaceId: string): Promise<void> {
     await this.service.deleteWorkspace(workspaceId);
+  }
+
+  async beginEditing(workspaceId: string): Promise<EditingSession | null> {
+    const holder = new Uint8Array(9);
+    crypto.getRandomValues(holder);
+    const holderId = `tab-${Array.from(holder, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+    let lease = await this.service.leases.acquire(workspaceId, holderId);
+    if (!lease) return null;
+    const heads = new Map<string, string>();
+    // Heartbeat well inside the 15s lease so suspensions lose ownership fast
+    // but active tabs never lapse.
+    const heartbeat = setInterval(() => {
+      void this.service.leases
+        .heartbeat(lease!)
+        .then((extended) => {
+          lease = extended;
+        })
+        .catch(() => clearInterval(heartbeat));
+    }, 5_000);
+    const service = this.service;
+    return {
+      async commitText(path: string, text: string): Promise<void> {
+        let expected = heads.get(path);
+        if (expected === undefined) {
+          const loaded = await service.loadWorkspace(workspaceId);
+          expected = loaded?.entries.find((entry) => entry.path === path)?.headRevisionId;
+        }
+        const committed = await service.commitText(workspaceId, path, text, {
+          fence: lease!,
+          ...(expected === undefined ? {} : { expectedHeadRevisionId: expected }),
+        });
+        heads.set(path, committed.revision.revisionId);
+      },
+      async release(): Promise<void> {
+        clearInterval(heartbeat);
+        await service.leases.release(lease!).catch(() => undefined);
+      },
+    };
   }
 
   shareScopeFor(workspace: WorkspaceDetail): ShareScope {

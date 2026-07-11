@@ -9,6 +9,7 @@
 //   /app?shell=empty     first visit, no workspaces yet
 
 import type {
+  EditingSession,
   ImportFileInput,
   ShareScope,
   StorageHealth,
@@ -188,6 +189,13 @@ export class MockWorkspaceService implements WorkspaceAppService {
   async deleteWorkspace(workspaceId: string): Promise<void> {
     const index = this.workspaces.findIndex((candidate) => candidate.id === workspaceId);
     if (index >= 0) this.workspaces.splice(index, 1);
+  }
+
+  async beginEditing(): Promise<EditingSession | null> {
+    return {
+      commitText: async () => undefined,
+      release: async () => undefined,
+    };
   }
 
   private newWorkspaceDraft(): WorkspaceDetail {

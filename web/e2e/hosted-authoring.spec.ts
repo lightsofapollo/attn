@@ -97,3 +97,51 @@ test('desk rename and delete are real and confirmed in-app', async ({ page }) =>
   await expect(page.locator('.workspace-row')).toHaveCount(0);
   await expect(page.locator('.empty-desk')).toBeVisible();
 });
+
+test('editing autosaves durable revisions and recovers after reload', async ({ page }) => {
+  await page.goto('/app#new');
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  const editor = page.locator('.writing-sheet .ProseMirror');
+  await expect(editor).toBeVisible();
+  await editor.click();
+  await page.keyboard.type('# Autosaved title');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('Body that must survive a reload.');
+  // Wait for a durable commit (data-commits increments only after the
+  // IndexedDB transaction completes), then for the settled save state.
+  await expect(page.locator('[data-commits]')).not.toHaveAttribute('data-commits', '0', {
+    timeout: 15_000,
+  });
+  await expect(page.locator('[data-save-state]')).toHaveAttribute(
+    'data-save-state',
+    'Saved on this device',
+    { timeout: 15_000 },
+  );
+  await page.reload();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await expect(page.locator('[data-body-text]')).toContainText('Autosaved title');
+  await expect(page.locator('[data-body-text]')).toContainText('survive a reload');
+});
+
+test('a second tab is honestly read-only while one tab edits', async ({ page, context }) => {
+  await page.goto('/app#new');
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  const url = page.url();
+  await page.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(page.locator('.writing-sheet .ProseMirror')).toBeVisible();
+
+  const second = await context.newPage();
+  await second.goto(url);
+  await expect(second.locator('[data-app-view="workspace"]')).toBeVisible();
+  await second.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(second.locator('[data-degraded="lease-denied"]')).toContainText(
+    'Another tab is editing this workspace.',
+  );
+  await expect(second.locator('.writing-sheet .ProseMirror')).toHaveCount(0);
+
+  // Done in the first tab releases the lease; the second tab can now edit.
+  await page.getByRole('button', { name: 'Done' }).click();
+  await second.getByRole('button', { name: 'Edit', exact: true }).click();
+  await expect(second.locator('.writing-sheet .ProseMirror')).toBeVisible();
+});

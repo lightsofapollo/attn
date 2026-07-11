@@ -857,3 +857,25 @@ a.workspace-row:hover {
   overflow-wrap: anywhere;
   font: 1.02rem/1.7 var(--serif);
 }
+
+/* Embedded ProseMirror editing surface (attn-7xl.3.3). */
+.writing-sheet .ProseMirror {
+  outline: none;
+  min-height: 420px;
+  font: 1.08rem/1.7 var(--serif);
+}
+
+.writing-sheet .ProseMirror pre {
+  background: var(--paper-deep);
+  padding: 0.9rem 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  font: 0.9rem/1.5 var(--mono);
+}
+
+.writing-sheet .ProseMirror blockquote {
+  border-left: 3px solid var(--rule);
+  margin-left: 0;
+  padding-left: 1rem;
+  color: var(--muted);
+}

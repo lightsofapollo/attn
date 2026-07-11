@@ -2,7 +2,16 @@
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
   import ShareSheet from './ShareSheet.svelte';
-  import type { StorageHealth, WorkspaceAppService, WorkspaceDetail, WorkspaceEntry } from './types';
+  import { AutosaveController } from './autosave';
+  import type {
+    EditingSession,
+    SaveState,
+    StorageHealth,
+    WorkspaceAppService,
+    WorkspaceDetail,
+    WorkspaceEntry,
+  } from './types';
+  import type EditorComponentType from '../../lib/Editor.svelte';
 
   interface Props {
     service: WorkspaceAppService;
@@ -32,6 +41,114 @@
   let shareButton = $state<HTMLButtonElement | undefined>();
   let dockFilesButton = $state<HTMLButtonElement | undefined>();
   let dockReviewButton = $state<HTMLButtonElement | undefined>();
+
+  // ————— editing (attn-7xl.3.3) —————
+  // svelte-ignore state_referenced_locally — props seed the initial values.
+  let displayText = $state<string | null>(bodyText);
+  // svelte-ignore state_referenced_locally
+  let saveState = $state<SaveState>(workspace.saveState);
+  let editing = $state(false);
+  let editDenied = $state(false);
+  let editorLoading = $state(false);
+  interface EditorExports {
+    getMarkdown(): string;
+    hasUnsavedChanges(): boolean;
+    resetToMarkdown(nextMarkdown: string): void;
+    commitSaved(): void;
+  }
+  let EditorComponent = $state<typeof EditorComponentType | null>(null);
+  let editorRef = $state<EditorExports | undefined>();
+  // Watches every document change (onDirtyChange only fires on transitions).
+  let changeWatcher = $state<unknown[]>([]);
+  let session: EditingSession | null = null;
+  let autosave: AutosaveController | null = null;
+  // Durable commits completed this session — observable for tests/status.
+  let commitCount = $state(0);
+
+  const canEdit = $derived(
+    activeEntry?.presentation === 'editable' &&
+      health.mode !== 'unavailable' &&
+      health.mode !== 'quota-pressure',
+  );
+
+  async function enterEdit(): Promise<void> {
+    if (editing || editorLoading || !activeEntry) return;
+    editorLoading = true;
+    editDenied = false;
+    try {
+      if (!EditorComponent) {
+        // The ProseMirror graph loads on demand; the app entry's static
+        // bundle stays editor-free (route bundle gate).
+        const [editorModule, pmState] = await Promise.all([
+          import('../../lib/Editor.svelte'),
+          import('prosemirror-state'),
+        ]);
+        EditorComponent = editorModule.default;
+        changeWatcher = [
+          new pmState.Plugin({
+            view: () => ({
+              update: (view, prevState) => {
+                if (!view.state.doc.eq(prevState.doc)) onEditorChanged();
+              },
+            }),
+          }),
+        ];
+      }
+      const granted = await service.beginEditing(workspace.id);
+      if (!granted) {
+        editDenied = true;
+        return;
+      }
+      session = granted;
+      const path = activeEntry.path;
+      autosave = new AutosaveController({
+        commit: async (text) => {
+          await session!.commitText(path, text);
+          commitCount += 1;
+        },
+        onState: (state) => (saveState = state),
+      });
+      editing = true;
+    } finally {
+      editorLoading = false;
+    }
+  }
+
+  function onEditorChanged(): void {
+    if (!editorRef || !autosave) return;
+    const text = editorRef.getMarkdown();
+    displayText = text;
+    autosave.noteChange(text);
+  }
+
+  async function exitEdit(): Promise<void> {
+    if (!editing) return;
+    if (editorRef) displayText = editorRef.getMarkdown();
+    await autosave?.flush();
+    autosave?.dispose();
+    autosave = null;
+    await session?.release();
+    session = null;
+    editing = false;
+  }
+
+  // Flush on tab hide / page unload so no committed-looking text is lost.
+  $effect(() => {
+    const flush = (): void => {
+      if (autosave?.dirty) void autosave.flush();
+    };
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', flush);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', flush);
+      flush();
+      void session?.release();
+    };
+  });
 
   function entryHref(entry: WorkspaceEntry): string {
     return `/app/w/${workspace.id}/${entry.path}`;
@@ -67,9 +184,24 @@
     </div>
     <div class="doc-name">
       {workspace.name}
-      <span class="save-state" data-save-state={workspace.saveState}>· {workspace.saveState}</span>
+      <span class="save-state" data-save-state={saveState} data-commits={commitCount}>· {saveState}</span>
     </div>
     <div class="share-action">
+      {#if canEdit}
+        {#if editing}
+          <button class="button" type="button" onclick={() => void exitEdit()}>Done</button>
+        {:else}
+          <button
+            class="button"
+            type="button"
+            data-action="edit"
+            disabled={editorLoading}
+            onclick={() => void enterEdit()}
+          >
+            {editorLoading ? 'Opening…' : 'Edit'}
+          </button>
+        {/if}
+      {/if}
       <button
         class="button primary"
         type="button"
@@ -124,8 +256,24 @@
           <DegradedBanner mode={health.mode} />
         </div>
       {/if}
+      {#if editDenied}
+        <div class="degraded-banner" role="status" data-degraded="lease-denied" style="max-width: 760px; margin: 0 auto 1.5rem;">
+          <div>
+            <strong>Another tab is editing this workspace.</strong>
+            <p>This tab stays read-only until the other tab finishes or closes.</p>
+          </div>
+        </div>
+      {/if}
       <article class="writing-sheet">
-        {#if isNewDraft}
+        {#if editing && EditorComponent}
+          <EditorComponent
+            bind:this={editorRef}
+            markdown={displayText ?? ''}
+            editable={true}
+            plugins={changeWatcher as never}
+            onCheckboxToggle={onEditorChanged}
+          />
+        {:else if isNewDraft && (displayText === null || displayText.length === 0)}
           <div class="eyebrow">New workspace</div>
           <h1>Untitled</h1>
           <p class="placeholder">Tap to start writing…</p>
@@ -146,10 +294,9 @@
         {:else}
           <div class="eyebrow">Working draft</div>
           <h1>{workspace.name}</h1>
-          {#if bodyText !== null && bodyText.length > 0}
-            <!-- Markdown source view; the editing surface lands in attn-7xl.3.3. -->
-            <div class="plain-md" data-body-text>{bodyText}</div>
-          {:else if bodyText !== null}
+          {#if displayText !== null && displayText.length > 0}
+            <div class="plain-md" data-body-text>{displayText}</div>
+          {:else if displayText !== null}
             <p class="placeholder">Start writing…</p>
           {:else}
             <p class="placeholder">This entry has no Markdown body.</p>
@@ -180,7 +327,13 @@
     <button type="button" bind:this={dockReviewButton} onclick={() => (reviewSheetOpen = true)}>
       Review · {workspace.reviewCards.length}
     </button>
-    <button type="button">Edit</button>
+    {#if editing}
+      <button type="button" onclick={() => void exitEdit()}>Done</button>
+    {:else}
+      <button type="button" disabled={!canEdit || editorLoading} onclick={() => void enterEdit()}>
+        Edit
+      </button>
+    {/if}
     <button type="button" onclick={() => (shareOpen = true)}>Share</button>
   </nav>
 </div>

@@ -93,6 +93,16 @@ export interface ImportFileInput {
  * adapter (real-service.ts) is the default and is loaded via dynamic import
  * so the app entry's static graph stays free of the crypto/storage modules.
  */
+/**
+ * A held writing session (attn-7xl.3.3): the real implementation owns the
+ * cross-tab writer lease (heartbeating in the background) and performs
+ * fenced, head-tracked durable commits. Release it when leaving edit mode.
+ */
+export interface EditingSession {
+  commitText(path: string, text: string): Promise<void>;
+  release(): Promise<void>;
+}
+
 export interface WorkspaceAppService {
   storageHealth(): StorageHealth;
   listWorkspaces(): Promise<WorkspaceSummary[]>;
@@ -104,5 +114,7 @@ export interface WorkspaceAppService {
   importFiles(name: string, files: ImportFileInput[]): Promise<WorkspaceDetail>;
   renameWorkspace(workspaceId: string, name: string): Promise<void>;
   deleteWorkspace(workspaceId: string): Promise<void>;
+  /** Null when another tab holds the writer lease — stay read-only. */
+  beginEditing(workspaceId: string): Promise<EditingSession | null>;
   shareScopeFor(workspace: WorkspaceDetail): ShareScope;
 }

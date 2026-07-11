@@ -32,6 +32,7 @@
 
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
+  base64UrlDecode,
   base64UrlEncode,
   buildAdmissionHeader,
   buildAdmissionSubprotocol,
@@ -88,6 +89,7 @@ import {
   BrowserPeerMesh,
   type BrowserDirectState,
 } from './browser-webrtc';
+import type { InviteCapability } from './browser-workspace-share';
 import type {
   Anchor,
   AnchorIndex,
@@ -167,11 +169,33 @@ export interface BrowserDeviceIdentity {
   publicEncryptionKey: Uint8Array;
 }
 
+/** Already-owned browser room material. The session validates and copies it. */
+export interface BrowserOwnerCredentials {
+  roomId: string;
+  roomSecret: Uint8Array;
+  keys: RoomKeys;
+  identity: BrowserDeviceIdentity;
+  policy: RoomPolicy;
+}
+
+export interface BrowserCollabDelivery {
+  envelopeId: string;
+  source: DecodedEnvelope['source'];
+  payload: string;
+  /** Authenticated immutable registration matching the envelope sender. */
+  sender: Device;
+}
+
 /**
  * Reactive snapshot of the session that the UI can render off of. Pure plain
  * object — we wire it into a `$state` field at the component layer.
  */
 export interface BrowserSessionState {
+  principal: 'owner' | 'reviewer';
+  /** Authenticated owner-device presence, separate from relay connectivity. */
+  ownerOnline: boolean;
+  /** True only while the owner authority and a transport are both online. */
+  liveEditingAvailable: boolean;
   status: BrowserSessionStatus;
   /** Honest hybrid transport state; mailbox remains durable in every online state. */
   connection: BrowserDirectState | 'offline';
@@ -220,6 +244,8 @@ export interface ReviewStoreSink {
 }
 
 export interface BrowserSessionOptions {
+  /** Explicit already-registered owner path; bypasses invite parsing and registration. */
+  owner?: BrowserOwnerCredentials;
   /** Window-like for parsing the invite from location.hash. */
   window?: BrowserWindowLike;
   /**
@@ -267,6 +293,8 @@ export interface BrowserSessionOptions {
   identity?: BrowserDeviceIdentity;
   /** Optional state observer — called on every state mutation. */
   onState?: (state: BrowserSessionState) => void;
+  /** Decrypted collab payload after sender-directory binding and envelope dedup. */
+  onCollab?: (delivery: BrowserCollabDelivery) => void | Promise<void>;
   /**
    * Sink for review-event / snapshot dispatch. Defaults to the global
    * `reviewStore` runes singleton; tests pass a plain object so they can
@@ -324,6 +352,229 @@ export function generateBrowserIdentity(): BrowserDeviceIdentity {
     encryptionSecret: encryption.secretKey,
     publicEncryptionKey: encryption.publicKey,
   };
+}
+
+/** Reconstruct and cross-check owner runtime material opened from a sealed capability. */
+export function ownerCredentialsFromInviteCapability(
+  capability: InviteCapability,
+  expectedRoomId: string,
+): BrowserOwnerCredentials {
+  if (!expectedRoomId) throw new Error('expected owner roomId is required');
+  // Keep every secret-bearing allocation tracked until ownership is
+  // transferred to the successful return value. A later decode or validation
+  // failure must clobber material decoded earlier in the sequence.
+  let roomSecret: Uint8Array | null = null;
+  let signingSecret: Uint8Array | null = null;
+  let encryptionSecret: Uint8Array | null = null;
+  let signingPublic: Uint8Array | null = null;
+  let encryptionPublic: Uint8Array | null = null;
+  let keys: RoomKeys | null = null;
+  try {
+    roomSecret = decodeCanonicalSecret(capability.roomSecret, 'room secret');
+    signingSecret = decodeCanonicalSecret(
+      capability.ownerSigningSecret,
+      'owner signing secret',
+    );
+    encryptionSecret = decodeCanonicalSecret(
+      capability.ownerEncryptionSecret,
+      'owner encryption secret',
+    );
+    const roomId = deriveRoomId(roomSecret);
+    if (roomId !== expectedRoomId) throw new Error('sealed owner roomId does not match its binding');
+    if (!capability.ownerDeviceId || !capability.ownerParticipantId) {
+      throw new Error('sealed owner identity ids are invalid');
+    }
+    const policy = validateRoomPolicy(capability.policy);
+    keys = deriveRoomKeys(roomSecret);
+    signingPublic = ed25519.getPublicKey(signingSecret);
+    encryptionPublic = x25519.getPublicKey(encryptionSecret);
+    const credentials: BrowserOwnerCredentials = {
+      roomId,
+      roomSecret,
+      keys,
+      identity: {
+        deviceId: capability.ownerDeviceId,
+        participantId: capability.ownerParticipantId,
+        signingSecret,
+        signingPublic,
+        encryptionSecret,
+        publicEncryptionKey: encryptionPublic,
+      },
+      policy,
+    };
+    roomSecret = null;
+    signingSecret = null;
+    encryptionSecret = null;
+    signingPublic = null;
+    encryptionPublic = null;
+    keys = null;
+    return credentials;
+  } catch (error) {
+    if (roomSecret) zero(roomSecret);
+    if (signingSecret) zero(signingSecret);
+    if (encryptionSecret) zero(encryptionSecret);
+    if (signingPublic) zero(signingPublic);
+    if (encryptionPublic) zero(encryptionPublic);
+    if (keys) zeroRoomKeys(keys);
+    throw error;
+  }
+}
+
+function decodeCanonicalSecret(value: unknown, label: string): Uint8Array {
+  if (typeof value !== 'string') throw new Error(`sealed ${label} is invalid`);
+  let bytes: Uint8Array;
+  try {
+    bytes = base64UrlDecode(value);
+  } catch {
+    throw new Error(`sealed ${label} is invalid`);
+  }
+  if (bytes.length !== 32 || base64UrlEncode(bytes) !== value) {
+    zero(bytes);
+    throw new Error(`sealed ${label} must be 32 canonical bytes`);
+  }
+  return bytes;
+}
+
+function validateRoomPolicy(value: unknown): RoomPolicy {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('owner room policy is invalid');
+  }
+  const policy = value as Partial<RoomPolicy>;
+  if (policy.mode !== 'live' && policy.mode !== 'async' && policy.mode !== 'hybrid') {
+    throw new Error('owner room policy mode is invalid');
+  }
+  for (const [label, number] of [
+    ['maxPeers', policy.maxPeers],
+    ['maxSnapshotBytes', policy.maxSnapshotBytes],
+    ['maxEventBytes', policy.maxEventBytes],
+    ['maxEvents', policy.maxEvents],
+    ['expiresAt', policy.expiresAt],
+    ['powBits', policy.powBits],
+  ] as const) {
+    if (!Number.isSafeInteger(number) || (number as number) <= 0) {
+      throw new Error(`owner room policy ${label} is invalid`);
+    }
+  }
+  if ((policy.powBits as number) < 12 || (policy.powBits as number) > 24) {
+    throw new Error('owner room policy powBits is invalid');
+  }
+  if ((policy.maxPeers as number) > 8) {
+    throw new Error('owner room policy maxPeers is invalid');
+  }
+  for (const [label, flag] of [
+    ['deleteEventsAfterOwnerAck', policy.deleteEventsAfterOwnerAck],
+    ['allowBrowser', policy.allowBrowser],
+    ['allowRemoteAgents', policy.allowRemoteAgents],
+  ] as const) {
+    if (typeof flag !== 'boolean') throw new Error(`owner room policy ${label} is invalid`);
+  }
+  return structuredClone(policy) as RoomPolicy;
+}
+
+function zeroRoomKeys(keys: RoomKeys): void {
+  zero(keys.rootKey);
+  zero(keys.eventKey);
+  zero(keys.snapshotKey);
+  zero(keys.signalingKey);
+  zero(keys.admissionKey);
+}
+
+function cloneAndValidateOwnerCredentials(
+  input: BrowserOwnerCredentials,
+): BrowserOwnerCredentials {
+  if (!(input.roomSecret instanceof Uint8Array) || input.roomSecret.length !== 32) {
+    throw new Error('owner roomSecret must be 32 bytes');
+  }
+  if (deriveRoomId(input.roomSecret) !== input.roomId) {
+    throw new Error('owner roomSecret does not derive the bound roomId');
+  }
+  const derived = deriveRoomKeys(input.roomSecret);
+  try {
+    for (const key of ['rootKey', 'eventKey', 'snapshotKey', 'signalingKey', 'admissionKey'] as const) {
+      if (!(input.keys[key] instanceof Uint8Array) || !equalBytes(input.keys[key], derived[key])) {
+        throw new Error(`owner ${key} does not match roomSecret`);
+      }
+    }
+  } finally {
+    zeroRoomKeys(derived);
+  }
+  const identity = input.identity;
+  if (!identity.deviceId || !identity.participantId) throw new Error('owner identity ids are invalid');
+  for (const [label, bytes] of [
+    ['signingSecret', identity.signingSecret],
+    ['signingPublic', identity.signingPublic],
+    ['encryptionSecret', identity.encryptionSecret],
+    ['publicEncryptionKey', identity.publicEncryptionKey],
+  ] as const) {
+    if (!(bytes instanceof Uint8Array) || bytes.length !== 32) {
+      throw new Error(`owner ${label} must be 32 bytes`);
+    }
+  }
+  let derivedSigningPublic: Uint8Array | null = null;
+  let derivedEncryptionPublic: Uint8Array | null = null;
+  try {
+    derivedSigningPublic = ed25519.getPublicKey(identity.signingSecret);
+    derivedEncryptionPublic = x25519.getPublicKey(identity.encryptionSecret);
+    if (!equalBytes(derivedSigningPublic, identity.signingPublic)) {
+      throw new Error('owner Ed25519 secret/public keys do not match');
+    }
+    if (!equalBytes(derivedEncryptionPublic, identity.publicEncryptionKey)) {
+      throw new Error('owner X25519 secret/public keys do not match');
+    }
+  } finally {
+    if (derivedSigningPublic) zero(derivedSigningPublic);
+    if (derivedEncryptionPublic) zero(derivedEncryptionPublic);
+  }
+  // Finish every potentially-throwing validation before allocating session
+  // copies, so rejected credentials cannot strand cloned secret material.
+  const policy = validateRoomPolicy(input.policy);
+  return {
+    roomId: input.roomId,
+    roomSecret: new Uint8Array(input.roomSecret),
+    keys: {
+      rootKey: new Uint8Array(input.keys.rootKey),
+      eventKey: new Uint8Array(input.keys.eventKey),
+      snapshotKey: new Uint8Array(input.keys.snapshotKey),
+      signalingKey: new Uint8Array(input.keys.signalingKey),
+      admissionKey: new Uint8Array(input.keys.admissionKey),
+    },
+    identity: {
+      deviceId: identity.deviceId,
+      participantId: identity.participantId,
+      signingSecret: new Uint8Array(identity.signingSecret),
+      signingPublic: new Uint8Array(identity.signingPublic),
+      encryptionSecret: new Uint8Array(identity.encryptionSecret),
+      publicEncryptionKey: new Uint8Array(identity.publicEncryptionKey),
+    },
+    policy,
+  };
+}
+
+function assertRegisteredBrowserOwner(
+  devices: readonly Device[],
+  identity: BrowserDeviceIdentity,
+): void {
+  const matches = devices.filter((device) => device.deviceId === identity.deviceId);
+  if (matches.length !== 1) throw new Error('owner device registration is missing or ambiguous');
+  const actual = matches[0]!;
+  const expected = buildRegisterDeviceBody(identity, 'owner');
+  if (
+    actual.participantId !== expected.participantId ||
+    actual.kind !== 'owner' ||
+    actual.client !== 'attn-browser' ||
+    actual.publicSigningKey !== expected.publicSigningKey ||
+    actual.publicEncryptionKey !== expected.publicEncryptionKey ||
+    actual.selfSignature !== expected.selfSignature
+  ) {
+    throw new Error('registered owner identity does not match sealed credentials');
+  }
+}
+
+function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  let diff = 0;
+  for (let index = 0; index < left.length; index += 1) diff |= left[index]! ^ right[index]!;
+  return diff === 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +656,9 @@ export function admissionHeaderValue(
 export class BrowserSession {
   private readonly opts: BrowserSessionOptions;
   private state: BrowserSessionState = {
+    principal: 'reviewer',
+    ownerOnline: false,
+    liveEditingAvailable: false,
     status: 'idle',
     connection: 'offline',
     directError: null,
@@ -421,6 +675,8 @@ export class BrowserSession {
     storagePersisted: null,
   };
   private identity: BrowserDeviceIdentity | null = null;
+  private ownerRoomSecret: Uint8Array | null = null;
+  private readonly principal: 'owner' | 'reviewer';
   private wsClient: BrowserWsClient | null = null;
   private keys: ActiveRoomKeys | null = null;
   private store: ReviewStoreSink | null;
@@ -444,6 +700,7 @@ export class BrowserSession {
   private readonly pendingWorkspaceManifests = new Map<string, PendingWorkspaceManifest>();
   private readonly signerRefreshAttempts = new Set<string>();
   private readonly dispatchedEnvelopeIds = new Set<string>();
+  private readonly collabDispatches = new Map<string, Promise<boolean>>();
   private readonly pendingSignals: BrowserSignalingPayload[] = [];
   private readonly pagehideTarget: BrowserWindowLike | null;
   private readonly pagehideHandler = (): void => this.close();
@@ -451,6 +708,8 @@ export class BrowserSession {
 
   constructor(opts: BrowserSessionOptions = {}) {
     this.opts = opts;
+    this.principal = opts.owner ? 'owner' : 'reviewer';
+    this.state = { ...this.state, principal: this.principal };
     this.store = opts.store ?? null;
     this.storage = opts.storage ?? null;
     this.pagehideTarget = opts.window ?? (globalThis as unknown as BrowserWindowLike);
@@ -568,6 +827,12 @@ export class BrowserSession {
 
   /** Current state snapshot — UI binds against this. */
   getState(): BrowserSessionState {
+    if (
+      this.state.liveEditingAvailable &&
+      (!this.roomPolicy?.allowBrowser || this.roomPolicy.expiresAt <= Date.now())
+    ) {
+      this.setState({});
+    }
     return this.state;
   }
 
@@ -608,6 +873,43 @@ export class BrowserSession {
 
   async retryOutbox(): Promise<void> {
     await this.outbox?.flushNow();
+  }
+
+  /** Send live collab as one broadcast envelope: direct first, relay always. */
+  async sendCollab(payload: string): Promise<void> {
+    // Re-evaluate wall-clock expiry even if no presence/policy frame has
+    // caused a state transition since the last render.
+    this.setState({});
+    if (!this.state.liveEditingAvailable) {
+      throw new Error('live editing is paused until the owner authority is online');
+    }
+    const identity = this.requireIdentity();
+    const keys = this.keys;
+    const policy = this.roomPolicy;
+    const outbox = this.outbox;
+    const roomId = this.state.roomId;
+    if (!keys || !policy || !outbox || !roomId) throw new Error('browser session is unavailable');
+    const envelope = assembleBrowserSignal({
+      signalingKey: keys.signalingKey,
+      roomId,
+      authorId: identity.participantId,
+      deviceId: identity.deviceId,
+      createdAt: this.nextCreatedAt(),
+      expiresAt: policy.expiresAt,
+      payload: { kind: 'collab', from: identity.deviceId, payload },
+    });
+    // Install locally before any network side effect. The DataChannel then
+    // gets the exact immutable envelope ahead of the relay POST; the later
+    // network echo is deduplicated after its durable cursor commit.
+    const enqueued = this.storage
+      ? outbox.enqueueDurably(envelope).then(() => undefined)
+      : Promise.resolve().then(() => { outbox.enqueue(envelope); });
+    this.peerMesh?.broadcastEnvelope(envelope);
+    await enqueued;
+    // The sealed envelope remains queued on a transient relay failure, but
+    // the caller must still learn that this submission did not reach the
+    // durable transport yet so its inflight controller can recover/resync.
+    await outbox.flushNow();
   }
 
   /** Explicitly persist a non-extractable room capability and sealed recovery state. */
@@ -707,6 +1009,10 @@ export class BrowserSession {
    */
   async start(): Promise<void> {
     if (this.state.status !== 'idle') return;
+    if (this.opts.owner) {
+      await this.startOwner(this.opts.owner);
+      return;
+    }
     this.setState({ status: 'parsing_invite' });
 
     // 1. Parse the invite (override > location.hash). A clean fragmentless
@@ -790,6 +1096,42 @@ export class BrowserSession {
     this.openWs(invite.roomId, roomKeys);
   }
 
+  private async startOwner(input: BrowserOwnerCredentials): Promise<void> {
+    let credentials: BrowserOwnerCredentials;
+    try {
+      credentials = cloneAndValidateOwnerCredentials(input);
+    } catch (error) {
+      this.fail('device_register', error instanceof Error ? error.message : String(error));
+      return;
+    }
+    this.ownerRoomSecret = credentials.roomSecret;
+    this.keys = credentials.keys;
+    this.identity = credentials.identity;
+    this.roomPolicy = credentials.policy;
+    this.setState({
+      roomId: credentials.roomId as RoomId,
+      status: 'connecting',
+      connection: 'offline',
+    });
+    const store = await this.ensureStore();
+    store.currentRoomId = credentials.roomId as RoomId;
+    try {
+      const bootstrap = await this.fetchRoomBootstrap(credentials.roomId, credentials.keys);
+      assertRegisteredBrowserOwner(bootstrap.devices, credentials.identity);
+      if (!bootstrap.policy.allowBrowser || bootstrap.policy.expiresAt <= Date.now()) {
+        throw new Error('authenticated room policy does not permit browser owner authority');
+      }
+      this.roomPolicy = bootstrap.policy;
+      this.bootstrapDevices = bootstrap.devices;
+    } catch (error) {
+      if (this.isTerminated()) return;
+      this.fail('device_register', error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (this.isTerminated()) return;
+    this.openWs(credentials.roomId, credentials.keys);
+  }
+
   /** Tear down transports and clobber in-memory keys. Safe to call repeatedly. */
   close(): void {
     this.detachPagehide();
@@ -822,7 +1164,25 @@ export class BrowserSession {
   // -----------------------------------------------------------------
 
   private setState(patch: Partial<BrowserSessionState>): void {
-    this.state = { ...this.state, ...patch };
+    const next = { ...this.state, ...patch };
+    const ownerDeviceIds = new Set(
+      this.bootstrapDevices
+        .filter((device) => device.kind === 'owner')
+        .map((device) => device.deviceId),
+    );
+    const ownerOnline = [...ownerDeviceIds].some((deviceId) => this.onlineDeviceIds.has(deviceId));
+    this.state = {
+      ...next,
+      principal: this.principal,
+      ownerOnline,
+      liveEditingAvailable:
+        ownerOnline &&
+        next.status === 'connected' &&
+        next.connection !== 'offline' &&
+        this.roomPolicy?.mode !== 'async' &&
+        this.roomPolicy?.allowBrowser === true &&
+        this.roomPolicy.expiresAt > Date.now(),
+    };
     this.opts.onState?.(this.state);
   }
 
@@ -1082,10 +1442,10 @@ export class BrowserSession {
   }
 
   private localDeviceRecord(identity: BrowserDeviceIdentity): Device {
-    const registration = buildRegisterDeviceBody(identity);
+    const registration = buildRegisterDeviceBody(identity, this.principal);
     return {
       ...registration,
-      kind: 'reviewer',
+      kind: this.principal,
       client: 'attn-browser',
     };
   }
@@ -1117,6 +1477,9 @@ export class BrowserSession {
     const roomId = this.state.roomId;
     if (!storage || !roomId || !this.storageWritesEnabled) return;
     for (const device of devices) await storage.putDevice(roomId, device);
+    // Browser-owned continuity lives in the workspace-key-sealed share cap.
+    // Do not create a half-remembered reviewer-room row without a room key.
+    if (this.principal === 'owner') return;
     if (!this.storageWritesEnabled) return;
     await storage.putRoom({
       roomId,
@@ -1181,6 +1544,7 @@ export class BrowserSession {
     this.onlineDeviceIds.clear();
     this.pendingSignals.length = 0;
     this.dispatchedEnvelopeIds.clear();
+    this.collabDispatches.clear();
     this.powAbortController?.abort();
     this.powAbortController = null;
     if (!this.wsClient) return;
@@ -1194,6 +1558,10 @@ export class BrowserSession {
 
   private releaseSensitiveState(): void {
     this.localAttestationRestored = false;
+    if (this.ownerRoomSecret) {
+      zero(this.ownerRoomSecret);
+      this.ownerRoomSecret = null;
+    }
     if (this.keys) {
       if (this.keys.rootKey) zero(this.keys.rootKey);
       zero(this.keys.eventKey);
@@ -1230,10 +1598,7 @@ export class BrowserSession {
     if (!parsed.policy || !Array.isArray(parsed.devices)) {
       throw new Error('GET /devices omitted authenticated room policy or device directory');
     }
-    if (!Number.isInteger(parsed.policy.powBits) || parsed.policy.powBits < 12 || parsed.policy.powBits > 24) {
-      throw new Error('GET /devices returned invalid policy powBits');
-    }
-    return { policy: parsed.policy, devices: parsed.devices };
+    return { policy: validateRoomPolicy(parsed.policy), devices: parsed.devices };
   }
 
   private async registerDevice(roomId: string, keys: RoomKeys, powBits: number): Promise<void> {
@@ -1309,18 +1674,49 @@ export class BrowserSession {
       reconnectMaxMs: this.opts.reconnectMaxMs,
       callbacks: {
         onHello: (frame, verifiedDevices) => {
-          this.setState({ status: 'connected', connection: 'mailbox' });
-          this.bootstrapDevices = [...verifiedDevices.values()];
+          const devices = [...verifiedDevices.values()];
+          let policy: RoomPolicy;
+          try {
+            policy = validateRoomPolicy(frame.policy);
+            if (this.principal === 'owner') {
+              const identity = this.identity;
+              if (!identity) throw new Error('owner identity is unavailable');
+              // The authoritative hello directory must itself contain the
+              // exact owner registration; the verified cache check below
+              // additionally proves that registration passed self-signature
+              // and immutable device-key binding validation.
+              assertRegisteredBrowserOwner(frame.devices, identity);
+              assertRegisteredBrowserOwner(devices, identity);
+              if (!policy.allowBrowser) {
+                throw new Error('authenticated room policy disabled browser owner authority');
+              }
+              if (policy.expiresAt <= Date.now()) {
+                this.fail('room_expired', 'authenticated room policy has expired');
+                return;
+              }
+            }
+          } catch (error) {
+            this.fail('network', error instanceof Error ? error.message : String(error));
+            return;
+          }
+          this.roomPolicy = policy;
+          this.bootstrapDevices = devices;
           this.onlineDeviceIds.clear();
-          for (const deviceId of frame.onlineDeviceIds ?? this.bootstrapDevices.map((device) => device.deviceId)) {
+          const onlineDeviceIds = frame.onlineDeviceIds ?? (
+            this.principal === 'owner' && this.identity
+              ? [this.identity.deviceId]
+              : []
+          );
+          for (const deviceId of onlineDeviceIds) {
             this.onlineDeviceIds.add(deviceId);
           }
-          void this.persistDirectoryAndRoom(this.bootstrapDevices, frame.policy).catch(() => undefined);
+          this.setState({ status: 'connected', connection: 'mailbox' });
+          void this.persistDirectoryAndRoom(this.bootstrapDevices, policy).catch(() => undefined);
           const generation = this.transportGeneration;
           void (async () => {
-            await this.initializeAuthoring(frame.policy);
+            await this.initializeAuthoring(policy, this.principal === 'owner');
             if (generation !== this.transportGeneration || this.isTerminated()) return;
-            await this.startPeerMesh(frame.policy, this.bootstrapDevices);
+            await this.startPeerMesh(policy, this.bootstrapDevices);
           })().catch(() => {
             if (generation !== this.transportGeneration || this.isTerminated()) return;
             this.setState({
@@ -1333,6 +1729,7 @@ export class BrowserSession {
         onUnknownSigner: (envelope) => this.refreshSignerAndRetry(roomId, keys, envelope),
         onClose: (code) => {
           if (code < 4000 && this.state.status !== 'error' && this.state.status !== 'terminated') {
+            this.onlineDeviceIds.clear();
             this.setState({
               status: this.state.snapshotContent === null ? 'connecting' : 'offline',
               connection: 'offline',
@@ -1344,19 +1741,41 @@ export class BrowserSession {
           // Non-fatal — keep status as-is. Could surface as a toast later.
         },
         onPolicyChanged: (policy) => {
-          this.roomPolicy = policy;
+          let validated: RoomPolicy;
+          try {
+            validated = validateRoomPolicy(policy);
+            if (this.principal === 'owner') {
+              if (!validated.allowBrowser) {
+                throw new Error('authenticated room policy disabled browser owner authority');
+              }
+              if (validated.expiresAt <= Date.now()) {
+                this.fail('room_expired', 'authenticated room policy has expired');
+                return;
+              }
+            }
+          } catch (error) {
+            this.fail('network', error instanceof Error ? error.message : String(error));
+            return;
+          }
+          this.roomPolicy = validated;
+          this.setState({});
           const generation = this.transportGeneration;
           void (async () => {
-            await this.initializeAuthoring(policy);
+            await this.initializeAuthoring(validated);
             if (generation !== this.transportGeneration || this.isTerminated()) return;
-            await this.startPeerMesh(policy, this.bootstrapDevices);
+            await this.startPeerMesh(validated, this.bootstrapDevices);
           })().catch(() => {
             if (generation === this.transportGeneration && !this.isTerminated()) {
               this.setState({ connection: 'direct_failed', directError: 'direct_policy_update_failed' });
             }
           });
         },
-        onPresence: (event, deviceId) => {
+        onPresence: (event, deviceId, participantId) => {
+          const authenticated = this.bootstrapDevices.find(
+            (device) =>
+              device.deviceId === deviceId && device.participantId === participantId,
+          );
+          if (!authenticated) return;
           if (event === 'leave') {
             this.onlineDeviceIds.delete(deviceId);
             this.peerMesh?.removePeer(deviceId);
@@ -1364,6 +1783,7 @@ export class BrowserSession {
             this.onlineDeviceIds.add(deviceId);
             this.peerMesh?.syncDevices(this.activeWebRtcDevices());
           }
+          this.setState({});
         },
       },
     });
@@ -1447,7 +1867,6 @@ export class BrowserSession {
       zero(plaintext);
       return;
     }
-    this.rememberDispatchedEnvelope(envelope.envelopeId);
     if (envelope.kind === 'event') {
       let parsed: { meta?: EventMeta; body?: ReviewEventBody; auth?: ReviewEvent['auth'] };
       try {
@@ -1482,6 +1901,7 @@ export class BrowserSession {
         if (this.state.status === 'error') return;
       }
       store.applyEvent(event);
+      this.rememberDispatchedEnvelope(envelope.envelopeId);
       return;
     }
     if (envelope.kind === 'snapshot_blob') {
@@ -1551,12 +1971,14 @@ export class BrowserSession {
       }
       if (!waiting || waiting.length === 0) {
         this.snapshotBlobs.set(blobId, cached);
+        this.rememberDispatchedEnvelope(envelope.envelopeId);
         return;
       }
       this.pendingSnapshots.delete(blobId);
       for (const pending of waiting) {
         await this.hydrateSnapshotBlob(pending.store, pending.meta, pending.body, cached);
       }
+      this.rememberDispatchedEnvelope(envelope.envelopeId);
       return;
     }
     if (envelope.kind === 'signal') {
@@ -1578,18 +2000,60 @@ export class BrowserSession {
       const sender = this.bootstrapDevices.find((device) => device.deviceId === envelope.deviceId);
       if (!sender || sender.participantId !== envelope.authorId) return;
       if (sender.client !== 'attn-native' && sender.client !== 'attn-browser') return;
+      if (payload.kind === 'collab') {
+        if (envelope.target !== null && envelope.target !== undefined) return;
+        if (sender.deviceId === this.identity?.deviceId) return;
+        await this.dispatchCollabOnce({
+          envelopeId: envelope.envelopeId,
+          source: decoded.source,
+          payload: payload.payload,
+          sender: structuredClone(sender),
+        });
+        return;
+      }
       if (!this.peerMesh) {
-        if (this.pendingSignals.length < 64) this.pendingSignals.push(payload);
+        if (this.pendingSignals.length < 64) {
+          this.pendingSignals.push(payload);
+          this.rememberDispatchedEnvelope(envelope.envelopeId);
+        }
         return;
       }
       try {
         await this.peerMesh.handleSignal(payload);
+        this.rememberDispatchedEnvelope(envelope.envelopeId);
       } catch {
         this.setState({ directError: 'direct_signal_rejected' });
       }
       return;
     }
     zero(plaintext);
+  }
+
+  private async dispatchCollabOnce(delivery: BrowserCollabDelivery): Promise<void> {
+    // A direct delivery and its durable network echo may overlap. Wait for the
+    // active callback: success suppresses the echo, while rejection lets the
+    // authenticated network/replay copy try again.
+    while (!this.dispatchedEnvelopeIds.has(delivery.envelopeId)) {
+      const active = this.collabDispatches.get(delivery.envelopeId);
+      if (!active) break;
+      if (await active) return;
+    }
+    if (this.dispatchedEnvelopeIds.has(delivery.envelopeId)) return;
+
+    let settle!: (succeeded: boolean) => void;
+    const pending = new Promise<boolean>((resolve) => { settle = resolve; });
+    this.collabDispatches.set(delivery.envelopeId, pending);
+    let succeeded = false;
+    try {
+      await this.opts.onCollab?.(delivery);
+      this.rememberDispatchedEnvelope(delivery.envelopeId);
+      succeeded = true;
+    } finally {
+      settle(succeeded);
+      if (this.collabDispatches.get(delivery.envelopeId) === pending) {
+        this.collabDispatches.delete(delivery.envelopeId);
+      }
+    }
   }
 
   private rememberDispatchedEnvelope(envelopeId: string): void {

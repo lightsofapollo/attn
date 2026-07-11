@@ -23,9 +23,11 @@ import {
   buildRegisterDeviceBody,
   canonicalRegisterDeviceBytes,
   generateBrowserIdentity,
+  ownerCredentialsFromInviteCapability,
   parseBrowserSnapshotPlaintext,
   admissionHeaderValue,
   type BrowserDeviceIdentity,
+  type BrowserOwnerCredentials,
   type BrowserSessionState,
   type FetchLikeInit,
   type FetchLikeResponse,
@@ -61,6 +63,8 @@ import type {
 } from '../types';
 import type { MailboxEnvelope, RoomPolicy, Device, WebSocketLike } from './browser-ws';
 import { BrowserStorage, BROWSER_STORAGE_DB_NAME } from './browser-storage';
+import { assembleBrowserSignal } from './browser-signaling';
+import type { InviteCapability } from './browser-workspace-share';
 
 // ---------------------------------------------------------------------------
 // In-test stand-in for the runes-backed reviewStore. Matches the
@@ -232,6 +236,74 @@ const POLICY: RoomPolicy = {
   allowBrowser: true,
   allowRemoteAgents: false,
 };
+
+function browserOwnerCredentials(): BrowserOwnerCredentials {
+  const signingSecret = new Uint8Array(32).fill(0x51);
+  const encryptionSecret = new Uint8Array(32).fill(0x61);
+  return {
+    roomId: ROOM_ID,
+    roomSecret: new Uint8Array(ROOM_SECRET),
+    keys: deriveRoomKeys(ROOM_SECRET),
+    identity: {
+      deviceId: 'browser-owner-device',
+      participantId: 'browser-owner-participant',
+      signingSecret,
+      signingPublic: ed25519.getPublicKey(signingSecret),
+      encryptionSecret,
+      publicEncryptionKey: x25519.getPublicKey(encryptionSecret),
+    },
+    policy: structuredClone(POLICY),
+  };
+}
+
+function browserOwnerDevice(credentials: BrowserOwnerCredentials): Device {
+  return signedDirectoryDevice({
+    deviceId: credentials.identity.deviceId,
+    participantId: credentials.identity.participantId,
+    publicEncryptionKey: base64UrlEncode(credentials.identity.publicEncryptionKey),
+    publicSigningKey: base64UrlEncode(credentials.identity.signingPublic),
+    client: 'attn-browser',
+    kind: 'owner',
+    registeredAt: 1_700_000_000_000,
+  }, credentials.identity.signingSecret);
+}
+
+function browserReviewerDevice(seed = 0x71): { identity: BrowserDeviceIdentity; device: Device } {
+  const signingSecret = new Uint8Array(32).fill(seed);
+  const encryptionSecret = new Uint8Array(32).fill(seed + 1);
+  const identity: BrowserDeviceIdentity = {
+    deviceId: `browser-reviewer-${seed}`,
+    participantId: `browser-reviewer-participant-${seed}`,
+    signingSecret,
+    signingPublic: ed25519.getPublicKey(signingSecret),
+    encryptionSecret,
+    publicEncryptionKey: x25519.getPublicKey(encryptionSecret),
+  };
+  return {
+    identity,
+    device: signedDirectoryDevice({
+      deviceId: identity.deviceId,
+      participantId: identity.participantId,
+      publicEncryptionKey: base64UrlEncode(identity.publicEncryptionKey),
+      publicSigningKey: base64UrlEncode(identity.signingPublic),
+      client: 'attn-browser',
+      kind: 'reviewer',
+      registeredAt: 1_700_000_000_001,
+    }, signingSecret),
+  };
+}
+
+function ownerCapability(credentials: BrowserOwnerCredentials): InviteCapability {
+  return {
+    v: 1,
+    roomSecret: base64UrlEncode(credentials.roomSecret),
+    ownerSigningSecret: base64UrlEncode(credentials.identity.signingSecret),
+    ownerEncryptionSecret: base64UrlEncode(credentials.identity.encryptionSecret),
+    ownerDeviceId: credentials.identity.deviceId,
+    ownerParticipantId: credentials.identity.participantId,
+    policy: structuredClone(credentials.policy),
+  };
+}
 
 interface MockServer {
   port: number;
@@ -615,6 +687,505 @@ defineCase('admissionHeaderValue prefixes with v2. and base64url-encodes the tag
   const tag = value.slice(3);
   // base64url-no-pad of HMAC-SHA-256 is 43 chars.
   assertEq(tag.length, 43, 'tag length 43 chars (32 bytes base64url-no-pad)');
+});
+
+defineCase('sealed owner capability reconstructs and cross-checks every secret', () => {
+  const original = browserOwnerCredentials();
+  const rebuilt = ownerCredentialsFromInviteCapability(ownerCapability(original), ROOM_ID);
+  assertEq(rebuilt.roomId, ROOM_ID, 'derived owner room id');
+  assert(
+    rebuilt.keys.eventKey.every((byte, index) => byte === original.keys.eventKey[index]),
+    'event key reconstruction',
+  );
+  assert(
+    rebuilt.identity.signingPublic.every(
+      (byte, index) => byte === original.identity.signingPublic[index],
+    ),
+    'Ed25519 public reconstruction',
+  );
+  assert(
+    rebuilt.identity.publicEncryptionKey.every(
+      (byte, index) => byte === original.identity.publicEncryptionKey[index],
+    ),
+    'X25519 public reconstruction',
+  );
+  let roomMismatch = false;
+  try { ownerCredentialsFromInviteCapability(ownerCapability(original), 'wrong-room'); }
+  catch { roomMismatch = true; }
+  assert(roomMismatch, 'room binding mismatch accepted');
+  let secretMismatch = false;
+  try {
+    ownerCredentialsFromInviteCapability(
+      { ...ownerCapability(original), ownerSigningSecret: base64UrlEncode(new Uint8Array(31)) },
+      ROOM_ID,
+    );
+  } catch { secretMismatch = true; }
+  assert(secretMismatch, 'short owner secret accepted');
+  let policyMismatch = false;
+  try {
+    ownerCredentialsFromInviteCapability(
+      { ...ownerCapability(original), policy: { ...POLICY, powBits: 2 } },
+      ROOM_ID,
+    );
+  } catch { policyMismatch = true; }
+  assert(policyMismatch, 'invalid sealed policy accepted');
+});
+
+defineCase('owner principal verifies GET directory and never registers or joins as reviewer', async () => {
+  const credentials = browserOwnerCredentials();
+  const device = browserOwnerDevice(credentials);
+  const callerSigning = new Uint8Array(credentials.identity.signingSecret);
+  const callerRoomSecret = new Uint8Array(credentials.roomSecret);
+  const methods: string[] = [];
+  const store = makeStubStore();
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      ws.on('message', (raw) => {
+        const frame = JSON.parse(String(raw));
+        if (frame.type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello',
+          serverSeq: 0,
+          policy: POLICY,
+          devices: [device],
+          onlineDeviceIds: [device.deviceId],
+          missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    const session = new BrowserSession({
+      owner: credentials,
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      disableWebRtc: true,
+      store,
+      powToken: 'unused-owner-pow',
+      fetchImpl: async (_url, init) => {
+        methods.push(init.method ?? 'GET');
+        if (init.method !== 'GET') throw new Error('owner startup attempted a POST');
+        return { status: 200, text: async () => JSON.stringify({ policy: POLICY, devices: [device] }) };
+      },
+      webSocketFactory: nodeFactory,
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 200,
+    });
+    await session.start();
+    for (let index = 0; index < 80 && !session.getState().authoringReady; index += 1) await delay(20);
+    assertEq(session.getState().status, 'connected', 'owner connected');
+    assertEq(session.getState().principal, 'owner', 'owner principal');
+    assertEq(session.getState().ownerOnline, true, 'owner online');
+    assertEq(session.getState().liveEditingAvailable, true, 'owner live authority');
+    assertEq(session.getState().authoringReady, true, 'owner durable authoring ready');
+    assertEq(methods.join(','), 'GET', 'only authenticated GET issued');
+    assertEq(store.events.length, 0, 'no reviewer ParticipantJoined emitted');
+    const internals = session as unknown as {
+      keys: typeof KEYS;
+      identity: BrowserDeviceIdentity;
+      ownerRoomSecret: Uint8Array;
+    };
+    const keyRef = internals.keys.eventKey;
+    const secretRef = internals.identity.signingSecret;
+    const roomSecretRef = internals.ownerRoomSecret;
+    session.close();
+    assert(keyRef.every((byte) => byte === 0), 'session event key zeroed');
+    assert(secretRef.every((byte) => byte === 0), 'session signing secret zeroed');
+    assert(roomSecretRef.every((byte) => byte === 0), 'session room secret zeroed');
+    assert(
+      credentials.identity.signingSecret.every((byte, index) => byte === callerSigning[index]),
+      'caller signing secret was aliased',
+    );
+    assert(
+      credentials.roomSecret.every((byte, index) => byte === callerRoomSecret[index]),
+      'caller room secret was aliased',
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('owner startup rejects a mismatched or downgraded directory registration', async () => {
+  for (const mutate of [
+    (device: Device): Device => ({ ...device, kind: 'reviewer' }),
+    (device: Device): Device => ({ ...device, participantId: 'wrong-participant' }),
+    (device: Device): Device => ({ ...device, publicSigningKey: base64UrlEncode(new Uint8Array(32)) }),
+  ]) {
+    const credentials = browserOwnerCredentials();
+    const device = mutate(browserOwnerDevice(credentials));
+    let socketOpened = false;
+    const session = new BrowserSession({
+      owner: credentials,
+      relayUrl: 'http://127.0.0.1:9',
+      store: makeStubStore(),
+      fetchImpl: async () => ({
+        status: 200,
+        text: async () => JSON.stringify({ policy: POLICY, devices: [device] }),
+      }),
+      webSocketFactory: () => {
+        socketOpened = true;
+        throw new Error('mismatched owner must not open WS');
+      },
+    });
+    await session.start();
+    assertEq(session.getState().status, 'error', 'mismatch is terminal');
+    assertEq(socketOpened, false, 'WS stayed closed');
+    session.close();
+  }
+});
+
+defineCase('owner hello fully validates policy and reasserts its authoritative registration', async () => {
+  const scenarios: Array<{
+    name: string;
+    policy: RoomPolicy;
+    helloDevices?: Device[];
+    errorKind: NonNullable<BrowserSessionState['error']>['kind'];
+  }> = [
+    { name: 'invalid maxPeers', policy: { ...POLICY, maxPeers: 9 }, errorKind: 'network' },
+    { name: 'browser authority revoked', policy: { ...POLICY, allowBrowser: false }, errorKind: 'network' },
+    { name: 'expired', policy: { ...POLICY, expiresAt: Date.now() - 1 }, errorKind: 'room_expired' },
+    { name: 'owner omitted', policy: POLICY, helloDevices: [], errorKind: 'network' },
+  ];
+  for (const scenario of scenarios) {
+    const credentials = browserOwnerCredentials();
+    const device = browserOwnerDevice(credentials);
+    const server = await startMockServer();
+    try {
+      server.onClient((ws) => {
+        ws.on('message', (raw) => {
+          if (JSON.parse(String(raw)).type !== 'subscribe') return;
+          ws.send(JSON.stringify({
+            type: 'hello',
+            serverSeq: 0,
+            policy: scenario.policy,
+            devices: scenario.helloDevices ?? [device],
+            onlineDeviceIds: [device.deviceId],
+            missedSignalEnvelopeIds: [],
+          }));
+        });
+      });
+      const session = new BrowserSession({
+        owner: credentials,
+        relayUrl: `http://127.0.0.1:${server.port}`,
+        disableWebRtc: true,
+        store: makeStubStore(),
+        fetchImpl: async () => ({
+          status: 200,
+          text: async () => JSON.stringify({ policy: POLICY, devices: [device] }),
+        }),
+        webSocketFactory: nodeFactory,
+        reconnectInitialMs: 50,
+        reconnectMaxMs: 200,
+      });
+      await session.start();
+      for (let index = 0; index < 80 && session.getState().status !== 'error'; index += 1) {
+        await delay(10);
+      }
+      assertEq(session.getState().status, 'error', `${scenario.name} rejected`);
+      assertEq(session.getState().error?.kind, scenario.errorKind, `${scenario.name} error kind`);
+      assertEq(session.getState().liveEditingAvailable, false, `${scenario.name} live editing closed`);
+      session.close();
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+defineCase('owner policy changes are fully validated and revoke live authority fail closed', async () => {
+  for (const scenario of [
+    { name: 'invalid maxPeers', policy: { ...POLICY, maxPeers: 9 }, errorKind: 'network' },
+    { name: 'browser authority revoked', policy: { ...POLICY, allowBrowser: false }, errorKind: 'network' },
+    { name: 'expired', policy: { ...POLICY, expiresAt: Date.now() - 1 }, errorKind: 'room_expired' },
+  ] as const) {
+    const credentials = browserOwnerCredentials();
+    const device = browserOwnerDevice(credentials);
+    let socket: WebSocket | null = null;
+    const server = await startMockServer();
+    try {
+      server.onClient((ws) => {
+        socket = ws;
+        ws.on('message', (raw) => {
+          if (JSON.parse(String(raw)).type !== 'subscribe') return;
+          ws.send(JSON.stringify({
+            type: 'hello', serverSeq: 0, policy: POLICY, devices: [device],
+            onlineDeviceIds: [device.deviceId], missedSignalEnvelopeIds: [],
+          }));
+        });
+      });
+      const session = new BrowserSession({
+        owner: credentials,
+        relayUrl: `http://127.0.0.1:${server.port}`,
+        disableWebRtc: true,
+        store: makeStubStore(),
+        fetchImpl: async () => ({
+          status: 200,
+          text: async () => JSON.stringify({ policy: POLICY, devices: [device] }),
+        }),
+        webSocketFactory: nodeFactory,
+        reconnectInitialMs: 50,
+        reconnectMaxMs: 200,
+      });
+      await session.start();
+      for (let index = 0; index < 80 && session.getState().status !== 'connected'; index += 1) {
+        await delay(10);
+      }
+      assertEq(session.getState().liveEditingAvailable, true, `${scenario.name} starts live`);
+      socket!.send(JSON.stringify({ type: 'policy_changed', policy: scenario.policy }));
+      for (let index = 0; index < 80 && session.getState().status !== 'error'; index += 1) {
+        await delay(10);
+      }
+      assertEq(session.getState().status, 'error', `${scenario.name} rejected`);
+      assertEq(session.getState().error?.kind, scenario.errorKind, `${scenario.name} error kind`);
+      assertEq(session.getState().liveEditingAvailable, false, `${scenario.name} live editing closed`);
+      session.close();
+    } finally {
+      await server.close();
+    }
+  }
+});
+
+defineCase('owner presence gates only live editing and collab uses one target-null envelope direct-first plus relay', async () => {
+  const credentials = browserOwnerCredentials();
+  const device = browserOwnerDevice(credentials);
+  let socket: WebSocket | null = null;
+  const direct: MailboxEnvelope[] = [];
+  const posted: Array<Record<string, unknown>> = [];
+  let failRelay = false;
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      socket = ws;
+      ws.on('message', (raw) => {
+        const frame = JSON.parse(String(raw));
+        if (frame.type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello', serverSeq: 0, policy: POLICY, devices: [device],
+          onlineDeviceIds: [device.deviceId], missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    const session = new BrowserSession({
+      owner: credentials,
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      disableWebRtc: true,
+      store: makeStubStore(),
+      powToken: 'owner-outbox-pow',
+      fetchImpl: async (_url, init) => {
+        if (init.method === 'GET') {
+          return { status: 200, text: async () => JSON.stringify({ policy: POLICY, devices: [device] }) };
+        }
+        const body = JSON.parse(init.body ?? '{}') as { envelopes?: Array<Record<string, unknown>> };
+        posted.push(...(body.envelopes ?? []));
+        if (failRelay) {
+          return { status: 503, text: async () => 'relay unavailable' };
+        }
+        return {
+          status: 201,
+          text: async () => JSON.stringify({
+            accepted: (body.envelopes ?? []).map((envelope, index) => ({
+              envelopeId: envelope.envelopeId,
+              serverSeq: index + 1,
+            })),
+          }),
+        };
+      },
+      webSocketFactory: nodeFactory,
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 200,
+    });
+    await session.start();
+    for (let index = 0; index < 80 && !session.getState().authoringReady; index += 1) await delay(20);
+    (session as unknown as { peerMesh: {
+      broadcastEnvelope(envelope: MailboxEnvelope): void;
+      close(): void;
+      removePeer(deviceId: string): void;
+      syncDevices(devices: Iterable<Device>): void;
+    } }).peerMesh = {
+      broadcastEnvelope: (envelope) => direct.push(structuredClone(envelope)),
+      close: () => undefined,
+      removePeer: () => undefined,
+      syncDevices: () => undefined,
+    };
+    await session.sendCollab('{"kind":"submit","epoch":"snap"}');
+    assertEq(direct.length, 1, 'direct fanout happened synchronously');
+    for (let index = 0; index < 80 && posted.length === 0; index += 1) await delay(20);
+    assertEq(posted.length, 1, 'same collab envelope relayed once');
+    assertEq(direct[0]!.target, null, 'direct collab target is null');
+    assertEq(posted[0]!.target, null, 'relay collab target is null');
+    for (const field of ['envelopeId', 'nonce', 'ciphertext', 'ciphertextBytes'] as const) {
+      assertEq(posted[0]![field], direct[0]![field], `direct/relay ${field}`);
+    }
+
+    failRelay = true;
+    let relayFailureSurfaced = false;
+    try { await session.sendCollab('{"kind":"submit","epoch":"next"}'); }
+    catch { relayFailureSurfaced = true; }
+    assert(relayFailureSurfaced, 'relay failure did not reject sendCollab');
+    assertEq(direct.length, 2, 'failed relay still used direct transport once');
+    assertEq(session.getState().outboxPending, 1, 'failed relay retained the exact envelope');
+
+    socket!.send(JSON.stringify({
+      type: 'presence', event: 'leave', deviceId: device.deviceId, participantId: 'spoofed',
+    }));
+    await delay(20);
+    assertEq(session.getState().ownerOnline, true, 'spoofed presence ignored');
+    socket!.send(JSON.stringify({
+      type: 'presence', event: 'leave', deviceId: device.deviceId, participantId: device.participantId,
+    }));
+    for (let index = 0; index < 40 && session.getState().ownerOnline; index += 1) await delay(10);
+    assertEq(session.getState().ownerOnline, false, 'authenticated owner leave');
+    assertEq(session.getState().liveEditingAvailable, false, 'live editing paused');
+    assertEq(session.getState().authoringReady, true, 'durable review remains ready');
+    let collabPaused = false;
+    try { await session.sendCollab('{}'); } catch { collabPaused = true; }
+    assert(collabPaused, 'collab authored while owner offline');
+    socket!.send(JSON.stringify({
+      type: 'presence', event: 'join', deviceId: device.deviceId, participantId: device.participantId,
+    }));
+    for (let index = 0; index < 40 && !session.getState().ownerOnline; index += 1) await delay(10);
+    assertEq(session.getState().liveEditingAvailable, true, 'owner join resumes live editing');
+    session.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('direct-first and relay collab delivery dispatch once with authenticated sender context', async () => {
+  const credentials = browserOwnerCredentials();
+  const owner = browserOwnerDevice(credentials);
+  const reviewer = browserReviewerDevice();
+  let socket: WebSocket | null = null;
+  const deliveries: Array<{ source: string; sender: Device; payload: string }> = [];
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      socket = ws;
+      ws.on('message', (raw) => {
+        const frame = JSON.parse(String(raw));
+        if (frame.type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello', serverSeq: 0, policy: POLICY, devices: [owner, reviewer.device],
+          onlineDeviceIds: [owner.deviceId, reviewer.device.deviceId], missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    const session = new BrowserSession({
+      owner: credentials,
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      disableWebRtc: true,
+      store: makeStubStore(),
+      fetchImpl: async () => ({
+        status: 200,
+        text: async () => JSON.stringify({ policy: POLICY, devices: [owner, reviewer.device] }),
+      }),
+      webSocketFactory: nodeFactory,
+      onCollab: (delivery) => {
+        deliveries.push({
+          source: delivery.source,
+          sender: delivery.sender,
+          payload: delivery.payload,
+        });
+      },
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 200,
+    });
+    await session.start();
+    for (let index = 0; index < 80 && !session.getState().authoringReady; index += 1) await delay(20);
+    const envelope = assembleBrowserSignal({
+      signalingKey: KEYS.signalingKey,
+      roomId: ROOM_ID,
+      authorId: reviewer.identity.participantId,
+      deviceId: reviewer.identity.deviceId,
+      createdAt: 1_700_000_700_000,
+      expiresAt: POLICY.expiresAt,
+      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: '{"kind":"resync"}' },
+      clientNonce: new Uint8Array(16).fill(0x22),
+      aeadNonce: new Uint8Array(24).fill(0x23),
+    });
+    const client = (session as unknown as { wsClient: { ingestDirectEnvelope(envelope: MailboxEnvelope): Promise<void> } }).wsClient;
+    await client.ingestDirectEnvelope(envelope);
+    socket!.send(JSON.stringify({ type: 'envelope', envelope, serverSeq: 1 }));
+    await delay(40);
+    assertEq(deliveries.length, 1, 'direct/network duplicate dispatched once');
+    assertEq(deliveries[0]!.source, 'direct', 'direct won delivery race');
+    assertEq(deliveries[0]!.sender.kind, 'reviewer', 'authenticated sender kind surfaced');
+    assertEq(deliveries[0]!.sender.deviceId, reviewer.identity.deviceId, 'sender device surfaced');
+    assertEq(deliveries[0]!.payload, '{"kind":"resync"}', 'collab payload surfaced');
+    session.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('rejected direct collab callback retries from durable network delivery', async () => {
+  const credentials = browserOwnerCredentials();
+  const owner = browserOwnerDevice(credentials);
+  const reviewer = browserReviewerDevice();
+  let socket: WebSocket | null = null;
+  let session!: BrowserSession;
+  const attempts: string[] = [];
+  let networkWasCommitted = false;
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      socket = ws;
+      ws.on('message', (raw) => {
+        if (JSON.parse(String(raw)).type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello', serverSeq: 0, policy: POLICY, devices: [owner, reviewer.device],
+          onlineDeviceIds: [owner.deviceId, reviewer.device.deviceId], missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    session = new BrowserSession({
+      owner: credentials,
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      disableWebRtc: true,
+      store: makeStubStore(),
+      fetchImpl: async () => ({
+        status: 200,
+        text: async () => JSON.stringify({ policy: POLICY, devices: [owner, reviewer.device] }),
+      }),
+      webSocketFactory: nodeFactory,
+      onCollab: (delivery) => {
+        attempts.push(delivery.source);
+        if (delivery.source === 'direct') throw new Error('transient direct consumer failure');
+        networkWasCommitted = (
+          session as unknown as { volatileInbound: Map<string, unknown> }
+        ).volatileInbound.has(delivery.envelopeId);
+      },
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 200,
+    });
+    await session.start();
+    for (let index = 0; index < 80 && !session.getState().authoringReady; index += 1) await delay(20);
+    const envelope = assembleBrowserSignal({
+      signalingKey: KEYS.signalingKey,
+      roomId: ROOM_ID,
+      authorId: reviewer.identity.participantId,
+      deviceId: reviewer.identity.deviceId,
+      createdAt: 1_700_000_710_000,
+      expiresAt: POLICY.expiresAt,
+      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: '{"kind":"retry"}' },
+      clientNonce: new Uint8Array(16).fill(0x24),
+      aeadNonce: new Uint8Array(24).fill(0x25),
+    });
+    const client = (
+      session as unknown as { wsClient: { ingestDirectEnvelope(item: MailboxEnvelope): Promise<void> } }
+    ).wsClient;
+    let directRejected = false;
+    try { await client.ingestDirectEnvelope(envelope); }
+    catch { directRejected = true; }
+    assert(directRejected, 'direct callback rejection did not surface');
+    socket!.send(JSON.stringify({ type: 'envelope', envelope, serverSeq: 1 }));
+    for (let index = 0; index < 80 && attempts.length < 2; index += 1) await delay(10);
+    assertEq(attempts.join(','), 'direct,network', 'network delivery retried rejected direct callback');
+    assert(networkWasCommitted, 'network durability commit did not precede callback retry');
+    socket!.send(JSON.stringify({ type: 'envelope', envelope, serverSeq: 2 }));
+    await delay(30);
+    assertEq(attempts.length, 2, 'successful network retry was not deduplicated');
+    session.close();
+  } finally {
+    await server.close();
+  }
 });
 
 defineCase('happy path: invite → POST /devices → WS hello → connected', async () => {

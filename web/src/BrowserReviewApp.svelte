@@ -80,6 +80,9 @@
   // ---------------------------------------------------------------------------
 
   let sessionState = $state<BrowserSessionState>({
+    principal: 'reviewer',
+    ownerOnline: false,
+    liveEditingAvailable: false,
     status: 'idle',
     connection: 'offline',
     directError: null,

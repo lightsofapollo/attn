@@ -1042,6 +1042,21 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
     }));
     for (let index = 0; index < 40 && !session.getState().ownerOnline; index += 1) await delay(10);
     assertEq(session.getState().liveEditingAvailable, true, 'owner join resumes live editing');
+    const terminal = session.prepareTerminalEvent({
+      type: 'suggestion_rejected', suggestionId: 'suggestion-owner-terminal',
+    });
+    const beforeAdopt = posted.length;
+    failRelay = false;
+    await session.adoptDurableEnvelope(terminal.envelope);
+    assert(
+      posted.slice(beforeAdopt).some((item) => item.envelopeId === terminal.envelope.envelopeId),
+      'prepared exact terminal envelope was not adopted and flushed',
+    );
+    let wrongOwnerRejected = false;
+    try {
+      await session.adoptDurableEnvelope({ ...terminal.envelope, deviceId: 'wrong-owner' });
+    } catch { wrongOwnerRejected = true; }
+    assert(wrongOwnerRejected, 'terminal envelope from another device was adopted');
     session.close();
   } finally {
     await server.close();

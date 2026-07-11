@@ -1637,6 +1637,161 @@ mod tests {
         (ctx, tmp)
     }
 
+    #[derive(serde::Deserialize)]
+    struct SharedApplyCorpus {
+        v: u8,
+        classification: Vec<SharedClassificationVector>,
+        apply: Vec<SharedApplyVector>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct SharedClassificationVector {
+        name: String,
+        snapshot: String,
+        current: String,
+        expected: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SharedApplyVector {
+        name: String,
+        current: String,
+        operation: SuggestionOperation,
+        resolution: SharedResolutionVector,
+        expected_verdict: String,
+        expected_match: Option<String>,
+        expected_target: [usize; 2],
+        expected_replacement: String,
+        expected_result: Option<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SharedResolutionVector {
+        status: String,
+        confidence: f64,
+        byte_range: [u64; 2],
+    }
+
+    fn match_kind_label(kind: TextMatchKind) -> &'static str {
+        match kind {
+            TextMatchKind::Exact => "exact",
+            TextMatchKind::NormalizedUnicode => "normalized_unicode",
+            TextMatchKind::TrailingWhitespace => "trailing_whitespace",
+            TextMatchKind::Mismatch => "mismatch",
+        }
+    }
+
+    /// One checked-in corpus is consumed here and by browser-review-actions.test.ts.
+    /// This is the parity gate for drift classification, thresholds, byte
+    /// cursors, all four operations, and UTF-8/emoji splicing.
+    #[test]
+    fn shared_browser_native_suggestion_apply_vectors() {
+        let corpus: SharedApplyCorpus = serde_json::from_str(include_str!(
+            "../../planning/collab/test-vectors/suggestion-apply.json"
+        ))
+        .expect("shared suggestion apply corpus");
+        assert_eq!(corpus.v, 1, "unsupported corpus version");
+
+        for vector in corpus.classification {
+            assert_eq!(
+                match_kind_label(classify_text_match(&vector.snapshot, &vector.current)),
+                vector.expected,
+                "classification vector {}",
+                vector.name,
+            );
+        }
+
+        for vector in corpus.apply {
+            let current_range = PositionAnchor {
+                byte_range: vector.resolution.byte_range,
+                line_range: [0, 0],
+                pm_range: None,
+            };
+            let resolved = match vector.resolution.status.as_str() {
+                "exact" => ResolvedAnchor::Exact {
+                    confidence: vector.resolution.confidence,
+                    current_range,
+                    reason: crate::review::model::ExactReason::BaseHashMatch,
+                },
+                "remapped" => ResolvedAnchor::Remapped {
+                    confidence: vector.resolution.confidence,
+                    current_range,
+                    reason: crate::review::model::RemappedReason::QuoteMatch,
+                },
+                other => panic!("unsupported vector resolution status {other}"),
+            };
+            let verdict = decide(
+                event_id("shared-vector-suggestion"),
+                &vector.operation,
+                resolved,
+                vector.current.as_bytes(),
+            );
+            match (&verdict, vector.expected_verdict.as_str()) {
+                (
+                    ApplyVerdict::Ready {
+                        target_byte_range,
+                        replacement,
+                        match_kind,
+                        ..
+                    },
+                    "ready",
+                ) => {
+                    assert_eq!(
+                        *target_byte_range,
+                        (vector.expected_target[0], vector.expected_target[1]),
+                        "target vector {}",
+                        vector.name,
+                    );
+                    assert_eq!(
+                        replacement, &vector.expected_replacement,
+                        "replacement vector {}",
+                        vector.name
+                    );
+                    assert_eq!(
+                        Some(match_kind_label(*match_kind)),
+                        vector.expected_match.as_deref(),
+                        "match vector {}",
+                        vector.name,
+                    );
+                    let (ctx, _tmp) = make_ctx(vector.current.as_bytes());
+                    apply_ready_verdict(&verdict, &ctx, vector.current.as_bytes())
+                        .unwrap_or_else(|error| panic!("apply vector {}: {error}", vector.name));
+                    assert_eq!(
+                        std::fs::read_to_string(&ctx.path).expect("read applied vector"),
+                        vector.expected_result.expect("ready vector expectedResult"),
+                        "splice vector {}",
+                        vector.name,
+                    );
+                }
+                (
+                    ApplyVerdict::RequiresThreeWay {
+                        target_byte_range,
+                        proposed_replacement,
+                        ..
+                    },
+                    "requires_three_way",
+                ) => {
+                    assert_eq!(
+                        *target_byte_range,
+                        (vector.expected_target[0], vector.expected_target[1]),
+                        "three-way target vector {}",
+                        vector.name,
+                    );
+                    assert_eq!(
+                        proposed_replacement, &vector.expected_replacement,
+                        "three-way replacement vector {}",
+                        vector.name,
+                    );
+                }
+                (actual, expected) => {
+                    panic!("vector {} expected {expected}, got {actual:?}", vector.name)
+                }
+            }
+        }
+    }
+
     /// Construct a `Ready` verdict directly without going through the
     /// resolver. Lets each apply test pick its own splice target precisely
     /// instead of fighting the resolver's quote-matching heuristics.

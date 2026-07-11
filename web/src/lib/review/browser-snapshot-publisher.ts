@@ -19,6 +19,7 @@ import {
 } from './browser-crypto';
 import { assembleBrowserEvent, assembleSnapshotBlobEnvelope } from './browser-envelope';
 import type { BrowserDeviceIdentity } from './browser-session';
+import type { WorkspaceFence } from './browser-workspace-store';
 import {
   sealSnapshotR2Body,
   uploadBrowserR2Snapshot,
@@ -39,6 +40,8 @@ interface BrowserSnapshotEntryBase {
   bytes: Uint8Array;
   /** Reuse this identity across edits and renames. */
   fileId?: string;
+  /** Exact sealed workspace revision whose bytes are being published. */
+  revisionId?: string;
 }
 
 export type BrowserSnapshotEntry =
@@ -58,6 +61,8 @@ export interface PublishedManifestPointer {
     fileId: string;
     snapshotId: string;
     contentHash: string;
+    /** Added after v1 launch; absent legacy pointers remain readable. */
+    revisionId?: string;
   }>;
 }
 
@@ -71,15 +76,26 @@ export interface SnapshotPublicationSink {
     capId: string,
     publishedManifest: PublishedManifestPointer,
     envelopes: readonly MailboxEnvelope[],
+    fence: WorkspaceFence,
   ): Promise<unknown>;
   loadPendingPublication(
     workspaceId: string,
     capId: string,
+    fence: WorkspaceFence,
   ): Promise<readonly MailboxEnvelope[]>;
   commitPublication(
     workspaceId: string,
     capId: string,
+    fence: WorkspaceFence,
   ): Promise<unknown>;
+}
+
+export interface SnapshotPublicationRevisionSource {
+  getRevisionBody(
+    workspaceId: string,
+    path: string,
+    revisionId: string,
+  ): Promise<Uint8Array>;
 }
 
 export interface BrowserSnapshotPublicationResult {
@@ -105,6 +121,9 @@ export interface PublishBrowserSnapshotsOptions {
     sink: SnapshotPublicationSink;
     workspaceId: string;
     capId: string;
+    fence: WorkspaceFence;
+    /** Opens the exact workspace revision before any envelope is assembled. */
+    revisionSource: SnapshotPublicationRevisionSource;
   };
   /** Test seam; production always resolves the canonical Rust/comrak WASM builder. */
   indexBuilder?: (markdown: Uint8Array, snapshotId: string) => Promise<AnchorIndex>;
@@ -140,13 +159,35 @@ export async function publishBrowserSnapshots(
     : undefined;
   if (previous) validatePublishedPointerForReuse(previous);
   const previousByPath = new Map(previous?.entries.map((entry) => [entry.path, entry]));
-  const resolved = sources.map((source) => {
+  const resolved = await Promise.all(sources.map(async (source) => {
     const baseHash = contentHash(source.bytes);
     const fileId = source.fileId ?? previousByPath.get(source.path)?.fileId
       ?? deriveFileId(options.roomSecret, source.path, baseHash);
     requireCanonicalId(fileId, 16, `snapshot entry fileId for ${source.path}`);
+    if (source.revisionId !== undefined) {
+      requireCanonicalId(source.revisionId, 16, `source revisionId for ${source.path}`);
+    }
+    if (options.publication) {
+      const revisionId = source.revisionId!;
+      const stored = await options.publication.revisionSource.getRevisionBody(
+        options.publication.workspaceId,
+        source.path,
+        revisionId,
+      );
+      if (!(stored instanceof Uint8Array)) {
+        throw new Error(`revision source returned invalid bytes: ${source.path}`);
+      }
+      try {
+        const storedHash = contentHash(stored);
+        if (storedHash !== baseHash || !sameBytes(stored, source.bytes)) {
+          throw new Error(`snapshot bytes do not match workspace revision: ${source.path}`);
+        }
+      } finally {
+        stored.fill(0);
+      }
+    }
     return { source, baseHash, fileId };
-  });
+  }));
   const fileIds = new Set<string>();
   for (const item of resolved) {
     if (fileIds.has(item.fileId)) throw new Error(`duplicate snapshot entry fileId: ${item.fileId}`);
@@ -204,14 +245,19 @@ export async function publishBrowserSnapshots(
     blobRef: publishedManifest.blobRef,
   });
 
+  const resolvedByPath = new Map(resolved.map((item) => [item.source.path, item]));
   const pointer: PublishedManifestPointer = {
     manifestSnapshotId,
-    entries: manifest.entries.map(({ path, fileId, snapshotId, contentHash: hash }) => ({
-      path,
-      fileId,
-      snapshotId,
-      contentHash: hash,
-    })),
+    entries: manifest.entries.map(({ path, fileId, snapshotId, contentHash: hash }) => {
+      const revisionId = resolvedByPath.get(path)?.source.revisionId;
+      return {
+        path,
+        fileId,
+        snapshotId,
+        contentHash: hash,
+        ...(revisionId === undefined ? {} : { revisionId }),
+      };
+    }),
   };
   // For browser-owned rooms stagePublication atomically seals the pointer and
   // installs the complete ciphertext batch in the durable outbox. The outbox
@@ -222,6 +268,7 @@ export async function publishBrowserSnapshots(
       options.publication.capId,
       pointer,
       envelopes,
+      options.publication.fence,
     );
   }
   await options.outbox.enqueueBatchDurably(envelopes);
@@ -238,6 +285,7 @@ export async function resumeBrowserSnapshotPublication(
     const pending = await publication.sink.loadPendingPublication(
       publication.workspaceId,
       publication.capId,
+      publication.fence,
     );
     await outbox.enqueueBatchDurably(pending);
   }
@@ -246,6 +294,7 @@ export async function resumeBrowserSnapshotPublication(
     await publication.sink.commitPublication(
       publication.workspaceId,
       publication.capId,
+      publication.fence,
     );
   }
 }
@@ -376,6 +425,12 @@ function validateOptions(options: PublishBrowserSnapshotsOptions): void {
     throw new Error('room event/snapshot keys must be 32 bytes');
   }
   if (options.entries.length === 0) throw new Error('at least one snapshot entry is required');
+  if (
+    options.publication &&
+    typeof options.publication.revisionSource?.getRevisionBody !== 'function'
+  ) {
+    throw new Error('published workspace requires a revision source');
+  }
   for (const entry of options.entries) {
     if (!(entry.bytes instanceof Uint8Array)) throw new Error('snapshot bytes must be Uint8Array');
     if (entry.docType !== 'markdown' && entry.docType !== 'html' && entry.docType !== 'asset') {
@@ -384,7 +439,19 @@ function validateOptions(options: PublishBrowserSnapshotsOptions): void {
     if (entry.docType === 'asset' && !isValidSnapshotMediaType(entry.mediaType)) {
       throw new Error('asset mediaType is invalid');
     }
+    if (options.publication && entry.revisionId === undefined) {
+      throw new Error(`published workspace entry requires revisionId: ${entry.path}`);
+    }
   }
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  let diff = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    diff |= left[index]! ^ right[index]!;
+  }
+  return diff === 0;
 }
 
 function secureRandom(length: number): Uint8Array {
@@ -438,6 +505,9 @@ function validatePublishedPointerForReuse(pointer: PublishedManifestPointer): vo
     requireCanonicalId(entry.fileId, 16, `published fileId for ${entry.path}`);
     requireCanonicalId(entry.snapshotId, 16, `published snapshotId for ${entry.path}`);
     requireCanonicalId(entry.contentHash, 32, `published contentHash for ${entry.path}`);
+    if (entry.revisionId !== undefined) {
+      requireCanonicalId(entry.revisionId, 16, `published revisionId for ${entry.path}`);
+    }
     if (fileIds.has(entry.fileId) || snapshotIds.has(entry.snapshotId)) {
       throw new Error('published manifest contains duplicate identities');
     }

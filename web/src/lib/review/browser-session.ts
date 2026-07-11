@@ -46,7 +46,7 @@ import {
   decodeCanonicalBase64Url,
   validateSnapshotPlaintext,
 } from './browser-workspace-manifest';
-import { assembleBrowserEvent } from './browser-envelope';
+import { assembleBrowserEvent, type AssembledBrowserEvent } from './browser-envelope';
 import {
   BrowserOutbox,
   type BrowserOutboxError,
@@ -873,6 +873,52 @@ export class BrowserSession {
 
   async retryOutbox(): Promise<void> {
     await this.outbox?.flushNow();
+  }
+
+  /** Owner-only trusted terminal-event preparation for a wider atomic commit. */
+  prepareTerminalEvent(body: ReviewEventBody): AssembledBrowserEvent {
+    if (this.principal !== 'owner') throw new Error('only the browser owner may prepare terminal events');
+    if (body.type !== 'suggestion_accepted' && body.type !== 'suggestion_rejected') {
+      throw new Error('terminal event body must accept or reject a suggestion');
+    }
+    const identity = this.requireIdentity();
+    const keys = this.keys;
+    const policy = this.roomPolicy;
+    const roomId = this.state.roomId;
+    if (!keys || !policy || !roomId || !this.state.authoringReady) {
+      throw new Error('browser owner authoring is unavailable');
+    }
+    return assembleBrowserEvent({
+      eventKey: keys.eventKey,
+      signingSecret: identity.signingSecret,
+      signingPublic: identity.signingPublic,
+      roomId,
+      authorId: identity.participantId,
+      deviceId: identity.deviceId,
+      createdAt: this.nextCreatedAt(),
+      expiresAt: policy.expiresAt,
+      body,
+    });
+  }
+
+  /** Adopt exact ciphertext already committed by an atomic workspace action. */
+  async adoptDurableEnvelope(envelope: MailboxEnvelope): Promise<void> {
+    if (this.principal !== 'owner') throw new Error('only the browser owner may adopt terminal events');
+    const identity = this.requireIdentity();
+    const roomId = this.state.roomId;
+    const outbox = this.outbox;
+    if (!roomId || !outbox) throw new Error('browser owner outbox is unavailable');
+    if (
+      envelope.roomId !== roomId ||
+      envelope.kind !== 'event' ||
+      (envelope.target !== undefined && envelope.target !== null) ||
+      envelope.authorId !== identity.participantId ||
+      envelope.deviceId !== identity.deviceId
+    ) {
+      throw new Error('durable terminal envelope is not bound to this browser owner');
+    }
+    await outbox.enqueueDurably(envelope);
+    await outbox.flushNow();
   }
 
   /** Send live collab as one broadcast envelope: direct first, relay always. */

@@ -465,6 +465,73 @@ defineCase('recovers exact outbox bytes and atomically moves acknowledgements to
   }
 });
 
+defineCase('ACK promotion honors recorded fence expiry while preserving durable history', async () => {
+  const { factory, name } = testDatabase();
+  let clock = 100;
+  const storage = await BrowserStorage.open({
+    indexedDB: factory,
+    databaseName: name,
+    createIfMissing: true,
+    now: () => clock,
+  });
+  try {
+    const workspaceId = 'ws-fenced-promotion';
+    const holderId = 'publisher-tab';
+    const fence = await storage.leases({
+      now: () => clock,
+      leaseDurationMs: 5,
+      channel: null,
+    }).acquire(workspaceId, holderId);
+    assert(fence, 'publisher lease acquired');
+    const roomId = 'room-fenced-promotion';
+    const envelopeId = base64UrlEncode(new Uint8Array(16).fill(0x71));
+    const pending = envelope(roomId, envelopeId, undefined, 'publisher-device');
+    await storage.putOutbox(roomId, pending);
+    await inspectDatabase(factory, name, async (database) => {
+      const tx = database.transaction('workspace_share_caps', 'readwrite');
+      tx.objectStore('workspace_share_caps').put({
+        v: 1,
+        workspaceId,
+        capId: 'cap-fenced-promotion',
+        roomId,
+        scopeKind: 'workspace',
+        createdAt: clock,
+        nonce: base64UrlEncode(new Uint8Array(24).fill(1)),
+        ciphertext: base64UrlEncode(new Uint8Array(16).fill(2)),
+        publication: 'pending',
+        generation: 1,
+        publicationCommit: {
+          envelopeIds: [envelopeId],
+          nonce: base64UrlEncode(new Uint8Array(24).fill(3)),
+          ciphertext: base64UrlEncode(new Uint8Array(16).fill(4)),
+          holderId,
+          fencingToken: fence.fencingToken,
+        },
+      });
+      await transactionResult(tx);
+    });
+
+    clock = 106;
+    assertEqual(
+      await storage.acknowledge(roomId, [pending], [{ envelopeId, serverSeq: 1 }]),
+      1,
+      'ACK still moves exact ciphertext',
+    );
+    assertEqual((await storage.listHistory(roomId)).length, 1, 'history remains durable');
+    await inspectDatabase(factory, name, async (database) => {
+      const tx = database.transaction('workspace_share_caps', 'readonly');
+      const record = await requestResult<Record<string, unknown>>(
+        tx.objectStore('workspace_share_caps').get([workspaceId, 'cap-fenced-promotion']),
+      );
+      await transactionResult(tx);
+      assertEqual(record.publication, 'pending', 'expired authority cannot auto-promote');
+      assert(record.publicationCommit !== undefined, 'pending promotion journal retained');
+    });
+  } finally {
+    storage.close();
+  }
+});
+
 class MemorySealedFilesystem implements SealedBlobFileSystem {
   readonly files = new Map<string, Uint8Array>();
   readonly writtenPaths: string[] = [];

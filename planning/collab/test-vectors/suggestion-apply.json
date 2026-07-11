@@ -1,0 +1,86 @@
+{
+  "v": 1,
+  "classification": [
+    { "name": "exact", "snapshot": "same", "current": "same", "expected": "exact" },
+    { "name": "nfc_nfd", "snapshot": "café", "current": "café", "expected": "normalized_unicode" },
+    { "name": "trailing_spaces", "snapshot": "one  \ntwo\n", "current": "one\ntwo", "expected": "trailing_whitespace" },
+    { "name": "single_trailing_newline", "snapshot": "one\n", "current": "one", "expected": "trailing_whitespace" },
+    { "name": "crlf_is_drift", "snapshot": "line\r\n", "current": "line\n", "expected": "mismatch" },
+    { "name": "case_is_drift", "snapshot": "Foo", "current": "foo", "expected": "mismatch" },
+    { "name": "bom_is_drift", "snapshot": "text", "current": "﻿text", "expected": "mismatch" },
+    { "name": "internal_whitespace_is_drift", "snapshot": "a b", "current": "a  b", "expected": "mismatch" }
+  ],
+  "apply": [
+    {
+      "name": "replace_exact_emoji",
+      "current": "go 😀 now",
+      "operation": { "kind": "replace", "expectedText": "😀", "replacement": "🚀" },
+      "resolution": { "status": "exact", "confidence": 1.0, "byteRange": [3, 7] },
+      "expectedVerdict": "ready",
+      "expectedMatch": "exact",
+      "expectedTarget": [3, 7],
+      "expectedReplacement": "🚀",
+      "expectedResult": "go 🚀 now"
+    },
+    {
+      "name": "replace_nfc_nfd",
+      "current": "A café day",
+      "operation": { "kind": "replace", "expectedText": "café", "replacement": "tea" },
+      "resolution": { "status": "remapped", "confidence": 0.9, "byteRange": [2, 8] },
+      "expectedVerdict": "ready",
+      "expectedMatch": "normalized_unicode",
+      "expectedTarget": [2, 8],
+      "expectedReplacement": "tea",
+      "expectedResult": "A tea day"
+    },
+    {
+      "name": "delete_trailing_whitespace",
+      "current": "alpha\nbeta",
+      "operation": { "kind": "delete", "expectedText": "alpha  " },
+      "resolution": { "status": "remapped", "confidence": 0.7, "byteRange": [0, 5] },
+      "expectedVerdict": "ready",
+      "expectedMatch": "trailing_whitespace",
+      "expectedTarget": [0, 5],
+      "expectedReplacement": "",
+      "expectedResult": "\nbeta"
+    },
+    {
+      "name": "insert_before_at_floor",
+      "current": "go 😀 now",
+      "operation": { "kind": "insert_before", "text": "big " },
+      "resolution": { "status": "remapped", "confidence": 0.7, "byteRange": [3, 7] },
+      "expectedVerdict": "ready",
+      "expectedMatch": "exact",
+      "expectedTarget": [3, 3],
+      "expectedReplacement": "big ",
+      "expectedResult": "go big 😀 now"
+    },
+    {
+      "name": "insert_after_below_floor",
+      "current": "go 😀 now",
+      "operation": { "kind": "insert_after", "text": " friend" },
+      "resolution": { "status": "remapped", "confidence": 0.69, "byteRange": [3, 7] },
+      "expectedVerdict": "requires_three_way",
+      "expectedTarget": [7, 7],
+      "expectedReplacement": " friend"
+    },
+    {
+      "name": "replace_case_drift",
+      "current": "The brown fox",
+      "operation": { "kind": "replace", "expectedText": "Brown", "replacement": "green" },
+      "resolution": { "status": "exact", "confidence": 1.0, "byteRange": [4, 9] },
+      "expectedVerdict": "requires_three_way",
+      "expectedTarget": [4, 9],
+      "expectedReplacement": "green"
+    },
+    {
+      "name": "delete_crlf_drift",
+      "current": "line\nnext",
+      "operation": { "kind": "delete", "expectedText": "line\r\n" },
+      "resolution": { "status": "remapped", "confidence": 0.9, "byteRange": [0, 5] },
+      "expectedVerdict": "requires_three_way",
+      "expectedTarget": [0, 5],
+      "expectedReplacement": ""
+    }
+  ]
+}

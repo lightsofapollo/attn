@@ -33,10 +33,17 @@ import {
   WORKSPACE_INDEX,
   WORKSPACE_RECORD_VERSION,
   WORKSPACE_UPDATED_INDEX,
+  normalizeEntryPath,
   validateWorkspaceLeaseRecord,
+  validateWorkspaceEntryRecord,
   validateWorkspaceRecoveryRecord,
+  validateWorkspaceRecord,
+  validateWorkspaceRevisionRecord,
+  type WorkspaceEntryRecord,
   type WorkspaceLeaseRecord,
   type WorkspaceRecoveryRecord,
+  type WorkspaceRecord,
+  type WorkspaceRevisionRecord,
   type WorkspaceShareCapRecord,
 } from './browser-workspace-schema';
 
@@ -55,7 +62,21 @@ import {
   validateCollabCheckpointRoomId,
   type BrowserCollabCheckpoint,
 } from './browser-collab-checkpoint';
-import { WorkspaceStore, type WorkspaceFence } from './browser-workspace-store';
+import {
+  WorkspaceStore,
+  workspaceRevisionGcIntentId,
+  type WorkspaceFence,
+} from './browser-workspace-store';
+import {
+  browserReviewActionRecoveryId,
+  decodeBrowserReviewActionReceipt,
+  deriveBrowserReviewActionId,
+  encodeBrowserReviewActionReceipt,
+  type AtomicBrowserReviewActionCommit,
+  type AtomicBrowserReviewActionStore,
+  type BrowserReviewActionIdentity,
+  type BrowserReviewActionReceipt,
+} from './browser-review-actions';
 import { WorkspaceShareStore } from './browser-workspace-share';
 import {
   WorkspaceLeaseManager,
@@ -85,6 +106,7 @@ const HISTORY_ORDER_INDEX = 'by_room_acked';
 const LOCAL_IDENTITY_INFO = new TextEncoder().encode('attn local identity storage v1');
 const LOCAL_IDENTITY_RECORD_VERSION = 1;
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
+const MAX_REVIEW_ACTION_COMMIT_RETRIES = 8;
 
 type StoreName =
   | typeof STORE_ROOM_KEYS
@@ -268,12 +290,20 @@ interface PublicationShareRecord extends WorkspaceShareCapRecord {
     envelopeIds: string[];
     nonce: string;
     ciphertext: string;
+    /** Present on fenced legacy rollover journals; absent means v3 legacy. */
+    holderId?: string;
+    fencingToken?: number;
   };
 }
 
 interface CollabRecoveryRecord extends WorkspaceRecoveryRecord {
   collabEpoch: string;
   collabVersion: number;
+}
+
+interface ReviewActionRecoveryRecord extends WorkspaceRecoveryRecord {
+  reviewActionId: string;
+  reviewActionDisposition: BrowserReviewActionReceipt['disposition'];
 }
 
 interface PrivateIdentityPayload {
@@ -301,7 +331,11 @@ interface OpfsFileHandle {
  * Durable browser persistence. IndexedDB contains only sealed content, public
  * registration data, and a structured-cloned non-extractable HKDF root key.
  */
-export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPersistence {
+export class BrowserStorage implements
+  BrowserInboxPersistence,
+  BrowserOutboxPersistence,
+  AtomicBrowserReviewActionStore
+{
   private readonly db: IDBDatabase;
   private readonly databaseName: string;
   private readonly cryptoImpl: Crypto;
@@ -799,7 +833,7 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
     const ackedAt = this.now();
     requireTimestamp(ackedAt, 'ackedAt');
     const tx = this.db.transaction(
-      [STORE_OUTBOX, STORE_HISTORY, STORE_WORKSPACE_SHARE_CAPS],
+      [STORE_OUTBOX, STORE_HISTORY, STORE_WORKSPACE_SHARE_CAPS, STORE_WORKSPACE_LEASES],
       'readwrite',
     );
     const done = transactionDone(tx);
@@ -859,6 +893,34 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
       }
       decodeLength(promotion.nonce, 24, 'publication promotion nonce').fill(0);
       decodeAtLeast(promotion.ciphertext, 16, 'publication promotion ciphertext').fill(0);
+      const hasFenceMetadata =
+        promotion.holderId !== undefined || promotion.fencingToken !== undefined;
+      if (hasFenceMetadata) {
+        if (
+          typeof promotion.holderId !== 'string' ||
+          promotion.holderId.length === 0 ||
+          !Number.isSafeInteger(promotion.fencingToken) ||
+          promotion.fencingToken! < 1
+        ) {
+          tx.abort();
+          await done.catch(() => undefined);
+          throw new BrowserStorageError('publication promotion fence metadata is invalid');
+        }
+        const lease = await requestValue<WorkspaceLeaseRecord | undefined>(
+          tx.objectStore(STORE_WORKSPACE_LEASES).get(share.workspaceId),
+        );
+        try {
+          validateActiveFence(
+            lease,
+            { holderId: promotion.holderId, fencingToken: promotion.fencingToken! },
+            ackedAt,
+          );
+        } catch {
+          // ACK durability is independent of authority. Leave the share
+          // pending for the current fenced owner to promote explicitly.
+          continue;
+        }
+      }
       let fullyAcknowledged = true;
       for (const envelopeId of promotion.envelopeIds) {
         const [stillQueued, sent] = await Promise.all([
@@ -1049,6 +1111,313 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
     return record.rootKey;
   }
 
+  /** Open the workspace-key-sealed terminal decision receipt for idempotent replay. */
+  async getReviewActionReceipt(
+    identity: BrowserReviewActionIdentity,
+    actionId: string,
+  ): Promise<BrowserReviewActionReceipt | null> {
+    const workspaceId = identity.workspaceId;
+    requireId(workspaceId, 'workspaceId');
+    if (deriveBrowserReviewActionId(identity) !== actionId) {
+      throw new StorageConflictError('review action id does not match its normalized identity');
+    }
+    const recoveryId = browserReviewActionRecoveryId(actionId);
+    const bytes = await this.getWorkspaceRecovery(workspaceId, recoveryId);
+    if (!bytes) return null;
+    try {
+      const receipt = decodeBrowserReviewActionReceipt(bytes);
+      if (receipt.workspaceId !== workspaceId || receipt.actionId !== actionId) {
+        throw new StorageConflictError('review action receipt routing metadata conflicts');
+      }
+      const [outbox, history] = await Promise.all([
+        this.get<OutboxRecord>(STORE_OUTBOX, [receipt.roomId, receipt.terminalEnvelopeId]),
+        this.get<HistoryRecord>(STORE_HISTORY, [receipt.roomId, receipt.terminalEnvelopeId]),
+      ]);
+      const durable = outbox?.envelope ?? history?.envelope;
+      if (!durable || !sameEnvelope(durable, receipt.terminalEnvelope)) {
+        throw new StorageConflictError('review action receipt has no identical durable envelope');
+      }
+      return receipt;
+    } finally {
+      bytes.fill(0);
+    }
+  }
+
+  /**
+   * Commit one owner terminal decision without a write-before-event window.
+   * Revision/head, workspace clock, sealed receipt, and the exact ciphertext
+   * outbox row share one fenced IndexedDB readwrite transaction.
+   */
+  async commitReviewAction(
+    commit: AtomicBrowserReviewActionCommit,
+  ): Promise<{ receipt: BrowserReviewActionReceipt; replayed: boolean }> {
+    const { identity } = commit;
+    requireId(identity.workspaceId, 'workspaceId');
+    requireId(identity.roomId, 'roomId');
+    requireId(identity.path, 'path');
+    if (identity.path !== normalizeEntryPath(identity.path)) {
+      throw new BrowserStorageError('review action path must be canonical');
+    }
+    requireId(identity.suggestionId, 'suggestionId');
+    requireId(commit.expectedHeadRevisionId, 'expectedHeadRevisionId');
+    browserReviewActionRecoveryId(commit.actionId);
+    validateEnvelope(identity.roomId, commit.terminal.envelope);
+    if (commit.terminal.event.meta.roomId !== identity.roomId) {
+      throw new BrowserStorageError('review action terminal event routing is invalid');
+    }
+
+    if (deriveBrowserReviewActionId(identity) !== commit.actionId) {
+      throw new StorageConflictError('review action id does not match its normalized identity');
+    }
+    const existing = await this.getReviewActionReceipt(identity, commit.actionId);
+    if (existing) {
+      validateReceiptAgainstCommit(existing, commit);
+      return { receipt: existing, replayed: true };
+    }
+
+    const rootKey = await this.getWorkspaceRootKey(identity.workspaceId);
+    if (!rootKey) {
+      throw new BrowserStorageError(`workspace key is unavailable: ${identity.workspaceId}`);
+    }
+    const recoveryId = browserReviewActionRecoveryId(commit.actionId);
+
+    for (let attempt = 0; attempt < MAX_REVIEW_ACTION_COMMIT_RETRIES; attempt += 1) {
+      const workspace = await this.workspaces.getWorkspace(identity.workspaceId);
+      const entry = await this.workspaces.getEntry(identity.workspaceId, identity.path);
+      if (!workspace) {
+        throw new BrowserStorageError(`workspace does not exist: ${identity.workspaceId}`);
+      }
+      if (!entry) throw new BrowserStorageError(`entry does not exist: ${identity.path}`);
+      if (entry.headRevisionId !== commit.expectedHeadRevisionId) {
+        throw new StorageConflictError('head advanced past the expected review action base');
+      }
+      if (workspace.clock >= Number.MAX_SAFE_INTEGER) {
+        throw new BrowserStorageError('workspace clock is exhausted');
+      }
+      const clock = workspace.clock + 1;
+      const at = this.now();
+      requireTimestamp(at, 'review action createdAt');
+      const updatedAt = Math.max(at, workspace.updatedAt);
+      const nextWorkspace: WorkspaceRecord = { ...workspace, clock, updatedAt };
+
+      let revision: WorkspaceRevisionRecord | undefined;
+      let nextEntry: WorkspaceEntryRecord = entry;
+      if (commit.disposition === 'accepted') {
+        revision = await this.workspaces.prepareRevisionForAtomicCommit({
+          workspaceId: identity.workspaceId,
+          revisionId: commit.revisionId,
+          path: identity.path,
+          clock,
+          body: commit.body,
+        });
+        if (revision.bodyHash !== commit.bodyHash) {
+          throw new BrowserStorageError('accepted revision body hash does not match action');
+        }
+        nextEntry = {
+          ...entry,
+          headRevisionId: commit.revisionId,
+          sizeBytes: commit.body.length,
+          clock,
+          updatedAt,
+        };
+      }
+
+      const receipt: BrowserReviewActionReceipt = {
+        v: 1,
+        ...identity,
+        actionId: commit.actionId,
+        disposition: commit.disposition,
+        terminalEvent: structuredClone(commit.terminal.event),
+        terminalEnvelope: structuredClone(commit.terminal.envelope),
+        terminalEnvelopeId: commit.terminal.envelope.envelopeId,
+        baseRevisionId: commit.expectedHeadRevisionId,
+        ...(commit.disposition === 'accepted'
+          ? {
+              baseBodyHash: commit.expectedBodyHash,
+              appliedRevisionId: commit.revisionId,
+              resultingHash: commit.bodyHash,
+            }
+          : {}),
+      };
+      const receiptBytes = encodeBrowserReviewActionReceipt(receipt);
+      let sealedReceipt: { nonce: string; ciphertext: string };
+      try {
+        sealedReceipt = await sealRecovery(
+          this.cryptoImpl,
+          rootKey,
+          { workspaceId: identity.workspaceId, recoveryId },
+          receiptBytes,
+        );
+      } finally {
+        receiptBytes.fill(0);
+      }
+      const receiptRecord: ReviewActionRecoveryRecord = {
+        v: WORKSPACE_RECORD_VERSION,
+        workspaceId: identity.workspaceId,
+        recoveryId,
+        createdAt: updatedAt,
+        nonce: sealedReceipt.nonce,
+        ciphertext: sealedReceipt.ciphertext,
+        reviewActionId: commit.actionId,
+        reviewActionDisposition: commit.disposition,
+      };
+      validateWorkspaceRecoveryRecord(receiptRecord);
+
+      const stores: StoreName[] = [
+        STORE_WORKSPACES,
+        STORE_WORKSPACE_ENTRIES,
+        STORE_WORKSPACE_REVISIONS,
+        STORE_WORKSPACE_GC,
+        STORE_WORKSPACE_LEASES,
+        STORE_WORKSPACE_RECOVERY,
+        STORE_OUTBOX,
+        STORE_HISTORY,
+      ];
+      const tx = this.db.transaction(stores, 'readwrite');
+      const done = transactionDone(tx);
+      const [currentWorkspace, currentEntry, baseRevision, lease, priorReceipt, outboxRow, historyRow] =
+        await Promise.all([
+          requestValue<WorkspaceRecord | undefined>(
+            tx.objectStore(STORE_WORKSPACES).get(identity.workspaceId),
+          ),
+          requestValue<WorkspaceEntryRecord | undefined>(
+            tx.objectStore(STORE_WORKSPACE_ENTRIES).get([identity.workspaceId, identity.path]),
+          ),
+          requestValue<WorkspaceRevisionRecord | undefined>(
+            tx.objectStore(STORE_WORKSPACE_REVISIONS).get([
+              identity.workspaceId,
+              commit.expectedHeadRevisionId,
+            ]),
+          ),
+          requestValue<WorkspaceLeaseRecord | undefined>(
+            tx.objectStore(STORE_WORKSPACE_LEASES).get(identity.workspaceId),
+          ),
+          requestValue<ReviewActionRecoveryRecord | undefined>(
+            tx.objectStore(STORE_WORKSPACE_RECOVERY).get([identity.workspaceId, recoveryId]),
+          ),
+          requestValue<OutboxRecord | undefined>(
+            tx.objectStore(STORE_OUTBOX).get([
+              identity.roomId,
+              commit.terminal.envelope.envelopeId,
+            ]),
+          ),
+          requestValue<HistoryRecord | undefined>(
+            tx.objectStore(STORE_HISTORY).get([
+              identity.roomId,
+              commit.terminal.envelope.envelopeId,
+            ]),
+          ),
+        ]);
+
+      if (priorReceipt) {
+        validateWorkspaceRecoveryRecord(priorReceipt);
+        if (
+          priorReceipt.reviewActionId !== commit.actionId ||
+          priorReceipt.reviewActionDisposition !== commit.disposition
+        ) {
+          tx.abort();
+          await done.catch(() => undefined);
+          throw new StorageConflictError('suggestion already has the opposite terminal decision');
+        }
+        await done;
+        const replay = await this.getReviewActionReceipt(identity, commit.actionId);
+        if (!replay) throw new BrowserStorageError('review action replay receipt disappeared');
+        validateReceiptAgainstCommit(replay, commit);
+        return { receipt: replay, replayed: true };
+      }
+
+      if (!currentWorkspace || currentWorkspace.clock !== workspace.clock) {
+        tx.abort();
+        await done.catch(() => undefined);
+        continue;
+      }
+      validateWorkspaceRecord(currentWorkspace);
+      if (!currentEntry || currentEntry.deletedAt !== undefined) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new BrowserStorageError(`entry does not exist: ${identity.path}`);
+      }
+      validateWorkspaceEntryRecord(currentEntry);
+      if (currentEntry.headRevisionId !== commit.expectedHeadRevisionId) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('head advanced past the expected review action base');
+      }
+      if (commit.disposition === 'accepted') {
+        if (!baseRevision) {
+          tx.abort();
+          await done.catch(() => undefined);
+          throw new BrowserStorageError('review action base revision is missing');
+        }
+        validateWorkspaceRevisionRecord(baseRevision);
+        if (
+          baseRevision.path !== identity.path ||
+          baseRevision.bodyHash !== commit.expectedBodyHash
+        ) {
+          tx.abort();
+          await done.catch(() => undefined);
+          throw new StorageConflictError('review action bytes do not match the expected head');
+        }
+      }
+      try {
+        validateActiveFence(lease, commit.fence, this.now());
+      } catch (error) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw error;
+      }
+
+      const priorEnvelope = outboxRow?.envelope ?? historyRow?.envelope;
+      if (priorEnvelope && !sameEnvelope(priorEnvelope, commit.terminal.envelope)) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('terminal envelope id conflicts with durable ciphertext');
+      }
+
+      if (revision) {
+        const priorRevision = await requestValue<WorkspaceRevisionRecord | undefined>(
+          tx.objectStore(STORE_WORKSPACE_REVISIONS).get([
+            identity.workspaceId,
+            revision.revisionId,
+          ]),
+        );
+        if (priorRevision) {
+          validateWorkspaceRevisionRecord(priorRevision);
+          if (
+            priorRevision.path !== revision.path ||
+            priorRevision.sizeBytes !== revision.sizeBytes ||
+            priorRevision.bodyHash !== revision.bodyHash
+          ) {
+            tx.abort();
+            await done.catch(() => undefined);
+            throw new StorageConflictError('accepted revision id conflicts with stored content');
+          }
+        } else {
+          tx.objectStore(STORE_WORKSPACE_REVISIONS).add(revision);
+        }
+        tx.objectStore(STORE_WORKSPACE_ENTRIES).put(nextEntry);
+        if (revision.body.location === 'opfs') {
+          tx.objectStore(STORE_WORKSPACE_GC).delete(
+            workspaceRevisionGcIntentId(identity.workspaceId, revision.revisionId),
+          );
+        }
+      }
+      tx.objectStore(STORE_WORKSPACES).put(nextWorkspace);
+      tx.objectStore(STORE_WORKSPACE_RECOVERY).add(receiptRecord);
+      if (!priorEnvelope) {
+        tx.objectStore(STORE_OUTBOX).add({
+          roomId: identity.roomId,
+          envelopeId: commit.terminal.envelope.envelopeId,
+          createdAt: commit.terminal.envelope.createdAt,
+          envelope: structuredClone(commit.terminal.envelope),
+        } satisfies OutboxRecord);
+      }
+      await done;
+      return { receipt, replayed: false };
+    }
+    throw new StorageConflictError('review action commit kept losing workspace clock races');
+  }
+
   /** Seal an opaque recovery payload under this workspace's non-extractable key. */
   async putWorkspaceRecovery(
     workspaceId: string,
@@ -1198,14 +1567,12 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
       tx.objectStore(STORE_WORKSPACE_LEASES).get(workspaceId),
     );
     if (lease) validateWorkspaceLeaseRecord(lease);
-    if (
-      !lease ||
-      lease.holderId !== options.fence.holderId ||
-      lease.fencingToken !== options.fence.fencingToken
-    ) {
+    try {
+      validateActiveFence(lease, options.fence, this.now());
+    } catch (error) {
       tx.abort();
       await done.catch(() => undefined);
-      throw new StorageConflictError('collab checkpoint write was fenced off');
+      throw error;
     }
     const store = tx.objectStore(STORE_WORKSPACE_RECOVERY);
     const existing = await requestValue<CollabRecoveryRecord | undefined>(
@@ -1681,6 +2048,60 @@ function sameInbound(a: InboxRecord, b: InboxRecord): boolean {
 
 function sameEnvelope(a: MailboxEnvelope, b: MailboxEnvelope): boolean {
   return toCanonicalString(a) === toCanonicalString(b);
+}
+
+function validateActiveFence(
+  lease: WorkspaceLeaseRecord | undefined,
+  fence: WorkspaceFence,
+  now: number,
+): void {
+  requireTimestamp(now, 'lease check time');
+  if (!lease) throw new StorageConflictError('write requires an active lease');
+  validateWorkspaceLeaseRecord(lease);
+  if (lease.expiresAt <= now) {
+    throw new StorageConflictError('write requires an unexpired lease');
+  }
+  if (lease.holderId !== fence.holderId || lease.fencingToken !== fence.fencingToken) {
+    throw new StorageConflictError('write was fenced off by a newer lease');
+  }
+}
+
+function validateReceiptAgainstCommit(
+  receipt: BrowserReviewActionReceipt,
+  commit: AtomicBrowserReviewActionCommit,
+): void {
+  if (
+    receipt.actionId !== commit.actionId ||
+    receipt.workspaceId !== commit.identity.workspaceId ||
+    receipt.roomId !== commit.identity.roomId ||
+    receipt.path !== commit.identity.path ||
+    receipt.suggestionId !== commit.identity.suggestionId ||
+    receipt.disposition !== commit.disposition ||
+    receipt.baseRevisionId !== commit.expectedHeadRevisionId ||
+    receipt.terminalEnvelopeId !== commit.terminal.envelope.envelopeId ||
+    !sameEnvelope(receipt.terminalEnvelope, commit.terminal.envelope) ||
+    toCanonicalString(receipt.terminalEvent) !== toCanonicalString(commit.terminal.event)
+  ) {
+    throw new StorageConflictError('review action replay differs from the requested commit');
+  }
+  if (
+    commit.disposition === 'accepted' &&
+    (
+      receipt.baseBodyHash !== commit.expectedBodyHash ||
+      receipt.appliedRevisionId !== commit.revisionId ||
+      receipt.resultingHash !== commit.bodyHash
+    )
+  ) {
+    throw new StorageConflictError('accepted action replay differs from the requested transition');
+  }
+  if (
+    commit.disposition === 'rejected' &&
+    (receipt.baseBodyHash !== undefined ||
+      receipt.appliedRevisionId !== undefined ||
+      receipt.resultingHash !== undefined)
+  ) {
+    throw new StorageConflictError('rejected action replay contains accepted transition fields');
+  }
 }
 
 function sameDeviceRegistration(existing: Record<string, unknown>, candidate: Device): boolean {

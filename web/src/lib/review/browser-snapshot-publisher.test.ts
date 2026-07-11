@@ -1,3 +1,4 @@
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { aeadOpen, base64UrlDecode, base64UrlEncode, contentHash, deriveFileId, deriveRoomKeys, deriveSnapshotId } from './browser-crypto';
 import { generateBrowserIdentity } from './browser-session';
@@ -6,9 +7,17 @@ import {
   resumeBrowserSnapshotPublication,
   type SnapshotPublicationOutbox,
   type SnapshotPublicationSink,
+  type SnapshotPublicationRevisionSource,
   type PublishedManifestPointer,
 } from './browser-snapshot-publisher';
 import type { MailboxEnvelope, RoomPolicy } from './browser-ws';
+import type { WorkspaceFence } from './browser-workspace-store';
+import { BrowserStorage } from './browser-storage';
+
+Object.defineProperty(globalThis, 'IDBKeyRange', {
+  configurable: true,
+  value: IDBKeyRange,
+});
 
 interface Result { name: string; ok: boolean; detail?: string }
 const cases: Array<() => Promise<Result>> = [];
@@ -64,6 +73,7 @@ class FakePublicationSink implements SnapshotPublicationSink {
     _capId: string,
     pointer: PublishedManifestPointer,
     envelopes: readonly MailboxEnvelope[],
+    _fence: WorkspaceFence,
   ): Promise<void> {
     if (this.pending) throw new Error('pending publication exists');
     this.pending = {
@@ -71,10 +81,18 @@ class FakePublicationSink implements SnapshotPublicationSink {
       envelopes: envelopes.map((envelope) => structuredClone(envelope)),
     };
   }
-  async loadPendingPublication(): Promise<readonly MailboxEnvelope[]> {
+  async loadPendingPublication(
+    _workspaceId: string,
+    _capId: string,
+    _fence: WorkspaceFence,
+  ): Promise<readonly MailboxEnvelope[]> {
     return structuredClone(this.pending?.envelopes ?? []);
   }
-  async commitPublication(): Promise<void> {
+  async commitPublication(
+    _workspaceId: string,
+    _capId: string,
+    _fence: WorkspaceFence,
+  ): Promise<void> {
     if (!this.pending) throw new Error('no pending publication');
     this.published = this.pending.pointer;
     this.pending = undefined;
@@ -86,6 +104,8 @@ const roomSecret = new Uint8Array(32).fill(7);
 const keys = deriveRoomKeys(roomSecret);
 const identity = generateBrowserIdentity();
 const now = 1_700_000_000_000;
+const fence: WorkspaceFence = { holderId: 'publisher-tab', fencingToken: 1 };
+const revisionId = (fill: number): string => base64UrlEncode(new Uint8Array(16).fill(fill));
 const policy: RoomPolicy = {
   mode: 'hybrid', maxPeers: 8, maxSnapshotBytes: 5 * 1024 * 1024,
   maxEventBytes: 256 * 1024, maxEvents: 500, expiresAt: now + 86_400_000,
@@ -98,6 +118,22 @@ const indexBuilder = async (bytes: Uint8Array) => ({
   docHash: base64UrlEncode(sha256(bytes)), canonicalEncoding: 'utf8-bytes' as const,
   lineCount: new TextDecoder().decode(bytes).split('\n').length, blocks: [], headings: [],
 });
+
+function matchingRevisionSource(entries: Array<{
+  path: string;
+  revisionId: string;
+  bytes: Uint8Array;
+}>): SnapshotPublicationRevisionSource {
+  const byId = new Map(entries.map((entry) => [entry.revisionId, entry]));
+  return {
+    getRevisionBody: async (_workspaceId, path, id) => {
+      const entry = byId.get(id);
+      if (!entry) throw new Error(`revision does not exist: ${id}`);
+      if (entry.path !== path) throw new Error('revision belongs to a different workspace path');
+      return new Uint8Array(entry.bytes);
+    },
+  };
+}
 
 function open(envelope: MailboxEnvelope, key: Uint8Array): Record<string, unknown> {
   const plaintext = aeadOpen(key, base64UrlDecode(envelope.nonce), base64UrlDecode(envelope.ciphertext), {
@@ -131,14 +167,28 @@ test('mailbox publishes blob before signed pointer and marks only after ACK', as
   const outbox = new FakeOutbox();
   const sink = new FakePublicationSink();
   const markdown = '# Secret title\n\nBody only peers may read.\n';
+  const source = {
+    path: 'notes/brief.md',
+    bytes: new TextEncoder().encode(markdown),
+    docType: 'markdown' as const,
+    revisionId: revisionId(61),
+  };
   const [result] = await publishBrowserSnapshots({
     relayUrl: 'https://relay.example', roomId: 'room-publish', roomSecret, keys, identity, policy,
-    entries: [{ path: 'notes/brief.md', bytes: new TextEncoder().encode(markdown), docType: 'markdown' }], indexBuilder,
+    entries: [source], indexBuilder,
     outbox, now: () => now, randomBytes,
-    publication: { workspaceId: 'ws', capId: 'cap', sink },
+    publication: {
+      workspaceId: 'ws', capId: 'cap', sink, fence,
+      revisionSource: matchingRevisionSource([source]),
+    },
   });
   assert(result, 'publication result');
   equal(result.path, 'notes/brief.md', 'normalized owner path');
+  equal(
+    sink.published?.entries[0]?.revisionId,
+    revisionId(61),
+    'sealed pointer binds exact source revision',
+  );
   equal(outbox.envelopes.map((e) => e.kind), ['snapshot_blob', 'event', 'snapshot_blob', 'event'], 'entry pair precedes manifest pair');
   equal(sink.commits, 1, 'published after successful flush');
   assert(!JSON.stringify(outbox.envelopes).includes('Secret title'), 'wire is content-blind');
@@ -153,6 +203,132 @@ test('mailbox publishes blob before signed pointer and marks only after ACK', as
   const manifest = open(outbox.envelopes[2]!, keys.snapshotKey);
   equal(manifest.docType, 'workspace_manifest', 'manifest is the final blob');
   equal(((manifest.manifest as Record<string, unknown>).entries as unknown[]).length, 1, 'manifest lists entry');
+});
+
+test('fenced publication requires an exact source revision', async () => {
+  const sink = new FakePublicationSink();
+  sink.published = {
+    manifestSnapshotId: base64UrlEncode(new Uint8Array(16).fill(70)),
+    entries: [{
+      path: 'legacy.md',
+      fileId: base64UrlEncode(new Uint8Array(16).fill(71)),
+      snapshotId: base64UrlEncode(new Uint8Array(16).fill(72)),
+      contentHash: base64UrlEncode(new Uint8Array(32).fill(73)),
+    }],
+  };
+  let failed = false;
+  try {
+    await publishBrowserSnapshots({
+      relayUrl: 'https://relay.example',
+      roomId: 'room-revision-required',
+      roomSecret,
+      keys,
+      identity,
+      policy,
+      entries: [{
+        path: 'legacy.md',
+        bytes: new TextEncoder().encode('new bytes'),
+        docType: 'markdown',
+      }],
+      outbox: new FakeOutbox(),
+      publication: {
+        workspaceId: 'ws', capId: 'cap', sink, fence,
+        revisionSource: matchingRevisionSource([]),
+      },
+      now: () => now,
+      randomBytes,
+      indexBuilder,
+    });
+  } catch {
+    failed = true;
+  }
+  assert(failed, 'new fenced publication accepted no exact source revision');
+});
+
+test('real workspace revision source rejects wrong revision, wrong path, and tampered bytes', async () => {
+  const storage = await BrowserStorage.open({
+    indexedDB: new IDBFactory(),
+    databaseName: 'snapshot-publisher-real-revision-source',
+    createIfMissing: true,
+    filesystem: null,
+    navigator: null,
+    now: () => now,
+  });
+  try {
+    const workspaceId = 'ws-real-revision-source';
+    const path = 'verified.md';
+    const bytes = new TextEncoder().encode('verified revision bytes');
+    const created = await storage.workspaces.createWorkspace({
+      workspaceId,
+      name: 'Revision source',
+      storagePersisted: true,
+      entry: { path, kind: 'markdown', body: bytes },
+    });
+    const attempt = async (entry: {
+      path: string;
+      revisionId: string;
+      bytes: Uint8Array;
+    }): Promise<{ failed: boolean; sink: FakePublicationSink; outbox: FakeOutbox }> => {
+      const sink = new FakePublicationSink();
+      const outbox = new FakeOutbox();
+      let failed = false;
+      try {
+        await publishBrowserSnapshots({
+          relayUrl: 'https://relay.example',
+          roomId: 'room-real-revision-source',
+          roomSecret,
+          keys,
+          identity,
+          policy,
+          entries: [{ ...entry, docType: 'markdown' }],
+          outbox,
+          publication: {
+            workspaceId,
+            capId: 'cap-real',
+            sink,
+            fence,
+            revisionSource: storage.workspaces,
+          },
+          now: () => now,
+          randomBytes,
+          indexBuilder,
+        });
+      } catch {
+        failed = true;
+      }
+      return { failed, sink, outbox };
+    };
+
+    const missing = await attempt({
+      path,
+      revisionId: revisionId(91),
+      bytes,
+    });
+    assert(missing.failed, 'unknown revision was accepted');
+    equal(missing.outbox.envelopes.length, 0, 'unknown revision assembled no envelopes');
+
+    const wrongPath = await attempt({
+      path: 'other.md',
+      revisionId: created.revision.revisionId,
+      bytes,
+    });
+    assert(wrongPath.failed, 'revision bound to another path was accepted');
+    equal(wrongPath.outbox.envelopes.length, 0, 'wrong path assembled no envelopes');
+
+    const tampered = await attempt({
+      path,
+      revisionId: created.revision.revisionId,
+      bytes: new TextEncoder().encode('tampered caller bytes'),
+    });
+    assert(tampered.failed, 'tampered bytes were accepted');
+    equal(tampered.outbox.envelopes.length, 0, 'tampered bytes assembled no envelopes');
+
+    const valid = await attempt({ path, revisionId: created.revision.revisionId, bytes });
+    assert(!valid.failed, 'exact stored revision was rejected');
+    assert(valid.sink.published, 'exact stored revision was published');
+  } finally {
+    storage.close();
+  }
 });
 
 test('binary asset with NUL publishes base64url and canonical metadata without UTF-8 decoding', async () => {
@@ -178,12 +354,19 @@ test('failure before ACK stays pending and resume marks without republishing', a
   const outbox = new FakeOutbox();
   outbox.failFlush = true;
   const sink = new FakePublicationSink();
-  const publication = { workspaceId: 'ws', capId: 'cap', sink };
+  const source = {
+    path: 'a.md', bytes: new TextEncoder().encode('retry secret'), docType: 'markdown' as const,
+    revisionId: revisionId(62),
+  };
+  const publication = {
+    workspaceId: 'ws', capId: 'cap', sink, fence,
+    revisionSource: matchingRevisionSource([source]),
+  };
   let failed = false;
   try {
     await publishBrowserSnapshots({
       relayUrl: 'https://relay.example', roomId: 'room-retry', roomSecret, keys, identity, policy,
-      entries: [{ path: 'a.md', bytes: new TextEncoder().encode('retry secret'), docType: 'markdown' }],
+      entries: [source],
       outbox, now: () => now, randomBytes, publication, indexBuilder,
     });
   } catch { failed = true; }
@@ -235,24 +418,35 @@ test('sealed publication journal automatically preserves FileId and explicit ren
     }],
   };
   const outbox = new FakeOutbox();
+  const sameSource = {
+    path: 'same.md', bytes: new TextEncoder().encode('edited'), docType: 'markdown' as const,
+    revisionId: revisionId(63),
+  };
   const results = await publishBrowserSnapshots({
     relayUrl: 'https://relay.example', roomId: 'room-stable', roomSecret, keys, identity, policy,
-    entries: [{ path: 'same.md', bytes: new TextEncoder().encode('edited'), docType: 'markdown' }],
+    entries: [sameSource],
     outbox, now: () => now, randomBytes, indexBuilder,
-    publication: { workspaceId: 'ws', capId: 'cap', sink },
+    publication: {
+      workspaceId: 'ws', capId: 'cap', sink, fence,
+      revisionSource: matchingRevisionSource([sameSource]),
+    },
   });
   equal(results[0]?.fileId, priorFileId, 'same path reuses sealed prior FileId automatically');
 
   const renamedOutbox = new FakeOutbox();
   const renamedSink = new FakePublicationSink();
+  const renamedSource = {
+    path: 'renamed.md', bytes: new TextEncoder().encode('edited again'),
+    docType: 'markdown' as const, fileId: priorFileId, revisionId: revisionId(64),
+  };
   const renamed = await publishBrowserSnapshots({
     relayUrl: 'https://relay.example', roomId: 'room-stable', roomSecret, keys, identity, policy,
-    entries: [{
-      path: 'renamed.md', bytes: new TextEncoder().encode('edited again'), docType: 'markdown',
-      fileId: priorFileId,
-    }],
+    entries: [renamedSource],
     outbox: renamedOutbox, now: () => now + 1, randomBytes, indexBuilder,
-    publication: { workspaceId: 'ws', capId: 'cap', sink: renamedSink },
+    publication: {
+      workspaceId: 'ws', capId: 'cap', sink: renamedSink, fence,
+      revisionSource: matchingRevisionSource([renamedSource]),
+    },
   });
   equal(renamed[0]?.fileId, priorFileId, 'durable local identity survives rename');
 });

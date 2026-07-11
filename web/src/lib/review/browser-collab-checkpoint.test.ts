@@ -362,13 +362,26 @@ defineCase('epoch keys, version CAS, and lease fencing prevent checkpoint rollba
     );
 
     clock = 106;
+    await expectStorageError(
+      () => storage.putCollabCheckpoint(
+        'ws-race',
+        checkpoint({
+          epoch: id(12),
+          version: 1,
+          steps: [{ stepType: 'replace', from: 1, to: 1 }],
+          clientIDs: ['expired-tab'],
+        }),
+        { fence: firstFence, expectedVersion: 0 },
+      ),
+      'expired lease must fail even before another tab takes over',
+    );
     const secondFence = await leases.acquire('ws-race', 'second-tab');
     assert(secondFence, 'expired lease takeover acquired');
     await expectStorageError(
       () => storage.putCollabCheckpoint(
         'ws-race',
         checkpoint({
-          epoch: id(12),
+          epoch: id(13),
           version: 1,
           steps: [{ stepType: 'replace', from: 1, to: 1 }],
           clientIDs: ['stale-tab'],

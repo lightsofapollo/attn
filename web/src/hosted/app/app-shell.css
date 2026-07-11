@@ -82,7 +82,7 @@
 
 .degraded-banner p {
   margin: 0.2rem 0 0;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font-size: 0.84rem;
 }
 
@@ -116,7 +116,7 @@
 
 .desk-title p {
   margin: 0;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.85rem var(--mono);
 }
 
@@ -152,13 +152,13 @@
 }
 
 .quick span {
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.82rem var(--sans);
 }
 
 .folio-label {
   font: 0.72rem var(--mono);
-  color: var(--muted);
+  color: var(--hosted-muted);
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
@@ -184,7 +184,7 @@ a.workspace-row:hover {
 }
 
 .workspace-row span {
-  color: var(--muted);
+  color: var(--hosted-muted);
   font-size: 0.82rem;
 }
 
@@ -200,7 +200,7 @@ a.workspace-row:hover {
 
 .empty-desk .meta {
   font: 0.72rem var(--mono);
-  color: var(--muted);
+  color: var(--hosted-muted);
   border-bottom: 1px solid var(--rule);
   padding-bottom: 0.9rem;
 }
@@ -218,7 +218,7 @@ a.workspace-row:hover {
 }
 
 .empty-desk .cursor-line {
-  color: var(--muted);
+  color: var(--hosted-muted);
 }
 
 .empty-desk .caret {
@@ -267,8 +267,33 @@ a.workspace-row:hover {
 }
 
 .editor-top .save-state {
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.72rem var(--mono);
+}
+
+.mobile-workspace-title {
+  max-width: min(48vw, 12rem);
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-title-input {
+  width: min(48vw, 12rem);
+  height: 2rem;
+  padding: 0 0.5rem;
+  border: 1px solid var(--rust);
+  border-radius: 6px;
+  background: var(--sheet);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 700;
 }
 
 .editor-top .share-action {
@@ -291,7 +316,7 @@ a.workspace-row:hover {
 .rail-title {
   font: 0.68rem var(--mono);
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--hosted-muted);
   margin: 0.4rem 0 1.1rem;
 }
 
@@ -325,18 +350,18 @@ a.workspace-row:hover {
 }
 
 .file.asset {
-  color: var(--muted);
+  color: var(--hosted-muted);
 }
 
 .file .file-size {
   float: right;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.7rem var(--mono);
 }
 
 .rail-add {
   margin-top: 1rem;
-  color: var(--muted);
+  color: var(--hosted-muted);
 }
 
 .editor-canvas {
@@ -373,7 +398,7 @@ a.workspace-row:hover {
 }
 
 .writing-sheet .placeholder {
-  color: var(--muted);
+  color: var(--hosted-muted);
 }
 
 .asset-preview {
@@ -381,7 +406,7 @@ a.workspace-row:hover {
   border: 1px dashed var(--rule);
   padding: 2.4rem 1.6rem;
   text-align: center;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.9rem/1.5 var(--sans);
 }
 
@@ -404,7 +429,7 @@ a.workspace-row:hover {
 
 .owner-room-status {
   margin-left: 0.4rem;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.68rem var(--mono);
   white-space: nowrap;
 }
@@ -454,9 +479,230 @@ a.workspace-row:hover {
 
 .review-empty {
   margin-top: 7rem;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font-size: 0.84rem;
   line-height: 1.5;
+}
+
+/* ————— desktop editor parity —————
+   Desktop browser authoring uses the same Sidebar / PathBreadcrumb / Editor /
+   WorkspaceEditorFrame composition as native attn. Browser-only workspace
+   actions live in the shared sidebar's optional footer. */
+
+.hosted-desktop-editor {
+  height: 100svh;
+  overflow: hidden;
+  color: var(--foreground);
+  background: var(--background);
+  font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+}
+
+.hosted-workspace-frame {
+  height: 100%;
+}
+
+.hosted-shell-loading {
+  display: grid;
+  height: 100%;
+  place-items: center;
+  color: var(--muted-foreground);
+  background: var(--background);
+  font: 400 0.85rem/1.55 'Source Code Pro Variable', 'Source Code Pro', monospace;
+}
+
+.hosted-content-viewport {
+  background: var(--background);
+}
+
+.hosted-native-document {
+  min-height: 100%;
+  padding: 0.35rem 0 4rem;
+  color: var(--foreground);
+  background: var(--background);
+}
+
+.hosted-native-document .editor-container {
+  min-height: 100%;
+}
+
+.hosted-native-document > .hosted-editor-surface {
+  display: contents;
+}
+
+.hosted-document-banner {
+  width: min(760px, calc(100% - 2rem));
+  margin: 0.75rem auto 0;
+}
+
+.hosted-editor-loading {
+  max-width: 72ch;
+  margin: 0 auto;
+  padding: 1rem 2.25rem;
+  color: var(--muted-foreground);
+  font: 600 0.85rem/1.4 'Source Sans 3 Variable', 'Source Sans 3', sans-serif;
+}
+
+.hosted-header-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: -0.75rem;
+  font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+}
+
+.hosted-workspace-title {
+  max-width: 12rem;
+  overflow: hidden;
+  padding: 0.25rem 0.35rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: color-mix(in oklch, var(--foreground) 82%, transparent);
+  font-size: 0.7rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.hosted-workspace-title:hover,
+.hosted-workspace-title:focus-visible {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.hosted-title-input {
+  width: min(12rem, 25vw);
+  height: 1.75rem;
+  padding: 0 0.5rem;
+  border: 1px solid var(--input);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 0.7rem;
+}
+
+.hosted-save-state {
+  max-width: 13rem;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font: 500 0.7rem/1.2 'Source Code Pro Variable', 'Source Code Pro', monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hosted-header-button {
+  height: 1.75rem;
+  padding: 0 0.65rem;
+  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+  border-radius: 6px;
+  background: color-mix(in oklch, var(--background) 70%, transparent);
+  color: var(--foreground);
+  font-size: 0.7rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.hosted-header-button:hover {
+  background: var(--accent);
+}
+
+.hosted-header-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.hosted-sidebar-footer {
+  display: grid;
+  gap: 0.25rem;
+  font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+}
+
+.hosted-sidebar-action {
+  display: flex;
+  width: 100%;
+  min-height: 2rem;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.35rem 0.55rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sidebar-foreground);
+  font-size: 0.7rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hosted-sidebar-action:hover,
+.hosted-sidebar-action:focus-visible {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+
+.hosted-entry-actions {
+  display: flex;
+  gap: 0.2rem;
+  padding-bottom: 0.35rem;
+}
+
+.hosted-entry-actions button,
+.hosted-delete-confirm button {
+  min-height: 1.75rem;
+  padding: 0.25rem 0.45rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.hosted-entry-actions button:hover,
+.hosted-delete-confirm button:hover {
+  background: var(--sidebar-accent);
+  color: var(--foreground);
+}
+
+.hosted-entry-actions .danger,
+.hosted-delete-confirm .danger {
+  color: var(--destructive);
+}
+
+.hosted-sidebar-input {
+  width: 100%;
+  height: 2rem;
+  padding: 0 0.55rem;
+  border: 1px solid var(--input);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 0.7rem;
+}
+
+.hosted-delete-confirm {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 0.35rem;
+  padding: 0.55rem;
+  border: 1px solid color-mix(in oklch, var(--destructive) 35%, var(--border));
+  border-radius: 8px;
+  color: var(--foreground);
+  font-size: 0.7rem;
+}
+
+.hosted-delete-confirm > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.25rem;
+}
+
+.hosted-sidebar-error {
+  margin: 0.35rem 0 0;
+  color: var(--destructive);
+  font-size: 0.7rem;
+  line-height: 1.35;
 }
 
 /* ————— mobile editor: reader + dock + sheets ————— */
@@ -518,7 +764,8 @@ a.workspace-row:hover {
 
   .writing-sheet p,
   .writing-sheet li,
-  .writing-sheet .plain-md {
+  .writing-sheet .plain-md,
+  .writing-sheet .hosted-mobile-reader {
     font-size: 1.15rem;
     line-height: 1.7;
   }
@@ -581,7 +828,7 @@ a.workspace-row:hover {
 
 .bottom-sheet-head h2 {
   margin: 0;
-  font-size: 1.4rem;
+  font-size: 1.5rem;
 }
 
 /* ————— share sheet ————— */
@@ -652,7 +899,7 @@ a.workspace-row:hover {
 
 .share-step p {
   margin: 0.25rem 0 0;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.87rem/1.45 var(--sans);
 }
 
@@ -689,7 +936,7 @@ a.workspace-row:hover {
 }
 
 .storage-panel h2 {
-  font-size: 1.9rem;
+  font-size: 2rem;
   margin: 0.6rem 0 0.6rem;
 }
 
@@ -732,13 +979,13 @@ a.workspace-row:hover {
 }
 
 .status-box p {
-  color: var(--muted);
+  color: var(--hosted-muted);
   font-size: 0.88rem;
   line-height: 1.5;
 }
 
 .status-box small {
-  color: var(--muted);
+  color: var(--hosted-muted);
 }
 
 .confirm-clear {
@@ -772,15 +1019,15 @@ a.workspace-row:hover {
 
 .drop-zone p {
   margin: 0;
-  color: var(--muted);
-  font-size: 0.92rem;
+  color: var(--hosted-muted);
+  font-size: 1rem;
   line-height: 1.6;
 }
 
 .drop-zone .formats {
   margin-top: 1.4rem;
-  color: var(--muted);
-  font: 0.72rem var(--mono);
+  color: var(--hosted-muted);
+  font: 0.7rem var(--mono);
 }
 
 /* ————— small screens ————— */
@@ -869,7 +1116,7 @@ a.workspace-row:hover {
 .row-action {
   border: 0;
   background: transparent;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 650 0.78rem var(--sans);
   cursor: pointer;
   padding: 0.3rem 0.4rem;
@@ -920,14 +1167,14 @@ a.workspace-row:hover {
   padding: 0.9rem 1rem;
   border-radius: 8px;
   overflow-x: auto;
-  font: 0.9rem/1.5 var(--mono);
+  font: 0.85rem/1.55 var(--mono);
 }
 
 .writing-sheet .ProseMirror blockquote {
   border-left: 3px solid var(--rule);
   margin-left: 0;
   padding-left: 1rem;
-  color: var(--muted);
+  color: var(--hosted-muted);
 }
 
 /* ————— file rail actions + inline preview (attn-7xl.3.4) ————— */
@@ -999,7 +1246,7 @@ a.workspace-row:hover {
   place-items: center;
   min-height: 56px;
   color: var(--ink);
-  font: 650 0.78rem var(--sans);
+  font: 650 0.7rem var(--sans);
 }
 
 /* Wide content scrolls inside its own frame; the page never pans. */
@@ -1051,7 +1298,7 @@ a.workspace-row:hover {
 
 .edit-bar-state {
   margin-left: auto;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.7rem var(--mono);
   padding-right: 0.4rem;
 }

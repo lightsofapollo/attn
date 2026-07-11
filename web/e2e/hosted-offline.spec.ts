@@ -24,7 +24,7 @@ test('offline launch serves the cached shell and local content survives', async 
   await context.setOffline(true);
   await page.reload();
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.doc-name')).toContainText('Untitled');
+  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('Untitled');
   await context.setOffline(false);
 });
 

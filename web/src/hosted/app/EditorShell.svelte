@@ -18,6 +18,7 @@
   import type EditorComponentType from '../../lib/Editor.svelte';
   import type ReviewMarginComponentType from '../../lib/ReviewMargin.svelte';
   import type ReviewApplyExpandComponentType from '../../lib/ReviewApplyExpand.svelte';
+  import type HostedDesktopWorkspaceFrameType from './HostedDesktopWorkspaceFrame.svelte';
   import type { EditorBridge } from '../../lib/prosemirror/collab-session';
   import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
   import type { RequiresThreeWayVerdict, Thread } from '../../lib/types';
@@ -37,19 +38,36 @@
   const activeEntry = $derived(
     workspace.entries.find((entry) => entry.path === activePath) ?? workspace.entries[0],
   );
-  const markdownEntries = $derived(
-    workspace.entries.filter((entry) => entry.presentation === 'editable'),
-  );
-  const assetEntries = $derived(
-    workspace.entries.filter((entry) => entry.presentation !== 'editable'),
-  );
-
   let shareOpen = $state(false);
   let filesSheetOpen = $state(false);
   let reviewSheetOpen = $state(false);
   let shareButton = $state<HTMLButtonElement | undefined>();
   let dockFilesButton = $state<HTMLButtonElement | undefined>();
   let dockReviewButton = $state<HTMLButtonElement | undefined>();
+  let desktopLayout = $state(
+    typeof window !== 'undefined' && window.matchMedia('(min-width: 901px)').matches,
+  );
+  let desktopEditRequested = false;
+  let HostedDesktopWorkspaceFrame = $state<typeof HostedDesktopWorkspaceFrameType | null>(null);
+
+  $effect(() => {
+    const query = window.matchMedia('(min-width: 901px)');
+    const update = (): void => {
+      desktopLayout = query.matches;
+    };
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  });
+
+  $effect(() => {
+    if (!desktopLayout || HostedDesktopWorkspaceFrame) return;
+    untrack(() => {
+      void import('./HostedDesktopWorkspaceFrame.svelte').then((module) => {
+        HostedDesktopWorkspaceFrame = module.default;
+      });
+    });
+  });
 
   // ————— editing (attn-7xl.3.3) —————
   // svelte-ignore state_referenced_locally — props seed the initial values.
@@ -347,6 +365,7 @@
       imports.push(Promise.all([
         import('../../lib/Editor.svelte'),
         import('prosemirror-state'),
+        import('./desktop-editor-styles'),
       ]).then(([editorModule, pmState]) => {
         EditorComponent = editorModule.default;
         changeWatcher = [
@@ -482,11 +501,21 @@
 
   async function enterEdit(): Promise<void> {
     if (editing || editorLoading || !activeEntry) return;
+    const retryingDeniedLease = editDenied;
     editorLoading = true;
     editDenied = false;
     try {
       await ensureEditorGraph(ownerState?.roomId != null);
-      const granted = await ensureOwnerSession();
+      let granted = await ensureOwnerSession();
+      // Closing another tab releases its fenced IndexedDB lease
+      // asynchronously. An explicit retry should absorb that brief handoff
+      // instead of making the user click repeatedly.
+      if (!granted && retryingDeniedLease) {
+        for (let attempt = 0; attempt < 7 && !granted; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 150));
+          granted = await ensureOwnerSession();
+        }
+      }
       if (!granted) {
         editDenied = true;
         return;
@@ -500,6 +529,30 @@
       editorLoading = false;
     }
   }
+
+  // Mobile is reader-first, but it is still a rendered Markdown reader. Load
+  // the shared document surface without granting editability; the Edit action
+  // later promotes this same view after the owner lease is confirmed.
+  $effect(() => {
+    if (desktopLayout || activeEntry?.presentation !== 'editable' || EditorComponent) return;
+    untrack(() => { void ensureEditorGraph(false); });
+  });
+
+  // Desktop browser authoring opens directly into the same editor-first
+  // posture as native attn. Mobile intentionally remains reader-first and
+  // enters editing only from its thumb dock.
+  $effect(() => {
+    if (
+      !desktopLayout
+      || desktopEditRequested
+      || editing
+      || editorLoading
+      || !canEdit
+      || ownerState?.leaseRole === 'passive'
+    ) return;
+    desktopEditRequested = true;
+    untrack(() => { void enterEdit(); });
+  });
 
   function onEditorChanged(): void {
     if (!editorRef || !autosave) return;
@@ -631,6 +684,11 @@
     return `/app/w/${workspace.id}/${entry.path}`;
   }
 
+  function navigateDesktopTree(relativePath: string): void {
+    if (!relativePath || relativePath === activeEntry?.path) return;
+    window.location.assign(`/app/w/${workspace.id}/${relativePath}`);
+  }
+
   function entryGlyph(entry: WorkspaceEntry): string {
     if (entry.presentation === 'editable') return '';
     return entry.presentation === 'preview' ? '▧ ' : '◇ ';
@@ -652,17 +710,276 @@
   }
 </script>
 
+{#snippet documentSurface()}
+  <div class:hosted-native-document={desktopLayout} class:writing-sheet={!desktopLayout}>
+    {#if health.mode !== 'persistent' && health.mode !== 'best-effort'}
+      <div class="hosted-document-banner">
+        <DegradedBanner mode={health.mode} />
+      </div>
+    {/if}
+    {#if editDenied}
+      <div class="degraded-banner hosted-document-banner" role="status" data-degraded="lease-denied">
+        <div>
+          <strong>Another tab is editing this workspace.</strong>
+          <p>This tab stays read-only until the other tab finishes or closes.</p>
+        </div>
+      </div>
+    {/if}
+    {#if ownerState?.roomId && !ownerState.liveEditingAvailable}
+      <div class="degraded-banner owner-authority-banner hosted-document-banner" role="status" data-degraded="owner-authority-paused">
+        <div>
+          <strong>Live review is paused.</strong>
+          <p>{ownerState.reason ?? 'Your encrypted review remains readable while authority reconnects.'}</p>
+        </div>
+        {#if ownerState.authority?.session?.authoringError}
+          <button class="button" type="button" onclick={() => void retryReviewDelivery()}>Retry delivery</button>
+        {/if}
+      </div>
+    {/if}
+    {#if activeEntry?.presentation === 'editable' && EditorComponent}
+      <div
+        class="hosted-editor-surface"
+        class:hosted-mobile-reader={!desktopLayout}
+        data-body-text="rendered"
+      >
+        <EditorComponent
+          bind:this={editorRef}
+          markdown={collabSeed?.markdown ?? displayText ?? ''}
+          editable={editing && ownerState?.writable !== false}
+          plugins={changeWatcher as never}
+          onReady={handleEditorReady}
+          onCheckboxToggle={onEditorChanged}
+          collabClientId={ownerState?.liveEditingAvailable
+            ? collabClientId ?? undefined
+            : undefined}
+          {collabEpoch}
+          onCollabDocChange={handleCollabDocChange}
+          onCollabSelectionChange={handleCollabSelectionChange}
+        />
+      </div>
+    {:else if desktopLayout && activeEntry?.presentation === 'editable'}
+      <div class="hosted-editor-loading" role="status">Opening editor…</div>
+    {:else if isNewDraft && (displayText === null || displayText.length === 0)}
+      <div class="eyebrow">New workspace</div>
+      <h1>Untitled</h1>
+      <p class="placeholder">Tap to start writing…</p>
+    {:else if activeEntry && activeEntry.presentation !== 'editable'}
+      <div class="eyebrow">
+        {activeEntry.presentation === 'preview' ? 'Asset preview' : 'Download only'}
+      </div>
+      <h1>{activeEntry.path}</h1>
+      {#if activeEntry.presentation === 'preview' && previewUrl}
+        <button
+          class="asset-image-button"
+          type="button"
+          aria-label={`View ${activeEntry.path} full screen`}
+          onclick={openLightbox}
+        >
+          <img class="asset-image" src={previewUrl} alt={activeEntry.path} />
+        </button>
+      {:else}
+        <div class="asset-preview">
+          <strong>{activeEntry.path}</strong>
+          {#if activeEntry.presentation === 'preview'}
+            Decrypting preview… · {activeEntry.sizeLabel}
+          {:else}
+            This format is never executed here. Download it or open it in native attn ·
+            {activeEntry.sizeLabel}
+          {/if}
+        </div>
+        <div class="storage-actions">
+          <button class="button" type="button" onclick={() => void downloadActiveEntry()}>
+            Download
+          </button>
+        </div>
+      {/if}
+    {:else}
+      <div class="eyebrow">Working draft</div>
+      <h1>{workspace.name}</h1>
+      {#if displayText !== null && displayText.length > 0}
+        <div class="plain-md" data-body-text>{displayText}</div>
+      {:else if displayText !== null}
+        <p class="placeholder">Start writing…</p>
+      {:else}
+        <p class="placeholder">This entry has no Markdown body.</p>
+      {/if}
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet desktopHeaderActions()}
+  <div class="hosted-header-actions">
+    {#if renamingTitle}
+      <input
+        class="hosted-title-input"
+        type="text"
+        aria-label="Workspace title"
+        bind:value={titleValue}
+        onkeydown={(event) => {
+          if (event.key === 'Enter') void commitTitleRename();
+          if (event.key === 'Escape') renamingTitle = false;
+        }}
+        onblur={() => void commitTitleRename()}
+      />
+    {:else}
+      <button
+        class="hosted-workspace-title"
+        type="button"
+        aria-label="Rename workspace"
+        title="Rename workspace"
+        onclick={() => {
+          titleValue = workspace.name;
+          renamingTitle = true;
+        }}
+      >{workspace.name}</button>
+    {/if}
+    <span class="save-state hosted-save-state" data-save-state={saveState} data-commits={commitCount}>
+      {ownerRoomStatus ?? saveState}
+    </span>
+    {#if canEdit}
+      <button
+        class="hosted-header-button"
+        type="button"
+        data-action="edit"
+        disabled={editorLoading}
+        onclick={() => editing ? void exitEdit() : void enterEdit()}
+      >
+        {editing ? 'Done' : editorLoading ? 'Opening…' : editDenied ? 'Retry edit' : 'Edit'}
+      </button>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet desktopSidebarFooter()}
+  <div class="hosted-sidebar-footer" aria-label="Workspace actions">
+    {#if activeEntry}
+      <div class="hosted-entry-actions" aria-label={`Actions for ${activeEntry.path}`}>
+        {#if renamingEntry}
+          <input
+            class="hosted-sidebar-input"
+            type="text"
+            aria-label="New path"
+            bind:value={renameEntryValue}
+            onkeydown={(event) => {
+              if (event.key === 'Enter') void commitEntryRename();
+              if (event.key === 'Escape') renamingEntry = false;
+            }}
+          />
+        {:else}
+          <button
+            type="button"
+            onclick={() => {
+              renamingEntry = true;
+              renameEntryValue = activeEntry?.path ?? '';
+            }}
+          >Rename</button>
+          <button type="button" onclick={() => void downloadActiveEntry()}>Download</button>
+          <button class="danger" type="button" onclick={() => (confirmingEntryDelete = true)}>Delete</button>
+        {/if}
+      </div>
+      {#if confirmingEntryDelete}
+        <div class="hosted-delete-confirm" role="alertdialog" aria-label={`Delete ${activeEntry.path}?`}>
+          <span>Delete {activeEntry.path}?</span>
+          <div>
+            <button type="button" onclick={() => (confirmingEntryDelete = false)}>Cancel</button>
+            <button class="danger" type="button" onclick={() => void deleteActiveEntry()}>Delete file</button>
+          </div>
+        </div>
+      {/if}
+    {/if}
+    {#if addingMarkdown}
+      <input
+        class="hosted-sidebar-input"
+        type="text"
+        aria-label="New Markdown file path"
+        placeholder="notes.md"
+        bind:value={newMarkdownPath}
+        onkeydown={(event) => {
+          if (event.key === 'Enter') void createMarkdownFile();
+          if (event.key === 'Escape') addingMarkdown = false;
+        }}
+      />
+    {:else}
+      <button class="hosted-sidebar-action" type="button" data-action="new-markdown" onclick={() => (addingMarkdown = true)}>
+        <span aria-hidden="true">＋</span>
+        <span>New Markdown</span>
+      </button>
+    {/if}
+    <button class="hosted-sidebar-action" type="button" data-action="add-assets" onclick={() => assetInput?.click()}>
+      <span aria-hidden="true">↑</span>
+      <span>Add files or assets</span>
+    </button>
+    <button class="hosted-sidebar-action" type="button" data-action="export-zip" onclick={() => void exportZip()}>
+      <span aria-hidden="true">↓</span>
+      <span>Export workspace</span>
+    </button>
+    <input
+      bind:this={assetInput}
+      type="file"
+      multiple
+      class="sr-only"
+      aria-hidden="true"
+      tabindex="-1"
+      onchange={() => void onAssetsPicked()}
+    />
+    {#if railError}
+      <p class="hosted-sidebar-error" role="alert">{railError}</p>
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet desktopRail()}
+  {#if ownerState?.roomId && ReviewMarginComponent}
+    {#if ownerState.authority?.session?.authoringError}
+      <div class="review-delivery-status" role="status">
+        <span>{ownerState.authority.session.authoringError}</span>
+        <button class="row-action" type="button" onclick={() => void retryReviewDelivery()}>Retry</button>
+      </div>
+    {/if}
+    <ReviewMarginComponent
+      view={pmViewForReview}
+      readOnly={!ownerState.liveEditingAvailable}
+      reviewerAuthoring={durableReviewAvailable}
+      suggestionActions={ownerState.liveEditingAvailable
+        ? { accept: acceptSuggestion, reject: rejectSuggestion }
+        : {}}
+      onResolveComment={resolveReview}
+      onReplyComment={replyToReview}
+    />
+  {/if}
+{/snippet}
+
+{#if desktopLayout}
+  <div class="hosted-desktop-editor" data-app-view="workspace" data-workspace-id={workspace.id}>
+    {#if HostedDesktopWorkspaceFrame}
+      <HostedDesktopWorkspaceFrame
+        workspaceId={workspace.id}
+        workspaceName={workspace.name}
+        entries={workspace.entries}
+        activeEntryPath={activeEntry?.path}
+        {shareOpen}
+        actions={desktopHeaderActions}
+        footer={desktopSidebarFooter}
+        content={documentSurface}
+        rail={desktopRail}
+        onNavigate={navigateDesktopTree}
+        onShare={(trigger) => {
+          shareButton = trigger;
+          shareOpen = true;
+        }}
+        onViewport={(viewport) => (canvasEl = viewport ?? undefined)}
+      />
+    {:else}
+      <div class="hosted-shell-loading" role="status">Opening workspace…</div>
+    {/if}
+  </div>
+{:else}
 <div class="editor-shell" data-app-view="workspace" data-workspace-id={workspace.id}>
   <header class="editor-top">
-    <div class="top-brand">
-      <a class="brand" href="/app" aria-label="Back to your desk">
-        <span class="mark" aria-hidden="true">a.</span>attn
-      </a>
-    </div>
     <div class="doc-name">
-      {#if renamingTitle}
+      {#if editing && renamingTitle}
         <input
-          class="rail-input title-input"
+          class="mobile-title-input"
           type="text"
           aria-label="Workspace title"
           bind:value={titleValue}
@@ -674,297 +991,29 @@
         />
       {:else if editing}
         <button
-          class="title-button"
+          class="mobile-workspace-title"
           type="button"
           aria-label="Rename workspace"
           onclick={() => {
             titleValue = workspace.name;
             renamingTitle = true;
           }}
-        >
-          {workspace.name}
-        </button>
+        >{workspace.name}</button>
       {:else}
-        {workspace.name}
+        <strong>{workspace.name}</strong>
       {/if}
       <span class="save-state" data-save-state={saveState} data-commits={commitCount}>· {saveState}</span>
-      {#if ownerRoomStatus}
-        <span class="owner-room-status" data-owner-room-status>{ownerRoomStatus}</span>
-      {/if}
     </div>
     <div class="share-action">
-      {#if canEdit}
-        {#if editing}
-          <button class="button" type="button" onclick={() => void exitEdit()}>Done</button>
-        {:else}
-          <button
-            class="button"
-            type="button"
-            data-action="edit"
-            disabled={editorLoading}
-            onclick={() => void enterEdit()}
-          >
-            {editorLoading ? 'Opening…' : editDenied ? 'Retry edit' : 'Edit'}
-          </button>
-        {/if}
-      {/if}
-      <button
-        class="button primary"
-        type="button"
-        bind:this={shareButton}
-        onclick={() => (shareOpen = true)}
-      >
-        Share
-      </button>
+      <button class="button primary" type="button" bind:this={shareButton} onclick={() => (shareOpen = true)}>Share</button>
     </div>
   </header>
-
-  <div class="editor-grid">
-    <aside class="file-rail" aria-label="Workspace files">
-      <div class="rail-title">
-        On this device · {workspace.entries.length}
-        {workspace.entries.length === 1 ? 'entry' : 'entries'}
-      </div>
-      <ul class="file-list">
-        {#each markdownEntries as entry (entry.path)}
-          <li>
-            <a
-              class="file"
-              class:active={entry.path === activeEntry?.path}
-              href={entryHref(entry)}
-              aria-current={entry.path === activeEntry?.path ? 'page' : undefined}
-            >
-              {entry.path}
-              <span class="file-size">{entry.sizeLabel}</span>
-            </a>
-          </li>
-        {/each}
-        {#each assetEntries as entry (entry.path)}
-          <li>
-            <a
-              class="file asset"
-              class:active={entry.path === activeEntry?.path}
-              href={entryHref(entry)}
-              aria-current={entry.path === activeEntry?.path ? 'page' : undefined}
-            >
-              {entryGlyph(entry)}{entry.path}
-              <span class="file-size">{entry.sizeLabel}</span>
-            </a>
-          </li>
-        {/each}
-      </ul>
-      {#if activeEntry}
-        <div class="entry-actions" aria-label={`Actions for ${activeEntry.path}`}>
-          {#if renamingEntry}
-            <input
-              class="rail-input"
-              type="text"
-              aria-label="New path"
-              bind:value={renameEntryValue}
-              onkeydown={(event) => {
-                if (event.key === 'Enter') void commitEntryRename();
-                if (event.key === 'Escape') renamingEntry = false;
-              }}
-            />
-          {:else}
-            <button
-              class="row-action"
-              type="button"
-              onclick={() => {
-                renamingEntry = true;
-                renameEntryValue = activeEntry?.path ?? '';
-              }}
-            >
-              Rename
-            </button>
-            <button class="row-action danger" type="button" onclick={() => (confirmingEntryDelete = true)}>
-              Delete
-            </button>
-            <button class="row-action" type="button" onclick={() => void downloadActiveEntry()}>
-              Download
-            </button>
-          {/if}
-        </div>
-        {#if confirmingEntryDelete}
-          <div class="confirm-clear" role="alertdialog" aria-label={`Delete ${activeEntry.path}?`}>
-            <strong>Delete {activeEntry.path}?</strong>
-            <div class="actions">
-              <button class="button" type="button" onclick={() => (confirmingEntryDelete = false)}>
-                Cancel
-              </button>
-              <button class="button danger" type="button" onclick={() => void deleteActiveEntry()}>
-                Delete file
-              </button>
-            </div>
-          </div>
-        {/if}
-      {/if}
-      {#if addingMarkdown}
-        <input
-          class="rail-input"
-          type="text"
-          aria-label="New Markdown file path"
-          placeholder="notes.md"
-          bind:value={newMarkdownPath}
-          onkeydown={(event) => {
-            if (event.key === 'Enter') void createMarkdownFile();
-            if (event.key === 'Escape') addingMarkdown = false;
-          }}
-        />
-      {:else}
-        <button class="file rail-add" type="button" data-action="new-markdown" onclick={() => (addingMarkdown = true)}>
-          ＋ New Markdown
-        </button>
-      {/if}
-      <button class="file rail-add" type="button" data-action="add-assets" onclick={() => assetInput?.click()}>
-        ↥ Add files or assets
-      </button>
-      <button class="file rail-add" type="button" data-action="export-zip" onclick={() => void exportZip()}>
-        ⤓ Export workspace (.zip)
-      </button>
-      <input
-        bind:this={assetInput}
-        type="file"
-        multiple
-        style="display: none"
-        aria-hidden="true"
-        tabindex="-1"
-        onchange={() => void onAssetsPicked()}
-      />
-      {#if railError}
-        <p role="alert" style="color: var(--rust-deep); font: 0.8rem/1.4 var(--sans); margin-top: 0.6rem;">
-          {railError}
-        </p>
-      {/if}
-    </aside>
-
-    <!-- Scrollable region must be keyboard-reachable (axe
-         scrollable-region-focusable); the region role makes the tabindex
-         legitimate for assistive tech. -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-    <main class="editor-canvas" bind:this={canvasEl} tabindex="0" aria-label="Document">
-      {#if health.mode !== 'persistent' && health.mode !== 'best-effort'}
-        <div style="max-width: 760px; margin: 0 auto 1.5rem;">
-          <DegradedBanner mode={health.mode} />
-        </div>
-      {/if}
-      {#if editDenied}
-        <div class="degraded-banner" role="status" data-degraded="lease-denied" style="max-width: 760px; margin: 0 auto 1.5rem;">
-          <div>
-            <strong>Another tab is editing this workspace.</strong>
-            <p>This tab stays read-only until the other tab finishes or closes.</p>
-          </div>
-        </div>
-      {/if}
-      {#if ownerState?.roomId && !ownerState.liveEditingAvailable}
-        <div class="degraded-banner owner-authority-banner" role="status" data-degraded="owner-authority-paused" style="max-width: 760px; margin: 0 auto 1.5rem;">
-          <div>
-            <strong>Live review is paused.</strong>
-            <p>{ownerState.reason ?? 'Your encrypted review remains readable while authority reconnects.'}</p>
-          </div>
-          {#if ownerState.authority?.session?.authoringError}
-            <button class="button" type="button" onclick={() => void retryReviewDelivery()}>Retry delivery</button>
-          {/if}
-        </div>
-      {/if}
-      <article class="writing-sheet">
-        {#if (editing || collabSeed) && EditorComponent}
-          <EditorComponent
-            bind:this={editorRef}
-            markdown={collabSeed?.markdown ?? displayText ?? ''}
-            editable={editing && ownerState?.writable !== false}
-            plugins={changeWatcher as never}
-            onReady={handleEditorReady}
-            onCheckboxToggle={onEditorChanged}
-            collabClientId={ownerState?.liveEditingAvailable
-              ? collabClientId ?? undefined
-              : undefined}
-            {collabEpoch}
-            onCollabDocChange={handleCollabDocChange}
-            onCollabSelectionChange={handleCollabSelectionChange}
-          />
-        {:else if isNewDraft && (displayText === null || displayText.length === 0)}
-          <div class="eyebrow">New workspace</div>
-          <h1>Untitled</h1>
-          <p class="placeholder">Tap to start writing…</p>
-        {:else if activeEntry && activeEntry.presentation !== 'editable'}
-          <div class="eyebrow">
-            {activeEntry.presentation === 'preview' ? 'Asset preview' : 'Download only'}
-          </div>
-          <h1>{activeEntry.path}</h1>
-          {#if activeEntry.presentation === 'preview' && previewUrl}
-            <button
-              class="asset-image-button"
-              type="button"
-              aria-label={`View ${activeEntry.path} full screen`}
-              onclick={openLightbox}
-            >
-              <img class="asset-image" src={previewUrl} alt={activeEntry.path} />
-            </button>
-          {:else}
-            <div class="asset-preview">
-              <strong>{activeEntry.path}</strong>
-              {#if activeEntry.presentation === 'preview'}
-                Decrypting preview… · {activeEntry.sizeLabel}
-              {:else}
-                This format is never executed here. Download it or open it in native attn ·
-                {activeEntry.sizeLabel}
-              {/if}
-            </div>
-            <div class="storage-actions">
-              <button class="button" type="button" onclick={() => void downloadActiveEntry()}>
-                Download
-              </button>
-            </div>
-          {/if}
-        {:else}
-          <div class="eyebrow">Working draft</div>
-          <h1>{workspace.name}</h1>
-          {#if displayText !== null && displayText.length > 0}
-            <div class="plain-md" data-body-text>{displayText}</div>
-          {:else if displayText !== null}
-            <p class="placeholder">Start writing…</p>
-          {:else}
-            <p class="placeholder">This entry has no Markdown body.</p>
-          {/if}
-        {/if}
-      </article>
-    </main>
-
-    <aside class="review-rail" aria-label="Review margin">
-      <div class="rail-title">Review margin</div>
-      {#if ownerState?.roomId && ReviewMarginComponent}
-        {#if ownerState.authority?.session?.authoringError}
-          <div class="review-delivery-status" role="status">
-            <span>{ownerState.authority.session.authoringError}</span>
-            <button class="row-action" type="button" onclick={() => void retryReviewDelivery()}>Retry</button>
-          </div>
-        {/if}
-        <ReviewMarginComponent
-          view={pmViewForReview}
-          readOnly={!ownerState.liveEditingAvailable}
-          reviewerAuthoring={durableReviewAvailable}
-          suggestionActions={ownerState.liveEditingAvailable
-            ? { accept: acceptSuggestion, reject: rejectSuggestion }
-            : {}}
-          onResolveComment={resolveReview}
-          onReplyComment={replyToReview}
-        />
-      {:else}
-        {#each workspace.reviewCards as card (card.author + card.body)}
-          <div class="review-card">
-            <strong>{card.author} · {card.ageLabel}</strong>
-            {card.body}
-          </div>
-        {:else}
-          <p class="review-empty">
-            No review yet. Share this workspace to open an encrypted room around it.
-          </p>
-        {/each}
-      {/if}
-    </aside>
-  </div>
-
+  <!-- The constrained layout remains reader-first: one document column,
+       thumb actions, and bottom sheets for files/review. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <main class="editor-canvas" bind:this={canvasEl} tabindex="0" aria-label="Document">
+    {@render documentSurface()}
+  </main>
   <nav class="thumb-dock" aria-label="Document actions">
     <button
       type="button"
@@ -998,8 +1047,9 @@
     <button type="button" onclick={() => (shareOpen = true)}>Share</button>
   </nav>
 </div>
+{/if}
 
-{#if editing}
+{#if editing && !desktopLayout}
   <div class="edit-bar" style={`--kb-offset: ${editBarOffset}px`} role="toolbar" aria-label="Formatting">
     <button type="button" aria-label="Bold" onclick={() => editorRef?.toggleBold()}><strong>B</strong></button>
     <button type="button" aria-label="Italic" onclick={() => editorRef?.toggleItalic()}><em>I</em></button>

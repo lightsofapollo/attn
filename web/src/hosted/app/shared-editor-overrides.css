@@ -1,0 +1,18 @@
+/* Native attn pins the entire app to one viewport and scrolls its inner
+   ScrollArea. Hosted mobile deliberately lets the document own page scroll so
+   Safari's address bar, text selection, and saved reading position work. */
+@media (max-width: 900px) {
+  html,
+  body {
+    height: auto;
+    min-height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  #app {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+}

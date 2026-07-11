@@ -57,11 +57,15 @@ defineCase('peer, tab, tree, sidebar, room, and rail surfaces render unread badg
     'ReviewFileTree.svelte',
     'Sidebar.svelte',
     'ReviewBar.svelte',
-    '../App.svelte',
+    'WorkspaceEditorFrame.svelte',
   ];
   for (const file of surfaces) {
     assert(source(file).includes('UnreadBadge'), `${file} must render UnreadBadge`);
   }
+  assert(
+    source('../App.svelte').includes('WorkspaceEditorFrame'),
+    'App.svelte must render the shared workspace frame that owns the rail badge',
+  );
 });
 
 async function run(): Promise<void> {

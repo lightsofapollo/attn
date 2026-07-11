@@ -45,7 +45,7 @@ for (const [path, name] of [
 
 test('axe: share sheet open', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
-  await page.getByRole('button', { name: 'Share', exact: true }).click();
+  await page.getByRole('button', { name: 'Share for review' }).click();
   await expect(page.getByRole('dialog', { name: /Share Product direction/u })).toBeVisible();
   await expectNoAxeViolations(page, 'share sheet');
 });
@@ -74,7 +74,7 @@ test('keyboard-only: landing reaches both CTAs', async ({ page }) => {
 
 test('keyboard-only: share sheet opens, traps start focus, and closes', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
-  const share = page.getByRole('button', { name: 'Share', exact: true });
+  const share = page.getByRole('button', { name: 'Share for review' });
   await share.focus();
   await page.keyboard.press('Enter');
   const dialog = page.getByRole('dialog', { name: /Share Product direction/u });

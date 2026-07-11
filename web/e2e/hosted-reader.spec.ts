@@ -21,7 +21,8 @@ for (const width of [320, 375, 390, 430]) {
 
     // 18–19 CSS px body text at phone widths (ios-ux.md §3).
     const fontSize = await page
-      .locator('[data-body-text]')
+      .locator('[data-body-text] .ProseMirror p')
+      .first()
       .evaluate((el) => Number.parseFloat(getComputedStyle(el).fontSize));
     expect(fontSize).toBeGreaterThanOrEqual(17.5);
     expect(fontSize).toBeLessThanOrEqual(19.5);
@@ -36,7 +37,7 @@ for (const width of [320, 375, 390, 430]) {
   });
 }
 
-for (const width of [820, 1024]) {
+for (const width of [820]) {
   test(`iPad-width reader at ${width}px keeps a capped, centered measure`, async ({ page }) => {
     await page.setViewportSize({ width, height: 1000 });
     await page.goto(READER_PATH);
@@ -52,6 +53,14 @@ for (const width of [820, 1024]) {
     expect(overflow).toBe(0);
   });
 }
+
+test('wide tablet uses the shared desktop workspace composition', async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 1000 });
+  await page.goto(READER_PATH);
+  await expect(page.locator('[data-slot="sidebar"]')).toBeVisible();
+  await expect(page.locator('.hosted-native-document .ProseMirror')).toBeVisible();
+  await expect(page.locator('.thumb-dock')).toHaveCount(0);
+});
 
 test('reading position survives file switches and sheet trips', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -131,7 +140,7 @@ test('mobile edit mode: formatting bar above the keyboard viewport, 44px targets
   await bar.getByRole('button', { name: 'Bold' }).click();
   await bar.getByRole('button', { name: 'Heading' }).click();
   await page.locator('.thumb-dock').getByRole('button', { name: 'Done' }).click();
-  await expect(page.locator('[data-body-text]')).toContainText('## **emphasis target**');
+  await expect(page.locator('[data-body-text] h2 strong')).toContainText('emphasis target');
 });
 
 test('workspace title is a separate edit target in edit mode', async ({ page }) => {

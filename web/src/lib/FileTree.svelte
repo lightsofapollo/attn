@@ -3,6 +3,7 @@
   import FileTree from './FileTree.svelte';
   import { openExternal } from './ipc';
   import {
+    SidebarMenu,
     SidebarMenuItem,
     SidebarMenuButton,
   } from '$lib/components/ui/sidebar';
@@ -230,12 +231,12 @@
     {@const exp = isExpanded(node.path)}
     {@const presenceBadge = presenceBadgeFor(node, exp)}
     {@const folderShared = isPathShared(node)}
-    <Collapsible
-      open={exp}
-      onOpenChange={(v) => handleDirOpenChange(node.path, v)}
-      class="group/collapsible"
-    >
-      <SidebarMenuItem>
+    <SidebarMenuItem>
+      <Collapsible
+        open={exp}
+        onOpenChange={(v) => handleDirOpenChange(node.path, v)}
+        class="group/collapsible"
+      >
         <ContextMenu>
           <ContextMenuTrigger>
             {#snippet child({ props: ctxProps })}
@@ -295,13 +296,13 @@
         </ContextMenu>
         <CollapsibleContent>
           {#if node.children}
-            <div class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
+            <SidebarMenu class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
               <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {sharedPaths} {collaboratorLocations} />
-            </div>
+            </SidebarMenu>
           {/if}
         </CollapsibleContent>
-      </SidebarMenuItem>
-    </Collapsible>
+      </Collapsible>
+    </SidebarMenuItem>
   {:else}
     {@const icon = getFileIcon(node)}
     {@const presenceBadge = presenceBadgeFor(node, false)}

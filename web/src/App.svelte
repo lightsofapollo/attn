@@ -67,8 +67,6 @@
   import ShareDialog from './lib/ShareDialog.svelte';
   import NamePrompt from './lib/NamePrompt.svelte';
   import { userProfile } from './lib/review/profile.svelte';
-  import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
-  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import Users from '@lucide/svelte/icons/users';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
@@ -83,7 +81,6 @@
   import type { ConstructAnchorContext } from './lib/review/anchors';
   import { toast } from 'svelte-sonner';
   import { Toaster } from '$lib/components/ui/sonner';
-  import { SidebarProvider, SidebarInset } from '$lib/components/ui/sidebar';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import PathBreadcrumb from './lib/PathBreadcrumb.svelte';
   import {
@@ -113,8 +110,8 @@
   import type { EditorView } from 'prosemirror-view';
   import type { Plugin as PMPlugin } from 'prosemirror-state';
   import { TextSelection } from 'prosemirror-state';
-  import UnreadBadge from './lib/UnreadBadge.svelte';
   import ResidentSettings from './lib/ResidentSettings.svelte';
+  import WorkspaceEditorFrame from './lib/WorkspaceEditorFrame.svelte';
 
   interface Props {
     /**
@@ -2697,6 +2694,36 @@
   />
 {/snippet}
 
+{#snippet workspaceSidebar()}
+  <Sidebar
+    entries={fileTree}
+    reviewMode={isReviewerInRoom}
+    {activePath}
+    {rootPath}
+    {knownProjects}
+    {activeProjectPath}
+    remoteSearchQuery={sidebarSearchQuery}
+    remoteSearchItems={sidebarSearchResults}
+    outline={outlineHeadings}
+    {activeOutlineId}
+    {sharedPaths}
+    onProjectSwitch={handleProjectSwitch}
+    onNavigate={handleSidebarNavigate}
+    onExpand={handleTreeExpand}
+    onShare={openShareDialogForPath}
+    onSearchQuery={handleSidebarSearchQuery}
+    onOutlineNavigate={handleOutlineNavigate}
+  />
+{/snippet}
+
+{#snippet workspaceRail()}
+  {#if rightRail}
+    {@render rightRail()}
+  {:else}
+    {@render rightRailPlaceholder()}
+  {/if}
+{/snippet}
+
 {#snippet minimalDiagnosticContent()}
   <div class="flex-1 overflow-auto px-4 py-3 font-mono text-xs leading-5 text-foreground">
     <p class="mb-2 font-semibold">Diagnostic mode: minimal</p>
@@ -2759,109 +2786,20 @@
     {@render editorOnlyContent()}
   </main>
 {:else if hasSidebar}
-  <SidebarProvider class="h-svh overflow-hidden">
-    <Sidebar
-      entries={fileTree}
-      reviewMode={isReviewerInRoom}
-      {activePath}
-      {rootPath}
-      {knownProjects}
-      {activeProjectPath}
-      remoteSearchQuery={sidebarSearchQuery}
-      remoteSearchItems={sidebarSearchResults}
-      outline={outlineHeadings}
-      {activeOutlineId}
-      {sharedPaths}
-      onProjectSwitch={handleProjectSwitch}
-      onNavigate={handleSidebarNavigate}
-      onExpand={handleTreeExpand}
-      onShare={openShareDialogForPath}
-      onSearchQuery={handleSidebarSearchQuery}
-      onOutlineNavigate={handleOutlineNavigate}
-    />
-    <SidebarInset class="overflow-hidden">
-      <!-- Full-width header row: the shared-doc banner spans the document
-           AND the rail (attn-42y). The content+rail row below it is the
-           `relative` anchor for the floating ReviewBar, so the bar keeps
-           its alignment over the breadcrumb regardless of the banner. -->
-      {@render sharedDocBanner()}
-      <div class="relative flex min-h-0 flex-1 flex-row overflow-hidden">
-        {@render reviewChrome()}
-        <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
-          {@render mainContent()}
-        </div>
-        <!-- The rail starts at the UNDERSIDE of the header strip (mt-12
-             clears the floating breadcrumb/ReviewBar row; flex-stretch
-             sizing absorbs the margin) and owns its toggle in a header row
-             — centered in the collapsed gutter, right-aligned expanded.
-             overflow-hidden (not auto): the rail must never scroll
-             independently — cards are repositioned per document scroll so
-             they stay tied to their anchors (attn-23m); off-screen cards
-             clip with their text. Width changes are INSTANT: WebKit pauses
-             CSS transitions in occluded windows, which left the rail stuck
-             mid-transition at ~1px (attn-23m), and an animating width also
-             desyncs the breadcrumb inset. -->
-        <!-- Top border at the hairline weight of the header divider (the
-             earlier /60 + header border-b combination read as one thick
-             line). onwheel: the rail never scrolls itself (attn-23m), so
-             wheel gestures over it forward to the document viewport —
-             otherwise reading flow dead-stops whenever the pointer crosses
-             the rail. No preventDefault needed: nothing else scrolls here. -->
-        <aside
-          class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden rounded-tl-lg border-l border-t border-border/40 data-[mode=hidden]:border-none bg-sidebar"
-          style="width: {RAIL_WIDTH_PX[reviewStore.railMode]}px;"
-          data-state={reviewStore.panelOpen ? 'open' : 'closed'}
-          data-mode={reviewStore.railMode}
-          data-slot="right-rail"
-          aria-hidden={reviewStore.railMode === 'hidden'}
-          onwheel={(e) => {
-            if (contentViewport) contentViewport.scrollTop += e.deltaY;
-          }}
-        >
-          {#if reviewStore.railMode !== 'hidden'}
-            <div
-              class="flex h-10 shrink-0 items-center border-b border-border/40 {reviewStore.panelOpen ? 'justify-end pr-2' : 'justify-center'}"
-              data-slot="rail-header"
-            >
-              <button
-                type="button"
-                class="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                data-slot="rail-toggle"
-                data-state={reviewStore.panelOpen ? 'expanded' : 'collapsed'}
-                aria-label={reviewStore.panelOpen ? 'Collapse comments rail' : 'Expand comments rail'}
-                title="{reviewStore.panelOpen ? 'Collapse' : 'Expand'} comments (⌘J)"
-                aria-expanded={reviewStore.panelOpen}
-                onclick={() => reviewStore.togglePanel()}
-              >
-                {#if reviewStore.panelOpen}
-                  <PanelRightClose class="size-4" aria-hidden="true" />
-                {:else}
-                  <PanelRightOpen class="size-4" aria-hidden="true" />
-                {/if}
-                <UnreadBadge
-                  count={reviewStore.currentRoomUnread}
-                  label="unread review updates"
-                  class="absolute -right-1.5 -top-1.5"
-                />
-              </button>
-            </div>
-            <!-- overflow-hidden + mb-2: cards/chips clip at this wrapper's
-                 bounds, keeping the rail's bottom 8px clear — the bottom
-                 counterpart of clampRailTop's breathing room (cards can't
-                 be pushed UP off their anchors, so the clip line is the
-                 only way to keep the bottom edge airy). -->
-            <div class="relative mb-2 min-h-0 flex-1 overflow-hidden">
-              {#if rightRail}
-                {@render rightRail()}
-              {:else}
-                {@render rightRailPlaceholder()}
-              {/if}
-            </div>
-          {/if}
-        </aside>
-      </div>
-    </SidebarInset>
-  </SidebarProvider>
+  <WorkspaceEditorFrame
+    sidebar={workspaceSidebar}
+    banner={sharedDocBanner}
+    chrome={reviewChrome}
+    content={mainContent}
+    rail={workspaceRail}
+    railMode={reviewStore.railMode}
+    panelOpen={reviewStore.panelOpen}
+    unreadCount={reviewStore.currentRoomUnread}
+    onToggleRail={() => reviewStore.togglePanel()}
+    onRailWheel={(deltaY) => {
+      if (contentViewport) contentViewport.scrollTop += deltaY;
+    }}
+  />
 {:else}
   <main class="relative flex h-screen flex-col overflow-hidden">
     {@render reviewChrome()}

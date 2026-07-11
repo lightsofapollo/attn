@@ -10,6 +10,7 @@
   --sheet-raised: #fff9ee;
   --ink: #221f1b;
   --muted: #655f57;
+  --hosted-muted: #655f57;
   --faint: #8c857b;
   --rule: rgba(34, 31, 27, 0.17);
   --rule-strong: var(--ink);
@@ -45,6 +46,7 @@
   --sheet-raised: #282319;
   --ink: #e9e3d6;
   --muted: #a89f90;
+  --hosted-muted: #a89f90;
   --faint: #7d7669;
   --rule: rgba(233, 227, 214, 0.16);
   --rule-strong: var(--ink);

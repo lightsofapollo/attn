@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
   import type { SearchResultItem, TreeNode } from './types';
   import FileTree from './FileTree.svelte';
   import ReviewFileTree from './ReviewFileTree.svelte';
@@ -10,6 +10,7 @@
   import {
     Sidebar,
     SidebarContent,
+    SidebarFooter,
     SidebarInput,
     SidebarMenu,
     SidebarRail,
@@ -44,6 +45,14 @@
     outline?: { id: string; text: string; level: number; line: number }[];
     activeOutlineId?: string;
     onOutlineNavigate?: (id: string) => void;
+    /** Optional platform-specific actions below the shared file/outline view. */
+    footer?: Snippet;
+    /** Native reserves space for macOS window controls; hosted desktop does not. */
+    showWindowDragRegion?: boolean;
+    /** Display label for virtual/browser workspace roots. */
+    rootLabel?: string;
+    /** Browser-owned workspaces do not expose an outline until one is derived. */
+    showOutline?: boolean;
   }
 
   let {
@@ -64,12 +73,17 @@
     outline = [],
     activeOutlineId = '',
     onOutlineNavigate,
+    footer,
+    showWindowDragRegion = true,
+    rootLabel,
+    showOutline = true,
   }: Props = $props();
   let sidebarView: 'files' | 'outline' = $state('files');
   let query = $state('');
   let sidebarRootEl: HTMLElement | null = $state(null);
 
   function formatRootLabel(path: string): string {
+    if (rootLabel && (path === rootPath || path === selectedProject)) return rootLabel;
     if (!path) return 'Workspace';
     const parts = path.split('/').filter(Boolean);
     return parts.at(-1) || path;
@@ -229,14 +243,16 @@
 
 <Sidebar class="project-sidebar" bind:ref={sidebarRootEl}>
   <!-- Drag strip: clears traffic lights -->
-  <div
-    class="h-[46px] shrink-0"
-    style="-webkit-user-select: none"
-    role="button"
-    aria-label="Drag window"
-    tabindex="-1"
-    onmousedown={dragWindow}
-  ></div>
+  {#if showWindowDragRegion}
+    <div
+      class="h-[46px] shrink-0"
+      style="-webkit-user-select: none"
+      role="button"
+      aria-label="Drag window"
+      tabindex="-1"
+      onmousedown={dragWindow}
+    ></div>
+  {/if}
 
   <div
     class="sidebar-controls"
@@ -284,6 +300,7 @@
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      {#if showOutline}
       <div class="sidebar-mode-toggle" aria-label="Sidebar views">
         <button
           type="button"
@@ -306,6 +323,7 @@
           <TextQuote class="size-3.5" />
         </button>
       </div>
+      {/if}
     </div>
     <div class="sidebar-search-wrap p-0">
       <SidebarInput
@@ -403,5 +421,10 @@
       </section>
     </div>
   </SidebarContent>
+  {#if footer}
+    <SidebarFooter class="border-t border-sidebar-border/70 p-2">
+      {@render footer()}
+    </SidebarFooter>
+  {/if}
   <SidebarRail />
 </Sidebar>

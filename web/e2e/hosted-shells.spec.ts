@@ -29,48 +29,49 @@ test('desk home lists recent workspaces with storage health', async ({ page }) =
 test('landing one-click intent opens an untitled draft editor', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
-  await expect(page.locator('.writing-sheet h1')).toHaveText('Untitled');
-  await expect(page.locator('.file.active')).toContainText('untitled.md');
+  await expect(page.locator('.hosted-native-document .ProseMirror')).toBeVisible();
+  await expect(page.locator('[data-path][data-active="true"]')).toContainText('untitled.md');
   await expect(page.locator('[data-save-state]')).toHaveAttribute(
     'data-save-state',
     'Saved on this device',
   );
 });
 
-test('editor shell renders rails, entries, and review margin', async ({ page }) => {
+test('desktop editor reuses the native sidebar, editor, and review rail frame', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
-  await expect(page.locator('.doc-name')).toContainText('Product direction');
-  await expect(page.locator('.file-rail .file-list .file')).toHaveCount(5);
-  await expect(page.locator('.file-rail .file.active')).toContainText('direction.md');
-  await expect(page.locator('.file-rail .file.asset')).toHaveCount(2);
-  await expect(page.locator('.review-rail .review-card')).toHaveCount(1);
-  await expect(page.locator('.review-rail .review-card')).toContainText('JULES');
+  await expect(page.locator('[data-slot="sidebar"]')).toBeVisible();
+  await expect(page.locator('[data-path][data-active="true"]')).toContainText('direction.md');
+  await expect(page.getByRole('button', { name: 'desk.png' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'notes.json' })).toBeVisible();
+  await expect(page.locator('.hosted-native-document .ProseMirror')).toBeVisible();
+  await expect(page.locator('[data-slot="right-rail"]')).toHaveCount(1);
+  await expect(page.locator('.file-rail, .review-rail')).toHaveCount(0);
   await expectNoHorizontalScroll(page);
 });
 
 test('asset entries render inline previews and download-only placeholders', async ({ page }) => {
   await page.goto('/app/w/ws-product/images/desk.png?shell=demo');
-  await expect(page.locator('.writing-sheet .eyebrow')).toHaveText('Asset preview');
+  await expect(page.locator('.hosted-native-document .eyebrow')).toHaveText('Asset preview');
   // Safe rasters render inline from (mock-)decrypted bytes.
   await expect(page.locator('.asset-image')).toBeVisible();
   await page.goto('/app/w/ws-product/data/notes.json?shell=demo');
-  await expect(page.locator('.writing-sheet .eyebrow')).toHaveText('Download only');
+  await expect(page.locator('.hosted-native-document .eyebrow')).toHaveText('Download only');
   await expect(page.locator('.asset-preview')).toContainText('never executed');
-  await expect(page.getByRole('article').getByRole('button', { name: 'Download' })).toBeVisible();
+  await expect(page.locator('.hosted-native-document').getByRole('button', { name: 'Download' })).toBeVisible();
 });
 
 test('share sheet opens as a dialog and returns focus on close', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
-  await page.getByRole('button', { name: 'Share', exact: true }).click();
+  await page.getByRole('button', { name: 'Share for review' }).click();
   const dialog = page.getByRole('dialog', { name: /Share Product direction/u });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText('Share the whole workspace · 5 entries');
   await expect(dialog).toContainText('3 Markdown files and 2 referenced assets');
-  await expect(dialog).toContainText('The room key stays in the fragment');
+  await expect(dialog).toContainText('Capability keys stay in the fragment');
   // Close button holds initial focus; Escape closes and restores focus.
   await page.keyboard.press('Escape');
   await expect(dialog).not.toBeVisible();
-  await expect(page.getByRole('button', { name: 'Share', exact: true })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Share for review' })).toBeFocused();
 });
 
 test('storage page confirms destructive clear in-app', async ({ page }) => {
@@ -169,14 +170,20 @@ test('capture shell screenshots for design review', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(path);
     await expect(page.locator('body')).toHaveAttribute('data-hydrated', 'true');
+    if (path.includes('/app/w/')) {
+      await expect(page.locator('.hosted-native-document')).toBeVisible();
+    }
     if (opts?.open === 'share') {
-      await page.getByRole('button', { name: 'Share', exact: true }).click();
+      await page.getByRole('button', { name: 'Share for review' }).click();
     }
     await page.screenshot({ path: `test-results/shell-${name}-desktop.png`, fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(path);
+    await expect(page.locator('body')).toHaveAttribute('data-hydrated', 'true');
+    if (path.includes('/app/w/')) {
+      await expect(page.locator('.writing-sheet')).toBeVisible();
+    }
     if (opts?.open === 'share') {
-      // Re-open via the dock after the viewport change re-laid out the page.
-      await page.keyboard.press('Escape');
       await page.locator('.thumb-dock').getByRole('button', { name: 'Share' }).click();
     }
     await page.screenshot({ path: `test-results/shell-${name}-mobile.png`, fullPage: true });

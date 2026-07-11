@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import {
     Breadcrumb,
     BreadcrumbItem,
@@ -15,7 +16,7 @@
     path: string;
     rootPath?: string;
     onNavigate?: (path: string) => void;
-    onShare?: () => void;
+    onShare?: (trigger?: HTMLButtonElement) => void;
     shareEnabled?: boolean;
     /** When set, shows an "open in browser" icon button in the header cluster
      *  (used for HTML files, which can't be shared but can be opened externally). */
@@ -24,6 +25,8 @@
     fixed?: boolean;
     topOffsetPx?: number;
     rightInsetPx?: number;
+    /** Platform-specific status/actions rendered beside the shared path chrome. */
+    actions?: Snippet;
   }
 
   let {
@@ -37,6 +40,7 @@
     fixed = false,
     topOffsetPx = 0,
     rightInsetPx = 16,
+    actions,
   }: Props = $props();
 
   interface Segment {
@@ -76,19 +80,19 @@
     }
   }
 
-  function handleShareClick(): void {
+  function handleShareClick(event: MouseEvent): void {
     if (!shareEnabled) return;
-    onShare?.();
+    onShare?.(event.currentTarget as HTMLButtonElement);
   }
 </script>
 
+<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class={`flex shrink-0 items-center justify-between gap-2 h-[40px] min-w-0 pr-4 pt-3 pb-0 bg-background/95 backdrop-blur-[1px] ${fixed ? 'fixed inset-x-0 z-30' : ''}`}
   style={`-webkit-user-select: none; padding-left: ${avoidWindowControls ? '6.5rem' : '1rem'}; padding-right: ${rightInsetPx}px; ${fixed ? `top: ${topOffsetPx}px;` : ''}`}
-  role="button"
-  aria-label="Drag window"
-  tabindex="-1"
-  onmousedown={dragWindow}
+  onmousedown={(event) => {
+    if (event.target === event.currentTarget) dragWindow(event);
+  }}
 >
   {#if segments.length > 1}
     <Breadcrumb class="mt-1.5 min-w-0 flex-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
@@ -115,6 +119,7 @@
   {:else}
     <div class="min-w-0 flex-1" aria-hidden="true"></div>
   {/if}
+  {@render actions?.()}
   {#if onOpenInBrowser}
     <button
       type="button"

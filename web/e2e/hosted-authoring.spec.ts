@@ -15,6 +15,14 @@ function captureOffOriginRequests(page: Page): string[] {
   return offOrigin;
 }
 
+function activeSidebarEntry(page: Page) {
+  return page.locator('[data-path][data-active="true"]');
+}
+
+function documentEditor(page: Page) {
+  return page.locator('[data-body-text] .ProseMirror');
+}
+
 test('one-click create is real: persists across reload with zero relay traffic', async ({ page }) => {
   await page.goto('/app');
   const offOrigin = captureOffOriginRequests(page);
@@ -22,14 +30,14 @@ test('one-click create is real: persists across reload with zero relay traffic',
   // The editor opens in place and the URL is rewritten to the workspace.
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/untitled\.md$/u);
-  await expect(page.locator('.writing-sheet h1')).toHaveText('Untitled');
+  await expect(page.getByRole('button', { name: 'Rename workspace' })).toHaveText('Untitled');
   expect(offOrigin).toEqual([]);
 
   // A full reload restores the workspace from IndexedDB.
   await page.reload();
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
-  await expect(page.locator('.doc-name')).toContainText('Untitled');
-  await expect(page.locator('.file-rail .file.active')).toContainText('untitled.md');
+  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('Untitled');
+  await expect(activeSidebarEntry(page)).toContainText('untitled.md');
 
   // And the desk lists it as a real recent workspace.
   await page.goto('/app');
@@ -66,10 +74,9 @@ test('import creates a real multi-file workspace preserving paths', async ({ pag
   ]);
   // Import navigates into the imported workspace's editor.
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\//u);
-  await expect(page.locator('.doc-name')).toContainText('direction');
+  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('direction');
   await expect(page.locator('[data-body-text]')).toContainText('Imported direction');
-  await expect(page.locator('.file-rail .file.asset')).toHaveCount(1);
-  await expect(page.locator('.file-rail .file.asset')).toContainText('desk.png');
+  await expect(page.getByRole('button', { name: 'desk.png' })).toBeVisible();
 });
 
 test('desk rename and delete are real and confirmed in-app', async ({ page }) => {
@@ -78,7 +85,7 @@ test('desk rename and delete are real and confirmed in-app', async ({ page }) =>
   await page.goto('/app');
   await expect(page.locator('.workspace-row')).toHaveCount(1);
 
-  await page.getByRole('button', { name: 'Rename' }).click();
+  await page.getByRole('button', { name: 'Rename', exact: true }).click();
   const input = page.getByRole('textbox', { name: 'Workspace name' });
   await input.fill('Product direction');
   await input.press('Enter');
@@ -101,8 +108,7 @@ test('desk rename and delete are real and confirmed in-app', async ({ page }) =>
 test('editing autosaves durable revisions and recovers after reload', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
-  await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  const editor = page.locator('.writing-sheet .ProseMirror');
+  const editor = documentEditor(page);
   await expect(editor).toBeVisible();
   await editor.click();
   await page.keyboard.type('# Autosaved title');
@@ -128,8 +134,7 @@ test('a second tab is honestly read-only while one tab edits', async ({ page, co
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   const url = page.url();
-  await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  await expect(page.locator('.writing-sheet .ProseMirror')).toBeVisible();
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 
   const second = await context.newPage();
   await second.goto(url);
@@ -137,13 +142,13 @@ test('a second tab is honestly read-only while one tab edits', async ({ page, co
   await expect(second.locator('[data-degraded="lease-denied"]')).toContainText(
     'Another tab is editing this workspace.',
   );
-  await expect(second.locator('.writing-sheet .ProseMirror')).toHaveCount(0);
+  await expect(documentEditor(second)).toHaveAttribute('contenteditable', 'false');
 
   // The route owns the lease even while its editor is closed. Closing the
   // first tab releases route authority; an explicit retry then acquires it.
   await page.close();
   await second.getByRole('button', { name: 'Retry edit', exact: true }).click();
-  await expect(second.locator('.writing-sheet .ProseMirror')).toBeVisible();
+  await expect(documentEditor(second)).toHaveAttribute('contenteditable', 'true');
 });
 
 test('multi-file rail: create, add asset with inline preview, rename, delete, export zip', async ({ page }) => {
@@ -155,7 +160,7 @@ test('multi-file rail: create, add asset with inline preview, rename, delete, ex
   await page.getByRole('textbox', { name: 'New Markdown file path' }).fill('docs/notes');
   await page.getByRole('textbox', { name: 'New Markdown file path' }).press('Enter');
   await expect(page).toHaveURL(/\/docs\/notes\.md$/u);
-  await expect(page.locator('.file-rail .file.active')).toContainText('docs/notes.md');
+  await expect(activeSidebarEntry(page)).toContainText('notes.md');
 
   // Add a PNG asset — it must render inline from decrypted bytes.
   const chooser = page.waitForEvent('filechooser');
@@ -166,8 +171,8 @@ test('multi-file rail: create, add asset with inline preview, rename, delete, ex
     'base64',
   );
   await (await chooser).setFiles([{ name: 'pixel.png', mimeType: 'image/png', buffer: png }]);
-  await expect(page.locator('.file-rail .file.asset')).toContainText('pixel.png');
-  await page.locator('.file-rail .file.asset').click();
+  await expect(page.getByRole('button', { name: 'pixel.png' })).toBeVisible();
+  await page.getByRole('button', { name: 'pixel.png' }).click();
   await expect(page.locator('.asset-image')).toBeVisible();
   const naturalWidth = await page
     .locator('.asset-image')
@@ -175,7 +180,7 @@ test('multi-file rail: create, add asset with inline preview, rename, delete, ex
   expect(naturalWidth).toBe(1); // decoded — the decrypted bytes are a real PNG
 
   // Rename the asset to a nested path.
-  await page.getByRole('button', { name: 'Rename' }).click();
+  await page.getByRole('button', { name: 'Rename', exact: true }).click();
   const renameInput = page.getByRole('textbox', { name: 'New path' });
   await renameInput.fill('images/pixel.png');
   await renameInput.press('Enter');
@@ -192,10 +197,9 @@ test('multi-file rail: create, add asset with inline preview, rename, delete, ex
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
   await page.getByRole('button', { name: 'Delete file' }).click();
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
-  await expect(page.locator('.file-rail .file.asset')).toHaveCount(0);
-  await expect(page.locator('.file-rail .file-list .file')).toHaveCount(2);
-  await expect(page.locator('.file-rail .file-list')).toContainText('untitled.md');
-  await expect(page.locator('.file-rail .file-list')).toContainText('docs/notes.md');
+  await expect(page.getByRole('button', { name: 'pixel.png' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'untitled.md' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'notes.md' })).toBeVisible();
 });
 
 test('zip import expands into a nested multi-file workspace', async ({ page }) => {
@@ -212,7 +216,8 @@ test('zip import expands into a nested multi-file workspace', async ({ page }) =
   await (await chooser).setFiles([{ name: 'folio.zip', mimeType: 'application/zip', buffer: zip }]);
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\//u);
   await expect(page.locator('[data-body-text]')).toContainText('Folio index');
-  await expect(page.locator('.file-rail .file.asset')).toContainText('folio/img/dot.png');
+  await page.getByRole('button', { name: 'img' }).click();
+  await expect(page.getByRole('button', { name: 'dot.png' })).toBeVisible();
 });
 
 test('phase gate: create → type → reload → edit → export → reimport with zero relay traffic', async ({ page }) => {
@@ -228,8 +233,7 @@ test('phase gate: create → type → reload → edit → export → reimport wi
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
 
   // Type through the real editor; wait for the durable commit.
-  await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  const editor = page.locator('.writing-sheet .ProseMirror');
+  const editor = documentEditor(page);
   await expect(editor).toBeVisible({ timeout: 60_000 });
   await editor.click();
   await page.keyboard.type('Journey body survives everything.');
@@ -250,7 +254,7 @@ test('phase gate: create → type → reload → edit → export → reimport wi
   await (await chooser).setFiles([
     { name: 'big.bin', mimeType: 'application/octet-stream', buffer: bigAsset },
   ]);
-  await expect(page.locator('.file-rail .file.asset')).toContainText('big.bin');
+  await expect(page.getByRole('button', { name: 'big.bin' })).toBeVisible();
 
   const downloadPromise = page.waitForEvent('download');
   await page.locator('[data-action="export-zip"]').click();
@@ -275,7 +279,7 @@ test('phase gate: create → type → reload → edit → export → reimport wi
   ]);
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\//u);
   await expect(page.locator('[data-body-text]')).toContainText('Journey body survives everything.');
-  await expect(page.locator('.file-rail .file.asset')).toContainText('big.bin');
+  await expect(page.getByRole('button', { name: 'big.bin' })).toBeVisible();
 
   // The entire journey — creation to reimport — touched no non-origin host.
   const origin = new URL(page.url()).origin;
@@ -308,7 +312,7 @@ test('storage page: export marks backup, reimport dedupes names, clear-all erase
     { name: 'backup.zip', mimeType: 'application/zip', buffer: fs.readFileSync(zipPath!) },
   ]);
   await expect(page).toHaveURL(/\/app\/w\//u);
-  await expect(page.locator('.doc-name')).toContainText('Untitled 2');
+  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('Untitled 2');
 
   // Clear all local data: in-app confirm, durable erasure.
   await page.goto('/app/storage');
@@ -336,7 +340,7 @@ test('remembered rooms can be forgotten with crypto-erasure confirmation', async
 
 test('first share is gated on durability until acknowledged', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=private');
-  await page.getByRole('button', { name: 'Share', exact: true }).click();
+  await page.getByRole('button', { name: 'Share for review' }).click();
   const dialog = page.getByRole('dialog', { name: /Share/u });
   await expect(dialog).toBeVisible();
   const copyLink = dialog.locator('[data-action="copy-link"]');

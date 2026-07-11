@@ -43,4 +43,7 @@ export function toggleTheme(): void {
 function applyTheme(next: ThemeName): void {
   theme = next;
   document.documentElement.dataset.theme = next;
+  // Shared native/editor components key their INK palette from `.dark`.
+  // Stamp both selectors so hosted and native views consume one token set.
+  document.documentElement.classList.toggle('dark', next === 'dark');
 }

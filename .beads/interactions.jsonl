@@ -287,3 +287,4 @@
 {"id":"int-91f2737e","kind":"field_change","created_at":"2026-07-11T10:09:36.061205Z","actor":"James Lal","issue_id":"attn-02a.4","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-35d57c4c","kind":"field_change","created_at":"2026-07-11T10:33:35.571094Z","actor":"James Lal","issue_id":"attn-02a.5.4","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-007d4fa3","kind":"field_change","created_at":"2026-07-11T10:33:41.003112Z","actor":"James Lal","issue_id":"attn-02a.5","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-17b1b2ea","kind":"field_change","created_at":"2026-07-11T13:23:19.378912Z","actor":"James Lal","issue_id":"attn-eaw","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}

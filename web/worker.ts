@@ -51,7 +51,11 @@ export default {
     headers.set('X-Frame-Options', 'DENY');
 
     const pathname = new URL(request.url).pathname;
-    if (response.headers.get('content-type')?.includes('text/html')) {
+    if (pathname === '/sw.js') {
+      // The service worker must revalidate on every check so new versions
+      // activate promptly.
+      headers.set('Cache-Control', 'no-cache, no-transform');
+    } else if (response.headers.get('content-type')?.includes('text/html')) {
       // `no-transform` prevents zone-level Browser Insights/Web Analytics
       // from injecting a third-party beacon into this zero-analytics surface.
       headers.set('Cache-Control', 'no-store, no-transform');

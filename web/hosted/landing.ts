@@ -15,3 +15,9 @@ const target = document.getElementById('app');
 if (!target) throw new Error('missing landing mount element');
 mount(Landing, { target });
 document.body.dataset.hydrated = 'true';
+
+// Install the app-shell service worker (attn-7xl.6.2); registration is
+// best-effort and never blocks the page.
+if ('serviceWorker' in navigator && !import.meta.env.DEV) {
+  navigator.serviceWorker.register('/sw.js').catch(() => undefined);
+}

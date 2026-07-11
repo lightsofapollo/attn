@@ -15,6 +15,7 @@ export default defineConfig({
     'hosted-shells.spec.ts',
     'hosted-a11y.spec.ts',
     'hosted-authoring.spec.ts',
+    'hosted-offline.spec.ts',
   ],
   timeout: 60_000,
   expect: { timeout: 20_000 },

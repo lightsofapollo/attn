@@ -374,11 +374,18 @@
     const onVisibility = (): void => {
       if (document.visibilityState === 'hidden') flush();
     };
+    const onPageHide = (): void => {
+      flush();
+      // Release the writer lease so another tab can take over immediately
+      // instead of waiting out the 15s expiry (attn-7xl.6.4). If the commit
+      // above is still in flight the fencing token keeps it safe.
+      void session?.release();
+    };
     document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('pagehide', flush);
+    window.addEventListener('pagehide', onPageHide);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('pagehide', flush);
+      window.removeEventListener('pagehide', onPageHide);
       flush();
       void session?.release();
     };

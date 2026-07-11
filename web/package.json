@@ -8,7 +8,7 @@
     "dev": "npm run generate:icons && vite",
     "dev:browser": "npm run generate:icons && vite --config vite.browser.config.ts",
     "build": "npm run generate:icons && vite build",
-    "build:browser": "npm run generate:icons && vite build --config vite.browser.config.ts",
+    "build:browser": "npm run generate:icons && vite build --config vite.browser.config.ts && npm run build:sw",
     "deploy:staging": "node scripts/deploy-browser-staging.mjs",
     "check": "npm run generate:icons && svelte-check --tsconfig ./tsconfig.json",
     "test": "node scripts/run-tests.mjs",
@@ -16,7 +16,8 @@
     "test:e2e:hosted": "playwright test e2e/hosted-review.spec.ts",
     "check:route-bundles": "node scripts/check-route-bundles.mjs",
     "test:e2e:routes": "npm run build:browser && npm run check:route-bundles && playwright test --config playwright.routes.config.ts",
-    "test:e2e:storage": "playwright test --config playwright.storage.config.ts"
+    "test:e2e:storage": "playwright test --config playwright.storage.config.ts",
+    "build:sw": "vite build --config vite.sw.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/source-code-pro": "^5.2.7",

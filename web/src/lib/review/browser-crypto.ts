@@ -621,6 +621,28 @@ function canonicalRequestBytes(
   return out;
 }
 
+/**
+ * Build `Attn-Owner-Signature: <base64url(Ed25519(canonicalRequest))>` for
+ * owner-privileged requests (room create/delete; relay owner-sig.ts). Uses
+ * the exact canonical bytes the admission HMAC signs.
+ */
+export function buildOwnerSignatureHeader(
+  signingSecret: Uint8Array,
+  method: string,
+  urlPath: string,
+  body: Uint8Array,
+): string {
+  if (signingSecret.length !== 32) {
+    throw new Error('owner signing secret must be 32 bytes');
+  }
+  const canon = canonicalRequestBytes(method, urlPath, [], body);
+  try {
+    return base64UrlEncode(ed25519.sign(canon, signingSecret));
+  } finally {
+    canon.fill(0);
+  }
+}
+
 /** Build `Attn-Admission: v2.<base64url HMAC>` for an HTTP request. */
 export function buildAdmissionHeader(
   admissionKey: Uint8Array,

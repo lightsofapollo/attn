@@ -328,7 +328,7 @@ interface RegisterDeviceBody {
   publicSigningKey: string;
   publicEncryptionKey: string;
   client: 'attn-browser';
-  kind: 'reviewer';
+  kind: 'reviewer' | 'owner';
   selfSignature: string;
 }
 
@@ -356,6 +356,7 @@ export function canonicalRegisterDeviceBytes(body: RegisterDeviceBody): Uint8Arr
  */
 export function buildRegisterDeviceBody(
   identity: BrowserDeviceIdentity,
+  kind: 'reviewer' | 'owner' = 'reviewer',
 ): RegisterDeviceBody {
   const body: RegisterDeviceBody = {
     deviceId: identity.deviceId,
@@ -363,7 +364,7 @@ export function buildRegisterDeviceBody(
     publicSigningKey: base64UrlEncode(identity.signingPublic),
     publicEncryptionKey: base64UrlEncode(identity.publicEncryptionKey),
     client: 'attn-browser',
-    kind: 'reviewer',
+    kind,
     selfSignature: '',
   };
   const canonical = canonicalRegisterDeviceBytes(body);

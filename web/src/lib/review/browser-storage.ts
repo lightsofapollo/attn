@@ -32,6 +32,11 @@ import {
   WORKSPACE_UPDATED_INDEX,
 } from './browser-workspace-schema';
 
+import {
+  generateWorkspaceRootKey,
+  validateWorkspaceRootKey,
+} from './browser-workspace-crypto';
+
 export { BrowserStorageError, MissingBrowserStorageError, StorageConflictError };
 
 /** Stable origin-local database name. Change only with an explicit migration. */
@@ -64,7 +69,15 @@ type StoreName =
   | typeof STORE_INBOX
   | typeof STORE_CURSORS
   | typeof STORE_OUTBOX
-  | typeof STORE_HISTORY;
+  | typeof STORE_HISTORY
+  | typeof STORE_WORKSPACES
+  | typeof STORE_WORKSPACE_KEYS
+  | typeof STORE_WORKSPACE_ENTRIES
+  | typeof STORE_WORKSPACE_REVISIONS
+  | typeof STORE_WORKSPACE_SHARE_CAPS
+  | typeof STORE_WORKSPACE_RECOVERY
+  | typeof STORE_WORKSPACE_GC
+  | typeof STORE_WORKSPACE_LEASES;
 
 export interface BrowserStorageRoom {
   roomId: string;
@@ -852,6 +865,56 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
     }
     await this.filesystem?.deletePrefix(sealedBlobRoomPrefix(roomId));
     return true;
+  }
+
+  /**
+   * Generate and persist a fresh non-extractable workspace HKDF root. The
+   * raw key bytes never exist outside generateWorkspaceRootKey. Exactly one
+   * root may ever exist per workspace — a second create conflicts.
+   */
+  async createWorkspaceKey(workspaceId: string): Promise<CryptoKey> {
+    requireId(workspaceId, 'workspaceId');
+    const rootKey = await generateWorkspaceRootKey(this.cryptoImpl);
+    const tx = this.db.transaction(STORE_WORKSPACE_KEYS, 'readwrite');
+    const done = transactionDone(tx);
+    tx.objectStore(STORE_WORKSPACE_KEYS).add({ workspaceId, rootKey });
+    try {
+      await done;
+    } catch (error) {
+      if (isConstraintError(error)) {
+        throw new StorageConflictError('workspace already has a root key');
+      }
+      throw error;
+    }
+    return rootKey;
+  }
+
+  async getWorkspaceRootKey(workspaceId: string): Promise<CryptoKey | null> {
+    requireId(workspaceId, 'workspaceId');
+    const record = await this.get<{ workspaceId: string; rootKey: CryptoKey }>(
+      STORE_WORKSPACE_KEYS,
+      workspaceId,
+    );
+    if (!record) return null;
+    validateWorkspaceRootKey(record.rootKey);
+    return record.rootKey;
+  }
+
+  /**
+   * Crypto-erasure primitive: deleting the root makes every sealed revision,
+   * capability, and recovery record for the workspace permanently opaque.
+   * Callers delete the key FIRST, then clean up records — an interrupted
+   * cleanup can never resurrect private content.
+   */
+  async deleteWorkspaceKey(workspaceId: string): Promise<boolean> {
+    requireId(workspaceId, 'workspaceId');
+    const tx = this.db.transaction(STORE_WORKSPACE_KEYS, 'readwrite');
+    const done = transactionDone(tx);
+    const store = tx.objectStore(STORE_WORKSPACE_KEYS);
+    const existing = await requestValue<unknown>(store.get(workspaceId));
+    if (existing !== undefined) store.delete(workspaceId);
+    await done;
+    return existing !== undefined;
   }
 
   private async requireRoomRootKey(roomId: string): Promise<CryptoKey> {

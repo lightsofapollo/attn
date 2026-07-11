@@ -12,9 +12,19 @@ import {
   stripFragment,
   zero,
   InviteParseError,
+  composeInviteFragmentV3,
+  parseInviteFragmentV3,
   type BrowserWindowLike,
   type ParsedInvite,
 } from './browser-invite';
+import {
+  aeadOpen,
+  aeadSeal,
+  deriveReadKeysV3,
+  deriveRoomKeys,
+  deriveRoomKeyTreeV3,
+  type EnvelopeAad,
+} from './browser-crypto';
 
 // ---------------------------------------------------------------------------
 // Tiny harness
@@ -351,6 +361,82 @@ defineCase('zero clobbers the secret bytes', () => {
 
   // No-op on non-Uint8Array — must not throw.
   zero(undefined as unknown as Uint8Array);
+});
+
+defineCase('v3 view fragment roundtrip yields decrypt keys and no write key', () => {
+  const tree = deriveRoomKeyTreeV3(fixtureSecret());
+  const fragment = composeInviteFragmentV3('view', tree.readKeys.readCapabilityKey);
+  assert(fragment.startsWith('#v=3&tier=view&read='), 'canonical view prefix');
+  const parsed = parseInviteFragmentV3(fragment);
+  assertEq(parsed.tier, 'view', 'tier');
+  assert(parsed.writeAdmissionKey === undefined, 'view has no write key');
+  const readOnly = deriveReadKeysV3(parsed.readCapabilityKey);
+  assertBytesEq(readOnly.eventKey, tree.readKeys.eventKey, 'event decrypt key');
+  assertBytesEq(readOnly.snapshotKey, tree.readKeys.snapshotKey, 'snapshot decrypt key');
+
+  const plaintext = new TextEncoder().encode('{"type":"view-capability-proof"}');
+  const nonce = new Uint8Array(24).fill(7);
+  const aad: EnvelopeAad = {
+    v: 3,
+    roomId: 'room-v3-proof',
+    envelopeId: 'envelope-v3-proof',
+    kind: 'event',
+    authorId: 'owner-v3-proof',
+    deviceId: 'device-v3-proof',
+    createdAt: 1_700_000_000_000,
+  };
+  const ciphertext = aeadSeal(tree.readKeys.eventKey, nonce, plaintext, aad);
+  const opened = aeadOpen(readOnly.eventKey, nonce, ciphertext, aad);
+  assertBytesEq(opened, plaintext, 'view capability decrypts owner event');
+});
+
+defineCase('v2 and v3 event leaves are domain-separated', () => {
+  const secret = fixtureSecret();
+  const v2 = deriveRoomKeys(secret);
+  const v3 = deriveRoomKeyTreeV3(secret);
+  assert(
+    v2.eventKey.some((byte, index) => byte !== v3.readKeys.eventKey[index]),
+    'v2 and v3 event keys must differ',
+  );
+});
+
+defineCase('v3 writable tiers require and preserve independent write key', () => {
+  const tree = deriveRoomKeyTreeV3(fixtureSecret());
+  for (const tier of ['comment', 'suggest'] as const) {
+    const fragment = composeInviteFragmentV3(
+      tier,
+      tree.readKeys.readCapabilityKey,
+      tree.writeAdmissionKey,
+    );
+    const parsed = parseInviteFragmentV3(fragment);
+    assertEq(parsed.tier, tier, `${tier} tier`);
+    assertBytesEq(parsed.writeAdmissionKey!, tree.writeAdmissionKey, `${tier} write key`);
+  }
+});
+
+defineCase('v3 fragments reject duplicate, unknown, mismatch, length, and noncanonical input', () => {
+  const tree = deriveRoomKeyTreeV3(fixtureSecret());
+  const read = composeInviteFragmentV3('view', tree.readKeys.readCapabilityKey).split('read=')[1]!;
+  const write = (() => {
+    const fragment = composeInviteFragmentV3('comment', tree.readKeys.readCapabilityKey, tree.writeAdmissionKey);
+    return fragment.split('&write=')[1]!;
+  })();
+  const rejected = [
+    `#v=3&tier=view&read=${read}&read=${read}`,
+    `#v=3&tier=view&read=${read}&future=x`,
+    `#v=3&tier=view&read=${read}&write=${write}`,
+    `#v=3&tier=comment&read=${read}`,
+    '#v=3&tier=view&read=AQ',
+    `#tier=view&v=3&read=${read}`,
+    `#v=2&tier=view&read=${read}`,
+  ];
+  for (const fragment of rejected) {
+    assertThrows(
+      () => parseInviteFragmentV3(fragment),
+      (e) => e instanceof InviteParseError,
+      `reject ${fragment}`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -38,6 +38,16 @@ export interface ParsedInvite {
   roomSecret: Uint8Array;
 }
 
+export type InviteTierV3 = 'view' | 'comment' | 'suggest';
+
+export interface ParsedInviteFragmentV3 {
+  version: 3;
+  tier: InviteTierV3;
+  readCapabilityKey: Uint8Array;
+  /** Absent for `view`; required for `comment` and `suggest`. */
+  writeAdmissionKey?: Uint8Array;
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -193,6 +203,68 @@ export function composeInviteUrl(
   return `${trimmedBase}/${roomId}#${FRAGMENT_KEY_PREFIX}${encodedKey}`;
 }
 
+/** Build the canonical additive v3 capability fragment, including `#`. */
+export function composeInviteFragmentV3(
+  tier: InviteTierV3,
+  readCapabilityKey: Uint8Array,
+  writeAdmissionKey?: Uint8Array,
+): string {
+  requireCapabilityKey(readCapabilityKey, 'read');
+  if (tier !== 'view' && tier !== 'comment' && tier !== 'suggest') {
+    throw new InviteParseError(`unknown v3 invite tier: ${String(tier)}`);
+  }
+  if (tier === 'view') {
+    if (writeAdmissionKey !== undefined) {
+      throw new InviteParseError('view tier must not include write capability');
+    }
+    return `#v=3&tier=view&read=${base64UrlEncode(readCapabilityKey)}`;
+  }
+  if (writeAdmissionKey === undefined) {
+    throw new InviteParseError(`${tier} tier requires write capability`);
+  }
+  requireCapabilityKey(writeAdmissionKey, 'write');
+  return `#v=3&tier=${tier}&read=${base64UrlEncode(readCapabilityKey)}&write=${base64UrlEncode(writeAdmissionKey)}`;
+}
+
+/** Parse only the new v3 fragment grammar; legacy `#key=` stays separate. */
+export function parseInviteFragmentV3(fragment: string): ParsedInviteFragmentV3 {
+  if (typeof fragment !== 'string' || !fragment.startsWith('#')) {
+    throw new InviteParseError('v3 fragment must start with `#`');
+  }
+  const parts = fragment.slice(1).split('&');
+  const fields = new Map<string, string>();
+  for (const part of parts) {
+    const pair = part.split('=');
+    if (pair.length !== 2 || pair[0]!.length === 0 || pair[1]!.length === 0) {
+      throw new InviteParseError('malformed v3 fragment field');
+    }
+    const [key, value] = pair as [string, string];
+    if (!['v', 'tier', 'read', 'write'].includes(key)) {
+      throw new InviteParseError(`unknown v3 fragment field: ${key}`);
+    }
+    if (fields.has(key)) throw new InviteParseError(`duplicate v3 fragment field: ${key}`);
+    fields.set(key, value);
+  }
+  if (fields.get('v') !== '3') throw new InviteParseError('v3 fragment requires v=3');
+  const tier = fields.get('tier');
+  if (tier !== 'view' && tier !== 'comment' && tier !== 'suggest') {
+    throw new InviteParseError(`unknown v3 invite tier: ${String(tier)}`);
+  }
+  const readCapabilityKey = decodeCapability(fields.get('read'), 'read');
+  const write = fields.get('write');
+  const writeAdmissionKey = write === undefined ? undefined : decodeCapability(write, 'write');
+  const canonical = composeInviteFragmentV3(tier, readCapabilityKey, writeAdmissionKey);
+  if (canonical !== fragment) {
+    throw new InviteParseError('v3 fragment is not in canonical field order or encoding');
+  }
+  return {
+    version: 3,
+    tier,
+    readCapabilityKey,
+    ...(writeAdmissionKey === undefined ? {} : { writeAdmissionKey }),
+  };
+}
+
 /**
  * Overwrite a secret buffer with zeros. JS has no real way to guarantee a
  * value is purged from memory (the runtime may have copied it), but
@@ -205,6 +277,24 @@ export function composeInviteUrl(
 export function zero(secret: Uint8Array): void {
   if (!(secret instanceof Uint8Array)) return;
   secret.fill(0);
+}
+
+function requireCapabilityKey(value: Uint8Array, field: string): void {
+  if (!(value instanceof Uint8Array) || value.length !== 32) {
+    throw new InviteParseError(`${field} capability must be a 32-byte Uint8Array`);
+  }
+}
+
+function decodeCapability(value: string | undefined, field: string): Uint8Array {
+  if (value === undefined) throw new InviteParseError(`missing ${field} capability`);
+  let decoded: Uint8Array;
+  try {
+    decoded = base64UrlDecode(value);
+  } catch (err) {
+    throw new InviteParseError(`${field} capability base64url decode: ${String(err)}`);
+  }
+  requireCapabilityKey(decoded, field);
+  return decoded;
 }
 
 // ---------------------------------------------------------------------------

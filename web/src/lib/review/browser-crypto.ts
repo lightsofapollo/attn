@@ -206,6 +206,17 @@ export const INFO_SIGNALING = new TextEncoder().encode('attn signaling encryptio
 export const INFO_ADMISSION = new TextEncoder().encode('attn relay admission v2');
 export const ROOM_ID_PREFIX = new TextEncoder().encode('attn room v2');
 
+// Additive capability-split v3 tree. Existing v2 exports remain unchanged and
+// continue to back production networking until an explicit protocol cutover.
+export const INFO_ROOT_V3 = new TextEncoder().encode('attn room root v3');
+export const INFO_READ_CAPABILITY_V3 = new TextEncoder().encode('attn read capability v3');
+export const INFO_EVENT_V3 = new TextEncoder().encode('attn event encryption v3');
+export const INFO_SNAPSHOT_V3 = new TextEncoder().encode('attn snapshot encryption v3');
+export const INFO_SIGNALING_V3 = new TextEncoder().encode('attn signaling encryption v3');
+export const INFO_READ_ADMISSION_V3 = new TextEncoder().encode('attn read admission v3');
+export const INFO_WRITE_ADMISSION_V3 = new TextEncoder().encode('attn write admission v3');
+export const ROOM_ID_PREFIX_V3 = new TextEncoder().encode('attn room v3');
+
 export interface RoomKeys {
   /** HKDF root key — used only to derive subkeys. Never used directly. */
   rootKey: Uint8Array;
@@ -217,6 +228,20 @@ export interface RoomKeys {
   signalingKey: Uint8Array;
   /** HMAC key for relay-admission tokens. */
   admissionKey: Uint8Array;
+}
+
+export interface ReadKeysV3 {
+  readCapabilityKey: Uint8Array;
+  eventKey: Uint8Array;
+  snapshotKey: Uint8Array;
+  signalingKey: Uint8Array;
+  readAdmissionKey: Uint8Array;
+}
+
+export interface RoomKeyTreeV3 {
+  rootKey: Uint8Array;
+  readKeys: ReadKeysV3;
+  writeAdmissionKey: Uint8Array;
 }
 
 export function hkdfExpand32(ikm: Uint8Array, info: Uint8Array): Uint8Array {
@@ -239,6 +264,28 @@ export function deriveRoomKeys(roomSecret: Uint8Array): RoomKeys {
   };
 }
 
+export function deriveReadKeysV3(readCapabilityKey: Uint8Array): ReadKeysV3 {
+  requireKey32(readCapabilityKey, 'readCapabilityKey');
+  return {
+    readCapabilityKey: new Uint8Array(readCapabilityKey),
+    eventKey: hkdfExpand32(readCapabilityKey, INFO_EVENT_V3),
+    snapshotKey: hkdfExpand32(readCapabilityKey, INFO_SNAPSHOT_V3),
+    signalingKey: hkdfExpand32(readCapabilityKey, INFO_SIGNALING_V3),
+    readAdmissionKey: hkdfExpand32(readCapabilityKey, INFO_READ_ADMISSION_V3),
+  };
+}
+
+export function deriveRoomKeyTreeV3(roomSecret: Uint8Array): RoomKeyTreeV3 {
+  requireKey32(roomSecret, 'roomSecret');
+  const rootKey = hkdfExpand32(roomSecret, INFO_ROOT_V3);
+  const readCapabilityKey = hkdfExpand32(rootKey, INFO_READ_CAPABILITY_V3);
+  return {
+    rootKey,
+    readKeys: deriveReadKeysV3(readCapabilityKey),
+    writeAdmissionKey: hkdfExpand32(rootKey, INFO_WRITE_ADMISSION_V3),
+  };
+}
+
 export function deriveRoomId(roomSecret: Uint8Array): string {
   if (!(roomSecret instanceof Uint8Array) || roomSecret.length !== 32) {
     throw new Error('roomSecret must be a 32-byte Uint8Array');
@@ -249,6 +296,20 @@ export function deriveRoomId(roomSecret: Uint8Array): string {
   input.set(roomSecret, ROOM_ID_PREFIX.length);
   const digest = sha256(input);
   return base64UrlEncode(digest.subarray(0, 16));
+}
+
+export function deriveRoomIdV3(roomSecret: Uint8Array): string {
+  requireKey32(roomSecret, 'roomSecret');
+  const input = new Uint8Array(ROOM_ID_PREFIX_V3.length + roomSecret.length);
+  input.set(ROOM_ID_PREFIX_V3, 0);
+  input.set(roomSecret, ROOM_ID_PREFIX_V3.length);
+  return base64UrlEncode(sha256(input).subarray(0, 16));
+}
+
+function requireKey32(value: Uint8Array, name: string): void {
+  if (!(value instanceof Uint8Array) || value.length !== 32) {
+    throw new Error(`${name} must be a 32-byte Uint8Array`);
+  }
 }
 
 // ---------------------------------------------------------------------------

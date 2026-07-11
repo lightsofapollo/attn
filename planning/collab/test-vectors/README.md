@@ -16,6 +16,7 @@ The corpus must exist BEFORE the implementations — see
 | File                     | Spec section                                  | Filled by      |
 | ------------------------ | --------------------------------------------- | -------------- |
 | `kdf.json`               | §Key Derivation                               | attn-nnj.1.4   |
+| `kdf-v3.json`            | §V3 Split Capability Tree                    | attn-02a.2.1   |
 | `canonical-json.jsonl`   | §Canonical JSON (RFC 8785 JCS)                | attn-nnj.1.3   |
 | `event-signature.json`   | §Signatures, §Canonical Bytes for Signature   | attn-nnj.1.6   |
 | `event-id.json`          | §ID Construction → `EventId`                  | attn-nnj.1.8   |
@@ -35,6 +36,7 @@ Vector counts after the attn-nnj.11.6 corpus expansion pass (May 2026):
 | ------------------------ | ------: | ---------------------------------------------- |
 | `canonical-json.jsonl`   |   21    | + DEL boundary, 2^53 boundary, deep nesting, NFC/NFD |
 | `kdf.json`               |    4    | + all-ones, ASCII-pattern roomSecret           |
+| `kdf-v3.json`            |    4    | split read/write tree; same boundary inputs     |
 | `aead.json`              |    5    | + signal, large 4 KiB, pure non-ASCII          |
 | `event-signature.json`   |    5    | covers 5 distinct ReviewEventBody variants     |
 | `event-id.json`          |    5    | parent-count edges (0, 1, 2, 3, 10)            |

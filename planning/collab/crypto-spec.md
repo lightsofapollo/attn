@@ -62,7 +62,48 @@ compare or forward stored ciphertext as opaque bytes during migration/replay;
 it never decrypts or interprets it, nor places ciphertext, nonces, or plaintext
 in storage keys, logs, or errors.
 
-Note: only `roomSecret` is shared by URL. All other keys are derived, never transmitted.
+V2 note: only `roomSecret` is shared by URL. All other v2 keys are derived,
+never transmitted. V3 deliberately replaces that exposure model with the
+scoped capabilities below.
+
+### V3 Split Capability Tree
+
+V3 is additive. V2 labels, APIs, stored rooms, and networking remain unchanged
+until a separate protocol migration switches them. The owner derives:
+
+```text
+roomIdV3             := base64url(first 16 bytes of SHA-256("attn room v3" || roomSecret))
+rootKeyV3            := HKDF(roomSecret, info="attn room root v3", L=32)
+readCapabilityKeyV3  := HKDF(rootKeyV3, info="attn read capability v3", L=32)
+eventKeyV3           := HKDF(readCapabilityKeyV3, info="attn event encryption v3", L=32)
+snapshotKeyV3        := HKDF(readCapabilityKeyV3, info="attn snapshot encryption v3", L=32)
+signalingKeyV3       := HKDF(readCapabilityKeyV3, info="attn signaling encryption v3", L=32)
+readAdmissionKeyV3   := HKDF(readCapabilityKeyV3, info="attn read admission v3", L=32)
+writeAdmissionKeyV3  := HKDF(rootKeyV3, info="attn write admission v3", L=32)
+```
+
+The read branch is a capability: a recipient given `readCapabilityKeyV3` can
+derive every decryption key plus read admission, but cannot derive the sibling
+`writeAdmissionKeyV3`. The room path remains authenticated by read admission;
+recipients intentionally do not receive `roomSecret` and therefore do not
+recompute `roomIdV3`.
+
+V3 invite fragments are canonical and tiered:
+
+```text
+#v=3&tier=view&read=<base64url(readCapabilityKeyV3)>
+#v=3&tier=comment&read=<base64url(readCapabilityKeyV3)>&write=<base64url(writeAdmissionKeyV3)>
+#v=3&tier=suggest&read=<base64url(readCapabilityKeyV3)>&write=<base64url(writeAdmissionKeyV3)>
+```
+
+Fields appear exactly in that order, once each, with no unknown fields or
+padding. `read` and `write` decode to exactly 32 bytes. `view` forbids `write`;
+`comment` and `suggest` require it. These parsers/builders are separate from
+the legacy `#key=` invite API so production v2 behavior is byte-for-byte stable.
+The tier label is not itself a cryptographic boundary: comment and suggest
+carry the same write capability, and their signed registration grant plus
+import-side policy enforcement lands separately. The relay-enforced boundary
+in this key split is view (read only) versus writable.
 
 ## Invite URLs
 

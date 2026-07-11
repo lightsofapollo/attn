@@ -436,6 +436,124 @@ pub struct ParsedInvite {
     pub room_secret: [u8; 32],
 }
 
+/// Additive v3 invite tier. Production v2 `#key=` parsing remains separate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InviteTierV3 {
+    View,
+    Comment,
+    Suggest,
+}
+
+impl InviteTierV3 {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Comment => "comment",
+            Self::Suggest => "suggest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedInviteFragmentV3 {
+    pub tier: InviteTierV3,
+    pub read_capability_key: [u8; 32],
+    pub write_admission_key: Option<[u8; 32]>,
+}
+
+/// Build a strict canonical v3 capability fragment, including the leading `#`.
+pub fn build_invite_fragment_v3(
+    tier: InviteTierV3,
+    read_capability_key: &[u8; 32],
+    write_admission_key: Option<&[u8; 32]>,
+) -> Result<String, BootstrapError> {
+    let read = URL_SAFE_NO_PAD.encode(read_capability_key);
+    match (tier, write_admission_key) {
+        (InviteTierV3::View, None) => Ok(format!("#v=3&tier=view&read={read}")),
+        (InviteTierV3::View, Some(_)) => Err(BootstrapError::InviteParse(
+            "view tier must not include write capability".into(),
+        )),
+        (InviteTierV3::Comment | InviteTierV3::Suggest, Some(write)) => Ok(format!(
+            "#v=3&tier={}&read={read}&write={}",
+            tier.as_str(),
+            URL_SAFE_NO_PAD.encode(write)
+        )),
+        (InviteTierV3::Comment | InviteTierV3::Suggest, None) => Err(BootstrapError::InviteParse(
+            format!("{} tier requires write capability", tier.as_str()),
+        )),
+    }
+}
+
+/// Parse only the additive v3 fragment grammar. Duplicate/unknown fields,
+/// tier/write mismatches, invalid lengths, and noncanonical ordering fail.
+pub fn parse_invite_fragment_v3(fragment: &str) -> Result<ParsedInviteFragmentV3, BootstrapError> {
+    let body = fragment
+        .strip_prefix('#')
+        .ok_or_else(|| BootstrapError::InviteParse("v3 fragment must start with `#`".into()))?;
+    let mut fields = std::collections::BTreeMap::new();
+    for part in body.split('&') {
+        let (key, value) = part
+            .split_once('=')
+            .filter(|(key, value)| !key.is_empty() && !value.is_empty() && !value.contains('='))
+            .ok_or_else(|| BootstrapError::InviteParse("malformed v3 fragment field".into()))?;
+        if !matches!(key, "v" | "tier" | "read" | "write") {
+            return Err(BootstrapError::InviteParse(format!(
+                "unknown v3 fragment field: {key}"
+            )));
+        }
+        if fields.insert(key, value).is_some() {
+            return Err(BootstrapError::InviteParse(format!(
+                "duplicate v3 fragment field: {key}"
+            )));
+        }
+    }
+    if fields.get("v") != Some(&"3") {
+        return Err(BootstrapError::InviteParse(
+            "v3 fragment requires v=3".into(),
+        ));
+    }
+    let tier = match fields.get("tier").copied() {
+        Some("view") => InviteTierV3::View,
+        Some("comment") => InviteTierV3::Comment,
+        Some("suggest") => InviteTierV3::Suggest,
+        other => {
+            return Err(BootstrapError::InviteParse(format!(
+                "unknown v3 invite tier: {other:?}"
+            )));
+        }
+    };
+    let decode = |field: &'static str| -> Result<[u8; 32], BootstrapError> {
+        let encoded = fields
+            .get(field)
+            .ok_or_else(|| BootstrapError::InviteParse(format!("missing {field} capability")))?;
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded.as_bytes())
+            .map_err(|error| {
+                BootstrapError::InviteParse(format!("{field} capability base64url decode: {error}"))
+            })?;
+        bytes.try_into().map_err(|bytes: Vec<u8>| {
+            BootstrapError::InviteParse(format!(
+                "{field} capability must decode to 32 bytes, got {}",
+                bytes.len()
+            ))
+        })
+    };
+    let read_capability_key = decode("read")?;
+    let write_admission_key = fields.get("write").map(|_| decode("write")).transpose()?;
+    let canonical =
+        build_invite_fragment_v3(tier, &read_capability_key, write_admission_key.as_ref())?;
+    if canonical != fragment {
+        return Err(BootstrapError::InviteParse(
+            "v3 fragment is not in canonical field order or encoding".into(),
+        ));
+    }
+    Ok(ParsedInviteFragmentV3 {
+        tier,
+        read_capability_key,
+        write_admission_key,
+    })
+}
+
 /// Translate a `RoomMode` to its wire-format string. Matches the IPC mode
 /// strings the frontend already deals with for ShareDialog mode selection
 /// (`live` / `async` / `hybrid`).
@@ -2930,6 +3048,50 @@ mod tests {
         let parsed = parse_invite(&invite).expect("parse");
         assert_eq!(parsed.room_id, room_id);
         assert_eq!(parsed.room_secret, secret);
+    }
+
+    #[test]
+    fn v3_view_fragment_roundtrip_has_read_capability_only() {
+        use crate::review::crypto::kdf::{derive_read_keys_v3, derive_room_key_tree_v3};
+
+        let tree = derive_room_key_tree_v3(&[0x7a; 32]);
+        let fragment = build_invite_fragment_v3(
+            InviteTierV3::View,
+            tree.read_keys.read_capability_key.as_bytes(),
+            None,
+        )
+        .expect("build view fragment");
+        let parsed = parse_invite_fragment_v3(&fragment).expect("parse view fragment");
+        assert_eq!(parsed.tier, InviteTierV3::View);
+        assert!(parsed.write_admission_key.is_none());
+        let read_only = derive_read_keys_v3(&parsed.read_capability_key);
+        assert_eq!(
+            read_only.event_key.as_bytes(),
+            tree.read_keys.event_key.as_bytes()
+        );
+        assert_eq!(
+            read_only.snapshot_key.as_bytes(),
+            tree.read_keys.snapshot_key.as_bytes()
+        );
+    }
+
+    #[test]
+    fn v3_fragment_parser_rejects_duplicates_unknown_mismatch_and_bad_lengths() {
+        let read = URL_SAFE_NO_PAD.encode([1u8; 32]);
+        let write = URL_SAFE_NO_PAD.encode([2u8; 32]);
+        for invalid in [
+            format!("#v=3&tier=view&read={read}&read={read}"),
+            format!("#v=3&tier=view&read={read}&future=x"),
+            format!("#v=3&tier=view&read={read}&write={write}"),
+            format!("#v=3&tier=comment&read={read}"),
+            "#v=3&tier=view&read=AQ".to_string(),
+            format!("#tier=view&v=3&read={read}"),
+        ] {
+            assert!(
+                parse_invite_fragment_v3(&invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 
     #[test]

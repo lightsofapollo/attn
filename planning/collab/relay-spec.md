@@ -943,6 +943,65 @@ the owner issues owner-signed, PoW-protected
 alarms delete all state once the owner-renewed 90-day expiry passes. Room v2/v3
 endpoints and their shorter lifetimes are unchanged.
 
+### Tier-safe share bundle selection
+
+New share records replace the legacy single read/write pair with 1–3 strict
+entries, at most one per tier:
+
+```json
+{
+  "bundleId": "<16-byte base64url id>",
+  "tier": "view|comment|suggest",
+  "readAdmissionKey": "<32 bytes>",
+  "writeAdmissionKey": "<32 bytes; forbidden for view, required otherwise>",
+  "sealedBundle": "<base64url XChaCha nonce+ciphertext+tag, at most 2048 bytes>"
+}
+```
+
+The owner-signed share upsert stores a maximum of three unique tiers, bundle
+IDs, and admission keys. For an existing `bundleId`, tier and admissions are
+immutable while `sealedBundle` rotates each epoch. Public responses never
+return the entry list or any share admission key. Bundle-enabled share GET,
+snapshot GET, and mailbox GET/POST require `Attn-Share-Bundle: <bundleId>` and
+verify admission using exactly that selected entry. JSON responses return only
+the selected `{bundleId,tier,sealedBundle}`. Binary snapshot responses carry
+that same selection in bounded `Attn-Share-Bundle`, `Attn-Share-Tier`, and
+`Attn-Sealed-Bundle` response headers. View has no mailbox-write path;
+comment/suggest use independent write keys. Mailbox items are tagged and
+filtered by their selected bundle so one public link never enumerates sibling
+bundle IDs, tiers, ciphertext, or sealed capability payloads.
+
+Every share also carries a monotonic safe-integer `revision`. New shares must
+start at revision 0. Snapshot upload is the server-authoritative manifest
+mutation and increments revision by exactly one. The public response includes
+`manifestDigest = base64url(SHA-256(UTF8(JSON.stringify(manifest))))`, where
+`manifest` is sorted by `fileId` and every object is emitted in exact field
+order `{fileId,snapshotId,ciphertextBytes,ciphertextSha256,uploadedAt}` (the
+empty manifest digest is `T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU`).
+Generic owner changes to epoch, current-room routing, bundle membership,
+bundle identity/tier, or admissions require `revision == current + 1`.
+After a server snapshot increment, an owner may synchronize only sealed bundle
+bytes while keeping revision equal to the current revision; other no-routing
+updates cannot advance it. Sealed bundle plaintext binds the same bundle ID,
+revision, and manifest digest, allowing clients to reject same-epoch rollback.
+
+Bundle-mode mailbox POST bodies are exactly `{epoch,deviceId,items}`. `epoch`
+is a non-negative safe integer included in the admission-MAC body hash and
+must equal the current share epoch; a mismatch returns
+`409 ATTN_SHARE_EPOCH_STALE` with `currentEpoch` before PoW consumption or any
+mailbox write. Accepted items persist the selected bundle/tier and epoch.
+
+Legacy records without `bundles` retain the old single-pair authentication;
+once an owner migrates a record to bundles, the legacy keys are removed and
+cannot be mixed back in. While durable mail remains, an owner upsert returns
+`409 ATTN_SHARE_MAIL_PENDING` for any change to the full routing/capability
+projection: epoch, current room pointer, bundle membership, IDs, tiers,
+admissions, or sealed bundle bytes. This enforces drain-before-pointer-flip and
+prevents queued ciphertext from losing its selector or epoch context.
+For the same reason, an owner-authenticated bundle-mode snapshot PUT returns
+`409 ATTN_SHARE_MAIL_PENDING` before PoW, R2 upload, renewal, revision, or
+manifest mutation whenever retained mail exists; the owner drains first.
+
 Snapshot refs are a strict latest-per-file server-managed manifest. The owner
 uploads opaque ciphertext with an owner-signed, PoW-protected
 `PUT /v3/shares/:shareId/snapshots/:fileId/:snapshotId`. Both identifiers are

@@ -34,13 +34,26 @@ interface ShareCleanup {
   startedAt: number;
 }
 
+type ShareTier = "view" | "comment" | "suggest";
+
+interface ShareBundleEntry {
+  bundleId: string;
+  tier: ShareTier;
+  readAdmissionKey: string;
+  writeAdmissionKey?: string;
+  sealedBundle: string;
+}
+
 interface ShareRecord {
   v: 3;
   shareId: string;
   ownerSigningKey: string;
-  readAdmissionKey: string;
-  writeAdmissionKey: string;
+  /** Legacy single-capability fields. New tier-safe shares use bundles. */
+  readAdmissionKey?: string;
+  writeAdmissionKey?: string;
+  bundles?: ShareBundleEntry[];
   epoch: number;
+  revision: number;
   currentRoomId?: string;
   snapshots: StoredShareSnapshotRef[];
   placeholders: unknown[];
@@ -48,11 +61,13 @@ interface ShareRecord {
   expiresAt: number;
 }
 
-interface MailItem { seq: number; envelopeId: string; bytes: number; payload: unknown }
+interface MailItem { seq: number; envelopeId: string; bytes: number; payload: unknown; bundleId?: string; tier?: ShareTier; epoch?: number }
 interface MailIndex { seq: number; payloadHash: string; expiresAt: number }
 
-type PublicShareRecord = Omit<ShareRecord, "readAdmissionKey" | "writeAdmissionKey" | "snapshots"> & {
+type PublicShareRecord = Omit<ShareRecord, "readAdmissionKey" | "writeAdmissionKey" | "bundles" | "snapshots"> & {
   snapshots: ShareSnapshotRef[];
+  manifestDigest: string;
+  bundle?: Pick<ShareBundleEntry, "bundleId" | "tier" | "sealedBundle">;
   mailbox: { count: number; bytes: number; latestSeq: number };
   features: { push: false };
 };
@@ -106,14 +121,40 @@ export class ShareDO extends DurableObject<Env> {
   }
 
   private async record(): Promise<ShareRecord | undefined> {
-    return this.ctx.storage.get<ShareRecord>("share:record");
+    const record = await this.ctx.storage.get<ShareRecord>("share:record");
+    if (record !== undefined && !Number.isSafeInteger(record.revision)) record.revision = 0;
+    return record;
   }
 
-  private async publicRecord(record: ShareRecord): Promise<PublicShareRecord> {
-    const { readAdmissionKey: _read, writeAdmissionKey: _write, snapshots, ...safe } = record;
+  private async manifestDigest(snapshots: StoredShareSnapshotRef[]): Promise<string> {
+    const canonical = snapshots
+      .map(({ artifactId: _artifactId, fileId, snapshotId, ciphertextBytes, ciphertextSha256, uploadedAt }) => ({
+        fileId,
+        snapshotId,
+        ciphertextBytes,
+        ciphertextSha256,
+        uploadedAt,
+      }))
+      .sort((left, right) => left.fileId.localeCompare(right.fileId));
+    return base64UrlEncode(new Uint8Array(await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(JSON.stringify(canonical)),
+    )));
+  }
+
+  private async publicRecord(record: ShareRecord, selected?: ShareBundleEntry): Promise<PublicShareRecord> {
+    const { readAdmissionKey: _read, writeAdmissionKey: _write, bundles: _bundles, snapshots, ...safe } = record;
     return {
       ...safe,
       snapshots: snapshots.map(({ artifactId: _artifactId, ...snapshot }) => snapshot),
+      manifestDigest: await this.manifestDigest(snapshots),
+      ...(selected === undefined ? {} : {
+        bundle: {
+          bundleId: selected.bundleId,
+          tier: selected.tier,
+          sealedBundle: selected.sealedBundle,
+        },
+      }),
       mailbox: {
         count: await this.ctx.storage.get<number>("mail:count") ?? 0,
         bytes: await this.ctx.storage.get<number>("mail:bytes") ?? 0,
@@ -121,6 +162,44 @@ export class ShareDO extends DurableObject<Env> {
       },
       features: { push: false },
     };
+  }
+
+  private selectedBundle(request: Request, record: ShareRecord): ShareBundleEntry | Response | undefined {
+    const bundles = record.bundles ?? [];
+    if (bundles.length === 0) return undefined;
+    const bundleId = request.headers.get("Attn-Share-Bundle");
+    if (bundleId === null || !/^[A-Za-z0-9_-]{22}$/.test(bundleId)) {
+      return jsonError(401, "ATTN_SHARE_BUNDLE_REQUIRED", "a valid share bundle selector is required");
+    }
+    return bundles.find(bundle => bundle.bundleId === bundleId)
+      ?? jsonError(401, "ATTN_SHARE_BUNDLE_INVALID", "share bundle selector is invalid");
+  }
+
+  private async verifyBundleAdmission(
+    request: Request,
+    path: string,
+    record: ShareRecord,
+    required: "read" | "write",
+  ): Promise<ShareBundleEntry | Response | undefined> {
+    const selected = this.selectedBundle(request, record);
+    if (selected instanceof Response || selected === undefined) return selected;
+    if (required === "write" && selected.writeAdmissionKey === undefined) {
+      return jsonError(403, "ATTN_WRITE_CAPABILITY_REQUIRED", "selected share bundle is read-only");
+    }
+    await verifyAdmissionV3(request, path, {
+      roomId: record.shareId,
+      readAdmissionKey: base64UrlDecode(selected.readAdmissionKey),
+      writeAdmissionKey: base64UrlDecode(selected.writeAdmissionKey ?? selected.readAdmissionKey),
+    }, required);
+    return selected;
+  }
+
+  private bundleHeaders(selected: ShareBundleEntry): Headers {
+    return new Headers({
+      "Attn-Share-Bundle": selected.bundleId,
+      "Attn-Share-Tier": selected.tier,
+      "Attn-Sealed-Bundle": selected.sealedBundle,
+    });
   }
 
   private async verifyOwner(request: Request, path: string, record: ShareRecord): Promise<void> {
@@ -170,7 +249,7 @@ export class ShareDO extends DurableObject<Env> {
 
   private async upsert(request: Request, path: string, shareId: string): Promise<Response> {
     const body = await request.clone().json() as ShareMutationBody;
-    const allowed = new Set(["v", "ownerSigningKey", "readAdmissionKey", "writeAdmissionKey", "epoch", "currentRoomId", "snapshots", "placeholders", "deviceId"]);
+    const allowed = new Set(["v", "ownerSigningKey", "readAdmissionKey", "writeAdmissionKey", "bundles", "epoch", "revision", "currentRoomId", "snapshots", "placeholders", "deviceId"]);
     if (body.v !== 3 || Object.keys(body).some(key => !allowed.has(key))) {
       return jsonError(400, "ATTN_BODY_INVALID", "share body has an invalid version or field");
     }
@@ -186,26 +265,39 @@ export class ShareDO extends DurableObject<Env> {
     }
     const provisional: ShareRecord = existing ?? {
       v: 3, shareId, ownerSigningKey: ownerKey,
-      readAdmissionKey: body.readAdmissionKey ?? "",
-      writeAdmissionKey: body.writeAdmissionKey ?? "",
+      ...(body.readAdmissionKey === undefined ? {} : { readAdmissionKey: body.readAdmissionKey }),
+      ...(body.writeAdmissionKey === undefined ? {} : { writeAdmissionKey: body.writeAdmissionKey }),
+      ...(body.bundles === undefined ? {} : { bundles: body.bundles }),
       epoch: 0,
+      revision: 0,
       snapshots: [], placeholders: [], updatedAt: 0, expiresAt: 0,
     };
     if (existing && body.ownerSigningKey !== undefined && body.ownerSigningKey !== existing.ownerSigningKey) {
       return jsonError(409, "ATTN_SHARE_IMMUTABLE", "owner signing key is immutable");
     }
-    const keyValues = [body.readAdmissionKey ?? provisional.readAdmissionKey, body.writeAdmissionKey ?? provisional.writeAdmissionKey] as const;
-    for (const [index, value] of keyValues.entries()) {
-      try {
-        if (base64UrlDecode(value).length !== 32 || base64UrlEncode(base64UrlDecode(value)) !== value) {
+    if (existing === undefined && body.revision !== 0) {
+      return jsonError(400, "ATTN_SHARE_REVISION_INVALID", "new shares require revision 0");
+    }
+    const revision = body.revision ?? provisional.revision;
+    if (!Number.isSafeInteger(revision) || revision < provisional.revision || revision > provisional.revision + 1) {
+      return jsonError(409, "ATTN_SHARE_REVISION_INVALID", "share revision must be current or current + 1");
+    }
+    const bundles = this.validateBundles(body.bundles, provisional.bundles ?? []);
+    if (bundles instanceof Response) return bundles;
+    const legacyRead = body.readAdmissionKey ?? provisional.readAdmissionKey;
+    const legacyWrite = body.writeAdmissionKey ?? provisional.writeAdmissionKey;
+    if (bundles.length === 0) {
+      const keyValues = [legacyRead, legacyWrite] as const;
+      for (const [index, value] of keyValues.entries()) {
+        if (!this.isCanonicalKey(value, 32)) {
           return jsonError(400, "ATTN_BODY_INVALID", `${index === 0 ? "read" : "write"} admission key must be canonical 32-byte base64url`);
         }
-      } catch {
-        return jsonError(400, "ATTN_BODY_INVALID", "admission keys must be canonical base64url");
       }
-    }
-    if (keyValues[0] === keyValues[1]) {
-      return jsonError(400, "ATTN_BODY_INVALID", "read and write admission keys must differ");
+      if (legacyRead === legacyWrite) {
+        return jsonError(400, "ATTN_BODY_INVALID", "read and write admission keys must differ");
+      }
+    } else if (body.readAdmissionKey !== undefined || body.writeAdmissionKey !== undefined) {
+      return jsonError(400, "ATTN_BODY_INVALID", "tier-safe shares must not mix legacy admission keys with bundles");
     }
     const epoch = body.epoch ?? provisional.epoch;
     if (!Number.isSafeInteger(epoch) || epoch < provisional.epoch) {
@@ -231,13 +323,43 @@ export class ShareDO extends DurableObject<Env> {
       }
     }
     await this.verifyOwner(request, path, provisional);
+    const routingIdentityChanged = JSON.stringify({
+      epoch,
+      currentRoomId: currentRoomId ?? null,
+      bundles: bundles.map(({ sealedBundle: _sealedBundle, ...identity }) => identity),
+      legacyRead: bundles.length === 0 ? legacyRead : null,
+      legacyWrite: bundles.length === 0 ? legacyWrite : null,
+    }) !== JSON.stringify({
+      epoch: provisional.epoch,
+      currentRoomId: provisional.currentRoomId ?? null,
+      bundles: (provisional.bundles ?? []).map(({ sealedBundle: _sealedBundle, ...identity }) => identity),
+      legacyRead: (provisional.bundles ?? []).length === 0 ? provisional.readAdmissionKey : null,
+      legacyWrite: (provisional.bundles ?? []).length === 0 ? provisional.writeAdmissionKey : null,
+    });
+    const sealedBundlesChanged = JSON.stringify(bundles.map(({ bundleId, sealedBundle }) => ({ bundleId, sealedBundle })))
+      !== JSON.stringify((provisional.bundles ?? []).map(({ bundleId, sealedBundle }) => ({ bundleId, sealedBundle })));
+    const completeProjectionChanged = routingIdentityChanged || sealedBundlesChanged || revision !== provisional.revision;
+    if (existing !== undefined && completeProjectionChanged && (await this.ctx.storage.get<number>("mail:count") ?? 0) > 0) {
+      return jsonError(409, "ATTN_SHARE_MAIL_PENDING", "drain the durable mailbox before changing share routing or capabilities");
+    }
+    if (existing !== undefined && (routingIdentityChanged ? revision !== provisional.revision + 1 : revision !== provisional.revision)) {
+      return jsonError(
+        409,
+        "ATTN_SHARE_REVISION_INVALID",
+        routingIdentityChanged ? "routing changes require revision current + 1" : "sealed-bundle synchronization must keep the current revision",
+      );
+    }
     const ownerId = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", base64UrlDecode(ownerKey))));
     await this.verifyWritePow(request, shareId, body.deviceId ?? ownerId);
     const now = Date.now();
-    const { currentRoomId: _previousRoom, ...recordBase } = provisional;
+    const { currentRoomId: _previousRoom, readAdmissionKey: _oldRead, writeAdmissionKey: _oldWrite, bundles: _oldBundles, ...recordBase } = provisional;
     const record: ShareRecord = {
       ...recordBase,
+      ...(bundles.length === 0
+        ? { readAdmissionKey: legacyRead, writeAdmissionKey: legacyWrite }
+        : { bundles }),
       epoch,
+      revision,
       ...(currentRoomId === undefined ? {} : { currentRoomId }),
       snapshots,
       placeholders,
@@ -247,6 +369,80 @@ export class ShareDO extends DurableObject<Env> {
     await this.ctx.storage.put("share:record", record);
     await this.pruneMarkersAndSchedule(record, now);
     return shareJson(await this.publicRecord(record), existing ? 200 : 201);
+  }
+
+  private isCanonicalKey(value: unknown, bytes: number): value is string {
+    if (typeof value !== "string") return false;
+    try {
+      const decoded = base64UrlDecode(value);
+      return decoded.length === bytes && base64UrlEncode(decoded) === value;
+    } catch {
+      return false;
+    }
+  }
+
+  private validateBundles(candidate: unknown, stored: ShareBundleEntry[]): ShareBundleEntry[] | Response {
+    if (candidate === undefined) return stored;
+    if (!Array.isArray(candidate) || candidate.length < 1 || candidate.length > 3) {
+      return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "bundles must contain 1..3 tier entries");
+    }
+    const allowed = new Set(["bundleId", "tier", "readAdmissionKey", "writeAdmissionKey", "sealedBundle"]);
+    const tiers = new Set<string>();
+    const ids = new Set<string>();
+    const admissions = new Set<string>();
+    const normalized: ShareBundleEntry[] = [];
+    for (const raw of candidate) {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw) || Object.keys(raw).some(key => !allowed.has(key))) {
+        return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "bundle entry has an invalid field");
+      }
+      const entry = raw as Partial<ShareBundleEntry>;
+      if (!this.isCanonicalKey(entry.bundleId, 16) || !["view", "comment", "suggest"].includes(entry.tier ?? "")) {
+        return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "bundle id or tier is invalid");
+      }
+      if (!this.isCanonicalKey(entry.readAdmissionKey, 32)) {
+        return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "bundle read admission is invalid");
+      }
+      if (entry.tier === "view") {
+        if (entry.writeAdmissionKey !== undefined) {
+          return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "view bundle must not carry write admission");
+        }
+      } else if (!this.isCanonicalKey(entry.writeAdmissionKey, 32) || entry.writeAdmissionKey === entry.readAdmissionKey) {
+        return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "writable bundle requires a distinct write admission");
+      }
+      if (typeof entry.sealedBundle !== "string" || entry.sealedBundle.length > 2800) {
+        return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "sealed bundle is missing or too large");
+      }
+      try {
+        const sealed = base64UrlDecode(entry.sealedBundle);
+        if (sealed.length < 40 || sealed.length > 2048 || base64UrlEncode(sealed) !== entry.sealedBundle) {
+          return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "sealed bundle must be canonical bounded ciphertext");
+        }
+      } catch {
+        return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "sealed bundle must be canonical base64url");
+      }
+      const valid = entry as ShareBundleEntry;
+      if (tiers.has(valid.tier) || ids.has(valid.bundleId) || admissions.has(valid.readAdmissionKey)
+        || (valid.writeAdmissionKey !== undefined && admissions.has(valid.writeAdmissionKey))) {
+        return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "bundle tiers, ids, and admission keys must be unique");
+      }
+      const previous = stored.find(item => item.bundleId === valid.bundleId);
+      if (previous !== undefined && (previous.tier !== valid.tier
+        || previous.readAdmissionKey !== valid.readAdmissionKey
+        || previous.writeAdmissionKey !== valid.writeAdmissionKey)) {
+        return jsonError(409, "ATTN_SHARE_BUNDLE_IMMUTABLE", "bundle identity and admissions are immutable");
+      }
+      tiers.add(valid.tier); ids.add(valid.bundleId); admissions.add(valid.readAdmissionKey);
+      if (valid.writeAdmissionKey !== undefined) admissions.add(valid.writeAdmissionKey);
+      normalized.push({
+        bundleId: valid.bundleId,
+        tier: valid.tier,
+        readAdmissionKey: valid.readAdmissionKey,
+        ...(valid.writeAdmissionKey === undefined ? {} : { writeAdmissionKey: valid.writeAdmissionKey }),
+        sealedBundle: valid.sealedBundle,
+      });
+    }
+    normalized.sort((left, right) => left.tier.localeCompare(right.tier));
+    return normalized;
   }
 
   /**
@@ -314,6 +510,9 @@ export class ShareDO extends DurableObject<Env> {
       body: boundedBody,
     });
     await this.verifyOwner(authenticatedRequest, path, record);
+    if ((record.bundles ?? []).length > 0 && (await this.ctx.storage.get<number>("mail:count") ?? 0) > 0) {
+      return jsonError(409, "ATTN_SHARE_MAIL_PENDING", "drain the durable mailbox before changing the snapshot manifest");
+    }
     await this.verifyWritePow(authenticatedRequest, shareId, request.headers.get("Attn-Device-Id") ?? shareId);
     const ciphertext = boundedBody;
     const actualDigest = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", ciphertext)));
@@ -333,6 +532,9 @@ export class ShareDO extends DurableObject<Env> {
       + ciphertext.byteLength;
     if (retainedBytes > MAX_SHARE_SNAPSHOT_BYTES) {
       return jsonError(413, "ATTN_SHARE_SNAPSHOT_BYTES_FULL", "share retained snapshot byte cap reached");
+    }
+    if (record.revision >= Number.MAX_SAFE_INTEGER) {
+      return jsonError(409, "ATTN_SHARE_REVISION_INVALID", "share revision is exhausted");
     }
 
     const artifactId = crypto.randomUUID();
@@ -366,6 +568,7 @@ export class ShareDO extends DurableObject<Env> {
       await transaction.put("share:record", {
         ...record,
         snapshots,
+        revision: record.revision + 1,
         updatedAt: now,
         expiresAt: now + LIFETIME_MS,
       } satisfies ShareRecord);
@@ -414,11 +617,15 @@ export class ShareDO extends DurableObject<Env> {
     fileId: string,
     record: ShareRecord,
   ): Promise<Response> {
-    await verifyAdmissionV3(request, path, {
-      roomId: shareId,
-      readAdmissionKey: base64UrlDecode(record.readAdmissionKey),
-      writeAdmissionKey: base64UrlDecode(record.writeAdmissionKey),
-    }, "read");
+    const selected = await this.verifyBundleAdmission(request, path, record, "read");
+    if (selected instanceof Response) return selected;
+    if (selected === undefined) {
+      await verifyAdmissionV3(request, path, {
+        roomId: shareId,
+        readAdmissionKey: base64UrlDecode(record.readAdmissionKey!),
+        writeAdmissionKey: base64UrlDecode(record.writeAdmissionKey!),
+      }, "read");
+    }
     const snapshot = record.snapshots.find(candidate => candidate.fileId === fileId);
     if (snapshot === undefined) return jsonError(404, "ATTN_SHARE_SNAPSHOT_NOT_FOUND", "snapshot not found");
     let object: R2ObjectBody | null;
@@ -435,18 +642,25 @@ export class ShareDO extends DurableObject<Env> {
       "Attn-Ciphertext-Sha256": snapshot.ciphertextSha256,
       "X-Attn-Allow-Browser": "true",
     });
+    if (selected !== undefined) {
+      for (const [key, value] of this.bundleHeaders(selected)) headers.set(key, value);
+    }
     return new Response(object.body, { status: 200, headers });
   }
 
   private async read(request: Request, path: string, shareId: string): Promise<Response> {
     const record = await this.record();
     if (!record || record.expiresAt <= Date.now()) return jsonError(404, "ATTN_SHARE_NOT_FOUND", `share ${shareId} not found`);
-    await verifyAdmissionV3(request, path, {
-      roomId: shareId,
-      readAdmissionKey: base64UrlDecode(record.readAdmissionKey),
-      writeAdmissionKey: base64UrlDecode(record.writeAdmissionKey),
-    }, "read");
-    return shareJson(await this.publicRecord(record));
+    const selected = await this.verifyBundleAdmission(request, path, record, "read");
+    if (selected instanceof Response) return selected;
+    if (selected === undefined) {
+      await verifyAdmissionV3(request, path, {
+        roomId: shareId,
+        readAdmissionKey: base64UrlDecode(record.readAdmissionKey!),
+        writeAdmissionKey: base64UrlDecode(record.writeAdmissionKey!),
+      }, "read");
+    }
+    return shareJson(await this.publicRecord(record, selected));
   }
 
   private async revoke(request: Request, path: string, shareId: string): Promise<Response> {
@@ -514,9 +728,16 @@ export class ShareDO extends DurableObject<Env> {
   private async handleMailbox(request: Request, path: string, shareId: string): Promise<Response> {
     const record = await this.record();
     if (!record || record.expiresAt <= Date.now()) return jsonError(404, "ATTN_SHARE_NOT_FOUND", "share not found");
-    const admission = { roomId: shareId, readAdmissionKey: base64UrlDecode(record.readAdmissionKey), writeAdmissionKey: base64UrlDecode(record.writeAdmissionKey) };
     if (request.method === "GET") {
-      await verifyAdmissionV3(request, path, admission, "read");
+      const selected = await this.verifyBundleAdmission(request, path, record, "read");
+      if (selected instanceof Response) return selected;
+      if (selected === undefined) {
+        await verifyAdmissionV3(request, path, {
+          roomId: shareId,
+          readAdmissionKey: base64UrlDecode(record.readAdmissionKey!),
+          writeAdmissionKey: base64UrlDecode(record.writeAdmissionKey!),
+        }, "read");
+      }
       const requestUrl = new URL(request.url);
       const after = Number(requestUrl.searchParams.get("after") ?? 0);
       if (!Number.isSafeInteger(after) || after < 0) return jsonError(400, "ATTN_QUERY_INVALID", "after must be a non-negative safe integer");
@@ -525,10 +746,19 @@ export class ShareDO extends DurableObject<Env> {
       const page = await this.ctx.storage.list<MailItem>({
         prefix: "mail:item:",
         startAfter: `mail:item:${after.toString().padStart(12, "0")}`,
-        limit,
       });
-      const items = [...page.values()];
-      return shareJson({ items, nextAfter: items.at(-1)?.seq ?? after });
+      const items = [...page.values()]
+        .filter(item => selected === undefined ? item.bundleId === undefined : item.bundleId === selected.bundleId)
+        .slice(0, limit);
+      return shareJson({
+        items,
+        nextAfter: items.at(-1)?.seq ?? after,
+        ...(selected === undefined ? {} : { bundle: {
+          bundleId: selected.bundleId,
+          tier: selected.tier,
+          sealedBundle: selected.sealedBundle,
+        } }),
+      });
     }
     if (request.method === "DELETE") {
       await this.verifyOwner(request, path, record);
@@ -558,8 +788,37 @@ export class ShareDO extends DurableObject<Env> {
       return new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } });
     }
     if (request.method !== "POST") return jsonError(405, "ATTN_METHOD_NOT_ALLOWED", "method not allowed");
-    await verifyAdmissionV3(request, path, admission, "write");
-    const body = await request.json() as { deviceId?: string; items?: unknown[] };
+    const selected = await this.verifyBundleAdmission(request, path, record, "write");
+    if (selected instanceof Response) {
+      await request.body?.cancel().catch(() => undefined);
+      return selected;
+    }
+    if (selected === undefined) {
+      await verifyAdmissionV3(request, path, {
+        roomId: shareId,
+        readAdmissionKey: base64UrlDecode(record.readAdmissionKey!),
+        writeAdmissionKey: base64UrlDecode(record.writeAdmissionKey!),
+      }, "write");
+    }
+    const body = await request.json() as { epoch?: unknown; deviceId?: unknown; items?: unknown[] };
+    if (selected !== undefined) {
+      const keys = Object.keys(body).sort();
+      if (keys.length !== 3 || keys[0] !== "deviceId" || keys[1] !== "epoch" || keys[2] !== "items"
+        || !Number.isSafeInteger(body.epoch) || (body.epoch as number) < 0
+        || typeof body.deviceId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(body.deviceId)) {
+        return jsonError(400, "ATTN_BODY_INVALID", "bundle mailbox body must be exactly {epoch, deviceId, items}");
+      }
+      if (body.epoch !== record.epoch) {
+        return Response.json({
+          error: {
+            code: "ATTN_SHARE_EPOCH_STALE",
+            message: "share epoch changed; re-resolve before retrying",
+            currentEpoch: record.epoch,
+          },
+          currentEpoch: record.epoch,
+        }, { status: 409, headers: { "X-Attn-Allow-Browser": "true" } });
+      }
+    }
     if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > MAX_BATCH) return jsonError(400, "ATTN_BODY_INVALID", "items must contain 1..32 entries");
     let seq = await this.ctx.storage.get<number>("mail:seq") ?? 0;
     let bytes = await this.ctx.storage.get<number>("mail:bytes") ?? 0;
@@ -578,7 +837,7 @@ export class ShareDO extends DurableObject<Env> {
       }
       const payloadHash = base64UrlEncode(new Uint8Array(await crypto.subtle.digest(
         "SHA-256",
-        new TextEncoder().encode(JSON.stringify(payload)),
+        new TextEncoder().encode(JSON.stringify({ bundleId: selected?.bundleId, epoch: selected === undefined ? undefined : body.epoch, payload })),
       )));
       const pending = pendingIds.get(envelopeId);
       let existing = pending ?? await this.ctx.storage.get<MailIndex>(`mail:id:${envelopeId}`);
@@ -597,14 +856,20 @@ export class ShareDO extends DurableObject<Env> {
       seq += 1;
       const index = { seq, payloadHash, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS };
       pendingIds.set(envelopeId, index);
-      newItems.push({ seq, envelopeId, payload, bytes: itemBytes });
+      newItems.push({
+        seq,
+        envelopeId,
+        payload,
+        bytes: itemBytes,
+        ...(selected === undefined ? {} : { bundleId: selected.bundleId, tier: selected.tier, epoch: body.epoch as number }),
+      });
       results.push({ envelopeId, seq, status: "accepted" });
     }
     if (count + newItems.length > MAX_MAILBOX_ITEMS) return jsonError(413, "ATTN_SHARE_MAILBOX_FULL", "mailbox item cap reached");
     if (bytes + newItems.reduce((total, item) => total + item.bytes, 0) > MAX_MAILBOX_BYTES) {
       return jsonError(413, "ATTN_SHARE_MAILBOX_FULL", "mailbox byte cap reached");
     }
-    await this.verifyWritePow(request, shareId, body.deviceId ?? "share-mailbox");
+    await this.verifyWritePow(request, shareId, typeof body.deviceId === "string" ? body.deviceId : "share-mailbox");
     for (const item of newItems) {
       bytes += item.bytes;
       writes[`mail:item:${item.seq.toString().padStart(12, "0")}`] = item;
@@ -617,7 +882,16 @@ export class ShareDO extends DurableObject<Env> {
       const alarm = await this.ctx.storage.getAlarm();
       if (alarm === null || alarm > nextIdExpiry) await this.ctx.storage.setAlarm(nextIdExpiry);
     }
-    return shareJson({ acceptedThrough: seq, accepted: newItems.length, results }, newItems.length > 0 ? 201 : 200);
+    return shareJson({
+      acceptedThrough: seq,
+      accepted: newItems.length,
+      results,
+      ...(selected === undefined ? {} : { bundle: {
+        bundleId: selected.bundleId,
+        tier: selected.tier,
+        sealedBundle: selected.sealedBundle,
+      } }),
+    }, newItems.length > 0 ? 201 : 200);
   }
 
   override async alarm(): Promise<void> {

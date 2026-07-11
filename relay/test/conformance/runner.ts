@@ -70,6 +70,7 @@ export type Step =
   | V3AdmissionMatrixStep
   | DurableShareMatrixStep
   | ShareArtifactMatrixStep
+  | ShareTierBundleMatrixStep
   | CreateRoomStep
   | RecreateRoomStep
   | RegisterDeviceStep
@@ -109,6 +110,10 @@ interface DurableShareMatrixStep extends BaseStep {
 
 interface ShareArtifactMatrixStep extends BaseStep {
   action: "shareArtifactMatrix";
+}
+
+interface ShareTierBundleMatrixStep extends BaseStep {
+  action: "shareTierBundleMatrix";
 }
 
 interface CreateRoomStep extends BaseStep {
@@ -910,6 +915,7 @@ async function actDurableShareMatrix(scenarioId: string, stepIdx: number): Promi
     readAdmissionKey: base64UrlEncode(readKey),
     writeAdmissionKey: base64UrlEncode(writeKey),
     epoch: 0,
+    revision: 0,
     snapshots: [],
     placeholders: [],
   });
@@ -921,6 +927,8 @@ async function actDurableShareMatrix(scenarioId: string, stepIdx: number): Promi
   const createdBody = await assertResponse(created, { status: 201 }, `${scenarioId} step #${stepIdx} share create`) as Record<string, unknown>;
   expect(createdBody.readAdmissionKey).toBeUndefined();
   expect(createdBody.writeAdmissionKey).toBeUndefined();
+  expect(createdBody.revision).toBe(0);
+  expect(createdBody.manifestDigest).toBe("T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU");
 
   const scoped = async (scope: "read" | "write", key: Uint8Array, method: string, target: string, requestBody?: string): Promise<string> => {
     const canonical = await canonicalRequest(new Request(target, { method, body: requestBody }), new URL(target).pathname);
@@ -966,6 +974,7 @@ async function actShareArtifactMatrix(scenarioId: string, stepIdx: number): Prom
   const writeKey = makeAdmissionKey(0x94);
   const createBody = JSON.stringify({
     v: 3,
+    revision: 0,
     ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
     readAdmissionKey: base64UrlEncode(readKey),
     writeAdmissionKey: base64UrlEncode(writeKey),
@@ -1004,6 +1013,13 @@ async function actShareArtifactMatrix(scenarioId: string, stepIdx: number): Prom
   expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
   await assertResponse(await upload("snapshot-two", new Uint8Array([9]), `${FIXED_POW_RAND}a2`), { status: 200 }, `${scenarioId} step #${stepIdx} superseding artifact upload`);
   expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
+  const revisedRecord = await assertResponse(
+    await SELF.fetch(shareUrl, { headers: { "Attn-Admission": await scopedRead(shareUrl) } }),
+    { status: 200 },
+    `${scenarioId} step #${stepIdx} revised manifest`,
+  ) as { revision: number; manifestDigest: string };
+  expect(revisedRecord.revision).toBe(2);
+  expect(revisedRecord.manifestDigest).toMatch(/^[A-Za-z0-9_-]{43}$/);
 
   const artifactUrl = `${shareUrl}/snapshots/readme`;
   const fetched = await SELF.fetch(artifactUrl, { headers: { "Attn-Admission": await scopedRead(artifactUrl) } });
@@ -1017,6 +1033,109 @@ async function actShareArtifactMatrix(scenarioId: string, stepIdx: number): Prom
     "Attn-PoW": revokePow,
   } }), { status: 204 }, `${scenarioId} step #${stepIdx} artifact share revoke`);
   expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(0);
+}
+
+async function actShareTierBundleMatrix(scenarioId: string, stepIdx: number): Promise<void> {
+  const shareId = uniqueRoomId(scenarioId, "tier-share");
+  const url = `${URL_BASE}/v3/shares/${shareId}`;
+  const owner = await generateEd25519Keypair();
+  const definitions = [
+    { tier: "view", seed: 0x21 },
+    { tier: "comment", seed: 0x41 },
+    { tier: "suggest", seed: 0x61 },
+  ] as const;
+  const bundles = definitions.map(({ tier, seed }) => ({
+    bundleId: base64UrlEncode(new Uint8Array(16).fill(seed)),
+    tier,
+    readAdmissionKey: base64UrlEncode(new Uint8Array(32).fill(seed + 1)),
+    ...(tier === "view" ? {} : { writeAdmissionKey: base64UrlEncode(new Uint8Array(32).fill(seed + 2)) }),
+    sealedBundle: base64UrlEncode(new Uint8Array(80).fill(seed + 3)),
+  }));
+  if (bundles[0] === undefined || bundles[1] === undefined || bundles[2] === undefined) expect.fail("tier bundle setup");
+  const body = JSON.stringify({
+    v: 3,
+    revision: 0,
+    ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+    epoch: 0,
+    bundles,
+    snapshots: [],
+    placeholders: [],
+  });
+  await assertResponse(await SELF.fetch(url, { method: "POST", body, headers: {
+    "Content-Type": "application/json",
+    "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "POST", url, body, privateKey: owner.privateKey }),
+    "Attn-PoW": await createPowHeader(shareId, owner.publicKeyBytes, `/v3/shares/${shareId}`),
+  } }), { status: 201 }, `${scenarioId} step #${stepIdx} tier share create`);
+
+  const scoped = async (scope: "read" | "write", key: Uint8Array, method: string, target: string, requestBody?: string): Promise<string> => {
+    const canonical = await canonicalRequest(new Request(target, { method, body: requestBody }), new URL(target).pathname);
+    const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    return `v3.${scope}.${base64UrlEncode(new Uint8Array(await crypto.subtle.sign("HMAC", cryptoKey, canonical)))}`;
+  };
+  await assertResponse(await SELF.fetch(url), { status: 401, errorCode: "ATTN_SHARE_BUNDLE_REQUIRED" }, `${scenarioId} step #${stepIdx} selector required`);
+  const viewRead = await SELF.fetch(url, { headers: {
+    "Attn-Share-Bundle": bundles[0].bundleId,
+    "Attn-Admission": await scoped("read", new Uint8Array(32).fill(0x22), "GET", url),
+  } });
+  const viewBody = await assertResponse(viewRead, { status: 200 }, `${scenarioId} step #${stepIdx} selected view read`) as { bundle: { bundleId: string; sealedBundle: string } };
+  expect(viewBody.bundle).toEqual({ bundleId: bundles[0].bundleId, tier: "view", sealedBundle: bundles[0].sealedBundle });
+  expect(JSON.stringify(viewBody)).not.toContain(bundles[1].sealedBundle);
+
+  const mailboxUrl = `${url}/mailbox`;
+  const mailBody = JSON.stringify({ epoch: 0, deviceId: "tier-corpus", items: [{ envelopeId: "tier-corpus-mail", ciphertext: "opaque" }] });
+  await assertResponse(await SELF.fetch(mailboxUrl, { method: "POST", headers: {
+    "Attn-Share-Bundle": bundles[0].bundleId,
+  } }), { status: 403, errorCode: "ATTN_WRITE_CAPABILITY_REQUIRED" }, `${scenarioId} step #${stepIdx} view write denied`);
+  const pow = await mintPowForTests({ roomId: shareId, deviceId: "tier-corpus", method: "POST", path: `/v3/shares/${shareId}/mailbox`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}tb` });
+  await assertResponse(await SELF.fetch(mailboxUrl, { method: "POST", body: mailBody, headers: {
+    "Content-Type": "application/json",
+    "Attn-Share-Bundle": bundles[1].bundleId,
+    "Attn-Admission": await scoped("write", new Uint8Array(32).fill(0x43), "POST", mailboxUrl, mailBody),
+    "Attn-PoW": pow,
+  } }), { status: 201 }, `${scenarioId} step #${stepIdx} comment write`);
+  const staleBody = JSON.stringify({ epoch: 1, deviceId: "tier-corpus", items: [{ envelopeId: "tier-corpus-stale", ciphertext: "opaque" }] });
+  const stale = await SELF.fetch(mailboxUrl, { method: "POST", body: staleBody, headers: {
+    "Content-Type": "application/json",
+    "Attn-Share-Bundle": bundles[1].bundleId,
+    "Attn-Admission": await scoped("write", new Uint8Array(32).fill(0x43), "POST", mailboxUrl, staleBody),
+  } });
+  const staleJson = await assertResponse(stale, { status: 409, errorCode: "ATTN_SHARE_EPOCH_STALE" }, `${scenarioId} step #${stepIdx} stale epoch fence`) as { currentEpoch: number };
+  expect(staleJson.currentEpoch).toBe(0);
+  const blockedSnapshotUrl = `${url}/snapshots/readme/blocked-snapshot`;
+  const blockedBytes = new Uint8Array([7, 7, 7]);
+  const blockedCanonical = await canonicalRequest(new Request(blockedSnapshotUrl, {
+    method: "PUT",
+    body: blockedBytes,
+    headers: { "Content-Type": "application/octet-stream" },
+  }), new URL(blockedSnapshotUrl).pathname);
+  const blockedSignature = base64UrlEncode(new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, owner.privateKey, blockedCanonical),
+  ));
+  await assertResponse(await SELF.fetch(blockedSnapshotUrl, { method: "PUT", body: blockedBytes, headers: {
+    "Content-Type": "application/octet-stream",
+    "Attn-Device-Id": shareId,
+    "Attn-Owner-Signature": blockedSignature,
+  } }), { status: 409, errorCode: "ATTN_SHARE_MAIL_PENDING" }, `${scenarioId} step #${stepIdx} pending mail blocks snapshot`);
+  expect((await env.RELAY_BLOBS.list({ prefix: shareArtifactPrefix(shareId) })).objects).toHaveLength(0);
+  const unchanged = await assertResponse(await SELF.fetch(url, { headers: {
+    "Attn-Share-Bundle": bundles[0].bundleId,
+    "Attn-Admission": await scoped("read", new Uint8Array(32).fill(0x22), "GET", url),
+  } }), { status: 200 }, `${scenarioId} step #${stepIdx} snapshot rejection is immutable`) as {
+    revision: number;
+    manifestDigest: string;
+    snapshots: unknown[];
+  };
+  expect(unchanged).toMatchObject({
+    revision: 0,
+    manifestDigest: "T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU",
+    snapshots: [],
+  });
+  const suggestRead = await SELF.fetch(mailboxUrl, { headers: {
+    "Attn-Share-Bundle": bundles[2].bundleId,
+    "Attn-Admission": await scoped("read", new Uint8Array(32).fill(0x62), "GET", mailboxUrl),
+  } });
+  const suggestBody = await assertResponse(suggestRead, { status: 200 }, `${scenarioId} step #${stepIdx} suggest mailbox isolation`) as { items: unknown[] };
+  expect(suggestBody.items).toEqual([]);
 }
 
 async function actRecreateRoom(
@@ -1876,6 +1995,9 @@ export async function runScenario(scenario: Scenario): Promise<void> {
           break;
         case "shareArtifactMatrix":
           await actShareArtifactMatrix(scenario.id, i);
+          break;
+        case "shareTierBundleMatrix":
+          await actShareTierBundleMatrix(scenario.id, i);
           break;
         case "v3AdmissionMatrix":
           await actV3AdmissionMatrix(scenario.id, i);

@@ -36,6 +36,7 @@ async function createShare(label: string): Promise<{
   const write = crypto.getRandomValues(new Uint8Array(32));
   const body = JSON.stringify({
     v: 3,
+    revision: 0,
     ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
     readAdmissionKey: base64UrlEncode(read),
     writeAdmissionKey: base64UrlEncode(write),
@@ -76,6 +77,232 @@ async function uploadSnapshot(
 }
 
 describe("durable v3 shares", () => {
+  it("selects exactly one tier bundle for generic, snapshot, and mailbox authorization", async () => {
+    const shareId = `share-tier-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+    const url = `https://relay.example/v3/shares/${shareId}`;
+    const owner = await generateEd25519Keypair();
+    const tiers = [
+      { tier: "view", seed: 0x11 },
+      { tier: "comment", seed: 0x31 },
+      { tier: "suggest", seed: 0x51 },
+    ] as const;
+    const bundles = tiers.map(({ tier, seed }) => ({
+      bundleId: base64UrlEncode(new Uint8Array(16).fill(seed)),
+      tier,
+      readAdmissionKey: base64UrlEncode(new Uint8Array(32).fill(seed + 1)),
+      ...(tier === "view" ? {} : { writeAdmissionKey: base64UrlEncode(new Uint8Array(32).fill(seed + 2)) }),
+      sealedBundle: base64UrlEncode(new Uint8Array(80).fill(seed + 3)),
+    }));
+    if (bundles[0] === undefined || bundles[1] === undefined || bundles[2] === undefined) {
+      throw new Error("expected all three tier bundles");
+    }
+    const body = JSON.stringify({
+      v: 3,
+      ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+      epoch: 0,
+      revision: 0,
+      bundles,
+      snapshots: [],
+      placeholders: [],
+    });
+    const created = await SELF.fetch(url, { method: "POST", body, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url, body, privateKey: owner.privateKey }),
+      "Attn-PoW": await createPowHeader(shareId, owner.publicKeyBytes, `/v3/shares/${shareId}`),
+    } });
+    expect(created.status).toBe(201);
+    const createdJson = await created.json() as Record<string, unknown>;
+    expect(createdJson.revision).toBe(0);
+    expect(createdJson.manifestDigest).toBe("T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU");
+    expect(createdJson).not.toHaveProperty("bundles");
+    expect(createdJson).not.toHaveProperty("readAdmissionKey");
+    expect(createdJson).not.toHaveProperty("writeAdmissionKey");
+
+    expect((await SELF.fetch(url)).status).toBe(401);
+    const viewReadKey = new Uint8Array(32).fill(0x12);
+    const view = await SELF.fetch(url, { headers: {
+      "Attn-Share-Bundle": bundles[0].bundleId,
+      "Attn-Admission": await admission("read", viewReadKey, "GET", url),
+    } });
+    const viewBody = await view.json() as { bundle: Record<string, unknown> } & Record<string, unknown>;
+    expect(view.status).toBe(200);
+    expect(viewBody.bundle).toEqual({
+      bundleId: bundles[0].bundleId,
+      tier: "view",
+      sealedBundle: bundles[0].sealedBundle,
+    });
+    expect(JSON.stringify(viewBody)).not.toContain(bundles[1].sealedBundle);
+    expect(JSON.stringify(viewBody)).not.toContain(bundles[2].sealedBundle);
+
+    const crossSelected = await SELF.fetch(url, { headers: {
+      "Attn-Share-Bundle": bundles[0].bundleId,
+      "Attn-Admission": await admission("read", new Uint8Array(32).fill(0x32), "GET", url),
+    } });
+    expect(crossSelected.status).toBe(401);
+
+    const mailboxUrl = `${url}/mailbox`;
+    const mailBody = JSON.stringify({ epoch: 0, deviceId: "tier-writer", items: [{ envelopeId: "tier-mail", ciphertext: "opaque" }] });
+    const viewWrite = await SELF.fetch(mailboxUrl, { method: "POST", body: mailBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Share-Bundle": bundles[0].bundleId,
+      "Attn-Admission": await admission("read", viewReadKey, "POST", mailboxUrl, mailBody),
+    } });
+    expect(viewWrite.status).toBe(403);
+
+    const commentWriteKey = new Uint8Array(32).fill(0x33);
+    const missingEpochBody = JSON.stringify({ deviceId: "tier-writer", items: [{ envelopeId: "missing-epoch", ciphertext: "opaque" }] });
+    const missingEpoch = await SELF.fetch(mailboxUrl, { method: "POST", body: missingEpochBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Share-Bundle": bundles[1].bundleId,
+      "Attn-Admission": await admission("write", commentWriteKey, "POST", mailboxUrl, missingEpochBody),
+    } });
+    expect(missingEpoch.status).toBe(400);
+    expect((await missingEpoch.json() as { error: { code: string } }).error.code).toBe("ATTN_BODY_INVALID");
+
+    const mailPow = await mintPowForTests({ roomId: shareId, deviceId: "tier-writer", method: "POST", path: `/v3/shares/${shareId}/mailbox`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}tm` });
+    const queued = await SELF.fetch(mailboxUrl, { method: "POST", body: mailBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Share-Bundle": bundles[1].bundleId,
+      "Attn-Admission": await admission("write", commentWriteKey, "POST", mailboxUrl, mailBody),
+      "Attn-PoW": mailPow,
+    } });
+    expect(queued.status).toBe(201);
+    expect((await queued.json() as { bundle: { bundleId: string } }).bundle.bundleId).toBe(bundles[1].bundleId);
+
+    const suggestMailbox = await SELF.fetch(mailboxUrl, { headers: {
+      "Attn-Share-Bundle": bundles[2].bundleId,
+      "Attn-Admission": await admission("read", new Uint8Array(32).fill(0x52), "GET", mailboxUrl),
+    } });
+    expect((await suggestMailbox.json() as { items: unknown[] }).items).toEqual([]);
+    const commentMailbox = await SELF.fetch(mailboxUrl, { headers: {
+      "Attn-Share-Bundle": bundles[1].bundleId,
+      "Attn-Admission": await admission("read", new Uint8Array(32).fill(0x32), "GET", mailboxUrl),
+    } });
+    const commentItems = (await commentMailbox.json() as { items: Array<{ bundleId: string; tier: string; epoch: number }> }).items;
+    expect(commentItems).toHaveLength(1);
+    expect(commentItems[0]).toMatchObject({ bundleId: bundles[1].bundleId, tier: "comment", epoch: 0 });
+
+    const staleBody = JSON.stringify({ epoch: 1, deviceId: "tier-writer", items: [{ envelopeId: "stale-mail", ciphertext: "opaque" }] });
+    const stale = await SELF.fetch(mailboxUrl, { method: "POST", body: staleBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Share-Bundle": bundles[1].bundleId,
+      "Attn-Admission": await admission("write", commentWriteKey, "POST", mailboxUrl, staleBody),
+    } });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      currentEpoch: 0,
+      error: { code: "ATTN_SHARE_EPOCH_STALE", currentEpoch: 0 },
+    });
+
+    const routingBody = JSON.stringify({
+      v: 3,
+      ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+      currentRoomId: "different-room",
+    });
+    const routingChange = await SELF.fetch(url, { method: "POST", body: routingBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url, body: routingBody, privateKey: owner.privateKey }),
+    } });
+    expect(routingChange.status).toBe(409);
+    expect((await routingChange.json() as { error: { code: string } }).error.code).toBe("ATTN_SHARE_MAIL_PENDING");
+
+    const epochBody = JSON.stringify({
+      v: 3,
+      ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+      epoch: 1,
+      bundles: bundles.map(bundle => ({ ...bundle, sealedBundle: base64UrlEncode(new Uint8Array(81).fill(0x77)) })),
+    });
+    const epochAdvance = await SELF.fetch(url, { method: "POST", body: epochBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url, body: epochBody, privateKey: owner.privateKey }),
+    } });
+    expect(epochAdvance.status).toBe(409);
+    expect((await epochAdvance.json() as { error: { code: string } }).error.code).toBe("ATTN_SHARE_MAIL_PENDING");
+
+    const blockedSnapshotUrl = `${url}/snapshots/readme/blocked-snapshot`;
+    const blockedCiphertext = new Uint8Array([9, 9, 9]);
+    const blockedSnapshot = await SELF.fetch(blockedSnapshotUrl, { method: "PUT", body: blockedCiphertext, headers: {
+      "Content-Type": "application/octet-stream",
+      "Attn-Device-Id": shareId,
+      "Attn-Owner-Signature": await binaryOwnerSignature("PUT", blockedSnapshotUrl, blockedCiphertext, owner.privateKey),
+    } });
+    expect(blockedSnapshot.status).toBe(409);
+    expect((await blockedSnapshot.json() as { error: { code: string } }).error.code).toBe("ATTN_SHARE_MAIL_PENDING");
+    expect((await env.RELAY_BLOBS.list({ prefix: shareArtifactPrefix(shareId) })).objects).toHaveLength(0);
+    const unchanged = await SELF.fetch(url, { headers: {
+      "Attn-Share-Bundle": bundles[0].bundleId,
+      "Attn-Admission": await admission("read", viewReadKey, "GET", url),
+    } });
+    expect(await unchanged.json()).toMatchObject({
+      revision: 0,
+      manifestDigest: "T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU",
+      updatedAt: createdJson.updatedAt,
+      expiresAt: createdJson.expiresAt,
+      snapshots: [],
+    });
+
+    const drainUrl = `${mailboxUrl}?through=1`;
+    const drainPow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "DELETE", path: `/v3/shares/${shareId}/mailbox`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}td` });
+    expect((await SELF.fetch(drainUrl, { method: "DELETE", headers: {
+      "Attn-Device-Id": shareId,
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "DELETE", url: drainUrl, privateKey: owner.privateKey }),
+      "Attn-PoW": drainPow,
+    } })).status).toBe(204);
+
+    const snapshotId = "tier-snapshot";
+    const snapshotUrl = `${url}/snapshots/readme/${snapshotId}`;
+    const ciphertext = new Uint8Array([4, 2, 4, 2]);
+    const snapshotPow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "PUT", path: `/v3/shares/${shareId}/snapshots/readme/${snapshotId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}ts` });
+    const snapshotUpload = await SELF.fetch(snapshotUrl, { method: "PUT", body: ciphertext, headers: {
+      "Content-Type": "application/octet-stream",
+      "Attn-Device-Id": shareId,
+      "Attn-Owner-Signature": await binaryOwnerSignature("PUT", snapshotUrl, ciphertext, owner.privateKey),
+      "Attn-PoW": snapshotPow,
+    } });
+    expect(snapshotUpload.status).toBe(201);
+    const snapshotRef = await snapshotUpload.json() as Record<string, unknown>;
+    const expectedManifestDigest = base64UrlEncode(new Uint8Array(await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(JSON.stringify([snapshotRef])),
+    )));
+    const revised = await SELF.fetch(url, { headers: {
+      "Attn-Share-Bundle": bundles[0].bundleId,
+      "Attn-Admission": await admission("read", viewReadKey, "GET", url),
+    } });
+    const revisedJson = await revised.json() as { revision: number; manifestDigest: string };
+    expect(revisedJson).toMatchObject({ revision: 1, manifestDigest: expectedManifestDigest });
+
+    const synchronizedBundles = bundles.map(bundle => ({
+      ...bundle,
+      sealedBundle: base64UrlEncode(new Uint8Array(82).fill(0x66)),
+    }));
+    const syncBody = JSON.stringify({
+      v: 3,
+      ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+      revision: 1,
+      bundles: synchronizedBundles,
+    });
+    const ownerId = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", owner.publicKeyBytes)));
+    const syncPow = await mintPowForTests({ roomId: shareId, deviceId: ownerId, method: "POST", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}tu` });
+    const synchronized = await SELF.fetch(url, { method: "POST", body: syncBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url, body: syncBody, privateKey: owner.privateKey }),
+      "Attn-PoW": syncPow,
+    } });
+    expect(synchronized.status).toBe(200);
+    expect(await synchronized.json()).toMatchObject({ revision: 1, manifestDigest: expectedManifestDigest });
+    const snapshotReadUrl = `${url}/snapshots/readme`;
+    const snapshotRead = await SELF.fetch(snapshotReadUrl, { headers: {
+      "Attn-Share-Bundle": bundles[0].bundleId,
+      "Attn-Admission": await admission("read", viewReadKey, "GET", snapshotReadUrl),
+    } });
+    expect(snapshotRead.status).toBe(200);
+    expect(snapshotRead.headers.get("Attn-Share-Bundle")).toBe(bundles[0].bundleId);
+    expect(snapshotRead.headers.get("Attn-Share-Tier")).toBe("view");
+    expect(snapshotRead.headers.get("Attn-Sealed-Bundle")).toBe(synchronizedBundles[0]!.sealedBundle);
+    expect(snapshotRead.headers.get("Attn-Sealed-Bundle")).not.toBe(bundles[1].sealedBundle);
+  });
+
   it("pins only the latest owner-uploaded snapshot per file and removes all ciphertext on revoke", async () => {
     const fixture = await createShare("share-artifacts");
     const forgedManifestBody = JSON.stringify({
@@ -261,7 +488,7 @@ describe("durable v3 shares", () => {
     const write = new Uint8Array(32).fill(0x72);
     const ownerId = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", owner.publicKeyBytes)));
     const body = JSON.stringify({
-      v: 3, ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+      v: 3, revision: 0, ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
       readAdmissionKey: base64UrlEncode(read), writeAdmissionKey: base64UrlEncode(write),
       currentRoomId: null, snapshots: [], placeholders: [{ fileId: "future-file" }],
     });
@@ -427,6 +654,7 @@ describe("durable v3 shares", () => {
     const same = new Uint8Array(32).fill(0x44);
     const body = JSON.stringify({
       v: 3,
+      revision: 0,
       ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
       readAdmissionKey: base64UrlEncode(same),
       writeAdmissionKey: base64UrlEncode(same),
@@ -451,6 +679,7 @@ describe("durable v3 shares", () => {
     const requests = await Promise.all(owners.map(async (owner, index) => {
       const body = JSON.stringify({
         v: 3,
+        revision: 0,
         ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
         readAdmissionKey: base64UrlEncode(new Uint8Array(32).fill(0x10 + index)),
         writeAdmissionKey: base64UrlEncode(new Uint8Array(32).fill(0x20 + index)),

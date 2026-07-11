@@ -1,6 +1,7 @@
 #[cfg(target_os = "macos")]
 mod cli_alias;
 mod cli_review;
+mod cli_share;
 mod daemon;
 mod files;
 mod ipc;
@@ -111,6 +112,8 @@ enum TopLevelSubcommand {
     /// Manage review rooms and agent identities. Spec:
     /// `planning/collab/amendments.md` §Agent CLI key handling.
     Review(cli_review::ReviewArgs),
+    /// Create, renew, or revoke a durable share link.
+    Share(cli_share::ShareArgs),
 }
 
 fn main() {
@@ -129,6 +132,7 @@ fn run() -> Result<()> {
     if let Some(command) = cli.command {
         match command {
             TopLevelSubcommand::Review(args) => return cli_review::run(args),
+            TopLevelSubcommand::Share(args) => return cli_share::run(args),
         }
     }
 
@@ -583,11 +587,18 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             // Keep durable-share capabilities on their own reserved route so
             // they can never fall through to local file serving.
             if let Some(invite) = parse_share_invite_uri(&uri) {
-                daemon::dispatch_share_open_intent(&invite);
+                let dispatched = daemon::dispatch_share_open_intent(
+                    &invite,
+                    custom_protocol_review_manager.as_ref(),
+                );
+                let (status, body) = share_open_response(dispatched.is_ok());
+                if dispatched.is_err() {
+                    tracing::warn!(share_id = %invite.share_id, "durable share open is not implemented");
+                }
                 return wry::http::Response::builder()
-                    .status(200)
+                    .status(status)
                     .header("Content-Type", "text/html; charset=utf-8")
-                    .body(SHARE_OPEN_ACK_HTML.as_bytes().to_vec().into())
+                    .body(body.as_bytes().to_vec().into())
                     .unwrap();
             }
 
@@ -1018,7 +1029,14 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                         window.set_visible(true);
                         window.set_focus();
                     } else if let Some(invite) = parse_share_invite_uri(url.as_str()) {
-                        daemon::dispatch_share_open_intent(&invite);
+                        if daemon::dispatch_share_open_intent(
+                            &invite,
+                            opened_review_manager.as_ref(),
+                        )
+                        .is_err()
+                        {
+                            tracing::warn!(share_id = %invite.share_id, "durable share open is not implemented");
+                        }
                         platform::activate_app();
                         window.set_visible(true);
                         window.set_focus();
@@ -1676,6 +1694,15 @@ if (!window.__attn_js_bridge_installed__) {
 /// development.
 const REVIEW_JOIN_ACK_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>Joining review</title><p>Joining review room…</p>";
 const SHARE_OPEN_ACK_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>Opening share</title><p>Opening durable share…</p>";
+const SHARE_OPEN_UNAVAILABLE_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>Share unavailable</title><p>Durable share opening is not available in this build.</p>";
+
+fn share_open_response(dispatched: bool) -> (u16, &'static str) {
+    if dispatched {
+        (200, SHARE_OPEN_ACK_HTML)
+    } else {
+        (501, SHARE_OPEN_UNAVAILABLE_HTML)
+    }
+}
 
 /// Parse an `attn://review/...` invite URI.
 ///
@@ -1842,6 +1869,14 @@ mod tests {
         assert!(parse_share_invite_uri("attn://shareable/id#key=x").is_none());
         assert!(parse_share_invite_uri("https://attn.sh/s/id#key=x").is_none());
         assert!(parse_share_invite_uri("attn://share/AAECAwQFBgcICQoLDA0ODw").is_none());
+    }
+
+    #[test]
+    fn unavailable_share_open_never_returns_success_ack() {
+        let (status, body) = share_open_response(false);
+        assert_eq!(status, 501);
+        assert_eq!(body, SHARE_OPEN_UNAVAILABLE_HTML);
+        assert_ne!(body, SHARE_OPEN_ACK_HTML);
     }
 
     #[test]

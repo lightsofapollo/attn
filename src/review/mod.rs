@@ -20,6 +20,7 @@ pub mod ipc;
 pub mod manager;
 pub mod model;
 pub mod share;
+pub mod share_lifecycle;
 pub mod store;
 pub mod transport;
 pub mod watcher_state;

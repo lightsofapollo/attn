@@ -105,10 +105,29 @@ carry the same write capability, and their signed registration grant plus
 import-side policy enforcement lands separately. The relay-enforced boundary
 in this key split is view (read only) versus writable.
 
-### Durable Share Epochs
+### Tier-safe Durable Share Capabilities
 
-A durable share has one 32-byte `shareSecret` carried only in its URL fragment.
-Each plaintext monotonic epoch derives a fresh ordinary v3 room secret:
+A durable share has one owner-local 32-byte `shareSecret`. It is never placed
+in a URL or sent to the relay. The owner derives three independent public
+bearer siblings and each recipient expands only its sibling's descendants:
+
+```text
+viewLinkSecret    := HKDF(shareSecret, info="attn share link view v3", L=32)
+commentLinkSecret := HKDF(shareSecret, info="attn share link comment v3", L=32)
+suggestLinkSecret := HKDF(shareSecret, info="attn share link suggest v3", L=32)
+
+bundleKey           := HKDF(linkSecret, info="attn share bundle key v3", L=32)
+bundleId            := base64url(first 16 bytes of SHA-256("attn share bundle id v3" || linkSecret))
+shareReadAdmission  := HKDF(linkSecret, info="attn share read admission v3", L=32)
+shareWriteAdmission := HKDF(linkSecret, info="attn share write admission v3", L=32) // writable tiers only
+```
+
+All sibling outputs are distinct. View has no write leaf. Comment and suggest
+derive independent write leaves; their different in-room authority continues
+to be enforced by the existing owner-signed device grants.
+
+The owner root separately derives each monotonic epoch's ordinary v3 room
+secret:
 
 ```text
 epochInfo_n  := UTF-8("attn share room v3") || uint64be(epoch_n)
@@ -117,19 +136,35 @@ roomSecret_n := HKDF-SHA-256(IKM=shareSecret, salt=empty, info=epochInfo_n, L=32
 
 The uint64 encoding is unsigned, fixed-width, and network byte order. It is
 part of HKDF `info`, not salt. The derived `roomSecret_n` feeds the complete v3
-split-capability tree unchanged, so successive rooms are unlinkable without
-the share capability while Rust and browser owners derive identical keys.
+split-capability tree unchanged, so public links do not reveal the owner root
+or permit derivation of later room secrets. Rust and browser owners derive
+identical keys.
 Browser JSON consumers restrict epochs to non-negative safe integers.
+
+For each tier and epoch the owner seals one strict canonical-JSON capability
+bundle under that tier's `bundleKey` using XChaCha20-Poly1305 and a fresh
+24-byte nonce. Wire form is `base64url(nonce || ciphertext || tag)`. AAD is
+`UTF8("attn share sealed bundle v3\\0") || UTF8(shareId) || 0x00 || UTF8(bundleId)`.
+The plaintext contains exactly `bundleId`, the public owner signing key,
+`shareId`, epoch, non-negative safe `revision`, canonical 32-byte
+`manifestDigest`, tier, `roomId`, and the existing v3 room
+`readCapabilityKey`; writable tiers
+also require the existing room `writeAdmissionKey` and 64-byte owner
+`grantSignature`. View forbids those final two fields. Openers validate the
+expected `(shareId,bundleId,epoch,revision,manifestDigest,tier)` and every canonical key length before
+use. Shared Rust/TypeScript vectors live in
+`test-vectors/share-capabilities-v3.json`.
 
 Canonical durable URL forms are:
 
 ```text
-attn://share/<shareId>#key=<base64url(shareSecret)>
-https://attn.sh/s/<shareId>#key=<base64url(shareSecret)>
+attn://share/<shareId>#key=<base64url(linkSecret)>
+https://attn.sh/s/<shareId>#key=<base64url(linkSecret)>
 ```
 
 The initial implementation uses a random 16-byte, unpadded-base64url
-`shareId`. The fragment contains exactly one unpadded 32-byte `key`; it is
+`shareId`. The fragment contains exactly one unpadded 32-byte tier-specific
+`linkSecret`; it is
 stripped immediately in browsers and never reaches the relay.
 Parsers accept only these exact origins and paths: no credentials, explicit
 ports, query strings, extra path segments, alternate HTTPS hosts, or fragment

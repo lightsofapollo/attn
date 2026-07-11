@@ -1,0 +1,46 @@
+{
+  "version": 2,
+  "shareSecret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "shareId": "AAECAwQFBgcICQoLDA0ODw",
+  "epoch": 7,
+  "vectors": [
+    {
+      "tier": "view",
+      "linkSecret": "_iivkXH-HEIrC-VBkwNylEBJLC0U2MRhqOaGlYH4J_o",
+      "bundleKey": "V_q5DXmSQ9QSLKwEsosg415B0Kaya2EBFeZyWhaW68Y",
+      "bundleId": "WvZSFKPHwLtX7etx1yo_ig",
+      "readAdmissionKey": "NpjP34A_QiNYEKm2ADrSWXpVfdPQkDlFLzZKOrkhfn8",
+      "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX",
+      "bundle": {
+        "v": 3,
+        "purpose": "attn share capability bundle v3",
+        "bundleId": "WvZSFKPHwLtX7etx1yo_ig",
+        "ownerSigningKey": "xoImN8fTEOxXYnvgC6JZ0lN0n0qvZERwz_vlOjX3MkI",
+        "shareId": "AAECAwQFBgcICQoLDA0ODw",
+        "epoch": 7,
+        "revision": 0,
+        "manifestDigest": "T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU",
+        "tier": "view",
+        "roomId": "9NtFB-9ZR-ni2gGD9e-5ww",
+        "readCapabilityKey": "ot_A07Fwz5nItmd8QthGidrqI29Gc1kiOJpdLp_5K_o"
+      },
+      "sealedBundle": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXAypRGLR4QgsMMFCShWc4DSZmqQ7XSf2LWFm7EkTwR-JieZClZWM4Rb_njEhg5wZssrd1eOtmhZybc8Yg2x4hW7YfW1WMyCnqj0bLk-zp9TgfCD1yePqvVSE6kd_g4l6FqW2qtBuaGkZxYt_0R_2gBUfTjGnmG6QxvNmvdQVKaSOfLjYS3YvzLUXDk_zX86X8PYeew87L9z59brqbgu-ILFgiIzWezZnS3WgGe6Iy6N3yPaTmGnWPp5mWv6F9GU7pMuf2HPcJyWxPC3J4GGp2InlZNg0pjfJuix382fSVK48f12NTMzaOJvaiECmX7eq8wPy8YqDk_8PcKI7JMp7Pbmv-oSrKphQcaKSujD74qvBQwOEo_FNL98NJqdqrYw8G8ZrVx9T4nZgQOUoz045Ht64giLQdE1Np5jaXYw2PGpTSKTy6HJW7z79wuHPS54FatR3ExAhECINYDMQxiQ7Ki4m4b6NwbhmI6Vt5RSNioFsBah1s4DG1iI-sxU5rXwiEn4ezXGPE5LZZJiSTEkE1UO0B"
+    },
+    {
+      "tier": "comment",
+      "linkSecret": "zVu_dz11Z-yhRoflKgNsnMLGBmqG_1cljor7CmJc-uY",
+      "bundleKey": "3n7kuToBo-5Itpt20zgWcaHgu_9pyz2VjbhLx71vofk",
+      "bundleId": "juYuYixq8lLDKbYpPDnRbw",
+      "readAdmissionKey": "ryusraS6TZ-jRisIXUUAhW9B_0ULcl7GDGUUHC1eXZY",
+      "writeAdmissionKey": "gEGIi9s-OTNfPh0Oonq3DpsiPUNfdP91y_IXBgcjpug"
+    },
+    {
+      "tier": "suggest",
+      "linkSecret": "Qxh0mHQPf5ZiKXJmGLglMIk8125hMw4xaUbF5cTx3SM",
+      "bundleKey": "omVT19HdUUeiKVxh0t6kU145vWY2DD5VvqPOUhhmn1Y",
+      "bundleId": "rVFYj4zdrEDQkIIwbgt6eg",
+      "readAdmissionKey": "o8uMrAgUZE2vs75T1csdy3VOBPcjG0V2vlgrO-xbHL8",
+      "writeAdmissionKey": "As0AAwLRKyrZ8J9i3VTfxz1Tc2xWmHGoX5arjus3vcU"
+    }
+  ]
+}

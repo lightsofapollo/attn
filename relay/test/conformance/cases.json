@@ -1993,6 +1993,16 @@
       ]
     },
     {
+      "id": "share-tier-bundles-018",
+      "name": "Durable share tier bundles — exact selection, view denial, independent writable mailboxes",
+      "spec": "relay-spec.md §Tier-safe durable share capabilities",
+      "tags": ["v3", "share", "capabilities", "tiers", "mailbox"],
+      "requires": ["share-tier-bundle-matrix"],
+      "steps": [
+        { "action": "shareTierBundleMatrix" }
+      ]
+    },
+    {
       "id": "longsession-014b",
       "name": "longSession=false with far-future expiresAt clamps to 24h cap",
       "spec": "relay-spec.md \u00a7Test Plan #14",

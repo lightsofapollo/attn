@@ -50,6 +50,13 @@ pub const ROOM_ID_PREFIX_V3: &[u8] = b"attn room v3";
 /// Fixed prefix for durable-share epoch room secrets. The canonical HKDF
 /// `info` is this UTF-8 prefix followed by the epoch as unsigned uint64be.
 pub const INFO_SHARE_ROOM_V3: &[u8] = b"attn share room v3";
+pub const INFO_SHARE_LINK_VIEW_V3: &[u8] = b"attn share link view v3";
+pub const INFO_SHARE_LINK_COMMENT_V3: &[u8] = b"attn share link comment v3";
+pub const INFO_SHARE_LINK_SUGGEST_V3: &[u8] = b"attn share link suggest v3";
+pub const INFO_SHARE_BUNDLE_KEY_V3: &[u8] = b"attn share bundle key v3";
+pub const INFO_SHARE_READ_ADMISSION_V3: &[u8] = b"attn share read admission v3";
+pub const INFO_SHARE_WRITE_ADMISSION_V3: &[u8] = b"attn share write admission v3";
+pub const SHARE_BUNDLE_ID_PREFIX_V3: &[u8] = b"attn share bundle id v3";
 
 // ---------------------------------------------------------------------------
 // DerivedKey — 32-byte symmetric key, zeroizes on drop
@@ -122,6 +129,25 @@ pub struct RoomKeyTreeV3 {
     pub root_key: DerivedKey,
     pub read_keys: ReadKeysV3,
     pub write_admission_key: DerivedKey,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShareLinkTier {
+    View,
+    Comment,
+    Suggest,
+}
+
+/// Tier-specific durable-share material derived by the owner. Only
+/// `link_secret` is placed in a public URL; `bundle_key` and admissions are
+/// recomputed by recipients and never serialized in the fragment.
+pub struct ShareLinkKeys {
+    pub link_secret: DerivedKey,
+    pub bundle_key: DerivedKey,
+    pub bundle_id: String,
+    pub read_admission_key: DerivedKey,
+    pub write_admission_key: Option<DerivedKey>,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +238,45 @@ pub fn derive_share_epoch_room_secret(share_secret: &[u8; 32], epoch: u64) -> De
     info.extend_from_slice(INFO_SHARE_ROOM_V3);
     info.extend_from_slice(&epoch.to_be_bytes());
     hkdf_expand_32(share_secret, &info)
+}
+
+/// Derive one independent public-link sibling and its share-relay leaves.
+/// The owner's `shareSecret` never leaves local storage.
+pub fn derive_share_link_keys(share_secret: &[u8; 32], tier: ShareLinkTier) -> ShareLinkKeys {
+    let link_info = match tier {
+        ShareLinkTier::View => INFO_SHARE_LINK_VIEW_V3,
+        ShareLinkTier::Comment => INFO_SHARE_LINK_COMMENT_V3,
+        ShareLinkTier::Suggest => INFO_SHARE_LINK_SUGGEST_V3,
+    };
+    let link_secret = hkdf_expand_32(share_secret, link_info);
+    expand_share_link_keys(link_secret.as_bytes(), tier)
+}
+
+/// Expand the public URL bearer into its bundle key/id and static relay
+/// admissions. This does not and cannot recover the owner share root.
+pub fn expand_share_link_keys(link_secret_bytes: &[u8; 32], tier: ShareLinkTier) -> ShareLinkKeys {
+    let link_secret = DerivedKey(*link_secret_bytes);
+    let bundle_key = hkdf_expand_32(link_secret.as_bytes(), INFO_SHARE_BUNDLE_KEY_V3);
+    let read_admission_key = hkdf_expand_32(link_secret.as_bytes(), INFO_SHARE_READ_ADMISSION_V3);
+    let write_admission_key = if tier == ShareLinkTier::View {
+        None
+    } else {
+        Some(hkdf_expand_32(
+            link_secret.as_bytes(),
+            INFO_SHARE_WRITE_ADMISSION_V3,
+        ))
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(SHARE_BUNDLE_ID_PREFIX_V3);
+    hasher.update(link_secret.as_bytes());
+    let digest = hasher.finalize();
+    ShareLinkKeys {
+        link_secret,
+        bundle_key,
+        bundle_id: URL_SAFE_NO_PAD.encode(&digest[..16]),
+        read_admission_key,
+        write_admission_key,
+    }
 }
 
 // ---------------------------------------------------------------------------

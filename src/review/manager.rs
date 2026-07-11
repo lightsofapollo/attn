@@ -66,6 +66,18 @@ pub enum ReviewCommand {
         mode: String,
         ttl: Option<String>,
     },
+    /// Create a stable durable share rooted at `path`.
+    CreateDurableShare { path: PathBuf },
+    /// Renew one durable share, or every active share when `target` is absent.
+    RenewDurableShare { target: Option<String> },
+    /// Revoke a durable share by canonical share id or exact owner path.
+    RevokeDurableShare { target: String },
+    /// Resolve a durable-share deep link. The secret wrapper zeroizes on drop
+    /// and redacts Debug output, so command diagnostics cannot leak it.
+    OpenDurableShare {
+        share_id: String,
+        link_secret: crate::review::share_lifecycle::ShareLinkSecret,
+    },
     /// Join a remote review room from an `attn://review/...` invite.
     Join { invite: String },
     /// Pull pending envelopes for a room, or for every active room when `None`.
@@ -3039,6 +3051,10 @@ fn decide_collab_routing(peer_count: usize, connected_count: usize) -> CollabRou
 fn review_command_name(cmd: &ReviewCommand) -> &'static str {
     match cmd {
         ReviewCommand::Share { .. } => "Share",
+        ReviewCommand::CreateDurableShare { .. } => "CreateDurableShare",
+        ReviewCommand::RenewDurableShare { .. } => "RenewDurableShare",
+        ReviewCommand::RevokeDurableShare { .. } => "RevokeDurableShare",
+        ReviewCommand::OpenDurableShare { .. } => "OpenDurableShare",
         ReviewCommand::Join { .. } => "Join",
         ReviewCommand::Pull { .. } => "Pull",
         ReviewCommand::Stop { .. } => "Stop",
@@ -3069,6 +3085,32 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
                 path.display(),
                 mode
             ),
+        },
+        ReviewCommand::CreateDurableShare { path } => ReviewUpdate::Error {
+            room_id: None,
+            code: "ATTN_NOT_IMPLEMENTED".into(),
+            message: format!(
+                "durable share creation is not wired yet (path={})",
+                path.display()
+            ),
+        },
+        ReviewCommand::RenewDurableShare { target } => ReviewUpdate::Error {
+            room_id: None,
+            code: "ATTN_NOT_IMPLEMENTED".into(),
+            message: format!(
+                "durable share renewal is not wired yet (target={})",
+                target.as_deref().unwrap_or("all")
+            ),
+        },
+        ReviewCommand::RevokeDurableShare { target } => ReviewUpdate::Error {
+            room_id: None,
+            code: "ATTN_NOT_IMPLEMENTED".into(),
+            message: format!("durable share revocation is not wired yet (target={target})"),
+        },
+        ReviewCommand::OpenDurableShare { share_id, .. } => ReviewUpdate::Error {
+            room_id: None,
+            code: "ATTN_NOT_IMPLEMENTED".into(),
+            message: format!("durable share resolution is not wired yet (shareId={share_id})"),
         },
         // TODO(attn-nnj.3b): parse invite, open transport, fetch snapshot, emit
         // RoomStatus + SnapshotCreated as data arrives.

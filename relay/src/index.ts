@@ -87,7 +87,8 @@ const INTERNAL_ALLOW_BROWSER_HEADER = "X-Attn-Allow-Browser";
  * relay-spec list (Content-Type for JSON bodies, the three Attn-* protocol
  * headers).
  */
-const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id";
+const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id, Attn-Share-Bundle";
+const CORS_EXPOSED_HEADERS = "Attn-Share-Bundle, Attn-Share-Tier, Attn-Sealed-Bundle, Attn-Snapshot-Id, Attn-Ciphertext-Sha256";
 
 /** Methods the relay exposes to browsers — everything in the v2 HTTP surface. */
 const CORS_ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS";
@@ -150,6 +151,7 @@ function corsMiddleware(request: Request, env: Env, response: Response): Respons
       newHeaders.set("Access-Control-Allow-Origin", origin);
       newHeaders.set("Access-Control-Allow-Headers", CORS_ALLOWED_HEADERS);
       newHeaders.set("Access-Control-Allow-Methods", CORS_ALLOWED_METHODS);
+      newHeaders.set("Access-Control-Expose-Headers", CORS_EXPOSED_HEADERS);
       // `Vary: Origin` lets caches keep one entry per origin so non-allowlisted
       // hits don't poison the response for a later allowlisted requester.
       const existingVary = newHeaders.get("Vary");

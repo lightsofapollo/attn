@@ -12,6 +12,8 @@
 > the same executable corpus rather than leaving the new surface test-only.
 > `shareArtifactMatrix` covers owner upload, survival across the room-prefix
 > sweep, latest-per-file supersession, read-admission fetch, and revoke cleanup.
+> `shareTierBundleMatrix` locks exact bundle selection, view write denial, and
+> independent comment/suggest mailbox authorization without exposing siblings.
 
 Cross-language conformance suite for the attn relay. The same `cases.json`
 is consumed by:
@@ -107,6 +109,7 @@ Each step has an `action` discriminator. The corpus deliberately models
 | `seedR2Blob`              | Pre-populate an R2 object under `rooms/<roomId>/<key>`. Used for R2 spillover / cleanup tests.           |
 | `listR2`                  | Enumerate R2 keys under a prefix; assert exact membership.                                               |
 | `shareArtifactMatrix`     | Replay durable share snapshot pin/supersede/fetch/revoke semantics with relay-minted R2 keys.            |
+| `shareTierBundleMatrix`   | Replay strict per-tier share bundle selection and independent mailbox admission.                         |
 | `expectStorageState`      | Peek inside DO storage (Miniflare: `runInDurableObject`; Rust: not applicable — skipped).                |
 
 ### Naming via `as` / `in`

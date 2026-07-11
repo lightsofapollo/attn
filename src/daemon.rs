@@ -100,6 +100,18 @@ pub enum SocketMessage {
         ttl: Option<String>,
     },
 
+    #[serde(rename = "durable_share_create", rename_all = "camelCase")]
+    DurableShareCreate { path: String },
+
+    #[serde(rename = "durable_share_renew", rename_all = "camelCase")]
+    DurableShareRenew {
+        #[serde(default)]
+        target: Option<String>,
+    },
+
+    #[serde(rename = "durable_share_revoke", rename_all = "camelCase")]
+    DurableShareRevoke { target: String },
+
     /// Pull pending envelopes for one room (or every active room when
     /// `room_id` is None). Stubbed until issue attn-nnj.2.8.
     ///
@@ -439,6 +451,39 @@ pub fn send_review_share(path: &str, mode: &str, ttl: Option<&str>) -> Result<()
     }
 }
 
+pub fn send_durable_share_create(path: &std::path::Path) -> Result<()> {
+    let path = path
+        .to_str()
+        .context("durable share path must be valid UTF-8")?;
+    let msg = SocketMessage::DurableShareCreate {
+        path: path.to_owned(),
+    };
+    expect_socket_ok(send_command(&msg)?, "durable_share_create")
+}
+
+pub fn send_durable_share_renew(target: Option<&str>) -> Result<()> {
+    let msg = SocketMessage::DurableShareRenew {
+        target: target.map(str::to_owned),
+    };
+    expect_socket_ok(send_command(&msg)?, "durable_share_renew")
+}
+
+pub fn send_durable_share_revoke(target: &str) -> Result<()> {
+    let msg = SocketMessage::DurableShareRevoke {
+        target: target.to_owned(),
+    };
+    expect_socket_ok(send_command(&msg)?, "durable_share_revoke")
+}
+
+fn expect_socket_ok(response: Option<SocketResponse>, operation: &str) -> Result<()> {
+    match response {
+        Some(SocketResponse::Ok) => Ok(()),
+        Some(SocketResponse::Error { message }) => bail!("{operation} failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
 /// Query the running daemon's persisted verdict state.
 pub fn send_review_verdicts(
     participant_id: crate::review::ids::ParticipantId,
@@ -642,6 +687,21 @@ fn submit_review_socket_command(review_manager: Option<&Arc<ReviewManager>>, cmd
     }
 }
 
+fn reject_unimplemented_durable_command(
+    review_manager: Option<&Arc<ReviewManager>>,
+    command: ReviewCommand,
+) -> SocketResponse {
+    let message = if let Some(manager) = review_manager {
+        manager.submit(command);
+        "ATTN_NOT_IMPLEMENTED: durable share lifecycle adapter is not wired"
+    } else {
+        "ATTN_NOT_IMPLEMENTED: durable shares are unavailable because ReviewManager did not start"
+    };
+    SocketResponse::Error {
+        message: message.to_string(),
+    }
+}
+
 fn query_review_verdicts(
     review_manager: Option<&Arc<ReviewManager>>,
     participant_id: &crate::review::ids::ParticipantId,
@@ -764,8 +824,28 @@ pub fn dispatch_review_join(invite: &str, review_manager: Option<&Arc<ReviewMana
 /// Receive a native durable-share deep link at the daemon boundary without
 /// logging its fragment capability. The lifecycle resolver consumes this
 /// intent once persisted share state is wired by Workstream A.
-pub fn dispatch_share_open_intent(invite: &ParsedShareInvite) {
+pub fn dispatch_share_open_intent(
+    invite: &ParsedShareInvite,
+    review_manager: Option<&Arc<ReviewManager>>,
+) -> Result<(), crate::review::share_lifecycle::ShareLifecycleError> {
     tracing::info!(share_id = %invite.share_id, "durable share open intent routed to daemon");
+    let command = ReviewCommand::OpenDurableShare {
+        share_id: invite.share_id.clone(),
+        link_secret: crate::review::share_lifecycle::ShareLinkSecret::new(invite.link_secret),
+    };
+    let Some(manager) = review_manager else {
+        return Err(
+            crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(
+                "durable share resolver is unavailable because ReviewManager did not start".into(),
+            ),
+        );
+    };
+    manager.submit(command);
+    Err(
+        crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(
+            "durable share resolver adapter is not wired".into(),
+        ),
+    )
 }
 
 /// Start listening on the unix socket. Spawns a thread that accepts connections
@@ -956,6 +1036,41 @@ fn handle_client(
                     stream,
                     "{}",
                     serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::DurableShareCreate { path }) => {
+                let response = reject_unimplemented_durable_command(
+                    review_manager,
+                    ReviewCommand::CreateDurableShare {
+                        path: PathBuf::from(path),
+                    },
+                );
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&response).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::DurableShareRenew { target }) => {
+                let response = reject_unimplemented_durable_command(
+                    review_manager,
+                    ReviewCommand::RenewDurableShare { target },
+                );
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&response).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::DurableShareRevoke { target }) => {
+                let response = reject_unimplemented_durable_command(
+                    review_manager,
+                    ReviewCommand::RevokeDurableShare { target },
+                );
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&response).unwrap_or_default()
                 );
             }
             Ok(SocketMessage::ReviewPull { room_id }) => {
@@ -1222,6 +1337,7 @@ mod tests {
     use crate::review::manager::{ReviewUpdate, UpdateSink};
     use crate::review::store::ReviewStore;
     use crate::review::working_copy::WorkingCopyService;
+    use base64::Engine as _;
     use std::sync::Mutex;
     use std::sync::mpsc;
     use tempfile::TempDir;
@@ -1257,6 +1373,108 @@ mod tests {
         assert!(
             matches!(update, ReviewUpdate::RoomStatusChanged { .. }),
             "expected RoomStatusChanged stub from Share, got {update:?}"
+        );
+    }
+
+    #[test]
+    fn durable_share_socket_commands_lower_to_manager_without_secret_echo() {
+        let (manager, rx, _tmp) = make_test_manager();
+        submit_review_socket_command(
+            Some(&manager),
+            ReviewCommand::CreateDurableShare {
+                path: PathBuf::from("/tmp/plan.md"),
+            },
+        );
+        let create = rx.try_recv().expect("create update");
+        assert!(matches!(
+            create,
+            ReviewUpdate::Error { ref code, .. } if code == "ATTN_NOT_IMPLEMENTED"
+        ));
+
+        submit_review_socket_command(
+            Some(&manager),
+            ReviewCommand::RenewDurableShare { target: None },
+        );
+        let renew = rx.try_recv().expect("renew update");
+        assert!(matches!(
+            renew,
+            ReviewUpdate::Error { ref code, .. } if code == "ATTN_NOT_IMPLEMENTED"
+        ));
+
+        submit_review_socket_command(
+            Some(&manager),
+            ReviewCommand::RevokeDurableShare {
+                target: "AAECAwQFBgcICQoLDA0ODw".into(),
+            },
+        );
+        let revoke = rx.try_recv().expect("revoke update");
+        assert!(matches!(
+            revoke,
+            ReviewUpdate::Error { ref code, .. } if code == "ATTN_NOT_IMPLEMENTED"
+        ));
+
+        let encoded_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42; 32]);
+        let invite = crate::review::share::parse_share_invite(&format!(
+            "attn://share/AAECAwQFBgcICQoLDA0ODw#key={encoded_secret}"
+        ))
+        .expect("invite");
+        let result = dispatch_share_open_intent(&invite, Some(&manager));
+        assert!(matches!(
+            result,
+            Err(crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(_))
+        ));
+        let open = rx.try_recv().expect("open update");
+        let rendered = format!("{open:?}");
+        assert!(rendered.contains("AAECAwQFBgcICQoLDA0ODw"));
+        assert!(!rendered.contains(&encoded_secret));
+
+        let absent = dispatch_share_open_intent(&invite, None);
+        assert!(matches!(
+            absent,
+            Err(crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(_))
+        ));
+    }
+
+    #[test]
+    fn durable_commands_return_not_implemented_with_or_without_manager() {
+        let (manager, _rx, _tmp) = make_test_manager();
+        for response in [
+            reject_unimplemented_durable_command(
+                Some(&manager),
+                ReviewCommand::RenewDurableShare { target: None },
+            ),
+            reject_unimplemented_durable_command(
+                None,
+                ReviewCommand::RenewDurableShare { target: None },
+            ),
+        ] {
+            assert!(matches!(
+                response,
+                SocketResponse::Error { message } if message.starts_with("ATTN_NOT_IMPLEMENTED:")
+            ));
+        }
+    }
+
+    #[test]
+    fn durable_share_socket_wire_shapes_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&SocketMessage::DurableShareCreate {
+                path: "/tmp/plan.md".into()
+            })
+            .expect("create"),
+            r#"{"type":"durable_share_create","path":"/tmp/plan.md"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&SocketMessage::DurableShareRenew { target: None })
+                .expect("renew"),
+            r#"{"type":"durable_share_renew","target":null}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&SocketMessage::DurableShareRevoke {
+                target: "share-id".into()
+            })
+            .expect("revoke"),
+            r#"{"type":"durable_share_revoke","target":"share-id"}"#
         );
     }
 

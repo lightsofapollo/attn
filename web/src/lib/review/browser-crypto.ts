@@ -217,6 +217,13 @@ export const INFO_READ_ADMISSION_V3 = new TextEncoder().encode('attn read admiss
 export const INFO_WRITE_ADMISSION_V3 = new TextEncoder().encode('attn write admission v3');
 export const ROOM_ID_PREFIX_V3 = new TextEncoder().encode('attn room v3');
 export const INFO_SHARE_ROOM_V3 = new TextEncoder().encode('attn share room v3');
+export const INFO_SHARE_LINK_VIEW_V3 = new TextEncoder().encode('attn share link view v3');
+export const INFO_SHARE_LINK_COMMENT_V3 = new TextEncoder().encode('attn share link comment v3');
+export const INFO_SHARE_LINK_SUGGEST_V3 = new TextEncoder().encode('attn share link suggest v3');
+export const INFO_SHARE_BUNDLE_KEY_V3 = new TextEncoder().encode('attn share bundle key v3');
+export const INFO_SHARE_READ_ADMISSION_V3 = new TextEncoder().encode('attn share read admission v3');
+export const INFO_SHARE_WRITE_ADMISSION_V3 = new TextEncoder().encode('attn share write admission v3');
+export const SHARE_BUNDLE_ID_PREFIX_V3 = new TextEncoder().encode('attn share bundle id v3');
 
 export interface RoomKeys {
   /** HKDF root key — used only to derive subkeys. Never used directly. */
@@ -243,6 +250,16 @@ export interface RoomKeyTreeV3 {
   rootKey: Uint8Array;
   readKeys: ReadKeysV3;
   writeAdmissionKey: Uint8Array;
+}
+
+export type ShareLinkTier = 'view' | 'comment' | 'suggest';
+
+export interface ShareLinkKeys {
+  linkSecret: Uint8Array;
+  bundleKey: Uint8Array;
+  bundleId: string;
+  readAdmissionKey: Uint8Array;
+  writeAdmissionKey?: Uint8Array;
 }
 
 export function hkdfExpand32(ikm: Uint8Array, info: Uint8Array): Uint8Array {
@@ -305,6 +322,45 @@ export function deriveShareEpochRoomSecret(
   const view = new DataView(info.buffer, info.byteOffset, info.byteLength);
   view.setBigUint64(INFO_SHARE_ROOM_V3.length, BigInt(epoch), false);
   return hkdfExpand32(shareSecret, info);
+}
+
+export function deriveShareLinkKeys(
+  shareSecret: Uint8Array,
+  tier: ShareLinkTier,
+): ShareLinkKeys {
+  requireKey32(shareSecret, 'shareSecret');
+  const info = tier === 'view'
+    ? INFO_SHARE_LINK_VIEW_V3
+    : tier === 'comment'
+      ? INFO_SHARE_LINK_COMMENT_V3
+      : INFO_SHARE_LINK_SUGGEST_V3;
+  const linkSecret = hkdfExpand32(shareSecret, info);
+  try {
+    return expandShareLinkKeys(linkSecret, tier);
+  } finally {
+    linkSecret.fill(0);
+  }
+}
+
+export function expandShareLinkKeys(
+  linkSecret: Uint8Array,
+  tier: ShareLinkTier,
+): ShareLinkKeys {
+  requireKey32(linkSecret, 'linkSecret');
+  const idInput = new Uint8Array(SHARE_BUNDLE_ID_PREFIX_V3.length + linkSecret.length);
+  idInput.set(SHARE_BUNDLE_ID_PREFIX_V3, 0);
+  idInput.set(linkSecret, SHARE_BUNDLE_ID_PREFIX_V3.length);
+  const bundleId = base64UrlEncode(sha256(idInput).subarray(0, 16));
+  idInput.fill(0);
+  return {
+    linkSecret: new Uint8Array(linkSecret),
+    bundleKey: hkdfExpand32(linkSecret, INFO_SHARE_BUNDLE_KEY_V3),
+    bundleId,
+    readAdmissionKey: hkdfExpand32(linkSecret, INFO_SHARE_READ_ADMISSION_V3),
+    ...(tier === 'view'
+      ? {}
+      : { writeAdmissionKey: hkdfExpand32(linkSecret, INFO_SHARE_WRITE_ADMISSION_V3) }),
+  };
 }
 
 export function deriveRoomId(roomSecret: Uint8Array): string {

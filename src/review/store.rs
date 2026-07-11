@@ -261,11 +261,16 @@ impl ReviewStore {
         room_id: &RoomId,
         snapshot_id: &SnapshotId,
     ) -> Result<Option<SnapshotNode>> {
-        read_json(&self.snapshot_file(room_id, snapshot_id))
+        let snapshot = read_json(&self.snapshot_file(room_id, snapshot_id))?;
+        if let Some(node) = snapshot.as_ref() {
+            validate_snapshot_node(node)?;
+        }
+        Ok(snapshot)
     }
 
     /// Atomically write a single snapshot file.
     pub fn save_snapshot(&self, room_id: &RoomId, snapshot: &SnapshotNode) -> Result<()> {
+        validate_snapshot_node(snapshot)?;
         let dir = self.room_dir(room_id).join("snapshots");
         write_json_atomic(
             &dir,
@@ -304,7 +309,10 @@ impl ReviewStore {
             }
             let parsed: Result<Option<SnapshotNode>> = read_json(&path);
             match parsed {
-                Ok(Some(node)) => out.push(Ok(node)),
+                Ok(Some(node)) => match validate_snapshot_node(&node) {
+                    Ok(()) => out.push(Ok(node)),
+                    Err(err) => out.push(Err(err)),
+                },
                 Ok(None) => {} // file vanished mid-iteration; ignore.
                 Err(err) => out.push(Err(err)),
             }
@@ -785,6 +793,19 @@ impl ReviewStore {
     }
 }
 
+/// Decrypted snapshot payloads are untrusted persisted input after restart.
+/// Validate the additive discriminated shape before a node can participate in
+/// recovery/latest-snapshot selection; malformed files remain isolated as an
+/// ordinary store error instead of poisoning the room.
+fn validate_snapshot_node(snapshot: &SnapshotNode) -> Result<()> {
+    if let Some(plaintext) = snapshot.plaintext.as_ref() {
+        plaintext
+            .validate()
+            .with_context(|| format!("snapshot {} plaintext", snapshot.snapshot_id.as_str()))?;
+    }
+    Ok(())
+}
+
 // -------------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------------
@@ -1128,7 +1149,7 @@ mod tests {
             encrypted_blob_ref: None,
             plaintext: Some(SnapshotPlaintext {
                 doc_type: crate::review::model::DocType::Markdown,
-                content: "# hi\n".to_string(),
+                content: Some("# hi\n".to_string()),
                 anchor_index: Some(AnchorIndex {
                     doc_hash: id::<ContentHash>("hash-1"),
                     canonical_encoding: CanonicalEncoding::Utf8Bytes,
@@ -1136,6 +1157,9 @@ mod tests {
                     blocks: vec![],
                     headings: vec![],
                 }),
+                media_type: None,
+                encoding: None,
+                manifest: None,
             }),
         }
     }
@@ -1688,6 +1712,29 @@ mod tests {
         let missing: SnapshotId = id("snap-missing");
         assert_eq!(
             store.load_snapshot(&room_id, &missing).expect("missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_snapshot_plaintext_is_rejected_before_storage() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-abc");
+        let mut snap = sample_snapshot("snap-invalid", "file-invalid");
+        snap.plaintext = Some(SnapshotPlaintext {
+            doc_type: crate::review::model::DocType::Asset,
+            content: Some("AA==".to_string()),
+            anchor_index: None,
+            media_type: Some("application/octet-stream".to_string()),
+            encoding: Some(crate::review::model::SnapshotAssetEncoding::Base64url),
+            manifest: None,
+        });
+
+        assert!(store.save_snapshot(&room_id, &snap).is_err());
+        assert_eq!(
+            store
+                .load_snapshot(&room_id, &snap.snapshot_id)
+                .expect("invalid snapshot was not persisted"),
             None
         );
     }

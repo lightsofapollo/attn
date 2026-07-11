@@ -268,7 +268,8 @@ export class DurableShareBrowserSessionFacade {
   private generation = 0;
   private closed = false;
   private startAbort: AbortController | null = null;
-  private state: import('./browser-session').BrowserSessionState = { status: 'idle', connection: 'offline', directError: null,
+  private state: import('./browser-session').BrowserSessionState = { principal: 'reviewer', ownerOnline: false,
+    liveEditingAvailable: false, status: 'idle', connection: 'offline', directError: null,
     roomId: null, snapshotContent: null, snapshotDocType: 'markdown', snapshotId: null, fileId: null, error: null,
     authoringReady: false, grantTier: 'view', outboxPending: 0, authoringError: null, persistence: 'ephemeral',
     storagePersisted: null, canRemember: false };
@@ -332,6 +333,7 @@ export class DurableShareBrowserSessionFacade {
     const snapshot = next.snapshots[0];
     this.state = { ...this.state,
       status: next.status === 'ready' ? 'connected' : next.status === 'error' ? 'error' : next.status === 'terminated' ? 'idle' : 'connecting',
+      ownerOnline: next.ownerOnline, liveEditingAvailable: false,
       connection: next.ownerOnline ? 'live_direct' : next.status === 'ready' ? 'mailbox' : 'offline', roomId: next.roomId,
       snapshotContent: snapshot?.content ?? (next.ownerOnline ? this.state.snapshotContent : null),
       snapshotDocType: snapshot?.docType ?? (next.ownerOnline ? this.state.snapshotDocType : 'markdown'),
@@ -359,7 +361,8 @@ export class RememberedPushShareSessionFacade {
   private observer: ((state: import('./browser-session').BrowserSessionState) => void) | null = null;
   private closed = false;
   private abort: AbortController | null = null;
-  private state: import('./browser-session').BrowserSessionState = { status: 'idle', connection: 'offline', directError: null,
+  private state: import('./browser-session').BrowserSessionState = { principal: 'reviewer', ownerOnline: false,
+    liveEditingAvailable: false, status: 'idle', connection: 'offline', directError: null,
     roomId: null, snapshotContent: null, snapshotDocType: 'markdown', snapshotId: null, fileId: null, error: null,
     authoringReady: false, grantTier: 'view', outboxPending: 0, authoringError: null, persistence: 'remembered',
     storagePersisted: true, canRemember: false };

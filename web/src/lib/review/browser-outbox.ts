@@ -66,6 +66,7 @@ export interface BrowserOutboxAccepted {
 export interface BrowserOutboxPersistence {
   loadPending(): Promise<MailboxEnvelope[]>;
   putPending(envelope: MailboxEnvelope): Promise<void>;
+  putPendingBatch(envelopes: readonly MailboxEnvelope[]): Promise<void>;
   acknowledge(batch: MailboxEnvelope[], accepted: BrowserOutboxAccepted[]): Promise<void>;
 }
 
@@ -227,13 +228,33 @@ export class BrowserOutbox {
 
   /** Persist the immutable sealed envelope before optimistic UI echo. */
   async enqueueDurably(envelope: MailboxEnvelope): Promise<boolean> {
+    return (await this.enqueueBatchDurably([envelope])) === 1;
+  }
+
+  /** Validate and persist the whole immutable batch before exposing any item in memory. */
+  async enqueueBatchDurably(envelopes: readonly MailboxEnvelope[]): Promise<number> {
     if (this.closed) throw new Error('outbox is closed');
     if (!this.initialized) await this.initialize();
-    this.validateEnvelope(envelope);
-    const existing = this.queue.find((item) => item.envelopeId === envelope.envelopeId);
-    if (existing) return this.sameOrConflict(existing, envelope);
-    await this.persistence?.putPending(envelope);
-    return this.enqueueMemory(envelope);
+    const batchIds = new Set<string>();
+    for (const envelope of envelopes) {
+      this.validateEnvelope(envelope);
+      if (batchIds.has(envelope.envelopeId)) {
+        throw new BrowserOutboxError(
+          'ATTN_ENVELOPE_ID_CONFLICT',
+          'durable batch contains a duplicate envelope id',
+          true,
+        );
+      }
+      batchIds.add(envelope.envelopeId);
+      const existing = this.queue.find((item) => item.envelopeId === envelope.envelopeId);
+      if (existing) this.sameOrConflict(existing, envelope);
+    }
+    await this.persistence?.putPendingBatch(envelopes);
+    let inserted = 0;
+    for (const envelope of envelopes) {
+      if (this.enqueueMemory(envelope)) inserted += 1;
+    }
+    return inserted;
   }
 
   private enqueueMemory(envelope: MailboxEnvelope): boolean {

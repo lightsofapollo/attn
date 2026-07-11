@@ -18,11 +18,14 @@
 
 <script lang="ts">
   import AmbiguousAnchorPicker from './AmbiguousAnchorPicker.svelte';
-  import { reviewAcceptSuggestion, reviewRejectSuggestion } from './ipc';
   import { AGENT_GLYPH, monogramFor } from './peer-strip-format';
   import { shouldSubmitOnEnter } from './review/composer-keys';
+  import {
+    runSuggestionAction,
+    type SuggestionActionFeedback,
+  } from './review/suggestion-action-port';
   import { reviewStore } from './review/store.svelte';
-  import type { EventId, ResolvedAnchorCandidate, RoomId, Thread } from './types';
+  import type { ResolvedAnchorCandidate, Thread } from './types';
 
   type CardKind = 'comment' | 'suggestion';
   type CardState =
@@ -51,8 +54,10 @@
     quotePreview: string;
     /** Click target: editor focuses this card's anchor. */
     onActivate: () => void;
-    /** Reject handler — UI-only until reject IPC exists (TODO 4.x). */
-    onReject?: () => void;
+    /** Accept a suggestion through the parent-owned action port. */
+    onAccept?: () => unknown | Promise<unknown>;
+    /** Reject a suggestion through the parent-owned action port. */
+    onReject?: () => unknown | Promise<unknown>;
     /** Resolve handler — mints a CommentResolved event (attn-zhr). */
     onResolve?: () => void;
     /** Post a reply to this thread (attn-1rm). Parent wires it to
@@ -99,6 +104,7 @@
     authorName,
     quotePreview,
     onActivate,
+    onAccept,
     onReject,
     onResolve,
     onReply,
@@ -237,34 +243,23 @@
     if (onCancelReanchor) onCancelReanchor();
   }
 
-  function handleAccept(): void {
-    if (readOnly) return;
-    if (kind !== 'suggestion') return;
-    // For now, the suggestion event id IS the suggestionId (the body
-    // carries it; we round-trip through the meta.eventId). The Rust apply
-    // pipeline will return a verdict and may open the three-way card.
-    const root = thread.rootEvent.body;
-    if (root.type !== 'suggestion_created') return;
-    const roomId: RoomId = thread.rootEvent.meta.roomId;
-    const suggestionId: EventId = root.suggestionId;
-    void reviewAcceptSuggestion(roomId, suggestionId);
+  let suggestionFeedback = $state<SuggestionActionFeedback>({ status: 'idle' });
+  const suggestionPending = $derived(suggestionFeedback.status === 'pending');
+
+  function handleAccept(e: MouseEvent): void {
+    e.stopPropagation();
+    if (readOnly || kind !== 'suggestion' || suggestionPending) return;
+    void runSuggestionAction(onAccept, 'accept', (feedback) => {
+      suggestionFeedback = feedback;
+    });
   }
 
   function handleReject(e: MouseEvent): void {
     e.stopPropagation();
-    if (readOnly) return;
-    // Suggestions: persist + propagate the rejection (mirror handleAccept) so
-    // every participant's log records it and the ghost text stops rendering.
-    // Comments have no rejection event, so they only dismiss locally.
-    if (kind === 'suggestion') {
-      const root = thread.rootEvent.body;
-      if (root.type === 'suggestion_created') {
-        const roomId: RoomId = thread.rootEvent.meta.roomId;
-        const suggestionId: EventId = root.suggestionId;
-        void reviewRejectSuggestion(roomId, suggestionId);
-      }
-    }
-    if (onReject) onReject();
+    if (readOnly || kind !== 'suggestion' || suggestionPending) return;
+    void runSuggestionAction(onReject, 'reject', (feedback) => {
+      suggestionFeedback = feedback;
+    });
   }
 
   function handleResolve(e: MouseEvent): void {
@@ -401,6 +396,7 @@
   data-hovered={hovered ? 'true' : 'false'}
   data-offset={offset ? 'true' : 'false'}
   data-pending-dismiss={pendingDismiss ? 'true' : 'false'}
+  data-suggestion-pending={suggestionPending ? 'true' : 'false'}
   data-awaiting-reanchor={awaitingReanchor ? 'true' : 'false'}
   style:--rmc-accent={authorAccent}
   onclick={handleCardClick}
@@ -409,6 +405,7 @@
   onmouseleave={handleMouseLeave}
   role="group"
   tabindex="0"
+  aria-busy={suggestionPending}
   aria-label={`${kind} by ${authorName}, ${cardState}`}
 >
   <header class="rmc-header">
@@ -550,24 +547,32 @@
         </button>
       {/if}
     {:else if kind === 'suggestion' && !readOnly}
-      <button
-        type="button"
-        class="rmc-btn rmc-btn-primary"
-        data-action="accept"
-        onclick={(e) => { e.stopPropagation(); handleAccept(); }}
-        disabled={pendingDismiss}
-      >
-        Accept
-      </button>
-      <button
-        type="button"
-        class="rmc-btn"
-        data-action="reject"
-        onclick={handleReject}
-        disabled={pendingDismiss}
-      >
-        Reject
-      </button>
+      {#if onAccept}
+        <button
+          type="button"
+          class="rmc-btn rmc-btn-primary"
+          data-action="accept"
+          onclick={handleAccept}
+          disabled={pendingDismiss || suggestionPending}
+        >
+          {suggestionFeedback.status === 'pending' && suggestionFeedback.action === 'accept'
+            ? 'Accepting…'
+            : 'Accept'}
+        </button>
+      {/if}
+      {#if onReject}
+        <button
+          type="button"
+          class="rmc-btn"
+          data-action="reject"
+          onclick={handleReject}
+          disabled={pendingDismiss || suggestionPending}
+        >
+          {suggestionFeedback.status === 'pending' && suggestionFeedback.action === 'reject'
+            ? 'Rejecting…'
+            : 'Reject'}
+        </button>
+      {/if}
     {:else if kind === 'comment'}
       {#if onReply}
         <button
@@ -594,6 +599,16 @@
       {/if}
     {/if}
   </footer>
+  {/if}
+
+  {#if suggestionFeedback.status === 'error'}
+    <p class="rmc-action-feedback rmc-action-error" role="alert">
+      {suggestionFeedback.message}
+    </p>
+  {:else if suggestionFeedback.status === 'delivery_pending'}
+    <p class="rmc-action-feedback" role="status">
+      {suggestionFeedback.message}
+    </p>
   {/if}
 
   {#if replying && (!readOnly || reviewerAuthoring)}
@@ -927,6 +942,17 @@
   .rmc-actions {
     display: flex;
     gap: 6px;
+  }
+
+  .rmc-action-feedback {
+    margin: 8px 0 0;
+    color: var(--muted-foreground, rgba(0, 0, 0, 0.62));
+    font-size: 11px;
+    line-height: 1.35;
+  }
+
+  .rmc-action-error {
+    color: var(--color-danger, var(--destructive, #b42318));
   }
 
   .rmc-btn {

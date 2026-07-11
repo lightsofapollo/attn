@@ -3411,7 +3411,9 @@ export class RoomDO extends DurableObject<Env> {
     }
     const participantId = deviceRecord.participantId;
 
-    // Peer cap: count distinct deviceIds currently connected.
+    // Peer cap: count distinct deviceIds currently represented by an
+    // announced socket. Multiple tabs/connections for one registered device
+    // are one presence peer and consume one peer-cap slot.
     const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
     if (policy === undefined) {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
@@ -3419,13 +3421,16 @@ export class RoomDO extends DurableObject<Env> {
     const connectedDevices = new Set<string>();
     for (const existing of this.ctx.getWebSockets()) {
       const attached = readAttachment(existing);
-      if (attached?.kind === "device") connectedDevices.add(attached.deviceId);
+      if (attached?.kind === "device" && attached.presenceAnnounced) {
+        connectedDevices.add(attached.deviceId);
+      }
     }
-    // If THIS deviceId is already connected we let it in (the prior socket
-    // will be replaced — the spec doesn't speak to multi-tab per device, so we
-    // treat it as the same peer). New deviceId beyond cap → close 4004.
+    // If THIS deviceId is already connected we let another socket in while
+    // continuing to represent it as one online peer. New deviceId beyond cap
+    // → close 4004.
+    const deviceAlreadyOnline = connectedDevices.has(deviceId);
     const wouldBeOver =
-      !connectedDevices.has(deviceId) && connectedDevices.size >= policy.maxPeers;
+      !deviceAlreadyOnline && connectedDevices.size >= policy.maxPeers;
 
     // Build the upgrade response.
     const pair = new WebSocketPair();
@@ -3444,6 +3449,7 @@ export class RoomDO extends DurableObject<Env> {
       participantId,
       subscribed: false,
       lastPongTs: 0,
+      presenceAnnounced: !wouldBeOver,
     });
 
     if (wouldBeOver) {
@@ -3460,8 +3466,11 @@ export class RoomDO extends DurableObject<Env> {
       });
     }
 
-    // Broadcast presence:join to every OTHER connected peer.
-    this.broadcastPresence({ event: "join", deviceId, participantId }, server);
+    // Presence is per registered device, not per socket. A second tab/socket
+    // for an already-online device must not produce another join.
+    if (!deviceAlreadyOnline) {
+      this.broadcastPresence({ event: "join", deviceId, participantId }, server);
+    }
 
     return new Response(null, {
       status: 101,
@@ -3476,6 +3485,27 @@ export class RoomDO extends DurableObject<Env> {
    * eviction between frames.
    */
   override async webSocketMessage(ws: WebSocket, msg: string | ArrayBuffer): Promise<void> {
+    // A peer-cap rejection uses an accepted-then-closed upgrade so the client
+    // can observe close code 4004. Frames can race that close. Gate on the
+    // attachment before decoding or replying so the rejected socket cannot
+    // subscribe, receive hello/replay/ping, or elicit validation errors.
+    const att = readAttachment(ws);
+    if (att === undefined) {
+      try {
+        ws.close(CLOSE_NORMAL, "missing attachment");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    if (att.kind === "device" && !att.presenceAnnounced) {
+      try {
+        ws.close(CLOSE_PEER_CAP, "peer cap reached");
+      } catch {
+        // close is already in progress
+      }
+      return;
+    }
     if (typeof msg !== "string") {
       sendError(ws, "ATTN_FRAME_INVALID", "binary frames are reserved");
       return;
@@ -3492,16 +3522,6 @@ export class RoomDO extends DurableObject<Env> {
       sendError(ws, "ATTN_FRAME_INVALID", formatZodError(frame.error));
       return;
     }
-    const att = readAttachment(ws);
-    if (att === undefined) {
-      // Attachment shouldn't be missing — defensively close.
-      try {
-        ws.close(CLOSE_NORMAL, "missing attachment");
-      } catch {
-        // ignore
-      }
-      return;
-    }
     const body = frame.data;
     if (body.type === "subscribe") {
       await this.handleSubscribe(ws, att, body.after);
@@ -3513,7 +3533,7 @@ export class RoomDO extends DurableObject<Env> {
     }
   }
 
-  /** Hibernation entry-point on close. Broadcast presence:leave. */
+  /** Hibernation entry-point on close. Leave only after the final device socket. */
   override async webSocketClose(
     ws: WebSocket,
     _code: number,
@@ -3521,11 +3541,13 @@ export class RoomDO extends DurableObject<Env> {
     _wasClean: boolean,
   ): Promise<void> {
     const att = readAttachment(ws);
-    if (att?.kind === "device") {
-      this.broadcastPresence(
-        { event: "leave", deviceId: att.deviceId, participantId: att.participantId },
-        ws,
-      );
+    if (att?.kind === "device" && att.presenceAnnounced &&
+      !this.hasOtherDeviceSocket(ws, att.deviceId)) {
+      this.broadcastPresence({
+        event: "leave",
+        deviceId: att.deviceId,
+        participantId: att.participantId,
+      }, ws);
     }
     // No need to call ws.close — the runtime already did. We just clean up
     // any state we owned (the attachment lives on the socket itself, which
@@ -3535,12 +3557,28 @@ export class RoomDO extends DurableObject<Env> {
   /** Hibernation entry-point on socket-level error. Same handling as close. */
   override async webSocketError(ws: WebSocket, _err: unknown): Promise<void> {
     const att = readAttachment(ws);
-    if (att?.kind === "device") {
-      this.broadcastPresence(
-        { event: "leave", deviceId: att.deviceId, participantId: att.participantId },
-        ws,
-      );
+    if (att?.kind === "device" && att.presenceAnnounced) {
+      // Error may be followed by webSocketClose. Mark this socket first so
+      // that the later callback cannot emit a duplicate leave.
+      writeAttachment(ws, { ...att, presenceAnnounced: false });
+      if (!this.hasOtherDeviceSocket(ws, att.deviceId)) {
+        this.broadcastPresence({
+          event: "leave",
+          deviceId: att.deviceId,
+          participantId: att.participantId,
+        }, ws);
+      }
     }
+  }
+
+  /** True when another announced socket still represents `deviceId` online. */
+  private hasOtherDeviceSocket(originator: WebSocket, deviceId: string): boolean {
+    return this.ctx.getWebSockets().some((socket) => {
+      if (socket === originator) return false;
+      const attachment = readAttachment(socket);
+      return attachment?.kind === "device" && attachment.presenceAnnounced &&
+        attachment.deviceId === deviceId;
+    });
   }
 
   /**
@@ -3596,22 +3634,52 @@ export class RoomDO extends DurableObject<Env> {
       failSocketCorrupt(ws);
       return;
     }
-    const orderedReplay = await this.loadValidatedEnvelopePayloads(serverSeq);
-    if (orderedReplay instanceof Response) {
-      failSocketCorrupt(ws);
-      return;
+    // Close the replay/live-broadcast gap. While the attachment is not yet
+    // subscribed, fresh broadcasts deliberately skip it. Any envelope that
+    // commits while an awaited replay load is in flight must therefore be
+    // folded into a new replay high-watermark before we mark the socket live.
+    // The final equality read is the last await: no ingest can interleave
+    // between that fence and the synchronous replay + attachment update.
+    let replayServerSeq = serverSeq;
+    let orderedReplay: EnvelopeRecord[];
+    for (;;) {
+      const candidate = await this.loadValidatedEnvelopePayloads(replayServerSeq);
+      const latestServerSeq = await this.ctx.storage.get<number>(META.serverSeq);
+      if (!isNonnegativeSafeInteger(latestServerSeq) || latestServerSeq < replayServerSeq) {
+        failSocketCorrupt(ws);
+        return;
+      }
+      if (candidate instanceof Response) {
+        // A concurrent append can make a replay captured at N observe an N+1
+        // record and look corrupt. Retry at the authoritative high-watermark;
+        // a stable failure is genuine storage corruption.
+        if (latestServerSeq !== replayServerSeq) {
+          replayServerSeq = latestServerSeq;
+          continue;
+        }
+        failSocketCorrupt(ws);
+        return;
+      }
+      if (latestServerSeq !== replayServerSeq) {
+        replayServerSeq = latestServerSeq;
+        continue;
+      }
+      orderedReplay = candidate;
+      break;
     }
     const onlineDeviceIds = [...new Set(
       this.ctx.getWebSockets()
         .map((socket) => {
           const attachment = readAttachment(socket);
-          return attachment?.kind === "device" ? attachment.deviceId : undefined;
+          return attachment?.kind === "device" && attachment.presenceAnnounced
+            ? attachment.deviceId
+            : undefined;
         })
         .filter((deviceId): deviceId is string => deviceId !== undefined),
     )].sort();
     const hello: ServerFrame = {
       type: "hello",
-      serverSeq,
+      serverSeq: replayServerSeq,
       policy,
       devices,
       onlineDeviceIds,
@@ -3667,6 +3735,7 @@ export class RoomDO extends DurableObject<Env> {
       for (const sock of sockets) {
         const att = readAttachment(sock);
         if (att === undefined) continue;
+        if (att.kind === "device" && !att.presenceAnnounced) continue;
         if (!att.subscribed) continue;
         if (!deliverableTo(record, att)) continue;
         sendRaw(sock, json);
@@ -3692,7 +3761,7 @@ export class RoomDO extends DurableObject<Env> {
     for (const sock of this.ctx.getWebSockets()) {
       if (sock === originator) continue;
       const att = readAttachment(sock);
-      if (att?.kind !== "device") continue;
+      if (att?.kind !== "device" || !att.presenceAnnounced) continue;
       sendRaw(sock, json);
     }
   }
@@ -4811,6 +4880,8 @@ interface DeviceWSAttachment extends WSAttachmentBase {
   kind: "device";
   deviceId: string;
   participantId: string;
+  /** This socket participates in the device's aggregate online presence. */
+  presenceAnnounced: boolean;
 }
 
 /** Anonymous v3 read session. It is deliberately not a room participant. */
@@ -4974,6 +5045,9 @@ function readAttachment(ws: WebSocket): WSAttachment | undefined {
     kind: "device",
     deviceId: r.deviceId,
     participantId: r.participantId,
+    // Attachments written before aggregate same-device presence shipped did
+    // announce presence, so missing legacy state must restore as true.
+    presenceAnnounced: r.presenceAnnounced !== false,
     subscribed,
     lastPongTs,
   };

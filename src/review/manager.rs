@@ -3733,55 +3733,217 @@ fn rehydrate_snapshot_event(
     room_id: &RoomId,
     event: &mut crate::review::model::ReviewEvent,
 ) {
-    use crate::review::crypto::ids::content_hash;
-    use crate::review::model::{ReviewEventBody, SnapshotPlaintext};
+    use crate::review::model::ReviewEventBody;
 
     let ReviewEventBody::SnapshotCreated {
-        encrypted_blob_ref: Some(blob_ref),
-        inline_snapshot,
-        snapshot_id,
-        ..
+        inline_snapshot, ..
     } = &mut event.body
     else {
         return;
     };
-    if inline_snapshot.is_some() {
-        return;
-    }
-    let bytes = match store.load_snapshot_blob(room_id, &blob_ref.blob_id) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            tracing::warn!(
-                "snapshot {} references blob {} not (yet) in local store; emitting without inline",
-                snapshot_id.as_str(),
-                blob_ref.blob_id,
-            );
-            return;
-        }
+    // `inlineSnapshot` is local-only. Never trust a sender-provided value: a
+    // malicious but authorized publisher could otherwise bypass BlobRef,
+    // baseHash, anchor-index, and manifest-entry binding checks by putting
+    // plaintext directly in the signed event.
+    *inline_snapshot = None;
+    let plaintext = match load_validated_snapshot_plaintext(store, room_id, event) {
+        Ok(plaintext) => plaintext,
         Err(err) => {
-            tracing::warn!("load snapshot blob {}: {err}", blob_ref.blob_id);
+            tracing::warn!("snapshot hydration rejected: {err}");
             return;
         }
     };
-    // The BlobRef rides inside the Ed25519-signed event, so checking the
-    // stored bytes against it extends the signature's integrity to the
-    // blob lane (which is confidentiality-only on the wire).
-    if bytes.len() as u64 != blob_ref.byte_length || content_hash(&bytes) != blob_ref.content_hash {
-        tracing::warn!(
-            "snapshot blob {} failed BlobRef integrity check; dropping inline",
-            blob_ref.blob_id,
-        );
+    if plaintext.doc_type == crate::review::model::DocType::WorkspaceManifest
+        && let Err(err) = validate_workspace_manifest_binding(store, room_id, event, &plaintext)
+    {
+        tracing::warn!("workspace manifest hydration rejected: {err}");
         return;
     }
-    match serde_json::from_slice::<SnapshotPlaintext>(&bytes) {
-        Ok(plaintext) => *inline_snapshot = Some(plaintext),
-        Err(err) => {
-            tracing::warn!(
-                "snapshot blob {} did not parse as SnapshotPlaintext: {err}",
-                blob_ref.blob_id,
-            );
+    if let ReviewEventBody::SnapshotCreated {
+        inline_snapshot, ..
+    } = &mut event.body
+    {
+        *inline_snapshot = Some(plaintext);
+    }
+}
+
+/// Load and validate one persisted snapshot without recursively hydrating any
+/// other event. The event has already passed envelope signature and room
+/// authorization checks before `InboundPipeline` appends it to `events.jsonl`.
+/// Checking its signed `BlobRef` and `baseHash` here therefore extends that
+/// authentication to both the snapshot JSON and its recovered raw bytes.
+fn load_validated_snapshot_plaintext(
+    store: &crate::review::store::ReviewStore,
+    room_id: &RoomId,
+    event: &crate::review::model::ReviewEvent,
+) -> Result<crate::review::model::SnapshotPlaintext, String> {
+    use crate::review::crypto::ids::content_hash;
+    use crate::review::model::{DocType, ReviewEventBody, SnapshotPlaintext};
+
+    let ReviewEventBody::SnapshotCreated {
+        encrypted_blob_ref: Some(blob_ref),
+        snapshot_id,
+        base_hash,
+        ..
+    } = &event.body
+    else {
+        return Err("SnapshotCreated event has no encrypted BlobRef".to_string());
+    };
+    let bytes = store
+        .load_snapshot_blob(room_id, &blob_ref.blob_id)
+        .map_err(|err| format!("load snapshot blob {}: {err}", blob_ref.blob_id))?
+        .ok_or_else(|| {
+            format!(
+                "snapshot {} references blob {} not (yet) in local store",
+                snapshot_id.as_str(),
+                blob_ref.blob_id
+            )
+        })?;
+    if bytes.len() as u64 != blob_ref.byte_length || content_hash(&bytes) != blob_ref.content_hash {
+        return Err(format!(
+            "snapshot blob {} failed signed BlobRef integrity check",
+            blob_ref.blob_id
+        ));
+    }
+    let plaintext = serde_json::from_slice::<SnapshotPlaintext>(&bytes).map_err(|err| {
+        format!(
+            "snapshot blob {} did not parse as SnapshotPlaintext: {err}",
+            blob_ref.blob_id
+        )
+    })?;
+    plaintext.validate().map_err(|err| {
+        format!(
+            "snapshot blob {} failed payload validation: {err}",
+            blob_ref.blob_id
+        )
+    })?;
+    let raw_bytes = plaintext.raw_content_bytes().map_err(|err| {
+        format!(
+            "snapshot blob {} failed raw-content recovery: {err}",
+            blob_ref.blob_id
+        )
+    })?;
+    if content_hash(&raw_bytes) != *base_hash {
+        return Err(format!(
+            "snapshot blob {} raw content does not match signed baseHash",
+            blob_ref.blob_id
+        ));
+    }
+    if let (DocType::Markdown, Some(index)) = (plaintext.doc_type, plaintext.anchor_index.as_ref())
+    {
+        let expected = crate::review::anchors::index::build_anchor_index(&raw_bytes, snapshot_id)
+            .map_err(|err| {
+            format!(
+                "snapshot blob {} anchorIndex rebuild failed: {err}",
+                blob_ref.blob_id
+            )
+        })?;
+        if expected != *index {
+            return Err(format!(
+                "snapshot blob {} carries a non-canonical anchorIndex",
+                blob_ref.blob_id
+            ));
         }
     }
+    Ok(plaintext)
+}
+
+/// Bind a workspace manifest to the exact authenticated entry events that
+/// precede it in the durable room log. A valid manifest cannot invent an
+/// entry, relabel an asset, move a path, or point at bytes other than those
+/// vouched for by each entry event's signed `BlobRef` and `baseHash`.
+fn validate_workspace_manifest_binding(
+    store: &crate::review::store::ReviewStore,
+    room_id: &RoomId,
+    manifest_event: &crate::review::model::ReviewEvent,
+    plaintext: &crate::review::model::SnapshotPlaintext,
+) -> Result<(), String> {
+    use crate::review::crypto::ids::derive_workspace_manifest_file_id;
+    use crate::review::model::ReviewEventBody;
+
+    let ReviewEventBody::SnapshotCreated {
+        file_id: manifest_file_id,
+        ..
+    } = &manifest_event.body
+    else {
+        return Err("workspace manifest payload is not attached to SnapshotCreated".to_string());
+    };
+    let manifest = plaintext
+        .manifest
+        .as_ref()
+        .ok_or_else(|| "workspace manifest payload is missing its manifest".to_string())?;
+
+    // Every joined/owned room persists the invite secret before starting its
+    // transport. It is therefore available at this production hydration
+    // boundary and lets native receivers reject an ordinary file masquerading
+    // as the room's one synthetic manifest document.
+    let room_secret = crate::review::bootstrap::load_room_secret(store.root(), room_id)
+        .map_err(|err| format!("load room secret for manifest FileId binding: {err}"))?;
+    let expected_manifest_file_id = derive_workspace_manifest_file_id(&room_secret);
+    if *manifest_file_id != expected_manifest_file_id {
+        return Err(
+            "manifest event fileId is not the room's synthetic manifest FileId".to_string(),
+        );
+    }
+
+    let mut earlier_snapshots = Vec::new();
+    let mut found_manifest_event = false;
+    for stored in store
+        .iter_events(room_id)
+        .map_err(|err| format!("iterate room events for manifest binding: {err}"))?
+    {
+        let stored = stored.map_err(|err| format!("decode earlier room event: {err}"))?;
+        if stored.meta.event_id == manifest_event.meta.event_id {
+            found_manifest_event = true;
+            break;
+        }
+        if matches!(stored.body, ReviewEventBody::SnapshotCreated { .. }) {
+            earlier_snapshots.push(stored);
+        }
+    }
+    if !found_manifest_event {
+        return Err("manifest event is absent from the authenticated room log".to_string());
+    }
+
+    for entry in &manifest.entries {
+        let matching: Vec<_> = earlier_snapshots
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    &candidate.body,
+                    ReviewEventBody::SnapshotCreated {
+                        file_id,
+                        snapshot_id,
+                        ..
+                    } if file_id == &entry.file_id && snapshot_id == &entry.snapshot_id
+                )
+            })
+            .collect();
+        let [candidate] = matching.as_slice() else {
+            return Err(format!(
+                "manifest entry {} must match exactly one earlier SnapshotCreated event",
+                entry.path
+            ));
+        };
+        let ReviewEventBody::SnapshotCreated {
+            owner_display_path, ..
+        } = &candidate.body
+        else {
+            unreachable!("candidate filter only admits SnapshotCreated");
+        };
+        if owner_display_path.as_deref() != Some(entry.path.as_str()) {
+            return Err(format!(
+                "manifest entry {} does not match the event's normalized ownerDisplayPath",
+                entry.path
+            ));
+        }
+        let entry_payload = load_validated_snapshot_plaintext(store, room_id, candidate)
+            .map_err(|err| format!("manifest entry {}: {err}", entry.path))?;
+        manifest
+            .validate_entry_payload(entry, &entry_payload)
+            .map_err(|err| format!("manifest entry {}: {err}", entry.path))?;
+    }
+    Ok(())
 }
 
 /// Translate a `TransportEvent` from the mailbox WS subscriber into the
@@ -4108,25 +4270,25 @@ mod tests {
     #[test]
     fn rehydrate_snapshot_event_inlines_persisted_blob_and_enforces_integrity() {
         use crate::review::crypto::ids::content_hash;
-        use crate::review::model::{
-            AnchorIndex, BlobRef, BlobStorage, CanonicalEncoding, ReviewEventBody,
-            SnapshotPlaintext,
-        };
+        use crate::review::model::{BlobRef, BlobStorage, ReviewEventBody, SnapshotPlaintext};
 
         let tmp = TempDir::new().expect("tempdir");
         let store = ReviewStore::open_at(tmp.path().join("reviews")).expect("open store");
         let room_id: RoomId = dummy_id("room-rehydrate");
 
+        let snapshot_id: SnapshotId = dummy_id("snap-1");
+        let content = "# rehydrated\n";
+        let base_hash = content_hash(content.as_bytes());
         let plaintext = SnapshotPlaintext {
             doc_type: crate::review::model::DocType::Markdown,
-            content: "# rehydrated\n".to_string(),
-            anchor_index: Some(AnchorIndex {
-                doc_hash: dummy_id("hash-1"),
-                canonical_encoding: CanonicalEncoding::Utf8Bytes,
-                line_count: 1,
-                blocks: vec![],
-                headings: vec![],
-            }),
+            content: Some(content.to_string()),
+            anchor_index: Some(
+                crate::review::anchors::index::build_anchor_index(content.as_bytes(), &snapshot_id)
+                    .expect("anchor index"),
+            ),
+            media_type: None,
+            encoding: None,
+            manifest: None,
         };
         let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
             .expect("canonical snapshot");
@@ -4142,22 +4304,34 @@ mod tests {
         };
         let body = ReviewEventBody::SnapshotCreated {
             file_id: dummy_id("file-1"),
-            snapshot_id: dummy_id("snap-1"),
+            snapshot_id,
             owner_display_path: None,
             parent_snapshot_id: None,
-            base_hash: dummy_id("hash-1"),
+            base_hash,
             encrypted_blob_ref: Some(blob_ref.clone()),
             inline_snapshot: None,
         };
 
-        // Happy path: blob present + hash matches → inline filled.
+        // Happy path: blob present + hash matches → inline filled. A
+        // sender-provided inline payload is discarded first because the wire
+        // protocol authenticates the referenced blob, not inline plaintext.
         let mut event = stub_review_event(&room_id, body.clone());
+        if let ReviewEventBody::SnapshotCreated {
+            inline_snapshot, ..
+        } = &mut event.body
+        {
+            *inline_snapshot = Some(SnapshotPlaintext {
+                content: Some("# injected\n".to_string()),
+                anchor_index: None,
+                ..plaintext.clone()
+            });
+        }
         rehydrate_snapshot_event(&store, &room_id, &mut event);
         match &event.body {
             ReviewEventBody::SnapshotCreated {
                 inline_snapshot: Some(inline),
                 ..
-            } => assert_eq!(inline.content, "# rehydrated\n"),
+            } => assert_eq!(inline.content.as_deref(), Some("# rehydrated\n")),
             other => panic!("expected inlined snapshot, got {other:?}"),
         }
 
@@ -4209,7 +4383,7 @@ mod tests {
         };
         let mut event = stub_review_event(
             &room_id,
-            match body {
+            match body.clone() {
                 ReviewEventBody::SnapshotCreated {
                     file_id,
                     snapshot_id,
@@ -4237,6 +4411,379 @@ mod tests {
                 ..
             }
         ));
+
+        // A BlobRef-valid payload still cannot override the signed raw
+        // baseHash carried by SnapshotCreated.
+        let mut wrong_base = stub_review_event(&room_id, body.clone());
+        if let ReviewEventBody::SnapshotCreated { base_hash, .. } = &mut wrong_base.body {
+            *base_hash = content_hash(b"different raw document");
+        }
+        rehydrate_snapshot_event(&store, &room_id, &mut wrong_base);
+        assert!(matches!(
+            wrong_base.body,
+            ReviewEventBody::SnapshotCreated {
+                inline_snapshot: None,
+                ..
+            }
+        ));
+
+        // Structurally invalid new payloads are soft-dropped after BlobRef
+        // verification; they never poison the replay/event stream.
+        let malformed_asset = br#"{"content":"AA==","docType":"asset","encoding":"base64url","mediaType":"application/octet-stream"}"#;
+        store
+            .save_snapshot_blob(&room_id, "blob-malformed-asset", malformed_asset)
+            .expect("save malformed asset blob");
+        let mut malformed_event = stub_review_event(
+            &room_id,
+            ReviewEventBody::SnapshotCreated {
+                file_id: dummy_id("file-asset"),
+                snapshot_id: dummy_id("snap-asset"),
+                owner_display_path: Some("assets/raw.bin".to_string()),
+                parent_snapshot_id: None,
+                base_hash: content_hash(&[0]),
+                encrypted_blob_ref: Some(BlobRef {
+                    storage: BlobStorage::Mailbox,
+                    blob_id: "blob-malformed-asset".to_string(),
+                    byte_length: malformed_asset.len() as u64,
+                    content_hash: content_hash(malformed_asset),
+                }),
+                inline_snapshot: None,
+            },
+        );
+        rehydrate_snapshot_event(&store, &room_id, &mut malformed_event);
+        assert!(matches!(
+            malformed_event.body,
+            ReviewEventBody::SnapshotCreated {
+                inline_snapshot: None,
+                ..
+            }
+        ));
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ManifestBindingTamper {
+        None,
+        MissingEntry,
+        FileId,
+        SnapshotId,
+        Path,
+        Kind,
+        ByteLength,
+        ContentHash,
+        MediaType,
+        SyntheticManifestFileId,
+        MissingRoomSecret,
+    }
+
+    fn persist_snapshot_event(
+        store: &ReviewStore,
+        room_id: &RoomId,
+        event_label: &str,
+        file_id: FileId,
+        snapshot_id: SnapshotId,
+        path: &str,
+        payload: &crate::review::model::SnapshotPlaintext,
+    ) -> crate::review::model::ReviewEvent {
+        use crate::review::crypto::ids::content_hash;
+        use crate::review::model::{BlobRef, BlobStorage, ReviewEventBody};
+
+        let blob_id = format!("blob-{event_label}");
+        let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(payload)
+            .expect("canonical snapshot payload");
+        store
+            .save_snapshot_blob(room_id, &blob_id, &blob_bytes)
+            .expect("save snapshot blob");
+        let raw = payload.raw_content_bytes().expect("raw snapshot content");
+        let mut event = stub_review_event(
+            room_id,
+            ReviewEventBody::SnapshotCreated {
+                file_id,
+                snapshot_id,
+                owner_display_path: Some(path.to_string()),
+                parent_snapshot_id: None,
+                base_hash: content_hash(&raw),
+                encrypted_blob_ref: Some(BlobRef {
+                    storage: BlobStorage::Mailbox,
+                    blob_id,
+                    byte_length: blob_bytes.len() as u64,
+                    content_hash: content_hash(&blob_bytes),
+                }),
+                inline_snapshot: None,
+            },
+        );
+        event.meta.event_id = dummy_id(&format!("event-{event_label}"));
+        event
+    }
+
+    fn bound_manifest_case(
+        tamper: ManifestBindingTamper,
+    ) -> (
+        TempDir,
+        ReviewStore,
+        RoomId,
+        crate::review::model::ReviewEvent,
+    ) {
+        use crate::review::crypto::ids::{
+            content_hash, derive_room_id, derive_workspace_manifest_file_id,
+        };
+        use crate::review::model::{
+            DocType, ReviewEventBody, SnapshotAssetEncoding, SnapshotPlaintext,
+            WorkspaceManifestEntry, WorkspaceManifestEntryKind, WorkspaceManifestKind,
+            WorkspaceManifestScope, WorkspaceSnapshotManifest,
+        };
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let tmp = TempDir::new().expect("tempdir");
+        let store = ReviewStore::open_at(tmp.path().join("reviews")).expect("open store");
+        let secret = [0x11; 32];
+        let room_id = derive_room_id(&secret);
+        if !matches!(tamper, ManifestBindingTamper::MissingRoomSecret) {
+            let shares = store.root().join("shares");
+            std::fs::create_dir_all(&shares).expect("create shares dir");
+            std::fs::write(
+                shares.join(format!("{}.secret", room_id.as_str())),
+                URL_SAFE_NO_PAD.encode(secret),
+            )
+            .expect("persist test room secret");
+        }
+
+        let asset_file_id: FileId = dummy_id("AQEBAQEBAQEBAQEBAQEBAQ");
+        let asset_snapshot_id: SnapshotId = dummy_id("AgICAgICAgICAgICAgICAg");
+        let markdown_file_id: FileId = dummy_id("AwMDAwMDAwMDAwMDAwMDAw");
+        let markdown_snapshot_id: SnapshotId = dummy_id("BAQEBAQEBAQEBAQEBAQEBA");
+        let asset_raw = vec![0, 0xff, 0x80, b'A', 0, b'/', b'*'];
+        let asset_payload = SnapshotPlaintext {
+            doc_type: DocType::Asset,
+            content: Some(URL_SAFE_NO_PAD.encode(&asset_raw)),
+            anchor_index: None,
+            media_type: Some("application/octet-stream".to_string()),
+            encoding: Some(SnapshotAssetEncoding::Base64url),
+            manifest: None,
+        };
+        let markdown_raw = b"# Nested\n\nHello workspace.\n";
+        let markdown_payload = SnapshotPlaintext {
+            doc_type: DocType::Markdown,
+            content: Some(String::from_utf8(markdown_raw.to_vec()).expect("utf8 markdown")),
+            anchor_index: Some(
+                crate::review::anchors::index::build_anchor_index(
+                    markdown_raw,
+                    &markdown_snapshot_id,
+                )
+                .expect("markdown anchor index"),
+            ),
+            media_type: None,
+            encoding: None,
+            manifest: None,
+        };
+
+        let mut asset_event = persist_snapshot_event(
+            &store,
+            &room_id,
+            "asset-entry",
+            asset_file_id.clone(),
+            asset_snapshot_id.clone(),
+            "assets/raw.bin",
+            &asset_payload,
+        );
+        match tamper {
+            ManifestBindingTamper::FileId => {
+                if let ReviewEventBody::SnapshotCreated { file_id, .. } = &mut asset_event.body {
+                    *file_id = dummy_id("BQUFBQUFBQUFBQUFBQUFBQ");
+                }
+            }
+            ManifestBindingTamper::SnapshotId => {
+                if let ReviewEventBody::SnapshotCreated { snapshot_id, .. } = &mut asset_event.body
+                {
+                    *snapshot_id = dummy_id("BgYGBgYGBgYGBgYGBgYGBg");
+                }
+            }
+            ManifestBindingTamper::Path => {
+                if let ReviewEventBody::SnapshotCreated {
+                    owner_display_path, ..
+                } = &mut asset_event.body
+                {
+                    *owner_display_path = Some("assets/moved.bin".to_string());
+                }
+            }
+            _ => {}
+        }
+        if !matches!(tamper, ManifestBindingTamper::MissingEntry) {
+            assert!(
+                store
+                    .append_event(&room_id, &asset_event)
+                    .expect("append asset event")
+            );
+        }
+
+        let markdown_event = persist_snapshot_event(
+            &store,
+            &room_id,
+            "markdown-entry",
+            markdown_file_id.clone(),
+            markdown_snapshot_id.clone(),
+            "notes/readme.md",
+            &markdown_payload,
+        );
+        assert!(
+            store
+                .append_event(&room_id, &markdown_event)
+                .expect("append markdown event")
+        );
+
+        let mut manifest = WorkspaceSnapshotManifest {
+            v: 1,
+            kind: WorkspaceManifestKind::AttnWorkspaceSnapshot,
+            scope: WorkspaceManifestScope::Workspace,
+            entries: vec![
+                WorkspaceManifestEntry {
+                    file_id: asset_file_id.clone(),
+                    snapshot_id: asset_snapshot_id,
+                    path: "assets/raw.bin".to_string(),
+                    kind: WorkspaceManifestEntryKind::Asset,
+                    media_type: Some("application/octet-stream".to_string()),
+                    byte_length: asset_raw.len() as u64,
+                    content_hash: content_hash(&asset_raw),
+                },
+                WorkspaceManifestEntry {
+                    file_id: markdown_file_id,
+                    snapshot_id: markdown_snapshot_id,
+                    path: "notes/readme.md".to_string(),
+                    kind: WorkspaceManifestEntryKind::Markdown,
+                    media_type: None,
+                    byte_length: markdown_raw.len() as u64,
+                    content_hash: content_hash(markdown_raw),
+                },
+            ],
+        };
+        match tamper {
+            ManifestBindingTamper::Kind => {
+                manifest.entries[0].kind = WorkspaceManifestEntryKind::Html;
+                manifest.entries[0].media_type = None;
+            }
+            ManifestBindingTamper::ByteLength => manifest.entries[0].byte_length += 1,
+            ManifestBindingTamper::ContentHash => {
+                manifest.entries[0].content_hash = content_hash(b"different raw bytes");
+            }
+            ManifestBindingTamper::MediaType => {
+                manifest.entries[0].media_type = Some("image/png".to_string());
+            }
+            _ => {}
+        }
+        let manifest_payload = SnapshotPlaintext {
+            doc_type: DocType::WorkspaceManifest,
+            content: None,
+            anchor_index: None,
+            media_type: None,
+            encoding: None,
+            manifest: Some(manifest),
+        };
+        let mut manifest_event = persist_snapshot_event(
+            &store,
+            &room_id,
+            "workspace-manifest",
+            derive_workspace_manifest_file_id(&secret),
+            dummy_id("BwcHBwcHBwcHBwcHBwcHBw"),
+            "workspace.manifest",
+            &manifest_payload,
+        );
+        if matches!(tamper, ManifestBindingTamper::SyntheticManifestFileId)
+            && let ReviewEventBody::SnapshotCreated { file_id, .. } = &mut manifest_event.body
+        {
+            *file_id = asset_file_id;
+        }
+        assert!(
+            store
+                .append_event(&room_id, &manifest_event)
+                .expect("append manifest event")
+        );
+        (tmp, store, room_id, manifest_event)
+    }
+
+    #[test]
+    fn rehydrate_manifest_binds_valid_nested_markdown_and_binary_entries() {
+        use crate::review::model::{DocType, ReviewEventBody};
+
+        let (_tmp, store, room_id, mut event) = bound_manifest_case(ManifestBindingTamper::None);
+        rehydrate_snapshot_event(&store, &room_id, &mut event);
+        match event.body {
+            ReviewEventBody::SnapshotCreated {
+                inline_snapshot: Some(inline),
+                ..
+            } => {
+                assert_eq!(inline.doc_type, DocType::WorkspaceManifest);
+                assert_eq!(inline.manifest.expect("manifest").entries.len(), 2);
+            }
+            other => panic!("expected bound workspace manifest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rehydrate_manifest_rejects_every_entry_binding_tamper_and_missing_entry() {
+        use crate::review::model::ReviewEventBody;
+
+        for tamper in [
+            ManifestBindingTamper::MissingEntry,
+            ManifestBindingTamper::FileId,
+            ManifestBindingTamper::SnapshotId,
+            ManifestBindingTamper::Path,
+            ManifestBindingTamper::Kind,
+            ManifestBindingTamper::ByteLength,
+            ManifestBindingTamper::ContentHash,
+            ManifestBindingTamper::MediaType,
+            ManifestBindingTamper::SyntheticManifestFileId,
+            ManifestBindingTamper::MissingRoomSecret,
+        ] {
+            let (_tmp, store, room_id, mut event) = bound_manifest_case(tamper);
+            rehydrate_snapshot_event(&store, &room_id, &mut event);
+            assert!(
+                matches!(
+                    event.body,
+                    ReviewEventBody::SnapshotCreated {
+                        inline_snapshot: None,
+                        ..
+                    }
+                ),
+                "{tamper:?} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn rehydrate_legacy_html_does_not_require_manifest_correlation() {
+        use crate::review::model::{DocType, ReviewEventBody, SnapshotPlaintext};
+
+        let tmp = TempDir::new().expect("tempdir");
+        let store = ReviewStore::open_at(tmp.path().join("reviews")).expect("open store");
+        let room_id: RoomId = dummy_id("legacy-html-room");
+        let payload = SnapshotPlaintext {
+            doc_type: DocType::Html,
+            content: Some("<article>legacy</article>\n".to_string()),
+            anchor_index: None,
+            media_type: None,
+            encoding: None,
+            manifest: None,
+        };
+        let mut event = persist_snapshot_event(
+            &store,
+            &room_id,
+            "legacy-html",
+            dummy_id("legacy-file"),
+            dummy_id("legacy-snapshot"),
+            "legacy.html",
+            &payload,
+        );
+        // Legacy single-document snapshots predate the manifest protocol and
+        // therefore need neither a persisted room secret nor an event-log
+        // correlation record at this hydration boundary.
+        rehydrate_snapshot_event(&store, &room_id, &mut event);
+        assert!(matches!(
+            event.body,
+            ReviewEventBody::SnapshotCreated {
+                inline_snapshot: Some(ref inline),
+                ..
+            } if inline == &payload
+        ));
     }
 
     // ----- replay of persisted room state on resume/re-join (attn-6dd) ----
@@ -4244,10 +4791,7 @@ mod tests {
     #[test]
     fn replay_room_to_webview_emits_persisted_events_with_rehydrated_snapshots() {
         use crate::review::crypto::ids::content_hash;
-        use crate::review::model::{
-            AnchorIndex, BlobRef, BlobStorage, CanonicalEncoding, ReviewEventBody,
-            SnapshotPlaintext,
-        };
+        use crate::review::model::{BlobRef, BlobStorage, ReviewEventBody, SnapshotPlaintext};
 
         let (mgr, rx, tmp) = make_manager();
         // Second handle onto the same on-disk store to seed "session 1" state.
@@ -4257,16 +4801,19 @@ mod tests {
         // Persist the snapshot blob the SnapshotCreated event references —
         // this is what the inbound pipeline leaves behind for a reviewer
         // (events.jsonl + blobs/*.bin; no SnapshotNode on the reviewer side).
+        let snapshot_id: SnapshotId = dummy_id("snap-1");
+        let content = "# replayed doc\n";
+        let base_hash = content_hash(content.as_bytes());
         let plaintext = SnapshotPlaintext {
             doc_type: crate::review::model::DocType::Markdown,
-            content: "# replayed doc\n".to_string(),
-            anchor_index: Some(AnchorIndex {
-                doc_hash: dummy_id("hash-1"),
-                canonical_encoding: CanonicalEncoding::Utf8Bytes,
-                line_count: 1,
-                blocks: vec![],
-                headings: vec![],
-            }),
+            content: Some(content.to_string()),
+            anchor_index: Some(
+                crate::review::anchors::index::build_anchor_index(content.as_bytes(), &snapshot_id)
+                    .expect("anchor index"),
+            ),
+            media_type: None,
+            encoding: None,
+            manifest: None,
         };
         let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
             .expect("canonical snapshot");
@@ -4286,10 +4833,10 @@ mod tests {
             &room_id,
             ReviewEventBody::SnapshotCreated {
                 file_id: dummy_id("file-1"),
-                snapshot_id: dummy_id("snap-1"),
+                snapshot_id,
                 owner_display_path: Some("/tmp/doc.md".to_string()),
                 parent_snapshot_id: None,
-                base_hash: dummy_id("hash-1"),
+                base_hash,
                 encrypted_blob_ref: Some(blob_ref),
                 inline_snapshot: None,
             },
@@ -4332,7 +4879,7 @@ mod tests {
                     ReviewEventBody::SnapshotCreated {
                         inline_snapshot: Some(inline),
                         ..
-                    } => assert_eq!(inline.content, "# replayed doc\n"),
+                    } => assert_eq!(inline.content.as_deref(), Some("# replayed doc\n")),
                     other => panic!("expected rehydrated SnapshotCreated, got {other:?}"),
                 }
             }
@@ -6556,7 +7103,7 @@ mod request_snapshot_tests {
             encrypted_blob_ref: None,
             plaintext: Some(SnapshotPlaintext {
                 doc_type: crate::review::model::DocType::Markdown,
-                content: "# hi\n".to_string(),
+                content: Some("# hi\n".to_string()),
                 anchor_index: Some(AnchorIndex {
                     doc_hash: id::<ContentHash>("hash-1"),
                     canonical_encoding: CanonicalEncoding::Utf8Bytes,
@@ -6564,6 +7111,9 @@ mod request_snapshot_tests {
                     blocks: vec![],
                     headings: vec![],
                 }),
+                media_type: None,
+                encoding: None,
+                manifest: None,
             }),
         }
     }

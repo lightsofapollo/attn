@@ -83,7 +83,10 @@ owner_has_two_suggestions() {
     [ "$(json_eval attn_owner "String(window.__attn_review_store__?.events.filter(e => e.body.type === 'suggestion_created').length || 0)")" -eq 2 ]
 }
 invite_ready() {
-    INVITE="$(json_eval attn_owner 'window.__attn_review_store__?.currentShare?.inviteUrl || ""')"
+    # The human default is intentionally comment-only. This gate submits and
+    # resolves suggestions, so it must exercise the explicit suggest grant
+    # rather than relying on the pre-v3 permissive default invite.
+    INVITE="$(json_eval attn_owner 'window.__attn_review_store__?.currentShare?.suggestInviteUrl || ""')"
     case "$INVITE" in attn://review/*) return 0;; *) return 1;; esac
 }
 canonical_sha256_base64url() {

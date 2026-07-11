@@ -6,7 +6,10 @@ import {
   relativeTimeLabel,
   sizeLabel,
 } from './workspace-service';
-import { StorageConflictError, BrowserStorageError } from '../../lib/review/browser-storage';
+import { StorageConflictError, BrowserStorage, BrowserStorageError } from '../../lib/review/browser-storage';
+import { inviteCapabilityFrom } from '../../lib/review/browser-workspace-share';
+import { generateBrowserIdentity } from '../../lib/review/browser-session';
+import { base64UrlEncode, contentHash } from '../../lib/review/browser-crypto';
 
 Object.defineProperty(globalThis, 'IDBKeyRange', {
   configurable: true,
@@ -71,6 +74,55 @@ defineCase('one-click create opens an empty untitled.md and lists it', async () 
     assertEqual(listed[0]!.openPath, 'untitled.md', 'open path');
     assertEqual(listed[0]!.sharing, 'local-only', 'nothing shared before Share');
   } finally {
+    service.close();
+  }
+});
+
+defineCase('desk summary reports a promoted non-stopped owner share honestly', async () => {
+  counter += 1;
+  const factory = new IDBFactory();
+  const databaseName = `attn-workspace-service-test-${counter}`;
+  const service = await BrowserWorkspaceService.open({
+    databaseName, indexedDB: factory, crypto, navigator: null,
+  });
+  const storage = await BrowserStorage.open({
+    databaseName, indexedDB: factory, crypto, navigator: null, createIfMissing: true,
+  });
+  try {
+    const created = await service.createWorkspace();
+    const workspaceId = created.workspace.workspaceId;
+    const rootKey = await storage.getWorkspaceRootKey(workspaceId);
+    assert(rootKey, 'workspace key');
+    const identity = generateBrowserIdentity();
+    const id = (fill: number) => base64UrlEncode(new Uint8Array(16).fill(fill));
+    await storage.shares.bindShare(rootKey, {
+      workspaceId,
+      capId: 'cap-summary',
+      roomId: 'room-summary',
+      scopeKind: 'file',
+      relayUrl: 'https://relay.example',
+      capability: inviteCapabilityFrom({
+        roomSecret: new Uint8Array(32).fill(7),
+        ownerSigningSecret: identity.signingSecret,
+        ownerEncryptionSecret: identity.encryptionSecret,
+        ownerDeviceId: identity.deviceId,
+        ownerParticipantId: identity.participantId,
+        policy: {},
+        publishedManifest: {
+          manifestSnapshotId: id(1),
+          entries: [{
+            path: 'untitled.md', fileId: id(2), snapshotId: id(3),
+            contentHash: contentHash(new Uint8Array(0)),
+            revisionId: created.revision.revisionId,
+          }],
+        },
+      }),
+    });
+    assertEqual((await service.listWorkspaces())[0]?.sharing, 'shared', 'promoted share state');
+    await storage.shares.setPublication(workspaceId, 'cap-summary', 'stopped');
+    assertEqual((await service.listWorkspaces())[0]?.sharing, 'local-only', 'stopped share state');
+  } finally {
+    storage.close();
     service.close();
   }
 });

@@ -217,6 +217,78 @@ export class WorkspaceStore {
     return this.openBody(workspaceId, revision);
   }
 
+  /** Open one exact immutable revision, rejecting path aliases/misbindings. */
+  async getRevisionBody(
+    workspaceId: string,
+    path: string,
+    revisionId: string,
+  ): Promise<Uint8Array> {
+    requireId(workspaceId, 'workspaceId');
+    requireId(revisionId, 'revisionId');
+    const canonical = normalizeEntryPath(path);
+    const revision = await this.getRaw<WorkspaceRevisionRecord>(STORE_WORKSPACE_REVISIONS, [
+      workspaceId,
+      revisionId,
+    ]);
+    if (!revision) throw new BrowserStorageError(`revision does not exist: ${revisionId}`);
+    validateWorkspaceRevisionRecord(revision);
+    if (revision.path !== canonical) {
+      throw new StorageConflictError('revision belongs to a different workspace path');
+    }
+    return this.openBody(workspaceId, revision);
+  }
+
+  /**
+   * Seal an immutable revision for a wider BrowserStorage transaction.
+   * The caller must add the returned record and clear its OPFS GC intent in
+   * the same transaction that advances the entry head.
+   */
+  async prepareRevisionForAtomicCommit(input: {
+    workspaceId: string;
+    revisionId: string;
+    path: string;
+    clock: number;
+    body: Uint8Array;
+  }): Promise<WorkspaceRevisionRecord> {
+    requireId(input.workspaceId, 'workspaceId');
+    requireId(input.revisionId, 'revisionId');
+    const path = normalizeEntryPath(input.path);
+    requireBody(input.body);
+    if (!Number.isSafeInteger(input.clock) || input.clock < 1) {
+      throw new BrowserStorageError('revision clock must be a positive safe integer');
+    }
+    const rootKey = await this.requireRootKey(input.workspaceId);
+    const bodyHash = base64UrlEncode(sha256(input.body));
+    const sealed = await sealRevisionBody(
+      this.cryptoImpl,
+      rootKey,
+      {
+        workspaceId: input.workspaceId,
+        revisionId: input.revisionId,
+        path,
+        clock: input.clock,
+        sizeBytes: input.body.length,
+        bodyHash,
+      },
+      input.body,
+    );
+    // Atomic actions stage before the fencing transaction. Never publish to
+    // the deterministic OPFS path here: a stale concurrent attempt could
+    // overwrite the winner's ciphertext and then lose the transaction.
+    // idb-large keeps the sealed bytes transaction-local at any body size.
+    return {
+      v: WORKSPACE_RECORD_VERSION,
+      workspaceId: input.workspaceId,
+      revisionId: input.revisionId,
+      path,
+      clock: input.clock,
+      createdAt: this.timestamp(0),
+      sizeBytes: input.body.length,
+      bodyHash,
+      body: this.fallbackBody(sealed),
+    };
+  }
+
   // ————— mutations —————
 
   async createWorkspace(input: CreateWorkspaceInput): Promise<CommittedRevision> {
@@ -742,7 +814,7 @@ export class WorkspaceStore {
         const lease = await requestValue<WorkspaceLeaseRecord | undefined>(
           tx.objectStore(STORE_WORKSPACE_LEASES).get(workspaceId),
         );
-        assertFence(lease, fence);
+        assertFence(lease, fence, this.timestamp(0));
       }
       try {
         await plan.apply(tx);
@@ -802,7 +874,7 @@ export class WorkspaceStore {
   private async checkFence(workspaceId: string, fence: WorkspaceFence | undefined): Promise<void> {
     if (!fence) return;
     const lease = await this.getRaw<WorkspaceLeaseRecord>(STORE_WORKSPACE_LEASES, workspaceId);
-    assertFence(lease ?? undefined, fence);
+    assertFence(lease ?? undefined, fence, this.timestamp(0));
   }
 
   private async seal(
@@ -1039,9 +1111,16 @@ export class WorkspaceStore {
   }
 }
 
-function assertFence(lease: WorkspaceLeaseRecord | undefined, fence: WorkspaceFence): void {
+function assertFence(
+  lease: WorkspaceLeaseRecord | undefined,
+  fence: WorkspaceFence,
+  now: number,
+): void {
   if (!lease) throw new StorageConflictError('write requires an active lease');
   validateWorkspaceLeaseRecord(lease);
+  if (lease.expiresAt <= now) {
+    throw new StorageConflictError('write requires an unexpired lease');
+  }
   if (lease.holderId !== fence.holderId || lease.fencingToken !== fence.fencingToken) {
     throw new StorageConflictError('write was fenced off by a newer lease');
   }
@@ -1066,8 +1145,12 @@ function requireName(value: unknown): asserts value is string {
   }
 }
 
-function gcIntentId(workspaceId: string, revisionId: string): string {
+export function workspaceRevisionGcIntentId(workspaceId: string, revisionId: string): string {
   return `opfs:${workspaceId}:${revisionId}`;
+}
+
+function gcIntentId(workspaceId: string, revisionId: string): string {
+  return workspaceRevisionGcIntentId(workspaceId, revisionId);
 }
 
 function opaqueHash(label: string, value: string): string {

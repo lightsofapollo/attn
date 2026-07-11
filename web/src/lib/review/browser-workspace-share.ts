@@ -17,12 +17,27 @@ import { base64UrlDecode, base64UrlEncode } from './browser-crypto';
 import { openCapability, sealCapability, validateWorkspaceRootKey } from './browser-workspace-crypto';
 import { requestValue, transactionDone } from './browser-idb';
 import { BrowserStorageError, StorageConflictError } from './browser-storage-errors';
+import type { PublishedManifestPointer } from './browser-snapshot-publisher';
+import type { SnapshotPublicationSink } from './browser-snapshot-publisher';
+import type { MailboxEnvelope } from './browser-ws';
+import type { WorkspaceFence } from './browser-workspace-store';
+import { compareManifestPathsUtf8 } from './browser-workspace-manifest';
 import {
+  STORE_WORKSPACE_LEASES,
+  STORE_WORKSPACE_ENTRIES,
+  STORE_WORKSPACE_REVISIONS,
   STORE_WORKSPACE_SHARE_CAPS,
   WORKSPACE_INDEX,
   WORKSPACE_RECORD_VERSION,
+  normalizeEntryPath,
+  validateWorkspaceLeaseRecord,
+  validateWorkspaceEntryRecord,
+  validateWorkspaceRevisionRecord,
   validateWorkspaceShareCapRecord,
   type ShareScopeKind,
+  type WorkspaceLeaseRecord,
+  type WorkspaceEntryRecord,
+  type WorkspaceRevisionRecord,
   type WorkspaceShareCapRecord,
 } from './browser-workspace-schema';
 
@@ -46,6 +61,14 @@ export interface InviteCapability {
   policy: unknown;
   /** Published-revision pointer (attn-7xl.4.3 updates it). */
   publishedRevisionId?: string;
+  /** Last fully-acknowledged manifest and stable per-entry identities. */
+  publishedManifest?: PublishedManifestPointer;
+  /** In-flight publication is sealed before its exact ciphertext batch is
+   * exposed to the transport. Envelope ids bind it to durable outbox rows. */
+  pendingPublication?: {
+    publishedManifest: PublishedManifestPointer;
+    envelopeIds: string[];
+  };
 }
 
 export interface ShareRecordView {
@@ -61,7 +84,33 @@ export interface ShareRecordView {
 interface StoredShareRecord extends WorkspaceShareCapRecord {
   relayUrl: string;
   publication: SharePublicationState;
+  /** Monotonic local CAS token; absent legacy records read as generation 0. */
+  generation?: number;
+  /** Legacy pre-sealed ACK promotion journal. New fenced publications leave
+   * this absent and promote explicitly after ACK under the active lease. */
+  publicationCommit?: {
+    envelopeIds: string[];
+    nonce: string;
+    ciphertext: string;
+  };
 }
+
+interface OutboxRecord {
+  roomId: string;
+  envelopeId: string;
+  createdAt: number;
+  envelope: MailboxEnvelope;
+}
+
+interface HistoryRecord extends OutboxRecord {
+  serverSeq: number;
+  ackedAt: number;
+}
+
+// Stable room-store names created by browser-storage schema v2. Kept local to
+// avoid a browser-storage -> workspace-share -> browser-storage import cycle.
+const STORE_OUTBOX = 'outbox';
+const STORE_HISTORY = 'history';
 
 export interface BindShareInput {
   workspaceId: string;
@@ -129,6 +178,7 @@ export class WorkspaceShareStore {
       ciphertext: sealed.ciphertext,
       relayUrl: input.relayUrl,
       publication: 'pending',
+      generation: 0,
     };
     validateWorkspaceShareCapRecord(record);
 
@@ -153,6 +203,13 @@ export class WorkspaceShareStore {
     validateWorkspaceRootKey(rootKey);
     const record = await this.getRaw(workspaceId, capId);
     if (!record) throw new BrowserStorageError(`share does not exist: ${capId}`);
+    return this.openRecord(rootKey, record);
+  }
+
+  private async openRecord(
+    rootKey: CryptoKey,
+    record: StoredShareRecord,
+  ): Promise<InviteCapability> {
     const opened = await openCapability(
       this.cryptoImpl,
       rootKey,
@@ -165,15 +222,7 @@ export class WorkspaceShareStore {
       { nonce: record.nonce, ciphertext: record.ciphertext },
     );
     try {
-      const parsed = JSON.parse(new TextDecoder().decode(opened)) as InviteCapability;
-      if (parsed.v !== CAPABILITY_VERSION || typeof parsed.roomSecret !== 'string') {
-        throw new BrowserStorageError('sealed capability has an invalid schema');
-      }
-      // Sanity-check the secret decodes to 32 bytes without keeping it here.
-      if (base64UrlDecode(parsed.roomSecret).length !== 32) {
-        throw new BrowserStorageError('sealed room secret is not 32 bytes');
-      }
-      return parsed;
+      return validateInviteCapability(JSON.parse(new TextDecoder().decode(opened)));
     } finally {
       opened.fill(0);
     }
@@ -210,10 +259,474 @@ export class WorkspaceShareStore {
       await done.catch(() => undefined);
       throw new BrowserStorageError(`share does not exist: ${capId}`);
     }
-    const next: StoredShareRecord = { ...record, publication };
+    if (publication === 'published') {
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new BrowserStorageError('published state requires durable relay acknowledgements');
+    }
+    if (publication === 'pending') {
+      if (record.publication === 'pending') {
+        await done;
+        return toView(record);
+      }
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new StorageConflictError('share cannot be reset to pending without a new transaction');
+    }
+    const next: StoredShareRecord = {
+      ...record,
+      publication,
+      generation: generationOf(record) + 1,
+      publicationCommit: undefined,
+    };
     store.put(next);
     await done;
     return toView(next);
+  }
+
+  /** A bound adapter keeps the workspace root key out of publisher state. */
+  publicationSink(rootKey: CryptoKey): SnapshotPublicationSink {
+    validateWorkspaceRootKey(rootKey);
+    return {
+      loadPublishedManifest: (workspaceId, capId) =>
+        this.loadPublishedManifest(rootKey, workspaceId, capId),
+      stagePublication: (workspaceId, capId, pointer, envelopes, fence) =>
+        this.stagePublication(rootKey, workspaceId, capId, pointer, envelopes, fence),
+      loadPendingPublication: (workspaceId, capId, fence) =>
+        this.loadPendingPublication(rootKey, workspaceId, capId, fence),
+      commitPublication: (workspaceId, capId, fence) =>
+        this.commitPublication(rootKey, workspaceId, capId, fence),
+    };
+  }
+
+  async loadPublishedManifest(
+    rootKey: CryptoKey,
+    workspaceId: string,
+    capId: string,
+  ): Promise<PublishedManifestPointer | undefined> {
+    validateWorkspaceRootKey(rootKey);
+    const record = await this.getRaw(workspaceId, capId);
+    if (!record) throw new BrowserStorageError(`share does not exist: ${capId}`);
+    const capability = await this.openRecord(rootKey, record);
+    if (capability.pendingPublication) {
+      throw new StorageConflictError('pending publication must be resumed before publishing again');
+    }
+    return capability.publishedManifest === undefined
+      ? undefined
+      : validatePublishedManifest(capability.publishedManifest);
+  }
+
+  /**
+   * Read the last promoted pointer even while a newer publication is pending.
+   * Owner authority uses this only to boot the old authenticated epoch before
+   * adopting and promoting the exact crash-recovery batch through its live
+   * outbox. New publication still goes through loadPublishedManifest(), which
+   * rejects while pending.
+   */
+  async loadPromotedManifest(
+    rootKey: CryptoKey,
+    workspaceId: string,
+    capId: string,
+  ): Promise<PublishedManifestPointer | undefined> {
+    validateWorkspaceRootKey(rootKey);
+    const record = await this.getRaw(workspaceId, capId);
+    if (!record) throw new BrowserStorageError(`share does not exist: ${capId}`);
+    const capability = await this.openRecord(rootKey, record);
+    return capability.publishedManifest === undefined
+      ? undefined
+      : validatePublishedManifest(capability.publishedManifest);
+  }
+
+  /**
+   * Seal the pending pointer and atomically install every immutable envelope.
+   * A crash sees either both journal+batch or neither; no partial batch exists.
+   */
+  async stagePublication(
+    rootKey: CryptoKey,
+    workspaceId: string,
+    capId: string,
+    publishedManifest: PublishedManifestPointer,
+    envelopes: readonly MailboxEnvelope[],
+    fence: WorkspaceFence,
+  ): Promise<ShareRecordView> {
+    validateWorkspaceRootKey(rootKey);
+    const pointer = validatePublishedManifest(publishedManifest);
+    const original = await this.getRaw(workspaceId, capId);
+    if (!original) throw new BrowserStorageError(`share does not exist: ${capId}`);
+    if (original.publication === 'stopped') {
+      throw new StorageConflictError('stopped share cannot stage a publication');
+    }
+    const records = validatePublicationEnvelopes(original.roomId, envelopes);
+    const capability = await this.openRecord(rootKey, original);
+    if (capability.pendingPublication) {
+      throw new StorageConflictError('share already has a pending publication');
+    }
+    const nextCapability: InviteCapability = {
+      ...capability,
+      pendingPublication: {
+        publishedManifest: pointer,
+        envelopeIds: records.map((record) => record.envelopeId),
+      },
+    };
+    const sealed = await this.sealRecordCapability(rootKey, original, nextCapability);
+    const tx = this.db.transaction(
+      [
+        STORE_WORKSPACE_SHARE_CAPS,
+        STORE_WORKSPACE_LEASES,
+        STORE_WORKSPACE_ENTRIES,
+        STORE_WORKSPACE_REVISIONS,
+        STORE_OUTBOX,
+        STORE_HISTORY,
+      ],
+      'readwrite',
+    );
+    const done = transactionDone(tx);
+    const shares = tx.objectStore(STORE_WORKSPACE_SHARE_CAPS);
+    await this.assertActiveFenceInTransaction(tx, workspaceId, fence);
+    const current = await requestValue<StoredShareRecord | undefined>(
+      shares.get([workspaceId, capId]),
+    );
+    if (!sameGeneration(current, original)) {
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new StorageConflictError('share changed in another tab');
+    }
+    const workspaceEntries = tx.objectStore(STORE_WORKSPACE_ENTRIES);
+    const workspaceRevisions = tx.objectStore(STORE_WORKSPACE_REVISIONS);
+    for (const entry of pointer.entries) {
+      if (entry.revisionId === undefined) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new BrowserStorageError('published manifest entry is missing its source revision');
+      }
+      const [live, revision] = await Promise.all([
+        requestValue<WorkspaceEntryRecord | undefined>(
+          workspaceEntries.get([workspaceId, entry.path]),
+        ),
+        requestValue<WorkspaceRevisionRecord | undefined>(
+          workspaceRevisions.get([workspaceId, entry.revisionId]),
+        ),
+      ]);
+      if (!live || live.deletedAt !== undefined || !revision) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('published source revision is not a live workspace head');
+      }
+      validateWorkspaceEntryRecord(live);
+      validateWorkspaceRevisionRecord(revision);
+      if (
+        live.headRevisionId !== entry.revisionId ||
+        revision.path !== entry.path ||
+        revision.bodyHash !== entry.contentHash
+      ) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('published source revision moved or mismatches content');
+      }
+    }
+    const outbox = tx.objectStore(STORE_OUTBOX);
+    const history = tx.objectStore(STORE_HISTORY);
+    for (const record of records) {
+      const pending = await requestValue<OutboxRecord | undefined>(
+        outbox.get([original.roomId, record.envelopeId]),
+      );
+      const sent = await requestValue<HistoryRecord | undefined>(
+        history.get([original.roomId, record.envelopeId]),
+      );
+      const prior = pending ?? sent;
+      if (prior && !sameEnvelope(prior.envelope, record.envelope)) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('publication envelope id conflicts with durable ciphertext');
+      }
+      if (!prior) outbox.add(record);
+    }
+    const next: StoredShareRecord = {
+      ...original,
+      nonce: sealed.nonce,
+      ciphertext: sealed.ciphertext,
+      publication: 'pending',
+      generation: generationOf(original) + 1,
+      // ACK moves exact ciphertext to history, but cannot promote this pointer
+      // without the workspace key and a currently-valid fencing token.
+      publicationCommit: undefined,
+    };
+    shares.put(next);
+    await done;
+    return toView(next);
+  }
+
+  /** Recover only unacknowledged exact ciphertext; history proves prior ACKs. */
+  async loadPendingPublication(
+    rootKey: CryptoKey,
+    workspaceId: string,
+    capId: string,
+    fence: WorkspaceFence,
+  ): Promise<readonly MailboxEnvelope[]> {
+    validateWorkspaceRootKey(rootKey);
+    const record = await this.getRaw(workspaceId, capId);
+    if (!record) throw new BrowserStorageError(`share does not exist: ${capId}`);
+    if (record.publication === 'published') return [];
+    if (record.publication !== 'pending') {
+      throw new StorageConflictError('share publication is not pending');
+    }
+    const capability = await this.openRecord(rootKey, record);
+    const pending = validatePendingPublication(capability.pendingPublication);
+    const tx = this.db.transaction(
+      [STORE_WORKSPACE_LEASES, STORE_OUTBOX, STORE_HISTORY],
+      'readonly',
+    );
+    const done = transactionDone(tx);
+    await this.assertActiveFenceInTransaction(tx, workspaceId, fence);
+    const outbox = tx.objectStore(STORE_OUTBOX);
+    const history = tx.objectStore(STORE_HISTORY);
+    const recovered: MailboxEnvelope[] = [];
+    for (const envelopeId of pending.envelopeIds) {
+      const queued = await requestValue<OutboxRecord | undefined>(
+        outbox.get([record.roomId, envelopeId]),
+      );
+      const sent = await requestValue<HistoryRecord | undefined>(
+        history.get([record.roomId, envelopeId]),
+      );
+      if (queued && sent) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('publication envelope exists in outbox and history');
+      }
+      if (!queued && !sent) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('publication envelope is missing from durable storage');
+      }
+      if (
+        (queued && queued.envelope.envelopeId !== envelopeId) ||
+        (sent && sent.envelope.envelopeId !== envelopeId)
+      ) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('publication envelope routing metadata is corrupt');
+      }
+      if (queued) {
+        validatePublicationEnvelopes(record.roomId, [queued.envelope]);
+        recovered.push(structuredClone(queued.envelope));
+      }
+    }
+    await done;
+    return recovered;
+  }
+
+  /** Promote the sealed pending pointer only after every envelope has an ACK. */
+  async commitPublication(
+    rootKey: CryptoKey,
+    workspaceId: string,
+    capId: string,
+    fence: WorkspaceFence,
+  ): Promise<ShareRecordView> {
+    validateWorkspaceRootKey(rootKey);
+    await this.assertActiveFence(workspaceId, fence);
+    const original = await this.getRaw(workspaceId, capId);
+    if (!original) throw new BrowserStorageError(`share does not exist: ${capId}`);
+    if (original.publication === 'published') return toView(original);
+    if (original.publication !== 'pending') {
+      throw new StorageConflictError('share publication is not pending');
+    }
+    const capability = await this.openRecord(rootKey, original);
+    const pending = validatePendingPublication(capability.pendingPublication);
+    const finalCapability: InviteCapability = {
+      ...capability,
+      publishedManifest: pending.publishedManifest,
+      pendingPublication: undefined,
+    };
+    const promotion = await this.sealRecordCapability(rootKey, original, finalCapability);
+
+    const tx = this.db.transaction(
+      [
+        STORE_WORKSPACE_SHARE_CAPS,
+        STORE_WORKSPACE_LEASES,
+        STORE_WORKSPACE_ENTRIES,
+        STORE_WORKSPACE_REVISIONS,
+        STORE_OUTBOX,
+        STORE_HISTORY,
+      ],
+      'readwrite',
+    );
+    const done = transactionDone(tx);
+    const store = tx.objectStore(STORE_WORKSPACE_SHARE_CAPS);
+    await this.assertActiveFenceInTransaction(tx, workspaceId, fence);
+    const current = await requestValue<StoredShareRecord | undefined>(
+      store.get([workspaceId, capId]),
+    );
+    if (!sameGeneration(current, original)) {
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new StorageConflictError('share capability changed in another tab');
+    }
+    const workspaceEntries = tx.objectStore(STORE_WORKSPACE_ENTRIES);
+    const workspaceRevisions = tx.objectStore(STORE_WORKSPACE_REVISIONS);
+    for (const entry of pending.publishedManifest.entries) {
+      if (entry.revisionId === undefined) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new BrowserStorageError('pending published manifest entry is missing its source revision');
+      }
+      const [live, revision] = await Promise.all([
+        requestValue<WorkspaceEntryRecord | undefined>(
+          workspaceEntries.get([workspaceId, entry.path]),
+        ),
+        requestValue<WorkspaceRevisionRecord | undefined>(
+          workspaceRevisions.get([workspaceId, entry.revisionId]),
+        ),
+      ]);
+      if (!live || live.deletedAt !== undefined || !revision) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('published source revision is no longer a live workspace head');
+      }
+      validateWorkspaceEntryRecord(live);
+      validateWorkspaceRevisionRecord(revision);
+      if (
+        live.headRevisionId !== entry.revisionId ||
+        revision.path !== entry.path ||
+        revision.bodyHash !== entry.contentHash
+      ) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('published source revision moved before promotion');
+      }
+    }
+    const outbox = tx.objectStore(STORE_OUTBOX);
+    const history = tx.objectStore(STORE_HISTORY);
+    for (const envelopeId of pending.envelopeIds) {
+      const queued = await requestValue<OutboxRecord | undefined>(
+        outbox.get([original.roomId, envelopeId]),
+      );
+      const sent = await requestValue<HistoryRecord | undefined>(
+        history.get([original.roomId, envelopeId]),
+      );
+      if (queued || !sent) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('publication has not been fully acknowledged');
+      }
+    }
+    const next: StoredShareRecord = {
+      ...current,
+      nonce: promotion.nonce,
+      ciphertext: promotion.ciphertext,
+      publication: 'published',
+      generation: generationOf(current) + 1,
+      publicationCommit: undefined,
+    };
+    store.put(next);
+    await done;
+    return toView(next);
+  }
+
+  /**
+   * Abandon only a provably stale pending pointer while retaining the last
+   * promoted generation. Exact snapshot envelopes stay in history/outbox as
+   * harmless immutable blobs; the caller immediately republishes live heads.
+   */
+  async discardPendingPublication(
+    rootKey: CryptoKey,
+    workspaceId: string,
+    capId: string,
+    fence: WorkspaceFence,
+  ): Promise<ShareRecordView> {
+    validateWorkspaceRootKey(rootKey);
+    const original = await this.getRaw(workspaceId, capId);
+    if (!original) throw new BrowserStorageError(`share does not exist: ${capId}`);
+    if (original.publication !== 'pending') {
+      throw new StorageConflictError('share publication is not pending');
+    }
+    const capability = await this.openRecord(rootKey, original);
+    validatePendingPublication(capability.pendingPublication);
+    if (!capability.publishedManifest) {
+      throw new StorageConflictError('initial publication cannot be discarded');
+    }
+    const nextCapability: InviteCapability = {
+      ...capability,
+      pendingPublication: undefined,
+    };
+    const sealed = await this.sealRecordCapability(rootKey, original, nextCapability);
+    const tx = this.db.transaction(
+      [STORE_WORKSPACE_SHARE_CAPS, STORE_WORKSPACE_LEASES],
+      'readwrite',
+    );
+    const done = transactionDone(tx);
+    await this.assertActiveFenceInTransaction(tx, workspaceId, fence);
+    const store = tx.objectStore(STORE_WORKSPACE_SHARE_CAPS);
+    const current = await requestValue<StoredShareRecord | undefined>(
+      store.get([workspaceId, capId]),
+    );
+    if (!sameGeneration(current, original)) {
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new StorageConflictError('share capability changed while discarding publication');
+    }
+    const next: StoredShareRecord = {
+      ...current,
+      nonce: sealed.nonce,
+      ciphertext: sealed.ciphertext,
+      publication: 'published',
+      generation: generationOf(current) + 1,
+      publicationCommit: undefined,
+    };
+    store.put(next);
+    await done;
+    return toView(next);
+  }
+
+  private async assertActiveFence(
+    workspaceId: string,
+    fence: WorkspaceFence,
+  ): Promise<void> {
+    const tx = this.db.transaction(STORE_WORKSPACE_LEASES, 'readonly');
+    const done = transactionDone(tx);
+    await this.assertActiveFenceInTransaction(tx, workspaceId, fence);
+    await done;
+  }
+
+  private async assertActiveFenceInTransaction(
+    tx: IDBTransaction,
+    workspaceId: string,
+    fence: WorkspaceFence,
+  ): Promise<void> {
+    const lease = await requestValue<WorkspaceLeaseRecord | undefined>(
+      tx.objectStore(STORE_WORKSPACE_LEASES).get(workspaceId),
+    );
+    if (lease) validateWorkspaceLeaseRecord(lease);
+    if (
+      !lease ||
+      lease.holderId !== fence.holderId ||
+      lease.fencingToken !== fence.fencingToken ||
+      lease.expiresAt <= this.timestamp()
+    ) {
+      throw new StorageConflictError('publication write was fenced off');
+    }
+  }
+
+  private async sealRecordCapability(
+    rootKey: CryptoKey,
+    record: StoredShareRecord,
+    capability: InviteCapability,
+  ): Promise<{ nonce: string; ciphertext: string }> {
+    const plaintext = new TextEncoder().encode(JSON.stringify(capability));
+    try {
+      return await sealCapability(
+        this.cryptoImpl,
+        rootKey,
+        {
+          workspaceId: record.workspaceId,
+          capId: record.capId,
+          roomId: record.roomId,
+          scopeKind: record.scopeKind,
+        },
+        plaintext,
+      );
+    } finally {
+      plaintext.fill(0);
+    }
   }
 
   /** Remove a share binding (stop-sharing / rollback). */
@@ -255,6 +768,7 @@ export function inviteCapabilityFrom(input: {
   ownerParticipantId: string;
   policy: unknown;
   publishedRevisionId?: string;
+  publishedManifest?: PublishedManifestPointer;
 }): InviteCapability {
   return {
     v: CAPABILITY_VERSION,
@@ -267,7 +781,236 @@ export function inviteCapabilityFrom(input: {
     ...(input.publishedRevisionId === undefined
       ? {}
       : { publishedRevisionId: input.publishedRevisionId }),
+    ...(input.publishedManifest === undefined
+      ? {}
+      : { publishedManifest: validatePublishedManifest(input.publishedManifest) }),
   };
+}
+
+function validateInviteCapability(value: unknown): InviteCapability {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new BrowserStorageError('sealed capability has an invalid schema');
+  }
+  const parsed = value as Partial<InviteCapability>;
+  if (
+    parsed.v !== CAPABILITY_VERSION ||
+    typeof parsed.roomSecret !== 'string' ||
+    typeof parsed.ownerSigningSecret !== 'string' ||
+    typeof parsed.ownerEncryptionSecret !== 'string' ||
+    typeof parsed.ownerDeviceId !== 'string' ||
+    parsed.ownerDeviceId.length === 0 ||
+    typeof parsed.ownerParticipantId !== 'string' ||
+    parsed.ownerParticipantId.length === 0 ||
+    typeof parsed.policy !== 'object' ||
+    parsed.policy === null
+  ) {
+    throw new BrowserStorageError('sealed capability has an invalid schema');
+  }
+  for (const [label, secret] of [
+    ['room secret', parsed.roomSecret],
+    ['owner signing secret', parsed.ownerSigningSecret],
+    ['owner encryption secret', parsed.ownerEncryptionSecret],
+  ] as const) {
+    try {
+      if (base64UrlDecode(secret).length !== 32) {
+        throw new BrowserStorageError(`sealed ${label} is not 32 bytes`);
+      }
+    } catch (error) {
+      if (error instanceof BrowserStorageError) throw error;
+      throw new BrowserStorageError(`sealed ${label} is invalid`);
+    }
+  }
+  if (parsed.publishedRevisionId !== undefined && typeof parsed.publishedRevisionId !== 'string') {
+    throw new BrowserStorageError('sealed published revision is invalid');
+  }
+  return {
+    ...(parsed as InviteCapability),
+    ...(parsed.publishedManifest === undefined
+      ? {}
+      : { publishedManifest: validatePublishedManifest(parsed.publishedManifest) }),
+    ...(parsed.pendingPublication === undefined
+      ? {}
+      : { pendingPublication: validatePendingPublication(parsed.pendingPublication) }),
+  };
+}
+
+function validatePendingPublication(
+  value: InviteCapability['pendingPublication'] | unknown,
+): NonNullable<InviteCapability['pendingPublication']> {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('publishedManifest' in value) ||
+    !('envelopeIds' in value) ||
+    !Array.isArray(value.envelopeIds) ||
+    value.envelopeIds.length === 0
+  ) {
+    throw new BrowserStorageError('sealed pending publication is invalid');
+  }
+  const ids = new Set<string>();
+  const envelopeIds = value.envelopeIds.map((id) => {
+    requireCapabilityId(id, 16, 'pending envelopeId');
+    if (ids.has(id)) throw new BrowserStorageError('pending publication has duplicate envelopes');
+    ids.add(id);
+    return id;
+  });
+  return {
+    publishedManifest: validatePublishedManifest(
+      value.publishedManifest as PublishedManifestPointer,
+    ),
+    envelopeIds,
+  };
+}
+
+function validatePublicationEnvelopes(
+  roomId: string,
+  envelopes: readonly MailboxEnvelope[],
+): OutboxRecord[] {
+  if (envelopes.length === 0) throw new BrowserStorageError('publication batch is empty');
+  const ids = new Set<string>();
+  return envelopes.map((envelope) => {
+    if (!envelope || typeof envelope !== 'object') {
+      throw new BrowserStorageError('publication envelope is invalid');
+    }
+    if (envelope.v !== undefined && envelope.v !== 2) {
+      throw new BrowserStorageError('publication envelope version is invalid');
+    }
+    if (envelope.roomId !== undefined && envelope.roomId !== roomId) {
+      throw new BrowserStorageError('publication envelope room is invalid');
+    }
+    requireCapabilityId(envelope.envelopeId, 16, 'envelopeId');
+    if (ids.has(envelope.envelopeId)) {
+      throw new BrowserStorageError('publication batch has a duplicate envelope id');
+    }
+    ids.add(envelope.envelopeId);
+    requireId(envelope.authorId, 'envelope authorId');
+    requireId(envelope.deviceId, 'envelope deviceId');
+    if (envelope.kind !== 'event' && envelope.kind !== 'snapshot_blob') {
+      throw new BrowserStorageError('publication envelope kind is invalid');
+    }
+    if (
+      !Number.isSafeInteger(envelope.createdAt) ||
+      !Number.isSafeInteger(envelope.expiresAt) ||
+      envelope.createdAt < 0 ||
+      envelope.expiresAt < envelope.createdAt
+    ) {
+      throw new BrowserStorageError('publication envelope timestamps are invalid');
+    }
+    requireCapabilityId(envelope.nonce, 24, 'envelope nonce');
+    let ciphertext: Uint8Array;
+    try {
+      ciphertext = base64UrlDecode(envelope.ciphertext);
+    } catch {
+      throw new BrowserStorageError('publication envelope ciphertext is invalid');
+    }
+    try {
+      if (
+        ciphertext.length < 16 ||
+        base64UrlEncode(ciphertext) !== envelope.ciphertext ||
+        envelope.ciphertextBytes !== ciphertext.length
+      ) {
+        throw new BrowserStorageError('publication envelope ciphertext length is invalid');
+      }
+    } finally {
+      ciphertext.fill(0);
+    }
+    return {
+      roomId,
+      envelopeId: envelope.envelopeId,
+      createdAt: envelope.createdAt,
+      envelope: structuredClone(envelope),
+    };
+  });
+}
+
+function generationOf(record: StoredShareRecord): number {
+  return Number.isSafeInteger(record.generation) && (record.generation ?? 0) >= 0
+    ? record.generation!
+    : 0;
+}
+
+function sameGeneration(
+  current: StoredShareRecord | undefined,
+  original: StoredShareRecord,
+): current is StoredShareRecord {
+  return Boolean(
+    current &&
+      generationOf(current) === generationOf(original) &&
+      current.nonce === original.nonce &&
+      current.ciphertext === original.ciphertext &&
+      current.publication === original.publication,
+  );
+}
+
+function sameEnvelope(left: MailboxEnvelope, right: MailboxEnvelope): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validatePublishedManifest(value: PublishedManifestPointer): PublishedManifestPointer {
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    typeof value.manifestSnapshotId !== 'string' ||
+    value.manifestSnapshotId.length === 0 ||
+    !Array.isArray(value.entries) ||
+    value.entries.length === 0
+  ) {
+    throw new BrowserStorageError('published manifest pointer is invalid');
+  }
+  requireCapabilityId(value.manifestSnapshotId, 16, 'manifest snapshotId');
+  let previous: string | undefined;
+  const fileIds = new Set<string>();
+  const snapshotIds = new Set<string>();
+  const entries = value.entries.map((entry) => {
+    if (
+      typeof entry !== 'object' ||
+      entry === null ||
+      typeof entry.path !== 'string' ||
+      normalizeEntryPathForCapability(entry.path) !== entry.path ||
+      typeof entry.fileId !== 'string' ||
+      typeof entry.snapshotId !== 'string' ||
+      typeof entry.contentHash !== 'string' ||
+      (entry.revisionId !== undefined && typeof entry.revisionId !== 'string')
+    ) {
+      throw new BrowserStorageError('published manifest entry is invalid');
+    }
+    requireCapabilityId(entry.fileId, 16, 'entry fileId');
+    requireCapabilityId(entry.snapshotId, 16, 'entry snapshotId');
+    requireCapabilityId(entry.contentHash, 32, 'entry contentHash');
+    if (entry.revisionId !== undefined) {
+      requireCapabilityId(entry.revisionId, 16, 'entry revisionId');
+    }
+    if (fileIds.has(entry.fileId) || snapshotIds.has(entry.snapshotId)) {
+      throw new BrowserStorageError('published manifest entries have duplicate identities');
+    }
+    fileIds.add(entry.fileId);
+    snapshotIds.add(entry.snapshotId);
+    if (previous !== undefined && compareManifestPathsUtf8(previous, entry.path) >= 0) {
+      throw new BrowserStorageError('published manifest entries are not uniquely path-sorted');
+    }
+    previous = entry.path;
+    return { ...entry };
+  });
+  return { manifestSnapshotId: value.manifestSnapshotId, entries };
+}
+
+function requireCapabilityId(value: string, bytes: number, label: string): void {
+  try {
+    const decoded = base64UrlDecode(value);
+    if (decoded.length !== bytes || base64UrlEncode(decoded) !== value) {
+      throw new Error('invalid length/encoding');
+    }
+  } catch {
+    throw new BrowserStorageError(`published manifest ${label} is invalid`);
+  }
+}
+
+function normalizeEntryPathForCapability(path: string): string {
+  try {
+    return normalizeEntryPath(path);
+  } catch {
+    return '';
+  }
 }
 
 function toView(record: StoredShareRecord): ShareRecordView {

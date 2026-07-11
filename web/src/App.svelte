@@ -621,6 +621,12 @@
       // Owner only: seed an authority for a file a reviewer reaches before the
       // owner has opened it, from that file's base snapshot.
       getSeedDoc: isOwner ? collabSeedDocFor : undefined,
+      isAuthorityDevice: isOwner
+        ? undefined
+        : (deviceId) =>
+            reviewStore.peersResolved.some(
+              (peer) => peer.deviceId === deviceId && peer.kind === 'owner',
+            ),
       getLocation: currentCollabLocation,
       onPeerLocation: (deviceId, location) => {
         reviewStore.notePeerLocation(deviceId, location);
@@ -2137,7 +2143,12 @@
       // Live transport state: `mailbox` on relay subscribe, `offline` on
       // disconnect. Drives the ConnectionBadge.
       reviewConnection(payload: import('./lib/types').ReviewConnectionChanged) {
+        const reconnecting =
+          payload.roomId === reviewStore.currentRoomId &&
+          reviewStore.connection === 'offline' &&
+          payload.connection !== 'offline';
         reviewStore.applyConnection(payload);
+        if (reconnecting) collabController?.onTransportConnected();
       },
       reviewUnread(payload: ReviewUnreadChanged) {
         reviewStore.applyUnread(payload);

@@ -25,7 +25,8 @@ export interface AssembleBrowserSignalInput {
   roomId: string;
   authorId: string;
   deviceId: string;
-  targetDeviceId: string;
+  /** Required for negotiation/request messages; omitted only for collab broadcast. */
+  targetDeviceId?: string;
   createdAt: number;
   expiresAt: number;
   payload: BrowserSignalingPayload;
@@ -64,7 +65,7 @@ export function assembleBrowserSignal(input: AssembleBrowserSignalInput): Mailbo
       createdAt: input.createdAt,
       expiresAt: input.expiresAt,
       kind: 'signal',
-      target: { deviceId: input.targetDeviceId },
+      target: input.targetDeviceId === undefined ? null : { deviceId: input.targetDeviceId },
       nonce: base64UrlEncode(nonce),
       ciphertext: base64UrlEncode(ciphertext),
       ciphertextBytes: ciphertext.length,
@@ -167,9 +168,15 @@ function validateAssembleInput(input: AssembleBrowserSignalInput): void {
     ['roomId', input.roomId],
     ['authorId', input.authorId],
     ['deviceId', input.deviceId],
-    ['targetDeviceId', input.targetDeviceId],
   ] as const) {
     if (value.length === 0) throw new Error(`${label} is required`);
+  }
+  if (input.payload.kind === 'collab') {
+    if (input.targetDeviceId !== undefined) {
+      throw new Error('collab signal must be broadcast with no targetDeviceId');
+    }
+  } else if (input.targetDeviceId === undefined || input.targetDeviceId.length === 0) {
+    throw new Error('targetDeviceId is required for non-collab signaling');
   }
   if (input.payload.from !== input.deviceId) throw new Error('signal from must match deviceId');
   if (!Number.isSafeInteger(input.createdAt) || input.createdAt <= 0) {

@@ -9,6 +9,7 @@
 // trivially unit-testable.
 
 import type { FileId, RoomId, ReviewSnapshot } from '../types';
+import { isRenderableReviewSnapshot } from './snapshot-kind';
 
 /** A single shared file, resolved to its latest snapshot. */
 export interface SharedFile {
@@ -100,7 +101,7 @@ export function deriveSharedFiles(
 
   const latestByFile = new Map<FileId, ReviewSnapshot>();
   for (const snap of snapshots) {
-    if (snap.roomId !== roomId) continue;
+    if (snap.roomId !== roomId || !isRenderableReviewSnapshot(snap)) continue;
     const existing = latestByFile.get(snap.fileId);
     if (existing === undefined || snap.createdAt > existing.createdAt) {
       latestByFile.set(snap.fileId, snap);

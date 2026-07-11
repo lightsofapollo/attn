@@ -83,3 +83,9 @@ impl ParticipantId {
 /// snapshot creation and working-copy save.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentHash(String);
+
+impl ContentHash {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}

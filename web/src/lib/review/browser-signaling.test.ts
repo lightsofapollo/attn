@@ -46,7 +46,7 @@ for (const payload of [
       roomId: 'room-a',
       authorId: 'participant-a',
       deviceId: 'device-a',
-      targetDeviceId: 'device-b',
+      ...(payload.kind === 'collab' ? {} : { targetDeviceId: 'device-b' }),
       createdAt: 1_700_000_000_000,
       expiresAt: 1_700_086_400_000,
       payload,
@@ -71,8 +71,14 @@ for (const payload of [
     const parsed = parseBrowserSignalingPayload(plaintext, 'device-a');
     plaintext.fill(0);
     assert(JSON.stringify(parsed) === JSON.stringify(payload), 'payload round-trip mismatch');
-    assert(validateSignalTarget(envelope, 'device-b'), 'matching signal target rejected');
-    assert(!validateSignalTarget(envelope, 'device-c'), 'wrong signal target accepted');
+    assert(validateSignalTarget(envelope, 'device-b'), 'matching/broadcast signal target rejected');
+    assert(
+      payload.kind === 'collab' || !validateSignalTarget(envelope, 'device-c'),
+      'wrong signal target accepted',
+    );
+    if (payload.kind === 'collab') {
+      assert(envelope.target === null, 'collab signal was not emitted as target:null');
+    }
     assert(validateSignalTarget({ ...envelope, target: null }, 'device-b'), 'broadcast signal rejected before decrypt');
     const wire = JSON.stringify(envelope);
     assert(!wire.includes('v=0'), 'SDP leaked into relay envelope');
@@ -97,6 +103,40 @@ test('strict parser rejects sender mismatch and extra fields', () => {
   try { parseBrowserSignalingPayload(extra, 'device-a'); } catch { extraRejected = true; }
   assert(mismatchRejected, 'sender mismatch was accepted');
   assert(extraRejected, 'extra signaling field was accepted');
+});
+
+test('assembler rejects targeted collab and broadcast negotiation', () => {
+  let targetedCollabRejected = false;
+  try {
+    assembleBrowserSignal({
+      signalingKey: key,
+      roomId: 'room-a',
+      authorId: 'participant-a',
+      deviceId: 'device-a',
+      targetDeviceId: 'device-b',
+      createdAt: 1_700_000_000_000,
+      expiresAt: 1_700_086_400_000,
+      payload: { kind: 'collab', from: 'device-a', payload: '{}' },
+      clientNonce,
+      aeadNonce,
+    });
+  } catch { targetedCollabRejected = true; }
+  let broadcastOfferRejected = false;
+  try {
+    assembleBrowserSignal({
+      signalingKey: key,
+      roomId: 'room-a',
+      authorId: 'participant-a',
+      deviceId: 'device-a',
+      createdAt: 1_700_000_000_000,
+      expiresAt: 1_700_086_400_000,
+      payload: { kind: 'offer', from: 'device-a', sdp: 'v=0' },
+      clientNonce,
+      aeadNonce,
+    });
+  } catch { broadcastOfferRejected = true; }
+  assert(targetedCollabRejected, 'targeted collab signal accepted');
+  assert(broadcastOfferRejected, 'broadcast offer signal accepted');
 });
 
 console.log(`browser-signaling: ${passed} passed, ${failures.length} failed`);

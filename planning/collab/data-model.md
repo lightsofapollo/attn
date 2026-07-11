@@ -265,10 +265,36 @@ type SnapshotNode = {
   baseHash: ContentHash;
   byteLength: number;
   encryptedBlobRef?: BlobRef;
-  plaintext?: {
-    markdown: string;
-    anchorIndex: AnchorIndex;
-  };
+  plaintext?: SnapshotPlaintext;
+};
+
+type SnapshotPlaintext =
+  | { docType: "markdown"; content: string; anchorIndex?: AnchorIndex }
+  | { docType: "html"; content: string }
+  | {
+      docType: "asset";
+      content: string; // unpadded base64url of arbitrary raw bytes
+      mediaType: string;
+      encoding: "base64url";
+    }
+  | {
+      docType: "workspace_manifest";
+      manifest: WorkspaceSnapshotManifest;
+    };
+
+type WorkspaceSnapshotManifest = {
+  v: 1;
+  kind: "attn_workspace_snapshot";
+  scope: "file" | "entries" | "workspace";
+  entries: Array<{
+    fileId: FileId;
+    snapshotId: SnapshotId;
+    path: string;
+    kind: "markdown" | "html" | "asset";
+    mediaType?: string;
+    byteLength: number;
+    contentHash: ContentHash;
+  }>;
 };
 
 type BlobRef = {
@@ -283,8 +309,26 @@ type ContentHash = string;
 
 Rules:
 
-- `SnapshotNode.baseHash` is the canonical hash of the markdown bytes.
-- Live mode can send snapshot plaintext over the encrypted DataChannel.
+- `SnapshotNode.baseHash` hashes the raw document/asset bytes. For a workspace
+  manifest it hashes the canonical JSON bytes of the nested `manifest` object,
+  not the outer `SnapshotPlaintext` wrapper.
+- Existing Markdown and HTML canonical JSON bytes remain unchanged. Markdown
+  published by a browser carries the exact Rust/comrak `AnchorIndex` produced
+  from the same bytes and `snapshotId`.
+- Asset `content` is canonical unpadded base64url. `mediaType` is a MIME type
+  without parameters; relays and R2 never inspect or persist either field in
+  plaintext.
+- Manifest paths are NFC-normalized, slash-separated, root-relative paths.
+  Entries are unique and strictly sorted by UTF-8 path bytes; `fileId`,
+  `snapshotId`, byte length, content hash, kind, and asset media type bind each
+  entry to its previously published snapshot.
+- A publication sends every entry snapshot before the synthetic manifest
+  snapshot. The manifest file identity is
+  `base64url(SHA-256("attn workspace manifest v1" || roomSecret)[:16])` and is
+  stable across republishing. Publication state advances only after every
+  encrypted blob and signed pointer is durably acknowledged.
+- Live mode can send the same application-layer encrypted snapshot envelope
+  over the DataChannel; no plaintext transport exception exists.
 - Async mode stores the encrypted snapshot blob in the bounded mailbox.
 - A new snapshot does not rewrite old anchors. It creates a new node in the snapshot graph.
 - Review events always record the `snapshotId` they were authored against.

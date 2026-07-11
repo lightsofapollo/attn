@@ -2498,6 +2498,12 @@ fn seal_managed_snapshot(
     snapshot: &crate::review::bootstrap::DurableEpochSnapshot,
     snapshot_key: &[u8; 32],
 ) -> Result<Zeroizing<Vec<u8>>, ShareLifecycleError> {
+    let content = snapshot.plaintext.content.as_deref().ok_or_else(|| {
+        ShareLifecycleError::Invalid(format!(
+            "managed durable snapshot {} has no text content",
+            snapshot.snapshot_id.as_str()
+        ))
+    })?;
     let aad = crate::review::crypto::canonical::to_canonical_bytes(&ManagedSnapshotAad {
         v: 3,
         purpose: "attn durable share snapshot v3",
@@ -2513,7 +2519,7 @@ fn seal_managed_snapshot(
             file_id: snapshot.file_id.as_str(),
             snapshot_id: snapshot.snapshot_id.as_str(),
             doc_type: snapshot.plaintext.doc_type,
-            content: &snapshot.plaintext.content,
+            content,
             metadata: snapshot.plaintext.anchor_index.as_ref(),
         })
         .map_err(|error| {
@@ -3119,8 +3125,11 @@ mod tests {
                 .unwrap(),
             plaintext: crate::review::model::SnapshotPlaintext {
                 doc_type: crate::review::model::DocType::Markdown,
-                content: "# secret\n".into(),
+                content: Some("# secret\n".into()),
                 anchor_index: None,
+                media_type: None,
+                encoding: None,
+                manifest: None,
             },
         };
         let key = [0x55; 32];
@@ -3171,6 +3180,35 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn managed_snapshot_rejects_workspace_manifest_without_inventing_text_content() {
+        let snapshot = crate::review::bootstrap::DurableEpochSnapshot {
+            file_id: serde_json::from_value(serde_json::Value::String("manifest-file".into()))
+                .unwrap(),
+            snapshot_id: serde_json::from_value(serde_json::Value::String(
+                "manifest-snapshot".into(),
+            ))
+            .unwrap(),
+            plaintext: crate::review::model::SnapshotPlaintext {
+                doc_type: crate::review::model::DocType::WorkspaceManifest,
+                content: None,
+                anchor_index: None,
+                media_type: None,
+                encoding: None,
+                manifest: Some(crate::review::model::WorkspaceSnapshotManifest {
+                    v: 1,
+                    kind: crate::review::model::WorkspaceManifestKind::AttnWorkspaceSnapshot,
+                    scope: crate::review::model::WorkspaceManifestScope::Workspace,
+                    entries: Vec::new(),
+                }),
+            },
+        };
+        let error = seal_managed_snapshot(SHARE_ID, 4, &snapshot, &[0x55; 32])
+            .expect_err("workspace manifests are not legacy text snapshots");
+        assert!(error.to_string().contains("has no text content"));
+        assert!(snapshot.plaintext.content.is_none());
     }
 
     #[tokio::test]

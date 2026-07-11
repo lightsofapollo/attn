@@ -536,7 +536,11 @@ fn draft_hunk(snapshot: &SnapshotNode, hunk: &DiffHunk) -> Result<SuggestionDraf
         .anchor_index
         .as_ref()
         .ok_or_else(|| anyhow!("snapshot AnchorIndex is unavailable"))?;
-    let source = SourceLines::new(&plaintext.content);
+    let content = plaintext
+        .content
+        .as_deref()
+        .ok_or_else(|| anyhow!("markdown snapshot content is unavailable"))?;
+    let source = SourceLines::new(content);
     let old_projection: Vec<&str> = hunk
         .lines
         .iter()
@@ -833,12 +837,29 @@ mod tests {
             encrypted_blob_ref: None,
             plaintext: Some(SnapshotPlaintext {
                 doc_type: DocType::Markdown,
-                content: markdown.to_string(),
+                content: Some(markdown.to_string()),
                 anchor_index: Some(
                     build_anchor_index(markdown.as_bytes(), &snapshot_id).expect("anchor index"),
                 ),
+                media_type: None,
+                encoding: None,
+                manifest: None,
             }),
         }
+    }
+
+    #[test]
+    fn draft_hunk_rejects_missing_markdown_content_clearly() {
+        let parsed = parse_unified_diff("--- a/doc.md\n+++ b/doc.md\n@@ -1 +1 @@\n-old\n+new\n")
+            .expect("parse");
+        let mut snapshot = snapshot("old\n");
+        snapshot.plaintext.as_mut().expect("plaintext").content = None;
+        let error = draft_hunk(&snapshot, &parsed.hunks[0]).expect_err("missing content");
+        assert!(
+            error
+                .to_string()
+                .contains("markdown snapshot content is unavailable")
+        );
     }
 
     #[test]

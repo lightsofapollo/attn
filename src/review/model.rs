@@ -19,9 +19,13 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::review::ids::{
     ContentHash, DeviceId, EventId, FileId, ParticipantId, RoomId, SnapshotId,
@@ -229,6 +233,8 @@ pub enum DocType {
     #[default]
     Markdown,
     Html,
+    Asset,
+    WorkspaceManifest,
 }
 
 /// Local-only decrypted snapshot payload (document content + optional anchor
@@ -240,14 +246,406 @@ pub enum DocType {
 ///
 /// Spec: `data-model.md` §Snapshot Graph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SnapshotPlaintext {
     pub doc_type: DocType,
     /// The raw UTF-8 document source — markdown source for `Markdown`, HTML
     /// source for `Html`.
-    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_index: Option<AnchorIndex>,
+    /// Required only for `asset`; a syntactically valid MIME type without
+    /// parameters. Keeping this declaration inside the encrypted payload
+    /// means the relay/R2 remain content-blind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// Required only for `asset`. V1 supports exactly unpadded base64url.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<SnapshotAssetEncoding>,
+    /// Required only for `workspace_manifest`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<WorkspaceSnapshotManifest>,
+}
+
+/// Binary encoding used by an asset snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotAssetEncoding {
+    Base64url,
+}
+
+/// Canonical description of the entries included in one workspace share.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceSnapshotManifest {
+    pub v: u32,
+    pub kind: WorkspaceManifestKind,
+    pub scope: WorkspaceManifestScope,
+    pub entries: Vec<WorkspaceManifestEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceManifestKind {
+    #[serde(rename = "attn_workspace_snapshot")]
+    AttnWorkspaceSnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceManifestScope {
+    File,
+    Entries,
+    Workspace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceManifestEntry {
+    pub file_id: FileId,
+    pub snapshot_id: SnapshotId,
+    /// NFC-normalized, slash-separated, root-relative path. This is the only
+    /// path that may cross the protocol boundary; absolute/OPFS paths are
+    /// rejected by [`SnapshotPlaintext::validate`].
+    pub path: String,
+    pub kind: WorkspaceManifestEntryKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// Length/hash of the raw entry bytes (not the snapshot JSON/base64).
+    pub byte_length: u64,
+    pub content_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceManifestEntryKind {
+    Markdown,
+    Html,
+    Asset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotValidationError(String);
+
+impl SnapshotValidationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl fmt::Display for SnapshotValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SnapshotValidationError {}
+
+const MAX_WORKSPACE_ENTRY_PATH_BYTES: usize = 1024;
+const MAX_WORKSPACE_ENTRY_PATH_SEGMENTS: usize = 64;
+
+impl SnapshotPlaintext {
+    /// Validate the discriminated payload and every canonical manifest rule.
+    /// Callers must invoke this after deserialization, before exposing the
+    /// plaintext to room/UI state.
+    pub fn validate(&self) -> Result<(), SnapshotValidationError> {
+        match self.doc_type {
+            DocType::Markdown => {
+                self.require_text_shape("markdown")?;
+            }
+            DocType::Html => {
+                self.require_text_shape("html")?;
+                if self.anchor_index.is_some() {
+                    return Err(SnapshotValidationError::new(
+                        "html snapshot must not contain anchorIndex",
+                    ));
+                }
+            }
+            DocType::Asset => {
+                if self.anchor_index.is_some() || self.manifest.is_some() {
+                    return Err(SnapshotValidationError::new(
+                        "asset snapshot contains document/manifest fields",
+                    ));
+                }
+                if self.encoding != Some(SnapshotAssetEncoding::Base64url) {
+                    return Err(SnapshotValidationError::new(
+                        "asset snapshot encoding must be base64url",
+                    ));
+                }
+                validate_media_type(
+                    self.media_type.as_deref().ok_or_else(|| {
+                        SnapshotValidationError::new("asset mediaType is required")
+                    })?,
+                )?;
+                self.decode_asset_bytes()?;
+            }
+            DocType::WorkspaceManifest => {
+                if self.content.is_some()
+                    || self.anchor_index.is_some()
+                    || self.media_type.is_some()
+                    || self.encoding.is_some()
+                {
+                    return Err(SnapshotValidationError::new(
+                        "workspace manifest contains non-manifest fields",
+                    ));
+                }
+                self.manifest
+                    .as_ref()
+                    .ok_or_else(|| SnapshotValidationError::new("workspace manifest is required"))?
+                    .validate()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn require_text_shape(&self, label: &str) -> Result<(), SnapshotValidationError> {
+        if self.content.is_none() {
+            return Err(SnapshotValidationError::new(format!(
+                "{label} snapshot content is required"
+            )));
+        }
+        if self.media_type.is_some() || self.encoding.is_some() || self.manifest.is_some() {
+            return Err(SnapshotValidationError::new(format!(
+                "{label} snapshot contains asset/manifest fields"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Recover arbitrary raw asset bytes while rejecting padding, standard
+    /// base64 alphabet, whitespace, and non-canonical encodings.
+    pub fn decode_asset_bytes(&self) -> Result<Vec<u8>, SnapshotValidationError> {
+        if self.doc_type != DocType::Asset {
+            return Err(SnapshotValidationError::new("snapshot is not an asset"));
+        }
+        let encoded = self
+            .content
+            .as_deref()
+            .ok_or_else(|| SnapshotValidationError::new("asset content is required"))?;
+        if encoded.contains('=') {
+            return Err(SnapshotValidationError::new(
+                "asset content must be unpadded base64url",
+            ));
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| SnapshotValidationError::new("asset content is invalid base64url"))?;
+        if URL_SAFE_NO_PAD.encode(&bytes) != encoded {
+            return Err(SnapshotValidationError::new(
+                "asset content is not canonical base64url",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    /// Raw bytes whose hash/length define this snapshot's base identity.
+    pub fn raw_content_bytes(&self) -> Result<Vec<u8>, SnapshotValidationError> {
+        self.validate()?;
+        match self.doc_type {
+            DocType::Markdown | DocType::Html => Ok(self
+                .content
+                .as_deref()
+                .expect("validated text content")
+                .as_bytes()
+                .to_vec()),
+            DocType::Asset => self.decode_asset_bytes(),
+            DocType::WorkspaceManifest => crate::review::crypto::canonical::to_canonical_bytes(
+                self.manifest.as_ref().expect("validated manifest"),
+            )
+            .map_err(|e| SnapshotValidationError::new(format!("canonical manifest: {e}"))),
+        }
+    }
+}
+
+impl WorkspaceSnapshotManifest {
+    pub fn validate(&self) -> Result<(), SnapshotValidationError> {
+        if self.v != 1 {
+            return Err(SnapshotValidationError::new(
+                "workspace manifest version must be 1",
+            ));
+        }
+        if self.entries.is_empty() {
+            return Err(SnapshotValidationError::new(
+                "workspace manifest entries must not be empty",
+            ));
+        }
+        if self.scope == WorkspaceManifestScope::File && self.entries.len() != 1 {
+            return Err(SnapshotValidationError::new(
+                "file-scoped manifest must contain exactly one entry",
+            ));
+        }
+
+        let mut previous: Option<&str> = None;
+        let mut file_ids = HashSet::with_capacity(self.entries.len());
+        let mut snapshot_ids = HashSet::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            validate_manifest_entry(entry)?;
+            if let Some(prev) = previous
+                && prev.as_bytes() >= entry.path.as_bytes()
+            {
+                return Err(SnapshotValidationError::new(
+                    "workspace manifest entries must be strictly sorted by UTF-8 path",
+                ));
+            }
+            previous = Some(&entry.path);
+            if !file_ids.insert(entry.file_id.as_str()) {
+                return Err(SnapshotValidationError::new(
+                    "workspace manifest contains duplicate fileId",
+                ));
+            }
+            if !snapshot_ids.insert(entry.snapshot_id.as_str()) {
+                return Err(SnapshotValidationError::new(
+                    "workspace manifest contains duplicate snapshotId",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify one manifest entry against its decrypted snapshot payload. This
+    /// binds the manifest's declared raw length/hash/kind/media type to the
+    /// actual entry bytes without requiring paths or plaintext at the relay.
+    pub fn validate_entry_payload(
+        &self,
+        entry: &WorkspaceManifestEntry,
+        payload: &SnapshotPlaintext,
+    ) -> Result<(), SnapshotValidationError> {
+        self.validate()?;
+        if !self.entries.contains(entry) {
+            return Err(SnapshotValidationError::new(
+                "entry is not present in workspace manifest",
+            ));
+        }
+        payload.validate()?;
+        let expected_kind = match payload.doc_type {
+            DocType::Markdown => WorkspaceManifestEntryKind::Markdown,
+            DocType::Html => WorkspaceManifestEntryKind::Html,
+            DocType::Asset => WorkspaceManifestEntryKind::Asset,
+            DocType::WorkspaceManifest => {
+                return Err(SnapshotValidationError::new(
+                    "workspace manifest cannot contain itself as an entry",
+                ));
+            }
+        };
+        if entry.kind != expected_kind {
+            return Err(SnapshotValidationError::new(
+                "manifest entry kind does not match snapshot payload",
+            ));
+        }
+        if entry.media_type != payload.media_type {
+            return Err(SnapshotValidationError::new(
+                "manifest entry mediaType does not match snapshot payload",
+            ));
+        }
+        let raw = payload.raw_content_bytes()?;
+        if entry.byte_length != raw.len() as u64 {
+            return Err(SnapshotValidationError::new(
+                "manifest entry byteLength does not match snapshot payload",
+            ));
+        }
+        if entry.content_hash != crate::review::crypto::ids::content_hash(&raw) {
+            return Err(SnapshotValidationError::new(
+                "manifest entry contentHash does not match snapshot payload",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_manifest_entry(entry: &WorkspaceManifestEntry) -> Result<(), SnapshotValidationError> {
+    validate_typed_id(entry.file_id.as_str(), "fileId", 16)?;
+    validate_typed_id(entry.snapshot_id.as_str(), "snapshotId", 16)?;
+    validate_typed_id(entry.content_hash.as_str(), "contentHash", 32)?;
+    validate_workspace_path(&entry.path)?;
+    match entry.kind {
+        WorkspaceManifestEntryKind::Asset => {
+            validate_media_type(entry.media_type.as_deref().ok_or_else(|| {
+                SnapshotValidationError::new("asset entry mediaType is required")
+            })?)?
+        }
+        WorkspaceManifestEntryKind::Markdown | WorkspaceManifestEntryKind::Html => {
+            if entry.media_type.is_some() {
+                return Err(SnapshotValidationError::new(
+                    "mediaType is only valid for asset entries",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_workspace_path(path: &str) -> Result<(), SnapshotValidationError> {
+    if path.is_empty()
+        || path.len() > MAX_WORKSPACE_ENTRY_PATH_BYTES
+        || path.nfc().collect::<String>() != path
+    {
+        return Err(SnapshotValidationError::new(
+            "workspace entry path is empty, oversized, or not NFC",
+        ));
+    }
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() > MAX_WORKSPACE_ENTRY_PATH_SEGMENTS {
+        return Err(SnapshotValidationError::new(
+            "workspace entry path has too many segments",
+        ));
+    }
+    for segment in segments {
+        if segment.is_empty()
+            || segment == "."
+            || segment == ".."
+            || segment
+                .chars()
+                .any(|c| c == '\\' || c <= '\u{1f}' || c == '\u{7f}')
+        {
+            return Err(SnapshotValidationError::new(
+                "workspace entry path is not normalized root-relative form",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_media_type(value: &str) -> Result<(), SnapshotValidationError> {
+    if value.len() > 255 {
+        return Err(SnapshotValidationError::new("mediaType is too long"));
+    }
+    let mut parts = value.split('/');
+    let Some(top) = parts.next() else {
+        return Err(SnapshotValidationError::new("mediaType is invalid"));
+    };
+    let Some(sub) = parts.next() else {
+        return Err(SnapshotValidationError::new("mediaType is invalid"));
+    };
+    let valid_token = |token: &str| {
+        !token.is_empty()
+            && token.bytes().all(|b| {
+                b.is_ascii_alphanumeric()
+                    || matches!(
+                        b,
+                        b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+                    )
+            })
+    };
+    if parts.next().is_some() || !valid_token(top) || !valid_token(sub) {
+        return Err(SnapshotValidationError::new("mediaType is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_typed_id(
+    value: &str,
+    label: &str,
+    expected_bytes: usize,
+) -> Result<(), SnapshotValidationError> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| SnapshotValidationError::new(format!("{label} is invalid base64url")))?;
+    if decoded.len() != expected_bytes || URL_SAFE_NO_PAD.encode(decoded) != value {
+        return Err(SnapshotValidationError::new(format!(
+            "{label} has invalid length or non-canonical encoding"
+        )));
+    }
+    Ok(())
 }
 
 /// Reference to an encrypted blob — inline within an event, in the mailbox,
@@ -902,6 +1300,8 @@ pub struct DeliveryAck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::crypto::canonical::to_canonical_string;
+    use crate::review::crypto::ids::content_hash;
     use serde_json::{Value, json};
 
     /// Construct a typed newtype id from a string by going through serde.
@@ -971,6 +1371,251 @@ mod tests {
     {
         let json = serde_json::to_string(value).expect("serialize");
         serde_json::from_str(&json).expect("deserialize")
+    }
+
+    fn text_snapshot(doc_type: DocType, content: &str) -> SnapshotPlaintext {
+        SnapshotPlaintext {
+            doc_type,
+            content: Some(content.to_string()),
+            anchor_index: None,
+            media_type: None,
+            encoding: None,
+            manifest: None,
+        }
+    }
+
+    fn binary_asset(bytes: &[u8]) -> SnapshotPlaintext {
+        SnapshotPlaintext {
+            doc_type: DocType::Asset,
+            content: Some(URL_SAFE_NO_PAD.encode(bytes)),
+            anchor_index: None,
+            media_type: Some("application/octet-stream".to_string()),
+            encoding: Some(SnapshotAssetEncoding::Base64url),
+            manifest: None,
+        }
+    }
+
+    fn manifest_entry(path: &str, bytes: &[u8]) -> WorkspaceManifestEntry {
+        WorkspaceManifestEntry {
+            file_id: id("AQEBAQEBAQEBAQEBAQEBAQ"),
+            snapshot_id: id("AgICAgICAgICAgICAgICAg"),
+            path: path.to_string(),
+            kind: WorkspaceManifestEntryKind::Asset,
+            media_type: Some("application/octet-stream".to_string()),
+            byte_length: bytes.len() as u64,
+            content_hash: content_hash(bytes),
+        }
+    }
+
+    fn workspace_manifest(entries: Vec<WorkspaceManifestEntry>) -> SnapshotPlaintext {
+        SnapshotPlaintext {
+            doc_type: DocType::WorkspaceManifest,
+            content: None,
+            anchor_index: None,
+            media_type: None,
+            encoding: None,
+            manifest: Some(WorkspaceSnapshotManifest {
+                v: 1,
+                kind: WorkspaceManifestKind::AttnWorkspaceSnapshot,
+                scope: WorkspaceManifestScope::Workspace,
+                entries,
+            }),
+        }
+    }
+
+    #[test]
+    fn legacy_markdown_and_html_canonical_bytes_are_unchanged() {
+        let markdown = text_snapshot(DocType::Markdown, "# old wire\n");
+        let html = text_snapshot(DocType::Html, "<p>old wire</p>\n");
+        assert_eq!(
+            to_canonical_string(&markdown).unwrap(),
+            "{\"content\":\"# old wire\\u000a\",\"docType\":\"markdown\"}"
+        );
+        assert_eq!(
+            to_canonical_string(&html).unwrap(),
+            "{\"content\":\"<p>old wire</p>\\u000a\",\"docType\":\"html\"}"
+        );
+        markdown.validate().unwrap();
+        html.validate().unwrap();
+    }
+
+    #[test]
+    fn asset_round_trips_arbitrary_bytes_and_nul_canonically() {
+        let raw = [0x00, 0xff, 0x80, b'a', b'/', b'+', 0x00];
+        let asset = binary_asset(&raw);
+        asset.validate().unwrap();
+        assert_eq!(asset.decode_asset_bytes().unwrap(), raw);
+        assert_eq!(
+            to_canonical_string(&asset).unwrap(),
+            "{\"content\":\"AP-AYS8rAA\",\"docType\":\"asset\",\"encoding\":\"base64url\",\"mediaType\":\"application/octet-stream\"}"
+        );
+    }
+
+    #[test]
+    fn asset_rejects_noncanonical_encoding_media_and_wrong_shape() {
+        for content in ["AA==", "AA+_", "AA A", "A"] {
+            let mut asset = binary_asset(&[0]);
+            asset.content = Some(content.to_string());
+            assert!(asset.validate().is_err(), "accepted {content:?}");
+        }
+        let mut asset = binary_asset(&[0]);
+        asset.media_type = Some("image/png; charset=binary".to_string());
+        assert!(asset.validate().is_err());
+        let mut asset = binary_asset(&[0]);
+        asset.anchor_index = Some(AnchorIndex {
+            doc_hash: content_hash(b""),
+            canonical_encoding: CanonicalEncoding::Utf8Bytes,
+            line_count: 0,
+            blocks: vec![],
+            headings: vec![],
+        });
+        assert!(asset.validate().is_err());
+    }
+
+    #[test]
+    fn manifest_validates_paths_order_uniqueness_and_payload_integrity() {
+        let first_raw = [0x00, 0xff, 0x80];
+        let second_raw = b"# nested\n";
+        let first = manifest_entry("assets/raw.bin", &first_raw);
+        let second = WorkspaceManifestEntry {
+            file_id: id("AwMDAwMDAwMDAwMDAwMDAw"),
+            snapshot_id: id("BAQEBAQEBAQEBAQEBAQEBA"),
+            path: "notes/deep/readme.md".to_string(),
+            kind: WorkspaceManifestEntryKind::Markdown,
+            media_type: None,
+            byte_length: second_raw.len() as u64,
+            content_hash: content_hash(second_raw),
+        };
+        let payload = workspace_manifest(vec![first.clone(), second]);
+        payload.validate().unwrap();
+        payload
+            .manifest
+            .as_ref()
+            .unwrap()
+            .validate_entry_payload(&first, &binary_asset(&first_raw))
+            .unwrap();
+
+        let mut reversed = payload.clone();
+        reversed.manifest.as_mut().unwrap().entries.reverse();
+        assert!(reversed.validate().is_err());
+
+        for bad_path in [
+            "/absolute.bin",
+            "../escape.bin",
+            "a/./b.bin",
+            "a//b.bin",
+            "win\\path.bin",
+            "opfs://opaque/body",
+            "nul\0byte.bin",
+            "e\u{301}.bin",
+        ] {
+            let bad = workspace_manifest(vec![manifest_entry(bad_path, &first_raw)]);
+            assert!(bad.validate().is_err(), "accepted path {bad_path:?}");
+        }
+
+        let mut duplicate = payload.clone();
+        let mut copy = duplicate.manifest.as_ref().unwrap().entries[0].clone();
+        copy.path = "z.bin".to_string();
+        duplicate.manifest.as_mut().unwrap().entries.push(copy);
+        assert!(duplicate.validate().is_err());
+
+        let manifest = payload.manifest.as_ref().unwrap();
+        let mut bad_length = first.clone();
+        bad_length.byte_length += 1;
+        let bad_length_manifest = WorkspaceSnapshotManifest {
+            entries: vec![bad_length.clone()],
+            scope: WorkspaceManifestScope::Workspace,
+            ..manifest.clone()
+        };
+        assert!(
+            bad_length_manifest
+                .validate_entry_payload(&bad_length, &binary_asset(&first_raw))
+                .is_err()
+        );
+
+        let mut bad_hash = first.clone();
+        bad_hash.content_hash = content_hash(b"tampered");
+        let bad_hash_manifest = WorkspaceSnapshotManifest {
+            entries: vec![bad_hash.clone()],
+            scope: WorkspaceManifestScope::Workspace,
+            ..manifest.clone()
+        };
+        assert!(
+            bad_hash_manifest
+                .validate_entry_payload(&bad_hash, &binary_asset(&first_raw))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_empty_entries_wrong_version_scope_media_and_ids() {
+        let empty = workspace_manifest(vec![]);
+        assert!(empty.validate().is_err());
+
+        let raw = [0];
+        let mut payload = workspace_manifest(vec![manifest_entry("a.bin", &raw)]);
+        payload.manifest.as_mut().unwrap().v = 2;
+        assert!(payload.validate().is_err());
+
+        let mut payload = workspace_manifest(vec![
+            manifest_entry("a.bin", &raw),
+            WorkspaceManifestEntry {
+                file_id: id("AwMDAwMDAwMDAwMDAwMDAw"),
+                snapshot_id: id("BAQEBAQEBAQEBAQEBAQEBA"),
+                path: "b.bin".to_string(),
+                ..manifest_entry("b.bin", &raw)
+            },
+        ]);
+        payload.manifest.as_mut().unwrap().scope = WorkspaceManifestScope::File;
+        assert!(payload.validate().is_err());
+
+        let mut payload = workspace_manifest(vec![manifest_entry("a.bin", &raw)]);
+        payload.manifest.as_mut().unwrap().entries[0].media_type = None;
+        assert!(payload.validate().is_err());
+
+        let mut payload = workspace_manifest(vec![manifest_entry("a.bin", &raw)]);
+        payload.manifest.as_mut().unwrap().entries[0].file_id = id("not-base64url!");
+        assert!(payload.validate().is_err());
+    }
+
+    #[test]
+    fn workspace_snapshot_corpus_pins_canonical_bytes_and_valid_payloads() {
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../planning/collab/test-vectors/workspace-snapshot.json"
+        ))
+        .expect("workspace snapshot corpus JSON");
+        for case in corpus["cases"].as_array().expect("cases") {
+            let name = case["name"].as_str().expect("case name");
+            let value = &case["value"];
+            let canonical = crate::review::crypto::canonical::canonicalize_value(value)
+                .unwrap_or_else(|err| panic!("{name}: canonicalize: {err}"));
+            assert_eq!(
+                canonical,
+                case["canonicalJson"].as_str().expect("canonicalJson"),
+                "{name} canonical JSON"
+            );
+            assert_eq!(
+                URL_SAFE_NO_PAD.encode(canonical.as_bytes()),
+                case["canonicalBytesBase64url"]
+                    .as_str()
+                    .expect("canonicalBytesBase64url"),
+                "{name} canonical bytes"
+            );
+            let payload: SnapshotPlaintext = serde_json::from_value(value.clone())
+                .unwrap_or_else(|err| panic!("{name}: deserialize: {err}"));
+            payload
+                .validate()
+                .unwrap_or_else(|err| panic!("{name}: validate: {err}"));
+            if let Some(raw) = case.get("rawBytesBase64url") {
+                assert_eq!(
+                    payload.decode_asset_bytes().expect("asset bytes"),
+                    URL_SAFE_NO_PAD
+                        .decode(raw.as_str().expect("rawBytesBase64url"))
+                        .expect("raw bytes corpus encoding"),
+                    "{name} raw bytes"
+                );
+            }
+        }
     }
 
     #[test]

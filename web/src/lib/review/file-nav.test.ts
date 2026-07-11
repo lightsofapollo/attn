@@ -10,6 +10,7 @@
 // `deriveFileEntries`, and asserts on the resulting entry list.
 
 import { deriveFileEntries, type ReviewFileEntry } from './file-nav';
+import { deriveSharedFiles } from './shared-tree';
 import type { FileId, RoomId, ReviewSnapshot } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -184,6 +185,42 @@ defineCase('mixed rooms → only currentRoom files appear', () => {
   assert(out.length === 1, `expected 1, got ${out.length}`);
   assert(JSON.stringify(fileIds(out)) === JSON.stringify(['f1']), `fileIds: ${JSON.stringify(fileIds(out))}`);
   assert(out[0]!.name === 'Keep', `name: ${out[0]!.name}`);
+});
+
+defineCase('assets, manifests, and pointer placeholders never become file entries', () => {
+  const document = snap({
+    roomId: 'r1', fileId: 'doc', snapshotId: 'doc-snapshot', createdAt: 1, markdown: '# Visible',
+  });
+  const inert: ReviewSnapshot[] = [
+    {
+      ...document,
+      fileId: 'asset' as FileId,
+      snapshotId: 'asset-snapshot',
+      docType: 'asset',
+      content: undefined,
+      mediaType: 'application/octet-stream',
+    },
+    {
+      ...document,
+      fileId: 'manifest' as FileId,
+      snapshotId: 'manifest-snapshot',
+      docType: 'workspace_manifest',
+      content: undefined,
+    },
+    {
+      ...document,
+      fileId: 'pointer' as FileId,
+      snapshotId: 'pointer-snapshot',
+      docType: undefined,
+      content: undefined,
+    },
+  ];
+  const out = deriveFileEntries([...inert, document], 'r1' as RoomId);
+  assert(out.length === 1, `expected only one renderable entry, got ${JSON.stringify(out)}`);
+  assert(out[0]?.fileId === 'doc', `expected document entry, got ${String(out[0]?.fileId)}`);
+  const treeFiles = deriveSharedFiles([...inert, document], 'r1' as RoomId);
+  assert(treeFiles.length === 1, `expected one shared-tree file, got ${JSON.stringify(treeFiles)}`);
+  assert(treeFiles[0]?.fileId === 'doc', 'shared tree must exclude every inert snapshot');
 });
 
 // ---------------------------------------------------------------------------

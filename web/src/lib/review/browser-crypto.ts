@@ -570,6 +570,9 @@ export function signEvent(
 const ENVELOPE_ID_PREFIX = new TextEncoder().encode('envelope v2');
 const FILE_ID_PREFIX = new TextEncoder().encode('attn file v2');
 const SNAPSHOT_ID_PREFIX = new TextEncoder().encode('snapshot v2');
+const WORKSPACE_MANIFEST_FILE_ID_PREFIX = new TextEncoder().encode(
+  'attn workspace manifest v1',
+);
 
 /**
  * Stable room-private file identity. The first snapshot hash is deliberately
@@ -601,6 +604,19 @@ export function deriveFileId(
   input.set(pathBytes, offset);
   offset += pathBytes.length;
   input.set(hashBytes, offset);
+  const digest = sha256(input);
+  input.fill(0);
+  return base64UrlEncode(digest.subarray(0, 16));
+}
+
+/** Stable synthetic FileId for the one workspace manifest stream in a room. */
+export function deriveWorkspaceManifestFileId(roomSecret: Uint8Array): string {
+  if (!(roomSecret instanceof Uint8Array) || roomSecret.length !== 32) {
+    throw new Error('roomSecret must be a 32-byte Uint8Array');
+  }
+  const input = new Uint8Array(WORKSPACE_MANIFEST_FILE_ID_PREFIX.length + roomSecret.length);
+  input.set(WORKSPACE_MANIFEST_FILE_ID_PREFIX, 0);
+  input.set(roomSecret, WORKSPACE_MANIFEST_FILE_ID_PREFIX.length);
   const digest = sha256(input);
   input.fill(0);
   return base64UrlEncode(digest.subarray(0, 16));

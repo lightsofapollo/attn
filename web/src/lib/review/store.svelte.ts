@@ -31,6 +31,10 @@ import {
 import { userProfile } from './profile.svelte';
 import { computeRailMode, type RailMode } from './rail-mode';
 import { shouldActivateRoomStatus, shouldForgetRoomStatus } from './room-ui';
+import {
+  isHydratedReviewSnapshot,
+  isRenderableReviewSnapshot,
+} from './snapshot-kind';
 import { isThreadActive } from './thread-visibility';
 import type {
   EventId,
@@ -740,6 +744,13 @@ export class ReviewStore {
     if (event.body.type === 'snapshot_created') {
       const body = event.body;
       const inline = body.inlineSnapshot;
+      const document = inline?.docType === 'markdown' || inline?.docType === 'html' ? inline : undefined;
+      // BrowserSession authenticates inert payloads through applySnapshot.
+      // Do not mirror inline assets/manifests from the event body here: a
+      // manifest may be waiting for referenced R2 entries, and exposing it
+      // now would bypass that binding gate. Content-less pointer events still
+      // create the placeholder that a later authenticated blob replaces.
+      if (inline != null && document === undefined) return;
       const snapshot: ReviewSnapshot = {
         roomId: event.meta.roomId,
         fileId: body.fileId,
@@ -749,10 +760,13 @@ export class ReviewStore {
         createdAt: event.meta.createdAt,
         createdBy: event.meta.authorId,
         baseHash: body.baseHash,
-        byteLength: inline ? inline.content.length : 0,
+        byteLength: document ? new TextEncoder().encode(document.content).length : 0,
         docType: inline?.docType,
-        content: inline?.content,
-        anchorIndex: inline?.anchorIndex,
+        content: document?.content,
+        anchorIndex: document?.docType === 'markdown' ? document.anchorIndex : undefined,
+        mediaType: inline?.docType === 'asset' ? inline.mediaType : undefined,
+        workspaceManifest:
+          inline?.docType === 'workspace_manifest' ? inline.manifest : undefined,
         encryptedBlobRef: body.encryptedBlobRef,
       };
       // De-dupe by snapshotId — the relay echoes the owner's own snapshot
@@ -767,7 +781,11 @@ export class ReviewStore {
       // Auto-focus the file the snapshot belongs to when nothing is
       // selected yet — this is what makes the reviewer's editor switch
       // from "their local files" to "the shared doc" on first snapshot.
-      if (this.currentRoomId === event.meta.roomId && this.currentFileId === null) {
+      if (
+        document !== undefined &&
+        this.currentRoomId === event.meta.roomId &&
+        this.currentFileId === null
+      ) {
         this.currentFileId = body.fileId;
       }
     }
@@ -788,8 +806,8 @@ export class ReviewStore {
       // exact authenticated placeholder; ordinary duplicate replays stay
       // idempotent and conflicting snapshot identities are never merged.
       if (
-        existing.content === undefined &&
-        snapshot.content !== undefined &&
+        !isHydratedReviewSnapshot(existing) &&
+        isHydratedReviewSnapshot(snapshot) &&
         existing.fileId === snapshot.fileId &&
         existing.baseHash === snapshot.baseHash
       ) {
@@ -801,7 +819,11 @@ export class ReviewStore {
     }
     this.snapshots = [...this.snapshots, snapshot];
     this.upsertRoom(snapshot.roomId, {});
-    if (this.currentRoomId === snapshot.roomId && this.currentFileId === null) {
+    if (
+      isRenderableReviewSnapshot(snapshot) &&
+      this.currentRoomId === snapshot.roomId &&
+      this.currentFileId === null
+    ) {
       this.currentFileId = snapshot.fileId;
     }
   }
@@ -872,6 +894,13 @@ export class ReviewStore {
    * file-relative.
    */
   setCurrentFile(fileId: FileId | null): void {
+    if (fileId !== null && this.currentRoomId !== null) {
+      const known = this.snapshots.filter(
+        (snapshot) =>
+          snapshot.roomId === this.currentRoomId && snapshot.fileId === fileId,
+      );
+      if (known.length > 0 && !known.some(isRenderableReviewSnapshot)) return;
+    }
     this.currentFileId = fileId;
     this.currentSnapshotId = null;
     this.expandedResolvedThreadId = null;
@@ -908,6 +937,13 @@ export class ReviewStore {
    */
   setCurrentSnapshot(snapshotId: SnapshotId | null): void {
     if (this.currentFileId === null) return;
+    if (snapshotId !== null) {
+      const known = this.snapshots.find(
+        (snapshot) =>
+          snapshot.roomId === this.currentRoomId && snapshot.snapshotId === snapshotId,
+      );
+      if (known !== undefined && !isRenderableReviewSnapshot(known)) return;
+    }
     this.currentSnapshotId = snapshotId;
   }
 
@@ -932,11 +968,16 @@ export class ReviewStore {
 
     const currentFileStillExists =
       this.currentFileId !== null
-      && this.snapshots.some((s) => s.roomId === roomId && s.fileId === this.currentFileId);
+      && this.snapshots.some(
+        (s) =>
+          s.roomId === roomId &&
+          s.fileId === this.currentFileId &&
+          isRenderableReviewSnapshot(s),
+      );
     if (!currentFileStillExists) {
       let latest: ReviewSnapshot | null = null;
       for (const snapshot of this.snapshots) {
-        if (snapshot.roomId !== roomId) continue;
+        if (snapshot.roomId !== roomId || !isRenderableReviewSnapshot(snapshot)) continue;
         if (latest === null || snapshot.createdAt > latest.createdAt) {
           latest = snapshot;
         }

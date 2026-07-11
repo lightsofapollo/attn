@@ -354,20 +354,25 @@ function validateAndConstructBundle(
     'v', 'shareId', 'bundleId', 'epoch', 'revision', 'manifestDigest', 'roomId',
     'tier', 'roomCapability', 'shareMailboxCapability',
   ]);
-  if (
-    !isRecord(value) || Object.keys(value).some((key) => !allowed.has(key)) ||
-    value.v !== 3 || value.shareId !== record.shareId || value.bundleId !== record.bundleId ||
-    value.epoch !== record.epoch || value.revision !== record.revision ||
-    value.manifestDigest !== manifestDigest || !PROTOCOL_ID.test(value.roomId) ||
-    (value.tier !== 'view' && value.tier !== 'comment' && value.tier !== 'suggest') ||
-    value.roomCapability == null ||
-    (record.currentRoomId !== undefined && record.currentRoomId !== value.roomId) ||
-    (value.tier === 'view' && value.shareMailboxCapability !== undefined) ||
-    (value.tier !== 'view' && value.shareMailboxCapability == null)
-  ) {
+  const failures = [
+    !isRecord(value) || Object.keys(value).some((key) => !allowed.has(key)) ? 'shape' : '',
+    value.v !== 3 ? 'version' : '',
+    value.shareId !== record.shareId ? 'share_id' : '',
+    value.bundleId !== record.bundleId ? 'bundle_id' : '',
+    value.epoch !== record.epoch ? 'epoch' : '',
+    value.revision !== record.revision ? 'revision' : '',
+    value.manifestDigest !== manifestDigest ? 'manifest_digest' : '',
+    !PROTOCOL_ID.test(value.roomId) ? 'room_id' : '',
+    value.tier !== 'view' && value.tier !== 'comment' && value.tier !== 'suggest' ? 'tier' : '',
+    value.roomCapability == null ? 'room_capability' : '',
+    record.currentRoomId !== undefined && record.currentRoomId !== value.roomId ? 'current_room' : '',
+    value.tier === 'view' && value.shareMailboxCapability !== undefined ? 'view_mailbox' : '',
+    value.tier !== 'view' && value.shareMailboxCapability == null ? 'write_mailbox' : '',
+  ].filter(Boolean);
+  if (failures.length > 0) {
     throw new BrowserShareResolutionError(
       'bundle_invalid',
-      'decoded capability bundle does not match the authenticated share record and manifest',
+      `decoded capability bundle does not match the authenticated share record and manifest (${failures.join(',')})`,
     );
   }
   return {
@@ -450,11 +455,14 @@ function validateManifest(value: unknown): DurableShareSnapshotRef[] {
 }
 
 function canonicalManifestBytes(refs: DurableShareSnapshotRef[]): Uint8Array {
+  // Match relay `canonicalize()` byte-for-byte. JSON object insertion order is
+  // observable here because these bytes are hashed into the sealed capability
+  // bundle; keep keys in ASCII order rather than the public wire order.
   return new TextEncoder().encode(JSON.stringify(refs.map((ref) => ({
-    fileId: ref.fileId,
-    snapshotId: ref.snapshotId,
     ciphertextBytes: ref.ciphertextBytes,
     ciphertextSha256: ref.ciphertextSha256,
+    fileId: ref.fileId,
+    snapshotId: ref.snapshotId,
     uploadedAt: ref.uploadedAt,
   }))));
 }

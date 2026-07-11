@@ -8,12 +8,9 @@
        encrypted WebSocket.
     2. While waiting for the first `SnapshotCreated` event we render a
        "Loading review…" state.
-    3. Once the snapshot arrives, the editor mounts read-only with the
-       markdown bytes and the `ReviewMargin` overlay surfaces comments +
-       suggestion threads via the existing `reviewStore`.
-
-  This slice is an explicitly read-only receiver. Authoring and mutation
-  controls stay hidden until the browser outbox can durably POST envelopes.
+    3. Once the snapshot arrives, the editor mounts at that authenticated
+       epoch. It becomes live-editable only while the owner is online; durable
+       comments and suggestions remain available while the owner is away.
 
   Error states map straight off `session.state.error.kind`:
     - invite_invalid    → "Invalid invite link"
@@ -30,6 +27,7 @@
   import { onDestroy, onMount, untrack } from 'svelte';
   import type { EditorView } from 'prosemirror-view';
   import { TextSelection, type Plugin as PMPlugin } from 'prosemirror-state';
+  import { getVersion } from 'prosemirror-collab';
   import Editor from './lib/Editor.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
@@ -43,14 +41,27 @@
     reviewDecorationsPlugin,
     requestReviewDecorationsRebuild,
   } from './lib/prosemirror/review-decorations';
-  import { BrowserSession, type BrowserSessionState } from './lib/review/browser-session';
+  import {
+    BrowserSession,
+    type BrowserCollabDelivery,
+    type BrowserSessionState,
+  } from './lib/review/browser-session';
   import type { DurableShareBrowserSessionFacade, RememberedPushShareSessionFacade } from './lib/review/browser-share-production';
   import type { BrowserPushConsentState } from './lib/review/browser-push-consent';
+  import { CollabController } from './lib/prosemirror/collab-controller';
+  import type { EditorBridge } from './lib/prosemirror/collab-session';
+  import { remoteCursorsKey } from './lib/prosemirror/remote-cursors';
+  import {
+    BrowserReviewerCollabGate,
+    browserReviewerAvailability,
+    browserReviewerViewMatchesEpoch,
+    rememberAuthenticatedOwnerDevice,
+  } from './lib/review/browser-review-collab';
   import type { ParsedInvite } from './lib/review/browser-invite';
   import { hasTextSelection } from './lib/review/popover-anchor';
   import { resolveAnchor } from './lib/review/resolver';
   import type { ConstructAnchorContext } from './lib/review/anchors';
-  import type { Anchor, RoomId, SuggestionDraft } from './lib/types';
+  import type { Anchor, FileId, RoomId, SuggestionDraft } from './lib/types';
 
   interface Props {
     /**
@@ -82,6 +93,9 @@
   // ---------------------------------------------------------------------------
 
   let sessionState = $state<BrowserSessionState>({
+    principal: 'reviewer',
+    ownerOnline: false,
+    liveEditingAvailable: false,
     status: 'idle',
     connection: 'offline',
     directError: null,
@@ -99,6 +113,22 @@
     storagePersisted: null,
     canRemember: true,
   });
+  let collabSetupError = $state<string | null>(null);
+  const authenticatedOwnerDeviceIds = new Set<string>();
+  const reviewerCollabGate = new BrowserReviewerCollabGate((error) => {
+    collabSetupError = error.message;
+  });
+
+  function handleSessionState(state: BrowserSessionState): void {
+    sessionState = state;
+  }
+
+  async function handleSessionCollab(delivery: BrowserCollabDelivery): Promise<void> {
+    // BrowserSession has already bound this immutable Device record to the
+    // verified directory entry and envelope signature.
+    rememberAuthenticatedOwnerDevice(authenticatedOwnerDeviceIds, delivery);
+    await reviewerCollabGate.route(delivery);
+  }
 
   // Capture once at construction — both props are stable for the lifetime of
   // the component, but the runes compiler can't infer that. `untrack` reads
@@ -117,13 +147,13 @@
       parsedInvite: initialParsedInvite,
       inviteError: initialInviteError,
       rememberedRoomId: initialRememberedRoomId,
-      onState: (s) => {
-        sessionState = s;
-      },
+      onState: handleSessionState,
+      onCollab: handleSessionCollab,
     });
   }
 
   const session = buildSession();
+  const collabCapable = 'sendCollab' in session && typeof session.sendCollab === 'function';
   const pushCapable = 'getPushConsentState' in session && 'setPushConsentObserver' in session &&
     'enablePushFromUserGesture' in session && 'disablePushFromUserGesture' in session;
   let pushConsent = $state<BrowserPushConsentState>({ status: pushCapable ? 'checking' : 'unsupported', message: null, enabled: false });
@@ -157,6 +187,7 @@
   });
 
   onDestroy(() => {
+    reviewerCollabGate.close();
     if (!initialInjected || ('closeOnDestroy' in initialInjected && initialInjected.closeOnDestroy === true)) {
       session.close();
     }
@@ -172,6 +203,7 @@
 
   function handleEditorReady(view: EditorView): void {
     pmViewForReview = view;
+    reviewerCollabReadyEpoch = reviewerCollabEpoch;
     (window as unknown as { __attnPmView?: EditorView }).__attnPmView = view;
     refreshSelectionToolbar();
   }
@@ -214,6 +246,159 @@
   const displayedDocType = $derived(
     displayedSnapshot?.docType ?? sessionState.snapshotDocType,
   );
+
+  $effect(() => {
+    void sessionState.roomId;
+    authenticatedOwnerDeviceIds.clear();
+    return () => authenticatedOwnerDeviceIds.clear();
+  });
+
+  // -------------------------------------------------------------------------
+  // Reviewer live collaboration.
+  //
+  // Keep the collab plugin mounted while the owner is away so the editor's
+  // confirmed version and any remote state survive presence blips. Presence
+  // gates only document editability; durable comments/suggestions continue to
+  // use BrowserSession's encrypted outbox independently.
+  // -------------------------------------------------------------------------
+
+  interface ReviewerCollabSeed {
+    key: string;
+    roomId: RoomId;
+    fileId: FileId;
+    snapshotId: string;
+    markdown: string;
+  }
+
+  let reviewerCollabSeed = $state<ReviewerCollabSeed | null>(null);
+  let reviewerCollabClientId = $state<string | null>(null);
+  let reviewerCollabEpoch = $state(0);
+  let reviewerCollabReadyEpoch = $state(-1);
+  let reviewerCollabController = $state<CollabController | null>(null);
+  let reviewerCollabBoundView: EditorView | undefined;
+
+  const reviewerAvailability = $derived.by(() => {
+    const availability = browserReviewerAvailability({
+      hasMarkdownSnapshot:
+        collabCapable && reviewerCollabSeed !== null && displayedDocType === 'markdown',
+      ownerOnline: sessionState.ownerOnline,
+      liveEditingAvailable: sessionState.liveEditingAvailable,
+      authoringReady: sessionState.authoringReady,
+    });
+    return {
+      ...availability,
+      liveEditing: availability.liveEditing && sessionState.grantTier === 'suggest',
+      reviewAuthoring: availability.reviewAuthoring && sessionState.grantTier !== 'view',
+    };
+  });
+
+  $effect(() => {
+    const snapshot = displayedSnapshot;
+    const roomId = sessionState.roomId;
+    if (
+      !collabCapable ||
+      !roomId ||
+      !snapshot ||
+      snapshot.docType !== 'markdown' ||
+      typeof snapshot.content !== 'string'
+    ) {
+      if (reviewerCollabSeed !== null) {
+        reviewerCollabGate.reset();
+        reviewerCollabSeed = null;
+        reviewerCollabClientId = null;
+        reviewerCollabController = null;
+        reviewerCollabBoundView = undefined;
+      }
+      return;
+    }
+    const key = `${roomId}:${snapshot.fileId}:${snapshot.snapshotId}`;
+    if (reviewerCollabSeed?.key === key) return;
+    reviewerCollabGate.reset();
+    reviewerCollabController = null;
+    reviewerCollabSeed = {
+      key,
+      roomId,
+      fileId: snapshot.fileId,
+      snapshotId: snapshot.snapshotId,
+      markdown: snapshot.content,
+    };
+    reviewerCollabClientId = crypto.randomUUID();
+    reviewerCollabEpoch += 1;
+    collabSetupError = null;
+  });
+
+  $effect(() => {
+    const seed = reviewerCollabSeed;
+    const clientId = reviewerCollabClientId;
+    if (!collabCapable || !seed || !clientId || reviewerCollabController) return;
+    reviewerCollabController = new CollabController({
+      isOwner: false,
+      send: (payload) => {
+        if (!('sendCollab' in session)) {
+          throw new Error('browser collaboration transport is unavailable');
+        }
+        return session.sendCollab(payload);
+      },
+      selfClientId: clientId,
+      selfLabel: 'Reviewer',
+      selfColor: '#2563eb',
+      isAuthorityDevice: (deviceId) => authenticatedOwnerDeviceIds.has(deviceId),
+      getLocation: () => ({
+        fileId: seed.fileId,
+        snapshotId: seed.snapshotId,
+        path: displayedSnapshot?.ownerDisplayPath,
+      }),
+      onRemoteCursors: (cursors) => {
+        const view = pmViewForReview;
+        if (view) view.dispatch(view.state.tr.setMeta(remoteCursorsKey, cursors));
+      },
+    });
+  });
+
+  $effect(() => {
+    const seed = reviewerCollabSeed;
+    const controller = reviewerCollabController;
+    const view = pmViewForReview;
+    if (!seed || !controller || !view || view === reviewerCollabBoundView) return;
+    if (!browserReviewerViewMatchesEpoch(reviewerCollabReadyEpoch, reviewerCollabEpoch)) return;
+    if (!viewHasCollab(view)) return;
+    const bridge: EditorBridge = {
+      getState: () => view.state,
+      apply: (transaction) => view.dispatch(transaction),
+    };
+    controller.setActiveFile(seed.fileId, bridge, seed.snapshotId);
+    reviewerCollabBoundView = view;
+    reviewerCollabGate.bind((delivery) => {
+      controller.onInbound(delivery.payload, delivery.sender.deviceId);
+    });
+  });
+
+  let previousLiveEditingAvailable = false;
+  $effect(() => {
+    const liveEditingAvailable = sessionState.liveEditingAvailable;
+    const controller = reviewerCollabController;
+    if (liveEditingAvailable && !previousLiveEditingAvailable) {
+      controller?.onTransportConnected();
+    }
+    previousLiveEditingAvailable = liveEditingAvailable;
+  });
+
+  function viewHasCollab(view: EditorView): boolean {
+    try {
+      getVersion(view.state);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function handleReviewerCollabDocChange(): void {
+    if (reviewerAvailability.liveEditing) reviewerCollabController?.onLocalChange();
+  }
+
+  function handleReviewerCollabSelectionChange(head: number): void {
+    if (reviewerAvailability.liveEditing) reviewerCollabController?.broadcastCursor(head);
+  }
 
   // Resolve arrived and locally-authored anchors against the active snapshot.
   $effect(() => {
@@ -274,7 +459,7 @@
 
   function refreshSelectionToolbar(): void {
     const view = pmViewForReview;
-    if (!sessionState.authoringReady || !view || !hasTextSelection(view)) {
+    if (!reviewerAvailability.reviewAuthoring || !view || !hasTextSelection(view)) {
       toolbarSelection = null;
       return;
     }
@@ -286,7 +471,7 @@
   }
 
   $effect(() => {
-    void sessionState.authoringReady;
+    void reviewerAvailability.reviewAuthoring;
     refreshSelectionToolbar();
   });
 
@@ -414,6 +599,7 @@
   data-connection={sessionState.connection}
   data-direct-error={sessionState.directError ?? ''}
   data-grant-tier={sessionState.grantTier}
+  data-live-editing={reviewerAvailability.liveEditing ? 'true' : 'false'}
 >
   {#if sessionState.error}
     <div class="browser-review-error flex h-full flex-col items-center justify-center gap-3 px-6 text-center"
@@ -520,6 +706,16 @@
                     ? 'Encrypted mailbox'
                     : 'Offline'}
             </span>
+            {#if reviewerAvailability.ownerStatus}
+              <span data-slot="browser-owner-offline-status" role="status">
+                {reviewerAvailability.ownerStatus}
+              </span>
+            {/if}
+            {#if collabSetupError}
+              <span class="text-destructive" data-slot="browser-collab-error" role="status">
+                {collabSetupError}
+              </span>
+            {/if}
             {#if sessionState.grantTier !== 'view' && !sessionState.authoringReady}
               <span>Preparing encrypted authoring…</span>
             {/if}
@@ -546,10 +742,18 @@
             <HtmlViewer content={displayedContent ?? ''} allowScripts={false} />
           {:else}
             <Editor
-              markdown={displayedContent ?? ''}
-              editable={false}
+              markdown={reviewerCollabSeed?.markdown ?? displayedContent ?? ''}
+              editable={reviewerAvailability.liveEditing}
               plugins={editorPlugins}
               onReady={handleEditorReady}
+              collabClientId={reviewerAvailability.collabReady
+                ? reviewerCollabClientId ?? undefined
+                : undefined}
+              collabEpoch={reviewerCollabEpoch}
+              onCollabDocChange={handleReviewerCollabDocChange}
+              onCollabSelectionChange={handleReviewerCollabSelectionChange}
+              suggesting={reviewerAvailability.liveEditing}
+              suggestionAuthor="Reviewer"
             />
           {/if}
         </div>
@@ -560,7 +764,7 @@
           <ReviewMargin
             view={pmViewForReview}
             readOnly={true}
-            reviewerAuthoring={sessionState.authoringReady && sessionState.grantTier !== 'view'}
+            reviewerAuthoring={reviewerAvailability.reviewAuthoring}
             onResolveComment={resolveBrowserComment}
             onReplyComment={replyBrowserComment}
           />

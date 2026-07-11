@@ -10,7 +10,7 @@
  * exercise by replaying HTTP requests through `SELF.fetch`.
  */
 
-import { SELF, env, runInDurableObject } from "cloudflare:test";
+import { SELF as WORKER_SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
@@ -25,6 +25,23 @@ declare module "cloudflare:test" {
 }
 
 const URL_BASE = "https://relay.example";
+
+// `singleWorker` intentionally keeps the edge limiter alive across the whole
+// relay suite. Requests that omit Cloudflare's edge IP would otherwise all
+// consume the shared `unknown` bucket and make this file order-dependent.
+// Preserve explicit scenario IPs while assigning ordinary helper traffic a
+// dedicated, valid test-net identity.
+const RATE_LIMIT_TEST_IP = "198.51.100.242";
+const SELF = {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const request = new Request(input, init);
+    const headers = new Headers(request.headers);
+    if (!headers.has("CF-Connecting-IP")) {
+      headers.set("CF-Connecting-IP", RATE_LIMIT_TEST_IP);
+    }
+    return WORKER_SELF.fetch(new Request(request, { headers }));
+  },
+};
 
 // --- shared helpers (slim copies of envelopes.test.ts) -----------------
 
@@ -111,6 +128,10 @@ async function createRoom(opts: {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      // Per-device cases create independent live rooms; keep source quota
+      // state from coupling those cases while their ordinary requests still
+      // share RATE_LIMIT_TEST_IP for edge-rate coverage.
+      "CF-Connecting-IP": `198.18.2.${(counter % 250) + 1}`,
       "Attn-Owner-Signature": base64UrlEncode(sig),
       "Attn-PoW": await createPowHeader(opts.roomId, opts.ownerKp.publicKeyBytes),
     },

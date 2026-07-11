@@ -398,6 +398,37 @@ a.workspace-row:hover {
   background: var(--paper);
   padding: 1rem;
   font-family: var(--sans);
+  position: relative;
+  min-height: 0;
+}
+
+.owner-room-status {
+  margin-left: 0.4rem;
+  color: var(--muted);
+  font: 0.68rem var(--mono);
+  white-space: nowrap;
+}
+
+.owner-authority-banner .button {
+  flex: 0 0 auto;
+}
+
+.review-delivery-status {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+  padding: 0.65rem;
+  border: 1px solid var(--rust);
+  color: var(--rust-deep);
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
+.review-sheet-margin {
+  position: relative;
+  min-height: 55vh;
 }
 
 .review-card {

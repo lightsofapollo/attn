@@ -134,15 +134,15 @@ test('a second tab is honestly read-only while one tab edits', async ({ page, co
   const second = await context.newPage();
   await second.goto(url);
   await expect(second.locator('[data-app-view="workspace"]')).toBeVisible();
-  await second.getByRole('button', { name: 'Edit', exact: true }).click();
   await expect(second.locator('[data-degraded="lease-denied"]')).toContainText(
     'Another tab is editing this workspace.',
   );
   await expect(second.locator('.writing-sheet .ProseMirror')).toHaveCount(0);
 
-  // Done in the first tab releases the lease; the second tab can now edit.
-  await page.getByRole('button', { name: 'Done' }).click();
-  await second.getByRole('button', { name: 'Edit', exact: true }).click();
+  // The route owns the lease even while its editor is closed. Closing the
+  // first tab releases route authority; an explicit retry then acquires it.
+  await page.close();
+  await second.getByRole('button', { name: 'Retry edit', exact: true }).click();
   await expect(second.locator('.writing-sheet .ProseMirror')).toBeVisible();
 });
 

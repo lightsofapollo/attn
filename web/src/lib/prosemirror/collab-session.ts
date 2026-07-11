@@ -14,7 +14,11 @@
 //
 // Spec: planning/collab/ (live channel) + ./collab-authority.ts.
 
-import { getVersion, receiveTransaction, sendableSteps } from 'prosemirror-collab';
+import {
+  getVersion,
+  receiveTransaction,
+  sendableSteps,
+} from 'prosemirror-collab';
 import type { EditorState, Transaction } from 'prosemirror-state';
 
 import {
@@ -22,7 +26,9 @@ import {
   deserializeSteps,
   serializeSteps,
   type CollabBroadcast,
+  type CollabCheckpoint,
   type CollabSubmission,
+  type PreparedCollabBatch,
 } from './collab-authority';
 
 /**
@@ -37,7 +43,7 @@ export interface EditorBridge {
 }
 
 /** Sends a local submission toward the authority (owner). */
-export type SubmitFn = (submission: CollabSubmission) => void;
+export type SubmitFn = (submission: CollabSubmission) => unknown;
 
 /**
  * Per-editor live-typing controller. Owns the "one batch in flight" discipline
@@ -68,11 +74,25 @@ export class CollabClient {
     const sendable = sendableSteps(this.bridge.getState());
     if (!sendable) return;
     this.inflight = true;
-    this.submit({
-      clientID: sendable.clientID,
-      version: sendable.version,
-      steps: serializeSteps(sendable.steps),
-    });
+    try {
+      const pending = this.submit({
+        clientID: sendable.clientID,
+        version: sendable.version,
+        steps: serializeSteps(sendable.steps),
+      });
+      if (
+        pending !== null &&
+        typeof pending === 'object' &&
+        'then' in pending &&
+        typeof pending.then === 'function'
+      ) {
+        void Promise.resolve(pending).catch(() => {
+          this.inflight = false;
+        });
+      }
+    } catch {
+      this.inflight = false;
+    }
   }
 
   /**
@@ -88,17 +108,28 @@ export class CollabClient {
    */
   receive(broadcast: CollabBroadcast): boolean {
     const have = this.version;
+    const end = broadcast.startVersion + broadcast.steps.length;
+    if (!Number.isSafeInteger(end) || end < have) return false;
     const skip = have - broadcast.startVersion;
     if (skip < 0) {
       // Gap: a batch we haven't seen the predecessors of. Don't apply out of
       // order — surface for resync.
       return false;
     }
-    const steps = deserializeSteps(broadcast.steps).slice(skip);
+    let steps;
+    try {
+      steps = deserializeSteps(broadcast.steps).slice(skip);
+    } catch {
+      return false;
+    }
     const clientIDs = broadcast.clientIDs.slice(skip);
     if (steps.length > 0) {
-      const state = this.bridge.getState();
-      this.bridge.apply(receiveTransaction(state, steps, clientIDs));
+      try {
+        const state = this.bridge.getState();
+        this.bridge.apply(receiveTransaction(state, steps, clientIDs));
+      } catch {
+        return false;
+      }
     }
     // The batch confirmed (or superseded) whatever we had in flight.
     this.inflight = false;
@@ -108,7 +139,18 @@ export class CollabClient {
 }
 
 /** Broadcasts an accepted batch to every participant. */
-export type BroadcastFn = (broadcast: CollabBroadcast) => void;
+export type BroadcastFn = (broadcast: CollabBroadcast) => void | Promise<void>;
+
+/** Persists a candidate checkpoint before the live authority may advance. */
+export type PersistCheckpointFn = (
+  checkpoint: CollabCheckpoint,
+  expectedVersion: number,
+) => Promise<void>;
+
+export interface HostSubmissionResult {
+  status: 'accepted' | 'catchup' | 'invalid' | 'paused';
+  version: number;
+}
 
 /**
  * Owner-side session host. Wraps the {@link CollabAuthority}: every inbound
@@ -119,16 +161,33 @@ export type BroadcastFn = (broadcast: CollabBroadcast) => void;
 export class CollabHost {
   readonly authority: CollabAuthority;
   private readonly broadcast: BroadcastFn;
+  private readonly persistCheckpoint: PersistCheckpointFn | null;
   private ownerClient: CollabClient | null = null;
+  private serial: Promise<unknown> = Promise.resolve();
+  private persistenceError: Error | null = null;
 
-  constructor(authority: CollabAuthority, broadcast: BroadcastFn) {
+  constructor(
+    authority: CollabAuthority,
+    broadcast: BroadcastFn,
+    persistCheckpoint?: PersistCheckpointFn,
+  ) {
     this.authority = authority;
     this.broadcast = broadcast;
+    this.persistCheckpoint = persistCheckpoint ?? null;
   }
 
   /** The current authority version. */
   get version(): number {
     return this.authority.version;
+  }
+
+  /** A persistence failure pauses this host until it is rebuilt/restored. */
+  get paused(): boolean {
+    return this.persistenceError !== null;
+  }
+
+  get pauseReason(): string | null {
+    return this.persistenceError?.message ?? null;
   }
 
   /**
@@ -150,16 +209,112 @@ export class CollabHost {
    * (stale) submission is a no-op — the sender will catch up via earlier
    * broadcasts and resubmit.
    */
-  onSubmission(submission: CollabSubmission): void {
+  onSubmission(submission: CollabSubmission): Promise<HostSubmissionResult> {
+    // Preserve the existing synchronous fast path when no durable checkpoint
+    // store is configured. Browser owners supply `persistCheckpoint`, which
+    // uses the serialized path below.
+    if (this.persistCheckpoint === null) {
+      try {
+        return Promise.resolve(this.processImmediate(submission));
+      } catch {
+        return Promise.resolve({ status: 'invalid', version: this.version });
+      }
+    }
+
+    const task = this.serial.then(() => this.processPersisted(submission));
+    // A rejected task must not poison the queue: the host itself enters a
+    // terminal paused state and later submissions receive `paused`.
+    this.serial = task.catch(() => undefined);
+    return task;
+  }
+
+  private processImmediate(submission: CollabSubmission): HostSubmissionResult {
+    if (this.persistenceError)
+      return { status: 'paused', version: this.version };
+    const prepared = this.prepare(submission);
+    if (prepared === 'invalid')
+      return { status: 'invalid', version: this.version };
+    if (prepared === null) {
+      void this.broadcastBestEffort(this.catchupFor(submission.version));
+      return { status: 'catchup', version: this.version };
+    }
     const before = this.authority.version;
-    const result = this.authority.receiveSteps(
-      submission.version,
-      deserializeSteps(submission.steps),
-      submission.clientID,
-    );
-    if (!result.accepted) return;
+    this.authority.commitPrepared(prepared);
     const batch = this.authority.stepsSince(before);
-    this.broadcast(batch);
     this.ownerClient?.receive(batch);
+    void this.broadcastBestEffort(batch);
+    return { status: 'accepted', version: this.version };
+  }
+
+  private async processPersisted(
+    submission: CollabSubmission,
+  ): Promise<HostSubmissionResult> {
+    if (this.persistenceError)
+      return { status: 'paused', version: this.version };
+    const prepared = this.prepare(submission);
+    if (prepared === 'invalid')
+      return { status: 'invalid', version: this.version };
+    if (prepared === null) {
+      await this.broadcastBestEffort(this.catchupFor(submission.version));
+      return { status: 'catchup', version: this.version };
+    }
+    try {
+      await this.persistCheckpoint!(
+        prepared.checkpoint,
+        prepared.expectedVersion,
+      );
+    } catch (error) {
+      this.persistenceError =
+        error instanceof Error ? error : new Error(String(error));
+      return { status: 'paused', version: this.version };
+    }
+    const before = this.authority.version;
+    this.authority.commitPrepared(prepared);
+    const batch = this.authority.stepsSince(before);
+    this.ownerClient?.receive(batch);
+    // Persistence + authority commit are already durable. A transient
+    // transport failure must not strand the owner's own editor in-flight;
+    // peers recover through catch-up/resync.
+    await this.broadcastBestEffort(batch);
+    return { status: 'accepted', version: this.version };
+  }
+
+  private async broadcastBestEffort(broadcast: CollabBroadcast): Promise<void> {
+    try {
+      await this.broadcast(broadcast);
+    } catch {
+      // The checkpoint/authority is already durable. Peers recover through
+      // their next resync; transport failure must not reject the host queue.
+    }
+  }
+
+  private prepare(
+    submission: CollabSubmission,
+  ): PreparedCollabBatch | null | 'invalid' {
+    if (submission.version !== this.version) return null;
+    if (submission.steps.length === 0) return 'invalid';
+    let steps;
+    try {
+      steps = deserializeSteps(submission.steps);
+    } catch {
+      return 'invalid';
+    }
+    return (
+      this.authority.prepareSteps(
+        submission.version,
+        steps,
+        submission.clientID,
+      ) ?? 'invalid'
+    );
+  }
+
+  private catchupFor(requestedVersion: number): CollabBroadcast {
+    const from =
+      Number.isSafeInteger(requestedVersion) &&
+      requestedVersion >= 0 &&
+      requestedVersion <= this.version
+        ? requestedVersion
+        : 0;
+    return this.authority.stepsSince(from);
   }
 }

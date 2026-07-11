@@ -2015,7 +2015,8 @@ impl Bootstrapper {
                     .get(file_id.as_str())
                     .and_then(|node| node.plaintext.as_ref())
                     .is_some_and(|plaintext| {
-                        plaintext.doc_type == expected_doc_type && plaintext.content == source
+                        plaintext.doc_type == expected_doc_type
+                            && plaintext.content.as_deref() == Some(source.as_str())
                     });
                 if matches_source {
                     continue;
@@ -3026,8 +3027,11 @@ impl Bootstrapper {
         };
         let plaintext = SnapshotPlaintext {
             doc_type,
-            content,
+            content: Some(content),
             anchor_index,
+            media_type: None,
+            encoding: None,
+            manifest: None,
         };
 
         // ---- Seal the snapshot bytes as a `kind=snapshot_blob` envelope.
@@ -5070,7 +5074,7 @@ mod tests {
         .expect("blob opens under snapshotKey");
         let plaintext: SnapshotPlaintext =
             serde_json::from_slice(&blob_bytes).expect("blob is a SnapshotPlaintext");
-        assert_eq!(plaintext.content, "# Plan\n");
+        assert_eq!(plaintext.content.as_deref(), Some("# Plan\n"));
         assert_eq!(plaintext.doc_type, crate::review::model::DocType::Markdown);
         assert!(
             plaintext.anchor_index.is_some(),
@@ -5179,7 +5183,7 @@ mod tests {
         let plaintext: SnapshotPlaintext =
             serde_json::from_slice(&blob_bytes).expect("blob is a SnapshotPlaintext");
         assert_eq!(plaintext.doc_type, crate::review::model::DocType::Html);
-        assert_eq!(plaintext.content, html);
+        assert_eq!(plaintext.content.as_deref(), Some(html));
         assert!(
             plaintext.anchor_index.is_none(),
             "read-only HTML snapshots carry no anchor index"
@@ -5322,7 +5326,10 @@ mod tests {
             .create_durable_epoch_room(path.clone(), secret)
             .await
             .expect("initial durable room");
-        assert_eq!(first.snapshots[0].plaintext.content, "# Before\n");
+        assert_eq!(
+            first.snapshots[0].plaintext.content.as_deref(),
+            Some("# Before\n")
+        );
         std::fs::write(&path, "# After\n\nEdited offline.\n").expect("offline edit");
 
         let second = boot
@@ -5335,8 +5342,8 @@ mod tests {
             second.snapshots[0].snapshot_id
         );
         assert_eq!(
-            second.snapshots[0].plaintext.content,
-            "# After\n\nEdited offline.\n"
+            second.snapshots[0].plaintext.content.as_deref(),
+            Some("# After\n\nEdited offline.\n")
         );
     }
 

@@ -295,6 +295,15 @@ test('remembered outbox survives reconstruction and removes exact ciphertext onl
       }
       pending.set(item.envelopeId, structuredClone(item));
     },
+    putPendingBatch: async (items) => {
+      for (const item of items) {
+        const existing = pending.get(item.envelopeId);
+        if (existing && JSON.stringify(existing) !== JSON.stringify(item)) {
+          throw new Error('conflicting durable envelope');
+        }
+      }
+      for (const item of items) pending.set(item.envelopeId, structuredClone(item));
+    },
     acknowledge: async (batch, accepted: BrowserOutboxAccepted[]) => {
       for (const ack of accepted) {
         const item = batch.find((candidate) => candidate.envelopeId === ack.envelopeId);
@@ -369,6 +378,9 @@ test('envelopes authored while persistence is enabling are durably migrated', as
       }
       pending.set(item.envelopeId, structuredClone(item));
     },
+    putPendingBatch: async (items) => {
+      for (const item of items) await persistence.putPending(item);
+    },
     acknowledge: async () => undefined,
   };
   const outbox = makeOutbox(async (_url, init) => acceptedFromBody(init.body), []);
@@ -397,6 +409,9 @@ test('persistence waits for an already in-flight memory drain before becoming au
   const persistence: BrowserOutboxPersistence = {
     loadPending: async () => [...pending.values()],
     putPending: async (item) => { pending.set(item.envelopeId, structuredClone(item)); },
+    putPendingBatch: async (items) => {
+      for (const item of items) pending.set(item.envelopeId, structuredClone(item));
+    },
     acknowledge: async (batch) => {
       durableAcks += 1;
       assert(batch.every((item) => pending.has(item.envelopeId)), 'durable ack requires pending rows');

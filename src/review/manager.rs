@@ -3955,7 +3955,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verdicts_wait_timeout_returns_pending_partial_report() {
+    async fn e2e_gate_timeout_returns_parseable_pending_partial_report() {
         let (mgr, _rx, _tmp) = make_manager();
         let room_id: RoomId = dummy_id("room-verdicts-timeout");
         let created = verdicts_test_event(
@@ -3989,6 +3989,123 @@ mod tests {
             report.rooms["room-verdicts-timeout"].suggestions["suggestion-pending"].status,
             crate::review::store::SuggestionVerdictStatus::Pending
         );
+        serde_json::to_string(&report).expect("partial verdict report remains JSON serializable");
+    }
+
+    #[tokio::test]
+    async fn e2e_gate_mixed_verdicts_block_wake_scope_and_canonical_hash() {
+        use crate::review::crypto::ids::content_hash;
+        use crate::review::store::SuggestionVerdictStatus;
+
+        let (mgr, _rx, tmp) = make_manager();
+        let mgr = Arc::new(mgr);
+        let room_id: RoomId = dummy_id("room-e2e-gate");
+        let gate_agent: crate::review::ids::ParticipantId = dummy_id("gate-agent");
+
+        for (event_id, author, suggestion_id, replacement) in [
+            ("evt-gate-one", "gate-agent", "suggestion-one", "accepted"),
+            ("evt-gate-two", "gate-agent", "suggestion-two", "rejected"),
+            ("evt-other", "other-agent", "suggestion-other", "invisible"),
+        ] {
+            let created = verdicts_test_event(
+                &room_id,
+                event_id,
+                author,
+                ReviewEventBody::SuggestionCreated {
+                    suggestion_id: suggestion_id.to_string(),
+                    anchor: dummy_anchor(),
+                    operation: SuggestionOperation::Replace {
+                        expected_text: "old".to_string(),
+                        replacement: replacement.to_string(),
+                    },
+                    note: None,
+                },
+            );
+            mgr.store.append_event(&room_id, &created).expect("create");
+        }
+
+        let mut waiter = {
+            let mgr = Arc::clone(&mgr);
+            let gate_agent = gate_agent.clone();
+            tokio::spawn(async move { mgr.wait_for_verdicts(Some(&gate_agent), None, None).await })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut waiter)
+                .await
+                .is_err(),
+            "gate must remain blocked before verdicts after being actively scheduled"
+        );
+
+        let owner_bytes = b"# Gate result\n\nfirst accepted\n\nsecond unchanged\n";
+        let owner_path = tmp.path().join("owner.md");
+        std::fs::write(&owner_path, owner_bytes).expect("write owner result");
+        let resulting_hash = content_hash(&std::fs::read(owner_path).expect("read owner result"));
+        let expected_hash = serde_json::to_value(&resulting_hash)
+            .expect("serialize canonical hash")
+            .as_str()
+            .expect("hash is a string")
+            .to_string();
+
+        let accepted = verdicts_test_event(
+            &room_id,
+            "evt-gate-accepted",
+            "owner",
+            ReviewEventBody::SuggestionAccepted {
+                suggestion_id: "suggestion-one".to_string(),
+                applied_revision_id: "revision-gate".to_string(),
+                resulting_hash,
+            },
+        );
+        let rejected = verdicts_test_event(
+            &room_id,
+            "evt-gate-rejected",
+            "owner",
+            ReviewEventBody::SuggestionRejected {
+                suggestion_id: "suggestion-two".to_string(),
+                reason: Some("not for this change".to_string()),
+            },
+        );
+        mgr.store.append_event(&room_id, &accepted).expect("accept");
+        mgr.store.append_event(&room_id, &rejected).expect("reject");
+        forward_transport_event(
+            &mgr.update_tx,
+            &mgr.store,
+            &mgr.verdict_revision_tx,
+            &room_id,
+            "owner-device",
+            None,
+            crate::review::transport::TransportEvent::EventImported {
+                room_id: room_id.clone(),
+                event: rejected,
+            },
+        );
+
+        let outcome = waiter
+            .await
+            .expect("join waiter")
+            .expect("wait for verdicts");
+        let VerdictWaitOutcome::Complete(report) = outcome else {
+            panic!("mixed verdict gate should complete")
+        };
+        let suggestions = &report.rooms["room-e2e-gate"].suggestions;
+        assert_eq!(
+            suggestions.len(),
+            2,
+            "distinct agent suggestions stay scoped out"
+        );
+        assert_eq!(
+            suggestions["suggestion-one"].status,
+            SuggestionVerdictStatus::Accepted
+        );
+        assert_eq!(
+            suggestions["suggestion-one"].resulting_hash.as_deref(),
+            Some(expected_hash.as_str())
+        );
+        assert_eq!(
+            suggestions["suggestion-two"].status,
+            SuggestionVerdictStatus::Rejected
+        );
+        assert!(!suggestions.contains_key("suggestion-other"));
     }
 
     fn dummy_id<T: for<'de> Deserialize<'de>>(s: &str) -> T {

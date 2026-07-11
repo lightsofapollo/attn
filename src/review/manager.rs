@@ -284,6 +284,14 @@ pub struct PeerPresence {
 /// closure without dragging in `tao::EventLoopProxy`.
 pub type UpdateSink = Arc<dyn Fn(ReviewUpdate) + Send + Sync>;
 
+/// Result of waiting for a fixed set of suggestion verdicts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "report", rename_all = "snake_case")]
+pub enum VerdictWaitOutcome {
+    Complete(crate::review::store::VerdictsReport),
+    TimedOut(crate::review::store::VerdictsReport),
+}
+
 /// Daemon-owned runtime service. Owns the durable review store handle and
 /// the working-copy writer; exposes a synchronous `submit` entry point that
 /// dispatches a `ReviewCommand` and (eventually) drives the room runtime.
@@ -353,6 +361,10 @@ pub struct ReviewManager {
     outboxes: Arc<
         std::sync::Mutex<HashMap<RoomId, Arc<crate::review::transport::mailbox::OutboxProcessor>>>,
     >,
+
+    /// Monotonic signal for freshly imported, durably persisted verdicts.
+    /// Waiters subscribe before reading the store, closing the query/park race.
+    verdict_revision_tx: tokio::sync::watch::Sender<u64>,
 }
 
 /// A room's live WebRTC mesh — one DataChannel transport per other participant
@@ -412,6 +424,33 @@ impl std::fmt::Debug for RoomSignalContext {
     }
 }
 
+fn verdict_report_for_targets(
+    report: &crate::review::store::VerdictsReport,
+    targets: &std::collections::BTreeSet<(String, String)>,
+) -> crate::review::store::VerdictsReport {
+    let mut rooms = std::collections::BTreeMap::new();
+    for (room_id, room) in &report.rooms {
+        let suggestions = room
+            .suggestions
+            .iter()
+            .filter(|(suggestion_id, _)| {
+                targets.contains(&(room_id.clone(), (*suggestion_id).clone()))
+            })
+            .map(|(suggestion_id, verdict)| (suggestion_id.clone(), verdict.clone()))
+            .collect();
+        if targets
+            .iter()
+            .any(|(target_room, _)| target_room == room_id)
+        {
+            rooms.insert(
+                room_id.clone(),
+                crate::review::store::RoomVerdicts { suggestions },
+            );
+        }
+    }
+    crate::review::store::VerdictsReport { rooms }
+}
+
 impl ReviewManager {
     /// Query current suggestion verdicts across every persisted room.
     ///
@@ -432,6 +471,90 @@ impl ReviewManager {
         Ok(crate::review::store::VerdictsReport { rooms })
     }
 
+    /// Wait until a fixed suggestion set has accepted/rejected verdicts.
+    ///
+    /// With `suggestion_ids = None`, the target is every currently pending
+    /// suggestion visible through `creator`. Explicit ids override that
+    /// default and may name already-complete suggestions. The returned report
+    /// contains only the captured targets. No polling is used: after draining
+    /// persisted state, this parks on the imported-verdict revision stream.
+    pub async fn wait_for_verdicts(
+        &self,
+        creator: Option<&ParticipantId>,
+        suggestion_ids: Option<&std::collections::BTreeSet<String>>,
+        timeout: Option<std::time::Duration>,
+    ) -> anyhow::Result<VerdictWaitOutcome> {
+        use crate::review::store::SuggestionVerdictStatus;
+
+        // Subscribe first. A verdict imported between this subscription and
+        // the first store fold leaves `changed()` ready instead of being lost.
+        let mut revisions = self.verdict_revision_tx.subscribe();
+        let initial = self.verdicts(creator)?;
+        let mut targets = std::collections::BTreeSet::<(String, String)>::new();
+
+        for (room_id, room) in &initial.rooms {
+            for (suggestion_id, verdict) in &room.suggestions {
+                let selected = suggestion_ids
+                    .map_or(verdict.status == SuggestionVerdictStatus::Pending, |ids| {
+                        ids.contains(suggestion_id)
+                    });
+                if selected {
+                    targets.insert((room_id.clone(), suggestion_id.clone()));
+                }
+            }
+        }
+
+        if let Some(ids) = suggestion_ids {
+            let found = targets
+                .iter()
+                .map(|(_, suggestion_id)| suggestion_id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let missing = ids.difference(&found).cloned().collect::<Vec<_>>();
+            if !missing.is_empty() {
+                anyhow::bail!("unknown suggestion id(s): {}", missing.join(","));
+            }
+        }
+
+        let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
+        let mut current = initial;
+        loop {
+            let partial = verdict_report_for_targets(&current, &targets);
+            let complete = partial.rooms.values().all(|room| {
+                room.suggestions
+                    .values()
+                    .all(|verdict| verdict.status != SuggestionVerdictStatus::Pending)
+            });
+            if complete {
+                return Ok(VerdictWaitOutcome::Complete(partial));
+            }
+
+            let changed = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, revisions.changed()).await,
+                None => Ok(revisions.changed().await),
+            };
+            match changed {
+                Ok(Ok(())) => current = self.verdicts(creator)?,
+                Ok(Err(_)) => anyhow::bail!("verdict notification stream closed"),
+                Err(_) => {
+                    // Drain durable state once more at the deadline so a
+                    // verdict persisted concurrently with timeout wins.
+                    current = self.verdicts(creator)?;
+                    let partial = verdict_report_for_targets(&current, &targets);
+                    let complete = partial.rooms.values().all(|room| {
+                        room.suggestions
+                            .values()
+                            .all(|verdict| verdict.status != SuggestionVerdictStatus::Pending)
+                    });
+                    return Ok(if complete {
+                        VerdictWaitOutcome::Complete(partial)
+                    } else {
+                        VerdictWaitOutcome::TimedOut(partial)
+                    });
+                }
+            }
+        }
+    }
+
     /// Construct a new manager. The `update_tx` closure is invoked from
     /// `submit` (synchronously today; future async work may spawn). It's
     /// expected to forward into the tao event loop via
@@ -441,6 +564,7 @@ impl ReviewManager {
         working_copy: Arc<WorkingCopyService>,
         update_tx: UpdateSink,
     ) -> Self {
+        let (verdict_revision_tx, _) = tokio::sync::watch::channel(0);
         Self {
             store,
             working_copy,
@@ -453,6 +577,7 @@ impl ReviewManager {
             live_webrtc: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             outboxes: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            verdict_revision_tx,
         }
     }
 
@@ -1746,6 +1871,7 @@ impl ReviewManager {
         let badge_update_tx = Arc::clone(&self.update_tx);
         let webrtc_live_map = Arc::clone(&self.live_webrtc);
         let forward_store = Arc::clone(&self.store);
+        let verdict_revision_tx = self.verdict_revision_tx.clone();
         let room_id_owned = room_id.clone();
         let self_device_id = device_id.as_str().to_string();
         let owner_participant_id: Option<String> = self
@@ -2119,6 +2245,7 @@ impl ReviewManager {
                 forward_transport_event(
                     &update_tx,
                     &forward_store,
+                    &verdict_revision_tx,
                     &room_id_owned,
                     &self_device_id,
                     owner_participant_id.as_deref(),
@@ -3116,6 +3243,7 @@ fn rehydrate_snapshot_event(
 fn forward_transport_event(
     update_tx: &UpdateSink,
     store: &crate::review::store::ReviewStore,
+    verdict_revision_tx: &tokio::sync::watch::Sender<u64>,
     room_id: &RoomId,
     self_device_id: &str,
     owner_participant_id: Option<&str>,
@@ -3127,6 +3255,11 @@ fn forward_transport_event(
             room_id: rid,
             mut event,
         } => {
+            let is_verdict = matches!(
+                &event.body,
+                ReviewEventBody::SuggestionAccepted { .. }
+                    | ReviewEventBody::SuggestionRejected { .. }
+            );
             tracing::debug!(
                 event_id = event.meta.event_id.as_str(),
                 body_type = review_event_body_name(&event.body),
@@ -3137,6 +3270,11 @@ fn forward_transport_event(
                 room_id: rid,
                 event,
             });
+            if is_verdict {
+                verdict_revision_tx.send_modify(|revision| {
+                    *revision = revision.wrapping_add(1);
+                });
+            }
         }
         TransportEvent::Envelope { .. } => {
             // Already covered by EventImported (events) / handled elsewhere
@@ -3654,6 +3792,168 @@ mod tests {
         });
         let mgr = ReviewManager::new(store, working_copy, sink);
         (mgr, rx, tmp)
+    }
+
+    fn verdicts_test_event(
+        room_id: &RoomId,
+        event_id: &str,
+        author_id: &str,
+        body: ReviewEventBody,
+    ) -> crate::review::model::ReviewEvent {
+        let mut event = stub_review_event(room_id, body);
+        event.meta.event_id = dummy_id(event_id);
+        event.meta.author_id = dummy_id(author_id);
+        event
+    }
+
+    #[tokio::test]
+    async fn verdicts_wait_already_complete_does_not_block() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-verdicts-complete");
+        let created = verdicts_test_event(
+            &room_id,
+            "evt-created",
+            "agent-a",
+            ReviewEventBody::SuggestionCreated {
+                suggestion_id: "suggestion-a".to_string(),
+                anchor: dummy_anchor(),
+                operation: SuggestionOperation::Replace {
+                    expected_text: "old".to_string(),
+                    replacement: "done".to_string(),
+                },
+                note: None,
+            },
+        );
+        let accepted = verdicts_test_event(
+            &room_id,
+            "evt-accepted",
+            "owner",
+            ReviewEventBody::SuggestionAccepted {
+                suggestion_id: "suggestion-a".to_string(),
+                applied_revision_id: "revision-a".to_string(),
+                resulting_hash: stub_content_hash(),
+            },
+        );
+        mgr.store.append_event(&room_id, &created).expect("create");
+        mgr.store.append_event(&room_id, &accepted).expect("accept");
+        let ids = ["suggestion-a".to_string()].into_iter().collect();
+
+        let outcome = mgr
+            .wait_for_verdicts(
+                Some(&dummy_id("agent-a")),
+                Some(&ids),
+                Some(std::time::Duration::ZERO),
+            )
+            .await
+            .expect("wait");
+        assert!(matches!(outcome, VerdictWaitOutcome::Complete(_)));
+    }
+
+    #[tokio::test]
+    async fn verdicts_wait_wakes_on_late_persisted_import_notification() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let mgr = Arc::new(mgr);
+        let room_id: RoomId = dummy_id("room-verdicts-late");
+        let created = verdicts_test_event(
+            &room_id,
+            "evt-created-late",
+            "agent-a",
+            ReviewEventBody::SuggestionCreated {
+                suggestion_id: "suggestion-late".to_string(),
+                anchor: dummy_anchor(),
+                operation: SuggestionOperation::Replace {
+                    expected_text: "old".to_string(),
+                    replacement: "late".to_string(),
+                },
+                note: None,
+            },
+        );
+        mgr.store.append_event(&room_id, &created).expect("create");
+
+        let notifier = Arc::clone(&mgr);
+        let notify_room = room_id.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let accepted = verdicts_test_event(
+                &notify_room,
+                "evt-accepted-late",
+                "owner",
+                ReviewEventBody::SuggestionAccepted {
+                    suggestion_id: "suggestion-late".to_string(),
+                    applied_revision_id: "revision-late".to_string(),
+                    resulting_hash: stub_content_hash(),
+                },
+            );
+            notifier
+                .store
+                .append_event(&notify_room, &accepted)
+                .expect("persist before notification");
+            forward_transport_event(
+                &notifier.update_tx,
+                &notifier.store,
+                &notifier.verdict_revision_tx,
+                &notify_room,
+                "self-device",
+                None,
+                crate::review::transport::TransportEvent::EventImported {
+                    room_id: notify_room.clone(),
+                    event: accepted,
+                },
+            );
+        });
+
+        let outcome = mgr
+            .wait_for_verdicts(
+                Some(&dummy_id("agent-a")),
+                None,
+                Some(std::time::Duration::from_secs(1)),
+            )
+            .await
+            .expect("wait");
+        let VerdictWaitOutcome::Complete(report) = outcome else {
+            panic!("late verdict should complete")
+        };
+        assert_eq!(
+            report.rooms["room-verdicts-late"].suggestions["suggestion-late"].status,
+            crate::review::store::SuggestionVerdictStatus::Accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn verdicts_wait_timeout_returns_pending_partial_report() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-verdicts-timeout");
+        let created = verdicts_test_event(
+            &room_id,
+            "evt-created-timeout",
+            "agent-a",
+            ReviewEventBody::SuggestionCreated {
+                suggestion_id: "suggestion-pending".to_string(),
+                anchor: dummy_anchor(),
+                operation: SuggestionOperation::Replace {
+                    expected_text: "old".to_string(),
+                    replacement: "pending".to_string(),
+                },
+                note: None,
+            },
+        );
+        mgr.store.append_event(&room_id, &created).expect("create");
+
+        let outcome = mgr
+            .wait_for_verdicts(
+                Some(&dummy_id("agent-a")),
+                None,
+                Some(std::time::Duration::ZERO),
+            )
+            .await
+            .expect("wait");
+        let VerdictWaitOutcome::TimedOut(report) = outcome else {
+            panic!("pending verdict should time out")
+        };
+        assert_eq!(
+            report.rooms["room-verdicts-timeout"].suggestions["suggestion-pending"].status,
+            crate::review::store::SuggestionVerdictStatus::Pending
+        );
     }
 
     fn dummy_id<T: for<'de> Deserialize<'de>>(s: &str) -> T {

@@ -134,6 +134,16 @@ pub enum ReviewSubcommand {
         /// identity. Ignored for filtering with `--all`, but still validated.
         #[arg(long, value_name = "NAME")]
         as_agent: Option<String>,
+        /// Park until the captured suggestion set is accepted or rejected.
+        #[arg(long)]
+        wait: bool,
+        /// Wait for these comma-separated suggestion ids instead of all
+        /// currently pending suggestions visible to the calling identity.
+        #[arg(long = "for", value_name = "ID,ID", value_delimiter = ',', num_args = 1..)]
+        for_ids: Option<Vec<String>>,
+        /// Maximum wait (`ms`, `s`, `m`, or `h`, for example `500ms`, `2m`).
+        #[arg(long, value_name = "DURATION", value_parser = parse_verdict_wait_duration)]
+        timeout: Option<Duration>,
     },
 
     /// Run a **headless, long-lived** review participant — no window, no
@@ -210,7 +220,10 @@ pub fn run(args: ReviewArgs) -> Result<()> {
             json,
             all,
             as_agent,
-        } => run_verdicts(json, all, as_agent.as_deref()),
+            wait,
+            for_ids,
+            timeout,
+        } => run_verdicts(json, all, as_agent.as_deref(), wait, for_ids, timeout),
         ReviewSubcommand::Agent {
             share,
             mode,
@@ -219,16 +232,81 @@ pub fn run(args: ReviewArgs) -> Result<()> {
     }
 }
 
-fn run_verdicts(json: bool, all: bool, as_agent: Option<&str>) -> Result<()> {
-    if !json {
+fn run_verdicts(
+    json: bool,
+    all: bool,
+    as_agent: Option<&str>,
+    wait: bool,
+    for_ids: Option<Vec<String>>,
+    timeout: Option<Duration>,
+) -> Result<()> {
+    validate_verdict_wait_options(wait, for_ids.as_deref(), timeout)?;
+    if !json && !wait {
         bail!("verdicts currently requires --json");
     }
     let base = runtime_dir().context("resolve runtime_dir for verdict identity")?;
     let identity = load_verdict_identity(&base, as_agent)?;
-    let report = crate::daemon::send_review_verdicts(identity.typed_participant_id(), all)
-        .context("query persisted review verdicts from the running daemon")?;
-    println!("{}", verdicts_json(&report)?);
+    if wait {
+        match crate::daemon::send_review_verdicts_wait(
+            identity.typed_participant_id(),
+            all,
+            for_ids,
+            timeout,
+        )
+        .context("wait for persisted review verdicts from the running daemon")?
+        {
+            crate::review::manager::VerdictWaitOutcome::Complete(report) => {
+                println!("{}", verdicts_json(&report)?);
+                Ok(())
+            }
+            crate::review::manager::VerdictWaitOutcome::TimedOut(report) => {
+                // Keep the machine-readable channel clean even on non-zero
+                // exit. `main` writes the human timeout diagnostic to stderr.
+                println!("{}", verdicts_json(&report)?);
+                bail!("timed out waiting for suggestion verdicts")
+            }
+        }
+    } else {
+        let report = crate::daemon::send_review_verdicts(identity.typed_participant_id(), all)
+            .context("query persisted review verdicts from the running daemon")?;
+        println!("{}", verdicts_json(&report)?);
+        Ok(())
+    }
+}
+
+fn validate_verdict_wait_options(
+    wait: bool,
+    for_ids: Option<&[String]>,
+    timeout: Option<Duration>,
+) -> Result<()> {
+    if !wait && for_ids.is_some() {
+        bail!("--for requires --wait");
+    }
+    if !wait && timeout.is_some() {
+        bail!("--timeout requires --wait");
+    }
     Ok(())
+}
+
+fn parse_verdict_wait_duration(raw: &str) -> std::result::Result<Duration, String> {
+    let (number, multiplier) = if let Some(number) = raw.strip_suffix("ms") {
+        (number, 1u64)
+    } else if let Some(number) = raw.strip_suffix('s') {
+        (number, 1_000)
+    } else if let Some(number) = raw.strip_suffix('m') {
+        (number, 60_000)
+    } else if let Some(number) = raw.strip_suffix('h') {
+        (number, 3_600_000)
+    } else {
+        return Err("duration must end in ms, s, m, or h".to_string());
+    };
+    let value = number
+        .parse::<u64>()
+        .map_err(|_| format!("invalid duration {raw:?}"))?;
+    let millis = value
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("duration {raw:?} is too large"))?;
+    Ok(Duration::from_millis(millis))
 }
 
 fn load_verdict_identity(base: &Path, as_agent: Option<&str>) -> Result<DeviceIdentity> {
@@ -556,15 +634,88 @@ mod tests {
                         json,
                         all,
                         as_agent,
+                        wait,
+                        for_ids,
+                        timeout,
                     },
                 ..
             }) => {
                 assert!(json);
                 assert!(all);
                 assert_eq!(as_agent.as_deref(), Some("rufus"));
+                assert!(!wait);
+                assert!(for_ids.is_none());
+                assert!(timeout.is_none());
             }
             _ => panic!("expected review verdicts"),
         }
+    }
+
+    #[test]
+    fn verdicts_cli_parses_wait_targets_and_timeout() {
+        let parsed = TestCli::try_parse_from([
+            "attn",
+            "review",
+            "verdicts",
+            "--wait",
+            "--for",
+            "suggestion-a,suggestion-b",
+            "--timeout",
+            "2m",
+        ])
+        .expect("parse wait CLI");
+        let TestCommand::Review(ReviewArgs {
+            command:
+                ReviewSubcommand::Verdicts {
+                    json,
+                    wait,
+                    for_ids,
+                    timeout,
+                    ..
+                },
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected review verdicts")
+        };
+        assert!(!json, "--wait implies JSON at execution time");
+        assert!(wait);
+        assert_eq!(
+            for_ids,
+            Some(vec!["suggestion-a".to_string(), "suggestion-b".to_string()])
+        );
+        assert_eq!(timeout, Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn verdicts_duration_parser_supports_ms_s_m_h_and_rejects_bare_values() {
+        assert_eq!(
+            parse_verdict_wait_duration("250ms"),
+            Ok(Duration::from_millis(250))
+        );
+        assert_eq!(
+            parse_verdict_wait_duration("3s"),
+            Ok(Duration::from_secs(3))
+        );
+        assert_eq!(
+            parse_verdict_wait_duration("2m"),
+            Ok(Duration::from_secs(120))
+        );
+        assert_eq!(
+            parse_verdict_wait_duration("1h"),
+            Ok(Duration::from_secs(3600))
+        );
+        assert!(parse_verdict_wait_duration("30").is_err());
+    }
+
+    #[test]
+    fn verdicts_for_and_timeout_require_wait() {
+        let ids = vec!["suggestion-a".to_string()];
+        assert!(validate_verdict_wait_options(false, Some(&ids), None).is_err());
+        assert!(validate_verdict_wait_options(false, None, Some(Duration::from_secs(1))).is_err());
+        assert!(
+            validate_verdict_wait_options(true, Some(&ids), Some(Duration::from_secs(1))).is_ok()
+        );
     }
 
     #[test]

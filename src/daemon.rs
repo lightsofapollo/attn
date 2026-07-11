@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tao::event_loop::EventLoopProxy;
 
-use crate::review::manager::{ReviewCommand, ReviewManager};
+use crate::review::manager::{ReviewCommand, ReviewManager, VerdictWaitOutcome};
 use crate::watcher::UserEvent;
 
 /// Structured interaction actions for E2E testing (debug builds only).
@@ -134,6 +134,17 @@ pub enum SocketMessage {
         #[serde(default)]
         all: bool,
     },
+    /// Wait for a fixed set of suggestions to receive persisted verdicts.
+    #[serde(rename = "review_verdicts_wait", rename_all = "camelCase")]
+    ReviewVerdictsWait {
+        participant_id: crate::review::ids::ParticipantId,
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        suggestion_ids: Option<Vec<String>>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
 }
 
 /// Response sent from daemon back to client.
@@ -163,6 +174,8 @@ pub enum SocketResponse {
     ReviewVerdicts {
         report: crate::review::store::VerdictsReport,
     },
+    #[serde(rename = "review_verdicts_wait")]
+    ReviewVerdictsWait { outcome: VerdictWaitOutcome },
 }
 
 /// Runtime directory for daemon state (socket, fingerprint, log, future reviews/).
@@ -434,6 +447,29 @@ pub fn send_review_verdicts(
     }
 }
 
+/// Wait through the running daemon for imported suggestion verdicts.
+pub fn send_review_verdicts_wait(
+    participant_id: crate::review::ids::ParticipantId,
+    all: bool,
+    suggestion_ids: Option<Vec<String>>,
+    timeout: Option<Duration>,
+) -> Result<VerdictWaitOutcome> {
+    let timeout_ms =
+        timeout.map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+    let msg = SocketMessage::ReviewVerdictsWait {
+        participant_id,
+        all,
+        suggestion_ids,
+        timeout_ms,
+    };
+    match send_command(&msg)? {
+        Some(SocketResponse::ReviewVerdictsWait { outcome }) => Ok(outcome),
+        Some(SocketResponse::Error { message }) => bail!("review_verdicts_wait failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
 /// Send a command to the daemon and read the response.
 /// Returns None if no daemon is running.
 fn send_command(msg: &SocketMessage) -> Result<Option<SocketResponse>> {
@@ -600,6 +636,42 @@ fn query_review_verdicts(
     }
 }
 
+fn wait_review_verdicts(
+    review_manager: Option<&Arc<ReviewManager>>,
+    participant_id: &crate::review::ids::ParticipantId,
+    all: bool,
+    suggestion_ids: Option<Vec<String>>,
+    timeout_ms: Option<u64>,
+) -> SocketResponse {
+    let Some(manager) = review_manager else {
+        return SocketResponse::Error {
+            message: "ReviewManager unavailable".to_string(),
+        };
+    };
+    let suggestion_ids = suggestion_ids.map(|ids| ids.into_iter().collect());
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            return SocketResponse::Error {
+                message: format!("could not start verdict waiter: {err}"),
+            };
+        }
+    };
+    match runtime.block_on(manager.wait_for_verdicts(
+        (!all).then_some(participant_id),
+        suggestion_ids.as_ref(),
+        timeout_ms.map(Duration::from_millis),
+    )) {
+        Ok(outcome) => SocketResponse::ReviewVerdictsWait { outcome },
+        Err(err) => SocketResponse::Error {
+            message: format!("could not wait for persisted verdicts: {err:#}"),
+        },
+    }
+}
+
 /// Parse a wire-format room id (`String`) into the typed `RoomId` newtype.
 /// The constructor on `RoomId` is crate-private, so we route through serde —
 /// same trick used in tests and stub helpers.
@@ -673,7 +745,9 @@ pub fn start_listener(
                 Ok(stream) => {
                     let proxy = proxy.clone();
                     let manager = review_manager.clone();
-                    handle_client(stream, &proxy, manager.as_ref());
+                    std::thread::spawn(move || {
+                        handle_client(stream, &proxy, manager.as_ref());
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("socket accept error: {e}");
@@ -872,6 +946,25 @@ fn handle_client(
                 all,
             }) => {
                 let resp = query_review_verdicts(review_manager, &participant_id, all);
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::ReviewVerdictsWait {
+                participant_id,
+                all,
+                suggestion_ids,
+                timeout_ms,
+            }) => {
+                let resp = wait_review_verdicts(
+                    review_manager,
+                    &participant_id,
+                    all,
+                    suggestion_ids,
+                    timeout_ms,
+                );
                 let _ = writeln!(
                     stream,
                     "{}",
@@ -1116,8 +1209,9 @@ mod tests {
 
     #[test]
     fn verdicts_socket_returns_manager_unavailable_error() {
-        let participant_id = serde_json::from_value(serde_json::Value::String("agent-a".into()))
-            .expect("participant id");
+        let participant_id: crate::review::ids::ParticipantId =
+            serde_json::from_value(serde_json::Value::String("agent-a".into()))
+                .expect("participant id");
         let response = query_review_verdicts(None, &participant_id, false);
         match response {
             SocketResponse::Error { message } => {
@@ -1140,6 +1234,35 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&response).expect("serialize response"),
             r#"{"type":"review_verdicts","report":{"rooms":{"room-a":{"suggestions":{}},"room-b":{"suggestions":{}}}}}"#
+        );
+    }
+
+    #[test]
+    fn verdicts_wait_socket_serialization_is_typed() {
+        let participant_id: crate::review::ids::ParticipantId =
+            serde_json::from_value(serde_json::Value::String("agent-a".into()))
+                .expect("participant id");
+        let request = SocketMessage::ReviewVerdictsWait {
+            participant_id: participant_id.clone(),
+            all: false,
+            suggestion_ids: Some(vec!["suggestion-a".to_string()]),
+            timeout_ms: Some(1_500),
+        };
+        assert_eq!(
+            serde_json::to_string(&request).expect("serialize request"),
+            r#"{"type":"review_verdicts_wait","participantId":"agent-a","all":false,"suggestionIds":["suggestion-a"],"timeoutMs":1500}"#
+        );
+
+        let response = wait_review_verdicts(
+            Some(&make_test_manager().0),
+            &participant_id,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(
+            serde_json::to_string(&response).expect("serialize response"),
+            r#"{"type":"review_verdicts_wait","outcome":{"status":"complete","report":{"rooms":{}}}}"#
         );
     }
 

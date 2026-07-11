@@ -921,6 +921,26 @@ export class BrowserSession {
     await outbox.flushNow();
   }
 
+  /** Owner-only snapshot batch adoption for a lease-scoped publication. */
+  async enqueuePublicationBatch(envelopes: readonly MailboxEnvelope[]): Promise<number> {
+    if (this.principal !== 'owner') throw new Error('only the browser owner may publish snapshots');
+    const outbox = this.outbox;
+    if (!outbox || !this.state.authoringReady) {
+      throw new Error('browser owner publication outbox is unavailable');
+    }
+    return outbox.enqueueBatchDurably(envelopes);
+  }
+
+  /** Flush the exact owner outbox used by snapshot publication. */
+  async flushPublicationOutbox(): Promise<void> {
+    if (this.principal !== 'owner') throw new Error('only the browser owner may publish snapshots');
+    const outbox = this.outbox;
+    if (!outbox || !this.state.authoringReady) {
+      throw new Error('browser owner publication outbox is unavailable');
+    }
+    await outbox.flushNow();
+  }
+
   /** Send live collab as one broadcast envelope: direct first, relay always. */
   async sendCollab(payload: string): Promise<void> {
     // Re-evaluate wall-clock expiry even if no presence/policy frame has

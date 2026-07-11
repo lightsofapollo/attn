@@ -10,6 +10,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import type {
   ApplyVerdict,
   EventId,
+  RequiresThreeWayVerdict,
   ReviewEvent,
   RoomId,
   SuggestionAcceptedBody,
@@ -121,22 +122,41 @@ export interface AcceptBrowserSuggestionInput
   extends BrowserReviewActionBaseInput,
     Omit<ResolveBrowserSuggestionInput, 'roomId' | 'suggestionId'> {}
 
+export interface PrepareBrowserSuggestionInput
+  extends BrowserReviewActionIdentity,
+    Omit<ResolveBrowserSuggestionInput, 'roomId' | 'suggestionId'> {
+  expectedHeadRevisionId: string;
+}
+
 export interface RejectBrowserSuggestionInput extends BrowserReviewActionBaseInput {
   reason?: string;
 }
 
-export type AcceptBrowserSuggestionResult =
-  | { status: 'needs_review'; verdict: Exclude<ApplyVerdict, { kind: 'ready' }> }
-  | {
-      status: 'committed';
-      receipt: BrowserReviewActionReceipt;
-      event: ReviewEvent;
-      replayed: boolean;
-      deliveryPending: boolean;
-      deliveryError?: string;
-    };
+/**
+ * Opaque, runtime-held proof of the exact head/body that produced a reviewed
+ * three-way verdict. Its private payload lives in this module's WeakMap, so a
+ * caller cannot manufacture a reviewed apply from verdict fields alone.
+ */
+export interface BrowserReviewedSuggestion {
+  readonly workspaceId: string;
+  readonly roomId: RoomId;
+  readonly path: string;
+  readonly suggestionId: EventId;
+  readonly expectedHeadRevisionId: string;
+  readonly currentBodyHash: string;
+  readonly verdict: RequiresThreeWayVerdict;
+}
 
-export interface RejectBrowserSuggestionResult {
+export interface ApplyReviewedBrowserSuggestionInput {
+  reviewed: BrowserReviewedSuggestion;
+  fence: WorkspaceFence;
+  store: AtomicBrowserReviewActionStore;
+  terminalPort: BrowserReviewTerminalPort;
+  /** Exact owner-approved replacement (proposed text or hand-edited merge). */
+  replacement: string;
+}
+
+export interface CommittedBrowserSuggestionResult {
   status: 'committed';
   receipt: BrowserReviewActionReceipt;
   event: ReviewEvent;
@@ -144,6 +164,30 @@ export interface RejectBrowserSuggestionResult {
   deliveryPending: boolean;
   deliveryError?: string;
 }
+
+export type AcceptBrowserSuggestionResult =
+  | { status: 'needs_review'; verdict: RequiresThreeWayVerdict; reviewed: BrowserReviewedSuggestion }
+  | {
+      status: 'needs_review';
+      verdict: Exclude<ApplyVerdict, { kind: 'ready' } | RequiresThreeWayVerdict>;
+    }
+  | CommittedBrowserSuggestionResult;
+
+export type PreparedBrowserSuggestion =
+  | { status: 'ready'; verdict: Extract<ApplyVerdict, { kind: 'ready' }> }
+  | Exclude<AcceptBrowserSuggestionResult, CommittedBrowserSuggestionResult>;
+
+export type RejectBrowserSuggestionResult = CommittedBrowserSuggestionResult;
+
+interface ReviewedSuggestionPrivate {
+  identity: BrowserReviewActionIdentity;
+  expectedHeadRevisionId: string;
+  currentMarkdownBytes: Uint8Array;
+  currentBodyHash: string;
+  verdict: RequiresThreeWayVerdict;
+}
+
+const reviewedSuggestionPrivate = new WeakMap<BrowserReviewedSuggestion, ReviewedSuggestionPrivate>();
 
 export class BrowserReviewActionConflictError extends Error {
   constructor(message: string) {
@@ -297,8 +341,25 @@ export function decodeBrowserReviewActionReceipt(bytes: Uint8Array): BrowserRevi
 export async function acceptBrowserSuggestion(
   input: AcceptBrowserSuggestionInput,
 ): Promise<AcceptBrowserSuggestionResult> {
-  const identity = actionIdentity(input);
-  const actionId = deriveBrowserReviewActionId(identity);
+  const prepared = prepareBrowserSuggestion(input);
+  if (prepared.status === 'needs_review') return prepared;
+  const verdict = prepared.verdict;
+
+  // Native requires the exact bytes used for resolution to be the bytes fed
+  // to the guarded write. One input makes that invariant unrepresentable to
+  // violate at this layer; the atomic store still CASes expectedHeadRevisionId.
+  const nextBody = applyBrowserReadyVerdict(input.currentMarkdownBytes, verdict);
+  return commitAcceptedTransition(input, input.currentMarkdownBytes, nextBody);
+}
+
+/**
+ * Resolve against an exact workspace head and mint an opaque token only for
+ * the three-way case. Runtimes may call this before starting an epoch
+ * transition, retain `reviewed` while the UI is open, then commit it later.
+ */
+export function prepareBrowserSuggestion(
+  input: PrepareBrowserSuggestionInput,
+): PreparedBrowserSuggestion {
   const verdict = resolveBrowserSuggestion({
     roomId: input.roomId,
     suggestionId: input.suggestionId,
@@ -306,13 +367,69 @@ export async function acceptBrowserSuggestion(
     resolvedAnchor: input.resolvedAnchor,
     currentMarkdownBytes: input.currentMarkdownBytes,
   });
+  if (verdict.kind === 'requires_three_way') {
+    return {
+      status: 'needs_review',
+      verdict,
+      reviewed: createReviewedSuggestion(input, verdict),
+    };
+  }
   if (verdict.kind !== 'ready') return { status: 'needs_review', verdict };
+  return { status: 'ready', verdict };
+}
 
-  // Native requires the exact bytes used for resolution to be the bytes fed
-  // to the guarded write. One input makes that invariant unrepresentable to
-  // violate at this layer; the atomic store still CASes expectedHeadRevisionId.
-  const nextBody = applyBrowserReadyVerdict(input.currentMarkdownBytes, verdict);
-  const previousHash = browserWorkspaceBodyHash(input.currentMarkdownBytes);
+/**
+ * Commit an owner-reviewed three-way replacement against the exact context
+ * that produced the verdict. The opaque token supplies both bytes and head;
+ * the atomic store rechecks head + body hash under the active fence, so a
+ * token that became stale while the card was open fails instead of applying.
+ */
+export async function applyReviewedBrowserSuggestion(
+  input: ApplyReviewedBrowserSuggestionInput,
+): Promise<CommittedBrowserSuggestionResult> {
+  const pending = reviewedSuggestionPrivate.get(input.reviewed);
+  if (!pending) {
+    throw new BrowserReviewActionConflictError('reviewed suggestion token is invalid or expired');
+  }
+  if (typeof input.replacement !== 'string') {
+    throw new BrowserReviewActionConflictError('reviewed suggestion replacement is invalid');
+  }
+
+  const verdict = pending.verdict;
+  const currentBody = new Uint8Array(pending.currentMarkdownBytes);
+  if (browserWorkspaceBodyHash(currentBody) !== pending.currentBodyHash) {
+    throw new BrowserReviewActionConflictError('reviewed suggestion body context was corrupted');
+  }
+  const nextBody = applyBrowserReadyVerdict(currentBody, {
+    kind: 'ready',
+    suggestionId: pending.identity.suggestionId,
+    targetByteRange: [...verdict.targetByteRange],
+    replacement: input.replacement,
+    confidence: verdict.confidence,
+    matchKind: 'mismatch',
+    confidenceNote: 'owner reviewed three-way drift',
+  });
+  return commitAcceptedTransition(
+    {
+      ...pending.identity,
+      expectedHeadRevisionId: pending.expectedHeadRevisionId,
+      fence: input.fence,
+      store: input.store,
+      terminalPort: input.terminalPort,
+    },
+    currentBody,
+    nextBody,
+  );
+}
+
+async function commitAcceptedTransition(
+  input: BrowserReviewActionBaseInput,
+  currentMarkdownBytes: Uint8Array,
+  nextBody: Uint8Array,
+): Promise<CommittedBrowserSuggestionResult> {
+  const identity = actionIdentity(input);
+  const actionId = deriveBrowserReviewActionId(identity);
+  const previousHash = browserWorkspaceBodyHash(currentMarkdownBytes);
   const resultingHash = browserWorkspaceBodyHash(nextBody);
   const revisionId = deriveBrowserAppliedRevisionId({
     identity,
@@ -556,6 +673,30 @@ function actionIdentity(input: BrowserReviewActionIdentity): BrowserReviewAction
     path: input.path,
     suggestionId: input.suggestionId,
   });
+}
+
+function createReviewedSuggestion(
+  input: PrepareBrowserSuggestionInput,
+  verdict: RequiresThreeWayVerdict,
+): BrowserReviewedSuggestion {
+  const identity = actionIdentity(input);
+  const currentMarkdownBytes = new Uint8Array(input.currentMarkdownBytes);
+  const currentBodyHash = browserWorkspaceBodyHash(currentMarkdownBytes);
+  const privateVerdict = structuredClone(verdict);
+  const reviewed: BrowserReviewedSuggestion = Object.freeze({
+    ...identity,
+    expectedHeadRevisionId: input.expectedHeadRevisionId,
+    currentBodyHash,
+    verdict: structuredClone(privateVerdict),
+  });
+  reviewedSuggestionPrivate.set(reviewed, {
+    identity,
+    expectedHeadRevisionId: input.expectedHeadRevisionId,
+    currentMarkdownBytes,
+    currentBodyHash,
+    verdict: privateVerdict,
+  });
+  return reviewed;
 }
 
 async function replayReceipt(

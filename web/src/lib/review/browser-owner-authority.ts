@@ -19,7 +19,7 @@ import {
   CollabAuthority,
   type CollabCheckpoint,
 } from '../prosemirror/collab-authority';
-import type { FileId, ReviewEventBody } from '../types';
+import type { Anchor, FileId, ReviewEvent, ReviewEventBody } from '../types';
 import {
   MAX_COLLAB_CHECKPOINT_PLAINTEXT_BYTES,
   MAX_COLLAB_CHECKPOINT_STEPS,
@@ -38,6 +38,7 @@ import { StorageConflictError } from './browser-storage-errors';
 import type { WorkspaceFence } from './browser-workspace-store';
 import type { LeaseHandle } from './browser-workspace-lease';
 import type { PublishedManifestPointer } from './browser-snapshot-publisher';
+import type { SnapshotPublicationOutbox } from './browser-snapshot-publisher';
 import type { MailboxEnvelope } from './browser-ws';
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
@@ -87,6 +88,11 @@ export interface BrowserOwnerSession {
   getState(): BrowserSessionState;
   prepareTerminalEvent(body: ReviewEventBody): AssembledBrowserEvent;
   adoptDurableEnvelope(envelope: MailboxEnvelope): Promise<void>;
+  replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
+  resolveComment(threadId: string): Promise<ReviewEvent>;
+  retryOutbox(): Promise<void>;
+  enqueuePublicationBatch(envelopes: readonly MailboxEnvelope[]): Promise<number>;
+  flushPublicationOutbox(): Promise<void>;
 }
 
 export type BrowserOwnerAuthorityPauseKind =
@@ -129,6 +135,8 @@ export interface BrowserOwnerAuthorityRollover {
     checkpoint: CollabCheckpoint;
     /** Active fence for any workspace mutation needed by the publisher shell. */
     fence: WorkspaceFence;
+    /** Live owner outbox scoped to this rollover publication phase. */
+    publicationOutbox: SnapshotPublicationOutbox;
   }) => unknown | Promise<unknown>;
 }
 
@@ -175,6 +183,8 @@ export interface BrowserPublishedEpochTransition {
   fence: WorkspaceFence;
   /** Trusted terminal-event access, valid only while `commit` is executing. */
   terminalPort: BrowserPublishedEpochTerminalPort;
+  /** Exact live owner outbox, valid only while `publish` is executing. */
+  publicationOutbox: SnapshotPublicationOutbox;
 }
 
 export interface BrowserPublishedEpochTerminalPort {
@@ -320,6 +330,22 @@ export class BrowserOwnerAuthorityService {
     }
   }
 
+  /** Durable owner review remains distinct from live collab availability. */
+  async replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent> {
+    const session = this.requireDurableReviewSession();
+    return session.replyToComment(anchor, body, threadId);
+  }
+
+  async resolveComment(threadId: string): Promise<ReviewEvent> {
+    const session = this.requireDurableReviewSession();
+    return session.resolveComment(threadId);
+  }
+
+  async retryOutbox(): Promise<void> {
+    const session = this.requireDurableReviewSession();
+    await session.retryOutbox();
+  }
+
   /** Fenced publication seam with an explicit irreversible phase boundary. */
   async transitionPublishedEpoch(
     fileId: FileId,
@@ -366,6 +392,21 @@ export class BrowserOwnerAuthorityService {
         throw new StorageConflictError('transition terminal port is unavailable outside the live commit phase');
       }
     };
+    const requirePublishOutboxAccess = (): void => {
+      const live = this.lease;
+      if (
+        transitionPhase !== 'publish' ||
+        !live ||
+        live.workspaceId !== handle.workspaceId ||
+        live.holderId !== handle.holderId ||
+        live.fencingToken !== handle.fencingToken ||
+        this.transitionCollabBarrier !== transitionBarrier ||
+        this.state.status !== 'transitioning' ||
+        !this.requireFreshLease()
+      ) {
+        throw new StorageConflictError('transition publication outbox is unavailable outside the live publish phase');
+      }
+    };
     const input: BrowserPublishedEpochTransition = {
       workspaceId: this.options.workspaceId,
       roomId: this.options.roomId,
@@ -381,6 +422,19 @@ export class BrowserOwnerAuthorityService {
           requireCommitTerminalAccess();
           await session.adoptDurableEnvelope(envelope);
           requireCommitTerminalAccess();
+        },
+      },
+      publicationOutbox: {
+        enqueueBatchDurably: async (envelopes) => {
+          requirePublishOutboxAccess();
+          const inserted = await session.enqueuePublicationBatch(envelopes);
+          requirePublishOutboxAccess();
+          return inserted;
+        },
+        flushNow: async () => {
+          requirePublishOutboxAccess();
+          await session.flushPublicationOutbox();
+          requirePublishOutboxAccess();
         },
       },
     };
@@ -464,6 +518,13 @@ export class BrowserOwnerAuthorityService {
       });
       throw error;
     }
+  }
+
+  private requireDurableReviewSession(): BrowserOwnerSession {
+    if (!this.lease || !this.sessionValue || !this.requireFreshLease()) {
+      throw new StorageConflictError('owner durable review session is unavailable');
+    }
+    return this.sessionValue;
   }
 
   /** Acquire, preload every file authority, compose controller, then connect. */

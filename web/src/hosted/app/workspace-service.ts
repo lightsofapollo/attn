@@ -32,6 +32,10 @@ import type {
   WorkspaceRecord,
 } from '../../lib/review/browser-workspace-schema';
 import type { PersistenceMode, WorkspaceSummary } from './types';
+import {
+  BrowserOwnerWorkspaceRuntime,
+  type BrowserOwnerWorkspaceRuntimeOptions,
+} from '../../lib/review/browser-owner-workspace-runtime';
 
 export type WorkspaceErrorKind = 'conflict' | 'quota' | 'unavailable' | 'storage';
 
@@ -79,6 +83,7 @@ export class BrowserWorkspaceService {
   private readonly leaseManager: WorkspaceLeaseManager;
   private capabilitiesSnapshot: StorageCapabilities;
   private readonly probeOptions: BrowserWorkspaceServiceOptions;
+  private readonly ownerRuntimes = new Map<string, BrowserOwnerWorkspaceRuntime>();
 
   private constructor(
     storage: BrowserStorage,
@@ -120,8 +125,43 @@ export class BrowserWorkspaceService {
   }
 
   close(): void {
-    this.leaseManager.close();
-    this.storage.close();
+    const closing = [...this.ownerRuntimes.values()].map((runtime) => runtime.close());
+    this.ownerRuntimes.clear();
+    void Promise.allSettled(closing).finally(() => {
+      this.leaseManager.close();
+      this.storage.close();
+    });
+  }
+
+  /** Route-lifetime owner coordinator; BrowserStorage remains encapsulated. */
+  async beginOwnerRuntime(
+    workspaceId: string,
+    holderId: string,
+    options: Partial<Pick<
+      BrowserOwnerWorkspaceRuntimeOptions,
+      'collab' | 'sessionOptions' | 'heartbeatIntervalMs' | 'onState'
+    >> = {},
+  ): Promise<BrowserOwnerWorkspaceRuntime> {
+    const existing = this.ownerRuntimes.get(workspaceId);
+    if (existing && existing.getState().status !== 'closed') return existing;
+    const runtime = new BrowserOwnerWorkspaceRuntime({
+      storage: this.storage,
+      workspaceId,
+      holderId,
+      collab: options.collab ?? {
+        selfClientId: holderId,
+        selfLabel: 'You',
+        selfColor: '#7c5cff',
+      },
+      ...(options.sessionOptions === undefined ? {} : { sessionOptions: options.sessionOptions }),
+      ...(options.heartbeatIntervalMs === undefined
+        ? {}
+        : { heartbeatIntervalMs: options.heartbeatIntervalMs }),
+      ...(options.onState === undefined ? {} : { onState: options.onState }),
+    });
+    this.ownerRuntimes.set(workspaceId, runtime);
+    await runtime.start();
+    return runtime;
   }
 
   // ————— capabilities —————
@@ -151,10 +191,24 @@ export class BrowserWorkspaceService {
       const summaries: WorkspaceSummary[] = [];
       for (const workspace of workspaces) {
         const entries = await this.storage.workspaces.listEntries(workspace.workspaceId);
-        summaries.push(toSummary(workspace, entries, now));
+        const sharing = await this.hasActivePublishedShare(workspace.workspaceId)
+          ? 'shared'
+          : 'local-only';
+        summaries.push(toSummary(workspace, entries, now, sharing));
       }
       return summaries;
     });
+  }
+
+  private async hasActivePublishedShare(workspaceId: string): Promise<boolean> {
+    const rootKey = await this.storage.getWorkspaceRootKey(workspaceId);
+    if (!rootKey) return false;
+    for (const share of await this.storage.shares.listShares(workspaceId)) {
+      if (share.publication === 'stopped') continue;
+      const capability = await this.storage.shares.openShare(rootKey, workspaceId, share.capId);
+      if (capability.publishedManifest) return true;
+    }
+    return false;
   }
 
   async loadWorkspace(workspaceId: string): Promise<LoadedWorkspace | null> {
@@ -426,6 +480,7 @@ export function toSummary(
   workspace: WorkspaceRecord,
   entries: WorkspaceEntryRecord[],
   now: number,
+  sharing: WorkspaceSummary['sharing'] = 'local-only',
 ): WorkspaceSummary {
   const markdownCount = entries.filter((entry) => entry.kind === 'markdown').length;
   const totalBytes = entries.reduce((sum, entry) => sum + entry.sizeBytes, 0);
@@ -435,7 +490,7 @@ export function toSummary(
     markdownCount,
     assetCount: entries.length - markdownCount,
     lastEditedLabel: relativeTimeLabel(workspace.updatedAt, now),
-    sharing: 'local-only',
+    sharing,
     sizeLabel: sizeLabel(totalBytes),
     backupLabel: backupLabel(workspace.lastBackupAt, now),
     openPath: workspace.activePath ?? entries[0]?.path ?? UNTITLED_PATH,

@@ -6,6 +6,7 @@ import { generateBrowserIdentity } from './browser-session';
 import {
   BrowserReviewActionConflictError,
   acceptBrowserSuggestion,
+  applyReviewedBrowserSuggestion,
   applyBrowserReadyVerdict,
   browserWorkspaceBodyHash,
   classifyBrowserSuggestionText,
@@ -16,6 +17,7 @@ import {
   type AtomicBrowserReviewActionCommit,
   type AtomicBrowserReviewActionStore,
   type BrowserReviewActionReceipt,
+  type BrowserReviewedSuggestion,
 } from './browser-review-actions';
 import { assembleBrowserEvent } from './browser-envelope';
 
@@ -197,6 +199,24 @@ function acceptInput(store: AtomicBrowserReviewActionStore, counter: { value: nu
     resolvedAnchor: resolved(),
     currentMarkdownBytes: encoder.encode('The brown fox'),
   };
+}
+
+async function reviewedInput(
+  store: AtomicBrowserReviewActionStore,
+  counter: { value: number } = { value: 0 },
+) {
+  const result = await acceptBrowserSuggestion({
+    ...acceptInput(store, counter),
+    operation: { kind: 'replace', expectedText: 'black', replacement: 'green' },
+  });
+  if (
+    result.status !== 'needs_review'
+    || result.verdict.kind !== 'requires_three_way'
+    || !('reviewed' in result)
+  ) {
+    throw new Error('expected reviewed three-way token');
+  }
+  return result.reviewed;
 }
 
 defineCase('text drift policy matches native exact/NFC/trailing-whitespace/mismatch tiers', () => {
@@ -393,6 +413,97 @@ defineCase('adoption failure reports pending without undoing commit and replay r
   equal(replay.deliveryPending, false, 'replay adoption did not recover');
   equal(adopted[0], committed.receipt.terminalEnvelope, 'replay adopted winner ciphertext');
   equal(store.commits, 1, 'replay changed durable action');
+});
+
+defineCase('reviewed three-way token commits proposed or edited replacement atomically', async () => {
+  const proposedStore = new AtomicMemoryStore();
+  const proposed = await reviewedInput(proposedStore);
+  const proposedResult = await applyReviewedBrowserSuggestion({
+    reviewed: proposed,
+    replacement: proposed.verdict.proposedReplacement,
+    fence: FENCE,
+    store: proposedStore,
+    terminalPort: testTerminalPort(),
+  });
+  equal(decoder.decode(proposedStore.body), 'The green fox', 'proposed replacement applied');
+  equal(proposedResult.receipt.baseBodyHash, proposed.currentBodyHash, 'reviewed body hash bound');
+  equal(proposedResult.receipt.baseRevisionId, proposed.expectedHeadRevisionId, 'reviewed head bound');
+
+  const editedStore = new AtomicMemoryStore();
+  const edited = await reviewedInput(editedStore);
+  await applyReviewedBrowserSuggestion({
+    reviewed: edited,
+    replacement: 'blue',
+    fence: FENCE,
+    store: editedStore,
+    terminalPort: testTerminalPort(),
+  });
+  equal(decoder.decode(editedStore.body), 'The blue fox', 'owner-edited replacement applied');
+});
+
+defineCase('reviewed apply fails closed when its exact head became stale', async () => {
+  const store = new AtomicMemoryStore();
+  const reviewed = await reviewedInput(store);
+  store.head = 'head-2';
+  store.body = encoder.encode('The locally edited fox');
+  let failed = false;
+  try {
+    await applyReviewedBrowserSuggestion({
+      reviewed,
+      replacement: 'green',
+      fence: FENCE,
+      store,
+      terminalPort: testTerminalPort(),
+    });
+  } catch {
+    failed = true;
+  }
+  assert(failed, 'stale reviewed token must not force apply');
+  equal(decoder.decode(store.body), 'The locally edited fox', 'newer body preserved');
+  equal(store.commits, 0, 'no terminal receipt committed against stale head');
+});
+
+defineCase('reviewed apply rejects a fabricated verdict-only token', async () => {
+  const store = new AtomicMemoryStore();
+  const real = await reviewedInput(store);
+  const forged = structuredClone(real) as BrowserReviewedSuggestion;
+  let failed = false;
+  try {
+    await applyReviewedBrowserSuggestion({
+      reviewed: forged,
+      replacement: 'green',
+      fence: FENCE,
+      store,
+      terminalPort: testTerminalPort(),
+    });
+  } catch (error) {
+    failed = error instanceof BrowserReviewActionConflictError;
+  }
+  assert(failed, 'public verdict fields alone must not authorize reviewed apply');
+  equal(store.commits, 0, 'forged token committed nothing');
+});
+
+defineCase('reviewed apply replays one durable transition after a lost response', async () => {
+  const store = new AtomicMemoryStore();
+  const authored = { value: 0 };
+  const reviewed = await reviewedInput(store, authored);
+  store.fail = 'after';
+  const input = {
+    reviewed,
+    replacement: 'green',
+    fence: FENCE,
+    store,
+    terminalPort: testTerminalPort(authored),
+  };
+  await applyReviewedBrowserSuggestion(input).then(
+    () => { throw new Error('expected simulated lost response'); },
+    () => undefined,
+  );
+  const replay = await applyReviewedBrowserSuggestion(input);
+  assert(replay.replayed, 'reviewed receipt replayed');
+  equal(decoder.decode(store.body), 'The green fox', 'reviewed body applied once');
+  equal(store.commits, 1, 'one reviewed transaction');
+  equal(authored.value, 1, 'one reviewed terminal ciphertext');
 });
 
 defineCase('crash before atomic commit applies nothing and retry applies once', async () => {

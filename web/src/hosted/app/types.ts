@@ -87,6 +87,20 @@ export interface ImportFileInput {
   mediaType?: string;
 }
 
+import type { CollabController } from '../../lib/prosemirror/collab-controller';
+import type {
+  BrowserOwnerWorkspaceAcceptInput,
+  BrowserOwnerWorkspaceApplyInput,
+  BrowserOwnerWorkspaceRejectInput,
+  BrowserOwnerWorkspaceRuntimeState,
+} from '../../lib/review/browser-owner-workspace-runtime';
+import type {
+  AcceptBrowserSuggestionResult,
+  CommittedBrowserSuggestionResult,
+  RejectBrowserSuggestionResult,
+} from '../../lib/review/browser-review-actions';
+import type { Anchor, ReviewEvent } from '../../lib/types';
+
 /**
  * Injected async view-service the shells render from (attn-7xl.3.2). The
  * mock implementation serves the `?shell=` scenarios; the storage-backed
@@ -100,6 +114,17 @@ export interface ImportFileInput {
  */
 export interface EditingSession {
   commitText(path: string, text: string): Promise<void>;
+  getOwnerState(): BrowserOwnerWorkspaceRuntimeState;
+  subscribeOwner(listener: (state: BrowserOwnerWorkspaceRuntimeState) => void): () => void;
+  getController(): CollabController | null;
+  getCollabSeed(path: string): Promise<{ fileId: string; epoch: string; markdown: string } | null>;
+  acceptSuggestion(input: BrowserOwnerWorkspaceAcceptInput): Promise<AcceptBrowserSuggestionResult>;
+  applySuggestion(input: BrowserOwnerWorkspaceApplyInput): Promise<CommittedBrowserSuggestionResult>;
+  rejectSuggestion(input: BrowserOwnerWorkspaceRejectInput): Promise<RejectBrowserSuggestionResult>;
+  replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
+  resolveComment(threadId: string): Promise<ReviewEvent>;
+  retryReviewOutbox(): Promise<void>;
+  /** Leaves edit mode; the route-lifetime owner lease remains held. */
   release(): Promise<void>;
 }
 

@@ -3,7 +3,7 @@ import { ReplaceStep } from 'prosemirror-transform';
 
 import { parseCollabWireMessage } from '../prosemirror/collab-controller';
 import { schema } from '../schema';
-import type { FileId, ReviewEventBody } from '../types';
+import type { Anchor, FileId, ReviewEvent, ReviewEventBody } from '../types';
 import { contentHash } from './browser-crypto';
 import type { AssembledBrowserEvent } from './browser-envelope';
 import type { BrowserCollabCheckpoint } from './browser-collab-checkpoint';
@@ -150,6 +150,7 @@ class FakeSession implements BrowserOwnerSession {
   started = false;
   closed = false;
   adopted: MailboxEnvelope[] = [];
+  durableReviewCalls: string[] = [];
   sendGate: Promise<void> | null = null;
   constructor(readonly options: BrowserSessionOptions, private readonly events: string[]) {}
   async start(): Promise<void> {
@@ -175,6 +176,19 @@ class FakeSession implements BrowserOwnerSession {
   async adoptDurableEnvelope(envelope: MailboxEnvelope): Promise<void> {
     this.adopted.push(envelope);
   }
+  async replyToComment(_anchor: Anchor, _body: string, threadId: string): Promise<ReviewEvent> {
+    this.durableReviewCalls.push(`reply:${threadId}`);
+    return {} as ReviewEvent;
+  }
+  async resolveComment(threadId: string): Promise<ReviewEvent> {
+    this.durableReviewCalls.push(`resolve:${threadId}`);
+    return {} as ReviewEvent;
+  }
+  async retryOutbox(): Promise<void> { this.durableReviewCalls.push('retry'); }
+  async enqueuePublicationBatch(_envelopes: readonly MailboxEnvelope[]): Promise<number> {
+    return 0;
+  }
+  async flushPublicationOutbox(): Promise<void> {}
 }
 
 class FakeStorage implements BrowserOwnerAuthorityStorage {
@@ -430,6 +444,26 @@ defineCase('terminal preparation and durable adoption stay behind the live lease
   const envelope = { envelopeId: 'terminal' } as MailboxEnvelope;
   await f.service.adoptDurableEnvelope(envelope);
   assertEqual(f.session().adopted[0], envelope, 'exact durable envelope delegated');
+  await f.service.close();
+});
+
+defineCase('durable owner review remains available while live authority is paused', async () => {
+  const f = fixture();
+  await f.service.start();
+  try {
+    await f.service.transitionPublishedEpoch(FILE_ID, {
+      publish: () => { throw new Error('relay publication paused'); },
+    });
+  } catch { /* expected irreversible pause */ }
+  assertEqual(f.service.getState().status, 'paused', 'live authority paused');
+  await f.service.replyToComment({} as Anchor, 'reply', 'thread-1');
+  await f.service.resolveComment('thread-1');
+  await f.service.retryOutbox();
+  assertEqual(
+    f.session().durableReviewCalls.join(','),
+    'reply:thread-1,resolve:thread-1,retry',
+    'durable review delegated while collab paused',
+  );
   await f.service.close();
 });
 

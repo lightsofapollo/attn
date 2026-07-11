@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
+  import type { EditorView } from 'prosemirror-view';
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
   import ShareSheet from './ShareSheet.svelte';
@@ -14,6 +16,11 @@
     WorkspaceEntry,
   } from './types';
   import type EditorComponentType from '../../lib/Editor.svelte';
+  import type ReviewMarginComponentType from '../../lib/ReviewMargin.svelte';
+  import type ReviewApplyExpandComponentType from '../../lib/ReviewApplyExpand.svelte';
+  import type { EditorBridge } from '../../lib/prosemirror/collab-session';
+  import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
+  import type { RequiresThreeWayVerdict, Thread } from '../../lib/types';
 
   interface Props {
     service: WorkspaceAppService;
@@ -65,13 +72,42 @@
     toggleBulletList(): void;
   }
   let EditorComponent = $state<typeof EditorComponentType | null>(null);
+  let ReviewMarginComponent = $state<typeof ReviewMarginComponentType | null>(null);
+  let ReviewApplyExpandComponent = $state<typeof ReviewApplyExpandComponentType | null>(null);
   let editorRef = $state<EditorExports | undefined>();
+  let pmViewForReview = $state<EditorView | undefined>();
   // Watches every document change (onDirtyChange only fires on transitions).
   let changeWatcher = $state<unknown[]>([]);
-  let session: EditingSession | null = null;
+  let session = $state<EditingSession | null>(null);
+  let ownerState = $state<BrowserOwnerWorkspaceRuntimeState | null>(null);
+  let collabSeed = $state<{ fileId: string; epoch: string; markdown: string } | null>(null);
+  let collabClientId = $state<string | null>(null);
+  let collabEpoch = $state(0);
+  let readyCollabEpoch = $state(-1);
+  let ownerSessionOpening: Promise<EditingSession | null> | null = null;
+  let unsubscribeOwner: (() => void) | null = null;
+  let collabSeedRequest = 0;
+  let loadedCollabGenerationKey: string | null = null;
+  let boundCollabKey: string | null = null;
   let autosave: AutosaveController | null = null;
   // Durable commits completed this session — observable for tests/status.
   let commitCount = $state(0);
+
+  const durableReviewAvailable = $derived(
+    ownerState?.roomId !== null
+      && ownerState?.roomId !== undefined
+      && ownerState.authority?.session?.authoringReady === true,
+  );
+  const ownerRoomStatus = $derived.by(() => {
+    const state = ownerState;
+    if (!state) return null;
+    if (state.leaseRole === 'passive') return 'Read-only tab';
+    if (!state.roomId) return null;
+    if (!state.liveEditingAvailable) return 'Live review paused';
+    return state.authority?.session?.connection === 'live_direct'
+      ? 'Shared · Direct'
+      : 'Shared · Encrypted relay';
+  });
 
   // ————— multi-file rail state (attn-7xl.3.4) —————
   let addingMarkdown = $state(false);
@@ -305,18 +341,13 @@
       health.mode !== 'quota-pressure',
   );
 
-  async function enterEdit(): Promise<void> {
-    if (editing || editorLoading || !activeEntry) return;
-    editorLoading = true;
-    editDenied = false;
-    try {
-      if (!EditorComponent) {
-        // The ProseMirror graph loads on demand; the app entry's static
-        // bundle stays editor-free (route bundle gate).
-        const [editorModule, pmState] = await Promise.all([
-          import('../../lib/Editor.svelte'),
-          import('prosemirror-state'),
-        ]);
+  async function ensureEditorGraph(includeReview = false): Promise<void> {
+    const imports: Promise<unknown>[] = [];
+    if (!EditorComponent) {
+      imports.push(Promise.all([
+        import('../../lib/Editor.svelte'),
+        import('prosemirror-state'),
+      ]).then(([editorModule, pmState]) => {
         EditorComponent = editorModule.default;
         changeWatcher = [
           new pmState.Plugin({
@@ -327,21 +358,143 @@
             }),
           }),
         ];
-      }
-      const granted = await service.beginEditing(workspace.id);
-      if (!granted) {
-        editDenied = true;
-        return;
-      }
-      session = granted;
+      }));
+    }
+    if (includeReview && (!ReviewMarginComponent || !ReviewApplyExpandComponent)) {
+      imports.push(Promise.all([
+        import('../../lib/ReviewMargin.svelte'),
+        import('../../lib/ReviewApplyExpand.svelte'),
+      ]).then(([marginModule, applyModule]) => {
+        ReviewMarginComponent = marginModule.default;
+        ReviewApplyExpandComponent = applyModule.default;
+      }));
+    }
+    await Promise.all(imports);
+  }
+
+  function installOwnerSession(granted: EditingSession): void {
+    session = granted;
+    unsubscribeOwner?.();
+    unsubscribeOwner = granted.subscribeOwner((state) => {
+      ownerState = state;
+      editDenied = state.leaseRole === 'passive';
+      if (!state.writable) editing = false;
+    });
+    if (!autosave && activeEntry?.presentation === 'editable') {
       const path = activeEntry.path;
       autosave = new AutosaveController({
         commit: async (text) => {
-          await session!.commitText(path, text);
+          await granted.commitText(path, text);
           commitCount += 1;
         },
         onState: (state) => (saveState = state),
       });
+    }
+  }
+
+  async function ensureOwnerSession(): Promise<EditingSession | null> {
+    if (session) return session;
+    if (ownerSessionOpening) return ownerSessionOpening;
+    ownerSessionOpening = service.beginEditing(workspace.id).then((granted) => {
+      if (!granted) {
+        editDenied = true;
+        ownerState = null;
+        return null;
+      }
+      installOwnerSession(granted);
+      return granted;
+    }).finally(() => {
+      ownerSessionOpening = null;
+    });
+    return ownerSessionOpening;
+  }
+
+  // Acquire the route-lifetime lease immediately. A passive tab is visibly
+  // read-only before the user tries to edit, and a shared owner can run
+  // authority/review while merely reading.
+  $effect(() => {
+    void workspace.id;
+    untrack(() => { void ensureOwnerSession(); });
+    return () => {
+      unsubscribeOwner?.();
+      unsubscribeOwner = null;
+      autosave?.dispose();
+      autosave = null;
+      void session?.release();
+    };
+  });
+
+  $effect(() => {
+    const currentSession = session;
+    const state = ownerState;
+    const entry = activeEntry;
+    if (!currentSession || !state?.roomId || entry?.presentation !== 'editable') {
+      loadedCollabGenerationKey = null;
+      return;
+    }
+    untrack(() => { void ensureEditorGraph(true); });
+    if (!state.liveEditingAvailable) return;
+    const generation = state.controllerGeneration;
+    const generationKey = `${generation}:${entry.path}`;
+    if (loadedCollabGenerationKey === generationKey) return;
+    loadedCollabGenerationKey = generationKey;
+    const request = ++collabSeedRequest;
+    void currentSession.getCollabSeed(entry.path).then((seed) => {
+      if (
+        request !== collabSeedRequest
+        || ownerState?.controllerGeneration !== generation
+        || activeEntry?.path !== entry.path
+      ) return;
+      collabSeed = seed;
+      collabClientId = seed ? crypto.randomUUID() : null;
+      boundCollabKey = null;
+      collabEpoch += 1;
+    }).catch((error) => {
+      if (loadedCollabGenerationKey === generationKey) loadedCollabGenerationKey = null;
+      railError = error instanceof Error ? error.message : String(error);
+    });
+  });
+
+  $effect(() => {
+    const currentSession = session;
+    const state = ownerState;
+    const seed = collabSeed;
+    const view = pmViewForReview;
+    const epoch = collabEpoch;
+    if (
+      !currentSession
+      || !state?.liveEditingAvailable
+      || !seed
+      || !view
+      || readyCollabEpoch !== epoch
+    ) return;
+    const controller = currentSession.getController();
+    if (!controller) return;
+    const key = `${state.controllerGeneration}:${seed.fileId}:${seed.epoch}:${epoch}`;
+    if (boundCollabKey === key) return;
+    const bridge: EditorBridge = {
+      getState: () => view.state,
+      apply: (transaction) => view.dispatch(transaction),
+    };
+    controller.setActiveFile(seed.fileId, bridge, seed.epoch);
+    boundCollabKey = key;
+  });
+
+  async function enterEdit(): Promise<void> {
+    if (editing || editorLoading || !activeEntry) return;
+    editorLoading = true;
+    editDenied = false;
+    try {
+      await ensureEditorGraph(ownerState?.roomId != null);
+      const granted = await ensureOwnerSession();
+      if (!granted) {
+        editDenied = true;
+        return;
+      }
+      if (!granted.getOwnerState().writable) {
+        editDenied = true;
+        return;
+      }
       editing = true;
     } finally {
       editorLoading = false;
@@ -351,18 +504,102 @@
   function onEditorChanged(): void {
     if (!editorRef || !autosave) return;
     const text = editorRef.getMarkdown();
+    if (text === displayText) return;
     displayText = text;
     autosave.noteChange(text);
+  }
+
+  function handleEditorReady(view: EditorView): void {
+    pmViewForReview = view;
+    readyCollabEpoch = collabEpoch;
+  }
+
+  function handleCollabDocChange(): void {
+    if (ownerState?.liveEditingAvailable) session?.getController()?.onLocalChange();
+    onEditorChanged();
+  }
+
+  function handleCollabSelectionChange(head: number): void {
+    if (ownerState?.liveEditingAvailable) session?.getController()?.broadcastCursor(head);
+  }
+
+  async function acceptSuggestion(thread: Thread): Promise<unknown> {
+    const currentSession = session;
+    const entry = activeEntry;
+    const root = thread.rootEvent.body;
+    if (
+      !currentSession
+      || !entry
+      || root.type !== 'suggestion_created'
+      || !thread.resolvedAnchor
+    ) throw new Error('Suggestion is not ready for owner review.');
+    const result = await currentSession.acceptSuggestion({
+      path: entry.path,
+      suggestionId: root.suggestionId,
+      operation: root.operation,
+      resolvedAnchor: thread.resolvedAnchor,
+    });
+    if (result.status === 'needs_review' && result.verdict.kind === 'requires_three_way') {
+      const { reviewStore } = await import('../../lib/review/store.svelte');
+      reviewStore.openThreeWayApply(result.verdict);
+    }
+    return result;
+  }
+
+  async function rejectSuggestion(thread: Thread): Promise<unknown> {
+    const currentSession = session;
+    const entry = activeEntry;
+    const root = thread.rootEvent.body;
+    if (!currentSession || !entry || root.type !== 'suggestion_created') {
+      throw new Error('Suggestion is not available.');
+    }
+    return currentSession.rejectSuggestion({
+      path: entry.path,
+      suggestionId: root.suggestionId,
+    });
+  }
+
+  async function applyReviewedSuggestion(
+    verdict: RequiresThreeWayVerdict,
+    replacement: string,
+  ): Promise<unknown> {
+    const currentSession = session;
+    const entry = activeEntry;
+    if (!currentSession || !entry) throw new Error('Owner apply is unavailable.');
+    return currentSession.applySuggestion({
+      path: entry.path,
+      suggestionId: verdict.suggestionId,
+      replacement,
+    });
+  }
+
+  async function replyToReview(anchor: import('../../lib/types').Anchor, body: string, threadId: string): Promise<void> {
+    const currentSession = session;
+    if (!currentSession) throw new Error('Review authoring is unavailable.');
+    await currentSession.replyToComment(anchor, body, threadId);
+  }
+
+  async function resolveReview(threadId: string): Promise<void> {
+    const currentSession = session;
+    if (!currentSession) throw new Error('Review authoring is unavailable.');
+    await currentSession.resolveComment(threadId);
+  }
+
+  async function retryReviewDelivery(): Promise<void> {
+    const currentSession = session;
+    if (!currentSession) return;
+    railError = null;
+    try {
+      await currentSession.retryReviewOutbox();
+    } catch (error) {
+      railError = error instanceof Error ? error.message : String(error);
+    }
   }
 
   async function exitEdit(): Promise<void> {
     if (!editing) return;
     if (editorRef) displayText = editorRef.getMarkdown();
     await autosave?.flush();
-    autosave?.dispose();
-    autosave = null;
-    await session?.release();
-    session = null;
     editing = false;
   }
 
@@ -376,9 +613,8 @@
     };
     const onPageHide = (): void => {
       flush();
-      // Release the writer lease so another tab can take over immediately
-      // instead of waiting out the 15s expiry (attn-7xl.6.4). If the commit
-      // above is still in flight the fencing token keeps it safe.
+      // The route runtime owns pagehide lease cleanup. EditingSession.release
+      // only exits the editor surface; it intentionally keeps route authority.
       void session?.release();
     };
     document.addEventListener('visibilitychange', onVisibility);
@@ -452,6 +688,9 @@
         {workspace.name}
       {/if}
       <span class="save-state" data-save-state={saveState} data-commits={commitCount}>· {saveState}</span>
+      {#if ownerRoomStatus}
+        <span class="owner-room-status" data-owner-room-status>{ownerRoomStatus}</span>
+      {/if}
     </div>
     <div class="share-action">
       {#if canEdit}
@@ -465,7 +704,7 @@
             disabled={editorLoading}
             onclick={() => void enterEdit()}
           >
-            {editorLoading ? 'Opening…' : 'Edit'}
+            {editorLoading ? 'Opening…' : editDenied ? 'Retry edit' : 'Edit'}
           </button>
         {/if}
       {/if}
@@ -617,14 +856,32 @@
           </div>
         </div>
       {/if}
+      {#if ownerState?.roomId && !ownerState.liveEditingAvailable}
+        <div class="degraded-banner owner-authority-banner" role="status" data-degraded="owner-authority-paused" style="max-width: 760px; margin: 0 auto 1.5rem;">
+          <div>
+            <strong>Live review is paused.</strong>
+            <p>{ownerState.reason ?? 'Your encrypted review remains readable while authority reconnects.'}</p>
+          </div>
+          {#if ownerState.authority?.session?.authoringError}
+            <button class="button" type="button" onclick={() => void retryReviewDelivery()}>Retry delivery</button>
+          {/if}
+        </div>
+      {/if}
       <article class="writing-sheet">
-        {#if editing && EditorComponent}
+        {#if (editing || collabSeed) && EditorComponent}
           <EditorComponent
             bind:this={editorRef}
-            markdown={displayText ?? ''}
-            editable={true}
+            markdown={collabSeed?.markdown ?? displayText ?? ''}
+            editable={editing && ownerState?.writable !== false}
             plugins={changeWatcher as never}
+            onReady={handleEditorReady}
             onCheckboxToggle={onEditorChanged}
+            collabClientId={ownerState?.liveEditingAvailable
+              ? collabClientId ?? undefined
+              : undefined}
+            {collabEpoch}
+            onCollabDocChange={handleCollabDocChange}
+            onCollabSelectionChange={handleCollabSelectionChange}
           />
         {:else if isNewDraft && (displayText === null || displayText.length === 0)}
           <div class="eyebrow">New workspace</div>
@@ -675,17 +932,36 @@
     </main>
 
     <aside class="review-rail" aria-label="Review margin">
-      <div class="rail-title">Review margin · {workspace.reviewCards.length}</div>
-      {#each workspace.reviewCards as card (card.author + card.body)}
-        <div class="review-card">
-          <strong>{card.author} · {card.ageLabel}</strong>
-          {card.body}
-        </div>
+      <div class="rail-title">Review margin</div>
+      {#if ownerState?.roomId && ReviewMarginComponent}
+        {#if ownerState.authority?.session?.authoringError}
+          <div class="review-delivery-status" role="status">
+            <span>{ownerState.authority.session.authoringError}</span>
+            <button class="row-action" type="button" onclick={() => void retryReviewDelivery()}>Retry</button>
+          </div>
+        {/if}
+        <ReviewMarginComponent
+          view={pmViewForReview}
+          readOnly={!ownerState.liveEditingAvailable}
+          reviewerAuthoring={durableReviewAvailable}
+          suggestionActions={ownerState.liveEditingAvailable
+            ? { accept: acceptSuggestion, reject: rejectSuggestion }
+            : {}}
+          onResolveComment={resolveReview}
+          onReplyComment={replyToReview}
+        />
       {:else}
-        <p class="review-empty">
-          No review yet. Share this workspace to open an encrypted room around it.
-        </p>
-      {/each}
+        {#each workspace.reviewCards as card (card.author + card.body)}
+          <div class="review-card">
+            <strong>{card.author} · {card.ageLabel}</strong>
+            {card.body}
+          </div>
+        {:else}
+          <p class="review-empty">
+            No review yet. Share this workspace to open an encrypted room around it.
+          </p>
+        {/each}
+      {/if}
     </aside>
   </div>
 
@@ -713,7 +989,7 @@
     {#if editing}
       <button type="button" onclick={() => void exitEdit()}>Done</button>
     {:else if canEdit}
-      <button type="button" disabled={editorLoading} onclick={() => void enterEdit()}>Edit</button>
+      <button type="button" disabled={editorLoading} onclick={() => void enterEdit()}>{editDenied ? 'Retry edit' : 'Edit'}</button>
     {:else}
       <!-- Editing is unavailable here; the reader stays first-class and the
            native app is the honest handoff (ios-ux.md §6). -->
@@ -790,16 +1066,38 @@
 {/if}
 
 {#if reviewSheetOpen}
-  <BottomSheet title={`Review · ${workspace.reviewCards.length}`} onclose={closeReviewSheet}>
-    {#each workspace.reviewCards as card (card.author + card.body)}
-      <div class="review-card">
-        <strong>{card.author} · {card.ageLabel}</strong>
-        {card.body}
+  <BottomSheet
+    title={ownerState?.roomId ? 'Review' : `Review · ${workspace.reviewCards.length}`}
+    onclose={closeReviewSheet}
+  >
+    {#if ownerState?.roomId && ReviewMarginComponent}
+      <div class="review-sheet-margin">
+        <ReviewMarginComponent
+          view={pmViewForReview}
+          readOnly={!ownerState.liveEditingAvailable}
+          reviewerAuthoring={durableReviewAvailable}
+          suggestionActions={ownerState.liveEditingAvailable
+            ? { accept: acceptSuggestion, reject: rejectSuggestion }
+            : {}}
+          onResolveComment={resolveReview}
+          onReplyComment={replyToReview}
+        />
       </div>
     {:else}
-      <p class="review-empty" style="margin-top: 0.5rem;">
-        No review yet. Share this workspace to open an encrypted room around it.
-      </p>
-    {/each}
+      {#each workspace.reviewCards as card (card.author + card.body)}
+        <div class="review-card">
+          <strong>{card.author} · {card.ageLabel}</strong>
+          {card.body}
+        </div>
+      {:else}
+        <p class="review-empty" style="margin-top: 0.5rem;">
+          No review yet. Share this workspace to open an encrypted room around it.
+        </p>
+      {/each}
+    {/if}
   </BottomSheet>
+{/if}
+
+{#if ownerState?.roomId && ReviewApplyExpandComponent}
+  <ReviewApplyExpandComponent onApplySuggestion={applyReviewedSuggestion} />
 {/if}

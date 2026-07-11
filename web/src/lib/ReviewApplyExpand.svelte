@@ -17,8 +17,9 @@
     - Click-outside cancels (no IPC sent).
 
   State: subscribes to `reviewStore.activeThreeWayApply`. When that becomes
-  non-null the card mounts; on any user action the store clears it and the
-  card unmounts.
+  non-null the card mounts. Cancel/keep clear it immediately; apply awaits the
+  selected native or hosted authority and only clears after durable success,
+  leaving failures visible and retryable.
 
   Tests: `web/src/lib/ReviewApplyExpand.test.ts` (tsx harness, mirrors
   `resolver.test.ts` conventions — no vitest yet).
@@ -27,12 +28,32 @@
 <script lang="ts">
   import { reviewAcceptSuggestion } from './ipc';
   import { reviewStore } from './review/store.svelte';
+  import {
+    selectReviewedApplyCallback,
+    type ReviewedApplyCallback,
+  } from './review/reviewed-apply-port';
   import { diffLines, diffWordsInLine } from './review/text-diff';
   import type {
     LineDiffSegment,
     WordDiffSegment,
   } from './review/text-diff';
   import type { RequiresThreeWayVerdict } from './types';
+
+  interface Props {
+    /** Hosted reviewed-apply authority. Omit to preserve native IPC. */
+    onApplySuggestion?: ReviewedApplyCallback;
+  }
+
+  let { onApplySuggestion }: Props = $props();
+
+  const nativeApplySuggestion: ReviewedApplyCallback = (pending, replacement) =>
+    replacement === pending.proposedReplacement
+      ? reviewAcceptSuggestion(pending.roomId, pending.suggestionId)
+      : reviewAcceptSuggestion(pending.roomId, pending.suggestionId, replacement);
+
+  const applySuggestion: ReviewedApplyCallback = $derived(
+    selectReviewedApplyCallback(onApplySuggestion, nativeApplySuggestion),
+  );
 
   // ---------------------------------------------------------------------------
   // Reactive verdict
@@ -52,6 +73,8 @@
 
   let editing = $state(false);
   let editBuffer = $state('');
+  let applying = $state(false);
+  let applyError = $state('');
 
   // Reset edit-mode whenever the verdict changes (e.g. a new three-way opens
   // while one was already in `editing`).
@@ -59,12 +82,15 @@
     if (!verdict) {
       editing = false;
       editBuffer = '';
+      applying = false;
+      applyError = '';
       return;
     }
     // When a fresh verdict arrives, prefill the buffer with the proposed text.
     // Subsequent re-renders of the same verdict don't clobber user edits
     // because we key off `verdict.suggestionId`.
     editBuffer = verdict.proposedReplacement;
+    applyError = '';
   });
 
   // ---------------------------------------------------------------------------
@@ -100,12 +126,12 @@
   // ---------------------------------------------------------------------------
 
   function acceptTheirs(): void {
-    if (!verdict) return;
-    void reviewAcceptSuggestion(verdict.roomId, verdict.suggestionId);
-    reviewStore.clearThreeWayApply();
+    if (!verdict || applying) return;
+    void applyReplacement(verdict.proposedReplacement);
   }
 
   function keepMine(): void {
+    if (applying) return;
     // No IPC — the suggestion stays in `RequiresThreeWay` state on the Rust
     // side until the owner explicitly rejects it via the margin card's
     // reject path. Per 10.4 §3 candidate (b) "leave suggestion in
@@ -121,21 +147,38 @@
   }
 
   function confirmEdit(): void {
-    if (!verdict) return;
-    void reviewAcceptSuggestion(
-      verdict.roomId,
-      verdict.suggestionId,
-      editBuffer,
-    );
-    reviewStore.clearThreeWayApply();
+    if (!verdict || applying) return;
+    void applyReplacement(editBuffer);
+  }
+
+  async function applyReplacement(replacement: string): Promise<void> {
+    const pendingVerdict = verdict;
+    if (!pendingVerdict || applying) return;
+    applying = true;
+    applyError = '';
+    try {
+      await applySuggestion(pendingVerdict, replacement);
+      if (
+        reviewStore.activeThreeWayApply?.suggestionId
+        === pendingVerdict.suggestionId
+      ) {
+        reviewStore.clearThreeWayApply();
+      }
+    } catch (error) {
+      applyError = error instanceof Error ? error.message : 'Could not apply this suggestion';
+    } finally {
+      applying = false;
+    }
   }
 
   function cancelEdit(): void {
+    if (applying) return;
     editing = false;
     if (verdict) editBuffer = verdict.proposedReplacement;
   }
 
   function cancel(): void {
+    if (applying) return;
     reviewStore.clearThreeWayApply();
   }
 
@@ -162,6 +205,10 @@
   function handleKeydown(e: KeyboardEvent): void {
     if (e.repeat || e.defaultPrevented || e.isComposing) return;
     if (!verdict) return;
+    if (applying) {
+      e.preventDefault();
+      return;
+    }
     // In edit mode, the textarea owns most key events; only intercept
     // `Esc` (cancel edit) and `Cmd/Ctrl+Enter` (confirm edit).
     if (editing) {
@@ -243,6 +290,7 @@
       onkeydown={handleKeydown}
       role="group"
       aria-label="Three-way apply: snapshot, current, and proposed text"
+      aria-busy={applying}
       tabindex="0"
     >
       <!-- Header: reviewer, age, confidence, drift summary -->
@@ -271,6 +319,7 @@
           class="three-way-close"
           aria-label="Cancel three-way apply"
           onclick={cancel}
+          disabled={applying}
         >
           ×
         </button>
@@ -304,19 +353,22 @@
               bind:value={editBuffer}
               aria-label="Edit proposed replacement"
               spellcheck="false"
+              disabled={applying}
             ></textarea>
             <div class="three-way-edit-actions">
               <button
                 type="button"
                 class="three-way-btn three-way-btn-primary"
                 onclick={confirmEdit}
+                disabled={applying}
               >
-                Confirm edit
+                {applying ? 'Applying…' : 'Confirm edit'}
               </button>
               <button
                 type="button"
                 class="three-way-btn"
                 onclick={cancelEdit}
+                disabled={applying}
               >
                 Cancel edit
               </button>
@@ -364,8 +416,9 @@
             data-action="accept"
             onclick={acceptTheirs}
             aria-keyshortcuts="a"
+            disabled={applying}
           >
-            <kbd class="three-way-kbd">a</kbd> accept theirs
+            <kbd class="three-way-kbd">a</kbd> {applying ? 'applying…' : 'accept theirs'}
           </button>
           <button
             type="button"
@@ -373,6 +426,7 @@
             data-action="keep"
             onclick={keepMine}
             aria-keyshortcuts="k"
+            disabled={applying}
           >
             <kbd class="three-way-kbd">k</kbd> keep mine
           </button>
@@ -382,6 +436,7 @@
             data-action="edit"
             onclick={enterEdit}
             aria-keyshortcuts="e"
+            disabled={applying}
           >
             <kbd class="three-way-kbd">e</kbd> edit
           </button>
@@ -391,10 +446,14 @@
             data-action="cancel"
             onclick={cancel}
             aria-keyshortcuts="Escape"
+            disabled={applying}
           >
             <kbd class="three-way-kbd">Esc</kbd> cancel
           </button>
         </footer>
+      {/if}
+      {#if applyError}
+        <p class="three-way-apply-error" role="alert">{applyError}</p>
       {/if}
     </div>
   </div>
@@ -483,6 +542,11 @@
 
   .three-way-close:hover {
     background: var(--muted, rgba(0, 0, 0, 0.06));
+  }
+
+  .three-way-close:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
   }
 
   .three-way-columns {
@@ -640,6 +704,20 @@
 
   .three-way-btn:hover {
     background: var(--muted, rgba(0, 0, 0, 0.05));
+  }
+
+  .three-way-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  .three-way-apply-error {
+    margin: 0;
+    padding: 8px 14px;
+    border-top: 1px solid var(--border, rgba(0, 0, 0, 0.08));
+    color: var(--color-danger, var(--destructive, #b42318));
+    font-size: 12px;
+    line-height: 1.4;
   }
 
   .three-way-btn-primary {

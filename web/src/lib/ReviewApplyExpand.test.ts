@@ -24,6 +24,7 @@
 //   5. The expand fixture renders shape correctly under each scenario.
 
 import { reviewAcceptSuggestion } from './ipc';
+import { selectReviewedApplyCallback } from './review/reviewed-apply-port';
 import { diffLines, diffWordsInLine } from './review/text-diff';
 import type { RequiresThreeWayVerdict } from './types';
 
@@ -235,6 +236,34 @@ defineCase('accept theirs: reviewAcceptSuggestion sends IPC + clears store', () 
     `accept-theirs must not carry editedReplacement (got ${String(msg.editedReplacement)})`,
   );
   assert(store.activeThreeWayApply === null, 'store should be cleared after accept');
+});
+
+defineCase('omitted hosted apply callback preserves the native default', () => {
+  let nativeCalls = 0;
+  const selected = selectReviewedApplyCallback(
+    undefined,
+    () => { nativeCalls += 1; },
+  );
+  selected(sampleVerdict(), 'proposed');
+  assert(nativeCalls === 1, `expected native default once, got ${nativeCalls}`);
+});
+
+defineCase('injected apply callback receives proposed and owner-edited replacements', () => {
+  const replacements: string[] = [];
+  let nativeCalls = 0;
+  const selected = selectReviewedApplyCallback(
+    (_verdict, replacement) => { replacements.push(replacement); },
+    () => { nativeCalls += 1; },
+  );
+  const verdict = sampleVerdict();
+  selected(verdict, verdict.proposedReplacement);
+  selected(verdict, 'owner hand merge');
+  assert(nativeCalls === 0, 'injected callback must bypass native IPC');
+  assert(
+    replacements[0] === verdict.proposedReplacement,
+    'accept-theirs passes the proposed replacement explicitly',
+  );
+  assert(replacements[1] === 'owner hand merge', 'edit path passes owner replacement');
 });
 
 // ---------------------------------------------------------------------------

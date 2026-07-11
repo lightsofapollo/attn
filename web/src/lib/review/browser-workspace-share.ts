@@ -317,6 +317,27 @@ export class WorkspaceShareStore {
   }
 
   /**
+   * Read the last promoted pointer even while a newer publication is pending.
+   * Owner authority uses this only to boot the old authenticated epoch before
+   * adopting and promoting the exact crash-recovery batch through its live
+   * outbox. New publication still goes through loadPublishedManifest(), which
+   * rejects while pending.
+   */
+  async loadPromotedManifest(
+    rootKey: CryptoKey,
+    workspaceId: string,
+    capId: string,
+  ): Promise<PublishedManifestPointer | undefined> {
+    validateWorkspaceRootKey(rootKey);
+    const record = await this.getRaw(workspaceId, capId);
+    if (!record) throw new BrowserStorageError(`share does not exist: ${capId}`);
+    const capability = await this.openRecord(rootKey, record);
+    return capability.publishedManifest === undefined
+      ? undefined
+      : validatePublishedManifest(capability.publishedManifest);
+  }
+
+  /**
    * Seal the pending pointer and atomically install every immutable envelope.
    * A crash sees either both journal+batch or neither; no partial batch exists.
    */
@@ -592,6 +613,61 @@ export class WorkspaceShareStore {
       ...current,
       nonce: promotion.nonce,
       ciphertext: promotion.ciphertext,
+      publication: 'published',
+      generation: generationOf(current) + 1,
+      publicationCommit: undefined,
+    };
+    store.put(next);
+    await done;
+    return toView(next);
+  }
+
+  /**
+   * Abandon only a provably stale pending pointer while retaining the last
+   * promoted generation. Exact snapshot envelopes stay in history/outbox as
+   * harmless immutable blobs; the caller immediately republishes live heads.
+   */
+  async discardPendingPublication(
+    rootKey: CryptoKey,
+    workspaceId: string,
+    capId: string,
+    fence: WorkspaceFence,
+  ): Promise<ShareRecordView> {
+    validateWorkspaceRootKey(rootKey);
+    const original = await this.getRaw(workspaceId, capId);
+    if (!original) throw new BrowserStorageError(`share does not exist: ${capId}`);
+    if (original.publication !== 'pending') {
+      throw new StorageConflictError('share publication is not pending');
+    }
+    const capability = await this.openRecord(rootKey, original);
+    validatePendingPublication(capability.pendingPublication);
+    if (!capability.publishedManifest) {
+      throw new StorageConflictError('initial publication cannot be discarded');
+    }
+    const nextCapability: InviteCapability = {
+      ...capability,
+      pendingPublication: undefined,
+    };
+    const sealed = await this.sealRecordCapability(rootKey, original, nextCapability);
+    const tx = this.db.transaction(
+      [STORE_WORKSPACE_SHARE_CAPS, STORE_WORKSPACE_LEASES],
+      'readwrite',
+    );
+    const done = transactionDone(tx);
+    await this.assertActiveFenceInTransaction(tx, workspaceId, fence);
+    const store = tx.objectStore(STORE_WORKSPACE_SHARE_CAPS);
+    const current = await requestValue<StoredShareRecord | undefined>(
+      store.get([workspaceId, capId]),
+    );
+    if (!sameGeneration(current, original)) {
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new StorageConflictError('share capability changed while discarding publication');
+    }
+    const next: StoredShareRecord = {
+      ...current,
+      nonce: sealed.nonce,
+      ciphertext: sealed.ciphertext,
       publication: 'published',
       generation: generationOf(current) + 1,
       publicationCommit: undefined,

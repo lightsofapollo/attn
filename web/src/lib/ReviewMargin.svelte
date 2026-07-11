@@ -51,8 +51,18 @@
     RESOLVED_CHIP_HEIGHT,
   } from './review/rail-mode';
   import { reviewStore } from './review/store.svelte';
+  import {
+    selectSuggestionActionPort,
+    shouldDismissSuggestionAfterAction,
+    type SuggestionActionPort,
+  } from './review/suggestion-action-port';
   import { isThreadActive } from './review/thread-visibility';
-  import { reviewResolveComment, reviewCreateComment } from './ipc';
+  import {
+    reviewAcceptSuggestion,
+    reviewCreateComment,
+    reviewRejectSuggestion,
+    reviewResolveComment,
+  } from './ipc';
   import type {
     Anchor,
     EventId,
@@ -70,6 +80,12 @@
     readOnly?: boolean;
     /** Allow only reviewer comment reply/resolve actions in hosted mode. */
     reviewerAuthoring?: boolean;
+    /**
+     * Hosted suggestion authority. Omit for native IPC defaults; pass an
+     * empty object when hosted authority is unavailable so controls stay
+     * absent instead of falling through to native IPC.
+     */
+    suggestionActions?: SuggestionActionPort<Thread>;
     onResolveComment?: (threadId: string) => Promise<void> | void;
     onReplyComment?: (anchor: Anchor, body: string, threadId: string) => Promise<void> | void;
   }
@@ -80,6 +96,7 @@
     maxRenderedCards = 50,
     readOnly = false,
     reviewerAuthoring = false,
+    suggestionActions,
     onResolveComment,
     onReplyComment,
   }: Props = $props();
@@ -470,11 +487,46 @@
     }
   }
 
-  // Reject is UI-only for now (no reject IPC yet — see ReviewMarginCard's
-  // `onReject` doc): optimistically hide the card locally without a daemon
-  // round-trip. `locallyDismissed` drives the card's `pendingDismiss`.
-  function dismissLocally(threadId: string): void {
-    reviewStore.dismissThreadLocally(threadId);
+  const nativeSuggestionActions: SuggestionActionPort<Thread> = {
+    accept: async (thread) => {
+      const root = thread.rootEvent.body;
+      if (root.type !== 'suggestion_created') return;
+      await reviewAcceptSuggestion(thread.rootEvent.meta.roomId, root.suggestionId);
+    },
+    reject: async (thread) => {
+      const root = thread.rootEvent.body;
+      if (root.type !== 'suggestion_created') return;
+      await reviewRejectSuggestion(thread.rootEvent.meta.roomId, root.suggestionId);
+    },
+  };
+
+  const suggestionActionPort: SuggestionActionPort<Thread> = $derived(
+    selectSuggestionActionPort(suggestionActions, nativeSuggestionActions),
+  );
+
+  async function acceptSuggestion(thread: Thread): Promise<unknown> {
+    const result = await suggestionActionPort.accept?.(thread);
+    // Native accept continues to resolve from its daemon event echo. Hosted
+    // actions, however, return only after the browser transition is durable;
+    // dismiss committed results immediately, including durable outbox rows.
+    if (
+      suggestionActions !== undefined
+      && shouldDismissSuggestionAfterAction(result)
+    ) {
+      reviewStore.dismissThreadLocally(thread.id);
+    }
+    return result;
+  }
+
+  async function rejectSuggestion(thread: Thread): Promise<unknown> {
+    const result = await suggestionActionPort.reject?.(thread);
+    // `deliveryPending` is already durable locally. The shared outbox
+    // indicator owns its non-destructive retry status, while the decided
+    // suggestion leaves the active rail.
+    if (shouldDismissSuggestionAfterAction(result)) {
+      reviewStore.dismissThreadLocally(thread.id);
+    }
+    return result;
   }
 
   // Post a reply (attn-1rm): a CommentCreated carrying the thread's existing id
@@ -899,7 +951,8 @@
               authorKind={authorKindFor(t)}
               quotePreview={quotePreviewFor(t)}
               onActivate={() => activateThread(t)}
-              onReject={() => dismissLocally(t.id)}
+              onAccept={suggestionActionPort.accept ? () => acceptSuggestion(t) : undefined}
+              onReject={suggestionActionPort.reject ? () => rejectSuggestion(t) : undefined}
               onResolve={() => { void resolveThread(t.id); }}
               onReply={(body) => replyToThread(t, body)}
               pendingDismiss={locallyDismissed.has(t.id)}
@@ -956,7 +1009,8 @@
           authorKind={authorKindFor(t)}
           quotePreview={quotePreviewFor(t)}
           onActivate={() => activateThread(t)}
-          onReject={() => dismissLocally(t.id)}
+          onAccept={suggestionActionPort.accept ? () => acceptSuggestion(t) : undefined}
+          onReject={suggestionActionPort.reject ? () => rejectSuggestion(t) : undefined}
           onResolve={() => { void resolveThread(t.id); }}
           onReply={(body) => replyToThread(t, body)}
           pendingDismiss={locallyDismissed.has(t.id)}

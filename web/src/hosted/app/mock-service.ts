@@ -17,6 +17,7 @@ import type {
   WorkspaceDetail,
   WorkspaceSummary,
 } from './types';
+import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
 
 /** 'real' (no ?shell= param) boots the storage-backed service; every other
  * scenario runs this mock so degraded states stay directly reachable. */
@@ -274,9 +275,41 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return cleared;
   }
 
-  async beginEditing(): Promise<EditingSession | null> {
+  async beginEditing(workspaceId: string): Promise<EditingSession | null> {
+    const ownerState: BrowserOwnerWorkspaceRuntimeState = {
+      status: 'active',
+      leaseRole: 'owner',
+      writable: true,
+      liveEditingAvailable: false,
+      reason: null,
+      workspaceId,
+      roomId: null,
+      capId: null,
+      bindings: [],
+      controllerGeneration: 0,
+      authority: null,
+    };
     return {
       commitText: async () => undefined,
+      getOwnerState: () => structuredClone(ownerState),
+      subscribeOwner: (listener) => {
+        listener(structuredClone(ownerState));
+        return () => undefined;
+      },
+      getController: () => null,
+      getCollabSeed: async () => null,
+      acceptSuggestion: async () => {
+        throw new Error('Mock owner review actions are unavailable.');
+      },
+      applySuggestion: async () => {
+        throw new Error('Mock owner reviewed actions are unavailable.');
+      },
+      rejectSuggestion: async () => {
+        throw new Error('Mock owner review actions are unavailable.');
+      },
+      replyToComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
+      resolveComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
+      retryReviewOutbox: async () => undefined,
       release: async () => undefined,
     };
   }

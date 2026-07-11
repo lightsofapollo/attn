@@ -338,6 +338,7 @@ export class BrowserStorage implements
 {
   private readonly db: IDBDatabase;
   private readonly databaseName: string;
+  private readonly indexedDbFactory: IDBFactory;
   private readonly cryptoImpl: Crypto;
   private readonly filesystem: SealedBlobFileSystem | null;
   private readonly navigatorImpl: BrowserStorageNavigator | null;
@@ -348,10 +349,11 @@ export class BrowserStorage implements
   private constructor(
     db: IDBDatabase,
     options: Required<Pick<BrowserStorageOpenOptions, 'databaseName' | 'crypto' | 'now'>> &
-      Pick<BrowserStorageOpenOptions, 'filesystem' | 'navigator'>,
+      Pick<BrowserStorageOpenOptions, 'filesystem' | 'navigator'> & { indexedDB: IDBFactory },
   ) {
     this.db = db;
     this.databaseName = options.databaseName;
+    this.indexedDbFactory = options.indexedDB;
     this.cryptoImpl = options.crypto;
     this.navigatorImpl = options.navigator ?? null;
     this.filesystem =
@@ -370,10 +372,28 @@ export class BrowserStorage implements
     const db = await openDatabase(factory, databaseName, options.createIfMissing);
     return new BrowserStorage(db, {
       databaseName,
+      indexedDB: factory,
       crypto: cryptoImpl,
       filesystem: options.filesystem,
       navigator: options.navigator ?? defaultNavigator(),
       now: options.now ?? Date.now,
+    });
+  }
+
+  /**
+   * Open an independently-owned connection to the same durable profile.
+   * BrowserSession closes its connection on transport teardown, so hosted
+   * owner authority must use this sibling rather than the app's shared handle.
+   */
+  async openSibling(createIfMissing = true): Promise<BrowserStorage> {
+    return BrowserStorage.open({
+      createIfMissing,
+      databaseName: this.databaseName,
+      indexedDB: this.indexedDbFactory,
+      crypto: this.cryptoImpl,
+      filesystem: this.filesystem,
+      navigator: this.navigatorImpl,
+      now: this.now,
     });
   }
 

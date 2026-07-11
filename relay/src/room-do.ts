@@ -17,6 +17,7 @@ import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 
 import {
+  verifyAdmissionV3,
   verifyAdmission,
   AdmissionError,
   base64UrlDecode,
@@ -60,6 +61,7 @@ import {
   deviceRegistrationSchema,
   envelopeBatchSchema,
   roomCreationSchema,
+  roomCreationSchemaV3,
   type DeviceRecord,
   type DeviceRegistrationRequest,
   type EnvelopeInput,
@@ -67,15 +69,15 @@ import {
   type RoomPolicy,
 } from "./schema";
 
-const ROOM_PATH_RE = /^\/v2\/rooms\/([^/]+)\/?$/;
-const ROOM_DEVICES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/devices\/?$/;
-const ROOM_ENVELOPES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/envelopes\/?$/;
-const ROOM_ACKS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/acks\/?$/;
-const ROOM_SOCKET_PATH_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
-const ROOM_BLOBS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/?$/;
-const ROOM_BLOB_OBJECT_PATH_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
+const ROOM_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/?$/;
+const ROOM_DEVICES_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/devices\/?$/;
+const ROOM_ENVELOPES_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/envelopes\/?$/;
+const ROOM_ACKS_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/acks\/?$/;
+const ROOM_SOCKET_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/socket\/?$/;
+const ROOM_BLOBS_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/blobs\/?$/;
+const ROOM_BLOB_OBJECT_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
 /** Any path starting with `/v2/rooms/:roomId` (optionally followed by a subroute). */
-const ROOM_PATH_LOOSE_RE = /^\/v2\/rooms\/([^/]+)(?:\/.*)?$/;
+const ROOM_PATH_LOOSE_RE = /^\/v(?:2|3)\/rooms\/([^/]+)(?:\/.*)?$/;
 
 /**
  * Best-effort extraction of the roomId from any room-scoped path. Used by the
@@ -113,9 +115,12 @@ function parseEnvAllowedOrigins(env: Env): Set<string> {
  * `tagAllowBrowserOnResponse` (the runtime freezes 101 response headers
  * once the webSocket is attached), so we set the header at construction.
  */
-function buildSocketUpgradeHeaders(policy: RoomPolicy | undefined): Record<string, string> {
+function buildSocketUpgradeHeaders(
+  policy: RoomPolicy | undefined,
+  protocolVersion = 2,
+): Record<string, string> {
   const headers: Record<string, string> = {
-    "Sec-WebSocket-Protocol": "attn.v2",
+    "Sec-WebSocket-Protocol": `attn.v${protocolVersion}`,
   };
   if (policy !== undefined) {
     headers["X-Attn-Allow-Browser"] = policy.allowBrowser ? "true" : "false";
@@ -146,6 +151,9 @@ const META = {
   ownerSigningKey: "meta:owner_signing_key",
   ownerSigningKeyId: "meta:owner_signing_key_id",
   admissionKey: "meta:admission_key",
+  protocolVersion: "meta:protocol_version",
+  readAdmissionKeyV3: "meta:read_admission_key_v3",
+  writeAdmissionKeyV3: "meta:write_admission_key_v3",
   /**
    * Round-trip of the URL-path roomId. The DO has no built-in way to recover
    * the name it was created with, but the alarm() path needs it to walk R2
@@ -424,12 +432,13 @@ export class RoomDO extends DurableObject<Env> {
     // accepting any new durable write. Reads and owner DELETE remain available
     // so rollout can never trap user ciphertext in an unaccounted legacy room.
     if (request.method === "POST" && ROOM_PATH_LOOSE_RE.test(url.pathname)) {
-      const [admissionKey, lease] = await Promise.all([
+      const [admissionKey, readAdmissionKeyV3, lease] = await Promise.all([
         this.ctx.storage.get<Uint8Array>(META.admissionKey),
+        this.ctx.storage.get<Uint8Array>(META.readAdmissionKeyV3),
         this.ctx.storage.get<RoomQuotaLease>(META.quotaLease),
       ]);
       if (
-        admissionKey !== undefined &&
+        (admissionKey !== undefined || readAdmissionKeyV3 !== undefined) &&
         (lease === undefined || !isRoomQuotaLease(lease) || lease.confirmed !== true)
       ) {
         return quotaUnavailableResponse("room must rejoin to acquire a quota generation");
@@ -539,6 +548,49 @@ export class RoomDO extends DurableObject<Env> {
    */
   private async handleOptionsPreflight(_roomId: string): Promise<Response> {
     return new Response(null, { status: 204 });
+  }
+
+  private async verifyRoomAdmission(
+    request: Request,
+    roomId: string,
+    urlPath: string,
+    required: "read" | "write",
+  ): Promise<Response | undefined> {
+    const routeVersion = urlPath.startsWith("/v3/") ? 3 : 2;
+    const [storedVersion, v2Key, readKey, writeKey] = await Promise.all([
+      this.ctx.storage.get<number>(META.protocolVersion),
+      this.ctx.storage.get<Uint8Array>(META.admissionKey),
+      this.ctx.storage.get<Uint8Array>(META.readAdmissionKeyV3),
+      this.ctx.storage.get<Uint8Array>(META.writeAdmissionKeyV3),
+    ]);
+    const roomVersion = storedVersion ?? (v2Key === undefined ? undefined : 2);
+    if (roomVersion === undefined) {
+      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+    }
+    if (roomVersion !== routeVersion) {
+      return errorResponse(409, "ATTN_PROTOCOL_VERSION_MISMATCH", `room uses protocol v${roomVersion}, request used v${routeVersion}`);
+    }
+    try {
+      if (routeVersion === 2) {
+        if (v2Key === undefined) return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing admission key`);
+        await verifyAdmission(request, urlPath, { roomId, admissionKey: v2Key });
+      } else {
+        if (readKey === undefined || writeKey === undefined) {
+          return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing v3 admission keys`);
+        }
+        await verifyAdmissionV3(request, urlPath, {
+          roomId,
+          readAdmissionKey: readKey,
+          writeAdmissionKey: writeKey,
+        }, required);
+      }
+    } catch (err) {
+      if (err instanceof AdmissionError) {
+        return errorResponse(err.code === "ATTN_WRITE_CAPABILITY_REQUIRED" ? 403 : 401, err.code, err.message);
+      }
+      throw err;
+    }
+    return undefined;
   }
 
   /**
@@ -652,29 +704,18 @@ export class RoomDO extends DurableObject<Env> {
     if (isRejoin) {
       // Verify admission before returning anything — URL holders should still
       // prove they know admissionKey on subsequent calls.
-      const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-      if (storedAdmissionKey === undefined) {
-        // Inconsistent state; refuse rather than silently bypass admission.
-        return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing admission key`);
-      }
-      try {
-        // Build a fresh Request from the buffered body so verifyAdmission can
-        // re-clone it without us racing the original stream.
-        const buffered = new Request(request.url, {
-          method: request.method,
-          headers: request.headers,
-          body: bodyBytes.byteLength === 0 ? null : bodyBytes,
-        });
-        await verifyAdmission(buffered, new URL(request.url).pathname, {
-          roomId,
-          admissionKey: storedAdmissionKey,
-        });
-      } catch (err) {
-        if (err instanceof AdmissionError) {
-          return errorResponse(401, err.code, err.message);
-        }
-        throw err;
-      }
+      const buffered = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: bodyBytes.byteLength === 0 ? null : bodyBytes,
+      });
+      const admissionError = await this.verifyRoomAdmission(
+        buffered,
+        roomId,
+        new URL(request.url).pathname,
+        "write",
+      );
+      if (admissionError !== undefined) return admissionError;
 
       // Rollout adoption for rooms created before QuotaDO existed. This is the
       // only legacy path that can create a lease; all subsequent writes require
@@ -734,11 +775,16 @@ export class RoomDO extends DurableObject<Env> {
 
     // Version gate runs before zod so we can return the canonical version error
     // even when other fields are missing/garbage.
-    if (typeof parsed === "object" && parsed !== null && "v" in parsed && (parsed as { v: unknown }).v !== 2) {
-      return errorResponse(400, "ATTN_VERSION_UNSUPPORTED", `unsupported protocol version: ${String((parsed as { v: unknown }).v)}`);
+    const routeVersion = new URL(request.url).pathname.startsWith("/v3/") ? 3 : 2;
+    if (typeof parsed === "object" && parsed !== null && "v" in parsed && (parsed as { v: unknown }).v !== routeVersion) {
+      return routeVersion === 2
+        ? errorResponse(400, "ATTN_VERSION_UNSUPPORTED", `unsupported protocol version: ${String((parsed as { v: unknown }).v)}`)
+        : errorResponse(409, "ATTN_PROTOCOL_VERSION_MISMATCH", `route is v${routeVersion}, body is v${String((parsed as { v: unknown }).v)}`);
     }
 
-    const result = roomCreationSchema.safeParse(parsed);
+    const result = routeVersion === 3
+      ? roomCreationSchemaV3.safeParse(parsed)
+      : roomCreationSchema.safeParse(parsed);
     if (!result.success) {
       return errorResponse(400, "ATTN_BODY_INVALID", formatZodError(result.error));
     }
@@ -746,7 +792,9 @@ export class RoomDO extends DurableObject<Env> {
 
     // Decode binary key fields; reject if they don't match expected lengths.
     let ownerKeyBytes: Uint8Array;
-    let admissionKeyBytes: Uint8Array;
+    let admissionKeyBytes: Uint8Array | undefined;
+    let readAdmissionKeyBytes: Uint8Array | undefined;
+    let writeAdmissionKeyBytes: Uint8Array | undefined;
     try {
       ownerKeyBytes = base64UrlDecode(body.ownerSigningKey);
     } catch (err) {
@@ -756,12 +804,33 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(400, "ATTN_BODY_INVALID", `ownerSigningKey must be ${ED25519_PUB_BYTE_LEN} bytes (got ${ownerKeyBytes.length})`);
     }
     try {
-      admissionKeyBytes = base64UrlDecode(body.admissionKey);
+      if (body.v === 2) {
+        admissionKeyBytes = base64UrlDecode(body.admissionKey);
+      } else {
+        readAdmissionKeyBytes = base64UrlDecode(body.readAdmissionKey);
+        writeAdmissionKeyBytes = base64UrlDecode(body.writeAdmissionKey);
+      }
     } catch (err) {
-      return errorResponse(400, "ATTN_BODY_INVALID", `admissionKey base64url decode failed: ${(err as Error).message}`);
+      return errorResponse(400, "ATTN_BODY_INVALID", `admission key base64url decode failed: ${(err as Error).message}`);
     }
-    if (admissionKeyBytes.length !== ADMISSION_KEY_BYTE_LEN) {
-      return errorResponse(400, "ATTN_BODY_INVALID", `admissionKey must be ${ADMISSION_KEY_BYTE_LEN} bytes (got ${admissionKeyBytes.length})`);
+    for (const [name, bytes] of body.v === 2
+      ? [["admissionKey", admissionKeyBytes] as const]
+      : [["readAdmissionKey", readAdmissionKeyBytes] as const, ["writeAdmissionKey", writeAdmissionKeyBytes] as const]) {
+      if (bytes === undefined || bytes.length !== ADMISSION_KEY_BYTE_LEN) {
+        return errorResponse(400, "ATTN_BODY_INVALID", `${name} must be ${ADMISSION_KEY_BYTE_LEN} bytes (got ${bytes?.length ?? 0})`);
+      }
+    }
+    if (
+      body.v === 3 &&
+      readAdmissionKeyBytes !== undefined &&
+      writeAdmissionKeyBytes !== undefined &&
+      constantTimeEquals(readAdmissionKeyBytes, writeAdmissionKeyBytes)
+    ) {
+      return errorResponse(
+        400,
+        "ATTN_BODY_INVALID",
+        "writeAdmissionKey must differ from readAdmissionKey",
+      );
     }
 
     // H1 defense (planning/collab/security-review.md §H1): require
@@ -900,11 +969,11 @@ export class RoomDO extends DurableObject<Env> {
     // Persist everything in one DO transaction. We use put-many so the writes
     // commit atomically — partial creates are observable as either fully-done
     // or fully-absent.
-    await this.ctx.storage.put<unknown>({
+    const roomMetadata: Record<string, unknown> = {
       [META.policy]: clamped.policy,
       [META.ownerSigningKey]: ownerKeyBytes,
       [META.ownerSigningKeyId]: ownerSigningKeyId,
-      [META.admissionKey]: admissionKeyBytes,
+      [META.protocolVersion]: routeVersion,
       [META.roomId]: roomId,
       [META.createdAt]: createdAt,
       [META.expiresAt]: clamped.policy.expiresAt,
@@ -917,7 +986,13 @@ export class RoomDO extends DurableObject<Env> {
       [META.oldestRetainedSeq]: 0,
       [META.quotaLease]: quotaLease,
       [powSeenKey(verifiedPow.hash)]: verifiedPow.expiresAt,
-    });
+    };
+    if (routeVersion === 2) roomMetadata[META.admissionKey] = admissionKeyBytes;
+    else {
+      roomMetadata[META.readAdmissionKeyV3] = readAdmissionKeyBytes;
+      roomMetadata[META.writeAdmissionKeyV3] = writeAdmissionKeyBytes;
+    }
+    await this.ctx.storage.put<unknown>(roomMetadata);
 
     // Schedule the TTL/idle alarm. The alarm() handler owns the actual
     // expire/prune logic; `rescheduleAlarm()` picks the earliest of
@@ -994,11 +1069,6 @@ export class RoomDO extends DurableObject<Env> {
   ): Promise<Response> {
     // Bail early if the room was never created — every following check needs
     // the policy + admissionKey + ownerSigningKey loaded from storage.
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
     // Buffer the body once. Both verifyAdmission and the JSON parser below
     // need to read it; the room-create handler ran into the same workerd
     // "Can't read from request stream after response has been sent" failure
@@ -1008,15 +1078,10 @@ export class RoomDO extends DurableObject<Env> {
     const bodyBytes = bodyRead;
 
     // 1. Admission — URL-as-bearer trust boundary.
-    try {
-      const buffered = bufferedRequest(request, bodyBytes);
-      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, "write",
+    );
+    if (admissionError !== undefined) return admissionError;
 
     // 2. Schema-validate the body so we have a `deviceId` to bind the PoW to.
     //    Per spec we tie PoW to (roomId, deviceId, method, path) — that needs
@@ -1210,20 +1275,8 @@ export class RoomDO extends DurableObject<Env> {
     roomId: string,
     urlPath: string,
   ): Promise<Response> {
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-    try {
-      // GET bodies are always empty; we can hand the original request straight
-      // to verifyAdmission (no double-read concern).
-      await verifyAdmission(request, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(request, roomId, urlPath, "read");
+    if (admissionError !== undefined) return admissionError;
 
     // Range-scan the order index, then load each payload. We bound the scan
     // by HARD_MAX_PEERS — listing more devices than the policy allows would
@@ -1274,11 +1327,6 @@ export class RoomDO extends DurableObject<Env> {
     urlPath: string,
   ): Promise<Response> {
     const limits = readHardLimits(this.env);
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
     // Buffer the body up front — verifyAdmission, JSON.parse, and the bulk
     // decode all need a non-streamed copy.
     const maxEnvelopeBodyBytes = Math.ceil((limits.maxRoomBytes * 4) / 3) + ENVELOPE_BODY_OVERHEAD_BYTES;
@@ -1287,15 +1335,10 @@ export class RoomDO extends DurableObject<Env> {
     const bodyBytes = bodyRead;
 
     // 1. Admission.
-    try {
-      const buffered = bufferedRequest(request, bodyBytes);
-      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, "write",
+    );
+    if (admissionError !== undefined) return admissionError;
 
     // Parse + schema-validate so we have a deviceId for the PoW binding and the
     // batch size for the cap check.
@@ -1916,26 +1959,16 @@ export class RoomDO extends DurableObject<Env> {
     roomId: string,
     urlPath: string,
   ): Promise<Response> {
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
     // Buffer body so admission/owner-sig + JSON.parse can both read it.
     const bodyRead = await readBoundedBody(request, ACK_BODY_MAX_BYTES);
     if (bodyRead instanceof Response) return bodyRead;
     const bodyBytes = bodyRead;
 
     // 1. Admission — URL-as-bearer trust boundary.
-    try {
-      const buffered = bufferedRequest(request, bodyBytes);
-      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, "write",
+    );
+    if (admissionError !== undefined) return admissionError;
 
     // 2. Parse body (need deviceId to bind PoW).
     let parsed: unknown;
@@ -2205,26 +2238,16 @@ export class RoomDO extends DurableObject<Env> {
     urlPath: string,
   ): Promise<Response> {
     const limits = readHardLimits(this.env);
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
     // Buffer body once — admission + JSON.parse both need it.
     const bodyRead = await readBoundedBody(request, BLOB_PRESIGN_BODY_MAX_BYTES);
     if (bodyRead instanceof Response) return bodyRead;
     const bodyBytes = bodyRead;
 
     // 1. Admission.
-    try {
-      const buffered = bufferedRequest(request, bodyBytes);
-      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, "write",
+    );
+    if (admissionError !== undefined) return admissionError;
 
     // 2. Schema-validate so we have a deviceId for the PoW binding.
     let parsed: unknown;
@@ -2384,6 +2407,7 @@ export class RoomDO extends DurableObject<Env> {
         body.ciphertextBytes,
         undefined,
         priorReservation?.objectKeyVersion ?? 2,
+        urlPath.startsWith("/v3/") ? 3 : 2,
       );
     } catch (err) {
       return errorResponse(500, "ATTN_BLOB_PRESIGN_FAILED", `presign failed: ${(err as Error).message}`);
@@ -2525,20 +2549,8 @@ export class RoomDO extends DurableObject<Env> {
     envelopeId: string,
     urlPath: string,
   ): Promise<Response> {
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-    try {
-      // GET bodies are always empty; hand the original request straight to
-      // verifyAdmission (no double-read concern).
-      await verifyAdmission(request, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(request, roomId, urlPath, "read");
+    if (admissionError !== undefined) return admissionError;
 
     const [lease, reservationLookup] = await Promise.all([
       this.ctx.storage.get<RoomQuotaLease>(META.quotaLease),
@@ -2575,6 +2587,7 @@ export class RoomDO extends DurableObject<Env> {
         envelopeId,
         undefined,
         reservationLookup.objectKeyVersion,
+        urlPath.startsWith("/v3/") ? 3 : 2,
       );
       return Response.json(presigned, { status: 200 });
     } catch (err) {
@@ -2631,21 +2644,11 @@ export class RoomDO extends DurableObject<Env> {
 
     // 1. Existence check — without admissionKey we couldn't verify admission
     //    anyway, and every other endpoint surfaces unknown rooms as 404.
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
     // 2. Admission — URL-as-bearer trust boundary.
-    try {
-      const buffered = bufferedRequest(request, bodyBytes);
-      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, "write",
+    );
+    if (admissionError !== undefined) return admissionError;
 
     // 3. PoW. DELETE has no body to carry deviceId; the token itself binds it.
     //    We parse first to extract the deviceId, then hand it to verifyPow which
@@ -2965,9 +2968,22 @@ export class RoomDO extends DurableObject<Env> {
 
     // Existence check before parsing the subprotocol so unknown rooms surface
     // as 404 rather than 401 (matches the device list precedent).
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
+    const [storedVersion, v2Key, readKeyV3] = await Promise.all([
+      this.ctx.storage.get<number>(META.protocolVersion),
+      this.ctx.storage.get<Uint8Array>(META.admissionKey),
+      this.ctx.storage.get<Uint8Array>(META.readAdmissionKeyV3),
+    ]);
+    const roomVersion = storedVersion ?? (v2Key === undefined ? undefined : 2);
+    if (roomVersion === undefined) {
       return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+    }
+    const routeVersion = url.pathname.startsWith("/v3/") ? 3 : 2;
+    if (roomVersion !== routeVersion) {
+      return errorResponse(409, "ATTN_PROTOCOL_VERSION_MISMATCH", `room uses protocol v${roomVersion}, request used v${routeVersion}`);
+    }
+    const storedAdmissionKey = routeVersion === 3 ? readKeyV3 : v2Key;
+    if (storedAdmissionKey === undefined) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing socket admission key`);
     }
 
     // Browser-policy allowlist check (attn-ask, relay-spec.md §Browser
@@ -3021,7 +3037,9 @@ export class RoomDO extends DurableObject<Env> {
     // post-expiry observable behaviour.
     const cleanupRan = await this.maybeRunPreExpiryCleanup();
     if (cleanupRan) {
-      const stillThere = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
+      const stillThere = routeVersion === 3
+        ? await this.ctx.storage.get<Uint8Array>(META.readAdmissionKeyV3)
+        : await this.ctx.storage.get<Uint8Array>(META.admissionKey);
       if (stillThere === undefined) {
         return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
       }
@@ -3029,7 +3047,7 @@ export class RoomDO extends DurableObject<Env> {
 
     // Parse Sec-WebSocket-Protocol → ["attn.v2", "hmac.<b64url>"].
     const protocolHeader = request.headers.get("Sec-WebSocket-Protocol");
-    const parsedProtocol = parseAttnProtocol(protocolHeader);
+    const parsedProtocol = parseAttnProtocol(protocolHeader, routeVersion);
     if (parsedProtocol === undefined) {
       // Without a parseable subprotocol we can't even negotiate `attn.v2`, so
       // we refuse the upgrade outright. This is the only admission-failure
@@ -3038,7 +3056,9 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(
         401,
         "ATTN_ADMISSION_INVALID",
-        "Sec-WebSocket-Protocol must be 'attn.v2, hmac.<base64url>'",
+        routeVersion === 3
+          ? "Sec-WebSocket-Protocol must be 'attn.v3, read-hmac.<base64url>'"
+          : "Sec-WebSocket-Protocol must be 'attn.v2, hmac.<base64url>'",
       );
     }
 
@@ -3063,7 +3083,7 @@ export class RoomDO extends DurableObject<Env> {
       return new Response(null, {
         status: 101,
         webSocket: c,
-        headers: buildSocketUpgradeHeaders(policyForTag),
+        headers: buildSocketUpgradeHeaders(policyForTag, routeVersion),
       });
     }
 
@@ -3131,7 +3151,7 @@ export class RoomDO extends DurableObject<Env> {
       return new Response(null, {
         status: 101,
         webSocket: client,
-        headers: buildSocketUpgradeHeaders(policy),
+        headers: buildSocketUpgradeHeaders(policy, routeVersion),
       });
     }
 
@@ -3141,7 +3161,7 @@ export class RoomDO extends DurableObject<Env> {
     return new Response(null, {
       status: 101,
       webSocket: client,
-      headers: buildSocketUpgradeHeaders(policy),
+      headers: buildSocketUpgradeHeaders(policy, routeVersion),
     });
   }
 
@@ -4523,7 +4543,10 @@ const clientFrameSchema = z.discriminatedUnion("type", [
  * Parse Sec-WebSocket-Protocol expected as `attn.v2, hmac.<base64url>`.
  * Returns undefined on any shape mismatch — the caller surfaces as 401.
  */
-function parseAttnProtocol(header: string | null): { hmac: Uint8Array } | undefined {
+function parseAttnProtocol(
+  header: string | null,
+  version = 2,
+): { hmac: Uint8Array } | undefined {
   if (header === null || header === "") return undefined;
   // Cloudflare's runtime exposes the *comma-joined* original header. We split
   // on `,` and trim each token, matching how browsers serialize the list.
@@ -4531,17 +4554,18 @@ function parseAttnProtocol(header: string | null): { hmac: Uint8Array } | undefi
   if (tokens.length < 2) return undefined;
   // Require the canonical subprotocol up front; reject mixed orderings so the
   // canonical request stays deterministic on the client side.
-  if (tokens[0] !== "attn.v2") return undefined;
+  if (tokens[0] !== `attn.v${version}`) return undefined;
+  const hmacPrefix = version === 3 ? "read-hmac." : "hmac.";
   let hmacToken: string | undefined;
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i];
-    if (t !== undefined && t.startsWith("hmac.")) {
+    if (t !== undefined && t.startsWith(hmacPrefix)) {
       hmacToken = t;
       break;
     }
   }
   if (hmacToken === undefined) return undefined;
-  const encoded = hmacToken.slice("hmac.".length);
+  const encoded = hmacToken.slice(hmacPrefix.length);
   if (encoded === "") return undefined;
   let bytes: Uint8Array;
   try {

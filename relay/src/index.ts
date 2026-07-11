@@ -193,13 +193,13 @@ function buildPreflightForNonRoomRoute(): Response {
  * `/v2/rooms/:roomId` and `/v2/rooms/:roomId/<subroute>`. The first capture
  * is the `roomId` we hand to the DO namespace.
  */
-const ROOM_ROUTE_RE = /^\/v2\/rooms\/([^/]+)(?:\/.*)?$/;
+const ROOM_ROUTE_RE = /^\/v(?:2|3)\/rooms\/([^/]+)(?:\/.*)?$/;
 
 /** Bare room path (no subroute) — `POST` here is room creation. */
-const ROOM_CREATE_RE = /^\/v2\/rooms\/([^/]+)\/?$/;
+const ROOM_CREATE_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/?$/;
 
 /** WS upgrade route matcher: `/v2/rooms/:roomId/socket`. */
-const ROOM_SOCKET_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
+const ROOM_SOCKET_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/socket\/?$/;
 
 /**
  * R2 capability-backed blob route: `/v2/rooms/:roomId/blobs/:envelopeId`.
@@ -210,7 +210,7 @@ const ROOM_SOCKET_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
  * is the `?cap=<token>` query parameter — minted by the DO's POST /blobs
  * handler, verified here on every request.
  */
-const ROOM_BLOB_OBJECT_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
+const ROOM_BLOB_OBJECT_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
@@ -220,7 +220,7 @@ export default {
     // counters, Durable Object name allocation, or any other durable side
     // effect. Protocol-v2 room IDs are base64url tokens, not path text.
     const earlyRoomMatch = url.pathname.match(ROOM_ROUTE_RE);
-    if (url.pathname.startsWith("/v2/rooms/") && earlyRoomMatch?.[1] === undefined) {
+    if (/^\/v(?:2|3)\/rooms\//.test(url.pathname) && earlyRoomMatch?.[1] === undefined) {
       return identifierError();
     }
     if (earlyRoomMatch?.[1] !== undefined && !isProtocolId(earlyRoomMatch[1], ROOM_ID_MAX_CHARS)) {
@@ -608,7 +608,7 @@ async function maybeUpgradeUnknownRoomTo429(
  * sentinel bucket.
  */
 function roomIdForRateBucket(pathname: string): string | undefined {
-  const m = pathname.match(/^\/v2\/rooms\/([^/]+)(?:\/.*)?$/);
+  const m = pathname.match(/^\/v(?:2|3)\/rooms\/([^/]+)(?:\/.*)?$/);
   return m?.[1];
 }
 
@@ -636,7 +636,12 @@ async function handleBlobPut(
   }
   let verified;
   try {
-    verified = await verifyBlobCap(cap, { method: "PUT", roomId, envelopeId }, env);
+    verified = await verifyBlobCap(cap, {
+      method: "PUT",
+      roomId,
+      envelopeId,
+      protocolVersion: url.pathname.startsWith("/v3/") ? 3 : 2,
+    }, env);
   } catch {
     return blobErrorResponse(503, "ATTN_BLOB_CAP_UNAVAILABLE", "blob capability verifier unavailable");
   }
@@ -706,7 +711,12 @@ async function handleBlobGet(
   }
   let verified;
   try {
-    verified = await verifyBlobCap(cap, { method: "GET", roomId, envelopeId }, env);
+    verified = await verifyBlobCap(cap, {
+      method: "GET",
+      roomId,
+      envelopeId,
+      protocolVersion: url.pathname.startsWith("/v3/") ? 3 : 2,
+    }, env);
   } catch {
     return blobErrorResponse(503, "ATTN_BLOB_CAP_UNAVAILABLE", "blob capability verifier unavailable");
   }

@@ -1,5 +1,12 @@
 # Relay Conformance Corpus
 
+> V3 scoped-admission coverage lives in `test/integration/v3-admission.test.ts`
+> plus the self-contained semantic corpus action `v3AdmissionMatrix`. It
+> exercises read success, every mutating endpoint's read-capability rejection,
+> write success, and protocol mismatch. The Rust corpus interpreter does not
+> yet have v3 room/key/scope vocabulary; `requires: ["v3-admission-matrix"]`
+> records that explicit harness debt until the Rust v3 client lands.
+
 Cross-language conformance suite for the attn relay. The same `cases.json`
 is consumed by:
 

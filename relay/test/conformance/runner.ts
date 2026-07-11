@@ -67,6 +67,7 @@ export interface Scenario {
 }
 
 export type Step =
+  | V3AdmissionMatrixStep
   | CreateRoomStep
   | RecreateRoomStep
   | RegisterDeviceStep
@@ -94,6 +95,10 @@ export type Step =
 interface BaseStep {
   /** Optional human-readable label that the runner echoes on failure. */
   label?: string;
+}
+
+interface V3AdmissionMatrixStep extends BaseStep {
+  action: "v3AdmissionMatrix";
 }
 
 interface CreateRoomStep extends BaseStep {
@@ -828,6 +833,59 @@ async function actCreateRoom(
       policy: ((responseBody as { policy?: RoomPolicy })?.policy ?? policy),
     });
   }
+}
+
+async function actV3AdmissionMatrix(scenarioId: string, stepIdx: number): Promise<void> {
+  const roomId = uniqueRoomId(scenarioId, "v3-room");
+  const url = `${URL_BASE}/v3/rooms/${roomId}`;
+  const ownerKp = await generateEd25519Keypair();
+  const readKey = makeAdmissionKey(0x31);
+  const writeKey = makeAdmissionKey(0x72);
+  const body = JSON.stringify({
+    v: 3,
+    policy: defaultPolicy(),
+    ownerSigningKey: base64UrlEncode(ownerKp.publicKeyBytes),
+    readAdmissionKey: base64UrlEncode(readKey),
+    writeAdmissionKey: base64UrlEncode(writeKey),
+  });
+  const ownerSig = await ownerSignatureHeaderFor({ method: "POST", url, body, privateKey: ownerKp.privateKey });
+  const created = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": ownerSig,
+      "Attn-PoW": await createPowHeader(roomId, ownerKp.publicKeyBytes, `/v3/rooms/${roomId}`),
+    },
+    body,
+  });
+  await assertResponse(created, { status: 201 }, `${scenarioId} step #${stepIdx} v3 create`);
+
+  const scoped = async (scope: "read" | "write", key: Uint8Array, method: string, target: string, requestBody?: string): Promise<string> => {
+    const unsigned = new Request(target, { method, body: requestBody });
+    const canonical = await canonicalRequest(unsigned, new URL(target).pathname);
+    const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const mac = new Uint8Array(await crypto.subtle.sign("HMAC", cryptoKey, canonical));
+    return `v3.${scope}.${base64UrlEncode(mac)}`;
+  };
+  const devicesUrl = `${url}/devices`;
+  const read = await SELF.fetch(devicesUrl, {
+    headers: { "Attn-Admission": await scoped("read", readKey, "GET", devicesUrl) },
+  });
+  await assertResponse(read, { status: 200 }, `${scenarioId} step #${stepIdx} v3 read`);
+
+  const rejected = await SELF.fetch(url, {
+    method: "POST",
+    headers: { "Attn-Admission": await scoped("read", readKey, "POST", url, body) },
+    body,
+  });
+  await assertResponse(rejected, { status: 403, errorCode: "ATTN_WRITE_CAPABILITY_REQUIRED" }, `${scenarioId} step #${stepIdx} v3 read-on-write`);
+
+  const accepted = await SELF.fetch(url, {
+    method: "POST",
+    headers: { "Attn-Admission": await scoped("write", writeKey, "POST", url, body) },
+    body,
+  });
+  await assertResponse(accepted, { status: 200 }, `${scenarioId} step #${stepIdx} v3 write`);
 }
 
 async function actRecreateRoom(
@@ -1682,6 +1740,9 @@ export async function runScenario(scenario: Scenario): Promise<void> {
       const step = scenario.steps[i];
       if (step === undefined) continue;
       switch (step.action) {
+        case "v3AdmissionMatrix":
+          await actV3AdmissionMatrix(scenario.id, i);
+          break;
         case "createRoom":
           await actCreateRoom(scenario.id, state, step, i);
           break;

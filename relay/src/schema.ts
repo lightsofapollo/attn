@@ -90,6 +90,34 @@ export const roomCreationSchema = z.object({
     .max(BASE64URL_32_BYTE_MAX_CHARS),
 });
 
+/** Additive `/v3` create body; v2 schema and call sites remain unchanged. */
+export const roomCreationSchemaV3 = z.object({
+  v: z.literal(3),
+  policy: policySchema,
+  ownerSigningKey: b64url.min(1).max(BASE64URL_32_BYTE_MAX_CHARS),
+  readAdmissionKey: b64url.min(1).max(BASE64URL_32_BYTE_MAX_CHARS),
+  writeAdmissionKey: b64url.min(1).max(BASE64URL_32_BYTE_MAX_CHARS),
+}).superRefine((body, ctx) => {
+  if (constantTimeStringEquals(body.readAdmissionKey, body.writeAdmissionKey)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["writeAdmissionKey"],
+      message: "writeAdmissionKey must differ from readAdmissionKey",
+    });
+  }
+});
+
+function constantTimeStringEquals(a: string, b: string): boolean {
+  let diff = a.length ^ b.length;
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i++) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+
+export type RoomCreationRequestV3 = z.infer<typeof roomCreationSchemaV3>;
+
 export type RoomCreationRequest = z.infer<typeof roomCreationSchema>;
 export type RoomPolicyInput = z.input<typeof policySchema>;
 export type RoomPolicy = z.infer<typeof policySchema>;

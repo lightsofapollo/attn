@@ -83,6 +83,48 @@ The server:
 
 Note: `admissionKey` is per-room, derived from `roomSecret`, and the server only stores `roomId` (not `admissionKey` itself — it derives at request time from a server-side per-room secret? No: the server **cannot** derive `admissionKey` without `roomSecret`. Therefore the server stores `admissionKey` *publicly visible* by definition, and admission HMAC only proves the caller knows `admissionKey`. Equivalent to URL-as-bearer-token. **Decision required**: either accept this (admission HMAC is bookkeeping, not security beyond URL secrecy) and document the threat model accordingly, or move to per-device tokens issued at room creation. See `crypto-spec.md` §Admission.)
 
+### Additive v3 scoped admission
+
+V3 rooms use `/v3/rooms/:roomId` and store `protocolVersion=3` plus separate
+32-byte `readAdmissionKey` and `writeAdmissionKey` verifier secrets. First
+create supplies `v: 3`, `ownerSigningKey`, both admission keys, and policy.
+Existing v2 routes, bodies, stored rooms, and `v2.MAC` verification are
+unchanged. Accessing a stored room through the other version's route fails
+`409 ATTN_PROTOCOL_VERSION_MISMATCH`.
+
+```http
+Attn-Admission: v3.read.<base64url HMAC>
+Attn-Admission: v3.write.<base64url HMAC>
+```
+
+Both MACs cover the existing canonical request bytes. Endpoint requirements:
+
+| Operation | Required v3 capability |
+|---|---|
+| `GET /devices` | read |
+| Cap-less blob download presign | read |
+| WebSocket upgrade | read |
+| Room rejoin `POST` | write |
+| `POST /devices`, `/envelopes`, `/acks`, `/blobs` | write |
+| `DELETE /rooms/:roomId` | write |
+
+Blob upload/download capabilities minted for v3 contain `protocolVersion: 3`
+inside the signed cap payload and emit `/v3/...` URLs. The Worker verifies that
+field against the requested route, so rewriting a valid cap between `/v2` and
+`/v3` fails. V2 cap payloads omit the field and retain their existing bytes and
+`/v2/...` URLs.
+
+A syntactically and cryptographically valid read proof used on a write route
+returns `403 ATTN_WRITE_CAPABILITY_REQUIRED`. Missing, malformed, wrong-key,
+or wrong-scope proofs return `401 ATTN_ADMISSION_INVALID`. V3 WebSockets use
+`Sec-WebSocket-Protocol: attn.v3, read-hmac.<base64url HMAC>`.
+
+Known limitation: WebSocket admission still requires an already-registered
+device, while `POST /devices` is a write operation. A fresh view-only bearer
+therefore cannot create an anonymous identity in this phase. The constrained
+read-only identity design is deferred; this contract does not weaken device
+registration to solve it.
+
 ### Owner Distinction
 
 `POST /v2/rooms/:roomId` (room creation) includes the owner's public signing key in the body. The DO stores this as `ownerSigningKeyId`. The first-create POST itself also requires an `Attn-Owner-Signature` Ed25519 sig over canonicalRequest, verified against the pubkey in the body (self-rooting) — this is the security-review §H1 mitigation that prevents a leaked-URL race attacker from registering as owner. All subsequent privileged ops (`POST /acks` with delete, `DELETE /v2/rooms/:roomId`) require the same header verified against the stored `ownerSigningKeyId`.

@@ -6,6 +6,7 @@ import {
   deviceRegistrationSchema,
   envelopeSchema,
   roomCreationSchema,
+  roomCreationSchemaV3,
 } from "../../src/schema";
 
 const basePolicy = {
@@ -56,6 +57,22 @@ function envelope(overrides: Record<string, unknown> = {}) {
 }
 
 describe("relay durable metadata schema bounds", () => {
+  it("accepts v3 create with separate read/write keys and rejects v2 shape", () => {
+    const v3 = {
+      v: 3,
+      policy: basePolicy,
+      ownerSigningKey: "A".repeat(43),
+      readAdmissionKey: "B".repeat(43),
+      writeAdmissionKey: "C".repeat(43),
+    };
+    expect(roomCreationSchemaV3.safeParse(v3).success).toBe(true);
+    expect(roomCreationSchema.safeParse(v3).success).toBe(false);
+    expect(roomCreationSchemaV3.safeParse(roomCreation()).success).toBe(false);
+    expect(roomCreationSchemaV3.safeParse({
+      ...v3,
+      writeAdmissionKey: v3.readAdmissionKey,
+    }).success).toBe(false);
+  });
   it("accepts protocol-sized room key encodings", () => {
     expect(roomCreationSchema.safeParse(roomCreation()).success).toBe(true);
   });

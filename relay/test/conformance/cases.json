@@ -1963,6 +1963,16 @@
       ]
     },
     {
+      "id": "v3-admission-015",
+      "name": "V3 split capabilities — read succeeds, read-on-write rejected, write succeeds",
+      "spec": "relay-spec.md §Additive v3 scoped admission",
+      "tags": ["v3", "capabilities", "admission"],
+      "requires": ["v3-admission-matrix"],
+      "steps": [
+        { "action": "v3AdmissionMatrix" }
+      ]
+    },
+    {
       "id": "longsession-014b",
       "name": "longSession=false with far-future expiresAt clamps to 24h cap",
       "spec": "relay-spec.md \u00a7Test Plan #14",

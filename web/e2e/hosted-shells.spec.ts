@@ -65,12 +65,13 @@ test('asset entries render inline previews and download-only placeholders', asyn
 test('share sheet opens as a dialog and returns focus on close', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await page.getByRole('button', { name: 'Share for review' }).click();
-  const dialog = page.getByRole('dialog', { name: /Share Product direction/u });
+  const dialog = page.getByRole('dialog', { name: 'Share for review' });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText('Share the whole workspace · 5 entries');
-  await expect(dialog).toContainText('3 Markdown files and 2 referenced assets');
-  await expect(dialog).toContainText('Capability keys stay in the fragment');
-  // Close button holds initial focus; Escape closes and restores focus.
+  await expect(dialog).toContainText('Choose the review scope');
+  await expect(dialog).toContainText('1 entry · 18 KB');
+  await expect(dialog).toContainText('The encryption key stays in the invite link');
+  // The dialog heading owns initial focus; Escape closes and restores focus.
+  await expect(dialog.getByRole('heading', { name: 'Share for review' })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(dialog).not.toBeVisible();
   await expect(page.getByRole('button', { name: 'Share for review' })).toBeFocused();
@@ -155,7 +156,7 @@ test('share sheet fits 320px without page overflow', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 700 });
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await page.locator('.thumb-dock').getByRole('button', { name: 'Share' }).click();
-  await expect(page.getByRole('dialog', { name: /Share Product direction/u })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Share for review' })).toBeVisible();
   await expectNoHorizontalScroll(page);
 });
 

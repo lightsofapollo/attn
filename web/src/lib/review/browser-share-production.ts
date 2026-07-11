@@ -4,6 +4,7 @@ import {
   BrowserSession,
   buildRegisterDeviceBodyV3,
   generateBrowserIdentity,
+  type BrowserSessionOptions,
   type ReviewStoreSink,
 } from './browser-session';
 import { assembleBrowserEvent } from './browser-envelope';
@@ -117,6 +118,8 @@ export interface ProductionDurableShareSessionOptions extends BrowserDurableShar
   disableWebRtc?: boolean;
   /** PoW execution seam for non-Window production-boundary harnesses. */
   mailboxMintPow?: (input: { shareId: string; deviceId: string; path: string; signal?: AbortSignal }) => Promise<string>;
+  registrationMintPow?: BrowserSessionOptions['registrationMintPow'];
+  outboxMintPow?: BrowserSessionOptions['outboxMintPow'];
   /** Browser seams used by the focused consent harness. */
   pushConsentDependencies?: Omit<BrowserPushConsentOptions, 'getBindingContext' | 'canEnable' | 'isBindingContextCurrent' | 'onState'>;
   onPushConsentState?: (state: BrowserPushConsentState) => void;
@@ -182,6 +185,8 @@ export async function createProductionDurableShareSession(options: ProductionDur
         signingSecret: new Uint8Array(identity.signingSecret), signingPublic: new Uint8Array(identity.signingPublic),
         encryptionSecret: new Uint8Array(identity.encryptionSecret), publicEncryptionKey: new Uint8Array(identity.publicEncryptionKey) },
         onState: options.onLiveState, store: options.liveStore, disableWebRtc: options.disableWebRtc,
+        ...(options.registrationMintPow === undefined ? {} : { registrationMintPow: options.registrationMintPow }),
+        ...(options.outboxMintPow === undefined ? {} : { outboxMintPow: options.outboxMintPow }),
         parsedInvite: { version: 3,
         roomId: resolution.bundle.roomId, tier: resolution.bundle.tier,
         readCapabilityKey: new Uint8Array(capability.readCapabilityKey),

@@ -881,7 +881,11 @@ fn parse_room_id(raw: String) -> crate::review::ids::RoomId {
 /// `Bootstrapper::join`, which subscribes the daemon's own window to the
 /// room (a windowed join — NOT the headless `--as-agent` path).
 pub fn log_review_join_intent(invite: &str) {
-    tracing::info!("review join — routing invite to ReviewManager: {invite}");
+    tracing::info!("{}", review_join_log_message(invite));
+}
+
+fn review_join_log_message(_invite: &str) -> &'static str {
+    "review join — routing redacted invite to ReviewManager"
 }
 
 /// Dispatch a `ReviewJoin` from the in-process custom-protocol handler.
@@ -904,9 +908,9 @@ pub fn dispatch_review_join(invite: &str, review_manager: Option<&Arc<ReviewMana
     );
 }
 
-/// Receive a native durable-share deep link at the daemon boundary without
-/// logging its fragment capability. The lifecycle resolver consumes this
-/// intent once persisted share state is wired by Workstream A.
+/// Receive a native durable-share deep link without logging its fragment.
+/// Resolution blocks only on the manager's dedicated review runtime, then
+/// hands a least-privilege v3 room invite to the normal Join pipeline.
 pub fn dispatch_share_open_intent(
     invite: &ParsedShareInvite,
     review_manager: Option<&Arc<ReviewManager>>,
@@ -923,12 +927,18 @@ pub fn dispatch_share_open_intent(
             ),
         );
     };
-    manager.submit(command);
-    Err(
-        crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(
-            "durable share resolver adapter is not wired".into(),
-        ),
-    )
+    if let ReviewCommand::OpenDurableShare {
+        share_id,
+        link_secret,
+    } = &command
+    {
+        manager
+            .open_durable_share(share_id, link_secret)
+            .map_err(|error| {
+                crate::review::share_lifecycle::ShareLifecycleError::Relay(error.to_string())
+            })?;
+    }
+    Ok(())
 }
 
 /// Start listening on the unix socket. Spawns a thread that accepts connections
@@ -1448,6 +1458,15 @@ mod tests {
     }
 
     #[test]
+    fn review_join_log_message_never_contains_invite_secret() {
+        let invite = "attn://review/room-canary#key=SECRET-CANARY";
+        let message = review_join_log_message(invite);
+        assert!(!message.contains(invite));
+        assert!(!message.contains("SECRET-CANARY"));
+        assert!(!message.contains("#key="));
+    }
+
+    #[test]
     fn submit_review_socket_command_routes_to_manager() {
         // The daemon-socket side mirrors the webview-side IPC dispatch:
         // each Review* SocketMessage variant lowers to a ReviewCommand and
@@ -1513,12 +1532,14 @@ mod tests {
         let result = dispatch_share_open_intent(&invite, Some(&manager));
         assert!(matches!(
             result,
-            Err(crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(_))
+            Err(crate::review::share_lifecycle::ShareLifecycleError::Relay(
+                _
+            ))
         ));
-        let open = rx.try_recv().expect("open update");
-        let rendered = format!("{open:?}");
-        assert!(rendered.contains("AAECAwQFBgcICQoLDA0ODw"));
-        assert!(!rendered.contains(&encoded_secret));
+        assert!(
+            rx.try_recv().is_err(),
+            "failed routing emits no secret-bearing update"
+        );
 
         let absent = dispatch_share_open_intent(&invite, None);
         assert!(matches!(

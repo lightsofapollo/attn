@@ -156,6 +156,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The anchor WASM equivalence test invokes the native Rust example.
+      # On Linux, the attn crate links its desktop target dependencies even
+      # though the example itself only exercises the canonical parser.
+      - name: Install native test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
+        working-directory: .
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:

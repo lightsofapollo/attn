@@ -16,6 +16,7 @@ export default defineConfig({
     'hosted-a11y.spec.ts',
     'hosted-authoring.spec.ts',
     'hosted-offline.spec.ts',
+    'hosted-share-sheet.spec.ts',
   ],
   timeout: 60_000,
   expect: { timeout: 20_000 },

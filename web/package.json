@@ -20,6 +20,7 @@
     "test:e2e:routes": "npm run build:browser && npm run check:route-bundles && playwright test --config playwright.routes.config.ts",
     "test:e2e:storage": "playwright test --config playwright.storage.config.ts",
     "test:e2e:push": "playwright test --config playwright.push.config.ts",
+    "test:share-owner:live": "tsx scripts/test-browser-share-owner-live.ts",
     "build:sw": "vite build --config vite.sw.config.ts"
   },
   "dependencies": {

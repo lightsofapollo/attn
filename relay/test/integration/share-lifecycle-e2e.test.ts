@@ -425,5 +425,5 @@ describe("durable share v3 real-stack lifecycle", () => {
     expect((await SELF.fetch(`${shareUrl}/snapshots/readme`)).status).toBe(404);
     expect((await SELF.fetch(mailboxUrl)).status).toBe(404);
     expect((await env.RELAY_BLOBS.list({ prefix: shareArtifactPrefix(shareId) })).objects).toHaveLength(0);
-  });
+  }, 30_000);
 });

@@ -57,8 +57,12 @@ export interface InviteCapability {
   ownerEncryptionSecret: string;
   ownerDeviceId: string;
   ownerParticipantId: string;
+  /** Stable ShareDO owner root and crash-recovery projection for v3 shares. */
+  durableShare?: DurableShareCapabilityState;
   /** Snapshot of the room policy at share time. */
   policy: unknown;
+  /** Exact normalized scope paths retained before the first network request. */
+  sharePaths?: string[];
   /** Published-revision pointer (attn-7xl.4.3 updates it). */
   publishedRevisionId?: string;
   /** Last fully-acknowledged manifest and stable per-entry identities. */
@@ -69,6 +73,19 @@ export interface InviteCapability {
     publishedManifest: PublishedManifestPointer;
     envelopeIds: string[];
   };
+}
+
+export interface DurableShareCapabilityState {
+  protocolVersion: 3;
+  shareId: string;
+  shareSecret: string;
+  epoch: number;
+  revision: number;
+  manifestDigest: string;
+  currentRoomId?: string;
+  expiresAt?: number;
+  drainCursor?: number;
+  lifecycle: 'active' | 'revoke_pending';
 }
 
 export interface ShareRecordView {
@@ -195,6 +212,86 @@ export class WorkspaceShareStore {
       }
       throw error;
     }
+    return toView(record);
+  }
+
+  /**
+   * Prepare one active share under the route's live fence before contacting
+   * the relay. This closes the create→bind crash window and prevents two tabs
+   * from minting different active rooms for one workspace.
+   */
+  async bindShareFenced(
+    rootKey: CryptoKey,
+    input: BindShareInput,
+    fence: WorkspaceFence,
+  ): Promise<ShareRecordView> {
+    validateWorkspaceRootKey(rootKey);
+    requireId(input.workspaceId, 'workspaceId');
+    requireId(input.capId, 'capId');
+    requireId(input.roomId, 'roomId');
+    requireRelay(input.relayUrl);
+
+    const plaintext = new TextEncoder().encode(
+      JSON.stringify({ ...input.capability, v: CAPABILITY_VERSION }),
+    );
+    const meta = {
+      workspaceId: input.workspaceId,
+      capId: input.capId,
+      roomId: input.roomId,
+      scopeKind: input.scopeKind,
+    } as const;
+    let sealed: { nonce: string; ciphertext: string };
+    try {
+      sealed = await sealCapability(this.cryptoImpl, rootKey, meta, plaintext);
+    } finally {
+      plaintext.fill(0);
+    }
+    const record: StoredShareRecord = {
+      v: WORKSPACE_RECORD_VERSION,
+      workspaceId: input.workspaceId,
+      capId: input.capId,
+      roomId: input.roomId,
+      scopeKind: input.scopeKind,
+      createdAt: this.timestamp(),
+      nonce: sealed.nonce,
+      ciphertext: sealed.ciphertext,
+      relayUrl: input.relayUrl,
+      publication: 'pending',
+      generation: 0,
+    };
+    validateWorkspaceShareCapRecord(record);
+
+    const tx = this.db.transaction(
+      [STORE_WORKSPACE_SHARE_CAPS, STORE_WORKSPACE_LEASES],
+      'readwrite',
+    );
+    const done = transactionDone(tx);
+    await this.assertActiveFenceInTransaction(tx, input.workspaceId, fence);
+    const store = tx.objectStore(STORE_WORKSPACE_SHARE_CAPS);
+    const records = await requestValue<StoredShareRecord[]>(
+      store.index(WORKSPACE_INDEX).getAll(IDBKeyRange.only(input.workspaceId)),
+    );
+    const existing = records.find((candidate) => candidate.capId === input.capId);
+    if (existing) {
+      if (
+        existing.roomId !== input.roomId
+        || existing.scopeKind !== input.scopeKind
+        || existing.relayUrl !== input.relayUrl
+      ) {
+        tx.abort();
+        await done.catch(() => undefined);
+        throw new StorageConflictError('share capId already belongs to different ownership');
+      }
+      await done;
+      return toView(existing);
+    }
+    if (records.some((candidate) => candidate.publication !== 'stopped')) {
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new StorageConflictError('workspace already has an active share');
+    }
+    store.add(record);
+    await done;
     return toView(record);
   }
 
@@ -677,6 +774,63 @@ export class WorkspaceShareStore {
     return toView(next);
   }
 
+  /**
+   * Fenced reseal of the owner-only ShareDO projection. Network transitions
+   * journal here before links become visible or revocation starts.
+   */
+  async updateDurableShareFenced(
+    rootKey: CryptoKey,
+    workspaceId: string,
+    capId: string,
+    durableShare: DurableShareCapabilityState,
+    fence: WorkspaceFence,
+    policy?: unknown,
+  ): Promise<ShareRecordView> {
+    validateWorkspaceRootKey(rootKey);
+    const state = validateDurableShareCapability(durableShare);
+    const original = await this.getRaw(workspaceId, capId);
+    if (!original) throw new BrowserStorageError(`share does not exist: ${capId}`);
+    if (original.publication === 'stopped') {
+      throw new StorageConflictError('stopped share cannot update durable ownership');
+    }
+    const capability = await this.openRecord(rootKey, original);
+    if (capability.durableShare && capability.durableShare.shareId !== state.shareId) {
+      throw new StorageConflictError('durable share id is immutable');
+    }
+    if (policy !== undefined && (typeof policy !== 'object' || policy === null)) {
+      throw new BrowserStorageError('durable share policy is invalid');
+    }
+    const sealed = await this.sealRecordCapability(rootKey, original, {
+      ...capability,
+      durableShare: state,
+      ...(policy === undefined ? {} : { policy }),
+    });
+    const tx = this.db.transaction(
+      [STORE_WORKSPACE_SHARE_CAPS, STORE_WORKSPACE_LEASES],
+      'readwrite',
+    );
+    const done = transactionDone(tx);
+    await this.assertActiveFenceInTransaction(tx, workspaceId, fence);
+    const store = tx.objectStore(STORE_WORKSPACE_SHARE_CAPS);
+    const current = await requestValue<StoredShareRecord | undefined>(
+      store.get([workspaceId, capId]),
+    );
+    if (!sameGeneration(current, original)) {
+      tx.abort();
+      await done.catch(() => undefined);
+      throw new StorageConflictError('share capability changed while updating durable ownership');
+    }
+    const next: StoredShareRecord = {
+      ...current,
+      nonce: sealed.nonce,
+      ciphertext: sealed.ciphertext,
+      generation: generationOf(current) + 1,
+    };
+    store.put(next);
+    await done;
+    return toView(next);
+  }
+
   private async assertActiveFence(
     workspaceId: string,
     fence: WorkspaceFence,
@@ -740,6 +894,27 @@ export class WorkspaceShareStore {
     return existing !== undefined;
   }
 
+  /** Crypto-erase a stopped capability only while this route still owns it. */
+  async forgetShareFenced(
+    workspaceId: string,
+    capId: string,
+    fence: WorkspaceFence,
+  ): Promise<boolean> {
+    const tx = this.db.transaction(
+      [STORE_WORKSPACE_SHARE_CAPS, STORE_WORKSPACE_LEASES],
+      'readwrite',
+    );
+    const done = transactionDone(tx);
+    await this.assertActiveFenceInTransaction(tx, workspaceId, fence);
+    const store = tx.objectStore(STORE_WORKSPACE_SHARE_CAPS);
+    const existing = await requestValue<StoredShareRecord | undefined>(
+      store.get([workspaceId, capId]),
+    );
+    if (existing) store.delete([workspaceId, capId]);
+    await done;
+    return existing !== undefined;
+  }
+
   private async getRaw(workspaceId: string, capId: string): Promise<StoredShareRecord | null> {
     const tx = this.db.transaction(STORE_WORKSPACE_SHARE_CAPS, 'readonly');
     const done = transactionDone(tx);
@@ -766,7 +941,9 @@ export function inviteCapabilityFrom(input: {
   ownerEncryptionSecret: Uint8Array;
   ownerDeviceId: string;
   ownerParticipantId: string;
+  durableShare?: DurableShareCapabilityState;
   policy: unknown;
+  sharePaths?: string[];
   publishedRevisionId?: string;
   publishedManifest?: PublishedManifestPointer;
 }): InviteCapability {
@@ -777,7 +954,11 @@ export function inviteCapabilityFrom(input: {
     ownerEncryptionSecret: base64UrlEncode(input.ownerEncryptionSecret),
     ownerDeviceId: input.ownerDeviceId,
     ownerParticipantId: input.ownerParticipantId,
+    ...(input.durableShare === undefined
+      ? {}
+      : { durableShare: validateDurableShareCapability(input.durableShare) }),
     policy: input.policy,
+    ...(input.sharePaths === undefined ? {} : { sharePaths: validateSharePaths(input.sharePaths) }),
     ...(input.publishedRevisionId === undefined
       ? {}
       : { publishedRevisionId: input.publishedRevisionId }),
@@ -823,8 +1004,15 @@ function validateInviteCapability(value: unknown): InviteCapability {
   if (parsed.publishedRevisionId !== undefined && typeof parsed.publishedRevisionId !== 'string') {
     throw new BrowserStorageError('sealed published revision is invalid');
   }
+  const sharePaths = parsed.sharePaths === undefined
+    ? undefined
+    : validateSharePaths(parsed.sharePaths);
   return {
     ...(parsed as InviteCapability),
+    ...(sharePaths === undefined ? {} : { sharePaths }),
+    ...(parsed.durableShare === undefined
+      ? {}
+      : { durableShare: validateDurableShareCapability(parsed.durableShare) }),
     ...(parsed.publishedManifest === undefined
       ? {}
       : { publishedManifest: validatePublishedManifest(parsed.publishedManifest) }),
@@ -832,6 +1020,52 @@ function validateInviteCapability(value: unknown): InviteCapability {
       ? {}
       : { pendingPublication: validatePendingPublication(parsed.pendingPublication) }),
   };
+}
+
+function validateDurableShareCapability(value: unknown): DurableShareCapabilityState {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new BrowserStorageError('sealed durable share is invalid');
+  }
+  const state = value as Partial<DurableShareCapabilityState>;
+  if (
+    state.protocolVersion !== 3
+    || typeof state.shareId !== 'string'
+    || typeof state.shareSecret !== 'string'
+    || !Number.isSafeInteger(state.epoch) || (state.epoch ?? -1) < 0
+    || !Number.isSafeInteger(state.revision) || (state.revision ?? -1) < 0
+    || typeof state.manifestDigest !== 'string'
+    || (state.currentRoomId !== undefined && typeof state.currentRoomId !== 'string')
+    || (state.expiresAt !== undefined && (!Number.isSafeInteger(state.expiresAt) || state.expiresAt < 0))
+    || (state.drainCursor !== undefined && (!Number.isSafeInteger(state.drainCursor) || state.drainCursor < 0))
+    || (state.lifecycle !== 'active' && state.lifecycle !== 'revoke_pending')
+  ) {
+    throw new BrowserStorageError('sealed durable share is invalid');
+  }
+  try {
+    if (base64UrlDecode(state.shareId).length !== 16 || base64UrlDecode(state.shareSecret).length !== 32) {
+      throw new BrowserStorageError('sealed durable share identifiers are invalid');
+    }
+  } catch (error) {
+    if (error instanceof BrowserStorageError) throw error;
+    throw new BrowserStorageError('sealed durable share identifiers are invalid');
+  }
+  return { ...(state as DurableShareCapabilityState) };
+}
+
+function validateSharePaths(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new BrowserStorageError('sealed share paths are invalid');
+  }
+  const paths = value.map((path) => {
+    if (typeof path !== 'string') throw new BrowserStorageError('sealed share path is invalid');
+    const normalized = normalizeEntryPath(path);
+    if (normalized !== path) throw new BrowserStorageError('sealed share path is not normalized');
+    return normalized;
+  });
+  if (new Set(paths).size !== paths.length) {
+    throw new BrowserStorageError('sealed share paths contain duplicates');
+  }
+  return paths;
 }
 
 function validatePendingPublication(

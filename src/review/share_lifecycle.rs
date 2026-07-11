@@ -19,11 +19,13 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chacha20poly1305::XChaCha20Poly1305;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest as _, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::review::bootstrap::{
-    BOOTSTRAP_POW_DIFFICULTY, BOOTSTRAP_POW_TTL_MS, Bootstrapper, DeviceIdentity,
-    admission_header_value_v3_with_query, owner_sig_header_value_with_query,
+    BOOTSTRAP_POW_DIFFICULTY, BOOTSTRAP_POW_TTL_MS, Bootstrapper, DeviceIdentity, InviteTierV3,
+    admission_header_value_v3_with_query, build_invite_fragment_v3,
+    owner_sig_header_value_with_query,
 };
 use crate::review::crypto::kdf::{
     ShareLinkTier, derive_room_id_v3, derive_room_key_tree_v3, derive_share_epoch_room_secret,
@@ -32,8 +34,8 @@ use crate::review::crypto::kdf::{
 use crate::review::crypto::pow::TokenPool;
 use crate::review::ids::RoomId;
 use crate::review::share::{
-    ShareCapabilityBundle, build_browser_share_invite, build_native_share_invite,
-    seal_capability_bundle_with_nonce,
+    ShareBundleContext, ShareCapabilityBundle, build_browser_share_invite,
+    build_native_share_invite, open_capability_bundle, seal_capability_bundle_with_nonce,
 };
 
 const RECORD_VERSION: u32 = 3;
@@ -980,6 +982,139 @@ pub struct SelectedShareBundle {
     pub bundle_id: String,
     pub tier: ShareTier,
     pub sealed_bundle: String,
+}
+
+/// Resolve a stable public bearer into the currently authenticated ordinary
+/// v3 room invite. The returned URL contains only the tier-scoped room leaves
+/// from the sealed bundle; the ShareDO admission and bundle keys are dropped.
+///
+/// Native Join then reuses its existing v3 directory/grant verification and
+/// transport path. A missing current room remains a normal Join failure; the
+/// retained-snapshot offline adapter is intentionally a separate concern.
+pub async fn resolve_public_share_to_room_invite(
+    relay_url: &str,
+    share_id: &str,
+    link_secret: &ShareLinkSecret,
+) -> Result<String, ShareLifecycleError> {
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| ShareLifecycleError::Relay(error.to_string()))?;
+    let path = format!("/v3/shares/{share_id}");
+    // Bundle id, bundle key, and read admission are expanded directly from the
+    // tier-specific URL bearer and are identical regardless of which enum is
+    // passed here. The tier itself is authenticated inside the selected relay
+    // record and sealed bundle; it cannot be inferred by probing because it is
+    // intentionally absent from the public URL.
+    let probe = crate::review::crypto::kdf::expand_share_link_keys(
+        link_secret.expose(),
+        ShareLinkTier::View,
+    );
+    let response = http
+        .get(format!("{}{}", relay_url.trim_end_matches('/'), path))
+        .header("Attn-Share-Bundle", &probe.bundle_id)
+        .header(
+            "Attn-Admission",
+            admission_header_value_v3_with_query(
+                probe.read_admission_key.as_bytes(),
+                "read",
+                "GET",
+                &path,
+                &[],
+                &[],
+            ),
+        )
+        .send()
+        .await
+        .map_err(|error| ShareLifecycleError::Relay(error.to_string()))?;
+    let record: ShareRelayRecord = HttpShareRelayClient::decode_json(response).await?;
+    let selected_bundle = record.bundle.as_ref().ok_or_else(|| {
+        ShareLifecycleError::Relay("share response omitted the selected bundle".into())
+    })?;
+    let tier = match selected_bundle.tier {
+        ShareTier::View => ShareLinkTier::View,
+        ShareTier::Comment => ShareLinkTier::Comment,
+        ShareTier::Suggest => ShareLinkTier::Suggest,
+    };
+    let keys = crate::review::crypto::kdf::expand_share_link_keys(link_secret.expose(), tier);
+    if selected_bundle.bundle_id != keys.bundle_id {
+        return Err(ShareLifecycleError::Relay(
+            "share response selected a mismatched bundle".into(),
+        ));
+    }
+    let manifest_bytes = crate::review::crypto::canonical::to_canonical_bytes(&record.snapshots)
+        .map_err(|error| ShareLifecycleError::Invalid(format!("share manifest: {error}")))?;
+    let manifest_digest = URL_SAFE_NO_PAD.encode(Sha256::digest(&manifest_bytes));
+    if manifest_digest != record.manifest_digest {
+        return Err(ShareLifecycleError::Relay(
+            "share manifest digest failed authentication".into(),
+        ));
+    }
+    let opened = open_capability_bundle(
+        keys.bundle_key.as_bytes(),
+        &ShareBundleContext {
+            bundle_id: &keys.bundle_id,
+            share_id,
+            epoch: record.epoch,
+            revision: record.revision,
+            manifest_digest: &record.manifest_digest,
+            tier,
+        },
+        &selected_bundle.sealed_bundle,
+    )
+    .map_err(ShareLifecycleError::Invalid)?;
+    let current_room = record
+        .current_room_id
+        .as_deref()
+        .ok_or_else(|| ShareLifecycleError::NotFound("stable share has no active room".into()))?;
+    if opened.room_id != current_room {
+        return Err(ShareLifecycleError::Relay(
+            "sealed bundle room does not match the active share pointer".into(),
+        ));
+    }
+    let read: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(&opened.read_capability_key)
+        .map_err(|_| ShareLifecycleError::Invalid("bundle read capability is invalid".into()))?
+        .try_into()
+        .map_err(|_| {
+            ShareLifecycleError::Invalid("bundle read capability length is invalid".into())
+        })?;
+    let write = opened
+        .write_admission_key
+        .as_deref()
+        .map(|value| {
+            URL_SAFE_NO_PAD
+                .decode(value)
+                .map_err(|_| {
+                    ShareLifecycleError::Invalid("bundle write capability is invalid".into())
+                })?
+                .try_into()
+                .map_err(|_| {
+                    ShareLifecycleError::Invalid("bundle write capability length is invalid".into())
+                })
+        })
+        .transpose()?;
+    let grant = opened
+        .grant_signature
+        .as_deref()
+        .map(|value| {
+            URL_SAFE_NO_PAD
+                .decode(value)
+                .map_err(|_| ShareLifecycleError::Invalid("bundle grant is invalid".into()))?
+                .try_into()
+                .map_err(|_| ShareLifecycleError::Invalid("bundle grant length is invalid".into()))
+        })
+        .transpose()?;
+    let invite_tier = match tier {
+        ShareLinkTier::View => InviteTierV3::View,
+        ShareLinkTier::Comment => InviteTierV3::Comment,
+        ShareLinkTier::Suggest => InviteTierV3::Suggest,
+    };
+    let fragment = build_invite_fragment_v3(invite_tier, &read, write.as_ref(), grant.as_ref())
+        .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?;
+    Ok(format!("attn://review/{current_room}{fragment}"))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3766,6 +3901,79 @@ mod tests {
             &events[1].body,
             ReviewEventBody::CommentCreated { body, .. } if body == "valid comment after poison"
         ));
+    }
+
+    #[tokio::test]
+    async fn public_share_resolver_authenticates_comment_bundle_and_builds_v3_invite() {
+        let server = MockServer::start().await;
+        let owner_root = [0x42; 32];
+        let comment = derive_share_link_keys(&owner_root, ShareLinkTier::Comment);
+        let room_id = URL_SAFE_NO_PAD.encode([0x11; 16]);
+        let read = [0x22; 32];
+        let write = [0x33; 32];
+        let grant = [0x44; 64];
+        let bundle = ShareCapabilityBundle {
+            v: 3,
+            purpose: "attn share capability bundle v3".into(),
+            bundle_id: comment.bundle_id.clone(),
+            owner_signing_key: URL_SAFE_NO_PAD.encode([0x55; 32]),
+            share_id: SHARE_ID.into(),
+            epoch: 7,
+            revision: 9,
+            manifest_digest: EMPTY_MANIFEST_DIGEST.into(),
+            tier: ShareLinkTier::Comment,
+            room_id: room_id.clone(),
+            read_capability_key: URL_SAFE_NO_PAD.encode(read),
+            write_admission_key: Some(URL_SAFE_NO_PAD.encode(write)),
+            grant_signature: Some(URL_SAFE_NO_PAD.encode(grant)),
+        };
+        let sealed_bundle = seal_capability_bundle_with_nonce(
+            comment.bundle_key.as_bytes(),
+            &comment.bundle_id,
+            &bundle,
+            &[0x66; 24],
+        )
+        .expect("seal comment bundle");
+
+        Mock::given(method("GET"))
+            .and(path(format!("/v3/shares/{SHARE_ID}")))
+            .and(header("Attn-Share-Bundle", comment.bundle_id.as_str()))
+            .and(header_exists("Attn-Admission"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "v": 3,
+                "shareId": SHARE_ID,
+                "ownerSigningKey": URL_SAFE_NO_PAD.encode([0x55; 32]),
+                "epoch": 7,
+                "revision": 9,
+                "currentRoomId": room_id,
+                "snapshots": [],
+                "placeholders": [],
+                "manifestDigest": EMPTY_MANIFEST_DIGEST,
+                "bundle": {
+                    "bundleId": comment.bundle_id,
+                    "tier": "comment",
+                    "sealedBundle": sealed_bundle
+                },
+                "updatedAt": 1,
+                "expiresAt": 2,
+                "mailbox": { "count": 0, "bytes": 0, "latestSeq": 0 },
+                "features": { "push": false }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let invite = resolve_public_share_to_room_invite(
+            &server.uri(),
+            SHARE_ID,
+            &ShareLinkSecret::new(*comment.link_secret.as_bytes()),
+        )
+        .await
+        .expect("resolve comment link");
+        let fragment =
+            build_invite_fragment_v3(InviteTierV3::Comment, &read, Some(&write), Some(&grant))
+                .expect("comment fragment");
+        assert_eq!(invite, format!("attn://review/{room_id}{fragment}"));
     }
 
     #[tokio::test]

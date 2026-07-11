@@ -14,6 +14,7 @@
     WorkspaceAppService,
     WorkspaceDetail,
     WorkspaceEntry,
+    WorkspaceShareRequest,
   } from './types';
   import type EditorComponentType from '../../lib/Editor.svelte';
   import type ReviewMarginComponentType from '../../lib/ReviewMargin.svelte';
@@ -42,6 +43,8 @@
   let filesSheetOpen = $state(false);
   let reviewSheetOpen = $state(false);
   let shareButton = $state<HTMLButtonElement | undefined>();
+  let dockShareButton = $state<HTMLButtonElement | undefined>();
+  let shareReturnFocus = $state<HTMLButtonElement | undefined>();
   let dockFilesButton = $state<HTMLButtonElement | undefined>();
   let dockReviewButton = $state<HTMLButtonElement | undefined>();
   let desktopLayout = $state(
@@ -450,6 +453,15 @@
     const entry = activeEntry;
     if (!currentSession || !state?.roomId || entry?.presentation !== 'editable') {
       loadedCollabGenerationKey = null;
+      if (!state?.roomId) {
+        untrack(() => {
+          collabSeedRequest += 1;
+          collabSeed = null;
+          collabClientId = null;
+          boundCollabKey = null;
+          collabEpoch += 1;
+        });
+      }
       return;
     }
     untrack(() => { void ensureEditorGraph(true); });
@@ -698,9 +710,38 @@
     return entry.presentation === 'preview' ? '▧ ' : '◇ ';
   }
 
+  function openShare(trigger: HTMLButtonElement | undefined): void {
+    blurEditor();
+    filesSheetOpen = false;
+    reviewSheetOpen = false;
+    shareReturnFocus = trigger;
+    shareOpen = true;
+  }
+
   function closeShare(): void {
     shareOpen = false;
-    shareButton?.focus();
+    const trigger = shareReturnFocus ?? shareButton;
+    shareReturnFocus = undefined;
+    queueMicrotask(() => trigger?.focus());
+  }
+
+  async function inspectWorkspaceShare() {
+    const granted = await ensureOwnerSession();
+    if (!granted) return null;
+    return granted.inspectShare();
+  }
+
+  async function createWorkspaceShare(request: WorkspaceShareRequest) {
+    await autosave?.flush();
+    const granted = await ensureOwnerSession();
+    if (!granted) throw new Error('Another tab owns this workspace.');
+    return granted.ensureShare(request);
+  }
+
+  async function stopWorkspaceShare(): Promise<void> {
+    const granted = await ensureOwnerSession();
+    if (!granted) throw new Error('Another tab owns this workspace.');
+    await granted.stopShare();
   }
 
   function closeFilesSheet(): void {
@@ -968,10 +1009,7 @@
         content={documentSurface}
         rail={desktopRail}
         onNavigate={navigateDesktopTree}
-        onShare={(trigger) => {
-          shareButton = trigger;
-          shareOpen = true;
-        }}
+        onShare={openShare}
         onViewport={(viewport) => (canvasEl = viewport ?? undefined)}
       />
     {:else}
@@ -1010,7 +1048,14 @@
       <span class="save-state" data-save-state={saveState} data-commits={commitCount}>· {saveState}</span>
     </div>
     <div class="share-action">
-      <button class="button primary" type="button" bind:this={shareButton} onclick={() => (shareOpen = true)}>Share</button>
+      <button
+        class="button primary"
+        type="button"
+        bind:this={shareButton}
+        onclick={() => openShare(shareButton)}
+      >
+        Share
+      </button>
     </div>
   </header>
   <!-- The constrained layout remains reader-first: one document column,
@@ -1049,7 +1094,11 @@
            native app is the honest handoff (ios-ux.md §6). -->
       <a class="dock-link" href="/#native" data-action="open-native">Open native</a>
     {/if}
-    <button type="button" onclick={() => (shareOpen = true)}>Share</button>
+    <button
+      type="button"
+      bind:this={dockShareButton}
+      onclick={() => openShare(dockShareButton)}
+    >Share</button>
   </nav>
 </div>
 {/if}
@@ -1090,9 +1139,13 @@
 
 {#if shareOpen}
   <ShareSheet
-    workspaceName={workspace.name}
-    scope={service.shareScopeFor(workspace)}
+    {workspace}
+    {activeEntry}
     {health}
+    ownerStatus={ownerRoomStatus ?? undefined}
+    onInspect={inspectWorkspaceShare}
+    onCreate={createWorkspaceShare}
+    onStop={stopWorkspaceShare}
     onclose={closeShare}
     onRequestPersist={() => service.requestPersistence()}
     onBackup={() => exportZip()}

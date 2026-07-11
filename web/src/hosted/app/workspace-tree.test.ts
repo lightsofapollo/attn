@@ -6,9 +6,27 @@ import {
 } from './workspace-tree';
 
 const entries = [
-  { path: 'readme.md', presentation: 'editable' as const, sizeLabel: '1 KB' },
-  { path: 'docs/notes.md', presentation: 'editable' as const, sizeLabel: '2 KB' },
-  { path: 'images/dot.png', presentation: 'preview' as const, sizeLabel: '3 KB' },
+  {
+    path: 'readme.md',
+    kind: 'markdown' as const,
+    presentation: 'editable' as const,
+    sizeBytes: 1_024,
+    sizeLabel: '1 KB',
+  },
+  {
+    path: 'docs/notes.md',
+    kind: 'markdown' as const,
+    presentation: 'editable' as const,
+    sizeBytes: 2_048,
+    sizeLabel: '2 KB',
+  },
+  {
+    path: 'images/dot.png',
+    kind: 'asset' as const,
+    presentation: 'preview' as const,
+    sizeBytes: 3_072,
+    sizeLabel: '3 KB',
+  },
 ];
 
 const tree = workspaceEntriesToTree('workspace-id', entries);

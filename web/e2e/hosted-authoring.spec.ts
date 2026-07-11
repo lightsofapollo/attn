@@ -429,11 +429,11 @@ test('remembered rooms can be forgotten with crypto-erasure confirmation', async
 test('first share is gated on durability until acknowledged', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=private');
   await page.getByRole('button', { name: 'Share for review' }).click();
-  const dialog = page.getByRole('dialog', { name: /Share/u });
+  const dialog = page.getByRole('dialog', { name: 'Share for review' });
   await expect(dialog).toBeVisible();
-  const copyLink = dialog.locator('[data-action="copy-link"]');
-  await expect(copyLink).toBeDisabled();
-  await expect(dialog).toContainText('Sharing unlocks once storage is persistent');
-  await dialog.getByRole('checkbox').check();
-  await expect(copyLink).toBeEnabled();
+  const createLink = dialog.getByRole('button', { name: 'Create review link' });
+  await expect(createLink).toBeDisabled();
+  await expect(dialog).toContainText('Private browsing is session-only');
+  await dialog.getByRole('checkbox', { name: /I understand this browser may erase/u }).check();
+  await expect(createLink).toBeEnabled();
 });

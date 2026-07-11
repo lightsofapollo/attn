@@ -8,6 +8,9 @@ import {
 } from './export-zip';
 import {
   MAX_IMPORT_FILE_BYTES,
+  MAX_IMPORT_ARCHIVE_ENTRIES,
+  MAX_IMPORT_EXPANDED_BYTES,
+  acceptZipEntry,
   dedupeWorkspaceName,
   expandPicked,
   expandZip,
@@ -54,6 +57,15 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
 function assertThrows(fn: () => unknown, message: string): void {
   try {
     fn();
+  } catch {
+    return;
+  }
+  throw new Error(`${message}: expected an error`);
+}
+
+async function assertRejects(fn: () => Promise<unknown>, message: string): Promise<void> {
+  try {
+    await fn();
   } catch {
     return;
   }
@@ -114,8 +126,26 @@ defineCase('zip expansion preserves nested paths and skips junk entries', async 
 
 defineCase('zip with traversal paths aborts the whole import', async () => {
   const zip = zipSync({ '../escape.md': new TextEncoder().encode('bad') });
-  const files = await expandZip(picked('evil.zip', zip));
-  assertThrows(() => toImportFiles(files), 'zip traversal rejected');
+  await assertRejects(() => expandZip(picked('evil.zip', zip)), 'zip traversal rejected before expansion');
+});
+
+defineCase('zip metadata budgets reject bombs before expansion', () => {
+  assertThrows(() => acceptZipEntry(
+    { name: 'huge.bin', originalSize: MAX_IMPORT_FILE_BYTES + 1 },
+    { entries: 0, expandedBytes: 0 },
+  ), 'oversized zip entry rejected');
+  assertThrows(() => acceptZipEntry(
+    { name: 'overflow.bin', originalSize: 1 },
+    { entries: MAX_IMPORT_ARCHIVE_ENTRIES, expandedBytes: 0 },
+  ), 'zip entry-count bomb rejected');
+  assertThrows(() => acceptZipEntry(
+    { name: 'overflow.bin', originalSize: 1 },
+    { entries: 0, expandedBytes: MAX_IMPORT_EXPANDED_BYTES },
+  ), 'zip expanded-byte bomb rejected');
+  assertThrows(() => acceptZipEntry(
+    { name: '../escape.md', originalSize: 1 },
+    { entries: 0, expandedBytes: 0 },
+  ), 'zip traversal rejected by metadata filter');
 });
 
 defineCase('corrupt zip is a clear error', async () => {

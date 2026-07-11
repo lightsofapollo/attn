@@ -823,6 +823,23 @@ impl ReviewManager {
         // Bootstrap pipeline owns Share + Join when wired in. Everything else
         // still goes through `stub_update_for` (filled in by follow-up issues).
         match (&cmd, self.bootstrap.as_ref(), self.runtime.as_ref()) {
+            (
+                ReviewCommand::OpenDurableShare {
+                    share_id,
+                    link_secret,
+                },
+                Some(_),
+                Some(_),
+            ) => {
+                if let Err(error) = self.open_durable_share(share_id, link_secret) {
+                    (self.update_tx)(ReviewUpdate::Error {
+                        room_id: None,
+                        code: "ATTN_DURABLE_SHARE_OPEN".into(),
+                        message: error.to_string(),
+                    });
+                }
+                return;
+            }
             (ReviewCommand::CreateDurableShare { path }, _, Some(runtime)) => {
                 let result = self
                     .durable_shares
@@ -1204,6 +1221,34 @@ impl ReviewManager {
             self.start_room_runtime(&link.room_id)?;
         }
         Ok(links)
+    }
+
+    /// Resolve a stable public link and hand its exact tier-scoped v3 room
+    /// invite to the existing native Join pipeline.
+    pub fn open_durable_share(
+        &self,
+        share_id: &str,
+        link_secret: &crate::review::share_lifecycle::ShareLinkSecret,
+    ) -> anyhow::Result<()> {
+        let bootstrap = self
+            .bootstrap
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review bootstrap unavailable"))?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review runtime unavailable"))?;
+        let invite = runtime
+            .block_on(
+                crate::review::share_lifecycle::resolve_public_share_to_room_invite(
+                    &bootstrap.config().relay_url,
+                    share_id,
+                    link_secret,
+                ),
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        self.submit(ReviewCommand::Join { invite });
+        Ok(())
     }
 
     pub fn emit_durable_command_result(
@@ -3522,9 +3567,9 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
         },
         // TODO(attn-nnj.3b): parse invite, open transport, fetch snapshot, emit
         // RoomStatus + SnapshotCreated as data arrives.
-        ReviewCommand::Join { invite } => ReviewUpdate::RoomStatusChanged {
+        ReviewCommand::Join { invite: _ } => ReviewUpdate::RoomStatusChanged {
             room_id: stub_room_id(),
-            status: format!("Pending join — not yet implemented (invite={invite})"),
+            status: "Pending join — invite accepted for processing".to_string(),
         },
         // Pull / Stop / Inbox are handled for real in `submit` (they drive the
         // per-room runtime registries) and always return before reaching here.
@@ -5948,7 +5993,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_join_emits_room_status_changed_with_invite() {
+    fn submit_join_status_never_exposes_invite_fragment() {
         let (mgr, rx, _tmp) = make_manager();
         let invite = "attn://review/abc#key=xyz".to_string();
         mgr.submit(ReviewCommand::Join {
@@ -5957,7 +6002,9 @@ mod tests {
         let update = rx.try_recv().expect("expected one update");
         match update {
             ReviewUpdate::RoomStatusChanged { status, .. } => {
-                assert!(status.contains(&invite));
+                assert!(status.contains("Pending join"));
+                assert!(!status.contains(&invite));
+                assert!(!status.contains("key=xyz"));
             }
             other => panic!("expected RoomStatusChanged, got {other:?}"),
         }

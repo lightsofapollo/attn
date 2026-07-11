@@ -310,7 +310,7 @@ function ownerCapability(credentials: BrowserOwnerCredentials): InviteCapability
 
 interface MockServer {
   port: number;
-  onClient: (handler: (ws: WebSocket, subprotocol: string) => void) => void;
+  onClient: (handler: (ws: WebSocket, subprotocol: string, requestUrl: string) => void) => void;
   close: () => Promise<void>;
 }
 
@@ -322,7 +322,7 @@ async function startMockServer(): Promise<MockServer> {
     throw new Error('mock server returned unexpected address');
   }
   const port = addr.port;
-  const handlers: Array<(ws: WebSocket, sub: string) => void> = [];
+  const handlers: Array<(ws: WebSocket, sub: string, requestUrl: string) => void> = [];
   server.on('connection', (ws, req) => {
     const protoHeader: string | string[] | undefined = req.headers['sec-websocket-protocol'];
     const sub =
@@ -333,7 +333,7 @@ async function startMockServer(): Promise<MockServer> {
           : '';
     for (const h of handlers) {
       try {
-        h(ws, sub);
+        h(ws, sub, req.url ?? '');
       } catch (err) {
         console.error('mock handler threw:', err);
       }
@@ -643,7 +643,7 @@ async function assertInvalidBlobRefRejected(
       });
     });
     const session = new BrowserSession({
-      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      inviteUrl: composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET),
       relayUrl: `http://127.0.0.1:${server.port}`,
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
@@ -1384,7 +1384,7 @@ defineCase('happy path: invite → POST /devices → WS hello → connected', as
       });
     });
 
-    const inviteUrl = composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET);
+    const inviteUrl = composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET);
     const states: BrowserSessionState[] = [];
     const identity = deterministicIdentity();
     const session = new BrowserSession({
@@ -1628,7 +1628,7 @@ defineCase('browser authoring posts signed ciphertext, echoes locally, and prese
       });
     });
     const session = new BrowserSession({
-      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      inviteUrl: composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET),
       relayUrl: `http://127.0.0.1:${server.port}`,
       identity,
       powToken: 'test-registration-pow',
@@ -1763,7 +1763,7 @@ defineCase('POST /devices 403 → status=error, kind=device_register', async () 
     server.onClient(() => {
       // never reached — fetch fails first
     });
-    const inviteUrl = composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET);
+    const inviteUrl = composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET);
     const session = new BrowserSession({
       inviteUrl,
       relayUrl: `http://127.0.0.1:${server.port}`,
@@ -1798,7 +1798,7 @@ defineCase('registration PoW uses authenticated room policy difficulty', async (
     server.onClient(() => undefined);
     const highPowPolicy = { ...POLICY, powBits: 19 };
     const session = new BrowserSession({
-      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      inviteUrl: composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET),
       relayUrl: `http://127.0.0.1:${server.port}`,
       identity: deterministicIdentity(),
       store,
@@ -1854,7 +1854,7 @@ defineCase('SnapshotCreated event populates state.snapshotContent + store', asyn
       });
     });
 
-    const inviteUrl = composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET);
+    const inviteUrl = composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET);
     const session = new BrowserSession({
       inviteUrl,
       relayUrl: `http://127.0.0.1:${server.port}`,
@@ -1954,7 +1954,7 @@ defineCase('mailbox snapshot_blob rehydrates a native SnapshotCreated pointer', 
     });
 
     const session = new BrowserSession({
-      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      inviteUrl: composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET),
       relayUrl: `http://127.0.0.1:${server.port}`,
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
@@ -2028,7 +2028,7 @@ defineCase('R2 snapshot_blob downloads, authenticates, and rehydrates a native p
     const relayUrl = `http://127.0.0.1:${server.port}`;
     const requested: string[] = [];
     const session = new BrowserSession({
-      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      inviteUrl: composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET),
       relayUrl,
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
@@ -2106,7 +2106,7 @@ defineCase('unknown snapshot signer refreshes GET /devices and retries once', as
     });
     let deviceGets = 0;
     const session = new BrowserSession({
-      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      inviteUrl: composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET),
       relayUrl: `http://127.0.0.1:${server.port}`,
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
@@ -2170,7 +2170,7 @@ defineCase('HTML SnapshotCreated populates content + docType=html (read-only)', 
       });
     });
 
-    const inviteUrl = composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET);
+    const inviteUrl = composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET);
     const session = new BrowserSession({
       inviteUrl,
       relayUrl: `http://127.0.0.1:${server.port}`,
@@ -2231,7 +2231,7 @@ defineCase('terminal close after hydration clears session and store plaintext', 
       });
     });
     const session = new BrowserSession({
-      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      inviteUrl: composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET),
       relayUrl: `http://127.0.0.1:${server.port}`,
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
@@ -2266,7 +2266,7 @@ defineCase('Admission rejected (WS close 4000) → kind=admission_rejected', asy
         ws.close(4000, 'admission rejected');
       });
     });
-    const inviteUrl = composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET);
+    const inviteUrl = composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET);
     const session = new BrowserSession({
       inviteUrl,
       relayUrl: `http://127.0.0.1:${server.port}`,
@@ -2302,15 +2302,18 @@ defineCase('remembered room restores two files, cursor, identity, and sealed off
     navigator: { storage: { persist: async () => true, estimate: async () => ({}) } },
   });
   const server = await startMockServer();
-  const subscribeAfter: number[] = [];
+  const subscribeAfterByDevice = new Map<string, number[]>();
   let subscriptions = 0;
   try {
-    server.onClient((ws) => {
+    server.onClient((ws, _subprotocol, requestUrl) => {
+      const deviceId = new URL(requestUrl, 'http://127.0.0.1').searchParams.get('device_id') ?? 'unknown';
       ws.on('message', (raw) => {
         const msg = JSON.parse(String(raw));
         if (msg.type !== 'subscribe') return;
         subscriptions += 1;
-        subscribeAfter.push(msg.after as number);
+        const deviceSubscriptions = subscribeAfterByDevice.get(deviceId) ?? [];
+        deviceSubscriptions.push(msg.after as number);
+        subscribeAfterByDevice.set(deviceId, deviceSubscriptions);
         ws.send(JSON.stringify({
           type: 'hello',
           serverSeq: 11,
@@ -2348,7 +2351,7 @@ defineCase('remembered room restores two files, cursor, identity, and sealed off
 
     const firstStore = makeStubStore();
     const first = new BrowserSession({
-      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      inviteUrl: composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET),
       relayUrl: `http://127.0.0.1:${server.port}`,
       identity: deterministicIdentity(),
       powToken: 'test-pow-token',
@@ -2368,7 +2371,7 @@ defineCase('remembered room restores two files, cursor, identity, and sealed off
     assertEq(first.getState().persistence, 'remembered', 'explicit remember succeeds');
 
     const duplicate = new BrowserSession({
-      inviteUrl: composeInviteUrl('http://example.com/review', ROOM_ID, ROOM_SECRET),
+      inviteUrl: composeInviteUrl('https://example.com/review', ROOM_ID, ROOM_SECRET),
       relayUrl: `http://127.0.0.1:${server.port}`,
       identity: generateBrowserIdentity(),
       powToken: 'test-pow-token',
@@ -2467,7 +2470,20 @@ defineCase('remembered room restores two files, cursor, identity, and sealed off
     assert(thirdStore.events.some(
       (event) => event.body.type === 'comment_created' && event.body.body === 'SEALED-OFFLINE-COMMENT',
     ), 'sealed pending comment decrypts after another reload');
-    assert(subscribeAfter.slice(1).every((after) => after === 11), 'reload subscribes from committed cursor');
+    for (
+      let i = 0;
+      i < 50 && (subscribeAfterByDevice.get('br-test-device')?.length ?? 0) < 3;
+      i += 1
+    ) {
+      await delay(10);
+    }
+    const rememberedSubscriptions = subscribeAfterByDevice.get('br-test-device') ?? [];
+    assertEq(rememberedSubscriptions[0], 0, 'first invite starts from an empty cursor');
+    assert(
+      rememberedSubscriptions.length >= 3
+        && rememberedSubscriptions.slice(1).every((after) => after === 11),
+      `remembered device reloads subscribe from committed cursor: ${JSON.stringify(rememberedSubscriptions)}`,
+    );
     await third.forgetRoom();
     third.close();
     const forgotten = await openStorage(false);

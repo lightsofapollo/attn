@@ -1,10 +1,13 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+import { sha256 } from '@noble/hashes/sha2.js';
 
 import { assembleBrowserEvent, type AssembledBrowserEvent } from './browser-envelope';
 import {
   base64UrlEncode,
   contentHash,
   deriveRoomId,
+  deriveRoomIdV3,
+  deriveRoomKeyTreeV3,
   deriveRoomKeys,
 } from './browser-crypto';
 import {
@@ -12,6 +15,7 @@ import {
   type BrowserOwnerWorkspaceAuthority,
   type BrowserOwnerWorkspaceRuntimeOptions,
 } from './browser-owner-workspace-runtime';
+import type { CreateOwnedRoomOptions, OwnedRoomBootstrapV3 } from './browser-owner-bootstrap';
 import type {
   BrowserOwnerAuthorityFile,
   BrowserOwnerAuthorityOptions,
@@ -21,7 +25,23 @@ import type {
 } from './browser-owner-authority';
 import { BrowserStorage } from './browser-storage';
 import { generateBrowserIdentity } from './browser-session';
+import {
+  publishBrowserSnapshots,
+  type PublishBrowserSnapshotsOptions,
+} from './browser-snapshot-publisher';
 import { inviteCapabilityFrom } from './browser-workspace-share';
+import {
+  BrowserShareOwnerRelayError,
+  digestShareSnapshotManifest,
+  type BrowserShareRelayRecord,
+  type BrowserShareUpsertRequest,
+  type ManagedShareSnapshotRef,
+} from './browser-share-owner';
+import type {
+  BrowserShareOwnerRelayPort,
+  BrowserWorkspaceShareOutbox,
+  BrowserWorkspaceShareRequest,
+} from './browser-workspace-sharing';
 import type { MailboxEnvelope, RoomPolicy } from './browser-ws';
 import type { Anchor, ReviewEvent } from '../types';
 
@@ -77,6 +97,132 @@ const POLICY: RoomPolicy = {
 
 function opaque(fill: number): string {
   return base64UrlEncode(new Uint8Array(16).fill(fill));
+}
+
+function bootstrapFromOptions(options: CreateOwnedRoomOptions): OwnedRoomBootstrapV3 {
+  assert(options.roomSecret, 'sharing coordinator supplies its prepared room secret');
+  assert(options.identity, 'sharing coordinator supplies its prepared owner identity');
+  assert(options.policy, 'sharing coordinator supplies its prepared room policy');
+  const roomSecret = new Uint8Array(options.roomSecret);
+  return {
+    roomId: deriveRoomIdV3(roomSecret),
+    roomSecret,
+    keys: deriveRoomKeyTreeV3(roomSecret),
+    identity: options.identity,
+    policy: options.policy,
+    commentGrantSignature: base64UrlEncode(new Uint8Array(64).fill(3)),
+    suggestGrantSignature: base64UrlEncode(new Uint8Array(64).fill(5)),
+    created: true,
+  };
+}
+
+class MemoryShareRelay implements BrowserShareOwnerRelayPort {
+  private record: BrowserShareRelayRecord | null = null;
+  constructor(private readonly shareId: string) {}
+  async upsert(request: BrowserShareUpsertRequest): Promise<BrowserShareRelayRecord> {
+    this.record = { v: 3, shareId: this.shareId, ownerSigningKey: request.ownerSigningKey,
+      epoch: request.epoch, revision: request.revision,
+      ...(request.currentRoomId === null ? {} : { currentRoomId: request.currentRoomId }),
+      snapshots: structuredClone(request.snapshots), placeholders: [],
+      manifestDigest: digestShareSnapshotManifest(request.snapshots), updatedAt: 1_800_000_000_000,
+      expiresAt: 1_900_000_000_000, mailbox: { count: 0, bytes: 0, latestSeq: 0 } };
+    return structuredClone(this.record);
+  }
+  async fetchWithViewCapability(): Promise<BrowserShareRelayRecord> {
+    if (!this.record) throw new BrowserShareOwnerRelayError(404, 'fetch');
+    return structuredClone(this.record);
+  }
+  async uploadSnapshot(fileId: string, snapshotId: string, ciphertext: Uint8Array): Promise<ManagedShareSnapshotRef> {
+    assert(this.record, 'dark share exists');
+    const ref = { fileId, snapshotId, ciphertextBytes: ciphertext.length,
+      ciphertextSha256: base64UrlEncode(sha256(ciphertext)), uploadedAt: 1_800_000_000_001 };
+    const snapshots = [...this.record.snapshots.filter(value => value.fileId !== fileId), ref]
+      .sort((a, b) => a.fileId.localeCompare(b.fileId));
+    this.record = { ...this.record, snapshots, revision: this.record.revision + 1,
+      manifestDigest: digestShareSnapshotManifest(snapshots) };
+    return ref;
+  }
+  async deleteSnapshot(fileId: string): Promise<void> {
+    if (!this.record) return;
+    const snapshots = this.record.snapshots.filter(value => value.fileId !== fileId);
+    this.record = { ...this.record, snapshots, revision: this.record.revision + 1,
+      manifestDigest: digestShareSnapshotManifest(snapshots) };
+  }
+  async fetchMailbox(): Promise<never> { throw new Error('empty mailbox must not be fetched'); }
+  async ackMailbox(): Promise<void> { throw new Error('empty mailbox must not be ACKed'); }
+  async revoke(): Promise<void> { this.record = null; }
+}
+
+function memoryShareRelayFactory() {
+  let relay: MemoryShareRelay | null = null;
+  return (options: { shareId: string }) => (relay ??= new MemoryShareRelay(options.shareId));
+}
+
+const testIndexBuilder = async (markdown: Uint8Array) => ({
+  docHash: base64UrlEncode(sha256(markdown)), canonicalEncoding: 'utf8-bytes' as const,
+  lineCount: new TextDecoder().decode(markdown).split('\n').length, blocks: [], headings: [],
+});
+
+class AckingShareOutbox implements BrowserWorkspaceShareOutbox {
+  readonly envelopes: MailboxEnvelope[] = [];
+
+  constructor(
+    private readonly storage: BrowserStorage,
+    private readonly roomId: string,
+    private readonly events: string[],
+    private readonly failFlush = false,
+  ) {}
+
+  async initialize(): Promise<void> {
+    this.events.push('outbox-initialize');
+  }
+
+  async enqueueBatchDurably(envelopes: readonly MailboxEnvelope[]): Promise<number> {
+    for (const envelope of envelopes) {
+      const existing = this.envelopes.find((item) => item.envelopeId === envelope.envelopeId);
+      if (!existing) this.envelopes.push(structuredClone(envelope));
+    }
+    this.events.push('outbox-adopt');
+    return envelopes.length;
+  }
+
+  async flushNow(): Promise<void> {
+    this.events.push('outbox-flush');
+    if (this.failFlush) throw new Error('relay offline');
+    await this.storage.acknowledge(
+      this.roomId,
+      this.envelopes,
+      this.envelopes.map((envelope, index) => ({
+        envelopeId: envelope.envelopeId,
+        serverSeq: index + 1,
+      })),
+    );
+  }
+
+  close(): void {
+    this.events.push('outbox-close');
+  }
+}
+
+function deterministicRandom(): (length: number) => Uint8Array {
+  let counter = 1;
+  return (length) => new Uint8Array(length).fill(counter++);
+}
+
+function shareRequest(): BrowserWorkspaceShareRequest {
+  return {
+    relayUrl: 'https://relay.example',
+    browserReviewBase: 'https://attn.example/review',
+    scopeKind: 'file',
+    paths: ['notes.md'],
+  };
+}
+
+function snapshotPublisher(options: PublishBrowserSnapshotsOptions): Promise<unknown> {
+  return publishBrowserSnapshots({
+    ...options,
+    indexBuilder: testIndexBuilder,
+  });
 }
 
 async function seedLocal(storage: BrowserStorage, workspaceId: string, text = 'hello') {
@@ -174,6 +320,7 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
   }
 
   async close(): Promise<void> {
+    this.events.push('authority-close');
     this.sessionStorage?.close();
     this.sessionStorage = null;
     this.state = authorityState('closed', null);
@@ -354,6 +501,198 @@ defineCase('local heartbeat loss becomes passive and close cannot release the ta
   await runtime.close();
   equal((await takeoverManager.current(workspaceId))?.holderId, 'takeover-tab', 'close preserved winner');
   takeoverManager.close();
+  storage.close();
+});
+
+defineCase('ensureShare activates authority on the runtime-owned lease without reacquiring', async () => {
+  const now = 1_720_000_000_000;
+  const storage = await openStorage(() => now);
+  const workspaceId = 'share-activate-attached-lease';
+  await seedLocal(storage, workspaceId);
+  const events: string[] = [];
+  const attachedLeases: BrowserOwnerAuthorityOptions['attachedLease'][] = [];
+  const randomBytes = deterministicRandom();
+  const runtime = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, workspaceId, {
+    now: () => now,
+    authorityFactory: (options) => {
+      attachedLeases.push(options.attachedLease);
+      return new FakeAuthority(options, storage, events);
+    },
+    sharing: {
+      now: () => now,
+      randomBytes,
+      createRoom: async (options) => bootstrapFromOptions(options),
+      publish: snapshotPublisher,
+      indexBuilder: testIndexBuilder,
+      shareRelayFactory: memoryShareRelayFactory(),
+      outboxFactory: ({ storage: outboxStorage, credentials }) =>
+        new AckingShareOutbox(outboxStorage, credentials.roomId, events),
+    },
+  }));
+  await runtime.start();
+  const ownedFence = runtime.fence;
+  assert(ownedFence, 'runtime owns a workspace lease before sharing');
+
+  const view = await runtime.ensureShare(shareRequest());
+  assert(view.invite, 'published share exposes its invite');
+  equal(attachedLeases.length, 1, 'one authority instance activated');
+  equal(
+    attachedLeases[0]?.fencingToken,
+    ownedFence.fencingToken,
+    'authority receives the existing runtime fence',
+  );
+  equal(runtime.fence?.fencingToken, ownedFence.fencingToken, 'share activation preserves fence token');
+  equal(runtime.fence?.holderId, ownedFence.holderId, 'share activation preserves lease holder');
+  equal(runtime.getState().roomId, view.roomId, 'active runtime exposes published room');
+  equal(runtime.getState().liveEditingAvailable, true, 'live authority becomes available');
+
+  const competing = storage.leases({ channel: null });
+  equal(
+    await competing.acquire(workspaceId, 'competing-tab'),
+    null,
+    'runtime continues to own the sole workspace lease',
+  );
+  competing.close();
+  await runtime.close();
+  storage.close();
+});
+
+defineCase('ensureShare resumes persisted pending ciphertext before activating authority', async () => {
+  const now = 1_720_000_000_000;
+  const storage = await openStorage(() => now);
+  const workspaceId = 'share-pending-runtime-resume';
+  await seedLocal(storage, workspaceId);
+  const events: string[] = [];
+  const outboxes: AckingShareOutbox[] = [];
+  let createCalls = 0;
+  let publishCalls = 0;
+  const sharing: NonNullable<BrowserOwnerWorkspaceRuntimeOptions['sharing']> = {
+    now: () => now,
+    randomBytes: deterministicRandom(),
+    createRoom: async (options) => {
+      createCalls += 1;
+      return bootstrapFromOptions(options);
+    },
+    publish: async (options) => {
+      publishCalls += 1;
+      return snapshotPublisher(options);
+    },
+    indexBuilder: testIndexBuilder,
+    shareRelayFactory: memoryShareRelayFactory(),
+    outboxFactory: ({ storage: outboxStorage, credentials }) => {
+      const outbox = new AckingShareOutbox(
+        outboxStorage,
+        credentials.roomId,
+        events,
+        outboxes.length === 0,
+      );
+      outboxes.push(outbox);
+      return outbox;
+    },
+  };
+  const first = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, workspaceId, {
+    holderId: 'pending-first-tab',
+    now: () => now,
+    sharing,
+  }));
+  await first.start();
+  let failed = false;
+  try {
+    await first.ensureShare(shareRequest());
+  } catch (error) {
+    failed = error instanceof Error && error.message === 'relay offline';
+  }
+  assert(failed, 'initial publication stops at the simulated relay outage');
+  const pending = await first.inspectShare('https://attn.example/review');
+  assert(pending, 'pending ownership remains inspectable');
+  equal(pending.publication, 'pending', 'failed publication remains pending');
+  equal(pending.invite, null, 'pending publication does not expose an invite');
+  equal(first.getState().roomId, null, 'authority does not start before promotion');
+  const exactPendingBatch = JSON.stringify(outboxes[0]?.envelopes);
+  await first.close();
+
+  let authorityStarts = 0;
+  const second = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, workspaceId, {
+    holderId: 'pending-resume-tab',
+    now: () => now,
+    sharing,
+    authorityFactory: (options) => {
+      authorityStarts += 1;
+      return new FakeAuthority(options, storage, events);
+    },
+  }));
+  await second.start();
+  const resumed = await second.inspectShare('https://attn.example/review');
+  assert(resumed, 'route startup promotes the recoverable share');
+  equal(createCalls, 2, 'persisted resume idempotently rejoins the same relay room');
+  equal(publishCalls, 1, 'persisted resume does not assemble fresh ciphertext');
+  equal(JSON.stringify(outboxes[1]?.envelopes), exactPendingBatch, 'resume adopts exact pending batch');
+  equal(resumed.roomId, pending.roomId, 'resume keeps prepared room identity');
+  equal(resumed.capId, pending.capId, 'resume keeps prepared capability identity');
+  assert(resumed.invite, 'invite appears after resumed publication promotes');
+  equal(authorityStarts, 1, 'authority starts after automatic resumed promotion');
+  equal(second.getState().liveEditingAvailable, true, 'resumed runtime activates live authority');
+  await second.close();
+  storage.close();
+});
+
+defineCase('stopShare tears down authority, resets runtime state, and recreates fresh ownership', async () => {
+  const now = 1_720_000_000_000;
+  const storage = await openStorage(() => now);
+  const workspaceId = 'share-stop-recreate-runtime';
+  await seedLocal(storage, workspaceId);
+  const events: string[] = [];
+  let authorityInstances = 0;
+  let deleteCalls = 0;
+  const runtime = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, workspaceId, {
+    now: () => now,
+    authorityFactory: (options) => {
+      authorityInstances += 1;
+      return new FakeAuthority(options, storage, events);
+    },
+    sharing: {
+      now: () => now,
+      randomBytes: deterministicRandom(),
+      createRoom: async (options) => bootstrapFromOptions(options),
+      deleteRoom: async () => {
+        deleteCalls += 1;
+        events.push('relay-delete');
+        return true;
+      },
+      publish: snapshotPublisher,
+      indexBuilder: testIndexBuilder,
+      shareRelayFactory: memoryShareRelayFactory(),
+      outboxFactory: ({ storage: outboxStorage, credentials }) =>
+        new AckingShareOutbox(outboxStorage, credentials.roomId, events),
+    },
+  }));
+  await runtime.start();
+  const first = await runtime.ensureShare(shareRequest());
+  equal(authorityInstances, 1, 'first share starts one authority');
+
+  await runtime.stopShare();
+  equal(deleteCalls, 1, 'stop performs one owner-authorized relay deletion');
+  assert(
+    events.indexOf('relay-delete') < events.indexOf('authority-close'),
+    'relay deletion succeeds before local authority shuts down',
+  );
+  equal((await storage.shares.listShares(workspaceId)).length, 0, 'stop erases local capability');
+  equal(runtime.getState().status, 'active', 'local-only runtime remains active after stop');
+  equal(runtime.getState().leaseRole, 'owner', 'runtime retains workspace lease after stop');
+  equal(runtime.getState().writable, true, 'local authoring remains writable after stop');
+  equal(runtime.getState().liveEditingAvailable, false, 'live authority is unavailable after stop');
+  equal(runtime.getState().roomId, null, 'stopped room identity is cleared');
+  equal(runtime.getState().capId, null, 'stopped capability identity is cleared');
+  equal(runtime.getState().bindings.length, 0, 'stopped share bindings are cleared');
+  equal(runtime.getState().authority, null, 'stopped authority state is cleared');
+
+  const recreated = await runtime.ensureShare(shareRequest());
+  assert(recreated.roomId !== first.roomId, 'recreate mints a fresh room secret and room ID');
+  assert(recreated.capId !== first.capId, 'recreate mints a fresh capability ID');
+  equal(authorityInstances, 2, 'recreate starts a fresh authority instance');
+  equal(runtime.getState().roomId, recreated.roomId, 'recreated runtime exposes new room');
+  equal(runtime.getState().liveEditingAvailable, true, 'recreated authority is live');
+  await runtime.close();
   storage.close();
 });
 

@@ -685,7 +685,7 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                 );
                 let (status, body) = share_open_response(dispatched.is_ok());
                 if dispatched.is_err() {
-                    tracing::warn!(share_id = %invite.share_id, "durable share open is not implemented");
+                    tracing::warn!(share_id = %invite.share_id, "durable share open failed");
                 }
                 return wry::http::Response::builder()
                     .status(status)
@@ -1163,7 +1163,7 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                         )
                         .is_err()
                         {
-                            tracing::warn!(share_id = %invite.share_id, "durable share open is not implemented");
+                            tracing::warn!(share_id = %invite.share_id, "durable share open failed");
                         }
                         platform::activate_app();
                         window.set_visible(true);
@@ -1897,6 +1897,7 @@ fn parse_review_invite(uri: &str) -> Option<String> {
 
 /// Notification deep links contain no room secret and therefore focus only a
 /// room already present in the local store; they never invoke Join.
+#[cfg(any(target_os = "macos", test))]
 fn notification_room_id_from_deep_link(uri: &str) -> Option<String> {
     review::notifications::room_id_from_deep_link(uri)
 }
@@ -1905,6 +1906,7 @@ fn notification_room_id_from_deep_link(uri: &str) -> Option<String> {
 /// hydrated, then select it through the same production store bridge used by
 /// an already-open window. The room id is JSON encoded before crossing into
 /// JavaScript so an untrusted URI segment cannot become executable source.
+#[cfg(any(target_os = "macos", test))]
 fn notification_focus_script(room_id: &str) -> String {
     review::notifications::focus_script(room_id)
 }

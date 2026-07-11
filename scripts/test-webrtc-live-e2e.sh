@@ -58,7 +58,9 @@ if [ -n "${ATTN_EXTERNAL_RELAY:-}" ]; then
 else
     [ -d "$PROJECT_DIR/relay/node_modules" ] || (cd relay && npm ci >/dev/null)
     log "Starting relay on :$RELAY_PORT"
-    ( cd "$PROJECT_DIR/relay" && exec npx wrangler dev --local --port "$RELAY_PORT" ) >"$RELAY_LOG" 2>&1 &
+    ( cd "$PROJECT_DIR/relay" && exec npx wrangler dev --local --port "$RELAY_PORT" \
+        --var QUOTA_ALLOW_UNATTRIBUTED_CREATES:true \
+        --var BLOB_CAP_SIGNING_KEY:webrtc-live-e2e-blob-key-material-32 ) >"$RELAY_LOG" 2>&1 &
     RELAY_PID=$!
     deadline=$(( $(date +%s) + 60 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do curl -fsS "$RELAY_URL/health" >/dev/null 2>&1 && break; kill -0 "$RELAY_PID" 2>/dev/null || { log "relay died"; tail -20 "$RELAY_LOG"; exit 1; }; sleep 0.3; done
@@ -80,15 +82,25 @@ wait_ready attn_owner '[data-slot=share-invite-url]' 20000 || { log "no invite f
 INVITE=""; deadline=$(( $(date +%s) + 15 ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     INVITE="$(attn_owner --eval "document.querySelector('[data-slot=share-invite-url]')?.value||''" 2>/dev/null | tr -d '"\\' | tr -d '\r\n')"
-    case "$INVITE" in attn://review/*) break;; esac; sleep 0.3
+    case "$INVITE" in attn://review/*|https://attn.sh/review/*|https://staging.attn.sh/review/*) break;; esac; sleep 0.3
 done
-case "$INVITE" in attn://review/*) ok "owner minted invite";; *) bad "no invite ('$INVITE')"; exit 1;; esac
+case "$INVITE" in attn://review/*|https://attn.sh/review/*|https://staging.attn.sh/review/*) ok "owner minted invite";; *) bad "no invite ('$INVITE')"; exit 1;; esac
 
-log "Reviewer joins (review_join IPC)"
+log "Reviewer joins through the authenticated daemon socket"
 # Pre-set the reviewer's name too so the post-join onboarding prompt doesn't
 # overlay the editor during the co-typing/suggesting assertions below.
 attn_rv --eval "window.__attn_user_profile__ && window.__attn_user_profile__.save('Reviewer');'x'" >/dev/null 2>&1 || true
-attn_rv --eval "window.ipc && window.ipc.postMessage(JSON.stringify({type:'review_join',invite:'$INVITE'}));'x'" >/dev/null 2>&1 && ok "reviewer join dispatched" || bad "reviewer join failed"
+JOIN_INVITE="$INVITE"
+case "$JOIN_INVITE" in
+  https://attn.sh/review/*) JOIN_INVITE="attn://review/${JOIN_INVITE#https://attn.sh/review/}" ;;
+  https://staging.attn.sh/review/*) JOIN_INVITE="attn://review/${JOIN_INVITE#https://staging.attn.sh/review/}" ;;
+esac
+JOIN_ERROR=""
+if JOIN_ERROR="$(attn_rv review join "$JOIN_INVITE" 2>&1)"; then
+  ok "reviewer join dispatched"
+else
+  bad "reviewer join failed: ${JOIN_ERROR%%$'\n'*}"
+fi
 
 # Presence converges (each sees 1 peer).
 peer_count() { "$1" --query '[data-slot=peer-chip]' 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("count",0))' 2>/dev/null || echo 0; }

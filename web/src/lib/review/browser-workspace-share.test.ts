@@ -87,7 +87,7 @@ async function acquireFence(
   return lease;
 }
 
-function sampleCapability() {
+function sampleCapability(sharePaths?: string[]) {
   const identity = generateBrowserIdentity();
   return inviteCapabilityFrom({
     roomSecret: new Uint8Array(32).fill(7),
@@ -96,6 +96,7 @@ function sampleCapability() {
     ownerDeviceId: identity.deviceId,
     ownerParticipantId: identity.participantId,
     policy: { mode: 'hybrid', maxPeers: 8 },
+    ...(sharePaths === undefined ? {} : { sharePaths }),
   });
 }
 
@@ -253,6 +254,53 @@ defineCase('publication state advances and shares list/forget', async () => {
       storage.shares.setPublication('ws-1', 'cap-1', 'stopped'),
       'missing share update errors',
     );
+  } finally {
+    storage.close();
+  }
+});
+
+defineCase('fenced preparation allows one active share and fenced crypto-erasure', async () => {
+  const { storage } = await openStorage();
+  try {
+    const workspaceId = 'ws-fenced-prepare';
+    const rootKey = await storage.createWorkspaceKey(workspaceId);
+    const fence = await acquireFence(storage, workspaceId, 'active-tab');
+    const prepared = await storage.shares.bindShareFenced(rootKey, {
+      workspaceId,
+      capId: 'cap-prepared',
+      roomId: 'room-prepared',
+      scopeKind: 'entries',
+      relayUrl: 'https://relay.example',
+      capability: sampleCapability(['notes.md', 'assets/diagram.png']),
+    }, fence);
+    assertEqual(prepared.publication, 'pending', 'prepared before network');
+    const opened = await storage.shares.openShare(rootKey, workspaceId, prepared.capId);
+    assertEqual(opened.sharePaths?.join('|'), 'notes.md|assets/diagram.png', 'scope paths sealed');
+
+    await expectStorageError(
+      storage.shares.bindShareFenced(rootKey, {
+        workspaceId,
+        capId: 'cap-second',
+        roomId: 'room-second',
+        scopeKind: 'workspace',
+        relayUrl: 'https://relay.example',
+        capability: sampleCapability(['notes.md']),
+      }, fence),
+      'one active room per workspace',
+    );
+    await expectStorageError(
+      storage.shares.forgetShareFenced(
+        workspaceId,
+        prepared.capId,
+        { ...fence, holderId: 'stale-tab' },
+      ),
+      'passive tab cannot erase ownership',
+    );
+    assert(
+      await storage.shares.forgetShareFenced(workspaceId, prepared.capId, fence),
+      'active owner erased capability',
+    );
+    assertEqual((await storage.shares.listShares(workspaceId)).length, 0, 'late ACK has no record to revive');
   } finally {
     storage.close();
   }

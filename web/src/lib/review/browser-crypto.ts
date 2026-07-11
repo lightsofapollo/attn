@@ -863,11 +863,12 @@ export function buildOwnerSignatureHeader(
   method: string,
   urlPath: string,
   body: Uint8Array,
+  queryPairs: Array<[string, string]> = [],
 ): string {
   if (signingSecret.length !== 32) {
     throw new Error('owner signing secret must be 32 bytes');
   }
-  const canon = canonicalRequestBytes(method, urlPath, [], body);
+  const canon = canonicalRequestBytes(method, urlPath, queryPairs, body);
   try {
     return base64UrlEncode(ed25519.sign(canon, signingSecret));
   } finally {
@@ -898,9 +899,10 @@ export function buildAdmissionHeaderV3(
   method: string,
   urlPath: string,
   body: Uint8Array,
+  queryPairs: Array<[string, string]> = [],
 ): string {
   if (admissionKey.length !== 32) throw new Error('admissionKey must be 32 bytes');
-  const canon = canonicalRequestBytes(method, urlPath, [], body);
+  const canon = canonicalRequestBytes(method, urlPath, queryPairs, body);
   const tag = hmac(sha256, admissionKey, canon);
   canon.fill(0);
   return `v3.${scope}.${base64UrlEncode(tag)}`;

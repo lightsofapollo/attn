@@ -108,6 +108,7 @@ export interface BrowserSnapshotPublicationResult {
 }
 
 export interface PublishBrowserSnapshotsOptions {
+  protocolVersion?: 2 | 3;
   relayUrl: string;
   roomId: string;
   roomSecret: Uint8Array;
@@ -115,6 +116,8 @@ export interface PublishBrowserSnapshotsOptions {
   identity: BrowserDeviceIdentity;
   policy: RoomPolicy;
   entries: readonly BrowserSnapshotEntry[];
+  /** One-time room genesis events, atomically journaled before initial snapshots. */
+  prefixEnvelopes?: readonly MailboxEnvelope[];
   scope?: WorkspaceManifestScope;
   outbox: SnapshotPublicationOutbox;
   publication?: {
@@ -196,7 +199,9 @@ export async function publishBrowserSnapshots(
 
   const results: BrowserSnapshotPublicationResult[] = [];
   const manifestEntries: WorkspaceManifestEntry[] = [];
-  const envelopes: MailboxEnvelope[] = [];
+  const envelopes: MailboxEnvelope[] = (options.prefixEnvelopes ?? []).map((envelope) =>
+    structuredClone(envelope)
+  );
 
   for (const { source, baseHash, fileId } of resolved) {
     const snapshotId = deriveSnapshotId(options.roomId, fileId, baseHash, createdAt);
@@ -371,6 +376,7 @@ async function prepareSnapshot(
         throw new Error('encrypted snapshot exceeds the room snapshot limit');
       }
       await (options.uploadR2 ?? uploadBrowserR2Snapshot)({
+        protocolVersion: options.protocolVersion,
         relayUrl: options.relayUrl,
         roomId: options.roomId,
         admissionKey: options.keys.admissionKey,
@@ -441,6 +447,16 @@ function validateOptions(options: PublishBrowserSnapshotsOptions): void {
     }
     if (options.publication && entry.revisionId === undefined) {
       throw new Error(`published workspace entry requires revisionId: ${entry.path}`);
+    }
+  }
+  for (const envelope of options.prefixEnvelopes ?? []) {
+    if (
+      envelope.roomId !== options.roomId
+      || envelope.deviceId !== options.identity.deviceId
+      || envelope.authorId !== options.identity.participantId
+      || envelope.kind !== 'event'
+    ) {
+      throw new Error('snapshot publication prefix envelope is not owner-room bound');
     }
   }
 }

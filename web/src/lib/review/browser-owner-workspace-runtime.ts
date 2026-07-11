@@ -30,6 +30,7 @@ import {
 } from './browser-review-actions';
 import {
   ownerCredentialsFromInviteCapability,
+  ownerCredentialsV3FromInviteCapability,
   type BrowserOwnerCredentials,
   type BrowserSessionOptions,
 } from './browser-session';
@@ -47,6 +48,12 @@ import type { CommittedRevision, CommitRevisionInput } from './browser-workspace
 import type { LeaseHandle, WorkspaceLeaseManagerOptions } from './browser-workspace-lease';
 import type { CollabController } from '../prosemirror/collab-controller';
 import type { BrowserReviewTerminalPort } from './browser-review-actions';
+import {
+  BrowserWorkspaceSharingCoordinator,
+  type BrowserWorkspaceShareRequest,
+  type BrowserWorkspaceShareView,
+  type BrowserWorkspaceSharingDependencies,
+} from './browser-workspace-sharing';
 
 export type BrowserOwnerWorkspaceRuntimeStatus =
   | 'starting'
@@ -107,6 +114,8 @@ export interface BrowserOwnerWorkspaceRuntimeOptions {
   authorityFactory?: (options: BrowserOwnerAuthorityOptions) => BrowserOwnerWorkspaceAuthority;
   /** Test seam. Production always calls the canonical snapshot publisher. */
   publisher?: (options: PublishBrowserSnapshotsOptions) => Promise<unknown>;
+  /** Initial share/stop seams; production uses the canonical coordinator. */
+  sharing?: BrowserWorkspaceSharingDependencies;
   schedule?: (callback: () => void, delayMs: number) => unknown;
   cancelScheduled?: (handle: unknown) => void;
   pagehideTarget?: {
@@ -132,6 +141,15 @@ export interface BrowserOwnerWorkspaceAuthority extends BrowserReviewTerminalPor
 export type BrowserOwnerWorkspaceRuntimeSubscriber = (
   state: BrowserOwnerWorkspaceRuntimeState,
 ) => void;
+
+interface DiscoveredPublishedShare {
+  share: ShareRecordView;
+  rootKey: CryptoKey;
+  credentials: BrowserOwnerCredentials;
+  bindings: BrowserOwnerAuthorityFile[];
+  pendingPublication: boolean;
+  localHeadsMoved: boolean;
+}
 
 export class BrowserOwnerWorkspaceRuntime {
   private readonly options: BrowserOwnerWorkspaceRuntimeOptions;
@@ -253,6 +271,7 @@ export class BrowserOwnerWorkspaceRuntime {
       this.pagehideTarget?.addEventListener('pagehide', this.pagehideHandler);
       let discovered: Awaited<ReturnType<BrowserOwnerWorkspaceRuntime['discoverPublishedShare']>>;
       try {
+        await this.sharingCoordinator().reconcileActive();
         discovered = await this.discoverPublishedShare();
       } catch (error) {
         this.startLocalHeartbeat();
@@ -276,71 +295,7 @@ export class BrowserOwnerWorkspaceRuntime {
         });
         return this.getState();
       }
-      this.share = discovered.share;
-      this.credentials = discovered.credentials;
-      const factory = this.options.authorityFactory
-        ?? ((authorityOptions) => new BrowserOwnerAuthorityService(authorityOptions));
-      const authority = factory({
-        workspaceId: this.options.workspaceId,
-        holderId: this.options.holderId,
-        roomId: discovered.share.roomId,
-        capId: discovered.share.capId,
-        owner: discovered.credentials,
-        files: discovered.bindings,
-        storage: this.authorityStorage(discovered.rootKey),
-        leaseManager: this.leaseManager,
-        attachedLease: lease,
-        sessionOptions: {
-          ...this.options.sessionOptions,
-          relayUrl: discovered.share.relayUrl,
-          // BrowserSession owns and closes its persistence connection.
-          // Never hand it the app service's shared BrowserStorage handle.
-          storageFactory: (createIfMissing) =>
-            this.options.storage.openSibling(createIfMissing),
-        },
-        collab: this.options.collab,
-        rollover: {
-          onRequired: (input) => this.commitRolloverAndPublish(
-            input.fileId,
-            input.doc,
-            input.publicationOutbox,
-          ),
-        },
-        ...(this.options.heartbeatIntervalMs === undefined
-          ? {}
-          : { heartbeatIntervalMs: this.options.heartbeatIntervalMs }),
-        ...(this.options.now === undefined ? {} : { now: this.options.now }),
-        onState: (authorityState) => this.onAuthorityState(authorityState),
-      });
-      this.authority = authority;
-      // Publish the durable room identity before transport startup. If the
-      // owner opens offline, the shell can still show recovered review state
-      // and its honest paused status instead of masquerading as local-only.
-      this.patchState({
-        roomId: discovered.share.roomId,
-        capId: discovered.share.capId,
-        bindings: discovered.bindings,
-        authority: authority.getState(),
-      });
-      const started = await authority.start();
-      if (!started) {
-        this.onAuthorityState(authority.getState());
-        return this.getState();
-      }
-      this.refreshController();
-      const reconciled = await this.reconcileStartupPublication(discovered);
-      if (!reconciled) return this.getState();
-      this.patchState({
-        status: 'active',
-        leaseRole: 'owner',
-        writable: true,
-        liveEditingAvailable: true,
-        reason: null,
-        roomId: discovered.share.roomId,
-        capId: discovered.share.capId,
-        bindings: discovered.bindings,
-        authority: authority.getState(),
-      });
+      await this.activatePublishedShare(discovered, lease);
       return this.getState();
     } catch (error) {
       if (this.lease) {
@@ -383,6 +338,64 @@ export class BrowserOwnerWorkspaceRuntime {
         ...input,
         workspaceId: this.options.workspaceId,
         fence: this.requireFence(),
+      });
+    });
+  }
+
+  async inspectShare(browserReviewBase: string): Promise<BrowserWorkspaceShareView | null> {
+    const coordinator = this.sharingCoordinator();
+    return coordinator.inspect(browserReviewBase);
+  }
+
+  async ensureShare(request: BrowserWorkspaceShareRequest): Promise<BrowserWorkspaceShareView> {
+    return this.enqueueMutation(async () => {
+      if (!this.stateValue.writable || !this.lease) {
+        throw new StorageConflictError('browser owner workspace is not writable');
+      }
+      const coordinator = this.sharingCoordinator();
+      const view = await coordinator.ensurePublished(request);
+      if (!this.authority) {
+        const discovered = await this.discoverPublishedShare();
+        if (!discovered) throw new StorageConflictError('published share could not be reopened');
+        try {
+          await this.activatePublishedShare(discovered, this.requireFence());
+        } catch (error) {
+          await this.deactivateAuthority();
+          this.startLocalHeartbeat();
+          this.patchState({
+            status: 'error',
+            leaseRole: 'owner',
+            writable: true,
+            liveEditingAvailable: false,
+            reason: errorMessage(error),
+          });
+        }
+      }
+      return view;
+    });
+  }
+
+  async stopShare(): Promise<void> {
+    return this.enqueueMutation(async () => {
+      if (!this.stateValue.writable || !this.lease) {
+        throw new StorageConflictError('browser owner workspace is not writable');
+      }
+      const coordinator = this.sharingCoordinator();
+      // Do not claim a stop until the owner-signed relay deletion succeeds.
+      const record = await coordinator.deleteRemote();
+      await this.deactivateAuthority();
+      await coordinator.eraseLocal(record);
+      this.startLocalHeartbeat();
+      this.patchState({
+        status: 'active',
+        leaseRole: 'owner',
+        writable: true,
+        liveEditingAvailable: false,
+        reason: null,
+        roomId: null,
+        capId: null,
+        bindings: [],
+        authority: null,
       });
     });
   }
@@ -571,14 +584,100 @@ export class BrowserOwnerWorkspaceRuntime {
     return this.closePromise;
   }
 
-  private async discoverPublishedShare(): Promise<{
-    share: ShareRecordView;
-    rootKey: CryptoKey;
-    credentials: BrowserOwnerCredentials;
-    bindings: BrowserOwnerAuthorityFile[];
-    pendingPublication: boolean;
-    localHeadsMoved: boolean;
-  } | null> {
+  private sharingCoordinator(): BrowserWorkspaceSharingCoordinator {
+    return new BrowserWorkspaceSharingCoordinator(
+      this.options.storage,
+      this.options.workspaceId,
+      this.requireFence(),
+      {
+        ...this.options.sharing,
+        ...(this.options.publisher === undefined ? {} : { publish: this.options.publisher }),
+        ...(this.options.now === undefined ? {} : { now: this.options.now }),
+      },
+    );
+  }
+
+  private async activatePublishedShare(
+    discovered: DiscoveredPublishedShare,
+    lease: LeaseHandle,
+  ): Promise<boolean> {
+    this.stopLocalHeartbeat();
+    this.share = discovered.share;
+    this.credentials = discovered.credentials;
+    const factory = this.options.authorityFactory
+      ?? ((authorityOptions) => new BrowserOwnerAuthorityService(authorityOptions));
+    const authority = factory({
+      workspaceId: this.options.workspaceId,
+      holderId: this.options.holderId,
+      roomId: discovered.share.roomId,
+      capId: discovered.share.capId,
+      owner: discovered.credentials,
+      files: discovered.bindings,
+      storage: this.authorityStorage(discovered.rootKey),
+      leaseManager: this.leaseManager,
+      attachedLease: lease,
+      sessionOptions: {
+        ...this.options.sessionOptions,
+        relayUrl: discovered.share.relayUrl,
+        // BrowserSession owns and closes its persistence connection.
+        // Never hand it the app service's shared BrowserStorage handle.
+        storageFactory: (createIfMissing) =>
+          this.options.storage.openSibling(createIfMissing),
+      },
+      collab: this.options.collab,
+      rollover: {
+        onRequired: (input) => this.commitRolloverAndPublish(
+          input.fileId,
+          input.doc,
+          input.publicationOutbox,
+        ),
+      },
+      ...(this.options.heartbeatIntervalMs === undefined
+        ? {}
+        : { heartbeatIntervalMs: this.options.heartbeatIntervalMs }),
+      ...(this.options.now === undefined ? {} : { now: this.options.now }),
+      onState: (authorityState) => this.onAuthorityState(authorityState),
+    });
+    this.authority = authority;
+    this.patchState({
+      roomId: discovered.share.roomId,
+      capId: discovered.share.capId,
+      bindings: discovered.bindings,
+      authority: authority.getState(),
+    });
+    const started = await authority.start();
+    if (!started) {
+      this.onAuthorityState(authority.getState());
+      return false;
+    }
+    this.refreshController();
+    const reconciled = await this.reconcileStartupPublication(discovered);
+    if (!reconciled) return false;
+    this.patchState({
+      status: 'active',
+      leaseRole: 'owner',
+      writable: true,
+      liveEditingAvailable: true,
+      reason: null,
+      roomId: discovered.share.roomId,
+      capId: discovered.share.capId,
+      bindings: discovered.bindings,
+      authority: authority.getState(),
+    });
+    return true;
+  }
+
+  private async deactivateAuthority(): Promise<void> {
+    const authority = this.authority;
+    this.authority = null;
+    if (authority) await authority.close().catch(() => undefined);
+    this.refreshController();
+    zeroOwnerCredentials(this.credentials);
+    this.credentials = null;
+    this.share = null;
+  }
+
+  private async discoverPublishedShare(): Promise<DiscoveredPublishedShare | null> {
     const rootKey = await this.options.storage.getWorkspaceRootKey(this.options.workspaceId);
     if (!rootKey) throw new BrowserStorageError('workspace key is unavailable');
     const candidates: Array<{
@@ -601,7 +700,9 @@ export class BrowserOwnerWorkspaceRuntime {
       );
     }
     const { share, capability } = candidates[0]!;
-    const credentials = ownerCredentialsFromInviteCapability(capability, share.roomId);
+    const credentials = capability.durableShare
+      ? ownerCredentialsV3FromInviteCapability(capability, share.roomId)
+      : ownerCredentialsFromInviteCapability(capability, share.roomId);
     try {
       const manifest = capability.publishedManifest;
       if (!manifest) throw new StorageConflictError('active share has no promoted manifest');
@@ -668,13 +769,9 @@ export class BrowserOwnerWorkspaceRuntime {
     };
   }
 
-  private async reconcileStartupPublication(discovered: {
-    share: ShareRecordView;
-    rootKey: CryptoKey;
-    bindings: readonly BrowserOwnerAuthorityFile[];
-    pendingPublication: boolean;
-    localHeadsMoved: boolean;
-  }): Promise<boolean> {
+  private async reconcileStartupPublication(
+    discovered: DiscoveredPublishedShare,
+  ): Promise<boolean> {
     if (!discovered.pendingPublication && !discovered.localHeadsMoved) return true;
     const authority = this.requireActiveAuthority();
     const binding = discovered.bindings[0]!;
@@ -801,6 +898,7 @@ export class BrowserOwnerWorkspaceRuntime {
       }
       const publisher = this.options.publisher ?? publishBrowserSnapshots;
       await publisher({
+        protocolVersion: credentials.protocolVersion,
         relayUrl: share.relayUrl,
         roomId: share.roomId,
         roomSecret: credentials.roomSecret,
@@ -1042,6 +1140,11 @@ function zeroOwnerCredentials(credentials: BrowserOwnerCredentials | null): void
   credentials.keys.snapshotKey.fill(0);
   credentials.keys.signalingKey.fill(0);
   credentials.keys.admissionKey.fill(0);
+  credentials.readAdmissionKey?.fill(0);
+  credentials.readCapabilityKey?.fill(0);
+  if ('shareSecret' in credentials && credentials.shareSecret instanceof Uint8Array) {
+    credentials.shareSecret.fill(0);
+  }
   credentials.identity.signingSecret.fill(0);
   credentials.identity.signingPublic.fill(0);
   credentials.identity.encryptionSecret.fill(0);

@@ -60,6 +60,8 @@ export interface WorkspaceRecord {
   updatedAt: number;
   /** Result of the last navigator.storage.persist() observation. */
   storagePersisted: boolean;
+  /** Currently selected entry (canonical path); cleared when it is deleted. */
+  activePath?: string;
 }
 
 export type WorkspaceEntryKind = 'markdown' | 'asset';
@@ -256,6 +258,11 @@ export function validateWorkspaceRecord(value: unknown): asserts value is Worksp
   requireTimestamp(record.updatedAt, 'updatedAt');
   if (typeof record.storagePersisted !== 'boolean') {
     throw new BrowserStorageError('storagePersisted must be a boolean');
+  }
+  if (record.activePath !== undefined) {
+    if (typeof record.activePath !== 'string' || normalizeEntryPath(record.activePath) !== record.activePath) {
+      throw new BrowserStorageError('activePath is not in canonical form');
+    }
   }
 }
 

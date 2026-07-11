@@ -17,6 +17,7 @@ import {
   MissingBrowserStorageError,
   StorageConflictError,
 } from './browser-storage-errors';
+import { isConstraintError, requestValue, transactionDone } from './browser-idb';
 import {
   GC_CREATED_INDEX,
   REVISION_HISTORY_INDEX,
@@ -36,6 +37,7 @@ import {
   generateWorkspaceRootKey,
   validateWorkspaceRootKey,
 } from './browser-workspace-crypto';
+import { WorkspaceStore } from './browser-workspace-store';
 
 export { BrowserStorageError, MissingBrowserStorageError, StorageConflictError };
 
@@ -260,6 +262,7 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
   private readonly filesystem: SealedBlobFileSystem | null;
   private readonly navigatorImpl: BrowserStorageNavigator | null;
   private readonly now: () => number;
+  private workspaceStore: WorkspaceStore | null = null;
 
   private constructor(
     db: IDBDatabase,
@@ -295,6 +298,14 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
 
   close(): void {
     this.db.close();
+  }
+
+  /** Atomic workspace/file transaction APIs (attn-7xl.2.3). */
+  get workspaces(): WorkspaceStore {
+    if (!this.workspaceStore) {
+      this.workspaceStore = new WorkspaceStore(this.db, this.cryptoImpl, this.now);
+    }
+    return this.workspaceStore;
   }
 
   async putRoom(room: BrowserStorageRoom): Promise<void> {
@@ -1362,31 +1373,6 @@ function ownedBuffer(bytes: Uint8Array): ArrayBuffer {
   return copy.buffer;
 }
 
-function requestValue<T>(request: IDBRequest<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new BrowserStorageError('IndexedDB request failed'));
-  });
-}
-
-function transactionDone(transaction: IDBTransaction): Promise<void> {
-  const completion = new Promise<void>((resolve, reject) => {
-    transaction.oncomplete = () => resolve();
-    transaction.onabort = () => reject(transaction.error ?? new DOMException('Transaction aborted', 'AbortError'));
-    transaction.onerror = () => {
-      // onabort carries the authoritative final error.
-    };
-  });
-  // Some operations perform several cursor/request awaits before awaiting the
-  // transaction itself. Mark early aborts observed immediately while keeping
-  // the original rejection available to the eventual `await completion`.
-  void completion.catch(() => undefined);
-  return completion;
-}
-
-function isConstraintError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'ConstraintError';
-}
 
 async function deleteRoomRecords(
   database: IDBDatabase,

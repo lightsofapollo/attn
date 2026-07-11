@@ -21,9 +21,10 @@
     to: number;
     onComment: () => void;
     onSuggest: () => void;
+    canSuggest?: boolean;
   }
 
-  const { view, from, to, onComment, onSuggest }: Props = $props();
+  const { view, from, to, onComment, onSuggest, canSuggest = true }: Props = $props();
 
   // A compact bar, so position it tightly above the selection.
   const pos = $derived<PopoverAnchor>(
@@ -49,8 +50,9 @@
   >
     Comment
   </button>
-  <div class="mx-0.5 h-4 w-px bg-border" aria-hidden="true"></div>
-  <button
+  {#if canSuggest}
+    <div class="mx-0.5 h-4 w-px bg-border" aria-hidden="true"></div>
+    <button
     type="button"
     data-slot="selection-toolbar-suggest"
     class="rounded px-2 py-1 text-xs font-medium text-popover-foreground hover:bg-muted"
@@ -58,5 +60,6 @@
     onclick={onSuggest}
   >
     Suggest
-  </button>
+    </button>
+  {/if}
 </div>

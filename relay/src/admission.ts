@@ -107,6 +107,64 @@ export async function verifyAdmission(
   }
 }
 
+export type AdmissionScopeV3 = "read" | "write";
+
+export interface AdmissionContextV3 {
+  roomId: string;
+  readAdmissionKey: Uint8Array;
+  writeAdmissionKey: Uint8Array;
+}
+
+/** Verify additive v3 scoped admission without changing the v2 wire parser. */
+export async function verifyAdmissionV3(
+  request: Request,
+  urlPath: string,
+  ctx: AdmissionContextV3,
+  required: AdmissionScopeV3,
+): Promise<void> {
+  const parsed = parseAdmissionHeaderV3(request.headers.get(ADMISSION_HEADER));
+  const canonical = await canonicalRequest(request, urlPath);
+  if (required === "read") {
+    if (parsed.scope !== "read" || !(await hmacMatches(ctx.readAdmissionKey, canonical, parsed.mac))) {
+      throw new AdmissionError("ATTN_ADMISSION_INVALID", `admission HMAC mismatch for room ${ctx.roomId}`);
+    }
+    return;
+  }
+  if (parsed.scope === "write") {
+    if (await hmacMatches(ctx.writeAdmissionKey, canonical, parsed.mac)) return;
+    throw new AdmissionError("ATTN_ADMISSION_INVALID", `admission HMAC mismatch for room ${ctx.roomId}`);
+  }
+  if (await hmacMatches(ctx.readAdmissionKey, canonical, parsed.mac)) {
+    throw new AdmissionError(
+      "ATTN_WRITE_CAPABILITY_REQUIRED",
+      `write capability required for room ${ctx.roomId}`,
+    );
+  }
+  throw new AdmissionError("ATTN_ADMISSION_INVALID", `admission HMAC mismatch for room ${ctx.roomId}`);
+}
+
+export function parseAdmissionHeaderV3(
+  value: string | null,
+): { scope: AdmissionScopeV3; mac: Uint8Array } {
+  if (value === null || value === "") {
+    throw new AdmissionError("ATTN_ADMISSION_INVALID", "missing Attn-Admission header");
+  }
+  const parts = value.split(".");
+  if (parts.length !== 3 || parts[0] !== "v3" || (parts[1] !== "read" && parts[1] !== "write")) {
+    throw new AdmissionError("ATTN_ADMISSION_INVALID", "Attn-Admission must be v3.read.MAC or v3.write.MAC");
+  }
+  let mac: Uint8Array;
+  try {
+    mac = base64UrlDecode(parts[2] ?? "");
+  } catch (err) {
+    throw new AdmissionError("ATTN_ADMISSION_INVALID", `Attn-Admission base64url decode failed: ${(err as Error).message}`);
+  }
+  if (mac.length !== HMAC_BYTE_LEN) {
+    throw new AdmissionError("ATTN_ADMISSION_INVALID", `Attn-Admission HMAC must be ${HMAC_BYTE_LEN} bytes (got ${mac.length})`);
+  }
+  return { scope: parts[1], mac };
+}
+
 /**
  * Parse `v2.<base64url-hmac>`. Returns the 32-byte HMAC.
  * Throws AdmissionError with `ATTN_ADMISSION_INVALID` on any parse failure
@@ -232,6 +290,22 @@ export function base64UrlEncode(bytes: Uint8Array): string {
     bin += String.fromCharCode(bytes[i] ?? 0);
   }
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function hmacMatches(
+  rawKey: Uint8Array,
+  canonical: Uint8Array,
+  provided: Uint8Array,
+): Promise<boolean> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    rawKey,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const expected = new Uint8Array(await crypto.subtle.sign("HMAC", key, canonical));
+  return constantTimeEquals(expected, provided);
 }
 
 function concatBytes(parts: Uint8Array[]): Uint8Array {

@@ -11,6 +11,7 @@ import { markdownParser } from '../schema';
 
 import {
   CollabController,
+  parseCollabWireMessage,
   type CollabAuthoritySeed,
   type CollabPeerLocation,
   type RemoteCursor,
@@ -883,6 +884,13 @@ export class BrowserOwnerAuthorityService {
   }
 
   private async routeCollabDelivery(delivery: BrowserCollabDelivery): Promise<void> {
+    const message = parseCollabWireMessage(delivery.payload);
+    // This is the browser workspace's owner-authority boundary. BrowserSession
+    // has already authenticated `sender`; only non-mutating remote presence
+    // and replay requests cross into the ProseMirror controller. Suggestions
+    // arrive as durable SuggestionCreated events and are applied elsewhere by
+    // an explicit owner action.
+    if (!message || (message.kind !== 'resync' && message.kind !== 'cursor')) return;
     const barrier = this.transitionCollabBarrier;
     if (barrier) {
       if (barrier.waiters >= MAX_TRANSITION_COLLAB_WAITERS) {

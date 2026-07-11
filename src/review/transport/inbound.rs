@@ -129,6 +129,9 @@ pub enum InboundError {
         expected: String,
         actual: Option<String>,
     },
+    /// Protocol-v3 signal omitted or failed its registered-device proof.
+    #[error("signal registered-device proof failed: {0}")]
+    SignalDeviceProof(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +167,13 @@ pub struct ImportOutcome {
 /// adds keys from device-directory updates without juggling two clones.
 pub type VerifyingKeyCache = Arc<RwLock<HashMap<String, DeviceVerifyingKey>>>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantTier {
+    Comment,
+    Suggest,
+}
+
 #[derive(Debug, Clone)]
 pub struct RegisteredDeviceAuthorization {
     pub participant_id: crate::review::ids::ParticipantId,
@@ -172,6 +182,12 @@ pub struct RegisteredDeviceAuthorization {
     pub public_signing_key: String,
     pub client: DeviceClient,
     pub kind: ParticipantKind,
+    /// Verified relay-directory grant. `None` is legacy v2 and defaults to
+    /// suggest for backward compatibility (including agents).
+    pub grant_tier: Option<GrantTier>,
+    /// Exact owner proof paired with `grant_tier`; retained so refreshes
+    /// cannot silently replace an immutable v3 authorization.
+    pub grant_signature: Option<String>,
     pub attested: bool,
 }
 
@@ -188,7 +204,7 @@ impl RegisteredDeviceAuthorization {
             && participant.participant_id == self.participant_id
             && participant.kind == self.kind
             && participant.public_signing_key == self.public_signing_key
-            && exact_capabilities(&participant.capabilities, self.kind)
+            && exact_capabilities(&participant.capabilities, self.kind, self.grant_tier)
             && device.device_id == event.meta.device_id
             && device.device_id == self.device_id
             && device.participant_id == self.participant_id
@@ -226,6 +242,77 @@ pub struct InboundPipeline {
 }
 
 impl InboundPipeline {
+    /// Decrypt, verify, authorize, and policy-check a complete event batch
+    /// without mutating device attestation state or the event store. Callers
+    /// use this before any external registration or durable append.
+    pub async fn preflight_event_envelopes<F>(
+        &self,
+        envelopes: &[MailboxEnvelope],
+        allow: F,
+    ) -> Result<Vec<ReviewEvent>, InboundError>
+    where
+        F: Fn(usize, &ReviewEvent) -> bool,
+    {
+        let keys = self.keys.read().await.clone();
+        let mut authorizations = self.authorizations.read().await.clone();
+        let mut events = Vec::with_capacity(envelopes.len());
+        for (index, envelope) in envelopes.iter().enumerate() {
+            if envelope.kind != EnvelopeKind::Event {
+                return Err(InboundError::KindMismatch {
+                    expected: EnvelopeKind::Event,
+                    actual: envelope.kind,
+                });
+            }
+            let event = match disassemble_event_envelope(DisassembleInput {
+                envelope,
+                event_key: self.event_key,
+                verifying_keys: &keys,
+            }) {
+                Ok(event) => event,
+                Err(EnvelopeError::UnknownSigner(keyid)) => {
+                    return Err(InboundError::UnknownSigner {
+                        signing_key_id: keyid,
+                    });
+                }
+                Err(error) => return Err(InboundError::Envelope(error)),
+            };
+            authorize_event(&event, &mut authorizations)?;
+            if !allow(index, &event) {
+                return Err(InboundError::UnauthorizedEvent);
+            }
+            events.push(event);
+        }
+        Ok(events)
+    }
+
+    /// Commit an already-preflighted batch. Authorization state is staged for
+    /// the whole batch before the first append, preventing a partial
+    /// attestation from becoming observable when a later event is invalid.
+    pub async fn commit_preflighted_events(
+        &self,
+        room_id: &RoomId,
+        events: &[ReviewEvent],
+    ) -> Result<Vec<ImportOutcome>, InboundError> {
+        let mut guard = self.authorizations.write().await;
+        let mut staged = guard.clone();
+        for event in events {
+            authorize_event(event, &mut staged)?;
+        }
+        let mut outcomes = Vec::with_capacity(events.len());
+        for event in events {
+            let newly_imported = self
+                .store
+                .append_event(room_id, event)
+                .map_err(|error| InboundError::Store(error.to_string()))?;
+            outcomes.push(ImportOutcome {
+                event: event.clone(),
+                newly_imported,
+            });
+        }
+        *guard = staged;
+        Ok(outcomes)
+    }
+
     /// Construct a new pipeline. The three AEAD keys must be derived from the
     /// same `rootKey` via `crypto::kdf::derive_room_keys` so the kind/key
     /// mapping (see crypto-spec.md data-classification table) is consistent.
@@ -278,6 +365,24 @@ impl InboundPipeline {
         room_id: &RoomId,
         envelope: &MailboxEnvelope,
     ) -> Result<ImportOutcome, InboundError> {
+        self.import_event_envelope_if(room_id, envelope, |_| true)
+            .await
+    }
+
+    /// Import through the full crypto/authorization pipeline while applying
+    /// one caller policy immediately before persistence. Durable-share
+    /// offline intake uses this to admit only its frozen attestation followed
+    /// by comments; checking after `import_event_envelope` would be too late
+    /// because the event log append has already happened.
+    pub async fn import_event_envelope_if<F>(
+        &self,
+        room_id: &RoomId,
+        envelope: &MailboxEnvelope,
+        allow: F,
+    ) -> Result<ImportOutcome, InboundError>
+    where
+        F: FnOnce(&ReviewEvent) -> bool,
+    {
         if envelope.kind != EnvelopeKind::Event {
             return Err(InboundError::KindMismatch {
                 expected: EnvelopeKind::Event,
@@ -308,6 +413,9 @@ impl InboundPipeline {
 
         let mut authorizations = self.authorizations.write().await;
         authorize_event(&event, &mut authorizations)?;
+        if !allow(&event) {
+            return Err(InboundError::UnauthorizedEvent);
+        }
 
         let newly_imported = self
             .store
@@ -442,6 +550,65 @@ impl InboundPipeline {
         self.open_blob(envelope, &self.signaling_key)
     }
 
+    /// Verify a v3 signal proof against the immutable authenticated directory
+    /// before any SDP/ICE or collaboration plaintext is dispatched.
+    pub async fn verify_signal_device_proof_v3(
+        &self,
+        room_id: &RoomId,
+        envelope: &MailboxEnvelope,
+    ) -> Result<(), InboundError> {
+        let generation = envelope
+            .signal_generation
+            .ok_or_else(|| InboundError::SignalDeviceProof("missing signalGeneration".into()))?;
+        let signature = envelope
+            .device_signature
+            .as_deref()
+            .ok_or_else(|| InboundError::SignalDeviceProof("missing deviceSignature".into()))?;
+        let authorizations = self.authorizations.read().await;
+        let authorization = authorizations
+            .values()
+            .find(|record| {
+                record.device_id == envelope.device_id
+                    && record.participant_id == envelope.author_id
+            })
+            .ok_or_else(|| {
+                InboundError::SignalDeviceProof(
+                    "signer is absent from authenticated directory".into(),
+                )
+            })?;
+        let raw = URL_SAFE_NO_PAD
+            .decode(authorization.public_signing_key.as_bytes())
+            .map_err(|error| InboundError::SignalDeviceProof(format!("directory key: {error}")))?;
+        let bytes: [u8; 32] = raw.try_into().map_err(|raw: Vec<u8>| {
+            InboundError::SignalDeviceProof(format!(
+                "directory key must be 32 bytes, got {}",
+                raw.len()
+            ))
+        })?;
+        let key = DeviceVerifyingKey::from_bytes(&bytes)
+            .map_err(|error| InboundError::SignalDeviceProof(format!("directory key: {error}")))?;
+        let target = envelope
+            .target
+            .as_ref()
+            .map(|target| id_to_string(&target.device_id));
+        crate::review::crypto::device_proof::verify_device_signal_proof_v3(
+            &key,
+            signature,
+            room_id.as_str(),
+            &envelope.envelope_id,
+            &id_to_string(&envelope.author_id),
+            &id_to_string(&envelope.device_id),
+            target.as_deref(),
+            generation,
+            envelope.created_at,
+            envelope.expires_at,
+            &envelope.nonce,
+            &envelope.ciphertext,
+            envelope.ciphertext_bytes,
+        )
+        .map_err(InboundError::SignalDeviceProof)
+    }
+
     /// Shared AEAD-open path for `snapshot_blob` and `signal` envelopes.
     ///
     /// Both envelope shapes are confidentiality-only: the plaintext is opaque
@@ -514,7 +681,10 @@ fn authorize_event(
         _ if registered.kind != ParticipantKind::Owner && !registered.attested => {
             Err(InboundError::UnauthorizedEvent)
         }
-        ReviewEventBody::CommentCreated { .. } | ReviewEventBody::SuggestionCreated { .. } => {
+        ReviewEventBody::CommentCreated { .. } => Ok(()),
+        ReviewEventBody::SuggestionCreated { .. }
+            if registered.grant_tier.unwrap_or(GrantTier::Suggest) == GrantTier::Suggest =>
+        {
             Ok(())
         }
         ReviewEventBody::CommentResolved { resolved_by, .. }
@@ -549,9 +719,21 @@ fn authorize_event(
     }
 }
 
-fn exact_capabilities(actual: &[Capability], kind: ParticipantKind) -> bool {
-    let expected: &[Capability] = match kind {
-        ParticipantKind::Owner => &[
+fn exact_capabilities(
+    actual: &[Capability],
+    kind: ParticipantKind,
+    grant_tier: Option<GrantTier>,
+) -> bool {
+    let expected: &[Capability] = match (kind, grant_tier) {
+        (ParticipantKind::Reviewer, Some(GrantTier::Comment)) => &[
+            Capability::ReadSnapshot,
+            Capability::WriteComment,
+            Capability::ResolveComment,
+        ],
+        (ParticipantKind::Agent, Some(GrantTier::Comment)) => {
+            &[Capability::ReadSnapshot, Capability::WriteComment]
+        }
+        (ParticipantKind::Owner, _) => &[
             Capability::RoomAdmin,
             Capability::ReadSnapshot,
             Capability::WriteComment,
@@ -560,13 +742,13 @@ fn exact_capabilities(actual: &[Capability], kind: ParticipantKind) -> bool {
             Capability::AcceptSuggestion,
             Capability::PublishSnapshot,
         ],
-        ParticipantKind::Reviewer => &[
+        (ParticipantKind::Reviewer, _) => &[
             Capability::ReadSnapshot,
             Capability::WriteComment,
             Capability::WriteSuggestion,
             Capability::ResolveComment,
         ],
-        ParticipantKind::Agent => &[
+        (ParticipantKind::Agent, _) => &[
             Capability::ReadSnapshot,
             Capability::WriteComment,
             Capability::WriteSuggestion,
@@ -648,6 +830,8 @@ mod tests {
             public_signing_key,
             client: DeviceClient::AttnNative,
             kind: ParticipantKind::Reviewer,
+            grant_tier: None,
+            grant_signature: None,
             attested: true,
         };
         Arc::new(RwLock::new(HashMap::from([(key_id, record)])))
@@ -801,6 +985,8 @@ mod tests {
             nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
             ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
             ciphertext_bytes: ciphertext.len() as u64,
+            signal_generation: None,
+            device_signature: None,
         }
     }
 
@@ -811,6 +997,14 @@ mod tests {
     #[tokio::test]
     async fn import_event_envelope_happy_path_marks_newly_imported() {
         let (pipeline, _store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        pipeline
+            .authorizations
+            .write()
+            .await
+            .values_mut()
+            .next()
+            .expect("authorization")
+            .grant_tier = Some(GrantTier::Comment);
         let envelope = mint_event_envelope(pipeline.event_key, signer, &room_id);
 
         let outcome = pipeline
@@ -832,6 +1026,65 @@ mod tests {
             }
             other => panic!("expected CommentCreated, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn caller_policy_rejects_before_event_log_append() {
+        let (pipeline, store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let envelope = mint_event_envelope(pipeline.event_key, signer, &room_id);
+        let error = pipeline
+            .import_event_envelope_if(&room_id, &envelope, |_| false)
+            .await
+            .expect_err("caller policy must reject");
+        assert!(matches!(error, InboundError::UnauthorizedEvent));
+        assert_eq!(store.iter_events(&room_id).expect("events").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn tier_comment_rejects_suggestion_before_persistence() {
+        let (pipeline, store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        pipeline
+            .authorizations
+            .write()
+            .await
+            .values_mut()
+            .next()
+            .expect("authorization")
+            .grant_tier = Some(GrantTier::Comment);
+        let envelope = mint_event_envelope_with_body(
+            pipeline.event_key,
+            signer,
+            &room_id,
+            ReviewEventBody::SuggestionCreated {
+                suggestion_id: "suggestion-out-of-tier".to_string(),
+                anchor: Anchor {
+                    v: 2,
+                    file_id: id::<FileId>("f-file-01"),
+                    snapshot_id: id::<SnapshotId>("eQ7pDCC-mekpz-we7gDYag"),
+                    base_hash: id::<ContentHash>("fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y"),
+                    position: PositionAnchor {
+                        byte_range: [0, 9],
+                        line_range: [1, 1],
+                        pm_range: None,
+                    },
+                    quote: None,
+                    block: None,
+                    context: None,
+                    structure: None,
+                },
+                operation: crate::review::model::SuggestionOperation::Replace {
+                    expected_text: "old".to_string(),
+                    replacement: "new".to_string(),
+                },
+                note: None,
+            },
+        );
+        let error = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect_err("comment tier cannot import suggestion");
+        assert!(matches!(error, InboundError::UnauthorizedEvent));
+        assert_eq!(store.iter_events(&room_id).expect("events").count(), 0);
     }
 
     #[tokio::test]

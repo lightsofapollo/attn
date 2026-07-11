@@ -32,8 +32,12 @@ use crate::review::model::{
     Anchor, DeviceClient, EnvelopeKind, MailboxEnvelope, PositionAnchor, ResolvedAnchor,
     ReviewEventBody, RoomMode, SuggestionDraft,
 };
+use crate::review::notifications::{
+    NoopNotificationSink, ReviewNotificationSink, ReviewNotifications, summary_for_event,
+};
+use crate::review::share_lifecycle::{DurableShareLinks, DurableShareService};
 use crate::review::store::ReviewStore;
-use crate::review::transport::inbound::{AuthorizationCache, VerifyingKeyCache};
+use crate::review::transport::inbound::{AuthorizationCache, GrantTier, VerifyingKeyCache};
 use crate::review::transport::selector::{self, RoomTransports, TransportConfig, TransportMode};
 use crate::review::transport::signaling::{SignalingPayload, assemble_signal_envelope};
 use crate::review::transport::{EnvelopeAck, TransportError};
@@ -65,6 +69,18 @@ pub enum ReviewCommand {
         path: PathBuf,
         mode: String,
         ttl: Option<String>,
+    },
+    /// Create a stable durable share rooted at `path`.
+    CreateDurableShare { path: PathBuf },
+    /// Renew one durable share, or every active share when `target` is absent.
+    RenewDurableShare { target: Option<String> },
+    /// Revoke a durable share by canonical share id or exact owner path.
+    RevokeDurableShare { target: String },
+    /// Resolve a durable-share deep link. The secret wrapper zeroizes on drop
+    /// and redacts Debug output, so command diagnostics cannot leak it.
+    OpenDurableShare {
+        share_id: String,
+        link_secret: crate::review::share_lifecycle::ShareLinkSecret,
     },
     /// Join a remote review room from an `attn://review/...` invite.
     Join { invite: String },
@@ -124,6 +140,16 @@ pub enum ReviewCommand {
     /// active room so existing comments resolve to the new name everywhere
     /// (the original ParticipantJoined was frozen at share/join time).
     ReannounceIdentity,
+    /// Browser visibility report. Unread state may advance only when both
+    /// predicates are true; keeping the decision native prevents a hidden or
+    /// blurred webview from clearing durable badges optimistically.
+    SetViewState {
+        room_id: RoomId,
+        room_visible: bool,
+        window_focused: bool,
+    },
+    /// Persist the native notification preference for one room.
+    SetNotificationMuted { room_id: RoomId, muted: bool },
 }
 
 /// Updates the `ReviewManager` emits up to the tao event loop.
@@ -167,6 +193,10 @@ pub enum ReviewUpdate {
         /// HTTPS invite for the hosted reviewer. The room secret remains in
         /// the URL fragment and is never sent to the static host.
         browser_invite_url: String,
+        view_invite_url: String,
+        suggest_invite_url: String,
+        browser_view_invite_url: String,
+        browser_suggest_invite_url: String,
         /// Absolute path the owner shared, so the dialog can recognise its own
         /// room without relying on a frontend-captured intent. Serialised as
         /// `ownerDisplayPath`.
@@ -214,6 +244,13 @@ pub enum ReviewUpdate {
     /// `ConnectionBadge`. Values match the frontend `ReviewStatus.connection`
     /// union (`live_direct | mailbox | offline | direct_failed`).
     ConnectionChanged { room_id: RoomId, connection: String },
+    /// Effective grant for the local room identity. Join/bootstrap can set
+    /// this before any authoring command; absent legacy/owner metadata keeps
+    /// the v2-compatible `suggest` default.
+    LocalGrantTierChanged {
+        room_id: RoomId,
+        grant_tier: GrantTier,
+    },
     /// Inbound live co-typing traffic for the webview's prosemirror-collab
     /// authority/client. `payload` is the opaque step JSON the sender emitted;
     /// `from` lets the webview drop its own broadcast echoes.
@@ -227,6 +264,10 @@ pub enum ReviewUpdate {
         room_id: RoomId,
         pending_count: usize,
     },
+    /// Durable per-room unread count derived from fresh verified imports.
+    UnreadChanged { room_id: RoomId, unread_count: u32 },
+    /// Durable native notification preference for the focused room.
+    NotificationMuteChanged { room_id: RoomId, muted: bool },
     /// A command failed; surfaced to the frontend for toast/error UI.
     Error {
         room_id: Option<RoomId>,
@@ -253,8 +294,11 @@ impl ReviewUpdate {
             ReviewUpdate::AnchorResolutionChanged { .. } => "reviewAnchorResolution",
             ReviewUpdate::PresenceChanged { .. } => "reviewPresence",
             ReviewUpdate::ConnectionChanged { .. } => "reviewConnection",
+            ReviewUpdate::LocalGrantTierChanged { .. } => "reviewStatus",
             ReviewUpdate::CollabSignal { .. } => "reviewCollab",
             ReviewUpdate::OutboxChanged { .. } => "reviewStatus",
+            ReviewUpdate::UnreadChanged { .. } => "reviewUnread",
+            ReviewUpdate::NotificationMuteChanged { .. } => "reviewNotificationMute",
             ReviewUpdate::Error { .. } => "reviewStatus",
         }
     }
@@ -284,6 +328,14 @@ pub struct PeerPresence {
 /// closure without dragging in `tao::EventLoopProxy`.
 pub type UpdateSink = Arc<dyn Fn(ReviewUpdate) + Send + Sync>;
 
+/// Result of waiting for a fixed set of suggestion verdicts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "report", rename_all = "snake_case")]
+pub enum VerdictWaitOutcome {
+    Complete(crate::review::store::VerdictsReport),
+    TimedOut(crate::review::store::VerdictsReport),
+}
+
 /// Daemon-owned runtime service. Owns the durable review store handle and
 /// the working-copy writer; exposes a synchronous `submit` entry point that
 /// dispatches a `ReviewCommand` and (eventually) drives the room runtime.
@@ -302,6 +354,7 @@ pub struct ReviewManager {
     /// fall back to the scaffold stub status messages — keeps unit tests
     /// that don't care about networking trivially constructable.
     bootstrap: Option<Arc<Bootstrapper>>,
+    durable_shares: Option<Arc<DurableShareService>>,
     /// Tokio runtime used to drive bootstrap calls from the synchronous
     /// `submit` dispatch. Lazy-instantiated alongside `bootstrap`; only
     /// present when the manager was built via `with_bootstrap`.
@@ -353,6 +406,16 @@ pub struct ReviewManager {
     outboxes: Arc<
         std::sync::Mutex<HashMap<RoomId, Arc<crate::review::transport::mailbox::OutboxProcessor>>>,
     >,
+
+    /// Runtime authorization metadata for the local participant. This is a
+    /// typed seam for v3 Join population; missing entries are legacy/owner
+    /// rooms and therefore retain the historical suggest capability.
+    local_grant_tiers: Arc<std::sync::Mutex<HashMap<RoomId, GrantTier>>>,
+
+    /// Monotonic signal for freshly imported, durably persisted verdicts.
+    /// Waiters subscribe before reading the store, closing the query/park race.
+    verdict_revision_tx: tokio::sync::watch::Sender<u64>,
+    notifications: Arc<ReviewNotifications>,
 }
 
 /// A room's live WebRTC mesh — one DataChannel transport per other participant
@@ -379,6 +442,7 @@ struct LiveWebrtc {
 /// recovery path even when no `WebRtcTransport` is live (e.g. Hybrid mode
 /// where the DataChannel is down but the mailbox arm is up).
 pub struct RoomSignalContext {
+    pub protocol_version: u32,
     pub room_id: RoomId,
     pub author_id: ParticipantId,
     pub local_device_id: DeviceId,
@@ -412,7 +476,204 @@ impl std::fmt::Debug for RoomSignalContext {
     }
 }
 
+fn verdict_report_for_targets(
+    report: &crate::review::store::VerdictsReport,
+    targets: &std::collections::BTreeSet<(String, String)>,
+) -> crate::review::store::VerdictsReport {
+    let mut rooms = std::collections::BTreeMap::new();
+    for (room_id, room) in &report.rooms {
+        let suggestions = room
+            .suggestions
+            .iter()
+            .filter(|(suggestion_id, _)| {
+                targets.contains(&(room_id.clone(), (*suggestion_id).clone()))
+            })
+            .map(|(suggestion_id, verdict)| (suggestion_id.clone(), verdict.clone()))
+            .collect();
+        if targets
+            .iter()
+            .any(|(target_room, _)| target_room == room_id)
+        {
+            rooms.insert(
+                room_id.clone(),
+                crate::review::store::RoomVerdicts { suggestions },
+            );
+        }
+    }
+    crate::review::store::VerdictsReport { rooms }
+}
+
 impl ReviewManager {
+    /// Record the verified local grant supplied by room bootstrap metadata.
+    /// `None` removes v3 metadata and restores the v2/owner suggest default.
+    pub fn set_local_grant_tier(&self, room_id: RoomId, tier: Option<GrantTier>) {
+        let effective = tier.unwrap_or(GrantTier::Suggest);
+        let mut tiers = self
+            .local_grant_tiers
+            .lock()
+            .expect("local grant tier mutex poisoned");
+        if let Some(tier) = tier {
+            tiers.insert(room_id.clone(), tier);
+        } else {
+            tiers.remove(&room_id);
+        }
+        drop(tiers);
+        (self.update_tx)(ReviewUpdate::LocalGrantTierChanged {
+            room_id,
+            grant_tier: effective,
+        });
+    }
+
+    fn local_grant_tier(&self, room_id: &RoomId) -> GrantTier {
+        self.local_grant_tiers
+            .lock()
+            .expect("local grant tier mutex poisoned")
+            .get(room_id)
+            .copied()
+            .unwrap_or(GrantTier::Suggest)
+    }
+
+    /// Submit one suggestion synchronously and durably mirror its authored
+    /// event into the local event log before acknowledging the caller.
+    ///
+    /// The local append is what makes an immediate `verdicts --wait` capture
+    /// this suggestion as pending without racing its relay round-trip.
+    pub fn submit_suggestion_sync(
+        &self,
+        room_id: RoomId,
+        draft: SuggestionDraft,
+    ) -> anyhow::Result<String> {
+        if self.local_grant_tier(&room_id) == GrantTier::Comment {
+            anyhow::bail!("comment-only grant cannot create suggestions");
+        }
+        let bootstrapper = self
+            .bootstrap
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review bootstrapper unavailable"))?;
+        let suggestion_id = mint_thread_id();
+        let event_body = ReviewEventBody::SuggestionCreated {
+            suggestion_id: suggestion_id.clone(),
+            anchor: draft.anchor,
+            operation: draft.operation,
+            note: draft.note,
+        };
+        let outcome = bootstrapper
+            .send_event_sync(&room_id, event_body, unix_now_ms_for_manager())
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        self.store
+            .append_event(&room_id, &outcome.event)
+            .map_err(|err| anyhow::anyhow!("persist locally-authored suggestion: {err:#}"))?;
+        self.fan_envelope_over_mesh(&room_id, &outcome.envelope);
+        (self.update_tx)(ReviewUpdate::EventImported {
+            room_id,
+            event: outcome.event,
+        });
+        Ok(suggestion_id)
+    }
+
+    /// Query current suggestion verdicts across every persisted room.
+    ///
+    /// `creator = Some(..)` limits the report to suggestions authored by that
+    /// participant. `None` is the explicit `--all` view. This is synchronous
+    /// because it only folds local append-only JSONL logs.
+    pub fn verdicts(
+        &self,
+        creator: Option<&ParticipantId>,
+    ) -> anyhow::Result<crate::review::store::VerdictsReport> {
+        let mut rooms = std::collections::BTreeMap::new();
+        for room_id in self.store.list_rooms()? {
+            rooms.insert(
+                room_id.as_str().to_string(),
+                self.store.verdicts_for_room(&room_id, creator)?,
+            );
+        }
+        Ok(crate::review::store::VerdictsReport { rooms })
+    }
+
+    /// Wait until a fixed suggestion set has accepted/rejected verdicts.
+    ///
+    /// With `suggestion_ids = None`, the target is every currently pending
+    /// suggestion visible through `creator`. Explicit ids override that
+    /// default and may name already-complete suggestions. The returned report
+    /// contains only the captured targets. No polling is used: after draining
+    /// persisted state, this parks on the imported-verdict revision stream.
+    pub async fn wait_for_verdicts(
+        &self,
+        creator: Option<&ParticipantId>,
+        suggestion_ids: Option<&std::collections::BTreeSet<String>>,
+        timeout: Option<std::time::Duration>,
+    ) -> anyhow::Result<VerdictWaitOutcome> {
+        use crate::review::store::SuggestionVerdictStatus;
+
+        // Subscribe first. A verdict imported between this subscription and
+        // the first store fold leaves `changed()` ready instead of being lost.
+        let mut revisions = self.verdict_revision_tx.subscribe();
+        let initial = self.verdicts(creator)?;
+        let mut targets = std::collections::BTreeSet::<(String, String)>::new();
+
+        for (room_id, room) in &initial.rooms {
+            for (suggestion_id, verdict) in &room.suggestions {
+                let selected = suggestion_ids
+                    .map_or(verdict.status == SuggestionVerdictStatus::Pending, |ids| {
+                        ids.contains(suggestion_id)
+                    });
+                if selected {
+                    targets.insert((room_id.clone(), suggestion_id.clone()));
+                }
+            }
+        }
+
+        if let Some(ids) = suggestion_ids {
+            let found = targets
+                .iter()
+                .map(|(_, suggestion_id)| suggestion_id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let missing = ids.difference(&found).cloned().collect::<Vec<_>>();
+            if !missing.is_empty() {
+                anyhow::bail!("unknown suggestion id(s): {}", missing.join(","));
+            }
+        }
+
+        let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
+        let mut current = initial;
+        loop {
+            let partial = verdict_report_for_targets(&current, &targets);
+            let complete = partial.rooms.values().all(|room| {
+                room.suggestions
+                    .values()
+                    .all(|verdict| verdict.status != SuggestionVerdictStatus::Pending)
+            });
+            if complete {
+                return Ok(VerdictWaitOutcome::Complete(partial));
+            }
+
+            let changed = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, revisions.changed()).await,
+                None => Ok(revisions.changed().await),
+            };
+            match changed {
+                Ok(Ok(())) => current = self.verdicts(creator)?,
+                Ok(Err(_)) => anyhow::bail!("verdict notification stream closed"),
+                Err(_) => {
+                    // Drain durable state once more at the deadline so a
+                    // verdict persisted concurrently with timeout wins.
+                    current = self.verdicts(creator)?;
+                    let partial = verdict_report_for_targets(&current, &targets);
+                    let complete = partial.rooms.values().all(|room| {
+                        room.suggestions
+                            .values()
+                            .all(|verdict| verdict.status != SuggestionVerdictStatus::Pending)
+                    });
+                    return Ok(if complete {
+                        VerdictWaitOutcome::Complete(partial)
+                    } else {
+                        VerdictWaitOutcome::TimedOut(partial)
+                    });
+                }
+            }
+        }
+    }
+
     /// Construct a new manager. The `update_tx` closure is invoked from
     /// `submit` (synchronously today; future async work may spawn). It's
     /// expected to forward into the tao event loop via
@@ -422,11 +683,18 @@ impl ReviewManager {
         working_copy: Arc<WorkingCopyService>,
         update_tx: UpdateSink,
     ) -> Self {
+        let (verdict_revision_tx, _) = tokio::sync::watch::channel(0);
+        let notifications = ReviewNotifications::new(
+            Arc::clone(&store),
+            Arc::new(NoopNotificationSink),
+            std::time::Duration::from_secs(5),
+        );
         Self {
             store,
             working_copy,
             update_tx,
             bootstrap: None,
+            durable_shares: None,
             runtime: None,
             verifying_keys: None,
             rooms: Arc::new(AsyncMutex::new(HashMap::new())),
@@ -434,7 +702,21 @@ impl ReviewManager {
             live_webrtc: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             outboxes: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            local_grant_tiers: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            verdict_revision_tx,
+            notifications,
         }
+    }
+
+    /// Replace the no-op platform seam used by tests/CLI with the native OS
+    /// notification sink used by the desktop daemon.
+    pub fn with_notification_sink(mut self, sink: Arc<dyn ReviewNotificationSink>) -> Self {
+        self.notifications = ReviewNotifications::new(
+            Arc::clone(&self.store),
+            sink,
+            std::time::Duration::from_secs(5),
+        );
+        self
     }
 
     /// Attach the Share/Join bootstrap pipeline (attn-nnj.6.6).
@@ -461,7 +743,40 @@ impl ReviewManager {
             .enable_all()
             .thread_name("attn-review-bootstrap")
             .build()?;
-        self.bootstrap = Some(Arc::new(bootstrapper));
+        let bootstrapper = Arc::new(bootstrapper);
+        let share_store = Arc::new(
+            match &bootstrapper.config().identity_dir {
+                Some(directory) => crate::review::share_lifecycle::DurableShareStore::open_at(
+                    directory.join("shares"),
+                ),
+                None => crate::review::share_lifecycle::DurableShareStore::open(),
+            }
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        );
+        let identity = crate::review::bootstrap::load_or_create_identity_in(
+            &bootstrapper
+                .config()
+                .identity_dir()
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let share_relay = Arc::new(
+            crate::review::share_lifecycle::HttpShareRelayClient::new(
+                bootstrapper.config().relay_url.clone(),
+                &identity,
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        );
+        self.durable_shares = Some(Arc::new(
+            DurableShareService::new(
+                share_store,
+                Arc::clone(&self.store),
+                share_relay,
+                Arc::clone(&bootstrapper),
+            )
+            .with_notification_observer(Arc::clone(&self.notifications)),
+        ));
+        self.bootstrap = Some(bootstrapper);
         self.runtime = Some(Arc::new(runtime));
         self.verifying_keys = Some(verifying_keys);
         Ok(self)
@@ -494,9 +809,102 @@ impl ReviewManager {
         // comment/suggestion plaintext + collab steps to stderr.
         tracing::info!("received command {}", review_command_name(&cmd));
 
+        if let ReviewCommand::CreateSuggestion { room_id, .. } = &cmd
+            && self.local_grant_tier(room_id) == GrantTier::Comment
+        {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: "ATTN_GRANT_FORBIDDEN".into(),
+                message: "comment-only grant cannot create suggestions".into(),
+            });
+            return;
+        }
+
         // Bootstrap pipeline owns Share + Join when wired in. Everything else
         // still goes through `stub_update_for` (filled in by follow-up issues).
         match (&cmd, self.bootstrap.as_ref(), self.runtime.as_ref()) {
+            (ReviewCommand::CreateDurableShare { path }, _, Some(runtime)) => {
+                let result = self
+                    .durable_shares
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("durable share service unavailable"))
+                    .and_then(|service| {
+                        runtime
+                            .block_on(service.create(path))
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    });
+                let result = result.and_then(|link| {
+                    self.start_room_runtime(&link.room_id)?;
+                    Ok(link)
+                });
+                self.emit_durable_share_result(result, true);
+                return;
+            }
+            (ReviewCommand::RenewDurableShare { target }, _, Some(runtime)) => {
+                let result = self
+                    .durable_shares
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("durable share service unavailable"))
+                    .and_then(|service| {
+                        runtime
+                            .block_on(service.renew(target.as_deref()))
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    });
+                match result {
+                    Ok(links) => {
+                        for link in links {
+                            match self.start_room_runtime(&link.room_id) {
+                                Ok(()) => {
+                                    let room_id = link.room_id.clone();
+                                    self.emit_durable_share_ready(link, false);
+                                    // Durable renew drains authenticated offline
+                                    // mailbox events directly into events.jsonl,
+                                    // bypassing the live transport forwarder.
+                                    // Reconcile unread + replay now so the
+                                    // resident process surfaces them without a
+                                    // restart; frontend eventId dedup keeps
+                                    // already-rendered events idempotent.
+                                    self.replay_room_to_webview(&room_id);
+                                }
+                                Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                                    room_id: Some(link.room_id.clone()),
+                                    code: "ATTN_DURABLE_SHARE".into(),
+                                    message: error.to_string(),
+                                }),
+                            }
+                        }
+                    }
+                    Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                        room_id: None,
+                        code: "ATTN_DURABLE_SHARE".into(),
+                        message: error.to_string(),
+                    }),
+                }
+                return;
+            }
+            (ReviewCommand::RevokeDurableShare { target }, _, Some(runtime)) => {
+                let result = self
+                    .durable_shares
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("durable share service unavailable"))
+                    .and_then(|service| {
+                        runtime
+                            .block_on(service.revoke(target))
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))
+                    });
+                match result {
+                    Ok(()) => (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                        room_id: stub_room_id(),
+                        status: format!("Durable share revoked: {target}"),
+                    }),
+                    Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                        room_id: None,
+                        code: "ATTN_DURABLE_SHARE".into(),
+                        message: error.to_string(),
+                    }),
+                }
+                return;
+            }
             (ReviewCommand::Share { path, mode, ttl }, Some(bootstrapper), Some(runtime)) => {
                 let mode = mode_from_str(mode);
                 let result = runtime.block_on(bootstrapper.share(path.clone(), mode, ttl.clone()));
@@ -671,11 +1079,159 @@ impl ReviewManager {
                 self.emit_inbox();
                 return;
             }
+            (
+                ReviewCommand::SetViewState {
+                    room_id,
+                    room_visible,
+                    window_focused,
+                },
+                _,
+                _,
+            ) => {
+                self.notifications
+                    .set_view_state(room_id.clone(), *room_visible, *window_focused);
+                if *room_visible && *window_focused {
+                    match self.store.clear_unread(room_id) {
+                        Ok(state) => (self.update_tx)(ReviewUpdate::UnreadChanged {
+                            room_id: room_id.clone(),
+                            unread_count: state.unread_count,
+                        }),
+                        Err(error) => tracing::warn!(
+                            "could not persist read cursor for room {}: {error:#}",
+                            room_id.as_str()
+                        ),
+                    }
+                }
+                return;
+            }
+            (ReviewCommand::SetNotificationMuted { room_id, muted }, _, _) => {
+                match self.store.set_notification_muted(room_id, *muted) {
+                    Ok(()) => (self.update_tx)(ReviewUpdate::NotificationMuteChanged {
+                        room_id: room_id.clone(),
+                        muted: *muted,
+                    }),
+                    Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                        room_id: Some(room_id.clone()),
+                        code: "ATTN_NOTIFICATION_PREFERENCE_FAILED".into(),
+                        message: format!("could not save notification preference: {error:#}"),
+                    }),
+                }
+                return;
+            }
             _ => {}
         }
 
         let update = stub_update_for(&cmd);
         (self.update_tx)(update);
+    }
+
+    fn emit_durable_share_result(
+        &self,
+        result: anyhow::Result<DurableShareLinks>,
+        newly_created: bool,
+    ) {
+        match result {
+            Ok(links) => self.emit_durable_share_ready(links, newly_created),
+            Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                room_id: None,
+                code: "ATTN_DURABLE_SHARE".into(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
+    fn emit_durable_share_ready(&self, links: DurableShareLinks, newly_created: bool) {
+        (self.update_tx)(ReviewUpdate::ShareReady {
+            room_id: links.room_id.clone(),
+            invite_url: links.comment_native.clone(),
+            browser_invite_url: links.comment_browser.clone(),
+            view_invite_url: links.view_native.clone(),
+            suggest_invite_url: links.suggest_native.clone(),
+            browser_view_invite_url: links.view_browser.clone(),
+            browser_suggest_invite_url: links.suggest_browser.clone(),
+            owner_display_path: links.owner_display_path.clone(),
+            owner_signing_key: links.owner_signing_key.clone(),
+            mode: "hybrid".into(),
+            expires_at: links.expires_at,
+            newly_created,
+        });
+    }
+
+    pub fn reconcile_durable_shares(&self) -> anyhow::Result<Vec<DurableShareLinks>> {
+        let service = self
+            .durable_shares
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("durable share service unavailable"))?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review runtime unavailable"))?;
+        runtime
+            .block_on(service.renew(None))
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    }
+
+    /// Synchronous daemon/socket boundary for owner durable-share commands.
+    /// The caller receives the actual relay/persistence result; UI command
+    /// dispatch may additionally emit the returned links as updates.
+    pub fn run_durable_command(
+        &self,
+        command: &ReviewCommand,
+    ) -> anyhow::Result<Vec<DurableShareLinks>> {
+        let service = self
+            .durable_shares
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("durable share service unavailable"))?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review runtime unavailable"))?;
+        let links = match command {
+            ReviewCommand::CreateDurableShare { path } => runtime
+                .block_on(service.create(path))
+                .map(|link| vec![link])
+                .map_err(|error| anyhow::anyhow!(error.to_string())),
+            ReviewCommand::RenewDurableShare { target } => runtime
+                .block_on(service.renew(target.as_deref()))
+                .map_err(|error| anyhow::anyhow!(error.to_string())),
+            ReviewCommand::RevokeDurableShare { target } => runtime
+                .block_on(service.revoke(target))
+                .map(|()| vec![])
+                .map_err(|error| anyhow::anyhow!(error.to_string())),
+            _ => anyhow::bail!("not a durable-share owner command"),
+        }?;
+        for link in &links {
+            self.start_room_runtime(&link.room_id)?;
+        }
+        Ok(links)
+    }
+
+    pub fn emit_durable_command_result(
+        &self,
+        command: &ReviewCommand,
+        links: &[DurableShareLinks],
+    ) {
+        match command {
+            ReviewCommand::CreateDurableShare { .. } => {
+                for link in links.iter().cloned() {
+                    self.emit_durable_share_ready(link, true);
+                }
+            }
+            ReviewCommand::RenewDurableShare { .. } => {
+                for link in links.iter().cloned() {
+                    let room_id = link.room_id.clone();
+                    self.emit_durable_share_ready(link, false);
+                    self.replay_room_to_webview(&room_id);
+                }
+            }
+            ReviewCommand::RevokeDurableShare { target } => {
+                (self.update_tx)(ReviewUpdate::RoomStatusChanged {
+                    room_id: stub_room_id(),
+                    status: format!("Durable share revoked: {target}"),
+                })
+            }
+            _ => {}
+        }
     }
 
     /// Stop hosting/participating in `target` (every active room when `None`).
@@ -1294,11 +1850,23 @@ impl ReviewManager {
             });
         };
 
-        let secret = match load_room_secret(self.store.root(), room_id) {
-            Ok(s) => s,
-            Err(e) => return emit_err(format!("load room secret: {e}")),
-        };
-        let keys = derive_room_keys(&secret);
+        let (signaling_key, protocol_version) =
+            match crate::review::bootstrap::load_room_access_v3(self.store.root(), room_id) {
+                Ok(Some(access)) => (
+                    *crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key)
+                        .signaling_key
+                        .as_bytes(),
+                    3,
+                ),
+                Ok(None) => {
+                    let secret = match load_room_secret(self.store.root(), room_id) {
+                        Ok(secret) => secret,
+                        Err(error) => return emit_err(format!("load room secret: {error}")),
+                    };
+                    (*derive_room_keys(&secret).signaling_key.as_bytes(), 2)
+                }
+                Err(error) => return emit_err(format!("load v3 room access: {error}")),
+            };
 
         let identity = match bootstrapper
             .config()
@@ -1310,6 +1878,24 @@ impl ReviewManager {
         };
         let device_id = identity.typed_device_id();
         let participant_id = identity.typed_participant_id();
+        let is_owner = self
+            .store
+            .load_room(room_id)
+            .ok()
+            .flatten()
+            .is_some_and(|room| room.created_by == participant_id);
+        let Some(kind) = collab_wire_kind(payload) else {
+            return emit_err("invalid collaboration payload".to_string());
+        };
+        if !outbound_collab_allowed(is_owner, kind) {
+            return emit_err(if is_owner {
+                "owner collaboration may only broadcast local document state or cursor presence"
+                    .to_string()
+            } else {
+                "reviewers cannot submit live document mutations; create a durable suggestion instead"
+                    .to_string()
+            });
+        }
 
         let now_ms = unix_now_ms_for_manager() as i64;
         let envelope = match assemble_signal_envelope(
@@ -1317,7 +1903,7 @@ impl ReviewManager {
                 from: device_id.clone(),
                 payload: payload.to_string(),
             },
-            keys.signaling_key.as_bytes(),
+            &signaling_key,
             room_id,
             &participant_id,
             &device_id,
@@ -1326,6 +1912,19 @@ impl ReviewManager {
             now_ms,
             now_ms + SIGNAL_TTL_MS,
         ) {
+            Ok(env) if protocol_version == 3 => {
+                match crate::review::transport::signaling::authenticate_signal_envelope_v3(
+                    env,
+                    now_ms.max(0) as u64,
+                    &match identity.signing_key() {
+                        Ok(key) => key,
+                        Err(error) => return emit_err(format!("load signal signing key: {error}")),
+                    },
+                ) {
+                    Ok(env) => env,
+                    Err(error) => return emit_err(format!("authenticate collab signal: {error}")),
+                }
+            }
             Ok(env) => env,
             Err(e) => return emit_err(format!("assemble collab signal: {e}")),
         };
@@ -1405,6 +2004,10 @@ impl ReviewManager {
                     room_id: outcome.room_id,
                     invite_url: outcome.invite,
                     browser_invite_url: outcome.browser_invite,
+                    view_invite_url: outcome.view_invite,
+                    suggest_invite_url: outcome.suggest_invite,
+                    browser_view_invite_url: outcome.browser_view_invite,
+                    browser_suggest_invite_url: outcome.browser_suggest_invite,
                     owner_display_path: outcome.owner_display_path,
                     owner_signing_key: outcome.owner_signing_key,
                     mode: outcome.mode,
@@ -1446,6 +2049,7 @@ impl ReviewManager {
         match result {
             Ok(outcome) => {
                 let room_id = outcome.room_id;
+                self.set_local_grant_tier(room_id.clone(), outcome.local_grant_tier);
                 // Start the transport runtime BEFORE emitting status so
                 // by the time the frontend reacts to "Joined" the WS
                 // subscriber is already listening. If init fails we
@@ -1542,21 +2146,52 @@ impl ReviewManager {
         let identity = crate::review::bootstrap::load_or_create_identity_in(&identity_dir)?;
         let device_id = identity.typed_device_id();
 
-        // Room secret (32 bytes). Derives all per-room keys: AEAD for
-        // event / snapshot / signaling, plus the HMAC admission key.
-        let room_secret = load_room_secret(self.store.root(), room_id)?;
-        let room_keys = derive_room_keys(&room_secret);
+        // Prefer persisted v3 capability metadata. Legacy rooms continue to
+        // derive the v2 tree from their owner/reviewer room secret.
+        let v3_access = crate::review::bootstrap::load_room_access_v3(self.store.root(), room_id)?;
+        if let Some(access) = v3_access.as_ref() {
+            self.set_local_grant_tier(room_id.clone(), access.grant_tier);
+        }
+        let (event_key, snapshot_key, signaling_key, mailbox_config) = if let Some(access) =
+            v3_access.as_ref()
+        {
+            let read = crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key);
+            let config = MailboxConfig::from_v3_access(
+                bootstrap.config().relay_url.clone(),
+                room_id.clone(),
+                device_id.clone(),
+                access,
+                identity.signing_key()?.to_bytes(),
+                12,
+            )?;
+            (
+                *read.event_key.as_bytes(),
+                *read.snapshot_key.as_bytes(),
+                *read.signaling_key.as_bytes(),
+                config,
+            )
+        } else {
+            let room_secret = load_room_secret(self.store.root(), room_id)?;
+            let room_keys = derive_room_keys(&room_secret);
+            let config = MailboxConfig::from_room_secret(
+                bootstrap.config().relay_url.clone(),
+                room_id.clone(),
+                device_id.clone(),
+                &room_secret,
+                12,
+            );
+            (
+                *room_keys.event_key.as_bytes(),
+                *room_keys.snapshot_key.as_bytes(),
+                *room_keys.signaling_key.as_bytes(),
+                config,
+            )
+        };
 
         // MailboxConfig + TokenPool — shared between the outbox processor
         // and the WS subscriber so admission HMAC + PoW caching are
         // consistent across both paths.
-        let mailbox_config = Arc::new(MailboxConfig::from_room_secret(
-            bootstrap.config().relay_url.clone(),
-            room_id.clone(),
-            device_id.clone(),
-            &room_secret,
-            12, // MIN_POW_BITS — relay clamps anyway
-        ));
+        let mailbox_config = Arc::new(mailbox_config);
         let token_pool = Arc::new(TokenPool::new(
             room_id.as_str().to_string(),
             device_id.as_str().to_string(),
@@ -1651,9 +2286,9 @@ impl ReviewManager {
             Arc::clone(&self.store),
             verifying_keys.clone(),
             authorizations.clone(),
-            *room_keys.event_key.as_bytes(),
-            *room_keys.snapshot_key.as_bytes(),
-            *room_keys.signaling_key.as_bytes(),
+            event_key,
+            snapshot_key,
+            signaling_key,
         ));
 
         // Refresher invoked when an inbound envelope arrives from a peer
@@ -1695,9 +2330,15 @@ impl ReviewManager {
         // case; the N-peer star lands in a later stage.
         let webrtc_author_id = identity.typed_participant_id();
         let webrtc_local_device = device_id.clone();
-        let webrtc_event_key = *room_keys.event_key.as_bytes();
-        let webrtc_snapshot_key = *room_keys.snapshot_key.as_bytes();
-        let webrtc_signaling_key = *room_keys.signaling_key.as_bytes();
+        let webrtc_event_key = event_key;
+        let webrtc_snapshot_key = snapshot_key;
+        let webrtc_signaling_key = signaling_key;
+        let webrtc_protocol_version = if v3_access.is_some() { 3 } else { 2 };
+        let webrtc_signing_seed = if v3_access.is_some() {
+            Some(identity.signing_key()?.to_bytes())
+        } else {
+            None
+        };
         let webrtc_room_id = room_id.clone();
 
         // Outbound signaling forwarder: drain the transport's signaling_tx into
@@ -1727,6 +2368,8 @@ impl ReviewManager {
         let badge_update_tx = Arc::clone(&self.update_tx);
         let webrtc_live_map = Arc::clone(&self.live_webrtc);
         let forward_store = Arc::clone(&self.store);
+        let verdict_revision_tx = self.verdict_revision_tx.clone();
+        let notifications = Arc::clone(&self.notifications);
         let room_id_owned = room_id.clone();
         let self_device_id = device_id.as_str().to_string();
         let owner_participant_id: Option<String> = self
@@ -1735,6 +2378,7 @@ impl ReviewManager {
             .ok()
             .flatten()
             .map(|room| room.created_by.as_str().to_string());
+        let local_is_owner = owner_participant_id.as_deref() == Some(webrtc_author_id.as_str());
         runtime.spawn(async move {
             use crate::review::transport::PresenceEvent;
             use crate::review::transport::signaling::SignalingPayload;
@@ -1945,6 +2589,8 @@ impl ReviewManager {
                         continue;
                     }
                     let cfg = Arc::new(WebRtcConfig {
+                        protocol_version: webrtc_protocol_version,
+                        device_signing_seed: webrtc_signing_seed,
                         room_id: webrtc_room_id.clone(),
                         author_id: webrtc_author_id.clone(),
                         local_device_id: webrtc_local_device.clone(),
@@ -2100,6 +2746,11 @@ impl ReviewManager {
                 forward_transport_event(
                     &update_tx,
                     &forward_store,
+                    TransportObservers {
+                        verdict_revision_tx: &verdict_revision_tx,
+                        notifications: Some(&notifications),
+                        local_is_owner,
+                    },
                     &room_id_owned,
                     &self_device_id,
                     owner_participant_id.as_deref(),
@@ -2218,6 +2869,29 @@ impl ReviewManager {
     /// instead of aborting so one corrupt entry can't hide the rest of the
     /// log.
     pub(crate) fn replay_room_to_webview(&self, room_id: &RoomId) {
+        if let Some(bootstrapper) = self.bootstrap.as_ref() {
+            let identity = bootstrapper
+                .config()
+                .identity_dir()
+                .and_then(|dir| crate::review::bootstrap::load_or_create_identity_in(&dir));
+            match identity {
+                Ok(identity) => {
+                    if let Err(error) = self
+                        .store
+                        .reconcile_unread_from_events(room_id, identity.device_id.as_str())
+                    {
+                        tracing::warn!(
+                            "could not reconcile unread cursor for room {}: {error:#}",
+                            room_id.as_str()
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    "could not load identity for unread reconciliation in room {}: {error}",
+                    room_id.as_str()
+                ),
+            }
+        }
         let events = match self.store.iter_events(room_id) {
             Ok(iter) => iter,
             Err(err) => {
@@ -2249,6 +2923,28 @@ impl ReviewManager {
                 "replayed {replayed} persisted event(s) to the webview for room={}",
                 room_id.as_str()
             );
+        }
+        match self.store.load_unread_state(room_id) {
+            Ok(state) if state.unread_count > 0 => (self.update_tx)(ReviewUpdate::UnreadChanged {
+                room_id: room_id.clone(),
+                unread_count: state.unread_count,
+            }),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                "could not restore unread state for room {}: {error:#}",
+                room_id.as_str()
+            ),
+        }
+        match self.store.notification_muted(room_id) {
+            Ok(true) => (self.update_tx)(ReviewUpdate::NotificationMuteChanged {
+                room_id: room_id.clone(),
+                muted: true,
+            }),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                "could not restore notification preference for room {}: {error:#}",
+                room_id.as_str()
+            ),
         }
     }
 
@@ -2493,6 +3189,16 @@ impl ReviewManager {
             now_ms + SIGNAL_TTL_MS,
         )
         .map_err(|e| TransportError::Io(format!("assemble request_snapshot signal: {e}")))?;
+        let envelope = if ctx.protocol_version == 3 {
+            crate::review::transport::signaling::authenticate_signal_envelope_v3(
+                envelope,
+                now_ms.max(0) as u64,
+                &ctx.signing_key,
+            )
+            .map_err(|e| TransportError::Io(format!("authenticate request_snapshot signal: {e}")))?
+        } else {
+            envelope
+        };
 
         mailbox.send_envelopes(vec![envelope]).await.map(|_| ())
     }
@@ -2751,6 +3457,10 @@ fn decide_collab_routing(peer_count: usize, connected_count: usize) -> CollabRou
 fn review_command_name(cmd: &ReviewCommand) -> &'static str {
     match cmd {
         ReviewCommand::Share { .. } => "Share",
+        ReviewCommand::CreateDurableShare { .. } => "CreateDurableShare",
+        ReviewCommand::RenewDurableShare { .. } => "RenewDurableShare",
+        ReviewCommand::RevokeDurableShare { .. } => "RevokeDurableShare",
+        ReviewCommand::OpenDurableShare { .. } => "OpenDurableShare",
         ReviewCommand::Join { .. } => "Join",
         ReviewCommand::Pull { .. } => "Pull",
         ReviewCommand::Stop { .. } => "Stop",
@@ -2764,6 +3474,8 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::SendCollab { .. } => "SendCollab",
         ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
         ReviewCommand::ReannounceIdentity => "ReannounceIdentity",
+        ReviewCommand::SetViewState { .. } => "SetViewState",
+        ReviewCommand::SetNotificationMuted { .. } => "SetNotificationMuted",
     }
 }
 
@@ -2781,6 +3493,32 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
                 path.display(),
                 mode
             ),
+        },
+        ReviewCommand::CreateDurableShare { path } => ReviewUpdate::Error {
+            room_id: None,
+            code: "ATTN_DURABLE_SHARE_UNAVAILABLE".into(),
+            message: format!(
+                "durable share service is unavailable (path={})",
+                path.display()
+            ),
+        },
+        ReviewCommand::RenewDurableShare { target } => ReviewUpdate::Error {
+            room_id: None,
+            code: "ATTN_DURABLE_SHARE_UNAVAILABLE".into(),
+            message: format!(
+                "durable share service is unavailable (target={})",
+                target.as_deref().unwrap_or("all")
+            ),
+        },
+        ReviewCommand::RevokeDurableShare { target } => ReviewUpdate::Error {
+            room_id: None,
+            code: "ATTN_DURABLE_SHARE_UNAVAILABLE".into(),
+            message: format!("durable share service is unavailable (target={target})"),
+        },
+        ReviewCommand::OpenDurableShare { share_id, .. } => ReviewUpdate::Error {
+            room_id: None,
+            code: "ATTN_NOT_IMPLEMENTED".into(),
+            message: format!("durable share resolution is not wired yet (shareId={share_id})"),
         },
         // TODO(attn-nnj.3b): parse invite, open transport, fetch snapshot, emit
         // RoomStatus + SnapshotCreated as data arrives.
@@ -2906,6 +3644,16 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
             room_id: stub_room_id(),
             status: "Pending identity reannounce — no bootstrap attached".to_string(),
         },
+        ReviewCommand::SetViewState { room_id, .. } => ReviewUpdate::UnreadChanged {
+            room_id: room_id.clone(),
+            unread_count: 0,
+        },
+        ReviewCommand::SetNotificationMuted { room_id, muted } => {
+            ReviewUpdate::NotificationMuteChanged {
+                room_id: room_id.clone(),
+                muted: *muted,
+            }
+        }
     }
 }
 
@@ -3256,9 +4004,16 @@ fn validate_workspace_manifest_binding(
 /// matching `ReviewUpdate` so the frontend store reflects inbound events
 /// in real time. Lives outside `impl ReviewManager` so the spawned task
 /// only needs the `UpdateSink` clone (not the full manager).
+struct TransportObservers<'a> {
+    verdict_revision_tx: &'a tokio::sync::watch::Sender<u64>,
+    notifications: Option<&'a Arc<ReviewNotifications>>,
+    local_is_owner: bool,
+}
+
 fn forward_transport_event(
     update_tx: &UpdateSink,
     store: &crate::review::store::ReviewStore,
+    observers: TransportObservers<'_>,
     room_id: &RoomId,
     self_device_id: &str,
     owner_participant_id: Option<&str>,
@@ -3269,17 +4024,53 @@ fn forward_transport_event(
         TransportEvent::EventImported {
             room_id: rid,
             mut event,
+            newly_imported,
         } => {
+            let is_verdict = matches!(
+                &event.body,
+                ReviewEventBody::SuggestionAccepted { .. }
+                    | ReviewEventBody::SuggestionRejected { .. }
+            );
             tracing::debug!(
                 event_id = event.meta.event_id.as_str(),
                 body_type = review_event_body_name(&event.body),
                 "forwarding imported review event to webview"
             );
+            if newly_imported
+                && event.meta.device_id.as_str() != self_device_id
+                && matches!(
+                    &event.body,
+                    ReviewEventBody::CommentCreated { .. }
+                        | ReviewEventBody::SuggestionCreated { .. }
+                        | ReviewEventBody::SuggestionAccepted { .. }
+                        | ReviewEventBody::SuggestionRejected { .. }
+                )
+            {
+                match store.record_unread_event(&rid, &event.meta.event_id) {
+                    Ok(state) => (update_tx)(ReviewUpdate::UnreadChanged {
+                        room_id: rid.clone(),
+                        unread_count: state.unread_count,
+                    }),
+                    Err(error) => tracing::warn!(
+                        "could not persist unread import for room {}: {error:#}",
+                        rid.as_str()
+                    ),
+                }
+                if let Some(notifications) = observers.notifications {
+                    let (kind, file_display) = summary_for_event(store, &rid, &event.body);
+                    notifications.enqueue(rid.clone(), kind, file_display);
+                }
+            }
             rehydrate_snapshot_event(store, &rid, &mut event);
             (update_tx)(ReviewUpdate::EventImported {
                 room_id: rid,
                 event,
             });
+            if is_verdict {
+                observers.verdict_revision_tx.send_modify(|revision| {
+                    *revision = revision.wrapping_add(1);
+                });
+            }
         }
         TransportEvent::Envelope { .. } => {
             // Already covered by EventImported (events) / handled elsewhere
@@ -3351,6 +4142,29 @@ fn forward_transport_event(
             if from.as_str() == self_device_id {
                 return;
             }
+            let Some(kind) = collab_wire_kind(&payload) else {
+                return;
+            };
+            let sender_is_owner = owner_participant_id.is_some_and(|owner| {
+                store
+                    .load_devices(room_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|devices| {
+                        devices.iter().any(|device| {
+                            device.device_id == from && device.participant_id.as_str() == owner
+                        })
+                    })
+            });
+            if !inbound_collab_allowed(observers.local_is_owner, sender_is_owner, kind) {
+                tracing::warn!(
+                    room_id = room_id.as_str(),
+                    from = from.as_str(),
+                    kind = ?kind,
+                    "dropped remote document mutation at owner authority boundary"
+                );
+                return;
+            }
             (update_tx)(ReviewUpdate::CollabSignal {
                 room_id: rid,
                 from: from.as_str().to_string(),
@@ -3389,6 +4203,48 @@ fn forward_transport_event(
                 message,
             });
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollabWireKind {
+    Submit,
+    Broadcast,
+    Resync,
+    Cursor,
+}
+
+fn collab_wire_kind(payload: &str) -> Option<CollabWireKind> {
+    if payload.len() > 262_144 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    match value.get("kind")?.as_str()? {
+        "submit" => Some(CollabWireKind::Submit),
+        "broadcast" => Some(CollabWireKind::Broadcast),
+        "resync" => Some(CollabWireKind::Resync),
+        "cursor" => Some(CollabWireKind::Cursor),
+        _ => None,
+    }
+}
+
+fn outbound_collab_allowed(is_owner: bool, kind: CollabWireKind) -> bool {
+    if is_owner {
+        matches!(kind, CollabWireKind::Broadcast | CollabWireKind::Cursor)
+    } else {
+        matches!(kind, CollabWireKind::Resync | CollabWireKind::Cursor)
+    }
+}
+
+fn inbound_collab_allowed(
+    local_is_owner: bool,
+    sender_is_owner: bool,
+    kind: CollabWireKind,
+) -> bool {
+    if local_is_owner {
+        matches!(kind, CollabWireKind::Resync | CollabWireKind::Cursor)
+    } else {
+        sender_is_owner && matches!(kind, CollabWireKind::Broadcast | CollabWireKind::Cursor)
     }
 }
 
@@ -3487,6 +4343,49 @@ mod tests {
         assert!(device_supports_webrtc(DeviceClient::AttnNative));
         assert!(device_supports_webrtc(DeviceClient::AttnBrowser));
         assert!(!device_supports_webrtc(DeviceClient::AgentCli));
+    }
+
+    #[test]
+    fn owner_accept_boundary_allows_only_non_mutating_remote_collab() {
+        assert_eq!(
+            collab_wire_kind(r#"{"kind":"submit","submission":{"steps":[]}}"#),
+            Some(CollabWireKind::Submit)
+        );
+        assert!(!inbound_collab_allowed(true, false, CollabWireKind::Submit));
+        assert!(!inbound_collab_allowed(
+            true,
+            false,
+            CollabWireKind::Broadcast
+        ));
+        assert!(inbound_collab_allowed(true, false, CollabWireKind::Resync));
+        assert!(inbound_collab_allowed(true, false, CollabWireKind::Cursor));
+        assert!(inbound_collab_allowed(
+            false,
+            true,
+            CollabWireKind::Broadcast
+        ));
+        assert!(inbound_collab_allowed(false, true, CollabWireKind::Cursor));
+        assert!(!inbound_collab_allowed(false, true, CollabWireKind::Submit));
+        assert!(!inbound_collab_allowed(
+            false,
+            false,
+            CollabWireKind::Broadcast
+        ));
+        assert!(!inbound_collab_allowed(
+            false,
+            false,
+            CollabWireKind::Cursor
+        ));
+    }
+
+    #[test]
+    fn native_reviewer_cannot_emit_document_steps_in_any_grant_tier() {
+        assert!(!outbound_collab_allowed(false, CollabWireKind::Submit));
+        assert!(!outbound_collab_allowed(false, CollabWireKind::Broadcast));
+        assert!(outbound_collab_allowed(false, CollabWireKind::Resync));
+        assert!(outbound_collab_allowed(false, CollabWireKind::Cursor));
+        assert!(outbound_collab_allowed(true, CollabWireKind::Broadcast));
+        assert!(!outbound_collab_allowed(true, CollabWireKind::Submit));
     }
 
     #[test]
@@ -4184,6 +5083,804 @@ mod tests {
         (mgr, rx, tmp)
     }
 
+    fn verdicts_test_event(
+        room_id: &RoomId,
+        event_id: &str,
+        author_id: &str,
+        body: ReviewEventBody,
+    ) -> crate::review::model::ReviewEvent {
+        let mut event = stub_review_event(room_id, body);
+        event.meta.event_id = dummy_id(event_id);
+        event.meta.author_id = dummy_id(author_id);
+        event
+    }
+
+    #[test]
+    fn verified_remote_unread_import_counts_once_and_focused_visible_view_clears() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-unread-import");
+        let mut event = verdicts_test_event(
+            &room_id,
+            "evt-unread-comment",
+            "remote-reviewer",
+            ReviewEventBody::CommentCreated {
+                thread_id: "thread-unread".to_string(),
+                anchor: dummy_anchor(),
+                body: "remote comment".to_string(),
+            },
+        );
+        event.meta.device_id = dummy_id("remote-device");
+
+        let mut second = event.clone();
+        second.meta.event_id = dummy_id("evt-unread-comment-b");
+        let second_event_id = second.meta.event_id.clone();
+        for (delivered, newly_imported) in [
+            (event.clone(), true),
+            (second, true),
+            // Dual transport replay of A after B: the inbound append reports
+            // it as an existing event, so it must not re-badge.
+            (event.clone(), false),
+        ] {
+            forward_transport_event(
+                &mgr.update_tx,
+                &mgr.store,
+                TransportObservers {
+                    verdict_revision_tx: &mgr.verdict_revision_tx,
+                    notifications: None,
+                    local_is_owner: false,
+                },
+                &room_id,
+                "self-device",
+                None,
+                crate::review::transport::TransportEvent::EventImported {
+                    room_id: room_id.clone(),
+                    event: delivered,
+                    newly_imported,
+                },
+            );
+        }
+        assert_eq!(
+            mgr.store
+                .load_unread_state(&room_id)
+                .expect("unread after duplicate")
+                .unread_count,
+            2,
+            "A,B,A delivery must count the two fresh imports exactly once"
+        );
+        while rx.try_recv().is_ok() {}
+
+        mgr.submit(ReviewCommand::SetViewState {
+            room_id: room_id.clone(),
+            room_visible: true,
+            window_focused: false,
+        });
+        assert!(rx.try_recv().is_err(), "blurred view must not clear");
+        assert_eq!(
+            mgr.store
+                .load_unread_state(&room_id)
+                .expect("still unread")
+                .unread_count,
+            2
+        );
+
+        mgr.submit(ReviewCommand::SetViewState {
+            room_id: room_id.clone(),
+            room_visible: true,
+            window_focused: true,
+        });
+        assert!(matches!(
+            rx.try_recv().expect("clear update"),
+            ReviewUpdate::UnreadChanged {
+                unread_count: 0,
+                ..
+            }
+        ));
+        let cleared = mgr
+            .store
+            .load_unread_state(&room_id)
+            .expect("cleared state");
+        assert_eq!(cleared.unread_count, 0);
+        assert_eq!(cleared.last_seen_event_id, Some(second_event_id));
+    }
+
+    #[test]
+    fn local_and_non_attention_events_do_not_increment_unread() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-unread-filter");
+        let mut local = verdicts_test_event(
+            &room_id,
+            "evt-local-suggestion",
+            "self",
+            ReviewEventBody::SuggestionCreated {
+                suggestion_id: "suggestion-local".to_string(),
+                anchor: dummy_anchor(),
+                operation: SuggestionOperation::InsertAfter {
+                    text: "local".to_string(),
+                },
+                note: None,
+            },
+        );
+        local.meta.device_id = dummy_id("self-device");
+        let mut presence = verdicts_test_event(
+            &room_id,
+            "evt-remote-presence",
+            "remote",
+            ReviewEventBody::PresenceUpdated {
+                participant_id: dummy_id("remote"),
+                device_id: dummy_id("remote-device"),
+                online: true,
+                cursor: None,
+            },
+        );
+        presence.meta.device_id = dummy_id("remote-device");
+
+        for event in [local, presence] {
+            forward_transport_event(
+                &mgr.update_tx,
+                &mgr.store,
+                TransportObservers {
+                    verdict_revision_tx: &mgr.verdict_revision_tx,
+                    notifications: None,
+                    local_is_owner: false,
+                },
+                &room_id,
+                "self-device",
+                None,
+                crate::review::transport::TransportEvent::EventImported {
+                    room_id: room_id.clone(),
+                    event,
+                    newly_imported: true,
+                },
+            );
+        }
+        assert_eq!(
+            mgr.store
+                .load_unread_state(&room_id)
+                .expect("filtered state")
+                .unread_count,
+            0
+        );
+        assert!(
+            rx.try_iter()
+                .all(|update| !matches!(update, ReviewUpdate::UnreadChanged { .. }))
+        );
+    }
+
+    #[test]
+    fn fresh_verified_remote_attention_event_reaches_notification_sink_once() {
+        #[derive(Default)]
+        struct Sink(Mutex<Vec<crate::review::notifications::ReviewNotification>>);
+        impl ReviewNotificationSink for Sink {
+            fn post(&self, value: crate::review::notifications::ReviewNotification) {
+                self.0.lock().expect("notification sink").push(value);
+            }
+        }
+
+        let (mut mgr, _rx, _tmp) = make_manager();
+        let sink = Arc::new(Sink::default());
+        mgr.notifications = ReviewNotifications::new(
+            Arc::clone(&mgr.store),
+            sink.clone(),
+            std::time::Duration::from_millis(10),
+        );
+        let room_id: RoomId = dummy_id("room-native-notification");
+        let mut event = verdicts_test_event(
+            &room_id,
+            "evt-native-notification",
+            "remote-reviewer",
+            ReviewEventBody::CommentCreated {
+                thread_id: "thread-native-notification".to_string(),
+                anchor: dummy_anchor(),
+                body: "plaintext must never enter the OS summary".to_string(),
+            },
+        );
+        event.meta.device_id = dummy_id("remote-device");
+        forward_transport_event(
+            &mgr.update_tx,
+            &mgr.store,
+            TransportObservers {
+                verdict_revision_tx: &mgr.verdict_revision_tx,
+                notifications: Some(&mgr.notifications),
+                local_is_owner: false,
+            },
+            &room_id,
+            "self-device",
+            None,
+            crate::review::transport::TransportEvent::EventImported {
+                room_id: room_id.clone(),
+                event,
+                newly_imported: true,
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let posted = sink.0.lock().expect("notification sink");
+        assert_eq!(posted.len(), 1);
+        assert!(!posted[0].body.contains("plaintext"));
+    }
+
+    #[test]
+    fn resident_away_owner_loop_imports_notifies_focuses_and_survives_restart() {
+        use crate::review::notifications::ReviewNotification;
+
+        struct ChannelSink(mpsc::Sender<ReviewNotification>);
+        impl ReviewNotificationSink for ChannelSink {
+            fn post(&self, notification: ReviewNotification) {
+                let _ = self.0.send(notification);
+            }
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        let reviews_root = tmp.path().join("reviews");
+        let store =
+            Arc::new(ReviewStore::open_at(reviews_root.clone()).expect("open resident store"));
+        let (update_tx, update_rx) = mpsc::channel::<ReviewUpdate>();
+        let update_tx = Mutex::new(update_tx);
+        let update_sink: UpdateSink = Arc::new(move |update| {
+            let _ = update_tx.lock().expect("update sink").send(update);
+        });
+        let mut manager = ReviewManager::new(
+            Arc::clone(&store),
+            Arc::new(WorkingCopyService::new()),
+            update_sink,
+        );
+        let (notification_tx, notification_rx) = mpsc::channel();
+        let debounce = std::time::Duration::from_millis(15);
+        manager.notifications = ReviewNotifications::new(
+            Arc::clone(&store),
+            Arc::new(ChannelSink(notification_tx)),
+            debounce,
+        );
+
+        let first_room: RoomId = dummy_id("room-resident-first");
+        let second_room: RoomId = dummy_id("room-resident-second");
+        let muted_room: RoomId = dummy_id("room-resident-muted");
+        manager.submit(ReviewCommand::SetNotificationMuted {
+            room_id: muted_room.clone(),
+            muted: true,
+        });
+
+        // This is the production boundary immediately after the inbound
+        // pipeline has authenticated, decrypted, and durably appended a
+        // remote envelope. An empty view map models a resident daemon with no
+        // window: every fresh remote attention event enters unread accounting
+        // and the native notification coordinator.
+        for (room_id, event_id, thread_id) in [
+            (&first_room, "evt-resident-a1", "thread-a1"),
+            (&second_room, "evt-resident-b1", "thread-b1"),
+            (&first_room, "evt-resident-a2", "thread-a2"),
+            (&muted_room, "evt-resident-muted", "thread-muted"),
+        ] {
+            let mut event = verdicts_test_event(
+                room_id,
+                event_id,
+                "browser-reviewer",
+                ReviewEventBody::CommentCreated {
+                    thread_id: thread_id.to_string(),
+                    anchor: dummy_anchor(),
+                    body: format!("private body for {event_id}"),
+                },
+            );
+            event.meta.device_id = dummy_id("browser-device");
+            assert!(
+                store
+                    .append_event(room_id, &event)
+                    .expect("verified import is durable")
+            );
+            forward_transport_event(
+                &manager.update_tx,
+                &manager.store,
+                TransportObservers {
+                    verdict_revision_tx: &manager.verdict_revision_tx,
+                    notifications: Some(&manager.notifications),
+                    local_is_owner: false,
+                },
+                room_id,
+                "owner-device",
+                None,
+                crate::review::transport::TransportEvent::EventImported {
+                    room_id: room_id.clone(),
+                    event,
+                    newly_imported: true,
+                },
+            );
+        }
+
+        assert_eq!(
+            store
+                .load_unread_state(&first_room)
+                .expect("first unread")
+                .unread_count,
+            2
+        );
+        assert_eq!(
+            store
+                .load_unread_state(&second_room)
+                .expect("second unread")
+                .unread_count,
+            1
+        );
+        assert_eq!(
+            store
+                .load_unread_state(&muted_room)
+                .expect("muted unread")
+                .unread_count,
+            1,
+            "muting native notifications must not hide in-app unread state"
+        );
+
+        let posted = [
+            notification_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("first debounced native notification"),
+            notification_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("second debounced native notification"),
+        ];
+        let by_room = posted
+            .into_iter()
+            .map(|notification| (notification.room_id.clone(), notification))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(by_room.len(), 2, "bursts collapse independently per room");
+        assert!(by_room[&first_room].body.starts_with("2 new comments"));
+        assert!(by_room[&second_room].body.starts_with("1 new comment"));
+        assert!(!by_room.contains_key(&muted_room));
+        assert!(
+            notification_rx
+                .recv_timeout(debounce.saturating_mul(4))
+                .is_err(),
+            "muted room and burst duplicates must not post"
+        );
+
+        // A native click follows the production URI parser and focus script;
+        // once the hydrated frontend reports that room visible in a focused
+        // window, the same manager command clears only that room's badge.
+        let clicked = &by_room[&first_room];
+        let selected_room =
+            crate::review::notifications::room_id_from_deep_link(&clicked.deep_link)
+                .expect("notification deep link is a local room route");
+        assert_eq!(selected_room, first_room.as_str());
+        let focus_script = crate::review::notifications::focus_script(&selected_room);
+        assert!(focus_script.contains("__attn_pending_review_focus__"));
+        assert!(focus_script.contains("selectRoom(\"room-resident-first\")"));
+        manager.submit(ReviewCommand::SetViewState {
+            room_id: first_room.clone(),
+            room_visible: true,
+            window_focused: true,
+        });
+        assert_eq!(
+            store
+                .load_unread_state(&first_room)
+                .expect("focused unread")
+                .unread_count,
+            0
+        );
+        assert_eq!(
+            store
+                .load_unread_state(&second_room)
+                .expect("other room remains unread")
+                .unread_count,
+            1
+        );
+        assert!(update_rx.try_iter().any(|update| matches!(
+            update,
+            ReviewUpdate::UnreadChanged { room_id, unread_count: 0 }
+                if room_id == first_room
+        )));
+
+        drop(manager);
+        drop(store);
+
+        // Simulate the next resident process. Replaying durable room state
+        // restores badges and mute preferences to the frontend but never
+        // re-enqueues historical events into the native notification worker.
+        let reopened =
+            Arc::new(ReviewStore::open_at(reviews_root.clone()).expect("reopen resident store"));
+        let (restart_update_tx, restart_update_rx) = mpsc::channel::<ReviewUpdate>();
+        let restart_update_tx = Mutex::new(restart_update_tx);
+        let restart_updates: UpdateSink = Arc::new(move |update| {
+            let _ = restart_update_tx
+                .lock()
+                .expect("restart update sink")
+                .send(update);
+        });
+        let mut restarted = ReviewManager::new(
+            Arc::clone(&reopened),
+            Arc::new(WorkingCopyService::new()),
+            restart_updates,
+        );
+        let (restart_notification_tx, restart_notification_rx) = mpsc::channel();
+        restarted.notifications = ReviewNotifications::new(
+            Arc::clone(&reopened),
+            Arc::new(ChannelSink(restart_notification_tx)),
+            debounce,
+        );
+        for room_id in [&first_room, &second_room, &muted_room] {
+            restarted.replay_room_to_webview(room_id);
+        }
+
+        assert_eq!(
+            reopened
+                .load_unread_state(&first_room)
+                .expect("cleared state survives restart")
+                .unread_count,
+            0
+        );
+        assert_eq!(
+            reopened
+                .load_unread_state(&second_room)
+                .expect("unread survives restart")
+                .unread_count,
+            1
+        );
+        assert!(
+            reopened
+                .notification_muted(&muted_room)
+                .expect("mute survives restart")
+        );
+        let replayed_updates = restart_update_rx.try_iter().collect::<Vec<_>>();
+        assert!(replayed_updates.iter().any(|update| matches!(
+            update,
+            ReviewUpdate::UnreadChanged { room_id, unread_count: 1 }
+                if room_id == &second_room
+        )));
+        assert!(replayed_updates.iter().any(|update| matches!(
+            update,
+            ReviewUpdate::NotificationMuteChanged { room_id, muted: true }
+                if room_id == &muted_room
+        )));
+        assert!(
+            restart_notification_rx
+                .recv_timeout(debounce.saturating_mul(4))
+                .is_err(),
+            "resident restart must not replay historical OS notifications"
+        );
+    }
+
+    #[test]
+    fn durable_offline_unread_replay_surfaces_without_process_restart() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open durable replay store"),
+        );
+        let working_copy = Arc::new(WorkingCopyService::new());
+        let (tx, rx) = mpsc::channel::<ReviewUpdate>();
+        let tx = Mutex::new(tx);
+        let sink: UpdateSink = Arc::new(move |update| {
+            let _ = tx.lock().expect("sink").send(update);
+        });
+        let identity_dir = tmp.path().join("identity");
+        let manager = ReviewManager::new(Arc::clone(&store), working_copy, sink)
+            .with_bootstrap(
+                "http://127.0.0.1:1".to_string(),
+                Some(identity_dir),
+                Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            )
+            .expect("bootstrap without network");
+        let room_id: RoomId = dummy_id("room-durable-offline-unread");
+        let mut event = verdicts_test_event(
+            &room_id,
+            "evt-durable-offline-comment",
+            "browser-reviewer",
+            ReviewEventBody::CommentCreated {
+                thread_id: "thread-durable-offline".to_string(),
+                anchor: dummy_anchor(),
+                body: "offline browser comment".to_string(),
+            },
+        );
+        event.meta.device_id = dummy_id("browser-device");
+        store
+            .append_event(&room_id, &event)
+            .expect("durable drain committed event");
+
+        manager.replay_room_to_webview(&room_id);
+        assert_eq!(
+            store
+                .load_unread_state(&room_id)
+                .expect("unread reconciled")
+                .unread_count,
+            1
+        );
+        let updates = rx.try_iter().collect::<Vec<_>>();
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            ReviewUpdate::EventImported { event: imported, .. }
+                if imported.meta.event_id == event.meta.event_id
+        )));
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            ReviewUpdate::UnreadChanged {
+                unread_count: 1,
+                ..
+            }
+        )));
+
+        manager.replay_room_to_webview(&room_id);
+        assert_eq!(
+            store
+                .load_unread_state(&room_id)
+                .expect("idempotent durable replay")
+                .unread_count,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn verdicts_wait_already_complete_does_not_block() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-verdicts-complete");
+        let created = verdicts_test_event(
+            &room_id,
+            "evt-created",
+            "agent-a",
+            ReviewEventBody::SuggestionCreated {
+                suggestion_id: "suggestion-a".to_string(),
+                anchor: dummy_anchor(),
+                operation: SuggestionOperation::Replace {
+                    expected_text: "old".to_string(),
+                    replacement: "done".to_string(),
+                },
+                note: None,
+            },
+        );
+        let accepted = verdicts_test_event(
+            &room_id,
+            "evt-accepted",
+            "owner",
+            ReviewEventBody::SuggestionAccepted {
+                suggestion_id: "suggestion-a".to_string(),
+                applied_revision_id: "revision-a".to_string(),
+                resulting_hash: stub_content_hash(),
+            },
+        );
+        mgr.store.append_event(&room_id, &created).expect("create");
+        mgr.store.append_event(&room_id, &accepted).expect("accept");
+        let ids = ["suggestion-a".to_string()].into_iter().collect();
+
+        let outcome = mgr
+            .wait_for_verdicts(
+                Some(&dummy_id("agent-a")),
+                Some(&ids),
+                Some(std::time::Duration::ZERO),
+            )
+            .await
+            .expect("wait");
+        assert!(matches!(outcome, VerdictWaitOutcome::Complete(_)));
+    }
+
+    #[tokio::test]
+    async fn verdicts_wait_wakes_on_late_persisted_import_notification() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let mgr = Arc::new(mgr);
+        let room_id: RoomId = dummy_id("room-verdicts-late");
+        let created = verdicts_test_event(
+            &room_id,
+            "evt-created-late",
+            "agent-a",
+            ReviewEventBody::SuggestionCreated {
+                suggestion_id: "suggestion-late".to_string(),
+                anchor: dummy_anchor(),
+                operation: SuggestionOperation::Replace {
+                    expected_text: "old".to_string(),
+                    replacement: "late".to_string(),
+                },
+                note: None,
+            },
+        );
+        mgr.store.append_event(&room_id, &created).expect("create");
+
+        let notifier = Arc::clone(&mgr);
+        let notify_room = room_id.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let accepted = verdicts_test_event(
+                &notify_room,
+                "evt-accepted-late",
+                "owner",
+                ReviewEventBody::SuggestionAccepted {
+                    suggestion_id: "suggestion-late".to_string(),
+                    applied_revision_id: "revision-late".to_string(),
+                    resulting_hash: stub_content_hash(),
+                },
+            );
+            notifier
+                .store
+                .append_event(&notify_room, &accepted)
+                .expect("persist before notification");
+            forward_transport_event(
+                &notifier.update_tx,
+                &notifier.store,
+                TransportObservers {
+                    verdict_revision_tx: &notifier.verdict_revision_tx,
+                    notifications: None,
+                    local_is_owner: false,
+                },
+                &notify_room,
+                "self-device",
+                None,
+                crate::review::transport::TransportEvent::EventImported {
+                    room_id: notify_room.clone(),
+                    event: accepted,
+                    newly_imported: true,
+                },
+            );
+        });
+
+        let outcome = mgr
+            .wait_for_verdicts(
+                Some(&dummy_id("agent-a")),
+                None,
+                Some(std::time::Duration::from_secs(1)),
+            )
+            .await
+            .expect("wait");
+        let VerdictWaitOutcome::Complete(report) = outcome else {
+            panic!("late verdict should complete")
+        };
+        assert_eq!(
+            report.rooms["room-verdicts-late"].suggestions["suggestion-late"].status,
+            crate::review::store::SuggestionVerdictStatus::Accepted
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_gate_timeout_returns_parseable_pending_partial_report() {
+        let (mgr, _rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-verdicts-timeout");
+        let created = verdicts_test_event(
+            &room_id,
+            "evt-created-timeout",
+            "agent-a",
+            ReviewEventBody::SuggestionCreated {
+                suggestion_id: "suggestion-pending".to_string(),
+                anchor: dummy_anchor(),
+                operation: SuggestionOperation::Replace {
+                    expected_text: "old".to_string(),
+                    replacement: "pending".to_string(),
+                },
+                note: None,
+            },
+        );
+        mgr.store.append_event(&room_id, &created).expect("create");
+
+        let outcome = mgr
+            .wait_for_verdicts(
+                Some(&dummy_id("agent-a")),
+                None,
+                Some(std::time::Duration::ZERO),
+            )
+            .await
+            .expect("wait");
+        let VerdictWaitOutcome::TimedOut(report) = outcome else {
+            panic!("pending verdict should time out")
+        };
+        assert_eq!(
+            report.rooms["room-verdicts-timeout"].suggestions["suggestion-pending"].status,
+            crate::review::store::SuggestionVerdictStatus::Pending
+        );
+        serde_json::to_string(&report).expect("partial verdict report remains JSON serializable");
+    }
+
+    #[tokio::test]
+    async fn e2e_gate_mixed_verdicts_block_wake_scope_and_canonical_hash() {
+        use crate::review::crypto::ids::content_hash;
+        use crate::review::store::SuggestionVerdictStatus;
+
+        let (mgr, _rx, tmp) = make_manager();
+        let mgr = Arc::new(mgr);
+        let room_id: RoomId = dummy_id("room-e2e-gate");
+        let gate_agent: crate::review::ids::ParticipantId = dummy_id("gate-agent");
+
+        for (event_id, author, suggestion_id, replacement) in [
+            ("evt-gate-one", "gate-agent", "suggestion-one", "accepted"),
+            ("evt-gate-two", "gate-agent", "suggestion-two", "rejected"),
+            ("evt-other", "other-agent", "suggestion-other", "invisible"),
+        ] {
+            let created = verdicts_test_event(
+                &room_id,
+                event_id,
+                author,
+                ReviewEventBody::SuggestionCreated {
+                    suggestion_id: suggestion_id.to_string(),
+                    anchor: dummy_anchor(),
+                    operation: SuggestionOperation::Replace {
+                        expected_text: "old".to_string(),
+                        replacement: replacement.to_string(),
+                    },
+                    note: None,
+                },
+            );
+            mgr.store.append_event(&room_id, &created).expect("create");
+        }
+
+        let mut waiter = {
+            let mgr = Arc::clone(&mgr);
+            let gate_agent = gate_agent.clone();
+            tokio::spawn(async move { mgr.wait_for_verdicts(Some(&gate_agent), None, None).await })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut waiter)
+                .await
+                .is_err(),
+            "gate must remain blocked before verdicts after being actively scheduled"
+        );
+
+        let owner_bytes = b"# Gate result\n\nfirst accepted\n\nsecond unchanged\n";
+        let owner_path = tmp.path().join("owner.md");
+        std::fs::write(&owner_path, owner_bytes).expect("write owner result");
+        let resulting_hash = content_hash(&std::fs::read(owner_path).expect("read owner result"));
+        let expected_hash = serde_json::to_value(&resulting_hash)
+            .expect("serialize canonical hash")
+            .as_str()
+            .expect("hash is a string")
+            .to_string();
+
+        let accepted = verdicts_test_event(
+            &room_id,
+            "evt-gate-accepted",
+            "owner",
+            ReviewEventBody::SuggestionAccepted {
+                suggestion_id: "suggestion-one".to_string(),
+                applied_revision_id: "revision-gate".to_string(),
+                resulting_hash,
+            },
+        );
+        let rejected = verdicts_test_event(
+            &room_id,
+            "evt-gate-rejected",
+            "owner",
+            ReviewEventBody::SuggestionRejected {
+                suggestion_id: "suggestion-two".to_string(),
+                reason: Some("not for this change".to_string()),
+            },
+        );
+        mgr.store.append_event(&room_id, &accepted).expect("accept");
+        mgr.store.append_event(&room_id, &rejected).expect("reject");
+        forward_transport_event(
+            &mgr.update_tx,
+            &mgr.store,
+            TransportObservers {
+                verdict_revision_tx: &mgr.verdict_revision_tx,
+                notifications: None,
+                local_is_owner: false,
+            },
+            &room_id,
+            "owner-device",
+            None,
+            crate::review::transport::TransportEvent::EventImported {
+                room_id: room_id.clone(),
+                event: rejected,
+                newly_imported: true,
+            },
+        );
+
+        let outcome = waiter
+            .await
+            .expect("join waiter")
+            .expect("wait for verdicts");
+        let VerdictWaitOutcome::Complete(report) = outcome else {
+            panic!("mixed verdict gate should complete")
+        };
+        let suggestions = &report.rooms["room-e2e-gate"].suggestions;
+        assert_eq!(
+            suggestions.len(),
+            2,
+            "distinct agent suggestions stay scoped out"
+        );
+        assert_eq!(
+            suggestions["suggestion-one"].status,
+            SuggestionVerdictStatus::Accepted
+        );
+        assert_eq!(
+            suggestions["suggestion-one"].resulting_hash.as_deref(),
+            Some(expected_hash.as_str())
+        );
+        assert_eq!(
+            suggestions["suggestion-two"].status,
+            SuggestionVerdictStatus::Rejected
+        );
+        assert!(!suggestions.contains_key("suggestion-other"));
+    }
+
     fn dummy_id<T: for<'de> Deserialize<'de>>(s: &str) -> T {
         serde_json::from_value(serde_json::Value::String(s.to_string())).expect("id deserializes")
     }
@@ -4211,6 +5908,21 @@ mod tests {
         // Smoke test: construction must succeed and the manager must accept
         // an empty command flow without panicking.
         let (_mgr, _rx, _tmp) = make_manager();
+    }
+
+    #[test]
+    fn verdicts_aggregate_multiple_rooms_with_deterministic_serialization() {
+        let (mgr, _rx, _tmp) = make_manager();
+        for room in ["room-z", "room-a"] {
+            std::fs::create_dir_all(mgr.store.root().join("rooms").join(room))
+                .expect("create persisted room directory");
+        }
+
+        let report = mgr.verdicts(None).expect("aggregate verdicts");
+        assert_eq!(
+            serde_json::to_string(&report).expect("serialize"),
+            r#"{"rooms":{"room-a":{"suggestions":{}},"room-z":{"suggestions":{}}}}"#
+        );
     }
 
     #[test]
@@ -4311,6 +6023,44 @@ mod tests {
             }
             other => panic!("expected EventImported, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn comment_grant_rejects_suggestion_before_event_or_outbox() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-comment-only");
+        mgr.set_local_grant_tier(room_id.clone(), Some(GrantTier::Comment));
+        assert!(matches!(
+            rx.try_recv().expect("tier update"),
+            ReviewUpdate::LocalGrantTierChanged {
+                grant_tier: GrantTier::Comment,
+                ..
+            }
+        ));
+
+        mgr.submit(ReviewCommand::CreateSuggestion {
+            room_id: room_id.clone(),
+            draft: SuggestionDraft {
+                anchor: dummy_anchor(),
+                operation: SuggestionOperation::Replace {
+                    expected_text: "foo".into(),
+                    replacement: "bar".into(),
+                },
+                note: None,
+            },
+        });
+        assert!(matches!(
+            rx.try_recv().expect("authorization error"),
+            ReviewUpdate::Error { code, .. } if code == "ATTN_GRANT_FORBIDDEN"
+        ));
+        assert!(
+            mgr.store
+                .iter_events(&room_id)
+                .expect("events")
+                .next()
+                .is_none()
+        );
+        assert!(rx.try_recv().is_err(), "no event/outbox update may escape");
     }
 
     #[test]
@@ -4843,6 +6593,22 @@ mod bootstrap_integration_tests {
     async fn mount_create_and_register(server: &MockServer) {
         Mock::given(method("POST"))
             .and(wiremock::matchers::path_regex(
+                r"^/v3/rooms/[A-Za-z0-9_-]+$",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "roomId": "any",
+                "createdAt": 0u64,
+                "expiresAt": 0u64,
+                "policy": {},
+                "ownerSigningKeyId": "k",
+                "serverSeq": 0,
+            })))
+            .mount(server)
+            .await;
+        // The join compatibility assertion below deliberately exercises a
+        // persisted v2 invite while new shares use v3.
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
                 r"^/v2/rooms/[A-Za-z0-9_-]+$",
             ))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
@@ -4858,6 +6624,13 @@ mod bootstrap_integration_tests {
         Mock::given(method("POST"))
             .and(wiremock::matchers::path_regex(
                 r"^/v2/rooms/[A-Za-z0-9_-]+/devices$",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/v3/rooms/[A-Za-z0-9_-]+/devices$",
             ))
             .respond_with(ResponseTemplate::new(204))
             .mount(server)
@@ -4900,6 +6673,10 @@ mod bootstrap_integration_tests {
             ReviewUpdate::ShareReady {
                 invite_url,
                 browser_invite_url,
+                view_invite_url,
+                suggest_invite_url,
+                browser_view_invite_url,
+                browser_suggest_invite_url,
                 owner_signing_key,
                 mode,
                 expires_at,
@@ -4913,6 +6690,10 @@ mod bootstrap_integration_tests {
                     browser_invite_url.starts_with("https://attn.sh/review/"),
                     "ShareReady browser_invite_url shape, got: {browser_invite_url}"
                 );
+                assert!(view_invite_url.contains("tier=view"));
+                assert!(suggest_invite_url.contains("tier=suggest"));
+                assert!(browser_view_invite_url.contains("tier=view"));
+                assert!(browser_suggest_invite_url.contains("tier=suggest"));
                 assert_eq!(mode, "async", "wire mode string round-trips");
                 assert!(!owner_signing_key.is_empty(), "owner key surfaced");
                 assert!(expires_at > 0, "expires_at populated");
@@ -4929,7 +6710,15 @@ mod bootstrap_integration_tests {
             }
             other => panic!("expected RoomStatusChanged second, got {other:?}"),
         }
-        assert!(rx.try_recv().is_err(), "no spurious third update");
+        // Starting the live runtime is best-effort. With no WebSocket mock,
+        // its expected transport error can race onto the channel here.
+        if let Ok(third) = rx.try_recv() {
+            assert!(
+                matches!(&third, ReviewUpdate::LocalGrantTierChanged { .. })
+                    || matches!(&third, ReviewUpdate::Error { code, .. } if code == "ATTN_TRANSPORT_INIT" || code == "ATTN_WS"),
+                "unexpected third update: {third:?}"
+            );
+        }
         let _ = invite;
         // Identity must be on disk.
         let identity = load_identity_from(id_tmp.path())
@@ -4963,6 +6752,7 @@ mod bootstrap_integration_tests {
         // WS health, so drain updates until we observe it.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut joined = false;
+        let mut seen = Vec::new();
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
@@ -4979,13 +6769,16 @@ mod bootstrap_integration_tests {
                 }
                 // Ignore the expected transient WS-dial failure and any other
                 // pre-"Joined" updates.
-                Ok(_) => continue,
+                Ok(update) => {
+                    seen.push(format!("{update:?}"));
+                    continue;
+                }
                 Err(_) => break,
             }
         }
         assert!(
             joined,
-            "expected a RoomStatusChanged {{ status: \"Joined\" }} update"
+            "expected a RoomStatusChanged {{ status: \"Joined\" }} update; saw {seen:?}"
         );
     }
 
@@ -5455,6 +7248,7 @@ mod request_snapshot_tests {
         let signing_key =
             DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).expect("signing key from seed");
         RoomSignalContext {
+            protocol_version: 2,
             room_id: room_id.clone(),
             author_id: id::<ParticipantId>("p-author-01"),
             local_device_id: id::<DeviceId>("d-local-01"),

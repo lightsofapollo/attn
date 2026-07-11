@@ -150,6 +150,14 @@ Independent of the events policy: `snapshot_blob` envelopes are kept until room 
 
 This adds a constraint to `relay-spec.md` caps: `maxRoomBytes` must accommodate `maxSnapshotBytes × ~3` (one current + a couple superseded) on top of the event log. Current cap of 25 MiB is fine.
 
+**Durable-share amendment (v3):** decision #9's seven-day R2 safety-net sweep
+is now prefix-scoped to room ciphertext. A live share's latest encrypted
+snapshot per file is uploaded into `shares_v1/`, outside the room sweep, and
+retained until it is superseded or the 90-day owner-renewed share is
+revoked/expires. ShareDO owns a strict 64-file / 25 MiB manifest, generates R2
+object identifiers itself, and tombstones cleanup before deleting ciphertext
+so revocation is immediate and cleanup remains crash-retryable.
+
 ### Recovery from local-store loss
 
 Pinned protocol:

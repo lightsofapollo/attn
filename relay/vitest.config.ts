@@ -18,6 +18,9 @@ export default defineWorkersConfig({
             // production/staging intentionally omit it.
             QUOTA_IP_HASH_KEY: "vitest-only-quota-ip-hmac-key-material-32",
             BLOB_CAP_SIGNING_KEY: "vitest-only-blob-cap-signing-key-32-bytes",
+            VAPID_PUBLIC_KEY: "BKOaMoQCJMzoFLApwG1J8FvD2rB3JECjlJ_ZU2qhp4tUGJSfB2Z-5OI6wxAVDd2DilYJoXLRkN0bOSDRA32s7HI",
+            VAPID_SUBJECT: "mailto:relay-tests@attn.sh",
+            VAPID_PRIVATE_JWK: "{\"kty\":\"EC\",\"x\":\"o5oyhAIkzOgUsCnAbUnwW8PasHckQKOUn9lTaqGni1Q\",\"y\":\"GJSfB2Z-5OI6wxAVDd2DilYJoXLRkN0bOSDRA32s7HI\",\"crv\":\"P-256\",\"d\":\"5jxhim-klclQknmN_V_qLFPmXvv7TUAkwzxGE9-mDyA\"}",
             QUOTA_ALLOW_UNATTRIBUTED_CREATES: "true",
             // Low source live cap makes Worker integration boundaries cheap;
             // existing tests use per-room unattributed buckets and do not

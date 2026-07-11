@@ -34,6 +34,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
+use zeroize::Zeroize as _;
 
 use crate::review::ids::DeviceId;
 use crate::review::model::{Device, MailboxEnvelope, RoomPolicy, SyncCursor};
@@ -210,10 +211,11 @@ impl MailboxWsClient {
             _ => return Ok(()),
         };
 
-        let presigned = relay_blobs::presign_blob_download(
+        let presigned = relay_blobs::presign_blob_download_versioned(
             &self.http,
             &self.config.relay_url,
-            &self.config.admission_key,
+            &self.config.read_admission_key,
+            self.config.protocol_version,
             room_id,
             &envelope_id,
         )
@@ -399,6 +401,29 @@ pub(crate) fn build_subprotocol(
     format!("attn.v2, hmac.{}", URL_SAFE_NO_PAD.encode(tag))
 }
 
+pub(crate) fn build_subprotocol_v3(
+    read_admission_key: &[u8; 32],
+    write_admission_key: &[u8; 32],
+    method: &str,
+    url_path: &str,
+    query_pairs: &[(String, String)],
+    device_signature: &str,
+) -> String {
+    let canonical = canonical_request_bytes(method, url_path, query_pairs, b"");
+    let mut read_mac =
+        <Hmac<Sha256>>::new_from_slice(read_admission_key).expect("HMAC accepts any key length");
+    read_mac.update(&canonical);
+    let mut write_mac =
+        <Hmac<Sha256>>::new_from_slice(write_admission_key).expect("HMAC accepts any key length");
+    write_mac.update(&canonical);
+    format!(
+        "attn.v3, read-hmac.{}, write-hmac.{}, device-proof.{}",
+        URL_SAFE_NO_PAD.encode(read_mac.finalize().into_bytes()),
+        URL_SAFE_NO_PAD.encode(write_mac.finalize().into_bytes()),
+        device_signature,
+    )
+}
+
 /// Duplicate of `super::canonical_request_bytes` — pulled inline so this
 /// module compiles without a `pub(crate)` leak of the canonicalization helpers.
 /// The shape is identical (METHOD || "\n" || PATH || "\n" || CANON_QUERY ||
@@ -458,6 +483,15 @@ fn rfc3986_encode(s: &str) -> String {
 /// Anything else is left as-is so a caller can override (e.g. test fixtures
 /// that hand in `ws://127.0.0.1:NNNN` directly).
 pub(crate) fn build_ws_url(relay_url: &str, room_id: &str, device_id: &str) -> String {
+    build_ws_url_versioned(relay_url, room_id, device_id, 2)
+}
+
+pub(crate) fn build_ws_url_versioned(
+    relay_url: &str,
+    room_id: &str,
+    device_id: &str,
+    version: u32,
+) -> String {
     let trimmed = relay_url.trim_end_matches('/');
     let with_scheme = if let Some(rest) = trimmed.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -467,7 +501,7 @@ pub(crate) fn build_ws_url(relay_url: &str, room_id: &str, device_id: &str) -> S
         trimmed.to_string()
     };
     format!(
-        "{with_scheme}/v2/rooms/{room_id}/socket?device_id={device_id}",
+        "{with_scheme}/v{version}/rooms/{room_id}/socket?device_id={device_id}",
         room_id = rfc3986_encode(room_id),
         device_id = rfc3986_encode(device_id),
     )
@@ -478,7 +512,11 @@ pub(crate) fn build_ws_url(relay_url: &str, room_id: &str, device_id: &str) -> S
 /// addressed device. We surface it as a separate `query_pairs` arg so the
 /// canonicalizer (which sort+encodes) handles the formatting.
 pub(crate) fn socket_path(room_id: &str) -> String {
-    format!("/v2/rooms/{}/socket", room_id)
+    socket_path_versioned(room_id, 2)
+}
+
+pub(crate) fn socket_path_versioned(room_id: &str, version: u32) -> String {
+    format!("/v{version}/rooms/{room_id}/socket")
 }
 
 /// Round-trip a typed id newtype to its inner string. Mirrors the helper in
@@ -679,15 +717,82 @@ impl MailboxWsClient {
         // "attn.v2, hmac.<base64url>" form. tokio-tungstenite's `connect_async`
         // would otherwise set its own protocol header.
         let device_id_str = id_to_string(&self.config.device_id);
-        let path = socket_path(self.config.room_id.as_str());
-        let query: Vec<(String, String)> = vec![("device_id".to_string(), device_id_str.clone())];
-        let subprotocol = build_subprotocol(&self.config.admission_key, "GET", &path, &query);
+        let path =
+            socket_path_versioned(self.config.room_id.as_str(), self.config.protocol_version);
+        let mut query: Vec<(String, String)> =
+            vec![("device_id".to_string(), device_id_str.clone())];
+        let subprotocol = if self.config.protocol_version == 3 {
+            let Some(seed) = self.config.device_signing_seed.as_ref() else {
+                return ConnectionOutcome::Terminal(TransportError::Io(
+                    "v3 websocket config omitted device signing key".into(),
+                ));
+            };
+            let signing_key =
+                match crate::review::crypto::signing::DeviceSigningKey::from_bytes(seed) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        return ConnectionOutcome::Terminal(TransportError::Io(format!(
+                            "v3 websocket device signing key: {error}"
+                        )));
+                    }
+                };
+            let mut proof_nonce = [0u8; 16];
+            if let Err(error) = getrandom::getrandom(&mut proof_nonce) {
+                return ConnectionOutcome::Transient(format!(
+                    "v3 websocket proof entropy: {error}"
+                ));
+            }
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0);
+            let proof = match crate::review::crypto::device_proof::create_device_websocket_proof_v3(
+                &signing_key,
+                self.config.room_id.as_str(),
+                &device_id_str,
+                &path,
+                now_ms,
+                &proof_nonce,
+            ) {
+                Ok(proof) => proof,
+                Err(error) => {
+                    proof_nonce.zeroize();
+                    return ConnectionOutcome::Transient(format!(
+                        "v3 websocket proof canonicalization: {error}"
+                    ));
+                }
+            };
+            proof_nonce.zeroize();
+            query.push(("proof_expires".into(), proof.expires_at.to_string()));
+            query.push(("proof_nonce".into(), proof.nonce));
+            build_subprotocol_v3(
+                &self.config.read_admission_key,
+                &self.config.admission_key,
+                "GET",
+                &path,
+                &query,
+                &proof.signature,
+            )
+        } else {
+            build_subprotocol(&self.config.admission_key, "GET", &path, &query)
+        };
 
-        let url = build_ws_url(
+        let mut url = build_ws_url_versioned(
             &self.config.relay_url,
             self.config.room_id.as_str(),
             &device_id_str,
+            self.config.protocol_version,
         );
+        if self.config.protocol_version == 3 {
+            let proof_expires = query.iter().find(|(name, _)| name == "proof_expires");
+            let proof_nonce = query.iter().find(|(name, _)| name == "proof_nonce");
+            if let (Some((_, expires)), Some((_, nonce))) = (proof_expires, proof_nonce) {
+                url.push_str("&proof_expires=");
+                url.push_str(&rfc3986_encode(expires));
+                url.push_str("&proof_nonce=");
+                url.push_str(&rfc3986_encode(nonce));
+            }
+        }
         let mut request = match url.as_str().into_client_request() {
             Ok(req) => req,
             Err(e) => {
@@ -704,7 +809,12 @@ impl MailboxWsClient {
             },
         );
 
-        tracing::info!("dialing url={url} subprotocol={subprotocol}");
+        // The subprotocol carries admission HMACs and, on v3, a short-lived
+        // Ed25519 device proof. Never emit either bearer into logs.
+        tracing::info!(
+            "dialing mailbox websocket url={url} protocol=v{}",
+            self.config.protocol_version
+        );
         let connect_fut = tokio_tungstenite::connect_async(request);
         let stream = tokio::select! {
             res = connect_fut => res,
@@ -869,7 +979,7 @@ impl MailboxWsClient {
                 let room_id = envelope.room_id.clone();
                 let kind = envelope.kind;
                 use crate::review::model::EnvelopeKind;
-                let mut decoded_event: Option<crate::review::model::ReviewEvent> = None;
+                let mut decoded_event: Option<(crate::review::model::ReviewEvent, bool)> = None;
                 let mut decoded_collab: Option<(crate::review::ids::DeviceId, String)> = None;
                 let mut decoded_signaling: Option<
                     crate::review::transport::signaling::SignalingPayload,
@@ -879,7 +989,7 @@ impl MailboxWsClient {
                         EnvelopeKind::Event => {
                             match self.import_event_with_refresh(&room_id, &envelope).await {
                                 Ok(outcome) => {
-                                    decoded_event = Some(outcome.event);
+                                    decoded_event = Some((outcome.event, outcome.newly_imported));
                                     Ok(())
                                 }
                                 Err(err) => Err(err),
@@ -889,8 +999,7 @@ impl MailboxWsClient {
                             self.handle_snapshot_blob(&room_id, &envelope).await
                         }
                         EnvelopeKind::Signal => match self
-                            .inbound
-                            .import_signal_envelope(&room_id, &envelope, &self.config.device_id)
+                            .import_verified_signal(&room_id, &envelope)
                             .await
                         {
                             Ok(plaintext) => {
@@ -949,10 +1058,11 @@ impl MailboxWsClient {
                         // bridge can render it immediately; then the raw
                         // envelope frame for consumers that care about
                         // serverSeq watermarking.
-                        if let Some(event) = decoded_event {
+                        if let Some((event, newly_imported)) = decoded_event {
                             let _ = self.events_tx.send(TransportEvent::EventImported {
                                 room_id: room_id.clone(),
                                 event,
+                                newly_imported,
                             });
                         }
                         if let Some((from, payload)) = decoded_collab {
@@ -1059,6 +1169,21 @@ impl MailboxWsClient {
                 None
             }
         }
+    }
+
+    async fn import_verified_signal(
+        &self,
+        room_id: &crate::review::ids::RoomId,
+        envelope: &crate::review::model::MailboxEnvelope,
+    ) -> Result<Vec<u8>, crate::review::transport::inbound::InboundError> {
+        if self.config.protocol_version == 3 {
+            self.inbound
+                .verify_signal_device_proof_v3(room_id, envelope)
+                .await?;
+        }
+        self.inbound
+            .import_signal_envelope(room_id, envelope, &self.config.device_id)
+            .await
     }
 }
 
@@ -1191,6 +1316,8 @@ mod tests {
                 public_signing_key: URL_SAFE_NO_PAD.encode(vk.to_bytes()),
                 client: DeviceClient::AttnNative,
                 kind: ParticipantKind::Reviewer,
+                grant_tier: None,
+                grant_signature: None,
                 attested: true,
             },
         )])));
@@ -1336,6 +1463,9 @@ mod tests {
             room_id: id::<RoomId>(TEST_ROOM),
             device_id: id::<DeviceId>(TEST_DEVICE),
             admission_key: [0x42u8; 32],
+            read_admission_key: [0x42u8; 32],
+            protocol_version: 2,
+            device_signing_seed: None,
             pow_difficulty: 12,
         });
         MailboxWsClient::new(cfg, pipeline, store, events_tx)
@@ -1367,6 +1497,136 @@ mod tests {
         let tail = header.trim_start_matches("attn.v2, hmac.");
         let decoded = URL_SAFE_NO_PAD.decode(tail).expect("base64url");
         assert_eq!(decoded.len(), 32, "HMAC-SHA-256 produces 32 bytes");
+    }
+
+    #[test]
+    fn v3_device_subprotocol_has_exact_dual_proof_wire_shape() {
+        let header = build_subprotocol_v3(
+            &[0x42; 32],
+            &[0x43; 32],
+            "GET",
+            "/v3/rooms/room-1/socket",
+            &[("device_id".into(), "d-1".into())],
+            &"A".repeat(86),
+        );
+        assert!(header.starts_with("attn.v3, read-hmac."));
+        assert!(header.contains(", write-hmac."));
+        assert!(header.ends_with(&format!(", device-proof.{}", "A".repeat(86))));
+        assert!(!header.contains("hmac.v2."));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)] // tungstenite's handshake callback fixes this error type.
+    async fn v3_connect_mints_a_signed_one_shot_device_proof() {
+        use std::sync::Mutex as StdMutex;
+        use tokio::sync::oneshot;
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let relay_url = format!("http://{}", listener.local_addr().unwrap());
+        let (capture_tx, capture_rx) = oneshot::channel::<(String, String)>();
+        let capture = Arc::new(StdMutex::new(Some(capture_tx)));
+        let server = tokio::spawn({
+            let capture = Arc::clone(&capture);
+            async move {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let ws = tokio_tungstenite::accept_hdr_async(
+                    stream,
+                    move |request: &Request, mut response: Response| {
+                        let protocol = request
+                            .headers()
+                            .get("Sec-WebSocket-Protocol")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        if let Some(sender) = capture.lock().unwrap().take() {
+                            let _ = sender.send((request.uri().to_string(), protocol));
+                        }
+                        response
+                            .headers_mut()
+                            .insert("Sec-WebSocket-Protocol", "attn.v3".parse().unwrap());
+                        Ok(response)
+                    },
+                )
+                .await
+                .expect("upgrade");
+                let (mut sink, mut stream) = ws.split();
+                let _ = stream.next().await;
+                let _ = sink
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::from(close_codes::ADMISSION_INVALID),
+                        reason: "test complete".into(),
+                    })))
+                    .await;
+            }
+        });
+
+        let (pipeline, store, _, _tmp) = fresh_pipeline();
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let config = Arc::new(MailboxConfig {
+            relay_url,
+            room_id: id::<RoomId>(TEST_ROOM),
+            device_id: id::<DeviceId>(TEST_DEVICE),
+            admission_key: [0x43; 32],
+            read_admission_key: [0x42; 32],
+            protocol_version: 3,
+            device_signing_seed: Some(zeroize::Zeroizing::new(TEST_SIGNING_SEED)),
+            pow_difficulty: 12,
+        });
+        let client = MailboxWsClient::new(config, pipeline, store, events_tx);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let client_run = tokio::spawn(async move { client.run(cancel_rx).await });
+
+        let (uri, protocol) = tokio::time::timeout(Duration::from_secs(3), capture_rx)
+            .await
+            .expect("handshake timeout")
+            .expect("handshake capture");
+        let parsed = reqwest::Url::parse(&format!("http://relay.invalid{uri}"))
+            .expect("captured request URL");
+        let expires_at = parsed
+            .query_pairs()
+            .find(|(name, _)| name == "proof_expires")
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+            .expect("proof_expires");
+        let nonce = parsed
+            .query_pairs()
+            .find(|(name, _)| name == "proof_nonce")
+            .map(|(_, value)| value.into_owned())
+            .expect("proof_nonce");
+        assert_eq!(URL_SAFE_NO_PAD.decode(&nonce).unwrap().len(), 16);
+
+        let tokens: Vec<_> = protocol.split(',').map(str::trim).collect();
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0], "attn.v3");
+        let signature = tokens[3]
+            .strip_prefix("device-proof.")
+            .expect("device proof token");
+        let signature = ed25519_dalek::Signature::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(signature)
+                .expect("signature base64url"),
+        )
+        .expect("signature bytes");
+        let signing_key = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
+        let canonical = crate::review::crypto::device_proof::canonical_device_websocket_proof_v3(
+            TEST_ROOM,
+            TEST_DEVICE,
+            &socket_path_versioned(TEST_ROOM, 3),
+            expires_at,
+            &nonce,
+        )
+        .unwrap();
+        signing_key
+            .verifying_key()
+            .verify_protocol_bytes(&canonical, &signature.to_bytes())
+            .expect("registered device proof verifies");
+
+        let result = tokio::time::timeout(Duration::from_secs(3), client_run)
+            .await
+            .expect("client exit")
+            .expect("client task");
+        assert!(matches!(result, Err(TransportError::AdmissionRejected)));
+        server.await.expect("server task");
     }
 
     #[test]

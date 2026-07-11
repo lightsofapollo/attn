@@ -268,6 +268,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "objc2-user-notifications",
  "objc2-web-kit",
  "open",
  "percent-encoding",
@@ -2727,6 +2728,18 @@ dependencies = [
  "bitflags 2.11.0",
  "objc2",
  "objc2-core-foundation",
+ "objc2-foundation",
+]
+
+[[package]]
+name = "objc2-user-notifications"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a3f5ec77a81d9e0c5a0b32159b0cb143d7086165e79708351e02bf37dfc65cd"
+dependencies = [
+ "bitflags 2.11.0",
+ "block2",
+ "objc2",
  "objc2-foundation",
 ]
 

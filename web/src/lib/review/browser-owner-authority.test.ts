@@ -138,10 +138,12 @@ function sessionState(status: BrowserSessionState['status'] = 'connected'): Brow
     fileId: null,
     error: null,
     authoringReady: true,
+    grantTier: 'suggest',
     outboxPending: 0,
     authoringError: null,
     persistence: 'ephemeral',
     storagePersisted: null,
+    canRemember: true,
   };
 }
 
@@ -679,6 +681,29 @@ defineCase('persists accepted authority steps with the live fence and expectedVe
   assert(
     f.events.indexOf('checkpoint:put') < f.events.findIndex((event) => event === 'session:send'),
     'checkpoint was not durable before broadcast',
+  );
+  await f.service.close();
+});
+
+defineCase('authenticated hostile remote submit cannot advance owner authority or durable state', async () => {
+  const f = fixture();
+  await f.service.start();
+  const beforeRevision = new Uint8Array(f.storage.revisionBytes);
+  const beforeVersion = f.service.controller?.version ?? -1;
+  await f.session().options.onCollab?.(collabDelivery('hostile-submit', JSON.stringify({
+    kind: 'submit',
+    fileId: FILE_ID,
+    epoch: EPOCH,
+    submission: { clientID: 'forged-reviewer', version: 0, steps: [insertStep()] },
+  })));
+  await Promise.resolve();
+  assertEqual(f.service.controller?.version, beforeVersion, 'remote submit advanced authority');
+  assertEqual(f.storage.puts.length, 0, 'remote submit persisted a checkpoint');
+  assertEqual(f.session().sent.length, 0, 'remote submit produced an owner broadcast');
+  assertEqual(
+    new TextDecoder().decode(f.storage.revisionBytes),
+    new TextDecoder().decode(beforeRevision),
+    'remote submit changed the owner workspace revision',
   );
   await f.service.close();
 });

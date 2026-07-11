@@ -123,17 +123,53 @@ ATTN_BROWSER_REVIEW_URL="$WEB_ORIGIN/review" \
   "$ATTN_BIN" review share "$SHARE_DIR" >/dev/null
 
 INVITE=""
+COMMENT_INVITE=""
+VIEW_INVITE=""
 deadline=$((SECONDS + 60))
 while [ "$SECONDS" -lt "$deadline" ]; do
-  raw="$(ATTN_HOME="$ATTN_HOME" "$ATTN_BIN" --eval 'window.__attn_review_store__?.currentShare?.browserInviteUrl || ""' 2>/dev/null || true)"
-  INVITE="$(node -e 'const raw=process.argv[1]; try { process.stdout.write(JSON.parse(raw)); } catch {}' "$raw")"
-  [ -n "$INVITE" ] && break
+  raw="$(ATTN_HOME="$ATTN_HOME" "$ATTN_BIN" --eval 'JSON.stringify({suggest: window.__attn_review_store__?.currentShare?.browserSuggestInviteUrl || "", comment: window.__attn_review_store__?.currentShare?.browserInviteUrl || "", view: window.__attn_review_store__?.currentShare?.browserViewInviteUrl || ""})' 2>/dev/null || true)"
+  invites="$(node -e 'const raw=process.argv[1]; try { const value=JSON.parse(JSON.parse(raw)); process.stdout.write([value.suggest,value.comment,value.view].join("\n")); } catch {}' "$raw")"
+  INVITE="$(printf '%s\n' "$invites" | sed -n '1p')"
+  COMMENT_INVITE="$(printf '%s\n' "$invites" | sed -n '2p')"
+  VIEW_INVITE="$(printf '%s\n' "$invites" | sed -n '3p')"
+  [ -n "$INVITE" ] && [ -n "$COMMENT_INVITE" ] && [ -n "$VIEW_INVITE" ] && break
   sleep 0.2
 done
-[ -n "$INVITE" ] || { tail -80 "$OWNER_LOG"; tail -80 "$RELAY_LOG"; exit 1; }
+[ -n "$INVITE" ] && [ -n "$COMMENT_INVITE" ] && [ -n "$VIEW_INVITE" ] || { tail -80 "$OWNER_LOG"; tail -80 "$RELAY_LOG"; exit 1; }
 
-SECRET="${INVITE#*#key=}"
+ATTN_HOME="$ATTN_HOME" "$ATTN_BIN" --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'opened'" >/dev/null
+deadline=$((SECONDS + 10))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  ready="$(ATTN_HOME="$ATTN_HOME" "$ATTN_BIN" --eval "Boolean(document.querySelector('[data-slot=share-tier-view]'))" 2>/dev/null || true)"
+  [ "$ready" = "true" ] && break
+  sleep 0.2
+done
+[ "${ready:-false}" = "true" ] || { echo 'hosted E2E failed: tiered share sheet did not render' >&2; exit 1; }
+
+for tier_and_label in \
+  'view|Anyone with this link can view' \
+  'comment|Anyone with this link can comment' \
+  'suggest|Anyone with this link can suggest'
+do
+  tier="${tier_and_label%%|*}"
+  expected="${tier_and_label#*|}"
+  actual="$(ATTN_HOME="$ATTN_HOME" "$ATTN_BIN" --eval "document.querySelector('[data-slot=share-tier-${tier}] > span:first-child > span:first-child')?.textContent?.trim() || ''" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s))}catch{}})')"
+  [ "$actual" = "$expected" ] || { echo "hosted E2E failed: share tier '$tier' label was '$actual'" >&2; exit 1; }
+done
+
+ROOM_ID="$(node -e 'const u=new URL(process.argv[1]);process.stdout.write(u.pathname.split("/").filter(Boolean).at(-1) || "")' "$COMMENT_INVITE")"
+DEFAULT_COMMENT_INVITE="$(ATTN_HOME="$ATTN_HOME" ATTN_BROWSER_REVIEW_URL="$WEB_ORIGIN/review" "$ATTN_BIN" review invite "$ROOM_ID" --browser)"
+EXPLICIT_COMMENT_INVITE="$(ATTN_HOME="$ATTN_HOME" ATTN_BROWSER_REVIEW_URL="$WEB_ORIGIN/review" "$ATTN_BIN" review invite "$ROOM_ID" --tier comment --browser)"
+[ "$DEFAULT_COMMENT_INVITE" = "$COMMENT_INVITE" ] && [ "$EXPLICIT_COMMENT_INVITE" = "$COMMENT_INVITE" ] || {
+  echo 'hosted E2E failed: human/default browser invite is not comment tier' >&2
+  exit 1
+}
+
+SECRET="$(node -e 'const u=new URL(process.argv[1]); process.stdout.write(new URLSearchParams(u.hash.slice(1)).get("read") || "")' "$INVITE")"
 ATTN_BROWSER_INVITE_URL="$INVITE" \
+ATTN_BROWSER_COMMENT_INVITE_URL="$COMMENT_INVITE" \
+ATTN_BROWSER_VIEW_INVITE_URL="$VIEW_INVITE" \
+ATTN_BROWSER_SUGGEST_INVITE_URL="$INVITE" \
 ATTN_ROOM_SECRET_CANARY="$SECRET" \
 ATTN_EXPECTED_CANARY="NARWHAL-TEAK-7429" \
 ATTN_COMMENT_CANARY="$COMMENT_CANARY" \

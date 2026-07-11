@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "algorithm": "HKDF-SHA-256, empty salt, info = UTF-8(\"attn share room v3\") || uint64be(epoch), L=32",
+  "vectors": [
+    {
+      "name": "zero",
+      "shareSecret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "epoch": 0,
+      "roomSecret": "IToXWcPpD2l0raR7TFrSZqtg8C81RTzh3pZX1OJPrXg"
+    },
+    {
+      "name": "zero-epoch-1",
+      "shareSecret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "epoch": 1,
+      "roomSecret": "BkcWRsd2o4fO0qytU3JHcPQ1SV7GoKs_qTzNbtOVvz4"
+    },
+    {
+      "name": "ascending-epoch-42",
+      "shareSecret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "epoch": 42,
+      "roomSecret": "4tBOOHUAK_q2JrhCTtLMpijtHtqmzWHgZFx0JAO2OV8"
+    },
+    {
+      "name": "ff-max-safe",
+      "shareSecret": "__________________________________________8",
+      "epoch": 9007199254740991,
+      "roomSecret": "dO5s2SsOVgrx8-G7IcCT1GwShI45VhHywy0fs9axrWM"
+    }
+  ]
+}

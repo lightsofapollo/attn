@@ -44,6 +44,12 @@ pub enum UserEvent {
     /// `ReviewManager` integrates into the *existing* event loop rather than
     /// spinning up a separate runtime. See issue attn-nnj.2.8.
     Review(crate::review::manager::ReviewUpdate),
+    /// Post a content-safe native review notification on the main thread.
+    #[cfg(target_os = "macos")]
+    PostReviewNotification(crate::review::notifications::ReviewNotification),
+    /// A native notification click routed back through the review deep-link path.
+    #[cfg(target_os = "macos")]
+    OpenReviewDeepLink(String),
     /// Take a screenshot and send the path back through the channel.
     #[cfg(debug_assertions)]
     Screenshot(std::sync::mpsc::Sender<String>),
@@ -56,6 +62,8 @@ pub enum UserEvent {
     OpenDevtools,
     /// The user started dragging a custom title bar region.
     DragWindow,
+    /// Explicitly toggle the macOS resident daemon LaunchAgent.
+    ResidentLaunchAtLogin { enabled: bool },
     /// Show and focus the main window.
     #[cfg(target_os = "macos")]
     ShowWindow,

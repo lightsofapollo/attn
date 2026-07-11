@@ -102,19 +102,44 @@ Under the hood this:
 
 ### 3. Submit findings
 
-After 9.7 lands, the same identity is used to sign comments and
-suggestions:
+Named-agent comment, raw-suggestion, and inbox commands remain planned CLI
+surfaces. The currently implemented suggestion path accepts a unified diff:
 
 ```bash
-attn review submit-comment comment.json --as-agent rufus
-attn review submit-suggestion suggestion.json --as-agent rufus
-attn review inbox --json
+attn review submit-suggestion --from-diff /tmp/doc.diff
 ```
 
-The `--as-agent <name>` flag is the only thing that switches the
-signing key from "daemon owner" to "named agent." Without it, findings
-are attributed to the local owner (so a small one-shot pipe doesn't
-have to register an agent for trivial cases).
+The diff convenience path deliberately uses the running daemon's canonical
+identity. It does not accept `--as-agent`: the CLI prepares anchors from the
+daemon's persisted snapshot and sends all valid hunks in one typed local
+socket batch. `--room ID` is optional and exists only to disambiguate the
+same diff path persisted in more than one room.
+
+### Worktree acceptance-gate loop
+
+An agent does its work in a separate git worktree, then submits the resulting
+one-file diff. The owner's working copy is never read or modified by this
+command; only the owner's later accept action can mutate it.
+
+```bash
+# In the agent's worktree:
+git diff -- path/to/doc.md > /tmp/doc.diff
+attn review submit-suggestion --from-diff /tmp/doc.diff
+
+# Or stream it directly. Add --room "$ROOM_ID" only when attn reports that
+# the path is ambiguous across persisted rooms.
+git diff -- path/to/doc.md \
+  | attn review submit-suggestion --from-diff -
+
+# Park on the daemon's envelope-driven verdict condition (no polling).
+attn review verdicts --wait --timeout 30m
+# Branch on the emitted pending/accepted/rejected JSON, reconcile the
+# worktree with accepted hunks, and regenerate rejected changes if needed.
+```
+
+One suggestion is created per hunk, so partial acceptance is natural. If one
+hunk no longer anchors, all other valid hunks are submitted first and the CLI
+then exits non-zero with a diagnostic naming each failed hunk.
 
 ### 4. Exit
 
@@ -220,9 +245,9 @@ decides.
 
 ## Open Items
 
-- `submit-comment` / `submit-suggestion` / `inbox` ship with
-  attn-nnj.9.7. This doc covers the identity + join surfaces (9.6); the
-  submit surfaces hook into the same `--as-agent` plumbing.
+- `submit-comment`, raw `submit-suggestion`, and `inbox` remain future
+  named-agent surfaces. The diff convenience command documented above is
+  intentionally daemon-authored and does not accept `--as-agent`.
 - Browser-hosted agents (`client: "attn-browser"` with `kind: "agent"`)
   are not yet specified. The relay accepts the combination; the UI
   story lands with Phase 6.

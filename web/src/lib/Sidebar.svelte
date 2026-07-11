@@ -23,6 +23,7 @@
   import * as Command from '$lib/components/ui/command';
   import { reviewStore } from './review/store.svelte';
   import type { SidebarPresenceLocation } from './sidebar-presence';
+  import UnreadBadge from './UnreadBadge.svelte';
 
   interface Props {
     entries: TreeNode[];
@@ -322,7 +323,13 @@
         <ScrollArea class="min-h-0 flex-1" scrollbarYClasses="pr-1">
           {#if sidebarView === 'files'}
             {#if reviewMode}
-              <div class="px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">Shared files</div>
+              <div class="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">
+                <span>Shared files</span>
+                <UnreadBadge
+                  count={reviewStore.currentRoomUnread}
+                  label="unread updates in shared files"
+                />
+              </div>
               <ReviewFileTree />
             {:else}
             {#if filteredEntries.length > 0}

@@ -15,6 +15,7 @@ import {
 } from "./browser-origin";
 import { WorkerEdgeRateLimit, type RateLimitResult } from "./rate-limit";
 import { RoomDO } from "./room-do";
+import { ShareDO } from "./share-do";
 import { INTERNAL_QUOTA_SOURCE_HEADER, QuotaDO } from "./quota-do";
 import type { Env } from "./env";
 import {
@@ -23,7 +24,7 @@ import {
   ROOM_ID_MAX_CHARS,
 } from "./opaque-key";
 
-export { QuotaDO, RoomDO };
+export { QuotaDO, RoomDO, ShareDO };
 
 /**
  * Per-Worker-isolate rate limiter. Persists for the lifetime of the
@@ -86,7 +87,8 @@ const INTERNAL_ALLOW_BROWSER_HEADER = "X-Attn-Allow-Browser";
  * relay-spec list (Content-Type for JSON bodies, the three Attn-* protocol
  * headers).
  */
-const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW";
+const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id, Attn-Device-Proof, Attn-Device-Registration, Attn-Share-Bundle";
+const CORS_EXPOSED_HEADERS = "Attn-Share-Bundle, Attn-Share-Tier, Attn-Sealed-Bundle, Attn-Snapshot-Id, Attn-Ciphertext-Sha256";
 
 /** Methods the relay exposes to browsers — everything in the v2 HTTP surface. */
 const CORS_ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS";
@@ -149,6 +151,7 @@ function corsMiddleware(request: Request, env: Env, response: Response): Respons
       newHeaders.set("Access-Control-Allow-Origin", origin);
       newHeaders.set("Access-Control-Allow-Headers", CORS_ALLOWED_HEADERS);
       newHeaders.set("Access-Control-Allow-Methods", CORS_ALLOWED_METHODS);
+      newHeaders.set("Access-Control-Expose-Headers", CORS_EXPOSED_HEADERS);
       // `Vary: Origin` lets caches keep one entry per origin so non-allowlisted
       // hits don't poison the response for a later allowlisted requester.
       const existingVary = newHeaders.get("Vary");
@@ -193,13 +196,13 @@ function buildPreflightForNonRoomRoute(): Response {
  * `/v2/rooms/:roomId` and `/v2/rooms/:roomId/<subroute>`. The first capture
  * is the `roomId` we hand to the DO namespace.
  */
-const ROOM_ROUTE_RE = /^\/v2\/rooms\/([^/]+)(?:\/.*)?$/;
+const ROOM_ROUTE_RE = /^\/v(?:2|3)\/rooms\/([^/]+)(?:\/.*)?$/;
 
 /** Bare room path (no subroute) — `POST` here is room creation. */
-const ROOM_CREATE_RE = /^\/v2\/rooms\/([^/]+)\/?$/;
+const ROOM_CREATE_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/?$/;
 
 /** WS upgrade route matcher: `/v2/rooms/:roomId/socket`. */
-const ROOM_SOCKET_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
+const ROOM_SOCKET_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/socket\/?$/;
 
 /**
  * R2 capability-backed blob route: `/v2/rooms/:roomId/blobs/:envelopeId`.
@@ -210,17 +213,23 @@ const ROOM_SOCKET_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
  * is the `?cap=<token>` query parameter — minted by the DO's POST /blobs
  * handler, verified here on every request.
  */
-const ROOM_BLOB_OBJECT_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
+const ROOM_BLOB_OBJECT_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
+const SHARE_ROUTE_RE = /^\/v3\/shares\/([^/]+)(?:\/.*)?$/;
+const SHARE_WATCH_RE = /^\/v3\/shares\/([^/]+)\/watch\/?$/;
+const SHARE_CREATE_RE = /^\/v3\/shares\/([^/]+)\/?$/;
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    const shareMatch = url.pathname.match(SHARE_ROUTE_RE);
+    if (shareMatch?.[1] && !isProtocolId(shareMatch[1], ROOM_ID_MAX_CHARS)) return identifierError();
+
     // Reject unsafe room identifiers before quota attribution, edge-rate
     // counters, Durable Object name allocation, or any other durable side
     // effect. Protocol-v2 room IDs are base64url tokens, not path text.
     const earlyRoomMatch = url.pathname.match(ROOM_ROUTE_RE);
-    if (url.pathname.startsWith("/v2/rooms/") && earlyRoomMatch?.[1] === undefined) {
+    if (/^\/v(?:2|3)\/rooms\//.test(url.pathname) && earlyRoomMatch?.[1] === undefined) {
       return identifierError();
     }
     if (earlyRoomMatch?.[1] !== undefined && !isProtocolId(earlyRoomMatch[1], ROOM_ID_MAX_CHARS)) {
@@ -300,6 +309,13 @@ export default {
     // without CORS headers. Browsers only legitimately preflight room routes;
     // a 204 here is just defensive politeness. Room-route OPTIONS is dispatched
     // to the DO below so the response can be conditioned on policy.allowBrowser.
+    if (request.method === "OPTIONS" && shareMatch?.[1]) {
+      return corsMiddleware(
+        request,
+        env,
+        new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } }),
+      );
+    }
     if (request.method === "OPTIONS" && !ROOM_ROUTE_RE.test(url.pathname)) {
       return buildPreflightForNonRoomRoute();
     }
@@ -331,11 +347,31 @@ export default {
     // always injects CF-Connecting-IP at the edge (a client can't strip it), so
     // in production this is never "unknown". Lumping every anonymous dev/test
     // caller into one create bucket would be a counterproductive false-positive.
-    if (ip !== "unknown" && request.method === "POST" && ROOM_CREATE_RE.test(url.pathname)) {
+    if (
+      ip !== "unknown"
+      && request.method === "POST"
+      && (ROOM_CREATE_RE.test(url.pathname) || SHARE_CREATE_RE.test(url.pathname))
+    ) {
       const createResult = edgeRateLimit.checkCreate(ip);
       if (!createResult.ok) {
         return rateLimitedResponse(createResult);
       }
+    }
+
+    if (shareMatch?.[1]) {
+      let forwardedRequest = request;
+      if (SHARE_WATCH_RE.test(url.pathname)) {
+        const forwardedHeaders = new Headers(request.headers);
+        forwardedHeaders.set(
+          INTERNAL_EDGE_ORIGIN_HEADER,
+          encodeEdgeOriginContext(request.headers.get("Origin")),
+        );
+        forwardedRequest = new Request(request, { headers: forwardedHeaders });
+      }
+      const response = await env.RELAY_SHARES
+        .get(env.RELAY_SHARES.idFromName(shareMatch[1]))
+        .fetch(forwardedRequest);
+      return corsMiddleware(request, env, response);
     }
 
     // WebSocket upgrade for /v2/rooms/:roomId/socket. The DO performs admission
@@ -608,7 +644,7 @@ async function maybeUpgradeUnknownRoomTo429(
  * sentinel bucket.
  */
 function roomIdForRateBucket(pathname: string): string | undefined {
-  const m = pathname.match(/^\/v2\/rooms\/([^/]+)(?:\/.*)?$/);
+  const m = pathname.match(/^\/v(?:2|3)\/rooms\/([^/]+)(?:\/.*)?$/);
   return m?.[1];
 }
 
@@ -636,7 +672,12 @@ async function handleBlobPut(
   }
   let verified;
   try {
-    verified = await verifyBlobCap(cap, { method: "PUT", roomId, envelopeId }, env);
+    verified = await verifyBlobCap(cap, {
+      method: "PUT",
+      roomId,
+      envelopeId,
+      protocolVersion: url.pathname.startsWith("/v3/") ? 3 : 2,
+    }, env);
   } catch {
     return blobErrorResponse(503, "ATTN_BLOB_CAP_UNAVAILABLE", "blob capability verifier unavailable");
   }
@@ -706,7 +747,12 @@ async function handleBlobGet(
   }
   let verified;
   try {
-    verified = await verifyBlobCap(cap, { method: "GET", roomId, envelopeId }, env);
+    verified = await verifyBlobCap(cap, {
+      method: "GET",
+      roomId,
+      envelopeId,
+      protocolVersion: url.pathname.startsWith("/v3/") ? 3 : 2,
+    }, env);
   } catch {
     return blobErrorResponse(503, "ATTN_BLOB_CAP_UNAVAILABLE", "blob capability verifier unavailable");
   }

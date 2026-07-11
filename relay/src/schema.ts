@@ -90,6 +90,34 @@ export const roomCreationSchema = z.object({
     .max(BASE64URL_32_BYTE_MAX_CHARS),
 });
 
+/** Additive `/v3` create body; v2 schema and call sites remain unchanged. */
+export const roomCreationSchemaV3 = z.object({
+  v: z.literal(3),
+  policy: policySchema,
+  ownerSigningKey: b64url.min(1).max(BASE64URL_32_BYTE_MAX_CHARS),
+  readAdmissionKey: b64url.min(1).max(BASE64URL_32_BYTE_MAX_CHARS),
+  writeAdmissionKey: b64url.min(1).max(BASE64URL_32_BYTE_MAX_CHARS),
+}).superRefine((body, ctx) => {
+  if (constantTimeStringEquals(body.readAdmissionKey, body.writeAdmissionKey)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["writeAdmissionKey"],
+      message: "writeAdmissionKey must differ from readAdmissionKey",
+    });
+  }
+});
+
+function constantTimeStringEquals(a: string, b: string): boolean {
+  let diff = a.length ^ b.length;
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i++) {
+    diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  }
+  return diff === 0;
+}
+
+export type RoomCreationRequestV3 = z.infer<typeof roomCreationSchemaV3>;
+
 export type RoomCreationRequest = z.infer<typeof roomCreationSchema>;
 export type RoomPolicyInput = z.input<typeof policySchema>;
 export type RoomPolicy = z.infer<typeof policySchema>;
@@ -125,7 +153,26 @@ export const deviceRegistrationSchema = z.object({
     .max(BASE64URL_64_BYTE_MAX_CHARS),
 });
 
+export const deviceRegistrationSchemaV3 = deviceRegistrationSchema.extend({
+  grantTier: z.enum(["comment", "suggest"]).optional(),
+  grantSignature: b64url.min(1).max(BASE64URL_64_BYTE_MAX_CHARS).optional(),
+}).superRefine((body, ctx) => {
+  if (body.kind === "owner" && (body.grantTier !== undefined || body.grantSignature !== undefined)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "v3 owner registration forbids grantTier and grantSignature",
+    });
+  }
+  if (body.kind !== "owner" && (body.grantTier === undefined || body.grantSignature === undefined)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "v3 non-owner registration requires grantTier and grantSignature",
+    });
+  }
+});
+
 export type DeviceRegistrationRequest = z.infer<typeof deviceRegistrationSchema>;
+export type DeviceRegistrationRequestV3 = z.infer<typeof deviceRegistrationSchemaV3>;
 
 /**
  * Stored shape returned by `GET /v2/rooms/:roomId/devices`. Adds `registeredAt`
@@ -134,6 +181,8 @@ export type DeviceRegistrationRequest = z.infer<typeof deviceRegistrationSchema>
  * return devices in registration order.
  */
 export interface DeviceRecord extends DeviceRegistrationRequest {
+  grantTier?: "comment" | "suggest";
+  grantSignature?: string;
   registeredAt: number;
 }
 
@@ -177,6 +226,10 @@ export const envelopeSchema = z.object({
   nonce: b64url.min(1, "nonce required").max(XCHACHA20_NONCE_MAX_CHARS),
   ciphertext: b64url, // empty ciphertext is allowed at the schema layer; per-kind cap is enforced in handler
   ciphertextBytes: z.number().int().positive(),
+  /** V3 signal-only monotonic negotiation/collaboration generation. */
+  signalGeneration: z.number().int().nonnegative().optional(),
+  /** Ed25519 signature by the immutable registered device key. */
+  deviceSignature: b64url.max(86).optional(),
 });
 
 export const envelopeBatchSchema = z.object({
@@ -188,6 +241,81 @@ export const envelopeBatchSchema = z.object({
 export type EnvelopeInput = z.infer<typeof envelopeSchema>;
 export type EnvelopeBatchInput = z.infer<typeof envelopeBatchSchema>;
 export type EnvelopeKind = z.infer<typeof envelopeKindSchema>;
+
+// --- POST /v3/shares/:shareId/mailbox ------------------------------------
+
+/**
+ * Content-blind durable-share submission framing. These schemas deliberately
+ * validate only cleartext routing/authentication metadata and encrypted
+ * envelope headers. The relay never opens `ciphertext` or interprets a
+ * ReviewEvent body.
+ *
+ * All objects are strict because a durable mailbox item can outlive the room
+ * that produced it. Accepting an unbounded/unknown field here would turn the
+ * ShareDO into an attacker-controlled long-lived object store and make owner
+ * intake ambiguity survive every retry.
+ */
+export const durableSubmissionDeviceSchema = z.object({
+  deviceId: z.string().min(1).max(DEVICE_ID_MAX_CHARS),
+  participantId: z.string().min(1).max(PARTICIPANT_ID_MAX_CHARS),
+  publicSigningKey: b64url.length(BASE64URL_32_BYTE_MAX_CHARS),
+  publicEncryptionKey: b64url.length(BASE64URL_32_BYTE_MAX_CHARS),
+  client: z.enum(["attn-native", "attn-browser", "agent-cli"]),
+  kind: z.enum(["reviewer", "agent"]),
+  grantTier: z.enum(["comment", "suggest"]),
+  grantSignature: b64url.length(BASE64URL_64_BYTE_MAX_CHARS),
+  selfSignature: b64url.length(BASE64URL_64_BYTE_MAX_CHARS),
+}).strict();
+
+export const durableSubmissionEnvelopeSchema = z.object({
+  v: z.literal(2),
+  roomId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/),
+  envelopeId: z.string().min(1).max(ENVELOPE_ID_MAX_CHARS).regex(/^[A-Za-z0-9_-]+$/),
+  authorId: z.string().min(1).max(PARTICIPANT_ID_MAX_CHARS),
+  deviceId: z.string().min(1).max(DEVICE_ID_MAX_CHARS),
+  createdAt: unixMs,
+  expiresAt: unixMs,
+  kind: z.literal("event"),
+  nonce: b64url.length(XCHACHA20_NONCE_MAX_CHARS),
+  ciphertext: b64url.max(350_000),
+  ciphertextBytes: z.number().int().min(16).max(256 * 1024),
+}).strict().superRefine((envelope, ctx) => {
+  if (envelope.expiresAt < envelope.createdAt) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expiresAt"], message: "expiresAt precedes createdAt" });
+  }
+});
+
+export const durableReviewSubmissionSchema = z.object({
+  v: z.literal(3),
+  envelopeId: z.string().min(1).max(ENVELOPE_ID_MAX_CHARS).regex(/^[A-Za-z0-9_-]+$/),
+  type: z.literal("review_submission"),
+  shareId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/),
+  epoch: z.number().int().nonnegative().safe(),
+  roomId: z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/),
+  tier: z.enum(["comment", "suggest"]),
+  /** Required for tier-bundle shares; omitted only by legacy single-key shares. */
+  bundleId: z.string().length(22).regex(/^[A-Za-z0-9_-]+$/).optional(),
+  deviceRegistration: durableSubmissionDeviceSchema,
+  envelopes: z.array(durableSubmissionEnvelopeSchema).min(2).max(8),
+}).strict().superRefine((submission, ctx) => {
+  if (submission.deviceRegistration.grantTier !== submission.tier) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["deviceRegistration", "grantTier"], message: "grant tier mismatch" });
+  }
+  const envelopeIds = new Set<string>();
+  for (const [index, envelope] of submission.envelopes.entries()) {
+    if (envelope.roomId !== submission.roomId
+      || envelope.deviceId !== submission.deviceRegistration.deviceId
+      || envelope.authorId !== submission.deviceRegistration.participantId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["envelopes", index], message: "envelope routing identity mismatch" });
+    }
+    if (envelopeIds.has(envelope.envelopeId)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["envelopes", index, "envelopeId"], message: "duplicate envelopeId" });
+    }
+    envelopeIds.add(envelope.envelopeId);
+  }
+});
+
+export type DurableReviewSubmission = z.infer<typeof durableReviewSubmissionSchema>;
 
 /**
  * Stored shape — the wire envelope plus the server-assigned `serverSeq`.

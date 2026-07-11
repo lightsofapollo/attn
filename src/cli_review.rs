@@ -21,7 +21,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use crate::daemon::runtime_dir;
 use crate::review::agent_identity::{
@@ -29,7 +29,7 @@ use crate::review::agent_identity::{
 };
 use crate::review::bootstrap::{
     BootstrapConfig, BootstrapError, Bootstrapper, DeviceIdentity, IDENTITY_FILENAME,
-    load_or_create_identity_in,
+    load_identity_from, load_or_create_identity_in,
 };
 use crate::review::store::ReviewStore;
 use std::io::{self, IsTerminal, Write};
@@ -118,6 +118,57 @@ pub enum ReviewSubcommand {
         ttl: Option<String>,
     },
 
+    /// Re-emit a capability-scoped v3 invite for an existing local share.
+    Invite {
+        /// Exact shared path or persisted room id.
+        path_or_room: String,
+        /// Human invites default to comment-only. Agents should request suggest.
+        #[arg(long, value_enum, default_value_t = InviteTierArg::Comment)]
+        tier: InviteTierArg,
+        /// Emit the hosted HTTPS URL instead of an attn:// deep link.
+        #[arg(long)]
+        browser: bool,
+    },
+
+    /// Print suggestion verdicts derived from persisted review events across
+    /// every local room. JSON has the stable shape
+    /// `{"rooms":{"<room_id>":{"suggestions":{"<suggestion_id>":{"status":"pending|accepted|rejected","resulting_hash":"<hash>"}}}}}`.
+    /// `resulting_hash` is present only for accepted suggestions.
+    Verdicts {
+        /// Emit the documented machine-readable JSON report.
+        #[arg(long)]
+        json: bool,
+        /// Include suggestions from every creator, rather than only the
+        /// calling identity's suggestions.
+        #[arg(long)]
+        all: bool,
+        /// Scope to this registered agent identity instead of the daemon's
+        /// identity. Ignored for filtering with `--all`, but still validated.
+        #[arg(long, value_name = "NAME")]
+        as_agent: Option<String>,
+        /// Park until the captured suggestion set is accepted or rejected.
+        #[arg(long)]
+        wait: bool,
+        /// Wait for these comma-separated suggestion ids instead of all
+        /// currently pending suggestions visible to the calling identity.
+        #[arg(long = "for", value_name = "ID,ID", value_delimiter = ',', num_args = 1..)]
+        for_ids: Option<Vec<String>>,
+        /// Maximum wait (`ms`, `s`, `m`, or `h`, for example `500ms`, `2m`).
+        #[arg(long, value_name = "DURATION", value_parser = parse_verdict_wait_duration)]
+        timeout: Option<Duration>,
+    },
+
+    /// Turn a one-file unified diff into one suggestion per hunk, anchored
+    /// against the current persisted shared snapshot.
+    SubmitSuggestion {
+        /// Unified diff file, or `-` to read the diff from stdin.
+        #[arg(long, value_name = "FILE|-", required = true)]
+        from_diff: String,
+        /// Select one persisted room when the diff path is ambiguous.
+        #[arg(long, value_name = "ID")]
+        room: Option<String>,
+    },
+
     /// Run a **headless, long-lived** review participant — no window, no
     /// webview. The keystone for cross-topology testing (attn-8zd): a GUI-less
     /// peer that joins a room, *holds* the connection (WebRTC mesh + relay WS),
@@ -157,6 +208,13 @@ pub enum ReviewSubcommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InviteTierArg {
+    View,
+    Comment,
+    Suggest,
+}
+
 /// Default relay URL when `--relay-url` isn't passed and `ATTN_RELAY_URL`
 /// isn't set. Points at the dev relay so a local `wrangler dev` works
 /// without extra setup.
@@ -188,12 +246,178 @@ pub fn run(args: ReviewArgs) -> Result<()> {
         ReviewSubcommand::Share { path, mode, ttl } => {
             run_share_via_daemon(&path, &mode, ttl.as_deref())
         }
+        ReviewSubcommand::Invite {
+            path_or_room,
+            tier,
+            browser,
+        } => run_invite(&path_or_room, tier, browser),
+        ReviewSubcommand::Verdicts {
+            json,
+            all,
+            as_agent,
+            wait,
+            for_ids,
+            timeout,
+        } => run_verdicts(json, all, as_agent.as_deref(), wait, for_ids, timeout),
+        ReviewSubcommand::SubmitSuggestion { from_diff, room } => {
+            run_submit_suggestion_from_diff(&from_diff, room.as_deref())
+        }
         ReviewSubcommand::Agent {
             share,
             mode,
             relay_url,
         } => run_agent(share.as_deref(), &mode, relay_url.as_deref()),
     }
+}
+
+fn run_invite(target: &str, tier: InviteTierArg, browser: bool) -> Result<()> {
+    use crate::review::bootstrap::{InviteTierV3, build_existing_share_invite_v3};
+    let base = runtime_dir().context("resolve runtime directory for invite")?;
+    let identity = load_identity_from(&base)
+        .context("load owner identity")?
+        .context("no owner identity exists yet; share a room first")?;
+    let store = ReviewStore::open().context("open persisted review store")?;
+    let tier = match tier {
+        InviteTierArg::View => InviteTierV3::View,
+        InviteTierArg::Comment => InviteTierV3::Comment,
+        InviteTierArg::Suggest => InviteTierV3::Suggest,
+    };
+    let invite = build_existing_share_invite_v3(store.root(), &identity, target, tier, browser)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    println!("{invite}");
+    Ok(())
+}
+
+fn run_submit_suggestion_from_diff(from_diff: &str, room: Option<&str>) -> Result<()> {
+    let diff = if from_diff == "-" {
+        let mut input = String::new();
+        io::Read::read_to_string(&mut io::stdin().lock(), &mut input)
+            .context("read unified diff from stdin")?;
+        input
+    } else {
+        std::fs::read_to_string(from_diff)
+            .with_context(|| format!("read unified diff {from_diff:?}"))?
+    };
+    let store = ReviewStore::open().context("open persisted review store")?;
+    let report = crate::review::diff_suggestions::suggestions_from_diff(&store, &diff, room)?;
+
+    // Partial success is intentional: get every valid hunk into the approval
+    // queue before returning a non-zero status for invalid ones.
+    if !report.suggestions.is_empty() {
+        let ordinals = report
+            .suggestions
+            .iter()
+            .map(|item| item.hunk.to_string())
+            .collect::<Vec<_>>();
+        let submitted = crate::daemon::send_review_suggestions(report.suggestions)
+            .context("submit diff suggestions through the running daemon")?;
+        println!(
+            "submitted {submitted} suggestion(s) from hunk(s): {}",
+            ordinals.join(", ")
+        );
+    }
+    if !report.failures.is_empty() {
+        for failure in &report.failures {
+            eprintln!("hunk {} failed: {}", failure.hunk, failure.message);
+        }
+        bail!(
+            "{} diff hunk(s) could not be submitted",
+            report.failures.len()
+        );
+    }
+    Ok(())
+}
+
+fn run_verdicts(
+    json: bool,
+    all: bool,
+    as_agent: Option<&str>,
+    wait: bool,
+    for_ids: Option<Vec<String>>,
+    timeout: Option<Duration>,
+) -> Result<()> {
+    validate_verdict_wait_options(wait, for_ids.as_deref(), timeout)?;
+    if !json && !wait {
+        bail!("verdicts currently requires --json");
+    }
+    let base = runtime_dir().context("resolve runtime_dir for verdict identity")?;
+    let identity = load_verdict_identity(&base, as_agent)?;
+    if wait {
+        match crate::daemon::send_review_verdicts_wait(
+            identity.typed_participant_id(),
+            all,
+            for_ids,
+            timeout,
+        )
+        .context("wait for persisted review verdicts from the running daemon")?
+        {
+            crate::review::manager::VerdictWaitOutcome::Complete(report) => {
+                println!("{}", verdicts_json(&report)?);
+                Ok(())
+            }
+            crate::review::manager::VerdictWaitOutcome::TimedOut(report) => {
+                // Keep the machine-readable channel clean even on non-zero
+                // exit. `main` writes the human timeout diagnostic to stderr.
+                println!("{}", verdicts_json(&report)?);
+                bail!("timed out waiting for suggestion verdicts")
+            }
+        }
+    } else {
+        let report = crate::daemon::send_review_verdicts(identity.typed_participant_id(), all)
+            .context("query persisted review verdicts from the running daemon")?;
+        println!("{}", verdicts_json(&report)?);
+        Ok(())
+    }
+}
+
+fn validate_verdict_wait_options(
+    wait: bool,
+    for_ids: Option<&[String]>,
+    timeout: Option<Duration>,
+) -> Result<()> {
+    if !wait && for_ids.is_some() {
+        bail!("--for requires --wait");
+    }
+    if !wait && timeout.is_some() {
+        bail!("--timeout requires --wait");
+    }
+    Ok(())
+}
+
+fn parse_verdict_wait_duration(raw: &str) -> std::result::Result<Duration, String> {
+    let (number, multiplier) = if let Some(number) = raw.strip_suffix("ms") {
+        (number, 1u64)
+    } else if let Some(number) = raw.strip_suffix('s') {
+        (number, 1_000)
+    } else if let Some(number) = raw.strip_suffix('m') {
+        (number, 60_000)
+    } else if let Some(number) = raw.strip_suffix('h') {
+        (number, 3_600_000)
+    } else {
+        return Err("duration must end in ms, s, m, or h".to_string());
+    };
+    let value = number
+        .parse::<u64>()
+        .map_err(|_| format!("invalid duration {raw:?}"))?;
+    let millis = value
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("duration {raw:?} is too large"))?;
+    Ok(Duration::from_millis(millis))
+}
+
+fn load_verdict_identity(base: &Path, as_agent: Option<&str>) -> Result<DeviceIdentity> {
+    match as_agent {
+        Some(name) => load_agent_in(base, name).with_context(|| {
+            format!("load agent {name:?} — run `attn review register-agent {name}` first")
+        }),
+        None => load_identity_from(base)
+            .context("load daemon identity")?
+            .context("no daemon identity exists yet; share or join a review room first"),
+    }
+}
+
+fn verdicts_json(report: &crate::review::store::VerdictsReport) -> Result<String> {
+    serde_json::to_string(report).context("serialize verdict report")
 }
 
 fn set_attn_home_for_review(home: &Path) -> Result<()> {
@@ -257,7 +481,7 @@ fn run_agent(share: Option<&str>, mode: &str, relay_url_override: Option<&str>) 
 /// the invite). Reuse the same `parse_invite` the daemon runs so the CLI
 /// rejects exactly what the daemon would.
 fn validate_invite_for_join(invite: &str) -> Result<()> {
-    crate::review::bootstrap::parse_invite(invite).map_err(|e| {
+    crate::review::bootstrap::parse_invite_any(invite).map_err(|e| {
         anyhow::anyhow!(
             "invalid review invite ({e}).\n\
              Expected an invite URL like attn://review/<roomId>#key=<secret> — \
@@ -474,6 +698,232 @@ fn bootstrap_err_to_anyhow(err: BootstrapError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        command: TestCommand,
+    }
+
+    #[derive(Subcommand)]
+    enum TestCommand {
+        Review(ReviewArgs),
+    }
+
+    #[test]
+    fn invite_cli_defaults_comment_and_parses_browser_suggest() {
+        let parsed = TestCli::try_parse_from(["attn", "review", "invite", "room-a"])
+            .expect("default invite");
+        assert!(matches!(
+            parsed.command,
+            TestCommand::Review(ReviewArgs {
+                command: ReviewSubcommand::Invite {
+                    tier: InviteTierArg::Comment,
+                    browser: false,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        let parsed = TestCli::try_parse_from([
+            "attn",
+            "review",
+            "invite",
+            "/tmp/plan.md",
+            "--tier",
+            "suggest",
+            "--browser",
+        ])
+        .expect("suggest browser invite");
+        assert!(matches!(
+            parsed.command,
+            TestCommand::Review(ReviewArgs {
+                command: ReviewSubcommand::Invite {
+                    tier: InviteTierArg::Suggest,
+                    browser: true,
+                    ..
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn from_diff_cli_parses_file_and_stdin() {
+        for source in ["change.diff", "-"] {
+            let parsed = TestCli::try_parse_from([
+                "attn",
+                "review",
+                "submit-suggestion",
+                "--from-diff",
+                source,
+                "--room",
+                "room-a",
+            ])
+            .expect("parse from-diff CLI");
+            let TestCommand::Review(ReviewArgs {
+                command: ReviewSubcommand::SubmitSuggestion { from_diff, room },
+                ..
+            }) = parsed.command
+            else {
+                panic!("expected submit-suggestion")
+            };
+            assert_eq!(from_diff, source);
+            assert_eq!(room.as_deref(), Some("room-a"));
+        }
+        assert!(TestCli::try_parse_from(["attn", "review", "submit-suggestion"]).is_err());
+    }
+
+    #[test]
+    fn verdicts_cli_parses_json_all_and_as_agent() {
+        let parsed = TestCli::try_parse_from([
+            "attn",
+            "review",
+            "verdicts",
+            "--json",
+            "--all",
+            "--as-agent",
+            "rufus",
+        ])
+        .expect("parse verdicts CLI");
+        match parsed.command {
+            TestCommand::Review(ReviewArgs {
+                command:
+                    ReviewSubcommand::Verdicts {
+                        json,
+                        all,
+                        as_agent,
+                        wait,
+                        for_ids,
+                        timeout,
+                    },
+                ..
+            }) => {
+                assert!(json);
+                assert!(all);
+                assert_eq!(as_agent.as_deref(), Some("rufus"));
+                assert!(!wait);
+                assert!(for_ids.is_none());
+                assert!(timeout.is_none());
+            }
+            _ => panic!("expected review verdicts"),
+        }
+    }
+
+    #[test]
+    fn verdicts_cli_parses_wait_targets_and_timeout() {
+        let parsed = TestCli::try_parse_from([
+            "attn",
+            "review",
+            "verdicts",
+            "--wait",
+            "--for",
+            "suggestion-a,suggestion-b",
+            "--timeout",
+            "2m",
+        ])
+        .expect("parse wait CLI");
+        let TestCommand::Review(ReviewArgs {
+            command:
+                ReviewSubcommand::Verdicts {
+                    json,
+                    wait,
+                    for_ids,
+                    timeout,
+                    ..
+                },
+            ..
+        }) = parsed.command
+        else {
+            panic!("expected review verdicts")
+        };
+        assert!(!json, "--wait implies JSON at execution time");
+        assert!(wait);
+        assert_eq!(
+            for_ids,
+            Some(vec!["suggestion-a".to_string(), "suggestion-b".to_string()])
+        );
+        assert_eq!(timeout, Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn verdicts_duration_parser_supports_ms_s_m_h_and_rejects_bare_values() {
+        assert_eq!(
+            parse_verdict_wait_duration("250ms"),
+            Ok(Duration::from_millis(250))
+        );
+        assert_eq!(
+            parse_verdict_wait_duration("3s"),
+            Ok(Duration::from_secs(3))
+        );
+        assert_eq!(
+            parse_verdict_wait_duration("2m"),
+            Ok(Duration::from_secs(120))
+        );
+        assert_eq!(
+            parse_verdict_wait_duration("1h"),
+            Ok(Duration::from_secs(3600))
+        );
+        assert!(parse_verdict_wait_duration("30").is_err());
+    }
+
+    #[test]
+    fn verdicts_for_and_timeout_require_wait() {
+        let ids = vec!["suggestion-a".to_string()];
+        assert!(validate_verdict_wait_options(false, Some(&ids), None).is_err());
+        assert!(validate_verdict_wait_options(false, None, Some(Duration::from_secs(1))).is_err());
+        assert!(
+            validate_verdict_wait_options(true, Some(&ids), Some(Duration::from_secs(1))).is_ok()
+        );
+    }
+
+    #[test]
+    fn verdicts_json_output_is_exact_and_omits_absent_hash() {
+        use crate::review::store::{
+            RoomVerdicts, SuggestionVerdict, SuggestionVerdictStatus, VerdictsReport,
+        };
+        let report = VerdictsReport {
+            rooms: [(
+                "room-a".to_string(),
+                RoomVerdicts {
+                    suggestions: [
+                        (
+                            "accepted".to_string(),
+                            SuggestionVerdict {
+                                status: SuggestionVerdictStatus::Accepted,
+                                resulting_hash: Some("hash-exact".to_string()),
+                            },
+                        ),
+                        (
+                            "pending".to_string(),
+                            SuggestionVerdict {
+                                status: SuggestionVerdictStatus::Pending,
+                                resulting_hash: None,
+                            },
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(
+            verdicts_json(&report).expect("serialize"),
+            r#"{"rooms":{"room-a":{"suggestions":{"accepted":{"status":"accepted","resulting_hash":"hash-exact"},"pending":{"status":"pending"}}}}}"#
+        );
+    }
+
+    #[test]
+    fn verdicts_missing_daemon_identity_does_not_create_one() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error = load_verdict_identity(temp.path(), None).expect_err("identity must be absent");
+        assert!(error.to_string().contains("no daemon identity exists yet"));
+        assert!(!temp.path().join(IDENTITY_FILENAME).exists());
+    }
 
     #[test]
     fn join_with_as_agent_takes_the_headless_agent_path() {

@@ -101,6 +101,10 @@ pub enum TransportEvent {
     EventImported {
         room_id: RoomId,
         event: crate::review::model::ReviewEvent,
+        /// True only when this delivery appended the event to `events.jsonl`.
+        /// Duplicate mailbox/WebRTC delivery may still be surfaced to UI
+        /// consumers, but must not drive unread/notification accounting.
+        newly_imported: bool,
     },
     /// Presence (join/leave) update for a remote device in the room.
     Presence {

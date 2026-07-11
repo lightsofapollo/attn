@@ -52,14 +52,14 @@ defineCase('owner offline disables live editing without disabling durable review
   assert(availability.ownerStatus === BROWSER_OWNER_OFFLINE_STATUS, 'offline status copy drifted');
 });
 
-defineCase('authenticated owner presence enables epoch-bound editing', () => {
+defineCase('authenticated owner presence keeps reviewer document read-only', () => {
   const availability = browserReviewerAvailability({
     hasMarkdownSnapshot: true,
     ownerOnline: true,
     liveEditingAvailable: true,
     authoringReady: true,
   });
-  assert(availability.liveEditing, 'online owner did not enable live editing');
+  assert(!availability.liveEditing, 'online owner granted reviewer document authority');
   assert(availability.ownerStatus === null, 'online owner retained offline status');
 });
 

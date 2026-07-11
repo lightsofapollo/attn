@@ -17,6 +17,7 @@ import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 
 import {
+  verifyAdmissionV3,
   verifyAdmission,
   AdmissionError,
   base64UrlDecode,
@@ -25,6 +26,15 @@ import {
   constantTimeEquals,
 } from "./admission";
 import { canonicalize, type CanonicalValue } from "./canonical";
+import {
+  canonicalDeviceSignalProofV3,
+  canonicalDeviceWebSocketProofV3,
+  DeviceProofError,
+  validateDeviceProofNonce,
+  validateDeviceProofTime,
+  verifyDeviceHttpProofV3,
+  verifyDeviceProofSignature,
+} from "./device-proof";
 import {
   INTERNAL_EDGE_ORIGIN_HEADER,
   parseEdgeOriginContext,
@@ -58,24 +68,38 @@ import {
   acksRequestSchema,
   blobPresignRequestSchema,
   deviceRegistrationSchema,
+  deviceRegistrationSchemaV3,
   envelopeBatchSchema,
   roomCreationSchema,
+  roomCreationSchemaV3,
   type DeviceRecord,
   type DeviceRegistrationRequest,
   type EnvelopeInput,
   type EnvelopeRecord,
   type RoomPolicy,
 } from "./schema";
+import {
+  MAX_PUSH_SUBSCRIPTIONS,
+  parsePushSubscriptionInput,
+  PUSH_DEBOUNCE_MS,
+  PUSH_SUBSCRIPTION_PREFIX,
+  pushLastSentKey,
+  publicPushSubscription,
+  pushSubscriptionKey,
+  sendPayloadlessPush,
+  type StoredPushSubscription,
+} from "./web-push";
 
-const ROOM_PATH_RE = /^\/v2\/rooms\/([^/]+)\/?$/;
-const ROOM_DEVICES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/devices\/?$/;
-const ROOM_ENVELOPES_PATH_RE = /^\/v2\/rooms\/([^/]+)\/envelopes\/?$/;
-const ROOM_ACKS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/acks\/?$/;
-const ROOM_SOCKET_PATH_RE = /^\/v2\/rooms\/([^/]+)\/socket\/?$/;
-const ROOM_BLOBS_PATH_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/?$/;
-const ROOM_BLOB_OBJECT_PATH_RE = /^\/v2\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
+const ROOM_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/?$/;
+const ROOM_DEVICES_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/devices\/?$/;
+const ROOM_ENVELOPES_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/envelopes\/?$/;
+const ROOM_ACKS_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/acks\/?$/;
+const ROOM_SOCKET_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/socket\/?$/;
+const ROOM_BLOBS_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/blobs\/?$/;
+const ROOM_BLOB_OBJECT_PATH_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
+const ROOM_PUSH_SUBSCRIPTION_PATH_RE = /^\/v3\/rooms\/([^/]+)\/push-subscriptions\/([^/]+)\/?$/;
 /** Any path starting with `/v2/rooms/:roomId` (optionally followed by a subroute). */
-const ROOM_PATH_LOOSE_RE = /^\/v2\/rooms\/([^/]+)(?:\/.*)?$/;
+const ROOM_PATH_LOOSE_RE = /^\/v(?:2|3)\/rooms\/([^/]+)(?:\/.*)?$/;
 
 /**
  * Best-effort extraction of the roomId from any room-scoped path. Used by the
@@ -113,9 +137,12 @@ function parseEnvAllowedOrigins(env: Env): Set<string> {
  * `tagAllowBrowserOnResponse` (the runtime freezes 101 response headers
  * once the webSocket is attached), so we set the header at construction.
  */
-function buildSocketUpgradeHeaders(policy: RoomPolicy | undefined): Record<string, string> {
+function buildSocketUpgradeHeaders(
+  policy: RoomPolicy | undefined,
+  protocolVersion = 2,
+): Record<string, string> {
   const headers: Record<string, string> = {
-    "Sec-WebSocket-Protocol": "attn.v2",
+    "Sec-WebSocket-Protocol": `attn.v${protocolVersion}`,
   };
   if (policy !== undefined) {
     headers["X-Attn-Allow-Browser"] = policy.allowBrowser ? "true" : "false";
@@ -146,6 +173,9 @@ const META = {
   ownerSigningKey: "meta:owner_signing_key",
   ownerSigningKeyId: "meta:owner_signing_key_id",
   admissionKey: "meta:admission_key",
+  protocolVersion: "meta:protocol_version",
+  readAdmissionKeyV3: "meta:read_admission_key_v3",
+  writeAdmissionKeyV3: "meta:write_admission_key_v3",
   /**
    * Round-trip of the URL-path roomId. The DO has no built-in way to recover
    * the name it was created with, but the alarm() path needs it to walk R2
@@ -169,9 +199,15 @@ const META = {
 
 /** Storage prefix for the pow-replay set. Walked by the alarm to prune. */
 const POW_SEEN_PREFIX = "pow_seen:";
+const DEVICE_WS_PROOF_SEEN_PREFIX = "device_ws_proof_seen_v3:";
+const SIGNAL_GENERATION_PREFIX = "signal_generation_v3:";
 
 function powSeenKey(hash: string): string {
   return `${POW_SEEN_PREFIX}${hash}`;
+}
+
+function deviceWebSocketProofSeenKey(deviceId: string, nonce: string): string {
+  return `${DEVICE_WS_PROOF_SEEN_PREFIX}${encodeOpaqueSegment(deviceId)}:${encodeOpaqueSegment(nonce)}`;
 }
 
 /**
@@ -296,6 +332,7 @@ function buildRateLimitedResponse(result: RateLimitResult): Response {
 
 interface HardLimits {
   maxPeers: number;
+  maxViewerSockets: number;
   maxSnapshotBytes: number;
   maxEventBytes: number;
   maxEvents: number;
@@ -311,6 +348,10 @@ interface HardLimits {
 function readHardLimits(env: Env): HardLimits {
   return {
     maxPeers: parsePositiveInt(env.HARD_MAX_PEERS, "HARD_MAX_PEERS"),
+    maxViewerSockets: parsePositiveInt(
+      env.HARD_MAX_VIEWER_SOCKETS,
+      "HARD_MAX_VIEWER_SOCKETS",
+    ),
     maxSnapshotBytes: parsePositiveInt(env.HARD_MAX_SNAPSHOT_BYTES, "HARD_MAX_SNAPSHOT_BYTES"),
     maxEventBytes: parsePositiveInt(env.HARD_MAX_EVENT_BYTES, "HARD_MAX_EVENT_BYTES"),
     maxEvents: parsePositiveInt(env.HARD_MAX_EVENTS, "HARD_MAX_EVENTS"),
@@ -424,12 +465,13 @@ export class RoomDO extends DurableObject<Env> {
     // accepting any new durable write. Reads and owner DELETE remain available
     // so rollout can never trap user ciphertext in an unaccounted legacy room.
     if (request.method === "POST" && ROOM_PATH_LOOSE_RE.test(url.pathname)) {
-      const [admissionKey, lease] = await Promise.all([
+      const [admissionKey, readAdmissionKeyV3, lease] = await Promise.all([
         this.ctx.storage.get<Uint8Array>(META.admissionKey),
+        this.ctx.storage.get<Uint8Array>(META.readAdmissionKeyV3),
         this.ctx.storage.get<RoomQuotaLease>(META.quotaLease),
       ]);
       if (
-        admissionKey !== undefined &&
+        (admissionKey !== undefined || readAdmissionKeyV3 !== undefined) &&
         (lease === undefined || !isRoomQuotaLease(lease) || lease.confirmed !== true)
       ) {
         return quotaUnavailableResponse("room must rejoin to acquire a quota generation");
@@ -464,6 +506,16 @@ export class RoomDO extends DurableObject<Env> {
         return this.handleEnvelopesIngest(request, roomId, url.pathname);
       }
       return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", `${request.method} not allowed on /envelopes`);
+    }
+
+    const pushMatch = url.pathname.match(ROOM_PUSH_SUBSCRIPTION_PATH_RE);
+    if (pushMatch) {
+      const roomId = pushMatch[1];
+      const deviceId = pushMatch[2];
+      if (roomId === undefined || roomId === "" || deviceId === undefined || deviceId === "") {
+        return identifierErrorResponse();
+      }
+      return this.handlePushSubscription(request, roomId, deviceId, url.pathname);
     }
 
     const acksMatch = url.pathname.match(ROOM_ACKS_PATH_RE);
@@ -539,6 +591,49 @@ export class RoomDO extends DurableObject<Env> {
    */
   private async handleOptionsPreflight(_roomId: string): Promise<Response> {
     return new Response(null, { status: 204 });
+  }
+
+  private async verifyRoomAdmission(
+    request: Request,
+    roomId: string,
+    urlPath: string,
+    required: "read" | "write",
+  ): Promise<Response | undefined> {
+    const routeVersion = urlPath.startsWith("/v3/") ? 3 : 2;
+    const [storedVersion, v2Key, readKey, writeKey] = await Promise.all([
+      this.ctx.storage.get<number>(META.protocolVersion),
+      this.ctx.storage.get<Uint8Array>(META.admissionKey),
+      this.ctx.storage.get<Uint8Array>(META.readAdmissionKeyV3),
+      this.ctx.storage.get<Uint8Array>(META.writeAdmissionKeyV3),
+    ]);
+    const roomVersion = storedVersion ?? (v2Key === undefined ? undefined : 2);
+    if (roomVersion === undefined) {
+      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+    }
+    if (roomVersion !== routeVersion) {
+      return errorResponse(409, "ATTN_PROTOCOL_VERSION_MISMATCH", `room uses protocol v${roomVersion}, request used v${routeVersion}`);
+    }
+    try {
+      if (routeVersion === 2) {
+        if (v2Key === undefined) return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing admission key`);
+        await verifyAdmission(request, urlPath, { roomId, admissionKey: v2Key });
+      } else {
+        if (readKey === undefined || writeKey === undefined) {
+          return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing v3 admission keys`);
+        }
+        await verifyAdmissionV3(request, urlPath, {
+          roomId,
+          readAdmissionKey: readKey,
+          writeAdmissionKey: writeKey,
+        }, required);
+      }
+    } catch (err) {
+      if (err instanceof AdmissionError) {
+        return errorResponse(err.code === "ATTN_WRITE_CAPABILITY_REQUIRED" ? 403 : 401, err.code, err.message);
+      }
+      throw err;
+    }
+    return undefined;
   }
 
   /**
@@ -652,29 +747,18 @@ export class RoomDO extends DurableObject<Env> {
     if (isRejoin) {
       // Verify admission before returning anything — URL holders should still
       // prove they know admissionKey on subsequent calls.
-      const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-      if (storedAdmissionKey === undefined) {
-        // Inconsistent state; refuse rather than silently bypass admission.
-        return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing admission key`);
-      }
-      try {
-        // Build a fresh Request from the buffered body so verifyAdmission can
-        // re-clone it without us racing the original stream.
-        const buffered = new Request(request.url, {
-          method: request.method,
-          headers: request.headers,
-          body: bodyBytes.byteLength === 0 ? null : bodyBytes,
-        });
-        await verifyAdmission(buffered, new URL(request.url).pathname, {
-          roomId,
-          admissionKey: storedAdmissionKey,
-        });
-      } catch (err) {
-        if (err instanceof AdmissionError) {
-          return errorResponse(401, err.code, err.message);
-        }
-        throw err;
-      }
+      const buffered = new Request(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: bodyBytes.byteLength === 0 ? null : bodyBytes,
+      });
+      const admissionError = await this.verifyRoomAdmission(
+        buffered,
+        roomId,
+        new URL(request.url).pathname,
+        "write",
+      );
+      if (admissionError !== undefined) return admissionError;
 
       // Rollout adoption for rooms created before QuotaDO existed. This is the
       // only legacy path that can create a lease; all subsequent writes require
@@ -734,11 +818,16 @@ export class RoomDO extends DurableObject<Env> {
 
     // Version gate runs before zod so we can return the canonical version error
     // even when other fields are missing/garbage.
-    if (typeof parsed === "object" && parsed !== null && "v" in parsed && (parsed as { v: unknown }).v !== 2) {
-      return errorResponse(400, "ATTN_VERSION_UNSUPPORTED", `unsupported protocol version: ${String((parsed as { v: unknown }).v)}`);
+    const routeVersion = new URL(request.url).pathname.startsWith("/v3/") ? 3 : 2;
+    if (typeof parsed === "object" && parsed !== null && "v" in parsed && (parsed as { v: unknown }).v !== routeVersion) {
+      return routeVersion === 2
+        ? errorResponse(400, "ATTN_VERSION_UNSUPPORTED", `unsupported protocol version: ${String((parsed as { v: unknown }).v)}`)
+        : errorResponse(409, "ATTN_PROTOCOL_VERSION_MISMATCH", `route is v${routeVersion}, body is v${String((parsed as { v: unknown }).v)}`);
     }
 
-    const result = roomCreationSchema.safeParse(parsed);
+    const result = routeVersion === 3
+      ? roomCreationSchemaV3.safeParse(parsed)
+      : roomCreationSchema.safeParse(parsed);
     if (!result.success) {
       return errorResponse(400, "ATTN_BODY_INVALID", formatZodError(result.error));
     }
@@ -746,7 +835,9 @@ export class RoomDO extends DurableObject<Env> {
 
     // Decode binary key fields; reject if they don't match expected lengths.
     let ownerKeyBytes: Uint8Array;
-    let admissionKeyBytes: Uint8Array;
+    let admissionKeyBytes: Uint8Array | undefined;
+    let readAdmissionKeyBytes: Uint8Array | undefined;
+    let writeAdmissionKeyBytes: Uint8Array | undefined;
     try {
       ownerKeyBytes = base64UrlDecode(body.ownerSigningKey);
     } catch (err) {
@@ -756,12 +847,33 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(400, "ATTN_BODY_INVALID", `ownerSigningKey must be ${ED25519_PUB_BYTE_LEN} bytes (got ${ownerKeyBytes.length})`);
     }
     try {
-      admissionKeyBytes = base64UrlDecode(body.admissionKey);
+      if (body.v === 2) {
+        admissionKeyBytes = base64UrlDecode(body.admissionKey);
+      } else {
+        readAdmissionKeyBytes = base64UrlDecode(body.readAdmissionKey);
+        writeAdmissionKeyBytes = base64UrlDecode(body.writeAdmissionKey);
+      }
     } catch (err) {
-      return errorResponse(400, "ATTN_BODY_INVALID", `admissionKey base64url decode failed: ${(err as Error).message}`);
+      return errorResponse(400, "ATTN_BODY_INVALID", `admission key base64url decode failed: ${(err as Error).message}`);
     }
-    if (admissionKeyBytes.length !== ADMISSION_KEY_BYTE_LEN) {
-      return errorResponse(400, "ATTN_BODY_INVALID", `admissionKey must be ${ADMISSION_KEY_BYTE_LEN} bytes (got ${admissionKeyBytes.length})`);
+    for (const [name, bytes] of body.v === 2
+      ? [["admissionKey", admissionKeyBytes] as const]
+      : [["readAdmissionKey", readAdmissionKeyBytes] as const, ["writeAdmissionKey", writeAdmissionKeyBytes] as const]) {
+      if (bytes === undefined || bytes.length !== ADMISSION_KEY_BYTE_LEN) {
+        return errorResponse(400, "ATTN_BODY_INVALID", `${name} must be ${ADMISSION_KEY_BYTE_LEN} bytes (got ${bytes?.length ?? 0})`);
+      }
+    }
+    if (
+      body.v === 3 &&
+      readAdmissionKeyBytes !== undefined &&
+      writeAdmissionKeyBytes !== undefined &&
+      constantTimeEquals(readAdmissionKeyBytes, writeAdmissionKeyBytes)
+    ) {
+      return errorResponse(
+        400,
+        "ATTN_BODY_INVALID",
+        "writeAdmissionKey must differ from readAdmissionKey",
+      );
     }
 
     // H1 defense (planning/collab/security-review.md §H1): require
@@ -900,11 +1012,11 @@ export class RoomDO extends DurableObject<Env> {
     // Persist everything in one DO transaction. We use put-many so the writes
     // commit atomically — partial creates are observable as either fully-done
     // or fully-absent.
-    await this.ctx.storage.put<unknown>({
+    const roomMetadata: Record<string, unknown> = {
       [META.policy]: clamped.policy,
       [META.ownerSigningKey]: ownerKeyBytes,
       [META.ownerSigningKeyId]: ownerSigningKeyId,
-      [META.admissionKey]: admissionKeyBytes,
+      [META.protocolVersion]: routeVersion,
       [META.roomId]: roomId,
       [META.createdAt]: createdAt,
       [META.expiresAt]: clamped.policy.expiresAt,
@@ -917,7 +1029,13 @@ export class RoomDO extends DurableObject<Env> {
       [META.oldestRetainedSeq]: 0,
       [META.quotaLease]: quotaLease,
       [powSeenKey(verifiedPow.hash)]: verifiedPow.expiresAt,
-    });
+    };
+    if (routeVersion === 2) roomMetadata[META.admissionKey] = admissionKeyBytes;
+    else {
+      roomMetadata[META.readAdmissionKeyV3] = readAdmissionKeyBytes;
+      roomMetadata[META.writeAdmissionKeyV3] = writeAdmissionKeyBytes;
+    }
+    await this.ctx.storage.put<unknown>(roomMetadata);
 
     // Schedule the TTL/idle alarm. The alarm() handler owns the actual
     // expire/prune logic; `rescheduleAlarm()` picks the earliest of
@@ -994,11 +1112,6 @@ export class RoomDO extends DurableObject<Env> {
   ): Promise<Response> {
     // Bail early if the room was never created — every following check needs
     // the policy + admissionKey + ownerSigningKey loaded from storage.
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
     // Buffer the body once. Both verifyAdmission and the JSON parser below
     // need to read it; the room-create handler ran into the same workerd
     // "Can't read from request stream after response has been sent" failure
@@ -1008,15 +1121,10 @@ export class RoomDO extends DurableObject<Env> {
     const bodyBytes = bodyRead;
 
     // 1. Admission — URL-as-bearer trust boundary.
-    try {
-      const buffered = bufferedRequest(request, bodyBytes);
-      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, "write",
+    );
+    if (admissionError !== undefined) return admissionError;
 
     // 2. Schema-validate the body so we have a `deviceId` to bind the PoW to.
     //    Per spec we tie PoW to (roomId, deviceId, method, path) — that needs
@@ -1028,7 +1136,20 @@ export class RoomDO extends DurableObject<Env> {
     } catch (err) {
       return errorResponse(400, "ATTN_BODY_INVALID", `request body is not valid JSON: ${(err as Error).message}`);
     }
-    const result = deviceRegistrationSchema.safeParse(parsed);
+    if (urlPath.startsWith("/v3/") && typeof parsed === "object" && parsed !== null) {
+      const candidate = parsed as Record<string, unknown>;
+      const hasTier = candidate.grantTier !== undefined;
+      const hasSignature = candidate.grantSignature !== undefined;
+      if (candidate.kind === "owner" && (hasTier || hasSignature)) {
+        return errorResponse(400, "ATTN_GRANT_INVALID", "v3 owner registration forbids grant fields");
+      }
+      if (candidate.kind !== "owner" && (!hasTier || !hasSignature)) {
+        return errorResponse(400, "ATTN_GRANT_REQUIRED", "v3 non-owner registration requires both grant fields");
+      }
+    }
+    const result = urlPath.startsWith("/v3/")
+      ? deviceRegistrationSchemaV3.safeParse(parsed)
+      : deviceRegistrationSchema.safeParse(parsed);
     if (!result.success) {
       return errorResponse(400, "ATTN_BODY_INVALID", formatZodError(result.error));
     }
@@ -1112,6 +1233,35 @@ export class RoomDO extends DurableObject<Env> {
     const sigOk = await verifySelfSignature(body, signingKeyBytes, selfSig);
     if (!sigOk) {
       return errorResponse(400, "ATTN_DEVICE_SELF_SIG_INVALID", "selfSignature does not match canonical body");
+    }
+
+    if (urlPath.startsWith("/v3/") && body.kind !== "owner") {
+      if (!("grantTier" in body) || !("grantSignature" in body) ||
+        typeof body.grantTier !== "string" || typeof body.grantSignature !== "string") {
+        return errorResponse(400, "ATTN_GRANT_REQUIRED", "v3 non-owner registration requires owner grant");
+      }
+      const grantTier = body.grantTier as "comment" | "suggest";
+      const grantSignatureEncoded = body.grantSignature;
+      let grantSignature: Uint8Array;
+      try {
+        grantSignature = base64UrlDecode(grantSignatureEncoded);
+      } catch {
+        return errorResponse(403, "ATTN_GRANT_INVALID", "grantSignature is not valid base64url");
+      }
+      const ownerKey = await this.ctx.storage.get<Uint8Array>(META.ownerSigningKey);
+      if (ownerKey === undefined) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing owner key`);
+      }
+      const grantBytes = new TextEncoder().encode(canonicalize({
+        grantTier,
+        purpose: "attn device grant v3",
+        roomId,
+        v: 3,
+      }));
+      if (grantSignature.length !== ED25519_SIG_BYTE_LEN ||
+        !(await verifyEd25519(ownerKey, grantSignature, grantBytes))) {
+        return errorResponse(403, "ATTN_GRANT_INVALID", "grantSignature does not match room owner grant");
+      }
     }
 
     // 5. kind=owner gate: stored ownerSigningKey wins. Constant-time compare.
@@ -1210,20 +1360,8 @@ export class RoomDO extends DurableObject<Env> {
     roomId: string,
     urlPath: string,
   ): Promise<Response> {
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-    try {
-      // GET bodies are always empty; we can hand the original request straight
-      // to verifyAdmission (no double-read concern).
-      await verifyAdmission(request, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(request, roomId, urlPath, "read");
+    if (admissionError !== undefined) return admissionError;
 
     // Range-scan the order index, then load each payload. We bound the scan
     // by HARD_MAX_PEERS — listing more devices than the policy allows would
@@ -1273,12 +1411,8 @@ export class RoomDO extends DurableObject<Env> {
     roomId: string,
     urlPath: string,
   ): Promise<Response> {
+    const routeVersion = urlPath.startsWith("/v3/") ? 3 : 2;
     const limits = readHardLimits(this.env);
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
     // Buffer the body up front — verifyAdmission, JSON.parse, and the bulk
     // decode all need a non-streamed copy.
     const maxEnvelopeBodyBytes = Math.ceil((limits.maxRoomBytes * 4) / 3) + ENVELOPE_BODY_OVERHEAD_BYTES;
@@ -1287,15 +1421,10 @@ export class RoomDO extends DurableObject<Env> {
     const bodyBytes = bodyRead;
 
     // 1. Admission.
-    try {
-      const buffered = bufferedRequest(request, bodyBytes);
-      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, "write",
+    );
+    if (admissionError !== undefined) return admissionError;
 
     // Parse + schema-validate so we have a deviceId for the PoW binding and the
     // batch size for the cap check.
@@ -1452,6 +1581,7 @@ export class RoomDO extends DurableObject<Env> {
     //    first error so the whole batch is rejected atomically (spec wording
     //    says "reject the *whole batch*" for cap overflow; per-envelope shape
     //    errors mirror that for symmetry — partial accepts are footguns).
+    const stagedSignalGenerations = new Map<string, number>();
     for (const env of envelopes) {
       let decodedLen: number;
       try {
@@ -1492,6 +1622,50 @@ export class RoomDO extends DurableObject<Env> {
           "envelope author device is not registered",
         );
       }
+
+      const hasSignalProof = env.signalGeneration !== undefined || env.deviceSignature !== undefined;
+      if (routeVersion !== 3 || env.kind !== "signal") {
+        if (hasSignalProof) {
+          return errorResponse(400, "ATTN_DEVICE_PROOF_INVALID", "device proof fields are v3 signal-only");
+        }
+        continue;
+      }
+      if (env.signalGeneration === undefined || env.deviceSignature === undefined) {
+        return errorResponse(401, "ATTN_DEVICE_PROOF_INVALID", "v3 signal omitted registered-device proof");
+      }
+      try {
+        await verifyDeviceProofSignature(
+          deviceRecord.publicSigningKey,
+          env.deviceSignature,
+          canonicalDeviceSignalProofV3({
+            roomId,
+            envelopeId: env.envelopeId,
+            authorId: env.authorId,
+            deviceId: env.deviceId,
+            targetDeviceId: env.target?.deviceId ?? null,
+            generation: env.signalGeneration,
+            createdAt: env.createdAt,
+            expiresAt: env.expiresAt,
+            nonce: env.nonce,
+            ciphertext: env.ciphertext,
+            ciphertextBytes: env.ciphertextBytes,
+          }),
+        );
+      } catch (error) {
+        if (error instanceof DeviceProofError) {
+          return errorResponse(401, error.code, error.message);
+        }
+        throw error;
+      }
+      const generationKey = signalGenerationKey(env);
+      const priorGeneration = stagedSignalGenerations.get(generationKey)
+        ?? await this.ctx.storage.get<number>(generationKey)
+        ?? -1;
+      const exactRetry = preexistingById.has(env.envelopeId);
+      if (!exactRetry && env.signalGeneration < priorGeneration) {
+        return errorResponse(409, "ATTN_SIGNAL_GENERATION_STALE", "signal generation is older than the accepted generation");
+      }
+      stagedSignalGenerations.set(generationKey, Math.max(priorGeneration, env.signalGeneration));
     }
 
     // 5. Idempotency + running-totals.
@@ -1688,6 +1862,7 @@ export class RoomDO extends DurableObject<Env> {
     if (fresh.length > 0) {
       writeMap[META.envelopeCount] = finalCount;
       writeMap[META.bytesUsed] = finalInlineBytes;
+      for (const [key, generation] of stagedSignalGenerations) writeMap[key] = generation;
     }
 
     // Any fresh signal mutation validates the complete current payload index
@@ -1752,6 +1927,7 @@ export class RoomDO extends DurableObject<Env> {
     // filtering: kind=signal envelopes only deliver to target.deviceId.
     if (fresh.length > 0) {
       this.broadcastFreshEnvelopes(fresh, nextSeq);
+      await this.notifyOfflineRoomSubscribers(fresh);
     }
 
     // Sort accepted by serverSeq so clients see a stable order matching
@@ -1760,6 +1936,149 @@ export class RoomDO extends DurableObject<Env> {
     accepted.sort((a, b) => a.serverSeq - b.serverSeq);
 
     return Response.json({ accepted }, { status: 201 });
+  }
+
+  private async handlePushSubscription(
+    request: Request,
+    roomId: string,
+    deviceId: string,
+    urlPath: string,
+  ): Promise<Response> {
+    if (!isProtocolId(deviceId, DEVICE_ID_MAX_CHARS) || request.headers.get("Attn-Device-Id") !== deviceId) {
+      return errorResponse(400, "ATTN_DEVICE_ID_INVALID", "path and Attn-Device-Id must name the same protocol device");
+    }
+    const bodyRead = await readBoundedBody(request, DEVICE_BODY_MAX_BYTES);
+    if (bodyRead instanceof Response) return bodyRead;
+    const bodyBytes = bodyRead;
+    const required = request.method === "GET" ? "read" : "write";
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, required,
+    );
+    if (admissionError !== undefined) return admissionError;
+
+    const [device, policy] = await Promise.all([
+      this.findDeviceByDeviceId(deviceId),
+      this.ctx.storage.get<RoomPolicy>(META.policy),
+    ]);
+    if (device instanceof Response) return device;
+    if (device === undefined) return errorResponse(400, "ATTN_DEVICE_UNREGISTERED", "push device is not registered");
+    if (policy === undefined) return corruptRoomResponse();
+    const key = pushSubscriptionKey(deviceId);
+
+    if (request.method === "GET") {
+      const stored = await this.ctx.storage.get<StoredPushSubscription>(key);
+      if (stored === undefined || stored.expiresAt <= Date.now()) {
+        return errorResponse(404, "ATTN_PUSH_SUBSCRIPTION_NOT_FOUND", "push subscription not found");
+      }
+      return Response.json(publicPushSubscription(stored));
+    }
+    if (request.method !== "POST" && request.method !== "DELETE") {
+      return errorResponse(405, "ATTN_METHOD_NOT_ALLOWED", "method not allowed");
+    }
+    let parsedSubscription: ReturnType<typeof parsePushSubscriptionInput>;
+    if (request.method === "POST") {
+      try {
+        parsedSubscription = parsePushSubscriptionInput(JSON.parse(new TextDecoder().decode(bodyBytes)), Date.now(),
+          this.env.TEST_PUSH_ENDPOINT_ORIGIN);
+      } catch {
+        parsedSubscription = undefined;
+      }
+      if (parsedSubscription === undefined) return errorResponse(400, "ATTN_BODY_INVALID", "push subscription body is invalid");
+    }
+    const powToken = request.headers.get("Attn-PoW") ?? "";
+    try {
+      await verifyDeviceHttpProofV3({
+        publicSigningKey: device.publicSigningKey,
+        signature: request.headers.get("Attn-Device-Proof") ?? "",
+        resourceKind: "room",
+        resourceId: roomId,
+        deviceId,
+        method: request.method,
+        path: urlPath,
+        body: bodyBytes,
+        powToken,
+      });
+    } catch (error) {
+      if (error instanceof DeviceProofError) return errorResponse(401, error.code, error.message);
+      throw error;
+    }
+    const rateRejection = await this.enforceDeviceRateLimit(deviceId);
+    if (rateRejection !== undefined) return rateRejection;
+    try {
+      await verifyPow(powToken, {
+        roomId,
+        deviceId,
+        method: request.method,
+        urlPath,
+        policyPowBits: policy.powBits,
+        now: Date.now(),
+        isReplayed: hash => this.isPowSeen(hash),
+        markSeen: (hash, expiresAt) => this.markPowSeen(hash, expiresAt),
+      });
+    } catch (error) {
+      if (error instanceof PowError) return errorResponse(400, error.code, error.message);
+      throw error;
+    }
+    if (request.method === "DELETE") {
+      await this.ctx.storage.delete([key, pushLastSentKey(deviceId)]);
+      return new Response(null, { status: 204 });
+    }
+
+    const parsed = parsedSubscription!;
+    const now = Date.now();
+    const existing = await this.ctx.storage.get<StoredPushSubscription>(key);
+    const entries = await this.ctx.storage.list<StoredPushSubscription>({ prefix: PUSH_SUBSCRIPTION_PREFIX });
+    const active = [...entries.values()].filter(value => value.expiresAt > now);
+    const existingActive = existing !== undefined && existing.expiresAt > now;
+    if (!existingActive && active.length >= MAX_PUSH_SUBSCRIPTIONS) {
+      return errorResponse(413, "ATTN_PUSH_SUBSCRIPTION_CAP", "push subscription cap reached");
+    }
+    if (active.some(value => value.deviceId !== deviceId && value.endpoint === parsed.endpoint)) {
+      return errorResponse(409, "ATTN_PUSH_ENDPOINT_CONFLICT", "push endpoint is already bound to another device");
+    }
+    const stored: StoredPushSubscription = {
+      ...parsed,
+      deviceId,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      expiresAt: Math.min(policy.expiresAt, parsed.expirationTime ?? policy.expiresAt),
+    };
+    const unchanged = existing !== undefined && JSON.stringify({ ...existing, updatedAt: 0 }) === JSON.stringify({ ...stored, updatedAt: 0 });
+    await this.ctx.storage.put(key, unchanged ? existing : stored);
+    return Response.json(publicPushSubscription(unchanged ? existing : stored), { status: unchanged ? 200 : 201 });
+  }
+
+  private async notifyOfflineRoomSubscribers(fresh: readonly EnvelopeInput[]): Promise<void> {
+    const now = Date.now();
+    const entries = await this.ctx.storage.list<StoredPushSubscription>({ prefix: PUSH_SUBSCRIPTION_PREFIX });
+    const sockets = this.ctx.getWebSockets();
+    const deliveries: Array<Promise<void>> = [];
+    for (const [key, subscription] of entries) {
+      if (subscription.expiresAt <= now) {
+        await this.ctx.storage.delete([key, pushLastSentKey(subscription.deviceId)]);
+        continue;
+      }
+      const hasDeliverableNonSelfEnvelope = fresh.some(envelope =>
+        envelope.deviceId !== subscription.deviceId
+        && (envelope.kind !== "signal" || envelope.target?.deviceId === subscription.deviceId)
+      );
+      if (!hasDeliverableNonSelfEnvelope) continue;
+      const live = sockets.some(socket => {
+        const attachment = readAttachment(socket);
+        return attachment?.kind === "device" && attachment.deviceId === subscription.deviceId;
+      });
+      if (live) continue;
+      const debounceKey = pushLastSentKey(subscription.deviceId);
+      const lastSent = await this.ctx.storage.get<number>(debounceKey) ?? 0;
+      if (now - lastSent < PUSH_DEBOUNCE_MS) continue;
+      await this.ctx.storage.put(debounceKey, now);
+      deliveries.push((async () => {
+        const result = await sendPayloadlessPush(this.env, subscription.endpoint, now);
+        if (result === "gone") await this.ctx.storage.delete([key, debounceKey]);
+        if (result === "disabled") await this.ctx.storage.delete(debounceKey);
+      })());
+    }
+    await Promise.all(deliveries);
   }
 
   /**
@@ -1916,26 +2235,16 @@ export class RoomDO extends DurableObject<Env> {
     roomId: string,
     urlPath: string,
   ): Promise<Response> {
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
     // Buffer body so admission/owner-sig + JSON.parse can both read it.
     const bodyRead = await readBoundedBody(request, ACK_BODY_MAX_BYTES);
     if (bodyRead instanceof Response) return bodyRead;
     const bodyBytes = bodyRead;
 
     // 1. Admission — URL-as-bearer trust boundary.
-    try {
-      const buffered = bufferedRequest(request, bodyBytes);
-      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, "write",
+    );
+    if (admissionError !== undefined) return admissionError;
 
     // 2. Parse body (need deviceId to bind PoW).
     let parsed: unknown;
@@ -2205,26 +2514,16 @@ export class RoomDO extends DurableObject<Env> {
     urlPath: string,
   ): Promise<Response> {
     const limits = readHardLimits(this.env);
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
     // Buffer body once — admission + JSON.parse both need it.
     const bodyRead = await readBoundedBody(request, BLOB_PRESIGN_BODY_MAX_BYTES);
     if (bodyRead instanceof Response) return bodyRead;
     const bodyBytes = bodyRead;
 
     // 1. Admission.
-    try {
-      const buffered = bufferedRequest(request, bodyBytes);
-      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, "write",
+    );
+    if (admissionError !== undefined) return admissionError;
 
     // 2. Schema-validate so we have a deviceId for the PoW binding.
     let parsed: unknown;
@@ -2384,6 +2683,7 @@ export class RoomDO extends DurableObject<Env> {
         body.ciphertextBytes,
         undefined,
         priorReservation?.objectKeyVersion ?? 2,
+        urlPath.startsWith("/v3/") ? 3 : 2,
       );
     } catch (err) {
       return errorResponse(500, "ATTN_BLOB_PRESIGN_FAILED", `presign failed: ${(err as Error).message}`);
@@ -2525,20 +2825,8 @@ export class RoomDO extends DurableObject<Env> {
     envelopeId: string,
     urlPath: string,
   ): Promise<Response> {
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-    try {
-      // GET bodies are always empty; hand the original request straight to
-      // verifyAdmission (no double-read concern).
-      await verifyAdmission(request, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(request, roomId, urlPath, "read");
+    if (admissionError !== undefined) return admissionError;
 
     const [lease, reservationLookup] = await Promise.all([
       this.ctx.storage.get<RoomQuotaLease>(META.quotaLease),
@@ -2575,6 +2863,7 @@ export class RoomDO extends DurableObject<Env> {
         envelopeId,
         undefined,
         reservationLookup.objectKeyVersion,
+        urlPath.startsWith("/v3/") ? 3 : 2,
       );
       return Response.json(presigned, { status: 200 });
     } catch (err) {
@@ -2631,21 +2920,11 @@ export class RoomDO extends DurableObject<Env> {
 
     // 1. Existence check — without admissionKey we couldn't verify admission
     //    anyway, and every other endpoint surfaces unknown rooms as 404.
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
-      return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
-    }
-
     // 2. Admission — URL-as-bearer trust boundary.
-    try {
-      const buffered = bufferedRequest(request, bodyBytes);
-      await verifyAdmission(buffered, urlPath, { roomId, admissionKey: storedAdmissionKey });
-    } catch (err) {
-      if (err instanceof AdmissionError) {
-        return errorResponse(401, err.code, err.message);
-      }
-      throw err;
-    }
+    const admissionError = await this.verifyRoomAdmission(
+      bufferedRequest(request, bodyBytes), roomId, urlPath, "write",
+    );
+    if (admissionError !== undefined) return admissionError;
 
     // 3. PoW. DELETE has no body to carry deviceId; the token itself binds it.
     //    We parse first to extract the deviceId, then hand it to verifyPow which
@@ -2965,9 +3244,23 @@ export class RoomDO extends DurableObject<Env> {
 
     // Existence check before parsing the subprotocol so unknown rooms surface
     // as 404 rather than 401 (matches the device list precedent).
-    const storedAdmissionKey = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
-    if (storedAdmissionKey === undefined) {
+    const [storedVersion, v2Key, readKeyV3, writeKeyV3] = await Promise.all([
+      this.ctx.storage.get<number>(META.protocolVersion),
+      this.ctx.storage.get<Uint8Array>(META.admissionKey),
+      this.ctx.storage.get<Uint8Array>(META.readAdmissionKeyV3),
+      this.ctx.storage.get<Uint8Array>(META.writeAdmissionKeyV3),
+    ]);
+    const roomVersion = storedVersion ?? (v2Key === undefined ? undefined : 2);
+    if (roomVersion === undefined) {
       return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
+    }
+    const routeVersion = url.pathname.startsWith("/v3/") ? 3 : 2;
+    if (roomVersion !== routeVersion) {
+      return errorResponse(409, "ATTN_PROTOCOL_VERSION_MISMATCH", `room uses protocol v${roomVersion}, request used v${routeVersion}`);
+    }
+    const storedAdmissionKey = routeVersion === 3 ? readKeyV3 : v2Key;
+    if (storedAdmissionKey === undefined) {
+      return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing socket admission key`);
     }
 
     // Browser-policy allowlist check (attn-ask, relay-spec.md §Browser
@@ -3021,15 +3314,30 @@ export class RoomDO extends DurableObject<Env> {
     // post-expiry observable behaviour.
     const cleanupRan = await this.maybeRunPreExpiryCleanup();
     if (cleanupRan) {
-      const stillThere = await this.ctx.storage.get<Uint8Array>(META.admissionKey);
+      const stillThere = routeVersion === 3
+        ? await this.ctx.storage.get<Uint8Array>(META.readAdmissionKeyV3)
+        : await this.ctx.storage.get<Uint8Array>(META.admissionKey);
       if (stillThere === undefined) {
         return errorResponse(404, "ATTN_ROOM_NOT_FOUND", `room ${roomId} does not exist`);
       }
     }
 
-    // Parse Sec-WebSocket-Protocol → ["attn.v2", "hmac.<b64url>"].
+    // Determine the requested identity mode before parsing the subprotocol.
+    // We deliberately defer shape errors until after read admission so an
+    // unauthenticated caller cannot use identifier errors as a room oracle.
+    const deviceIds = url.searchParams.getAll("device_id");
+    const viewerIds = url.searchParams.getAll("viewer_id");
+    const hasDeviceId = deviceIds.length > 0;
+    const hasViewerId = viewerIds.length > 0;
+    const v3RegisteredDevice = routeVersion === 3
+      && deviceIds.length === 1
+      && viewerIds.length === 0;
+
+    // V2 retains its original protocol. V3 viewers prove read possession;
+    // v3 registered devices must additionally prove write possession so a
+    // view bearer cannot impersonate any public directory device id.
     const protocolHeader = request.headers.get("Sec-WebSocket-Protocol");
-    const parsedProtocol = parseAttnProtocol(protocolHeader);
+    const parsedProtocol = parseAttnProtocol(protocolHeader, routeVersion, v3RegisteredDevice);
     if (parsedProtocol === undefined) {
       // Without a parseable subprotocol we can't even negotiate `attn.v2`, so
       // we refuse the upgrade outright. This is the only admission-failure
@@ -3038,7 +3346,11 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(
         401,
         "ATTN_ADMISSION_INVALID",
-        "Sec-WebSocket-Protocol must be 'attn.v2, hmac.<base64url>'",
+        routeVersion === 3
+          ? v3RegisteredDevice
+            ? "registered v3 socket protocol must be exactly 'attn.v3, read-hmac.<base64url>, write-hmac.<base64url>, device-proof.<base64url>'"
+            : "viewer v3 socket protocol must be exactly 'attn.v3, read-hmac.<base64url>'"
+          : "Sec-WebSocket-Protocol must be 'attn.v2, hmac.<base64url>'",
       );
     }
 
@@ -3046,7 +3358,7 @@ export class RoomDO extends DurableObject<Env> {
     const hmacOk = await verifyAdmissionHmac({
       method: "GET",
       url,
-      providedHmac: parsedProtocol.hmac,
+      providedHmac: parsedProtocol.readHmac,
       admissionKey: storedAdmissionKey,
     });
     if (!hmacOk) {
@@ -3063,14 +3375,104 @@ export class RoomDO extends DurableObject<Env> {
       return new Response(null, {
         status: 101,
         webSocket: c,
-        headers: buildSocketUpgradeHeaders(policyForTag),
+        headers: buildSocketUpgradeHeaders(policyForTag, routeVersion),
       });
     }
 
-    // device_id query parameter is required so we can tag the socket.
-    const deviceId = url.searchParams.get("device_id");
-    if (deviceId === null || deviceId === "") {
-      return errorResponse(400, "ATTN_BODY_INVALID", "missing device_id query parameter");
+    if (v3RegisteredDevice) {
+      if (writeKeyV3 === undefined || parsedProtocol.writeHmac === undefined) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing socket write admission key`);
+      }
+      const writeHmacOk = await verifyAdmissionHmac({
+        method: "GET",
+        url,
+        providedHmac: parsedProtocol.writeHmac,
+        admissionKey: writeKeyV3,
+      });
+      if (!writeHmacOk) {
+        const pair = new WebSocketPair();
+        const [c, s] = [pair[0], pair[1]];
+        s.accept();
+        try {
+          s.close(CLOSE_ADMISSION_INVALID, "write admission HMAC invalid");
+        } catch {
+          // swallow
+        }
+        const policyForTag = await this.ctx.storage.get<RoomPolicy>(META.policy);
+        return new Response(null, {
+          status: 101,
+          webSocket: c,
+          headers: buildSocketUpgradeHeaders(policyForTag, routeVersion),
+        });
+      }
+    }
+
+    // Registered peers use device_id exactly as in v2. V3 additionally admits
+    // anonymous read-only sockets through viewer_id. Keeping the two query
+    // forms mutually exclusive is important: a caller must not be able to
+    // acquire viewer treatment while presenting an unregistered device id.
+    if (hasDeviceId === hasViewerId || deviceIds.length > 1 || viewerIds.length > 1) {
+      return errorResponse(
+        400,
+        "ATTN_BODY_INVALID",
+        routeVersion === 3
+          ? "socket requires exactly one of device_id or viewer_id"
+          : "socket requires exactly one device_id",
+      );
+    }
+
+    const viewerId = viewerIds[0];
+    if (viewerId !== undefined) {
+      if (routeVersion !== 3) {
+        return errorResponse(400, "ATTN_BODY_INVALID", "viewer_id is only valid on v3 sockets");
+      }
+      if (!isViewerId(viewerId)) {
+        return errorResponse(
+          400,
+          "ATTN_BODY_INVALID",
+          "viewer_id must be a canonical 16-byte base64url value",
+        );
+      }
+
+      const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+      if (policy === undefined) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
+      }
+      const maxViewerSockets = readHardLimits(this.env).maxViewerSockets;
+      const viewerSocketCount = this.ctx.getWebSockets().reduce((count, socket) => {
+        return count + (readAttachment(socket)?.kind === "viewer" ? 1 : 0);
+      }, 0);
+
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      this.ctx.acceptWebSocket(server, [`v3:${encodeOpaqueSegment(viewerId)}`]);
+      writeAttachment(server, {
+        kind: "viewer",
+        viewerId,
+        subscribed: false,
+        lastPongTs: 0,
+      });
+
+      // Anonymous readers have their own bounded pool. They neither consume
+      // maxPeers nor displace registered participants from a room.
+      if (viewerSocketCount >= maxViewerSockets) {
+        try {
+          server.close(CLOSE_RATE_LIMIT, "viewer socket limit reached");
+        } catch {
+          // best-effort close after accepting so browser clients see 4003
+        }
+      }
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+        headers: buildSocketUpgradeHeaders(policy, routeVersion),
+      });
+    }
+
+    const deviceId = deviceIds[0]!;
+    if (!isProtocolId(deviceId, DEVICE_ID_MAX_CHARS)) {
+      return errorResponse(400, "ATTN_BODY_INVALID", "device_id is malformed");
     }
 
     // Look up the device's participantId. Per spec the WS open is for an
@@ -3087,24 +3489,56 @@ export class RoomDO extends DurableObject<Env> {
     }
     const participantId = deviceRecord.participantId;
 
-    // Peer cap: count distinct deviceIds currently represented by an
-    // announced socket. Multiple tabs/connections for one registered device
-    // are one presence peer and consume one peer-cap slot.
+    // V3 capability HMACs prove possession of shared room bearers, not the
+    // registered device's private key. Require a short-lived, one-shot
+    // Ed25519 proof before accepting the socket or announcing presence.
+    if (routeVersion === 3) {
+      const expiresValues = url.searchParams.getAll("proof_expires");
+      const nonceValues = url.searchParams.getAll("proof_nonce");
+      const expiresAt = Number(expiresValues[0]);
+      const nonce = nonceValues[0];
+      if (expiresValues.length !== 1 || nonceValues.length !== 1 || nonce === undefined) {
+        return errorResponse(401, "ATTN_DEVICE_PROOF_INVALID", "registered v3 socket requires one proof_expires and proof_nonce");
+      }
+      try {
+        validateDeviceProofTime(expiresAt, Date.now());
+        validateDeviceProofNonce(nonce);
+        await verifyDeviceProofSignature(
+          deviceRecord.publicSigningKey,
+          parsedProtocol.deviceSignature ?? "",
+          canonicalDeviceWebSocketProofV3({
+            roomId,
+            deviceId,
+            path: url.pathname,
+            expiresAt,
+            nonce,
+          }),
+        );
+      } catch (error) {
+        if (error instanceof DeviceProofError) {
+          return errorResponse(401, error.code, error.message);
+        }
+        throw error;
+      }
+      const replayKey = deviceWebSocketProofSeenKey(deviceId, nonce);
+      const fresh = await this.ctx.storage.transaction(async (txn) => {
+        if ((await txn.get<number>(replayKey)) !== undefined) return false;
+        await txn.put(replayKey, expiresAt);
+        return true;
+      });
+      if (!fresh) {
+        return errorResponse(409, "ATTN_DEVICE_PROOF_REPLAYED", "device websocket proof was already used");
+      }
+    }
+
+    // The peer cap and presence transition happen only after subscribe has
+    // produced a complete hello/replay. An upgraded socket is not online yet:
+    // it must neither consume a peer slot nor receive live traffic while its
+    // replay cursor is still being fenced.
     const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
     if (policy === undefined) {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
     }
-    const connectedDevices = new Set<string>();
-    for (const existing of this.ctx.getWebSockets()) {
-      const attached = readAttachment(existing);
-      if (attached?.presenceAnnounced === true) connectedDevices.add(attached.deviceId);
-    }
-    // If THIS deviceId is already connected we let another socket in while
-    // continuing to represent it as one online peer. New deviceId beyond cap
-    // → close 4004.
-    const deviceAlreadyOnline = connectedDevices.has(deviceId);
-    const wouldBeOver =
-      !deviceAlreadyOnline && connectedDevices.size >= policy.maxPeers;
 
     // Build the upgrade response.
     const pair = new WebSocketPair();
@@ -3118,37 +3552,18 @@ export class RoomDO extends DurableObject<Env> {
       `p2:${encodeOpaqueSegment(participantId)}`,
     ]);
     writeAttachment(server, {
+      kind: "device",
       deviceId,
       participantId,
       subscribed: false,
       lastPongTs: 0,
-      presenceAnnounced: !wouldBeOver,
+      presenceAnnounced: false,
     });
-
-    if (wouldBeOver) {
-      // Close immediately so the client observes 4004 over the WS protocol.
-      try {
-        server.close(CLOSE_PEER_CAP, "peer cap reached");
-      } catch {
-        // swallow — close is best-effort
-      }
-      return new Response(null, {
-        status: 101,
-        webSocket: client,
-        headers: buildSocketUpgradeHeaders(policy),
-      });
-    }
-
-    // Presence is per registered device, not per socket. A second tab/socket
-    // for an already-online device must not produce another join.
-    if (!deviceAlreadyOnline) {
-      this.broadcastPresence({ event: "join", deviceId, participantId }, server);
-    }
 
     return new Response(null, {
       status: 101,
       webSocket: client,
-      headers: buildSocketUpgradeHeaders(policy),
+      headers: buildSocketUpgradeHeaders(policy, routeVersion),
     });
   }
 
@@ -3158,24 +3573,13 @@ export class RoomDO extends DurableObject<Env> {
    * eviction between frames.
    */
   override async webSocketMessage(ws: WebSocket, msg: string | ArrayBuffer): Promise<void> {
-    // A peer-cap rejection uses an accepted-then-closed upgrade so the client
-    // can observe close code 4004. Frames can race that close. Gate on the
-    // attachment before decoding or replying so the rejected socket cannot
-    // subscribe, receive hello/replay/ping, or elicit validation errors.
+    // Missing attachments cannot be trusted to participate in the protocol.
     const att = readAttachment(ws);
     if (att === undefined) {
       try {
         ws.close(CLOSE_NORMAL, "missing attachment");
       } catch {
         // ignore
-      }
-      return;
-    }
-    if (!att.presenceAnnounced) {
-      try {
-        ws.close(CLOSE_PEER_CAP, "peer cap reached");
-      } catch {
-        // close is already in progress
       }
       return;
     }
@@ -3214,7 +3618,8 @@ export class RoomDO extends DurableObject<Env> {
     _wasClean: boolean,
   ): Promise<void> {
     const att = readAttachment(ws);
-    if (att?.presenceAnnounced === true && !this.hasOtherDeviceSocket(ws, att.deviceId)) {
+    if (att?.kind === "device" && att.subscribed && att.presenceAnnounced &&
+      !this.hasOtherDeviceSocket(ws, att.deviceId)) {
       this.broadcastPresence({
         event: "leave",
         deviceId: att.deviceId,
@@ -3229,7 +3634,7 @@ export class RoomDO extends DurableObject<Env> {
   /** Hibernation entry-point on socket-level error. Same handling as close. */
   override async webSocketError(ws: WebSocket, _err: unknown): Promise<void> {
     const att = readAttachment(ws);
-    if (att?.presenceAnnounced === true) {
+    if (att?.kind === "device" && att.subscribed && att.presenceAnnounced) {
       // Error may be followed by webSocketClose. Mark this socket first so
       // that the later callback cannot emit a duplicate leave.
       writeAttachment(ws, { ...att, presenceAnnounced: false });
@@ -3248,7 +3653,9 @@ export class RoomDO extends DurableObject<Env> {
     return this.ctx.getWebSockets().some((socket) => {
       if (socket === originator) return false;
       const attachment = readAttachment(socket);
-      return attachment?.presenceAnnounced === true && attachment.deviceId === deviceId;
+      return attachment?.kind === "device" && attachment.subscribed &&
+        attachment.presenceAnnounced &&
+        attachment.deviceId === deviceId;
     });
   }
 
@@ -3265,54 +3672,123 @@ export class RoomDO extends DurableObject<Env> {
     if (att.subscribed) {
       return;
     }
-    const [policy, serverSeq, oldestRetainedSeq] = await Promise.all([
-      this.ctx.storage.get<RoomPolicy>(META.policy),
-      this.ctx.storage.get<number>(META.serverSeq),
-      this.ctx.storage.get<number>(META.oldestRetainedSeq),
-    ]);
-    if (policy === undefined || !isNonnegativeSafeInteger(serverSeq) ||
-      (oldestRetainedSeq !== undefined && !isNonnegativeSafeInteger(oldestRetainedSeq)) ||
-      (oldestRetainedSeq ?? 0) > serverSeq) {
+    const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+    if (policy === undefined) {
       failSocketCorrupt(ws);
       return;
     }
-    const oldest = oldestRetainedSeq ?? 0;
-    // Per spec: `after < oldest_retained_seq` → cursor too old. `after == 0`
-    // (first connect, no prior cursor) is always valid even if oldest > 0
-    // because the client is asking for "everything available".
-    if (after > 0 && after < oldest) {
-      sendError(ws, "ATTN_CURSOR_TOO_OLD", `cursor ${after} < oldest_retained_seq ${oldest}`, {
-        resyncFromSeq: oldest,
-      });
+
+    // Close both sides of the replay/live boundary. serverSeq fences appends;
+    // oldestRetainedSeq fences concurrent owner-ACK deletion and signal FIFO
+    // eviction. Every awaited snapshot is followed by a fresh pair read. A
+    // changed pair retries the entire snapshot; a newly stale cursor closes
+    // immediately instead of becoming live with an incomplete replay.
+    let replayServerSeq = 0;
+    let devices: DeviceRecord[] = [];
+    let missedSignalEnvelopeIds: string[] = [];
+    let orderedReplay: EnvelopeRecord[] = [];
+    for (;;) {
+      const initialFence = await this.readSubscribeFence();
+      if (initialFence === undefined) {
+        failSocketCorrupt(ws);
+        return;
+      }
+      if (this.rejectStaleSubscribeCursor(ws, after, initialFence.oldestRetainedSeq)) {
+        return;
+      }
+
+      const deviceCandidate = await this.listDevicesInOrder();
+      const afterDevicesFence = await this.readSubscribeFence();
+      if (afterDevicesFence === undefined) {
+        failSocketCorrupt(ws);
+        return;
+      }
+      if (this.rejectStaleSubscribeCursor(ws, after, afterDevicesFence.oldestRetainedSeq)) {
+        return;
+      }
+      if (!sameSubscribeFence(initialFence, afterDevicesFence)) {
+        continue;
+      }
+      if (deviceCandidate instanceof Response) {
+        failSocketCorrupt(ws);
+        return;
+      }
+
+      const missedCandidate = att.kind === "device"
+        ? await this.collectMissedSignalIds(att.deviceId, after)
+        : [];
+      const afterSignalsFence = await this.readSubscribeFence();
+      if (afterSignalsFence === undefined) {
+        failSocketCorrupt(ws);
+        return;
+      }
+      if (this.rejectStaleSubscribeCursor(ws, after, afterSignalsFence.oldestRetainedSeq)) {
+        return;
+      }
+      if (!sameSubscribeFence(initialFence, afterSignalsFence)) {
+        continue;
+      }
+      if (missedCandidate instanceof Response) {
+        failSocketCorrupt(ws);
+        return;
+      }
+
+      const replayCandidate = await this.loadValidatedEnvelopePayloads(initialFence.serverSeq);
+      // This is the final await. Once both metadata values equal the snapshot
+      // fence, hello, replay, attachment transition, and join are synchronous.
+      const finalFence = await this.readSubscribeFence();
+      if (finalFence === undefined) {
+        failSocketCorrupt(ws);
+        return;
+      }
+      if (this.rejectStaleSubscribeCursor(ws, after, finalFence.oldestRetainedSeq)) {
+        return;
+      }
+      if (!sameSubscribeFence(initialFence, finalFence)) {
+        continue;
+      }
+      if (replayCandidate instanceof Response) {
+        failSocketCorrupt(ws);
+        return;
+      }
+
+      replayServerSeq = finalFence.serverSeq;
+      devices = deviceCandidate;
+      missedSignalEnvelopeIds = missedCandidate;
+      orderedReplay = replayCandidate;
+      break;
+    }
+
+    // Peer cap is a subscribe-time property. Only devices that have crossed
+    // the stable hello/replay boundary count, and same-device tabs aggregate
+    // to one online peer. There is no await between this decision and the
+    // transition, so two concurrent subscribes cannot both claim one slot.
+    const connectedDevices = new Set<string>();
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket === ws) continue;
+      const attachment = readAttachment(socket);
+      if (attachment?.kind === "device" && attachment.subscribed &&
+        attachment.presenceAnnounced) {
+        connectedDevices.add(attachment.deviceId);
+      }
+    }
+    const deviceAlreadyOnline = att.kind === "device" && connectedDevices.has(att.deviceId);
+    if (att.kind === "device" && !deviceAlreadyOnline &&
+      connectedDevices.size >= policy.maxPeers) {
       try {
-        ws.close(CLOSE_CURSOR_TOO_OLD, "cursor too old");
+        ws.close(CLOSE_PEER_CAP, "peer cap reached");
       } catch {
-        // ignore
+        // best-effort close after upgrade so clients observe 4004
       }
       return;
     }
 
-    // Build the hello frame.
-    const devices = await this.listDevicesInOrder();
-    if (devices instanceof Response) {
-      failSocketCorrupt(ws);
-      return;
-    }
-    const missedSignalEnvelopeIds = await this.collectMissedSignalIds(att.deviceId, after);
-    if (missedSignalEnvelopeIds instanceof Response) {
-      failSocketCorrupt(ws);
-      return;
-    }
-    const orderedReplay = await this.loadValidatedEnvelopePayloads(serverSeq);
-    if (orderedReplay instanceof Response) {
-      failSocketCorrupt(ws);
-      return;
-    }
     const onlineDeviceIds = [...new Set(
       this.ctx.getWebSockets()
         .map((socket) => {
           const attachment = readAttachment(socket);
-          return attachment?.presenceAnnounced === true
+          return attachment?.kind === "device" && attachment.subscribed &&
+              attachment.presenceAnnounced
             ? attachment.deviceId
             : undefined;
         })
@@ -3320,7 +3796,7 @@ export class RoomDO extends DurableObject<Env> {
     )].sort();
     const hello: ServerFrame = {
       type: "hello",
-      serverSeq,
+      serverSeq: replayServerSeq,
       policy,
       devices,
       onlineDeviceIds,
@@ -3332,18 +3808,66 @@ export class RoomDO extends DurableObject<Env> {
     // for signal envelopes — only deliver to the addressed deviceId.
     for (const record of orderedReplay) {
       if (record.serverSeq <= after) continue;
-      if (!deliverableTo(record, att.deviceId)) continue;
+      if (!deliverableTo(record, att)) continue;
       const frame: ServerFrame = { type: "envelope", envelope: record, serverSeq: record.serverSeq };
       sendJson(ws, frame);
     }
 
-    writeAttachment(ws, { ...att, subscribed: true });
+    const transitionedAttachment: WSAttachment = att.kind === "device"
+      ? { ...att, subscribed: true, presenceAnnounced: true }
+      : { ...att, subscribed: true };
+    writeAttachment(ws, transitionedAttachment);
+
+    if (att.kind === "device" && !deviceAlreadyOnline) {
+      this.broadcastPresence({
+        event: "join",
+        deviceId: att.deviceId,
+        participantId: att.participantId,
+      }, ws);
+    }
 
     // Emit an immediate ping so clients can observe the ping/pong contract.
     // Periodic 30s pings are owned by the 5.12 alarm; this single ping is
     // enough to satisfy the spec's "server sends ping" guarantee on connect
     // and gives tests a deterministic frame to assert against.
     sendJson(ws, { type: "ping", ts: Date.now() } satisfies ServerFrame);
+  }
+
+  /** Read and validate the two metadata values that define a replay snapshot. */
+  private async readSubscribeFence(): Promise<SubscribeFence | undefined> {
+    const [serverSeq, oldestRetainedSeq] = await Promise.all([
+      this.ctx.storage.get<number>(META.serverSeq),
+      this.ctx.storage.get<number>(META.oldestRetainedSeq),
+    ]);
+    if (!isNonnegativeSafeInteger(serverSeq) ||
+      (oldestRetainedSeq !== undefined && !isNonnegativeSafeInteger(oldestRetainedSeq)) ||
+      (oldestRetainedSeq ?? 0) > serverSeq) {
+      return undefined;
+    }
+    return { serverSeq, oldestRetainedSeq: oldestRetainedSeq ?? 0 };
+  }
+
+  /** Close a non-initial cursor that has fallen behind the retained floor. */
+  private rejectStaleSubscribeCursor(
+    ws: WebSocket,
+    after: number,
+    oldestRetainedSeq: number,
+  ): boolean {
+    // `after == 0` is the first-connect sentinel and requests all remaining
+    // payloads even when earlier history has already expired.
+    if (after === 0 || after >= oldestRetainedSeq) return false;
+    sendError(
+      ws,
+      "ATTN_CURSOR_TOO_OLD",
+      `cursor ${after} < oldest_retained_seq ${oldestRetainedSeq}`,
+      { resyncFromSeq: oldestRetainedSeq },
+    );
+    try {
+      ws.close(CLOSE_CURSOR_TOO_OLD, "cursor too old");
+    } catch {
+      // ignore
+    }
+    return true;
   }
 
   /**
@@ -3375,9 +3899,10 @@ export class RoomDO extends DurableObject<Env> {
       const json = JSON.stringify(frame);
       for (const sock of sockets) {
         const att = readAttachment(sock);
-        if (att?.presenceAnnounced !== true) continue;
+        if (att === undefined) continue;
+        if (att.kind === "device" && !att.presenceAnnounced) continue;
         if (!att.subscribed) continue;
-        if (!deliverableTo(record, att.deviceId)) continue;
+        if (!deliverableTo(record, att)) continue;
         sendRaw(sock, json);
       }
     }
@@ -3401,7 +3926,7 @@ export class RoomDO extends DurableObject<Env> {
     for (const sock of this.ctx.getWebSockets()) {
       if (sock === originator) continue;
       const att = readAttachment(sock);
-      if (att?.presenceAnnounced !== true) continue;
+      if (att?.kind !== "device" || !att.subscribed || !att.presenceAnnounced) continue;
       sendRaw(sock, json);
     }
   }
@@ -3884,13 +4409,19 @@ export class RoomDO extends DurableObject<Env> {
    * entries; the list+delete is cheap.
    */
   private async prunePowSeen(now: number): Promise<void> {
-    const entries = await this.ctx.storage.list<number>({ prefix: POW_SEEN_PREFIX });
+    const [entries, deviceProofs] = await Promise.all([
+      this.ctx.storage.list<number>({ prefix: POW_SEEN_PREFIX }),
+      this.ctx.storage.list<number>({ prefix: DEVICE_WS_PROOF_SEEN_PREFIX }),
+    ]);
     const stale: string[] = [];
     for (const [key, expiresAt] of entries.entries()) {
       if (typeof expiresAt !== "number") continue;
       if (expiresAt + POW_MAX_LIFETIME_MS < now) {
         stale.push(key);
       }
+    }
+    for (const [key, expiresAt] of deviceProofs.entries()) {
+      if (typeof expiresAt === "number" && expiresAt < now) stale.push(key);
     }
     if (stale.length > 0) {
       await this.ctx.storage.delete(stale);
@@ -4133,8 +4664,14 @@ function sameEnvelopeInput(a: EnvelopeInput, b: EnvelopeInput): boolean {
     a.expiresAt === b.expiresAt &&
     a.nonce === b.nonce &&
     a.ciphertext === b.ciphertext &&
-    a.ciphertextBytes === b.ciphertextBytes
+    a.ciphertextBytes === b.ciphertextBytes &&
+    a.signalGeneration === b.signalGeneration &&
+    a.deviceSignature === b.deviceSignature
   );
+}
+
+function signalGenerationKey(envelope: EnvelopeInput): string {
+  return `${SIGNAL_GENERATION_PREFIX}${encodeOpaqueSegment(envelope.authorId)}:${encodeOpaqueSegment(envelope.deviceId)}:${encodeOpaqueSegment(envelope.target?.deviceId ?? "broadcast")}`;
 }
 
 function sameEnvelopeRecord(a: EnvelopeRecord, b: EnvelopeRecord): boolean {
@@ -4157,7 +4694,9 @@ function sameDeviceRegistration(a: DeviceRecord, b: DeviceRegistrationRequest): 
   return a.deviceId === b.deviceId && a.participantId === b.participantId &&
     a.publicSigningKey === b.publicSigningKey &&
     a.publicEncryptionKey === b.publicEncryptionKey &&
-    a.client === b.client && a.kind === b.kind && a.selfSignature === b.selfSignature;
+    a.client === b.client && a.kind === b.kind && a.selfSignature === b.selfSignature &&
+    a.grantTier === ("grantTier" in b ? b.grantTier : undefined) &&
+    a.grantSignature === ("grantSignature" in b ? b.grantSignature : undefined);
 }
 
 function sameBlobReservation(a: BlobReservation, b: BlobReservation): boolean {
@@ -4294,6 +4833,8 @@ function isStoredEnvelopeRecord(value: unknown): value is EnvelopeRecord {
     Number.isSafeInteger(record.expiresAt) && (record.expiresAt ?? -1) >= 0 &&
     typeof record.nonce === "string" && typeof record.ciphertext === "string" &&
     Number.isSafeInteger(record.ciphertextBytes) && (record.ciphertextBytes ?? 0) > 0 &&
+    (record.signalGeneration === undefined || (Number.isSafeInteger(record.signalGeneration) && (record.signalGeneration ?? -1) >= 0)) &&
+    (record.deviceSignature === undefined || typeof record.deviceSignature === "string") &&
     Number.isSafeInteger(record.serverSeq) && (record.serverSeq ?? 0) > 0;
 }
 
@@ -4417,7 +4958,10 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint
  * here byte-for-byte.
  */
 async function verifySelfSignature(
-  body: DeviceRegistrationRequest,
+  body: DeviceRegistrationRequest & {
+    grantTier?: "comment" | "suggest";
+    grantSignature?: string;
+  },
   publicKeyBytes: Uint8Array,
   signature: Uint8Array,
 ): Promise<boolean> {
@@ -4430,8 +4974,18 @@ async function verifySelfSignature(
     client: body.client,
     kind: body.kind,
   };
+  if (body.grantTier !== undefined) signed.grantTier = body.grantTier;
+  if (body.grantSignature !== undefined) signed.grantSignature = body.grantSignature;
   const canonical = new TextEncoder().encode(canonicalize(signed));
 
+  return verifyEd25519(publicKeyBytes, signature, canonical);
+}
+
+async function verifyEd25519(
+  publicKeyBytes: Uint8Array,
+  signature: Uint8Array,
+  message: Uint8Array,
+): Promise<boolean> {
   let key: CryptoKey;
   try {
     key = await crypto.subtle.importKey(
@@ -4444,7 +4998,7 @@ async function verifySelfSignature(
   } catch {
     return false;
   }
-  return crypto.subtle.verify({ name: "Ed25519" }, key, signature, canonical);
+  return crypto.subtle.verify({ name: "Ed25519" }, key, signature, message);
 }
 
 /** Constant-time byte equality. */
@@ -4493,16 +5047,40 @@ export const WS_CLOSE_CODES = {
   cursorTooOld: CLOSE_CURSOR_TOO_OLD,
 } as const;
 
-/** Persisted per-socket state. Survives hibernation via serializeAttachment. */
-interface WSAttachment {
-  deviceId: string;
-  participantId: string;
-  /** This socket participates in the device's aggregate online presence. */
-  presenceAnnounced: boolean;
+interface WSAttachmentBase {
   /** True once the socket has received a successful `subscribe` reply. */
   subscribed: boolean;
   /** Last seen pong timestamp (ms). 0 until the first pong. */
   lastPongTs: number;
+}
+
+/** Registered participant socket. Legacy attachments deserialize into this branch. */
+interface DeviceWSAttachment extends WSAttachmentBase {
+  kind: "device";
+  deviceId: string;
+  participantId: string;
+  /** This socket participates in the device's aggregate online presence. */
+  presenceAnnounced: boolean;
+}
+
+/** Anonymous v3 read session. It is deliberately not a room participant. */
+interface ViewerWSAttachment extends WSAttachmentBase {
+  kind: "viewer";
+  viewerId: string;
+}
+
+/** Persisted per-socket state. Survives hibernation via serializeAttachment. */
+type WSAttachment = DeviceWSAttachment | ViewerWSAttachment;
+
+/** Metadata pair that makes one replay snapshot stable against writes/deletes. */
+interface SubscribeFence {
+  serverSeq: number;
+  oldestRetainedSeq: number;
+}
+
+function sameSubscribeFence(a: SubscribeFence, b: SubscribeFence): boolean {
+  return a.serverSeq === b.serverSeq &&
+    a.oldestRetainedSeq === b.oldestRetainedSeq;
 }
 
 /**
@@ -4561,10 +5139,15 @@ const clientFrameSchema = z.discriminatedUnion("type", [
 // --- WebSocket helpers ---------------------------------------------------
 
 /**
- * Parse Sec-WebSocket-Protocol expected as `attn.v2, hmac.<base64url>`.
- * Returns undefined on any shape mismatch — the caller surfaces as 401.
+ * Parse the socket subprotocol. V3 forms are exact and ordered: viewers carry
+ * only read-hmac, while registered devices carry read-hmac then write-hmac.
+ * V2 retains its historical extra-token tolerance for compatibility.
  */
-function parseAttnProtocol(header: string | null): { hmac: Uint8Array } | undefined {
+function parseAttnProtocol(
+  header: string | null,
+  version = 2,
+  v3RegisteredDevice = false,
+): { readHmac: Uint8Array; writeHmac?: Uint8Array; deviceSignature?: string } | undefined {
   if (header === null || header === "") return undefined;
   // Cloudflare's runtime exposes the *comma-joined* original header. We split
   // on `,` and trim each token, matching how browsers serialize the list.
@@ -4572,26 +5155,40 @@ function parseAttnProtocol(header: string | null): { hmac: Uint8Array } | undefi
   if (tokens.length < 2) return undefined;
   // Require the canonical subprotocol up front; reject mixed orderings so the
   // canonical request stays deterministic on the client side.
-  if (tokens[0] !== "attn.v2") return undefined;
-  let hmacToken: string | undefined;
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t !== undefined && t.startsWith("hmac.")) {
-      hmacToken = t;
-      break;
+  if (tokens[0] !== `attn.v${version}`) return undefined;
+  const decodeToken = (token: string | undefined, prefix: string): Uint8Array | undefined => {
+    if (token === undefined || !token.startsWith(prefix)) return undefined;
+    const encoded = token.slice(prefix.length);
+    if (encoded === "") return undefined;
+    try {
+      const bytes = base64UrlDecode(encoded);
+      return bytes.length === 32 ? bytes : undefined;
+    } catch {
+      return undefined;
     }
+  };
+
+  if (version === 3) {
+    const expectedLength = v3RegisteredDevice ? 4 : 2;
+    if (tokens.length !== expectedLength) return undefined;
+    const readHmac = decodeToken(tokens[1], "read-hmac.");
+    if (readHmac === undefined) return undefined;
+    if (!v3RegisteredDevice) return { readHmac };
+    const writeHmac = decodeToken(tokens[2], "write-hmac.");
+    if (writeHmac === undefined) return undefined;
+    const proofToken = tokens[3];
+    if (proofToken === undefined || !proofToken.startsWith("device-proof.")) return undefined;
+    const deviceSignature = proofToken.slice("device-proof.".length);
+    if (!/^[A-Za-z0-9_-]{86}$/u.test(deviceSignature)) return undefined;
+    return { readHmac, writeHmac, deviceSignature };
   }
-  if (hmacToken === undefined) return undefined;
-  const encoded = hmacToken.slice("hmac.".length);
-  if (encoded === "") return undefined;
-  let bytes: Uint8Array;
-  try {
-    bytes = base64UrlDecode(encoded);
-  } catch {
-    return undefined;
+
+  let hmac: Uint8Array | undefined;
+  for (let i = 1; i < tokens.length; i++) {
+    hmac = decodeToken(tokens[i], "hmac.");
+    if (hmac !== undefined) break;
   }
-  if (bytes.length !== 32) return undefined;
-  return { hmac: bytes };
+  return hmac === undefined ? undefined : { readHmac: hmac };
 }
 
 /**
@@ -4623,16 +5220,30 @@ async function verifyAdmissionHmac(opts: {
 function readAttachment(ws: WebSocket): WSAttachment | undefined {
   const raw = ws.deserializeAttachment() as unknown;
   if (raw === null || typeof raw !== "object") return undefined;
-  const r = raw as Partial<WSAttachment>;
+  const r = raw as Record<string, unknown>;
+  const subscribed = r.subscribed === true;
+  const lastPongTs = typeof r.lastPongTs === "number" ? r.lastPongTs : 0;
+  if (r.kind === "viewer") {
+    if (typeof r.viewerId !== "string" || !isViewerId(r.viewerId)) return undefined;
+    return {
+      kind: "viewer",
+      viewerId: r.viewerId,
+      subscribed,
+      lastPongTs,
+    };
+  }
+  // Attachments created before the tagged union did not carry `kind`.
+  if (r.kind !== undefined && r.kind !== "device") return undefined;
   if (typeof r.deviceId !== "string" || typeof r.participantId !== "string") return undefined;
   return {
+    kind: "device",
     deviceId: r.deviceId,
     participantId: r.participantId,
-    // Attachments written before aggregate same-device presence shipped did
-    // announce presence, so missing legacy state must restore as true.
-    presenceAnnounced: r.presenceAnnounced !== false,
-    subscribed: r.subscribed === true,
-    lastPongTs: typeof r.lastPongTs === "number" ? r.lastPongTs : 0,
+    // Missing state must fail offline. Presence is announced only by the
+    // successful subscribe transition in the current protocol.
+    presenceAnnounced: r.presenceAnnounced === true,
+    subscribed,
+    lastPongTs,
   };
 }
 
@@ -4685,17 +5296,24 @@ function failSocketCorrupt(ws: WebSocket): void {
 }
 
 /**
- * Per-target deliverability check. Signal envelopes deliver only to their
- * target.deviceId; all other kinds broadcast to every connected peer.
+ * Per-target deliverability check. Anonymous viewers receive only opaque
+ * non-signal envelopes. Registered devices retain the v2 targeted/broadcast
+ * signal behavior.
  */
-function deliverableTo(record: EnvelopeRecord, deviceId: string): boolean {
+function deliverableTo(record: EnvelopeRecord, attachment: WSAttachment): boolean {
+  if (attachment.kind === "viewer") return record.kind !== "signal";
   if (record.kind === "signal") {
     // Targeted signal (WebRTC SDP/ICE) → only the addressed device.
     // Broadcast signal (target=null, e.g. live co-typing steps) → every
     // peer. The author also receives its own broadcast back; consumers drop
     // self-echoes via the payload's `from` field.
     if (record.target?.deviceId == null) return true;
-    return record.target.deviceId === deviceId;
+    return record.target.deviceId === attachment.deviceId;
   }
   return true;
+}
+
+/** Canonical base64url-no-pad encoding of exactly 16 random bytes. */
+function isViewerId(value: string): boolean {
+  return /^[A-Za-z0-9_-]{22}$/.test(value);
 }

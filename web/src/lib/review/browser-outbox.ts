@@ -1,4 +1,4 @@
-import { buildAdmissionHeader } from './browser-crypto';
+import { buildAdmissionHeader, buildAdmissionHeaderV3 } from './browser-crypto';
 import { mintBrowserPowInWorker } from './browser-pow';
 import type { MailboxEnvelope } from './browser-ws';
 
@@ -36,6 +36,7 @@ export interface BrowserOutboxOptions {
   roomId: string;
   deviceId: string;
   admissionKey: Uint8Array;
+  protocolVersion?: 2 | 3;
   powBits: number;
   maxEventBytes: number;
   /** Relay policy cap for `snapshot_blob`; defaults to maxEventBytes. */
@@ -358,8 +359,11 @@ export class BrowserOutbox {
     body: string,
     bodyBytes: Uint8Array,
   ): Promise<{ powInvalid: boolean; accepted: unknown }> {
-    const path = `/v2/rooms/${this.opts.roomId}/envelopes`;
-    const admission = buildAdmissionHeader(this.opts.admissionKey, 'POST', path, bodyBytes);
+    const version = this.opts.protocolVersion ?? 2;
+    const path = `/v${version}/rooms/${this.opts.roomId}/envelopes`;
+    const admission = version === 3
+      ? buildAdmissionHeaderV3(this.opts.admissionKey, 'write', 'POST', path, bodyBytes)
+      : buildAdmissionHeader(this.opts.admissionKey, 'POST', path, bodyBytes);
     this.requestAbort = new AbortController();
     const signal = this.requestAbort.signal;
     const mint =
@@ -494,6 +498,8 @@ function toRelayEnvelope(envelope: MailboxEnvelope): Record<string, unknown> {
     nonce: envelope.nonce,
     ciphertext: envelope.ciphertext,
     ciphertextBytes: envelope.ciphertextBytes,
+    ...(envelope.signalGeneration === undefined ? {} : { signalGeneration: envelope.signalGeneration }),
+    ...(envelope.deviceSignature === undefined ? {} : { deviceSignature: envelope.deviceSignature }),
   };
 }
 

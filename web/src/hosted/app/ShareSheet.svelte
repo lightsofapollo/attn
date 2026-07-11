@@ -147,22 +147,24 @@
       <div class="share-step">
         <span class="step-badge" aria-hidden="true">4</span>
         <div>
-          <strong>Link ready</strong>
+          <strong>Choose what the link allows</strong>
           <p>
-            The room key stays in the fragment. Attn services cannot recover this link or read
-            the workspace.
+            Comment is the default for people; use Suggest for agents. Capability keys stay in
+            the fragment, so Attn services cannot recover them or read the workspace.
           </p>
         </div>
       </div>
-      <div class="link-box" aria-label="Browser invite link preview">
-        https://attn.sh/review/7pmH1MwiTfQt9gecnT4HIA#key=••••••••••••••••••••
+      <div class="link-box" aria-label="Tiered browser invite link preview">
+        <div><strong>Anyone with this link can view</strong></div>
+        <div><strong>Anyone with this link can comment</strong> · default</div>
+        <div><strong>Anyone with this link can suggest</strong></div>
       </div>
       <div class="share-foot">
         <button class="button" type="button" disabled={!shareUnlocked}>
           Native &amp; CLI options
         </button>
         <button class="button primary" type="button" disabled={!shareUnlocked} data-action="copy-link">
-          Copy browser link
+          Copy comment link
         </button>
       </div>
       {#if !shareUnlocked}

@@ -21,6 +21,9 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import {
   BrowserSession,
   buildRegisterDeviceBody,
+  buildRegisterDeviceBodyV3,
+  canonicalDeviceGrantV3,
+  verifyDeviceGrantV3,
   canonicalRegisterDeviceBytes,
   generateBrowserIdentity,
   ownerCredentialsFromInviteCapability,
@@ -680,6 +683,55 @@ defineCase('canonicalRegisterDeviceBytes is deterministic and excludes selfSigna
   assert(str.includes('"kind":"reviewer"'), 'kind field is reviewer');
 });
 
+defineCase('v3 registration self-signature binds owner grant fields', () => {
+  const identity = deterministicIdentity();
+  const body = buildRegisterDeviceBodyV3(identity, 'comment', 'owner-grant-signature');
+  const canonical = new TextDecoder().decode(canonicalRegisterDeviceBytes(body));
+  assert(canonical.includes('"grantTier":"comment"'), 'tier is self-signed');
+  assert(canonical.includes('"grantSignature":"owner-grant-signature"'), 'grant signature is self-signed');
+  assertEq(
+    new TextDecoder().decode(canonicalDeviceGrantV3('room-1', 'comment')),
+    '{"grantTier":"comment","purpose":"attn device grant v3","roomId":"room-1","v":3}',
+    'exact owner grant canonical JSON',
+  );
+});
+
+defineCase('v3 owner grant verification binds tier, room, and owner key', () => {
+  const owner = ed25519.keygen(new Uint8Array(32).fill(0x61));
+  const other = ed25519.keygen(new Uint8Array(32).fill(0x62));
+  const signature = base64UrlEncode(
+    ed25519.sign(canonicalDeviceGrantV3('room-grant', 'comment'), owner.secretKey),
+  );
+  const ownerKey = base64UrlEncode(owner.publicKey);
+  assert(verifyDeviceGrantV3('room-grant', 'comment', signature, ownerKey), 'valid grant');
+  assert(!verifyDeviceGrantV3('room-grant', 'suggest', signature, ownerKey), 'wrong tier');
+  assert(!verifyDeviceGrantV3('other-room', 'comment', signature, ownerKey), 'wrong room');
+  assert(!verifyDeviceGrantV3('room-grant', 'comment', signature, base64UrlEncode(other.publicKey)), 'wrong owner');
+  assert(!verifyDeviceGrantV3('room-grant', 'comment', '', ownerKey), 'incomplete proof');
+});
+
+defineCase('comment-tier session hard-blocks direct suggestion authoring', async () => {
+  const session = new BrowserSession({ store: makeStubStore() });
+  (session as unknown as { state: BrowserSessionState }).state.grantTier = 'comment';
+  let rejected = false;
+  try {
+    await session.createSuggestion({
+      anchor: {
+        v: 2,
+        fileId: 'file-tier',
+        snapshotId: 'snapshot-tier',
+        baseHash: 'hash-tier',
+        position: { byteRange: [0, 1], lineRange: [1, 1] },
+      },
+      operation: { kind: 'replace', expectedText: 'a', replacement: 'b' },
+    });
+  } catch (error) {
+    rejected = error instanceof Error && error.message.includes('suggest grant');
+  }
+  assert(rejected, 'direct createSuggestion must reject comment tier');
+  session.close();
+});
+
 defineCase('admissionHeaderValue prefixes with v2. and base64url-encodes the tag', () => {
   const key = new Uint8Array(32).fill(0x11);
   const value = admissionHeaderValue(key, 'POST', '/v2/rooms/r/devices', new Uint8Array(0));
@@ -1004,7 +1056,10 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
       removePeer: () => undefined,
       syncDevices: () => undefined,
     };
-    await session.sendCollab('{"kind":"submit","epoch":"snap"}');
+    await session.sendCollab(JSON.stringify({
+      kind: 'broadcast', fileId: 'file-owner', epoch: 'snap',
+      broadcast: { startVersion: 0, steps: [], clientIDs: [] },
+    }));
     assertEq(direct.length, 1, 'direct fanout happened synchronously');
     for (let index = 0; index < 80 && posted.length === 0; index += 1) await delay(20);
     assertEq(posted.length, 1, 'same collab envelope relayed once');
@@ -1016,7 +1071,12 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
 
     failRelay = true;
     let relayFailureSurfaced = false;
-    try { await session.sendCollab('{"kind":"submit","epoch":"next"}'); }
+    try {
+      await session.sendCollab(JSON.stringify({
+        kind: 'broadcast', fileId: 'file-owner', epoch: 'next',
+        broadcast: { startVersion: 0, steps: [], clientIDs: [] },
+      }));
+    }
     catch { relayFailureSurfaced = true; }
     assert(relayFailureSurfaced, 'relay failure did not reject sendCollab');
     assertEq(direct.length, 2, 'failed relay still used direct transport once');
@@ -1060,6 +1120,34 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
     session.close();
   } finally {
     await server.close();
+  }
+});
+
+defineCase('view comment and suggest browser reviewers cannot emit ProseMirror submits', async () => {
+  const submit = JSON.stringify({
+    kind: 'submit', fileId: 'file-reviewer', epoch: 'snapshot-reviewer',
+    submission: {
+      clientID: 'reviewer-client', version: 0,
+      steps: [{ stepType: 'replace', from: 1, to: 1 }],
+    },
+  });
+  for (const tier of ['view', 'comment', 'suggest'] as const) {
+    const session = new BrowserSession({ relayUrl: 'http://127.0.0.1:8787' });
+    (session as unknown as { state: BrowserSessionState }).state = {
+      ...session.getState(),
+      grantTier: tier,
+      status: 'connected',
+      connection: 'mailbox',
+      ownerOnline: true,
+      liveEditingAvailable: true,
+    };
+    let rejected = false;
+    try { await session.sendCollab(submit); }
+    catch (error) {
+      rejected = error instanceof Error && error.message.includes('durable suggestion');
+    }
+    assert(rejected, `${tier} reviewer submit was not rejected at the session boundary`);
+    session.close();
   }
 });
 
@@ -1111,7 +1199,9 @@ defineCase('direct-first and relay collab delivery dispatch once with authentica
       deviceId: reviewer.identity.deviceId,
       createdAt: 1_700_000_700_000,
       expiresAt: POLICY.expiresAt,
-      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: '{"kind":"resync"}' },
+      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: JSON.stringify({
+        kind: 'resync', fileId: 'file-owner', epoch: 'snapshot-owner',
+      }) },
       clientNonce: new Uint8Array(16).fill(0x22),
       aeadNonce: new Uint8Array(24).fill(0x23),
     });
@@ -1123,7 +1213,74 @@ defineCase('direct-first and relay collab delivery dispatch once with authentica
     assertEq(deliveries[0]!.source, 'direct', 'direct won delivery race');
     assertEq(deliveries[0]!.sender.kind, 'reviewer', 'authenticated sender kind surfaced');
     assertEq(deliveries[0]!.sender.deviceId, reviewer.identity.deviceId, 'sender device surfaced');
-    assertEq(deliveries[0]!.payload, '{"kind":"resync"}', 'collab payload surfaced');
+    assertEq(deliveries[0]!.payload, JSON.stringify({
+      kind: 'resync', fileId: 'file-owner', epoch: 'snapshot-owner',
+    }), 'collab payload surfaced');
+    session.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('browser owner drops authenticated remote submits on direct and mailbox paths', async () => {
+  const credentials = browserOwnerCredentials();
+  const owner = browserOwnerDevice(credentials);
+  const reviewer = browserReviewerDevice();
+  let socket: WebSocket | null = null;
+  let dispatches = 0;
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      socket = ws;
+      ws.on('message', (raw) => {
+        if (JSON.parse(String(raw)).type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello', serverSeq: 0, policy: POLICY, devices: [owner, reviewer.device],
+          onlineDeviceIds: [owner.deviceId, reviewer.device.deviceId], missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    const session = new BrowserSession({
+      owner: credentials,
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      disableWebRtc: true,
+      store: makeStubStore(),
+      fetchImpl: async () => ({
+        status: 200,
+        text: async () => JSON.stringify({ policy: POLICY, devices: [owner, reviewer.device] }),
+      }),
+      webSocketFactory: nodeFactory,
+      onCollab: () => { dispatches += 1; },
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 200,
+    });
+    await session.start();
+    for (let index = 0; index < 80 && !session.getState().authoringReady; index += 1) await delay(20);
+    const submit = JSON.stringify({
+      kind: 'submit', fileId: 'file-owner', epoch: 'snapshot-owner',
+      submission: {
+        clientID: 'forged-reviewer', version: 0,
+        steps: [{ stepType: 'replace', from: 1, to: 1 }],
+      },
+    });
+    const envelope = assembleBrowserSignal({
+      signalingKey: KEYS.signalingKey,
+      roomId: ROOM_ID,
+      authorId: reviewer.identity.participantId,
+      deviceId: reviewer.identity.deviceId,
+      createdAt: 1_700_000_705_000,
+      expiresAt: POLICY.expiresAt,
+      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: submit },
+      clientNonce: new Uint8Array(16).fill(0x2a),
+      aeadNonce: new Uint8Array(24).fill(0x2b),
+    });
+    const client = (
+      session as unknown as { wsClient: { ingestDirectEnvelope(item: MailboxEnvelope): Promise<void> } }
+    ).wsClient;
+    await client.ingestDirectEnvelope(envelope);
+    socket!.send(JSON.stringify({ type: 'envelope', envelope, serverSeq: 1 }));
+    await delay(40);
+    assertEq(dispatches, 0, 'remote submit reached browser owner authority callback');
     session.close();
   } finally {
     await server.close();
@@ -1179,7 +1336,9 @@ defineCase('rejected direct collab callback retries from durable network deliver
       deviceId: reviewer.identity.deviceId,
       createdAt: 1_700_000_710_000,
       expiresAt: POLICY.expiresAt,
-      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: '{"kind":"retry"}' },
+      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: JSON.stringify({
+        kind: 'resync', fileId: 'file-owner', epoch: 'snapshot-owner',
+      }) },
       clientNonce: new Uint8Array(16).fill(0x24),
       aeadNonce: new Uint8Array(24).fill(0x25),
     });
@@ -1274,7 +1433,9 @@ defineCase('happy path: invite → POST /devices → WS hello → connected', as
       `should pass through connecting; got ${orderedStatuses.join(',')}`,
     );
     assertEq(store.currentRoomId, ROOM_ID as unknown as RoomId, 'store.currentRoomId set');
-    const internalKeys = (session as unknown as { keys: typeof KEYS | null }).keys;
+    const internalKeys = (session as unknown as {
+      keys: (typeof KEYS & { readAdmissionKey: Uint8Array; writeAdmissionKey?: Uint8Array }) | null;
+    }).keys;
     assert(internalKeys !== null, 'derived room keys retained while connected');
     session.close();
     for (const [label, bytes] of Object.entries({
@@ -1282,12 +1443,151 @@ defineCase('happy path: invite → POST /devices → WS hello → connected', as
       eventKey: internalKeys.eventKey,
       snapshotKey: internalKeys.snapshotKey,
       signalingKey: internalKeys.signalingKey,
-      admissionKey: internalKeys.admissionKey,
+      readAdmissionKey: internalKeys.readAdmissionKey,
+      writeAdmissionKey: internalKeys.writeAdmissionKey!,
       signingSecret: identity.signingSecret,
       encryptionSecret: identity.encryptionSecret,
     })) {
       assert(bytes.every((byte) => byte === 0), `${label} zeroed on close`);
     }
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('v3 view uses anonymous read socket and performs zero mutations', async () => {
+  const server = await startMockServer();
+  try {
+    let requestCount = 0;
+    let socketProtocol = '';
+    let socketUrl = '';
+    server.onClient((ws, protocol) => {
+      socketProtocol = protocol;
+      ws.on('message', (raw) => {
+        if (JSON.parse(String(raw)).type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello',
+          serverSeq: 0,
+          policy: POLICY,
+          devices: [OWNER_DEVICE],
+          onlineDeviceIds: [OWNER_DEVICE.deviceId],
+          missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    const session = new BrowserSession({
+      parsedInvite: {
+        version: 3,
+        tier: 'view',
+        roomId: ROOM_ID,
+        readCapabilityKey: new Uint8Array(32).fill(0x41),
+      },
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      store: makeStubStore(),
+      fetchImpl: async (url, init) => {
+        requestCount += 1;
+        assertEq(init.method, 'GET', 'view performs GET only');
+        assert(url.endsWith(`/v3/rooms/${ROOM_ID}/devices`), 'view reads v3 directory');
+        assert(init.headers?.['Attn-Admission']?.startsWith('v3.read.'), 'read-scoped admission');
+        return { status: 200, text: async () => JSON.stringify({ policy: POLICY, devices: [OWNER_DEVICE] }) };
+      },
+      webSocketFactory: (url, protocols) => {
+        socketUrl = url;
+        return nodeFactory(url, protocols);
+      },
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 100,
+    });
+    await session.start();
+    for (let i = 0; i < 50 && session.getState().status !== 'connected'; i++) await delay(10);
+    assertEq(session.getState().status, 'connected', 'view connects');
+    assertEq(session.getState().grantTier, 'view', 'view tier retained');
+    assertEq(session.getState().authoringReady, false, 'view never authors');
+    assertEq(requestCount, 1, 'no registration/outbox mutation');
+    assert(/\/v3\/rooms\/[^/]+\/socket\?viewer_id=[A-Za-z0-9_-]{22}$/u.test(socketUrl), 'canonical anonymous viewer URL');
+    assert(socketProtocol.includes('attn.v3') && socketProtocol.includes('read-hmac.'), 'v3 read socket');
+    session.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('v3 comment registration binds URL grant and uses write admission', async () => {
+  const server = await startMockServer();
+  try {
+    const grantSignature = base64UrlEncode(
+      ed25519.sign(canonicalDeviceGrantV3(ROOM_ID, 'comment'), OWNER_KEYPAIR.secret),
+    );
+    const captured: { registration: Record<string, unknown> | null } = { registration: null };
+    let socketProtocol = '';
+    server.onClient((ws, protocol) => {
+      socketProtocol = protocol;
+      ws.on('message', (raw) => {
+        if (JSON.parse(String(raw)).type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello',
+          serverSeq: 0,
+          policy: POLICY,
+          devices: [OWNER_DEVICE],
+          missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    const session = new BrowserSession({
+      parsedInvite: {
+        version: 3,
+        tier: 'comment',
+        roomId: ROOM_ID,
+        readCapabilityKey: new Uint8Array(32).fill(0x42),
+        writeAdmissionKey: new Uint8Array(32).fill(0x43),
+        grantSignature,
+      },
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      identity: deterministicIdentity(),
+      powToken: 'test-pow-token',
+      store: makeStubStore(),
+      fetchImpl: async (url, init) => {
+        if (init.method === 'GET') {
+          assert(init.headers?.['Attn-Admission']?.startsWith('v3.read.'), 'directory uses read scope');
+          return { status: 200, text: async () => JSON.stringify({ policy: POLICY, devices: [OWNER_DEVICE] }) };
+        }
+        if (url.endsWith('/devices')) {
+          assert(init.headers?.['Attn-Admission']?.startsWith('v3.write.'), 'registration uses write scope');
+          captured.registration = JSON.parse(init.body ?? '{}');
+          return { status: 204, text: async () => '' };
+        }
+        return { status: 200, text: async () => JSON.stringify({ accepted: [] }) };
+      },
+      webSocketFactory: nodeFactory,
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 100,
+    });
+    await session.start();
+    assert(captured.registration !== null, 'v3 device registration captured');
+    const registration = captured.registration;
+    assertEq(registration?.grantTier, 'comment', 'registration tier');
+    assertEq(registration?.grantSignature, grantSignature, 'registration owner grant');
+    assert(typeof registration?.selfSignature === 'string', 'device binds grant in self signature');
+    for (let i = 0; i < 50 && socketProtocol.length === 0; i++) await delay(10);
+    assert(socketProtocol.includes('read-hmac.'), 'device socket proves read capability');
+    assert(socketProtocol.includes('write-hmac.'), 'device socket proves write capability');
+    let rejected = false;
+    try {
+      await session.createSuggestion({
+        anchor: {
+          v: 2,
+          fileId: 'file-tier',
+          snapshotId: 'snapshot-tier',
+          baseHash: 'hash-tier',
+          position: { byteRange: [0, 1], lineRange: [1, 1] },
+        },
+        operation: { kind: 'replace', expectedText: 'a', replacement: 'b' },
+      });
+    } catch {
+      rejected = true;
+    }
+    assert(rejected, 'comment session hard-blocks suggestion');
+    session.close();
   } finally {
     await server.close();
   }

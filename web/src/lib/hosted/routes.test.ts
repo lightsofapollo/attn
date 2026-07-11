@@ -23,6 +23,8 @@ assertEq(hostedEntryForPath('/open'), 'app', 'import handoff');
 assertEq(hostedEntryForPath('/review'), 'review', 'review root');
 assertEq(hostedEntryForPath('/review/abc-123'), 'review', 'review room');
 assertEq(hostedEntryForPath('/review/abc-123/'), 'review', 'review room trailing slash');
+assertEq(hostedEntryForPath('/s/share-123'), 'review', 'durable share route');
+assertEq(hostedEntryForPath('/share'), 'landing', 'share prefix does not leak into review');
 
 // Entry documents.
 assertEq(entryHtmlPath('landing'), '/index.html', 'landing document');
@@ -37,6 +39,7 @@ assertEq(entryRequestPath('review'), '/review/', 'review request path');
 // App route parsing.
 assertEq(parseAppRoute('/'), undefined, 'landing is not an app route');
 assertEq(parseAppRoute('/review/abc'), undefined, 'review is not an app route');
+assertEq(parseAppRoute('/s/abc'), undefined, 'durable share is not an app route');
 assertEq(parseAppRoute('/app'), { view: 'home' }, 'app home');
 assertEq(parseAppRoute('/app/'), { view: 'home' }, 'app home trailing slash');
 assertEq(parseAppRoute('/app/storage'), { view: 'storage' }, 'storage');

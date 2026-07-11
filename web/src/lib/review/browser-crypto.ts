@@ -206,6 +206,25 @@ export const INFO_SIGNALING = new TextEncoder().encode('attn signaling encryptio
 export const INFO_ADMISSION = new TextEncoder().encode('attn relay admission v2');
 export const ROOM_ID_PREFIX = new TextEncoder().encode('attn room v2');
 
+// Additive capability-split v3 tree. Existing v2 exports remain unchanged and
+// continue to back production networking until an explicit protocol cutover.
+export const INFO_ROOT_V3 = new TextEncoder().encode('attn room root v3');
+export const INFO_READ_CAPABILITY_V3 = new TextEncoder().encode('attn read capability v3');
+export const INFO_EVENT_V3 = new TextEncoder().encode('attn event encryption v3');
+export const INFO_SNAPSHOT_V3 = new TextEncoder().encode('attn snapshot encryption v3');
+export const INFO_SIGNALING_V3 = new TextEncoder().encode('attn signaling encryption v3');
+export const INFO_READ_ADMISSION_V3 = new TextEncoder().encode('attn read admission v3');
+export const INFO_WRITE_ADMISSION_V3 = new TextEncoder().encode('attn write admission v3');
+export const ROOM_ID_PREFIX_V3 = new TextEncoder().encode('attn room v3');
+export const INFO_SHARE_ROOM_V3 = new TextEncoder().encode('attn share room v3');
+export const INFO_SHARE_LINK_VIEW_V3 = new TextEncoder().encode('attn share link view v3');
+export const INFO_SHARE_LINK_COMMENT_V3 = new TextEncoder().encode('attn share link comment v3');
+export const INFO_SHARE_LINK_SUGGEST_V3 = new TextEncoder().encode('attn share link suggest v3');
+export const INFO_SHARE_BUNDLE_KEY_V3 = new TextEncoder().encode('attn share bundle key v3');
+export const INFO_SHARE_READ_ADMISSION_V3 = new TextEncoder().encode('attn share read admission v3');
+export const INFO_SHARE_WRITE_ADMISSION_V3 = new TextEncoder().encode('attn share write admission v3');
+export const SHARE_BUNDLE_ID_PREFIX_V3 = new TextEncoder().encode('attn share bundle id v3');
+
 export interface RoomKeys {
   /** HKDF root key — used only to derive subkeys. Never used directly. */
   rootKey: Uint8Array;
@@ -217,6 +236,30 @@ export interface RoomKeys {
   signalingKey: Uint8Array;
   /** HMAC key for relay-admission tokens. */
   admissionKey: Uint8Array;
+}
+
+export interface ReadKeysV3 {
+  readCapabilityKey: Uint8Array;
+  eventKey: Uint8Array;
+  snapshotKey: Uint8Array;
+  signalingKey: Uint8Array;
+  readAdmissionKey: Uint8Array;
+}
+
+export interface RoomKeyTreeV3 {
+  rootKey: Uint8Array;
+  readKeys: ReadKeysV3;
+  writeAdmissionKey: Uint8Array;
+}
+
+export type ShareLinkTier = 'view' | 'comment' | 'suggest';
+
+export interface ShareLinkKeys {
+  linkSecret: Uint8Array;
+  bundleKey: Uint8Array;
+  bundleId: string;
+  readAdmissionKey: Uint8Array;
+  writeAdmissionKey?: Uint8Array;
 }
 
 export function hkdfExpand32(ikm: Uint8Array, info: Uint8Array): Uint8Array {
@@ -239,6 +282,87 @@ export function deriveRoomKeys(roomSecret: Uint8Array): RoomKeys {
   };
 }
 
+export function deriveReadKeysV3(readCapabilityKey: Uint8Array): ReadKeysV3 {
+  requireKey32(readCapabilityKey, 'readCapabilityKey');
+  return {
+    readCapabilityKey: new Uint8Array(readCapabilityKey),
+    eventKey: hkdfExpand32(readCapabilityKey, INFO_EVENT_V3),
+    snapshotKey: hkdfExpand32(readCapabilityKey, INFO_SNAPSHOT_V3),
+    signalingKey: hkdfExpand32(readCapabilityKey, INFO_SIGNALING_V3),
+    readAdmissionKey: hkdfExpand32(readCapabilityKey, INFO_READ_ADMISSION_V3),
+  };
+}
+
+export function deriveRoomKeyTreeV3(roomSecret: Uint8Array): RoomKeyTreeV3 {
+  requireKey32(roomSecret, 'roomSecret');
+  const rootKey = hkdfExpand32(roomSecret, INFO_ROOT_V3);
+  const readCapabilityKey = hkdfExpand32(rootKey, INFO_READ_CAPABILITY_V3);
+  return {
+    rootKey,
+    readKeys: deriveReadKeysV3(readCapabilityKey),
+    writeAdmissionKey: hkdfExpand32(rootKey, INFO_WRITE_ADMISSION_V3),
+  };
+}
+
+/**
+ * Derive one durable share epoch's room secret. The epoch is encoded as an
+ * unsigned uint64be suffix on the fixed HKDF info string. JavaScript callers
+ * use safe integers because the relay record carries the epoch as JSON.
+ */
+export function deriveShareEpochRoomSecret(
+  shareSecret: Uint8Array,
+  epoch: number,
+): Uint8Array {
+  requireKey32(shareSecret, 'shareSecret');
+  if (!Number.isSafeInteger(epoch) || epoch < 0) {
+    throw new Error('epoch must be a non-negative safe integer');
+  }
+  const info = new Uint8Array(INFO_SHARE_ROOM_V3.length + 8);
+  info.set(INFO_SHARE_ROOM_V3, 0);
+  const view = new DataView(info.buffer, info.byteOffset, info.byteLength);
+  view.setBigUint64(INFO_SHARE_ROOM_V3.length, BigInt(epoch), false);
+  return hkdfExpand32(shareSecret, info);
+}
+
+export function deriveShareLinkKeys(
+  shareSecret: Uint8Array,
+  tier: ShareLinkTier,
+): ShareLinkKeys {
+  requireKey32(shareSecret, 'shareSecret');
+  const info = tier === 'view'
+    ? INFO_SHARE_LINK_VIEW_V3
+    : tier === 'comment'
+      ? INFO_SHARE_LINK_COMMENT_V3
+      : INFO_SHARE_LINK_SUGGEST_V3;
+  const linkSecret = hkdfExpand32(shareSecret, info);
+  try {
+    return expandShareLinkKeys(linkSecret, tier);
+  } finally {
+    linkSecret.fill(0);
+  }
+}
+
+export function expandShareLinkKeys(
+  linkSecret: Uint8Array,
+  tier: ShareLinkTier,
+): ShareLinkKeys {
+  requireKey32(linkSecret, 'linkSecret');
+  const idInput = new Uint8Array(SHARE_BUNDLE_ID_PREFIX_V3.length + linkSecret.length);
+  idInput.set(SHARE_BUNDLE_ID_PREFIX_V3, 0);
+  idInput.set(linkSecret, SHARE_BUNDLE_ID_PREFIX_V3.length);
+  const bundleId = base64UrlEncode(sha256(idInput).subarray(0, 16));
+  idInput.fill(0);
+  return {
+    linkSecret: new Uint8Array(linkSecret),
+    bundleKey: hkdfExpand32(linkSecret, INFO_SHARE_BUNDLE_KEY_V3),
+    bundleId,
+    readAdmissionKey: hkdfExpand32(linkSecret, INFO_SHARE_READ_ADMISSION_V3),
+    ...(tier === 'view'
+      ? {}
+      : { writeAdmissionKey: hkdfExpand32(linkSecret, INFO_SHARE_WRITE_ADMISSION_V3) }),
+  };
+}
+
 export function deriveRoomId(roomSecret: Uint8Array): string {
   if (!(roomSecret instanceof Uint8Array) || roomSecret.length !== 32) {
     throw new Error('roomSecret must be a 32-byte Uint8Array');
@@ -249,6 +373,20 @@ export function deriveRoomId(roomSecret: Uint8Array): string {
   input.set(roomSecret, ROOM_ID_PREFIX.length);
   const digest = sha256(input);
   return base64UrlEncode(digest.subarray(0, 16));
+}
+
+export function deriveRoomIdV3(roomSecret: Uint8Array): string {
+  requireKey32(roomSecret, 'roomSecret');
+  const input = new Uint8Array(ROOM_ID_PREFIX_V3.length + roomSecret.length);
+  input.set(ROOM_ID_PREFIX_V3, 0);
+  input.set(roomSecret, ROOM_ID_PREFIX_V3.length);
+  return base64UrlEncode(sha256(input).subarray(0, 16));
+}
+
+function requireKey32(value: Uint8Array, name: string): void {
+  if (!(value instanceof Uint8Array) || value.length !== 32) {
+    throw new Error(`${name} must be a 32-byte Uint8Array`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -753,6 +891,21 @@ export function buildAdmissionHeader(
   return `v2.${base64UrlEncode(tag)}`;
 }
 
+/** Build a scoped v3 admission header. */
+export function buildAdmissionHeaderV3(
+  admissionKey: Uint8Array,
+  scope: 'read' | 'write',
+  method: string,
+  urlPath: string,
+  body: Uint8Array,
+): string {
+  if (admissionKey.length !== 32) throw new Error('admissionKey must be 32 bytes');
+  const canon = canonicalRequestBytes(method, urlPath, [], body);
+  const tag = hmac(sha256, admissionKey, canon);
+  canon.fill(0);
+  return `v3.${scope}.${base64UrlEncode(tag)}`;
+}
+
 /**
  * Build the `Sec-WebSocket-Protocol` value `"attn.v2, hmac.<base64url HMAC>"`
  * the browser passes when opening the WS to the relay. Equivalent to
@@ -770,4 +923,26 @@ export function buildAdmissionSubprotocol(
   const canon = canonicalRequestBytes(method, urlPath, queryPairs, new Uint8Array(0));
   const tag = hmac(sha256, admissionKey, canon);
   return `attn.v2, hmac.${base64UrlEncode(tag)}`;
+}
+
+/** Build the v3 read-scoped WebSocket admission subprotocol. */
+export function buildAdmissionSubprotocolV3(
+  readAdmissionKey: Uint8Array,
+  method: string,
+  urlPath: string,
+  queryPairs: Array<[string, string]>,
+  writeAdmissionKey?: Uint8Array,
+): string {
+  if (readAdmissionKey.length !== 32) throw new Error('readAdmissionKey must be 32 bytes');
+  if (writeAdmissionKey !== undefined && writeAdmissionKey.length !== 32) {
+    throw new Error('writeAdmissionKey must be 32 bytes');
+  }
+  const canon = canonicalRequestBytes(method, urlPath, queryPairs, new Uint8Array(0));
+  const readTag = hmac(sha256, readAdmissionKey, canon);
+  const writeTag = writeAdmissionKey === undefined ? undefined : hmac(sha256, writeAdmissionKey, canon);
+  canon.fill(0);
+  if (writeAdmissionKey === undefined) {
+    return `attn.v3, read-hmac.${base64UrlEncode(readTag)}`;
+  }
+  return `attn.v3, read-hmac.${base64UrlEncode(readTag)}, write-hmac.${base64UrlEncode(writeTag!)}`;
 }

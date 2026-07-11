@@ -50,6 +50,7 @@ export const FIXED_POW_RAND = "ELoREhMUFRYXGBkaGxwdHg";
 export async function createPowHeader(
   roomId: string,
   ownerPublicKeyBytes: Uint8Array,
+  path = `/v2/rooms/${roomId}`,
 ): Promise<string> {
   const ownerSigningKeyId = base64UrlEncode(
     new Uint8Array(await crypto.subtle.digest("SHA-256", ownerPublicKeyBytes)),
@@ -58,7 +59,7 @@ export async function createPowHeader(
     roomId,
     deviceId: ownerSigningKeyId,
     method: "POST",
-    path: `/v2/rooms/${roomId}`,
+    path,
     difficulty: 12,
     expiresAt: Date.now() + 5 * 60_000,
     rand: FIXED_POW_RAND,

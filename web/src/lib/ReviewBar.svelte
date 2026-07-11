@@ -46,6 +46,7 @@
   import { roomDisplayName, shortRoomId } from './review/room-ui';
   import { reviewStore } from './review/store.svelte';
   import type { ParticipantId, RoomId } from './types';
+  import UnreadBadge from './UnreadBadge.svelte';
 
   interface Props {
     /** Whether the share dialog is currently open (forces the row visible). */
@@ -144,12 +145,15 @@
         <DropdownMenu bind:open={roomMenuOpen}>
           <DropdownMenuTrigger
             class="room-menu-trigger inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-border/50 bg-background/65 px-1.5 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-            aria-label="Review rooms"
+            aria-label={reviewStore.totalUnread > 0
+              ? `Review rooms, ${reviewStore.totalUnread} unread updates`
+              : 'Review rooms'}
             aria-expanded={roomMenuOpen}
             title="Review rooms"
           >
             <ChevronsUpDown class="size-3.5" aria-hidden="true" />
             <span class="room-menu-count tabular-nums">{rooms.length}</span>
+            <UnreadBadge count={reviewStore.totalUnread} />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" class="w-64">
             <DropdownMenuLabel class="text-xs text-muted-foreground">
@@ -165,6 +169,10 @@
                   aria-hidden="true"
                 />
                 <span class="min-w-0 flex-1 truncate">{roomLabel(room.roomId, room.status)}</span>
+                <UnreadBadge
+                  count={reviewStore.unreadForRoom(room.roomId)}
+                  label="unread updates in this room"
+                />
                 <span class="room-menu-status">{room.connection === 'offline' ? 'offline' : 'syncing'}</span>
               </DropdownMenuItem>
             {/each}

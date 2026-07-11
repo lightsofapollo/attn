@@ -37,6 +37,27 @@ pub const INFO_ADMISSION: &[u8] = b"attn relay admission v2";
 /// (so the id is domain-separated from any HKDF output).
 pub const ROOM_ID_PREFIX: &[u8] = b"attn room v2";
 
+// Additive v3 capability tree. V2 constants and derivations above remain the
+// production protocol until the networking migration explicitly switches.
+pub const INFO_ROOT_V3: &[u8] = b"attn room root v3";
+pub const INFO_READ_CAPABILITY_V3: &[u8] = b"attn read capability v3";
+pub const INFO_EVENT_V3: &[u8] = b"attn event encryption v3";
+pub const INFO_SNAPSHOT_V3: &[u8] = b"attn snapshot encryption v3";
+pub const INFO_SIGNALING_V3: &[u8] = b"attn signaling encryption v3";
+pub const INFO_READ_ADMISSION_V3: &[u8] = b"attn read admission v3";
+pub const INFO_WRITE_ADMISSION_V3: &[u8] = b"attn write admission v3";
+pub const ROOM_ID_PREFIX_V3: &[u8] = b"attn room v3";
+/// Fixed prefix for durable-share epoch room secrets. The canonical HKDF
+/// `info` is this UTF-8 prefix followed by the epoch as unsigned uint64be.
+pub const INFO_SHARE_ROOM_V3: &[u8] = b"attn share room v3";
+pub const INFO_SHARE_LINK_VIEW_V3: &[u8] = b"attn share link view v3";
+pub const INFO_SHARE_LINK_COMMENT_V3: &[u8] = b"attn share link comment v3";
+pub const INFO_SHARE_LINK_SUGGEST_V3: &[u8] = b"attn share link suggest v3";
+pub const INFO_SHARE_BUNDLE_KEY_V3: &[u8] = b"attn share bundle key v3";
+pub const INFO_SHARE_READ_ADMISSION_V3: &[u8] = b"attn share read admission v3";
+pub const INFO_SHARE_WRITE_ADMISSION_V3: &[u8] = b"attn share write admission v3";
+pub const SHARE_BUNDLE_ID_PREFIX_V3: &[u8] = b"attn share bundle id v3";
+
 // ---------------------------------------------------------------------------
 // DerivedKey — 32-byte symmetric key, zeroizes on drop
 // ---------------------------------------------------------------------------
@@ -90,6 +111,43 @@ pub struct RoomKeys {
     /// `HKDF(rootKey, info="attn relay admission v2", L=32)`. Symmetric
     /// secret used to MAC relay-admission tokens.
     pub admission_key: DerivedKey,
+}
+
+/// Read-only branch of the v3 room tree. Possession permits decryption and
+/// read admission, but cannot derive the sibling write-admission capability.
+pub struct ReadKeysV3 {
+    pub read_capability_key: DerivedKey,
+    pub event_key: DerivedKey,
+    pub snapshot_key: DerivedKey,
+    pub signaling_key: DerivedKey,
+    pub read_admission_key: DerivedKey,
+}
+
+/// Full owner-side v3 tree. Share only `read_keys.read_capability_key` and,
+/// for writable tiers, the independently derived `write_admission_key`.
+pub struct RoomKeyTreeV3 {
+    pub root_key: DerivedKey,
+    pub read_keys: ReadKeysV3,
+    pub write_admission_key: DerivedKey,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShareLinkTier {
+    View,
+    Comment,
+    Suggest,
+}
+
+/// Tier-specific durable-share material derived by the owner. Only
+/// `link_secret` is placed in a public URL; `bundle_key` and admissions are
+/// recomputed by recipients and never serialized in the fragment.
+pub struct ShareLinkKeys {
+    pub link_secret: DerivedKey,
+    pub bundle_key: DerivedKey,
+    pub bundle_id: String,
+    pub read_admission_key: DerivedKey,
+    pub write_admission_key: Option<DerivedKey>,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +205,80 @@ pub fn derive_room_keys(room_secret: &[u8; 32]) -> RoomKeys {
     }
 }
 
+/// Expand a v3 read capability into all decrypt/read-admission leaves.
+pub fn derive_read_keys_v3(read_capability_key: &[u8; 32]) -> ReadKeysV3 {
+    ReadKeysV3 {
+        read_capability_key: DerivedKey(*read_capability_key),
+        event_key: hkdf_expand_32(read_capability_key, INFO_EVENT_V3),
+        snapshot_key: hkdf_expand_32(read_capability_key, INFO_SNAPSHOT_V3),
+        signaling_key: hkdf_expand_32(read_capability_key, INFO_SIGNALING_V3),
+        read_admission_key: hkdf_expand_32(read_capability_key, INFO_READ_ADMISSION_V3),
+    }
+}
+
+/// Derive the complete additive v3 capability tree from the owner's secret.
+pub fn derive_room_key_tree_v3(room_secret: &[u8; 32]) -> RoomKeyTreeV3 {
+    let root_key = hkdf_expand_32(room_secret, INFO_ROOT_V3);
+    let read_capability_key = hkdf_expand_32(root_key.as_bytes(), INFO_READ_CAPABILITY_V3);
+    let read_keys = derive_read_keys_v3(read_capability_key.as_bytes());
+    let write_admission_key = hkdf_expand_32(root_key.as_bytes(), INFO_WRITE_ADMISSION_V3);
+    RoomKeyTreeV3 {
+        root_key,
+        read_keys,
+        write_admission_key,
+    }
+}
+
+/// Derive the v3 room secret for one durable-share epoch.
+///
+/// `roomSecret_n = HKDF-SHA-256(shareSecret, empty salt,
+/// info = "attn share room v3" || uint64be(epoch), L=32)`.
+pub fn derive_share_epoch_room_secret(share_secret: &[u8; 32], epoch: u64) -> DerivedKey {
+    let mut info = Vec::with_capacity(INFO_SHARE_ROOM_V3.len() + 8);
+    info.extend_from_slice(INFO_SHARE_ROOM_V3);
+    info.extend_from_slice(&epoch.to_be_bytes());
+    hkdf_expand_32(share_secret, &info)
+}
+
+/// Derive one independent public-link sibling and its share-relay leaves.
+/// The owner's `shareSecret` never leaves local storage.
+pub fn derive_share_link_keys(share_secret: &[u8; 32], tier: ShareLinkTier) -> ShareLinkKeys {
+    let link_info = match tier {
+        ShareLinkTier::View => INFO_SHARE_LINK_VIEW_V3,
+        ShareLinkTier::Comment => INFO_SHARE_LINK_COMMENT_V3,
+        ShareLinkTier::Suggest => INFO_SHARE_LINK_SUGGEST_V3,
+    };
+    let link_secret = hkdf_expand_32(share_secret, link_info);
+    expand_share_link_keys(link_secret.as_bytes(), tier)
+}
+
+/// Expand the public URL bearer into its bundle key/id and static relay
+/// admissions. This does not and cannot recover the owner share root.
+pub fn expand_share_link_keys(link_secret_bytes: &[u8; 32], tier: ShareLinkTier) -> ShareLinkKeys {
+    let link_secret = DerivedKey(*link_secret_bytes);
+    let bundle_key = hkdf_expand_32(link_secret.as_bytes(), INFO_SHARE_BUNDLE_KEY_V3);
+    let read_admission_key = hkdf_expand_32(link_secret.as_bytes(), INFO_SHARE_READ_ADMISSION_V3);
+    let write_admission_key = if tier == ShareLinkTier::View {
+        None
+    } else {
+        Some(hkdf_expand_32(
+            link_secret.as_bytes(),
+            INFO_SHARE_WRITE_ADMISSION_V3,
+        ))
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(SHARE_BUNDLE_ID_PREFIX_V3);
+    hasher.update(link_secret.as_bytes());
+    let digest = hasher.finalize();
+    ShareLinkKeys {
+        link_secret,
+        bundle_key,
+        bundle_id: URL_SAFE_NO_PAD.encode(&digest[..16]),
+        read_admission_key,
+        write_admission_key,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Room id derivation
 // ---------------------------------------------------------------------------
@@ -166,6 +298,15 @@ pub fn derive_room_id(room_secret: &[u8; 32]) -> RoomId {
     let digest = hasher.finalize();
     let id = URL_SAFE_NO_PAD.encode(&digest[..16]);
     RoomId::new(id)
+}
+
+/// Additive v3 room id; production v2 room-id derivation is unchanged.
+pub fn derive_room_id_v3(room_secret: &[u8; 32]) -> RoomId {
+    let mut hasher = Sha256::new();
+    hasher.update(ROOM_ID_PREFIX_V3);
+    hasher.update(room_secret);
+    let digest = hasher.finalize();
+    RoomId::new(URL_SAFE_NO_PAD.encode(&digest[..16]))
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +550,156 @@ mod tests {
                 v.name
             );
         }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CorpusV3 {
+        version: u32,
+        vectors: Vec<VectorV3>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct VectorV3 {
+        name: String,
+        #[serde(rename = "roomSecret")]
+        room_secret: String,
+        expected: ExpectedV3,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ExpectedV3 {
+        room_id: String,
+        root_key: String,
+        read_capability_key: String,
+        event_key: String,
+        snapshot_key: String,
+        signaling_key: String,
+        read_admission_key: String,
+        write_admission_key: String,
+    }
+
+    #[test]
+    fn corpus_v3_replay_matches_split_capability_tree() {
+        let corpus: CorpusV3 = serde_json::from_str(include_str!(
+            "../../../planning/collab/test-vectors/kdf-v3.json"
+        ))
+        .expect("kdf-v3 corpus");
+        assert_eq!(corpus.version, 3);
+        assert_eq!(corpus.vectors.len(), 4);
+        for vector in corpus.vectors {
+            let secret = decode_secret(&vector.room_secret);
+            let tree = derive_room_key_tree_v3(&secret);
+            let expected = vector.expected;
+            assert_eq!(
+                derive_room_id_v3(&secret).as_str(),
+                expected.room_id,
+                "{} roomId",
+                vector.name
+            );
+            assert_eq!(
+                b64(tree.root_key.as_bytes()),
+                expected.root_key,
+                "{} root",
+                vector.name
+            );
+            assert_eq!(
+                b64(tree.read_keys.read_capability_key.as_bytes()),
+                expected.read_capability_key,
+                "{} read capability",
+                vector.name
+            );
+            assert_eq!(
+                b64(tree.read_keys.event_key.as_bytes()),
+                expected.event_key,
+                "{} event",
+                vector.name
+            );
+            assert_eq!(
+                b64(tree.read_keys.snapshot_key.as_bytes()),
+                expected.snapshot_key,
+                "{} snapshot",
+                vector.name
+            );
+            assert_eq!(
+                b64(tree.read_keys.signaling_key.as_bytes()),
+                expected.signaling_key,
+                "{} signaling",
+                vector.name
+            );
+            assert_eq!(
+                b64(tree.read_keys.read_admission_key.as_bytes()),
+                expected.read_admission_key,
+                "{} read admission",
+                vector.name
+            );
+            assert_eq!(
+                b64(tree.write_admission_key.as_bytes()),
+                expected.write_admission_key,
+                "{} write admission",
+                vector.name
+            );
+
+            let read_only = derive_read_keys_v3(tree.read_keys.read_capability_key.as_bytes());
+            assert_eq!(
+                read_only.event_key.as_bytes(),
+                tree.read_keys.event_key.as_bytes()
+            );
+            assert_eq!(
+                read_only.snapshot_key.as_bytes(),
+                tree.read_keys.snapshot_key.as_bytes()
+            );
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ShareEpochVector {
+        name: String,
+        share_secret: String,
+        epoch: u64,
+        room_secret: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ShareEpochCorpus {
+        version: u8,
+        vectors: Vec<ShareEpochVector>,
+    }
+
+    #[test]
+    fn share_epoch_corpus_matches_canonical_uint64be_schedule() {
+        let corpus: ShareEpochCorpus = serde_json::from_str(include_str!(
+            "../../../planning/collab/test-vectors/share-epoch-kdf.json"
+        ))
+        .expect("share epoch corpus");
+        assert_eq!(corpus.version, 1);
+        assert_eq!(corpus.vectors.len(), 4);
+        for vector in corpus.vectors {
+            let secret = decode_secret(&vector.share_secret);
+            assert_eq!(
+                b64(derive_share_epoch_room_secret(&secret, vector.epoch).as_bytes()),
+                vector.room_secret,
+                "{}",
+                vector.name
+            );
+        }
+    }
+
+    #[test]
+    fn v2_and_v3_leaves_are_domain_separated() {
+        let secret = [0x42; 32];
+        let v2 = derive_room_keys(&secret);
+        let v3 = derive_room_key_tree_v3(&secret);
+        assert_ne!(v2.event_key.as_bytes(), v3.read_keys.event_key.as_bytes());
+        assert_ne!(
+            v2.admission_key.as_bytes(),
+            v3.read_keys.read_admission_key.as_bytes()
+        );
+        assert_ne!(
+            v2.admission_key.as_bytes(),
+            v3.write_admission_key.as_bytes()
+        );
     }
 
     /// Helper: re-prints the bytes for the two corpus vectors. Run with

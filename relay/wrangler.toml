@@ -29,6 +29,10 @@ class_name = "RoomDO"
 name = "RELAY_QUOTAS"
 class_name = "QuotaDO"
 
+[[durable_objects.bindings]]
+name = "RELAY_SHARES"
+class_name = "ShareDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
@@ -37,12 +41,17 @@ new_sqlite_classes = ["RoomDO"]
 tag = "v2"
 new_sqlite_classes = ["QuotaDO"]
 
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["ShareDO"]
+
 [[r2_buckets]]
 binding = "RELAY_BLOBS"
 bucket_name = "attn-relay-blobs"
 
 [vars]
 HARD_MAX_PEERS = "8"
+HARD_MAX_VIEWER_SOCKETS = "32"
 HARD_MAX_ROOM_BYTES = "26214400"
 HARD_MAX_EVENT_BYTES = "262144"
 HARD_MAX_SNAPSHOT_BYTES = "5242880"
@@ -62,6 +71,9 @@ MAX_POW_BITS = "24"
 # are represented by an explicit no-Origin sentinel and bypass the allowlist.
 # This gates the in-browser reviewer served from attn.sh + staging.
 ALLOWED_BROWSER_ORIGINS = "https://attn.sh,https://staging.attn.sh"
+# Web Push is fail-closed unless VAPID_PRIVATE_JWK, VAPID_PUBLIC_KEY, and
+# VAPID_SUBJECT are configured with `wrangler secret put`. Never commit the
+# private JWK or reuse the production keypair in staging.
 # Conservative reserved-capacity admission. Every live room immediately
 # reserves HARD_MAX_ROOM_BYTES (25 MiB), regardless of current ciphertext use.
 QUOTA_MAX_LIVE_ROOMS_PER_SOURCE = "8"
@@ -82,6 +94,7 @@ routes = [{ pattern = "relay-staging.attn.sh", custom_domain = true }]
 # vars are NOT inherited by named environments, so the full set is repeated
 # here (otherwise a staging deploy is missing HARD_MAX_*/POW config and 500s).
 HARD_MAX_PEERS = "8"
+HARD_MAX_VIEWER_SOCKETS = "32"
 HARD_MAX_ROOM_BYTES = "26214400"
 HARD_MAX_EVENT_BYTES = "262144"
 HARD_MAX_SNAPSHOT_BYTES = "5242880"
@@ -94,6 +107,8 @@ DEFAULT_POW_BITS = "16"
 MIN_POW_BITS = "12"
 MAX_POW_BITS = "24"
 ALLOWED_BROWSER_ORIGINS = "https://staging.attn.sh,http://localhost:5173"
+# Configure an independent staging VAPID keypair with `wrangler secret put
+# <NAME> --env staging`; missing configuration disables Web Push.
 # Staging deploy/E2E runs create short-lived isolated rooms repeatedly from one
 # CI/developer edge IP. Keep production at 8 while allowing verification runs
 # to coexist until their normal idle alarms reap them.
@@ -117,6 +132,10 @@ class_name = "RoomDO"
 name = "RELAY_QUOTAS"
 class_name = "QuotaDO"
 
+[[env.staging.durable_objects.bindings]]
+name = "RELAY_SHARES"
+class_name = "ShareDO"
+
 [[env.staging.migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
@@ -124,6 +143,10 @@ new_sqlite_classes = ["RoomDO"]
 [[env.staging.migrations]]
 tag = "v2"
 new_sqlite_classes = ["QuotaDO"]
+
+[[env.staging.migrations]]
+tag = "v3"
+new_sqlite_classes = ["ShareDO"]
 
 [[env.staging.r2_buckets]]
 binding = "RELAY_BLOBS"

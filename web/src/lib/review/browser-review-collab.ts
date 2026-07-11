@@ -23,8 +23,10 @@ export function browserReviewerAvailability(
 ): BrowserReviewerAvailability {
   return {
     collabReady: input.hasMarkdownSnapshot,
-    liveEditing:
-      input.hasMarkdownSnapshot && input.ownerOnline && input.liveEditingAvailable,
+    // Reviewer documents are always read-only. The collab plugin stays
+    // mounted only to consume owner-authenticated broadcasts and keep cursor
+    // presence; authored changes use durable comment/suggestion events.
+    liveEditing: false,
     reviewAuthoring: input.authoringReady,
     ownerStatus:
       input.hasMarkdownSnapshot && !input.ownerOnline

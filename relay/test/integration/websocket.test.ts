@@ -404,15 +404,15 @@ class FrameQueue {
     if (queued !== undefined) return queued;
     if (this.closed) return undefined;
     return new Promise<unknown>((resolve) => {
-      const timer = setTimeout(() => {
-        const idx = this.waiters.indexOf(resolve);
-        if (idx >= 0) this.waiters.splice(idx, 1);
-        resolve(undefined);
-      }, timeoutMs);
       const wrapped = (frame: unknown): void => {
         clearTimeout(timer);
         resolve(frame);
       };
+      const timer = setTimeout(() => {
+        const idx = this.waiters.indexOf(wrapped);
+        if (idx >= 0) this.waiters.splice(idx, 1);
+        resolve(undefined);
+      }, timeoutMs);
       this.waiters.push(wrapped);
     });
   }
@@ -555,7 +555,9 @@ describe("WS /socket — admission", () => {
     expect(first.devices.length).toBe(1);
     expect(first.devices[0]?.deviceId).toBe("dev-h");
     expect(first.missedSignalEnvelopeIds).toEqual([]);
-    expect(first.onlineDeviceIds).toEqual(['dev-h']);
+    // The hello snapshot is taken before this socket's atomic subscribed /
+    // presence transition, so a device never reports itself as pre-online.
+    expect(first.onlineDeviceIds).toEqual([]);
     const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
     await runInDurableObject(stub, async (_instance, state) => {
       expect(state.getWebSockets(`d2:${encodeOpaqueSegment("dev-h")}`).length).toBe(1);
@@ -773,6 +775,143 @@ describe("WS /socket — backfill", () => {
     ws.close(1000, "done");
   });
 
+  it("fences concurrent ingest into subscribe replay without a cursor gap", async () => {
+    const roomId = uniqueRoomId("ws-subscribe-fence");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-fence",
+      participantId: "faye",
+    });
+    expect((await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [buildEnvelope({
+        envelopeId: "fence-before",
+        authorId: "faye",
+        deviceId: "dev-fence",
+      })],
+    })).status).toBe(201);
+
+    const { ws } = await openSocket({ roomId, deviceId: "dev-fence", admissionKey });
+    const queue = new FrameQueue(ws);
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    let concurrentStatus: number | undefined;
+
+    // Inject a real relay POST after the first replay has loaded its captured
+    // high-watermark but before handleSubscribe marks the socket subscribed.
+    // This deterministically recreates the production gap that lost room B.
+    await runInDurableObject(stub, async (instance) => {
+      type ReplayLoader = (seq: number) => Promise<EnvelopeRecord[] | Response>;
+      const target = instance as unknown as { loadValidatedEnvelopePayloads: ReplayLoader };
+      const original = target.loadValidatedEnvelopePayloads.bind(instance);
+      let injected = false;
+      target.loadValidatedEnvelopePayloads = async (seq: number) => {
+        const result = await original(seq);
+        if (!injected) {
+          injected = true;
+          const concurrent = await postEnvelopes({
+            roomId,
+            admissionKey,
+            envelopes: [buildEnvelope({
+              envelopeId: "fence-during",
+              authorId: "faye",
+              deviceId: "dev-fence",
+            })],
+          });
+          concurrentStatus = concurrent.status;
+        }
+        return result;
+      };
+    });
+
+    ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    const hello = await queue.next(5000);
+    expect(concurrentStatus).toBe(201);
+    expect(isHello(hello)).toBe(true);
+    if (!isHello(hello)) throw new Error("unreachable");
+    expect(hello.serverSeq).toBe(2);
+    const received: Array<{ id: string; seq: number }> = [];
+    for (let i = 0; i < 2; i++) {
+      const frame = await queue.next(5000);
+      expect(isEnvelope(frame)).toBe(true);
+      if (!isEnvelope(frame)) throw new Error("unreachable");
+      received.push({ id: frame.envelope.envelopeId, seq: frame.serverSeq });
+    }
+    expect(received).toEqual([
+      { id: "fence-before", seq: 1 },
+      { id: "fence-during", seq: 2 },
+    ]);
+    expect(isPing(await queue.next())).toBe(true);
+    ws.close(1000, "done");
+  });
+
+  it("rechecks a concurrently advanced retention floor before becoming live", async () => {
+    const roomId = uniqueRoomId("ws-subscribe-floor-fence");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-floor-fence",
+      participantId: "finn",
+    });
+    expect((await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        buildEnvelope({
+          envelopeId: "floor-before-1",
+          authorId: "finn",
+          deviceId: "dev-floor-fence",
+        }),
+        buildEnvelope({
+          envelopeId: "floor-before-2",
+          authorId: "finn",
+          deviceId: "dev-floor-fence",
+        }),
+      ],
+    })).status).toBe(201);
+
+    const { ws } = await openSocket({ roomId, deviceId: "dev-floor-fence", admissionKey });
+    const queue = new FrameQueue(ws);
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+
+    // Advance the retention floor only after the first candidate replay has
+    // loaded. This is the exact await boundary where an owner ACK deletion or
+    // signal FIFO eviction used to let an incomplete snapshot become live.
+    await runInDurableObject(stub, async (instance, state) => {
+      type ReplayLoader = (seq: number) => Promise<EnvelopeRecord[] | Response>;
+      const target = instance as unknown as { loadValidatedEnvelopePayloads: ReplayLoader };
+      const original = target.loadValidatedEnvelopePayloads.bind(instance);
+      let injected = false;
+      target.loadValidatedEnvelopePayloads = async (seq: number) => {
+        const result = await original(seq);
+        if (!injected) {
+          injected = true;
+          await state.storage.delete(
+            `env_v2:00000000000000000001:${encodeOpaqueSegment("floor-before-1")}`,
+          );
+          await state.storage.put("meta:oldest_retained_seq", 2);
+        }
+        return result;
+      };
+    });
+
+    ws.send(JSON.stringify({ type: "subscribe", after: 1 }));
+    const frame = await queue.next(5000);
+    expect(frame).toMatchObject({
+      type: "error",
+      code: "ATTN_CURSOR_TOO_OLD",
+      resyncFromSeq: 2,
+    });
+    expect(isHello(frame)).toBe(false);
+    await queue.waitClosed(5000);
+    expect(queue.closeCode).toBe(4005);
+  });
+
   it("emits ATTN_CURSOR_TOO_OLD + close 4005 when after < oldest_retained_seq", async () => {
     const roomId = uniqueRoomId("ws-cursor-too-old");
     const owner = await generateEd25519Keypair();
@@ -853,15 +992,17 @@ describe("WS /socket — live broadcast", () => {
     const qb = new FrameQueue(b.ws);
     const qc = new FrameQueue(c.ws);
     a.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(isHello(await qa.next())).toBe(true);
+    expect(isPing(await qa.next())).toBe(true);
     b.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(isHello(await qb.next())).toBe(true);
+    expect(isPing(await qb.next())).toBe(true);
+    expect(isPresence(await qa.next())).toBe(true);
     c.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
-    // Drain hello + immediate ping on each.
-    for (const q of [qa, qb, qc]) {
-      const h = await q.next();
-      expect(isHello(h)).toBe(true);
-      const p = await q.next();
-      expect(isPing(p)).toBe(true);
-    }
+    expect(isHello(await qc.next())).toBe(true);
+    expect(isPing(await qc.next())).toBe(true);
+    expect(isPresence(await qa.next())).toBe(true);
+    expect(isPresence(await qb.next())).toBe(true);
 
     // Ingest a signal targeted at dev-to.
     const r = await postEnvelopes({
@@ -912,6 +1053,12 @@ describe("WS /socket — presence", () => {
     expect(isPing(await queue.next())).toBe(true);
 
     const first = await openSocket({ roomId, deviceId: "shared-device", admissionKey });
+    const firstQueue = new FrameQueue(first.ws);
+    // Upgrade alone is not presence and cannot produce a join.
+    expect(await queue.next(150)).toBeUndefined();
+    first.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(isHello(await firstQueue.next())).toBe(true);
+    expect(isPing(await firstQueue.next())).toBe(true);
     const firstJoin = await queue.next();
     expect(firstJoin).toEqual({
       type: "presence",
@@ -921,9 +1068,18 @@ describe("WS /socket — presence", () => {
     });
 
     const second = await openSocket({ roomId, deviceId: "shared-device", admissionKey });
+    const secondQueue = new FrameQueue(second.ws);
     const isolated = await openSocket({ roomId, deviceId: "isolated-device", admissionKey });
-    // This must be the isolated device's join. If the second shared-device
-    // socket emitted a duplicate join, it would be the next queued frame.
+    const isolatedQueue = new FrameQueue(isolated.ws);
+    expect(await queue.next(150)).toBeUndefined();
+    second.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(isHello(await secondQueue.next())).toBe(true);
+    expect(isPing(await secondQueue.next())).toBe(true);
+    // A same-device 1→1 subscribe does not produce a duplicate join.
+    expect(await queue.next(150)).toBeUndefined();
+    isolated.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(isHello(await isolatedQueue.next())).toBe(true);
+    expect(isPing(await isolatedQueue.next())).toBe(true);
     expect(await queue.next()).toEqual({
       type: "presence",
       event: "join",
@@ -956,7 +1112,7 @@ describe("WS /socket — presence", () => {
     observer.ws.close(1000);
   });
 
-  it("broadcasts presence:join to existing peers when a new socket opens", async () => {
+  it("broadcasts presence:join only after the new socket subscribes", async () => {
     const roomId = uniqueRoomId("ws-presence-join");
     const owner = await generateEd25519Keypair();
     const admissionKey = await createRoom({ roomId, ownerKp: owner });
@@ -971,11 +1127,16 @@ describe("WS /socket — presence", () => {
     const pingA = await qa.next();
     expect(isPing(pingA)).toBe(true);
 
-    // Open second socket.
+    // Open second socket. Upgrade is intentionally silent to existing peers.
     const b = await openSocket({ roomId, deviceId: "dev-p2", admissionKey });
     const qb = new FrameQueue(b.ws);
+    expect(await qa.next(200)).toBeUndefined();
 
-    // Peer A should receive a presence:join for dev-p2.
+    b.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(isHello(await qb.next())).toBe(true);
+    expect(isPing(await qb.next())).toBe(true);
+
+    // Peer A receives the join only after B's successful hello/replay.
     const presence = await qa.next(2000);
     expect(isPresence(presence)).toBe(true);
     if (isPresence(presence)) {
@@ -986,7 +1147,7 @@ describe("WS /socket — presence", () => {
 
     a.ws.close(1000);
     b.ws.close(1000);
-    // Drain b to avoid runtime resource leaks; it only sees its own connect.
+    // Drain b to avoid runtime resource leaks.
     await qb.waitClosed();
   });
 
@@ -1004,7 +1165,12 @@ describe("WS /socket — presence", () => {
     expect(isPing(await qa.next())).toBe(true);
 
     const b = await openSocket({ roomId, deviceId: "dev-l2", admissionKey });
-    // a sees join.
+    const qb = new FrameQueue(b.ws);
+    expect(await qa.next(150)).toBeUndefined();
+    b.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(isHello(await qb.next())).toBe(true);
+    expect(isPing(await qb.next())).toBe(true);
+    // A sees join only once B is subscribed.
     const presenceJoin = await qa.next();
     expect(isPresence(presenceJoin)).toBe(true);
 
@@ -1046,70 +1212,43 @@ describe("WS /socket — ping/pong", () => {
 });
 
 describe("WS /socket — peer cap", () => {
-  it("drops a subscribe racing close on a cap-rejected attachment", async () => {
-    const roomId = uniqueRoomId("ws-peercap-subscribe-race");
+  it("does not count or deliver to upgraded sockets before subscribe", async () => {
+    const roomId = uniqueRoomId("ws-peercap-pre-subscribe");
     const owner = await generateEd25519Keypair();
-    const admissionKey = await createRoom({ roomId, ownerKp: owner });
-    await registerDevice({
+    const admissionKey = await createRoom({
       roomId,
-      admissionKey,
-      deviceId: "dev-rejected",
-      participantId: "rejected-p",
+      ownerKp: owner,
+      policy: { maxPeers: 1 },
     });
-    // Ensure a successful subscribe would have both hello and replay data to
-    // send, making silence a meaningful assertion rather than an empty room.
-    const envelope = buildEnvelope({
-      envelopeId: "rejected-race-event",
-      authorId: "rejected-p",
-      deviceId: "dev-rejected",
-    });
-    expect(
-      (await postEnvelopes({ roomId, admissionKey, envelopes: [envelope] })).status,
-    ).toBe(201);
+    await registerDevice({ roomId, admissionKey, deviceId: "dev-waiting", participantId: "waiting" });
+    await registerDevice({ roomId, admissionKey, deviceId: "dev-winner", participantId: "winner" });
 
-    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
-    const sent: string[] = [];
-    const closes: Array<{ code?: number; reason?: string }> = [];
-    await runInDurableObject(stub, async (instance) => {
-      let attachment: unknown = {
-        deviceId: "dev-rejected",
-        participantId: "rejected-p",
-        presenceAnnounced: false,
-        subscribed: false,
-        lastPongTs: 0,
-      };
-      // Drive the hibernation callback directly with a rejected attachment.
-      // This fixes the race ordering: subscribe is delivered while the
-      // accepted-then-closed socket is still capable of receiving callbacks.
-      const rejectedSocket = {
-        deserializeAttachment: () => attachment,
-        serializeAttachment: (next: unknown) => {
-          attachment = next;
-        },
-        send: (payload: string) => {
-          sent.push(payload);
-        },
-        close: (code?: number, reason?: string) => {
-          closes.push({ code, reason });
-        },
-      } as unknown as WebSocket;
-      const handler = instance as unknown as {
-        webSocketMessage(socket: WebSocket, message: string): Promise<void>;
-      };
-      await handler.webSocketMessage(
-        rejectedSocket,
-        JSON.stringify({ type: "subscribe", after: 0 }),
-      );
-    });
+    const waiting = await openSocket({ roomId, deviceId: "dev-waiting", admissionKey });
+    const winner = await openSocket({ roomId, deviceId: "dev-winner", admissionKey });
+    const waitingQueue = new FrameQueue(waiting.ws);
+    const winnerQueue = new FrameQueue(winner.ws);
 
-    expect(closes).toEqual([{ code: 4004, reason: "peer cap reached" }]);
-    expect(sent).toEqual([]);
+    // The first upgrade has not subscribed, so it owns no cap slot. The
+    // second socket can subscribe and becomes the sole online device.
+    winner.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    const winnerHello = await winnerQueue.next();
+    expect(isHello(winnerHello)).toBe(true);
+    if (isHello(winnerHello)) expect(winnerHello.onlineDeviceIds).toEqual([]);
+    expect(isPing(await winnerQueue.next())).toBe(true);
+    // An unsubscribed socket is excluded from presence delivery.
+    expect(await waitingQueue.next(200)).toBeUndefined();
+
+    waiting.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    await waitingQueue.waitClosed(2000);
+    expect(waitingQueue.closeCode).toBe(4004);
+    expect(await waitingQueue.next()).toBeUndefined();
+    winner.ws.close(1000);
   });
 
   it("closes the (maxPeers+1)-th distinct device with 4004", async () => {
     const roomId = uniqueRoomId("ws-peercap");
     const owner = await generateEd25519Keypair();
-    // Set maxPeers=2 so the third connect trips the cap immediately.
+    // Set maxPeers=2 so the third distinct subscribe trips the cap.
     const admissionKey = await createRoom({
       roomId,
       ownerKp: owner,
@@ -1126,24 +1265,27 @@ describe("WS /socket — peer cap", () => {
     expect(isPing(await qa.next())).toBe(true);
 
     const b = await openSocket({ roomId, deviceId: "dev-c2", admissionKey });
+    const qb = new FrameQueue(b.ws);
+    expect(await qa.next(150)).toBeUndefined();
+    b.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    const helloB = await qb.next();
+    expect(isHello(helloB)).toBe(true);
+    if (isHello(helloB)) {
+      expect(helloB.onlineDeviceIds).toEqual(["dev-c1"]);
+    }
+    expect(isPing(await qb.next())).toBe(true);
     expect(await qa.next()).toEqual({
       type: "presence",
       event: "join",
       deviceId: "dev-c2",
       participantId: "c2",
     });
-    const qb = new FrameQueue(b.ws);
-    b.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
-    const helloB = await qb.next();
-    expect(isHello(helloB)).toBe(true);
-    if (isHello(helloB)) {
-      expect(helloB.onlineDeviceIds).toEqual(["dev-c1", "dev-c2"]);
-    }
-    expect(isPing(await qb.next())).toBe(true);
 
-    // Third connect should be rejected with close 4004.
+    // Upgrade remains silent; the third subscribe is rejected with 4004.
     const c = await openSocket({ roomId, deviceId: "dev-c3", admissionKey });
     const qc = new FrameQueue(c.ws);
+    expect(await qa.next(150)).toBeUndefined();
+    c.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
     await qc.waitClosed(2000);
     expect(qc.closed).toBe(true);
     expect(qc.closeCode).toBe(4004);

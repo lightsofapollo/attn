@@ -651,6 +651,16 @@ async function drainHelloThroughPing(
   }
 }
 
+/** Drain an exact number of joins emitted after subscribe/replay. */
+async function drainPresence(q: FrameQueue, count: number): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    const frame = await q.next();
+    if (!isPresence(frame)) {
+      throw new Error(`unexpected post-subscribe frame: ${JSON.stringify(frame)}`);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // DO storage peek helpers (used to seed deterministic preconditions).
 // ---------------------------------------------------------------------------
@@ -1280,9 +1290,12 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
     a.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
     b.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
     c.ws.send(JSON.stringify({ type: "subscribe", after: 0 }));
-    await drainHelloThroughPing(qa);
-    await drainHelloThroughPing(qb);
-    await drainHelloThroughPing(qc);
+    const initialA = await drainHelloThroughPing(qa);
+    const initialB = await drainHelloThroughPing(qb);
+    const initialC = await drainHelloThroughPing(qc);
+    await drainPresence(qa, 2 - initialA.hello.onlineDeviceIds.length);
+    await drainPresence(qb, 2 - initialB.hello.onlineDeviceIds.length);
+    await drainPresence(qc, 2 - initialC.hello.onlineDeviceIds.length);
 
     const r = await postEnvelopes({
       roomId,
@@ -1301,7 +1314,7 @@ describe("Relay v2 release acceptance — spec §Test Plan", () => {
 
     // Target receives it.
     const onTo = await qb.next(2000);
-    expect(isEnvelope(onTo)).toBe(true);
+    expect(isEnvelope(onTo), `target frame: ${JSON.stringify(onTo)}`).toBe(true);
     if (isEnvelope(onTo)) {
       expect(onTo.envelope.envelopeId).toBe("s6a-sig-1");
       expect(onTo.envelope.target?.deviceId).toBe("dev-to");

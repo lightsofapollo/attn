@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tao::event_loop::EventLoopProxy;
 
-use crate::review::manager::{ReviewCommand, ReviewManager};
+use crate::review::manager::{ReviewCommand, ReviewManager, VerdictWaitOutcome};
+use crate::review::share::ParsedShareInvite;
 use crate::watcher::UserEvent;
 
 /// Structured interaction actions for E2E testing (debug builds only).
@@ -74,6 +75,10 @@ pub enum SocketMessage {
     #[cfg(debug_assertions)]
     #[serde(rename = "interact")]
     Interact(InteractAction),
+    /// Inject the exact native-notification click event in debug E2E tests.
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    #[serde(rename = "review_notification_click")]
+    ReviewNotificationClick { deep_link: String },
     /// Join a review room via an `attn://review/<roomId>#key=...` invite URL.
     ///
     /// The `invite` string is the full invite URI including any `#key=...`
@@ -98,6 +103,18 @@ pub enum SocketMessage {
         #[serde(default)]
         ttl: Option<String>,
     },
+
+    #[serde(rename = "durable_share_create", rename_all = "camelCase")]
+    DurableShareCreate { path: String },
+
+    #[serde(rename = "durable_share_renew", rename_all = "camelCase")]
+    DurableShareRenew {
+        #[serde(default)]
+        target: Option<String>,
+    },
+
+    #[serde(rename = "durable_share_revoke", rename_all = "camelCase")]
+    DurableShareRevoke { target: String },
 
     /// Pull pending envelopes for one room (or every active room when
     /// `room_id` is None). Stubbed until issue attn-nnj.2.8.
@@ -125,6 +142,32 @@ pub enum SocketMessage {
     /// Spec: `data-model.md` §Daemon Socket Commands.
     #[serde(rename = "review_inbox")]
     ReviewInbox,
+
+    /// Query persisted suggestion verdicts. The participant id is the calling
+    /// CLI identity; owner-authored verdict events are never used for scoping.
+    #[serde(rename = "review_verdicts", rename_all = "camelCase")]
+    ReviewVerdicts {
+        participant_id: crate::review::ids::ParticipantId,
+        #[serde(default)]
+        all: bool,
+    },
+    /// Wait for a fixed set of suggestions to receive persisted verdicts.
+    #[serde(rename = "review_verdicts_wait", rename_all = "camelCase")]
+    ReviewVerdictsWait {
+        participant_id: crate::review::ids::ParticipantId,
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        suggestion_ids: Option<Vec<String>>,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    /// Submit independently anchored suggestions generated from one diff in a
+    /// single local IPC request. The daemon identity authors every event.
+    #[serde(rename = "review_submit_suggestions", rename_all = "camelCase")]
+    ReviewSubmitSuggestions {
+        suggestions: Vec<crate::review::diff_suggestions::DiffSuggestion>,
+    },
 }
 
 /// Response sent from daemon back to client.
@@ -150,6 +193,20 @@ pub enum SocketResponse {
     Interact(InteractResult),
     #[serde(rename = "error")]
     Error { message: String },
+    #[serde(rename = "review_verdicts")]
+    ReviewVerdicts {
+        report: crate::review::store::VerdictsReport,
+    },
+    #[serde(rename = "review_verdicts_wait")]
+    ReviewVerdictsWait { outcome: VerdictWaitOutcome },
+    #[serde(rename = "review_suggestions_submitted", rename_all = "camelCase")]
+    ReviewSuggestionsSubmitted { submitted_count: usize },
+    #[serde(rename = "durable_shares", rename_all = "camelCase")]
+    DurableShares {
+        shares: Vec<crate::review::share_lifecycle::DurableShareLinks>,
+    },
+    #[serde(rename = "durable_share_revoked", rename_all = "camelCase")]
+    DurableShareRevoked { target: String },
 }
 
 /// Runtime directory for daemon state (socket, fingerprint, log, future reviews/).
@@ -208,6 +265,34 @@ fn ensure_runtime_dir() -> Result<()> {
             .with_context(|| format!("could not create {}", dir.display()))?;
     }
     Ok(())
+}
+
+/// Private placeholder used only while an explicitly resident daemon waits
+/// for its first open/deep-link intent. Keeping it inside the daemon runtime
+/// directory avoids recursively watching the user's home directory at login.
+pub(crate) fn resident_idle_path() -> Result<PathBuf> {
+    ensure_runtime_dir()?;
+    let path = runtime_dir()?.join("resident-idle.md");
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                bail!("refusing unsafe resident placeholder {}", path.display());
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .with_context(|| format!("could not create {}", path.display()))?;
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("could not inspect {}", path.display()));
+        }
+    }
+    Ok(path)
 }
 
 /// Compute a fingerprint of the current binary (mtime + size).
@@ -368,6 +453,20 @@ pub fn send_interact(action: InteractAction) -> Result<InteractResult> {
     }
 }
 
+/// Route a debug E2E click through the same event-loop branch used by the
+/// native notification delegate. This is intentionally absent from release.
+#[cfg(all(debug_assertions, target_os = "macos"))]
+pub fn send_review_notification_click(deep_link: &str) -> Result<()> {
+    match send_command(&SocketMessage::ReviewNotificationClick {
+        deep_link: deep_link.to_string(),
+    })? {
+        Some(SocketResponse::Ok) => Ok(()),
+        Some(SocketResponse::Error { message }) => bail!("notification click failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
 /// Send a `ReviewJoin` command to the running daemon.
 ///
 /// Used by future CLI entry points (e.g. a macOS URL handler that re-execs
@@ -399,6 +498,113 @@ pub fn send_review_share(path: &str, mode: &str, ttl: Option<&str>) -> Result<()
     match send_command(&msg)? {
         Some(SocketResponse::Ok) => Ok(()),
         Some(SocketResponse::Error { message }) => bail!("review_share failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
+pub fn send_durable_share_create(path: &std::path::Path) -> Result<()> {
+    let path = path
+        .to_str()
+        .context("durable share path must be valid UTF-8")?;
+    let msg = SocketMessage::DurableShareCreate {
+        path: path.to_owned(),
+    };
+    print_durable_links(send_command(&msg)?, "durable_share_create")
+}
+
+pub fn send_durable_share_renew(target: Option<&str>) -> Result<()> {
+    let msg = SocketMessage::DurableShareRenew {
+        target: target.map(str::to_owned),
+    };
+    print_durable_links(send_command(&msg)?, "durable_share_renew")
+}
+
+pub fn send_durable_share_revoke(target: &str) -> Result<()> {
+    let msg = SocketMessage::DurableShareRevoke {
+        target: target.to_owned(),
+    };
+    match send_command(&msg)? {
+        Some(SocketResponse::DurableShareRevoked { target }) => {
+            println!("revoked {target}");
+            Ok(())
+        }
+        Some(SocketResponse::Error { message }) => bail!("durable_share_revoke failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
+fn print_durable_links(response: Option<SocketResponse>, operation: &str) -> Result<()> {
+    match response {
+        Some(SocketResponse::DurableShares { shares }) => {
+            for share in shares {
+                println!("share {}", share.share_id);
+                println!("view: {}", share.view_native);
+                println!("view (browser): {}", share.view_browser);
+                println!("comment: {}", share.comment_native);
+                println!("comment (browser): {}", share.comment_browser);
+                println!("suggest: {}", share.suggest_native);
+                println!("suggest (browser): {}", share.suggest_browser);
+            }
+            Ok(())
+        }
+        Some(SocketResponse::Error { message }) => bail!("{operation} failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
+/// Query the running daemon's persisted verdict state.
+pub fn send_review_verdicts(
+    participant_id: crate::review::ids::ParticipantId,
+    all: bool,
+) -> Result<crate::review::store::VerdictsReport> {
+    let msg = SocketMessage::ReviewVerdicts {
+        participant_id,
+        all,
+    };
+    match send_command(&msg)? {
+        Some(SocketResponse::ReviewVerdicts { report }) => Ok(report),
+        Some(SocketResponse::Error { message }) => bail!("review_verdicts failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
+/// Wait through the running daemon for imported suggestion verdicts.
+pub fn send_review_verdicts_wait(
+    participant_id: crate::review::ids::ParticipantId,
+    all: bool,
+    suggestion_ids: Option<Vec<String>>,
+    timeout: Option<Duration>,
+) -> Result<VerdictWaitOutcome> {
+    let timeout_ms =
+        timeout.map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+    let msg = SocketMessage::ReviewVerdictsWait {
+        participant_id,
+        all,
+        suggestion_ids,
+        timeout_ms,
+    };
+    match send_command(&msg)? {
+        Some(SocketResponse::ReviewVerdictsWait { outcome }) => Ok(outcome),
+        Some(SocketResponse::Error { message }) => bail!("review_verdicts_wait failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
+/// Submit a prepared diff-suggestion batch through the running daemon.
+pub fn send_review_suggestions(
+    suggestions: Vec<crate::review::diff_suggestions::DiffSuggestion>,
+) -> Result<usize> {
+    let msg = SocketMessage::ReviewSubmitSuggestions { suggestions };
+    match send_command(&msg)? {
+        Some(SocketResponse::ReviewSuggestionsSubmitted { submitted_count }) => Ok(submitted_count),
+        Some(SocketResponse::Error { message }) => {
+            bail!("review_submit_suggestions failed: {message}")
+        }
         Some(other) => bail!("unexpected response: {other:?}"),
         None => bail!("no daemon running"),
     }
@@ -552,6 +758,110 @@ fn submit_review_socket_command(review_manager: Option<&Arc<ReviewManager>>, cmd
     }
 }
 
+fn execute_durable_command(
+    review_manager: Option<&Arc<ReviewManager>>,
+    command: ReviewCommand,
+) -> SocketResponse {
+    let Some(manager) = review_manager else {
+        return SocketResponse::Error {
+            message: "durable shares are unavailable because ReviewManager did not start".into(),
+        };
+    };
+    let revoked_target = match &command {
+        ReviewCommand::RevokeDurableShare { target } => Some(target.clone()),
+        _ => None,
+    };
+    match manager.run_durable_command(&command) {
+        Ok(shares) => {
+            manager.emit_durable_command_result(&command, &shares);
+            match revoked_target {
+                Some(target) => SocketResponse::DurableShareRevoked { target },
+                None => SocketResponse::DurableShares { shares },
+            }
+        }
+        Err(error) => SocketResponse::Error {
+            message: format!("ATTN_DURABLE_SHARE: {error}"),
+        },
+    }
+}
+
+fn query_review_verdicts(
+    review_manager: Option<&Arc<ReviewManager>>,
+    participant_id: &crate::review::ids::ParticipantId,
+    all: bool,
+) -> SocketResponse {
+    let Some(manager) = review_manager else {
+        return SocketResponse::Error {
+            message: "ReviewManager unavailable".to_string(),
+        };
+    };
+    match manager.verdicts((!all).then_some(participant_id)) {
+        Ok(report) => SocketResponse::ReviewVerdicts { report },
+        Err(err) => SocketResponse::Error {
+            message: format!("could not read persisted verdicts: {err:#}"),
+        },
+    }
+}
+
+fn wait_review_verdicts(
+    review_manager: Option<&Arc<ReviewManager>>,
+    participant_id: &crate::review::ids::ParticipantId,
+    all: bool,
+    suggestion_ids: Option<Vec<String>>,
+    timeout_ms: Option<u64>,
+) -> SocketResponse {
+    let Some(manager) = review_manager else {
+        return SocketResponse::Error {
+            message: "ReviewManager unavailable".to_string(),
+        };
+    };
+    let suggestion_ids = suggestion_ids.map(|ids| ids.into_iter().collect());
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            return SocketResponse::Error {
+                message: format!("could not start verdict waiter: {err}"),
+            };
+        }
+    };
+    match runtime.block_on(manager.wait_for_verdicts(
+        (!all).then_some(participant_id),
+        suggestion_ids.as_ref(),
+        timeout_ms.map(Duration::from_millis),
+    )) {
+        Ok(outcome) => SocketResponse::ReviewVerdictsWait { outcome },
+        Err(err) => SocketResponse::Error {
+            message: format!("could not wait for persisted verdicts: {err:#}"),
+        },
+    }
+}
+
+fn submit_review_suggestion_batch(
+    review_manager: Option<&Arc<ReviewManager>>,
+    suggestions: Vec<crate::review::diff_suggestions::DiffSuggestion>,
+) -> SocketResponse {
+    let Some(manager) = review_manager else {
+        return SocketResponse::Error {
+            message: "ReviewManager unavailable".to_string(),
+        };
+    };
+    let mut submitted_count = 0usize;
+    for suggestion in suggestions {
+        if let Err(err) = manager.submit_suggestion_sync(suggestion.room_id, suggestion.draft) {
+            return SocketResponse::Error {
+                message: format!(
+                    "suggestion submission failed after {submitted_count} successful hunk(s): {err:#}"
+                ),
+            };
+        }
+        submitted_count += 1;
+    }
+    SocketResponse::ReviewSuggestionsSubmitted { submitted_count }
+}
+
 /// Parse a wire-format room id (`String`) into the typed `RoomId` newtype.
 /// The constructor on `RoomId` is crate-private, so we route through serde —
 /// same trick used in tests and stub helpers.
@@ -594,6 +904,33 @@ pub fn dispatch_review_join(invite: &str, review_manager: Option<&Arc<ReviewMana
     );
 }
 
+/// Receive a native durable-share deep link at the daemon boundary without
+/// logging its fragment capability. The lifecycle resolver consumes this
+/// intent once persisted share state is wired by Workstream A.
+pub fn dispatch_share_open_intent(
+    invite: &ParsedShareInvite,
+    review_manager: Option<&Arc<ReviewManager>>,
+) -> Result<(), crate::review::share_lifecycle::ShareLifecycleError> {
+    tracing::info!(share_id = %invite.share_id, "durable share open intent routed to daemon");
+    let command = ReviewCommand::OpenDurableShare {
+        share_id: invite.share_id.clone(),
+        link_secret: crate::review::share_lifecycle::ShareLinkSecret::new(invite.link_secret),
+    };
+    let Some(manager) = review_manager else {
+        return Err(
+            crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(
+                "durable share resolver is unavailable because ReviewManager did not start".into(),
+            ),
+        );
+    };
+    manager.submit(command);
+    Err(
+        crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(
+            "durable share resolver adapter is not wired".into(),
+        ),
+    )
+}
+
 /// Start listening on the unix socket. Spawns a thread that accepts connections
 /// and sends events through the event loop proxy.
 ///
@@ -625,7 +962,9 @@ pub fn start_listener(
                 Ok(stream) => {
                     let proxy = proxy.clone();
                     let manager = review_manager.clone();
-                    handle_client(stream, &proxy, manager.as_ref());
+                    std::thread::spawn(move || {
+                        handle_client(stream, &proxy, manager.as_ref());
+                    });
                 }
                 Err(e) => {
                     tracing::warn!("socket accept error: {e}");
@@ -748,6 +1087,15 @@ fn handle_client(
                     serde_json::to_string(&resp).unwrap_or_default()
                 );
             }
+            #[cfg(all(debug_assertions, target_os = "macos"))]
+            Ok(SocketMessage::ReviewNotificationClick { deep_link }) => {
+                let _ = proxy.send_event(UserEvent::OpenReviewDeepLink(deep_link));
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&SocketResponse::Ok).unwrap_or_default()
+                );
+            }
             Ok(SocketMessage::ReviewJoin { invite }) => {
                 // Log via the shared intent helper (keeps custom-protocol +
                 // socket routes observably equivalent) and dispatch into the
@@ -782,6 +1130,41 @@ fn handle_client(
                     serde_json::to_string(&resp).unwrap_or_default()
                 );
             }
+            Ok(SocketMessage::DurableShareCreate { path }) => {
+                let response = execute_durable_command(
+                    review_manager,
+                    ReviewCommand::CreateDurableShare {
+                        path: PathBuf::from(path),
+                    },
+                );
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&response).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::DurableShareRenew { target }) => {
+                let response = execute_durable_command(
+                    review_manager,
+                    ReviewCommand::RenewDurableShare { target },
+                );
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&response).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::DurableShareRevoke { target }) => {
+                let response = execute_durable_command(
+                    review_manager,
+                    ReviewCommand::RevokeDurableShare { target },
+                );
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&response).unwrap_or_default()
+                );
+            }
             Ok(SocketMessage::ReviewPull { room_id }) => {
                 submit_review_socket_command(
                     review_manager,
@@ -813,6 +1196,44 @@ fn handle_client(
             Ok(SocketMessage::ReviewInbox) => {
                 submit_review_socket_command(review_manager, ReviewCommand::Inbox);
                 let resp = SocketResponse::Ok;
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::ReviewVerdicts {
+                participant_id,
+                all,
+            }) => {
+                let resp = query_review_verdicts(review_manager, &participant_id, all);
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::ReviewVerdictsWait {
+                participant_id,
+                all,
+                suggestion_ids,
+                timeout_ms,
+            }) => {
+                let resp = wait_review_verdicts(
+                    review_manager,
+                    &participant_id,
+                    all,
+                    suggestion_ids,
+                    timeout_ms,
+                );
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::ReviewSubmitSuggestions { suggestions }) => {
+                let resp = submit_review_suggestion_batch(review_manager, suggestions);
                 let _ = writeln!(
                     stream,
                     "{}",
@@ -1008,6 +1429,7 @@ mod tests {
     use crate::review::manager::{ReviewUpdate, UpdateSink};
     use crate::review::store::ReviewStore;
     use crate::review::working_copy::WorkingCopyService;
+    use base64::Engine as _;
     use std::sync::Mutex;
     use std::sync::mpsc;
     use tempfile::TempDir;
@@ -1047,12 +1469,190 @@ mod tests {
     }
 
     #[test]
+    fn durable_share_socket_commands_lower_to_manager_without_secret_echo() {
+        let (manager, rx, _tmp) = make_test_manager();
+        submit_review_socket_command(
+            Some(&manager),
+            ReviewCommand::CreateDurableShare {
+                path: PathBuf::from("/tmp/plan.md"),
+            },
+        );
+        let create = rx.try_recv().expect("create update");
+        assert!(matches!(
+            create,
+            ReviewUpdate::Error { ref code, .. } if code == "ATTN_DURABLE_SHARE_UNAVAILABLE"
+        ));
+
+        submit_review_socket_command(
+            Some(&manager),
+            ReviewCommand::RenewDurableShare { target: None },
+        );
+        let renew = rx.try_recv().expect("renew update");
+        assert!(matches!(
+            renew,
+            ReviewUpdate::Error { ref code, .. } if code == "ATTN_DURABLE_SHARE_UNAVAILABLE"
+        ));
+
+        submit_review_socket_command(
+            Some(&manager),
+            ReviewCommand::RevokeDurableShare {
+                target: "AAECAwQFBgcICQoLDA0ODw".into(),
+            },
+        );
+        let revoke = rx.try_recv().expect("revoke update");
+        assert!(matches!(
+            revoke,
+            ReviewUpdate::Error { ref code, .. } if code == "ATTN_DURABLE_SHARE_UNAVAILABLE"
+        ));
+
+        let encoded_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x42; 32]);
+        let invite = crate::review::share::parse_share_invite(&format!(
+            "attn://share/AAECAwQFBgcICQoLDA0ODw#key={encoded_secret}"
+        ))
+        .expect("invite");
+        let result = dispatch_share_open_intent(&invite, Some(&manager));
+        assert!(matches!(
+            result,
+            Err(crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(_))
+        ));
+        let open = rx.try_recv().expect("open update");
+        let rendered = format!("{open:?}");
+        assert!(rendered.contains("AAECAwQFBgcICQoLDA0ODw"));
+        assert!(!rendered.contains(&encoded_secret));
+
+        let absent = dispatch_share_open_intent(&invite, None);
+        assert!(matches!(
+            absent,
+            Err(crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(_))
+        ));
+    }
+
+    #[test]
+    fn durable_commands_return_real_unavailable_errors_without_a_service() {
+        let (manager, _rx, _tmp) = make_test_manager();
+        for response in [
+            execute_durable_command(
+                Some(&manager),
+                ReviewCommand::RenewDurableShare { target: None },
+            ),
+            execute_durable_command(None, ReviewCommand::RenewDurableShare { target: None }),
+        ] {
+            assert!(matches!(
+                response,
+                SocketResponse::Error { message } if !message.contains("NOT_IMPLEMENTED")
+            ));
+        }
+    }
+
+    #[test]
+    fn durable_share_socket_wire_shapes_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&SocketMessage::DurableShareCreate {
+                path: "/tmp/plan.md".into()
+            })
+            .expect("create"),
+            r#"{"type":"durable_share_create","path":"/tmp/plan.md"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&SocketMessage::DurableShareRenew { target: None })
+                .expect("renew"),
+            r#"{"type":"durable_share_renew","target":null}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&SocketMessage::DurableShareRevoke {
+                target: "share-id".into()
+            })
+            .expect("revoke"),
+            r#"{"type":"durable_share_revoke","target":"share-id"}"#
+        );
+    }
+
+    #[test]
     fn submit_review_socket_command_no_op_when_manager_missing() {
         // Defensive: a daemon that couldn't open the review store at startup
         // hands `None` into `start_listener`. The socket handler must drop
         // the command rather than panic.
         submit_review_socket_command(None, ReviewCommand::Inbox);
         // Pass = no panic.
+    }
+
+    #[test]
+    fn from_diff_daemon_batch_serialization() {
+        let json = serde_json::to_string(&SocketMessage::ReviewSubmitSuggestions {
+            suggestions: Vec::new(),
+        })
+        .expect("serialize batch");
+        assert_eq!(
+            json,
+            r#"{"type":"review_submit_suggestions","suggestions":[]}"#
+        );
+        let decoded: SocketMessage = serde_json::from_str(&json).expect("deserialize batch");
+        assert!(
+            matches!(decoded, SocketMessage::ReviewSubmitSuggestions { suggestions } if suggestions.is_empty())
+        );
+        assert!(matches!(
+            submit_review_suggestion_batch(None, Vec::new()),
+            SocketResponse::Error { message } if message == "ReviewManager unavailable"
+        ));
+    }
+
+    #[test]
+    fn verdicts_socket_returns_manager_unavailable_error() {
+        let participant_id: crate::review::ids::ParticipantId =
+            serde_json::from_value(serde_json::Value::String("agent-a".into()))
+                .expect("participant id");
+        let response = query_review_verdicts(None, &participant_id, false);
+        match response {
+            SocketResponse::Error { message } => {
+                assert_eq!(message, "ReviewManager unavailable");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verdicts_socket_serialization_is_stable_across_multiple_rooms() {
+        let (manager, _rx, tmp) = make_test_manager();
+        for room in ["room-b", "room-a"] {
+            std::fs::create_dir_all(tmp.path().join("reviews/rooms").join(room))
+                .expect("create room");
+        }
+        let participant_id = serde_json::from_value(serde_json::Value::String("agent-a".into()))
+            .expect("participant id");
+        let response = query_review_verdicts(Some(&manager), &participant_id, true);
+        assert_eq!(
+            serde_json::to_string(&response).expect("serialize response"),
+            r#"{"type":"review_verdicts","report":{"rooms":{"room-a":{"suggestions":{}},"room-b":{"suggestions":{}}}}}"#
+        );
+    }
+
+    #[test]
+    fn verdicts_wait_socket_serialization_is_typed() {
+        let participant_id: crate::review::ids::ParticipantId =
+            serde_json::from_value(serde_json::Value::String("agent-a".into()))
+                .expect("participant id");
+        let request = SocketMessage::ReviewVerdictsWait {
+            participant_id: participant_id.clone(),
+            all: false,
+            suggestion_ids: Some(vec!["suggestion-a".to_string()]),
+            timeout_ms: Some(1_500),
+        };
+        assert_eq!(
+            serde_json::to_string(&request).expect("serialize request"),
+            r#"{"type":"review_verdicts_wait","participantId":"agent-a","all":false,"suggestionIds":["suggestion-a"],"timeoutMs":1500}"#
+        );
+
+        let response = wait_review_verdicts(
+            Some(&make_test_manager().0),
+            &participant_id,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(
+            serde_json::to_string(&response).expect("serialize response"),
+            r#"{"type":"review_verdicts_wait","outcome":{"status":"complete","report":{"rooms":{}}}}"#
+        );
     }
 
     #[test]

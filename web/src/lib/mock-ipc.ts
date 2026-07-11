@@ -73,6 +73,8 @@ type ReviewSnapshotFn = (snapshot: ReviewSnapshot) => void;
 type ReviewAnchorResolutionFn = (update: ReviewAnchorResolutionUpdate) => void;
 type ReviewPresenceFn = (payload: import('../lib/types').ReviewPresenceChanged) => void;
 type ReviewConnectionFn = (payload: import('../lib/types').ReviewConnectionChanged) => void;
+type ReviewUnreadFn = (payload: import('../lib/types').ReviewUnreadChanged) => void;
+type ReviewNotificationMuteFn = (payload: import('../lib/types').ReviewNotificationMuteChanged) => void;
 type ReviewCollabFn = (payload: import('../lib/types').ReviewCollabSignal) => void;
 
 interface AttnBridge {
@@ -122,6 +124,10 @@ interface AttnBridge {
    * Drives the ConnectionBadge. Optional: only the daemon emits it.
    */
   reviewConnection?: ReviewConnectionFn;
+  /** Push the daemon-owned durable unread count for one room. */
+  reviewUnread?: ReviewUnreadFn;
+  /** Push the persisted per-room native notification preference. */
+  reviewNotificationMute?: ReviewNotificationMuteFn;
   /**
    * Push inbound live co-typing traffic (prosemirror-collab steps) to the
    * webview's collab controller. Optional: only the daemon emits it.

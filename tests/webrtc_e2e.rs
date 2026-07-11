@@ -122,6 +122,8 @@ fn reviewer_authorizations(key_id: String) -> AuthorizationCache {
             public_signing_key: "test-reviewer-key".into(),
             client: DeviceClient::AttnNative,
             kind: ParticipantKind::Reviewer,
+            grant_tier: None,
+            grant_signature: None,
             attested: true,
         },
     )])))
@@ -297,6 +299,8 @@ impl E2eHarness {
         // remote_device_id — that's where its outbound signal envelopes
         // are addressed.
         let owner_config = Arc::new(WebRtcConfig {
+            protocol_version: 2,
+            device_signing_seed: None,
             room_id: room_id.clone(),
             author_id: id::<ParticipantId>("p-owner-01"),
             local_device_id: owner_device.clone(),
@@ -312,6 +316,8 @@ impl E2eHarness {
             stun_servers: vec![],
         });
         let reviewer_config = Arc::new(WebRtcConfig {
+            protocol_version: 2,
+            device_signing_seed: None,
             room_id: room_id.clone(),
             author_id: author.clone(),
             local_device_id: reviewer_device.clone(),
@@ -649,7 +655,7 @@ async fn webrtc_happy_path_delivers_comment_envelope_to_owner_store() {
         .expect("owner events_rx must surface event within 5s")
         .expect("owner events_rx must not close before delivering event");
     match received {
-        TransportEvent::EventImported { room_id, event } => {
+        TransportEvent::EventImported { room_id, event, .. } => {
             assert_eq!(room_id, harness.room_id, "event must carry the room id");
             match event.body {
                 ReviewEventBody::CommentCreated { body, .. } => assert_eq!(

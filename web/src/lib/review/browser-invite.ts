@@ -32,11 +32,30 @@
 // Types
 // ---------------------------------------------------------------------------
 
-export interface ParsedInvite {
+export interface ParsedInviteV2 {
+  version: 2;
   roomId: string;
   /** 32 bytes (per crypto-spec §Key Derivation). */
   roomSecret: Uint8Array;
 }
+
+export type InviteTierV3 = 'view' | 'comment' | 'suggest';
+
+export interface ParsedInviteFragmentV3 {
+  version: 3;
+  tier: InviteTierV3;
+  readCapabilityKey: Uint8Array;
+  /** Absent for `view`; required for `comment` and `suggest`. */
+  writeAdmissionKey?: Uint8Array;
+  /** Owner Ed25519 proof; absent for view and required for writable tiers. */
+  grantSignature?: string;
+}
+
+export interface ParsedInviteV3 extends ParsedInviteFragmentV3 {
+  roomId: string;
+}
+
+export type ParsedInvite = ParsedInviteV2 | ParsedInviteV3;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -88,8 +107,11 @@ export function parseInviteUrl(url: string): ParsedInvite {
   if (fragment === null) {
     throw new InviteParseError('missing key fragment');
   }
+  if (fragment.startsWith('v=3&')) {
+    return { roomId: roomIdRaw, ...parseInviteFragmentV3(`#${fragment}`) };
+  }
   if (!fragment.startsWith(FRAGMENT_KEY_PREFIX)) {
-    throw new InviteParseError('fragment must start with `key=`');
+    throw new InviteParseError('fragment must start with `key=` or canonical `v=3&`');
   }
   const keyB64 = fragment.slice(FRAGMENT_KEY_PREFIX.length);
   if (keyB64.length === 0) {
@@ -110,6 +132,7 @@ export function parseInviteUrl(url: string): ParsedInvite {
   }
 
   return {
+    version: 2,
     roomId: roomIdRaw,
     roomSecret,
   };
@@ -139,7 +162,7 @@ export function parseAndStripInviteFromUrl(
   // sees the same fragment shape `splitInvite` produces.
   const fragment = hash.startsWith('#') ? hash.slice(1) : hash;
   stripFragment(win);
-  if (!fragment.startsWith(FRAGMENT_KEY_PREFIX)) return null;
+  if (!fragment.startsWith(FRAGMENT_KEY_PREFIX) && !fragment.startsWith('v=3&')) return null;
 
   // Reconstruct the full URL so `parseInviteUrl` validates the path shape
   // identically to a pasted invite. We use the current origin + pathname.
@@ -193,6 +216,102 @@ export function composeInviteUrl(
   return `${trimmedBase}/${roomId}#${FRAGMENT_KEY_PREFIX}${encodedKey}`;
 }
 
+/** Build the canonical additive v3 capability fragment, including `#`. */
+export function composeInviteFragmentV3(
+  tier: InviteTierV3,
+  readCapabilityKey: Uint8Array,
+  writeAdmissionKey?: Uint8Array,
+  grantSignature?: Uint8Array,
+): string {
+  requireCapabilityKey(readCapabilityKey, 'read');
+  if (tier !== 'view' && tier !== 'comment' && tier !== 'suggest') {
+    throw new InviteParseError(`unknown v3 invite tier: ${String(tier)}`);
+  }
+  if (tier === 'view') {
+    if (writeAdmissionKey !== undefined || grantSignature !== undefined) {
+      throw new InviteParseError('view tier must not include write capability or grant');
+    }
+    return `#v=3&tier=view&read=${base64UrlEncode(readCapabilityKey)}`;
+  }
+  if (writeAdmissionKey === undefined) {
+    throw new InviteParseError(`${tier} tier requires write capability`);
+  }
+  requireCapabilityKey(writeAdmissionKey, 'write');
+  if (!(grantSignature instanceof Uint8Array) || grantSignature.length !== 64) {
+    throw new InviteParseError(`${tier} tier requires a 64-byte owner grant signature`);
+  }
+  return `#v=3&tier=${tier}&read=${base64UrlEncode(readCapabilityKey)}&write=${base64UrlEncode(writeAdmissionKey)}&grant=${base64UrlEncode(grantSignature)}`;
+}
+
+/** Compose a complete native or hosted v3 invite URL. */
+export function composeInviteUrlV3(
+  base: string,
+  roomId: string,
+  tier: InviteTierV3,
+  readCapabilityKey: Uint8Array,
+  writeAdmissionKey?: Uint8Array,
+  grantSignature?: Uint8Array,
+): string {
+  if (!base || !roomId) throw new InviteParseError('base and roomId are required');
+  const trimmedBase = base.endsWith('/') ? base.slice(0, -1) : base;
+  return `${trimmedBase}/${roomId}${composeInviteFragmentV3(tier, readCapabilityKey, writeAdmissionKey, grantSignature)}`;
+}
+
+/** Parse only the new v3 fragment grammar; legacy `#key=` stays separate. */
+export function parseInviteFragmentV3(fragment: string): ParsedInviteFragmentV3 {
+  if (typeof fragment !== 'string' || !fragment.startsWith('#')) {
+    throw new InviteParseError('v3 fragment must start with `#`');
+  }
+  const parts = fragment.slice(1).split('&');
+  const fields = new Map<string, string>();
+  for (const part of parts) {
+    const pair = part.split('=');
+    if (pair.length !== 2 || pair[0]!.length === 0 || pair[1]!.length === 0) {
+      throw new InviteParseError('malformed v3 fragment field');
+    }
+    const [key, value] = pair as [string, string];
+    if (!['v', 'tier', 'read', 'write', 'grant'].includes(key)) {
+      throw new InviteParseError(`unknown v3 fragment field: ${key}`);
+    }
+    if (fields.has(key)) throw new InviteParseError(`duplicate v3 fragment field: ${key}`);
+    fields.set(key, value);
+  }
+  if (fields.get('v') !== '3') throw new InviteParseError('v3 fragment requires v=3');
+  const tier = fields.get('tier');
+  if (tier !== 'view' && tier !== 'comment' && tier !== 'suggest') {
+    throw new InviteParseError(`unknown v3 invite tier: ${String(tier)}`);
+  }
+  const readCapabilityKey = decodeCapability(fields.get('read'), 'read');
+  const write = fields.get('write');
+  const writeAdmissionKey = write === undefined ? undefined : decodeCapability(write, 'write');
+  const grant = fields.get('grant');
+  const grantBytes = grant === undefined ? undefined : decodeGrant(grant);
+  const canonical = composeInviteFragmentV3(tier, readCapabilityKey, writeAdmissionKey, grantBytes);
+  if (canonical !== fragment) {
+    throw new InviteParseError('v3 fragment is not in canonical field order or encoding');
+  }
+  return {
+    version: 3,
+    tier,
+    readCapabilityKey,
+    ...(writeAdmissionKey === undefined ? {} : { writeAdmissionKey }),
+    ...(grant === undefined ? {} : { grantSignature: grant }),
+  };
+}
+
+function decodeGrant(value: string): Uint8Array {
+  let decoded: Uint8Array;
+  try {
+    decoded = base64UrlDecode(value);
+  } catch (err) {
+    throw new InviteParseError(`grant signature base64url decode: ${String(err)}`);
+  }
+  if (decoded.length !== 64) {
+    throw new InviteParseError(`grant signature must decode to 64 bytes, got ${decoded.length}`);
+  }
+  return decoded;
+}
+
 /**
  * Overwrite a secret buffer with zeros. JS has no real way to guarantee a
  * value is purged from memory (the runtime may have copied it), but
@@ -205,6 +324,24 @@ export function composeInviteUrl(
 export function zero(secret: Uint8Array): void {
   if (!(secret instanceof Uint8Array)) return;
   secret.fill(0);
+}
+
+function requireCapabilityKey(value: Uint8Array, field: string): void {
+  if (!(value instanceof Uint8Array) || value.length !== 32) {
+    throw new InviteParseError(`${field} capability must be a 32-byte Uint8Array`);
+  }
+}
+
+function decodeCapability(value: string | undefined, field: string): Uint8Array {
+  if (value === undefined) throw new InviteParseError(`missing ${field} capability`);
+  let decoded: Uint8Array;
+  try {
+    decoded = base64UrlDecode(value);
+  } catch (err) {
+    throw new InviteParseError(`${field} capability base64url decode: ${String(err)}`);
+  }
+  requireCapabilityKey(decoded, field);
+  return decoded;
 }
 
 // ---------------------------------------------------------------------------

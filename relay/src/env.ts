@@ -2,6 +2,7 @@
 
 import type { RoomDO } from "./room-do";
 import type { QuotaDO } from "./quota-do";
+import type { ShareDO } from "./share-do";
 
 declare global {
   /** Optional build SHA injected at deploy time. */
@@ -15,12 +16,15 @@ export interface Env {
 
   // One account-wide quota coordinator, addressed as idFromName("quota:v1").
   RELAY_QUOTAS: DurableObjectNamespace<QuotaDO>;
+  RELAY_SHARES: DurableObjectNamespace<ShareDO>;
 
   // R2 bucket for blob spillover (encrypted snapshots > inline cap).
   RELAY_BLOBS: R2Bucket;
 
   // Hard maxima (string-typed env vars — parse at use site).
   HARD_MAX_PEERS: string;
+  /** Concurrent anonymous v3 viewer sockets per room. Independent of maxPeers. */
+  HARD_MAX_VIEWER_SOCKETS: string;
   HARD_MAX_ROOM_BYTES: string;
   HARD_MAX_EVENT_BYTES: string;
   HARD_MAX_SNAPSHOT_BYTES: string;
@@ -60,4 +64,16 @@ export interface Env {
 
   /** Local/test-only opt-in to the public deterministic blob-cap key. */
   ALLOW_INSECURE_BLOB_CAP_KEY?: string;
+
+  /** Uncompressed P-256 VAPID public key (65-byte canonical base64url). */
+  VAPID_PUBLIC_KEY?: string;
+
+  /** Contact URI placed in VAPID JWTs (`mailto:` or `https:`). */
+  VAPID_SUBJECT?: string;
+
+  /** Private P-256 JWK. Configure only through `wrangler secret put`. */
+  VAPID_PRIVATE_JWK?: string;
+
+  /** Exact loopback HTTP origin allowed only by local Web Push E2E. */
+  TEST_PUSH_ENDPOINT_ORIGIN?: string;
 }

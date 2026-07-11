@@ -744,6 +744,8 @@ pub(crate) mod test_support {
             nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
             ciphertext: "Y2lwaGVy".to_string(),
             ciphertext_bytes: 6,
+            signal_generation: None,
+            device_signature: None,
         }
     }
 }

@@ -7,8 +7,10 @@ import {
   canonicalRequest,
   constantTimeEquals,
   parseAdmissionHeader,
+  parseAdmissionHeaderV3,
   rfc3986Encode,
   verifyAdmission,
+  verifyAdmissionV3,
 } from "../../src/admission";
 
 /**
@@ -411,5 +413,45 @@ describe("verifyAdmission", () => {
         admissionKey: KEY_A,
       }),
     ).rejects.toMatchObject({ code: "ATTN_ADMISSION_INVALID" });
+  });
+});
+
+describe("v3 scoped admission", () => {
+  async function requestWith(scope: "read" | "write", key: Uint8Array): Promise<Request> {
+    const url = "https://relay.example/v3/rooms/abc/devices";
+    const unsigned = new Request(url, { method: scope === "read" ? "GET" : "POST", body: scope === "read" ? undefined : "{}" });
+    const mac = await hmacSha256(key, await canonicalRequest(unsigned, new URL(url).pathname));
+    return new Request(url, {
+      method: unsigned.method,
+      headers: { "Attn-Admission": `v3.${scope}.${base64UrlEncode(mac)}` },
+      body: scope === "read" ? undefined : "{}",
+    });
+  }
+
+  it("strictly parses v3.read and v3.write headers", () => {
+    const mac = base64UrlEncode(new Uint8Array(32));
+    expect(parseAdmissionHeaderV3(`v3.read.${mac}`).scope).toBe("read");
+    expect(parseAdmissionHeaderV3(`v3.write.${mac}`).scope).toBe("write");
+    expect(() => parseAdmissionHeaderV3(`v2.${mac}`)).toThrowError(AdmissionError);
+  });
+
+  it("accepts the proper key and scope", async () => {
+    await expect(verifyAdmissionV3(await requestWith("read", KEY_A), "/v3/rooms/abc/devices", {
+      roomId: ROOM_ID, readAdmissionKey: KEY_A, writeAdmissionKey: KEY_B,
+    }, "read")).resolves.toBeUndefined();
+    await expect(verifyAdmissionV3(await requestWith("write", KEY_B), "/v3/rooms/abc/devices", {
+      roomId: ROOM_ID, readAdmissionKey: KEY_A, writeAdmissionKey: KEY_B,
+    }, "write")).resolves.toBeUndefined();
+  });
+
+  it("distinguishes a valid read proof on a write from an invalid proof", async () => {
+    const validRead = await requestWith("read", KEY_A);
+    await expect(verifyAdmissionV3(validRead, "/v3/rooms/abc/devices", {
+      roomId: ROOM_ID, readAdmissionKey: KEY_A, writeAdmissionKey: KEY_B,
+    }, "write")).rejects.toMatchObject({ code: "ATTN_WRITE_CAPABILITY_REQUIRED" });
+    const invalidRead = await requestWith("read", KEY_B);
+    await expect(verifyAdmissionV3(invalidRead, "/v3/rooms/abc/devices", {
+      roomId: ROOM_ID, readAdmissionKey: KEY_A, writeAdmissionKey: KEY_B,
+    }, "write")).rejects.toMatchObject({ code: "ATTN_ADMISSION_INVALID" });
   });
 });

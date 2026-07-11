@@ -60,7 +60,7 @@ export function decideFetch(input: {
 
 /** Which cached shell serves an offline navigation. */
 export function shellPathFor(pathname: string): '/' | '/app/' | '/review/' {
-  if (/^\/review(?:\/|$)/u.test(pathname)) return '/review/';
+  if (/^\/(?:review|s)(?:\/|$)/u.test(pathname)) return '/review/';
   if (/^\/(?:app|open)(?:\/|$)/u.test(pathname)) return '/app/';
   return '/';
 }

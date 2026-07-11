@@ -25,7 +25,7 @@
  * header and cannot reproduce that runtime behavior by itself.
  */
 
-import { SELF, env } from "cloudflare:test";
+import { SELF as WORKER_SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
@@ -42,6 +42,25 @@ declare module "cloudflare:test" {
 }
 
 const URL_BASE = "https://relay.example";
+
+// The workers pool deliberately reuses one isolate across the full relay
+// suite, so the module-level edge limiter also survives between test files.
+// Give every request in this file a dedicated edge identity: otherwise a
+// preceding high-volume suite can exhaust the shared `unknown` bucket and
+// turn CORS assertions into unrelated 429s. This is a real edge header in
+// production and remains fixed here so the CORS file still exercises normal
+// per-IP accounting rather than bypassing the limiter.
+const CORS_TEST_IP = "198.51.100.241";
+const SELF = {
+  fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const request = new Request(input, init);
+    const headers = new Headers(request.headers);
+    if (!headers.has("CF-Connecting-IP")) {
+      headers.set("CF-Connecting-IP", CORS_TEST_IP);
+    }
+    return WORKER_SELF.fetch(new Request(request, { headers }));
+  },
+};
 
 function defaultPolicy(overrides: Partial<RoomPolicy> = {}): RoomPolicy {
   return {
@@ -123,6 +142,10 @@ async function createRoom(opts: {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      // Each case owns a live room. The test quota binding intentionally caps
+      // one source at two rooms, so isolate creation while keeping all later
+      // CORS traffic on the file-level edge identity above.
+      "CF-Connecting-IP": `198.18.1.${(roomCounter % 250) + 1}`,
       "Attn-Owner-Signature": base64UrlEncode(sig),
       "Attn-PoW": await createPowHeader(opts.roomId, ownerKp.publicKeyBytes),
     },
@@ -187,13 +210,16 @@ describe("CORS — OPTIONS preflight", () => {
       headers: {
         Origin: "https://attn.sh",
         "Access-Control-Request-Method": "POST",
-        "Access-Control-Request-Headers": "Content-Type, Attn-Admission, Attn-PoW",
+        "Access-Control-Request-Headers": "Content-Type, Attn-Admission, Attn-PoW, Attn-Device-Id, Attn-Share-Bundle",
       },
     });
     expect(res.status).toBe(204);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://attn.sh");
     expect(res.headers.get("Access-Control-Allow-Headers")).toBe(
-      "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW",
+      "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id, Attn-Device-Proof, Attn-Device-Registration, Attn-Share-Bundle",
+    );
+    expect(res.headers.get("Access-Control-Expose-Headers")).toBe(
+      "Attn-Share-Bundle, Attn-Share-Tier, Attn-Sealed-Bundle, Attn-Snapshot-Id, Attn-Ciphertext-Sha256",
     );
     expect(res.headers.get("Access-Control-Allow-Methods")).toBe(
       "GET, POST, DELETE, OPTIONS",

@@ -2,15 +2,17 @@
   import type { Tab } from './tabs';
   import * as Tabs from '$lib/components/ui/tabs';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
+  import UnreadBadge from './UnreadBadge.svelte';
 
   interface Props {
     tabs: Tab[];
     activeTabId: string;
     onSwitch: (id: string) => void;
     onClose: (id: string) => void;
+    reviewUnreadCount?: number;
   }
 
-  let { tabs, activeTabId, onSwitch, onClose }: Props = $props();
+  let { tabs, activeTabId, onSwitch, onClose, reviewUnreadCount = 0 }: Props = $props();
 
   function handleValueChange(value: string): void {
     onSwitch(value);
@@ -40,6 +42,12 @@
             onauxclick={(e: MouseEvent) => handleMiddleClick(e, tab.id)}
           >
             <span class="whitespace-nowrap">{tab.label}</span>
+            {#if tab.id === activeTabId}
+              <UnreadBadge
+                count={reviewUnreadCount}
+                label="unread review updates for this tab"
+              />
+            {/if}
             <span
               class="tab-close absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-50 data-[state=active]:opacity-50 text-base leading-none h-4 w-4 text-center rounded-sm hover:!opacity-100 hover:bg-accent"
               role="button"

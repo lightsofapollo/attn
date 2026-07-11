@@ -3,6 +3,7 @@ import {
   aeadOpen,
   base64UrlDecode,
   buildAdmissionHeader,
+  buildAdmissionHeaderV3,
   contentHash,
   randomAeadNonce,
   type EnvelopeAad,
@@ -188,6 +189,7 @@ export interface ResolveBrowserR2SnapshotOptions {
   relayUrl: string;
   roomId: string;
   admissionKey: Uint8Array;
+  protocolVersion?: 2 | 3;
   snapshotKey: Uint8Array;
   /** The exact encrypted `kind=snapshot_blob` mailbox wrapper. */
   wrapper: MailboxEnvelope;
@@ -223,7 +225,7 @@ export async function resolveBrowserR2Snapshot(
   validateInputs(options);
 
   const relay = parseRelayOrigin(options.relayUrl);
-  const path = blobPath(options.roomId, options.wrapper.envelopeId);
+  const path = blobPath(options.roomId, options.wrapper.envelopeId, options.protocolVersion ?? 2);
   const aad = wrapperAad(options.roomId, options.wrapper);
   const blobRef = openWrapperBlobRef(options.snapshotKey, options.wrapper, aad);
 
@@ -414,7 +416,7 @@ function parsePresignedUpload(
   } catch {
     throw new Error('R2 snapshot upload capability is invalid');
   }
-  const expectedPath = blobPath(roomId, envelopeId);
+  const expectedPath = blobPath(roomId, envelopeId, 2);
   const caps = resolved.searchParams.getAll('cap');
   const queryKeys = [...resolved.searchParams.keys()];
   if (
@@ -433,8 +435,8 @@ function parsePresignedUpload(
   return resolved;
 }
 
-function blobPath(roomId: string, envelopeId: string): string {
-  return `/v2/rooms/${encodeURIComponent(roomId)}/blobs/${encodeURIComponent(envelopeId)}`;
+function blobPath(roomId: string, envelopeId: string, version: 2 | 3): string {
+  return `/v${version}/rooms/${encodeURIComponent(roomId)}/blobs/${encodeURIComponent(envelopeId)}`;
 }
 
 function wrapperAad(roomId: string, wrapper: MailboxEnvelope): EnvelopeAad {
@@ -534,7 +536,9 @@ async function fetchSealedBody(
   relay: URL,
   path: string,
 ): Promise<Uint8Array> {
-  const admission = buildAdmissionHeader(options.admissionKey, 'GET', path, EMPTY_BODY);
+  const admission = (options.protocolVersion ?? 2) === 3
+    ? buildAdmissionHeaderV3(options.admissionKey, 'read', 'GET', path, EMPTY_BODY)
+    : buildAdmissionHeader(options.admissionKey, 'GET', path, EMPTY_BODY);
   let presignResponse: Response;
   try {
     presignResponse = await options.fetchImpl(`${relay.origin}${path}`, {

@@ -1,6 +1,7 @@
 #[cfg(target_os = "macos")]
 mod cli_alias;
 mod cli_review;
+mod cli_share;
 mod daemon;
 mod files;
 mod ipc;
@@ -8,13 +9,14 @@ mod logging;
 mod markdown;
 mod platform;
 mod projects;
+mod resident;
 mod review;
 #[cfg(all(debug_assertions, target_os = "macos"))]
 mod screenshot;
 mod watcher;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use percent_encoding::percent_decode_str;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -59,7 +61,7 @@ struct Cli {
     check: bool,
 
     /// Don't fork to background (for development)
-    #[arg(long)]
+    #[arg(long, global = true)]
     no_fork: bool,
 
     /// Take a screenshot of the daemon window and print the path
@@ -76,6 +78,11 @@ struct Cli {
     #[cfg(debug_assertions)]
     #[arg(long)]
     eval: Option<String>,
+
+    /// Inject a native review-notification click into the running daemon.
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    #[arg(long, hide = true)]
+    notification_click: Option<String>,
 
     /// Click an element by CSS selector or text= prefix
     #[cfg(debug_assertions)]
@@ -111,6 +118,26 @@ enum TopLevelSubcommand {
     /// Manage review rooms and agent identities. Spec:
     /// `planning/collab/amendments.md` §Agent CLI key handling.
     Review(cli_review::ReviewArgs),
+    /// Create, renew, or revoke a durable share link.
+    Share(cli_share::ShareArgs),
+    /// Run or configure the long-lived background daemon.
+    Daemon(DaemonArgs),
+}
+
+#[derive(Args, Debug)]
+struct DaemonArgs {
+    /// Keep the daemon alive without showing a window until a document or link opens.
+    #[arg(long)]
+    resident: bool,
+    /// Show daemon and macOS launch-at-login state.
+    #[arg(long)]
+    status: bool,
+    /// Explicitly install the macOS user LaunchAgent.
+    #[arg(long, conflicts_with = "uninstall_launch_agent")]
+    install_launch_agent: bool,
+    /// Unload and remove the macOS user LaunchAgent.
+    #[arg(long)]
+    uninstall_launch_agent: bool,
 }
 
 fn main() {
@@ -121,21 +148,63 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    let mut resident_mode = false;
 
     // Subcommands short-circuit BEFORE we touch the filesystem with
     // `canonicalize` — they don't need a path argument and shouldn't
     // fail with "cannot open '.'" when none was passed.
-    if let Some(command) = cli.command {
+    if let Some(command) = cli.command.take() {
         match command {
             TopLevelSubcommand::Review(args) => return cli_review::run(args),
+            TopLevelSubcommand::Share(args) => return cli_share::run(args),
+            TopLevelSubcommand::Daemon(args) => {
+                let action_count = usize::from(args.resident)
+                    + usize::from(args.status)
+                    + usize::from(args.install_launch_agent)
+                    + usize::from(args.uninstall_launch_agent);
+                if action_count != 1 {
+                    bail!(
+                        "daemon requires exactly one of --resident, --status, \
+                         --install-launch-agent, or --uninstall-launch-agent"
+                    );
+                }
+                if args.status {
+                    let status = resident::status();
+                    let running = daemon::send_info().is_ok();
+                    println!("running: {running}");
+                    println!("installed: {}", status.installed);
+                    println!("loaded: {}", status.loaded);
+                    println!("degraded: {}", status.degraded);
+                    println!("supported: {}", status.supported);
+                    if let Some(error) = status.error {
+                        println!("error: {error}");
+                    }
+                    return Ok(());
+                }
+                if args.install_launch_agent {
+                    resident::install_launch_agent()?;
+                    println!("attn resident daemon will launch at login");
+                    return Ok(());
+                }
+                if args.uninstall_launch_agent {
+                    resident::uninstall_launch_agent()?;
+                    println!("attn resident daemon will not launch at login");
+                    return Ok(());
+                }
+                resident_mode = true;
+            }
         }
     }
 
-    let path = cli
-        .path
+    let input_path = if resident_mode {
+        daemon::resident_idle_path()?
+    } else {
+        cli.path.clone()
+    };
+    let path = input_path
         .canonicalize()
-        .with_context(|| format!("cannot open '{}'", cli.path.display()))?;
+        .with_context(|| format!("cannot open '{}'", input_path.display()))?;
 
     // Daemon command modes — talk to running daemon
     #[cfg(debug_assertions)]
@@ -146,6 +215,11 @@ fn run() -> Result<()> {
     }
     #[cfg(debug_assertions)]
     {
+        #[cfg(target_os = "macos")]
+        if let Some(deep_link) = &cli.notification_click {
+            daemon::send_review_notification_click(deep_link)?;
+            return Ok(());
+        }
         if let Some(js) = &cli.eval {
             let result = daemon::send_eval(js)?;
             println!("{result}");
@@ -224,7 +298,10 @@ fn run() -> Result<()> {
     // Try to connect to an existing daemon — if successful, send path and exit
     let requested_path = normalize_input_path(path.clone());
     let path_str = requested_path.to_string_lossy().to_string();
-    if daemon::try_send_to_existing(&path_str)? {
+    if resident_mode && daemon::send_info().is_ok() {
+        return Ok(());
+    }
+    if !resident_mode && daemon::try_send_to_existing(&path_str)? {
         return Ok(());
     }
 
@@ -235,10 +312,10 @@ fn run() -> Result<()> {
     daemon::write_fingerprint()?;
 
     // We are now the daemon process
-    run_daemon(cli, requested_path)
+    run_daemon(cli, requested_path, resident_mode)
 }
 
-fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
+fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
     // Install the tracing subscriber as the first thing the daemon does, after
     // the fork has redirected stderr into attn.log. Every `info!`/`warn!`/… from
     // here on is timestamped and level-filtered (ATTN_LOG/RUST_LOG, default info).
@@ -297,6 +374,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         );
     }
 
+    let resident_status = resident::status();
     let init_payload_json = serde_json::json!({
         "markdown": "",
         "structure": &initial_structure,
@@ -322,6 +400,14 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         // capability gate. Release builds never set this, so the token stays
         // confined to the init payload there. See web/src/App.svelte.
         "debugBuild": cfg!(debug_assertions),
+        "resident": {
+            "active": resident_mode,
+            "installed": resident_status.installed,
+            "loaded": resident_status.loaded,
+            "degraded": resident_status.degraded,
+            "error": resident_status.error,
+            "supported": resident_status.supported,
+        },
     })
     .to_string();
     let page_html = build_page_html(&init_payload_json, theme);
@@ -340,7 +426,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
 
     // Create window and webview with typed event loop
     let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
-    platform::configure_event_loop(&mut event_loop);
+    platform::configure_event_loop(&mut event_loop, resident_mode);
 
     let watcher_proxy = event_loop.create_proxy();
 
@@ -359,6 +445,7 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
     let mut window_builder = WindowBuilder::new()
         .with_title("attn")
         .with_inner_size(tao::dpi::LogicalSize::new(960.0, 720.0))
+        .with_visible(!resident_mode)
         .with_window_icon(load_window_icon());
 
     #[cfg(target_os = "macos")]
@@ -406,7 +493,9 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         });
         let working_copy =
             Arc::new(crate::review::working_copy::WorkingCopyService::new());
-        let base = ReviewManager::new(Arc::clone(store), working_copy, update_tx);
+        let notification_sink = platform::review_notification_sink(event_loop.create_proxy());
+        let base = ReviewManager::new(Arc::clone(store), working_copy, update_tx)
+            .with_notification_sink(Arc::clone(&notification_sink));
 
         // Attach the bootstrap pipeline so Share/Join IPCs go through real
         // create-room + register-device against the relay rather than the
@@ -452,11 +541,10 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 let working_copy = Arc::new(
                     crate::review::working_copy::WorkingCopyService::new(),
                 );
-                Arc::new(ReviewManager::new(
-                    Arc::clone(store),
-                    working_copy,
-                    update_tx,
-                ))
+                Arc::new(
+                    ReviewManager::new(Arc::clone(store), working_copy, update_tx)
+                        .with_notification_sink(notification_sink),
+                )
             }
         }
     });
@@ -474,6 +562,14 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
         std::thread::Builder::new()
             .name("review-resume-known".to_string())
             .spawn(move || {
+                // Durable shares are reconciled before ordinary room resume:
+                // retry revoke-pending tombstones, revalidate owner paths,
+                // restore any deterministic epoch room, and owner-touch the
+                // 90-day share. This prevents a stale public pointer from
+                // racing the room runtime back online.
+                if let Err(error) = mgr.reconcile_durable_shares() {
+                    tracing::warn!("durable share boot reconciliation failed: {error:#}");
+                }
                 let resumed = mgr.resume_known_rooms();
                 if !resumed.is_empty() {
                     tracing::info!("resumed {} known room(s) on boot", resumed.len());
@@ -577,6 +673,24 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     .status(200)
                     .header("Content-Type", "text/html; charset=utf-8")
                     .body(body.into())
+                    .unwrap();
+            }
+
+            // Keep durable-share capabilities on their own reserved route so
+            // they can never fall through to local file serving.
+            if let Some(invite) = parse_share_invite_uri(&uri) {
+                let dispatched = daemon::dispatch_share_open_intent(
+                    &invite,
+                    custom_protocol_review_manager.as_ref(),
+                );
+                let (status, body) = share_open_response(dispatched.is_ok());
+                if dispatched.is_err() {
+                    tracing::warn!(share_id = %invite.share_id, "durable share open is not implemented");
+                }
+                return wry::http::Response::builder()
+                    .status(status)
+                    .header("Content-Type", "text/html; charset=utf-8")
+                    .body(body.as_bytes().to_vec().into())
                     .unwrap();
             }
 
@@ -726,8 +840,14 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                // Socket cleanup happens via Drop on _socket_cleanup
-                *control_flow = ControlFlow::Exit;
+                if keeps_daemon_after_window_close(resident_mode) {
+                    window.set_visible(false);
+                    #[cfg(target_os = "macos")]
+                    platform::enter_resident_mode();
+                } else {
+                    // Socket cleanup happens via Drop on _socket_cleanup
+                    *control_flow = ControlFlow::Exit;
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::ModifiersChanged(new_modifiers),
@@ -991,6 +1111,36 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
             Event::UserEvent(UserEvent::DragWindow) => {
                 let _ = window.drag_window();
             }
+            Event::UserEvent(UserEvent::ResidentLaunchAtLogin { enabled }) => {
+                // launchctl may terminate a daemon that is itself owned by the
+                // LaunchAgent. Run the transaction in a separate attn helper
+                // so rollback/removal can finish even if this UI process exits.
+                let result = run_resident_toggle_helper(enabled);
+                let status = resident::status();
+                let detail = serde_json::json!({
+                    "installed": status.installed,
+                    "loaded": status.loaded,
+                    "degraded": status.degraded,
+                    "error": result.err().map(|error| format!("{error:#}")).or(status.error),
+                });
+                let js = format!(
+                    "window.dispatchEvent(new CustomEvent('attn-resident-status', {{ detail: {detail} }}));"
+                );
+                let _ = webview.evaluate_script(&js);
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::PostReviewNotification(notification)) => {
+                platform::post_review_notification(&notification);
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::OpenReviewDeepLink(uri)) => {
+                if let Some(room_id) = notification_room_id_from_deep_link(&uri) {
+                    platform::activate_app();
+                    window.set_visible(true);
+                    window.set_focus();
+                    let _ = webview.evaluate_script(&notification_focus_script(&room_id));
+                }
+            }
             #[cfg(target_os = "macos")]
             // macOS open-URL: a clicked `attn://review/<roomId>#key=...` invite
             // (from a browser, Slack, etc.) is delivered here by Launch
@@ -1003,6 +1153,18 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 for url in &urls {
                     if let Some(invite) = parse_review_invite(url.as_str()) {
                         daemon::dispatch_review_join(&invite, opened_review_manager.as_ref());
+                        platform::activate_app();
+                        window.set_visible(true);
+                        window.set_focus();
+                    } else if let Some(invite) = parse_share_invite_uri(url.as_str()) {
+                        if daemon::dispatch_share_open_intent(
+                            &invite,
+                            opened_review_manager.as_ref(),
+                        )
+                        .is_err()
+                        {
+                            tracing::warn!(share_id = %invite.share_id, "durable share open is not implemented");
+                        }
                         platform::activate_app();
                         window.set_visible(true);
                         window.set_focus();
@@ -1081,7 +1243,9 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 let js = format!("window.__attn__.setContent({payload});");
                 let _ = webview.evaluate_script(&js);
 
-                // Bring window to front
+                #[cfg(target_os = "macos")]
+                platform::activate_app();
+                window.set_visible(true);
                 window.set_focus();
             }
             Event::UserEvent(UserEvent::SwitchProject(project_path)) => {
@@ -1139,11 +1303,37 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 let js = format!("window.__attn__.setContent({payload});");
                 let _ = webview.evaluate_script(&js);
 
+                #[cfg(target_os = "macos")]
+                platform::activate_app();
+                window.set_visible(true);
                 window.set_focus();
             }
             _ => {}
         }
     });
+}
+
+fn keeps_daemon_after_window_close(resident_mode: bool) -> bool {
+    resident_mode
+}
+
+fn run_resident_toggle_helper(enabled: bool) -> Result<()> {
+    let executable = std::env::current_exe().context("could not determine attn executable")?;
+    let flag = if enabled {
+        "--install-launch-agent"
+    } else {
+        "--uninstall-launch-agent"
+    };
+    let output = std::process::Command::new(executable)
+        .args(["daemon", flag])
+        .output()
+        .context("could not start resident settings helper")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("resident settings helper failed: {}", stderr.trim())
+    }
 }
 
 /// Detect if running inside Windows Subsystem for Linux.
@@ -1573,10 +1763,22 @@ const SUBFRAME_BRIDGE_GUARD: &str = r#"if (window.self !== window.top) {
 fn build_initialization_script(include_init_payload: bool, init_payload_json: &str) -> String {
     let base = r#"window.__attn_native_shortcuts__ = true;
 window.__attn_queue__ = window.__attn_queue__ || [];
+const __attnQueueReview = callback => data =>
+    window.__attn_queue__.push({ kind: 'review', callback, data });
 if (!window.__attn__) {
     window.__attn__ = {
         setContent: data => window.__attn_queue__.push({ kind: 'set', data }),
         updateContent: data => window.__attn_queue__.push({ kind: 'update', data }),
+        reviewStatus: __attnQueueReview('reviewStatus'),
+        reviewShareReady: __attnQueueReview('reviewShareReady'),
+        reviewEvent: __attnQueueReview('reviewEvent'),
+        reviewSnapshot: __attnQueueReview('reviewSnapshot'),
+        reviewAnchorResolution: __attnQueueReview('reviewAnchorResolution'),
+        reviewPresence: __attnQueueReview('reviewPresence'),
+        reviewConnection: __attnQueueReview('reviewConnection'),
+        reviewCollab: __attnQueueReview('reviewCollab'),
+        reviewUnread: __attnQueueReview('reviewUnread'),
+        reviewNotificationMute: __attnQueueReview('reviewNotificationMute'),
         increaseFontScale: () => {},
         decreaseFontScale: () => {},
         resetFontScale: () => {},
@@ -1659,6 +1861,16 @@ if (!window.__attn_js_bridge_installed__) {
 /// page makes the route easy to confirm via `--eval` or devtools during
 /// development.
 const REVIEW_JOIN_ACK_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>Joining review</title><p>Joining review room…</p>";
+const SHARE_OPEN_ACK_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>Opening share</title><p>Opening durable share…</p>";
+const SHARE_OPEN_UNAVAILABLE_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>Share unavailable</title><p>Durable share opening is not available in this build.</p>";
+
+fn share_open_response(dispatched: bool) -> (u16, &'static str) {
+    if dispatched {
+        (200, SHARE_OPEN_ACK_HTML)
+    } else {
+        (501, SHARE_OPEN_UNAVAILABLE_HTML)
+    }
+}
 
 /// Parse an `attn://review/...` invite URI.
 ///
@@ -1681,6 +1893,29 @@ fn parse_review_invite(uri: &str) -> Option<String> {
         None | Some('/') | Some('#') | Some('?') => Some(uri.to_string()),
         _ => None,
     }
+}
+
+/// Notification deep links contain no room secret and therefore focus only a
+/// room already present in the local store; they never invoke Join.
+fn notification_room_id_from_deep_link(uri: &str) -> Option<String> {
+    review::notifications::room_id_from_deep_link(uri)
+}
+
+/// Preserve the notification target until the Svelte review store has
+/// hydrated, then select it through the same production store bridge used by
+/// an already-open window. The room id is JSON encoded before crossing into
+/// JavaScript so an untrusted URI segment cannot become executable source.
+fn notification_focus_script(room_id: &str) -> String {
+    review::notifications::focus_script(room_id)
+}
+
+/// Detect the reserved native durable-share route while leaving strict ID and
+/// fragment validation to `review::share::parse_share_invite`.
+fn parse_share_invite_uri(uri: &str) -> Option<review::share::ParsedShareInvite> {
+    if !uri.starts_with("attn://share/") {
+        return None;
+    }
+    review::share::parse_share_invite(uri).ok()
 }
 
 /// True if the URI targets the reserved `attn://localhost/review/...` path
@@ -1769,6 +2004,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn daemon_resident_args_accept_global_no_fork_after_subcommand() {
+        let cli = Cli::try_parse_from(["attn", "daemon", "--resident", "--no-fork"])
+            .expect("resident daemon args");
+        assert!(cli.no_fork);
+        assert!(matches!(
+            cli.command,
+            Some(TopLevelSubcommand::Daemon(DaemonArgs {
+                resident: true,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn resident_close_keeps_runtime_nonresident_close_exits() {
+        assert!(keeps_daemon_after_window_close(true));
+        assert!(!keeps_daemon_after_window_close(false));
+    }
+
+    #[test]
+    fn notification_deep_link_focuses_only_a_plain_local_room_route() {
+        assert_eq!(
+            notification_room_id_from_deep_link("attn://review/room-42"),
+            Some("room-42".to_string())
+        );
+        assert_eq!(
+            notification_room_id_from_deep_link("attn://review/room-42#key=secret"),
+            None
+        );
+        assert_eq!(
+            notification_room_id_from_deep_link("attn://share/room-42"),
+            None
+        );
+        assert_eq!(notification_room_id_from_deep_link("attn://review/"), None);
+
+        let script = notification_focus_script("room-42");
+        assert!(script.contains("__attn_pending_review_focus__ = \"room-42\""));
+        assert!(script.contains("selectRoom(\"room-42\")"));
+        let escaped = notification_focus_script("room-\";alert(1)//");
+        assert!(!escaped.contains("room-\";alert"));
+        assert!(escaped.contains("room-\\\";alert"));
+    }
+
+    #[test]
     fn parse_review_invite_matches_basic_room() {
         let uri = "attn://review/abc123";
         assert_eq!(parse_review_invite(uri), Some(uri.to_string()));
@@ -1805,6 +2084,25 @@ mod tests {
         assert_eq!(parse_review_invite("attn://reviewable/abc"), None);
         assert_eq!(parse_review_invite("attn://review-foo/abc"), None);
         assert_eq!(parse_review_invite("attn://reviews/abc"), None);
+    }
+
+    #[test]
+    fn parse_share_invite_routes_exact_prefix_and_preserves_fragment() {
+        let uri =
+            "attn://share/AAECAwQFBgcICQoLDA0ODw#key=QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI";
+        let invite = parse_share_invite_uri(uri).expect("valid invite");
+        assert_eq!(invite.share_id, "AAECAwQFBgcICQoLDA0ODw");
+        assert!(parse_share_invite_uri("attn://shareable/id#key=x").is_none());
+        assert!(parse_share_invite_uri("https://attn.sh/s/id#key=x").is_none());
+        assert!(parse_share_invite_uri("attn://share/AAECAwQFBgcICQoLDA0ODw").is_none());
+    }
+
+    #[test]
+    fn unavailable_share_open_never_returns_success_ack() {
+        let (status, body) = share_open_response(false);
+        assert_eq!(status, 501);
+        assert_eq!(body, SHARE_OPEN_UNAVAILABLE_HTML);
+        assert_ne!(body, SHARE_OPEN_ACK_HTML);
     }
 
     #[test]
@@ -2117,6 +2415,13 @@ mod tests {
                 },
                 "reviewAnchorResolution",
             ),
+            (
+                ReviewUpdate::UnreadChanged {
+                    room_id: room.clone(),
+                    unread_count: 7,
+                },
+                "reviewUnread",
+            ),
         ];
 
         for (update, expected_callback) in cases {
@@ -2125,6 +2430,31 @@ mod tests {
             assert!(
                 js.contains(&needle),
                 "expected callback {expected_callback} in js={js}"
+            );
+        }
+    }
+
+    #[test]
+    fn unread_dispatch_is_camel_case_and_boot_bridge_queues_review_callbacks() {
+        let update = ReviewUpdate::UnreadChanged {
+            room_id: dummy_id("room-unread-boot"),
+            unread_count: 3,
+        };
+        let js = build_review_dispatch_js(&update).expect("unread dispatch");
+        assert!(js.contains("window.__attn__.reviewUnread("));
+        assert!(js.contains("\"roomId\":\"room-unread-boot\""));
+        assert!(js.contains("\"unreadCount\":3"));
+
+        let init = build_initialization_script(false, "{}");
+        for callback in [
+            "reviewStatus",
+            "reviewEvent",
+            "reviewUnread",
+            "reviewConnection",
+        ] {
+            assert!(
+                init.contains(&format!("{callback}: __attnQueueReview('{callback}')")),
+                "initialization bridge must queue early {callback} callbacks"
             );
         }
     }

@@ -1,0 +1,66 @@
+{
+  "_schema": {
+    "spec": "planning/collab/crypto-spec.md#v3-split-capability-tree",
+    "purpose": "Pin the additive v3 split read/write capability tree across Rust and TypeScript.",
+    "encoding": "All binary values are unpadded base64url."
+  },
+  "version": 3,
+  "vectors": [
+    {
+      "name": "all-zero roomSecret",
+      "roomSecret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "expected": {
+        "roomId": "Jv41qg3K2Ydv92e5YQlaVQ",
+        "rootKey": "EReNaE8Dw-EVvRjP8xDXJH55KVBg7wvcjI3g0blmju0",
+        "readCapabilityKey": "nOFJbEowAua022DZLVHTg20zRta2tSEtXhf_0qNgkqg",
+        "eventKey": "jhRqlMUbCii-nvDQRNDuQV06IkcHAWh6hL20zmJkdQ4",
+        "snapshotKey": "dBwrJ1Ix3W1Xo5SKuuXO77Fr5JCYUglScghOg2vmFOQ",
+        "signalingKey": "LppPc8ZyXHf4vfKEQtqXZrzw7CPe9jBkn83cEnS1ggs",
+        "readAdmissionKey": "zwJTI96qirQOcSQOIQ-nfdqXOXtfxIok6rsPPh1EsyI",
+        "writeAdmissionKey": "TD3M556il31greNV0gOwW58n4okf1gFTWBz7D9xZ22k"
+      }
+    },
+    {
+      "name": "counting bytes 00..1f",
+      "roomSecret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+      "expected": {
+        "roomId": "TSiwm-b9ctoPBzpXt82nFg",
+        "rootKey": "Wpze6v2TGPpAbSBBPyye4tVX8ZGbWcp3qvL7wBqQ_1c",
+        "readCapabilityKey": "dA-xIU9gueii-6_v45XieCQqyUI4A4rQOW4kIha-4gM",
+        "eventKey": "gVkrUGvJCO1PjWemnrsDUPOgPYkSGMB34Cs9eyiU3KU",
+        "snapshotKey": "HZChNpWSXHDi2MdU6buW2Tt70RYMmEhBNESWDB_TlnA",
+        "signalingKey": "DFeyYGVtmWlJuE8_JEPojao2xNWFbMxG80ZLye0yJrs",
+        "readAdmissionKey": "EoZLT-vf3SIrsPm2Z_mr2ksmRJqyfu1fZYt-u1Om_-0",
+        "writeAdmissionKey": "JNXu22CCJkW4UHN9ur4cfGUUkLvkXGHVWy86-S4ZMkw"
+      }
+    },
+    {
+      "name": "all-ones roomSecret",
+      "roomSecret": "__________________________________________8",
+      "expected": {
+        "roomId": "43NCTTYlFQikpHwWOQVZ5Q",
+        "rootKey": "S6DBBJaFOKECwrDXBkvs7-zxDdhDjRzh1JASWANxchg",
+        "readCapabilityKey": "XKX5REKrlWIVZDApOcKE6cmsuE55fq8-0UjGEy_sk9E",
+        "eventKey": "wA_ZWY_t9jlHkT-GxM-8rSTqHaf4XTu4zJp8V7EdR6U",
+        "snapshotKey": "v9zNWEJ6-UhDIIrUEKiu0zgc937x2WFfp7NGnUkLk9w",
+        "signalingKey": "Dctyra_jvyNFIA8gPQgK2lPbgwme93AT6tNQzj8AZP8",
+        "readAdmissionKey": "Nlmvp9mqeyv0bzaXlT_byy0MUoljQllXbAO1AhU33_c",
+        "writeAdmissionKey": "wbZL3QaxidQvQbMiDHORVeAIz2RSj8zGs95SJ_v8K_I"
+      }
+    },
+    {
+      "name": "ASCII bytes 41..60",
+      "roomSecret": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A",
+      "expected": {
+        "roomId": "aWD5SPbK28LVuTViFket0g",
+        "rootKey": "Xx4K-HNQNMgLRpssSIgdpUQGHxaG4-_VEy1dbVKtoLI",
+        "readCapabilityKey": "9mzba2neahJg6OsYSoC4PlopAB6Qfsg0KRjfNpecIBk",
+        "eventKey": "qAImPm6SNZd8KEeCa-4Xud1bxHvHl2T2elUvpzHfAOo",
+        "snapshotKey": "NT_NwJivS3kzvLMRVPA8A3G-jaitocsmWDxFz743KVY",
+        "signalingKey": "y_ETup-prmUXSvVkWd8OKRRj7kX9s_FJP8U6exalbTU",
+        "readAdmissionKey": "U4HV98asnRZkX4hyruVU7zdCdLlOThHQy9S3wUsSzPk",
+        "writeAdmissionKey": "2rwdZH3uVOKoyMNs0_ghfeMEpWL816Icy_7i5VNf9Zw"
+      }
+    }
+  ]
+}

@@ -41,6 +41,7 @@ import {
   type SignableMetaShape,
 } from './browser-crypto';
 import { validateSignalTarget } from './browser-signaling';
+import { verifyDeviceSignalProofV3 } from './device-proof';
 
 // ---------------------------------------------------------------------------
 // Wire types (mirror `ws.rs::ServerFrame` / `ClientFrame` and
@@ -71,6 +72,10 @@ export interface MailboxEnvelope {
   /** base64url-no-pad of `ciphertext || 16-byte Poly1305 tag`. */
   ciphertext: string;
   ciphertextBytes: number;
+  /** Required on protocol-v3 signal envelopes. */
+  signalGeneration?: number;
+  /** Ed25519 signature over the complete v3 signal routing/ciphertext header. */
+  deviceSignature?: string;
 }
 
 export interface RoomPolicy {
@@ -93,6 +98,8 @@ export interface Device {
   publicSigningKey: string;
   client: 'attn-native' | 'attn-browser' | 'agent-cli';
   kind: 'owner' | 'reviewer' | 'agent';
+  grantTier?: 'comment' | 'suggest';
+  grantSignature?: string;
   selfSignature: string;
   registeredAt?: number;
   createdAt?: number;
@@ -225,6 +232,8 @@ export interface BrowserWsOptions {
   url: string;
   /** Admission subprotocol value (`"attn.v2, hmac.<…>"`). */
   subprotocol: string;
+  /** Mint a fresh short-lived v3 device proof for every connection attempt. */
+  refreshConnection?: () => { url: string; subprotocol: string };
   /** Starting sequence the client subscribes from (load from local cursor). */
   afterSeq: number;
   /** 32-byte AEAD key for `kind:"event"` envelopes. */
@@ -233,8 +242,12 @@ export interface BrowserWsOptions {
   snapshotKey: Uint8Array;
   /** 32-byte AEAD key for `kind:"signal"` envelopes. */
   signalingKey: Uint8Array;
+  /** Room transport version; v3 requires device-authenticated signals. */
+  protocolVersion?: 2 | 3;
   /** Pre-seeded device cache (e.g. from a prior session). Empty Map by default. */
   initialDevices?: Map<string, Device>;
+  /** Previously verified ParticipantJoined signer ids from durable replay. */
+  initialAttestedSigningKeyIds?: readonly string[];
   /** Callback bundle. */
   callbacks?: BrowserWsCallbacks;
   /**
@@ -318,6 +331,12 @@ export class BrowserWsClient {
         }).WebSocket(url, protocols);
       });
     if (opts.initialDevices) this.ingestDevices([...opts.initialDevices.values()]);
+    for (const keyId of opts.initialAttestedSigningKeyIds ?? []) {
+      // The matching immutable signed registration may arrive in the same
+      // durable mailbox item after construction. Authorization still looks
+      // up that verified registration before consulting this checkpoint.
+      if (/^[A-Za-z0-9_-]{43}$/u.test(keyId)) this.attestedSigners.add(keyId);
+    }
   }
 
   /** Current connection state — useful for tests and UI status. */
@@ -328,6 +347,11 @@ export class BrowserWsClient {
   /** Cached device records keyed by signingKeyId. */
   getDevices(): ReadonlyMap<string, Device> {
     return this.devices;
+  }
+
+  /** Durable consumers may checkpoint only ids proven by ParticipantJoined. */
+  getAttestedSigningKeyIds(): readonly string[] {
+    return [...this.attestedSigners].sort();
   }
 
   /** Last network sequence whose consumer commit completed successfully. */
@@ -407,8 +431,12 @@ export class BrowserWsClient {
       // tokens. The WebSocket constructor accepts a list of protocol
       // strings; we split on comma so the browser sends the header per
       // RFC 6455 §4.1 (comma-separated values).
-      const protocols = this.opts.subprotocol.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
-      ws = this.factory(this.opts.url, protocols);
+      const connection = this.opts.refreshConnection?.() ?? {
+        url: this.opts.url,
+        subprotocol: this.opts.subprotocol,
+      };
+      const protocols = connection.subprotocol.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
+      ws = this.factory(connection.url, protocols);
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       this.scheduleReconnect(`ws constructor: ${m}`);
@@ -512,6 +540,7 @@ export class BrowserWsClient {
    * subsequent signature verification is O(1) by key id.
    */
   private ingestDevices(list: Device[]): void {
+    const validated: Array<{ device: Device; keyId: string }> = [];
     for (const d of list) {
       try {
         const pk = decodePublicSigningKey(d.publicSigningKey);
@@ -528,14 +557,66 @@ export class BrowserWsClient {
         if (existing && !sameRegistration(existing, d)) {
           throw new Error('immutable device registration changed');
         }
-        this.devices.set(kid, d);
-        this.deviceKeyIds.set(d.deviceId, kid);
+        validated.push({ device: d, keyId: kid });
       } catch (err) {
         const m = err instanceof Error ? err.message : String(err);
         this.callbacks.onError?.(
           'ATTN_WS_DEVICE',
           `device ${d.deviceId} has invalid publicSigningKey: ${m}`,
         );
+      }
+    }
+
+    // Grant proofs are rooted in the room owner's directory key, never in the
+    // joining reviewer's (self-signed) registration. Validate the batch as a
+    // transaction so a conflicting second owner cannot influence which key
+    // authorizes the remaining registrations.
+    const combined = new Map(this.devices);
+    for (const { device, keyId } of validated) combined.set(keyId, device);
+    const owners = [...combined.entries()].filter(([, device]) => device.kind === 'owner');
+    const distinctOwners = new Set(owners.map(([keyId, device]) => `${device.deviceId}:${keyId}`));
+    if (distinctOwners.size > 1) {
+      this.callbacks.onError?.('ATTN_WS_DEVICE', 'device directory contains conflicting owners');
+      return;
+    }
+    const owner = owners.length === 1 ? owners[0] : undefined;
+    if (owner && (owner[1].grantTier !== undefined || owner[1].grantSignature !== undefined)) {
+      this.callbacks.onError?.('ATTN_WS_DEVICE', 'owner registration must not contain a grant');
+      return;
+    }
+
+    for (const { device: d, keyId } of validated) {
+      try {
+        const hasTier = d.grantTier !== undefined;
+        const hasSignature = d.grantSignature !== undefined;
+        if (d.kind !== 'owner' && hasTier !== hasSignature) {
+          throw new Error('grantTier and grantSignature must be provided together');
+        }
+        if (d.kind !== 'owner' && this.opts.subprotocol.trim().startsWith('attn.v3') && !hasTier) {
+          throw new Error('v3 non-owner registration requires an owner grant');
+        }
+        if (d.kind !== 'owner' && hasTier) {
+          if (!owner) throw new Error('v3 grant requires one room owner');
+          if (d.grantTier !== 'comment' && d.grantTier !== 'suggest') {
+            throw new Error('unsupported grant tier');
+          }
+          const signature = base64UrlDecode(d.grantSignature!);
+          const ownerKey = decodePublicSigningKey(owner[1].publicSigningKey);
+          const grantBytes = toCanonicalBytes({
+            grantTier: d.grantTier,
+            purpose: 'attn device grant v3',
+            roomId: this.opts.roomId,
+            v: 3,
+          });
+          if (signature.length !== 64 || !ed25519.verify(signature, grantBytes, ownerKey)) {
+            throw new Error('owner grant signature is invalid for this room and tier');
+          }
+        }
+        this.devices.set(keyId, d);
+        this.deviceKeyIds.set(d.deviceId, keyId);
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        this.callbacks.onError?.('ATTN_WS_DEVICE', `device ${d.deviceId} is not authorized: ${m}`);
       }
     }
   }
@@ -585,6 +666,21 @@ export class BrowserWsClient {
     if (envelope.kind === 'signal' && !validateSignalTarget(envelope, this.opts.localDeviceId)) {
       this.callbacks.onError?.('ATTN_INBOUND', 'signal target does not match local device');
       return;
+    }
+    if (envelope.kind === 'signal' && (this.opts.protocolVersion ?? 2) === 3) {
+      const keyId = this.deviceKeyIds.get(envelope.deviceId);
+      const device = keyId === undefined ? undefined : this.devices.get(keyId);
+      if (!device || device.participantId !== envelope.authorId) {
+        this.callbacks.onError?.('ATTN_INBOUND', 'signal signer is absent from authenticated directory');
+        return;
+      }
+      try {
+        verifyDeviceSignalProofV3(envelope, this.opts.roomId, device.publicSigningKey);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.callbacks.onError?.('ATTN_INBOUND', `signal device proof failed: ${message}`);
+        return;
+      }
     }
 
     // Pick the AEAD key based on the envelope kind.
@@ -851,6 +947,8 @@ function registrationBytes(device: Device): Uint8Array {
     participantId: device.participantId,
     publicEncryptionKey: device.publicEncryptionKey,
     publicSigningKey: device.publicSigningKey,
+    ...(device.grantTier === undefined ? {} : { grantTier: device.grantTier }),
+    ...(device.grantSignature === undefined ? {} : { grantSignature: device.grantSignature }),
   });
 }
 
@@ -862,6 +960,8 @@ function sameRegistration(a: Device, b: Device): boolean {
     a.publicSigningKey === b.publicSigningKey &&
     a.client === b.client &&
     a.kind === b.kind &&
+    a.grantTier === b.grantTier &&
+    a.grantSignature === b.grantSignature &&
     a.selfSignature === b.selfSignature
   );
 }
@@ -870,7 +970,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function exactCapabilities(value: unknown, kind: Device['kind']): boolean {
+function exactCapabilities(
+  value: unknown,
+  kind: Device['kind'],
+  grantTier: Device['grantTier'],
+): boolean {
   if (!Array.isArray(value) || value.some((cap) => typeof cap !== 'string')) return false;
   const expected: Record<Device['kind'], string[]> = {
     owner: [
@@ -885,6 +989,10 @@ function exactCapabilities(value: unknown, kind: Device['kind']): boolean {
     reviewer: ['read_snapshot', 'write_comment', 'write_suggestion', 'resolve_comment'],
     agent: ['read_snapshot', 'write_comment', 'write_suggestion'],
   };
+  if (grantTier === 'comment') {
+    expected.reviewer = ['read_snapshot', 'write_comment', 'resolve_comment'];
+    expected.agent = ['read_snapshot', 'write_comment'];
+  }
   const actual = [...value].sort();
   const grants = [...expected[kind]].sort();
   return actual.length === grants.length && actual.every((cap, index) => cap === grants[index]);
@@ -905,7 +1013,7 @@ function validParticipantAttestation(
     typeof participant.displayName === 'string' &&
     participant.kind === registered.kind &&
     participant.publicSigningKey === registered.publicSigningKey &&
-    exactCapabilities(participant.capabilities, registered.kind) &&
+    exactCapabilities(participant.capabilities, registered.kind, registered.grantTier) &&
     device.deviceId === registered.deviceId &&
     device.participantId === registered.participantId &&
     device.publicEncryptionKey === registered.publicEncryptionKey &&
@@ -924,7 +1032,7 @@ function eventAllowedForRole(
     case 'comment_created':
       return true;
     case 'suggestion_created':
-      return true;
+      return registered.grantTier !== 'comment';
     case 'comment_resolved':
       return (registered.kind === 'owner' || registered.kind === 'reviewer')
         && body.resolvedBy === meta.authorId;
@@ -958,7 +1066,13 @@ function eventAllowedForRole(
  * `ws.rs::rfc3986_encode` — `encodeURIComponent` would leave `!*'()` raw and
  * diverge from the admission HMAC canonicalisation).
  */
-export function buildWsUrl(relayUrl: string, roomId: string, deviceId: string): string {
+export function buildWsUrl(
+  relayUrl: string,
+  roomId: string,
+  identityId: string,
+  version: 2 | 3 = 2,
+  identityKind: 'device' | 'viewer' = 'device',
+): string {
   const trimmed = relayUrl.replace(/\/+$/, '');
   let withScheme = trimmed;
   if (trimmed.startsWith('https://')) {
@@ -967,8 +1081,9 @@ export function buildWsUrl(relayUrl: string, roomId: string, deviceId: string): 
     withScheme = 'ws://' + trimmed.slice('http://'.length);
   }
   const eRoom = rfc3986EncodeForUrl(roomId);
-  const eDevice = rfc3986EncodeForUrl(deviceId);
-  return `${withScheme}/v2/rooms/${eRoom}/socket?device_id=${eDevice}`;
+  const encodedIdentity = rfc3986EncodeForUrl(identityId);
+  const queryName = identityKind === 'viewer' ? 'viewer_id' : 'device_id';
+  return `${withScheme}/v${version}/rooms/${eRoom}/socket?${queryName}=${encodedIdentity}`;
 }
 
 function rfc3986EncodeForUrl(s: string): string {
@@ -990,6 +1105,6 @@ function rfc3986EncodeForUrl(s: string): string {
 }
 
 /** Path component used in the admission HMAC canonicalisation. */
-export function socketPath(roomId: string): string {
-  return `/v2/rooms/${roomId}/socket`;
+export function socketPath(roomId: string, version: 2 | 3 = 2): string {
+  return `/v${version}/rooms/${roomId}/socket`;
 }

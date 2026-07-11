@@ -229,7 +229,46 @@ pub fn assemble_signal_envelope(
         nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
         ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
         ciphertext_bytes: ciphertext.len() as u64,
+        signal_generation: None,
+        device_signature: None,
     })
+}
+
+/// Upgrade an assembled signal envelope to the protocol-v3 authenticated
+/// wire form. The signature binds every relay-visible routing and ciphertext
+/// field, including the exact target and monotonic generation.
+pub fn authenticate_signal_envelope_v3(
+    mut envelope: MailboxEnvelope,
+    generation: u64,
+    signing_key: &crate::review::crypto::signing::DeviceSigningKey,
+) -> Result<MailboxEnvelope, EnvelopeError> {
+    if envelope.kind != EnvelopeKind::Signal {
+        return Err(EnvelopeError::InvalidPlaintext(
+            "device proof requires kind=signal".into(),
+        ));
+    }
+    let target = envelope
+        .target
+        .as_ref()
+        .map(|target| id_to_string(&target.device_id));
+    let signature = crate::review::crypto::device_proof::sign_device_signal_proof_v3(
+        signing_key,
+        envelope.room_id.as_str(),
+        &envelope.envelope_id,
+        &id_to_string(&envelope.author_id),
+        &id_to_string(&envelope.device_id),
+        target.as_deref(),
+        generation,
+        envelope.created_at,
+        envelope.expires_at,
+        &envelope.nonce,
+        &envelope.ciphertext,
+        envelope.ciphertext_bytes,
+    )
+    .map_err(canon_to_envelope_err)?;
+    envelope.signal_generation = Some(generation);
+    envelope.device_signature = Some(signature);
+    Ok(envelope)
 }
 
 /// Open a `kind: "signal"` envelope sealed by `assemble_signal_envelope`.

@@ -56,6 +56,46 @@ export function blobObjectKey(
   return `rooms_v2/${encodeOpaqueSegment(roomId)}/generations/${encodeOpaqueSegment(leaseId)}/blobs/${encodeOpaqueSegment(envelopeId)}`;
 }
 
+/**
+ * Durable-share ciphertext lives outside every room/generation prefix. The
+ * bucket lifecycle policy can therefore retain `shares_v1/` while continuing
+ * to sweep `rooms/` and `rooms_v2/` after seven days. Both path components are
+ * encoded, and `artifactId` is minted by ShareDO rather than supplied by the
+ * caller, so a share upload cannot select or overwrite another R2 key.
+ */
+export function shareArtifactPrefix(shareId: string): string {
+  return `shares_v1/${encodeOpaqueSegment(shareId)}/artifacts/`;
+}
+
+export function shareArtifactObjectKey(shareId: string, artifactId: string): string {
+  return `${shareArtifactPrefix(shareId)}${encodeOpaqueSegment(artifactId)}`;
+}
+
+/** Delete all durable ciphertext for one share, with bounded pagination. */
+export async function deleteShareArtifacts(env: Env, shareId: string): Promise<number> {
+  let total = 0;
+  let cursor: string | undefined;
+  const prefix = shareArtifactPrefix(shareId);
+  // A share has at most 64 live artifacts plus bounded superseded cleanup
+  // work. Fifty R2 pages is intentionally far above that cap while preventing
+  // a corrupted namespace from monopolizing one DO invocation.
+  for (let page = 0; page < 50; page += 1) {
+    const listed: R2Objects = await env.RELAY_BLOBS.list({
+      prefix,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    const keys = listed.objects.map(object => object.key);
+    if (keys.length > 0) {
+      await env.RELAY_BLOBS.delete(keys);
+      total += keys.length;
+    }
+    if (!listed.truncated) return total;
+    cursor = listed.cursor;
+    if (cursor === undefined) return total;
+  }
+  throw new Error("share artifact cleanup exceeded pagination bound");
+}
+
 export interface PresignedUploadResult {
   uploadUrl: string;
   method: "PUT";
@@ -77,6 +117,8 @@ export interface BlobCapPayload {
   leaseId: string;
   envelopeId: string;
   expiresAt: number;
+  /** Present only for v3. Omitted for v2 to preserve existing cap bytes. */
+  protocolVersion?: 3;
   /** Absent means the legacy raw-key layout; all newly minted caps use 2. */
   objectKeyVersion?: 2;
   /** One-time reservation claim, required only for PUT caps. */
@@ -101,6 +143,7 @@ export async function presignBlobUpload(
   ciphertextBytes: number,
   expiresInSeconds?: number,
   objectKeyVersion: 1 | 2 = 2,
+  protocolVersion: 2 | 3 = 2,
 ): Promise<PresignedUploadResult> {
   const ttl = expiresInSeconds ?? DEFAULT_UPLOAD_TTL_SECONDS;
   const expiresAt = Date.now() + ttl * 1000;
@@ -110,6 +153,7 @@ export async function presignBlobUpload(
     leaseId,
     envelopeId,
     expiresAt,
+    ...(protocolVersion === 3 ? { protocolVersion: 3 as const } : {}),
     ...(objectKeyVersion === 2 ? { objectKeyVersion: 2 as const } : {}),
     uploadId,
     ciphertextBytes,
@@ -119,7 +163,7 @@ export async function presignBlobUpload(
   // The path is the spec's `/v2/rooms/:roomId/blobs/:envelopeId`. The client
   // appends the token as a query parameter so the URL is fully self-contained
   // (no extra header coordination needed on the upload PUT).
-  const uploadUrl = `/v2/rooms/${encodeURIComponent(roomId)}/blobs/${encodeURIComponent(envelopeId)}?cap=${encodeURIComponent(token)}`;
+  const uploadUrl = `/v${protocolVersion}/rooms/${encodeURIComponent(roomId)}/blobs/${encodeURIComponent(envelopeId)}?cap=${encodeURIComponent(token)}`;
   return {
     uploadUrl,
     method: "PUT",
@@ -141,6 +185,7 @@ export async function presignBlobDownload(
   envelopeId: string,
   expiresInSeconds?: number,
   objectKeyVersion: 1 | 2 = 2,
+  protocolVersion: 2 | 3 = 2,
 ): Promise<PresignedDownloadResult> {
   const ttl = expiresInSeconds ?? DEFAULT_DOWNLOAD_TTL_SECONDS;
   const expiresAt = Date.now() + ttl * 1000;
@@ -150,10 +195,11 @@ export async function presignBlobDownload(
     leaseId,
     envelopeId,
     expiresAt,
+    ...(protocolVersion === 3 ? { protocolVersion: 3 as const } : {}),
     ...(objectKeyVersion === 2 ? { objectKeyVersion: 2 as const } : {}),
   };
   const token = await signCap(payload, env);
-  const downloadUrl = `/v2/rooms/${encodeURIComponent(roomId)}/blobs/${encodeURIComponent(envelopeId)}?cap=${encodeURIComponent(token)}`;
+  const downloadUrl = `/v${protocolVersion}/rooms/${encodeURIComponent(roomId)}/blobs/${encodeURIComponent(envelopeId)}?cap=${encodeURIComponent(token)}`;
   return {
     downloadUrl,
     method: "GET",
@@ -211,7 +257,7 @@ export async function deleteRoomBlobs(env: Env, roomId: string): Promise<number>
  */
 export async function verifyBlobCap(
   token: string,
-  expect: { method: "PUT" | "GET"; roomId: string; envelopeId: string; now?: number },
+  expect: { method: "PUT" | "GET"; roomId: string; envelopeId: string; protocolVersion?: 2 | 3; now?: number },
   env: Env,
 ): Promise<BlobCapPayload | undefined> {
   if (!token.startsWith(TOKEN_PREFIX)) return undefined;
@@ -240,6 +286,10 @@ export async function verifyBlobCap(
   if (payload.method !== expect.method) return undefined;
   if (payload.roomId !== expect.roomId) return undefined;
   if (payload.envelopeId !== expect.envelopeId) return undefined;
+  const expectedProtocolVersion = expect.protocolVersion ?? 2;
+  const payloadProtocolVersion = payload.protocolVersion ?? 2;
+  if (payloadProtocolVersion !== expectedProtocolVersion) return undefined;
+  if (payload.protocolVersion !== undefined && payload.protocolVersion !== 3) return undefined;
   if (typeof payload.leaseId !== "string" || payload.leaseId.length === 0) return undefined;
   if (payload.objectKeyVersion !== undefined && payload.objectKeyVersion !== 2) return undefined;
   if (payload.method === "PUT" && (typeof payload.uploadId !== "string" || payload.uploadId.length === 0)) {
@@ -304,6 +354,9 @@ function canonicalizePayload(p: BlobCapPayload): string {
     envelopeId: p.envelopeId,
     expiresAt: p.expiresAt,
   };
+  if (p.protocolVersion === 3) {
+    ordered.protocolVersion = 3;
+  }
   if (p.objectKeyVersion === 2) {
     ordered.objectKeyVersion = 2;
   }

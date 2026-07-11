@@ -1,5 +1,20 @@
 # Relay Conformance Corpus
 
+> V3 scoped-admission coverage lives in `test/integration/v3-admission.test.ts`
+> plus the self-contained semantic corpus action `v3AdmissionMatrix`. It
+> exercises read success, every mutating endpoint's read-capability rejection,
+> write success, and protocol mismatch. The Rust corpus interpreter does not
+> yet have v3 room/key/scope vocabulary; `requires: ["v3-admission-matrix"]`
+> records that explicit harness debt until the Rust v3 client lands.
+> Durable shares likewise use the self-contained semantic corpus action
+> `durableShareMatrix` until the native share client lands. It locks create,
+> public redaction, scoped read, mailbox retry idempotency, and revocation to
+> the same executable corpus rather than leaving the new surface test-only.
+> `shareArtifactMatrix` covers owner upload, survival across the room-prefix
+> sweep, latest-per-file supersession, read-admission fetch, and revoke cleanup.
+> `shareTierBundleMatrix` locks exact bundle selection, view write denial, and
+> independent comment/suggest mailbox authorization without exposing siblings.
+
 Cross-language conformance suite for the attn relay. The same `cases.json`
 is consumed by:
 
@@ -93,6 +108,10 @@ Each step has an `action` discriminator. The corpus deliberately models
 | `advanceMockClock`        | Advance the runner's mock clock by `params.ms`. Used for hard-max / idle-timeout scenarios.              |
 | `seedR2Blob`              | Pre-populate an R2 object under `rooms/<roomId>/<key>`. Used for R2 spillover / cleanup tests.           |
 | `listR2`                  | Enumerate R2 keys under a prefix; assert exact membership.                                               |
+| `shareArtifactMatrix`     | Replay durable share snapshot pin/supersede/fetch/idempotent-delete/revoke with relay-minted R2 keys.  |
+| `shareTierBundleMatrix`   | Replay strict per-tier share bundle selection and independent mailbox admission.                         |
+| `shareWatchMatrix`        | Replay browser-safe selected-bundle watch admission, content-blind changes, and terminal revoke close.   |
+| `webPushMatrix`           | Replay strict selected-bundle push subscription create/get/idempotency/delete without notification content. |
 | `expectStorageState`      | Peek inside DO storage (Miniflare: `runInDurableObject`; Rust: not applicable — skipped).                |
 
 ### Naming via `as` / `in`

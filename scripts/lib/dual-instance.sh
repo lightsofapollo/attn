@@ -24,6 +24,10 @@
 #   ATTN_BIN            path to attn binary          (default $REPO/target/debug/attn)
 #   ATTN_DUAL_FIXTURE   markdown fixture both daemons open
 #                       (default tests/fixtures/review/scenario-comment-survives-edit.md)
+#   ATTN_DUAL_OWNER_RESIDENT=1 starts the owner with `daemon --resident`
+#                       instead of a visible document window
+#   ATTN_DUAL_OWNER_NOTIFICATION_LOG debug JSONL observation path forwarded
+#                       only to the owner process
 #
 # Functions exposed (all return non-zero on failure so callers can `set -e`):
 #   attn_owner      — run attn against the owner daemon
@@ -140,8 +144,19 @@ start_dual() {
     # Forward ATTN_RELAY_URL (if set) so the daemons attach the real relay
     # instead of the scaffold stub — Share/Join/collab flows need it. Empty is
     # treated as "unset" by the daemon, so this is safe when no relay is wanted.
-    ATTN_HOME="$ATTN_DUAL_OWNER" ATTN_RELAY_URL="${ATTN_RELAY_URL:-}" "$ATTN_BIN" --no-fork "$ATTN_DUAL_FIXTURE" \
-        >"$ATTN_DUAL_OWNER/daemon.stdout.log" 2>"$ATTN_DUAL_OWNER/daemon.stderr.log" &
+    if [ "${ATTN_DUAL_OWNER_RESIDENT:-0}" = "1" ]; then
+        ATTN_HOME="$ATTN_DUAL_OWNER" \
+            ATTN_RELAY_URL="${ATTN_RELAY_URL:-}" \
+            ATTN_NOTIFICATION_TEST_LOG="${ATTN_DUAL_OWNER_NOTIFICATION_LOG:-}" \
+            "$ATTN_BIN" daemon --resident --no-fork \
+            >"$ATTN_DUAL_OWNER/daemon.stdout.log" 2>"$ATTN_DUAL_OWNER/daemon.stderr.log" &
+    else
+        ATTN_HOME="$ATTN_DUAL_OWNER" \
+            ATTN_RELAY_URL="${ATTN_RELAY_URL:-}" \
+            ATTN_NOTIFICATION_TEST_LOG="${ATTN_DUAL_OWNER_NOTIFICATION_LOG:-}" \
+            "$ATTN_BIN" --no-fork "$ATTN_DUAL_FIXTURE" \
+            >"$ATTN_DUAL_OWNER/daemon.stdout.log" 2>"$ATTN_DUAL_OWNER/daemon.stderr.log" &
+    fi
     ATTN_DUAL_OWNER_PID=$!
 
     ATTN_HOME="$ATTN_DUAL_REVIEWER" ATTN_RELAY_URL="${ATTN_RELAY_URL:-}" "$ATTN_BIN" --no-fork "$reviewer_fixture" \

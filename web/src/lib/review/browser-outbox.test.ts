@@ -77,6 +77,35 @@ function makeOutbox(
   });
 }
 
+test('v3 outbox uses write-scoped admission and v3 route', async () => {
+  let requestUrl = '';
+  let admission = '';
+  const outbox = new BrowserOutbox({
+    relayUrl: 'https://relay.example.test',
+    roomId: ROOM,
+    deviceId: DEVICE,
+    admissionKey: new Uint8Array(32).fill(0x43),
+    protocolVersion: 3,
+    powBits: 12,
+    maxEventBytes: 1024,
+    now: () => NOW,
+    fetchImpl: async (url, init) => {
+      requestUrl = url;
+      admission = init.headers['Attn-Admission']!;
+      return acceptedFromBody(init.body);
+    },
+    mintPow: async () => 'pow-v3',
+  });
+  try {
+    outbox.enqueue(envelope('env-v3'));
+    await outbox.flushNow();
+    assert(requestUrl.endsWith(`/v3/rooms/${ROOM}/envelopes`), 'v3 envelope path');
+    assert(admission.startsWith('v3.write.'), 'write-scoped admission');
+  } finally {
+    outbox.close();
+  }
+});
+
 test('ambiguous network failure retains exact sealed body and remints PoW', async () => {
   const bodies: string[] = [];
   const pows: string[] = [];

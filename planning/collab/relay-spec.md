@@ -83,6 +83,60 @@ The server:
 
 Note: `admissionKey` is per-room, derived from `roomSecret`, and the server only stores `roomId` (not `admissionKey` itself — it derives at request time from a server-side per-room secret? No: the server **cannot** derive `admissionKey` without `roomSecret`. Therefore the server stores `admissionKey` *publicly visible* by definition, and admission HMAC only proves the caller knows `admissionKey`. Equivalent to URL-as-bearer-token. **Decision required**: either accept this (admission HMAC is bookkeeping, not security beyond URL secrecy) and document the threat model accordingly, or move to per-device tokens issued at room creation. See `crypto-spec.md` §Admission.)
 
+### Additive v3 scoped admission
+
+V3 rooms use `/v3/rooms/:roomId` and store `protocolVersion=3` plus separate
+32-byte `readAdmissionKey` and `writeAdmissionKey` verifier secrets. First
+create supplies `v: 3`, `ownerSigningKey`, both admission keys, and policy.
+Existing v2 routes, bodies, stored rooms, and `v2.MAC` verification are
+unchanged. Accessing a stored room through the other version's route fails
+`409 ATTN_PROTOCOL_VERSION_MISMATCH`.
+
+```http
+Attn-Admission: v3.read.<base64url HMAC>
+Attn-Admission: v3.write.<base64url HMAC>
+```
+
+Both MACs cover the existing canonical request bytes. Endpoint requirements:
+
+| Operation | Required v3 capability |
+|---|---|
+| `GET /devices` | read |
+| Cap-less blob download presign | read |
+| Anonymous viewer WebSocket upgrade (`viewer_id`) | read |
+| Registered-device WebSocket upgrade (`device_id`) | read + write |
+| Room rejoin `POST` | write |
+| `POST /devices`, `/envelopes`, `/acks`, `/blobs` | write |
+| `DELETE /rooms/:roomId` | write |
+
+Blob upload/download capabilities minted for v3 contain `protocolVersion: 3`
+inside the signed cap payload and emit `/v3/...` URLs. The Worker verifies that
+field against the requested route, so rewriting a valid cap between `/v2` and
+`/v3` fails. V2 cap payloads omit the field and retain their existing bytes and
+`/v2/...` URLs.
+
+A syntactically and cryptographically valid read proof used on a write route
+returns `403 ATTN_WRITE_CAPABILITY_REQUIRED`. Missing, malformed, wrong-key,
+or wrong-scope proofs return `401 ATTN_ADMISSION_INVALID`. V3 anonymous viewer
+WebSockets use `Sec-WebSocket-Protocol: attn.v3, read-hmac.<base64url HMAC>`.
+Registered v3 device sockets use the exact ordered form
+`attn.v3, read-hmac.<base64url HMAC>, write-hmac.<base64url HMAC>`; both MACs
+cover the same canonical GET request. This prevents a view bearer from opening
+a socket under a public device id learned from the readable directory.
+
+V3 read-only bearers connect without weakening device registration through:
+
+`wss://relay/v3/rooms/:roomId/socket?viewer_id=<base64url(16 random bytes)>`
+
+Exactly one of `viewer_id` or `device_id` is required. Viewer sockets use an
+`attn.v3, read-hmac.<base64url HMAC>` admission proof, but are not device
+or participant records: they receive `hello`, non-signal replay, and fresh
+non-signal envelopes only. They never receive signaling or presence, never
+appear in `onlineDeviceIds`, and do not consume `maxPeers`. A separate
+`HARD_MAX_VIEWER_SOCKETS` cap bounds anonymous readers per room; overflow
+closes with 4003. `POST /devices` and every other mutation still require the
+write capability.
+
 ### Owner Distinction
 
 `POST /v2/rooms/:roomId` (room creation) includes the owner's public signing key in the body. The DO stores this as `ownerSigningKeyId`. The first-create POST itself also requires an `Attn-Owner-Signature` Ed25519 sig over canonicalRequest, verified against the pubkey in the body (self-rooting) — this is the security-review §H1 mitigation that prevents a leaked-URL race attacker from registering as owner. All subsequent privileged ops (`POST /acks` with delete, `DELETE /v2/rooms/:roomId`) require the same header verified against the stored `ownerSigningKeyId`.
@@ -393,9 +447,17 @@ Reads use a presigned `GET` URL fetched via `GET /v2/rooms/:roomId/blobs/:envelo
 
 URL: `wss://relay/v2/rooms/:roomId/socket?device_id=:deviceId`
 
+V3 registered URL: `wss://relay/v3/rooms/:roomId/socket?device_id=:deviceId`
+
+V3 anonymous read URL: `wss://relay/v3/rooms/:roomId/socket?viewer_id=:viewerId`
+
 Subprotocol: `attn.v2`
 
 Admission HMAC is passed via `Sec-WebSocket-Protocol` as a second protocol value: `attn.v2, hmac.<base64url HMAC>`. (Browsers don't allow custom headers on WS handshake.)
+
+V3 viewer subprotocols are exactly `attn.v3, read-hmac.<base64url HMAC>`.
+V3 registered-device subprotocols are exactly
+`attn.v3, read-hmac.<base64url HMAC>, write-hmac.<base64url HMAC>`.
 
 All frames are JSON text frames. Binary frames are reserved.
 
@@ -465,7 +527,7 @@ type ClientFrame =
 
 1. Client opens WS, sends `subscribe { after: lastSeenServerSeq }`.
 2. Server sends `hello { serverSeq, policy, devices, onlineDeviceIds, missedSignalEnvelopeIds }`. `devices` is the immutable registered directory; `onlineDeviceIds` is the authoritative active-socket snapshot used to build the live WebRTC mesh without resurrecting departed registrations. If `after < meta:oldest_retained_seq`, instead sends `error { code: "ATTN_CURSOR_TOO_OLD", resyncFromSeq: <oldest_retained_seq> }` and closes `4005`. Client responds by discarding its cursor and either requesting a snapshot from a peer or re-subscribing from `resyncFromSeq`.
-3. Server pushes `envelope` and `presence` frames as they happen. Each accepted envelope upload also resets the idle alarm.
+3. Server pushes `envelope` and `presence` frames as they happen. V3 anonymous viewers receive only non-signal `envelope` frames; presence and all signaling are suppressed. Each accepted envelope upload also resets the idle alarm.
 4. Server sends `ping` every 30s; if no `pong` within 60s, close `1001`.
 5. The DO uses WebSocket Hibernation: when no traffic for 60s, the DO hibernates, and frames are resumed transparently on the next event.
 
@@ -669,6 +731,13 @@ Rate limit responses: `429` with `retryAfterMs` header AND in the JSON error bod
 - Upload via generation-bound, one-time PUT capability (15-minute TTL).
 - Read via presigned GET URL (5-minute TTL), fetched per access.
 - Lifecycle rule on the bucket: auto-delete objects older than **7 days** (matches the max wall-clock room TTL with `longSession=true`; ~7× headroom for default 24h rooms). Safety net only — DO alarm-driven deletion is primary. If the DO alarm slips by more than ~6 hours on a room near its TTL ceiling, blobs may disappear before the room itself; mitigation: every WS connect runs `if now > meta:expires_at - 1h: cleanup_check()` to belt-and-braces the alarm.
+- The seven-day lifecycle applies only to the `rooms/` and `rooms_v2/`
+  prefixes. Durable share snapshots use the separately encoded
+  `shares_v1/<enc(shareId)>/artifacts/<enc(serverArtifactId)>` retention class
+  and are deleted by ShareDO on supersession, revocation, or 90-day expiry.
+  Share cleanup is tombstoned before R2 deletion and retried by alarm after a
+  bucket failure; a logically revoked/expired share therefore never becomes
+  readable while cleanup is pending.
 - Byte accounting: the DO tracks total room bytes by counting *envelope* `ciphertextBytes`, which for R2-spilled envelopes is the small BlobRef wrapper. The *actual* R2 bytes are tracked separately in `meta:bytes_used_r2`. Both must stay under `maxRoomBytes` combined.
 
 ## Anti-Abuse
@@ -844,3 +913,203 @@ Minimum acceptance suite before any production deploy:
 ## Decisions Reference
 
 All design decisions for this relay spec are tracked in [`amendments.md`](./amendments.md) §Decisions Locked. The values pinned here (PoW difficulty 16, batch cap 32, WS-only, 24h+idle-1h TTL model, R2 7-day safety net, `deleteEventsAfterOwnerAck` default false) come from there. No outstanding questions block implementation.
+# Durable shares (v3)
+
+`/v3/shares/:shareId` is a small long-lived indirection, separate from room
+TTL and room storage. A share stores the immutable owner signing key and
+read/write admission keys, an optional current room pointer, encrypted snapshot
+references, and unresolved-file placeholders. `POST` creates or owner-touches
+the record; every successful pre-expiry touch renews `expiresAt` to 90 days.
+Once expiry is observed, the share is tombstoned and cannot be resurrected even
+if its scheduled alarm has not run yet. Creation and
+updates require `Attn-Owner-Signature` over the canonical request plus
+`Attn-PoW`. `GET` requires exactly `v3.read.<MAC>`. `DELETE` requires the owner
+signature and PoW and atomically deletes the pointer, placeholders, mailbox,
+and renewal metadata. Public responses never return either stored admission
+key. `epoch` is a non-decreasing safe integer; `currentRoomId: null` clears a
+stale pointer. Manifests are capped at 64 snapshot refs, 64 placeholders, and
+256 KiB encoded metadata.
+
+`POST /v3/shares/:shareId/mailbox` accepts 1–32 opaque encrypted payloads with
+`v3.write.<MAC>` and PoW. The DO assigns strictly increasing `seq` values and
+caps retained data at 500 items / 25 MiB. `GET .../mailbox?after=N` requires
+read admission and returns at most 100 items ordered by `seq`; payloads remain
+opaque to the relay. Each payload carries an `envelopeId`; retries are
+idempotent for 24 hours and return the original per-envelope sequence;
+conflicting ciphertext under the same ID returns
+`409 ATTN_ENVELOPE_ID_CONFLICT`. After durably importing a page,
+the owner issues owner-signed, PoW-protected
+`DELETE .../mailbox?through=<seq>` to reclaim exactly that prefix. Share
+alarms delete all state once the owner-renewed 90-day expiry passes. Room v2/v3
+endpoints and their shorter lifetimes are unchanged.
+
+### Tier-safe share bundle selection
+
+New share records replace the legacy single read/write pair with 1–3 strict
+entries, at most one per tier:
+
+```json
+{
+  "bundleId": "<16-byte base64url id>",
+  "tier": "view|comment|suggest",
+  "readAdmissionKey": "<32 bytes>",
+  "writeAdmissionKey": "<32 bytes; forbidden for view, required otherwise>",
+  "sealedBundle": "<base64url XChaCha nonce+ciphertext+tag, at most 2048 bytes>"
+}
+```
+
+The owner-signed share upsert stores a maximum of three unique tiers, bundle
+IDs, and admission keys. For an existing `bundleId`, tier and admissions are
+immutable while `sealedBundle` rotates each epoch. Public responses never
+return the entry list or any share admission key. Bundle-enabled share GET,
+snapshot GET, and mailbox GET/POST require `Attn-Share-Bundle: <bundleId>` and
+verify admission using exactly that selected entry. JSON responses return only
+the selected `{bundleId,tier,sealedBundle}`. Binary snapshot responses carry
+that same selection in bounded `Attn-Share-Bundle`, `Attn-Share-Tier`, and
+`Attn-Sealed-Bundle` response headers. View has no mailbox-write path;
+comment/suggest use independent write keys. Mailbox items are tagged and
+filtered by their selected bundle so one public link never enumerates sibling
+bundle IDs, tiers, ciphertext, or sealed capability payloads.
+
+Every share also carries a monotonic safe-integer `revision`. New shares must
+start at revision 0. Snapshot upload is the server-authoritative manifest
+mutation and increments revision by exactly one. The public response includes
+`manifestDigest = base64url(SHA-256(UTF8(JSON.stringify(manifest))))`, where
+`manifest` is sorted by `fileId` and every object is emitted in exact field
+order `{fileId,snapshotId,ciphertextBytes,ciphertextSha256,uploadedAt}` (the
+empty manifest digest is `T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU`).
+Generic owner changes to epoch, current-room routing, bundle membership,
+bundle identity/tier, or admissions require `revision == current + 1`.
+After a server snapshot increment, an owner may synchronize only sealed bundle
+bytes while keeping revision equal to the current revision; other no-routing
+updates cannot advance it. Sealed bundle plaintext binds the same bundle ID,
+revision, and manifest digest, allowing clients to reject same-epoch rollback.
+
+Bundle-mode mailbox POST bodies are exactly `{epoch,deviceId,items}`. `epoch`
+is a non-negative safe integer included in the admission-MAC body hash and
+must equal the current share epoch; a mismatch returns
+`409 ATTN_SHARE_EPOCH_STALE` with `currentEpoch` before PoW consumption or any
+mailbox write. Accepted items persist the selected bundle/tier and epoch.
+
+Legacy records without `bundles` retain the old single-pair authentication;
+once an owner migrates a record to bundles, the legacy keys are removed and
+cannot be mixed back in. While durable mail remains, an owner upsert returns
+`409 ATTN_SHARE_MAIL_PENDING` for any change to the full routing/capability
+projection: epoch, current room pointer, bundle membership, IDs, tiers,
+admissions, or sealed bundle bytes. This enforces drain-before-pointer-flip and
+prevents queued ciphertext from losing its selector or epoch context.
+For the same reason, an owner-authenticated bundle-mode snapshot PUT returns
+`409 ATTN_SHARE_MAIL_PENDING` before PoW, R2 upload, renewal, revision, or
+manifest mutation whenever retained mail exists; the owner drains first.
+
+### Poll-free share watch
+
+`GET /v3/shares/:shareId/watch` is a hibernatable WebSocket notification
+channel for bundle-enabled shares. Because the browser WebSocket constructor
+cannot set custom request headers, selection and read admission use one exact,
+ordered subprotocol list:
+
+```
+attn.v3, bundle.<16-byte-base64url-bundle-id>, read-hmac.<32-byte-base64url-mac>
+```
+
+The MAC uses the selected bundle's read admission key and the canonical empty-
+body `GET` request for the watch URL. Missing, duplicated, reordered, or extra
+tokens are rejected; the upgrade response selects only `attn.v3`. Unknown
+selectors return `401`; a parseable but incorrect MAC upgrades and immediately
+closes with `4000`, matching v3 room admission. Legacy single-key shares do not
+support watch. The edge snapshots Origin into the private Worker-to-DO context;
+native clients and allowlisted browser origins are accepted, while malformed
+or non-allowlisted browser origins fail closed.
+
+Accepted server sockets hibernate with a tag derived only from the selected
+bundle ID. Concurrent watches are bounded by `HARD_MAX_VIEWER_SOCKETS` both in
+total and proportionally across configured bundles; excess upgrades close
+with `4003`. The server sends JSON ping frames and requires pong activity,
+closing idle sockets after 90 seconds. A successful owner upsert or snapshot
+manifest commit broadcasts exactly
+`{"type":"share_changed","epoch":N,"revision":N}` to every selected tier.
+The frame contains no bundle ID, tier, sealed bundle, mailbox item, snapshot,
+room pointer, or ciphertext. Revocation sends that final frame before closing
+all watch sockets with `4001`; expiry follows the same terminal behavior.
+The cleanup tombstone, including the last epoch/revision and its recovery
+alarm, commits before terminal notification. Normal cleanup and alarm recovery
+therefore use the same terminal broadcast/close path: an isolate failure can
+delay notification but cannot leave the deleted share reconnectable. Terminal
+close is attempted even when sending the final frame fails. Incoming text
+frames are bounded to 1 KiB before JSON parsing.
+
+### Payloadless browser Web Push
+
+V3 rooms and tiered durable shares expose strict subscription resources at
+`/v3/rooms/:roomId/push-subscriptions/:deviceId` and
+`/v3/shares/:shareId/push-subscriptions/:deviceId`. `POST` accepts exactly
+`{v:3,endpoint,expirationTime,keys:{p256dh,auth}}`; `GET` returns the selected
+device binding; `DELETE` is idempotent. The path device must exactly match
+`Attn-Device-Id`. GET uses v3 read admission. POST and DELETE use v3 write
+admission and PoW bound to the same device, method, and canonical path. Share
+requests additionally require `Attn-Share-Bundle` and store only that selected
+bundle ID; view bundles cannot create subscriptions. Room subscriptions require
+an existing registered device. Endpoints are HTTPS-only, bounded, restricted
+to recognized browser push services, unique within a resource, and the store is
+capped at 32 active entries. A share device key already stored for one bundle
+cannot be overwritten or deleted through a sibling bundle. An expired stored
+entry counts as a new activation for cap enforcement, so it cannot be revived
+while all 32 active slots are occupied.
+
+Subscriptions expire no later than their room policy/share. Room subscription
+expiry is the minimum of `policy.expiresAt` and the browser expiry, never the
+room's broader hard-max alarm. A pre-expiry share renewal
+re-pins subscriptions to the renewed share expiry (still capped by a browser-
+supplied `expirationTime`); an expired share remains non-renewable. Revocation,
+expiry, and room deletion remove the subscription store with the resource.
+
+After an accepted *fresh* event envelope, RoomDO sends a push only to subscribed
+deliverable devices other than the authoring device and only when that target
+has no live room WebSocket. Signal envelopes target only their named device.
+After accepted fresh share mailbox items, ShareDO considers only subscriptions
+in the selected bundle, excludes the posting device, and suppresses delivery
+while that bundle has a live share watch. The share watch deliberately carries
+no device identity, so suppression is conservatively bundle-wide rather than
+allowing an unauthenticated claimed device ID to silence another recipient.
+Retries that add no new envelope never push. Both paths durably debounce each
+device for 30 seconds and delete the binding after a push endpoint returns 404
+or 410.
+
+Push delivery is an empty HTTP POST authenticated with a 12-hour ES256 VAPID
+JWT and a bounded 300-second push-service TTL, allowing a temporarily offline
+user agent to wake without retaining stale pings for long. It has no body and includes no room/share ID, author, event kind, text,
+room secret, bundle, or ciphertext. The private P-256 JWK is an environment
+secret, is never persisted in a DO, and must match the separately configured
+public VAPID key. Startup/runtime validation requires a canonical 32-byte
+private scalar and proves it signs for that public key; missing, malformed, or
+inconsistent config disables push without a fallback.
+
+Snapshot refs are a strict latest-per-file server-managed manifest. The owner
+uploads opaque ciphertext with an owner-signed, PoW-protected
+`PUT /v3/shares/:shareId/snapshots/:fileId/:snapshotId`. Both identifiers are
+therefore covered by the owner signature; the relay hashes the body itself and
+mints the immutable R2 artifact component. Callers never select or receive an
+object key. The relay bounds the request stream before signature hashing and
+persists a cleanup intent before writing R2. A successful upload atomically
+switches the manifest, clears the new-object intent, and records the
+superseded-object cleanup intent; an isolate crash at any boundary therefore
+leaves alarm-recoverable work rather than an orphan. While any cleanup remains
+pending, further uploads fail closed. A successful upload renews the share and atomically replaces that file's public
+`{fileId,snapshotId,ciphertextBytes,ciphertextSha256,uploadedAt}` ref before
+the superseded object is deleted (with durable retry on failure). Reads use
+`GET` on the same route with `v3.read` admission. Limits are 64 files, 5 MiB
+per ciphertext, and 25 MiB across current refs. The generic share `POST` may
+only create an empty manifest or echo the current public manifest, preventing
+arbitrary R2 pinning.
+
+The owner removes a latest-per-file ref with an owner-signed, PoW-protected
+`DELETE /v3/shares/:shareId/snapshots/:fileId`. Bundle shares apply the same
+pending-mail fence as snapshot upload before consuming PoW. For a present ref,
+one atomic transaction removes it from the manifest, increments revision
+exactly once, renews the share, stores an artifact cleanup intent, and arms the
+cleanup alarm before R2 deletion is attempted. Watchers receive the resulting
+content-blind revision notification. Alarm retry makes the ciphertext deletion
+crash-safe. Deleting an absent file is an authenticated, PoW-consuming `204`
+no-op: revision and digest remain unchanged. Both successful forms return
+`Attn-Share-Revision` and `Attn-Manifest-Digest` response headers.

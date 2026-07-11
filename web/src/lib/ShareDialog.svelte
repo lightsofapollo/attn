@@ -51,6 +51,10 @@
     existingInviteUrl?: string;
     /** Hosted HTTPS invite; preferred for the human-facing copy-link action. */
     existingBrowserInviteUrl?: string;
+    existingViewInviteUrl?: string;
+    existingSuggestInviteUrl?: string;
+    existingBrowserViewInviteUrl?: string;
+    existingBrowserSuggestInviteUrl?: string;
     /** Non-null when a share already exists for this file. Suppresses re-mint. */
     existingRoomId?: RoomId | null;
     /** Latest daemon-side share failure while this dialog is open. */
@@ -74,6 +78,10 @@
     ownerSigningKey = '',
     existingInviteUrl = '',
     existingBrowserInviteUrl = '',
+    existingViewInviteUrl = '',
+    existingSuggestInviteUrl = '',
+    existingBrowserViewInviteUrl = '',
+    existingBrowserSuggestInviteUrl = '',
     existingRoomId = null,
     shareErrorMessage = '',
     writeToClipboard,
@@ -93,7 +101,7 @@
   // for optimal experience."
   const selectedMode: ShareMode = 'hybrid';
   let singleDeviceOnly = $state(false);
-  let copiedUrl = $state(false);
+  let copiedTier = $state<'view' | 'comment' | 'suggest' | null>(null);
   let copiedCli = $state(false);
   let copiedFingerprint = $state(false);
   let advancedOpen = $state(false);
@@ -104,6 +112,26 @@
   const MINT_TIMEOUT_MS = 15000;
 
   const inviteUrl = $derived(existingBrowserInviteUrl || existingInviteUrl);
+  const tierLinks = $derived([
+    {
+      tier: 'view' as const,
+      label: 'Anyone with this link can view',
+      detail: 'Read the document and review activity. No device registration or writes.',
+      url: existingBrowserViewInviteUrl || existingViewInviteUrl,
+    },
+    {
+      tier: 'comment' as const,
+      label: 'Anyone with this link can comment',
+      detail: 'Add and resolve comments. Suggestions are blocked by every importing peer.',
+      url: inviteUrl,
+    },
+    {
+      tier: 'suggest' as const,
+      label: 'Anyone with this link can suggest',
+      detail: 'Comment and propose edits for the owner to accept or reject.',
+      url: existingBrowserSuggestInviteUrl || existingSuggestInviteUrl,
+    },
+  ]);
   /**
    * Zero-install one-liner for reviewers without `attn` on their PATH.
    * `npx attnmd` is the published npm package's bin entrypoint — the
@@ -132,7 +160,7 @@
       mintingTarget = null;
       return;
     }
-    copiedUrl = false;
+    copiedTier = null;
     copiedCli = false;
     copiedFingerprint = false;
     if (existingRoomId !== null && existingInviteUrl.length > 0) {
@@ -159,15 +187,15 @@
       // Keep the backwards-compatible join command as the automatic clipboard
       // value until the production hosted origin is deployed. The staging-
       // configured HTTPS link remains available in the browser card below.
-      const automaticShare = cliCommand || inviteUrl;
+      const automaticShare = inviteUrl || cliCommand;
       void copyToClipboard(automaticShare).then((ok) => {
         if (ok) {
           if (cliCommand) {
             copiedCli = true;
             setTimeout(() => (copiedCli = false), 1600);
           } else {
-            copiedUrl = true;
-            setTimeout(() => (copiedUrl = false), 1600);
+            copiedTier = 'comment';
+            setTimeout(() => (copiedTier = null), 1600);
           }
         }
       });
@@ -255,11 +283,11 @@
     }
   }
 
-  async function handleCopyUrl(): Promise<void> {
-    const ok = await copyToClipboard(inviteUrl);
+  async function handleCopyTier(tier: 'view' | 'comment' | 'suggest', url: string): Promise<void> {
+    const ok = await copyToClipboard(url);
     if (ok) {
-      copiedUrl = true;
-      setTimeout(() => (copiedUrl = false), 1500);
+      copiedTier = tier;
+      setTimeout(() => (copiedTier = null), 1500);
     }
   }
 
@@ -385,21 +413,35 @@
       <!-- Rendered from the moment the dialog opens (attn-0sv): a
            placeholder row holds the card's final size while minting so
            the dialog never grows a whole card when ShareReady lands. -->
-      <div class="flex w-full min-w-0 flex-col gap-2 overflow-hidden rounded-lg border border-border/60 bg-muted/30 p-4" data-slot="share-url-card">
+      <div class="flex w-full min-w-0 flex-col gap-3 overflow-hidden rounded-lg border border-border/60 bg-muted/30 p-4" data-slot="share-url-card">
         <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
           <Link class="size-3.5" aria-hidden="true" />
-          Open in browser
+          Choose what the link allows
         </div>
         {#if isReady && inviteUrl.length > 0}
-          <button
-            type="button"
-            class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 text-left font-mono text-xs text-foreground hover:border-primary/60"
-            data-slot="share-invite-url-button"
-            onclick={handleCopyUrl}
-            title="Click to copy"
-          >
-            <span class="block truncate">{inviteUrl}</span>
-          </button>
+          <div class="grid gap-2" data-slot="share-tier-links">
+            {#each tierLinks as link (link.tier)}
+              <button
+                type="button"
+                class="group grid min-w-0 grid-cols-[1fr_auto] items-center gap-3 rounded-md border border-border bg-background px-3 py-2.5 text-left transition-colors hover:border-primary/60 hover:bg-primary/[0.03]"
+                data-slot={`share-tier-${link.tier}`}
+                onclick={() => handleCopyTier(link.tier, link.url)}
+                disabled={link.url.length === 0}
+              >
+                <span class="min-w-0">
+                  <span class="block text-sm font-medium text-foreground">{link.label}</span>
+                  <span class="block truncate text-[11px] leading-4 text-muted-foreground">{link.detail}</span>
+                </span>
+                <span class="flex size-7 items-center justify-center rounded border border-border text-muted-foreground group-hover:text-foreground">
+                  {#if copiedTier === link.tier}
+                    <Check class="size-3.5" aria-hidden="true" />
+                  {:else}
+                    <Copy class="size-3.5" aria-hidden="true" />
+                  {/if}
+                </span>
+              </button>
+            {/each}
+          </div>
           <!-- Hidden field with the same data-slot test selectors rely on.
                Stays gated on `isReady`: E2E scripts treat this element's
                APPEARANCE as the share-ready signal. -->
@@ -413,29 +455,17 @@
             data-slot="share-invite-url"
           />
         {:else}
-          <div class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-muted-foreground">
-            <span class="block truncate">https://attn.sh/review/… (generated when the room is ready)</span>
+          <div class="grid gap-2" aria-label="Generating permission links">
+            {#each ['View', 'Comment', 'Suggest'] as label}
+              <div class="flex h-[3.75rem] items-center rounded-md border border-border bg-background px-3 text-sm text-muted-foreground">
+                <span class="mr-2 inline-block size-2 animate-pulse rounded-full bg-primary/50" aria-hidden="true"></span>
+                {label} link
+              </div>
+            {/each}
           </div>
         {/if}
-        <Button
-          type="button"
-          variant="outline"
-          size="default"
-          onclick={handleCopyUrl}
-          data-slot="share-copy-url"
-          class="w-full"
-          disabled={!isReady}
-        >
-          {#if copiedUrl}
-            <Check class="size-4" aria-hidden="true" />
-            <span>Copied link</span>
-          {:else}
-            <Copy class="size-4" aria-hidden="true" />
-            <span>Copy direct link</span>
-          {/if}
-        </Button>
         <p class="text-xs text-muted-foreground">
-          Opens the read-only hosted reviewer. The relay and static host only receive encrypted envelopes.
+          Comment is the default for people; agent workflows use Suggest. The relay only sees encrypted envelopes and scoped admission proofs.
         </p>
       </div>
     {/if}

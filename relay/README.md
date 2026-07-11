@@ -34,6 +34,12 @@ it from your login or `CLOUDFLARE_ACCOUNT_ID`.
        npx wrangler r2 bucket create attn-relay-blobs
        npx wrangler r2 bucket create attn-relay-blobs-staging
 
+3. Configure R2 lifecycle rules so the seven-day expiry targets only room
+   ciphertext (`rooms/` and `rooms_v2/`). Do not apply that rule to
+   `shares_v1/`: ShareDO retains the latest encrypted snapshot per file until
+   supersession, owner revocation, or the owner-renewed 90-day share expiry.
+   Its alarm-driven tombstone cleanup is the authoritative deletion path.
+
 ### Deploy
 
        npm run deploy                       # production (top-level config)
@@ -43,8 +49,8 @@ Validate the bundle offline first (no auth needed):
 
        npx wrangler deploy --dry-run --outdir /tmp/attn-relay-dryrun
 
-The migrations create two SQLite-backed Durable Object classes: `v1` creates
-`RoomDO`; `v2` creates the singleton `QuotaDO`. Later deploys are migration
+The migrations create three SQLite-backed Durable Object classes: `v1` creates
+`RoomDO`; `v2` creates the singleton `QuotaDO`; `v3` creates `ShareDO`. Later deploys are migration
 no-ops unless another `[[migrations]]` tag is added.
 
 ### URL + client wiring

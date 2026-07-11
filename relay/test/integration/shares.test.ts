@@ -1,8 +1,14 @@
-import { SELF } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
+import type { Env } from "../../src/env";
+import { deleteRoomBlobs, shareArtifactObjectKey, shareArtifactPrefix } from "../../src/r2";
 import { generateEd25519Keypair, ownerSignatureHeader } from "../helpers/owner-sig";
 import { createPowHeader, FIXED_POW_RAND, mintPowForTests } from "../helpers/pow";
+
+declare module "cloudflare:test" {
+  interface ProvidedEnv extends Env {}
+}
 
 async function admission(scope: "read" | "write", key: Uint8Array, method: string, url: string, body?: string): Promise<string> {
   const canonical = await canonicalRequest(new Request(url, { method, body }), new URL(url).pathname);
@@ -11,7 +17,242 @@ async function admission(scope: "read" | "write", key: Uint8Array, method: strin
   return `v3.${scope}.${base64UrlEncode(mac)}`;
 }
 
+async function binaryOwnerSignature(method: string, url: string, body: Uint8Array, privateKey: CryptoKey): Promise<string> {
+  const request = new Request(url, { method, body, headers: { "Content-Type": "application/octet-stream" } });
+  const canonical = await canonicalRequest(request, new URL(url).pathname);
+  return base64UrlEncode(new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, canonical)));
+}
+
+async function createShare(label: string): Promise<{
+  shareId: string;
+  url: string;
+  owner: Awaited<ReturnType<typeof generateEd25519Keypair>>;
+  read: Uint8Array;
+}> {
+  const shareId = `${label}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+  const url = `https://relay.example/v3/shares/${shareId}`;
+  const owner = await generateEd25519Keypair();
+  const read = crypto.getRandomValues(new Uint8Array(32));
+  const write = crypto.getRandomValues(new Uint8Array(32));
+  const body = JSON.stringify({
+    v: 3,
+    ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+    readAdmissionKey: base64UrlEncode(read),
+    writeAdmissionKey: base64UrlEncode(write),
+    snapshots: [],
+    placeholders: [],
+  });
+  const created = await SELF.fetch(url, { method: "POST", body, headers: {
+    "Content-Type": "application/json",
+    "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url, body, privateKey: owner.privateKey }),
+    "Attn-PoW": await createPowHeader(shareId, owner.publicKeyBytes, `/v3/shares/${shareId}`),
+  } });
+  expect(created.status).toBe(201);
+  return { shareId, url, owner, read };
+}
+
+async function uploadSnapshot(
+  fixture: Awaited<ReturnType<typeof createShare>>,
+  fileId: string,
+  snapshotId: string,
+  ciphertext: Uint8Array,
+  rand: string,
+): Promise<Response> {
+  const url = `${fixture.url}/snapshots/${fileId}/${snapshotId}`;
+  return SELF.fetch(url, { method: "PUT", body: ciphertext, headers: {
+    "Content-Type": "application/octet-stream",
+    "Attn-Device-Id": fixture.shareId,
+    "Attn-Owner-Signature": await binaryOwnerSignature("PUT", url, ciphertext, fixture.owner.privateKey),
+    "Attn-PoW": await mintPowForTests({
+      roomId: fixture.shareId,
+      deviceId: fixture.shareId,
+      method: "PUT",
+      path: `/v3/shares/${fixture.shareId}/snapshots/${fileId}/${snapshotId}`,
+      difficulty: 12,
+      expiresAt: Date.now() + 300_000,
+      rand,
+    }),
+  } });
+}
+
 describe("durable v3 shares", () => {
+  it("pins only the latest owner-uploaded snapshot per file and removes all ciphertext on revoke", async () => {
+    const fixture = await createShare("share-artifacts");
+    const forgedManifestBody = JSON.stringify({
+      v: 3,
+      ownerSigningKey: base64UrlEncode(fixture.owner.publicKeyBytes),
+      snapshots: [{
+        fileId: "readme",
+        snapshotId: "caller-selected",
+        ciphertextBytes: 1,
+        ciphertextSha256: base64UrlEncode(new Uint8Array(32)),
+        uploadedAt: Date.now(),
+        blobKey: "shares_v1/another-share/artifacts/stolen",
+      }],
+    });
+    const forgedManifest = await SELF.fetch(fixture.url, { method: "POST", body: forgedManifestBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url: fixture.url, body: forgedManifestBody, privateKey: fixture.owner.privateKey }),
+      "Attn-PoW": await createPowHeader(fixture.shareId, fixture.owner.publicKeyBytes, `/v3/shares/${fixture.shareId}`),
+    } });
+    expect(forgedManifest.status).toBe(409);
+    expect((await forgedManifest.json() as { error: { code: string } }).error.code).toBe("ATTN_SHARE_MANIFEST_MANAGED");
+
+    const first = new TextEncoder().encode("opaque snapshot ciphertext v1");
+    const firstUpload = await uploadSnapshot(fixture, "readme", "snapshot-one", first, `${FIXED_POW_RAND}p1`);
+    expect(firstUpload.status).toBe(201);
+    const firstRef = await firstUpload.json() as Record<string, unknown>;
+    expect(firstRef).toMatchObject({ fileId: "readme", snapshotId: "snapshot-one", ciphertextBytes: first.byteLength });
+    expect(firstRef).not.toHaveProperty("artifactId");
+    expect(firstRef).not.toHaveProperty("blobKey");
+
+    const prefix = shareArtifactPrefix(fixture.shareId);
+    expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
+    // The existing room cleanup implementation can sweep every room layout
+    // without ever reaching the separately encoded durable-share domain.
+    await deleteRoomBlobs(env, fixture.shareId);
+    expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
+
+    const snapshotUrl = `${fixture.url}/snapshots/readme`;
+    expect((await SELF.fetch(snapshotUrl)).status).toBe(401);
+    const downloaded = await SELF.fetch(snapshotUrl, {
+      headers: { "Attn-Admission": await admission("read", fixture.read, "GET", snapshotUrl) },
+    });
+    expect(downloaded.status).toBe(200);
+    expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(first);
+
+    const second = new TextEncoder().encode("v2");
+    const replaced = await uploadSnapshot(fixture, "readme", "snapshot-two", second, `${FIXED_POW_RAND}p2`);
+    expect(replaced.status).toBe(200);
+    expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
+    const shareRead = await SELF.fetch(fixture.url, {
+      headers: { "Attn-Admission": await admission("read", fixture.read, "GET", fixture.url) },
+    });
+    const manifest = (await shareRead.json() as { snapshots: Array<Record<string, unknown>> }).snapshots;
+    expect(manifest).toHaveLength(1);
+    expect(manifest[0]).toMatchObject({ fileId: "readme", snapshotId: "snapshot-two", ciphertextBytes: 2 });
+    expect(manifest[0]).not.toHaveProperty("artifactId");
+
+    const deletePow = await mintPowForTests({
+      roomId: fixture.shareId,
+      deviceId: fixture.shareId,
+      method: "DELETE",
+      path: `/v3/shares/${fixture.shareId}`,
+      difficulty: 12,
+      expiresAt: Date.now() + 300_000,
+      rand: `${FIXED_POW_RAND}p3`,
+    });
+    const revoked = await SELF.fetch(fixture.url, { method: "DELETE", headers: {
+      "Attn-Device-Id": fixture.shareId,
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "DELETE", url: fixture.url, privateKey: fixture.owner.privateKey }),
+      "Attn-PoW": deletePow,
+    } });
+    expect(revoked.status).toBe(204);
+    expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(0);
+    expect((await SELF.fetch(snapshotUrl, {
+      headers: { "Attn-Admission": await admission("read", fixture.read, "GET", snapshotUrl) },
+    })).status).toBe(404);
+  });
+
+  it("cannot renew an expired share before its alarm and deletes the snapshot prefix", async () => {
+    const fixture = await createShare("share-artifact-expiry");
+    expect((await uploadSnapshot(
+      fixture,
+      "notes",
+      "snapshot-expired",
+      new Uint8Array([1, 2, 3, 4]),
+      `${FIXED_POW_RAND}e1`,
+    )).status).toBe(201);
+    const stub = env.RELAY_SHARES.get(env.RELAY_SHARES.idFromName(fixture.shareId));
+    await runInDurableObject(stub, async (_instance, state) => {
+      const record = await state.storage.get<Record<string, unknown>>("share:record");
+      expect(record).toBeDefined();
+      await state.storage.put("share:record", { ...record, expiresAt: Date.now() - 1 });
+    });
+    const touchBody = JSON.stringify({ v: 3, ownerSigningKey: base64UrlEncode(fixture.owner.publicKeyBytes) });
+    const renewal = await SELF.fetch(fixture.url, { method: "POST", body: touchBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({
+        method: "POST", url: fixture.url, body: touchBody, privateKey: fixture.owner.privateKey,
+      }),
+      "Attn-PoW": await createPowHeader(
+        fixture.shareId,
+        fixture.owner.publicKeyBytes,
+        `/v3/shares/${fixture.shareId}`,
+      ),
+    } });
+    expect(renewal.status).toBe(404);
+    expect((await env.RELAY_BLOBS.list({ prefix: shareArtifactPrefix(fixture.shareId) })).objects).toHaveLength(0);
+    expect((await SELF.fetch(fixture.url, {
+      headers: { "Attn-Admission": await admission("read", fixture.read, "GET", fixture.url) },
+    })).status).toBe(404);
+  });
+
+  it("resumes share-prefix cleanup from a durable tombstone after an interrupted revoke or expiry", async () => {
+    const fixture = await createShare("share-artifact-retry");
+    expect((await uploadSnapshot(
+      fixture,
+      "retry-file",
+      "snapshot-retry",
+      new Uint8Array([8, 6, 7, 5, 3, 0, 9]),
+      `${FIXED_POW_RAND}r1`,
+    )).status).toBe(201);
+    const prefix = shareArtifactPrefix(fixture.shareId);
+    const stub = env.RELAY_SHARES.get(env.RELAY_SHARES.idFromName(fixture.shareId));
+    // This is the durable state left if an invocation dies after making the
+    // share logically dead but before its R2 delete completes.
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.storage.deleteAll();
+      await state.storage.put("share:cleanup", {
+        shareId: fixture.shareId,
+        reason: "expired",
+        startedAt: Date.now() - 1_000,
+      });
+    });
+    expect((await SELF.fetch(fixture.url, {
+      headers: { "Attn-Admission": await admission("read", fixture.read, "GET", fixture.url) },
+    })).status).toBe(404);
+    expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
+    await runInDurableObject(stub, async (instance) => instance.alarm());
+    expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(0);
+  });
+
+  it("recovers an intent-first artifact left by a crash before manifest commit", async () => {
+    const fixture = await createShare("share-artifact-intent");
+    const artifactId = crypto.randomUUID();
+    const objectKey = shareArtifactObjectKey(fixture.shareId, artifactId);
+    await env.RELAY_BLOBS.put(objectKey, new Uint8Array([9, 9, 9]));
+    const stub = env.RELAY_SHARES.get(env.RELAY_SHARES.idFromName(fixture.shareId));
+    await runInDurableObject(stub, async (instance, state) => {
+      await state.storage.put(`artifact:delete:${artifactId}`, fixture.shareId);
+      await instance.alarm();
+    });
+    expect(await env.RELAY_BLOBS.head(objectKey)).toBeNull();
+  });
+
+  it("rejects a lengthless oversized stream before owner authentication buffers it", async () => {
+    const fixture = await createShare("share-artifact-stream-bound");
+    const url = `${fixture.url}/snapshots/readme/oversized`;
+    const stub = env.RELAY_SHARES.get(env.RELAY_SHARES.idFromName(fixture.shareId));
+    const status = await runInDurableObject(stub, async instance => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(5 * 1024 * 1024));
+          controller.enqueue(new Uint8Array([1]));
+          controller.close();
+        },
+      });
+      const response = await instance.fetch(new Request(url, {
+        method: "PUT",
+        body,
+        headers: { "Content-Type": "application/octet-stream" },
+      }));
+      return response.status;
+    });
+    expect(status).toBe(413);
+    expect((await env.RELAY_BLOBS.list({ prefix: shareArtifactPrefix(fixture.shareId) })).objects).toHaveLength(0);
+  });
+
   it("creates, reads, renews, queues ordered mailbox items, and revokes", async () => {
     const shareId = `share-${Date.now().toString(36)}`;
     const url = `https://relay.example/v3/shares/${shareId}`;

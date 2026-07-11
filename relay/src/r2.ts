@@ -56,6 +56,46 @@ export function blobObjectKey(
   return `rooms_v2/${encodeOpaqueSegment(roomId)}/generations/${encodeOpaqueSegment(leaseId)}/blobs/${encodeOpaqueSegment(envelopeId)}`;
 }
 
+/**
+ * Durable-share ciphertext lives outside every room/generation prefix. The
+ * bucket lifecycle policy can therefore retain `shares_v1/` while continuing
+ * to sweep `rooms/` and `rooms_v2/` after seven days. Both path components are
+ * encoded, and `artifactId` is minted by ShareDO rather than supplied by the
+ * caller, so a share upload cannot select or overwrite another R2 key.
+ */
+export function shareArtifactPrefix(shareId: string): string {
+  return `shares_v1/${encodeOpaqueSegment(shareId)}/artifacts/`;
+}
+
+export function shareArtifactObjectKey(shareId: string, artifactId: string): string {
+  return `${shareArtifactPrefix(shareId)}${encodeOpaqueSegment(artifactId)}`;
+}
+
+/** Delete all durable ciphertext for one share, with bounded pagination. */
+export async function deleteShareArtifacts(env: Env, shareId: string): Promise<number> {
+  let total = 0;
+  let cursor: string | undefined;
+  const prefix = shareArtifactPrefix(shareId);
+  // A share has at most 64 live artifacts plus bounded superseded cleanup
+  // work. Fifty R2 pages is intentionally far above that cap while preventing
+  // a corrupted namespace from monopolizing one DO invocation.
+  for (let page = 0; page < 50; page += 1) {
+    const listed: R2Objects = await env.RELAY_BLOBS.list({
+      prefix,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    const keys = listed.objects.map(object => object.key);
+    if (keys.length > 0) {
+      await env.RELAY_BLOBS.delete(keys);
+      total += keys.length;
+    }
+    if (!listed.truncated) return total;
+    cursor = listed.cursor;
+    if (cursor === undefined) return total;
+  }
+  throw new Error("share artifact cleanup exceeded pagination bound");
+}
+
 export interface PresignedUploadResult {
   uploadUrl: string;
   method: "PUT";

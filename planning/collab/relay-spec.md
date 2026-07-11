@@ -731,6 +731,13 @@ Rate limit responses: `429` with `retryAfterMs` header AND in the JSON error bod
 - Upload via generation-bound, one-time PUT capability (15-minute TTL).
 - Read via presigned GET URL (5-minute TTL), fetched per access.
 - Lifecycle rule on the bucket: auto-delete objects older than **7 days** (matches the max wall-clock room TTL with `longSession=true`; ~7× headroom for default 24h rooms). Safety net only — DO alarm-driven deletion is primary. If the DO alarm slips by more than ~6 hours on a room near its TTL ceiling, blobs may disappear before the room itself; mitigation: every WS connect runs `if now > meta:expires_at - 1h: cleanup_check()` to belt-and-braces the alarm.
+- The seven-day lifecycle applies only to the `rooms/` and `rooms_v2/`
+  prefixes. Durable share snapshots use the separately encoded
+  `shares_v1/<enc(shareId)>/artifacts/<enc(serverArtifactId)>` retention class
+  and are deleted by ShareDO on supersession, revocation, or 90-day expiry.
+  Share cleanup is tombstoned before R2 deletion and retried by alarm after a
+  bucket failure; a logically revoked/expired share therefore never becomes
+  readable while cleanup is pending.
 - Byte accounting: the DO tracks total room bytes by counting *envelope* `ciphertextBytes`, which for R2-spilled envelopes is the small BlobRef wrapper. The *actual* R2 bytes are tracked separately in `meta:bytes_used_r2`. Both must stay under `maxRoomBytes` combined.
 
 ## Anti-Abuse
@@ -912,7 +919,9 @@ All design decisions for this relay spec are tracked in [`amendments.md`](./amen
 TTL and room storage. A share stores the immutable owner signing key and
 read/write admission keys, an optional current room pointer, encrypted snapshot
 references, and unresolved-file placeholders. `POST` creates or owner-touches
-the record; every successful touch renews `expiresAt` to 90 days. Creation and
+the record; every successful pre-expiry touch renews `expiresAt` to 90 days.
+Once expiry is observed, the share is tombstoned and cannot be resurrected even
+if its scheduled alarm has not run yet. Creation and
 updates require `Attn-Owner-Signature` over the canonical request plus
 `Attn-PoW`. `GET` requires exactly `v3.read.<MAC>`. `DELETE` requires the owner
 signature and PoW and atomically deletes the pointer, placeholders, mailbox,
@@ -933,3 +942,21 @@ the owner issues owner-signed, PoW-protected
 `DELETE .../mailbox?through=<seq>` to reclaim exactly that prefix. Share
 alarms delete all state once the owner-renewed 90-day expiry passes. Room v2/v3
 endpoints and their shorter lifetimes are unchanged.
+
+Snapshot refs are a strict latest-per-file server-managed manifest. The owner
+uploads opaque ciphertext with an owner-signed, PoW-protected
+`PUT /v3/shares/:shareId/snapshots/:fileId/:snapshotId`. Both identifiers are
+therefore covered by the owner signature; the relay hashes the body itself and
+mints the immutable R2 artifact component. Callers never select or receive an
+object key. The relay bounds the request stream before signature hashing and
+persists a cleanup intent before writing R2. A successful upload atomically
+switches the manifest, clears the new-object intent, and records the
+superseded-object cleanup intent; an isolate crash at any boundary therefore
+leaves alarm-recoverable work rather than an orphan. While any cleanup remains
+pending, further uploads fail closed. A successful upload renews the share and atomically replaces that file's public
+`{fileId,snapshotId,ciphertextBytes,ciphertextSha256,uploadedAt}` ref before
+the superseded object is deleted (with durable retry on failure). Reads use
+`GET` on the same route with `v3.read` admission. Limits are 64 files, 5 MiB
+per ciphertext, and 25 MiB across current refs. The generic share `POST` may
+only create an empty manifest or echo the current public manifest, preventing
+arbitrary R2 pinning.

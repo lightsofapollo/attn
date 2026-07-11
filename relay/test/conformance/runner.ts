@@ -30,7 +30,7 @@ import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
 import { encodeOpaqueSegment } from "../../src/opaque-key";
-import { presignBlobDownload } from "../../src/r2";
+import { deleteRoomBlobs, presignBlobDownload, shareArtifactPrefix } from "../../src/r2";
 import type {
   DeviceRecord,
   EnvelopeInput,
@@ -69,6 +69,7 @@ export interface Scenario {
 export type Step =
   | V3AdmissionMatrixStep
   | DurableShareMatrixStep
+  | ShareArtifactMatrixStep
   | CreateRoomStep
   | RecreateRoomStep
   | RegisterDeviceStep
@@ -104,6 +105,10 @@ interface V3AdmissionMatrixStep extends BaseStep {
 
 interface DurableShareMatrixStep extends BaseStep {
   action: "durableShareMatrix";
+}
+
+interface ShareArtifactMatrixStep extends BaseStep {
+  action: "shareArtifactMatrix";
 }
 
 interface CreateRoomStep extends BaseStep {
@@ -951,6 +956,67 @@ async function actDurableShareMatrix(scenarioId: string, stepIdx: number): Promi
     { status: 404, errorCode: "ATTN_SHARE_NOT_FOUND" },
     `${scenarioId} step #${stepIdx} share revoked read`,
   );
+}
+
+async function actShareArtifactMatrix(scenarioId: string, stepIdx: number): Promise<void> {
+  const shareId = uniqueRoomId(scenarioId, "artifact-share");
+  const shareUrl = `${URL_BASE}/v3/shares/${shareId}`;
+  const owner = await generateEd25519Keypair();
+  const readKey = makeAdmissionKey(0x53);
+  const writeKey = makeAdmissionKey(0x94);
+  const createBody = JSON.stringify({
+    v: 3,
+    ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+    readAdmissionKey: base64UrlEncode(readKey),
+    writeAdmissionKey: base64UrlEncode(writeKey),
+    snapshots: [],
+    placeholders: [],
+  });
+  await assertResponse(await SELF.fetch(shareUrl, { method: "POST", body: createBody, headers: {
+    "Content-Type": "application/json",
+    "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "POST", url: shareUrl, body: createBody, privateKey: owner.privateKey }),
+    "Attn-PoW": await createPowHeader(shareId, owner.publicKeyBytes, `/v3/shares/${shareId}`),
+  } }), { status: 201 }, `${scenarioId} step #${stepIdx} artifact share create`);
+
+  const scopedRead = async (target: string): Promise<string> => {
+    const canonical = await canonicalRequest(new Request(target), new URL(target).pathname);
+    const key = await crypto.subtle.importKey("raw", readKey, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    return `v3.read.${base64UrlEncode(new Uint8Array(await crypto.subtle.sign("HMAC", key, canonical)))}`;
+  };
+  const upload = async (snapshotId: string, bytes: Uint8Array, rand: string): Promise<Response> => {
+    const target = `${shareUrl}/snapshots/readme/${snapshotId}`;
+    const canonical = await canonicalRequest(new Request(target, {
+      method: "PUT", body: bytes, headers: { "Content-Type": "application/octet-stream" },
+    }), new URL(target).pathname);
+    const signature = base64UrlEncode(new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, owner.privateKey, canonical)));
+    return SELF.fetch(target, { method: "PUT", body: bytes, headers: {
+      "Content-Type": "application/octet-stream",
+      "Attn-Device-Id": shareId,
+      "Attn-Owner-Signature": signature,
+      "Attn-PoW": await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "PUT", path: `/v3/shares/${shareId}/snapshots/readme/${snapshotId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand }),
+    } });
+  };
+
+  await assertResponse(await upload("snapshot-one", new Uint8Array([1, 2, 3]), `${FIXED_POW_RAND}a1`), { status: 201 }, `${scenarioId} step #${stepIdx} first artifact upload`);
+  const prefix = shareArtifactPrefix(shareId);
+  expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
+  await deleteRoomBlobs(env, shareId);
+  expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
+  await assertResponse(await upload("snapshot-two", new Uint8Array([9]), `${FIXED_POW_RAND}a2`), { status: 200 }, `${scenarioId} step #${stepIdx} superseding artifact upload`);
+  expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
+
+  const artifactUrl = `${shareUrl}/snapshots/readme`;
+  const fetched = await SELF.fetch(artifactUrl, { headers: { "Attn-Admission": await scopedRead(artifactUrl) } });
+  await assertResponse(fetched.clone(), { status: 200 }, `${scenarioId} step #${stepIdx} artifact read`);
+  expect(new Uint8Array(await fetched.arrayBuffer())).toEqual(new Uint8Array([9]));
+
+  const revokePow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "DELETE", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}a3` });
+  await assertResponse(await SELF.fetch(shareUrl, { method: "DELETE", headers: {
+    "Attn-Device-Id": shareId,
+    "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "DELETE", url: shareUrl, privateKey: owner.privateKey }),
+    "Attn-PoW": revokePow,
+  } }), { status: 204 }, `${scenarioId} step #${stepIdx} artifact share revoke`);
+  expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(0);
 }
 
 async function actRecreateRoom(
@@ -1807,6 +1873,9 @@ export async function runScenario(scenario: Scenario): Promise<void> {
       switch (step.action) {
         case "durableShareMatrix":
           await actDurableShareMatrix(scenario.id, i);
+          break;
+        case "shareArtifactMatrix":
+          await actShareArtifactMatrix(scenario.id, i);
           break;
         case "v3AdmissionMatrix":
           await actV3AdmissionMatrix(scenario.id, i);

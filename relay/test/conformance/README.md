@@ -10,6 +10,8 @@
 > `durableShareMatrix` until the native share client lands. It locks create,
 > public redaction, scoped read, mailbox retry idempotency, and revocation to
 > the same executable corpus rather than leaving the new surface test-only.
+> `shareArtifactMatrix` covers owner upload, survival across the room-prefix
+> sweep, latest-per-file supersession, read-admission fetch, and revoke cleanup.
 
 Cross-language conformance suite for the attn relay. The same `cases.json`
 is consumed by:
@@ -104,6 +106,7 @@ Each step has an `action` discriminator. The corpus deliberately models
 | `advanceMockClock`        | Advance the runner's mock clock by `params.ms`. Used for hard-max / idle-timeout scenarios.              |
 | `seedR2Blob`              | Pre-populate an R2 object under `rooms/<roomId>/<key>`. Used for R2 spillover / cleanup tests.           |
 | `listR2`                  | Enumerate R2 keys under a prefix; assert exact membership.                                               |
+| `shareArtifactMatrix`     | Replay durable share snapshot pin/supersede/fetch/revoke semantics with relay-minted R2 keys.            |
 | `expectStorageState`      | Peek inside DO storage (Miniflare: `runInDurableObject`; Rust: not applicable — skipped).                |
 
 ### Naming via `as` / `in`

@@ -7,7 +7,7 @@ async function openShare(page: Page) {
   await page.goto(WORKSPACE_URL);
   const dockShare = page.locator('.thumb-dock').getByRole('button', { name: 'Share' });
   if (await dockShare.isVisible()) await dockShare.click();
-  else await page.getByRole('banner').getByRole('button', { name: 'Share', exact: true }).click();
+  else await page.getByRole('button', { name: 'Share for review' }).click();
   const dialog = page.getByRole('dialog', { name: 'Share for review' });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Create review link' })).toBeVisible();
@@ -37,7 +37,7 @@ test('defaults to the focused current-file and hybrid delivery flow', async ({ p
 
 test('durability states gate sharing honestly', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=private');
-  await page.getByRole('button', { name: 'Share', exact: true }).click();
+  await page.getByRole('button', { name: 'Share for review' }).click();
   const privateDialog = page.getByRole('dialog', { name: 'Share for review' });
   const create = privateDialog.getByRole('button', { name: 'Create review link' });
   await expect(privateDialog).toContainText('Private browsing is session-only');
@@ -47,7 +47,7 @@ test('durability states gate sharing honestly', async ({ page }) => {
 
   await page.keyboard.press('Escape');
   await page.goto('/app/w/ws-product/direction.md?shell=quota');
-  await page.getByRole('button', { name: 'Share', exact: true }).click();
+  await page.getByRole('button', { name: 'Share for review' }).click();
   const quotaDialog = page.getByRole('dialog', { name: 'Share for review' });
   await expect(quotaDialog.getByRole('alert')).toContainText('Sharing stays unavailable');
   await expect(quotaDialog.getByRole('button', { name: 'Create review link' })).toBeDisabled();

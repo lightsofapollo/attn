@@ -310,7 +310,7 @@ function ownerCapability(credentials: BrowserOwnerCredentials): InviteCapability
 
 interface MockServer {
   port: number;
-  onClient: (handler: (ws: WebSocket, subprotocol: string) => void) => void;
+  onClient: (handler: (ws: WebSocket, subprotocol: string, requestUrl: string) => void) => void;
   close: () => Promise<void>;
 }
 
@@ -322,7 +322,7 @@ async function startMockServer(): Promise<MockServer> {
     throw new Error('mock server returned unexpected address');
   }
   const port = addr.port;
-  const handlers: Array<(ws: WebSocket, sub: string) => void> = [];
+  const handlers: Array<(ws: WebSocket, sub: string, requestUrl: string) => void> = [];
   server.on('connection', (ws, req) => {
     const protoHeader: string | string[] | undefined = req.headers['sec-websocket-protocol'];
     const sub =
@@ -333,7 +333,7 @@ async function startMockServer(): Promise<MockServer> {
           : '';
     for (const h of handlers) {
       try {
-        h(ws, sub);
+        h(ws, sub, req.url ?? '');
       } catch (err) {
         console.error('mock handler threw:', err);
       }
@@ -2302,15 +2302,18 @@ defineCase('remembered room restores two files, cursor, identity, and sealed off
     navigator: { storage: { persist: async () => true, estimate: async () => ({}) } },
   });
   const server = await startMockServer();
-  const subscribeAfter: number[] = [];
+  const subscribeAfterByDevice = new Map<string, number[]>();
   let subscriptions = 0;
   try {
-    server.onClient((ws) => {
+    server.onClient((ws, _subprotocol, requestUrl) => {
+      const deviceId = new URL(requestUrl, 'http://127.0.0.1').searchParams.get('device_id') ?? 'unknown';
       ws.on('message', (raw) => {
         const msg = JSON.parse(String(raw));
         if (msg.type !== 'subscribe') return;
         subscriptions += 1;
-        subscribeAfter.push(msg.after as number);
+        const deviceSubscriptions = subscribeAfterByDevice.get(deviceId) ?? [];
+        deviceSubscriptions.push(msg.after as number);
+        subscribeAfterByDevice.set(deviceId, deviceSubscriptions);
         ws.send(JSON.stringify({
           type: 'hello',
           serverSeq: 11,
@@ -2467,7 +2470,20 @@ defineCase('remembered room restores two files, cursor, identity, and sealed off
     assert(thirdStore.events.some(
       (event) => event.body.type === 'comment_created' && event.body.body === 'SEALED-OFFLINE-COMMENT',
     ), 'sealed pending comment decrypts after another reload');
-    assert(subscribeAfter.slice(1).every((after) => after === 11), 'reload subscribes from committed cursor');
+    for (
+      let i = 0;
+      i < 50 && (subscribeAfterByDevice.get('br-test-device')?.length ?? 0) < 3;
+      i += 1
+    ) {
+      await delay(10);
+    }
+    const rememberedSubscriptions = subscribeAfterByDevice.get('br-test-device') ?? [];
+    assertEq(rememberedSubscriptions[0], 0, 'first invite starts from an empty cursor');
+    assert(
+      rememberedSubscriptions.length >= 3
+        && rememberedSubscriptions.slice(1).every((after) => after === 11),
+      `remembered device reloads subscribe from committed cursor: ${JSON.stringify(rememberedSubscriptions)}`,
+    );
     await third.forgetRoom();
     third.close();
     const forgotten = await openStorage(false);

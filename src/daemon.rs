@@ -75,6 +75,10 @@ pub enum SocketMessage {
     #[cfg(debug_assertions)]
     #[serde(rename = "interact")]
     Interact(InteractAction),
+    /// Inject the exact native-notification click event in debug E2E tests.
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    #[serde(rename = "review_notification_click")]
+    ReviewNotificationClick { deep_link: String },
     /// Join a review room via an `attn://review/<roomId>#key=...` invite URL.
     ///
     /// The `invite` string is the full invite URI including any `#key=...`
@@ -263,6 +267,34 @@ fn ensure_runtime_dir() -> Result<()> {
     Ok(())
 }
 
+/// Private placeholder used only while an explicitly resident daemon waits
+/// for its first open/deep-link intent. Keeping it inside the daemon runtime
+/// directory avoids recursively watching the user's home directory at login.
+pub(crate) fn resident_idle_path() -> Result<PathBuf> {
+    ensure_runtime_dir()?;
+    let path = runtime_dir()?.join("resident-idle.md");
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                bail!("refusing unsafe resident placeholder {}", path.display());
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .with_context(|| format!("could not create {}", path.display()))?;
+        }
+        Err(err) => {
+            return Err(err).with_context(|| format!("could not inspect {}", path.display()));
+        }
+    }
+    Ok(path)
+}
+
 /// Compute a fingerprint of the current binary (mtime + size).
 fn binary_fingerprint() -> Result<String> {
     let exe = std::env::current_exe().context("could not determine executable path")?;
@@ -417,6 +449,20 @@ pub fn send_interact(action: InteractAction) -> Result<InteractResult> {
             SocketResponse::Error { message } => bail!("interact failed: {message}"),
             other => bail!("unexpected response: {other:?}"),
         },
+        None => bail!("no daemon running"),
+    }
+}
+
+/// Route a debug E2E click through the same event-loop branch used by the
+/// native notification delegate. This is intentionally absent from release.
+#[cfg(all(debug_assertions, target_os = "macos"))]
+pub fn send_review_notification_click(deep_link: &str) -> Result<()> {
+    match send_command(&SocketMessage::ReviewNotificationClick {
+        deep_link: deep_link.to_string(),
+    })? {
+        Some(SocketResponse::Ok) => Ok(()),
+        Some(SocketResponse::Error { message }) => bail!("notification click failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
         None => bail!("no daemon running"),
     }
 }
@@ -1039,6 +1085,15 @@ fn handle_client(
                     stream,
                     "{}",
                     serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            #[cfg(all(debug_assertions, target_os = "macos"))]
+            Ok(SocketMessage::ReviewNotificationClick { deep_link }) => {
+                let _ = proxy.send_event(UserEvent::OpenReviewDeepLink(deep_link));
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&SocketResponse::Ok).unwrap_or_default()
                 );
             }
             Ok(SocketMessage::ReviewJoin { invite }) => {

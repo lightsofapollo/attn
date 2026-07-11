@@ -45,6 +45,7 @@
   import { ownerKeyFingerprint } from './review/fingerprint';
   import { defaultFormatLastSeen } from './connection-badge-format';
   import type { ParticipantId, ReviewStatusPeer } from './types';
+  import UnreadBadge from './UnreadBadge.svelte';
 
   interface Props {
     /**
@@ -87,6 +88,7 @@
 
   const peers: ReviewStatusPeer[] = $derived(reviewStore.peersResolved);
   const split = $derived(splitForStrip(peers));
+  const unreadCount = $derived(reviewStore.currentRoomUnread);
 
   // When a peer's chip is clicked, kick off the fingerprint hash if we
   // don't already have it. The hash key is `participantId` (stable per
@@ -158,7 +160,7 @@
 
 <svelte:window onkeydown={handleKeyDown} />
 
-{#if peers.length === 0}
+{#if peers.length === 0 && unreadCount === 0}
   <!-- Empty strip per §7 — no border, no chips. The host (ReviewBar) keeps
        its own divider so this collapses cleanly. -->
   <div
@@ -176,6 +178,7 @@
     data-state="active"
     data-peer-count={peers.length}
   >
+    <UnreadBadge count={unreadCount} label="unread updates in this room" />
     {#each split.inline as peer (peer.participantId + ':' + peer.deviceId)}
       {@const visual = chipVisualFor(peer)}
       {@const youHere = isYou(peer, localParticipantId)}

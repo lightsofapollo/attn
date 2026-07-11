@@ -127,6 +127,41 @@ export class ReviewStore {
    */
   rooms = $state<Record<string, ReviewRoomSummary>>({});
 
+  /** Native-owned durable unread counts, keyed by room. */
+  unreadByRoom = $state<Record<string, number>>({});
+
+  /** Native-owned persisted mute preferences, keyed by room. */
+  notificationMutedByRoom = $state<Record<string, boolean>>({});
+
+  currentRoomUnread: number = $derived(
+    this.currentRoomId === null ? 0 : (this.unreadByRoom[this.currentRoomId] ?? 0),
+  );
+
+  totalUnread: number = $derived(
+    Object.values(this.unreadByRoom).reduce((sum, count) => sum + count, 0),
+  );
+
+  currentRoomNotificationMuted: boolean = $derived(
+    this.currentRoomId === null ? false : (this.notificationMutedByRoom[this.currentRoomId] ?? false),
+  );
+
+  applyNotificationMute(payload: { roomId: RoomId; muted: boolean }): void {
+    this.notificationMutedByRoom = {
+      ...this.notificationMutedByRoom,
+      [payload.roomId]: payload.muted,
+    };
+  }
+
+  unreadForRoom(roomId: RoomId): number {
+    return this.unreadByRoom[roomId] ?? 0;
+  }
+
+  applyUnread(payload: { roomId: RoomId; unreadCount: number }): void {
+    const count = Math.max(0, Math.floor(payload.unreadCount));
+    this.unreadByRoom = { ...this.unreadByRoom, [payload.roomId]: count };
+    this.upsertRoom(payload.roomId, {});
+  }
+
   roomsList: ReviewRoomSummary[] = $derived.by(() =>
     Object.values(this.rooms).sort((a, b) => b.updatedAt - a.updatedAt),
   );
@@ -876,9 +911,11 @@ export class ReviewStore {
     this.currentSnapshotId = snapshotId;
   }
 
-  selectRoom(roomId: RoomId): void {
+  /** Select a locally known room. Returns false without mutation until room
+   * hydration has upserted it (used by native notification deep links). */
+  selectRoom(roomId: RoomId): boolean {
     const room = this.rooms[roomId];
-    if (room === undefined) return;
+    if (room === undefined) return false;
     this.currentRoomId = roomId;
     this.localGrantTier = this.localGrantTiers[roomId] ?? 'suggest';
     this.currentShare = room.share ?? null;
@@ -908,6 +945,7 @@ export class ReviewStore {
     }
     this.currentSnapshotId = null;
     this.expandedResolvedThreadId = null;
+    return true;
   }
 
   leaveRoom(roomId: RoomId): void {
@@ -1051,6 +1089,8 @@ export class ReviewStore {
     this.rooms = rest;
     const { [roomId]: _grant, ...remainingGrantTiers } = this.localGrantTiers;
     this.localGrantTiers = remainingGrantTiers;
+    const { [roomId]: _unread, ...remainingUnread } = this.unreadByRoom;
+    this.unreadByRoom = remainingUnread;
     this.events = this.events.filter((event) => event.meta.roomId !== roomId);
     this.snapshots = this.snapshots.filter((snapshot) => snapshot.roomId !== roomId);
     this.anchorResolutions = Object.fromEntries(

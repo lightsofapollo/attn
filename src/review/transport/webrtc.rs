@@ -1075,6 +1075,7 @@ async fn dispatch_inbound_message(
                 let _ = events_tx.send(TransportEvent::EventImported {
                     room_id: config.room_id.clone(),
                     event: outcome.event,
+                    newly_imported: outcome.newly_imported,
                 });
             }
         }

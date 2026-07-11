@@ -101,6 +101,7 @@ export type IpcMessageType =
   | 'theme_change'
   | 'open_external'
   | 'open_devtools'
+  | 'resident_launch_at_login'
   | 'drag_window'
   | 'js_log'
   | 'js_error'
@@ -114,7 +115,9 @@ export type IpcMessageType =
   | 'review_resolve_comment'
   | 'review_set_display_name'
   | 'review_stop'
-  | 'review_collab_send';
+  | 'review_collab_send'
+  | 'review_view_state'
+  | 'review_notification_mute';
 
 export interface CheckboxToggleMessage {
   type: 'checkbox_toggle';
@@ -163,6 +166,11 @@ export interface DragWindowMessage {
 
 export interface OpenDevtoolsMessage {
   type: 'open_devtools';
+}
+
+export interface ResidentLaunchAtLoginMessage {
+  type: 'resident_launch_at_login';
+  enabled: boolean;
 }
 
 export interface JsLogMessage {
@@ -267,6 +275,19 @@ export interface ReviewCollabSendMessage {
   payload: string;
 }
 
+export interface ReviewViewStateMessage {
+  type: 'review_view_state';
+  roomId: RoomId;
+  roomVisible: boolean;
+  windowFocused: boolean;
+}
+
+export interface ReviewNotificationMuteMessage {
+  type: 'review_notification_mute';
+  roomId: RoomId;
+  muted: boolean;
+}
+
 export type IpcMessage =
   | CheckboxToggleMessage
   | NavigateMessage
@@ -277,6 +298,7 @@ export type IpcMessage =
   | ThemeChangeMessage
   | OpenExternalMessage
   | OpenDevtoolsMessage
+  | ResidentLaunchAtLoginMessage
   | DragWindowMessage
   | JsLogMessage
   | JsErrorMessage
@@ -290,7 +312,9 @@ export type IpcMessage =
   | ReviewResolveCommentMessage
   | ReviewSetDisplayNameMessage
   | ReviewStopMessage
-  | ReviewCollabSendMessage;
+  | ReviewCollabSendMessage
+  | ReviewViewStateMessage
+  | ReviewNotificationMuteMessage;
 
 export type AppMode = 'read' | 'edit';
 
@@ -325,6 +349,14 @@ export interface InitPayload {
    * (`window.__attn_ipc_token__`) for E2E suites; never set in release.
    */
   debugBuild?: boolean;
+  resident?: {
+    active: boolean;
+    installed: boolean;
+    loaded: boolean;
+    degraded: boolean;
+    error?: string | null;
+    supported: boolean;
+  };
 }
 
 /**
@@ -980,6 +1012,17 @@ export interface ReviewPresenceChanged {
 export interface ReviewConnectionChanged {
   roomId: RoomId;
   connection: ReviewStatus['connection'];
+}
+
+/** Durable unread count pushed after a verified import or focused clear. */
+export interface ReviewUnreadChanged {
+  roomId: RoomId;
+  unreadCount: number;
+}
+
+export interface ReviewNotificationMuteChanged {
+  roomId: RoomId;
+  muted: boolean;
 }
 
 /**

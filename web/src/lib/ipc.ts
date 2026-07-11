@@ -81,6 +81,10 @@ export function openDevtools(): void {
   send({ type: 'open_devtools' });
 }
 
+export function setResidentLaunchAtLogin(enabled: boolean): void {
+  send({ type: 'resident_launch_at_login', enabled });
+}
+
 /** Mousedown handler for drag regions — skips interactive child elements. */
 export function dragWindow(e: MouseEvent): void {
   const target = e.target as HTMLElement;
@@ -212,4 +216,18 @@ export function reviewStop(roomId?: RoomId): Promise<void> {
  */
 export function reviewCollabSend(roomId: RoomId, payload: string): void {
   send({ type: 'review_collab_send', roomId, payload });
+}
+
+/** Report the native read-marker predicates. Rust clears only when both true. */
+export function reviewViewState(
+  roomId: RoomId,
+  roomVisible: boolean,
+  windowFocused: boolean,
+): void {
+  send({ type: 'review_view_state', roomId, roomVisible, windowFocused });
+}
+
+/** Persist the per-room native OS notification preference. */
+export function reviewNotificationMute(roomId: RoomId, muted: boolean): void {
+  send({ type: 'review_notification_mute', roomId, muted });
 }

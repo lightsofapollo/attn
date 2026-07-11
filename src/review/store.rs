@@ -49,6 +49,23 @@ use crate::review::model::{
 /// Persistent JSON+JSONL store for review rooms.
 pub struct ReviewStore {
     root: PathBuf,
+    /// Serializes read/modify/write of `unread.json`. Imports arrive on
+    /// transport tasks while focus clears arrive on the IPC thread.
+    unread_mutation: std::sync::Mutex<()>,
+}
+
+/// Durable per-room unread cursor. `latest_event_id` is the furthest accounted
+/// event in append-log order (not delivery order); `last_seen_event_id`
+/// advances only when the room is actually visible in a focused window. The
+/// two scalar IDs keep state bounded without an ever-growing accounted-ID set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomUnreadState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_event_id: Option<crate::review::ids::EventId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_event_id: Option<crate::review::ids::EventId>,
+    pub unread_count: u32,
 }
 
 /// Stable machine-readable status for one persisted suggestion.
@@ -94,7 +111,10 @@ impl ReviewStore {
     pub fn open_at(root: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&root)
             .with_context(|| format!("could not create review store root {}", root.display()))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            unread_mutation: std::sync::Mutex::new(()),
+        })
     }
 
     /// Filesystem root of the store (`{runtime_dir}/reviews/`).
@@ -128,6 +148,14 @@ impl ReviewStore {
 
     fn cursor_file(&self, room_id: &RoomId) -> PathBuf {
         self.room_dir(room_id).join("cursors.json")
+    }
+
+    fn unread_file(&self, room_id: &RoomId) -> PathBuf {
+        self.room_dir(room_id).join("unread.json")
+    }
+
+    fn notification_settings_file(&self, room_id: &RoomId) -> PathBuf {
+        self.room_dir(room_id).join("notifications.json")
     }
 
     fn snapshot_file(&self, room_id: &RoomId, snapshot_id: &SnapshotId) -> PathBuf {
@@ -390,6 +418,181 @@ impl ReviewStore {
         room_id: &RoomId,
     ) -> Result<impl Iterator<Item = Result<ReviewEvent>>> {
         jsonl_iter(&self.events_file(room_id))
+    }
+
+    /// Load the persisted per-room read cursor. A missing file is the same as
+    /// a room with no unread activity; replaying `events.jsonl` must never
+    /// synthesize unread state.
+    pub fn load_unread_state(&self, room_id: &RoomId) -> Result<RoomUnreadState> {
+        Ok(read_json(&self.unread_file(room_id))?.unwrap_or_default())
+    }
+
+    /// Record one newly verified, remote, user-relevant event as unread.
+    /// Callers invoke this only after `append_event` reports a fresh import.
+    pub fn record_unread_event(
+        &self,
+        room_id: &RoomId,
+        event_id: &crate::review::ids::EventId,
+    ) -> Result<RoomUnreadState> {
+        let _guard = self
+            .unread_mutation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("unread state lock poisoned"))?;
+        let mut state = self.load_unread_state(room_id)?;
+        // Defensive idempotence at the accounting boundary. Fresh-import
+        // gating normally guarantees this, while equality protects direct
+        // callers and older persisted runtimes.
+        if state.latest_event_id.as_ref() == Some(event_id) {
+            return Ok(state);
+        }
+        state.latest_event_id =
+            Some(self.furthest_append_cursor(room_id, state.latest_event_id.as_ref(), event_id)?);
+        state.unread_count = state.unread_count.saturating_add(1);
+        let dir = self.room_dir(room_id);
+        write_json_atomic(&dir, &self.unread_file(room_id), &state)?;
+        Ok(state)
+    }
+
+    /// Pick the later of the existing watermark and a newly-accounted event
+    /// using authoritative `events.jsonl` order. Transport callbacks can be
+    /// scheduled B-before-A even though the store appended A-before-B; never
+    /// letting the watermark move backward prevents B from being re-counted
+    /// by restart reconciliation.
+    fn furthest_append_cursor(
+        &self,
+        room_id: &RoomId,
+        current: Option<&crate::review::ids::EventId>,
+        incoming: &crate::review::ids::EventId,
+    ) -> Result<crate::review::ids::EventId> {
+        let Some(current) = current else {
+            return Ok(incoming.clone());
+        };
+        if current == incoming {
+            return Ok(current.clone());
+        }
+
+        let mut current_index = None;
+        let mut incoming_index = None;
+        for (index, entry) in self.iter_events(room_id)?.enumerate() {
+            let event = entry?;
+            if &event.meta.event_id == current {
+                current_index = Some(index);
+            }
+            if &event.meta.event_id == incoming {
+                incoming_index = Some(index);
+            }
+            if current_index.is_some() && incoming_index.is_some() {
+                break;
+            }
+        }
+        Ok(match (current_index, incoming_index) {
+            (Some(old), Some(new)) if old >= new => current.clone(),
+            (Some(_), None) => current.clone(),
+            // Both IDs missing occurs only in isolated unit/scaffold callers;
+            // production records after append_event. Preserve legacy behavior
+            // there while never regressing a known on-disk watermark.
+            _ => incoming.clone(),
+        })
+    }
+
+    /// Advance the room's last-seen cursor through all currently imported
+    /// relevant events and clear its badge. This is called only after the
+    /// frontend proves that the room is visible and the window is focused.
+    pub fn clear_unread(&self, room_id: &RoomId) -> Result<RoomUnreadState> {
+        let _guard = self
+            .unread_mutation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("unread state lock poisoned"))?;
+        let mut state = self.load_unread_state(room_id)?;
+        state.last_seen_event_id = state.latest_event_id.clone();
+        state.unread_count = 0;
+        let dir = self.room_dir(room_id);
+        write_json_atomic(&dir, &self.unread_file(room_id), &state)?;
+        Ok(state)
+    }
+
+    /// Whether native OS notifications are muted for this room. Missing
+    /// settings preserve the default (notifications enabled).
+    pub fn notification_muted(&self, room_id: &RoomId) -> Result<bool> {
+        #[derive(Deserialize, Default)]
+        #[serde(rename_all = "camelCase")]
+        struct Settings {
+            muted: bool,
+        }
+        Ok(
+            read_json::<Settings>(&self.notification_settings_file(room_id))?
+                .unwrap_or_default()
+                .muted,
+        )
+    }
+
+    /// Persist the per-room native notification preference atomically.
+    pub fn set_notification_muted(&self, room_id: &RoomId, muted: bool) -> Result<()> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Settings {
+            muted: bool,
+        }
+        let dir = self.room_dir(room_id);
+        write_json_atomic(
+            &dir,
+            &self.notification_settings_file(room_id),
+            &Settings { muted },
+        )
+    }
+
+    /// Repair append/accounting crash gaps at startup. `events.jsonl` is the
+    /// source of truth: unread is recomputed from every remote attention event
+    /// after the durable *last-seen* cursor, not incrementally from the latest
+    /// delivery callback. This recovers holes such as append A,B → account B →
+    /// crash, while a seen cursor still prevents ordinary replay rebadging.
+    pub fn reconcile_unread_from_events(
+        &self,
+        room_id: &RoomId,
+        self_device_id: &str,
+    ) -> Result<RoomUnreadState> {
+        let _guard = self
+            .unread_mutation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("unread state lock poisoned"))?;
+        let mut state = self.load_unread_state(room_id)?;
+        let cursor = state.last_seen_event_id.clone();
+        let mut after_cursor = cursor.is_none();
+        let mut recomputed_count = 0u32;
+        let mut furthest_attention_event = cursor.clone();
+
+        for entry in self.iter_events(room_id)? {
+            let event = entry?;
+            if !after_cursor {
+                if Some(&event.meta.event_id) == cursor.as_ref() {
+                    after_cursor = true;
+                }
+                continue;
+            }
+            if event.meta.device_id.as_str() == self_device_id
+                || !matches!(
+                    event.body,
+                    crate::review::model::ReviewEventBody::CommentCreated { .. }
+                        | crate::review::model::ReviewEventBody::SuggestionCreated { .. }
+                        | crate::review::model::ReviewEventBody::SuggestionAccepted { .. }
+                        | crate::review::model::ReviewEventBody::SuggestionRejected { .. }
+                )
+            {
+                continue;
+            }
+            furthest_attention_event = Some(event.meta.event_id);
+            recomputed_count = recomputed_count.saturating_add(1);
+        }
+
+        let changed = state.unread_count != recomputed_count
+            || state.latest_event_id != furthest_attention_event;
+        state.unread_count = recomputed_count;
+        state.latest_event_id = furthest_attention_event;
+        if changed {
+            let dir = self.room_dir(room_id);
+            write_json_atomic(&dir, &self.unread_file(room_id), &state)?;
+        }
+        Ok(state)
     }
 
     /// Fold persisted suggestion events for one room. Creation authorship is
@@ -805,7 +1008,7 @@ mod tests {
         MailboxEnvelope, ReviewEvent, ReviewEventBody, ReviewRoom, RevisionSource, RoomMode,
         RoomPolicy, SnapshotNode, SnapshotPlaintext, SyncCursor,
     };
-    use std::sync::Mutex;
+    use std::sync::{Arc, Barrier, Mutex};
     use tempfile::TempDir;
 
     /// Guard against parallel mutation of process-global `ATTN_HOME`.
@@ -1074,6 +1277,279 @@ mod tests {
             .expect("decode");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], event);
+    }
+
+    #[test]
+    fn unread_cursor_persists_dedupes_and_clear_survives_restart() {
+        let (tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-unread");
+        let first: EventId = id("evt-unread-1");
+        let second: EventId = id("evt-unread-2");
+
+        assert_eq!(
+            store
+                .record_unread_event(&room_id, &first)
+                .expect("record first")
+                .unread_count,
+            1
+        );
+        assert_eq!(
+            store
+                .record_unread_event(&room_id, &first)
+                .expect("dedupe first")
+                .unread_count,
+            1
+        );
+        assert_eq!(
+            store
+                .record_unread_event(&room_id, &second)
+                .expect("record second")
+                .unread_count,
+            2
+        );
+
+        let reopened = ReviewStore::open_at(tmp.path().join("reviews")).expect("reopen");
+        let restored = reopened.load_unread_state(&room_id).expect("restore");
+        assert_eq!(restored.unread_count, 2);
+        assert_eq!(restored.latest_event_id, Some(second.clone()));
+
+        let cleared = reopened.clear_unread(&room_id).expect("clear");
+        assert_eq!(cleared.unread_count, 0);
+        assert_eq!(cleared.last_seen_event_id, Some(second));
+
+        let restarted = ReviewStore::open_at(tmp.path().join("reviews")).expect("restart");
+        assert_eq!(
+            restarted
+                .load_unread_state(&room_id)
+                .expect("restore clear"),
+            cleared
+        );
+    }
+
+    #[test]
+    fn concurrent_unread_import_and_focus_clear_are_serialized() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open concurrent store"),
+        );
+        let room_id: RoomId = id("room-unread-concurrent");
+        store
+            .record_unread_event(&room_id, &id("evt-seed"))
+            .expect("seed unread");
+        let barrier = Arc::new(Barrier::new(3));
+
+        let importing_store = Arc::clone(&store);
+        let importing_room = room_id.clone();
+        let importing_barrier = Arc::clone(&barrier);
+        let importer = std::thread::spawn(move || {
+            importing_barrier.wait();
+            for index in 0..64 {
+                let event_id: EventId = id(&format!("evt-concurrent-{index}"));
+                importing_store
+                    .record_unread_event(&importing_room, &event_id)
+                    .expect("concurrent import");
+            }
+        });
+
+        let clearing_store = Arc::clone(&store);
+        let clearing_room = room_id.clone();
+        let clearing_barrier = Arc::clone(&barrier);
+        let clearer = std::thread::spawn(move || {
+            clearing_barrier.wait();
+            for _ in 0..64 {
+                clearing_store
+                    .clear_unread(&clearing_room)
+                    .expect("concurrent clear");
+            }
+        });
+
+        barrier.wait();
+        importer.join().expect("import thread");
+        clearer.join().expect("clear thread");
+        let state = store.load_unread_state(&room_id).expect("valid final json");
+        assert!(state.unread_count <= 64);
+        assert!(state.latest_event_id.is_some());
+        assert!(
+            !store
+                .unread_file(&room_id)
+                .with_extension("json.tmp")
+                .exists(),
+            "serialized atomic writes must not strand a shared temp file"
+        );
+    }
+
+    #[test]
+    fn unread_restart_reconciles_only_unaccounted_remote_attention_events() {
+        let (tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-unread-reconcile");
+        let mut seen = suggestion_event(
+            "evt-seen",
+            "room-unread-reconcile",
+            "remote",
+            suggestion_created("suggestion-seen"),
+        );
+        seen.meta.device_id = id("remote-device");
+        store.append_event(&room_id, &seen).expect("append seen");
+        store
+            .record_unread_event(&room_id, &seen.meta.event_id)
+            .expect("account seen");
+        store.clear_unread(&room_id).expect("mark seen");
+
+        let mut local = suggestion_event(
+            "evt-local",
+            "room-unread-reconcile",
+            "self",
+            suggestion_created("suggestion-local"),
+        );
+        local.meta.device_id = id("self-device");
+        store.append_event(&room_id, &local).expect("append local");
+        let mut crashed = suggestion_event(
+            "evt-crash-gap",
+            "room-unread-reconcile",
+            "remote",
+            suggestion_created("suggestion-crash-gap"),
+        );
+        crashed.meta.device_id = id("remote-device");
+        store
+            .append_event(&room_id, &crashed)
+            .expect("append before simulated crash");
+
+        let restarted = ReviewStore::open_at(tmp.path().join("reviews")).expect("restart");
+        let repaired = restarted
+            .reconcile_unread_from_events(&room_id, "self-device")
+            .expect("repair crash gap");
+        assert_eq!(repaired.unread_count, 1);
+        assert_eq!(repaired.latest_event_id, Some(crashed.meta.event_id));
+        assert_eq!(
+            restarted
+                .reconcile_unread_from_events(&room_id, "self-device")
+                .expect("idempotent replay")
+                .unread_count,
+            1,
+            "ordinary restart replay must not re-badge accounted events"
+        );
+    }
+
+    #[test]
+    fn unread_append_watermark_survives_b_then_a_accounting_order() {
+        let (tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-unread-out-of-order");
+        let mut event_a = suggestion_event(
+            "evt-a",
+            "room-unread-out-of-order",
+            "remote",
+            suggestion_created("suggestion-a"),
+        );
+        event_a.meta.device_id = id("remote-device");
+        let mut event_b = suggestion_event(
+            "evt-b",
+            "room-unread-out-of-order",
+            "remote",
+            suggestion_created("suggestion-b"),
+        );
+        event_b.meta.device_id = id("remote-device");
+        store.append_event(&room_id, &event_a).expect("append A");
+        store.append_event(&room_id, &event_b).expect("append B");
+
+        store
+            .record_unread_event(&room_id, &event_b.meta.event_id)
+            .expect("account B first");
+        let accounted = store
+            .record_unread_event(&room_id, &event_a.meta.event_id)
+            .expect("account A second");
+        assert_eq!(accounted.unread_count, 2);
+        assert_eq!(
+            accounted.latest_event_id,
+            Some(event_b.meta.event_id.clone()),
+            "append-order watermark must not regress from B back to A"
+        );
+
+        let restarted = ReviewStore::open_at(tmp.path().join("reviews")).expect("restart");
+        let reconciled = restarted
+            .reconcile_unread_from_events(&room_id, "self-device")
+            .expect("reconcile out-of-order accounting");
+        assert_eq!(reconciled.unread_count, 2, "B must not be counted twice");
+        assert_eq!(reconciled.latest_event_id, Some(event_b.meta.event_id));
+    }
+
+    #[test]
+    fn unread_restart_recovers_a_hole_when_only_b_was_accounted() {
+        let (tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-unread-crash-hole");
+        let mut event_a = suggestion_event(
+            "evt-hole-a",
+            "room-unread-crash-hole",
+            "remote",
+            suggestion_created("suggestion-hole-a"),
+        );
+        event_a.meta.device_id = id("remote-device");
+        let mut event_b = suggestion_event(
+            "evt-hole-b",
+            "room-unread-crash-hole",
+            "remote",
+            suggestion_created("suggestion-hole-b"),
+        );
+        event_b.meta.device_id = id("remote-device");
+        store.append_event(&room_id, &event_a).expect("append A");
+        store.append_event(&room_id, &event_b).expect("append B");
+        let before_crash = store
+            .record_unread_event(&room_id, &event_b.meta.event_id)
+            .expect("account only B before crash");
+        assert_eq!(before_crash.unread_count, 1);
+        assert_eq!(
+            before_crash.latest_event_id,
+            Some(event_b.meta.event_id.clone())
+        );
+
+        let restarted = ReviewStore::open_at(tmp.path().join("reviews")).expect("restart");
+        let repaired = restarted
+            .reconcile_unread_from_events(&room_id, "self-device")
+            .expect("recompute from last-seen cursor");
+        assert_eq!(
+            repaired.unread_count, 2,
+            "A must be recovered even though B was the furthest accounted callback"
+        );
+        assert_eq!(repaired.latest_event_id, Some(event_b.meta.event_id));
+    }
+
+    #[test]
+    fn unread_append_watermark_state_is_constant_size_under_reverse_delivery() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-unread-bounded");
+        let mut ids = Vec::new();
+        for index in 0..128 {
+            let mut event = suggestion_event(
+                &format!("evt-bounded-{index:03}"),
+                "room-unread-bounded",
+                "remote",
+                suggestion_created(&format!("suggestion-{index:03}")),
+            );
+            event.meta.device_id = id("remote-device");
+            ids.push(event.meta.event_id.clone());
+            store
+                .append_event(&room_id, &event)
+                .expect("append bounded event");
+        }
+        for event_id in ids.iter().rev() {
+            store
+                .record_unread_event(&room_id, event_id)
+                .expect("account reverse delivery");
+        }
+        let state = store.load_unread_state(&room_id).expect("bounded state");
+        assert_eq!(state.unread_count, 128);
+        assert_eq!(state.latest_event_id.as_ref(), ids.last());
+        let bytes = std::fs::read(store.unread_file(&room_id)).expect("read unread state");
+        assert!(
+            bytes.len() < 512,
+            "scalar append watermark must stay bounded, got {} bytes",
+            bytes.len()
+        );
+        assert!(
+            !String::from_utf8(bytes)
+                .expect("unread state utf8")
+                .contains("accountedEventIds"),
+            "bounded design must not accumulate an ID window"
+        );
     }
 
     #[test]

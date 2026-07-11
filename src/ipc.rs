@@ -44,6 +44,9 @@ pub enum IpcMessage {
     #[serde(rename = "open_devtools")]
     OpenDevtools,
 
+    #[serde(rename = "resident_launch_at_login", rename_all = "camelCase")]
+    ResidentLaunchAtLogin { enabled: bool },
+
     #[serde(rename = "js_log")]
     JsLog {
         level: String,
@@ -141,6 +144,18 @@ pub enum IpcMessage {
         /// daemon shuttles it without parsing.
         payload: String,
     },
+
+    /// Report whether one room is actually visible in a focused window.
+    /// The native manager requires both flags before advancing its durable
+    /// read cursor.
+    #[serde(rename = "review_view_state", rename_all = "camelCase")]
+    ReviewViewState {
+        room_id: RoomId,
+        room_visible: bool,
+        window_focused: bool,
+    },
+    #[serde(rename = "review_notification_mute", rename_all = "camelCase")]
+    ReviewNotificationMute { room_id: RoomId, muted: bool },
 }
 
 /// Shared state accessible from the IPC handler.
@@ -333,6 +348,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             IpcMessage::OpenDevtools => {
                 let _ = proxy.send_event(UserEvent::OpenDevtools);
             }
+            IpcMessage::ResidentLaunchAtLogin { enabled } => {
+                let _ = proxy.send_event(UserEvent::ResidentLaunchAtLogin { enabled });
+            }
             IpcMessage::JsLog {
                 level,
                 message,
@@ -455,6 +473,26 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             }
             IpcMessage::ReviewCollabSend { room_id, payload } => {
                 submit_review_command(state, ReviewCommand::SendCollab { room_id, payload });
+            }
+            IpcMessage::ReviewViewState {
+                room_id,
+                room_visible,
+                window_focused,
+            } => {
+                submit_review_command(
+                    state,
+                    ReviewCommand::SetViewState {
+                        room_id,
+                        room_visible,
+                        window_focused,
+                    },
+                );
+            }
+            IpcMessage::ReviewNotificationMute { room_id, muted } => {
+                submit_review_command(
+                    state,
+                    ReviewCommand::SetNotificationMuted { room_id, muted },
+                );
             }
             IpcMessage::ReviewSetDisplayName { name } => {
                 // Direct identity write, then a manager command to re-announce
@@ -856,6 +894,30 @@ mod tests {
     }
 
     #[test]
+    fn ipc_message_review_view_state_parses_both_focus_predicates() {
+        let raw = r#"{"type":"review_view_state","roomId":"room-abc","roomVisible":true,"windowFocused":false}"#;
+        let msg: IpcMessage = serde_json::from_str(raw).expect("parse review_view_state");
+        assert!(matches!(
+            msg,
+            IpcMessage::ReviewViewState {
+                room_visible: true,
+                window_focused: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ipc_message_review_notification_mute_parses_persisted_toggle() {
+        let raw = r#"{"type":"review_notification_mute","roomId":"room-abc","muted":true}"#;
+        let msg: IpcMessage = serde_json::from_str(raw).expect("parse notification mute");
+        assert!(matches!(
+            msg,
+            IpcMessage::ReviewNotificationMute { muted: true, .. }
+        ));
+    }
+
+    #[test]
     fn ipc_message_review_reject_suggestion_parses_with_and_without_reason() {
         // The Reject button omits `reason`; the field is `#[serde(default)]`.
         let with_reason = r#"{"type":"review_reject_suggestion","roomId":"room-abc","suggestionId":"sugg-1","reason":"out of scope"}"#;
@@ -964,6 +1026,18 @@ mod tests {
                 ReviewCommand::ResolveComment { room_id, thread_id }
             }
             IpcMessage::ReviewStop { room_id } => ReviewCommand::Stop { room_id },
+            IpcMessage::ReviewViewState {
+                room_id,
+                room_visible,
+                window_focused,
+            } => ReviewCommand::SetViewState {
+                room_id,
+                room_visible,
+                window_focused,
+            },
+            IpcMessage::ReviewNotificationMute { room_id, muted } => {
+                ReviewCommand::SetNotificationMuted { room_id, muted }
+            }
             other => panic!("not a review IpcMessage: {other:?}"),
         };
         submit_review_command(state, cmd);
@@ -1003,6 +1077,48 @@ mod tests {
             rx.try_recv().is_err(),
             "ReviewManager should emit exactly one update per command"
         );
+    }
+
+    #[test]
+    fn ipc_review_view_state_clears_only_focused_visible_room() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = dummy_review_store(&tmp);
+        let room_id: RoomId = dummy_id("room-unread-ipc");
+        store
+            .record_unread_event(&room_id, &dummy_id("evt-unread-ipc"))
+            .expect("seed unread");
+        let (manager, rx) = make_test_manager(store.clone());
+        let state = make_state_with_manager(
+            tmp.path().join("doc.md"),
+            Some(store.clone()),
+            HashMap::new(),
+            Some(manager),
+        );
+
+        dispatch_review_ipc(
+            r#"{"type":"review_view_state","roomId":"room-unread-ipc","roomVisible":true,"windowFocused":false}"#,
+            &state,
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            store
+                .load_unread_state(&room_id)
+                .expect("still unread")
+                .unread_count,
+            1
+        );
+
+        dispatch_review_ipc(
+            r#"{"type":"review_view_state","roomId":"room-unread-ipc","roomVisible":true,"windowFocused":true}"#,
+            &state,
+        );
+        assert!(matches!(
+            rx.try_recv().expect("unread clear update"),
+            ReviewUpdate::UnreadChanged {
+                unread_count: 0,
+                ..
+            }
+        ));
     }
 
     #[test]

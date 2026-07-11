@@ -651,7 +651,7 @@ async fn webrtc_happy_path_delivers_comment_envelope_to_owner_store() {
         .expect("owner events_rx must surface event within 5s")
         .expect("owner events_rx must not close before delivering event");
     match received {
-        TransportEvent::EventImported { room_id, event } => {
+        TransportEvent::EventImported { room_id, event, .. } => {
             assert_eq!(room_id, harness.room_id, "event must carry the room id");
             match event.body {
                 ReviewEventBody::CommentCreated { body, .. } => assert_eq!(

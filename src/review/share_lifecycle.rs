@@ -1572,6 +1572,7 @@ pub struct DurableShareService {
     relay: Arc<dyn ShareRelayClient>,
     bootstrap: Arc<Bootstrapper>,
     operation_lock: tokio::sync::Mutex<()>,
+    notifications: Option<Arc<crate::review::notifications::ReviewNotifications>>,
 }
 
 impl DurableShareService {
@@ -1587,7 +1588,16 @@ impl DurableShareService {
             relay,
             bootstrap,
             operation_lock: tokio::sync::Mutex::new(()),
+            notifications: None,
         }
+    }
+
+    pub fn with_notification_observer(
+        mut self,
+        notifications: Arc<crate::review::notifications::ReviewNotifications>,
+    ) -> Self {
+        self.notifications = Some(notifications);
+        self
     }
 
     pub async fn create(&self, path: &Path) -> Result<DurableShareLinks, ShareLifecycleError> {
@@ -2273,12 +2283,32 @@ impl DurableShareService {
             )
             .await
             .map_err(bootstrap_failure)?;
-        pipeline
+        let outcomes = pipeline
             .commit_preflighted_events(room_id, &events)
             .await
             .map_err(|error| {
                 ShareLifecycleError::Invalid(format!("review_submission commit: {error}"))
             })?;
+        if let Some(notifications) = self.notifications.as_ref() {
+            for outcome in outcomes {
+                if outcome.newly_imported
+                    && matches!(
+                        &outcome.event.body,
+                        crate::review::model::ReviewEventBody::CommentCreated { .. }
+                            | crate::review::model::ReviewEventBody::SuggestionCreated { .. }
+                            | crate::review::model::ReviewEventBody::SuggestionAccepted { .. }
+                            | crate::review::model::ReviewEventBody::SuggestionRejected { .. }
+                    )
+                {
+                    let (kind, file_display) = crate::review::notifications::summary_for_event(
+                        &self.review_store,
+                        room_id,
+                        &outcome.event.body,
+                    );
+                    notifications.enqueue(room_id.clone(), kind, file_display);
+                }
+            }
+        }
         self.bootstrap
             .post_frozen_envelopes_v3(
                 room_id,

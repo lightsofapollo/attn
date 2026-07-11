@@ -16,6 +16,8 @@
     ReviewEvent,
     ReviewSnapshot,
     ReviewStatus,
+    ReviewUnreadChanged,
+    ReviewNotificationMuteChanged,
     SearchResultItem,
     UpdatePayload,
   } from './lib/types';
@@ -30,6 +32,7 @@
     openExternal,
     reviewAcceptSuggestion,
     reviewCollabSend,
+    reviewViewState,
     reviewStop,
     searchFiles,
     setIpcToken,
@@ -91,6 +94,7 @@
   } from './lib/markdown-layer';
   import { RAIL_WIDTH_PX } from './lib/review/rail-mode';
   import { reviewStore } from './lib/review/store.svelte';
+  import { consumePendingRoomFocus } from './lib/review/pending-room-focus';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
   import ReviewFileTree from './lib/ReviewFileTree.svelte';
@@ -109,6 +113,8 @@
   import type { EditorView } from 'prosemirror-view';
   import type { Plugin as PMPlugin } from 'prosemirror-state';
   import { TextSelection } from 'prosemirror-state';
+  import UnreadBadge from './lib/UnreadBadge.svelte';
+  import ResidentSettings from './lib/ResidentSettings.svelte';
 
   interface Props {
     /**
@@ -148,6 +154,14 @@
   let knownProjects: string[] = $state([]);
   let activeProjectPath = $state('');
   let diagMode: DiagMode = $state('full');
+  let residentSettings = $state({
+    active: false,
+    installed: false,
+    loaded: false,
+    degraded: false,
+    error: null as string | null,
+    supported: false,
+  });
   let editorRef: ReturnType<typeof Editor> | undefined = $state(undefined);
 
   // Tab state
@@ -161,6 +175,12 @@
   // Deferred navigation for auto-select when opening a directory
   let pendingAutoNav: string | null = null;
   let contentViewport: HTMLElement | null = $state(null);
+  let windowFocused = $state(
+    typeof document !== 'undefined' ? document.hasFocus() : false,
+  );
+  let documentVisible = $state(
+    typeof document !== 'undefined' ? document.visibilityState === 'visible' : false,
+  );
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let activePath = $derived(activeTab?.path ?? '');
@@ -212,6 +232,18 @@
     if (roomId === null || roomId === autoSelectedRoomId) return;
     autoSelectedRoomId = roomId;
     reviewStore.selectRoom(roomId);
+  });
+
+  // Native owns the durable read marker. Report both predicates together so
+  // selecting a room in a background/occluded window cannot clear it.
+  $effect(() => {
+    const roomId = reviewStore.currentRoomId;
+    if (roomId === null) return;
+    // Re-report after an import updates the count while the room remains
+    // selected. Otherwise the focus predicates have not changed, so a
+    // continuously focused room would retain a badge until blur/refocus.
+    reviewStore.currentRoomUnread;
+    reviewViewState(roomId, documentVisible, windowFocused);
   });
 
   // Reviewer rendering: when this daemon joined a room (currentRoomId set)
@@ -1728,6 +1760,9 @@
 
     // Seed the onboarding display name (chosen name + git/OS default).
     userProfile.hydrate(init.reviewProfile);
+    if (init.resident) {
+      residentSettings = { ...init.resident, error: init.resident.error ?? null };
+    }
 
     // Best-effort "update available" nudge: ping npm for the latest attnmd and
     // toast if this build is behind. No auto-install; failures are silent.
@@ -2013,6 +2048,17 @@
       }
     }
 
+    function consumeNativeRoomFocus(): void {
+      const targetWindow = window as Window & { __attn_pending_review_focus__?: string };
+      const pending = targetWindow.__attn_pending_review_focus__ ?? null;
+      const remaining = consumePendingRoomFocus(reviewStore, pending);
+      if (remaining === null) {
+        delete targetWindow.__attn_pending_review_focus__;
+      } else {
+        targetWindow.__attn_pending_review_focus__ = remaining;
+      }
+    }
+
     window.__attn__ = {
       setContent(data: ContentPayload) {
         applySetContent(data);
@@ -2040,6 +2086,7 @@
           return;
         }
         reviewStore.applyStatus(payload);
+        consumeNativeRoomFocus();
       },
       // Pushed by Rust right after `Bootstrapper::share` succeeds. Carries
       // the invite URL + owner key, so the Share dialog renders the URL +
@@ -2059,12 +2106,15 @@
           mode: payload.mode,
           expiresAt: payload.expiresAt,
         });
+        consumeNativeRoomFocus();
       },
       reviewEvent(payload: ReviewEvent) {
         reviewStore.applyEvent(payload);
+        consumeNativeRoomFocus();
       },
       reviewSnapshot(snapshot: ReviewSnapshot) {
         reviewStore.applySnapshot(snapshot);
+        consumeNativeRoomFocus();
       },
       reviewAnchorResolution(update: ReviewAnchorResolutionUpdate) {
         reviewStore.applyAnchorResolution(update);
@@ -2088,6 +2138,13 @@
       // disconnect. Drives the ConnectionBadge.
       reviewConnection(payload: import('./lib/types').ReviewConnectionChanged) {
         reviewStore.applyConnection(payload);
+      },
+      reviewUnread(payload: ReviewUnreadChanged) {
+        reviewStore.applyUnread(payload);
+        consumeNativeRoomFocus();
+      },
+      reviewNotificationMute(payload: ReviewNotificationMuteChanged) {
+        reviewStore.applyNotificationMute(payload);
       },
       // Inbound live co-typing steps — route into the active collab session.
       reviewCollab(payload: import('./lib/types').ReviewCollabSignal) {
@@ -2120,7 +2177,22 @@
 
     type QueuedMessage =
       | { kind: 'set'; data: ContentPayload }
-      | { kind: 'update'; data: UpdatePayload };
+      | { kind: 'update'; data: UpdatePayload }
+      | {
+          kind: 'review';
+          callback:
+            | 'reviewStatus'
+            | 'reviewShareReady'
+            | 'reviewEvent'
+            | 'reviewSnapshot'
+            | 'reviewAnchorResolution'
+            | 'reviewPresence'
+            | 'reviewConnection'
+            | 'reviewCollab'
+            | 'reviewUnread'
+            | 'reviewNotificationMute';
+          data: unknown;
+        };
     const w = window as Window & { __attn_queue__?: QueuedMessage[] };
     const queued = w.__attn_queue__ ?? [];
     for (const item of queued) {
@@ -2128,9 +2200,21 @@
         applySetContent(item.data);
       } else if (item.kind === 'update') {
         applyUpdateContent(item.data);
+      } else if (item.kind === 'review') {
+        // Native can resume rooms before the Svelte bridge mounts. Replay the
+        // queued callback through the newly-installed bridge so early status,
+        // events, and unread hydration are not lost at boot.
+        const bridge = window.__attn__ as unknown as Record<
+          typeof item.callback,
+          ((payload: unknown) => void) | undefined
+        >;
+        bridge[item.callback]?.(item.data);
       }
     }
     w.__attn_queue__ = [];
+    // A native notification can be clicked while the Svelte bridge is still
+    // mounting. Apply that focus only after queued room hydration has run.
+    consumeNativeRoomFocus();
   }
 
   function saveEdits(): void {
@@ -2427,7 +2511,13 @@
 
 {#snippet mainContent()}
   {#if showTabBar}
-    <TabBar {tabs} {activeTabId} onSwitch={switchTab} onClose={closeTab} />
+    <TabBar
+      {tabs}
+      {activeTabId}
+      reviewUnreadCount={reviewStore.currentRoomUnread}
+      onSwitch={switchTab}
+      onClose={closeTab}
+    />
   {/if}
   <div class="relative shrink-0">
     <PathBreadcrumb
@@ -2721,7 +2811,7 @@
             >
               <button
                 type="button"
-                class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                class="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                 data-slot="rail-toggle"
                 data-state={reviewStore.panelOpen ? 'expanded' : 'collapsed'}
                 aria-label={reviewStore.panelOpen ? 'Collapse comments rail' : 'Expand comments rail'}
@@ -2734,6 +2824,11 @@
                 {:else}
                   <PanelRightOpen class="size-4" aria-hidden="true" />
                 {/if}
+                <UnreadBadge
+                  count={reviewStore.currentRoomUnread}
+                  label="unread review updates"
+                  class="absolute -right-1.5 -top-1.5"
+                />
               </button>
             </div>
             <!-- overflow-hidden + mb-2: cards/chips clip at this wrapper's
@@ -2768,7 +2863,16 @@
   </main>
 {/if}
 
-<svelte:window onkeydown={(e) => { handleGlobalShortcutsHelpHotkey(e); handleGlobalRightRailHotkey(e); }} />
+<svelte:window
+  onkeydown={(e) => { handleGlobalShortcutsHelpHotkey(e); handleGlobalRightRailHotkey(e); }}
+  onfocus={() => { windowFocused = true; }}
+  onblur={() => { windowFocused = false; }}
+/>
+<svelte:document
+  onvisibilitychange={() => {
+    documentVisible = document.visibilityState === 'visible';
+  }}
+/>
 <KeyboardShortcutsDialog
   bind:open={shortcutsOpen}
   hasCommentComposer={true}
@@ -2850,3 +2954,13 @@
 <!-- closeButton: every toast (update nudge, file-changed, etc.) gets a
      dismiss ✕ instead of forcing the user to wait out the timeout. -->
 <Toaster closeButton />
+<ResidentSettings
+  active={residentSettings.active}
+  installed={residentSettings.installed}
+  loaded={residentSettings.loaded}
+  degraded={residentSettings.degraded}
+  statusError={residentSettings.error}
+  supported={residentSettings.supported}
+  roomId={reviewStore.currentRoomId}
+  notificationMuted={reviewStore.currentRoomNotificationMuted}
+/>

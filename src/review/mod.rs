@@ -19,6 +19,7 @@ pub mod ids;
 pub mod ipc;
 pub mod manager;
 pub mod model;
+pub mod notifications;
 pub mod share;
 pub mod share_lifecycle;
 pub mod store;

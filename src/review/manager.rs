@@ -32,6 +32,9 @@ use crate::review::model::{
     Anchor, DeviceClient, EnvelopeKind, MailboxEnvelope, PositionAnchor, ResolvedAnchor,
     ReviewEventBody, RoomMode, SuggestionDraft,
 };
+use crate::review::notifications::{
+    NoopNotificationSink, ReviewNotificationSink, ReviewNotifications, summary_for_event,
+};
 use crate::review::share_lifecycle::{DurableShareLinks, DurableShareService};
 use crate::review::store::ReviewStore;
 use crate::review::transport::inbound::{AuthorizationCache, GrantTier, VerifyingKeyCache};
@@ -137,6 +140,16 @@ pub enum ReviewCommand {
     /// active room so existing comments resolve to the new name everywhere
     /// (the original ParticipantJoined was frozen at share/join time).
     ReannounceIdentity,
+    /// Browser visibility report. Unread state may advance only when both
+    /// predicates are true; keeping the decision native prevents a hidden or
+    /// blurred webview from clearing durable badges optimistically.
+    SetViewState {
+        room_id: RoomId,
+        room_visible: bool,
+        window_focused: bool,
+    },
+    /// Persist the native notification preference for one room.
+    SetNotificationMuted { room_id: RoomId, muted: bool },
 }
 
 /// Updates the `ReviewManager` emits up to the tao event loop.
@@ -251,6 +264,10 @@ pub enum ReviewUpdate {
         room_id: RoomId,
         pending_count: usize,
     },
+    /// Durable per-room unread count derived from fresh verified imports.
+    UnreadChanged { room_id: RoomId, unread_count: u32 },
+    /// Durable native notification preference for the focused room.
+    NotificationMuteChanged { room_id: RoomId, muted: bool },
     /// A command failed; surfaced to the frontend for toast/error UI.
     Error {
         room_id: Option<RoomId>,
@@ -280,6 +297,8 @@ impl ReviewUpdate {
             ReviewUpdate::LocalGrantTierChanged { .. } => "reviewStatus",
             ReviewUpdate::CollabSignal { .. } => "reviewCollab",
             ReviewUpdate::OutboxChanged { .. } => "reviewStatus",
+            ReviewUpdate::UnreadChanged { .. } => "reviewUnread",
+            ReviewUpdate::NotificationMuteChanged { .. } => "reviewNotificationMute",
             ReviewUpdate::Error { .. } => "reviewStatus",
         }
     }
@@ -396,6 +415,7 @@ pub struct ReviewManager {
     /// Monotonic signal for freshly imported, durably persisted verdicts.
     /// Waiters subscribe before reading the store, closing the query/park race.
     verdict_revision_tx: tokio::sync::watch::Sender<u64>,
+    notifications: Arc<ReviewNotifications>,
 }
 
 /// A room's live WebRTC mesh — one DataChannel transport per other participant
@@ -663,6 +683,11 @@ impl ReviewManager {
         update_tx: UpdateSink,
     ) -> Self {
         let (verdict_revision_tx, _) = tokio::sync::watch::channel(0);
+        let notifications = ReviewNotifications::new(
+            Arc::clone(&store),
+            Arc::new(NoopNotificationSink),
+            std::time::Duration::from_secs(5),
+        );
         Self {
             store,
             working_copy,
@@ -678,7 +703,19 @@ impl ReviewManager {
             outboxes: Arc::new(std::sync::Mutex::new(HashMap::new())),
             local_grant_tiers: Arc::new(std::sync::Mutex::new(HashMap::new())),
             verdict_revision_tx,
+            notifications,
         }
+    }
+
+    /// Replace the no-op platform seam used by tests/CLI with the native OS
+    /// notification sink used by the desktop daemon.
+    pub fn with_notification_sink(mut self, sink: Arc<dyn ReviewNotificationSink>) -> Self {
+        self.notifications = ReviewNotifications::new(
+            Arc::clone(&self.store),
+            sink,
+            std::time::Duration::from_secs(5),
+        );
+        self
     }
 
     /// Attach the Share/Join bootstrap pipeline (attn-nnj.6.6).
@@ -729,12 +766,15 @@ impl ReviewManager {
             )
             .map_err(|error| anyhow::anyhow!(error.to_string()))?,
         );
-        self.durable_shares = Some(Arc::new(DurableShareService::new(
-            share_store,
-            Arc::clone(&self.store),
-            share_relay,
-            Arc::clone(&bootstrapper),
-        )));
+        self.durable_shares = Some(Arc::new(
+            DurableShareService::new(
+                share_store,
+                Arc::clone(&self.store),
+                share_relay,
+                Arc::clone(&bootstrapper),
+            )
+            .with_notification_observer(Arc::clone(&self.notifications)),
+        ));
         self.bootstrap = Some(bootstrapper);
         self.runtime = Some(Arc::new(runtime));
         self.verifying_keys = Some(verifying_keys);
@@ -813,7 +853,18 @@ impl ReviewManager {
                     Ok(links) => {
                         for link in links {
                             match self.start_room_runtime(&link.room_id) {
-                                Ok(()) => self.emit_durable_share_ready(link, false),
+                                Ok(()) => {
+                                    let room_id = link.room_id.clone();
+                                    self.emit_durable_share_ready(link, false);
+                                    // Durable renew drains authenticated offline
+                                    // mailbox events directly into events.jsonl,
+                                    // bypassing the live transport forwarder.
+                                    // Reconcile unread + replay now so the
+                                    // resident process surfaces them without a
+                                    // restart; frontend eventId dedup keeps
+                                    // already-rendered events idempotent.
+                                    self.replay_room_to_webview(&room_id);
+                                }
                                 Err(error) => (self.update_tx)(ReviewUpdate::Error {
                                     room_id: Some(link.room_id.clone()),
                                     code: "ATTN_DURABLE_SHARE".into(),
@@ -1027,6 +1078,45 @@ impl ReviewManager {
                 self.emit_inbox();
                 return;
             }
+            (
+                ReviewCommand::SetViewState {
+                    room_id,
+                    room_visible,
+                    window_focused,
+                },
+                _,
+                _,
+            ) => {
+                self.notifications
+                    .set_view_state(room_id.clone(), *room_visible, *window_focused);
+                if *room_visible && *window_focused {
+                    match self.store.clear_unread(room_id) {
+                        Ok(state) => (self.update_tx)(ReviewUpdate::UnreadChanged {
+                            room_id: room_id.clone(),
+                            unread_count: state.unread_count,
+                        }),
+                        Err(error) => tracing::warn!(
+                            "could not persist read cursor for room {}: {error:#}",
+                            room_id.as_str()
+                        ),
+                    }
+                }
+                return;
+            }
+            (ReviewCommand::SetNotificationMuted { room_id, muted }, _, _) => {
+                match self.store.set_notification_muted(room_id, *muted) {
+                    Ok(()) => (self.update_tx)(ReviewUpdate::NotificationMuteChanged {
+                        room_id: room_id.clone(),
+                        muted: *muted,
+                    }),
+                    Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                        room_id: Some(room_id.clone()),
+                        code: "ATTN_NOTIFICATION_PREFERENCE_FAILED".into(),
+                        message: format!("could not save notification preference: {error:#}"),
+                    }),
+                }
+                return;
+            }
             _ => {}
         }
 
@@ -1128,7 +1218,9 @@ impl ReviewManager {
             }
             ReviewCommand::RenewDurableShare { .. } => {
                 for link in links.iter().cloned() {
+                    let room_id = link.room_id.clone();
                     self.emit_durable_share_ready(link, false);
+                    self.replay_room_to_webview(&room_id);
                 }
             }
             ReviewCommand::RevokeDurableShare { target } => {
@@ -2237,6 +2329,7 @@ impl ReviewManager {
         let webrtc_live_map = Arc::clone(&self.live_webrtc);
         let forward_store = Arc::clone(&self.store);
         let verdict_revision_tx = self.verdict_revision_tx.clone();
+        let notifications = Arc::clone(&self.notifications);
         let room_id_owned = room_id.clone();
         let self_device_id = device_id.as_str().to_string();
         let owner_participant_id: Option<String> = self
@@ -2610,7 +2703,10 @@ impl ReviewManager {
                 forward_transport_event(
                     &update_tx,
                     &forward_store,
-                    &verdict_revision_tx,
+                    TransportObservers {
+                        verdict_revision_tx: &verdict_revision_tx,
+                        notifications: Some(&notifications),
+                    },
                     &room_id_owned,
                     &self_device_id,
                     owner_participant_id.as_deref(),
@@ -2729,6 +2825,29 @@ impl ReviewManager {
     /// instead of aborting so one corrupt entry can't hide the rest of the
     /// log.
     pub(crate) fn replay_room_to_webview(&self, room_id: &RoomId) {
+        if let Some(bootstrapper) = self.bootstrap.as_ref() {
+            let identity = bootstrapper
+                .config()
+                .identity_dir()
+                .and_then(|dir| crate::review::bootstrap::load_or_create_identity_in(&dir));
+            match identity {
+                Ok(identity) => {
+                    if let Err(error) = self
+                        .store
+                        .reconcile_unread_from_events(room_id, identity.device_id.as_str())
+                    {
+                        tracing::warn!(
+                            "could not reconcile unread cursor for room {}: {error:#}",
+                            room_id.as_str()
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    "could not load identity for unread reconciliation in room {}: {error}",
+                    room_id.as_str()
+                ),
+            }
+        }
         let events = match self.store.iter_events(room_id) {
             Ok(iter) => iter,
             Err(err) => {
@@ -2760,6 +2879,28 @@ impl ReviewManager {
                 "replayed {replayed} persisted event(s) to the webview for room={}",
                 room_id.as_str()
             );
+        }
+        match self.store.load_unread_state(room_id) {
+            Ok(state) if state.unread_count > 0 => (self.update_tx)(ReviewUpdate::UnreadChanged {
+                room_id: room_id.clone(),
+                unread_count: state.unread_count,
+            }),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                "could not restore unread state for room {}: {error:#}",
+                room_id.as_str()
+            ),
+        }
+        match self.store.notification_muted(room_id) {
+            Ok(true) => (self.update_tx)(ReviewUpdate::NotificationMuteChanged {
+                room_id: room_id.clone(),
+                muted: true,
+            }),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                "could not restore notification preference for room {}: {error:#}",
+                room_id.as_str()
+            ),
         }
     }
 
@@ -3279,6 +3420,8 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::SendCollab { .. } => "SendCollab",
         ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
         ReviewCommand::ReannounceIdentity => "ReannounceIdentity",
+        ReviewCommand::SetViewState { .. } => "SetViewState",
+        ReviewCommand::SetNotificationMuted { .. } => "SetNotificationMuted",
     }
 }
 
@@ -3447,6 +3590,16 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
             room_id: stub_room_id(),
             status: "Pending identity reannounce — no bootstrap attached".to_string(),
         },
+        ReviewCommand::SetViewState { room_id, .. } => ReviewUpdate::UnreadChanged {
+            room_id: room_id.clone(),
+            unread_count: 0,
+        },
+        ReviewCommand::SetNotificationMuted { room_id, muted } => {
+            ReviewUpdate::NotificationMuteChanged {
+                room_id: room_id.clone(),
+                muted: *muted,
+            }
+        }
     }
 }
 
@@ -3635,10 +3788,15 @@ fn rehydrate_snapshot_event(
 /// matching `ReviewUpdate` so the frontend store reflects inbound events
 /// in real time. Lives outside `impl ReviewManager` so the spawned task
 /// only needs the `UpdateSink` clone (not the full manager).
+struct TransportObservers<'a> {
+    verdict_revision_tx: &'a tokio::sync::watch::Sender<u64>,
+    notifications: Option<&'a Arc<ReviewNotifications>>,
+}
+
 fn forward_transport_event(
     update_tx: &UpdateSink,
     store: &crate::review::store::ReviewStore,
-    verdict_revision_tx: &tokio::sync::watch::Sender<u64>,
+    observers: TransportObservers<'_>,
     room_id: &RoomId,
     self_device_id: &str,
     owner_participant_id: Option<&str>,
@@ -3649,6 +3807,7 @@ fn forward_transport_event(
         TransportEvent::EventImported {
             room_id: rid,
             mut event,
+            newly_imported,
         } => {
             let is_verdict = matches!(
                 &event.body,
@@ -3660,13 +3819,38 @@ fn forward_transport_event(
                 body_type = review_event_body_name(&event.body),
                 "forwarding imported review event to webview"
             );
+            if newly_imported
+                && event.meta.device_id.as_str() != self_device_id
+                && matches!(
+                    &event.body,
+                    ReviewEventBody::CommentCreated { .. }
+                        | ReviewEventBody::SuggestionCreated { .. }
+                        | ReviewEventBody::SuggestionAccepted { .. }
+                        | ReviewEventBody::SuggestionRejected { .. }
+                )
+            {
+                match store.record_unread_event(&rid, &event.meta.event_id) {
+                    Ok(state) => (update_tx)(ReviewUpdate::UnreadChanged {
+                        room_id: rid.clone(),
+                        unread_count: state.unread_count,
+                    }),
+                    Err(error) => tracing::warn!(
+                        "could not persist unread import for room {}: {error:#}",
+                        rid.as_str()
+                    ),
+                }
+                if let Some(notifications) = observers.notifications {
+                    let (kind, file_display) = summary_for_event(store, &rid, &event.body);
+                    notifications.enqueue(rid.clone(), kind, file_display);
+                }
+            }
             rehydrate_snapshot_event(store, &rid, &mut event);
             (update_tx)(ReviewUpdate::EventImported {
                 room_id: rid,
                 event,
             });
             if is_verdict {
-                verdict_revision_tx.send_modify(|revision| {
+                observers.verdict_revision_tx.send_modify(|revision| {
                     *revision = revision.wrapping_add(1);
                 });
             }
@@ -4201,6 +4385,511 @@ mod tests {
         event
     }
 
+    #[test]
+    fn verified_remote_unread_import_counts_once_and_focused_visible_view_clears() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-unread-import");
+        let mut event = verdicts_test_event(
+            &room_id,
+            "evt-unread-comment",
+            "remote-reviewer",
+            ReviewEventBody::CommentCreated {
+                thread_id: "thread-unread".to_string(),
+                anchor: dummy_anchor(),
+                body: "remote comment".to_string(),
+            },
+        );
+        event.meta.device_id = dummy_id("remote-device");
+
+        let mut second = event.clone();
+        second.meta.event_id = dummy_id("evt-unread-comment-b");
+        let second_event_id = second.meta.event_id.clone();
+        for (delivered, newly_imported) in [
+            (event.clone(), true),
+            (second, true),
+            // Dual transport replay of A after B: the inbound append reports
+            // it as an existing event, so it must not re-badge.
+            (event.clone(), false),
+        ] {
+            forward_transport_event(
+                &mgr.update_tx,
+                &mgr.store,
+                TransportObservers {
+                    verdict_revision_tx: &mgr.verdict_revision_tx,
+                    notifications: None,
+                },
+                &room_id,
+                "self-device",
+                None,
+                crate::review::transport::TransportEvent::EventImported {
+                    room_id: room_id.clone(),
+                    event: delivered,
+                    newly_imported,
+                },
+            );
+        }
+        assert_eq!(
+            mgr.store
+                .load_unread_state(&room_id)
+                .expect("unread after duplicate")
+                .unread_count,
+            2,
+            "A,B,A delivery must count the two fresh imports exactly once"
+        );
+        while rx.try_recv().is_ok() {}
+
+        mgr.submit(ReviewCommand::SetViewState {
+            room_id: room_id.clone(),
+            room_visible: true,
+            window_focused: false,
+        });
+        assert!(rx.try_recv().is_err(), "blurred view must not clear");
+        assert_eq!(
+            mgr.store
+                .load_unread_state(&room_id)
+                .expect("still unread")
+                .unread_count,
+            2
+        );
+
+        mgr.submit(ReviewCommand::SetViewState {
+            room_id: room_id.clone(),
+            room_visible: true,
+            window_focused: true,
+        });
+        assert!(matches!(
+            rx.try_recv().expect("clear update"),
+            ReviewUpdate::UnreadChanged {
+                unread_count: 0,
+                ..
+            }
+        ));
+        let cleared = mgr
+            .store
+            .load_unread_state(&room_id)
+            .expect("cleared state");
+        assert_eq!(cleared.unread_count, 0);
+        assert_eq!(cleared.last_seen_event_id, Some(second_event_id));
+    }
+
+    #[test]
+    fn local_and_non_attention_events_do_not_increment_unread() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-unread-filter");
+        let mut local = verdicts_test_event(
+            &room_id,
+            "evt-local-suggestion",
+            "self",
+            ReviewEventBody::SuggestionCreated {
+                suggestion_id: "suggestion-local".to_string(),
+                anchor: dummy_anchor(),
+                operation: SuggestionOperation::InsertAfter {
+                    text: "local".to_string(),
+                },
+                note: None,
+            },
+        );
+        local.meta.device_id = dummy_id("self-device");
+        let mut presence = verdicts_test_event(
+            &room_id,
+            "evt-remote-presence",
+            "remote",
+            ReviewEventBody::PresenceUpdated {
+                participant_id: dummy_id("remote"),
+                device_id: dummy_id("remote-device"),
+                online: true,
+                cursor: None,
+            },
+        );
+        presence.meta.device_id = dummy_id("remote-device");
+
+        for event in [local, presence] {
+            forward_transport_event(
+                &mgr.update_tx,
+                &mgr.store,
+                TransportObservers {
+                    verdict_revision_tx: &mgr.verdict_revision_tx,
+                    notifications: None,
+                },
+                &room_id,
+                "self-device",
+                None,
+                crate::review::transport::TransportEvent::EventImported {
+                    room_id: room_id.clone(),
+                    event,
+                    newly_imported: true,
+                },
+            );
+        }
+        assert_eq!(
+            mgr.store
+                .load_unread_state(&room_id)
+                .expect("filtered state")
+                .unread_count,
+            0
+        );
+        assert!(
+            rx.try_iter()
+                .all(|update| !matches!(update, ReviewUpdate::UnreadChanged { .. }))
+        );
+    }
+
+    #[test]
+    fn fresh_verified_remote_attention_event_reaches_notification_sink_once() {
+        #[derive(Default)]
+        struct Sink(Mutex<Vec<crate::review::notifications::ReviewNotification>>);
+        impl ReviewNotificationSink for Sink {
+            fn post(&self, value: crate::review::notifications::ReviewNotification) {
+                self.0.lock().expect("notification sink").push(value);
+            }
+        }
+
+        let (mut mgr, _rx, _tmp) = make_manager();
+        let sink = Arc::new(Sink::default());
+        mgr.notifications = ReviewNotifications::new(
+            Arc::clone(&mgr.store),
+            sink.clone(),
+            std::time::Duration::from_millis(10),
+        );
+        let room_id: RoomId = dummy_id("room-native-notification");
+        let mut event = verdicts_test_event(
+            &room_id,
+            "evt-native-notification",
+            "remote-reviewer",
+            ReviewEventBody::CommentCreated {
+                thread_id: "thread-native-notification".to_string(),
+                anchor: dummy_anchor(),
+                body: "plaintext must never enter the OS summary".to_string(),
+            },
+        );
+        event.meta.device_id = dummy_id("remote-device");
+        forward_transport_event(
+            &mgr.update_tx,
+            &mgr.store,
+            TransportObservers {
+                verdict_revision_tx: &mgr.verdict_revision_tx,
+                notifications: Some(&mgr.notifications),
+            },
+            &room_id,
+            "self-device",
+            None,
+            crate::review::transport::TransportEvent::EventImported {
+                room_id: room_id.clone(),
+                event,
+                newly_imported: true,
+            },
+        );
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        let posted = sink.0.lock().expect("notification sink");
+        assert_eq!(posted.len(), 1);
+        assert!(!posted[0].body.contains("plaintext"));
+    }
+
+    #[test]
+    fn resident_away_owner_loop_imports_notifies_focuses_and_survives_restart() {
+        use crate::review::notifications::ReviewNotification;
+
+        struct ChannelSink(mpsc::Sender<ReviewNotification>);
+        impl ReviewNotificationSink for ChannelSink {
+            fn post(&self, notification: ReviewNotification) {
+                let _ = self.0.send(notification);
+            }
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        let reviews_root = tmp.path().join("reviews");
+        let store =
+            Arc::new(ReviewStore::open_at(reviews_root.clone()).expect("open resident store"));
+        let (update_tx, update_rx) = mpsc::channel::<ReviewUpdate>();
+        let update_tx = Mutex::new(update_tx);
+        let update_sink: UpdateSink = Arc::new(move |update| {
+            let _ = update_tx.lock().expect("update sink").send(update);
+        });
+        let mut manager = ReviewManager::new(
+            Arc::clone(&store),
+            Arc::new(WorkingCopyService::new()),
+            update_sink,
+        );
+        let (notification_tx, notification_rx) = mpsc::channel();
+        let debounce = std::time::Duration::from_millis(15);
+        manager.notifications = ReviewNotifications::new(
+            Arc::clone(&store),
+            Arc::new(ChannelSink(notification_tx)),
+            debounce,
+        );
+
+        let first_room: RoomId = dummy_id("room-resident-first");
+        let second_room: RoomId = dummy_id("room-resident-second");
+        let muted_room: RoomId = dummy_id("room-resident-muted");
+        manager.submit(ReviewCommand::SetNotificationMuted {
+            room_id: muted_room.clone(),
+            muted: true,
+        });
+
+        // This is the production boundary immediately after the inbound
+        // pipeline has authenticated, decrypted, and durably appended a
+        // remote envelope. An empty view map models a resident daemon with no
+        // window: every fresh remote attention event enters unread accounting
+        // and the native notification coordinator.
+        for (room_id, event_id, thread_id) in [
+            (&first_room, "evt-resident-a1", "thread-a1"),
+            (&second_room, "evt-resident-b1", "thread-b1"),
+            (&first_room, "evt-resident-a2", "thread-a2"),
+            (&muted_room, "evt-resident-muted", "thread-muted"),
+        ] {
+            let mut event = verdicts_test_event(
+                room_id,
+                event_id,
+                "browser-reviewer",
+                ReviewEventBody::CommentCreated {
+                    thread_id: thread_id.to_string(),
+                    anchor: dummy_anchor(),
+                    body: format!("private body for {event_id}"),
+                },
+            );
+            event.meta.device_id = dummy_id("browser-device");
+            assert!(
+                store
+                    .append_event(room_id, &event)
+                    .expect("verified import is durable")
+            );
+            forward_transport_event(
+                &manager.update_tx,
+                &manager.store,
+                TransportObservers {
+                    verdict_revision_tx: &manager.verdict_revision_tx,
+                    notifications: Some(&manager.notifications),
+                },
+                room_id,
+                "owner-device",
+                None,
+                crate::review::transport::TransportEvent::EventImported {
+                    room_id: room_id.clone(),
+                    event,
+                    newly_imported: true,
+                },
+            );
+        }
+
+        assert_eq!(
+            store
+                .load_unread_state(&first_room)
+                .expect("first unread")
+                .unread_count,
+            2
+        );
+        assert_eq!(
+            store
+                .load_unread_state(&second_room)
+                .expect("second unread")
+                .unread_count,
+            1
+        );
+        assert_eq!(
+            store
+                .load_unread_state(&muted_room)
+                .expect("muted unread")
+                .unread_count,
+            1,
+            "muting native notifications must not hide in-app unread state"
+        );
+
+        let posted = [
+            notification_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("first debounced native notification"),
+            notification_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("second debounced native notification"),
+        ];
+        let by_room = posted
+            .into_iter()
+            .map(|notification| (notification.room_id.clone(), notification))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(by_room.len(), 2, "bursts collapse independently per room");
+        assert!(by_room[&first_room].body.starts_with("2 new comments"));
+        assert!(by_room[&second_room].body.starts_with("1 new comment"));
+        assert!(!by_room.contains_key(&muted_room));
+        assert!(
+            notification_rx
+                .recv_timeout(debounce.saturating_mul(4))
+                .is_err(),
+            "muted room and burst duplicates must not post"
+        );
+
+        // A native click follows the production URI parser and focus script;
+        // once the hydrated frontend reports that room visible in a focused
+        // window, the same manager command clears only that room's badge.
+        let clicked = &by_room[&first_room];
+        let selected_room =
+            crate::review::notifications::room_id_from_deep_link(&clicked.deep_link)
+                .expect("notification deep link is a local room route");
+        assert_eq!(selected_room, first_room.as_str());
+        let focus_script = crate::review::notifications::focus_script(&selected_room);
+        assert!(focus_script.contains("__attn_pending_review_focus__"));
+        assert!(focus_script.contains("selectRoom(\"room-resident-first\")"));
+        manager.submit(ReviewCommand::SetViewState {
+            room_id: first_room.clone(),
+            room_visible: true,
+            window_focused: true,
+        });
+        assert_eq!(
+            store
+                .load_unread_state(&first_room)
+                .expect("focused unread")
+                .unread_count,
+            0
+        );
+        assert_eq!(
+            store
+                .load_unread_state(&second_room)
+                .expect("other room remains unread")
+                .unread_count,
+            1
+        );
+        assert!(update_rx.try_iter().any(|update| matches!(
+            update,
+            ReviewUpdate::UnreadChanged { room_id, unread_count: 0 }
+                if room_id == first_room
+        )));
+
+        drop(manager);
+        drop(store);
+
+        // Simulate the next resident process. Replaying durable room state
+        // restores badges and mute preferences to the frontend but never
+        // re-enqueues historical events into the native notification worker.
+        let reopened =
+            Arc::new(ReviewStore::open_at(reviews_root.clone()).expect("reopen resident store"));
+        let (restart_update_tx, restart_update_rx) = mpsc::channel::<ReviewUpdate>();
+        let restart_update_tx = Mutex::new(restart_update_tx);
+        let restart_updates: UpdateSink = Arc::new(move |update| {
+            let _ = restart_update_tx
+                .lock()
+                .expect("restart update sink")
+                .send(update);
+        });
+        let mut restarted = ReviewManager::new(
+            Arc::clone(&reopened),
+            Arc::new(WorkingCopyService::new()),
+            restart_updates,
+        );
+        let (restart_notification_tx, restart_notification_rx) = mpsc::channel();
+        restarted.notifications = ReviewNotifications::new(
+            Arc::clone(&reopened),
+            Arc::new(ChannelSink(restart_notification_tx)),
+            debounce,
+        );
+        for room_id in [&first_room, &second_room, &muted_room] {
+            restarted.replay_room_to_webview(room_id);
+        }
+
+        assert_eq!(
+            reopened
+                .load_unread_state(&first_room)
+                .expect("cleared state survives restart")
+                .unread_count,
+            0
+        );
+        assert_eq!(
+            reopened
+                .load_unread_state(&second_room)
+                .expect("unread survives restart")
+                .unread_count,
+            1
+        );
+        assert!(
+            reopened
+                .notification_muted(&muted_room)
+                .expect("mute survives restart")
+        );
+        let replayed_updates = restart_update_rx.try_iter().collect::<Vec<_>>();
+        assert!(replayed_updates.iter().any(|update| matches!(
+            update,
+            ReviewUpdate::UnreadChanged { room_id, unread_count: 1 }
+                if room_id == &second_room
+        )));
+        assert!(replayed_updates.iter().any(|update| matches!(
+            update,
+            ReviewUpdate::NotificationMuteChanged { room_id, muted: true }
+                if room_id == &muted_room
+        )));
+        assert!(
+            restart_notification_rx
+                .recv_timeout(debounce.saturating_mul(4))
+                .is_err(),
+            "resident restart must not replay historical OS notifications"
+        );
+    }
+
+    #[test]
+    fn durable_offline_unread_replay_surfaces_without_process_restart() {
+        let tmp = TempDir::new().expect("tempdir");
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open durable replay store"),
+        );
+        let working_copy = Arc::new(WorkingCopyService::new());
+        let (tx, rx) = mpsc::channel::<ReviewUpdate>();
+        let tx = Mutex::new(tx);
+        let sink: UpdateSink = Arc::new(move |update| {
+            let _ = tx.lock().expect("sink").send(update);
+        });
+        let identity_dir = tmp.path().join("identity");
+        let manager = ReviewManager::new(Arc::clone(&store), working_copy, sink)
+            .with_bootstrap(
+                "http://127.0.0.1:1".to_string(),
+                Some(identity_dir),
+                Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            )
+            .expect("bootstrap without network");
+        let room_id: RoomId = dummy_id("room-durable-offline-unread");
+        let mut event = verdicts_test_event(
+            &room_id,
+            "evt-durable-offline-comment",
+            "browser-reviewer",
+            ReviewEventBody::CommentCreated {
+                thread_id: "thread-durable-offline".to_string(),
+                anchor: dummy_anchor(),
+                body: "offline browser comment".to_string(),
+            },
+        );
+        event.meta.device_id = dummy_id("browser-device");
+        store
+            .append_event(&room_id, &event)
+            .expect("durable drain committed event");
+
+        manager.replay_room_to_webview(&room_id);
+        assert_eq!(
+            store
+                .load_unread_state(&room_id)
+                .expect("unread reconciled")
+                .unread_count,
+            1
+        );
+        let updates = rx.try_iter().collect::<Vec<_>>();
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            ReviewUpdate::EventImported { event: imported, .. }
+                if imported.meta.event_id == event.meta.event_id
+        )));
+        assert!(updates.iter().any(|update| matches!(
+            update,
+            ReviewUpdate::UnreadChanged {
+                unread_count: 1,
+                ..
+            }
+        )));
+
+        manager.replay_room_to_webview(&room_id);
+        assert_eq!(
+            store
+                .load_unread_state(&room_id)
+                .expect("idempotent durable replay")
+                .unread_count,
+            1
+        );
+    }
+
     #[tokio::test]
     async fn verdicts_wait_already_complete_does_not_block() {
         let (mgr, _rx, _tmp) = make_manager();
@@ -4286,13 +4975,17 @@ mod tests {
             forward_transport_event(
                 &notifier.update_tx,
                 &notifier.store,
-                &notifier.verdict_revision_tx,
+                TransportObservers {
+                    verdict_revision_tx: &notifier.verdict_revision_tx,
+                    notifications: None,
+                },
                 &notify_room,
                 "self-device",
                 None,
                 crate::review::transport::TransportEvent::EventImported {
                     room_id: notify_room.clone(),
                     event: accepted,
+                    newly_imported: true,
                 },
             );
         });
@@ -4430,13 +5123,17 @@ mod tests {
         forward_transport_event(
             &mgr.update_tx,
             &mgr.store,
-            &mgr.verdict_revision_tx,
+            TransportObservers {
+                verdict_revision_tx: &mgr.verdict_revision_tx,
+                notifications: None,
+            },
             &room_id,
             "owner-device",
             None,
             crate::review::transport::TransportEvent::EventImported {
                 room_id: room_id.clone(),
                 event: rejected,
+                newly_imported: true,
             },
         );
 

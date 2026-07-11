@@ -17,6 +17,7 @@
   import FileText from '@lucide/svelte/icons/file-text';
   import { reviewStore } from './review/store.svelte';
   import { deriveSharedTree, type SharedTreeNode } from './review/shared-tree';
+  import UnreadBadge from './UnreadBadge.svelte';
 
   const tree = $derived(deriveSharedTree(reviewStore.snapshots, reviewStore.currentRoomId));
   // Folders are expanded by default; track the COLLAPSED set so new folders
@@ -64,7 +65,13 @@
         onclick={() => reviewStore.setCurrentFile(node.fileId)}
       >
         <FileText class="size-3.5 shrink-0 opacity-70" aria-hidden="true" />
-        <span class="truncate">{node.name}</span>
+        <span class="min-w-0 flex-1 truncate">{node.name}</span>
+        {#if node.fileId === reviewStore.currentFileId}
+          <UnreadBadge
+            count={reviewStore.currentRoomUnread}
+            label="unread updates for this shared room"
+          />
+        {/if}
       </button>
     {/if}
   {/each}

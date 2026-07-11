@@ -916,7 +916,7 @@ impl MailboxWsClient {
                 let room_id = envelope.room_id.clone();
                 let kind = envelope.kind;
                 use crate::review::model::EnvelopeKind;
-                let mut decoded_event: Option<crate::review::model::ReviewEvent> = None;
+                let mut decoded_event: Option<(crate::review::model::ReviewEvent, bool)> = None;
                 let mut decoded_collab: Option<(crate::review::ids::DeviceId, String)> = None;
                 let mut decoded_signaling: Option<
                     crate::review::transport::signaling::SignalingPayload,
@@ -926,7 +926,7 @@ impl MailboxWsClient {
                         EnvelopeKind::Event => {
                             match self.import_event_with_refresh(&room_id, &envelope).await {
                                 Ok(outcome) => {
-                                    decoded_event = Some(outcome.event);
+                                    decoded_event = Some((outcome.event, outcome.newly_imported));
                                     Ok(())
                                 }
                                 Err(err) => Err(err),
@@ -996,10 +996,11 @@ impl MailboxWsClient {
                         // bridge can render it immediately; then the raw
                         // envelope frame for consumers that care about
                         // serverSeq watermarking.
-                        if let Some(event) = decoded_event {
+                        if let Some((event, newly_imported)) = decoded_event {
                             let _ = self.events_tx.send(TransportEvent::EventImported {
                                 room_id: room_id.clone(),
                                 event,
+                                newly_imported,
                             });
                         }
                         if let Some((from, payload)) = decoded_collab {

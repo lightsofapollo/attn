@@ -2,6 +2,10 @@
 
 A native markdown viewer CLI built with Rust (wry/tao) and Svelte 5.
 
+## Design Context
+
+Strategic design context lives in [`PRODUCT.md`](PRODUCT.md) at the repo root — read it before design/UI work. In short: register is **product** (the reviewer tool is the thing; design serves the task), platform **web** (Svelte in a wry webview + a hosted browser build). Positioning: *the reviewer for agent-authored docs* — human comments and AI suggestions in one end-to-end-encrypted thread over files that never leave your machine. The guiding principle is **warm surface, sharp behavior**: an editorial paper/ink/rust identity you can see, power-tool (Linear/Raycast-grade) precision you can feel. The visual system is captured in `DESIGN.md`.
+
 ## Development (HMR)
 
 Use the Taskfile dev command for frontend/native UI development:

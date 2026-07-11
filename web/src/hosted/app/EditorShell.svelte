@@ -428,12 +428,13 @@
     return ownerSessionOpening;
   }
 
-  // Acquire the route-lifetime lease immediately. A passive tab is visibly
-  // read-only before the user tries to edit, and a shared owner can run
-  // authority/review while merely reading.
+  // Desktop opens editor-first and therefore needs route authority up front.
+  // Mobile is deliberately reader-first: merely opening a document must not
+  // block a desktop writer in another tab. It asks for authority only when the
+  // user explicitly taps Edit.
   $effect(() => {
     void workspace.id;
-    untrack(() => { void ensureOwnerSession(); });
+    if (desktopLayout) untrack(() => { void ensureOwnerSession(); });
     return () => {
       unsubscribeOwner?.();
       unsubscribeOwner = null;

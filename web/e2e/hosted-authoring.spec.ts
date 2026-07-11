@@ -38,6 +38,8 @@ test('one-click create is real: persists across reload with zero relay traffic',
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('Untitled');
   await expect(activeSidebarEntry(page)).toContainText('untitled.md');
+  await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 
   // And the desk lists it as a real recent workspace.
   await page.goto('/app');
@@ -128,16 +130,38 @@ test('editing autosaves durable revisions and recovers after reload', async ({ p
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   await expect(page.locator('[data-body-text]')).toContainText('Autosaved title');
   await expect(page.locator('[data-body-text]')).toContainText('survive a reload');
+  await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 });
 
-test('a second tab is honestly read-only while one tab edits', async ({ page, context }) => {
+test('workspace rename reload keeps the same tab writable', async ({ page }) => {
+  await page.goto('/app#new');
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
+
+  await page.getByRole('button', { name: 'Rename workspace' }).click();
+  const input = page.getByRole('textbox', { name: 'Workspace title' });
+  await input.fill('Lease handoff');
+  await input.press('Enter');
+
+  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText(
+    'Lease handoff',
+  );
+  await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
+});
+
+test('a duplicated tab gets a distinct identity and stays read-only while one tab edits', async ({ page, context }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   const url = page.url();
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 
-  const second = await context.newPage();
-  await second.goto(url);
+  // Opening from the writer copies sessionStorage in real browsers. The new
+  // tab must detect that copied tab ID before requesting the writer lease.
+  const secondPromise = context.waitForEvent('page');
+  await page.evaluate((target) => window.open(target, '_blank'), url);
+  const second = await secondPromise;
+  await second.waitForLoadState('domcontentloaded');
   await expect(second.locator('[data-app-view="workspace"]')).toBeVisible();
   await expect(second.locator('[data-degraded="lease-denied"]')).toContainText(
     'Another tab is editing this workspace.',
@@ -151,6 +175,25 @@ test('a second tab is honestly read-only while one tab edits', async ({ page, co
   await expect(documentEditor(second)).toHaveAttribute('contenteditable', 'true');
 });
 
+test('mobile reader does not claim the writer lease until Edit is requested', async ({ page, context }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app#new');
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
+  const url = page.url();
+
+  const desktop = await context.newPage();
+  await desktop.setViewportSize({ width: 1280, height: 800 });
+  await desktop.goto(url);
+  await expect(documentEditor(desktop)).toHaveAttribute('contenteditable', 'true');
+
+  await page.locator('.thumb-dock').getByRole('button', { name: 'Edit' }).click();
+  await expect(page.locator('[data-degraded="lease-denied"]')).toContainText(
+    'Another tab is editing this workspace.',
+  );
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'false');
+});
+
 test('multi-file rail: create, add asset with inline preview, rename, delete, export zip', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
@@ -161,6 +204,8 @@ test('multi-file rail: create, add asset with inline preview, rename, delete, ex
   await page.getByRole('textbox', { name: 'New Markdown file path' }).press('Enter');
   await expect(page).toHaveURL(/\/docs\/notes\.md$/u);
   await expect(activeSidebarEntry(page)).toContainText('notes.md');
+  await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 
   // Add a PNG asset — it must render inline from decrypted bytes.
   const chooser = page.waitForEvent('filechooser');
@@ -172,6 +217,8 @@ test('multi-file rail: create, add asset with inline preview, rename, delete, ex
   );
   await (await chooser).setFiles([{ name: 'pixel.png', mimeType: 'image/png', buffer: png }]);
   await expect(page.getByRole('button', { name: 'pixel.png' })).toBeVisible();
+  await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
   await page.getByRole('button', { name: 'pixel.png' }).click();
   await expect(page.locator('.asset-image')).toBeVisible();
   const naturalWidth = await page

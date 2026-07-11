@@ -27,6 +27,100 @@ import type { WorkspaceEntryRecord } from '../../lib/review/browser-workspace-sc
 /** Safe raster types that may render inline (epic scope note 2026-07-10). */
 const INLINE_SAFE_MEDIA = /^image\/(?:png|jpeg|gif|webp|avif)$/iu;
 
+const TAB_HOLDER_STORAGE_KEY = 'attn:browser-tab-holder:v1';
+const TAB_IDENTITY_CHANNEL = 'attn:browser-tab-identity:v1';
+const TAB_IDENTITY_PROBE_MS = 75;
+
+type TabIdentityMessage =
+  | { type: 'probe'; holderId: string; probeId: string }
+  | { type: 'present'; holderId: string; probeId: string };
+
+let tabHolderPromise: Promise<string> | null = null;
+let tabHolderId: string | null = null;
+let tabIdentityChannel: BroadcastChannel | null = null;
+
+function randomHolderId(): string {
+  const holder = new Uint8Array(9);
+  crypto.getRandomValues(holder);
+  return `tab-${Array.from(holder, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/**
+ * Keep the writer identity stable across a reload in one browsing context.
+ *
+ * `sessionStorage` has exactly the lifetime we need, but browsers copy it
+ * when a tab is duplicated or opened by another same-origin tab. The small
+ * BroadcastChannel probe detects that live copy and rotates the new tab's
+ * identity before either page asks IndexedDB for the fenced writer lease.
+ */
+async function browserTabHolderId(): Promise<string> {
+  if (tabHolderId) return tabHolderId;
+  if (tabHolderPromise) return tabHolderPromise;
+
+  tabHolderPromise = (async () => {
+    let candidate = randomHolderId();
+    try {
+      candidate = sessionStorage.getItem(TAB_HOLDER_STORAGE_KEY) ?? candidate;
+    } catch {
+      // IndexedDB may still be available when sessionStorage is restricted.
+    }
+
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        const channel = new BroadcastChannel(TAB_IDENTITY_CHANNEL);
+        tabIdentityChannel = channel;
+        const probeId = crypto.randomUUID();
+        let copiedFromLiveTab = false;
+
+        channel.addEventListener('message', (event: MessageEvent<TabIdentityMessage>) => {
+          const message = event.data;
+          if (!message || message.holderId !== tabHolderId) return;
+          if (message.type === 'probe') {
+            channel.postMessage({
+              type: 'present',
+              holderId: tabHolderId,
+              probeId: message.probeId,
+            } satisfies TabIdentityMessage);
+          }
+        });
+        const detectCopy = (event: MessageEvent<TabIdentityMessage>): void => {
+          const message = event.data;
+          if (
+            message?.type === 'present'
+            && message.holderId === candidate
+            && message.probeId === probeId
+          ) copiedFromLiveTab = true;
+        };
+        channel.addEventListener('message', detectCopy);
+        channel.postMessage({ type: 'probe', holderId: candidate, probeId } satisfies TabIdentityMessage);
+        await new Promise((resolve) => window.setTimeout(resolve, TAB_IDENTITY_PROBE_MS));
+        channel.removeEventListener('message', detectCopy);
+        if (copiedFromLiveTab) candidate = randomHolderId();
+
+        window.addEventListener('pagehide', () => {
+          channel.close();
+          if (tabIdentityChannel === channel) tabIdentityChannel = null;
+        }, { once: true });
+      } catch {
+        // BroadcastChannel can be policy-disabled even when the constructor
+        // exists. Fencing remains safe; only duplicate-tab detection degrades.
+        tabIdentityChannel?.close();
+        tabIdentityChannel = null;
+      }
+    }
+
+    try {
+      sessionStorage.setItem(TAB_HOLDER_STORAGE_KEY, candidate);
+    } catch {
+      // Best-effort stability; the fenced lease remains safe without it.
+    }
+    tabHolderId = candidate;
+    return candidate;
+  })();
+
+  return tabHolderPromise;
+}
+
 export class RealWorkspaceAppService implements WorkspaceAppService {
   private readonly service: BrowserWorkspaceService;
 
@@ -35,7 +129,14 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   }
 
   static async open(options: BrowserWorkspaceServiceOptions = {}): Promise<RealWorkspaceAppService> {
-    return new RealWorkspaceAppService(await BrowserWorkspaceService.open(options));
+    // Establish the browsing-context identity while the shell opens, not only
+    // on the first edit. That lets an idle desk tab answer a later duplicate's
+    // collision probe before either one attempts to become the writer.
+    const [service] = await Promise.all([
+      BrowserWorkspaceService.open(options),
+      browserTabHolderId(),
+    ]);
+    return new RealWorkspaceAppService(service);
   }
 
   close(): void {
@@ -118,9 +219,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   }
 
   async beginEditing(workspaceId: string): Promise<EditingSession | null> {
-    const holder = new Uint8Array(9);
-    crypto.getRandomValues(holder);
-    const holderId = `tab-${Array.from(holder, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+    const holderId = await browserTabHolderId();
     const runtime = await this.service.beginOwnerRuntime(workspaceId, holderId);
     if (runtime.getState().leaseRole !== 'owner') {
       await runtime.close();

@@ -95,6 +95,13 @@ export type SealedBody =
       ciphertext: Uint8Array;
     }
   | {
+      /** Large-body fallback when OPFS is unavailable or fails: the sealed
+       * bytes live in the record without the inline cap. */
+      location: 'idb-large';
+      nonce: string;
+      ciphertext: Uint8Array;
+    }
+  | {
       location: 'opfs';
       nonce: string;
       /** Length of the sealed OPFS object, for GC/quota accounting. */
@@ -307,15 +314,18 @@ export function validateSealedBody(value: unknown): asserts value is SealedBody 
   requireRecord(value, 'sealed body');
   const body = value as Partial<SealedBody> & { location?: unknown };
   requireBase64Url(body.nonce, 'sealed body nonce');
-  if (body.location === 'idb') {
+  if (body.location === 'idb' || body.location === 'idb-large') {
     const ciphertext = (body as { ciphertext?: unknown }).ciphertext;
     if (!(ciphertext instanceof Uint8Array) || ciphertext.length < 16) {
       throw new BrowserStorageError('inline sealed body must include an authentication tag');
     }
-    if (ciphertext.length > MAX_INLINE_SEALED_BODY_BYTES) {
+    if (body.location === 'idb' && ciphertext.length > MAX_INLINE_SEALED_BODY_BYTES) {
       throw new BrowserStorageError(
         `inline sealed body exceeds ${MAX_INLINE_SEALED_BODY_BYTES} bytes`,
       );
+    }
+    if (ciphertext.length > MAX_BODY_BYTES + 16) {
+      throw new BrowserStorageError('sealed body exceeds the maximum size cap');
     }
     return;
   }

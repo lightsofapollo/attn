@@ -300,10 +300,12 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
     this.db.close();
   }
 
-  /** Atomic workspace/file transaction APIs (attn-7xl.2.3). */
+  /** Atomic workspace/file transaction APIs (attn-7xl.2.3/.2.4). */
   get workspaces(): WorkspaceStore {
     if (!this.workspaceStore) {
-      this.workspaceStore = new WorkspaceStore(this.db, this.cryptoImpl, this.now);
+      this.workspaceStore = new WorkspaceStore(this.db, this.cryptoImpl, this.now, {
+        filesystem: this.filesystem,
+      });
     }
     return this.workspaceStore;
   }

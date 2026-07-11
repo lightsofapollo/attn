@@ -18,7 +18,7 @@
 //     cleanup can never resurrect sealed content
 
 import { sha256 } from '@noble/hashes/sha2.js';
-import { base64UrlEncode } from './browser-crypto';
+import { base64UrlEncode, toCanonicalBytes } from './browser-crypto';
 import { abortWith, isConstraintError, requestValue, transactionDone } from './browser-idb';
 import { BrowserStorageError, StorageConflictError } from './browser-storage-errors';
 import {
@@ -30,6 +30,7 @@ import {
 import {
   MAX_BODY_BYTES,
   MAX_ENTRIES_PER_WORKSPACE,
+  MAX_INLINE_SEALED_BODY_BYTES,
   REVISION_HISTORY_INDEX,
   STORE_WORKSPACES,
   STORE_WORKSPACE_ENTRIES,
@@ -50,8 +51,24 @@ import {
   type WorkspaceEntryRecord,
   type WorkspaceLeaseRecord,
   type WorkspaceRecord,
+  type WorkspaceGcRecord,
   type WorkspaceRevisionRecord,
 } from './browser-workspace-schema';
+
+/** Files receive only already-sealed bytes and opaque hash-derived paths.
+ * Mirrors browser-storage.ts's SealedBlobFileSystem. */
+export interface WorkspaceBlobFileSystem {
+  write(path: string, sealedBytes: Uint8Array): Promise<void>;
+  read(path: string): Promise<Uint8Array | null>;
+  delete(path: string): Promise<boolean>;
+  deletePrefix(prefix: string): Promise<void>;
+}
+
+export interface WorkspaceStoreOptions {
+  filesystem?: WorkspaceBlobFileSystem | null;
+  /** Sealed bodies above this many bytes route to OPFS when available. */
+  inlineThresholdBytes?: number;
+}
 
 const MAX_COMMIT_RETRIES = 8;
 const MAX_CLOCK = Number.MAX_SAFE_INTEGER;
@@ -104,11 +121,20 @@ export class WorkspaceStore {
   private readonly db: IDBDatabase;
   private readonly cryptoImpl: Crypto;
   private readonly now: () => number;
+  private readonly filesystem: WorkspaceBlobFileSystem | null;
+  private readonly inlineThresholdBytes: number;
 
-  constructor(db: IDBDatabase, cryptoImpl: Crypto, now: () => number) {
+  constructor(
+    db: IDBDatabase,
+    cryptoImpl: Crypto,
+    now: () => number,
+    options: WorkspaceStoreOptions = {},
+  ) {
     this.db = db;
     this.cryptoImpl = cryptoImpl;
     this.now = now;
+    this.filesystem = options.filesystem ?? null;
+    this.inlineThresholdBytes = options.inlineThresholdBytes ?? MAX_INLINE_SEALED_BODY_BYTES;
   }
 
   // ————— reads —————
@@ -242,13 +268,16 @@ export class WorkspaceStore {
     const revision = sealed;
 
     const tx = this.db.transaction(
-      [STORE_WORKSPACES, STORE_WORKSPACE_ENTRIES, STORE_WORKSPACE_REVISIONS],
+      [STORE_WORKSPACES, STORE_WORKSPACE_ENTRIES, STORE_WORKSPACE_REVISIONS, STORE_WORKSPACE_GC],
       'readwrite',
     );
     const done = transactionDone(tx);
     tx.objectStore(STORE_WORKSPACES).add(workspace);
     tx.objectStore(STORE_WORKSPACE_ENTRIES).add(entry);
     tx.objectStore(STORE_WORKSPACE_REVISIONS).add(revision);
+    if (revision.body.location === 'opfs') {
+      tx.objectStore(STORE_WORKSPACE_GC).delete(gcIntentId(workspaceId, revision.revisionId));
+    }
     try {
       await done;
     } catch (error) {
@@ -596,7 +625,18 @@ export class WorkspaceStore {
       );
       for (const key of keys) tx.objectStore(store).delete(key);
     }
+    // Durable intent to remove the workspace's OPFS prefix, then attempt it
+    // now; sweepGc finishes the job if this process dies first.
+    tx.objectStore(STORE_WORKSPACE_GC).put({
+      v: WORKSPACE_RECORD_VERSION,
+      gcId: `workspace:${workspaceId}`,
+      kind: 'workspace',
+      workspaceId,
+      target: workspaceId,
+      createdAt: this.timestamp(0),
+    } satisfies WorkspaceGcRecord);
     await done;
+    await this.sweepGc().catch(() => undefined);
     return true;
   }
 
@@ -653,6 +693,12 @@ export class WorkspaceStore {
       }
       try {
         await plan.apply(tx);
+        const committedRevision = (plan.result as CommittedRevision).revision;
+        if (committedRevision && committedRevision.body.location === 'opfs') {
+          tx.objectStore(STORE_WORKSPACE_GC).delete(
+            gcIntentId(workspaceId, committedRevision.revisionId),
+          );
+        }
       } catch (error) {
         await abortWith(tx, done, toStorageError(error));
       }
@@ -730,6 +776,7 @@ export class WorkspaceStore {
       },
       input.body,
     );
+    const body = await this.placeSealedBody(input.workspaceId, input.revisionId, sealed);
     return {
       v: WORKSPACE_RECORD_VERSION,
       workspaceId: input.workspaceId,
@@ -739,19 +786,137 @@ export class WorkspaceStore {
       createdAt: this.timestamp(0),
       sizeBytes: input.body.length,
       bodyHash,
-      body: { location: 'idb', nonce: sealed.nonce, ciphertext: sealed.ciphertext },
+      body,
     };
+  }
+
+  /**
+   * Route sealed bytes: large bodies go to OPFS behind a write-ahead GC
+   * intent (intent row commits first, then the file is written and verified
+   * by read-back; the revision's commit transaction clears the intent), and
+   * every failure or missing-OPFS case falls back to encrypted IndexedDB.
+   */
+  private async placeSealedBody(
+    workspaceId: string,
+    revisionId: string,
+    sealed: { nonce: string; ciphertext: Uint8Array },
+  ): Promise<WorkspaceRevisionRecord['body']> {
+    const useOpfs = this.filesystem && sealed.ciphertext.length > this.inlineThresholdBytes;
+    if (!useOpfs) return this.fallbackBody(sealed);
+    const path = workspaceBlobPath(workspaceId, revisionId);
+    await this.putGcIntent(workspaceId, revisionId);
+    try {
+      await this.filesystem!.write(path, sealed.ciphertext);
+      const readBack = await this.filesystem!.read(path);
+      if (!readBack || !bytesEqual(readBack, sealed.ciphertext)) {
+        throw new BrowserStorageError('opfs read-back verification failed');
+      }
+      return { location: 'opfs', nonce: sealed.nonce, sealedBytes: sealed.ciphertext.length };
+    } catch {
+      // Best-effort cleanup, then keep the workspace usable via IndexedDB.
+      await this.filesystem!.delete(path).catch(() => undefined);
+      await this.deleteGcIntent(workspaceId, revisionId).catch(() => undefined);
+      return this.fallbackBody(sealed);
+    }
+  }
+
+  private fallbackBody(sealed: {
+    nonce: string;
+    ciphertext: Uint8Array;
+  }): WorkspaceRevisionRecord['body'] {
+    return sealed.ciphertext.length <= MAX_INLINE_SEALED_BODY_BYTES
+      ? { location: 'idb', nonce: sealed.nonce, ciphertext: sealed.ciphertext }
+      : { location: 'idb-large', nonce: sealed.nonce, ciphertext: sealed.ciphertext };
+  }
+
+  private async putGcIntent(workspaceId: string, revisionId: string): Promise<void> {
+    const record: WorkspaceGcRecord = {
+      v: WORKSPACE_RECORD_VERSION,
+      gcId: gcIntentId(workspaceId, revisionId),
+      kind: 'opfs-orphan',
+      workspaceId,
+      target: revisionId,
+      createdAt: this.timestamp(0),
+    };
+    const tx = this.db.transaction(STORE_WORKSPACE_GC, 'readwrite');
+    const done = transactionDone(tx);
+    tx.objectStore(STORE_WORKSPACE_GC).put(record);
+    await done;
+  }
+
+  private async deleteGcIntent(workspaceId: string, revisionId: string): Promise<void> {
+    const tx = this.db.transaction(STORE_WORKSPACE_GC, 'readwrite');
+    const done = transactionDone(tx);
+    tx.objectStore(STORE_WORKSPACE_GC).delete(gcIntentId(workspaceId, revisionId));
+    await done;
+  }
+
+  /**
+   * Sweep the GC ledger: delete orphaned OPFS files (write-ahead intents
+   * whose revision never committed, or retired revisions) and workspace
+   * prefixes. Safe to run at any time; committed OPFS-bodied revisions keep
+   * their files.
+   */
+  async sweepGc(): Promise<number> {
+    const tx = this.db.transaction(STORE_WORKSPACE_GC, 'readonly');
+    const done = transactionDone(tx);
+    const records = await requestValue<WorkspaceGcRecord[]>(
+      tx.objectStore(STORE_WORKSPACE_GC).getAll(),
+    );
+    await done;
+    let cleaned = 0;
+    for (const record of records) {
+      if (record.kind === 'opfs-orphan') {
+        const revision = await this.getRaw<WorkspaceRevisionRecord>(STORE_WORKSPACE_REVISIONS, [
+          record.workspaceId,
+          record.target,
+        ]);
+        if (revision && revision.body.location === 'opfs') {
+          // Committed revision whose in-tx intent clear lost a race — the
+          // file is live; just retire the stale intent row.
+          await this.deleteGcIntent(record.workspaceId, record.target);
+          continue;
+        }
+        await this.filesystem
+          ?.delete(workspaceBlobPath(record.workspaceId, record.target))
+          .catch(() => undefined);
+        await this.deleteGcIntent(record.workspaceId, record.target);
+        cleaned += 1;
+      } else if (record.kind === 'workspace') {
+        await this.filesystem
+          ?.deletePrefix(workspaceBlobPrefix(record.workspaceId))
+          .catch(() => undefined);
+        const cleanupTx = this.db.transaction(STORE_WORKSPACE_GC, 'readwrite');
+        const cleanupDone = transactionDone(cleanupTx);
+        cleanupTx.objectStore(STORE_WORKSPACE_GC).delete(record.gcId);
+        await cleanupDone;
+        cleaned += 1;
+      }
+    }
+    return cleaned;
   }
 
   private async openBody(
     workspaceId: string,
     revision: WorkspaceRevisionRecord,
   ): Promise<Uint8Array> {
-    if (revision.body.location !== 'idb') {
-      // The OPFS large-body tier lands in attn-7xl.2.4.
-      throw new BrowserStorageError('opfs revision bodies are not readable yet');
-    }
     const rootKey = await this.requireRootKey(workspaceId);
+    let ciphertext: Uint8Array;
+    if (revision.body.location === 'opfs') {
+      if (!this.filesystem) {
+        throw new BrowserStorageError('opfs revision body is unreachable: no filesystem');
+      }
+      const bytes = await this.filesystem.read(
+        workspaceBlobPath(workspaceId, revision.revisionId),
+      );
+      if (!bytes) throw new BrowserStorageError('opfs revision body is missing');
+      if (bytes.length !== revision.body.sealedBytes) {
+        throw new BrowserStorageError('opfs revision body length does not match its record');
+      }
+      ciphertext = bytes;
+    } else {
+      ciphertext = revision.body.ciphertext;
+    }
     return openRevisionBody(
       this.cryptoImpl,
       rootKey,
@@ -763,7 +928,7 @@ export class WorkspaceStore {
         sizeBytes: revision.sizeBytes,
         bodyHash: revision.bodyHash,
       },
-      { nonce: revision.body.nonce, ciphertext: revision.body.ciphertext },
+      { nonce: revision.body.nonce, ciphertext },
     );
   }
 
@@ -846,6 +1011,34 @@ function requireName(value: unknown): asserts value is string {
   if (typeof value !== 'string' || value.length === 0) {
     throw new BrowserStorageError('workspace name is required');
   }
+}
+
+function gcIntentId(workspaceId: string, revisionId: string): string {
+  return `opfs:${workspaceId}:${revisionId}`;
+}
+
+function opaqueHash(label: string, value: string): string {
+  const bytes = toCanonicalBytes({ label, value });
+  try {
+    return base64UrlEncode(sha256(bytes));
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+export function workspaceBlobPrefix(workspaceId: string): string {
+  return `.attn-workspace/v1/${opaqueHash('workspace', workspaceId)}`;
+}
+
+export function workspaceBlobPath(workspaceId: string, revisionId: string): string {
+  return `${workspaceBlobPrefix(workspaceId)}/${opaqueHash('revision', revisionId)}.bin`;
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let index = 0; index < a.length; index += 1) diff |= a[index]! ^ b[index]!;
+  return diff === 0;
 }
 
 function requireBody(value: unknown): asserts value is Uint8Array {

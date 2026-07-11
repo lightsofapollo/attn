@@ -58,6 +58,49 @@ test('landing hash intent creates without any dialog', async ({ page }) => {
   );
 });
 
+test('desktop editor fills the canvas and has no edit mode toggle', async ({ page }) => {
+  await page.goto('/app#new');
+  const editor = documentEditor(page);
+  await expect(editor).toHaveAttribute('contenteditable', 'true');
+  await expect(page.locator('[data-action="edit"]')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+
+  const geometry = await page.evaluate(() => {
+    const viewport = document.querySelector<HTMLElement>('.hosted-content-viewport');
+    const editable = document.querySelector<HTMLElement>('.hosted-native-document .ProseMirror');
+    if (!viewport || !editable) throw new Error('desktop editor geometry is unavailable');
+    const viewportRect = viewport.getBoundingClientRect();
+    const editorRect = editable.getBoundingClientRect();
+    return {
+      viewportHeight: viewportRect.height,
+      editorHeight: editorRect.height,
+      bottomGap: viewportRect.bottom - editorRect.bottom,
+      clickX: editorRect.left + editorRect.width / 2,
+      clickY: editorRect.bottom - 48,
+    };
+  });
+  expect(geometry.editorHeight).toBeGreaterThan(geometry.viewportHeight * 0.9);
+  expect(Math.abs(geometry.bottomGap)).toBeLessThanOrEqual(1);
+
+  await page.mouse.click(geometry.clickX, geometry.clickY);
+  await page.keyboard.type('Typed from the blank canvas.');
+  await expect(editor).toContainText('Typed from the blank canvas.');
+});
+
+test('returning from mobile reader mode restores desktop editing', async ({ page }) => {
+  await page.goto('/app#new');
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('.thumb-dock').getByRole('button', { name: 'Done' }).click();
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'false');
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
+  await expect(page.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
+});
+
 test('import creates a real multi-file workspace preserving paths', async ({ page }) => {
   await page.goto('/app');
   const chooser = page.waitForEvent('filechooser');
@@ -287,8 +330,6 @@ test('phase gate: create → type → reload → edit → export → reimport wi
   await expect(page.locator('.save-state[data-commits]')).not.toHaveAttribute('data-commits', '0', {
     timeout: 15_000,
   });
-  await page.getByRole('button', { name: 'Done' }).click();
-
   // Reload: the committed head recovers.
   await page.reload();
   await expect(page.locator('[data-body-text]')).toContainText('Journey body survives everything.');

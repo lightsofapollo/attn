@@ -44,6 +44,8 @@ test('desktop editor reuses the native sidebar, editor, and review rail frame', 
   await expect(page.getByRole('button', { name: 'desk.png' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'notes.json' })).toBeVisible();
   await expect(page.locator('.hosted-native-document .ProseMirror')).toBeVisible();
+  await expect(page.locator('[data-action="edit"]')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
   await expect(page.locator('[data-slot="right-rail"]')).toHaveCount(1);
   await expect(page.locator('.file-rail, .review-rail')).toHaveCount(0);
   await expectNoHorizontalScroll(page);

@@ -525,8 +525,27 @@ a.workspace-row:hover {
   min-height: 100%;
 }
 
-.hosted-native-document > .hosted-editor-surface {
-  display: contents;
+.hosted-native-editor-document {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  padding-bottom: 0;
+}
+
+.hosted-native-editor-document > .hosted-editor-surface,
+.hosted-native-editor-document .editor-container,
+.hosted-native-editor-document .prosemirror-mount {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.hosted-native-editor-document .ProseMirror {
+  width: 100%;
+  min-height: 100%;
+  flex: 1;
+  padding-bottom: 4rem;
 }
 
 .hosted-document-banner {

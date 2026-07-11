@@ -47,7 +47,7 @@
   let desktopLayout = $state(
     typeof window !== 'undefined' && window.matchMedia('(min-width: 901px)').matches,
   );
-  let desktopEditRequested = false;
+  let desktopEditRequested = $state(false);
   let HostedDesktopWorkspaceFrame = $state<typeof HostedDesktopWorkspaceFrameType | null>(null);
 
   $effect(() => {
@@ -543,9 +543,12 @@
   // posture as native attn. Mobile intentionally remains reader-first and
   // enters editing only from its thumb dock.
   $effect(() => {
+    if (!desktopLayout) {
+      desktopEditRequested = false;
+      return;
+    }
     if (
-      !desktopLayout
-      || desktopEditRequested
+      desktopEditRequested
       || editing
       || editorLoading
       || !canEdit
@@ -712,7 +715,11 @@
 </script>
 
 {#snippet documentSurface()}
-  <div class:hosted-native-document={desktopLayout} class:writing-sheet={!desktopLayout}>
+  <div
+    class:hosted-native-document={desktopLayout}
+    class:hosted-native-editor-document={desktopLayout && activeEntry?.presentation === 'editable'}
+    class:writing-sheet={!desktopLayout}
+  >
     {#if health.mode !== 'persistent' && health.mode !== 'best-effort'}
       <div class="hosted-document-banner">
         <DegradedBanner mode={health.mode} />
@@ -724,6 +731,14 @@
           <strong>Another tab is editing this workspace.</strong>
           <p>This tab stays read-only until the other tab finishes or closes.</p>
         </div>
+        {#if desktopLayout}
+          <button
+            class="hosted-header-button"
+            type="button"
+            disabled={editorLoading}
+            onclick={() => void enterEdit()}
+          >Retry edit</button>
+        {/if}
       </div>
     {/if}
     {#if ownerState?.roomId && !ownerState.liveEditingAvailable}
@@ -837,17 +852,6 @@
     <span class="save-state hosted-save-state" data-save-state={saveState} data-commits={commitCount}>
       {ownerRoomStatus ?? saveState}
     </span>
-    {#if canEdit}
-      <button
-        class="hosted-header-button"
-        type="button"
-        data-action="edit"
-        disabled={editorLoading}
-        onclick={() => editing ? void exitEdit() : void enterEdit()}
-      >
-        {editing ? 'Done' : editorLoading ? 'Opening…' : editDenied ? 'Retry edit' : 'Edit'}
-      </button>
-    {/if}
   </div>
 {/snippet}
 

@@ -452,6 +452,41 @@ fn verdict_report_for_targets(
 }
 
 impl ReviewManager {
+    /// Submit one suggestion synchronously and durably mirror its authored
+    /// event into the local event log before acknowledging the caller.
+    ///
+    /// The local append is what makes an immediate `verdicts --wait` capture
+    /// this suggestion as pending without racing its relay round-trip.
+    pub fn submit_suggestion_sync(
+        &self,
+        room_id: RoomId,
+        draft: SuggestionDraft,
+    ) -> anyhow::Result<String> {
+        let bootstrapper = self
+            .bootstrap
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review bootstrapper unavailable"))?;
+        let suggestion_id = mint_thread_id();
+        let event_body = ReviewEventBody::SuggestionCreated {
+            suggestion_id: suggestion_id.clone(),
+            anchor: draft.anchor,
+            operation: draft.operation,
+            note: draft.note,
+        };
+        let outcome = bootstrapper
+            .send_event_sync(&room_id, event_body, unix_now_ms_for_manager())
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        self.store
+            .append_event(&room_id, &outcome.event)
+            .map_err(|err| anyhow::anyhow!("persist locally-authored suggestion: {err:#}"))?;
+        self.fan_envelope_over_mesh(&room_id, &outcome.envelope);
+        (self.update_tx)(ReviewUpdate::EventImported {
+            room_id,
+            event: outcome.event,
+        });
+        Ok(suggestion_id)
+    }
+
     /// Query current suggestion verdicts across every persisted room.
     ///
     /// `creator = Some(..)` limits the report to suggestions authored by that

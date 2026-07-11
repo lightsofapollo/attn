@@ -146,6 +146,17 @@ pub enum ReviewSubcommand {
         timeout: Option<Duration>,
     },
 
+    /// Turn a one-file unified diff into one suggestion per hunk, anchored
+    /// against the current persisted shared snapshot.
+    SubmitSuggestion {
+        /// Unified diff file, or `-` to read the diff from stdin.
+        #[arg(long, value_name = "FILE|-", required = true)]
+        from_diff: String,
+        /// Select one persisted room when the diff path is ambiguous.
+        #[arg(long, value_name = "ID")]
+        room: Option<String>,
+    },
+
     /// Run a **headless, long-lived** review participant — no window, no
     /// webview. The keystone for cross-topology testing (attn-8zd): a GUI-less
     /// peer that joins a room, *holds* the connection (WebRTC mesh + relay WS),
@@ -224,12 +235,55 @@ pub fn run(args: ReviewArgs) -> Result<()> {
             for_ids,
             timeout,
         } => run_verdicts(json, all, as_agent.as_deref(), wait, for_ids, timeout),
+        ReviewSubcommand::SubmitSuggestion { from_diff, room } => {
+            run_submit_suggestion_from_diff(&from_diff, room.as_deref())
+        }
         ReviewSubcommand::Agent {
             share,
             mode,
             relay_url,
         } => run_agent(share.as_deref(), &mode, relay_url.as_deref()),
     }
+}
+
+fn run_submit_suggestion_from_diff(from_diff: &str, room: Option<&str>) -> Result<()> {
+    let diff = if from_diff == "-" {
+        let mut input = String::new();
+        io::Read::read_to_string(&mut io::stdin().lock(), &mut input)
+            .context("read unified diff from stdin")?;
+        input
+    } else {
+        std::fs::read_to_string(from_diff)
+            .with_context(|| format!("read unified diff {from_diff:?}"))?
+    };
+    let store = ReviewStore::open().context("open persisted review store")?;
+    let report = crate::review::diff_suggestions::suggestions_from_diff(&store, &diff, room)?;
+
+    // Partial success is intentional: get every valid hunk into the approval
+    // queue before returning a non-zero status for invalid ones.
+    if !report.suggestions.is_empty() {
+        let ordinals = report
+            .suggestions
+            .iter()
+            .map(|item| item.hunk.to_string())
+            .collect::<Vec<_>>();
+        let submitted = crate::daemon::send_review_suggestions(report.suggestions)
+            .context("submit diff suggestions through the running daemon")?;
+        println!(
+            "submitted {submitted} suggestion(s) from hunk(s): {}",
+            ordinals.join(", ")
+        );
+    }
+    if !report.failures.is_empty() {
+        for failure in &report.failures {
+            eprintln!("hunk {} failed: {}", failure.hunk, failure.message);
+        }
+        bail!(
+            "{} diff hunk(s) could not be submitted",
+            report.failures.len()
+        );
+    }
+    Ok(())
 }
 
 fn run_verdicts(
@@ -613,6 +667,32 @@ mod tests {
     #[derive(Subcommand)]
     enum TestCommand {
         Review(ReviewArgs),
+    }
+
+    #[test]
+    fn from_diff_cli_parses_file_and_stdin() {
+        for source in ["change.diff", "-"] {
+            let parsed = TestCli::try_parse_from([
+                "attn",
+                "review",
+                "submit-suggestion",
+                "--from-diff",
+                source,
+                "--room",
+                "room-a",
+            ])
+            .expect("parse from-diff CLI");
+            let TestCommand::Review(ReviewArgs {
+                command: ReviewSubcommand::SubmitSuggestion { from_diff, room },
+                ..
+            }) = parsed.command
+            else {
+                panic!("expected submit-suggestion")
+            };
+            assert_eq!(from_diff, source);
+            assert_eq!(room.as_deref(), Some("room-a"));
+        }
+        assert!(TestCli::try_parse_from(["attn", "review", "submit-suggestion"]).is_err());
     }
 
     #[test]

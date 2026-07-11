@@ -145,6 +145,12 @@ pub enum SocketMessage {
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
+    /// Submit independently anchored suggestions generated from one diff in a
+    /// single local IPC request. The daemon identity authors every event.
+    #[serde(rename = "review_submit_suggestions", rename_all = "camelCase")]
+    ReviewSubmitSuggestions {
+        suggestions: Vec<crate::review::diff_suggestions::DiffSuggestion>,
+    },
 }
 
 /// Response sent from daemon back to client.
@@ -176,6 +182,8 @@ pub enum SocketResponse {
     },
     #[serde(rename = "review_verdicts_wait")]
     ReviewVerdictsWait { outcome: VerdictWaitOutcome },
+    #[serde(rename = "review_suggestions_submitted", rename_all = "camelCase")]
+    ReviewSuggestionsSubmitted { submitted_count: usize },
 }
 
 /// Runtime directory for daemon state (socket, fingerprint, log, future reviews/).
@@ -470,6 +478,21 @@ pub fn send_review_verdicts_wait(
     }
 }
 
+/// Submit a prepared diff-suggestion batch through the running daemon.
+pub fn send_review_suggestions(
+    suggestions: Vec<crate::review::diff_suggestions::DiffSuggestion>,
+) -> Result<usize> {
+    let msg = SocketMessage::ReviewSubmitSuggestions { suggestions };
+    match send_command(&msg)? {
+        Some(SocketResponse::ReviewSuggestionsSubmitted { submitted_count }) => Ok(submitted_count),
+        Some(SocketResponse::Error { message }) => {
+            bail!("review_submit_suggestions failed: {message}")
+        }
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
 /// Send a command to the daemon and read the response.
 /// Returns None if no daemon is running.
 fn send_command(msg: &SocketMessage) -> Result<Option<SocketResponse>> {
@@ -670,6 +693,29 @@ fn wait_review_verdicts(
             message: format!("could not wait for persisted verdicts: {err:#}"),
         },
     }
+}
+
+fn submit_review_suggestion_batch(
+    review_manager: Option<&Arc<ReviewManager>>,
+    suggestions: Vec<crate::review::diff_suggestions::DiffSuggestion>,
+) -> SocketResponse {
+    let Some(manager) = review_manager else {
+        return SocketResponse::Error {
+            message: "ReviewManager unavailable".to_string(),
+        };
+    };
+    let mut submitted_count = 0usize;
+    for suggestion in suggestions {
+        if let Err(err) = manager.submit_suggestion_sync(suggestion.room_id, suggestion.draft) {
+            return SocketResponse::Error {
+                message: format!(
+                    "suggestion submission failed after {submitted_count} successful hunk(s): {err:#}"
+                ),
+            };
+        }
+        submitted_count += 1;
+    }
+    SocketResponse::ReviewSuggestionsSubmitted { submitted_count }
 }
 
 /// Parse a wire-format room id (`String`) into the typed `RoomId` newtype.
@@ -971,6 +1017,14 @@ fn handle_client(
                     serde_json::to_string(&resp).unwrap_or_default()
                 );
             }
+            Ok(SocketMessage::ReviewSubmitSuggestions { suggestions }) => {
+                let resp = submit_review_suggestion_batch(review_manager, suggestions);
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
             Err(e) => {
                 tracing::warn!("invalid socket message: {e}");
                 let resp = SocketResponse::Error {
@@ -1205,6 +1259,26 @@ mod tests {
         // the command rather than panic.
         submit_review_socket_command(None, ReviewCommand::Inbox);
         // Pass = no panic.
+    }
+
+    #[test]
+    fn from_diff_daemon_batch_serialization() {
+        let json = serde_json::to_string(&SocketMessage::ReviewSubmitSuggestions {
+            suggestions: Vec::new(),
+        })
+        .expect("serialize batch");
+        assert_eq!(
+            json,
+            r#"{"type":"review_submit_suggestions","suggestions":[]}"#
+        );
+        let decoded: SocketMessage = serde_json::from_str(&json).expect("deserialize batch");
+        assert!(
+            matches!(decoded, SocketMessage::ReviewSubmitSuggestions { suggestions } if suggestions.is_empty())
+        );
+        assert!(matches!(
+            submit_review_suggestion_batch(None, Vec::new()),
+            SocketResponse::Error { message } if message == "ReviewManager unavailable"
+        ));
     }
 
     #[test]

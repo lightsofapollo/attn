@@ -13,6 +13,7 @@ pub mod anchors;
 pub mod apply;
 pub mod bootstrap;
 pub mod crypto;
+pub mod diff_suggestions;
 pub mod envelope;
 pub mod ids;
 pub mod ipc;

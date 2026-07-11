@@ -4,24 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="referrer" content="no-referrer" />
+    <title>attn — a private desk for working documents</title>
     <meta
       name="description"
-      content="A private desk for working documents. Write in the browser or open local Markdown in native attn. No account, and no server can read the words."
+      content="Write in the browser or open local Markdown in native attn. Share a link when it needs another pair of eyes. No account, and no server can read the words."
     />
-    <title>attn — a private desk for working documents</title>
+    <link rel="canonical" href="https://attn.sh/" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="attn" />
+    <meta property="og:title" content="attn — a private desk for working documents" />
+    <meta
+      property="og:description"
+      content="Write in the browser or open local Markdown in native attn. Share a link when it needs another pair of eyes. No account, and no server can read the words."
+    />
+    <meta property="og:url" content="https://attn.sh/" />
+    <meta name="twitter:card" content="summary" />
   </head>
   <body data-route="landing">
-    <main class="landing">
-      <h1>A private desk for working documents.</h1>
-      <p>
-        Write in the browser or open local Markdown in native attn. Share a link when it needs
-        another pair of eyes. No account, and no server can read the words.
-      </p>
-      <p class="landing-actions">
-        <a class="landing-cta" href="/app" data-action="new-workspace">New workspace</a>
-        <a href="/app" data-action="open-desk">Open your desk</a>
-      </p>
-    </main>
+    <div id="app"></div>
     <script type="module" src="/landing.ts"></script>
   </body>
 </html>

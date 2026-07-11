@@ -3,7 +3,7 @@
 // bundle graph) and exposes the parsed route. attn-7xl.1.3 replaces the DOM
 // below with the designed Svelte shells behind a mock workspace service.
 import { parseAppRoute, type AppRoute } from '../../src/lib/hosted/routes';
-import '../styles/landing.css';
+import '../styles/app-placeholder.css';
 
 function describeRoute(route: AppRoute | undefined): string {
   if (!route) return 'Unknown app path';

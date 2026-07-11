@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // Route-level bundle boundary gate (attn-7xl.1.1).
 //
-// The landing entry must never statically pull the editor/crypto graph:
-// ProseMirror, Mermaid, KaTeX, room crypto (@noble/*), or WebRTC code. This
-// walks the Vite build manifest from each entry, collects every chunk and CSS
-// asset reachable through *static* imports (what the browser preloads on
-// navigation), and greps the chunk sources for forbidden markers.
+// The landing and app entries must never statically pull the editor/crypto
+// graph: ProseMirror, Mermaid, KaTeX, room crypto (@noble/*, src/lib/review),
+// or WebRTC code. This walks the Vite build manifest from each gated entry,
+// collects every chunk reachable through *static* imports (what the browser
+// preloads on navigation), and checks each chunk's constituent module IDs
+// (emitted by the chunkModulesManifest plugin in vite.browser.config.ts) —
+// page copy is allowed to mention "ProseMirror" without tripping the gate.
 //
 // Usage: node scripts/check-route-bundles.mjs   (after `npm run build:browser`)
 
@@ -16,23 +18,30 @@ import { fileURLToPath } from 'node:url';
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const distDir = path.join(webRoot, 'dist-browser');
 
-// Marker → human explanation. Matched case-insensitively against the JS
-// source of every statically reachable chunk of a gated entry.
-const FORBIDDEN_MARKERS = [
-  ['prosemirror', 'ProseMirror editor graph'],
-  ['mermaid', 'Mermaid diagram renderer'],
-  ['katex', 'KaTeX math renderer'],
-  ['@noble/', 'room crypto (@noble primitives)'],
-  ['rtcpeerconnection', 'WebRTC transport'],
+// Module-id patterns whose presence in a gated entry's static graph fails the
+// build, with human explanations.
+const FORBIDDEN_MODULES = [
+  [/node_modules\/(?:prosemirror-|@handlewithcare\/prosemirror)/u, 'ProseMirror editor graph'],
+  [/node_modules\/mermaid/u, 'Mermaid diagram renderer'],
+  [/node_modules\/katex/u, 'KaTeX math renderer'],
+  [/node_modules\/@noble\//u, 'room crypto (@noble primitives)'],
+  [/node_modules\/shiki/u, 'Shiki syntax highlighter'],
+  [/src\/lib\/review\//u, 'review room protocol code'],
 ];
+
+// The WebRTC transport is app code (no package marker), so match the API
+// identifier itself — case-sensitive, which page copy never contains.
+const FORBIDDEN_SOURCE = [['RTCPeerConnection', 'WebRTC transport']];
 
 // Entries whose static graph must stay clean. The review entry legitimately
 // owns crypto and (dynamically) the editor graph; the app entry gains editor
 // code in later phases only through dynamic imports, so it is gated too.
 const GATED_ENTRIES = ['landing', 'app'];
 
-const manifestPath = path.join(distDir, '.vite', 'manifest.json');
-const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+const manifest = JSON.parse(await readFile(path.join(distDir, '.vite', 'manifest.json'), 'utf8'));
+const chunkModules = JSON.parse(
+  await readFile(path.join(distDir, '.vite', 'chunk-modules.json'), 'utf8'),
+);
 
 const entryKeys = new Map();
 for (const [key, chunk] of Object.entries(manifest)) {
@@ -50,8 +59,18 @@ for (const entryName of GATED_ENTRIES) {
   const files = collectStaticFiles(entryKeys.get(entryName));
   for (const file of files) {
     if (!file.endsWith('.js')) continue;
-    const source = (await readFile(path.join(distDir, file), 'utf8')).toLowerCase();
-    for (const [marker, explanation] of FORBIDDEN_MARKERS) {
+    const modules = chunkModules[file];
+    if (!modules) throw new Error(`no module map recorded for chunk ${file}`);
+    for (const moduleId of modules) {
+      for (const [pattern, explanation] of FORBIDDEN_MODULES) {
+        if (pattern.test(moduleId)) {
+          console.error(`FAIL ${entryName}: ${file} bundles ${explanation} (${moduleId})`);
+          failures += 1;
+        }
+      }
+    }
+    const source = await readFile(path.join(distDir, file), 'utf8');
+    for (const [marker, explanation] of FORBIDDEN_SOURCE) {
       if (source.includes(marker)) {
         console.error(`FAIL ${entryName}: ${file} contains ${explanation} ("${marker}")`);
         failures += 1;

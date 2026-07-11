@@ -34,12 +34,36 @@ function hostedEntryRewrites(): Plugin {
   };
 }
 
+// Record which modules land in each emitted chunk so the route bundle gate
+// (scripts/check-route-bundles.mjs) can match forbidden *code* precisely —
+// page copy is allowed to say "ProseMirror" without tripping the gate.
+function chunkModulesManifest(): Plugin {
+  return {
+    name: 'attn-chunk-modules-manifest',
+    generateBundle(_options, bundle) {
+      const chunkModules: Record<string, string[]> = {};
+      for (const [fileName, output] of Object.entries(bundle)) {
+        if (output.type === 'chunk') {
+          chunkModules[fileName] = Object.keys(output.modules).map((id) =>
+            id.startsWith(webRoot) ? id.slice(webRoot.length) : id,
+          );
+        }
+      }
+      this.emitFile({
+        type: 'asset',
+        fileName: '.vite/chunk-modules.json',
+        source: JSON.stringify(chunkModules, null, 2),
+      });
+    },
+  };
+}
+
 export default defineConfig({
   root: hostedRoot,
   envDir: webRoot,
-  publicDir: false,
+  publicDir: path.join(hostedRoot, 'public'),
   appType: 'mpa',
-  plugins: [hostedEntryRewrites(), svelte(), tailwindcss()],
+  plugins: [hostedEntryRewrites(), chunkModulesManifest(), svelte(), tailwindcss()],
   resolve: {
     alias: {
       $lib: path.join(webRoot, 'src/lib'),

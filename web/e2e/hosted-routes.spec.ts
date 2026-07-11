@@ -27,6 +27,56 @@ test('landing serves at / without editor, crypto, or other-entry chunks', async 
   expect(forbidden).toEqual([]);
 });
 
+test('landing leads with browser CTAs and keeps native install below', async ({ page }) => {
+  await page.goto('/');
+  const hero = page.locator('.hero');
+  await expect(hero.locator('a[data-action="new-workspace"]')).toHaveAttribute('href', '/app#new');
+  await expect(hero.locator('a[data-action="open-desk"]')).toHaveAttribute('href', '/app');
+  await expect(page.locator('.native-section .code').first()).toContainText(
+    'brew install lightsofapollo/attn/attn',
+  );
+  await expect(page.locator('.site-nav a[href="https://github.com/lightsofapollo/attn"]')).toBeVisible();
+  // The browser is now a first-class surface; the old native-only claim is gone.
+  await expect(page.locator('body')).not.toContainText('No browser tab');
+});
+
+test('landing theme toggle flips palette, swaps captures, and persists', async ({ page }) => {
+  await page.goto('/');
+  const heroShot = page.locator('.product-stage .window img');
+  const initialTheme = await page.evaluate(() => document.documentElement.dataset.theme);
+  expect(initialTheme).toBe('light'); // Playwright defaults to prefers-color-scheme: light
+  await expect(heroShot).toHaveAttribute('src', /collab-light/u);
+  await page.getByRole('button', { name: 'Toggle theme' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await expect(heroShot).toHaveAttribute('src', /collab-dark/u);
+  await page.reload();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
+
+test('landing has no horizontal scrolling at 320 CSS px', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.goto('/');
+  await expect(page.locator('body')).toHaveAttribute('data-hydrated', 'true');
+  const overflow = await page.evaluate(() => {
+    const root = document.scrollingElement;
+    return root ? root.scrollWidth - root.clientWidth : 0;
+  });
+  expect(overflow).toBe(0);
+});
+
+test('capture landing screenshots for design review', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('body')).toHaveAttribute('data-hydrated', 'true');
+  await page.screenshot({ path: 'test-results/landing-desktop-light.png', fullPage: true });
+  await page.getByRole('button', { name: 'Toggle theme' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.screenshot({ path: 'test-results/landing-desktop-dark.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Toggle theme' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.screenshot({ path: 'test-results/landing-iphone-light.png', fullPage: true });
+});
+
 test('unknown paths fall back to the landing entry', async ({ page }) => {
   const response = await page.goto('/no-such-page');
   expect(response?.status()).toBe(200);

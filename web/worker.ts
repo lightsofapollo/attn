@@ -1,3 +1,4 @@
+import { buildContentSecurityPolicy, apexRedirectTarget } from './src/lib/hosted/csp';
 import { entryRequestPath, hostedEntryForPath } from './src/lib/hosted/routes';
 
 interface StaticAssets {
@@ -6,24 +7,10 @@ interface StaticAssets {
 
 interface Env {
   ASSETS: StaticAssets;
+  /** Relay origin allowed by connect-src; set per environment in wrangler
+   * config (staging: relay-staging.attn.sh, production: relay.attn.sh). */
+  RELAY_ORIGIN: string;
 }
-
-const CONTENT_SECURITY_POLICY = [
-  "default-src 'none'",
-  "base-uri 'none'",
-  "connect-src 'self' https://relay-staging.attn.sh wss://relay-staging.attn.sh",
-  "font-src 'self' data:",
-  "form-action 'none'",
-  "frame-ancestors 'none'",
-  "frame-src 'self' blob: data:",
-  "img-src 'self' blob: data:",
-  "manifest-src 'self'",
-  "media-src 'self' blob: data:",
-  "object-src 'none'",
-  "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
-  "worker-src 'self'",
-].join('; ');
 
 const IMMUTABLE_ASSET = /\/[\w-]+-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/;
 
@@ -45,10 +32,16 @@ function rewriteToEntryDocument(request: Request): Request {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    // One origin, no `www` (product decision #1). Fragments — including
+    // invite `#key=…` secrets — never reach the server and are reattached by
+    // the browser across this redirect.
+    const apexTarget = apexRedirectTarget(new URL(request.url));
+    if (apexTarget) return Response.redirect(apexTarget, 308);
+
     const response = await env.ASSETS.fetch(rewriteToEntryDocument(request));
     const headers = new Headers(response.headers);
 
-    headers.set('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+    headers.set('Content-Security-Policy', buildContentSecurityPolicy(env.RELAY_ORIGIN));
     headers.set('Cross-Origin-Opener-Policy', 'same-origin');
     headers.set('Cross-Origin-Resource-Policy', 'same-origin');
     headers.set('Permissions-Policy', 'camera=(), geolocation=(), microphone=(), payment=(), usb=()');

@@ -1,0 +1,37 @@
+// PRODUCTION config for the unified attn.sh surface (attn-7xl.1.4).
+//
+// ⛔ Do NOT deploy this before the attn-7xl.7 cutover is approved by the
+// owner. The reversible cutover procedure — DNS steps, verification matrix,
+// and rollback — lives in planning/web-authoring/07-landing-cutover.md.
+//
+// Deploy (cutover only):
+//   npm run build:browser   (with VITE_ATTN_RELAY_URL=https://relay.attn.sh)
+//   npx wrangler deploy --config wrangler.production.jsonc
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "attn-web",
+  "main": "worker.ts",
+  "compatibility_date": "2026-07-09",
+  "workers_dev": false,
+  "vars": {
+    "RELAY_ORIGIN": "https://relay.attn.sh"
+  },
+  "routes": [
+    {
+      "pattern": "attn.sh",
+      "custom_domain": true
+    },
+    {
+      // The worker 308s every www request to the apex; www exists only as a
+      // redirect surface so old links keep working.
+      "pattern": "www.attn.sh",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist-browser",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  }
+}

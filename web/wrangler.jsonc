@@ -4,6 +4,9 @@
   "main": "worker.ts",
   "compatibility_date": "2026-07-09",
   "workers_dev": false,
+  "vars": {
+    "RELAY_ORIGIN": "https://relay-staging.attn.sh"
+  },
   "routes": [
     {
       "pattern": "staging.attn.sh",

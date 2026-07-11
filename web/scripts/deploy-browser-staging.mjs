@@ -56,12 +56,11 @@ async function verifyBuild(expectedRelayOrigin) {
   if (!entrySource.includes(expectedRelayOrigin)) {
     throw new Error(`hosted entry does not embed the expected relay origin: ${expectedRelayOrigin}`);
   }
-  const workerSource = await readFile(path.join(webRoot, 'worker.ts'), 'utf8');
-  if (
-    !workerSource.includes(expectedRelayOrigin) ||
-    !workerSource.includes(expectedRelayOrigin.replace('https:', 'wss:'))
-  ) {
-    throw new Error('worker Content-Security-Policy does not allow the staging relay origin');
+  // The worker builds its CSP from the RELAY_ORIGIN var; make sure the
+  // staging config pins the staging relay before shipping.
+  const wranglerConfig = await readFile(path.join(webRoot, 'wrangler.jsonc'), 'utf8');
+  if (!wranglerConfig.includes(`"RELAY_ORIGIN": "${expectedRelayOrigin}"`)) {
+    throw new Error('wrangler.jsonc does not pin RELAY_ORIGIN to the staging relay origin');
   }
   return entryPath;
 }

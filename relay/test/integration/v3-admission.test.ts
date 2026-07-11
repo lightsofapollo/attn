@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { generateEd25519Keypair, ownerSignatureHeader } from "../helpers/owner-sig";
 import { createPowHeader } from "../helpers/pow";
+import { FIXED_POW_RAND, mintPowForTests } from "../helpers/pow";
 import { presignBlobDownload, presignBlobUpload } from "../../src/r2";
+import { canonicalize } from "../../src/canonical";
 
 async function scopedHeader(
   scope: "read" | "write",
@@ -107,6 +109,65 @@ describe("additive /v3 scoped admission", () => {
       body,
     });
     expect(created.status).toBe(201);
+
+    const register = async (
+      deviceLabel: string,
+      grantRoomId: string,
+    ): Promise<Response> => {
+      const device = await generateEd25519Keypair();
+      const grantBytes = new TextEncoder().encode(canonicalize({
+        grantTier: "comment",
+        purpose: "attn device grant v3",
+        roomId: grantRoomId,
+        v: 3,
+      }));
+      const grantSignature = base64UrlEncode(new Uint8Array(
+        await crypto.subtle.sign({ name: "Ed25519" }, owner.privateKey, grantBytes),
+      ));
+      const unsigned = {
+        deviceId: deviceLabel,
+        participantId: `participant-${deviceLabel}`,
+        publicSigningKey: base64UrlEncode(device.publicKeyBytes),
+        publicEncryptionKey: base64UrlEncode(new Uint8Array(32).fill(0x44)),
+        client: "attn-browser",
+        kind: "reviewer",
+        grantTier: "comment",
+        grantSignature,
+      };
+      const selfSignature = base64UrlEncode(new Uint8Array(
+        await crypto.subtle.sign(
+          { name: "Ed25519" },
+          device.privateKey,
+          new TextEncoder().encode(canonicalize(unsigned)),
+        ),
+      ));
+      const registration = JSON.stringify({ ...unsigned, selfSignature });
+      const devicesUrl = `${roomUrl}/devices`;
+      return SELF.fetch(devicesUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Attn-Admission": await scopedHeader("write", writeKey, "POST", devicesUrl, registration),
+          "Attn-PoW": await mintPowForTests({
+            roomId,
+            deviceId: deviceLabel,
+            method: "POST",
+            path: `/v3/rooms/${roomId}/devices`,
+            difficulty: 16,
+            expiresAt: Date.now() + 300_000,
+            rand: FIXED_POW_RAND,
+          }),
+        },
+        body: registration,
+      });
+    };
+
+    const validGrant = await register("v3-grant-valid", roomId);
+    expect(validGrant.status, await validGrant.clone().text()).toBe(204);
+    const crossRoom = await register("v3-grant-cross-room", `${roomId}-other`);
+    expect(crossRoom.status).toBe(403);
+    expect((await crossRoom.json() as { error: { code: string } }).error.code)
+      .toBe("ATTN_GRANT_INVALID");
 
     const devicesUrl = `${roomUrl}/devices`;
     const read = await SELF.fetch(devicesUrl, {

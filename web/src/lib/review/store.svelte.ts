@@ -108,6 +108,15 @@ export class ReviewStore {
   /** Currently-focused review room, if any. */
   currentRoomId = $state<RoomId | null>(null);
 
+  /** Effective local directory grant. Legacy v2 and owners default suggest. */
+  localGrantTier = $state<'comment' | 'suggest'>('suggest');
+  private localGrantTiers = $state<Record<string, 'comment' | 'suggest'>>({});
+
+  setLocalGrantTier(roomId: RoomId, tier: 'comment' | 'suggest'): void {
+    this.localGrantTiers = { ...this.localGrantTiers, [roomId]: tier };
+    if (this.currentRoomId === roomId) this.localGrantTier = tier;
+  }
+
   /**
    * Rooms known to this webview. Resumed rooms live here passively until the
    * user picks one, so a normal file open is never replaced by review mode.
@@ -855,6 +864,7 @@ export class ReviewStore {
     const room = this.rooms[roomId];
     if (room === undefined) return;
     this.currentRoomId = roomId;
+    this.localGrantTier = this.localGrantTiers[roomId] ?? 'suggest';
     this.currentShare = room.share ?? null;
     this.connection = room.connection;
     this.peers = room.peers;
@@ -1023,6 +1033,8 @@ export class ReviewStore {
     this.dismissedRoomIds = dismissed;
     const { [roomId]: _removed, ...rest } = this.rooms;
     this.rooms = rest;
+    const { [roomId]: _grant, ...remainingGrantTiers } = this.localGrantTiers;
+    this.localGrantTiers = remainingGrantTiers;
     this.events = this.events.filter((event) => event.meta.roomId !== roomId);
     this.snapshots = this.snapshots.filter((snapshot) => snapshot.roomId !== roomId);
     this.anchorResolutions = Object.fromEntries(
@@ -1031,6 +1043,7 @@ export class ReviewStore {
     if (this.currentRoomId !== roomId) return;
     this.pendingOutbox = [];
     this.currentRoomId = null;
+    this.localGrantTier = 'suggest';
     this.currentShare = null;
     this.currentFileId = null;
     this.currentSnapshotId = null;

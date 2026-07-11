@@ -1269,3 +1269,26 @@ References:
 - Should room invites distinguish read-only reviewers from suggestion-capable reviewers?
 - Should agent output use the same `CommentCreated` and `SuggestionCreated` events, or separate `FindingCreated` events?
 - Should mailbox upload require proof-of-work or signed room admission to reduce abuse?
+# V3 Device Grants and Import Authority
+
+V3 non-owner device registration carries `grantTier` (`comment` or `suggest`)
+and an owner `grantSignature` over exactly:
+
+```json
+{"grantTier":"comment|suggest","purpose":"attn device grant v3","roomId":"<roomId>","v":3}
+```
+
+The device `selfSignature` also covers both grant fields, binding the device to
+the owner's grant. Owners forbid grant fields and retain all room authority.
+For non-owners, effective authority comes only from the verified device
+directory record: reviewer/comment may read, comment, and resolve; reviewer/
+suggest additionally suggests; agent/comment may read and comment; agent/
+suggest additionally suggests. Legacy v2 records and agents without an
+explicit tier default to `suggest` for compatibility.
+
+`ParticipantJoined.capabilities` remains encrypted descriptive attestation,
+not an authority source. Native and browser import pipelines reject out-of-tier
+events before persistence even though the relay cannot inspect encrypted event
+bodies. This is policy enforcement at authenticated peers, not cryptographic
+content enforcement by the relay. Anonymous view-only WebSocket identity is
+deferred and device registration remains write-authorized.

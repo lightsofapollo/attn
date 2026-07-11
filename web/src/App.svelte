@@ -834,6 +834,7 @@
   }
 
   function openSuggestionComposer(): void {
+    if (reviewStore.localGrantTier !== 'suggest') return;
     const view = pmViewForReview;
     if (!view) return;
     if (!hasTextSelection(view)) return;
@@ -2034,6 +2035,10 @@
           reviewStore.applyError(payload);
           return;
         }
+        if (payload.grantTier) {
+          reviewStore.setLocalGrantTier(payload.roomId, payload.grantTier);
+          return;
+        }
         reviewStore.applyStatus(payload);
       },
       // Pushed by Rust right after `Bootstrapper::share` succeeds. Carries
@@ -2791,6 +2796,7 @@
     to={toolbarSelection.to}
     onComment={openCommentComposer}
     onSuggest={openSuggestionComposer}
+    canSuggest={reviewStore.localGrantTier === 'suggest'}
   />
 {/if}
 {#if activeSuggestion && pmViewForReview && !commentComposer}

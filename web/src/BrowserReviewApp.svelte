@@ -90,6 +90,7 @@
     fileId: null,
     error: null,
     authoringReady: false,
+    grantTier: 'suggest',
     outboxPending: 0,
     authoringError: null,
     persistence: 'ephemeral',
@@ -279,6 +280,7 @@
   });
 
   function openComposer(kind: 'comment' | 'suggestion'): void {
+    if (kind === 'suggestion' && sessionState.grantTier !== 'suggest') return;
     const view = pmViewForReview;
     const roomId = sessionState.roomId;
     const snapshot = activeSnapshotForCompose();
@@ -503,6 +505,7 @@
     to={toolbarSelection.to}
     onComment={() => openComposer('comment')}
     onSuggest={() => openComposer('suggestion')}
+    canSuggest={sessionState.grantTier === 'suggest'}
   />
 {/if}
 

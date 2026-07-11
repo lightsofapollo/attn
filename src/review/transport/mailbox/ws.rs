@@ -1191,6 +1191,8 @@ mod tests {
                 public_signing_key: URL_SAFE_NO_PAD.encode(vk.to_bytes()),
                 client: DeviceClient::AttnNative,
                 kind: ParticipantKind::Reviewer,
+                grant_tier: None,
+                grant_signature: None,
                 attested: true,
             },
         )])));

@@ -32,6 +32,7 @@
 
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
+  base64UrlDecode,
   base64UrlEncode,
   buildAdmissionHeader,
   buildAdmissionSubprotocol,
@@ -185,6 +186,8 @@ export interface BrowserSessionState {
   error: BrowserSessionError | null;
   /** True only after the signed ParticipantJoined envelope is acknowledged. */
   authoringReady: boolean;
+  /** Verified v3 directory grant; legacy v2 sessions default to suggest. */
+  grantTier: 'comment' | 'suggest';
   /** Number of sealed event envelopes waiting for relay acknowledgement. */
   outboxPending: number;
   /** Last authoring transport error. Reading remains available. */
@@ -255,6 +258,11 @@ export interface BrowserSessionOptions {
   outboxMintPow?: BrowserOutboxOptions['mintPow'];
   /** Human-readable encrypted ParticipantJoined display name. */
   displayName?: string;
+  /** Verified bootstrap grant. Defaults to suggest for legacy v2. */
+  grantTier?: 'comment' | 'suggest';
+  /** Owner Ed25519 grant proof; both fields are required when grantTier is set. */
+  grantSignature?: string;
+  ownerSigningKey?: string;
   /** Inject a pre-built identity (tests want deterministic keys). */
   identity?: BrowserDeviceIdentity;
   /** Optional state observer — called on every state mutation. */
@@ -332,6 +340,40 @@ interface RegisterDeviceBody {
   selfSignature: string;
 }
 
+export interface RegisterDeviceBodyV3 extends RegisterDeviceBody {
+  grantTier: 'comment' | 'suggest';
+  grantSignature: string;
+}
+
+export function canonicalDeviceGrantV3(
+  roomId: string,
+  grantTier: 'comment' | 'suggest',
+): Uint8Array {
+  return toCanonicalBytes({
+    grantTier,
+    purpose: 'attn device grant v3',
+    roomId,
+    v: 3,
+  });
+}
+
+export function verifyDeviceGrantV3(
+  roomId: string,
+  grantTier: 'comment' | 'suggest',
+  grantSignature: string,
+  ownerSigningKey: string,
+): boolean {
+  try {
+    return ed25519.verify(
+      base64UrlDecode(grantSignature),
+      canonicalDeviceGrantV3(roomId, grantTier),
+      base64UrlDecode(ownerSigningKey),
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Canonical-JSON bytes used as the input to `selfSignature`. The relay
  * reproduces the same bytes by dropping `selfSignature` before canonicalizing,
@@ -346,6 +388,8 @@ export function canonicalRegisterDeviceBytes(body: RegisterDeviceBody): Uint8Arr
     publicEncryptionKey: body.publicEncryptionKey,
     client: body.client,
     kind: body.kind,
+    ...('grantTier' in body ? { grantTier: body.grantTier } : {}),
+    ...('grantSignature' in body ? { grantSignature: body.grantSignature } : {}),
   };
   return toCanonicalBytes(unsigned);
 }
@@ -370,6 +414,23 @@ export function buildRegisterDeviceBody(
   const canonical = canonicalRegisterDeviceBytes(body);
   const sig = ed25519.sign(canonical, identity.signingSecret);
   body.selfSignature = base64UrlEncode(sig);
+  return body;
+}
+
+export function buildRegisterDeviceBodyV3(
+  identity: BrowserDeviceIdentity,
+  grantTier: 'comment' | 'suggest',
+  grantSignature: string,
+): RegisterDeviceBodyV3 {
+  const body: RegisterDeviceBodyV3 = {
+    ...buildRegisterDeviceBody(identity),
+    grantTier,
+    grantSignature,
+    selfSignature: '',
+  };
+  body.selfSignature = base64UrlEncode(
+    ed25519.sign(canonicalRegisterDeviceBytes(body), identity.signingSecret),
+  );
   return body;
 }
 
@@ -407,6 +468,7 @@ export class BrowserSession {
     fileId: null,
     error: null,
     authoringReady: false,
+    grantTier: 'suggest',
     outboxPending: 0,
     authoringError: null,
     persistence: 'ephemeral',
@@ -587,6 +649,9 @@ export class BrowserSession {
   }
 
   async createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent> {
+    if (this.state.grantTier !== 'suggest') {
+      throw new Error('suggestion authoring requires suggest grant');
+    }
     return this.authorEvent({
       type: 'suggestion_created',
       suggestionId: randomOpaqueId(),
@@ -747,6 +812,25 @@ export class BrowserSession {
       );
       zero(invite.roomSecret);
       return;
+    }
+    if (this.opts.grantTier !== undefined) {
+      try {
+        if (!this.opts.grantSignature || !this.opts.ownerSigningKey) {
+          throw new Error('v3 grant proof is incomplete');
+        }
+        const valid = verifyDeviceGrantV3(
+          invite.roomId,
+          this.opts.grantTier,
+          this.opts.grantSignature,
+          this.opts.ownerSigningKey,
+        );
+        if (!valid) throw new Error('v3 owner grant signature is invalid');
+        this.setState({ grantTier: this.opts.grantTier });
+      } catch (error) {
+        this.fail('invite_invalid', error instanceof Error ? error.message : String(error));
+        zero(invite.roomSecret);
+        return;
+      }
     }
     // Clobber the raw secret — only the subkeys are needed from here on.
     zero(invite.roomSecret);
@@ -951,9 +1035,9 @@ export class BrowserSession {
     const capabilities: Capability[] = [
       'read_snapshot',
       'write_comment',
-      'write_suggestion',
       'resolve_comment',
     ];
+    if (this.state.grantTier === 'suggest') capabilities.push('write_suggestion');
     const joined: ReviewEventBody = {
       type: 'participant_joined',
       participant: {

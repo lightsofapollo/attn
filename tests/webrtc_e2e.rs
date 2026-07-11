@@ -122,6 +122,8 @@ fn reviewer_authorizations(key_id: String) -> AuthorizationCache {
             public_signing_key: "test-reviewer-key".into(),
             client: DeviceClient::AttnNative,
             kind: ParticipantKind::Reviewer,
+            grant_tier: None,
+            grant_signature: None,
             attested: true,
         },
     )])))

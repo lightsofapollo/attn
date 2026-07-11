@@ -787,6 +787,10 @@ struct RegisterDeviceBody {
     client: String,
     /// `owner` for Share, `reviewer` for Join. Agents lie outside 6.6.
     kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grant_tier: Option<crate::review::transport::inbound::GrantTier>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grant_signature: Option<String>,
     /// `base64url(Ed25519 signature)` over the canonical body without
     /// `selfSignature`. See relay-spec.md §`POST /v2/rooms/:roomId/devices`
     /// "verify selfSignature".
@@ -808,6 +812,10 @@ struct DirectoryDevice {
     public_encryption_key: String,
     client: String,
     kind: String,
+    #[serde(default)]
+    grant_tier: Option<crate::review::transport::inbound::GrantTier>,
+    #[serde(default)]
+    grant_signature: Option<String>,
     self_signature: String,
     #[allow(dead_code)]
     registered_at: u64,
@@ -1612,7 +1620,45 @@ impl Bootstrapper {
             None => None,
         };
         let mut added = 0usize;
+        let owners = directory
+            .iter()
+            .filter(|device| device.kind == "owner")
+            .collect::<Vec<_>>();
+        if owners.len() > 1 {
+            return Err(BootstrapError::Crypto(
+                "directory contains conflicting owner registrations".into(),
+            ));
+        }
+        if owners
+            .iter()
+            .any(|owner| owner.grant_tier.is_some() || owner.grant_signature.is_some())
+        {
+            return Err(BootstrapError::Crypto(
+                "directory owner registration must not contain a grant".into(),
+            ));
+        }
+        let owner_grant_verifier = owners
+            .first()
+            .copied()
+            .map(|device| {
+                let raw = URL_SAFE_NO_PAD
+                    .decode(device.public_signing_key.as_bytes())
+                    .map_err(|e| {
+                        BootstrapError::Crypto(format!("owner directory key decode: {e}"))
+                    })?;
+                let bytes: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
+                    BootstrapError::Crypto("owner directory key must decode to 32 bytes".into())
+                })?;
+                ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                    .map_err(|e| BootstrapError::Crypto(format!("owner directory key: {e}")))
+            })
+            .transpose()?;
         for dev in &directory {
+            if dev.kind != "owner" && dev.grant_tier.is_some() != dev.grant_signature.is_some() {
+                return Err(BootstrapError::Crypto(
+                    "directory grant tier and owner signature must be paired".into(),
+                ));
+            }
             let raw = URL_SAFE_NO_PAD
                 .decode(dev.public_signing_key.as_bytes())
                 .map_err(|e| BootstrapError::Crypto(format!("directory key decode: {e}")))?;
@@ -1627,6 +1673,8 @@ impl Bootstrapper {
                 public_encryption_key: dev.public_encryption_key.clone(),
                 client: dev.client.clone(),
                 kind: dev.kind.clone(),
+                grant_tier: dev.grant_tier,
+                grant_signature: dev.grant_signature.clone(),
                 self_signature: String::new(),
             };
             let canonical = canonical_register_device_bytes(&registration)?;
@@ -1645,6 +1693,35 @@ impl Bootstrapper {
                     "directory self signature does not match registration".into(),
                 )
             })?;
+            if let Some(grant_tier) = dev.grant_tier {
+                let grant_signature = dev.grant_signature.as_ref().ok_or_else(|| {
+                    BootstrapError::Crypto("directory grant tier missing owner signature".into())
+                })?;
+                let owner = owner_grant_verifier.as_ref().ok_or_else(|| {
+                    BootstrapError::Crypto("directory missing pinned owner grant key".into())
+                })?;
+                let grant_value = serde_json::json!({
+                    "grantTier": grant_tier,
+                    "purpose": "attn device grant v3",
+                    "roomId": room_id.as_str(),
+                    "v": 3,
+                });
+                let grant_bytes =
+                    crate::review::crypto::canonical::to_canonical_bytes(&grant_value).map_err(
+                        |e| BootstrapError::Crypto(format!("canonicalize directory grant: {e}")),
+                    )?;
+                let raw = URL_SAFE_NO_PAD
+                    .decode(grant_signature.as_bytes())
+                    .map_err(|e| {
+                        BootstrapError::Crypto(format!("directory grant signature decode: {e}"))
+                    })?;
+                let signature = ed25519_dalek::Signature::from_slice(&raw).map_err(|e| {
+                    BootstrapError::Crypto(format!("directory grant signature: {e}"))
+                })?;
+                owner.verify(&grant_bytes, &signature).map_err(|_| {
+                    BootstrapError::Crypto("directory owner grant signature invalid".into())
+                })?;
+            }
             let key_id = vk.signing_key_id_base64url();
             if let Some(pinned_key_id) = persisted_device_keys.get(&dev.device_id)
                 && pinned_key_id != &key_id
@@ -1676,6 +1753,8 @@ impl Bootstrapper {
                     public_signing_key: dev.public_signing_key.clone(),
                     client,
                     kind,
+                    grant_tier: dev.grant_tier,
+                    grant_signature: dev.grant_signature.clone(),
                     attested: false,
                 };
                 incoming.attested = self
@@ -1693,7 +1772,9 @@ impl Bootstrapper {
                         || existing.public_encryption_key != incoming.public_encryption_key
                         || existing.public_signing_key != incoming.public_signing_key
                         || existing.client != incoming.client
-                        || existing.kind != incoming.kind)
+                        || existing.kind != incoming.kind
+                        || existing.grant_tier != incoming.grant_tier
+                        || existing.grant_signature != incoming.grant_signature)
                 {
                     return Err(BootstrapError::Crypto(
                         "immutable directory registration changed".into(),
@@ -2237,6 +2318,8 @@ impl Bootstrapper {
             public_encryption_key: identity.public_encryption_key.clone(),
             client: client.to_string(),
             kind: kind.to_string(),
+            grant_tier: None,
+            grant_signature: None,
             self_signature: String::new(),
         };
         let canonical_unsigned = canonical_register_device_bytes(&body)?;

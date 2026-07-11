@@ -59,6 +59,7 @@ import {
   acksRequestSchema,
   blobPresignRequestSchema,
   deviceRegistrationSchema,
+  deviceRegistrationSchemaV3,
   envelopeBatchSchema,
   roomCreationSchema,
   roomCreationSchemaV3,
@@ -1093,7 +1094,20 @@ export class RoomDO extends DurableObject<Env> {
     } catch (err) {
       return errorResponse(400, "ATTN_BODY_INVALID", `request body is not valid JSON: ${(err as Error).message}`);
     }
-    const result = deviceRegistrationSchema.safeParse(parsed);
+    if (urlPath.startsWith("/v3/") && typeof parsed === "object" && parsed !== null) {
+      const candidate = parsed as Record<string, unknown>;
+      const hasTier = candidate.grantTier !== undefined;
+      const hasSignature = candidate.grantSignature !== undefined;
+      if (candidate.kind === "owner" && (hasTier || hasSignature)) {
+        return errorResponse(400, "ATTN_GRANT_INVALID", "v3 owner registration forbids grant fields");
+      }
+      if (candidate.kind !== "owner" && (!hasTier || !hasSignature)) {
+        return errorResponse(400, "ATTN_GRANT_REQUIRED", "v3 non-owner registration requires both grant fields");
+      }
+    }
+    const result = urlPath.startsWith("/v3/")
+      ? deviceRegistrationSchemaV3.safeParse(parsed)
+      : deviceRegistrationSchema.safeParse(parsed);
     if (!result.success) {
       return errorResponse(400, "ATTN_BODY_INVALID", formatZodError(result.error));
     }
@@ -1177,6 +1191,35 @@ export class RoomDO extends DurableObject<Env> {
     const sigOk = await verifySelfSignature(body, signingKeyBytes, selfSig);
     if (!sigOk) {
       return errorResponse(400, "ATTN_DEVICE_SELF_SIG_INVALID", "selfSignature does not match canonical body");
+    }
+
+    if (urlPath.startsWith("/v3/") && body.kind !== "owner") {
+      if (!("grantTier" in body) || !("grantSignature" in body) ||
+        typeof body.grantTier !== "string" || typeof body.grantSignature !== "string") {
+        return errorResponse(400, "ATTN_GRANT_REQUIRED", "v3 non-owner registration requires owner grant");
+      }
+      const grantTier = body.grantTier as "comment" | "suggest";
+      const grantSignatureEncoded = body.grantSignature;
+      let grantSignature: Uint8Array;
+      try {
+        grantSignature = base64UrlDecode(grantSignatureEncoded);
+      } catch {
+        return errorResponse(403, "ATTN_GRANT_INVALID", "grantSignature is not valid base64url");
+      }
+      const ownerKey = await this.ctx.storage.get<Uint8Array>(META.ownerSigningKey);
+      if (ownerKey === undefined) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing owner key`);
+      }
+      const grantBytes = new TextEncoder().encode(canonicalize({
+        grantTier,
+        purpose: "attn device grant v3",
+        roomId,
+        v: 3,
+      }));
+      if (grantSignature.length !== ED25519_SIG_BYTE_LEN ||
+        !(await verifyEd25519(ownerKey, grantSignature, grantBytes))) {
+        return errorResponse(403, "ATTN_GRANT_INVALID", "grantSignature does not match room owner grant");
+      }
     }
 
     // 5. kind=owner gate: stored ownerSigningKey wins. Constant-time compare.
@@ -4138,7 +4181,9 @@ function sameDeviceRegistration(a: DeviceRecord, b: DeviceRegistrationRequest): 
   return a.deviceId === b.deviceId && a.participantId === b.participantId &&
     a.publicSigningKey === b.publicSigningKey &&
     a.publicEncryptionKey === b.publicEncryptionKey &&
-    a.client === b.client && a.kind === b.kind && a.selfSignature === b.selfSignature;
+    a.client === b.client && a.kind === b.kind && a.selfSignature === b.selfSignature &&
+    a.grantTier === ("grantTier" in b ? b.grantTier : undefined) &&
+    a.grantSignature === ("grantSignature" in b ? b.grantSignature : undefined);
 }
 
 function sameBlobReservation(a: BlobReservation, b: BlobReservation): boolean {
@@ -4398,7 +4443,10 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint
  * here byte-for-byte.
  */
 async function verifySelfSignature(
-  body: DeviceRegistrationRequest,
+  body: DeviceRegistrationRequest & {
+    grantTier?: "comment" | "suggest";
+    grantSignature?: string;
+  },
   publicKeyBytes: Uint8Array,
   signature: Uint8Array,
 ): Promise<boolean> {
@@ -4411,8 +4459,18 @@ async function verifySelfSignature(
     client: body.client,
     kind: body.kind,
   };
+  if (body.grantTier !== undefined) signed.grantTier = body.grantTier;
+  if (body.grantSignature !== undefined) signed.grantSignature = body.grantSignature;
   const canonical = new TextEncoder().encode(canonicalize(signed));
 
+  return verifyEd25519(publicKeyBytes, signature, canonical);
+}
+
+async function verifyEd25519(
+  publicKeyBytes: Uint8Array,
+  signature: Uint8Array,
+  message: Uint8Array,
+): Promise<boolean> {
   let key: CryptoKey;
   try {
     key = await crypto.subtle.importKey(
@@ -4425,7 +4483,7 @@ async function verifySelfSignature(
   } catch {
     return false;
   }
-  return crypto.subtle.verify({ name: "Ed25519" }, key, signature, canonical);
+  return crypto.subtle.verify({ name: "Ed25519" }, key, signature, message);
 }
 
 /** Constant-time byte equality. */

@@ -33,7 +33,7 @@ use crate::review::model::{
     ReviewEventBody, RoomMode, SuggestionDraft,
 };
 use crate::review::store::ReviewStore;
-use crate::review::transport::inbound::{AuthorizationCache, VerifyingKeyCache};
+use crate::review::transport::inbound::{AuthorizationCache, GrantTier, VerifyingKeyCache};
 use crate::review::transport::selector::{self, RoomTransports, TransportConfig, TransportMode};
 use crate::review::transport::signaling::{SignalingPayload, assemble_signal_envelope};
 use crate::review::transport::{EnvelopeAck, TransportError};
@@ -214,6 +214,13 @@ pub enum ReviewUpdate {
     /// `ConnectionBadge`. Values match the frontend `ReviewStatus.connection`
     /// union (`live_direct | mailbox | offline | direct_failed`).
     ConnectionChanged { room_id: RoomId, connection: String },
+    /// Effective grant for the local room identity. Join/bootstrap can set
+    /// this before any authoring command; absent legacy/owner metadata keeps
+    /// the v2-compatible `suggest` default.
+    LocalGrantTierChanged {
+        room_id: RoomId,
+        grant_tier: GrantTier,
+    },
     /// Inbound live co-typing traffic for the webview's prosemirror-collab
     /// authority/client. `payload` is the opaque step JSON the sender emitted;
     /// `from` lets the webview drop its own broadcast echoes.
@@ -253,6 +260,7 @@ impl ReviewUpdate {
             ReviewUpdate::AnchorResolutionChanged { .. } => "reviewAnchorResolution",
             ReviewUpdate::PresenceChanged { .. } => "reviewPresence",
             ReviewUpdate::ConnectionChanged { .. } => "reviewConnection",
+            ReviewUpdate::LocalGrantTierChanged { .. } => "reviewStatus",
             ReviewUpdate::CollabSignal { .. } => "reviewCollab",
             ReviewUpdate::OutboxChanged { .. } => "reviewStatus",
             ReviewUpdate::Error { .. } => "reviewStatus",
@@ -362,6 +370,11 @@ pub struct ReviewManager {
         std::sync::Mutex<HashMap<RoomId, Arc<crate::review::transport::mailbox::OutboxProcessor>>>,
     >,
 
+    /// Runtime authorization metadata for the local participant. This is a
+    /// typed seam for v3 Join population; missing entries are legacy/owner
+    /// rooms and therefore retain the historical suggest capability.
+    local_grant_tiers: Arc<std::sync::Mutex<HashMap<RoomId, GrantTier>>>,
+
     /// Monotonic signal for freshly imported, durably persisted verdicts.
     /// Waiters subscribe before reading the store, closing the query/park race.
     verdict_revision_tx: tokio::sync::watch::Sender<u64>,
@@ -452,6 +465,35 @@ fn verdict_report_for_targets(
 }
 
 impl ReviewManager {
+    /// Record the verified local grant supplied by room bootstrap metadata.
+    /// `None` removes v3 metadata and restores the v2/owner suggest default.
+    pub fn set_local_grant_tier(&self, room_id: RoomId, tier: Option<GrantTier>) {
+        let effective = tier.unwrap_or(GrantTier::Suggest);
+        let mut tiers = self
+            .local_grant_tiers
+            .lock()
+            .expect("local grant tier mutex poisoned");
+        if let Some(tier) = tier {
+            tiers.insert(room_id.clone(), tier);
+        } else {
+            tiers.remove(&room_id);
+        }
+        drop(tiers);
+        (self.update_tx)(ReviewUpdate::LocalGrantTierChanged {
+            room_id,
+            grant_tier: effective,
+        });
+    }
+
+    fn local_grant_tier(&self, room_id: &RoomId) -> GrantTier {
+        self.local_grant_tiers
+            .lock()
+            .expect("local grant tier mutex poisoned")
+            .get(room_id)
+            .copied()
+            .unwrap_or(GrantTier::Suggest)
+    }
+
     /// Submit one suggestion synchronously and durably mirror its authored
     /// event into the local event log before acknowledging the caller.
     ///
@@ -462,6 +504,9 @@ impl ReviewManager {
         room_id: RoomId,
         draft: SuggestionDraft,
     ) -> anyhow::Result<String> {
+        if self.local_grant_tier(&room_id) == GrantTier::Comment {
+            anyhow::bail!("comment-only grant cannot create suggestions");
+        }
         let bootstrapper = self
             .bootstrap
             .as_ref()
@@ -612,6 +657,7 @@ impl ReviewManager {
             live_webrtc: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cancels: Arc::new(std::sync::Mutex::new(HashMap::new())),
             outboxes: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            local_grant_tiers: Arc::new(std::sync::Mutex::new(HashMap::new())),
             verdict_revision_tx,
         }
     }
@@ -672,6 +718,17 @@ impl ReviewManager {
         // Log only the command NAME — never the `{:?}` body, which would spill
         // comment/suggestion plaintext + collab steps to stderr.
         tracing::info!("received command {}", review_command_name(&cmd));
+
+        if let ReviewCommand::CreateSuggestion { room_id, .. } = &cmd
+            && self.local_grant_tier(room_id) == GrantTier::Comment
+        {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: "ATTN_GRANT_FORBIDDEN".into(),
+                message: "comment-only grant cannot create suggestions".into(),
+            });
+            return;
+        }
 
         // Bootstrap pipeline owns Share + Join when wired in. Everything else
         // still goes through `stub_update_for` (filled in by follow-up issues).
@@ -4250,6 +4307,44 @@ mod tests {
             }
             other => panic!("expected EventImported, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn comment_grant_rejects_suggestion_before_event_or_outbox() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-comment-only");
+        mgr.set_local_grant_tier(room_id.clone(), Some(GrantTier::Comment));
+        assert!(matches!(
+            rx.try_recv().expect("tier update"),
+            ReviewUpdate::LocalGrantTierChanged {
+                grant_tier: GrantTier::Comment,
+                ..
+            }
+        ));
+
+        mgr.submit(ReviewCommand::CreateSuggestion {
+            room_id: room_id.clone(),
+            draft: SuggestionDraft {
+                anchor: dummy_anchor(),
+                operation: SuggestionOperation::Replace {
+                    expected_text: "foo".into(),
+                    replacement: "bar".into(),
+                },
+                note: None,
+            },
+        });
+        assert!(matches!(
+            rx.try_recv().expect("authorization error"),
+            ReviewUpdate::Error { code, .. } if code == "ATTN_GRANT_FORBIDDEN"
+        ));
+        assert!(
+            mgr.store
+                .iter_events(&room_id)
+                .expect("events")
+                .next()
+                .is_none()
+        );
+        assert!(rx.try_recv().is_err(), "no event/outbox update may escape");
     }
 
     #[test]

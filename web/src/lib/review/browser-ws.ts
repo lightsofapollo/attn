@@ -93,6 +93,8 @@ export interface Device {
   publicSigningKey: string;
   client: 'attn-native' | 'attn-browser' | 'agent-cli';
   kind: 'owner' | 'reviewer' | 'agent';
+  grantTier?: 'comment' | 'suggest';
+  grantSignature?: string;
   selfSignature: string;
   registeredAt?: number;
   createdAt?: number;
@@ -512,6 +514,7 @@ export class BrowserWsClient {
    * subsequent signature verification is O(1) by key id.
    */
   private ingestDevices(list: Device[]): void {
+    const validated: Array<{ device: Device; keyId: string }> = [];
     for (const d of list) {
       try {
         const pk = decodePublicSigningKey(d.publicSigningKey);
@@ -528,14 +531,63 @@ export class BrowserWsClient {
         if (existing && !sameRegistration(existing, d)) {
           throw new Error('immutable device registration changed');
         }
-        this.devices.set(kid, d);
-        this.deviceKeyIds.set(d.deviceId, kid);
+        validated.push({ device: d, keyId: kid });
       } catch (err) {
         const m = err instanceof Error ? err.message : String(err);
         this.callbacks.onError?.(
           'ATTN_WS_DEVICE',
           `device ${d.deviceId} has invalid publicSigningKey: ${m}`,
         );
+      }
+    }
+
+    // Grant proofs are rooted in the room owner's directory key, never in the
+    // joining reviewer's (self-signed) registration. Validate the batch as a
+    // transaction so a conflicting second owner cannot influence which key
+    // authorizes the remaining registrations.
+    const combined = new Map(this.devices);
+    for (const { device, keyId } of validated) combined.set(keyId, device);
+    const owners = [...combined.entries()].filter(([, device]) => device.kind === 'owner');
+    const distinctOwners = new Set(owners.map(([keyId, device]) => `${device.deviceId}:${keyId}`));
+    if (distinctOwners.size > 1) {
+      this.callbacks.onError?.('ATTN_WS_DEVICE', 'device directory contains conflicting owners');
+      return;
+    }
+    const owner = owners.length === 1 ? owners[0] : undefined;
+    if (owner && (owner[1].grantTier !== undefined || owner[1].grantSignature !== undefined)) {
+      this.callbacks.onError?.('ATTN_WS_DEVICE', 'owner registration must not contain a grant');
+      return;
+    }
+
+    for (const { device: d, keyId } of validated) {
+      try {
+        const hasTier = d.grantTier !== undefined;
+        const hasSignature = d.grantSignature !== undefined;
+        if (d.kind !== 'owner' && hasTier !== hasSignature) {
+          throw new Error('grantTier and grantSignature must be provided together');
+        }
+        if (d.kind !== 'owner' && hasTier) {
+          if (!owner) throw new Error('v3 grant requires one room owner');
+          if (d.grantTier !== 'comment' && d.grantTier !== 'suggest') {
+            throw new Error('unsupported grant tier');
+          }
+          const signature = base64UrlDecode(d.grantSignature!);
+          const ownerKey = decodePublicSigningKey(owner[1].publicSigningKey);
+          const grantBytes = toCanonicalBytes({
+            grantTier: d.grantTier,
+            purpose: 'attn device grant v3',
+            roomId: this.opts.roomId,
+            v: 3,
+          });
+          if (signature.length !== 64 || !ed25519.verify(signature, grantBytes, ownerKey)) {
+            throw new Error('owner grant signature is invalid for this room and tier');
+          }
+        }
+        this.devices.set(keyId, d);
+        this.deviceKeyIds.set(d.deviceId, keyId);
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        this.callbacks.onError?.('ATTN_WS_DEVICE', `device ${d.deviceId} is not authorized: ${m}`);
       }
     }
   }
@@ -851,6 +903,8 @@ function registrationBytes(device: Device): Uint8Array {
     participantId: device.participantId,
     publicEncryptionKey: device.publicEncryptionKey,
     publicSigningKey: device.publicSigningKey,
+    ...(device.grantTier === undefined ? {} : { grantTier: device.grantTier }),
+    ...(device.grantSignature === undefined ? {} : { grantSignature: device.grantSignature }),
   });
 }
 
@@ -862,6 +916,8 @@ function sameRegistration(a: Device, b: Device): boolean {
     a.publicSigningKey === b.publicSigningKey &&
     a.client === b.client &&
     a.kind === b.kind &&
+    a.grantTier === b.grantTier &&
+    a.grantSignature === b.grantSignature &&
     a.selfSignature === b.selfSignature
   );
 }
@@ -870,7 +926,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function exactCapabilities(value: unknown, kind: Device['kind']): boolean {
+function exactCapabilities(
+  value: unknown,
+  kind: Device['kind'],
+  grantTier: Device['grantTier'],
+): boolean {
   if (!Array.isArray(value) || value.some((cap) => typeof cap !== 'string')) return false;
   const expected: Record<Device['kind'], string[]> = {
     owner: [
@@ -885,6 +945,10 @@ function exactCapabilities(value: unknown, kind: Device['kind']): boolean {
     reviewer: ['read_snapshot', 'write_comment', 'write_suggestion', 'resolve_comment'],
     agent: ['read_snapshot', 'write_comment', 'write_suggestion'],
   };
+  if (grantTier === 'comment') {
+    expected.reviewer = ['read_snapshot', 'write_comment', 'resolve_comment'];
+    expected.agent = ['read_snapshot', 'write_comment'];
+  }
   const actual = [...value].sort();
   const grants = [...expected[kind]].sort();
   return actual.length === grants.length && actual.every((cap, index) => cap === grants[index]);
@@ -905,7 +969,7 @@ function validParticipantAttestation(
     typeof participant.displayName === 'string' &&
     participant.kind === registered.kind &&
     participant.publicSigningKey === registered.publicSigningKey &&
-    exactCapabilities(participant.capabilities, registered.kind) &&
+    exactCapabilities(participant.capabilities, registered.kind, registered.grantTier) &&
     device.deviceId === registered.deviceId &&
     device.participantId === registered.participantId &&
     device.publicEncryptionKey === registered.publicEncryptionKey &&
@@ -924,7 +988,7 @@ function eventAllowedForRole(
     case 'comment_created':
       return true;
     case 'suggestion_created':
-      return true;
+      return registered.grantTier !== 'comment';
     case 'comment_resolved':
       return (registered.kind === 'owner' || registered.kind === 'reviewer')
         && body.resolvedBy === meta.authorId;

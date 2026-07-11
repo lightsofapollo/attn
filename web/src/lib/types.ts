@@ -933,6 +933,8 @@ export interface ReviewStatus {
   pendingCount?: number;
   lastImportedSeq?: number;
   expiresAt?: number;
+  /** Effective locally-authorized v3 capability; absent means legacy suggest. */
+  grantTier?: 'comment' | 'suggest';
 }
 
 /**

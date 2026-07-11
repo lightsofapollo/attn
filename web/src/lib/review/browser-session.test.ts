@@ -21,6 +21,9 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import {
   BrowserSession,
   buildRegisterDeviceBody,
+  buildRegisterDeviceBodyV3,
+  canonicalDeviceGrantV3,
+  verifyDeviceGrantV3,
   canonicalRegisterDeviceBytes,
   generateBrowserIdentity,
   admissionHeaderValue,
@@ -622,6 +625,55 @@ defineCase('canonicalRegisterDeviceBytes is deterministic and excludes selfSigna
   assert(!str.includes('selfSignature'), 'canonical bytes must omit selfSignature');
   assert(str.includes('"client":"attn-browser"'), 'client field present');
   assert(str.includes('"kind":"reviewer"'), 'kind field is reviewer');
+});
+
+defineCase('v3 registration self-signature binds owner grant fields', () => {
+  const identity = deterministicIdentity();
+  const body = buildRegisterDeviceBodyV3(identity, 'comment', 'owner-grant-signature');
+  const canonical = new TextDecoder().decode(canonicalRegisterDeviceBytes(body));
+  assert(canonical.includes('"grantTier":"comment"'), 'tier is self-signed');
+  assert(canonical.includes('"grantSignature":"owner-grant-signature"'), 'grant signature is self-signed');
+  assertEq(
+    new TextDecoder().decode(canonicalDeviceGrantV3('room-1', 'comment')),
+    '{"grantTier":"comment","purpose":"attn device grant v3","roomId":"room-1","v":3}',
+    'exact owner grant canonical JSON',
+  );
+});
+
+defineCase('v3 owner grant verification binds tier, room, and owner key', () => {
+  const owner = ed25519.keygen(new Uint8Array(32).fill(0x61));
+  const other = ed25519.keygen(new Uint8Array(32).fill(0x62));
+  const signature = base64UrlEncode(
+    ed25519.sign(canonicalDeviceGrantV3('room-grant', 'comment'), owner.secretKey),
+  );
+  const ownerKey = base64UrlEncode(owner.publicKey);
+  assert(verifyDeviceGrantV3('room-grant', 'comment', signature, ownerKey), 'valid grant');
+  assert(!verifyDeviceGrantV3('room-grant', 'suggest', signature, ownerKey), 'wrong tier');
+  assert(!verifyDeviceGrantV3('other-room', 'comment', signature, ownerKey), 'wrong room');
+  assert(!verifyDeviceGrantV3('room-grant', 'comment', signature, base64UrlEncode(other.publicKey)), 'wrong owner');
+  assert(!verifyDeviceGrantV3('room-grant', 'comment', '', ownerKey), 'incomplete proof');
+});
+
+defineCase('comment-tier session hard-blocks direct suggestion authoring', async () => {
+  const session = new BrowserSession({ store: makeStubStore() });
+  (session as unknown as { state: BrowserSessionState }).state.grantTier = 'comment';
+  let rejected = false;
+  try {
+    await session.createSuggestion({
+      anchor: {
+        v: 2,
+        fileId: 'file-tier',
+        snapshotId: 'snapshot-tier',
+        baseHash: 'hash-tier',
+        position: { byteRange: [0, 1], lineRange: [1, 1] },
+      },
+      operation: { kind: 'replace', expectedText: 'a', replacement: 'b' },
+    });
+  } catch (error) {
+    rejected = error instanceof Error && error.message.includes('suggest grant');
+  }
+  assert(rejected, 'direct createSuggestion must reject comment tier');
+  session.close();
 });
 
 defineCase('admissionHeaderValue prefixes with v2. and base64url-encodes the tag', () => {

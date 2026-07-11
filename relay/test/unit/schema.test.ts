@@ -4,6 +4,7 @@ import {
   acksRequestSchema,
   blobPresignRequestSchema,
   deviceRegistrationSchema,
+  deviceRegistrationSchemaV3,
   envelopeSchema,
   roomCreationSchema,
   roomCreationSchemaV3,
@@ -88,6 +89,22 @@ describe("relay durable metadata schema bounds", () => {
 
   it("accepts protocol-sized device key and signature encodings", () => {
     expect(deviceRegistrationSchema.safeParse(deviceRegistration()).success).toBe(true);
+  });
+
+  it("enforces the v3 owner grant field matrix", () => {
+    const reviewer = deviceRegistration({
+      grantTier: "comment",
+      grantSignature: "G".repeat(86),
+    });
+    expect(deviceRegistrationSchemaV3.safeParse(reviewer).success).toBe(true);
+    expect(deviceRegistrationSchemaV3.safeParse(deviceRegistration()).success).toBe(false);
+    expect(deviceRegistrationSchemaV3.safeParse({ ...reviewer, grantSignature: undefined }).success)
+      .toBe(false);
+    expect(deviceRegistrationSchemaV3.safeParse(deviceRegistration({
+      kind: "owner",
+      grantTier: "suggest",
+      grantSignature: "G".repeat(86),
+    })).success).toBe(false);
   });
 
   it.each([

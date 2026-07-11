@@ -225,6 +225,27 @@ const TEST_DEVICE: Device = {
   ),
 };
 
+function signedDevice(unsigned: Omit<Device, 'selfSignature'>, secretKey: Uint8Array): Device {
+  return {
+    ...unsigned,
+    selfSignature: base64UrlEncode(
+      ed25519.sign(
+        toCanonicalBytes({
+          client: unsigned.client,
+          deviceId: unsigned.deviceId,
+          kind: unsigned.kind,
+          participantId: unsigned.participantId,
+          publicEncryptionKey: unsigned.publicEncryptionKey,
+          publicSigningKey: unsigned.publicSigningKey,
+          ...(unsigned.grantTier === undefined ? {} : { grantTier: unsigned.grantTier }),
+          ...(unsigned.grantSignature === undefined ? {} : { grantSignature: unsigned.grantSignature }),
+        }),
+        secretKey,
+      ),
+    ),
+  };
+}
+
 const TEST_POLICY: RoomPolicy = {
   mode: 'live',
   maxPeers: 8,
@@ -362,6 +383,47 @@ function clientOptions(port: number) {
 // ---------------------------------------------------------------------------
 // Test: hello → envelope flow
 // ---------------------------------------------------------------------------
+
+defineCase('v3 directory grants are rooted in the unique room owner key', () => {
+  const ownerKeys = ed25519.keygen(new Uint8Array(32).fill(0x44));
+  const owner = signedDevice({
+    deviceId: 'd-owner',
+    participantId: 'p-owner',
+    publicEncryptionKey: 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+    publicSigningKey: base64UrlEncode(ownerKeys.publicKey),
+    client: 'attn-native',
+    kind: 'owner',
+  }, ownerKeys.secretKey);
+  const grantBytes = toCanonicalBytes({
+    grantTier: 'comment',
+    purpose: 'attn device grant v3',
+    roomId: 'room-test',
+    v: 3,
+  });
+  const reviewerBase = { ...TEST_DEVICE_UNSIGNED, grantTier: 'comment' as const };
+  const forged = signedDevice({
+    ...reviewerBase,
+    grantSignature: base64UrlEncode(ed25519.sign(grantBytes, SIGNING_KEYPAIR.secret)),
+  }, SIGNING_KEYPAIR.secret);
+  const errors: string[] = [];
+  const client = new BrowserWsClient({
+    ...clientOptions(1),
+    callbacks: { onError: (_code, message) => errors.push(message) },
+  });
+  client.mergeDevices([owner, forged]);
+  assertEq(client.getDevices().size, 1, 'forged reviewer is not cached');
+  assert(errors.some((message) => message.includes('owner grant signature')), 'forgery rejected');
+
+  const valid = signedDevice({
+    ...reviewerBase,
+    grantSignature: base64UrlEncode(ed25519.sign(grantBytes, ownerKeys.secretKey)),
+  }, SIGNING_KEYPAIR.secret);
+  client.mergeDevices([valid]);
+  assertEq(client.getDevices().size, 2, 'owner-authorized reviewer is cached');
+  const cached = [...client.getDevices().values()].find((device) => device.kind === 'reviewer');
+  assertEq(cached?.grantTier, 'comment', 'verified tier is retained for event authorization');
+  client.close();
+});
 
 defineCase('hello frame populates device cache and onHello fires', async () => {
   const server = await startMockServer();

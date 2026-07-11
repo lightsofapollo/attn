@@ -153,7 +153,26 @@ export const deviceRegistrationSchema = z.object({
     .max(BASE64URL_64_BYTE_MAX_CHARS),
 });
 
+export const deviceRegistrationSchemaV3 = deviceRegistrationSchema.extend({
+  grantTier: z.enum(["comment", "suggest"]).optional(),
+  grantSignature: b64url.min(1).max(BASE64URL_64_BYTE_MAX_CHARS).optional(),
+}).superRefine((body, ctx) => {
+  if (body.kind === "owner" && (body.grantTier !== undefined || body.grantSignature !== undefined)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "v3 owner registration forbids grantTier and grantSignature",
+    });
+  }
+  if (body.kind !== "owner" && (body.grantTier === undefined || body.grantSignature === undefined)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "v3 non-owner registration requires grantTier and grantSignature",
+    });
+  }
+});
+
 export type DeviceRegistrationRequest = z.infer<typeof deviceRegistrationSchema>;
+export type DeviceRegistrationRequestV3 = z.infer<typeof deviceRegistrationSchemaV3>;
 
 /**
  * Stored shape returned by `GET /v2/rooms/:roomId/devices`. Adds `registeredAt`
@@ -162,6 +181,8 @@ export type DeviceRegistrationRequest = z.infer<typeof deviceRegistrationSchema>
  * return devices in registration order.
  */
 export interface DeviceRecord extends DeviceRegistrationRequest {
+  grantTier?: "comment" | "suggest";
+  grantSignature?: string;
   registeredAt: number;
 }
 

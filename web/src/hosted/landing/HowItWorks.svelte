@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getTheme } from './theme.svelte';
+  import { getTheme } from '../theme.svelte';
   import shareLight from './assets/share-light.png';
   import shareDark from './assets/share-dark.png';
 

@@ -6,7 +6,7 @@ import { defineConfig, devices } from '@playwright/test';
 // dist-browser first.
 export default defineConfig({
   testDir: './e2e',
-  testMatch: 'hosted-routes.spec.ts',
+  testMatch: ['hosted-routes.spec.ts', 'hosted-shells.spec.ts'],
   timeout: 60_000,
   expect: { timeout: 20_000 },
   fullyParallel: false,

@@ -84,10 +84,10 @@ test('unknown paths fall back to the landing entry', async ({ page }) => {
 });
 
 for (const [path, view, headingHint] of [
-  ['/app', 'home', 'On this device'],
+  ['/app', 'home', 'Your desk'],
   ['/app/storage', 'storage', 'Storage & recovery'],
   ['/open', 'open', 'Import into your desk'],
-  ['/app/w/ws1/docs/notes.md', 'workspace', 'Workspace ws1 — docs/notes.md'],
+  ['/app/w/ws-product/direction.md', 'workspace', 'Product direction'],
 ] as const) {
   test(`app entry serves ${path} without redirecting`, async ({ page }) => {
     const response = await page.goto(path);

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getTheme } from './theme.svelte';
+  import { getTheme } from '../theme.svelte';
   import collabLight from './assets/collab-light.png';
   import collabDark from './assets/collab-dark.png';
 

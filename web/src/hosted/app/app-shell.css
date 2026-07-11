@@ -1,0 +1,800 @@
+/* Local workspace shell styles (attn-7xl.1.3), from the approved prototype
+   (planning/web-authoring/prototype.html) on the shared token set. Desktop is
+   the three-column workspace; under 900px the editor becomes a reader-first
+   surface with a bottom action dock and sheets (ios-ux.md). */
+
+.app-shell {
+  min-height: 100dvh;
+  display: grid;
+  grid-template-rows: 64px 1fr;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0 1.4rem;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--sans);
+}
+
+.app-header .right {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  font: 750 1.28rem var(--serif);
+}
+
+.mark {
+  width: 29px;
+  height: 29px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--ink);
+  color: var(--sheet);
+  font: 700 0.74rem var(--mono);
+}
+
+.local-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font: 0.73rem var(--mono);
+  color: var(--green);
+}
+
+.local-badge.warn {
+  color: var(--rust-deep);
+}
+
+.local-badge .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.degraded-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin: 0 0 2rem;
+  padding: 1rem 1.2rem;
+  border: 1px solid var(--rust);
+  border-left-width: 3px;
+  background: var(--sheet);
+  font: 0.9rem/1.5 var(--sans);
+}
+
+.degraded-banner strong {
+  display: block;
+}
+
+.degraded-banner p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.degraded-banner .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.desk {
+  width: 100%;
+  max-width: 1300px;
+  margin: 0 auto;
+  padding: clamp(2rem, 6vw, 6rem) clamp(1rem, 4vw, 6rem);
+}
+
+.desk-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 1rem;
+  border-bottom: 1px solid var(--ink);
+  padding-bottom: 1.3rem;
+}
+
+.desk-title h1 {
+  margin: 0;
+  font-size: clamp(2.8rem, 5vw, 5rem);
+  letter-spacing: -0.045em;
+}
+
+.desk-title p {
+  margin: 0;
+  color: var(--muted);
+  font: 0.85rem var(--mono);
+}
+
+.quick-actions {
+  display: grid;
+  grid-template-columns: 1.6fr 1fr 1fr;
+  gap: 1px;
+  border: 1px solid var(--rule);
+  background: var(--rule);
+  margin: 2.5rem 0 4rem;
+}
+
+.quick {
+  min-height: 155px;
+  border: 0;
+  padding: 1.4rem;
+  text-align: left;
+  background: var(--sheet);
+  color: var(--ink);
+  cursor: pointer;
+  display: block;
+}
+
+.quick:hover {
+  background: var(--sheet-raised);
+}
+
+.quick big {
+  display: block;
+  font-family: var(--serif);
+  font-size: 1.55rem;
+  margin-top: 2.2rem;
+}
+
+.quick span {
+  color: var(--muted);
+  font: 0.82rem var(--sans);
+}
+
+.folio-label {
+  font: 0.72rem var(--mono);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.workspace-row {
+  display: grid;
+  grid-template-columns: 1.2fr 0.65fr 0.65fr auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.25rem 0.25rem;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--sans);
+  color: var(--ink);
+}
+
+a.workspace-row:hover {
+  background: color-mix(in srgb, var(--sheet) 55%, transparent);
+}
+
+.workspace-row strong {
+  font-family: var(--serif);
+  font-size: 1.18rem;
+}
+
+.workspace-row span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.empty-desk {
+  margin-top: 2.5rem;
+  max-width: 560px;
+  border: 1px solid var(--rule);
+  background: var(--sheet);
+  box-shadow: var(--shadow-soft);
+  padding: 2.4rem 2.6rem 3rem;
+  transform: rotate(-0.3deg);
+}
+
+.empty-desk .meta {
+  font: 0.72rem var(--mono);
+  color: var(--muted);
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 0.9rem;
+}
+
+.empty-desk h2 {
+  margin: 2rem 0 0.9rem;
+  font-size: 2.2rem;
+  letter-spacing: -0.03em;
+}
+
+.empty-desk p {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+
+.empty-desk .cursor-line {
+  color: var(--muted);
+}
+
+.empty-desk .caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  vertical-align: -0.18em;
+  background: var(--rust);
+}
+
+/* ————— editor ————— */
+
+.editor-shell {
+  min-height: 100dvh;
+  display: grid;
+  grid-template-rows: 58px 1fr;
+  background: var(--paper-deep);
+}
+
+.editor-top {
+  display: grid;
+  grid-template-columns: 240px 1fr 320px;
+  align-items: center;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+  font-family: var(--sans);
+}
+
+.editor-top > div {
+  padding: 0 1rem;
+  min-width: 0;
+}
+
+.editor-top .doc-name {
+  text-align: center;
+  font-family: var(--serif);
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-top .save-state {
+  color: var(--muted);
+  font: 0.72rem var(--mono);
+}
+
+.editor-top .share-action {
+  text-align: right;
+}
+
+.editor-grid {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 320px;
+  min-height: 0;
+}
+
+.file-rail {
+  border-right: 1px solid var(--rule);
+  padding: 1.2rem;
+  font-family: var(--sans);
+  background: color-mix(in srgb, var(--paper) 65%, transparent);
+}
+
+.rail-title {
+  font: 0.68rem var(--mono);
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0.4rem 0 1.1rem;
+}
+
+.file-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.file {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  padding: 0.55rem 0.65rem;
+  border-radius: 5px;
+  font-size: 0.88rem;
+  margin-bottom: 0.2rem;
+  cursor: pointer;
+}
+
+.file:hover {
+  background: color-mix(in srgb, var(--sheet) 70%, transparent);
+}
+
+.file.active {
+  background: var(--sheet);
+  box-shadow: inset 3px 0 var(--rust);
+}
+
+.file.asset {
+  color: var(--muted);
+}
+
+.file .file-size {
+  float: right;
+  color: var(--faint);
+  font: 0.7rem var(--mono);
+}
+
+.rail-add {
+  margin-top: 1rem;
+  color: var(--muted);
+}
+
+.editor-canvas {
+  overflow: auto;
+  padding: 3rem clamp(1.2rem, 5vw, 6rem);
+}
+
+.writing-sheet {
+  max-width: 760px;
+  min-height: 720px;
+  margin: 0 auto;
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  box-shadow: var(--shadow-soft);
+  padding: clamp(2.2rem, 6vw, 5.5rem);
+}
+
+.writing-sheet h1 {
+  font-size: clamp(2.4rem, 5vw, 3.4rem);
+  line-height: 1;
+  letter-spacing: -0.035em;
+  margin: 1.2rem 0 1.4rem;
+}
+
+.writing-sheet h2 {
+  font-size: 1.8rem;
+  margin: 2.2rem 0 0.9rem;
+}
+
+.writing-sheet p,
+.writing-sheet li {
+  font-size: 1.08rem;
+  line-height: 1.7;
+}
+
+.writing-sheet .placeholder {
+  color: var(--muted);
+}
+
+.asset-preview {
+  margin: 1.6rem 0 0;
+  border: 1px dashed var(--rule);
+  padding: 2.4rem 1.6rem;
+  text-align: center;
+  color: var(--muted);
+  font: 0.9rem/1.5 var(--sans);
+}
+
+.asset-preview strong {
+  display: block;
+  font: 0.78rem var(--mono);
+  color: var(--ink);
+  margin-bottom: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.review-rail {
+  border-left: 1px solid var(--rule);
+  background: var(--paper);
+  padding: 1rem;
+  font-family: var(--sans);
+}
+
+.review-card {
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  padding: 0.9rem;
+  margin-top: 1rem;
+  box-shadow: var(--shadow-label);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.review-card:first-of-type {
+  margin-top: 7rem;
+}
+
+.review-card strong {
+  display: block;
+  color: var(--rust-deep);
+  font-size: 0.75rem;
+  margin-bottom: 0.4rem;
+}
+
+.review-empty {
+  margin-top: 7rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+/* ————— mobile editor: reader + dock + sheets ————— */
+
+.thumb-dock {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .editor-shell {
+    grid-template-rows: 58px 1fr;
+  }
+
+  .editor-top {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .editor-top .top-brand {
+    display: none;
+  }
+
+  .editor-top .doc-name {
+    text-align: left;
+  }
+
+  .editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .file-rail,
+  .review-rail {
+    display: none;
+  }
+
+  .editor-canvas {
+    padding: 0;
+    /* Keep the last lines readable above the fixed dock. */
+    padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .writing-sheet {
+    border: 0;
+    box-shadow: none;
+    min-height: calc(100dvh - 58px);
+  }
+
+  .writing-sheet p,
+  .writing-sheet li {
+    font-size: 1.15rem;
+    line-height: 1.7;
+  }
+
+  .thumb-dock {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    border-top: 1px solid var(--rule);
+    background: var(--nav-veil);
+    backdrop-filter: blur(15px);
+    -webkit-backdrop-filter: blur(15px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    font-family: var(--sans);
+  }
+
+  .thumb-dock button {
+    min-height: 56px;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    font: 650 0.78rem var(--sans);
+    cursor: pointer;
+  }
+
+  .thumb-dock button:hover {
+    background: color-mix(in srgb, var(--sheet) 60%, transparent);
+  }
+}
+
+.bottom-sheet-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--overlay-veil);
+  display: grid;
+  align-items: end;
+}
+
+.bottom-sheet {
+  max-height: 82dvh;
+  overflow: auto;
+  background: var(--sheet);
+  border-top: 1px solid var(--ink);
+  padding: 1.1rem 1.2rem calc(1.4rem + env(safe-area-inset-bottom, 0px));
+  font-family: var(--sans);
+}
+
+.bottom-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+}
+
+.bottom-sheet-head h2 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+/* ————— share sheet ————— */
+
+.overlay-stage {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 2rem 1rem;
+  overflow: auto;
+  background: var(--overlay-veil);
+}
+
+.share-sheet {
+  width: min(690px, 100%);
+  min-width: 0;
+  background: var(--sheet);
+  border: 1px solid var(--ink);
+  box-shadow: var(--shadow-strong);
+}
+
+.share-head {
+  padding: 1.8rem 2rem;
+  border-bottom: 1px solid var(--rule);
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 1rem;
+}
+
+.share-head > div {
+  min-width: 0;
+}
+
+.share-head h2 {
+  margin: 0;
+  font-size: clamp(1.85rem, 6vw, 2.3rem);
+}
+
+.share-body {
+  padding: 1.6rem 2rem 2rem;
+}
+
+.share-step {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 0.8rem;
+  padding: 1rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.share-step .step-badge {
+  width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--rule);
+  border-radius: 50%;
+  font: 0.7rem var(--mono);
+}
+
+.share-step strong {
+  display: block;
+  font-family: var(--sans);
+}
+
+.share-step p {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font: 0.87rem/1.45 var(--sans);
+}
+
+.link-box {
+  min-width: 0;
+  margin-top: 1.4rem;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  padding: 0.85rem;
+  font: 0.75rem/1.5 var(--mono);
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.share-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  margin-top: 1rem;
+}
+
+/* ————— storage & open ————— */
+
+.storage-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+  gap: 3rem;
+  margin-top: 3rem;
+}
+
+.storage-panel {
+  border-top: 1px solid var(--ink);
+  padding-top: 1rem;
+}
+
+.storage-panel h2 {
+  font-size: 1.9rem;
+  margin: 0.6rem 0 0.6rem;
+}
+
+.storage-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-top: 1.5rem;
+}
+
+.meter {
+  height: 8px;
+  background: var(--paper-deep);
+  margin: 1rem 0 0.6rem;
+}
+
+.meter span {
+  display: block;
+  height: 100%;
+  background: var(--green);
+}
+
+.meter.warn span {
+  background: var(--rust);
+}
+
+.status-box {
+  background: var(--sheet);
+  border: 1px solid var(--rule);
+  padding: 1.2rem;
+  font-family: var(--sans);
+}
+
+.status-box strong {
+  color: var(--green);
+}
+
+.status-box.warn strong {
+  color: var(--rust-deep);
+}
+
+.status-box p {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.status-box small {
+  color: var(--muted);
+}
+
+.confirm-clear {
+  margin-top: 1rem;
+  border: 1px solid var(--rust);
+  background: var(--sheet);
+  padding: 1rem 1.2rem;
+  font: 0.88rem/1.5 var(--sans);
+}
+
+.confirm-clear .actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+}
+
+.drop-zone {
+  margin-top: 2.5rem;
+  border: 2px dashed var(--rule);
+  background: color-mix(in srgb, var(--sheet) 60%, transparent);
+  padding: clamp(2.5rem, 8vw, 5rem) 1.5rem;
+  text-align: center;
+  font-family: var(--sans);
+}
+
+.drop-zone h2 {
+  font-family: var(--serif);
+  font-size: 2rem;
+  margin: 0 0 0.7rem;
+}
+
+.drop-zone p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.6;
+}
+
+.drop-zone .formats {
+  margin-top: 1.4rem;
+  color: var(--muted);
+  font: 0.72rem var(--mono);
+}
+
+/* ————— small screens ————— */
+
+@media (max-width: 900px) {
+  .quick-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .workspace-row .detail {
+    display: none;
+  }
+
+  .storage-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .desk-title {
+    display: block;
+  }
+
+  .desk-title p {
+    margin: 1rem 0 0;
+    max-width: 32ch;
+    line-height: 1.45;
+  }
+
+  .share-head {
+    padding: 1.4rem 1.25rem;
+  }
+
+  .share-body {
+    padding: 1.1rem 1.25rem 1.4rem;
+  }
+
+  .share-foot {
+    flex-wrap: wrap;
+  }
+
+  .share-foot .button {
+    flex: 1 1 12rem;
+  }
+
+  .overlay-stage {
+    padding: 1rem;
+    place-items: start center;
+  }
+
+  .share-sheet {
+    margin-top: 3.5rem;
+  }
+}
+
+@media (max-width: 380px) {
+  .app-header {
+    padding: 0 0.8rem;
+  }
+
+  .app-header .right .button {
+    min-height: 40px;
+    padding: 0.5rem 0.7rem;
+  }
+}

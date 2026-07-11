@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getTheme, toggleTheme } from './theme.svelte';
+  import { getTheme, toggleTheme } from '../theme.svelte';
 </script>
 
 <nav class="site-nav" aria-label="Main navigation">

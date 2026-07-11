@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { getTheme } from './theme.svelte';
+  import { getTheme } from '../theme.svelte';
   import CopyCode from './CopyCode.svelte';
   import editorLight from './assets/editor-light.png';
   import editorDark from './assets/editor-dark.png';

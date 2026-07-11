@@ -169,6 +169,7 @@ export async function createProductionDurableShareSession(options: ProductionDur
       const envelopeId = randomProtocolId();
       const outer = { v: 3, envelopeId, type: 'review_submission', shareId: options.invite.shareId,
         epoch: resolution.record.epoch, roomId: resolution.bundle.roomId, tier: resolution.bundle.tier,
+        bundleId: resolution.record.bundleId,
         deviceRegistration: buildRegisterDeviceBodyV3(identity, resolution.bundle.tier, capability.grantSignature ?? ''),
         envelopes: [joined.envelope, comment.envelope] };
       return { envelopeId, epoch: resolution.record.epoch, revision: resolution.record.revision, tier: resolution.bundle.tier,
@@ -207,11 +208,13 @@ export async function createProductionDurableShareSession(options: ProductionDur
     if (!resolution || resolution.bundle.tier === 'view') throw new Error('view-only shares cannot enable notifications');
     const capability = resolution.bundle.roomCapability as DurableShareCapability;
     if (!capability.writeAdmissionKey || !linkKeys.writeAdmissionKey) throw new Error('share write capability is unavailable');
+    if (capability.grantSignature === undefined) throw new Error('share device grant is unavailable');
     // Copy every capability before the first await. A watch refresh may swap
     // and zero the committed resolution while the directory request is live.
     const roomReadCapabilityBytes = new Uint8Array(capability.readCapabilityKey);
     const readAdmissionKeyBytes = new Uint8Array(linkKeys.readAdmissionKey);
     const writeAdmissionKeyBytes = new Uint8Array(linkKeys.writeAdmissionKey);
+    const deviceSigningSecretBytes = new Uint8Array(identity.signingSecret);
     const roomDirectoryAdmission = new Uint8Array(capability.roomKeys.readAdmissionKey);
     const shareId = resolution.record.shareId;
     const bundleId = resolution.record.bundleId;
@@ -220,6 +223,11 @@ export async function createProductionDurableShareSession(options: ProductionDur
     const revision = resolution.record.revision;
     const manifestDigest = resolution.bundle.manifestDigest;
     const ownerSigningKey = capability.ownerSigningKey;
+    const deviceRegistration = buildRegisterDeviceBodyV3(
+      identity,
+      resolution.bundle.tier,
+      capability.grantSignature,
+    );
     const first = resolution.snapshots[0];
     const metadata = first && isRecord(first.metadata) ? first.metadata : {};
     const fileName = typeof metadata.ownerDisplayPath === 'string'
@@ -235,9 +243,10 @@ export async function createProductionDurableShareSession(options: ProductionDur
       const devices = structuredClone(raw.devices) as Device[];
       return { shareId, bundleId, roomId, epoch, revision, manifestDigest, deviceId: identity.deviceId, relayUrl: options.relayUrl,
         roomReadCapabilityBytes, readAdmissionKeyBytes, writeAdmissionKeyBytes,
-        ownerSigningKey, devices, fileName };
+        deviceSigningSecretBytes, deviceRegistration, ownerSigningKey, devices, fileName };
     } catch (error) {
       roomReadCapabilityBytes.fill(0); readAdmissionKeyBytes.fill(0); writeAdmissionKeyBytes.fill(0);
+      deviceSigningSecretBytes.fill(0);
       throw error;
     } finally {
       roomDirectoryAdmission.fill(0);

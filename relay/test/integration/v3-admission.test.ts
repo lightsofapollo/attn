@@ -185,7 +185,7 @@ describe("additive /v3 scoped admission", () => {
     expect((await missingBlob.json() as { error: { code: string } }).error.code)
       .not.toBe("ATTN_ADMISSION_INVALID");
 
-    const socketUrl = `${roomUrl}/socket?device_id=view-only-unregistered`;
+    const socketUrl = `${roomUrl}/socket?device_id=view-only-unregistered&proof_expires=${Date.now() + 60_000}&proof_nonce=${base64UrlEncode(new Uint8Array(16).fill(0x55))}`;
     const socketAdmission = await scopedHeader("read", readKey, "GET", socketUrl);
     const readOnlyDeviceSocket = await SELF.fetch(socketUrl, {
       headers: {
@@ -201,7 +201,7 @@ describe("additive /v3 scoped admission", () => {
     const socket = await SELF.fetch(socketUrl, {
       headers: {
         Upgrade: "websocket",
-        "Sec-WebSocket-Protocol": `attn.v3, read-hmac.${socketAdmission.split(".")[2]}, write-hmac.${socketWriteAdmission.split(".")[2]}`,
+        "Sec-WebSocket-Protocol": `attn.v3, read-hmac.${socketAdmission.split(".")[2]}, write-hmac.${socketWriteAdmission.split(".")[2]}, device-proof.${base64UrlEncode(new Uint8Array(64).fill(0x77))}`,
       },
     });
     expect(socket.status).toBe(404);

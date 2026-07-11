@@ -2,6 +2,7 @@ import { SELF, fetchMock, runInDurableObject, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { canonicalize } from "../../src/canonical";
+import { canonicalDeviceHttpProofV3, canonicalDeviceWebSocketProofV3, deviceHttpBodySha256 } from "../../src/device-proof";
 import type { Env } from "../../src/env";
 import { generateEd25519Keypair, ownerSignatureHeader } from "../helpers/owner-sig";
 import { FIXED_POW_RAND, createPowHeader, mintPowForTests } from "../helpers/pow";
@@ -38,11 +39,135 @@ async function pow(roomId: string, deviceId: string, method: string, path: strin
   });
 }
 
+type TestKeypair = Awaited<ReturnType<typeof generateEd25519Keypair>>;
+
+async function httpProof(input: {
+  keypair: TestKeypair;
+  resourceKind: "room" | "share";
+  resourceId: string;
+  deviceId: string;
+  method: "POST" | "DELETE";
+  path: string;
+  body?: string;
+  powToken: string;
+}): Promise<string> {
+  const body = new TextEncoder().encode(input.body ?? "");
+  const canonical = canonicalDeviceHttpProofV3({
+    resourceKind: input.resourceKind,
+    resourceId: input.resourceId,
+    deviceId: input.deviceId,
+    method: input.method,
+    path: input.path,
+    bodySha256: await deviceHttpBodySha256(body),
+    bodyLength: body.byteLength,
+    powToken: input.powToken,
+  });
+  return base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+    { name: "Ed25519" }, input.keypair.privateKey, canonical,
+  )));
+}
+
+async function reviewerRegistration(input: {
+  keypair: TestKeypair;
+  owner: TestKeypair;
+  roomId: string;
+  deviceId: string;
+  participantId?: string;
+  tier: "comment" | "suggest";
+}): Promise<Record<string, unknown>> {
+  const grant = canonicalize({ grantTier: input.tier, purpose: "attn device grant v3", roomId: input.roomId, v: 3 });
+  const unsigned = {
+    deviceId: input.deviceId,
+    participantId: input.participantId ?? `participant-${input.deviceId}`,
+    publicSigningKey: base64UrlEncode(input.keypair.publicKeyBytes),
+    publicEncryptionKey: base64UrlEncode(new Uint8Array(32).fill(0x44)),
+    client: "attn-browser" as const,
+    kind: "reviewer" as const,
+    grantTier: input.tier,
+    grantSignature: base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+      { name: "Ed25519" }, input.owner.privateKey, new TextEncoder().encode(grant),
+    ))),
+  };
+  return {
+    ...unsigned,
+    selfSignature: base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+      { name: "Ed25519" }, input.keypair.privateKey, new TextEncoder().encode(canonicalize(unsigned)),
+    ))),
+  };
+}
+
+function registrationHeader(registration: Record<string, unknown>): string {
+  return base64UrlEncode(new TextEncoder().encode(JSON.stringify(registration)));
+}
+
+function durableMailSubmission(input: {
+  shareId: string;
+  roomId: string;
+  bundleId: string;
+  envelopeId: string;
+}) {
+  const deviceId = "mail-sender";
+  const participantId = "mail-sender-participant";
+  const envelope = (suffix: string) => ({
+    v: 2 as const,
+    roomId: input.roomId,
+    envelopeId: `${input.envelopeId}-${suffix}`,
+    authorId: participantId,
+    deviceId,
+    createdAt: 1_000,
+    expiresAt: 10_000,
+    kind: "event" as const,
+    nonce: base64UrlEncode(new Uint8Array(24).fill(0x61)),
+    ciphertext: base64UrlEncode(new Uint8Array(32).fill(0x62)),
+    ciphertextBytes: 32,
+  });
+  return {
+    v: 3 as const,
+    envelopeId: input.envelopeId,
+    type: "review_submission" as const,
+    shareId: input.shareId,
+    epoch: 0,
+    roomId: input.roomId,
+    tier: "comment" as const,
+    bundleId: input.bundleId,
+    deviceRegistration: {
+      deviceId,
+      participantId,
+      publicSigningKey: base64UrlEncode(new Uint8Array(32).fill(0x63)),
+      publicEncryptionKey: base64UrlEncode(new Uint8Array(32).fill(0x64)),
+      client: "attn-browser" as const,
+      kind: "reviewer" as const,
+      grantTier: "comment" as const,
+      grantSignature: base64UrlEncode(new Uint8Array(64).fill(0x65)),
+      selfSignature: base64UrlEncode(new Uint8Array(64).fill(0x66)),
+    },
+    envelopes: [envelope("joined"), envelope("event")],
+  };
+}
+
+async function subscribeSocket(socket: WebSocket): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("socket subscribe timed out")), 2_000);
+    const onMessage = (event: MessageEvent) => {
+      const frame = JSON.parse(String(event.data)) as { type?: string };
+      if (frame.type !== "ping") return;
+      clearTimeout(timer);
+      socket.removeEventListener("message", onMessage);
+      resolve();
+    };
+    socket.addEventListener("message", onMessage);
+    socket.send(JSON.stringify({ type: "subscribe", after: 0 }));
+  });
+}
+
 describe("payloadless v3 Web Push", () => {
   it("stores share subscriptions idempotently, pings only fresh offline mail, debounces, and removes gone endpoints", async () => {
     const shareId = `share-push-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+    const testIp = "198.51.100.101";
     const shareUrl = `https://relay.example/v3/shares/${shareId}`;
     const owner = await generateEd25519Keypair();
+    const roomId = `room-${shareId}`;
+    const device = await generateEd25519Keypair();
     const bundleId = base64UrlEncode(new Uint8Array(16).fill(0x21));
     const read = new Uint8Array(32).fill(0x31);
     const write = new Uint8Array(32).fill(0x41);
@@ -50,7 +175,7 @@ describe("payloadless v3 Web Push", () => {
     const siblingRead = new Uint8Array(32).fill(0x32);
     const siblingWrite = new Uint8Array(32).fill(0x42);
     const createBody = JSON.stringify({
-      v: 3, ownerSigningKey: base64UrlEncode(owner.publicKeyBytes), epoch: 0, revision: 0,
+      v: 3, ownerSigningKey: base64UrlEncode(owner.publicKeyBytes), epoch: 0, revision: 0, currentRoomId: roomId,
       bundles: [{
         bundleId, tier: "comment", readAdmissionKey: base64UrlEncode(read),
         writeAdmissionKey: base64UrlEncode(write), sealedBundle: base64UrlEncode(new Uint8Array(80).fill(0x61)),
@@ -62,6 +187,7 @@ describe("payloadless v3 Web Push", () => {
     });
     const created = await SELF.fetch(shareUrl, { method: "POST", body: createBody, headers: {
       "Content-Type": "application/json",
+      "CF-Connecting-IP": testIp,
       "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url: shareUrl, body: createBody, privateKey: owner.privateKey }),
       "Attn-PoW": await createPowHeader(shareId, owner.publicKeyBytes, `/v3/shares/${shareId}`),
     } });
@@ -69,38 +195,56 @@ describe("payloadless v3 Web Push", () => {
     expect(await created.json()).toMatchObject({ features: { push: true } });
 
     const deviceId = "offline-reviewer";
+    const registration = await reviewerRegistration({ keypair: device, owner, roomId, deviceId, tier: "comment" });
     const pushPath = `/v3/shares/${shareId}/push-subscriptions/${deviceId}`;
     const pushUrl = `https://relay.example${pushPath}`;
     const oversized = await SELF.fetch(pushUrl, { method: "POST", body: "x".repeat(4097), headers: {
       "Attn-Device-Id": deviceId, "Attn-Share-Bundle": bundleId,
     } });
     expect(oversized.status).toBe(413);
-    const subscribe = async (suffix: string) => SELF.fetch(pushUrl, { method: "POST", body: PUSH_BODY, headers: {
-      "Content-Type": "application/json", "Attn-Device-Id": deviceId, "Attn-Share-Bundle": bundleId,
+    const subscribe = async (suffix: string) => {
+      const powToken = await pow(shareId, deviceId, "POST", pushPath, suffix);
+      return SELF.fetch(pushUrl, { method: "POST", body: PUSH_BODY, headers: {
+        "Content-Type": "application/json", "Attn-Device-Id": deviceId, "Attn-Share-Bundle": bundleId,
+        "CF-Connecting-IP": testIp,
       "Attn-Admission": await admission("write", write, "POST", pushUrl, PUSH_BODY),
-      "Attn-PoW": await pow(shareId, deviceId, "POST", pushPath, suffix),
+      "Attn-PoW": powToken,
+      "Attn-Device-Proof": await httpProof({ keypair: device, resourceKind: "share", resourceId: shareId,
+        deviceId, method: "POST", path: pushPath, body: PUSH_BODY, powToken }),
+      "Attn-Device-Registration": registrationHeader(registration),
     } });
+    };
     expect((await subscribe("s1")).status).toBe(201);
     expect((await subscribe("s2")).status).toBe(200);
 
+    const siblingPostPow = await pow(shareId, deviceId, "POST", pushPath, "sibling-post");
     const siblingOverwrite = await SELF.fetch(pushUrl, { method: "POST", body: PUSH_BODY, headers: {
       "Content-Type": "application/json", "Attn-Device-Id": deviceId, "Attn-Share-Bundle": siblingBundleId,
+      "CF-Connecting-IP": testIp,
       "Attn-Admission": await admission("write", siblingWrite, "POST", pushUrl, PUSH_BODY),
-      "Attn-PoW": await pow(shareId, deviceId, "POST", pushPath, "sibling-post"),
+      "Attn-PoW": siblingPostPow,
+      "Attn-Device-Proof": await httpProof({ keypair: device, resourceKind: "share", resourceId: shareId,
+        deviceId, method: "POST", path: pushPath, body: PUSH_BODY, powToken: siblingPostPow }),
     } });
     expect(siblingOverwrite.status).toBe(409);
     expect((await siblingOverwrite.json() as { error: { code: string } }).error.code).toBe("ATTN_PUSH_SUBSCRIPTION_BINDING_CONFLICT");
     const siblingDeletePow = await pow(shareId, deviceId, "DELETE", pushPath, "sibling-delete");
     const siblingDelete = await SELF.fetch(pushUrl, { method: "DELETE", headers: {
       "Attn-Device-Id": deviceId, "Attn-Share-Bundle": siblingBundleId,
+      "CF-Connecting-IP": testIp,
       "Attn-Admission": await admission("write", siblingWrite, "DELETE", pushUrl),
       "Attn-PoW": siblingDeletePow,
+      "Attn-Device-Proof": await httpProof({ keypair: device, resourceKind: "share", resourceId: shareId,
+        deviceId, method: "DELETE", path: pushPath, powToken: siblingDeletePow }),
     } });
     expect(siblingDelete.status).toBe(204);
     const replayedSiblingDeletePow = await SELF.fetch(pushUrl, { method: "DELETE", headers: {
       "Attn-Device-Id": deviceId, "Attn-Share-Bundle": bundleId,
+      "CF-Connecting-IP": testIp,
       "Attn-Admission": await admission("write", write, "DELETE", pushUrl),
       "Attn-PoW": siblingDeletePow,
+      "Attn-Device-Proof": await httpProof({ keypair: device, resourceKind: "share", resourceId: shareId,
+        deviceId, method: "DELETE", path: pushPath, powToken: siblingDeletePow }),
     } });
     expect(replayedSiblingDeletePow.status).toBe(400);
     expect((await replayedSiblingDeletePow.json() as { error: { code: string } }).error.code).toBe("ATTN_POW_INVALID");
@@ -120,9 +264,14 @@ describe("payloadless v3 Web Push", () => {
       .reply(201);
     const mailUrl = `${shareUrl}/mailbox`;
     const postMail = async (envelopeId: string, suffix: string) => {
-      const body = JSON.stringify({ epoch: 0, deviceId: "mail-sender", items: [{ envelopeId, ciphertext: "opaque" }] });
+      const body = JSON.stringify({
+        epoch: 0,
+        deviceId: "mail-sender",
+        items: [durableMailSubmission({ shareId, roomId, bundleId, envelopeId })],
+      });
       return SELF.fetch(mailUrl, { method: "POST", body, headers: {
         "Content-Type": "application/json", "Attn-Share-Bundle": bundleId,
+        "CF-Connecting-IP": testIp,
         "Attn-Admission": await admission("write", write, "POST", mailUrl, body),
         "Attn-PoW": await pow(shareId, "mail-sender", "POST", `/v3/shares/${shareId}/mailbox`, suffix),
       } });
@@ -174,13 +323,14 @@ describe("payloadless v3 Web Push", () => {
       const input = JSON.parse(PUSH_BODY) as { endpoint: string; expirationTime: null; keys: { p256dh: string; auth: string } };
       const writes: Record<string, unknown> = {
         [`push:subscription:${deviceId}`]: {
-          v: 3, deviceId, bundleId, ...input, createdAt: now - 1_000, updatedAt: now - 1_000, expiresAt: now - 1,
+          v: 3, deviceId, bundleId, devicePublicSigningKey: base64UrlEncode(device.publicKeyBytes),
+          ...input, createdAt: now - 1_000, updatedAt: now - 1_000, expiresAt: now - 1,
         },
       };
       for (let index = 0; index < 32; index++) {
         const cappedDevice = `cap-device-${index}`;
         writes[`push:subscription:${cappedDevice}`] = {
-          v: 3, deviceId: cappedDevice, bundleId, ...input,
+          v: 3, deviceId: cappedDevice, bundleId, devicePublicSigningKey: base64UrlEncode(device.publicKeyBytes), ...input,
           endpoint: `https://fcm.googleapis.com/fcm/send/cap-${index}`,
           createdAt: now, updatedAt: now, expiresAt: now + 60_000,
         };
@@ -192,6 +342,7 @@ describe("payloadless v3 Web Push", () => {
 
   it("binds room subscriptions to registered devices and suppresses self-authored events", async () => {
     const roomId = `room-push-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+    const testIp = "198.51.100.102";
     const roomUrl = `https://relay.example/v3/rooms/${roomId}`;
     const owner = await generateEd25519Keypair();
     const read = new Uint8Array(32).fill(0x71);
@@ -205,11 +356,12 @@ describe("payloadless v3 Web Push", () => {
     });
     expect((await SELF.fetch(roomUrl, { method: "POST", body: createBody, headers: {
       "Content-Type": "application/json",
+      "CF-Connecting-IP": testIp,
       "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url: roomUrl, body: createBody, privateKey: owner.privateKey }),
       "Attn-PoW": await createPowHeader(roomId, owner.publicKeyBytes, `/v3/rooms/${roomId}`),
     } })).status).toBe(201);
 
-    const register = async (deviceId: string, participantId: string) => {
+    const register = async (deviceId: string, participantId: string): Promise<TestKeypair> => {
       const device = await generateEd25519Keypair();
       const grant = canonicalize({ grantTier: "comment", purpose: "attn device grant v3", roomId, v: 3 });
       const unsigned = {
@@ -225,19 +377,25 @@ describe("payloadless v3 Web Push", () => {
       const url = `${roomUrl}/devices`;
       const response = await SELF.fetch(url, { method: "POST", body, headers: {
         "Content-Type": "application/json", "Attn-Admission": await admission("write", write, "POST", url, body),
+        "CF-Connecting-IP": testIp,
         "Attn-PoW": await pow(roomId, deviceId, "POST", `/v3/rooms/${roomId}/devices`, `r-${deviceId}`, 16),
       } });
       expect(response.status, await response.clone().text()).toBe(204);
+      return device;
     };
     await register("event-sender", "participant-sender");
-    await register("offline-target", "participant-target");
+    const offlineTarget = await register("offline-target", "participant-target");
 
     const pushPath = `/v3/rooms/${roomId}/push-subscriptions/offline-target`;
     const pushUrl = `https://relay.example${pushPath}`;
+    const subscribePow = await pow(roomId, "offline-target", "POST", pushPath, "sub", 16);
     const subscribed = await SELF.fetch(pushUrl, { method: "POST", body: PUSH_BODY, headers: {
       "Content-Type": "application/json", "Attn-Device-Id": "offline-target",
+      "CF-Connecting-IP": testIp,
       "Attn-Admission": await admission("write", write, "POST", pushUrl, PUSH_BODY),
-      "Attn-PoW": await pow(roomId, "offline-target", "POST", pushPath, "sub", 16),
+      "Attn-PoW": subscribePow,
+      "Attn-Device-Proof": await httpProof({ keypair: offlineTarget, resourceKind: "room", resourceId: roomId,
+        deviceId: "offline-target", method: "POST", path: pushPath, body: PUSH_BODY, powToken: subscribePow }),
     } });
     expect(subscribed.status).toBe(201);
     const publicRoomSubscription = await subscribed.json() as Record<string, unknown>;
@@ -257,6 +415,7 @@ describe("payloadless v3 Web Push", () => {
     const body = JSON.stringify({ envelopes: [envelope] });
     const posted = await SELF.fetch(envelopesUrl, { method: "POST", body, headers: {
       "Content-Type": "application/json", "Attn-Admission": await admission("write", write, "POST", envelopesUrl, body),
+      "CF-Connecting-IP": testIp,
       "Attn-PoW": await pow(roomId, "event-sender", "POST", `/v3/rooms/${roomId}/envelopes`, "event", 16),
     } });
     expect(posted.status, await posted.clone().text()).toBe(201);
@@ -264,29 +423,43 @@ describe("payloadless v3 Web Push", () => {
     await runInDurableObject(env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId)), async (_instance, state) => {
       await state.storage.put("push:last-sent:offline-target", Date.now() - 31_000);
     });
-    const socketUrl = `${roomUrl}/socket?device_id=offline-target`;
+    const socketPath = `/v3/rooms/${roomId}/socket`;
+    const proofExpires = Date.now() + 60_000;
+    const proofNonce = base64UrlEncode(new Uint8Array(16).fill(0x73));
+    const socketUrl = `${roomUrl}/socket?device_id=offline-target&proof_expires=${proofExpires}&proof_nonce=${proofNonce}`;
     const readProof = (await admission("read", read, "GET", socketUrl)).split(".")[2];
     const writeProof = (await admission("write", write, "GET", socketUrl)).split(".")[2];
+    const socketDeviceProof = base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+      { name: "Ed25519" }, offlineTarget.privateKey,
+      canonicalDeviceWebSocketProofV3({ roomId, deviceId: "offline-target", path: socketPath,
+        expiresAt: proofExpires, nonce: proofNonce }),
+    )));
     const socketResponse = await SELF.fetch(socketUrl, { headers: {
       Upgrade: "websocket", Origin: "https://attn.sh",
-      "Sec-WebSocket-Protocol": `attn.v3, read-hmac.${readProof}, write-hmac.${writeProof}`,
+      "Sec-WebSocket-Protocol": `attn.v3, read-hmac.${readProof}, write-hmac.${writeProof}, device-proof.${socketDeviceProof}`,
     } });
     expect(socketResponse.status).toBe(101);
     const socket = socketResponse.webSocket!;
     socket.accept();
+    await subscribeSocket(socket);
     const liveEnvelope = { ...envelope, envelopeId: "push-room-live-event" };
     const liveBody = JSON.stringify({ envelopes: [liveEnvelope] });
     const livePosted = await SELF.fetch(envelopesUrl, { method: "POST", body: liveBody, headers: {
       "Content-Type": "application/json", "Attn-Admission": await admission("write", write, "POST", envelopesUrl, liveBody),
+      "CF-Connecting-IP": testIp,
       "Attn-PoW": await pow(roomId, "event-sender", "POST", `/v3/rooms/${roomId}/envelopes`, "event-live", 16),
     } });
     expect(livePosted.status, await livePosted.clone().text()).toBe(201);
     socket.close(1000, "test complete");
 
+    const deletePow = await pow(roomId, "offline-target", "DELETE", pushPath, "delete", 16);
     const deleted = await SELF.fetch(pushUrl, { method: "DELETE", headers: {
       "Attn-Device-Id": "offline-target",
+      "CF-Connecting-IP": testIp,
       "Attn-Admission": await admission("write", write, "DELETE", pushUrl),
-      "Attn-PoW": await pow(roomId, "offline-target", "DELETE", pushPath, "delete", 16),
+      "Attn-PoW": deletePow,
+      "Attn-Device-Proof": await httpProof({ keypair: offlineTarget, resourceKind: "room", resourceId: roomId,
+        deviceId: "offline-target", method: "DELETE", path: pushPath, powToken: deletePow }),
     } });
     expect(deleted.status).toBe(204);
 
@@ -308,10 +481,14 @@ describe("payloadless v3 Web Push", () => {
       }
       await state.storage.put(writes);
     });
+    const reactivatePow = await pow(roomId, "offline-target", "POST", pushPath, "reactivate", 16);
     const reactivated = await SELF.fetch(pushUrl, { method: "POST", body: PUSH_BODY, headers: {
       "Content-Type": "application/json", "Attn-Device-Id": "offline-target",
+      "CF-Connecting-IP": testIp,
       "Attn-Admission": await admission("write", write, "POST", pushUrl, PUSH_BODY),
-      "Attn-PoW": await pow(roomId, "offline-target", "POST", pushPath, "reactivate", 16),
+      "Attn-PoW": reactivatePow,
+      "Attn-Device-Proof": await httpProof({ keypair: offlineTarget, resourceKind: "room", resourceId: roomId,
+        deviceId: "offline-target", method: "POST", path: pushPath, body: PUSH_BODY, powToken: reactivatePow }),
     } });
     expect(reactivated.status).toBe(413);
   });

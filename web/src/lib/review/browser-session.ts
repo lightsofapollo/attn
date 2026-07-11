@@ -92,7 +92,12 @@ import {
   BrowserPeerMesh,
   type BrowserDirectState,
 } from './browser-webrtc';
+import { createDeviceWebSocketProofV3 } from './device-proof';
 import type { InviteCapability } from './browser-workspace-share';
+import {
+  parseCollabWireMessage,
+  type CollabWireMessage,
+} from '../prosemirror/collab-controller';
 import type {
   Anchor,
   AnchorIndex,
@@ -792,6 +797,7 @@ export class BrowserSession {
   private readonly hydratedEntries = new Map<string, HydratedEntryMetadata>();
   private readonly pendingWorkspaceManifests = new Map<string, PendingWorkspaceManifest>();
   private readonly signerRefreshAttempts = new Set<string>();
+  private directoryRefresh: Promise<void> | null = null;
   private readonly dispatchedEnvelopeIds = new Set<string>();
   private readonly collabDispatches = new Map<string, Promise<boolean>>();
   private readonly pendingSignals: BrowserSignalingPayload[] = [];
@@ -1044,10 +1050,24 @@ export class BrowserSession {
 
   /** Send live collab as one broadcast envelope: direct first, relay always. */
   async sendCollab(payload: string): Promise<void> {
+    const message = parseCollabWireMessage(payload);
+    if (!message || !this.outboundCollabAllowed(message)) {
+      throw new Error(
+        this.principal === 'owner'
+          ? 'browser owner may only broadcast its own document state or cursor presence'
+          : 'reviewers cannot submit live document mutations; create a durable suggestion instead',
+      );
+    }
     // Re-evaluate wall-clock expiry even if no presence/policy frame has
-    // caused a state transition since the last render.
+    // caused a state transition since the last render. Owner document
+    // broadcasts require the live authority; reviewer cursor/resync traffic
+    // only requires an authenticated writable connection.
     this.setState({});
-    if (!this.state.liveEditingAvailable) {
+    if (
+      this.state.status !== 'connected'
+      || this.state.connection === 'offline'
+      || (this.principal === 'owner' && !this.state.liveEditingAvailable)
+    ) {
       throw new Error('live editing is paused until the owner authority is online');
     }
     const identity = this.requireIdentity();
@@ -1056,14 +1076,20 @@ export class BrowserSession {
     const outbox = this.outbox;
     const roomId = this.state.roomId;
     if (!keys || !policy || !outbox || !roomId) throw new Error('browser session is unavailable');
+    const createdAt = this.nextCreatedAt();
     const envelope = assembleBrowserSignal({
       signalingKey: keys.signalingKey,
       roomId,
       authorId: identity.participantId,
       deviceId: identity.deviceId,
-      createdAt: this.nextCreatedAt(),
+      createdAt,
       expiresAt: policy.expiresAt,
       payload: { kind: 'collab', from: identity.deviceId, payload },
+      protocolVersion: keys.version,
+      ...(keys.version === 3 ? {
+        signalGeneration: createdAt,
+        signingSecret: identity.signingSecret,
+      } : {}),
     });
     // Install locally before any network side effect. The DataChannel then
     // gets the exact immutable envelope ahead of the relay POST; the later
@@ -1077,6 +1103,32 @@ export class BrowserSession {
     // the caller must still learn that this submission did not reach the
     // durable transport yet so its inflight controller can recover/resync.
     await outbox.flushNow();
+  }
+
+  private outboundCollabAllowed(message: CollabWireMessage): boolean {
+    if (this.principal === 'owner') {
+      return message.kind === 'broadcast' || message.kind === 'cursor';
+    }
+    // Reviewers are read-only at the ProseMirror document layer. Resync lets
+    // them request the owner's authoritative log and cursor remains ephemeral
+    // presence; neither can advance an authority/checkpoint/workspace head.
+    return message.kind === 'resync' || message.kind === 'cursor';
+  }
+
+  private inboundCollabAllowed(
+    message: CollabWireMessage,
+    sender: Device,
+  ): boolean {
+    if (this.principal === 'owner') {
+      // Authenticated remote devices may request an owner replay or publish
+      // cursor presence, but no remote identity (including another owner
+      // device) may submit/linearize ProseMirror steps in this workspace.
+      return message.kind === 'resync' || message.kind === 'cursor';
+    }
+    // Reviewers converge read-only from a directory-authenticated owner.
+    // Other registered participants may contribute cursors only.
+    return message.kind === 'cursor'
+      || (message.kind === 'broadcast' && sender.kind === 'owner');
   }
 
   /** Explicitly persist a non-extractable room capability and sealed recovery state. */
@@ -1376,6 +1428,7 @@ export class BrowserSession {
       principal: this.principal,
       ownerOnline,
       liveEditingAvailable:
+        this.principal === 'owner' &&
         ownerOnline &&
         next.status === 'connected' &&
         next.connection !== 'offline' &&
@@ -1587,15 +1640,21 @@ export class BrowserSession {
     if (!target || (target.client !== 'attn-native' && target.client !== 'attn-browser')) {
       throw new Error('signal target is not an authenticated WebRTC peer');
     }
+    const createdAt = this.nextCreatedAt();
     const envelope = assembleBrowserSignal({
       signalingKey: keys.signalingKey,
       roomId,
       authorId: identity.participantId,
       deviceId: identity.deviceId,
       targetDeviceId,
-      createdAt: this.nextCreatedAt(),
+      createdAt,
       expiresAt: policy.expiresAt,
       payload,
+      protocolVersion: keys.version,
+      ...(keys.version === 3 ? {
+        signalGeneration: createdAt,
+        signingSecret: identity.signingSecret,
+      } : {}),
     });
     if (this.storage) await outbox.enqueueDurably(envelope);
     else outbox.enqueue(envelope);
@@ -1874,32 +1933,52 @@ export class BrowserSession {
     const viewOnly = this.state.grantTier === 'view';
     const identityId = viewOnly ? this.viewerId : this.requireIdentity().deviceId;
     const identityKind = viewOnly ? 'viewer' : 'device';
-    const url = buildWsUrl(relay, roomId, identityId, keys.version, identityKind);
     const path = socketPath(roomId, keys.version);
     const queryName = viewOnly ? 'viewer_id' : 'device_id';
     // The WS handshake admission HMAC is over METHOD=GET, path, empty body —
     // exactly what `buildAdmissionSubprotocol` produces (the `Sec-WebSocket-
     // Protocol` value carries it; browsers can't set custom headers on a WS
     // upgrade).
-    const query: Array<[string, string]> = [[queryName, identityId]];
-    const subprotocol = keys.version === 3
-      ? buildAdmissionSubprotocolV3(
-          keys.readAdmissionKey,
-          'GET',
+    const buildConnection = (): { url: string; subprotocol: string } => {
+      const query: Array<[string, string]> = [[queryName, identityId]];
+      let deviceProofSignature: string | undefined;
+      if (keys.version === 3 && !viewOnly) {
+        const proof = createDeviceWebSocketProofV3({
+          roomId,
+          deviceId: identityId,
           path,
-          query,
-          viewOnly ? undefined : keys.writeAdmissionKey,
-        )
-      : buildAdmissionSubprotocol(keys.readAdmissionKey, 'GET', path, query);
+          signingSecret: this.requireIdentity().signingSecret,
+        });
+        query.push(['proof_expires', String(proof.expiresAt)], ['proof_nonce', proof.nonce]);
+        deviceProofSignature = proof.signature;
+      }
+      const urlObject = new URL(buildWsUrl(relay, roomId, identityId, keys.version, identityKind));
+      for (const [name, value] of query.slice(1)) urlObject.searchParams.append(name, value);
+      let subprotocol = keys.version === 3
+        ? buildAdmissionSubprotocolV3(
+            keys.readAdmissionKey,
+            'GET',
+            path,
+            query,
+            viewOnly ? undefined : keys.writeAdmissionKey,
+          )
+        : buildAdmissionSubprotocol(keys.readAdmissionKey, 'GET', path, query);
+      if (deviceProofSignature !== undefined) {
+        subprotocol += `, device-proof.${deviceProofSignature}`;
+      }
+      return { url: urlObject.toString(), subprotocol };
+    };
+    const initialConnection = buildConnection();
     const client = new BrowserWsClient({
       roomId,
       localDeviceId: identityId,
-      url,
-      subprotocol,
+      ...initialConnection,
+      refreshConnection: buildConnection,
       afterSeq: this.persistedCursor,
       eventKey: keys.eventKey,
       snapshotKey: keys.snapshotKey,
       signalingKey: keys.signalingKey,
+      protocolVersion: keys.version,
       initialDevices: new Map(
         this.bootstrapDevices.map((device, index) => [`bootstrap-${index}`, device]),
       ),
@@ -2014,7 +2093,22 @@ export class BrowserSession {
             (device) =>
               device.deviceId === deviceId && device.participantId === participantId,
           );
-          if (!authenticated) return;
+          if (!authenticated) {
+            if (event === 'join' && !viewOnly) {
+              const generation = this.transportGeneration;
+              void this.refreshDeviceDirectory(roomId, keys).then(() => {
+                if (generation !== this.transportGeneration || this.isTerminated()) return;
+                const refreshed = this.bootstrapDevices.find(
+                  (device) => device.deviceId === deviceId && device.participantId === participantId,
+                );
+                if (!refreshed) return;
+                this.onlineDeviceIds.add(deviceId);
+                this.peerMesh?.syncDevices(this.activeWebRtcDevices());
+                this.setState({});
+              }).catch(() => undefined);
+            }
+            return;
+          }
           if (viewOnly) return;
           if (event === 'leave') {
             this.onlineDeviceIds.delete(deviceId);
@@ -2059,6 +2153,20 @@ export class BrowserSession {
     }
     this.signerRefreshAttempts.add(envelope.envelopeId);
     try {
+      await this.refreshDeviceDirectory(roomId, keys);
+    } catch (error) {
+      this.signerRefreshAttempts.delete(envelope.envelopeId);
+      if (this.state.snapshotContent === null) {
+        this.fail('network', 'Could not refresh participant signing keys');
+      }
+      throw error;
+    }
+  }
+
+  /** Refresh signed device records before trusting a join for a newly-seen peer. */
+  private async refreshDeviceDirectory(roomId: string, keys: ActiveRoomKeys): Promise<void> {
+    if (this.directoryRefresh) return this.directoryRefresh;
+    const refresh = (async () => {
       const path = `/v${keys.version}/rooms/${roomId}/devices`;
       const relay = validateBrowserRelayUrl(this.opts.relayUrl);
       const admission = keys.version === 3
@@ -2076,12 +2184,12 @@ export class BrowserSession {
       this.bootstrapDevices = [...(this.wsClient?.getDevices().values() ?? [])];
       this.peerMesh?.syncDevices(this.activeWebRtcDevices());
       if (this.roomPolicy) await this.persistDirectoryAndRoom(this.bootstrapDevices, this.roomPolicy);
-    } catch (error) {
-      this.signerRefreshAttempts.delete(envelope.envelopeId);
-      if (this.state.snapshotContent === null) {
-        this.fail('network', 'Could not refresh participant signing keys');
-      }
-      throw error;
+    })();
+    this.directoryRefresh = refresh;
+    try {
+      await refresh;
+    } finally {
+      if (this.directoryRefresh === refresh) this.directoryRefresh = null;
     }
   }
 
@@ -2246,6 +2354,8 @@ export class BrowserSession {
       if (payload.kind === 'collab') {
         if (envelope.target !== null && envelope.target !== undefined) return;
         if (sender.deviceId === this.identity?.deviceId) return;
+        const message = parseCollabWireMessage(payload.payload);
+        if (!message || !this.inboundCollabAllowed(message, sender)) return;
         await this.dispatchCollabOnce({
           envelopeId: envelope.envelopeId,
           source: decoded.source,

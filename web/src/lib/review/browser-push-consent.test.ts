@@ -34,8 +34,22 @@ function context(): BrowserPushBindingContext {
     roomReadCapabilityBytes: new Uint8Array(32).fill(7),
     readAdmissionKeyBytes: new Uint8Array(32).fill(8),
     writeAdmissionKeyBytes: new Uint8Array(32).fill(9),
+    deviceSigningSecretBytes: new Uint8Array(32).fill(10),
+    deviceRegistration: {
+      deviceId: DEVICE_ID, participantId: 'participant-reviewer',
+      publicSigningKey: base64UrlEncode(new Uint8Array(32).fill(11)),
+      publicEncryptionKey: base64UrlEncode(new Uint8Array(32).fill(12)),
+      client: 'attn-browser', kind: 'reviewer', grantTier: 'comment',
+      grantSignature: base64UrlEncode(new Uint8Array(64).fill(13)),
+      selfSignature: base64UrlEncode(new Uint8Array(64).fill(14)),
+    },
     ownerSigningKey: OWNER_KEY, devices: [owner], fileName: 'plan.md',
   };
+}
+
+function contextFor(bundleId: string, deviceId: string): BrowserPushBindingContext {
+  const value = context();
+  return { ...value, bundleId, deviceId, deviceRegistration: { ...value.deviceRegistration, deviceId } };
 }
 
 async function resetDb(): Promise<void> {
@@ -93,6 +107,8 @@ test('permission starts before capability/network work, then POST remembers a no
   assert(requests[0]!.headers.get('Attn-Device-Id') === DEVICE_ID, 'device binding header missing');
   assert(requests[0]!.headers.get('Attn-Share-Bundle') === BUNDLE_ID, 'bundle selector missing');
   assert(requests[0]!.headers.get('Attn-PoW') === 'v1:pow', 'PoW header missing');
+  assert(requests[0]!.headers.get('Attn-Device-Proof')?.length === 86, 'device proof header missing');
+  assert(requests[0]!.headers.get('Attn-Device-Registration') !== null, 'signed device registration missing');
   assert(JSON.parse(requests[0]!.body).v === 3, 'push subscription wire body is not v3');
   assert(await hasPushBinding(`share_${BUNDLE_ID}_${DEVICE_ID}`, fakeIndexedDB), 'worker binding was not remembered');
 });
@@ -229,7 +245,7 @@ test('origin subscription stays active while another remembered binding remains'
   const make = (bundleId: string, deviceId: string) => new BrowserPushConsentController({
     notification: { permission: 'granted', requestPermission: async () => 'granted' },
     navigator: { serviceWorker: { ready: Promise.resolve(registration(sub)) }, userAgent: 'Desktop', locks: testLocks }, indexedDB: fakeIndexedDB,
-    getBindingContext: async () => ({ ...context(), bundleId, deviceId }), mintPow: async () => 'v1:pow',
+    getBindingContext: async () => contextFor(bundleId, deviceId), mintPow: async () => 'v1:pow',
     fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => (init?.method ?? 'GET') === 'GET'
       ? Response.json({ features: { push: true, vapidPublicKey: base64UrlEncode(Uint8Array.from([4, ...new Uint8Array(64).fill(15)])) } })
       : (init?.method === 'DELETE' ? new Response(null, { status: 204 }) : Response.json({}, { status: 201 }))) as typeof fetch,
@@ -249,7 +265,7 @@ test('cross-tab lock serializes concurrent enable publication before teardown re
   const make = (bundleId: string, deviceId: string) => new BrowserPushConsentController({
     notification: { permission: 'granted', requestPermission: async () => 'granted' },
     navigator: { serviceWorker: { ready: Promise.resolve(registration(sub)) }, userAgent: 'Desktop', locks: testLocks },
-    indexedDB: fakeIndexedDB, getBindingContext: async () => ({ ...context(), bundleId, deviceId }), mintPow: async () => 'v1:pow',
+    indexedDB: fakeIndexedDB, getBindingContext: async () => contextFor(bundleId, deviceId), mintPow: async () => 'v1:pow',
     fetch: (async (_input: RequestInfo | URL, init?: RequestInit) => {
       const method = init?.method ?? 'GET';
       if (method === 'GET') return Response.json({ features: { push: true,

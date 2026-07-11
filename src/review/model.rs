@@ -1231,6 +1231,12 @@ pub struct MailboxEnvelope {
     pub nonce: String,
     pub ciphertext: String,
     pub ciphertext_bytes: u64,
+    /// V3 signal-only monotonic negotiation/collaboration generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_generation: Option<u64>,
+    /// Ed25519 proof over the complete v3 signal routing/ciphertext header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_signature: Option<String>,
 }
 
 /// Routing tag carried on an envelope's cleartext header. Only `kind: "signal"`
@@ -1684,6 +1690,8 @@ mod tests {
             nonce: "nonce-base64url".to_string(),
             ciphertext: "ct-base64url".to_string(),
             ciphertext_bytes: 128,
+            signal_generation: None,
+            device_signature: None,
         };
 
         let decoded: MailboxEnvelope = round_trip(&envelope);

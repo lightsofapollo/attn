@@ -1179,6 +1179,8 @@ mod tests {
             nonce: "nonce".to_string(),
             ciphertext: "ct".to_string(),
             ciphertext_bytes: 16,
+            signal_generation: None,
+            device_signature: None,
         }
     }
 

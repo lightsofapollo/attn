@@ -216,7 +216,7 @@ describe("CORS — OPTIONS preflight", () => {
     expect(res.status).toBe(204);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://attn.sh");
     expect(res.headers.get("Access-Control-Allow-Headers")).toBe(
-      "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id, Attn-Share-Bundle",
+      "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id, Attn-Device-Proof, Attn-Device-Registration, Attn-Share-Bundle",
     );
     expect(res.headers.get("Access-Control-Expose-Headers")).toBe(
       "Attn-Share-Bundle, Attn-Share-Tier, Attn-Sealed-Bundle, Attn-Snapshot-Id, Attn-Ciphertext-Sha256",

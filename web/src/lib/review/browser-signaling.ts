@@ -7,6 +7,7 @@ import {
   type EnvelopeAad,
 } from './browser-crypto';
 import type { MailboxEnvelope } from './browser-ws';
+import { signDeviceSignalProofV3, signalProofInputFromEnvelope } from './device-proof';
 
 const MAX_SDP_BYTES = 1_048_576;
 const MAX_ICE_CANDIDATES = 64;
@@ -30,6 +31,10 @@ export interface AssembleBrowserSignalInput {
   createdAt: number;
   expiresAt: number;
   payload: BrowserSignalingPayload;
+  /** Clean protocol cutover: v3 signals must carry a registered-device proof. */
+  protocolVersion?: 2 | 3;
+  signalGeneration?: number;
+  signingSecret?: Uint8Array;
   /** Stable logical-message nonce used only for envelope-id derivation. */
   clientNonce?: Uint8Array;
   /** Deterministic crypto-test seam. Production callers omit this. */
@@ -56,7 +61,7 @@ export function assembleBrowserSignal(input: AssembleBrowserSignalInput): Mailbo
   const plaintext = toCanonicalBytes(input.payload);
   try {
     const ciphertext = aeadSeal(input.signalingKey, nonce, plaintext, aad);
-    return {
+    const envelope: MailboxEnvelope = {
       v: 2,
       roomId: input.roomId,
       envelopeId,
@@ -70,6 +75,17 @@ export function assembleBrowserSignal(input: AssembleBrowserSignalInput): Mailbo
       ciphertext: base64UrlEncode(ciphertext),
       ciphertextBytes: ciphertext.length,
     };
+    if ((input.protocolVersion ?? 2) === 3) {
+      if (input.signalGeneration === undefined || input.signingSecret === undefined) {
+        throw new Error('v3 signal requires generation and device signing secret');
+      }
+      envelope.signalGeneration = input.signalGeneration;
+      envelope.deviceSignature = signDeviceSignalProofV3(
+        signalProofInputFromEnvelope(envelope, input.roomId),
+        input.signingSecret,
+      );
+    }
+    return envelope;
   } finally {
     plaintext.fill(0);
     clientNonce.fill(0);
@@ -190,6 +206,14 @@ function validateAssembleInput(input: AssembleBrowserSignalInput): void {
   }
   if (input.aeadNonce !== undefined && input.aeadNonce.length !== 24) {
     throw new Error('aeadNonce must be 24 bytes');
+  }
+  if ((input.protocolVersion ?? 2) === 3) {
+    if (!Number.isSafeInteger(input.signalGeneration) || (input.signalGeneration ?? -1) < 0) {
+      throw new Error('v3 signalGeneration must be a non-negative safe integer');
+    }
+    if (input.signingSecret?.length !== 32) throw new Error('v3 signingSecret must be 32 bytes');
+  } else if (input.signalGeneration !== undefined || input.signingSecret !== undefined) {
+    throw new Error('v2 signal must not carry v3 device proof inputs');
   }
   // Reuse the strict parser for outbound bounds and exact shape.
   const bytes = toCanonicalBytes(input.payload);

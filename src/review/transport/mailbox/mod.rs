@@ -82,6 +82,9 @@ pub struct MailboxConfig {
     pub admission_key: [u8; 32],
     pub read_admission_key: [u8; 32],
     pub protocol_version: u32,
+    /// Ed25519 seed used only for v3 per-connect registered-device proofs.
+    /// The allocation is scrubbed when the last shared config is dropped.
+    pub device_signing_seed: Option<zeroize::Zeroizing<[u8; 32]>>,
     /// Server-clamped PoW difficulty for this room
     /// (relay-spec.md §Proof of Work / crypto-spec.md §Difficulty).
     pub pow_difficulty: u32,
@@ -141,6 +144,7 @@ impl MailboxConfig {
             admission_key: *keys.admission_key.as_bytes(),
             read_admission_key: *keys.admission_key.as_bytes(),
             protocol_version: 2,
+            device_signing_seed: None,
             pow_difficulty,
         }
     }
@@ -150,6 +154,7 @@ impl MailboxConfig {
         room_id: RoomId,
         device_id: DeviceId,
         access: &crate::review::bootstrap::RoomAccessV3,
+        device_signing_seed: [u8; 32],
         pow_difficulty: u32,
     ) -> Result<Self, TransportError> {
         let read = crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key);
@@ -163,6 +168,7 @@ impl MailboxConfig {
             admission_key: write,
             read_admission_key: *read.read_admission_key.as_bytes(),
             protocol_version: 3,
+            device_signing_seed: Some(zeroize::Zeroizing::new(device_signing_seed)),
             pow_difficulty,
         })
     }
@@ -871,6 +877,7 @@ mod tests {
             admission_key: [0x42u8; 32],
             read_admission_key: [0x42u8; 32],
             protocol_version: 2,
+            device_signing_seed: None,
             pow_difficulty: TEST_DIFFICULTY,
         });
         let pool = Arc::new(TokenPool::new(
@@ -902,6 +909,8 @@ mod tests {
             nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
             ciphertext: "Y2lwaGVy".to_string(), // base64url("cipher")
             ciphertext_bytes: 6,
+            signal_generation: None,
+            device_signature: None,
         }
     }
 

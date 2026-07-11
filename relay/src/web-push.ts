@@ -19,6 +19,8 @@ export interface StoredPushSubscription {
   deviceId: string;
   /** Present only for tiered durable-share subscriptions. */
   bundleId?: string;
+  /** Immutable authenticated device key for durable shares; never public. */
+  devicePublicSigningKey?: string;
   endpoint: string;
   expirationTime: number | null;
   keys: { p256dh: string; auth: string };
@@ -37,7 +39,7 @@ export interface PushSubscriptionInput {
 
 export type PushSendResult = "sent" | "gone" | "retained" | "disabled";
 
-export type PublicPushSubscription = Omit<StoredPushSubscription, "endpoint" | "keys">;
+export type PublicPushSubscription = Omit<StoredPushSubscription, "endpoint" | "keys" | "devicePublicSigningKey">;
 
 export function pushSubscriptionKey(deviceId: string): string {
   return `${PUSH_SUBSCRIPTION_PREFIX}${deviceId}`;
@@ -79,7 +81,7 @@ export async function pushPublicConfig(env: Env): Promise<{ enabled: boolean; va
 }
 
 export function publicPushSubscription(value: StoredPushSubscription): PublicPushSubscription {
-  const { endpoint: _endpoint, keys: _keys, ...safe } = value;
+  const { endpoint: _endpoint, keys: _keys, devicePublicSigningKey: _devicePublicSigningKey, ...safe } = value;
   return safe;
 }
 

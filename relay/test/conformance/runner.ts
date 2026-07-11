@@ -28,6 +28,7 @@ import { expect } from "vitest";
 
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { canonicalize, type CanonicalValue } from "../../src/canonical";
+import { canonicalDeviceHttpProofV3, deviceHttpBodySha256 } from "../../src/device-proof";
 import type { Env } from "../../src/env";
 import { encodeOpaqueSegment } from "../../src/opaque-key";
 import { deleteRoomBlobs, presignBlobDownload, shareArtifactPrefix } from "../../src/r2";
@@ -644,6 +645,52 @@ async function generateEd25519Keypair(): Promise<Keypair> {
   };
 }
 
+function durableSubmission(input: {
+  shareId: string;
+  roomId: string;
+  envelopeId: string;
+  deviceId: string;
+  tier: "comment" | "suggest";
+  bundleId?: string;
+}) {
+  const participantId = `${input.deviceId}-participant`;
+  const envelope = (suffix: string) => ({
+    v: 2 as const,
+    roomId: input.roomId,
+    envelopeId: `${input.envelopeId}-${suffix}`,
+    authorId: participantId,
+    deviceId: input.deviceId,
+    createdAt: 1_000,
+    expiresAt: 10_000,
+    kind: "event" as const,
+    nonce: base64UrlEncode(new Uint8Array(24).fill(0x31)),
+    ciphertext: base64UrlEncode(new Uint8Array(32).fill(0x32)),
+    ciphertextBytes: 32,
+  });
+  return {
+    v: 3 as const,
+    envelopeId: input.envelopeId,
+    type: "review_submission" as const,
+    shareId: input.shareId,
+    epoch: 0,
+    roomId: input.roomId,
+    tier: input.tier,
+    ...(input.bundleId === undefined ? {} : { bundleId: input.bundleId }),
+    deviceRegistration: {
+      deviceId: input.deviceId,
+      participantId,
+      publicSigningKey: base64UrlEncode(new Uint8Array(32).fill(0x33)),
+      publicEncryptionKey: base64UrlEncode(new Uint8Array(32).fill(0x34)),
+      client: "attn-browser" as const,
+      kind: "reviewer" as const,
+      grantTier: input.tier,
+      grantSignature: base64UrlEncode(new Uint8Array(64).fill(0x35)),
+      selfSignature: base64UrlEncode(new Uint8Array(64).fill(0x36)),
+    },
+    envelopes: [envelope("joined"), envelope("event")],
+  };
+}
+
 let powExpiresAtBump = 0;
 function nextPowExpiresAt(delta = 0): number {
   powExpiresAtBump += 1;
@@ -919,6 +966,7 @@ async function actDurableShareMatrix(scenarioId: string, stepIdx: number): Promi
   const owner = await generateEd25519Keypair();
   const readKey = makeAdmissionKey(0x41);
   const writeKey = makeAdmissionKey(0x82);
+  const roomId = `room-${shareId}`;
   const body = JSON.stringify({
     v: 3,
     ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
@@ -926,6 +974,7 @@ async function actDurableShareMatrix(scenarioId: string, stepIdx: number): Promi
     writeAdmissionKey: base64UrlEncode(writeKey),
     epoch: 0,
     revision: 0,
+    currentRoomId: roomId,
     snapshots: [],
     placeholders: [],
   });
@@ -949,7 +998,16 @@ async function actDurableShareMatrix(scenarioId: string, stepIdx: number): Promi
   await assertResponse(read, { status: 200 }, `${scenarioId} step #${stepIdx} share read`);
 
   const mailboxUrl = `${url}/mailbox`;
-  const mailboxBody = JSON.stringify({ deviceId: "corpus-writer", items: [{ envelopeId: "corpus-envelope", ciphertext: "opaque" }] });
+  const mailboxBody = JSON.stringify({
+    deviceId: "corpus-writer",
+    items: [durableSubmission({
+      shareId,
+      roomId,
+      envelopeId: "corpus-envelope",
+      deviceId: "corpus-writer",
+      tier: "comment",
+    })],
+  });
   const enqueue = async (rand: string) => SELF.fetch(mailboxUrl, { method: "POST", body: mailboxBody, headers: {
     "Content-Type": "application/json",
     "Attn-Admission": await scoped("write", writeKey, "POST", mailboxUrl, mailboxBody),
@@ -1063,6 +1121,7 @@ async function actShareTierBundleMatrix(scenarioId: string, stepIdx: number): Pr
   const shareId = uniqueRoomId(scenarioId, "tier-share");
   const url = `${URL_BASE}/v3/shares/${shareId}`;
   const owner = await generateEd25519Keypair();
+  const roomId = `room-${shareId}`;
   const definitions = [
     { tier: "view", seed: 0x21 },
     { tier: "comment", seed: 0x41 },
@@ -1081,6 +1140,7 @@ async function actShareTierBundleMatrix(scenarioId: string, stepIdx: number): Pr
     revision: 0,
     ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
     epoch: 0,
+    currentRoomId: roomId,
     bundles,
     snapshots: [],
     placeholders: [],
@@ -1106,7 +1166,18 @@ async function actShareTierBundleMatrix(scenarioId: string, stepIdx: number): Pr
   expect(JSON.stringify(viewBody)).not.toContain(bundles[1].sealedBundle);
 
   const mailboxUrl = `${url}/mailbox`;
-  const mailBody = JSON.stringify({ epoch: 0, deviceId: "tier-corpus", items: [{ envelopeId: "tier-corpus-mail", ciphertext: "opaque" }] });
+  const mailBody = JSON.stringify({
+    epoch: 0,
+    deviceId: "tier-corpus",
+    items: [durableSubmission({
+      shareId,
+      roomId,
+      envelopeId: "tier-corpus-mail",
+      deviceId: "tier-corpus",
+      tier: "comment",
+      bundleId: bundles[1].bundleId,
+    })],
+  });
   await assertResponse(await SELF.fetch(mailboxUrl, { method: "POST", headers: {
     "Attn-Share-Bundle": bundles[0].bundleId,
   } }), { status: 403, errorCode: "ATTN_WRITE_CAPABILITY_REQUIRED" }, `${scenarioId} step #${stepIdx} view write denied`);
@@ -1237,11 +1308,14 @@ async function actWebPushMatrix(scenarioId: string, stepIdx: number): Promise<vo
   const shareId = uniqueRoomId(scenarioId, "push-share");
   const url = `${URL_BASE}/v3/shares/${shareId}`;
   const owner = await generateEd25519Keypair();
+  const roomId = `room-${shareId}`;
+  const device = await generateEd25519Keypair();
   const bundleId = base64UrlEncode(new Uint8Array(16).fill(0x81));
   const readKey = new Uint8Array(32).fill(0x82);
   const writeKey = new Uint8Array(32).fill(0x83);
   const createBody = JSON.stringify({
-    v: 3, epoch: 0, revision: 0, ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+    v: 3, epoch: 0, revision: 0, currentRoomId: roomId,
+    ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
     bundles: [{
       bundleId, tier: "comment", readAdmissionKey: base64UrlEncode(readKey),
       writeAdmissionKey: base64UrlEncode(writeKey), sealedBundle: base64UrlEncode(new Uint8Array(80).fill(0x84)),
@@ -1269,17 +1343,57 @@ async function actWebPushMatrix(scenarioId: string, stepIdx: number): Promise<vo
       auth: base64UrlEncode(new Uint8Array(16).fill(0x85)),
     },
   });
-  const mutate = async (method: "POST" | "DELETE", suffix: string, body?: string): Promise<Response> => SELF.fetch(pushUrl, {
-    method, body, headers: {
+  const grant = canonicalize({ grantTier: "comment", purpose: "attn device grant v3", roomId, v: 3 });
+  const unsignedRegistration = {
+    deviceId,
+    participantId: "push-corpus-participant",
+    publicSigningKey: base64UrlEncode(device.publicKeyBytes),
+    publicEncryptionKey: base64UrlEncode(new Uint8Array(32).fill(0x86)),
+    client: "attn-browser" as const,
+    kind: "reviewer" as const,
+    grantTier: "comment" as const,
+    grantSignature: base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+      { name: "Ed25519" }, owner.privateKey, new TextEncoder().encode(grant),
+    ))),
+  };
+  const registration = {
+    ...unsignedRegistration,
+    selfSignature: base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+      { name: "Ed25519" }, device.privateKey,
+      new TextEncoder().encode(canonicalize(unsignedRegistration)),
+    ))),
+  };
+  const registrationHeader = base64UrlEncode(new TextEncoder().encode(JSON.stringify(registration)));
+  const mutate = async (method: "POST" | "DELETE", suffix: string, body?: string): Promise<Response> => {
+    const powToken = await mintPowForTests({
+      roomId: shareId, deviceId, method, path, difficulty: 12,
+      expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}${suffix}`,
+    });
+    const bodyBytes = new TextEncoder().encode(body ?? "");
+    const proof = base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+      { name: "Ed25519" }, device.privateKey,
+      canonicalDeviceHttpProofV3({
+        resourceKind: "share",
+        resourceId: shareId,
+        deviceId,
+        method,
+        path,
+        bodySha256: await deviceHttpBodySha256(bodyBytes),
+        bodyLength: bodyBytes.byteLength,
+        powToken,
+      }),
+    )));
+    return SELF.fetch(pushUrl, {
+      method, body, headers: {
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
       "Attn-Device-Id": deviceId, "Attn-Share-Bundle": bundleId,
       "Attn-Admission": await scoped("write", writeKey, method, pushUrl, body),
-      "Attn-PoW": await mintPowForTests({
-        roomId: shareId, deviceId, method, path, difficulty: 12,
-        expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}${suffix}`,
-      }),
+      "Attn-PoW": powToken,
+      "Attn-Device-Proof": proof,
+      "Attn-Device-Registration": registrationHeader,
     },
-  });
+    });
+  };
   await assertResponse(await mutate("POST", "wp1", pushBody), { status: 201 }, `${scenarioId} step #${stepIdx} subscribe`);
   await assertResponse(await mutate("POST", "wp2", pushBody), { status: 200 }, `${scenarioId} step #${stepIdx} idempotent subscribe`);
   const got = await assertResponse(await SELF.fetch(pushUrl, { headers: {

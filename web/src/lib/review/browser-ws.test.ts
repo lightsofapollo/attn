@@ -1066,14 +1066,24 @@ defineCase('reconnects with backoff on close 1001 transient', async () => {
     });
 
     let attempts = 0;
+    let refreshes = 0;
+    const offeredProofs: string[] = [];
     let helloFired = false;
     let terminal: WsTerminalError | null = null;
     const wrapped = (url: string, protocols: string | string[]) => {
       attempts += 1;
+      offeredProofs.push(Array.isArray(protocols) ? protocols.join(', ') : protocols);
       return nodeFactory(url, protocols);
     };
     const client = new BrowserWsClient({
       ...clientOptions(server.port),
+      refreshConnection: () => {
+        refreshes += 1;
+        return {
+          url: `ws://127.0.0.1:${server.port}/v3/rooms/room-1/socket?device_id=d-local&proof_nonce=${refreshes}`,
+          subprotocol: `attn.v2, hmac.fresh-${refreshes}`,
+        };
+      },
       webSocketFactory: wrapped,
       callbacks: {
         onHello: () => {
@@ -1088,6 +1098,8 @@ defineCase('reconnects with backoff on close 1001 transient', async () => {
     for (let i = 0; i < 100 && !helloFired; i++) await delay(20);
     assert(helloFired, 'must reconnect and receive hello on second attempt');
     assert(attempts >= 2, `expected >=2 connect attempts, got ${attempts}`);
+    assert(refreshes >= 2, `expected a fresh proof per connect, got ${refreshes}`);
+    assert(offeredProofs[0] !== offeredProofs[1], 'reconnect reused its admission/device proof');
     assert(terminal === null, 'no terminal error on transient drop');
     // Backoff should have doubled at least once (initial=50 → 100).
     assert(

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
 import { canonicalize } from "../../src/canonical";
+import { canonicalDeviceSignalProofV3, canonicalDeviceWebSocketProofV3 } from "../../src/device-proof";
 import type { EnvelopeInput, RoomPolicy } from "../../src/schema";
 import { generateEd25519Keypair, ownerSignatureHeader } from "../helpers/owner-sig";
 import { FIXED_POW_RAND, createPowHeader, mintPowForTests } from "../helpers/pow";
@@ -135,13 +136,13 @@ async function registerOwner(room: V3Room, deviceId = "owner-device"): Promise<v
   expect(response.status, await response.clone().text()).toBe(204);
 }
 
-function envelope(
+async function envelope(
   room: V3Room,
   id: string,
   kind: "event" | "signal" = "event",
   target: { deviceId: string } | null = null,
-): EnvelopeInput {
-  return {
+): Promise<EnvelopeInput> {
+  const value: EnvelopeInput = {
     envelopeId: id,
     authorId: "owner-participant",
     deviceId: "owner-device",
@@ -153,9 +154,40 @@ function envelope(
     ciphertext: base64UrlEncode(new Uint8Array(32).fill(0x77)),
     ciphertextBytes: 32,
   };
+  if (kind === "signal") {
+    value.signalGeneration = value.createdAt;
+    value.deviceSignature = await signSignal(room, value);
+  }
+  return value;
+}
+
+async function signSignal(room: V3Room, value: EnvelopeInput): Promise<string> {
+  if (value.signalGeneration === undefined) throw new Error("signal generation required");
+  return base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+      { name: "Ed25519" },
+      room.owner.privateKey,
+      canonicalDeviceSignalProofV3({
+        roomId: room.roomId,
+        envelopeId: value.envelopeId,
+        authorId: value.authorId,
+        deviceId: value.deviceId,
+        targetDeviceId: value.target?.deviceId ?? null,
+        generation: value.signalGeneration,
+        createdAt: value.createdAt,
+        expiresAt: value.expiresAt,
+        nonce: value.nonce,
+        ciphertext: value.ciphertext,
+        ciphertextBytes: value.ciphertextBytes,
+      }),
+    )));
 }
 
 async function postEnvelopes(room: V3Room, envelopes: EnvelopeInput[]): Promise<void> {
+  const response = await postEnvelopeResponse(room, envelopes);
+  expect(response.status, await response.clone().text()).toBe(201);
+}
+
+async function postEnvelopeResponse(room: V3Room, envelopes: EnvelopeInput[]): Promise<Response> {
   const url = `${BASE}/v3/rooms/${room.roomId}/envelopes`;
   const body = JSON.stringify({ envelopes });
   const response = await SELF.fetch(url, {
@@ -169,13 +201,13 @@ async function postEnvelopes(room: V3Room, envelopes: EnvelopeInput[]): Promise<
         method: "POST",
         path: `/v3/rooms/${room.roomId}/envelopes`,
         difficulty: 16,
-        expiresAt: Date.now() + 300_000 + sequence,
+        expiresAt: Date.now() + 300_000 + sequence++,
         rand: FIXED_POW_RAND,
       }),
     },
     body,
   });
-  expect(response.status, await response.clone().text()).toBe(201);
+  return response;
 }
 
 async function openSocket(
@@ -184,7 +216,27 @@ async function openSocket(
   readKey = room.readKey,
   deviceProtocol: "valid" | "read-only" | "swapped-order" | "swapped-proofs" | "bad-write" = "valid",
 ): Promise<{ response: Response; socket: WebSocket | null }> {
-  const url = `${BASE}/v3/rooms/${room.roomId}/socket${query}`;
+  const parsedUrl = new URL(`${BASE}/v3/rooms/${room.roomId}/socket${query}`);
+  const registeredDeviceId = parsedUrl.searchParams.get("device_id");
+  let deviceProofToken: string | undefined;
+  if (registeredDeviceId !== null && parsedUrl.searchParams.getAll("device_id").length === 1) {
+    const expiresAt = Date.now() + 60_000;
+    const proofNonce = base64UrlEncode(new Uint8Array(16).fill((sequence++ % 250) + 1));
+    parsedUrl.searchParams.set("proof_expires", String(expiresAt));
+    parsedUrl.searchParams.set("proof_nonce", proofNonce);
+    deviceProofToken = base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+      { name: "Ed25519" },
+      room.owner.privateKey,
+      canonicalDeviceWebSocketProofV3({
+        roomId: room.roomId,
+        deviceId: registeredDeviceId,
+        path: parsedUrl.pathname,
+        expiresAt,
+        nonce: proofNonce,
+      }),
+    )));
+  }
+  const url = parsedUrl.toString();
   const admission = await scopedHeader("read", readKey, "GET", url);
   const writeAdmission = await scopedHeader(
     "write",
@@ -199,10 +251,10 @@ async function openSocket(
   const writeToken = `write-hmac.${writeAdmission.split(".")[2]}`;
   let protocol = `attn.v3, ${readToken}`;
   if (registeredDevice && deviceProtocol !== "read-only") {
-    if (deviceProtocol === "swapped-order") protocol = `attn.v3, ${writeToken}, ${readToken}`;
+    if (deviceProtocol === "swapped-order") protocol = `attn.v3, ${writeToken}, ${readToken}, device-proof.${deviceProofToken ?? "invalid"}`;
     else if (deviceProtocol === "swapped-proofs") {
-      protocol = `attn.v3, read-hmac.${writeAdmission.split(".")[2]}, write-hmac.${admission.split(".")[2]}`;
-    } else protocol = `attn.v3, ${readToken}, ${writeToken}`;
+      protocol = `attn.v3, read-hmac.${writeAdmission.split(".")[2]}, write-hmac.${admission.split(".")[2]}, device-proof.${deviceProofToken ?? "invalid"}`;
+    } else protocol = `attn.v3, ${readToken}, ${writeToken}, device-proof.${deviceProofToken ?? "invalid"}`;
   }
   const response = await SELF.fetch(url, {
     headers: {
@@ -216,6 +268,44 @@ async function openSocket(
     openSockets.push(socket);
   }
   return { response, socket };
+}
+
+async function openDeviceSocketWithProof(
+  room: V3Room,
+  input: {
+    deviceId: string;
+    signedDeviceId?: string;
+    expiresAt: number;
+    nonce: string;
+    privateKey?: CryptoKey;
+  },
+): Promise<Response> {
+  const path = `/v3/rooms/${room.roomId}/socket`;
+  const url = `${BASE}${path}?device_id=${input.deviceId}&proof_expires=${input.expiresAt}&proof_nonce=${input.nonce}`;
+  const read = await scopedHeader("read", room.readKey, "GET", url);
+  const write = await scopedHeader("write", room.writeKey, "GET", url);
+  const signature = base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+    { name: "Ed25519" },
+    input.privateKey ?? room.owner.privateKey,
+    canonicalDeviceWebSocketProofV3({
+      roomId: room.roomId,
+      deviceId: input.signedDeviceId ?? input.deviceId,
+      path,
+      expiresAt: input.expiresAt,
+      nonce: input.nonce,
+    }),
+  )));
+  const response = await SELF.fetch(url, {
+    headers: {
+      Upgrade: "websocket",
+      "Sec-WebSocket-Protocol": `attn.v3, read-hmac.${read.split(".")[2]}, write-hmac.${write.split(".")[2]}, device-proof.${signature}`,
+    },
+  });
+  if (response.webSocket !== null) {
+    response.webSocket.accept();
+    openSockets.push(response.webSocket);
+  }
+  return response;
 }
 
 class FrameQueue {
@@ -266,6 +356,56 @@ class FrameQueue {
 }
 
 describe("v3 anonymous viewer WebSocket", () => {
+  it("requires a fresh registered-device signature before socket presence", async () => {
+    const room = await createRoom();
+    await registerOwner(room, "owner-device");
+    await registerOwner(room, "other-device");
+    const expiresAt = Date.now() + 60_000;
+    const nonce = base64UrlEncode(new Uint8Array(16).fill(0xa1));
+
+    const accepted = await openDeviceSocketWithProof(room, {
+      deviceId: "owner-device", expiresAt, nonce,
+    });
+    expect(accepted.status).toBe(101);
+
+    const replayed = await openDeviceSocketWithProof(room, {
+      deviceId: "owner-device", expiresAt, nonce,
+    });
+    expect(replayed.status).toBe(409);
+    expect((await replayed.json() as { error: { code: string } }).error.code)
+      .toBe("ATTN_DEVICE_PROOF_REPLAYED");
+
+    const expired = await openDeviceSocketWithProof(room, {
+      deviceId: "owner-device",
+      expiresAt: Date.now() - 1,
+      nonce: base64UrlEncode(new Uint8Array(16).fill(0xa2)),
+    });
+    expect(expired.status).toBe(401);
+    expect((await expired.json() as { error: { code: string } }).error.code)
+      .toBe("ATTN_DEVICE_PROOF_EXPIRED");
+
+    const rewritten = await openDeviceSocketWithProof(room, {
+      deviceId: "other-device",
+      signedDeviceId: "owner-device",
+      expiresAt: Date.now() + 60_000,
+      nonce: base64UrlEncode(new Uint8Array(16).fill(0xa3)),
+    });
+    expect(rewritten.status).toBe(401);
+    expect((await rewritten.json() as { error: { code: string } }).error.code)
+      .toBe("ATTN_DEVICE_PROOF_INVALID");
+
+    const attacker = await generateEd25519Keypair();
+    const forged = await openDeviceSocketWithProof(room, {
+      deviceId: "owner-device",
+      expiresAt: Date.now() + 60_000,
+      nonce: base64UrlEncode(new Uint8Array(16).fill(0xa4)),
+      privateKey: attacker.privateKey,
+    });
+    expect(forged.status).toBe(401);
+    expect((await forged.json() as { error: { code: string } }).error.code)
+      .toBe("ATTN_DEVICE_PROOF_INVALID");
+  });
+
   it("requires exactly one well-formed viewer_id or registered device_id", async () => {
     const room = await createRoom();
     const validViewer = viewerId(1);
@@ -360,11 +500,11 @@ describe("v3 anonymous viewer WebSocket", () => {
   it("replays and broadcasts non-signals without presence, signals, or viewer roster entries", async () => {
     const room = await createRoom({ maxPeers: 2 });
     await registerOwner(room);
-    await postEnvelopes(room, [
+    await postEnvelopes(room, await Promise.all([
       envelope(room, "replay-event"),
       envelope(room, "replay-target-signal", "signal", { deviceId: "owner-device" }),
       envelope(room, "replay-broadcast-signal", "signal"),
-    ]);
+    ]));
 
     const ownerOpen = await openSocket(room, "?device_id=owner-device");
     expect(ownerOpen.response.status).toBe(101);
@@ -406,11 +546,11 @@ describe("v3 anonymous viewer WebSocket", () => {
       code: "ATTN_FRAME_INVALID",
     });
 
-    await postEnvelopes(room, [
+    await postEnvelopes(room, await Promise.all([
       envelope(room, "fresh-event"),
       envelope(room, "fresh-target-signal", "signal", { deviceId: "owner-device" }),
       envelope(room, "fresh-broadcast-signal", "signal"),
-    ]);
+    ]));
     expect(await viewerFrames.next()).toMatchObject({
       type: "envelope",
       envelope: { envelopeId: "fresh-event", kind: "event" },
@@ -435,12 +575,44 @@ describe("v3 anonymous viewer WebSocket", () => {
     ownerOpen.socket!.send(JSON.stringify({ type: "subscribe", after: 0 }));
     const hello = await ownerFrames.next() as { type: string; onlineDeviceIds: string[] };
     expect(hello.type).toBe("hello");
-    expect(hello.onlineDeviceIds).toEqual(["owner-device"]);
+    // Presence is announced only after hello/replay, so the subscribing
+    // socket does not report itself as already online in its own hello.
+    expect(hello.onlineDeviceIds).toEqual([]);
 
     const overflow = await openSocket(room, `?viewer_id=${viewerId(99)}`);
     expect(overflow.response.status).toBe(101);
     const overflowFrames = new FrameQueue(overflow.socket!);
     await overflowFrames.waitClosed();
     expect(overflowFrames.closeCode).toBe(4003);
+  });
+
+  it("rejects target rewrites, wrong keys, and stale signed generations before storage", async () => {
+    const room = await createRoom();
+    await registerOwner(room);
+    const accepted = await envelope(room, "signal-current", "signal", { deviceId: "owner-device" });
+    accepted.signalGeneration = 500;
+    accepted.deviceSignature = await signSignal(room, accepted);
+    await postEnvelopes(room, [accepted]);
+
+    const rewritten = await envelope(room, "signal-rewritten", "signal", null);
+    rewritten.signalGeneration = 501;
+    rewritten.deviceSignature = await signSignal(room, rewritten);
+    rewritten.target = { deviceId: "owner-device" };
+    const rewriteResponse = await postEnvelopeResponse(room, [rewritten]);
+    expect(rewriteResponse.status).toBe(401);
+    expect(await rewriteResponse.json()).toMatchObject({ error: { code: "ATTN_DEVICE_PROOF_INVALID" } });
+
+    const wrongKey = await envelope(room, "signal-wrong-key", "signal", { deviceId: "owner-device" });
+    wrongKey.signalGeneration = 502;
+    wrongKey.deviceSignature = base64UrlEncode(new Uint8Array(64).fill(0xaa));
+    const wrongKeyResponse = await postEnvelopeResponse(room, [wrongKey]);
+    expect(wrongKeyResponse.status).toBe(401);
+
+    const stale = await envelope(room, "signal-stale", "signal", { deviceId: "owner-device" });
+    stale.signalGeneration = 499;
+    stale.deviceSignature = await signSignal(room, stale);
+    const staleResponse = await postEnvelopeResponse(room, [stale]);
+    expect(staleResponse.status).toBe(409);
+    expect(await staleResponse.json()).toMatchObject({ error: { code: "ATTN_SIGNAL_GENERATION_STALE" } });
   });
 });

@@ -1017,6 +1017,8 @@ struct ReviewSubmission {
     epoch: u64,
     room_id: String,
     tier: ShareTier,
+    #[serde(default)]
+    bundle_id: Option<String>,
     device_registration: ShareDeviceRegistration,
     envelopes: Vec<crate::review::model::MailboxEnvelope>,
 }
@@ -1830,7 +1832,13 @@ impl DurableShareService {
                 let drained = self.drain_mailbox(&record, &remote).await?;
                 if let Some(through) = drained {
                     record.imported_cursor = record.imported_cursor.max(through);
+                    // Persist terminal handling before issuing the prefix ACK.
+                    // A crash or transient DELETE failure retries the exact
+                    // idempotent ACK on the next renewal; it never reclassifies
+                    // a poison item or loses an imported valid submission.
+                    record.drain_cursor = through;
                     self.store.save(&record)?;
+                    self.relay.ack_mailbox(&record.share_id, through).await?;
                 }
                 if drained.is_none() && remote.mailbox.count > 0 {
                     return Err(ShareLifecycleError::Invalid(
@@ -1858,16 +1866,7 @@ impl DurableShareService {
                         .await?
                 };
                 record.expires_at = Some(touched.expires_at);
-                if let Some(through) = drained {
-                    // Only the public pointer/touch success makes this prefix
-                    // ACKable. A crash before here deliberately replays the
-                    // idempotent local/room imports on the next renewal.
-                    record.drain_cursor = through;
-                }
                 self.store.save(&record)?;
-                if let Some(through) = drained {
-                    self.relay.ack_mailbox(&record.share_id, through).await?;
-                }
             }
             let remote = self
                 .relay
@@ -1997,7 +1996,12 @@ impl DurableShareService {
         let drained = self.drain_mailbox(record, &remote).await?;
         if let Some(through) = drained {
             record.imported_cursor = record.imported_cursor.max(through);
+            record.drain_cursor = through;
             self.store.save(record)?;
+            // Drain/ACK before changing a missing-room pointer. ShareDO
+            // intentionally fences routing changes while retained mail
+            // exists; terminal poison must not make that fence permanent.
+            self.relay.ack_mailbox(&record.share_id, through).await?;
         }
         // Same epoch means retained snapshots and the already-published
         // sealed capability projection remain valid. Re-sealing introduces a
@@ -2022,13 +2026,7 @@ impl DurableShareService {
         record.current_room_id = Some(outcome.room_id.clone());
         record.epoch_rooms.insert(record.epoch, outcome.room_id);
         record.expires_at = Some(live.expires_at);
-        if let Some(through) = drained {
-            record.drain_cursor = through;
-        }
         self.store.save(record)?;
-        if let Some(through) = drained {
-            self.relay.ack_mailbox(&record.share_id, through).await?;
-        }
         Ok(())
     }
 
@@ -2098,17 +2096,51 @@ impl DurableShareService {
             expected = expected.saturating_add(1);
         }
         let epoch_secret = derive_share_epoch_room_secret(root.expose(), record.epoch);
-        // Validate/decrypt/authorize the entire retained prefix before any
-        // registration, relay forward, or local append becomes observable.
+        // Process every retained item as an independent authenticated unit.
+        // Invalid routing, grants, ciphertext, signatures, and event policy
+        // are terminal poison: advancing the prefix ACK quarantines them at
+        // the owner boundary and lets later valid mail through. External
+        // network/relay/storage failures remain errors, so the prefix is not
+        // ACKed and the exact valid submission is retried idempotently.
+        let mut handled_through = record.drain_cursor;
         for item in items.values() {
-            self.import_submission(record, remote, item, epoch_secret.as_bytes(), false)
-                .await?;
+            match self
+                .import_submission(record, remote, item, epoch_secret.as_bytes(), false)
+                .await
+            {
+                Ok(()) => {}
+                Err(ShareLifecycleError::Invalid(reason)) => {
+                    tracing::warn!(
+                        share_id = %record.share_id,
+                        mailbox_seq = item.seq,
+                        envelope_id = %item.envelope_id,
+                        reason = %reason,
+                        "terminally quarantining invalid durable mailbox submission"
+                    );
+                    handled_through = item.seq;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+            match self
+                .import_submission(record, remote, item, epoch_secret.as_bytes(), true)
+                .await
+            {
+                Ok(()) => handled_through = item.seq,
+                Err(ShareLifecycleError::Invalid(reason)) => {
+                    tracing::warn!(
+                        share_id = %record.share_id,
+                        mailbox_seq = item.seq,
+                        envelope_id = %item.envelope_id,
+                        reason = %reason,
+                        "terminally quarantining invalid durable mailbox submission"
+                    );
+                    handled_through = item.seq;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        for item in items.values() {
-            self.import_submission(record, remote, item, epoch_secret.as_bytes(), true)
-                .await?;
-        }
-        Ok(items.keys().next_back().copied())
+        Ok(Some(handled_through))
     }
 
     async fn import_submission(
@@ -2138,6 +2170,7 @@ impl DurableShareService {
             || submission.share_id != record.share_id
             || submission.epoch != record.epoch
             || submission.room_id != room_id.as_str()
+            || submission.bundle_id.as_deref() != Some(expected_bundle_id.as_str())
             || item.epoch != Some(record.epoch)
             || item.bundle_id.as_deref() != Some(expected_bundle_id.as_str())
             || item.tier != Some(submission.tier)
@@ -2282,12 +2315,15 @@ impl DurableShareService {
                 tree.write_admission_key.as_bytes(),
             )
             .await
-            .map_err(bootstrap_failure)?;
+            .map_err(frozen_registration_failure)?;
         let outcomes = pipeline
             .commit_preflighted_events(room_id, &events)
             .await
-            .map_err(|error| {
-                ShareLifecycleError::Invalid(format!("review_submission commit: {error}"))
+            .map_err(|error| match error {
+                crate::review::transport::inbound::InboundError::Store(message) => {
+                    ShareLifecycleError::Store(format!("review_submission commit: {message}"))
+                }
+                other => ShareLifecycleError::Invalid(format!("review_submission commit: {other}")),
             })?;
         if let Some(notifications) = self.notifications.as_ref() {
             for outcome in outcomes {
@@ -2347,6 +2383,35 @@ fn retained_manifest_is_exact(
 
 fn bootstrap_failure(error: crate::review::bootstrap::BootstrapError) -> ShareLifecycleError {
     ShareLifecycleError::Relay(error.to_string())
+}
+
+fn frozen_registration_failure(
+    error: crate::review::bootstrap::BootstrapError,
+) -> ShareLifecycleError {
+    use crate::review::bootstrap::BootstrapError;
+
+    match error {
+        BootstrapError::Relay {
+            status,
+            code,
+            message,
+        } if matches!(
+            code.as_str(),
+            "ATTN_DEVICE_ID_CONFLICT"
+                | "ATTN_DEVICE_KEY_CHANGED"
+                | "ATTN_DEVICE_RECORD_CHANGED"
+                | "ATTN_ROOM_DEVICE_CAP"
+        ) =>
+        {
+            ShareLifecycleError::Invalid(format!(
+                "frozen device registration rejected: relay http {status}: {code}: {message}"
+            ))
+        }
+        BootstrapError::InviteParse(message) | BootstrapError::InvalidShare(message) => {
+            ShareLifecycleError::Invalid(format!("frozen device registration: {message}"))
+        }
+        other => bootstrap_failure(other),
+    }
 }
 
 fn bundle_access(secret: &[u8; 32], tier: ShareLinkTier) -> ShareBundleAccess {
@@ -2550,7 +2615,7 @@ fn seal_managed_snapshot(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use wiremock::matchers::{header, header_exists, method, path, path_regex};
+    use wiremock::matchers::{body_partial_json, header, header_exists, method, path, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const SHARE_ID: &str = "AAECAwQFBgcICQoLDA0ODw";
@@ -2570,6 +2635,234 @@ mod tests {
             ciphertext_sha256: "digest".into(),
             uploaded_at: 1,
         }
+    }
+
+    fn typed_id<T: for<'de> Deserialize<'de>>(value: &str) -> T {
+        serde_json::from_value(serde_json::Value::String(value.to_owned()))
+            .expect("typed protocol id")
+    }
+
+    struct MailboxFixtureRelay {
+        items: Vec<ShareMailboxItem>,
+    }
+
+    struct FailOnceAckRelay {
+        fail: AtomicBool,
+        operations: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ShareRelayClient for FailOnceAckRelay {
+        fn device_id(&self) -> &str {
+            "owner-device"
+        }
+
+        async fn fetch_share(
+            &self,
+            _: &str,
+            _: &ShareBundleAccess,
+        ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+            self.operations.lock().unwrap().push("fetch".into());
+            unreachable!("pending ACK must precede a fresh share fetch")
+        }
+
+        async fn create_or_renew(
+            &self,
+            _: &str,
+            _: &ShareUpsertRequest,
+        ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+            unreachable!()
+        }
+
+        async fn fetch_mailbox(
+            &self,
+            _: &str,
+            _: &ShareBundleAccess,
+            _: u64,
+            _: u16,
+        ) -> Result<ShareMailboxPage, ShareLifecycleError> {
+            unreachable!()
+        }
+
+        async fn ack_mailbox(&self, _: &str, through: u64) -> Result<(), ShareLifecycleError> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(format!("ack:{through}"));
+            if self.fail.swap(false, Ordering::SeqCst) {
+                Err(ShareLifecycleError::Relay("injected ACK failure".into()))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn revoke_share(&self, _: &str) -> Result<(), ShareLifecycleError> {
+            unreachable!()
+        }
+
+        async fn upload_snapshot(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[u8],
+        ) -> Result<ManagedShareSnapshotRef, ShareLifecycleError> {
+            unreachable!()
+        }
+
+        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), ShareLifecycleError> {
+            unreachable!()
+        }
+
+        async fn fetch_snapshot(
+            &self,
+            _: &str,
+            _: &str,
+            _: &ShareBundleAccess,
+        ) -> Result<ManagedSnapshotCiphertext, ShareLifecycleError> {
+            unreachable!()
+        }
+    }
+
+    #[async_trait]
+    impl ShareRelayClient for MailboxFixtureRelay {
+        fn device_id(&self) -> &str {
+            "owner-device"
+        }
+
+        async fn fetch_share(
+            &self,
+            _: &str,
+            _: &ShareBundleAccess,
+        ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+            unreachable!()
+        }
+
+        async fn create_or_renew(
+            &self,
+            _: &str,
+            _: &ShareUpsertRequest,
+        ) -> Result<ShareRelayRecord, ShareLifecycleError> {
+            unreachable!()
+        }
+
+        async fn fetch_mailbox(
+            &self,
+            _: &str,
+            access: &ShareBundleAccess,
+            after: u64,
+            _: u16,
+        ) -> Result<ShareMailboxPage, ShareLifecycleError> {
+            let items = self
+                .items
+                .iter()
+                .filter(|item| item.seq > after && item.tier == Some(access.tier))
+                .cloned()
+                .collect::<Vec<_>>();
+            let next_after = items.last().map_or(after, |item| item.seq);
+            Ok(ShareMailboxPage {
+                items,
+                next_after,
+                bundle: Some(SelectedShareBundle {
+                    bundle_id: access.bundle_id.clone(),
+                    tier: access.tier,
+                    sealed_bundle: "sealed".into(),
+                }),
+            })
+        }
+
+        async fn ack_mailbox(&self, _: &str, _: u64) -> Result<(), ShareLifecycleError> {
+            Ok(())
+        }
+
+        async fn revoke_share(&self, _: &str) -> Result<(), ShareLifecycleError> {
+            unreachable!()
+        }
+
+        async fn upload_snapshot(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[u8],
+        ) -> Result<ManagedShareSnapshotRef, ShareLifecycleError> {
+            unreachable!()
+        }
+
+        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), ShareLifecycleError> {
+            unreachable!()
+        }
+
+        async fn fetch_snapshot(
+            &self,
+            _: &str,
+            _: &str,
+            _: &ShareBundleAccess,
+        ) -> Result<ManagedSnapshotCiphertext, ShareLifecycleError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn renewal_retries_persisted_mailbox_ack_before_any_fresh_remote_read() {
+        use crate::review::bootstrap::BootstrapConfig;
+        use crate::review::store::ReviewStore;
+
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let share_store =
+            Arc::new(DurableShareStore::open_at(temporary.path().join("shares")).expect("shares"));
+        let mut pending = record(temporary.path());
+        pending.current_room_id = Some(pending.room_for_epoch(0).expect("epoch room"));
+        pending.imported_cursor = 7;
+        pending.drain_cursor = 7;
+        share_store
+            .save(&pending)
+            .expect("persist pending ACK intent");
+
+        let review_store =
+            Arc::new(ReviewStore::open_at(temporary.path().join("reviews")).expect("reviews"));
+        let bootstrap = Arc::new(
+            Bootstrapper::new(
+                Arc::clone(&review_store),
+                Arc::new(BootstrapConfig {
+                    relay_url: "http://127.0.0.1:9".into(),
+                    identity_dir: Some(temporary.path().join("identity")),
+                }),
+            )
+            .expect("bootstrap"),
+        );
+        let relay = Arc::new(FailOnceAckRelay {
+            fail: AtomicBool::new(true),
+            operations: std::sync::Mutex::new(Vec::new()),
+        });
+        let service = DurableShareService::new(
+            Arc::clone(&share_store),
+            review_store,
+            relay.clone(),
+            bootstrap,
+        );
+
+        assert!(matches!(
+            service.renew(Some(SHARE_ID)).await,
+            Err(ShareLifecycleError::Relay(_))
+        ));
+        assert_eq!(
+            share_store
+                .resolve(SHARE_ID)
+                .expect("saved intent")
+                .drain_cursor,
+            7,
+            "failed ACK must leave the persisted retry cursor intact"
+        );
+        assert!(matches!(
+            service.renew(Some(SHARE_ID)).await,
+            Err(ShareLifecycleError::Relay(_))
+        ));
+        assert_eq!(
+            relay.operations.lock().unwrap().as_slice(),
+            ["ack:7", "ack:7"],
+            "the next renewal must retry the exact ACK before any fresh relay read"
+        );
     }
 
     struct DarkPointerRelay {
@@ -3209,6 +3502,270 @@ mod tests {
             .expect_err("workspace manifests are not legacy text snapshots");
         assert!(error.to_string().contains("has no text content"));
         assert!(snapshot.plaintext.content.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_drain_quarantines_poison_retries_transient_and_dedupes_later_valid_mail() {
+        use crate::review::bootstrap::{
+            BootstrapConfig, InviteTierV3, assemble_envelope_for_event, canonical_device_grant_v3,
+        };
+        use crate::review::ids::{ContentHash, FileId, SnapshotId};
+        use crate::review::model::{
+            Anchor, Capability, Device, DeviceClient, Participant, ParticipantKind, PositionAnchor,
+            ReviewEventBody,
+        };
+        use crate::review::store::ReviewStore;
+
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let mut record = record(temporary.path());
+        let room_id = record.room_for_epoch(0).expect("epoch room");
+        record.current_room_id = Some(room_id.clone());
+
+        let owner = DeviceIdentity::generate().expect("owner identity");
+        let poison_visitor = DeviceIdentity::generate().expect("poison visitor identity");
+        let visitor = DeviceIdentity::generate().expect("visitor identity");
+        let owner_grant = owner
+            .signing_key()
+            .expect("owner signer")
+            .sign_protocol_bytes(
+                &canonical_device_grant_v3(&room_id, InviteTierV3::Comment).expect("grant bytes"),
+            );
+        let root = record.share_secret.as_ref().expect("root");
+        let epoch_secret = derive_share_epoch_room_secret(root.expose(), 0);
+        let event_key = derive_room_key_tree_v3(epoch_secret.as_bytes())
+            .read_keys
+            .event_key;
+        let bundle_id = submission_bundle_id(root.expose(), ShareTier::Comment);
+        let submission = |identity: &DeviceIdentity, outer_id: &str, thread_id: &str| {
+            let unsigned_registration = serde_json::json!({
+                "deviceId": identity.device_id,
+                "participantId": identity.participant_id,
+                "publicSigningKey": identity.public_signing_key,
+                "publicEncryptionKey": identity.public_encryption_key,
+                "client": "attn-browser",
+                "kind": "reviewer",
+                "grantTier": "comment",
+                "grantSignature": URL_SAFE_NO_PAD.encode(owner_grant),
+            });
+            let self_signature = identity
+                .signing_key()
+                .expect("visitor signer")
+                .sign_protocol_bytes(
+                    &crate::review::crypto::canonical::to_canonical_bytes(&unsigned_registration)
+                        .expect("registration canonical bytes"),
+                );
+            let mut registration = unsigned_registration;
+            registration["selfSignature"] =
+                serde_json::Value::String(URL_SAFE_NO_PAD.encode(self_signature));
+            let participant = Participant {
+                participant_id: identity.typed_participant_id(),
+                display_name: "Offline reviewer".into(),
+                kind: ParticipantKind::Reviewer,
+                public_signing_key: identity.public_signing_key.clone(),
+                capabilities: vec![
+                    Capability::ReadSnapshot,
+                    Capability::WriteComment,
+                    Capability::ResolveComment,
+                ],
+            };
+            let device = Device {
+                device_id: identity.typed_device_id(),
+                participant_id: identity.typed_participant_id(),
+                public_encryption_key: identity.public_encryption_key.clone(),
+                public_signing_key: identity.public_signing_key.clone(),
+                client: DeviceClient::AttnBrowser,
+                created_at: 100,
+            };
+            let joined = assemble_envelope_for_event(
+                identity,
+                &room_id,
+                event_key.as_bytes(),
+                ReviewEventBody::ParticipantJoined {
+                    participant,
+                    device,
+                },
+                100,
+                10_000,
+            )
+            .expect("joined envelope");
+            let comment = assemble_envelope_for_event(
+                identity,
+                &room_id,
+                event_key.as_bytes(),
+                ReviewEventBody::CommentCreated {
+                    thread_id: thread_id.into(),
+                    anchor: Anchor {
+                        v: 2,
+                        file_id: typed_id::<FileId>("file-valid"),
+                        snapshot_id: typed_id::<SnapshotId>("snapshot-valid"),
+                        base_hash: typed_id::<ContentHash>("hash-valid"),
+                        position: PositionAnchor {
+                            byte_range: [0, 1],
+                            line_range: [1, 1],
+                            pm_range: None,
+                        },
+                        quote: None,
+                        block: None,
+                        context: None,
+                        structure: None,
+                    },
+                    body: "valid comment after poison".into(),
+                },
+                101,
+                10_000,
+            )
+            .expect("comment envelope");
+            serde_json::json!({
+                "v": 3,
+                "envelopeId": outer_id,
+                "type": "review_submission",
+                "shareId": SHARE_ID,
+                "epoch": 0,
+                "roomId": room_id,
+                "tier": "comment",
+                "bundleId": bundle_id,
+                "deviceRegistration": registration,
+                "envelopes": [joined, comment],
+            })
+        };
+        let valid = submission(&visitor, "outer-valid", "thread-valid");
+        let duplicate = submission(&visitor, "outer-duplicate", "thread-valid");
+        let poison = submission(&poison_visitor, "outer-poison", "thread-poison");
+        let joined_envelope_id = valid["envelopes"][0]["envelopeId"].clone();
+        let comment_envelope_id = valid["envelopes"][1]["envelopeId"].clone();
+        let item = |seq, envelope_id: &str, payload| ShareMailboxItem {
+            seq,
+            envelope_id: envelope_id.into(),
+            bytes: serde_json::to_vec(&payload).unwrap().len() as u64,
+            payload,
+            epoch: Some(0),
+            bundle_id: Some(bundle_id.clone()),
+            tier: Some(ShareTier::Comment),
+        };
+        let relay = Arc::new(MailboxFixtureRelay {
+            items: vec![
+                item(1, "outer-poison", poison),
+                item(2, "outer-valid", valid),
+                item(3, "outer-duplicate", duplicate),
+            ],
+        });
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v3/rooms/{}/devices", room_id.as_str())))
+            .and(body_partial_json(serde_json::json!({
+                "deviceId": poison_visitor.device_id
+            })))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "ATTN_DEVICE_ID_CONFLICT",
+                    "message": "device identifier is already bound to another participant"
+                }
+            })))
+            .with_priority(1)
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/v3/rooms/{}/devices", room_id.as_str())))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(3)
+            .mount(&server)
+            .await;
+        let envelopes_path = format!("/v3/rooms/{}/envelopes", room_id.as_str());
+        Mock::given(method("POST"))
+            .and(path(envelopes_path.clone()))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(envelopes_path))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "accepted": [
+                    { "envelopeId": joined_envelope_id, "serverSeq": 1 },
+                    { "envelopeId": comment_envelope_id, "serverSeq": 2 }
+                ]
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let review_store =
+            Arc::new(ReviewStore::open_at(temporary.path().join("reviews")).expect("review store"));
+        let bootstrap = Arc::new(
+            Bootstrapper::new(
+                Arc::clone(&review_store),
+                Arc::new(BootstrapConfig {
+                    relay_url: server.uri(),
+                    identity_dir: Some(temporary.path().join("identity")),
+                }),
+            )
+            .expect("bootstrap"),
+        );
+        let service = DurableShareService::new(
+            Arc::new(DurableShareStore::open_at(temporary.path().join("shares")).expect("shares")),
+            Arc::clone(&review_store),
+            relay,
+            bootstrap,
+        );
+        let remote = ShareRelayRecord {
+            v: 3,
+            share_id: SHARE_ID.into(),
+            owner_signing_key: owner.public_signing_key,
+            epoch: 0,
+            revision: 0,
+            current_room_id: Some(room_id.as_str().into()),
+            snapshots: vec![],
+            placeholders: vec![],
+            manifest_digest: EMPTY_MANIFEST_DIGEST.into(),
+            bundle: None,
+            updated_at: 1,
+            expires_at: 10_000,
+            mailbox: ShareMailboxSummary {
+                count: 3,
+                bytes: 1,
+                latest_seq: 3,
+            },
+            features: ShareFeatures { push: false },
+        };
+
+        let first = service.drain_mailbox(&record, &remote).await;
+        assert!(
+            matches!(first, Err(ShareLifecycleError::Relay(_))),
+            "transient relay failure must preserve the prefix for retry: {first:?}"
+        );
+        assert_eq!(
+            review_store
+                .iter_events(&room_id)
+                .expect("events")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("event decode")
+                .len(),
+            2,
+            "valid submission was durably imported before transient forward failure"
+        );
+
+        assert_eq!(
+            service
+                .drain_mailbox(&record, &remote)
+                .await
+                .expect("retry drain"),
+            Some(3),
+            "poison and duplicate are terminally accounted through the later valid item"
+        );
+        let events = review_store
+            .iter_events(&room_id)
+            .expect("events")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("event decode");
+        assert_eq!(events.len(), 2, "retry and duplicate import exactly once");
+        assert!(matches!(
+            &events[1].body,
+            ReviewEventBody::CommentCreated { body, .. } if body == "valid comment after poison"
+        ));
     }
 
     #[tokio::test]

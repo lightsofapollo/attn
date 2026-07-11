@@ -114,6 +114,11 @@ impl DeviceSigningKey {
     pub fn verifying_key(&self) -> DeviceVerifyingKey {
         DeviceVerifyingKey(self.0.verifying_key())
     }
+
+    /// Sign already-domain-separated canonical protocol bytes.
+    pub fn sign_protocol_bytes(&self, bytes: &[u8]) -> [u8; 64] {
+        self.0.sign(bytes).to_bytes()
+    }
 }
 
 impl fmt::Debug for DeviceSigningKey {
@@ -139,6 +144,17 @@ impl DeviceVerifyingKey {
     /// Return the 32-byte compressed Edwards-y encoding.
     pub fn to_bytes(&self) -> [u8; 32] {
         self.0.to_bytes()
+    }
+
+    /// Verify already-domain-separated canonical protocol bytes.
+    pub fn verify_protocol_bytes(
+        &self,
+        bytes: &[u8],
+        signature: &[u8; 64],
+    ) -> Result<(), SignError> {
+        self.0
+            .verify(bytes, &Signature::from_bytes(signature))
+            .map_err(|error| SignError::Ed25519(error.to_string()))
     }
 
     /// `signingKeyId` per crypto-spec.md §Signatures —

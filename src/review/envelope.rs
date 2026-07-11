@@ -322,6 +322,8 @@ pub fn assemble_event_envelope_with_nonce(
         nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
         ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
         ciphertext_bytes: ciphertext.len() as u64,
+        signal_generation: None,
+        device_signature: None,
     };
 
     Ok(envelope)
@@ -455,6 +457,8 @@ pub fn assemble_snapshot_blob_envelope(
         nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
         ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
         ciphertext_bytes: ciphertext.len() as u64,
+        signal_generation: None,
+        device_signature: None,
     })
 }
 

@@ -7,6 +7,7 @@ import { assembleBrowserEvent } from '../src/lib/review/browser-envelope';
 import { base64UrlEncode, buildAdmissionHeaderV3, deriveReadKeysV3, toCanonicalBytes } from '../src/lib/review/browser-crypto';
 import { buildRegisterDeviceBody, buildRegisterDeviceBodyV3, canonicalDeviceGrantV3,
   generateBrowserIdentity } from '../src/lib/review/browser-session';
+import { createDeviceHttpProofV3 } from '../src/lib/review/device-proof';
 import type { Device, MailboxEnvelope } from '../src/lib/review/browser-ws';
 import { canonicalRequest as relayCanonicalRequest } from '../../relay/src/admission';
 import { createPowHeader, FIXED_POW_RAND, mintPowForTests } from '../../relay/test/helpers/pow';
@@ -28,6 +29,10 @@ interface RelayFixture {
   write: Uint8Array;
   owner: Device;
   ownerIdentity: ReturnType<typeof generateBrowserIdentity>;
+  reviewerIdentity: ReturnType<typeof generateBrowserIdentity>;
+  reviewerRegistration: ReturnType<typeof buildRegisterDeviceBodyV3>;
+  authorIdentity: ReturnType<typeof generateBrowserIdentity>;
+  authorRegistration: ReturnType<typeof buildRegisterDeviceBodyV3>;
   shareRecord: Record<string, unknown>;
   snapshot: Uint8Array;
   mailbox: Array<Record<string, unknown>>;
@@ -42,6 +47,8 @@ test.afterAll(async () => {
   await new Promise<void>(resolve => fixture.server.close(() => resolve()));
   fixture.root.fill(0); fixture.read.fill(0); fixture.write.fill(0); fixture.snapshot.fill(0);
   fixture.ownerIdentity.signingSecret.fill(0); fixture.ownerIdentity.encryptionSecret.fill(0);
+  fixture.reviewerIdentity.signingSecret.fill(0); fixture.reviewerIdentity.encryptionSecret.fill(0);
+  fixture.authorIdentity.signingSecret.fill(0); fixture.authorIdentity.encryptionSecret.fill(0);
 });
 
 test('payloadless wake decrypts locally, tag-replaces, and fragmentless click restores the thread', async ({ context, page, browserName }) => {
@@ -149,6 +156,14 @@ async function startRelayFixture(): Promise<RelayFixture> {
   const write = new Uint8Array(32).fill(25);
   const ownerIdentity = generateBrowserIdentity();
   const owner = buildRegisterDeviceBody(ownerIdentity, 'owner') as Device;
+  const reviewerIdentity = { ...generateBrowserIdentity(),
+    deviceId: 'browser-reviewer', participantId: 'browser-participant' };
+  const reviewerGrant = base64UrlEncode(ed25519.sign(
+    canonicalDeviceGrantV3(roomId, 'comment'), ownerIdentity.signingSecret));
+  const reviewerRegistration = buildRegisterDeviceBodyV3(reviewerIdentity, 'comment', reviewerGrant);
+  const authorIdentity = { ...generateBrowserIdentity(),
+    deviceId: 'browser-author', participantId: 'browser-author-participant' };
+  const authorRegistration = buildRegisterDeviceBodyV3(authorIdentity, 'comment', reviewerGrant);
   const keys = deriveReadKeysV3(root);
   const aad = toCanonicalBytes({ v: 3, purpose: 'attn durable share snapshot v3', shareId, epoch: 2, fileId, snapshotId });
   const plaintext = toCanonicalBytes({ v: 3, fileId, snapshotId, docType: 'markdown',
@@ -173,6 +188,7 @@ async function startRelayFixture(): Promise<RelayFixture> {
   const ownerPrivateKey = await importEd25519Private(ownerIdentity.signingSecret);
   const createUrl = `${relayOrigin}/v3/shares/${shareId}`;
   const createBody = JSON.stringify({ v: 3, ownerSigningKey: owner.publicSigningKey, epoch: 2, revision: 0,
+    currentRoomId: roomId,
     bundles: [{ bundleId, tier: 'comment', readAdmissionKey: base64UrlEncode(read),
       writeAdmissionKey: base64UrlEncode(write), sealedBundle: base64UrlEncode(new Uint8Array(80).fill(0x61)) }],
     snapshots: [], placeholders: [] });
@@ -193,24 +209,28 @@ async function startRelayFixture(): Promise<RelayFixture> {
   const shareRecord = await selected.json() as Record<string, unknown>;
   aad.fill(0); plaintext.fill(0); keys.eventKey.fill(0); keys.snapshotKey.fill(0); keys.signalingKey.fill(0);
   keys.readAdmissionKey.fill(0);
-  return { server, root, read, write, owner, ownerIdentity, shareRecord, snapshot, mailbox, requests };
+  return { server, root, read, write, owner, ownerIdentity, reviewerIdentity,
+    reviewerRegistration, authorIdentity, authorRegistration, shareRecord, snapshot, mailbox, requests };
 }
 
 function harnessInput(target: RelayFixture): Record<string, unknown> {
   return { shareId, bundleId, roomId, epoch: 2, revision: 1,
     manifestDigest: String(target.shareRecord.manifestDigest), deviceId: 'browser-reviewer', relayUrl: relayOrigin,
     root: [...target.root], read: [...target.read], write: [...target.write],
+    deviceSigningSecret: [...target.reviewerIdentity.signingSecret],
+    deviceRegistration: structuredClone(target.reviewerRegistration),
     ownerSigningKey: target.owner.publicSigningKey, devices: [target.owner], fileName: 'plan.md',
     pushEndpoint: 'http://127.0.0.1:8800/push/browser-reviewer' };
 }
 
 async function postOwnerEvent(item: Record<string, unknown>): Promise<void> {
   const path = `/v3/shares/${shareId}/mailbox`;
-  const body = JSON.stringify({ epoch: 2, deviceId: 'owner-e2e', items: [item] });
+  const deviceId = fixture.authorIdentity.deviceId;
+  const body = JSON.stringify({ epoch: 2, deviceId, items: [item] });
   const response = await fetch(`${relayOrigin}${path}`, { method: 'POST', body, headers: {
     'Content-Type': 'application/json', 'Attn-Share-Bundle': bundleId,
     'Attn-Admission': buildAdmissionHeaderV3(fixture.write, 'write', 'POST', path, new TextEncoder().encode(body)),
-    'Attn-PoW': await mintPowForTests({ roomId: shareId, deviceId: 'owner-e2e', method: 'POST', path,
+    'Attn-PoW': await mintPowForTests({ roomId: shareId, deviceId, method: 'POST', path,
       difficulty: 12, expiresAt: Date.now() + 300_000,
       rand: base64UrlEncode(crypto.getRandomValues(new Uint8Array(16))) }) } });
   expect(response.status).toBe(201);
@@ -251,13 +271,19 @@ async function postRealRoomOwnerEvent(target: RelayFixture): Promise<void> {
   const subscriptionBody = JSON.stringify({ v: 3, endpoint: 'http://127.0.0.1:8800/push/room-reviewer', expirationTime: null,
     keys: { p256dh: 'BKOaMoQCJMzoFLApwG1J8FvD2rB3JECjlJ_ZU2qhp4tUGJSfB2Z-5OI6wxAVDd2DilYJoXLRkN0bOSDRA32s7HI',
       auth: 'AAAAAAAAAAAAAAAAAAAAAA' } });
+  const subscriptionBodyBytes = new TextEncoder().encode(subscriptionBody);
+  const subscriptionPow = await mintPowForTests({ roomId: actualRoomId, deviceId: targetDevice.deviceId, method: 'POST',
+    path: subscriptionPath, difficulty: 16, expiresAt: Date.now() + 300_000,
+    rand: base64UrlEncode(new Uint8Array(16).fill(0x43)) });
   const subscribed = await fetch(`${relayOrigin}${subscriptionPath}`, { method: 'POST', body: subscriptionBody,
     headers: { 'Content-Type': 'application/json', 'Attn-Device-Id': targetDevice.deviceId,
       'Attn-Admission': buildAdmissionHeaderV3(target.write, 'write', 'POST', subscriptionPath,
-        new TextEncoder().encode(subscriptionBody)),
-      'Attn-PoW': await mintPowForTests({ roomId: actualRoomId, deviceId: targetDevice.deviceId, method: 'POST',
-        path: subscriptionPath, difficulty: 16, expiresAt: Date.now() + 300_000,
-        rand: base64UrlEncode(new Uint8Array(16).fill(0x43)) }) } });
+        subscriptionBodyBytes),
+      'Attn-PoW': subscriptionPow,
+      'Attn-Device-Proof': await createDeviceHttpProofV3({ resourceKind: 'room', resourceId: actualRoomId,
+        deviceId: targetDevice.deviceId, method: 'POST', path: subscriptionPath, body: subscriptionBodyBytes,
+        powToken: subscriptionPow, signingSecret: targetIdentity.signingSecret }) } });
+  subscriptionBodyBytes.fill(0);
   expect(subscribed.status, await subscribed.clone().text()).toBe(201);
   const eventKey = deriveReadKeysV3(target.root).eventKey;
   const event = assembleBrowserEvent({ eventKey, signingSecret: target.ownerIdentity.signingSecret,
@@ -299,15 +325,27 @@ async function ownerSignature(url: string, method: string, body: Uint8Array, pri
 
 function ownerCommentItem(target: RelayFixture, seq: number, body: string, nonceByte: number): Record<string, unknown> {
   const eventKey = deriveReadKeysV3(target.root).eventKey;
-  const assembled = assembleBrowserEvent({ eventKey, signingSecret: target.ownerIdentity.signingSecret,
-    signingPublic: target.ownerIdentity.signingPublic, roomId, authorId: target.ownerIdentity.participantId,
-    deviceId: target.ownerIdentity.deviceId, createdAt: 1_000 + seq, expiresAt: Date.now() + 60_000,
+  const identity = target.authorIdentity;
+  const joined = assembleBrowserEvent({ eventKey, signingSecret: identity.signingSecret,
+    signingPublic: identity.signingPublic, roomId, authorId: identity.participantId,
+    deviceId: identity.deviceId, createdAt: 900 + seq, expiresAt: Date.now() + 60_000,
+    nonce: new Uint8Array(24).fill(nonceByte + 64), body: { type: 'participant_joined', participant: {
+      participantId: identity.participantId, displayName: 'Browser reviewer', kind: 'reviewer',
+      publicSigningKey: base64UrlEncode(identity.signingPublic),
+      capabilities: ['read_snapshot', 'write_comment', 'resolve_comment'],
+    }, device: { deviceId: identity.deviceId, participantId: identity.participantId,
+      publicEncryptionKey: base64UrlEncode(identity.publicEncryptionKey),
+      publicSigningKey: base64UrlEncode(identity.signingPublic), client: 'attn-browser', createdAt: 900 + seq } } });
+  const assembled = assembleBrowserEvent({ eventKey, signingSecret: identity.signingSecret,
+    signingPublic: identity.signingPublic, roomId, authorId: identity.participantId,
+    deviceId: identity.deviceId, createdAt: 1_000 + seq, expiresAt: Date.now() + 60_000,
     nonce: new Uint8Array(24).fill(nonceByte), body: { type: 'comment_created', threadId: `thread-${seq}`,
       anchor: { v: 2, fileId, snapshotId, baseHash: 'hash-push-e2e',
         position: { byteRange: [0, 4], lineRange: [1, 1] } }, body } });
   const envelope = assembled.envelope as MailboxEnvelope;
   const item = { v: 3, envelopeId: `outer-${seq}`, type: 'review_submission', shareId, epoch: 2,
-    roomId, tier: 'comment', deviceRegistration: target.owner, envelopes: [envelope] };
+    roomId, tier: 'comment', bundleId, deviceRegistration: target.authorRegistration,
+    envelopes: [joined.envelope, envelope] };
   eventKey.fill(0);
   return item;
 }

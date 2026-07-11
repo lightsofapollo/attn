@@ -41,6 +41,7 @@ import {
   type SignableMetaShape,
 } from './browser-crypto';
 import { validateSignalTarget } from './browser-signaling';
+import { verifyDeviceSignalProofV3 } from './device-proof';
 
 // ---------------------------------------------------------------------------
 // Wire types (mirror `ws.rs::ServerFrame` / `ClientFrame` and
@@ -71,6 +72,10 @@ export interface MailboxEnvelope {
   /** base64url-no-pad of `ciphertext || 16-byte Poly1305 tag`. */
   ciphertext: string;
   ciphertextBytes: number;
+  /** Required on protocol-v3 signal envelopes. */
+  signalGeneration?: number;
+  /** Ed25519 signature over the complete v3 signal routing/ciphertext header. */
+  deviceSignature?: string;
 }
 
 export interface RoomPolicy {
@@ -227,6 +232,8 @@ export interface BrowserWsOptions {
   url: string;
   /** Admission subprotocol value (`"attn.v2, hmac.<…>"`). */
   subprotocol: string;
+  /** Mint a fresh short-lived v3 device proof for every connection attempt. */
+  refreshConnection?: () => { url: string; subprotocol: string };
   /** Starting sequence the client subscribes from (load from local cursor). */
   afterSeq: number;
   /** 32-byte AEAD key for `kind:"event"` envelopes. */
@@ -235,6 +242,8 @@ export interface BrowserWsOptions {
   snapshotKey: Uint8Array;
   /** 32-byte AEAD key for `kind:"signal"` envelopes. */
   signalingKey: Uint8Array;
+  /** Room transport version; v3 requires device-authenticated signals. */
+  protocolVersion?: 2 | 3;
   /** Pre-seeded device cache (e.g. from a prior session). Empty Map by default. */
   initialDevices?: Map<string, Device>;
   /** Previously verified ParticipantJoined signer ids from durable replay. */
@@ -422,8 +431,12 @@ export class BrowserWsClient {
       // tokens. The WebSocket constructor accepts a list of protocol
       // strings; we split on comma so the browser sends the header per
       // RFC 6455 §4.1 (comma-separated values).
-      const protocols = this.opts.subprotocol.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
-      ws = this.factory(this.opts.url, protocols);
+      const connection = this.opts.refreshConnection?.() ?? {
+        url: this.opts.url,
+        subprotocol: this.opts.subprotocol,
+      };
+      const protocols = connection.subprotocol.split(',').map((p) => p.trim()).filter((p) => p.length > 0);
+      ws = this.factory(connection.url, protocols);
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       this.scheduleReconnect(`ws constructor: ${m}`);
@@ -653,6 +666,21 @@ export class BrowserWsClient {
     if (envelope.kind === 'signal' && !validateSignalTarget(envelope, this.opts.localDeviceId)) {
       this.callbacks.onError?.('ATTN_INBOUND', 'signal target does not match local device');
       return;
+    }
+    if (envelope.kind === 'signal' && (this.opts.protocolVersion ?? 2) === 3) {
+      const keyId = this.deviceKeyIds.get(envelope.deviceId);
+      const device = keyId === undefined ? undefined : this.devices.get(keyId);
+      if (!device || device.participantId !== envelope.authorId) {
+        this.callbacks.onError?.('ATTN_INBOUND', 'signal signer is absent from authenticated directory');
+        return;
+      }
+      try {
+        verifyDeviceSignalProofV3(envelope, this.opts.roomId, device.publicSigningKey);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.callbacks.onError?.('ATTN_INBOUND', `signal device proof failed: ${message}`);
+        return;
+      }
     }
 
     // Pick the AEAD key based on the envelope kind.

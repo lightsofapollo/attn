@@ -299,6 +299,8 @@ impl E2eHarness {
         // remote_device_id — that's where its outbound signal envelopes
         // are addressed.
         let owner_config = Arc::new(WebRtcConfig {
+            protocol_version: 2,
+            device_signing_seed: None,
             room_id: room_id.clone(),
             author_id: id::<ParticipantId>("p-owner-01"),
             local_device_id: owner_device.clone(),
@@ -314,6 +316,8 @@ impl E2eHarness {
             stun_servers: vec![],
         });
         let reviewer_config = Arc::new(WebRtcConfig {
+            protocol_version: 2,
+            device_signing_seed: None,
             room_id: room_id.clone(),
             author_id: author.clone(),
             local_device_id: reviewer_device.clone(),

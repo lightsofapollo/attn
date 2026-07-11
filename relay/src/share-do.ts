@@ -2,11 +2,22 @@ import { DurableObject } from "cloudflare:workers";
 import { base64UrlDecode, base64UrlEncode, canonicalRequest, constantTimeEquals, verifyAdmissionV3 } from "./admission";
 import { INTERNAL_EDGE_ORIGIN_HEADER, parseEdgeOriginContext } from "./browser-origin";
 import { canonicalize } from "./canonical";
+import {
+  DeviceProofError,
+  verifyDeviceHttpProofV3,
+  verifyDeviceProofSignature,
+} from "./device-proof";
 import type { Env } from "./env";
 import { encodeOpaqueSegment } from "./opaque-key";
 import { verifyOwnerSignature } from "./owner-sig";
 import { verifyPow } from "./pow";
 import { deleteShareArtifacts, shareArtifactObjectKey } from "./r2";
+import {
+  deviceRegistrationSchemaV3,
+  durableReviewSubmissionSchema,
+  type DeviceRegistrationRequestV3,
+  type DurableReviewSubmission,
+} from "./schema";
 import {
   MAX_PUSH_SUBSCRIPTIONS,
   parsePushSubscriptionInput,
@@ -939,13 +950,16 @@ export class ShareDO extends DurableObject<Env> {
     const newItems: MailItem[] = [];
     const results: Array<{ envelopeId: string; seq: number; status: "accepted" | "duplicate" }> = [];
     for (const payload of body.items) {
-      if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
-        return jsonError(400, "ATTN_BODY_INVALID", "mailbox items must be envelope objects");
+      const parsed = durableReviewSubmissionSchema.safeParse(payload);
+      if (!parsed.success) {
+        return jsonError(400, "ATTN_BODY_INVALID", "mailbox item is not an exact bounded v3 review_submission");
       }
-      const envelopeId = (payload as { envelopeId?: unknown }).envelopeId;
-      if (typeof envelopeId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(envelopeId)) {
-        return jsonError(400, "ATTN_BODY_INVALID", "mailbox envelopeId is invalid");
-      }
+      const submission: DurableReviewSubmission = parsed.data;
+      const routingError = this.validateDurableSubmissionRouting(
+        submission, shareId, record, selected, body.deviceId,
+      );
+      if (routingError !== undefined) return routingError;
+      const envelopeId = submission.envelopeId;
       const payloadHash = base64UrlEncode(new Uint8Array(await crypto.subtle.digest(
         "SHA-256",
         new TextEncoder().encode(JSON.stringify({ bundleId: selected?.bundleId, epoch: selected === undefined ? undefined : body.epoch, payload })),
@@ -1008,6 +1022,46 @@ export class ShareDO extends DurableObject<Env> {
     }, newItems.length > 0 ? 201 : 200);
   }
 
+  /**
+   * Validate only cleartext routing and encrypted-envelope framing. In
+   * particular, this must never decrypt or branch on ReviewEvent plaintext.
+   */
+  private validateDurableSubmissionRouting(
+    submission: DurableReviewSubmission,
+    shareId: string,
+    record: ShareRecord,
+    selected: ShareBundleEntry | undefined,
+    requestDeviceId: unknown,
+  ): Response | undefined {
+    if (submission.shareId !== shareId
+      || submission.epoch !== record.epoch
+      || submission.roomId !== record.currentRoomId
+      || submission.deviceRegistration.deviceId !== requestDeviceId) {
+      return jsonError(400, "ATTN_BODY_INVALID", "review_submission routing context is invalid");
+    }
+    if (selected === undefined) {
+      if (submission.bundleId !== undefined) {
+        return jsonError(400, "ATTN_BODY_INVALID", "legacy share submission must not name a bundle");
+      }
+    } else if (submission.bundleId !== selected.bundleId || submission.tier !== selected.tier) {
+      return jsonError(400, "ATTN_BODY_INVALID", "review_submission bundle or tier is invalid");
+    }
+    for (const envelope of submission.envelopes) {
+      let nonce: Uint8Array;
+      let ciphertext: Uint8Array;
+      try {
+        nonce = base64UrlDecode(envelope.nonce);
+        ciphertext = base64UrlDecode(envelope.ciphertext);
+      } catch {
+        return jsonError(400, "ATTN_BODY_INVALID", "review_submission envelope encoding is invalid");
+      }
+      if (nonce.byteLength !== 24 || ciphertext.byteLength !== envelope.ciphertextBytes) {
+        return jsonError(400, "ATTN_BODY_INVALID", "review_submission envelope byte counts are invalid");
+      }
+    }
+    return undefined;
+  }
+
   private async handlePushSubscription(
     request: Request,
     path: string,
@@ -1040,6 +1094,54 @@ export class ShareDO extends DurableObject<Env> {
       }
       return shareJson(publicPushSubscription(existing));
     }
+    if (request.method !== "POST" && request.method !== "DELETE") {
+      return jsonError(405, "ATTN_METHOD_NOT_ALLOWED", "method not allowed");
+    }
+
+    let registration: DeviceRegistrationRequestV3 | undefined;
+    if (request.method === "POST" && existing === undefined) {
+      const parsedRegistration = this.parsePushDeviceRegistration(request);
+      if (parsedRegistration instanceof Response) return parsedRegistration;
+      registration = parsedRegistration;
+      const registrationError = await this.verifySharePushRegistration(
+        registration, record, selected, deviceId,
+      );
+      if (registrationError !== undefined) return registrationError;
+    } else if (request.headers.has("Attn-Device-Registration")) {
+      const parsedRegistration = this.parsePushDeviceRegistration(request);
+      if (parsedRegistration instanceof Response) return parsedRegistration;
+      registration = parsedRegistration;
+      const registrationError = await this.verifySharePushRegistration(
+        registration, record, selected, deviceId,
+      );
+      if (registrationError !== undefined) return registrationError;
+      if (existing !== undefined && existing.devicePublicSigningKey !== registration.publicSigningKey) {
+        return jsonError(409, "ATTN_DEVICE_KEY_CHANGED", "push device signing key is immutable");
+      }
+    }
+
+    const publicSigningKey = existing?.devicePublicSigningKey ?? registration?.publicSigningKey;
+    if (publicSigningKey === undefined) {
+      return jsonError(401, "ATTN_PUSH_DEVICE_UNBOUND", "push device has no authenticated key binding");
+    }
+    const powToken = request.headers.get("Attn-PoW") ?? "";
+    try {
+      await verifyDeviceHttpProofV3({
+        publicSigningKey,
+        signature: request.headers.get("Attn-Device-Proof") ?? "",
+        resourceKind: "share",
+        resourceId: shareId,
+        deviceId,
+        method: request.method,
+        path,
+        body: postBody ?? new Uint8Array(),
+        powToken,
+      });
+    } catch (error) {
+      if (error instanceof DeviceProofError) return jsonError(401, error.code, error.message);
+      throw error;
+    }
+
     if (request.method === "DELETE") {
       await this.verifyWritePow(authenticatedRequest, shareId, deviceId);
       // DELETE is deliberately existence-oblivious across sibling bundles.
@@ -1050,7 +1152,6 @@ export class ShareDO extends DurableObject<Env> {
       }
       return new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } });
     }
-    if (request.method !== "POST") return jsonError(405, "ATTN_METHOD_NOT_ALLOWED", "method not allowed");
 
     let parsedJson: unknown;
     try {
@@ -1078,6 +1179,7 @@ export class ShareDO extends DurableObject<Env> {
       ...parsed,
       deviceId,
       bundleId: selected.bundleId,
+      devicePublicSigningKey: publicSigningKey,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       expiresAt: Math.min(record.expiresAt, parsed.expirationTime ?? record.expiresAt),
@@ -1086,6 +1188,74 @@ export class ShareDO extends DurableObject<Env> {
     await this.ctx.storage.put(key, unchanged ? existing : stored);
     await this.pruneMarkersAndSchedule(record, now);
     return shareJson(publicPushSubscription(unchanged ? existing : stored), unchanged ? 200 : 201);
+  }
+
+  private parsePushDeviceRegistration(request: Request): DeviceRegistrationRequestV3 | Response {
+    const encoded = request.headers.get("Attn-Device-Registration");
+    if (encoded === null || encoded.length === 0) {
+      return jsonError(401, "ATTN_DEVICE_REGISTRATION_REQUIRED", "first push subscription requires signed v3 device registration");
+    }
+    let parsed: unknown;
+    try {
+      const bytes = base64UrlDecode(encoded);
+      if (bytes.byteLength > 2_048) throw new Error("registration header is too large");
+      parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
+    } catch {
+      return jsonError(400, "ATTN_DEVICE_REGISTRATION_INVALID", "device registration header is invalid");
+    }
+    const result = deviceRegistrationSchemaV3.safeParse(parsed);
+    return result.success
+      ? result.data
+      : jsonError(400, "ATTN_DEVICE_REGISTRATION_INVALID", "device registration does not match v3 schema");
+  }
+
+  private async verifySharePushRegistration(
+    registration: DeviceRegistrationRequestV3,
+    record: ShareRecord,
+    selected: ShareBundleEntry,
+    deviceId: string,
+  ): Promise<Response | undefined> {
+    if (registration.deviceId !== deviceId || registration.client !== "attn-browser" || registration.kind !== "reviewer") {
+      return jsonError(403, "ATTN_DEVICE_REGISTRATION_INVALID", "push registration identity does not match browser device");
+    }
+    if (record.currentRoomId === undefined ||
+      (selected.tier !== "comment" && selected.tier !== "suggest") ||
+      registration.grantTier !== selected.tier || registration.grantSignature === undefined) {
+      return jsonError(403, "ATTN_GRANT_INVALID", "device grant does not match current share room and bundle tier");
+    }
+    const unsigned = {
+      deviceId: registration.deviceId,
+      participantId: registration.participantId,
+      publicSigningKey: registration.publicSigningKey,
+      publicEncryptionKey: registration.publicEncryptionKey,
+      client: registration.client,
+      kind: registration.kind,
+      grantTier: registration.grantTier,
+      grantSignature: registration.grantSignature,
+    };
+    try {
+      await verifyDeviceProofSignature(
+        registration.publicSigningKey,
+        registration.selfSignature,
+        new TextEncoder().encode(canonicalize(unsigned)),
+      );
+      await verifyDeviceProofSignature(
+        record.ownerSigningKey,
+        registration.grantSignature,
+        new TextEncoder().encode(canonicalize({
+          grantTier: registration.grantTier,
+          purpose: "attn device grant v3",
+          roomId: record.currentRoomId,
+          v: 3,
+        })),
+      );
+    } catch (error) {
+      if (error instanceof DeviceProofError) {
+        return jsonError(403, "ATTN_DEVICE_REGISTRATION_INVALID", "device self-signature or owner grant is invalid");
+      }
+      throw error;
+    }
+    return undefined;
   }
 
   private async readBoundedPushBody(request: Request): Promise<Uint8Array | Response> {

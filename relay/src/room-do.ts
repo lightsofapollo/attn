@@ -27,6 +27,15 @@ import {
 } from "./admission";
 import { canonicalize, type CanonicalValue } from "./canonical";
 import {
+  canonicalDeviceSignalProofV3,
+  canonicalDeviceWebSocketProofV3,
+  DeviceProofError,
+  validateDeviceProofNonce,
+  validateDeviceProofTime,
+  verifyDeviceHttpProofV3,
+  verifyDeviceProofSignature,
+} from "./device-proof";
+import {
   INTERNAL_EDGE_ORIGIN_HEADER,
   parseEdgeOriginContext,
 } from "./browser-origin";
@@ -190,9 +199,15 @@ const META = {
 
 /** Storage prefix for the pow-replay set. Walked by the alarm to prune. */
 const POW_SEEN_PREFIX = "pow_seen:";
+const DEVICE_WS_PROOF_SEEN_PREFIX = "device_ws_proof_seen_v3:";
+const SIGNAL_GENERATION_PREFIX = "signal_generation_v3:";
 
 function powSeenKey(hash: string): string {
   return `${POW_SEEN_PREFIX}${hash}`;
+}
+
+function deviceWebSocketProofSeenKey(deviceId: string, nonce: string): string {
+  return `${DEVICE_WS_PROOF_SEEN_PREFIX}${encodeOpaqueSegment(deviceId)}:${encodeOpaqueSegment(nonce)}`;
 }
 
 /**
@@ -1396,6 +1411,7 @@ export class RoomDO extends DurableObject<Env> {
     roomId: string,
     urlPath: string,
   ): Promise<Response> {
+    const routeVersion = urlPath.startsWith("/v3/") ? 3 : 2;
     const limits = readHardLimits(this.env);
     // Buffer the body up front — verifyAdmission, JSON.parse, and the bulk
     // decode all need a non-streamed copy.
@@ -1565,6 +1581,7 @@ export class RoomDO extends DurableObject<Env> {
     //    first error so the whole batch is rejected atomically (spec wording
     //    says "reject the *whole batch*" for cap overflow; per-envelope shape
     //    errors mirror that for symmetry — partial accepts are footguns).
+    const stagedSignalGenerations = new Map<string, number>();
     for (const env of envelopes) {
       let decodedLen: number;
       try {
@@ -1605,6 +1622,50 @@ export class RoomDO extends DurableObject<Env> {
           "envelope author device is not registered",
         );
       }
+
+      const hasSignalProof = env.signalGeneration !== undefined || env.deviceSignature !== undefined;
+      if (routeVersion !== 3 || env.kind !== "signal") {
+        if (hasSignalProof) {
+          return errorResponse(400, "ATTN_DEVICE_PROOF_INVALID", "device proof fields are v3 signal-only");
+        }
+        continue;
+      }
+      if (env.signalGeneration === undefined || env.deviceSignature === undefined) {
+        return errorResponse(401, "ATTN_DEVICE_PROOF_INVALID", "v3 signal omitted registered-device proof");
+      }
+      try {
+        await verifyDeviceProofSignature(
+          deviceRecord.publicSigningKey,
+          env.deviceSignature,
+          canonicalDeviceSignalProofV3({
+            roomId,
+            envelopeId: env.envelopeId,
+            authorId: env.authorId,
+            deviceId: env.deviceId,
+            targetDeviceId: env.target?.deviceId ?? null,
+            generation: env.signalGeneration,
+            createdAt: env.createdAt,
+            expiresAt: env.expiresAt,
+            nonce: env.nonce,
+            ciphertext: env.ciphertext,
+            ciphertextBytes: env.ciphertextBytes,
+          }),
+        );
+      } catch (error) {
+        if (error instanceof DeviceProofError) {
+          return errorResponse(401, error.code, error.message);
+        }
+        throw error;
+      }
+      const generationKey = signalGenerationKey(env);
+      const priorGeneration = stagedSignalGenerations.get(generationKey)
+        ?? await this.ctx.storage.get<number>(generationKey)
+        ?? -1;
+      const exactRetry = preexistingById.has(env.envelopeId);
+      if (!exactRetry && env.signalGeneration < priorGeneration) {
+        return errorResponse(409, "ATTN_SIGNAL_GENERATION_STALE", "signal generation is older than the accepted generation");
+      }
+      stagedSignalGenerations.set(generationKey, Math.max(priorGeneration, env.signalGeneration));
     }
 
     // 5. Idempotency + running-totals.
@@ -1801,6 +1862,7 @@ export class RoomDO extends DurableObject<Env> {
     if (fresh.length > 0) {
       writeMap[META.envelopeCount] = finalCount;
       writeMap[META.bytesUsed] = finalInlineBytes;
+      for (const [key, generation] of stagedSignalGenerations) writeMap[key] = generation;
     }
 
     // Any fresh signal mutation validates the complete current payload index
@@ -1923,9 +1985,25 @@ export class RoomDO extends DurableObject<Env> {
       }
       if (parsedSubscription === undefined) return errorResponse(400, "ATTN_BODY_INVALID", "push subscription body is invalid");
     }
+    const powToken = request.headers.get("Attn-PoW") ?? "";
+    try {
+      await verifyDeviceHttpProofV3({
+        publicSigningKey: device.publicSigningKey,
+        signature: request.headers.get("Attn-Device-Proof") ?? "",
+        resourceKind: "room",
+        resourceId: roomId,
+        deviceId,
+        method: request.method,
+        path: urlPath,
+        body: bodyBytes,
+        powToken,
+      });
+    } catch (error) {
+      if (error instanceof DeviceProofError) return errorResponse(401, error.code, error.message);
+      throw error;
+    }
     const rateRejection = await this.enforceDeviceRateLimit(deviceId);
     if (rateRejection !== undefined) return rateRejection;
-    const powToken = request.headers.get("Attn-PoW") ?? "";
     try {
       await verifyPow(powToken, {
         roomId,
@@ -3270,7 +3348,7 @@ export class RoomDO extends DurableObject<Env> {
         "ATTN_ADMISSION_INVALID",
         routeVersion === 3
           ? v3RegisteredDevice
-            ? "registered v3 socket protocol must be exactly 'attn.v3, read-hmac.<base64url>, write-hmac.<base64url>'"
+            ? "registered v3 socket protocol must be exactly 'attn.v3, read-hmac.<base64url>, write-hmac.<base64url>, device-proof.<base64url>'"
             : "viewer v3 socket protocol must be exactly 'attn.v3, read-hmac.<base64url>'"
           : "Sec-WebSocket-Protocol must be 'attn.v2, hmac.<base64url>'",
       );
@@ -3411,26 +3489,56 @@ export class RoomDO extends DurableObject<Env> {
     }
     const participantId = deviceRecord.participantId;
 
-    // Peer cap: count distinct deviceIds currently represented by an
-    // announced socket. Multiple tabs/connections for one registered device
-    // are one presence peer and consume one peer-cap slot.
+    // V3 capability HMACs prove possession of shared room bearers, not the
+    // registered device's private key. Require a short-lived, one-shot
+    // Ed25519 proof before accepting the socket or announcing presence.
+    if (routeVersion === 3) {
+      const expiresValues = url.searchParams.getAll("proof_expires");
+      const nonceValues = url.searchParams.getAll("proof_nonce");
+      const expiresAt = Number(expiresValues[0]);
+      const nonce = nonceValues[0];
+      if (expiresValues.length !== 1 || nonceValues.length !== 1 || nonce === undefined) {
+        return errorResponse(401, "ATTN_DEVICE_PROOF_INVALID", "registered v3 socket requires one proof_expires and proof_nonce");
+      }
+      try {
+        validateDeviceProofTime(expiresAt, Date.now());
+        validateDeviceProofNonce(nonce);
+        await verifyDeviceProofSignature(
+          deviceRecord.publicSigningKey,
+          parsedProtocol.deviceSignature ?? "",
+          canonicalDeviceWebSocketProofV3({
+            roomId,
+            deviceId,
+            path: url.pathname,
+            expiresAt,
+            nonce,
+          }),
+        );
+      } catch (error) {
+        if (error instanceof DeviceProofError) {
+          return errorResponse(401, error.code, error.message);
+        }
+        throw error;
+      }
+      const replayKey = deviceWebSocketProofSeenKey(deviceId, nonce);
+      const fresh = await this.ctx.storage.transaction(async (txn) => {
+        if ((await txn.get<number>(replayKey)) !== undefined) return false;
+        await txn.put(replayKey, expiresAt);
+        return true;
+      });
+      if (!fresh) {
+        return errorResponse(409, "ATTN_DEVICE_PROOF_REPLAYED", "device websocket proof was already used");
+      }
+    }
+
+    // The peer cap and presence transition happen only after subscribe has
+    // produced a complete hello/replay. An upgraded socket is not online yet:
+    // it must neither consume a peer slot nor receive live traffic while its
+    // replay cursor is still being fenced.
     const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
     if (policy === undefined) {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
     }
-    const connectedDevices = new Set<string>();
-    for (const existing of this.ctx.getWebSockets()) {
-      const attached = readAttachment(existing);
-      if (attached?.kind === "device" && attached.presenceAnnounced) {
-        connectedDevices.add(attached.deviceId);
-      }
-    }
-    // If THIS deviceId is already connected we let another socket in while
-    // continuing to represent it as one online peer. New deviceId beyond cap
-    // → close 4004.
-    const deviceAlreadyOnline = connectedDevices.has(deviceId);
-    const wouldBeOver =
-      !deviceAlreadyOnline && connectedDevices.size >= policy.maxPeers;
 
     // Build the upgrade response.
     const pair = new WebSocketPair();
@@ -3449,28 +3557,8 @@ export class RoomDO extends DurableObject<Env> {
       participantId,
       subscribed: false,
       lastPongTs: 0,
-      presenceAnnounced: !wouldBeOver,
+      presenceAnnounced: false,
     });
-
-    if (wouldBeOver) {
-      // Close immediately so the client observes 4004 over the WS protocol.
-      try {
-        server.close(CLOSE_PEER_CAP, "peer cap reached");
-      } catch {
-        // swallow — close is best-effort
-      }
-      return new Response(null, {
-        status: 101,
-        webSocket: client,
-        headers: buildSocketUpgradeHeaders(policy, routeVersion),
-      });
-    }
-
-    // Presence is per registered device, not per socket. A second tab/socket
-    // for an already-online device must not produce another join.
-    if (!deviceAlreadyOnline) {
-      this.broadcastPresence({ event: "join", deviceId, participantId }, server);
-    }
 
     return new Response(null, {
       status: 101,
@@ -3485,24 +3573,13 @@ export class RoomDO extends DurableObject<Env> {
    * eviction between frames.
    */
   override async webSocketMessage(ws: WebSocket, msg: string | ArrayBuffer): Promise<void> {
-    // A peer-cap rejection uses an accepted-then-closed upgrade so the client
-    // can observe close code 4004. Frames can race that close. Gate on the
-    // attachment before decoding or replying so the rejected socket cannot
-    // subscribe, receive hello/replay/ping, or elicit validation errors.
+    // Missing attachments cannot be trusted to participate in the protocol.
     const att = readAttachment(ws);
     if (att === undefined) {
       try {
         ws.close(CLOSE_NORMAL, "missing attachment");
       } catch {
         // ignore
-      }
-      return;
-    }
-    if (att.kind === "device" && !att.presenceAnnounced) {
-      try {
-        ws.close(CLOSE_PEER_CAP, "peer cap reached");
-      } catch {
-        // close is already in progress
       }
       return;
     }
@@ -3541,7 +3618,7 @@ export class RoomDO extends DurableObject<Env> {
     _wasClean: boolean,
   ): Promise<void> {
     const att = readAttachment(ws);
-    if (att?.kind === "device" && att.presenceAnnounced &&
+    if (att?.kind === "device" && att.subscribed && att.presenceAnnounced &&
       !this.hasOtherDeviceSocket(ws, att.deviceId)) {
       this.broadcastPresence({
         event: "leave",
@@ -3557,7 +3634,7 @@ export class RoomDO extends DurableObject<Env> {
   /** Hibernation entry-point on socket-level error. Same handling as close. */
   override async webSocketError(ws: WebSocket, _err: unknown): Promise<void> {
     const att = readAttachment(ws);
-    if (att?.kind === "device" && att.presenceAnnounced) {
+    if (att?.kind === "device" && att.subscribed && att.presenceAnnounced) {
       // Error may be followed by webSocketClose. Mark this socket first so
       // that the later callback cannot emit a duplicate leave.
       writeAttachment(ws, { ...att, presenceAnnounced: false });
@@ -3576,7 +3653,8 @@ export class RoomDO extends DurableObject<Env> {
     return this.ctx.getWebSockets().some((socket) => {
       if (socket === originator) return false;
       const attachment = readAttachment(socket);
-      return attachment?.kind === "device" && attachment.presenceAnnounced &&
+      return attachment?.kind === "device" && attachment.subscribed &&
+        attachment.presenceAnnounced &&
         attachment.deviceId === deviceId;
     });
   }
@@ -3594,84 +3672,123 @@ export class RoomDO extends DurableObject<Env> {
     if (att.subscribed) {
       return;
     }
-    const [policy, serverSeq, oldestRetainedSeq] = await Promise.all([
-      this.ctx.storage.get<RoomPolicy>(META.policy),
-      this.ctx.storage.get<number>(META.serverSeq),
-      this.ctx.storage.get<number>(META.oldestRetainedSeq),
-    ]);
-    if (policy === undefined || !isNonnegativeSafeInteger(serverSeq) ||
-      (oldestRetainedSeq !== undefined && !isNonnegativeSafeInteger(oldestRetainedSeq)) ||
-      (oldestRetainedSeq ?? 0) > serverSeq) {
+    const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+    if (policy === undefined) {
       failSocketCorrupt(ws);
       return;
     }
-    const oldest = oldestRetainedSeq ?? 0;
-    // Per spec: `after < oldest_retained_seq` → cursor too old. `after == 0`
-    // (first connect, no prior cursor) is always valid even if oldest > 0
-    // because the client is asking for "everything available".
-    if (after > 0 && after < oldest) {
-      sendError(ws, "ATTN_CURSOR_TOO_OLD", `cursor ${after} < oldest_retained_seq ${oldest}`, {
-        resyncFromSeq: oldest,
-      });
+
+    // Close both sides of the replay/live boundary. serverSeq fences appends;
+    // oldestRetainedSeq fences concurrent owner-ACK deletion and signal FIFO
+    // eviction. Every awaited snapshot is followed by a fresh pair read. A
+    // changed pair retries the entire snapshot; a newly stale cursor closes
+    // immediately instead of becoming live with an incomplete replay.
+    let replayServerSeq = 0;
+    let devices: DeviceRecord[] = [];
+    let missedSignalEnvelopeIds: string[] = [];
+    let orderedReplay: EnvelopeRecord[] = [];
+    for (;;) {
+      const initialFence = await this.readSubscribeFence();
+      if (initialFence === undefined) {
+        failSocketCorrupt(ws);
+        return;
+      }
+      if (this.rejectStaleSubscribeCursor(ws, after, initialFence.oldestRetainedSeq)) {
+        return;
+      }
+
+      const deviceCandidate = await this.listDevicesInOrder();
+      const afterDevicesFence = await this.readSubscribeFence();
+      if (afterDevicesFence === undefined) {
+        failSocketCorrupt(ws);
+        return;
+      }
+      if (this.rejectStaleSubscribeCursor(ws, after, afterDevicesFence.oldestRetainedSeq)) {
+        return;
+      }
+      if (!sameSubscribeFence(initialFence, afterDevicesFence)) {
+        continue;
+      }
+      if (deviceCandidate instanceof Response) {
+        failSocketCorrupt(ws);
+        return;
+      }
+
+      const missedCandidate = att.kind === "device"
+        ? await this.collectMissedSignalIds(att.deviceId, after)
+        : [];
+      const afterSignalsFence = await this.readSubscribeFence();
+      if (afterSignalsFence === undefined) {
+        failSocketCorrupt(ws);
+        return;
+      }
+      if (this.rejectStaleSubscribeCursor(ws, after, afterSignalsFence.oldestRetainedSeq)) {
+        return;
+      }
+      if (!sameSubscribeFence(initialFence, afterSignalsFence)) {
+        continue;
+      }
+      if (missedCandidate instanceof Response) {
+        failSocketCorrupt(ws);
+        return;
+      }
+
+      const replayCandidate = await this.loadValidatedEnvelopePayloads(initialFence.serverSeq);
+      // This is the final await. Once both metadata values equal the snapshot
+      // fence, hello, replay, attachment transition, and join are synchronous.
+      const finalFence = await this.readSubscribeFence();
+      if (finalFence === undefined) {
+        failSocketCorrupt(ws);
+        return;
+      }
+      if (this.rejectStaleSubscribeCursor(ws, after, finalFence.oldestRetainedSeq)) {
+        return;
+      }
+      if (!sameSubscribeFence(initialFence, finalFence)) {
+        continue;
+      }
+      if (replayCandidate instanceof Response) {
+        failSocketCorrupt(ws);
+        return;
+      }
+
+      replayServerSeq = finalFence.serverSeq;
+      devices = deviceCandidate;
+      missedSignalEnvelopeIds = missedCandidate;
+      orderedReplay = replayCandidate;
+      break;
+    }
+
+    // Peer cap is a subscribe-time property. Only devices that have crossed
+    // the stable hello/replay boundary count, and same-device tabs aggregate
+    // to one online peer. There is no await between this decision and the
+    // transition, so two concurrent subscribes cannot both claim one slot.
+    const connectedDevices = new Set<string>();
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket === ws) continue;
+      const attachment = readAttachment(socket);
+      if (attachment?.kind === "device" && attachment.subscribed &&
+        attachment.presenceAnnounced) {
+        connectedDevices.add(attachment.deviceId);
+      }
+    }
+    const deviceAlreadyOnline = att.kind === "device" && connectedDevices.has(att.deviceId);
+    if (att.kind === "device" && !deviceAlreadyOnline &&
+      connectedDevices.size >= policy.maxPeers) {
       try {
-        ws.close(CLOSE_CURSOR_TOO_OLD, "cursor too old");
+        ws.close(CLOSE_PEER_CAP, "peer cap reached");
       } catch {
-        // ignore
+        // best-effort close after upgrade so clients observe 4004
       }
       return;
     }
 
-    // Build the hello frame.
-    const devices = await this.listDevicesInOrder();
-    if (devices instanceof Response) {
-      failSocketCorrupt(ws);
-      return;
-    }
-    const missedSignalEnvelopeIds = att.kind === "device"
-      ? await this.collectMissedSignalIds(att.deviceId, after)
-      : [];
-    if (missedSignalEnvelopeIds instanceof Response) {
-      failSocketCorrupt(ws);
-      return;
-    }
-    // Close the replay/live-broadcast gap. While the attachment is not yet
-    // subscribed, fresh broadcasts deliberately skip it. Any envelope that
-    // commits while an awaited replay load is in flight must therefore be
-    // folded into a new replay high-watermark before we mark the socket live.
-    // The final equality read is the last await: no ingest can interleave
-    // between that fence and the synchronous replay + attachment update.
-    let replayServerSeq = serverSeq;
-    let orderedReplay: EnvelopeRecord[];
-    for (;;) {
-      const candidate = await this.loadValidatedEnvelopePayloads(replayServerSeq);
-      const latestServerSeq = await this.ctx.storage.get<number>(META.serverSeq);
-      if (!isNonnegativeSafeInteger(latestServerSeq) || latestServerSeq < replayServerSeq) {
-        failSocketCorrupt(ws);
-        return;
-      }
-      if (candidate instanceof Response) {
-        // A concurrent append can make a replay captured at N observe an N+1
-        // record and look corrupt. Retry at the authoritative high-watermark;
-        // a stable failure is genuine storage corruption.
-        if (latestServerSeq !== replayServerSeq) {
-          replayServerSeq = latestServerSeq;
-          continue;
-        }
-        failSocketCorrupt(ws);
-        return;
-      }
-      if (latestServerSeq !== replayServerSeq) {
-        replayServerSeq = latestServerSeq;
-        continue;
-      }
-      orderedReplay = candidate;
-      break;
-    }
     const onlineDeviceIds = [...new Set(
       this.ctx.getWebSockets()
         .map((socket) => {
           const attachment = readAttachment(socket);
-          return attachment?.kind === "device" && attachment.presenceAnnounced
+          return attachment?.kind === "device" && attachment.subscribed &&
+              attachment.presenceAnnounced
             ? attachment.deviceId
             : undefined;
         })
@@ -3696,13 +3813,61 @@ export class RoomDO extends DurableObject<Env> {
       sendJson(ws, frame);
     }
 
-    writeAttachment(ws, { ...att, subscribed: true });
+    const transitionedAttachment: WSAttachment = att.kind === "device"
+      ? { ...att, subscribed: true, presenceAnnounced: true }
+      : { ...att, subscribed: true };
+    writeAttachment(ws, transitionedAttachment);
+
+    if (att.kind === "device" && !deviceAlreadyOnline) {
+      this.broadcastPresence({
+        event: "join",
+        deviceId: att.deviceId,
+        participantId: att.participantId,
+      }, ws);
+    }
 
     // Emit an immediate ping so clients can observe the ping/pong contract.
     // Periodic 30s pings are owned by the 5.12 alarm; this single ping is
     // enough to satisfy the spec's "server sends ping" guarantee on connect
     // and gives tests a deterministic frame to assert against.
     sendJson(ws, { type: "ping", ts: Date.now() } satisfies ServerFrame);
+  }
+
+  /** Read and validate the two metadata values that define a replay snapshot. */
+  private async readSubscribeFence(): Promise<SubscribeFence | undefined> {
+    const [serverSeq, oldestRetainedSeq] = await Promise.all([
+      this.ctx.storage.get<number>(META.serverSeq),
+      this.ctx.storage.get<number>(META.oldestRetainedSeq),
+    ]);
+    if (!isNonnegativeSafeInteger(serverSeq) ||
+      (oldestRetainedSeq !== undefined && !isNonnegativeSafeInteger(oldestRetainedSeq)) ||
+      (oldestRetainedSeq ?? 0) > serverSeq) {
+      return undefined;
+    }
+    return { serverSeq, oldestRetainedSeq: oldestRetainedSeq ?? 0 };
+  }
+
+  /** Close a non-initial cursor that has fallen behind the retained floor. */
+  private rejectStaleSubscribeCursor(
+    ws: WebSocket,
+    after: number,
+    oldestRetainedSeq: number,
+  ): boolean {
+    // `after == 0` is the first-connect sentinel and requests all remaining
+    // payloads even when earlier history has already expired.
+    if (after === 0 || after >= oldestRetainedSeq) return false;
+    sendError(
+      ws,
+      "ATTN_CURSOR_TOO_OLD",
+      `cursor ${after} < oldest_retained_seq ${oldestRetainedSeq}`,
+      { resyncFromSeq: oldestRetainedSeq },
+    );
+    try {
+      ws.close(CLOSE_CURSOR_TOO_OLD, "cursor too old");
+    } catch {
+      // ignore
+    }
+    return true;
   }
 
   /**
@@ -3761,7 +3926,7 @@ export class RoomDO extends DurableObject<Env> {
     for (const sock of this.ctx.getWebSockets()) {
       if (sock === originator) continue;
       const att = readAttachment(sock);
-      if (att?.kind !== "device" || !att.presenceAnnounced) continue;
+      if (att?.kind !== "device" || !att.subscribed || !att.presenceAnnounced) continue;
       sendRaw(sock, json);
     }
   }
@@ -4244,13 +4409,19 @@ export class RoomDO extends DurableObject<Env> {
    * entries; the list+delete is cheap.
    */
   private async prunePowSeen(now: number): Promise<void> {
-    const entries = await this.ctx.storage.list<number>({ prefix: POW_SEEN_PREFIX });
+    const [entries, deviceProofs] = await Promise.all([
+      this.ctx.storage.list<number>({ prefix: POW_SEEN_PREFIX }),
+      this.ctx.storage.list<number>({ prefix: DEVICE_WS_PROOF_SEEN_PREFIX }),
+    ]);
     const stale: string[] = [];
     for (const [key, expiresAt] of entries.entries()) {
       if (typeof expiresAt !== "number") continue;
       if (expiresAt + POW_MAX_LIFETIME_MS < now) {
         stale.push(key);
       }
+    }
+    for (const [key, expiresAt] of deviceProofs.entries()) {
+      if (typeof expiresAt === "number" && expiresAt < now) stale.push(key);
     }
     if (stale.length > 0) {
       await this.ctx.storage.delete(stale);
@@ -4493,8 +4664,14 @@ function sameEnvelopeInput(a: EnvelopeInput, b: EnvelopeInput): boolean {
     a.expiresAt === b.expiresAt &&
     a.nonce === b.nonce &&
     a.ciphertext === b.ciphertext &&
-    a.ciphertextBytes === b.ciphertextBytes
+    a.ciphertextBytes === b.ciphertextBytes &&
+    a.signalGeneration === b.signalGeneration &&
+    a.deviceSignature === b.deviceSignature
   );
+}
+
+function signalGenerationKey(envelope: EnvelopeInput): string {
+  return `${SIGNAL_GENERATION_PREFIX}${encodeOpaqueSegment(envelope.authorId)}:${encodeOpaqueSegment(envelope.deviceId)}:${encodeOpaqueSegment(envelope.target?.deviceId ?? "broadcast")}`;
 }
 
 function sameEnvelopeRecord(a: EnvelopeRecord, b: EnvelopeRecord): boolean {
@@ -4656,6 +4833,8 @@ function isStoredEnvelopeRecord(value: unknown): value is EnvelopeRecord {
     Number.isSafeInteger(record.expiresAt) && (record.expiresAt ?? -1) >= 0 &&
     typeof record.nonce === "string" && typeof record.ciphertext === "string" &&
     Number.isSafeInteger(record.ciphertextBytes) && (record.ciphertextBytes ?? 0) > 0 &&
+    (record.signalGeneration === undefined || (Number.isSafeInteger(record.signalGeneration) && (record.signalGeneration ?? -1) >= 0)) &&
+    (record.deviceSignature === undefined || typeof record.deviceSignature === "string") &&
     Number.isSafeInteger(record.serverSeq) && (record.serverSeq ?? 0) > 0;
 }
 
@@ -4893,6 +5072,17 @@ interface ViewerWSAttachment extends WSAttachmentBase {
 /** Persisted per-socket state. Survives hibernation via serializeAttachment. */
 type WSAttachment = DeviceWSAttachment | ViewerWSAttachment;
 
+/** Metadata pair that makes one replay snapshot stable against writes/deletes. */
+interface SubscribeFence {
+  serverSeq: number;
+  oldestRetainedSeq: number;
+}
+
+function sameSubscribeFence(a: SubscribeFence, b: SubscribeFence): boolean {
+  return a.serverSeq === b.serverSeq &&
+    a.oldestRetainedSeq === b.oldestRetainedSeq;
+}
+
 /**
  * Server-emitted frames per relay-spec.md §WebSocket Protocol.
  * `MailboxEnvelope` is `EnvelopeRecord` on the server (the wire envelope plus
@@ -4957,7 +5147,7 @@ function parseAttnProtocol(
   header: string | null,
   version = 2,
   v3RegisteredDevice = false,
-): { readHmac: Uint8Array; writeHmac?: Uint8Array } | undefined {
+): { readHmac: Uint8Array; writeHmac?: Uint8Array; deviceSignature?: string } | undefined {
   if (header === null || header === "") return undefined;
   // Cloudflare's runtime exposes the *comma-joined* original header. We split
   // on `,` and trim each token, matching how browsers serialize the list.
@@ -4979,14 +5169,18 @@ function parseAttnProtocol(
   };
 
   if (version === 3) {
-    const expectedLength = v3RegisteredDevice ? 3 : 2;
+    const expectedLength = v3RegisteredDevice ? 4 : 2;
     if (tokens.length !== expectedLength) return undefined;
     const readHmac = decodeToken(tokens[1], "read-hmac.");
     if (readHmac === undefined) return undefined;
     if (!v3RegisteredDevice) return { readHmac };
     const writeHmac = decodeToken(tokens[2], "write-hmac.");
     if (writeHmac === undefined) return undefined;
-    return { readHmac, writeHmac };
+    const proofToken = tokens[3];
+    if (proofToken === undefined || !proofToken.startsWith("device-proof.")) return undefined;
+    const deviceSignature = proofToken.slice("device-proof.".length);
+    if (!/^[A-Za-z0-9_-]{86}$/u.test(deviceSignature)) return undefined;
+    return { readHmac, writeHmac, deviceSignature };
   }
 
   let hmac: Uint8Array | undefined;
@@ -5045,9 +5239,9 @@ function readAttachment(ws: WebSocket): WSAttachment | undefined {
     kind: "device",
     deviceId: r.deviceId,
     participantId: r.participantId,
-    // Attachments written before aggregate same-device presence shipped did
-    // announce presence, so missing legacy state must restore as true.
-    presenceAnnounced: r.presenceAnnounced !== false,
+    // Missing state must fail offline. Presence is announced only by the
+    // successful subscribe transition in the current protocol.
+    presenceAnnounced: r.presenceAnnounced === true,
     subscribed,
     lastPongTs,
   };

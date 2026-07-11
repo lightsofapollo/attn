@@ -777,6 +777,9 @@
 
   let collabSaveTimer: ReturnType<typeof setTimeout> | null = null;
   function handleCollabDocChange(): void {
+    // Reviewer views consume owner broadcasts read-only. A remote transaction
+    // must never become a local submission or reach the owner's save path.
+    if (collabRole !== 'owner') return;
     collabController?.onLocalChange();
     // The owner persists the converged live doc to disk (debounced) so a
     // co-typing session isn't lost on close and each save republishes a
@@ -2584,7 +2587,7 @@
       <Editor
         bind:this={editorRef}
         markdown={collabActive ? (collabSeedMarkdown || effectiveMarkdown) : effectiveMarkdown}
-        editable={collabActive}
+        editable={false}
         onLinkNavigate={handleEditorLinkNavigate}
         onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}
@@ -2596,7 +2599,7 @@
         {collabEpoch}
         onCollabDocChange={handleCollabDocChange}
         onCollabSelectionChange={handleCollabSelectionChange}
-        suggesting={collabActive && collabRole === 'reviewer'}
+        suggesting={false}
         suggestionAuthor={userProfile.effectiveName}
       />
     {:else if !hasActiveTab}
@@ -2612,7 +2615,7 @@
       <Editor
         bind:this={editorRef}
         markdown={collabActive ? (collabSeedMarkdown || effectiveMarkdown) : effectiveMarkdown}
-        editable={collabActive || mode === 'edit'}
+        editable={(collabActive && collabRole === 'owner') || mode === 'edit'}
         onLinkNavigate={handleEditorLinkNavigate}
         onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}
@@ -2624,7 +2627,7 @@
         {collabEpoch}
         onCollabDocChange={handleCollabDocChange}
         onCollabSelectionChange={handleCollabSelectionChange}
-        suggesting={collabActive && collabRole === 'reviewer'}
+        suggesting={false}
         suggestionAuthor={userProfile.effectiveName}
       />
     {:else if activeFileType === 'image'}
@@ -2666,7 +2669,7 @@
       <span class="text-foreground/80">Shared document</span>
       <span class="text-muted-foreground/45" aria-hidden="true">·</span>
       <span class="font-normal text-muted-foreground">
-        {collabActive ? 'live editing' : 'read-only'} · end-to-end encrypted
+        {collabActive && collabRole === 'owner' ? 'owner editing' : 'read-only'} · end-to-end encrypted
       </span>
     </div>
   {/if}

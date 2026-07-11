@@ -442,6 +442,7 @@ struct LiveWebrtc {
 /// recovery path even when no `WebRtcTransport` is live (e.g. Hybrid mode
 /// where the DataChannel is down but the mailbox arm is up).
 pub struct RoomSignalContext {
+    pub protocol_version: u32,
     pub room_id: RoomId,
     pub author_id: ParticipantId,
     pub local_device_id: DeviceId,
@@ -1849,19 +1850,20 @@ impl ReviewManager {
             });
         };
 
-        let signaling_key =
+        let (signaling_key, protocol_version) =
             match crate::review::bootstrap::load_room_access_v3(self.store.root(), room_id) {
-                Ok(Some(access)) => {
+                Ok(Some(access)) => (
                     *crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key)
                         .signaling_key
-                        .as_bytes()
-                }
+                        .as_bytes(),
+                    3,
+                ),
                 Ok(None) => {
                     let secret = match load_room_secret(self.store.root(), room_id) {
                         Ok(secret) => secret,
                         Err(error) => return emit_err(format!("load room secret: {error}")),
                     };
-                    *derive_room_keys(&secret).signaling_key.as_bytes()
+                    (*derive_room_keys(&secret).signaling_key.as_bytes(), 2)
                 }
                 Err(error) => return emit_err(format!("load v3 room access: {error}")),
             };
@@ -1876,6 +1878,24 @@ impl ReviewManager {
         };
         let device_id = identity.typed_device_id();
         let participant_id = identity.typed_participant_id();
+        let is_owner = self
+            .store
+            .load_room(room_id)
+            .ok()
+            .flatten()
+            .is_some_and(|room| room.created_by == participant_id);
+        let Some(kind) = collab_wire_kind(payload) else {
+            return emit_err("invalid collaboration payload".to_string());
+        };
+        if !outbound_collab_allowed(is_owner, kind) {
+            return emit_err(if is_owner {
+                "owner collaboration may only broadcast local document state or cursor presence"
+                    .to_string()
+            } else {
+                "reviewers cannot submit live document mutations; create a durable suggestion instead"
+                    .to_string()
+            });
+        }
 
         let now_ms = unix_now_ms_for_manager() as i64;
         let envelope = match assemble_signal_envelope(
@@ -1892,6 +1912,19 @@ impl ReviewManager {
             now_ms,
             now_ms + SIGNAL_TTL_MS,
         ) {
+            Ok(env) if protocol_version == 3 => {
+                match crate::review::transport::signaling::authenticate_signal_envelope_v3(
+                    env,
+                    now_ms.max(0) as u64,
+                    &match identity.signing_key() {
+                        Ok(key) => key,
+                        Err(error) => return emit_err(format!("load signal signing key: {error}")),
+                    },
+                ) {
+                    Ok(env) => env,
+                    Err(error) => return emit_err(format!("authenticate collab signal: {error}")),
+                }
+            }
             Ok(env) => env,
             Err(e) => return emit_err(format!("assemble collab signal: {e}")),
         };
@@ -2128,6 +2161,7 @@ impl ReviewManager {
                 room_id.clone(),
                 device_id.clone(),
                 access,
+                identity.signing_key()?.to_bytes(),
                 12,
             )?;
             (
@@ -2299,6 +2333,12 @@ impl ReviewManager {
         let webrtc_event_key = event_key;
         let webrtc_snapshot_key = snapshot_key;
         let webrtc_signaling_key = signaling_key;
+        let webrtc_protocol_version = if v3_access.is_some() { 3 } else { 2 };
+        let webrtc_signing_seed = if v3_access.is_some() {
+            Some(identity.signing_key()?.to_bytes())
+        } else {
+            None
+        };
         let webrtc_room_id = room_id.clone();
 
         // Outbound signaling forwarder: drain the transport's signaling_tx into
@@ -2338,6 +2378,7 @@ impl ReviewManager {
             .ok()
             .flatten()
             .map(|room| room.created_by.as_str().to_string());
+        let local_is_owner = owner_participant_id.as_deref() == Some(webrtc_author_id.as_str());
         runtime.spawn(async move {
             use crate::review::transport::PresenceEvent;
             use crate::review::transport::signaling::SignalingPayload;
@@ -2548,6 +2589,8 @@ impl ReviewManager {
                         continue;
                     }
                     let cfg = Arc::new(WebRtcConfig {
+                        protocol_version: webrtc_protocol_version,
+                        device_signing_seed: webrtc_signing_seed,
                         room_id: webrtc_room_id.clone(),
                         author_id: webrtc_author_id.clone(),
                         local_device_id: webrtc_local_device.clone(),
@@ -2706,6 +2749,7 @@ impl ReviewManager {
                     TransportObservers {
                         verdict_revision_tx: &verdict_revision_tx,
                         notifications: Some(&notifications),
+                        local_is_owner,
                     },
                     &room_id_owned,
                     &self_device_id,
@@ -3145,6 +3189,16 @@ impl ReviewManager {
             now_ms + SIGNAL_TTL_MS,
         )
         .map_err(|e| TransportError::Io(format!("assemble request_snapshot signal: {e}")))?;
+        let envelope = if ctx.protocol_version == 3 {
+            crate::review::transport::signaling::authenticate_signal_envelope_v3(
+                envelope,
+                now_ms.max(0) as u64,
+                &ctx.signing_key,
+            )
+            .map_err(|e| TransportError::Io(format!("authenticate request_snapshot signal: {e}")))?
+        } else {
+            envelope
+        };
 
         mailbox.send_envelopes(vec![envelope]).await.map(|_| ())
     }
@@ -3953,6 +4007,7 @@ fn validate_workspace_manifest_binding(
 struct TransportObservers<'a> {
     verdict_revision_tx: &'a tokio::sync::watch::Sender<u64>,
     notifications: Option<&'a Arc<ReviewNotifications>>,
+    local_is_owner: bool,
 }
 
 fn forward_transport_event(
@@ -4087,6 +4142,29 @@ fn forward_transport_event(
             if from.as_str() == self_device_id {
                 return;
             }
+            let Some(kind) = collab_wire_kind(&payload) else {
+                return;
+            };
+            let sender_is_owner = owner_participant_id.is_some_and(|owner| {
+                store
+                    .load_devices(room_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|devices| {
+                        devices.iter().any(|device| {
+                            device.device_id == from && device.participant_id.as_str() == owner
+                        })
+                    })
+            });
+            if !inbound_collab_allowed(observers.local_is_owner, sender_is_owner, kind) {
+                tracing::warn!(
+                    room_id = room_id.as_str(),
+                    from = from.as_str(),
+                    kind = ?kind,
+                    "dropped remote document mutation at owner authority boundary"
+                );
+                return;
+            }
             (update_tx)(ReviewUpdate::CollabSignal {
                 room_id: rid,
                 from: from.as_str().to_string(),
@@ -4125,6 +4203,48 @@ fn forward_transport_event(
                 message,
             });
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollabWireKind {
+    Submit,
+    Broadcast,
+    Resync,
+    Cursor,
+}
+
+fn collab_wire_kind(payload: &str) -> Option<CollabWireKind> {
+    if payload.len() > 262_144 {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    match value.get("kind")?.as_str()? {
+        "submit" => Some(CollabWireKind::Submit),
+        "broadcast" => Some(CollabWireKind::Broadcast),
+        "resync" => Some(CollabWireKind::Resync),
+        "cursor" => Some(CollabWireKind::Cursor),
+        _ => None,
+    }
+}
+
+fn outbound_collab_allowed(is_owner: bool, kind: CollabWireKind) -> bool {
+    if is_owner {
+        matches!(kind, CollabWireKind::Broadcast | CollabWireKind::Cursor)
+    } else {
+        matches!(kind, CollabWireKind::Resync | CollabWireKind::Cursor)
+    }
+}
+
+fn inbound_collab_allowed(
+    local_is_owner: bool,
+    sender_is_owner: bool,
+    kind: CollabWireKind,
+) -> bool {
+    if local_is_owner {
+        matches!(kind, CollabWireKind::Resync | CollabWireKind::Cursor)
+    } else {
+        sender_is_owner && matches!(kind, CollabWireKind::Broadcast | CollabWireKind::Cursor)
     }
 }
 
@@ -4223,6 +4343,49 @@ mod tests {
         assert!(device_supports_webrtc(DeviceClient::AttnNative));
         assert!(device_supports_webrtc(DeviceClient::AttnBrowser));
         assert!(!device_supports_webrtc(DeviceClient::AgentCli));
+    }
+
+    #[test]
+    fn owner_accept_boundary_allows_only_non_mutating_remote_collab() {
+        assert_eq!(
+            collab_wire_kind(r#"{"kind":"submit","submission":{"steps":[]}}"#),
+            Some(CollabWireKind::Submit)
+        );
+        assert!(!inbound_collab_allowed(true, false, CollabWireKind::Submit));
+        assert!(!inbound_collab_allowed(
+            true,
+            false,
+            CollabWireKind::Broadcast
+        ));
+        assert!(inbound_collab_allowed(true, false, CollabWireKind::Resync));
+        assert!(inbound_collab_allowed(true, false, CollabWireKind::Cursor));
+        assert!(inbound_collab_allowed(
+            false,
+            true,
+            CollabWireKind::Broadcast
+        ));
+        assert!(inbound_collab_allowed(false, true, CollabWireKind::Cursor));
+        assert!(!inbound_collab_allowed(false, true, CollabWireKind::Submit));
+        assert!(!inbound_collab_allowed(
+            false,
+            false,
+            CollabWireKind::Broadcast
+        ));
+        assert!(!inbound_collab_allowed(
+            false,
+            false,
+            CollabWireKind::Cursor
+        ));
+    }
+
+    #[test]
+    fn native_reviewer_cannot_emit_document_steps_in_any_grant_tier() {
+        assert!(!outbound_collab_allowed(false, CollabWireKind::Submit));
+        assert!(!outbound_collab_allowed(false, CollabWireKind::Broadcast));
+        assert!(outbound_collab_allowed(false, CollabWireKind::Resync));
+        assert!(outbound_collab_allowed(false, CollabWireKind::Cursor));
+        assert!(outbound_collab_allowed(true, CollabWireKind::Broadcast));
+        assert!(!outbound_collab_allowed(true, CollabWireKind::Submit));
     }
 
     #[test]
@@ -4964,6 +5127,7 @@ mod tests {
                 TransportObservers {
                     verdict_revision_tx: &mgr.verdict_revision_tx,
                     notifications: None,
+                    local_is_owner: false,
                 },
                 &room_id,
                 "self-device",
@@ -5057,6 +5221,7 @@ mod tests {
                 TransportObservers {
                     verdict_revision_tx: &mgr.verdict_revision_tx,
                     notifications: None,
+                    local_is_owner: false,
                 },
                 &room_id,
                 "self-device",
@@ -5116,6 +5281,7 @@ mod tests {
             TransportObservers {
                 verdict_revision_tx: &mgr.verdict_revision_tx,
                 notifications: Some(&mgr.notifications),
+                local_is_owner: false,
             },
             &room_id,
             "self-device",
@@ -5206,6 +5372,7 @@ mod tests {
                 TransportObservers {
                     verdict_revision_tx: &manager.verdict_revision_tx,
                     notifications: Some(&manager.notifications),
+                    local_is_owner: false,
                 },
                 room_id,
                 "owner-device",
@@ -5525,6 +5692,7 @@ mod tests {
                 TransportObservers {
                     verdict_revision_tx: &notifier.verdict_revision_tx,
                     notifications: None,
+                    local_is_owner: false,
                 },
                 &notify_room,
                 "self-device",
@@ -5673,6 +5841,7 @@ mod tests {
             TransportObservers {
                 verdict_revision_tx: &mgr.verdict_revision_tx,
                 notifications: None,
+                local_is_owner: false,
             },
             &room_id,
             "owner-device",
@@ -7079,6 +7248,7 @@ mod request_snapshot_tests {
         let signing_key =
             DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).expect("signing key from seed");
         RoomSignalContext {
+            protocol_version: 2,
             room_id: room_id.clone(),
             author_id: id::<ParticipantId>("p-author-01"),
             local_device_id: id::<DeviceId>("d-local-01"),

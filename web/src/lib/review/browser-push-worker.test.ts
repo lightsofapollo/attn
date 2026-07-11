@@ -140,6 +140,7 @@ function mailPage(device: Device, envelope: unknown, seq = 1): unknown {
       epoch: 4,
       roomId: ROOM_ID,
       tier: 'comment',
+      bundleId: BUNDLE_ID,
       deviceRegistration: device,
       envelopes: [envelope],
     },

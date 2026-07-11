@@ -498,6 +498,8 @@ function toRelayEnvelope(envelope: MailboxEnvelope): Record<string, unknown> {
     nonce: envelope.nonce,
     ciphertext: envelope.ciphertext,
     ciphertextBytes: envelope.ciphertextBytes,
+    ...(envelope.signalGeneration === undefined ? {} : { signalGeneration: envelope.signalGeneration }),
+    ...(envelope.deviceSignature === undefined ? {} : { deviceSignature: envelope.deviceSignature }),
   };
 }
 

@@ -54,7 +54,9 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use crate::review::ids::{DeviceId, ParticipantId, RoomId};
 use crate::review::model::MailboxEnvelope;
 use crate::review::transport::inbound::InboundPipeline;
-use crate::review::transport::signaling::{SignalingPayload, assemble_signal_envelope};
+use crate::review::transport::signaling::{
+    SignalingPayload, assemble_signal_envelope, authenticate_signal_envelope_v3,
+};
 use crate::review::transport::{EnvelopeAck, TransportError, TransportEvent};
 
 /// Default STUN server set when `WebRtcConfig::stun_servers` is empty. Google
@@ -85,6 +87,8 @@ const DATA_CHANNEL_LABEL: &str = "attn-review";
 /// `InboundPipeline` was constructed with — both come from
 /// `crypto::kdf::derive_room_keys` over the same `roomSecret`.
 pub struct WebRtcConfig {
+    pub protocol_version: u32,
+    pub device_signing_seed: Option<[u8; 32]>,
     pub room_id: RoomId,
     /// Logical author id under which this device publishes events/signals.
     /// Matches `ReviewManager::participant_id` for the local user.
@@ -1102,6 +1106,14 @@ async fn dispatch_inbound_message(
             // Anti-redirect (H2): pass the local device id as the expected
             // target so a relay-redirected signal envelope (target ≠ self)
             // is rejected before its plaintext reaches anything upstream.
+            if config.protocol_version == 3
+                && inbound
+                    .verify_signal_device_proof_v3(&config.room_id, &envelope)
+                    .await
+                    .is_err()
+            {
+                return;
+            }
             if let Ok(plaintext) = inbound
                 .import_signal_envelope(&config.room_id, &envelope, &config.local_device_id)
                 .await
@@ -1141,7 +1153,7 @@ fn mint_signal_envelope(
     created_at_ms: i64,
     client_nonce: &[u8; 16],
 ) -> Result<MailboxEnvelope, crate::review::envelope::EnvelopeError> {
-    assemble_signal_envelope(
+    let envelope = assemble_signal_envelope(
         payload,
         &config.signaling_key,
         &config.room_id,
@@ -1151,7 +1163,21 @@ fn mint_signal_envelope(
         client_nonce,
         created_at_ms,
         created_at_ms + SIGNAL_TTL_MS,
-    )
+    )?;
+    if config.protocol_version == 3 {
+        let seed = config.device_signing_seed.ok_or_else(|| {
+            crate::review::envelope::EnvelopeError::InvalidPlaintext(
+                "v3 WebRTC config omitted device signing key".into(),
+            )
+        })?;
+        let signing_key = crate::review::crypto::signing::DeviceSigningKey::from_bytes(&seed)
+            .map_err(|error| {
+                crate::review::envelope::EnvelopeError::InvalidPlaintext(error.to_string())
+            })?;
+        authenticate_signal_envelope_v3(envelope, created_at_ms.max(0) as u64, &signing_key)
+    } else {
+        Ok(envelope)
+    }
 }
 
 /// Generate a fresh 16-byte client nonce for an outbound signal envelope.
@@ -1211,6 +1237,8 @@ mod tests {
     fn fixture_config() -> Arc<WebRtcConfig> {
         let keys = derive_room_keys(&TEST_ROOM_SECRET);
         Arc::new(WebRtcConfig {
+            protocol_version: 2,
+            device_signing_seed: None,
             room_id: id::<RoomId>("hjCfgOvsatNOUedgxhZpyw"),
             author_id: id::<ParticipantId>("p-author-01"),
             local_device_id: id::<DeviceId>("d-local"),
@@ -1300,6 +1328,8 @@ mod tests {
     #[test]
     fn ice_servers_default_to_google_stun() {
         let mut cfg = WebRtcConfig {
+            protocol_version: 2,
+            device_signing_seed: None,
             room_id: id::<RoomId>("r"),
             author_id: id::<ParticipantId>("a"),
             local_device_id: id::<DeviceId>("l"),
@@ -1519,6 +1549,8 @@ mod tests {
             nonce: String::new(),
             ciphertext: String::new(),
             ciphertext_bytes: 0,
+            signal_generation: None,
+            device_signature: None,
         };
         let err = transport
             .send_envelope(envelope)

@@ -212,6 +212,21 @@ describe("durable share v3 real-stack lifecycle", () => {
     // View cannot write. Comment can submit an exact frozen offline payload;
     // suggest is independently writable but cannot read the comment mailbox.
     const mailboxUrl = `${shareUrl}/mailbox`;
+    const browserDeviceId = "browser-commenter";
+    const browserParticipantId = "browser-participant";
+    const opaqueEvent = (suffix: string) => ({
+      v: 2,
+      roomId: room0,
+      envelopeId: `frozen-${suffix}`,
+      authorId: browserParticipantId,
+      deviceId: browserDeviceId,
+      createdAt: 1_000,
+      expiresAt: 10_000,
+      kind: "event" as const,
+      nonce: base64UrlEncode(new Uint8Array(24).fill(0x71)),
+      ciphertext: base64UrlEncode(new Uint8Array(32).fill(0x72)),
+      ciphertextBytes: 32,
+    });
     const offlineSubmission = {
       v: 3,
       envelopeId: "offline-comment-e0",
@@ -220,10 +235,59 @@ describe("durable share v3 real-stack lifecycle", () => {
       epoch: 0,
       roomId: room0,
       tier: "comment",
-      deviceRegistration: { opaque: "signed v3 registration" },
-      envelopes: [{ type: "ParticipantJoined" }, { type: "CommentCreated", body: "offline" }],
+      bundleId: comment.bundleId,
+      deviceRegistration: {
+        deviceId: browserDeviceId,
+        participantId: browserParticipantId,
+        publicSigningKey: base64UrlEncode(new Uint8Array(32).fill(0x73)),
+        publicEncryptionKey: base64UrlEncode(new Uint8Array(32).fill(0x74)),
+        client: "attn-browser",
+        kind: "reviewer",
+        grantTier: "comment",
+        grantSignature: base64UrlEncode(new Uint8Array(64).fill(0x75)),
+        selfSignature: base64UrlEncode(new Uint8Array(64).fill(0x76)),
+      },
+      // Random opaque bytes are sufficient: ShareDO validates framing and
+      // routing only and never interprets ReviewEvent plaintext.
+      envelopes: [opaqueEvent("joined"), opaqueEvent("comment")],
     };
-    const mailBody = JSON.stringify({ epoch: 0, deviceId: "browser-commenter", items: [offlineSubmission] });
+    const mailBody = JSON.stringify({ epoch: 0, deviceId: browserDeviceId, items: [offlineSubmission] });
+    const malformedSubmissions: unknown[] = [
+      { ...offlineSubmission, envelopeId: "bad-extra", unexpectedPlaintext: "must never be retained" },
+      { ...offlineSubmission, envelopeId: "bad-share", shareId: `${shareId}-misrouted` },
+      { ...offlineSubmission, envelopeId: "bad-bundle", bundleId: view.bundleId },
+      { ...offlineSubmission, envelopeId: "bad-tier", tier: "suggest" },
+      { ...offlineSubmission, envelopeId: "bad-device", deviceRegistration: {
+        ...offlineSubmission.deviceRegistration, deviceId: "different-device",
+      } },
+      { ...offlineSubmission, envelopeId: "bad-envelope-extra", envelopes: [
+        { ...offlineSubmission.envelopes[0], plaintext: "forbidden" },
+        offlineSubmission.envelopes[1],
+      ] },
+      { ...offlineSubmission, envelopeId: "bad-envelope-duplicate", envelopes: [
+        opaqueEvent("duplicate"), opaqueEvent("duplicate"),
+      ] },
+      { ...offlineSubmission, envelopeId: "bad-byte-count", envelopes: [
+        { ...offlineSubmission.envelopes[0], ciphertextBytes: 31 },
+        offlineSubmission.envelopes[1],
+      ] },
+    ];
+    for (const [index, malformed] of malformedSubmissions.entries()) {
+      const malformedBody = JSON.stringify({ epoch: 0, deviceId: browserDeviceId, items: [malformed] });
+      const rejected = await SELF.fetch(mailboxUrl, { method: "POST", body: malformedBody, headers: {
+        "Content-Type": "application/json",
+        "Attn-Share-Bundle": comment.bundleId,
+        "Attn-Admission": await admission("write", comment.write!, "POST", mailboxUrl, malformedBody),
+        "Attn-PoW": await pow(shareId, browserDeviceId, "POST", `/v3/shares/${shareId}/mailbox`, `malformed-${index}`),
+      } });
+      expect(rejected.status, `malformed durable item ${index}`).toBe(400);
+      expect(await rejected.json()).toMatchObject({ error: { code: "ATTN_BODY_INVALID" } });
+    }
+    const emptyAfterMalformed = await SELF.fetch(mailboxUrl, { headers: {
+      "Attn-Share-Bundle": comment.bundleId,
+      "Attn-Admission": await admission("read", comment.read, "GET", mailboxUrl),
+    } });
+    expect((await emptyAfterMalformed.json() as { items: unknown[] }).items).toEqual([]);
     const viewDenied = await SELF.fetch(mailboxUrl, { method: "POST", body: mailBody, headers: {
       "Content-Type": "application/json",
       "Attn-Share-Bundle": view.bundleId,
@@ -234,7 +298,7 @@ describe("durable share v3 real-stack lifecycle", () => {
       "Content-Type": "application/json",
       "Attn-Share-Bundle": comment.bundleId,
       "Attn-Admission": await admission("write", comment.write!, "POST", mailboxUrl, mailBody),
-      "Attn-PoW": await pow(shareId, "browser-commenter", "POST", `/v3/shares/${shareId}/mailbox`, "mail-e0"),
+      "Attn-PoW": await pow(shareId, browserDeviceId, "POST", `/v3/shares/${shareId}/mailbox`, "mail-e0"),
     } });
     expect(queued.status).toBe(201);
     expect(await queued.json()).toMatchObject({ acceptedThrough: 1, accepted: 1 });
@@ -321,13 +385,19 @@ describe("durable share v3 real-stack lifecycle", () => {
     expect(stale.status).toBe(409);
     expect(await stale.json()).toMatchObject({ currentEpoch: 1, error: { code: "ATTN_SHARE_EPOCH_STALE", currentEpoch: 1 } });
 
-    const epoch1Submission = { ...offlineSubmission, envelopeId: "offline-comment-e1", epoch: 1, roomId: room1 };
-    const epoch1Body = JSON.stringify({ epoch: 1, deviceId: "browser-commenter", items: [epoch1Submission] });
+    const epoch1Submission = {
+      ...offlineSubmission,
+      envelopeId: "offline-comment-e1",
+      epoch: 1,
+      roomId: room1,
+      envelopes: offlineSubmission.envelopes.map(envelope => ({ ...envelope, roomId: room1 })),
+    };
+    const epoch1Body = JSON.stringify({ epoch: 1, deviceId: browserDeviceId, items: [epoch1Submission] });
     expect((await SELF.fetch(mailboxUrl, { method: "POST", body: epoch1Body, headers: {
       "Content-Type": "application/json",
       "Attn-Share-Bundle": comment.bundleId,
       "Attn-Admission": await admission("write", comment.write!, "POST", mailboxUrl, epoch1Body),
-      "Attn-PoW": await pow(shareId, "browser-commenter", "POST", `/v3/shares/${shareId}/mailbox`, "mail-e1"),
+      "Attn-PoW": await pow(shareId, browserDeviceId, "POST", `/v3/shares/${shareId}/mailbox`, "mail-e1"),
     } })).status).toBe(201);
     const epoch1Mail = await SELF.fetch(mailboxUrl, { headers: {
       "Attn-Share-Bundle": comment.bundleId,

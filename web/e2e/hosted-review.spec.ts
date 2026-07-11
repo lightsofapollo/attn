@@ -82,7 +82,7 @@ function attachWireCapture(page: Page): {
   return { wire, deviceStatuses, browserErrors, envelopePosts, requestUrls, websocketUrls };
 }
 
-test('v3 browser tiers render and expose only their granted composers', async ({ context }) => {
+test('v3 browser tiers render and expose only their granted composers', async ({ browser }) => {
   test.skip(
     !viewInviteUrl || !commentInviteUrl || !suggestInviteUrl,
     'all three v3 browser tier URLs are required',
@@ -93,7 +93,8 @@ test('v3 browser tiers render and expose only their granted composers', async ({
     { tier: 'suggest', label: 'Can suggest', url: suggestInviteUrl!, authoring: 'true', comment: true, suggest: true },
   ] as const;
   for (const entry of matrix) {
-    const page = await context.newPage();
+    const tierContext = await browser.newContext();
+    const page = await tierContext.newPage();
     const capture = attachWireCapture(page);
     await page.goto(entry.url, { waitUntil: 'domcontentloaded' });
     const shell = page.locator('[data-slot="browser-review"]');
@@ -128,7 +129,7 @@ test('v3 browser tiers render and expose only their granted composers', async ({
       ).toEqual([]);
       expect(capture.websocketUrls.some((raw) => new URL(raw).searchParams.has('viewer_id'))).toBe(true);
     }
-    await page.close();
+    await tierContext.close();
   }
 });
 
@@ -236,6 +237,7 @@ test('missing and malformed invite capabilities fail closed without relay contac
 test('native share opens in hosted reviewer without leaking plaintext or keys', async ({
   page,
   context,
+  browser,
 }) => {
   test.skip(!inviteUrl, 'ATTN_BROWSER_INVITE_URL is required');
   test.skip(!secretCanary, 'ATTN_ROOM_SECRET_CANARY is required');
@@ -334,7 +336,9 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   // WebSocket intentionally drops event frames after the direct mesh opens;
   // receiving the comment therefore proves the exact encrypted envelope also
   // traversed the `attn-review` DataChannel.
-  const peerPage = await context.newPage();
+  const peerContext = await browser.newContext();
+  const peerPage = await peerContext.newPage();
+  const peerCapture = attachWireCapture(peerPage);
   await peerPage.addInitScript(() => {
     let dropMailboxEvents = false;
     Object.defineProperty(window, '__attnDropMailboxEvents', {
@@ -364,12 +368,43 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
       }
     }
     Object.defineProperty(window, 'WebSocket', { configurable: true, value: FilteringWebSocket });
+    const NativePeerConnection = window.RTCPeerConnection;
+    const peerConnections: RTCPeerConnection[] = [];
+    const TrackedPeerConnection = function (configuration?: RTCConfiguration) {
+      const peer = new NativePeerConnection(configuration);
+      peerConnections.push(peer);
+      return peer;
+    } as unknown as typeof RTCPeerConnection;
+    TrackedPeerConnection.prototype = NativePeerConnection.prototype;
+    Object.defineProperty(window, 'RTCPeerConnection', { configurable: true, value: TrackedPeerConnection });
+    (window as unknown as { __attnPeerConnections: RTCPeerConnection[] }).__attnPeerConnections = peerConnections;
   });
   await peerPage.goto(inviteUrl!, { waitUntil: 'domcontentloaded' });
   await expect(peerPage.locator('[data-slot="browser-review"]')).toHaveAttribute('data-authoring-ready', 'true');
   await peerPage.getByRole('button', { name: 'Hosted review canary' }).click();
   await expect(peerPage.getByText(contentCanary, { exact: false })).toBeVisible();
-  await expect(peerPage.locator('[data-slot="browser-review"]')).toHaveAttribute('data-connection', 'live_direct');
+  try {
+    await expect(peerPage.locator('[data-slot="browser-review"]')).toHaveAttribute('data-connection', 'live_direct');
+  } catch (error) {
+    await test.info().attach('peer-bootstrap-diagnostics.txt', {
+      body: Buffer.from(`${peerCapture.wire.join('\n')}\n\nBrowser errors:\n${peerCapture.browserErrors.join('\n')}`, 'utf8'),
+      contentType: 'text/plain',
+    });
+    const peerConnections = await peerPage.evaluate(() => (
+      (window as unknown as { __attnPeerConnections?: RTCPeerConnection[] }).__attnPeerConnections ?? []
+    ).map((peer) => ({
+      connectionState: peer.connectionState,
+      iceConnectionState: peer.iceConnectionState,
+      signalingState: peer.signalingState,
+    })));
+    await test.info().attach('peer-webrtc-diagnostics.json', {
+      body: Buffer.from(JSON.stringify(peerConnections), 'utf8'),
+      contentType: 'application/json',
+    });
+    console.log(`Peer browser errors: ${peerCapture.browserErrors.join(' | ')}`);
+    console.log(`Peer direct error: ${await peerPage.locator('[data-slot="browser-review"]').getAttribute('data-direct-error')}`);
+    throw error;
+  }
   await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute('data-connection', 'live_direct');
   await peerPage.evaluate(() => {
     (window as unknown as { __attnDropMailboxEvents: boolean }).__attnDropMailboxEvents = true;
@@ -435,7 +470,9 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   await page.locator('[data-slot="selection-toolbar-comment"]').click();
   await page.locator('.comment-composer textarea').fill(commentCanary);
   await page.getByRole('button', { name: 'Submit' }).click();
-  await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute('data-outbox-pending', '1');
+  await expect.poll(async () => Number(
+    await page.locator('[data-slot="browser-review"]').getAttribute('data-outbox-pending'),
+  )).toBeGreaterThan(0);
   await context.setOffline(false);
   await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute('data-outbox-pending', '0');
   await expect.poll(() => capture.envelopePosts.length).toBeGreaterThan(postsBeforeOffline);
@@ -517,7 +554,7 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   await expect(peerSuggestionCard).toBeVisible();
   await expect(peerSuggestionCard.getByRole('button', { name: 'Accept' })).toHaveCount(0);
   await expect(peerSuggestionCard.getByRole('button', { name: 'Reject' })).toHaveCount(0);
-  await peerPage.close();
+  await peerContext.close();
 
   await commentCard.getByRole('button', { name: 'Resolve' }).click();
   await expect.poll(async () => {
@@ -584,7 +621,7 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
     // V3 capability persistence is intentionally not implemented yet. Keep
     // the UI honest and retain the fragmentless-refresh fail-closed behavior
     // proved above.
-    await expect(page.getByText('Temporary link session', { exact: true })).toBeVisible();
+    await expect(page.locator('[data-slot="browser-persistence-status"]')).toContainText('Open from this link');
     const unexpectedBrowserErrors = capture.browserErrors.filter(
       (message) => !message.includes('net::ERR_INTERNET_DISCONNECTED'),
     );

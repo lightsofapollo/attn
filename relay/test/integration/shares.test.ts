@@ -24,6 +24,55 @@ async function binaryOwnerSignature(method: string, url: string, body: Uint8Arra
   return base64UrlEncode(new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, canonical)));
 }
 
+function durableSubmission(input: {
+  shareId: string;
+  roomId: string;
+  envelopeId: string;
+  deviceId?: string;
+  tier?: "comment" | "suggest";
+  bundleId?: string;
+  ciphertextByte?: number;
+}) {
+  const deviceId = input.deviceId ?? "writer";
+  const participantId = `${deviceId}-participant`;
+  const tier = input.tier ?? "comment";
+  const opaqueEnvelope = (suffix: string) => ({
+    v: 2 as const,
+    roomId: input.roomId,
+    envelopeId: `${input.envelopeId}-${suffix}`,
+    authorId: participantId,
+    deviceId,
+    createdAt: 1_000,
+    expiresAt: 10_000,
+    kind: "event" as const,
+    nonce: base64UrlEncode(new Uint8Array(24).fill(0x41)),
+    ciphertext: base64UrlEncode(new Uint8Array(32).fill(input.ciphertextByte ?? 0x42)),
+    ciphertextBytes: 32,
+  });
+  return {
+    v: 3 as const,
+    envelopeId: input.envelopeId,
+    type: "review_submission" as const,
+    shareId: input.shareId,
+    epoch: 0,
+    roomId: input.roomId,
+    tier,
+    ...(input.bundleId === undefined ? {} : { bundleId: input.bundleId }),
+    deviceRegistration: {
+      deviceId,
+      participantId,
+      publicSigningKey: base64UrlEncode(new Uint8Array(32).fill(0x43)),
+      publicEncryptionKey: base64UrlEncode(new Uint8Array(32).fill(0x44)),
+      client: "attn-browser" as const,
+      kind: "reviewer" as const,
+      grantTier: tier,
+      grantSignature: base64UrlEncode(new Uint8Array(64).fill(0x45)),
+      selfSignature: base64UrlEncode(new Uint8Array(64).fill(0x46)),
+    },
+    envelopes: [opaqueEnvelope("joined"), opaqueEnvelope("event")],
+  };
+}
+
 async function createShare(label: string): Promise<{
   shareId: string;
   url: string;
@@ -102,6 +151,7 @@ describe("durable v3 shares", () => {
       ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
       epoch: 0,
       revision: 0,
+      currentRoomId: "tier-room",
       bundles,
       snapshots: [],
       placeholders: [],
@@ -142,7 +192,18 @@ describe("durable v3 shares", () => {
     expect(crossSelected.status).toBe(401);
 
     const mailboxUrl = `${url}/mailbox`;
-    const mailBody = JSON.stringify({ epoch: 0, deviceId: "tier-writer", items: [{ envelopeId: "tier-mail", ciphertext: "opaque" }] });
+    const mailBody = JSON.stringify({
+      epoch: 0,
+      deviceId: "tier-writer",
+      items: [durableSubmission({
+        shareId,
+        roomId: "tier-room",
+        envelopeId: "tier-mail",
+        deviceId: "tier-writer",
+        tier: "comment",
+        bundleId: bundles[1].bundleId,
+      })],
+    });
     const viewWrite = await SELF.fetch(mailboxUrl, { method: "POST", body: mailBody, headers: {
       "Content-Type": "application/json",
       "Attn-Share-Bundle": bundles[0].bundleId,
@@ -559,7 +620,7 @@ describe("durable v3 shares", () => {
     const body = JSON.stringify({
       v: 3, revision: 0, ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
       readAdmissionKey: base64UrlEncode(read), writeAdmissionKey: base64UrlEncode(write),
-      currentRoomId: null, snapshots: [], placeholders: [{ fileId: "future-file" }],
+      currentRoomId: "legacy-room", snapshots: [], placeholders: [{ fileId: "future-file" }],
     });
     const created = await SELF.fetch(url, {
       method: "POST", body,
@@ -602,8 +663,8 @@ describe("durable v3 shares", () => {
 
     const mailboxUrl = `${url}/mailbox`;
     const mailboxBody = JSON.stringify({ deviceId: "writer", items: [
-      { envelopeId: "mail-one", type: "comment", n: 1 },
-      { envelopeId: "mail-two", type: "placeholder", n: 2 },
+      durableSubmission({ shareId, roomId: "legacy-room", envelopeId: "mail-one" }),
+      durableSubmission({ shareId, roomId: "legacy-room", envelopeId: "mail-two" }),
     ] });
     const mailboxPow = await mintPowForTests({ roomId: shareId, deviceId: "writer", method: "POST", path: `/v3/shares/${shareId}/mailbox`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: FIXED_POW_RAND });
     const readOnWrite = await SELF.fetch(mailboxUrl, {
@@ -650,7 +711,12 @@ describe("durable v3 shares", () => {
     expect(retryResult.accepted).toBe(0);
     expect(retryResult.results).toContainEqual({ envelopeId: "mail-one", seq: 1, status: "duplicate" });
 
-    const conflictBody = JSON.stringify({ deviceId: "writer", items: [{ envelopeId: "mail-one", type: "comment", n: 99 }] });
+    const conflictBody = JSON.stringify({ deviceId: "writer", items: [durableSubmission({
+      shareId,
+      roomId: "legacy-room",
+      envelopeId: "mail-one",
+      ciphertextByte: 0x63,
+    })] });
     const conflict = await SELF.fetch(mailboxUrl, { method: "POST", body: conflictBody, headers: {
       "Content-Type": "application/json",
       "Attn-Admission": await admission("write", write, "POST", mailboxUrl, conflictBody),
@@ -660,8 +726,12 @@ describe("durable v3 shares", () => {
 
     for (let batch = 0; batch < 5; batch += 1) {
       const items = Array.from({ length: 26 }, (_, offset) => ({
-        envelopeId: `bulk-${batch}-${offset}`,
-        ciphertext: `opaque-${batch}-${offset}`,
+        ...durableSubmission({
+          shareId,
+          roomId: "legacy-room",
+          envelopeId: `bulk-${batch}-${offset}`,
+          ciphertextByte: 0x50 + batch,
+        }),
       }));
       const bulkBody = JSON.stringify({ deviceId: "writer", items });
       const bulkPow = await mintPowForTests({ roomId: shareId, deviceId: "writer", method: "POST", path: `/v3/shares/${shareId}/mailbox`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}b${batch}` });

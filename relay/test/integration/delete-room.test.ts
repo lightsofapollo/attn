@@ -103,6 +103,12 @@ function uniqueRoomId(label: string): string {
   return `${label}-${Date.now().toString(36)}-${roomCounter}`;
 }
 
+function roomTestIp(roomId: string): string {
+  let hash = 0;
+  for (const byte of new TextEncoder().encode(roomId)) hash = (hash * 33 + byte) >>> 0;
+  return `198.51.${(hash >>> 8) & 0xff}.${(hash & 0xfe) + 1}`;
+}
+
 async function createRoom(opts: {
   roomId: string;
   policy?: Partial<RoomPolicy>;
@@ -131,6 +137,7 @@ async function createRoom(opts: {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "CF-Connecting-IP": roomTestIp(opts.roomId),
       "Attn-Owner-Signature": base64UrlEncode(sig),
       "Attn-PoW": await createPowHeader(opts.roomId, opts.ownerKp.publicKeyBytes),
     },
@@ -272,6 +279,7 @@ async function registerDevice(opts: {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "CF-Connecting-IP": roomTestIp(opts.roomId),
       "Attn-Admission": adm,
       "Attn-PoW": pow,
     },

@@ -3,7 +3,8 @@ import type { Device } from '../../src/lib/review/browser-ws';
 
 interface HarnessInput {
   shareId: string; bundleId: string; roomId: string; epoch: number; revision: number; manifestDigest: string;
-  deviceId: string; relayUrl: string; root: number[]; read: number[]; write: number[];
+  deviceId: string; relayUrl: string; root: number[]; read: number[]; write: number[]; deviceSigningSecret: number[];
+  deviceRegistration: BrowserPushBindingContext['deviceRegistration'];
   ownerSigningKey: string; devices: Device[]; fileName: string; pushEndpoint: string;
 }
 
@@ -27,6 +28,8 @@ function configure(input: HarnessInput): BrowserPushConsentController {
     epoch: input.epoch, revision: input.revision, manifestDigest: input.manifestDigest, deviceId: input.deviceId,
     relayUrl: input.relayUrl, roomReadCapabilityBytes: Uint8Array.from(input.root),
     readAdmissionKeyBytes: Uint8Array.from(input.read), writeAdmissionKeyBytes: Uint8Array.from(input.write),
+    deviceSigningSecretBytes: Uint8Array.from(input.deviceSigningSecret),
+    deviceRegistration: structuredClone(input.deviceRegistration),
     ownerSigningKey: input.ownerSigningKey, devices: structuredClone(input.devices), fileName: input.fileName });
   return new BrowserPushConsentController({ getBindingContext: async () => binding(),
     notification: { permission: 'granted', requestPermission: async () => 'granted' },

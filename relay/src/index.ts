@@ -87,7 +87,7 @@ const INTERNAL_ALLOW_BROWSER_HEADER = "X-Attn-Allow-Browser";
  * relay-spec list (Content-Type for JSON bodies, the three Attn-* protocol
  * headers).
  */
-const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id, Attn-Share-Bundle";
+const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id, Attn-Device-Proof, Attn-Device-Registration, Attn-Share-Bundle";
 const CORS_EXPOSED_HEADERS = "Attn-Share-Bundle, Attn-Share-Tier, Attn-Sealed-Bundle, Attn-Snapshot-Id, Attn-Ciphertext-Sha256";
 
 /** Methods the relay exposes to browsers — everything in the v2 HTTP surface. */

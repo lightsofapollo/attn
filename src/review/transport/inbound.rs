@@ -129,6 +129,9 @@ pub enum InboundError {
         expected: String,
         actual: Option<String>,
     },
+    /// Protocol-v3 signal omitted or failed its registered-device proof.
+    #[error("signal registered-device proof failed: {0}")]
+    SignalDeviceProof(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +550,65 @@ impl InboundPipeline {
         self.open_blob(envelope, &self.signaling_key)
     }
 
+    /// Verify a v3 signal proof against the immutable authenticated directory
+    /// before any SDP/ICE or collaboration plaintext is dispatched.
+    pub async fn verify_signal_device_proof_v3(
+        &self,
+        room_id: &RoomId,
+        envelope: &MailboxEnvelope,
+    ) -> Result<(), InboundError> {
+        let generation = envelope
+            .signal_generation
+            .ok_or_else(|| InboundError::SignalDeviceProof("missing signalGeneration".into()))?;
+        let signature = envelope
+            .device_signature
+            .as_deref()
+            .ok_or_else(|| InboundError::SignalDeviceProof("missing deviceSignature".into()))?;
+        let authorizations = self.authorizations.read().await;
+        let authorization = authorizations
+            .values()
+            .find(|record| {
+                record.device_id == envelope.device_id
+                    && record.participant_id == envelope.author_id
+            })
+            .ok_or_else(|| {
+                InboundError::SignalDeviceProof(
+                    "signer is absent from authenticated directory".into(),
+                )
+            })?;
+        let raw = URL_SAFE_NO_PAD
+            .decode(authorization.public_signing_key.as_bytes())
+            .map_err(|error| InboundError::SignalDeviceProof(format!("directory key: {error}")))?;
+        let bytes: [u8; 32] = raw.try_into().map_err(|raw: Vec<u8>| {
+            InboundError::SignalDeviceProof(format!(
+                "directory key must be 32 bytes, got {}",
+                raw.len()
+            ))
+        })?;
+        let key = DeviceVerifyingKey::from_bytes(&bytes)
+            .map_err(|error| InboundError::SignalDeviceProof(format!("directory key: {error}")))?;
+        let target = envelope
+            .target
+            .as_ref()
+            .map(|target| id_to_string(&target.device_id));
+        crate::review::crypto::device_proof::verify_device_signal_proof_v3(
+            &key,
+            signature,
+            room_id.as_str(),
+            &envelope.envelope_id,
+            &id_to_string(&envelope.author_id),
+            &id_to_string(&envelope.device_id),
+            target.as_deref(),
+            generation,
+            envelope.created_at,
+            envelope.expires_at,
+            &envelope.nonce,
+            &envelope.ciphertext,
+            envelope.ciphertext_bytes,
+        )
+        .map_err(InboundError::SignalDeviceProof)
+    }
+
     /// Shared AEAD-open path for `snapshot_blob` and `signal` envelopes.
     ///
     /// Both envelope shapes are confidentiality-only: the plaintext is opaque
@@ -923,6 +985,8 @@ mod tests {
             nonce: URL_SAFE_NO_PAD.encode(aead_nonce),
             ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
             ciphertext_bytes: ciphertext.len() as u64,
+            signal_generation: None,
+            device_signature: None,
         }
     }
 

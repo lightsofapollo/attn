@@ -611,6 +611,7 @@ function parseSharePage(value: unknown, binding: PushBindingRecord): Array<{
     const payload = raw.payload;
     if (payload.v !== 3 || payload.type !== 'review_submission' || payload.shareId !== binding.resourceId
       || payload.epoch !== binding.epoch || payload.roomId !== binding.roomId
+      || payload.bundleId !== binding.bundleId
       || !isRecord(payload.deviceRegistration) || !Array.isArray(payload.envelopes)
       || payload.envelopes.length < 1 || payload.envelopes.length > 8) {
       throw new Error('share mailbox payload binding is invalid');

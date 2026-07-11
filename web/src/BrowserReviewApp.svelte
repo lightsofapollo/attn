@@ -8,9 +8,9 @@
        encrypted WebSocket.
     2. While waiting for the first `SnapshotCreated` event we render a
        "Loading review…" state.
-    3. Once the snapshot arrives, the editor mounts at that authenticated
-       epoch. It becomes live-editable only while the owner is online; durable
-       comments and suggestions remain available while the owner is away.
+    3. Once the snapshot arrives, the editor mounts read-only at that
+       authenticated epoch. Owner broadcasts keep it converged while durable
+       comments and suggestions remain available independently.
 
   Error states map straight off `session.state.error.kind`:
     - invite_invalid    → "Invalid invite link"
@@ -254,12 +254,12 @@
   });
 
   // -------------------------------------------------------------------------
-  // Reviewer live collaboration.
+  // Reviewer read-only convergence.
   //
   // Keep the collab plugin mounted while the owner is away so the editor's
-  // confirmed version and any remote state survive presence blips. Presence
-  // gates only document editability; durable comments/suggestions continue to
-  // use BrowserSession's encrypted outbox independently.
+  // confirmed version and any remote state survive presence blips. It never
+  // grants document authority; durable comments/suggestions continue to use
+  // BrowserSession's encrypted outbox independently.
   // -------------------------------------------------------------------------
 
   interface ReviewerCollabSeed {
@@ -373,14 +373,17 @@
     });
   });
 
-  let previousLiveEditingAvailable = false;
+  let previousCollabTransportAvailable = false;
   $effect(() => {
-    const liveEditingAvailable = sessionState.liveEditingAvailable;
+    const collabTransportAvailable =
+      sessionState.ownerOnline &&
+      sessionState.status === 'connected' &&
+      sessionState.connection !== 'offline';
     const controller = reviewerCollabController;
-    if (liveEditingAvailable && !previousLiveEditingAvailable) {
+    if (collabTransportAvailable && !previousCollabTransportAvailable) {
       controller?.onTransportConnected();
     }
-    previousLiveEditingAvailable = liveEditingAvailable;
+    previousCollabTransportAvailable = collabTransportAvailable;
   });
 
   function viewHasCollab(view: EditorView): boolean {
@@ -393,11 +396,12 @@
   }
 
   function handleReviewerCollabDocChange(): void {
-    if (reviewerAvailability.liveEditing) reviewerCollabController?.onLocalChange();
+    // Owner broadcasts may update the rendered document, but reviewer
+    // transactions are never submitted back into the authority.
   }
 
   function handleReviewerCollabSelectionChange(head: number): void {
-    if (reviewerAvailability.liveEditing) reviewerCollabController?.broadcastCursor(head);
+    if (reviewerAvailability.collabReady) reviewerCollabController?.broadcastCursor(head);
   }
 
   // Resolve arrived and locally-authored anchors against the active snapshot.
@@ -743,7 +747,7 @@
           {:else}
             <Editor
               markdown={reviewerCollabSeed?.markdown ?? displayedContent ?? ''}
-              editable={reviewerAvailability.liveEditing}
+              editable={false}
               plugins={editorPlugins}
               onReady={handleEditorReady}
               collabClientId={reviewerAvailability.collabReady
@@ -752,7 +756,7 @@
               collabEpoch={reviewerCollabEpoch}
               onCollabDocChange={handleReviewerCollabDocChange}
               onCollabSelectionChange={handleReviewerCollabSelectionChange}
-              suggesting={reviewerAvailability.liveEditing}
+              suggesting={false}
               suggestionAuthor="Reviewer"
             />
           {/if}

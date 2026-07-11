@@ -1056,7 +1056,10 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
       removePeer: () => undefined,
       syncDevices: () => undefined,
     };
-    await session.sendCollab('{"kind":"submit","epoch":"snap"}');
+    await session.sendCollab(JSON.stringify({
+      kind: 'broadcast', fileId: 'file-owner', epoch: 'snap',
+      broadcast: { startVersion: 0, steps: [], clientIDs: [] },
+    }));
     assertEq(direct.length, 1, 'direct fanout happened synchronously');
     for (let index = 0; index < 80 && posted.length === 0; index += 1) await delay(20);
     assertEq(posted.length, 1, 'same collab envelope relayed once');
@@ -1068,7 +1071,12 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
 
     failRelay = true;
     let relayFailureSurfaced = false;
-    try { await session.sendCollab('{"kind":"submit","epoch":"next"}'); }
+    try {
+      await session.sendCollab(JSON.stringify({
+        kind: 'broadcast', fileId: 'file-owner', epoch: 'next',
+        broadcast: { startVersion: 0, steps: [], clientIDs: [] },
+      }));
+    }
     catch { relayFailureSurfaced = true; }
     assert(relayFailureSurfaced, 'relay failure did not reject sendCollab');
     assertEq(direct.length, 2, 'failed relay still used direct transport once');
@@ -1112,6 +1120,34 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
     session.close();
   } finally {
     await server.close();
+  }
+});
+
+defineCase('view comment and suggest browser reviewers cannot emit ProseMirror submits', async () => {
+  const submit = JSON.stringify({
+    kind: 'submit', fileId: 'file-reviewer', epoch: 'snapshot-reviewer',
+    submission: {
+      clientID: 'reviewer-client', version: 0,
+      steps: [{ stepType: 'replace', from: 1, to: 1 }],
+    },
+  });
+  for (const tier of ['view', 'comment', 'suggest'] as const) {
+    const session = new BrowserSession({ relayUrl: 'http://127.0.0.1:8787' });
+    (session as unknown as { state: BrowserSessionState }).state = {
+      ...session.getState(),
+      grantTier: tier,
+      status: 'connected',
+      connection: 'mailbox',
+      ownerOnline: true,
+      liveEditingAvailable: true,
+    };
+    let rejected = false;
+    try { await session.sendCollab(submit); }
+    catch (error) {
+      rejected = error instanceof Error && error.message.includes('durable suggestion');
+    }
+    assert(rejected, `${tier} reviewer submit was not rejected at the session boundary`);
+    session.close();
   }
 });
 
@@ -1163,7 +1199,9 @@ defineCase('direct-first and relay collab delivery dispatch once with authentica
       deviceId: reviewer.identity.deviceId,
       createdAt: 1_700_000_700_000,
       expiresAt: POLICY.expiresAt,
-      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: '{"kind":"resync"}' },
+      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: JSON.stringify({
+        kind: 'resync', fileId: 'file-owner', epoch: 'snapshot-owner',
+      }) },
       clientNonce: new Uint8Array(16).fill(0x22),
       aeadNonce: new Uint8Array(24).fill(0x23),
     });
@@ -1175,7 +1213,74 @@ defineCase('direct-first and relay collab delivery dispatch once with authentica
     assertEq(deliveries[0]!.source, 'direct', 'direct won delivery race');
     assertEq(deliveries[0]!.sender.kind, 'reviewer', 'authenticated sender kind surfaced');
     assertEq(deliveries[0]!.sender.deviceId, reviewer.identity.deviceId, 'sender device surfaced');
-    assertEq(deliveries[0]!.payload, '{"kind":"resync"}', 'collab payload surfaced');
+    assertEq(deliveries[0]!.payload, JSON.stringify({
+      kind: 'resync', fileId: 'file-owner', epoch: 'snapshot-owner',
+    }), 'collab payload surfaced');
+    session.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('browser owner drops authenticated remote submits on direct and mailbox paths', async () => {
+  const credentials = browserOwnerCredentials();
+  const owner = browserOwnerDevice(credentials);
+  const reviewer = browserReviewerDevice();
+  let socket: WebSocket | null = null;
+  let dispatches = 0;
+  const server = await startMockServer();
+  try {
+    server.onClient((ws) => {
+      socket = ws;
+      ws.on('message', (raw) => {
+        if (JSON.parse(String(raw)).type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello', serverSeq: 0, policy: POLICY, devices: [owner, reviewer.device],
+          onlineDeviceIds: [owner.deviceId, reviewer.device.deviceId], missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    const session = new BrowserSession({
+      owner: credentials,
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      disableWebRtc: true,
+      store: makeStubStore(),
+      fetchImpl: async () => ({
+        status: 200,
+        text: async () => JSON.stringify({ policy: POLICY, devices: [owner, reviewer.device] }),
+      }),
+      webSocketFactory: nodeFactory,
+      onCollab: () => { dispatches += 1; },
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 200,
+    });
+    await session.start();
+    for (let index = 0; index < 80 && !session.getState().authoringReady; index += 1) await delay(20);
+    const submit = JSON.stringify({
+      kind: 'submit', fileId: 'file-owner', epoch: 'snapshot-owner',
+      submission: {
+        clientID: 'forged-reviewer', version: 0,
+        steps: [{ stepType: 'replace', from: 1, to: 1 }],
+      },
+    });
+    const envelope = assembleBrowserSignal({
+      signalingKey: KEYS.signalingKey,
+      roomId: ROOM_ID,
+      authorId: reviewer.identity.participantId,
+      deviceId: reviewer.identity.deviceId,
+      createdAt: 1_700_000_705_000,
+      expiresAt: POLICY.expiresAt,
+      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: submit },
+      clientNonce: new Uint8Array(16).fill(0x2a),
+      aeadNonce: new Uint8Array(24).fill(0x2b),
+    });
+    const client = (
+      session as unknown as { wsClient: { ingestDirectEnvelope(item: MailboxEnvelope): Promise<void> } }
+    ).wsClient;
+    await client.ingestDirectEnvelope(envelope);
+    socket!.send(JSON.stringify({ type: 'envelope', envelope, serverSeq: 1 }));
+    await delay(40);
+    assertEq(dispatches, 0, 'remote submit reached browser owner authority callback');
     session.close();
   } finally {
     await server.close();
@@ -1231,7 +1336,9 @@ defineCase('rejected direct collab callback retries from durable network deliver
       deviceId: reviewer.identity.deviceId,
       createdAt: 1_700_000_710_000,
       expiresAt: POLICY.expiresAt,
-      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: '{"kind":"retry"}' },
+      payload: { kind: 'collab', from: reviewer.identity.deviceId, payload: JSON.stringify({
+        kind: 'resync', fileId: 'file-owner', epoch: 'snapshot-owner',
+      }) },
       clientNonce: new Uint8Array(16).fill(0x24),
       aeadNonce: new Uint8Array(24).fill(0x25),
     });

@@ -1,5 +1,8 @@
 import { base64UrlDecode, buildAdmissionHeaderV3 } from './browser-crypto';
+import { base64UrlEncode } from './browser-crypto';
 import { BROWSER_POW_DIFFICULTY, mintBrowserPowInWorker } from './browser-pow';
+import type { RegisterDeviceBodyV3 } from './browser-session';
+import { createDeviceHttpProofV3 } from './device-proof';
 import {
   ensurePushSubscription,
   forgetPushBinding,
@@ -43,6 +46,8 @@ export interface BrowserPushBindingContext {
   roomReadCapabilityBytes: Uint8Array;
   readAdmissionKeyBytes: Uint8Array;
   writeAdmissionKeyBytes: Uint8Array;
+  deviceSigningSecretBytes: Uint8Array;
+  deviceRegistration: RegisterDeviceBodyV3;
   ownerSigningKey: string;
   devices: Device[];
   fileName: string;
@@ -268,8 +273,15 @@ export class BrowserPushConsentController {
     const body = JSON.stringify(subscriptionWireValue(subscription));
     const bodyBytes = new TextEncoder().encode(body);
     const pow = await this.pow(context, 'POST', path, signal);
+    const deviceProof = await createDeviceHttpProofV3({
+      resourceKind: 'share', resourceId: context.shareId, deviceId: context.deviceId,
+      method: 'POST', path, body: bodyBytes, powToken: pow,
+      signingSecret: context.deviceSigningSecretBytes,
+    });
+    const registration = base64UrlEncode(new TextEncoder().encode(JSON.stringify(context.deviceRegistration)));
     const response = await this.fetchImpl()(new URL(path, context.relayUrl), { method: 'POST', body, signal, headers: {
       'Content-Type': 'application/json', 'Attn-Device-Id': context.deviceId,
+      'Attn-Device-Proof': deviceProof, 'Attn-Device-Registration': registration,
       'Attn-Share-Bundle': context.bundleId,
       'Attn-Admission': buildAdmissionHeaderV3(context.writeAdmissionKeyBytes, 'write', 'POST', path, bodyBytes),
       'Attn-PoW': pow,
@@ -281,8 +293,14 @@ export class BrowserPushConsentController {
   private async deleteRelayBinding(context: BrowserPushBindingContext, signal?: AbortSignal): Promise<void> {
     const path = pushPath(context);
     const pow = await this.pow(context, 'DELETE', path, signal);
+    const deviceProof = await createDeviceHttpProofV3({
+      resourceKind: 'share', resourceId: context.shareId, deviceId: context.deviceId,
+      method: 'DELETE', path, body: new Uint8Array(), powToken: pow,
+      signingSecret: context.deviceSigningSecretBytes,
+    });
     const response = await this.fetchImpl()(new URL(path, context.relayUrl), { method: 'DELETE', signal, headers: {
       'Attn-Device-Id': context.deviceId, 'Attn-Share-Bundle': context.bundleId,
+      'Attn-Device-Proof': deviceProof,
       'Attn-Admission': buildAdmissionHeaderV3(context.writeAdmissionKeyBytes, 'write', 'DELETE', path, new Uint8Array()),
       'Attn-PoW': pow,
     } });
@@ -352,7 +370,13 @@ function bindingId(context: BrowserPushBindingContext): string {
 }
 function validateContext(context: BrowserPushBindingContext): void {
   if (context.writeAdmissionKeyBytes.byteLength !== 32 || context.readAdmissionKeyBytes.byteLength !== 32 ||
-    context.roomReadCapabilityBytes.byteLength !== 32) throw new Error('push capability is invalid');
+    context.roomReadCapabilityBytes.byteLength !== 32 || context.deviceSigningSecretBytes.byteLength !== 32) {
+    throw new Error('push capability is invalid');
+  }
+  if (context.deviceRegistration.deviceId !== context.deviceId ||
+    context.deviceRegistration.publicSigningKey.length === 0 || context.deviceRegistration.selfSignature.length === 0) {
+    throw new Error('push device registration is invalid');
+  }
   const owners = context.devices.filter(device => device.kind === 'owner' && device.publicSigningKey === context.ownerSigningKey);
   if (owners.length !== 1) throw new Error('push owner identity is not pinned');
 }
@@ -360,6 +384,7 @@ function zeroContext(context: BrowserPushBindingContext | null): void {
   context?.roomReadCapabilityBytes.fill(0);
   context?.readAdmissionKeyBytes.fill(0);
   context?.writeAdmissionKeyBytes.fill(0);
+  context?.deviceSigningSecretBytes.fill(0);
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

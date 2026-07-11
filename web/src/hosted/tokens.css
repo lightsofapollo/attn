@@ -112,6 +112,14 @@ a {
   outline-offset: 2px;
 }
 
+/* ProseMirror already communicates focus through its caret and selection.
+   Outlining its full contenteditable canvas makes the document look like a
+   giant form field; retain the global ring for actual controls instead. */
+.ProseMirror:focus-visible {
+  outline: none;
+  outline-offset: 0;
+}
+
 .eyebrow {
   color: var(--rust-deep);
   font: 750 0.72rem/1 var(--sans);

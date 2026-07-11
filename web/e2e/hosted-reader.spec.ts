@@ -134,7 +134,12 @@ test('mobile edit mode: formatting bar above the keyboard viewport, 44px targets
   await expect(bar.locator('.edit-bar-state')).toBeVisible();
 
   // Formatting commands apply to the document.
-  await page.locator('.writing-sheet .ProseMirror').click();
+  const editor = page.locator('.writing-sheet .ProseMirror');
+  await editor.click();
+  const editorOutlineStyle = await editor.evaluate(
+    (element) => getComputedStyle(element).outlineStyle,
+  );
+  expect(editorOutlineStyle).toBe('none');
   await page.keyboard.type('emphasis target');
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a');
   await bar.getByRole('button', { name: 'Bold' }).click();

@@ -84,8 +84,21 @@ test('desktop editor fills the canvas and has no edit mode toggle', async ({ pag
   expect(Math.abs(geometry.bottomGap)).toBeLessThanOrEqual(1);
 
   await page.mouse.click(geometry.clickX, geometry.clickY);
+  const editorOutlineStyle = await editor.evaluate(
+    (element) => getComputedStyle(element).outlineStyle,
+  );
+  expect(editorOutlineStyle).toBe('none');
   await page.keyboard.type('Typed from the blank canvas.');
   await expect(editor).toContainText('Typed from the blank canvas.');
+
+  // Removing the canvas rectangle must not weaken keyboard focus on controls.
+  const renameWorkspace = page.getByRole('button', { name: 'Rename workspace' });
+  await renameWorkspace.focus();
+  const controlFocus = await renameWorkspace.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
+  });
+  expect(controlFocus).toEqual({ outlineStyle: 'solid', outlineWidth: '2px' });
 });
 
 test('returning from mobile reader mode restores desktop editing', async ({ page }) => {

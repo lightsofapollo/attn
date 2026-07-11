@@ -125,6 +125,15 @@ pub enum SocketMessage {
     /// Spec: `data-model.md` §Daemon Socket Commands.
     #[serde(rename = "review_inbox")]
     ReviewInbox,
+
+    /// Query persisted suggestion verdicts. The participant id is the calling
+    /// CLI identity; owner-authored verdict events are never used for scoping.
+    #[serde(rename = "review_verdicts", rename_all = "camelCase")]
+    ReviewVerdicts {
+        participant_id: crate::review::ids::ParticipantId,
+        #[serde(default)]
+        all: bool,
+    },
 }
 
 /// Response sent from daemon back to client.
@@ -150,6 +159,10 @@ pub enum SocketResponse {
     Interact(InteractResult),
     #[serde(rename = "error")]
     Error { message: String },
+    #[serde(rename = "review_verdicts")]
+    ReviewVerdicts {
+        report: crate::review::store::VerdictsReport,
+    },
 }
 
 /// Runtime directory for daemon state (socket, fingerprint, log, future reviews/).
@@ -404,6 +417,23 @@ pub fn send_review_share(path: &str, mode: &str, ttl: Option<&str>) -> Result<()
     }
 }
 
+/// Query the running daemon's persisted verdict state.
+pub fn send_review_verdicts(
+    participant_id: crate::review::ids::ParticipantId,
+    all: bool,
+) -> Result<crate::review::store::VerdictsReport> {
+    let msg = SocketMessage::ReviewVerdicts {
+        participant_id,
+        all,
+    };
+    match send_command(&msg)? {
+        Some(SocketResponse::ReviewVerdicts { report }) => Ok(report),
+        Some(SocketResponse::Error { message }) => bail!("review_verdicts failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
 /// Send a command to the daemon and read the response.
 /// Returns None if no daemon is running.
 fn send_command(msg: &SocketMessage) -> Result<Option<SocketResponse>> {
@@ -549,6 +579,24 @@ fn submit_review_socket_command(review_manager: Option<&Arc<ReviewManager>>, cmd
         None => {
             tracing::warn!("socket review command dropped — ReviewManager unavailable: {cmd:?}")
         }
+    }
+}
+
+fn query_review_verdicts(
+    review_manager: Option<&Arc<ReviewManager>>,
+    participant_id: &crate::review::ids::ParticipantId,
+    all: bool,
+) -> SocketResponse {
+    let Some(manager) = review_manager else {
+        return SocketResponse::Error {
+            message: "ReviewManager unavailable".to_string(),
+        };
+    };
+    match manager.verdicts((!all).then_some(participant_id)) {
+        Ok(report) => SocketResponse::ReviewVerdicts { report },
+        Err(err) => SocketResponse::Error {
+            message: format!("could not read persisted verdicts: {err:#}"),
+        },
     }
 }
 
@@ -819,6 +867,17 @@ fn handle_client(
                     serde_json::to_string(&resp).unwrap_or_default()
                 );
             }
+            Ok(SocketMessage::ReviewVerdicts {
+                participant_id,
+                all,
+            }) => {
+                let resp = query_review_verdicts(review_manager, &participant_id, all);
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
             Err(e) => {
                 tracing::warn!("invalid socket message: {e}");
                 let resp = SocketResponse::Error {
@@ -1053,6 +1112,35 @@ mod tests {
         // the command rather than panic.
         submit_review_socket_command(None, ReviewCommand::Inbox);
         // Pass = no panic.
+    }
+
+    #[test]
+    fn verdicts_socket_returns_manager_unavailable_error() {
+        let participant_id = serde_json::from_value(serde_json::Value::String("agent-a".into()))
+            .expect("participant id");
+        let response = query_review_verdicts(None, &participant_id, false);
+        match response {
+            SocketResponse::Error { message } => {
+                assert_eq!(message, "ReviewManager unavailable");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verdicts_socket_serialization_is_stable_across_multiple_rooms() {
+        let (manager, _rx, tmp) = make_test_manager();
+        for room in ["room-b", "room-a"] {
+            std::fs::create_dir_all(tmp.path().join("reviews/rooms").join(room))
+                .expect("create room");
+        }
+        let participant_id = serde_json::from_value(serde_json::Value::String("agent-a".into()))
+            .expect("participant id");
+        let response = query_review_verdicts(Some(&manager), &participant_id, true);
+        assert_eq!(
+            serde_json::to_string(&response).expect("serialize response"),
+            r#"{"type":"review_verdicts","report":{"rooms":{"room-a":{"suggestions":{}},"room-b":{"suggestions":{}}}}}"#
+        );
     }
 
     #[test]

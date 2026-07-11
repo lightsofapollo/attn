@@ -31,7 +31,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -40,7 +40,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::daemon::runtime_dir;
-use crate::review::ids::{FileId, RoomId, SnapshotId};
+use crate::review::ids::{FileId, ParticipantId, RoomId, SnapshotId};
 use crate::review::model::{
     Device, LocalFileBinding, LocalRevision, MailboxEnvelope, Participant, ReviewEvent, ReviewRoom,
     SnapshotNode, SyncCursor,
@@ -49,6 +49,35 @@ use crate::review::model::{
 /// Persistent JSON+JSONL store for review rooms.
 pub struct ReviewStore {
     root: PathBuf,
+}
+
+/// Stable machine-readable status for one persisted suggestion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuggestionVerdictStatus {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+/// Current verdict derived exclusively from the append-only event log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuggestionVerdict {
+    pub status: SuggestionVerdictStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resulting_hash: Option<String>,
+}
+
+/// Verdicts for one room, keyed by the persisted suggestion id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomVerdicts {
+    pub suggestions: BTreeMap<String, SuggestionVerdict>,
+}
+
+/// Cross-room verdict report. BTreeMaps make serialized output deterministic.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerdictsReport {
+    pub rooms: BTreeMap<String, RoomVerdicts>,
 }
 
 impl ReviewStore {
@@ -361,6 +390,73 @@ impl ReviewStore {
         room_id: &RoomId,
     ) -> Result<impl Iterator<Item = Result<ReviewEvent>>> {
         jsonl_iter(&self.events_file(room_id))
+    }
+
+    /// Fold persisted suggestion events for one room. Creation authorship is
+    /// recorded separately from owner-authored verdict events, then joined so
+    /// identity scoping always uses `SuggestionCreated.meta.author_id`.
+    pub fn verdicts_for_room(
+        &self,
+        room_id: &RoomId,
+        creator: Option<&ParticipantId>,
+    ) -> Result<RoomVerdicts> {
+        let mut creations = BTreeMap::<String, ParticipantId>::new();
+        let mut verdicts = BTreeMap::<String, SuggestionVerdict>::new();
+
+        for event in self.iter_events(room_id)? {
+            let event = event?;
+            match event.body {
+                crate::review::model::ReviewEventBody::SuggestionCreated {
+                    suggestion_id, ..
+                } => {
+                    creations
+                        .entry(suggestion_id)
+                        .or_insert(event.meta.author_id);
+                }
+                crate::review::model::ReviewEventBody::SuggestionAccepted {
+                    suggestion_id,
+                    resulting_hash,
+                    ..
+                } => {
+                    let resulting_hash = serialized_string_id(&resulting_hash)
+                        .expect("ContentHash always serializes to a string");
+                    verdicts.insert(
+                        suggestion_id,
+                        SuggestionVerdict {
+                            status: SuggestionVerdictStatus::Accepted,
+                            resulting_hash: Some(resulting_hash),
+                        },
+                    );
+                }
+                crate::review::model::ReviewEventBody::SuggestionRejected {
+                    suggestion_id, ..
+                } => {
+                    verdicts.insert(
+                        suggestion_id,
+                        SuggestionVerdict {
+                            status: SuggestionVerdictStatus::Rejected,
+                            resulting_hash: None,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let suggestions = creations
+            .into_iter()
+            .filter(|(_, author)| creator.is_none_or(|wanted| wanted == author))
+            .map(|(suggestion_id, _)| {
+                let verdict = verdicts
+                    .remove(&suggestion_id)
+                    .unwrap_or(SuggestionVerdict {
+                        status: SuggestionVerdictStatus::Pending,
+                        resulting_hash: None,
+                    });
+                (suggestion_id, verdict)
+            })
+            .collect();
+        Ok(RoomVerdicts { suggestions })
     }
 
     // ---------------------------------------------------------------------
@@ -779,6 +875,43 @@ mod tests {
         }
     }
 
+    fn suggestion_event(
+        event_id: &str,
+        room_id: &str,
+        author_id: &str,
+        body: ReviewEventBody,
+    ) -> ReviewEvent {
+        let mut event = sample_event(event_id, room_id);
+        event.meta.author_id = id(author_id);
+        event.body = body;
+        event
+    }
+
+    fn suggestion_created(suggestion_id: &str) -> ReviewEventBody {
+        ReviewEventBody::SuggestionCreated {
+            suggestion_id: suggestion_id.to_string(),
+            anchor: crate::review::model::Anchor {
+                v: 2,
+                file_id: id("file-1"),
+                snapshot_id: id("snap-1"),
+                base_hash: id("base-hash"),
+                position: crate::review::model::PositionAnchor {
+                    byte_range: [0, 1],
+                    line_range: [1, 1],
+                    pm_range: None,
+                },
+                quote: None,
+                block: None,
+                context: None,
+                structure: None,
+            },
+            operation: crate::review::model::SuggestionOperation::InsertAfter {
+                text: "new".to_string(),
+            },
+            note: None,
+        }
+    }
+
     fn sample_snapshot(snapshot_id: &str, file_id: &str) -> SnapshotNode {
         SnapshotNode {
             snapshot_id: id::<SnapshotId>(snapshot_id),
@@ -941,6 +1074,126 @@ mod tests {
             .expect("decode");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], event);
+    }
+
+    #[test]
+    fn verdicts_fold_pending_accepted_rejected_and_exact_resulting_hash() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-verdicts");
+        let events = [
+            suggestion_event(
+                "evt-c1",
+                "room-verdicts",
+                "agent-a",
+                suggestion_created("pending"),
+            ),
+            suggestion_event(
+                "evt-c2",
+                "room-verdicts",
+                "agent-a",
+                suggestion_created("accepted"),
+            ),
+            suggestion_event(
+                "evt-c3",
+                "room-verdicts",
+                "agent-a",
+                suggestion_created("rejected"),
+            ),
+            suggestion_event(
+                "evt-v2",
+                "room-verdicts",
+                "owner",
+                ReviewEventBody::SuggestionAccepted {
+                    suggestion_id: "accepted".to_string(),
+                    applied_revision_id: "rev-1".to_string(),
+                    resulting_hash: id("sha256-exact"),
+                },
+            ),
+            suggestion_event(
+                "evt-v3",
+                "room-verdicts",
+                "owner",
+                ReviewEventBody::SuggestionRejected {
+                    suggestion_id: "rejected".to_string(),
+                    reason: Some("no".to_string()),
+                },
+            ),
+        ];
+        for event in events {
+            store
+                .append_event(&room_id, &event)
+                .expect("append verdict event");
+        }
+
+        let report = store
+            .verdicts_for_room(&room_id, None)
+            .expect("fold verdicts");
+        assert_eq!(
+            report.suggestions["pending"].status,
+            SuggestionVerdictStatus::Pending
+        );
+        assert_eq!(
+            report.suggestions["accepted"].status,
+            SuggestionVerdictStatus::Accepted
+        );
+        assert_eq!(
+            report.suggestions["accepted"].resulting_hash.as_deref(),
+            Some("sha256-exact")
+        );
+        assert_eq!(
+            report.suggestions["rejected"].status,
+            SuggestionVerdictStatus::Rejected
+        );
+        assert_eq!(report.suggestions["rejected"].resulting_hash, None);
+    }
+
+    #[test]
+    fn verdicts_scope_by_creator_and_all_ignores_owner_verdict_author() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-verdicts-scope");
+        for event in [
+            suggestion_event(
+                "evt-a",
+                "room-verdicts-scope",
+                "agent-a",
+                suggestion_created("a"),
+            ),
+            suggestion_event(
+                "evt-b",
+                "room-verdicts-scope",
+                "agent-b",
+                suggestion_created("b"),
+            ),
+            suggestion_event(
+                "evt-owner",
+                "room-verdicts-scope",
+                "owner",
+                ReviewEventBody::SuggestionRejected {
+                    suggestion_id: "a".to_string(),
+                    reason: None,
+                },
+            ),
+        ] {
+            store.append_event(&room_id, &event).expect("append");
+        }
+
+        let agent_a: ParticipantId = id("agent-a");
+        let own = store
+            .verdicts_for_room(&room_id, Some(&agent_a))
+            .expect("own");
+        assert_eq!(
+            own.suggestions.keys().cloned().collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert_eq!(
+            own.suggestions["a"].status,
+            SuggestionVerdictStatus::Rejected
+        );
+        let all = store.verdicts_for_room(&room_id, None).expect("all");
+        assert_eq!(
+            all.suggestions.keys().cloned().collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[test]

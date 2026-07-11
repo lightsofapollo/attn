@@ -29,7 +29,7 @@ use crate::review::agent_identity::{
 };
 use crate::review::bootstrap::{
     BootstrapConfig, BootstrapError, Bootstrapper, DeviceIdentity, IDENTITY_FILENAME,
-    load_or_create_identity_in,
+    load_identity_from, load_or_create_identity_in,
 };
 use crate::review::store::ReviewStore;
 use std::io::{self, IsTerminal, Write};
@@ -118,6 +118,24 @@ pub enum ReviewSubcommand {
         ttl: Option<String>,
     },
 
+    /// Print suggestion verdicts derived from persisted review events across
+    /// every local room. JSON has the stable shape
+    /// `{"rooms":{"<room_id>":{"suggestions":{"<suggestion_id>":{"status":"pending|accepted|rejected","resulting_hash":"<hash>"}}}}}`.
+    /// `resulting_hash` is present only for accepted suggestions.
+    Verdicts {
+        /// Emit the documented machine-readable JSON report.
+        #[arg(long)]
+        json: bool,
+        /// Include suggestions from every creator, rather than only the
+        /// calling identity's suggestions.
+        #[arg(long)]
+        all: bool,
+        /// Scope to this registered agent identity instead of the daemon's
+        /// identity. Ignored for filtering with `--all`, but still validated.
+        #[arg(long, value_name = "NAME")]
+        as_agent: Option<String>,
+    },
+
     /// Run a **headless, long-lived** review participant — no window, no
     /// webview. The keystone for cross-topology testing (attn-8zd): a GUI-less
     /// peer that joins a room, *holds* the connection (WebRTC mesh + relay WS),
@@ -188,12 +206,44 @@ pub fn run(args: ReviewArgs) -> Result<()> {
         ReviewSubcommand::Share { path, mode, ttl } => {
             run_share_via_daemon(&path, &mode, ttl.as_deref())
         }
+        ReviewSubcommand::Verdicts {
+            json,
+            all,
+            as_agent,
+        } => run_verdicts(json, all, as_agent.as_deref()),
         ReviewSubcommand::Agent {
             share,
             mode,
             relay_url,
         } => run_agent(share.as_deref(), &mode, relay_url.as_deref()),
     }
+}
+
+fn run_verdicts(json: bool, all: bool, as_agent: Option<&str>) -> Result<()> {
+    if !json {
+        bail!("verdicts currently requires --json");
+    }
+    let base = runtime_dir().context("resolve runtime_dir for verdict identity")?;
+    let identity = load_verdict_identity(&base, as_agent)?;
+    let report = crate::daemon::send_review_verdicts(identity.typed_participant_id(), all)
+        .context("query persisted review verdicts from the running daemon")?;
+    println!("{}", verdicts_json(&report)?);
+    Ok(())
+}
+
+fn load_verdict_identity(base: &Path, as_agent: Option<&str>) -> Result<DeviceIdentity> {
+    match as_agent {
+        Some(name) => load_agent_in(base, name).with_context(|| {
+            format!("load agent {name:?} — run `attn review register-agent {name}` first")
+        }),
+        None => load_identity_from(base)
+            .context("load daemon identity")?
+            .context("no daemon identity exists yet; share or join a review room first"),
+    }
+}
+
+fn verdicts_json(report: &crate::review::store::VerdictsReport) -> Result<String> {
+    serde_json::to_string(report).context("serialize verdict report")
 }
 
 fn set_attn_home_for_review(home: &Path) -> Result<()> {
@@ -474,6 +524,94 @@ fn bootstrap_err_to_anyhow(err: BootstrapError) -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        command: TestCommand,
+    }
+
+    #[derive(Subcommand)]
+    enum TestCommand {
+        Review(ReviewArgs),
+    }
+
+    #[test]
+    fn verdicts_cli_parses_json_all_and_as_agent() {
+        let parsed = TestCli::try_parse_from([
+            "attn",
+            "review",
+            "verdicts",
+            "--json",
+            "--all",
+            "--as-agent",
+            "rufus",
+        ])
+        .expect("parse verdicts CLI");
+        match parsed.command {
+            TestCommand::Review(ReviewArgs {
+                command:
+                    ReviewSubcommand::Verdicts {
+                        json,
+                        all,
+                        as_agent,
+                    },
+                ..
+            }) => {
+                assert!(json);
+                assert!(all);
+                assert_eq!(as_agent.as_deref(), Some("rufus"));
+            }
+            _ => panic!("expected review verdicts"),
+        }
+    }
+
+    #[test]
+    fn verdicts_json_output_is_exact_and_omits_absent_hash() {
+        use crate::review::store::{
+            RoomVerdicts, SuggestionVerdict, SuggestionVerdictStatus, VerdictsReport,
+        };
+        let report = VerdictsReport {
+            rooms: [(
+                "room-a".to_string(),
+                RoomVerdicts {
+                    suggestions: [
+                        (
+                            "accepted".to_string(),
+                            SuggestionVerdict {
+                                status: SuggestionVerdictStatus::Accepted,
+                                resulting_hash: Some("hash-exact".to_string()),
+                            },
+                        ),
+                        (
+                            "pending".to_string(),
+                            SuggestionVerdict {
+                                status: SuggestionVerdictStatus::Pending,
+                                resulting_hash: None,
+                            },
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(
+            verdicts_json(&report).expect("serialize"),
+            r#"{"rooms":{"room-a":{"suggestions":{"accepted":{"status":"accepted","resulting_hash":"hash-exact"},"pending":{"status":"pending"}}}}}"#
+        );
+    }
+
+    #[test]
+    fn verdicts_missing_daemon_identity_does_not_create_one() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let error = load_verdict_identity(temp.path(), None).expect_err("identity must be absent");
+        assert!(error.to_string().contains("no daemon identity exists yet"));
+        assert!(!temp.path().join(IDENTITY_FILENAME).exists());
+    }
 
     #[test]
     fn join_with_as_agent_takes_the_headless_agent_path() {

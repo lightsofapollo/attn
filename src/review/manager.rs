@@ -413,6 +413,25 @@ impl std::fmt::Debug for RoomSignalContext {
 }
 
 impl ReviewManager {
+    /// Query current suggestion verdicts across every persisted room.
+    ///
+    /// `creator = Some(..)` limits the report to suggestions authored by that
+    /// participant. `None` is the explicit `--all` view. This is synchronous
+    /// because it only folds local append-only JSONL logs.
+    pub fn verdicts(
+        &self,
+        creator: Option<&ParticipantId>,
+    ) -> anyhow::Result<crate::review::store::VerdictsReport> {
+        let mut rooms = std::collections::BTreeMap::new();
+        for room_id in self.store.list_rooms()? {
+            rooms.insert(
+                room_id.as_str().to_string(),
+                self.store.verdicts_for_room(&room_id, creator)?,
+            );
+        }
+        Ok(crate::review::store::VerdictsReport { rooms })
+    }
+
     /// Construct a new manager. The `update_tx` closure is invoked from
     /// `submit` (synchronously today; future async work may spawn). It's
     /// expected to forward into the tao event loop via
@@ -3664,6 +3683,21 @@ mod tests {
         // Smoke test: construction must succeed and the manager must accept
         // an empty command flow without panicking.
         let (_mgr, _rx, _tmp) = make_manager();
+    }
+
+    #[test]
+    fn verdicts_aggregate_multiple_rooms_with_deterministic_serialization() {
+        let (mgr, _rx, _tmp) = make_manager();
+        for room in ["room-z", "room-a"] {
+            std::fs::create_dir_all(mgr.store.root().join("rooms").join(room))
+                .expect("create persisted room directory");
+        }
+
+        let report = mgr.verdicts(None).expect("aggregate verdicts");
+        assert_eq!(
+            serde_json::to_string(&report).expect("serialize"),
+            r#"{"rooms":{"room-a":{"suggestions":{}},"room-z":{"suggestions":{}}}}"#
+        );
     }
 
     #[test]

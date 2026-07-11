@@ -68,6 +68,7 @@ export interface Scenario {
 
 export type Step =
   | V3AdmissionMatrixStep
+  | DurableShareMatrixStep
   | CreateRoomStep
   | RecreateRoomStep
   | RegisterDeviceStep
@@ -99,6 +100,10 @@ interface BaseStep {
 
 interface V3AdmissionMatrixStep extends BaseStep {
   action: "v3AdmissionMatrix";
+}
+
+interface DurableShareMatrixStep extends BaseStep {
+  action: "durableShareMatrix";
 }
 
 interface CreateRoomStep extends BaseStep {
@@ -886,6 +891,66 @@ async function actV3AdmissionMatrix(scenarioId: string, stepIdx: number): Promis
     body,
   });
   await assertResponse(accepted, { status: 200 }, `${scenarioId} step #${stepIdx} v3 write`);
+}
+
+async function actDurableShareMatrix(scenarioId: string, stepIdx: number): Promise<void> {
+  const shareId = uniqueRoomId(scenarioId, "share");
+  const url = `${URL_BASE}/v3/shares/${shareId}`;
+  const owner = await generateEd25519Keypair();
+  const readKey = makeAdmissionKey(0x41);
+  const writeKey = makeAdmissionKey(0x82);
+  const body = JSON.stringify({
+    v: 3,
+    ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+    readAdmissionKey: base64UrlEncode(readKey),
+    writeAdmissionKey: base64UrlEncode(writeKey),
+    epoch: 0,
+    snapshots: [],
+    placeholders: [],
+  });
+  const created = await SELF.fetch(url, { method: "POST", body, headers: {
+    "Content-Type": "application/json",
+    "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "POST", url, body, privateKey: owner.privateKey }),
+    "Attn-PoW": await createPowHeader(shareId, owner.publicKeyBytes, `/v3/shares/${shareId}`),
+  } });
+  const createdBody = await assertResponse(created, { status: 201 }, `${scenarioId} step #${stepIdx} share create`) as Record<string, unknown>;
+  expect(createdBody.readAdmissionKey).toBeUndefined();
+  expect(createdBody.writeAdmissionKey).toBeUndefined();
+
+  const scoped = async (scope: "read" | "write", key: Uint8Array, method: string, target: string, requestBody?: string): Promise<string> => {
+    const canonical = await canonicalRequest(new Request(target, { method, body: requestBody }), new URL(target).pathname);
+    const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    return `v3.${scope}.${base64UrlEncode(new Uint8Array(await crypto.subtle.sign("HMAC", cryptoKey, canonical)))}`;
+  };
+  const read = await SELF.fetch(url, { headers: { "Attn-Admission": await scoped("read", readKey, "GET", url) } });
+  await assertResponse(read, { status: 200 }, `${scenarioId} step #${stepIdx} share read`);
+
+  const mailboxUrl = `${url}/mailbox`;
+  const mailboxBody = JSON.stringify({ deviceId: "corpus-writer", items: [{ envelopeId: "corpus-envelope", ciphertext: "opaque" }] });
+  const enqueue = async (rand: string) => SELF.fetch(mailboxUrl, { method: "POST", body: mailboxBody, headers: {
+    "Content-Type": "application/json",
+    "Attn-Admission": await scoped("write", writeKey, "POST", mailboxUrl, mailboxBody),
+    "Attn-PoW": await mintPowForTests({ roomId: shareId, deviceId: "corpus-writer", method: "POST", path: `/v3/shares/${shareId}/mailbox`, difficulty: 12, expiresAt: Date.now() + 300_000, rand }),
+  } });
+  await assertResponse(await enqueue(`${FIXED_POW_RAND}s`), { status: 201 }, `${scenarioId} step #${stepIdx} mailbox enqueue`);
+  await assertResponse(await enqueue(`${FIXED_POW_RAND}r`), { status: 200 }, `${scenarioId} step #${stepIdx} mailbox retry`);
+
+  const mailboxRead = await SELF.fetch(mailboxUrl, { headers: { "Attn-Admission": await scoped("read", readKey, "GET", mailboxUrl) } });
+  const mailbox = await assertResponse(mailboxRead, { status: 200 }, `${scenarioId} step #${stepIdx} mailbox read`) as { items: unknown[] };
+  expect(mailbox.items).toHaveLength(1);
+
+  const revokePow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "DELETE", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}d` });
+  const revoked = await SELF.fetch(url, { method: "DELETE", headers: {
+    "Attn-Device-Id": shareId,
+    "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "DELETE", url, privateKey: owner.privateKey }),
+    "Attn-PoW": revokePow,
+  } });
+  await assertResponse(revoked, { status: 204 }, `${scenarioId} step #${stepIdx} share revoke`);
+  await assertResponse(
+    await SELF.fetch(url, { headers: { "Attn-Admission": await scoped("read", readKey, "GET", url) } }),
+    { status: 404, errorCode: "ATTN_SHARE_NOT_FOUND" },
+    `${scenarioId} step #${stepIdx} share revoked read`,
+  );
 }
 
 async function actRecreateRoom(
@@ -1740,6 +1805,9 @@ export async function runScenario(scenario: Scenario): Promise<void> {
       const step = scenario.steps[i];
       if (step === undefined) continue;
       switch (step.action) {
+        case "durableShareMatrix":
+          await actDurableShareMatrix(scenario.id, i);
+          break;
         case "v3AdmissionMatrix":
           await actV3AdmissionMatrix(scenario.id, i);
           break;

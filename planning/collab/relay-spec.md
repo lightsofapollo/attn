@@ -906,3 +906,30 @@ Minimum acceptance suite before any production deploy:
 ## Decisions Reference
 
 All design decisions for this relay spec are tracked in [`amendments.md`](./amendments.md) §Decisions Locked. The values pinned here (PoW difficulty 16, batch cap 32, WS-only, 24h+idle-1h TTL model, R2 7-day safety net, `deleteEventsAfterOwnerAck` default false) come from there. No outstanding questions block implementation.
+# Durable shares (v3)
+
+`/v3/shares/:shareId` is a small long-lived indirection, separate from room
+TTL and room storage. A share stores the immutable owner signing key and
+read/write admission keys, an optional current room pointer, encrypted snapshot
+references, and unresolved-file placeholders. `POST` creates or owner-touches
+the record; every successful touch renews `expiresAt` to 90 days. Creation and
+updates require `Attn-Owner-Signature` over the canonical request plus
+`Attn-PoW`. `GET` requires exactly `v3.read.<MAC>`. `DELETE` requires the owner
+signature and PoW and atomically deletes the pointer, placeholders, mailbox,
+and renewal metadata. Public responses never return either stored admission
+key. `epoch` is a non-decreasing safe integer; `currentRoomId: null` clears a
+stale pointer. Manifests are capped at 64 snapshot refs, 64 placeholders, and
+256 KiB encoded metadata.
+
+`POST /v3/shares/:shareId/mailbox` accepts 1–32 opaque encrypted payloads with
+`v3.write.<MAC>` and PoW. The DO assigns strictly increasing `seq` values and
+caps retained data at 500 items / 25 MiB. `GET .../mailbox?after=N` requires
+read admission and returns at most 100 items ordered by `seq`; payloads remain
+opaque to the relay. Each payload carries an `envelopeId`; retries are
+idempotent for 24 hours and return the original per-envelope sequence;
+conflicting ciphertext under the same ID returns
+`409 ATTN_ENVELOPE_ID_CONFLICT`. After durably importing a page,
+the owner issues owner-signed, PoW-protected
+`DELETE .../mailbox?through=<seq>` to reclaim exactly that prefix. Share
+alarms delete all state once the owner-renewed 90-day expiry passes. Room v2/v3
+endpoints and their shorter lifetimes are unchanged.

@@ -15,6 +15,7 @@ import {
 } from "./browser-origin";
 import { WorkerEdgeRateLimit, type RateLimitResult } from "./rate-limit";
 import { RoomDO } from "./room-do";
+import { ShareDO } from "./share-do";
 import { INTERNAL_QUOTA_SOURCE_HEADER, QuotaDO } from "./quota-do";
 import type { Env } from "./env";
 import {
@@ -23,7 +24,7 @@ import {
   ROOM_ID_MAX_CHARS,
 } from "./opaque-key";
 
-export { QuotaDO, RoomDO };
+export { QuotaDO, RoomDO, ShareDO };
 
 /**
  * Per-Worker-isolate rate limiter. Persists for the lifetime of the
@@ -86,7 +87,7 @@ const INTERNAL_ALLOW_BROWSER_HEADER = "X-Attn-Allow-Browser";
  * relay-spec list (Content-Type for JSON bodies, the three Attn-* protocol
  * headers).
  */
-const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW";
+const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id";
 
 /** Methods the relay exposes to browsers — everything in the v2 HTTP surface. */
 const CORS_ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS";
@@ -211,10 +212,15 @@ const ROOM_SOCKET_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/socket\/?$/;
  * handler, verified here on every request.
  */
 const ROOM_BLOB_OBJECT_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/blobs\/([^/]+)\/?$/;
+const SHARE_ROUTE_RE = /^\/v3\/shares\/([^/]+)(?:\/.*)?$/;
+const SHARE_CREATE_RE = /^\/v3\/shares\/([^/]+)\/?$/;
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    const shareMatch = url.pathname.match(SHARE_ROUTE_RE);
+    if (shareMatch?.[1] && !isProtocolId(shareMatch[1], ROOM_ID_MAX_CHARS)) return identifierError();
 
     // Reject unsafe room identifiers before quota attribution, edge-rate
     // counters, Durable Object name allocation, or any other durable side
@@ -300,6 +306,13 @@ export default {
     // without CORS headers. Browsers only legitimately preflight room routes;
     // a 204 here is just defensive politeness. Room-route OPTIONS is dispatched
     // to the DO below so the response can be conditioned on policy.allowBrowser.
+    if (request.method === "OPTIONS" && shareMatch?.[1]) {
+      return corsMiddleware(
+        request,
+        env,
+        new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } }),
+      );
+    }
     if (request.method === "OPTIONS" && !ROOM_ROUTE_RE.test(url.pathname)) {
       return buildPreflightForNonRoomRoute();
     }
@@ -331,11 +344,22 @@ export default {
     // always injects CF-Connecting-IP at the edge (a client can't strip it), so
     // in production this is never "unknown". Lumping every anonymous dev/test
     // caller into one create bucket would be a counterproductive false-positive.
-    if (ip !== "unknown" && request.method === "POST" && ROOM_CREATE_RE.test(url.pathname)) {
+    if (
+      ip !== "unknown"
+      && request.method === "POST"
+      && (ROOM_CREATE_RE.test(url.pathname) || SHARE_CREATE_RE.test(url.pathname))
+    ) {
       const createResult = edgeRateLimit.checkCreate(ip);
       if (!createResult.ok) {
         return rateLimitedResponse(createResult);
       }
+    }
+
+    if (shareMatch?.[1]) {
+      const response = await env.RELAY_SHARES
+        .get(env.RELAY_SHARES.idFromName(shareMatch[1]))
+        .fetch(request);
+      return corsMiddleware(request, env, response);
     }
 
     // WebSocket upgrade for /v2/rooms/:roomId/socket. The DO performs admission

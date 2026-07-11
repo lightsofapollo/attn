@@ -29,6 +29,10 @@ class_name = "RoomDO"
 name = "RELAY_QUOTAS"
 class_name = "QuotaDO"
 
+[[durable_objects.bindings]]
+name = "RELAY_SHARES"
+class_name = "ShareDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
@@ -36,6 +40,10 @@ new_sqlite_classes = ["RoomDO"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["QuotaDO"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["ShareDO"]
 
 [[r2_buckets]]
 binding = "RELAY_BLOBS"
@@ -119,6 +127,10 @@ class_name = "RoomDO"
 name = "RELAY_QUOTAS"
 class_name = "QuotaDO"
 
+[[env.staging.durable_objects.bindings]]
+name = "RELAY_SHARES"
+class_name = "ShareDO"
+
 [[env.staging.migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
@@ -126,6 +138,10 @@ new_sqlite_classes = ["RoomDO"]
 [[env.staging.migrations]]
 tag = "v2"
 new_sqlite_classes = ["QuotaDO"]
+
+[[env.staging.migrations]]
+tag = "v3"
+new_sqlite_classes = ["ShareDO"]
 
 [[env.staging.r2_buckets]]
 binding = "RELAY_BLOBS"

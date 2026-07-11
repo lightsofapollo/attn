@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use tao::event_loop::EventLoopProxy;
 
 use crate::review::manager::{ReviewCommand, ReviewManager, VerdictWaitOutcome};
+use crate::review::share::ParsedShareInvite;
 use crate::watcher::UserEvent;
 
 /// Structured interaction actions for E2E testing (debug builds only).
@@ -758,6 +759,13 @@ pub fn dispatch_review_join(invite: &str, review_manager: Option<&Arc<ReviewMana
             invite: invite.to_string(),
         },
     );
+}
+
+/// Receive a native durable-share deep link at the daemon boundary without
+/// logging its fragment capability. The lifecycle resolver consumes this
+/// intent once persisted share state is wired by Workstream A.
+pub fn dispatch_share_open_intent(invite: &ParsedShareInvite) {
+    tracing::info!(share_id = %invite.share_id, "durable share open intent routed to daemon");
 }
 
 /// Start listening on the unix socket. Spawns a thread that accepts connections

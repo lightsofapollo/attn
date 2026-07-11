@@ -187,13 +187,13 @@ describe("CORS — OPTIONS preflight", () => {
       headers: {
         Origin: "https://attn.sh",
         "Access-Control-Request-Method": "POST",
-        "Access-Control-Request-Headers": "Content-Type, Attn-Admission, Attn-PoW",
+        "Access-Control-Request-Headers": "Content-Type, Attn-Admission, Attn-PoW, Attn-Device-Id",
       },
     });
     expect(res.status).toBe(204);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://attn.sh");
     expect(res.headers.get("Access-Control-Allow-Headers")).toBe(
-      "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW",
+      "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id",
     );
     expect(res.headers.get("Access-Control-Allow-Methods")).toBe(
       "GET, POST, DELETE, OPTIONS",

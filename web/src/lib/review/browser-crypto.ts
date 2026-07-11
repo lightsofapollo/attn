@@ -216,6 +216,7 @@ export const INFO_SIGNALING_V3 = new TextEncoder().encode('attn signaling encryp
 export const INFO_READ_ADMISSION_V3 = new TextEncoder().encode('attn read admission v3');
 export const INFO_WRITE_ADMISSION_V3 = new TextEncoder().encode('attn write admission v3');
 export const ROOM_ID_PREFIX_V3 = new TextEncoder().encode('attn room v3');
+export const INFO_SHARE_ROOM_V3 = new TextEncoder().encode('attn share room v3');
 
 export interface RoomKeys {
   /** HKDF root key — used only to derive subkeys. Never used directly. */
@@ -284,6 +285,26 @@ export function deriveRoomKeyTreeV3(roomSecret: Uint8Array): RoomKeyTreeV3 {
     readKeys: deriveReadKeysV3(readCapabilityKey),
     writeAdmissionKey: hkdfExpand32(rootKey, INFO_WRITE_ADMISSION_V3),
   };
+}
+
+/**
+ * Derive one durable share epoch's room secret. The epoch is encoded as an
+ * unsigned uint64be suffix on the fixed HKDF info string. JavaScript callers
+ * use safe integers because the relay record carries the epoch as JSON.
+ */
+export function deriveShareEpochRoomSecret(
+  shareSecret: Uint8Array,
+  epoch: number,
+): Uint8Array {
+  requireKey32(shareSecret, 'shareSecret');
+  if (!Number.isSafeInteger(epoch) || epoch < 0) {
+    throw new Error('epoch must be a non-negative safe integer');
+  }
+  const info = new Uint8Array(INFO_SHARE_ROOM_V3.length + 8);
+  info.set(INFO_SHARE_ROOM_V3, 0);
+  const view = new DataView(info.buffer, info.byteOffset, info.byteLength);
+  view.setBigUint64(INFO_SHARE_ROOM_V3.length, BigInt(epoch), false);
+  return hkdfExpand32(shareSecret, info);
 }
 
 export function deriveRoomId(roomSecret: Uint8Array): string {

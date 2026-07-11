@@ -580,6 +580,17 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                     .unwrap();
             }
 
+            // Keep durable-share capabilities on their own reserved route so
+            // they can never fall through to local file serving.
+            if let Some(invite) = parse_share_invite_uri(&uri) {
+                daemon::dispatch_share_open_intent(&invite);
+                return wry::http::Response::builder()
+                    .status(200)
+                    .header("Content-Type", "text/html; charset=utf-8")
+                    .body(SHARE_OPEN_ACK_HTML.as_bytes().to_vec().into())
+                    .unwrap();
+            }
+
             // `attn://localhost/review/...` is reserved (collides with the
             // invite path-prefix convention). Refuse explicitly so a
             // misconfigured client cannot smuggle a file-serve request that
@@ -1003,6 +1014,11 @@ fn run_daemon(cli: Cli, path: PathBuf) -> Result<()> {
                 for url in &urls {
                     if let Some(invite) = parse_review_invite(url.as_str()) {
                         daemon::dispatch_review_join(&invite, opened_review_manager.as_ref());
+                        platform::activate_app();
+                        window.set_visible(true);
+                        window.set_focus();
+                    } else if let Some(invite) = parse_share_invite_uri(url.as_str()) {
+                        daemon::dispatch_share_open_intent(&invite);
                         platform::activate_app();
                         window.set_visible(true);
                         window.set_focus();
@@ -1659,6 +1675,7 @@ if (!window.__attn_js_bridge_installed__) {
 /// page makes the route easy to confirm via `--eval` or devtools during
 /// development.
 const REVIEW_JOIN_ACK_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>Joining review</title><p>Joining review room…</p>";
+const SHARE_OPEN_ACK_HTML: &str = "<!doctype html><meta charset=\"utf-8\"><title>Opening share</title><p>Opening durable share…</p>";
 
 /// Parse an `attn://review/...` invite URI.
 ///
@@ -1681,6 +1698,15 @@ fn parse_review_invite(uri: &str) -> Option<String> {
         None | Some('/') | Some('#') | Some('?') => Some(uri.to_string()),
         _ => None,
     }
+}
+
+/// Detect the reserved native durable-share route while leaving strict ID and
+/// fragment validation to `review::share::parse_share_invite`.
+fn parse_share_invite_uri(uri: &str) -> Option<review::share::ParsedShareInvite> {
+    if !uri.starts_with("attn://share/") {
+        return None;
+    }
+    review::share::parse_share_invite(uri).ok()
 }
 
 /// True if the URI targets the reserved `attn://localhost/review/...` path
@@ -1805,6 +1831,17 @@ mod tests {
         assert_eq!(parse_review_invite("attn://reviewable/abc"), None);
         assert_eq!(parse_review_invite("attn://review-foo/abc"), None);
         assert_eq!(parse_review_invite("attn://reviews/abc"), None);
+    }
+
+    #[test]
+    fn parse_share_invite_routes_exact_prefix_and_preserves_fragment() {
+        let uri =
+            "attn://share/AAECAwQFBgcICQoLDA0ODw#key=QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI";
+        let invite = parse_share_invite_uri(uri).expect("valid invite");
+        assert_eq!(invite.share_id, "AAECAwQFBgcICQoLDA0ODw");
+        assert!(parse_share_invite_uri("attn://shareable/id#key=x").is_none());
+        assert!(parse_share_invite_uri("https://attn.sh/s/id#key=x").is_none());
+        assert!(parse_share_invite_uri("attn://share/AAECAwQFBgcICQoLDA0ODw").is_none());
     }
 
     #[test]

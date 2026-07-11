@@ -1973,6 +1973,16 @@
       ]
     },
     {
+      "id": "durable-share-016",
+      "name": "Durable share — create, scoped read, idempotent mailbox, revoke",
+      "spec": "relay-spec.md §Durable shares (v3)",
+      "tags": ["v3", "share", "mailbox", "revocation"],
+      "requires": ["durable-share-matrix"],
+      "steps": [
+        { "action": "durableShareMatrix" }
+      ]
+    },
+    {
       "id": "longsession-014b",
       "name": "longSession=false with far-future expiresAt clamps to 24h cap",
       "spec": "relay-spec.md \u00a7Test Plan #14",

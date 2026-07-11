@@ -47,6 +47,9 @@ pub const INFO_SIGNALING_V3: &[u8] = b"attn signaling encryption v3";
 pub const INFO_READ_ADMISSION_V3: &[u8] = b"attn read admission v3";
 pub const INFO_WRITE_ADMISSION_V3: &[u8] = b"attn write admission v3";
 pub const ROOM_ID_PREFIX_V3: &[u8] = b"attn room v3";
+/// Fixed prefix for durable-share epoch room secrets. The canonical HKDF
+/// `info` is this UTF-8 prefix followed by the epoch as unsigned uint64be.
+pub const INFO_SHARE_ROOM_V3: &[u8] = b"attn share room v3";
 
 // ---------------------------------------------------------------------------
 // DerivedKey — 32-byte symmetric key, zeroizes on drop
@@ -198,6 +201,17 @@ pub fn derive_room_key_tree_v3(room_secret: &[u8; 32]) -> RoomKeyTreeV3 {
         read_keys,
         write_admission_key,
     }
+}
+
+/// Derive the v3 room secret for one durable-share epoch.
+///
+/// `roomSecret_n = HKDF-SHA-256(shareSecret, empty salt,
+/// info = "attn share room v3" || uint64be(epoch), L=32)`.
+pub fn derive_share_epoch_room_secret(share_secret: &[u8; 32], epoch: u64) -> DerivedKey {
+    let mut info = Vec::with_capacity(INFO_SHARE_ROOM_V3.len() + 8);
+    info.extend_from_slice(INFO_SHARE_ROOM_V3);
+    info.extend_from_slice(&epoch.to_be_bytes());
+    hkdf_expand_32(share_secret, &info)
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +583,40 @@ mod tests {
             assert_eq!(
                 read_only.snapshot_key.as_bytes(),
                 tree.read_keys.snapshot_key.as_bytes()
+            );
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ShareEpochVector {
+        name: String,
+        share_secret: String,
+        epoch: u64,
+        room_secret: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ShareEpochCorpus {
+        version: u8,
+        vectors: Vec<ShareEpochVector>,
+    }
+
+    #[test]
+    fn share_epoch_corpus_matches_canonical_uint64be_schedule() {
+        let corpus: ShareEpochCorpus = serde_json::from_str(include_str!(
+            "../../../planning/collab/test-vectors/share-epoch-kdf.json"
+        ))
+        .expect("share epoch corpus");
+        assert_eq!(corpus.version, 1);
+        assert_eq!(corpus.vectors.len(), 4);
+        for vector in corpus.vectors {
+            let secret = decode_secret(&vector.share_secret);
+            assert_eq!(
+                b64(derive_share_epoch_room_secret(&secret, vector.epoch).as_bytes()),
+                vector.room_secret,
+                "{}",
+                vector.name
             );
         }
     }

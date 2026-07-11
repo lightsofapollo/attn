@@ -105,6 +105,38 @@ carry the same write capability, and their signed registration grant plus
 import-side policy enforcement lands separately. The relay-enforced boundary
 in this key split is view (read only) versus writable.
 
+### Durable Share Epochs
+
+A durable share has one 32-byte `shareSecret` carried only in its URL fragment.
+Each plaintext monotonic epoch derives a fresh ordinary v3 room secret:
+
+```text
+epochInfo_n  := UTF-8("attn share room v3") || uint64be(epoch_n)
+roomSecret_n := HKDF-SHA-256(IKM=shareSecret, salt=empty, info=epochInfo_n, L=32)
+```
+
+The uint64 encoding is unsigned, fixed-width, and network byte order. It is
+part of HKDF `info`, not salt. The derived `roomSecret_n` feeds the complete v3
+split-capability tree unchanged, so successive rooms are unlinkable without
+the share capability while Rust and browser owners derive identical keys.
+Browser JSON consumers restrict epochs to non-negative safe integers.
+
+Canonical durable URL forms are:
+
+```text
+attn://share/<shareId>#key=<base64url(shareSecret)>
+https://attn.sh/s/<shareId>#key=<base64url(shareSecret)>
+```
+
+The initial implementation uses a random 16-byte, unpadded-base64url
+`shareId`. The fragment contains exactly one unpadded 32-byte `key`; it is
+stripped immediately in browsers and never reaches the relay.
+Parsers accept only these exact origins and paths: no credentials, explicit
+ports, query strings, extra path segments, alternate HTTPS hosts, or fragment
+fields are permitted. Deployment-specific browser origins require an explicit
+future trusted-origin parser API; the generic parser never trusts arbitrary
+HTTPS origins.
+
 ## Invite URLs
 
 Native:

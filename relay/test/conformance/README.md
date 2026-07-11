@@ -6,6 +6,10 @@
 > write success, and protocol mismatch. The Rust corpus interpreter does not
 > yet have v3 room/key/scope vocabulary; `requires: ["v3-admission-matrix"]`
 > records that explicit harness debt until the Rust v3 client lands.
+> Durable shares likewise use the self-contained semantic corpus action
+> `durableShareMatrix` until the native share client lands. It locks create,
+> public redaction, scoped read, mailbox retry idempotency, and revocation to
+> the same executable corpus rather than leaving the new surface test-only.
 
 Cross-language conformance suite for the attn relay. The same `cases.json`
 is consumed by:

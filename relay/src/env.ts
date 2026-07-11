@@ -2,6 +2,7 @@
 
 import type { RoomDO } from "./room-do";
 import type { QuotaDO } from "./quota-do";
+import type { ShareDO } from "./share-do";
 
 declare global {
   /** Optional build SHA injected at deploy time. */
@@ -15,6 +16,7 @@ export interface Env {
 
   // One account-wide quota coordinator, addressed as idFromName("quota:v1").
   RELAY_QUOTAS: DurableObjectNamespace<QuotaDO>;
+  RELAY_SHARES: DurableObjectNamespace<ShareDO>;
 
   // R2 bucket for blob spillover (encrypted snapshots > inline cap).
   RELAY_BLOBS: R2Bucket;

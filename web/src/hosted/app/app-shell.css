@@ -232,10 +232,15 @@ a.workspace-row:hover {
 /* ————— editor ————— */
 
 .editor-shell {
-  min-height: 100dvh;
+  height: 100dvh;
   display: grid;
   grid-template-rows: 58px 1fr;
   background: var(--paper-deep);
+}
+
+.editor-shell .editor-grid {
+  min-height: 0;
+  overflow: hidden;
 }
 
 .editor-top {
@@ -446,8 +451,21 @@ a.workspace-row:hover {
     text-align: left;
   }
 
+  .editor-shell {
+    height: auto;
+    min-height: 100dvh;
+  }
+
+  .editor-shell .editor-grid {
+    overflow: visible;
+  }
+
   .editor-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .editor-canvas {
+    overflow: visible;
   }
 
   .file-rail,
@@ -468,7 +486,8 @@ a.workspace-row:hover {
   }
 
   .writing-sheet p,
-  .writing-sheet li {
+  .writing-sheet li,
+  .writing-sheet .plain-md {
     font-size: 1.15rem;
     line-height: 1.7;
   }
@@ -908,4 +927,58 @@ a.workspace-row:hover {
   height: auto;
   margin-top: 1.4rem;
   border: 1px solid var(--rule);
+}
+
+/* ————— iOS reader (attn-7xl.3.7) ————— */
+
+.asset-image-button {
+  display: block;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: zoom-in;
+  max-width: 100%;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.86);
+  /* Native pinch zoom stays available on the image. */
+  touch-action: pinch-zoom;
+}
+
+.lightbox img {
+  max-width: 100vw;
+  max-height: 100dvh;
+  object-fit: contain;
+}
+
+.lightbox-close {
+  position: fixed;
+  top: calc(0.8rem + env(safe-area-inset-top, 0px));
+  right: 0.8rem;
+}
+
+.dock-link {
+  display: grid;
+  place-items: center;
+  min-height: 56px;
+  color: var(--ink);
+  font: 650 0.78rem var(--sans);
+}
+
+/* Wide content scrolls inside its own frame; the page never pans. */
+.writing-sheet table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.writing-sheet img {
+  max-width: 100%;
+  height: auto;
 }

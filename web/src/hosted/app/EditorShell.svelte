@@ -77,6 +77,66 @@
   let assetInput = $state<HTMLInputElement | undefined>();
   let previewUrl = $state<string | null>(null);
 
+  // ————— iOS reader behaviors (attn-7xl.3.7) —————
+  let canvasEl = $state<HTMLElement | undefined>();
+  let lightboxOpen = $state(false);
+  let lightboxTrigger: HTMLElement | null = null;
+
+  // Per-workspace/file reading position: best-effort, explicit anchors win.
+  const readPositionKey = $derived(
+    `attn-read-pos:${workspace.id}:${activeEntry?.path ?? ''}`,
+  );
+
+  $effect(() => {
+    const canvas = canvasEl;
+    const key = readPositionKey;
+    if (!canvas) return;
+    // Mobile scrolls the page (iOS address-bar friendly); desktop scrolls the
+    // canvas inside the pinned three-column layout.
+    const mobile = window.matchMedia('(max-width: 900px)').matches;
+    const scroller = mobile ? (document.scrollingElement as HTMLElement) : canvas;
+    const listenTarget: EventTarget = mobile ? window : canvas;
+    if (window.location.hash.length <= 1) {
+      try {
+        const saved = Number(sessionStorage.getItem(key) ?? '');
+        if (Number.isFinite(saved) && saved > 0) scroller.scrollTop = saved;
+      } catch {
+        // Session storage may be blocked; reading position is best-effort.
+      }
+    }
+    let ticking = false;
+    const onScroll = (): void => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        try {
+          sessionStorage.setItem(key, String(Math.round(scroller.scrollTop)));
+        } catch {
+          // best-effort
+        }
+      });
+    };
+    listenTarget.addEventListener('scroll', onScroll, { passive: true });
+    return () => listenTarget.removeEventListener('scroll', onScroll);
+  });
+
+  let lightboxClose = $state<HTMLButtonElement | undefined>();
+
+  $effect(() => {
+    if (lightboxOpen) lightboxClose?.focus();
+  });
+
+  function openLightbox(event: MouseEvent): void {
+    lightboxTrigger = event.currentTarget as HTMLElement;
+    lightboxOpen = true;
+  }
+
+  function closeLightbox(): void {
+    lightboxOpen = false;
+    lightboxTrigger?.focus();
+  }
+
   // Inline preview: decrypt safe raster bytes into a short-lived blob URL.
   $effect(() => {
     const entry = activeEntry;
@@ -452,7 +512,11 @@
       {/if}
     </aside>
 
-    <main class="editor-canvas">
+    <!-- Scrollable region must be keyboard-reachable (axe
+         scrollable-region-focusable); the region role makes the tabindex
+         legitimate for assistive tech. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <main class="editor-canvas" bind:this={canvasEl} tabindex="0" aria-label="Document">
       {#if health.mode !== 'persistent' && health.mode !== 'best-effort'}
         <div style="max-width: 760px; margin: 0 auto 1.5rem;">
           <DegradedBanner mode={health.mode} />
@@ -485,7 +549,14 @@
           </div>
           <h1>{activeEntry.path}</h1>
           {#if activeEntry.presentation === 'preview' && previewUrl}
-            <img class="asset-image" src={previewUrl} alt={activeEntry.path} />
+            <button
+              class="asset-image-button"
+              type="button"
+              aria-label={`View ${activeEntry.path} full screen`}
+              onclick={openLightbox}
+            >
+              <img class="asset-image" src={previewUrl} alt={activeEntry.path} />
+            </button>
           {:else}
             <div class="asset-preview">
               <strong>{activeEntry.path}</strong>
@@ -540,14 +611,38 @@
     </button>
     {#if editing}
       <button type="button" onclick={() => void exitEdit()}>Done</button>
+    {:else if canEdit}
+      <button type="button" disabled={editorLoading} onclick={() => void enterEdit()}>Edit</button>
     {:else}
-      <button type="button" disabled={!canEdit || editorLoading} onclick={() => void enterEdit()}>
-        Edit
-      </button>
+      <!-- Editing is unavailable here; the reader stays first-class and the
+           native app is the honest handoff (ios-ux.md §6). -->
+      <a class="dock-link" href="/#native" data-action="open-native">Open native</a>
     {/if}
     <button type="button" onclick={() => (shareOpen = true)}>Share</button>
   </nav>
 </div>
+
+{#if lightboxOpen && previewUrl && activeEntry}
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div
+    class="lightbox"
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    aria-label={`${activeEntry.path} full screen`}
+    onclick={(event) => {
+      if (event.target === event.currentTarget) closeLightbox();
+    }}
+    onkeydown={(event) => {
+      if (event.key === 'Escape') closeLightbox();
+    }}
+  >
+    <img src={previewUrl} alt={activeEntry.path} />
+    <button class="button lightbox-close" type="button" bind:this={lightboxClose} onclick={closeLightbox}>
+      Close
+    </button>
+  </div>
+{/if}
 
 {#if shareOpen}
   <ShareSheet

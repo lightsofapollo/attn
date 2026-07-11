@@ -6,7 +6,7 @@ import { defineConfig, devices } from '@playwright/test';
 // Run via `npm run test:e2e:storage`.
 export default defineConfig({
   testDir: './e2e',
-  testMatch: 'hosted-storage.spec.ts',
+  testMatch: ['hosted-storage.spec.ts', 'hosted-reader.spec.ts'],
   timeout: 90_000,
   expect: { timeout: 20_000 },
   fullyParallel: false,

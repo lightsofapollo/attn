@@ -146,6 +146,10 @@ export class MockWorkspaceService implements WorkspaceAppService {
         '- Create without a network request.',
         '- Autosave to the browser before showing “Saved.”',
         '- Export ordinary Markdown at any time.',
+        '',
+        ...Array.from({ length: 40 }, (_, index) =>
+          `Paragraph ${index + 1}: the reader must stay legible on a phone, keep its measure, and never pan the page horizontally while long documents scroll.\n`,
+        ),
       ].join('\n');
     }
     return `# ${workspace?.name ?? 'Untitled'}\n`;

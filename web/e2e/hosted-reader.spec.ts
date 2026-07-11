@@ -1,0 +1,107 @@
+import { expect, test } from '@playwright/test';
+
+// iOS reader surface matrix (attn-7xl.3.7): runs on Chromium AND WebKit via
+// playwright.storage.config.ts (Vite dev server, real route rewrites in the
+// dev middleware). Demo fixtures give the reader a long scrollable document.
+
+const READER_PATH = '/app/w/ws-product/direction.md?shell=demo';
+
+for (const width of [320, 375, 390, 430]) {
+  test(`phone reader at ${width}px: legible measure, no page overflow, dock reachable`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 780 });
+    await page.goto(READER_PATH);
+    await expect(page.locator('[data-body-text]')).toBeVisible();
+
+    // No page-level horizontal panning, ever.
+    const overflow = await page.evaluate(() => {
+      const root = document.scrollingElement;
+      return root ? root.scrollWidth - root.clientWidth : 0;
+    });
+    expect(overflow).toBe(0);
+
+    // 18–19 CSS px body text at phone widths (ios-ux.md §3).
+    const fontSize = await page
+      .locator('[data-body-text]')
+      .evaluate((el) => Number.parseFloat(getComputedStyle(el).fontSize));
+    expect(fontSize).toBeGreaterThanOrEqual(17.5);
+    expect(fontSize).toBeLessThanOrEqual(19.5);
+
+    // The thumb dock stays reachable and its targets are ≥44px tall.
+    const dock = page.locator('.thumb-dock');
+    await expect(dock).toBeVisible();
+    const buttonHeight = await dock
+      .getByRole('button', { name: 'Files' })
+      .evaluate((el) => el.getBoundingClientRect().height);
+    expect(buttonHeight).toBeGreaterThanOrEqual(44);
+  });
+}
+
+for (const width of [820, 1024]) {
+  test(`iPad-width reader at ${width}px keeps a capped, centered measure`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto(READER_PATH);
+    await expect(page.locator('[data-body-text]')).toBeVisible();
+    const sheetWidth = await page
+      .locator('.writing-sheet')
+      .evaluate((el) => el.getBoundingClientRect().width);
+    expect(sheetWidth).toBeLessThanOrEqual(760 + 2);
+    const overflow = await page.evaluate(() => {
+      const root = document.scrollingElement;
+      return root ? root.scrollWidth - root.clientWidth : 0;
+    });
+    expect(overflow).toBe(0);
+  });
+}
+
+test('reading position survives file switches and sheet trips', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(READER_PATH);
+  await expect(page.locator('[data-body-text]')).toBeVisible();
+
+  // Scroll deep into the document (mobile scrolls the page itself).
+  await page.evaluate(() => {
+    document.scrollingElement!.scrollTop = 1200;
+  });
+  await page.waitForFunction(() => document.scrollingElement!.scrollTop >= 1100);
+  // Opening and closing a sheet must not move the reading position.
+  await page.locator('.thumb-dock').getByRole('button', { name: 'Files' }).click();
+  await page.keyboard.press('Escape');
+  const afterSheet = await page.evaluate(() => document.scrollingElement!.scrollTop);
+  expect(afterSheet).toBeGreaterThanOrEqual(1100);
+
+  // Switch to another file and come back: position restores best-effort.
+  await page.locator('.thumb-dock').getByRole('button', { name: 'Files' }).click();
+  await page.getByRole('dialog').getByRole('link', { name: /principles\.md/u }).click();
+  await expect(page).toHaveURL(/principles\.md/u);
+  await page.goBack();
+  await expect(page.locator('[data-body-text]')).toBeVisible();
+  await page.waitForFunction(() => document.scrollingElement!.scrollTop >= 1100);
+});
+
+test('safe raster lightbox opens edge-to-edge and restores focus', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app/w/ws-product/images/desk.png?shell=demo');
+  const trigger = page.locator('.asset-image-button');
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+  const lightbox = page.getByRole('dialog', { name: /full screen/u });
+  await expect(lightbox).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(lightbox).not.toBeVisible();
+  await expect(trigger).toBeFocused();
+});
+
+test('view-only mode replaces Edit with Open native and keeps the reader useful', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app/w/ws-product/direction.md?shell=quota');
+  await expect(page.locator('[data-body-text]')).toBeVisible();
+  const dock = page.locator('.thumb-dock');
+  await expect(dock.getByRole('link', { name: 'Open native' })).toBeVisible();
+  await expect(dock.getByRole('button', { name: 'Edit' })).toHaveCount(0);
+  // Reader actions stay available: files sheet and share.
+  await dock.getByRole('button', { name: 'Files' }).click();
+  await expect(page.getByRole('dialog', { name: /Files/u })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await dock.getByRole('button', { name: 'Share' }).click();
+  await expect(page.getByRole('dialog', { name: /Share/u })).toBeVisible();
+});

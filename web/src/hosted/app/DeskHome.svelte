@@ -1,7 +1,7 @@
 <script lang="ts">
   import AppHeader from './AppHeader.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
-  import { expandPicked, importName, toImportFiles, type PickedFile } from './import-files';
+  import { expandPicked, prepareImport, type PickedFile } from './import-files';
   import type { ImportFileInput, SharingState, StorageHealth, WorkspaceSummary } from './types';
 
   interface Props {
@@ -47,8 +47,8 @@
           bytes: new Uint8Array(await file.arrayBuffer()),
         });
       }
-      const expanded = await expandPicked(picked);
-      await onImport(importName(expanded), toImportFiles(expanded));
+      const prepared = prepareImport(await expandPicked(picked));
+      await onImport(prepared.name, prepared.files);
     } catch (error) {
       importError = error instanceof Error ? error.message : String(error);
     } finally {

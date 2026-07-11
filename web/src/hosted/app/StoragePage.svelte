@@ -1,19 +1,66 @@
 <script lang="ts">
   import AppHeader from './AppHeader.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
-  import type { StorageHealth, WorkspaceSummary } from './types';
+  import { expandPicked, prepareImport, type PickedFile } from './import-files';
+  import type { ImportFileInput, StorageHealth, WorkspaceSummary } from './types';
 
   interface Props {
     health: StorageHealth;
     workspaces: WorkspaceSummary[];
+    rooms: string[];
+    onImport: (name: string, files: ImportFileInput[]) => Promise<void>;
+    onExportWorkspace: (workspaceId: string) => Promise<void>;
+    onExportAll: () => Promise<void>;
+    onClearAll: () => Promise<void>;
+    onForgetRoom: (roomId: string) => Promise<void>;
   }
 
-  const { health, workspaces }: Props = $props();
+  const {
+    health,
+    workspaces,
+    rooms,
+    onImport,
+    onExportWorkspace,
+    onExportAll,
+    onClearAll,
+    onForgetRoom,
+  }: Props = $props();
   const meterWarn = $derived(health.mode === 'quota-pressure');
 
   // Destructive action uses an in-app confirmation panel, never a browser
   // confirm dialog.
   let confirmingClear = $state(false);
+  let confirmingForget = $state<string | null>(null);
+  let actionError = $state<string | null>(null);
+  let importInput = $state<HTMLInputElement | undefined>();
+
+  async function guard(action: () => Promise<void>): Promise<void> {
+    actionError = null;
+    try {
+      await action();
+    } catch (error) {
+      actionError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function onBackupPicked(): Promise<void> {
+    const files = importInput?.files;
+    if (!files || files.length === 0) return;
+    await guard(async () => {
+      const picked: PickedFile[] = [];
+      for (const file of Array.from(files)) {
+        picked.push({
+          name: file.name,
+          relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
+          type: file.type,
+          bytes: new Uint8Array(await file.arrayBuffer()),
+        });
+      }
+      const prepared = prepareImport(await expandPicked(picked));
+      await onImport(prepared.name, prepared.files);
+    });
+    if (importInput) importInput.value = '';
+  }
 
   const persistenceStatus = $derived.by(() => {
     switch (health.mode) {
@@ -80,7 +127,9 @@
             <strong>{workspace.name}</strong>
             <span class="detail">{workspace.sizeLabel}</span>
             <span class="detail">{workspace.backupLabel}</span>
-            <button class="button" type="button">Export</button>
+            <button class="button" type="button" onclick={() => void guard(() => onExportWorkspace(workspace.id))}>
+              Export
+            </button>
           </div>
         {:else}
           <p style="color: var(--muted); font: 0.92rem/1.5 var(--sans);">
@@ -88,9 +137,75 @@
           </p>
         {/each}
         <div class="storage-actions">
-          <button class="button primary" type="button">Export all Markdown</button>
-          <button class="button" type="button">Import backup</button>
+          <button class="button primary" type="button" onclick={() => void guard(onExportAll)}>
+            Export all workspaces
+          </button>
+          <button class="button" type="button" onclick={() => importInput?.click()}>
+            Import backup
+          </button>
+          <input
+            bind:this={importInput}
+            type="file"
+            multiple
+            style="display: none"
+            aria-hidden="true"
+            tabindex="-1"
+            onchange={() => void onBackupPicked()}
+          />
         </div>
+        {#if actionError}
+          <p role="alert" style="color: var(--rust-deep); font: 0.9rem/1.5 var(--sans);">
+            {actionError}
+          </p>
+        {/if}
+
+        <h2 style="margin-top: 3rem;">Remembered review rooms</h2>
+        <p style="color: var(--muted); font: 0.88rem/1.5 var(--sans); max-width: 52ch;">
+          Forgetting a room crypto-erases its local key first — the sealed copy on this device
+          becomes permanently unreadable. The room itself keeps running for other participants.
+        </p>
+        {#each rooms as roomId (roomId)}
+          <div class="workspace-row">
+            <strong style="font: 0.85rem var(--mono);">{roomId}</strong>
+            <span class="detail">E2EE review room</span>
+            <span class="detail"></span>
+            <button
+              class="button danger"
+              type="button"
+              onclick={() => (confirmingForget = roomId)}
+            >
+              Forget
+            </button>
+          </div>
+          {#if confirmingForget === roomId}
+            <div class="confirm-clear" role="alertdialog" aria-label={`Forget room ${roomId}?`}>
+              <strong>Forget this room on this device?</strong>
+              <p style="margin: 0.3rem 0 0; color: var(--muted);">
+                The local key is deleted first, so the remembered copy can never be read again
+                here. Your invite link (if you still have it) can rejoin while the room lives.
+              </p>
+              <div class="actions">
+                <button class="button" type="button" onclick={() => (confirmingForget = null)}>
+                  Cancel
+                </button>
+                <button
+                  class="button danger"
+                  type="button"
+                  onclick={async () => {
+                    await guard(() => onForgetRoom(roomId));
+                    confirmingForget = null;
+                  }}
+                >
+                  Forget room
+                </button>
+              </div>
+            </div>
+          {/if}
+        {:else}
+          <p style="color: var(--muted); font: 0.92rem/1.5 var(--sans);">
+            No remembered review rooms in this browser profile.
+          </p>
+        {/each}
       </section>
 
       <aside class="storage-panel" aria-label="Persistence and quota">
@@ -101,6 +216,10 @@
             <span style={`width: ${Math.round(health.usedFraction * 100)}%`}></span>
           </div>
           <small>{health.usedLabel} used of about {health.quotaLabel} available</small>
+          <p style="margin-top: 0.6rem; font: 0.72rem var(--mono); color: var(--muted);">
+            Large files use the browser's origin file system when available and fall back to
+            encrypted database storage when it isn't. Either way, content is sealed.
+          </p>
         </div>
 
         {#if !confirmingClear}
@@ -123,7 +242,16 @@
               <button class="button" type="button" onclick={() => (confirmingClear = false)}>
                 Cancel
               </button>
-              <button class="button danger" type="button">Delete everything</button>
+              <button
+                class="button danger"
+                type="button"
+                onclick={async () => {
+                  await guard(onClearAll);
+                  confirmingClear = false;
+                }}
+              >
+                Delete everything
+              </button>
             </div>
           </div>
         {/if}

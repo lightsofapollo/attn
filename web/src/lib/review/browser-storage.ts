@@ -372,6 +372,18 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
     await done;
   }
 
+  /** Ids of fully-remembered rooms (unfinished claims stay hidden). */
+  async listRoomIds(): Promise<string[]> {
+    const tx = this.db.transaction(STORE_ROOMS, 'readonly');
+    const done = transactionDone(tx);
+    const records = await requestValue<RoomRecord[]>(tx.objectStore(STORE_ROOMS).getAll());
+    await done;
+    return records
+      .filter((record) => !record.rememberClaimId)
+      .map((record) => record.roomId)
+      .sort();
+  }
+
   async getRoom(roomId: string): Promise<BrowserStorageRoom | null> {
     requireId(roomId, 'roomId');
     const record = await this.get<RoomRecord>(STORE_ROOMS, roomId);

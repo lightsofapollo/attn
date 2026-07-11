@@ -2,6 +2,7 @@
 // testable: browser File objects are narrowed to this structural shape.
 
 import { normalizeEntryPath } from '../../lib/hosted/entry-path';
+import { MANIFEST_PATH, parseManifest } from './export-zip';
 import type { ImportFileInput, WorkspaceEntryKind } from './types';
 
 export interface PickedFile {
@@ -115,6 +116,39 @@ export async function expandPicked(picked: PickedFile[]): Promise<PickedFile[]> 
     else out.push(file);
   }
   return out;
+}
+
+export interface PreparedImport {
+  name: string;
+  files: ImportFileInput[];
+}
+
+/**
+ * Manifest-aware import preparation: strips `attn-manifest.json`, prefers its
+ * (non-secret) workspace name, and never carries room state — imports always
+ * create a fresh local workspace.
+ */
+export function prepareImport(picked: PickedFile[]): PreparedImport {
+  const manifestFile = picked.find(
+    (file) => (file.relativePath || file.name) === MANIFEST_PATH,
+  );
+  const manifest = manifestFile ? parseManifest(manifestFile.bytes) : null;
+  const contentFiles = picked.filter((file) => file !== manifestFile);
+  const files = toImportFiles(contentFiles);
+  if (files.length === 0) {
+    throw new EntryPathSafeError('Nothing to import: the selection contained only metadata.');
+  }
+  return { name: manifest?.name ?? importName(contentFiles), files };
+}
+
+/** Pick a non-conflicting workspace name ("Name", "Name 2", "Name 3", …). */
+export function dedupeWorkspaceName(name: string, existing: string[]): string {
+  const taken = new Set(existing);
+  if (!taken.has(name)) return name;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${name} ${suffix}`;
+    if (!taken.has(candidate)) return candidate;
+  }
 }
 
 /** Derive a workspace name from the imported set. */

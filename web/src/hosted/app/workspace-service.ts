@@ -335,6 +335,36 @@ export class BrowserWorkspaceService {
     return run(() => this.storage.workspaces.deleteWorkspace(workspaceId));
   }
 
+  async markBackedUp(workspaceId: string): Promise<void> {
+    await run(() => this.storage.workspaces.markBackedUp(workspaceId));
+  }
+
+  async requestPersistence(): Promise<boolean | null> {
+    const result = await this.storage.requestPersistence();
+    await this.refreshCapabilities().catch(() => undefined);
+    return result;
+  }
+
+  async listRememberedRooms(): Promise<string[]> {
+    return run(() => this.storage.listRoomIds());
+  }
+
+  /** Crypto-erasure: BrowserStorage.forgetRoom deletes the room key first. */
+  async forgetRoom(roomId: string): Promise<void> {
+    await run(() => this.storage.forgetRoom(roomId));
+  }
+
+  async clearAllWorkspaces(): Promise<number> {
+    return run(async () => {
+      const workspaces = await this.storage.workspaces.listWorkspaces();
+      let cleared = 0;
+      for (const workspace of workspaces) {
+        if (await this.storage.workspaces.deleteWorkspace(workspace.workspaceId)) cleared += 1;
+      }
+      return cleared;
+    });
+  }
+
   // ————— export —————
 
   async exportWorkspace(workspaceId: string): Promise<WorkspaceFileInput[]> {
@@ -407,7 +437,7 @@ export function toSummary(
     lastEditedLabel: relativeTimeLabel(workspace.updatedAt, now),
     sharing: 'local-only',
     sizeLabel: sizeLabel(totalBytes),
-    backupLabel: 'Never backed up',
+    backupLabel: backupLabel(workspace.lastBackupAt, now),
     openPath: workspace.activePath ?? entries[0]?.path ?? UNTITLED_PATH,
   };
 }
@@ -417,6 +447,15 @@ export function sizeLabel(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+export function backupLabel(lastBackupAt: number | undefined, now: number): string {
+  if (lastBackupAt === undefined) return 'Never backed up';
+  const elapsed = Math.max(0, now - lastBackupAt);
+  const hour = 3_600_000;
+  if (elapsed < hour) return 'Backed up just now';
+  if (elapsed < 24 * hour) return `Backed up ${Math.floor(elapsed / hour)} h ago`;
+  return `Backed up ${new Date(lastBackupAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
 }
 
 export function relativeTimeLabel(at: number, now: number): string {

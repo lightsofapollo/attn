@@ -3,7 +3,7 @@
   import DegradedBanner from './DegradedBanner.svelte';
   import ShareSheet from './ShareSheet.svelte';
   import { AutosaveController } from './autosave';
-  import { buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
+  import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
   import { expandPicked, toImportFiles, type PickedFile } from './import-files';
   import type {
     EditingSession,
@@ -290,8 +290,10 @@
     railError = null;
     try {
       const files = await service.exportWorkspace(workspace.id);
-      const zip = await buildWorkspaceZip(files);
+      const manifest = buildManifest(workspace.name, files, Date.now());
+      const zip = await buildWorkspaceZip(files, manifest);
       triggerDownload(document, zipFileName(workspace.name), zip, 'application/zip');
+      await service.markBackedUp(workspace.id);
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
@@ -754,6 +756,8 @@
     scope={service.shareScopeFor(workspace)}
     {health}
     onclose={closeShare}
+    onRequestPersist={() => service.requestPersistence()}
+    onBackup={() => exportZip()}
   />
 {/if}
 

@@ -3,12 +3,67 @@
 
 import type { ImportFileInput } from './types';
 
-/** Build a zip preserving relative paths and exact bytes. */
-export async function buildWorkspaceZip(files: ImportFileInput[]): Promise<Uint8Array> {
+export const MANIFEST_PATH = 'attn-manifest.json';
+export const MANIFEST_VERSION = 1;
+
+/** Non-secret backup manifest: names, paths, sizes — never keys or room
+ * material. Restores never require attn services. */
+export interface BackupManifest {
+  v: number;
+  kind: 'attn-workspace-backup';
+  name: string;
+  exportedAt: number;
+  entries: Array<{ path: string; kind: string; mediaType?: string; sizeBytes: number }>;
+}
+
+export function buildManifest(
+  name: string,
+  files: ImportFileInput[],
+  exportedAt: number,
+): BackupManifest {
+  return {
+    v: MANIFEST_VERSION,
+    kind: 'attn-workspace-backup',
+    name,
+    exportedAt,
+    entries: files.map((file) => ({
+      path: file.path,
+      kind: file.kind,
+      ...(file.mediaType === undefined ? {} : { mediaType: file.mediaType }),
+      sizeBytes: file.bytes.length,
+    })),
+  };
+}
+
+export function parseManifest(bytes: Uint8Array): BackupManifest | null {
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(bytes)) as Partial<BackupManifest>;
+    if (
+      parsed &&
+      parsed.v === MANIFEST_VERSION &&
+      parsed.kind === 'attn-workspace-backup' &&
+      typeof parsed.name === 'string'
+    ) {
+      return parsed as BackupManifest;
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
+/** Build a zip preserving relative paths and exact bytes, plus the manifest. */
+export async function buildWorkspaceZip(
+  files: ImportFileInput[],
+  manifest?: BackupManifest,
+): Promise<Uint8Array> {
   const { zipSync } = await import('fflate');
   const tree: Record<string, Uint8Array> = {};
   for (const file of files) {
     tree[file.path] = file.bytes;
+  }
+  if (manifest) {
+    tree[MANIFEST_PATH] = new TextEncoder().encode(JSON.stringify(manifest, null, 2));
   }
   return zipSync(tree, { level: 6 });
 }

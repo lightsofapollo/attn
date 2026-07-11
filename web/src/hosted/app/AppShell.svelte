@@ -50,6 +50,9 @@
         }
       } else {
         workspaces = await service.listWorkspaces();
+        if (route?.view === 'storage') {
+          rememberedRooms = await service.listRememberedRooms();
+        }
       }
       phase = 'ready';
     } catch (error) {
@@ -79,8 +82,49 @@
   }
 
   async function onImport(name: string, files: ImportFileInput[]): Promise<void> {
-    const imported = await service.importFiles(name, files);
+    // Duplicate workspace names get an explicit numbered variant; imports
+    // never overwrite or silently merge into an existing workspace.
+    const existing = (await service.listWorkspaces()).map((workspace) => workspace.name);
+    const { dedupeWorkspaceName } = await import('./import-files');
+    const imported = await service.importFiles(dedupeWorkspaceName(name, existing), files);
     window.location.assign(`/app/w/${imported.id}/${imported.openPath}`);
+  }
+
+  let rememberedRooms = $state<string[]>([]);
+
+  async function onExportWorkspace(workspaceId: string): Promise<void> {
+    const target = workspaces.find((workspace) => workspace.id === workspaceId);
+    const files = await service.exportWorkspace(workspaceId);
+    const { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } = await import(
+      './export-zip'
+    );
+    const name = target?.name ?? 'workspace';
+    const zip = await buildWorkspaceZip(files, buildManifest(name, files, Date.now()));
+    triggerDownload(document, zipFileName(name), zip, 'application/zip');
+    await service.markBackedUp(workspaceId);
+    workspaces = await service.listWorkspaces();
+  }
+
+  async function onExportAll(): Promise<void> {
+    const { buildManifest, buildWorkspaceZip, triggerDownload } = await import('./export-zip');
+    for (const workspace of workspaces) {
+      const files = await service.exportWorkspace(workspace.id);
+      const zip = await buildWorkspaceZip(files, buildManifest(workspace.name, files, Date.now()));
+      triggerDownload(document, `${workspace.name.replaceAll('/', '-')}.zip`, zip, 'application/zip');
+      await service.markBackedUp(workspace.id);
+    }
+    workspaces = await service.listWorkspaces();
+  }
+
+  async function onClearAll(): Promise<void> {
+    await service.clearAllWorkspaces();
+    workspaces = await service.listWorkspaces();
+    health = service.storageHealth();
+  }
+
+  async function onForgetRoom(roomId: string): Promise<void> {
+    await service.forgetRoom(roomId);
+    rememberedRooms = await service.listRememberedRooms();
   }
 
   async function onRename(workspaceId: string, name: string): Promise<void> {
@@ -134,7 +178,16 @@
     </main>
   </div>
 {:else if route?.view === 'storage'}
-  <StoragePage {health} {workspaces} />
+  <StoragePage
+    {health}
+    {workspaces}
+    rooms={rememberedRooms}
+    {onImport}
+    {onExportWorkspace}
+    {onExportAll}
+    {onClearAll}
+    {onForgetRoom}
+  />
 {:else if route?.view === 'open'}
   <OpenPage {health} {onImport} />
 {:else}

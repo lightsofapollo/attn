@@ -249,6 +249,31 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return files;
   }
 
+  private rememberedRooms: string[] = ['7pmH1MwiTfQt9gecnT4HIA'];
+
+  async markBackedUp(workspaceId: string): Promise<void> {
+    const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
+    if (workspace) workspace.backupLabel = 'Backed up just now';
+  }
+
+  async requestPersistence(): Promise<boolean | null> {
+    return this.scenario === 'private' || this.scenario === 'blocked' ? false : true;
+  }
+
+  async listRememberedRooms(): Promise<string[]> {
+    return this.scenario === 'blocked' ? [] : [...this.rememberedRooms];
+  }
+
+  async forgetRoom(roomId: string): Promise<void> {
+    this.rememberedRooms = this.rememberedRooms.filter((candidate) => candidate !== roomId);
+  }
+
+  async clearAllWorkspaces(): Promise<number> {
+    const cleared = this.workspaces.length;
+    this.workspaces.length = 0;
+    return cleared;
+  }
+
   async beginEditing(): Promise<EditingSession | null> {
     return {
       commitText: async () => undefined,

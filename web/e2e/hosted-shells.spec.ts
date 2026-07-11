@@ -76,7 +76,9 @@ test('share sheet opens as a dialog and returns focus on close', async ({ page }
 test('storage page confirms destructive clear in-app', async ({ page }) => {
   await page.goto('/app/storage?shell=demo');
   await expect(page.locator('.status-box strong')).toContainText('Protected from automatic cleanup');
-  await expect(page.locator('.storage-panel .workspace-row')).toHaveCount(3);
+  await expect(
+    page.getByRole('region', { name: 'Local workspaces' }).locator('.workspace-row'),
+  ).toHaveCount(4); // 3 workspaces + 1 remembered room row
   await page.getByRole('button', { name: 'Clear all local attn data' }).click();
   const confirm = page.getByRole('alertdialog');
   await expect(confirm).toContainText('Delete every local workspace in this browser?');

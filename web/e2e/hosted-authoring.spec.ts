@@ -217,9 +217,9 @@ test('zip import expands into a nested multi-file workspace', async ({ page }) =
 
 test('phase gate: create → type → reload → edit → export → reimport with zero relay traffic', async ({ page }) => {
   test.slow();
-  const offOrigin: string[] = [];
+  const allRequests: string[] = [];
   page.on('request', (request) => {
-    if (!request.url().startsWith('http://127.0.0.1:8797')) offOrigin.push(request.url());
+    allRequests.push(request.url());
   });
 
   // From the landing, one click into a real editor.
@@ -259,7 +259,7 @@ test('phase gate: create → type → reload → edit → export → reimport wi
   const { unzipSync } = await import('fflate');
   const fs = await import('node:fs');
   const exported = unzipSync(new Uint8Array(fs.readFileSync(zipPath!)));
-  expect(Object.keys(exported).sort()).toEqual(['big.bin', 'untitled.md']);
+  expect(Object.keys(exported).sort()).toEqual(['attn-manifest.json', 'big.bin', 'untitled.md']);
   expect(new TextDecoder().decode(exported['untitled.md']!)).toContain(
     'Journey body survives everything.',
   );
@@ -278,5 +278,70 @@ test('phase gate: create → type → reload → edit → export → reimport wi
   await expect(page.locator('.file-rail .file.asset')).toContainText('big.bin');
 
   // The entire journey — creation to reimport — touched no non-origin host.
-  expect(offOrigin).toEqual([]);
+  const origin = new URL(page.url()).origin;
+  expect(allRequests.filter((url) => !url.startsWith(origin))).toEqual([]);
+});
+
+test('storage page: export marks backup, reimport dedupes names, clear-all erases', async ({ page }) => {
+  test.slow();
+  // Create a workspace, then manage it from the storage page.
+  await page.goto('/app#new');
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await page.goto('/app/storage');
+  const panel = page.getByRole('region', { name: 'Local workspaces' });
+  await expect(panel.locator('.workspace-row')).toHaveCount(1);
+  await expect(panel).toContainText('Never backed up');
+
+  // Export → download fires and the backup label becomes honest.
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export', exact: true }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/\.zip$/u);
+  await expect(panel).toContainText('Backed up just now');
+
+  // Reimport the backup: manifest name + explicit numbered dedupe.
+  const zipPath = await download.path();
+  const fs = await import('node:fs');
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: 'Import backup' }).click();
+  await (await chooser).setFiles([
+    { name: 'backup.zip', mimeType: 'application/zip', buffer: fs.readFileSync(zipPath!) },
+  ]);
+  await expect(page).toHaveURL(/\/app\/w\//u);
+  await expect(page.locator('.doc-name')).toContainText('Untitled 2');
+
+  // Clear all local data: in-app confirm, durable erasure.
+  await page.goto('/app/storage');
+  const panelAfter = page.getByRole('region', { name: 'Local workspaces' });
+  await expect(panelAfter.locator('.workspace-row')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Clear all local attn data' }).click();
+  await page.getByRole('button', { name: 'Delete everything' }).click();
+  await expect(panelAfter.locator('.workspace-row')).toHaveCount(0);
+  await page.reload();
+  await expect(
+    page.getByRole('region', { name: 'Local workspaces' }).locator('.workspace-row'),
+  ).toHaveCount(0);
+});
+
+test('remembered rooms can be forgotten with crypto-erasure confirmation', async ({ page }) => {
+  await page.goto('/app/storage?shell=demo');
+  const roomsPanel = page.getByRole('region', { name: 'Local workspaces' });
+  await expect(roomsPanel).toContainText('7pmH1MwiTfQt9gecnT4HIA');
+  await page.getByRole('button', { name: 'Forget', exact: true }).click();
+  const confirm = page.getByRole('alertdialog', { name: /Forget room/u });
+  await expect(confirm).toContainText('The local key is deleted first');
+  await confirm.getByRole('button', { name: 'Forget room' }).click();
+  await expect(roomsPanel).toContainText('No remembered review rooms in this browser profile.');
+});
+
+test('first share is gated on durability until acknowledged', async ({ page }) => {
+  await page.goto('/app/w/ws-product/direction.md?shell=private');
+  await page.getByRole('button', { name: 'Share', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: /Share/u });
+  await expect(dialog).toBeVisible();
+  const copyLink = dialog.locator('[data-action="copy-link"]');
+  await expect(copyLink).toBeDisabled();
+  await expect(dialog).toContainText('Sharing unlocks once storage is persistent');
+  await dialog.getByRole('checkbox').check();
+  await expect(copyLink).toBeEnabled();
 });

@@ -586,6 +586,28 @@ export class WorkspaceStore {
     return committed.workspace;
   }
 
+  /** Record a successful export so the desk can show honest backup state. */
+  async markBackedUp(workspaceId: string, at?: number): Promise<WorkspaceRecord> {
+    requireId(workspaceId, 'workspaceId');
+    const committed = await this.retryCommit(workspaceId, undefined, async (workspace) => {
+      const timestamp = at ?? this.timestamp(workspace.updatedAt);
+      const clock = workspace.clock + 1;
+      const nextWorkspace: WorkspaceRecord = { ...workspace, clock, lastBackupAt: timestamp };
+      return {
+        expectedClock: workspace.clock,
+        apply: (tx) => {
+          tx.objectStore(STORE_WORKSPACES).put(nextWorkspace);
+        },
+        result: {
+          workspace: nextWorkspace,
+          entry: undefined as unknown as WorkspaceEntryRecord,
+          revision: undefined,
+        },
+      };
+    });
+    return committed.workspace;
+  }
+
   async renameWorkspace(input: {
     workspaceId: string;
     name: string;

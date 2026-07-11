@@ -192,6 +192,26 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     return this.service.exportWorkspace(workspaceId);
   }
 
+  async markBackedUp(workspaceId: string): Promise<void> {
+    await this.service.markBackedUp(workspaceId);
+  }
+
+  async requestPersistence(): Promise<boolean | null> {
+    return this.service.requestPersistence();
+  }
+
+  async listRememberedRooms(): Promise<string[]> {
+    return this.service.listRememberedRooms();
+  }
+
+  async forgetRoom(roomId: string): Promise<void> {
+    await this.service.forgetRoom(roomId);
+  }
+
+  async clearAllWorkspaces(): Promise<number> {
+    return this.service.clearAllWorkspaces();
+  }
+
   shareScopeFor(workspace: WorkspaceDetail): ShareScope {
     const entryCount = workspace.entries.length;
     return {

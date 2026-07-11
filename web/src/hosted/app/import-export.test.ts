@@ -1,11 +1,19 @@
 import { zipSync, unzipSync } from 'fflate';
-import { buildWorkspaceZip, zipFileName } from './export-zip';
+import {
+  buildManifest,
+  buildWorkspaceZip,
+  parseManifest,
+  MANIFEST_PATH,
+  zipFileName,
+} from './export-zip';
 import {
   MAX_IMPORT_FILE_BYTES,
+  dedupeWorkspaceName,
   expandPicked,
   expandZip,
   importName,
   kindForFile,
+  prepareImport,
   toImportFiles,
   type PickedFile,
 } from './import-files';
@@ -148,6 +156,48 @@ defineCase('workspace zip export round-trips exact bytes and paths', async () =>
 defineCase('zip file names are sanitized', () => {
   assertEqual(zipFileName('Product direction'), 'Product-direction.zip', 'spaces to dashes');
   assertEqual(zipFileName('///'), 'workspace.zip', 'degenerate names fall back');
+});
+
+defineCase('backup manifest round-trips and carries no secrets', async () => {
+  const files = [
+    { path: 'index.md', bytes: new TextEncoder().encode('# hi'), kind: 'markdown' as const },
+    { path: 'img/a.png', bytes: new Uint8Array(9), kind: 'asset' as const, mediaType: 'image/png' },
+  ];
+  const manifest = buildManifest('Product direction', files, 1_700_000_000_000);
+  const zip = await buildWorkspaceZip(files, manifest);
+  const round = unzipSync(zip);
+  const parsed = parseManifest(round[MANIFEST_PATH]!);
+  assert(parsed, 'manifest parses');
+  assertEqual(parsed.name, 'Product direction', 'name');
+  assertEqual(parsed.entries.length, 2, 'entries listed');
+  const raw = new TextDecoder().decode(round[MANIFEST_PATH]!);
+  for (const forbidden of ['key', 'secret', 'nonce', 'ciphertext', 'room']) {
+    assert(!raw.toLowerCase().includes(forbidden), `manifest contains no "${forbidden}"`);
+  }
+  assertEqual(parseManifest(new TextEncoder().encode('{"v":99}')), null, 'unknown versions rejected');
+});
+
+defineCase('prepareImport prefers the manifest name and strips the manifest', async () => {
+  const files = [
+    { path: 'notes.md', bytes: new TextEncoder().encode('n'), kind: 'markdown' as const },
+  ];
+  const manifest = buildManifest('Folio backup', files, 1_700_000_000_000);
+  const zip = await buildWorkspaceZip(files, manifest);
+  const expanded = await expandZip(picked('folio.zip', zip));
+  const prepared = prepareImport(expanded);
+  assertEqual(prepared.name, 'Folio backup', 'manifest name wins');
+  assertEqual(prepared.files.length, 1, 'manifest stripped from entries');
+  assertEqual(prepared.files[0]!.path, 'notes.md', 'content preserved');
+});
+
+defineCase('duplicate workspace names get explicit numbered variants', () => {
+  assertEqual(dedupeWorkspaceName('Untitled', []), 'Untitled', 'no conflict');
+  assertEqual(dedupeWorkspaceName('Untitled', ['Untitled']), 'Untitled 2', 'first conflict');
+  assertEqual(
+    dedupeWorkspaceName('Untitled', ['Untitled', 'Untitled 2']),
+    'Untitled 3',
+    'chains upward',
+  );
 });
 
 async function runAllCases(): Promise<void> {

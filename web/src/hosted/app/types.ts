@@ -128,5 +128,15 @@ export interface WorkspaceAppService {
   ): Promise<{ bytes: Uint8Array; mediaType?: string } | null>;
   /** Every live entry with exact bytes, for zip export / download-all. */
   exportWorkspace(workspaceId: string): Promise<ImportFileInput[]>;
+  /** Record a successful backup (drives honest backup labels). */
+  markBackedUp(workspaceId: string): Promise<void>;
+  /** Ask the browser for persistent storage from a user gesture. */
+  requestPersistence(): Promise<boolean | null>;
+  /** Remembered E2EE review rooms in this profile (ids only, no secrets). */
+  listRememberedRooms(): Promise<string[]>;
+  /** Crypto-erase a remembered room: key first, then records. */
+  forgetRoom(roomId: string): Promise<void>;
+  /** Delete every local workspace (crypto-erasure per workspace). */
+  clearAllWorkspaces(): Promise<number>;
   shareScopeFor(workspace: WorkspaceDetail): ShareScope;
 }

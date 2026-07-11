@@ -68,6 +68,8 @@ export interface WorkspaceRecord {
   storagePersisted: boolean;
   /** Currently selected entry (canonical path); cleared when it is deleted. */
   activePath?: string;
+  /** Wall clock of the last successful export/backup of this workspace. */
+  lastBackupAt?: number;
 }
 
 export type WorkspaceEntryKind = 'markdown' | 'asset';
@@ -256,6 +258,7 @@ export function validateWorkspaceRecord(value: unknown): asserts value is Worksp
       throw new BrowserStorageError('activePath is not in canonical form');
     }
   }
+  if (record.lastBackupAt !== undefined) requireTimestamp(record.lastBackupAt, 'lastBackupAt');
 }
 
 export function validateWorkspaceEntryRecord(

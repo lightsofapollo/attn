@@ -229,7 +229,24 @@ defineCase('opens and migrates the stable v1 schema to the current version', asy
     assertEqual(database.version, BROWSER_STORAGE_SCHEMA_VERSION, 'schema version');
     assertDeepEqual(
       [...database.objectStoreNames].sort(),
-      ['cursors', 'devices', 'history', 'identities', 'inbox', 'outbox', 'room_keys', 'rooms'],
+      [
+        'cursors',
+        'devices',
+        'history',
+        'identities',
+        'inbox',
+        'outbox',
+        'room_keys',
+        'rooms',
+        'workspace_entries',
+        'workspace_gc',
+        'workspace_keys',
+        'workspace_leases',
+        'workspace_recovery',
+        'workspace_revisions',
+        'workspace_share_caps',
+        'workspaces',
+      ],
       'object stores',
     );
   });

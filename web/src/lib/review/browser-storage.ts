@@ -12,11 +12,33 @@ import {
   toCanonicalString,
 } from './browser-crypto';
 import type { Device, MailboxEnvelope, RoomPolicy } from './browser-ws';
+import {
+  BrowserStorageError,
+  MissingBrowserStorageError,
+  StorageConflictError,
+} from './browser-storage-errors';
+import {
+  GC_CREATED_INDEX,
+  REVISION_HISTORY_INDEX,
+  STORE_WORKSPACES,
+  STORE_WORKSPACE_ENTRIES,
+  STORE_WORKSPACE_GC,
+  STORE_WORKSPACE_KEYS,
+  STORE_WORKSPACE_LEASES,
+  STORE_WORKSPACE_RECOVERY,
+  STORE_WORKSPACE_REVISIONS,
+  STORE_WORKSPACE_SHARE_CAPS,
+  WORKSPACE_INDEX,
+  WORKSPACE_UPDATED_INDEX,
+} from './browser-workspace-schema';
+
+export { BrowserStorageError, MissingBrowserStorageError, StorageConflictError };
 
 /** Stable origin-local database name. Change only with an explicit migration. */
 export const BROWSER_STORAGE_DB_NAME = 'attn-browser-review';
-/** v1 introduced room keys/metadata; v2 adds durable identity and envelope stores. */
-export const BROWSER_STORAGE_SCHEMA_VERSION = 2;
+/** v1 introduced room keys/metadata; v2 adds durable identity and envelope
+ * stores; v3 adds browser-owned workspace stores (attn-7xl.2.1). */
+export const BROWSER_STORAGE_SCHEMA_VERSION = 3;
 
 const STORE_ROOM_KEYS = 'room_keys';
 const STORE_ROOMS = 'rooms';
@@ -43,27 +65,6 @@ type StoreName =
   | typeof STORE_CURSORS
   | typeof STORE_OUTBOX
   | typeof STORE_HISTORY;
-
-export class BrowserStorageError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'BrowserStorageError';
-  }
-}
-
-export class MissingBrowserStorageError extends BrowserStorageError {
-  constructor(databaseName: string) {
-    super(`browser storage database does not exist: ${databaseName}`);
-    this.name = 'MissingBrowserStorageError';
-  }
-}
-
-export class StorageConflictError extends BrowserStorageError {
-  constructor(message: string) {
-    super(message);
-    this.name = 'StorageConflictError';
-  }
-}
 
 export interface BrowserStorageRoom {
   roomId: string;
@@ -926,6 +927,37 @@ function migrate(db: IDBDatabase, oldVersion: number, transaction: IDBTransactio
     outbox.createIndex(OUTBOX_ORDER_INDEX, ['roomId', 'createdAt', 'envelopeId']);
     const history = createRoomStore(db, STORE_HISTORY, ['roomId', 'envelopeId']);
     history.createIndex(HISTORY_ORDER_INDEX, ['roomId', 'ackedAt', 'envelopeId']);
+  }
+  if (oldVersion < 3) {
+    // Browser-owned workspace stores (attn-7xl.2.1). Every store the
+    // workspace feature will need is created here so later steps never
+    // require another version bump. Existing room stores are untouched.
+    const workspaces = db.createObjectStore(STORE_WORKSPACES, { keyPath: 'workspaceId' });
+    workspaces.createIndex(WORKSPACE_UPDATED_INDEX, 'updatedAt');
+    db.createObjectStore(STORE_WORKSPACE_KEYS, { keyPath: 'workspaceId' });
+    const entries = db.createObjectStore(STORE_WORKSPACE_ENTRIES, {
+      keyPath: ['workspaceId', 'path'],
+    });
+    entries.createIndex(WORKSPACE_INDEX, 'workspaceId');
+    const revisions = db.createObjectStore(STORE_WORKSPACE_REVISIONS, {
+      keyPath: ['workspaceId', 'revisionId'],
+    });
+    revisions.createIndex(WORKSPACE_INDEX, 'workspaceId');
+    revisions.createIndex(REVISION_HISTORY_INDEX, ['workspaceId', 'path', 'clock'], {
+      unique: true,
+    });
+    const shareCaps = db.createObjectStore(STORE_WORKSPACE_SHARE_CAPS, {
+      keyPath: ['workspaceId', 'capId'],
+    });
+    shareCaps.createIndex(WORKSPACE_INDEX, 'workspaceId');
+    const recovery = db.createObjectStore(STORE_WORKSPACE_RECOVERY, {
+      keyPath: ['workspaceId', 'recoveryId'],
+    });
+    recovery.createIndex(WORKSPACE_INDEX, 'workspaceId');
+    const gc = db.createObjectStore(STORE_WORKSPACE_GC, { keyPath: 'gcId' });
+    gc.createIndex(GC_CREATED_INDEX, 'createdAt');
+    gc.createIndex(WORKSPACE_INDEX, 'workspaceId');
+    db.createObjectStore(STORE_WORKSPACE_LEASES, { keyPath: 'workspaceId' });
   }
   // Touch transaction so strict implementations keep the upgrade transaction
   // associated with this migration function.

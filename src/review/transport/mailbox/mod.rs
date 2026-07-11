@@ -44,8 +44,8 @@ use crate::review::transport::{EnvelopeAck, TransportError};
 /// Single source of truth for the (method, path) tuple consumed by:
 ///   - the admission HMAC canonicalRequest builder,
 ///   - the PoW resource binding (`request_path_hash` in pow.rs).
-fn envelopes_path(room_id: &RoomId) -> String {
-    format!("/v2/rooms/{}/envelopes", room_id.as_str())
+fn envelopes_path(room_id: &RoomId, version: u32) -> String {
+    format!("/v{version}/rooms/{}/envelopes", room_id.as_str())
 }
 
 /// HTTP method used for the envelopes endpoint. Hoisted to a constant so the
@@ -80,6 +80,8 @@ pub struct MailboxConfig {
     /// 32-byte per-room admission key (`hkdf(rootKey, "attn relay admission v2")`).
     /// See relay-spec.md §Admission Key.
     pub admission_key: [u8; 32],
+    pub read_admission_key: [u8; 32],
+    pub protocol_version: u32,
     /// Server-clamped PoW difficulty for this room
     /// (relay-spec.md §Proof of Work / crypto-spec.md §Difficulty).
     pub pow_difficulty: u32,
@@ -137,8 +139,32 @@ impl MailboxConfig {
             room_id,
             device_id,
             admission_key: *keys.admission_key.as_bytes(),
+            read_admission_key: *keys.admission_key.as_bytes(),
+            protocol_version: 2,
             pow_difficulty,
         }
+    }
+
+    pub fn from_v3_access(
+        relay_url: String,
+        room_id: RoomId,
+        device_id: DeviceId,
+        access: &crate::review::bootstrap::RoomAccessV3,
+        pow_difficulty: u32,
+    ) -> Result<Self, TransportError> {
+        let read = crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key);
+        let write = access.write_admission_key.ok_or_else(|| {
+            TransportError::Io("v3 room is read-only; no outbox transport".into())
+        })?;
+        Ok(Self {
+            relay_url,
+            room_id,
+            device_id,
+            admission_key: write,
+            read_admission_key: *read.read_admission_key.as_bytes(),
+            protocol_version: 3,
+            pow_difficulty,
+        })
     }
 }
 
@@ -400,12 +426,25 @@ fn admission_header_value(
     query_pairs: &[(String, String)],
     body: &[u8],
 ) -> String {
+    format!(
+        "v2.{}",
+        admission_mac_value(admission_key, method, url_path, query_pairs, body)
+    )
+}
+
+fn admission_mac_value(
+    admission_key: &[u8; 32],
+    method: &str,
+    url_path: &str,
+    query_pairs: &[(String, String)],
+    body: &[u8],
+) -> String {
     let canonical = canonical_request_bytes(method, url_path, query_pairs, body);
     let mut mac =
         <Hmac<Sha256>>::new_from_slice(admission_key).expect("HMAC accepts any key length");
     mac.update(&canonical);
     let tag = mac.finalize().into_bytes();
-    format!("v2.{}", URL_SAFE_NO_PAD.encode(tag))
+    URL_SAFE_NO_PAD.encode(tag)
 }
 
 // ---------------------------------------------------------------------------
@@ -577,7 +616,7 @@ impl OutboxProcessor {
         let body = EnvelopesBody { envelopes };
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| TransportError::Io(format!("serialize envelopes: {e}")))?;
-        let path = envelopes_path(&self.config.room_id);
+        let path = envelopes_path(&self.config.room_id, self.config.protocol_version);
         let url = format!("{}{}", self.config.relay_url.trim_end_matches('/'), path);
 
         // First attempt; on ATTN_POW_INVALID retry once with a freshly minted
@@ -626,13 +665,26 @@ impl OutboxProcessor {
             .await
             .map_err(map_pow_err)?;
 
-        let admission = admission_header_value(
-            &self.config.admission_key,
-            ENVELOPES_METHOD,
-            path,
-            &[],
-            body,
-        );
+        let admission = if self.config.protocol_version == 3 {
+            format!(
+                "v3.write.{}",
+                admission_mac_value(
+                    &self.config.admission_key,
+                    ENVELOPES_METHOD,
+                    path,
+                    &[],
+                    body,
+                )
+            )
+        } else {
+            admission_header_value(
+                &self.config.admission_key,
+                ENVELOPES_METHOD,
+                path,
+                &[],
+                body,
+            )
+        };
 
         let resp = self
             .http_client
@@ -817,6 +869,8 @@ mod tests {
             room_id: id::<RoomId>(TEST_ROOM),
             device_id: id::<DeviceId>(TEST_DEVICE),
             admission_key: [0x42u8; 32],
+            read_admission_key: [0x42u8; 32],
+            protocol_version: 2,
             pow_difficulty: TEST_DIFFICULTY,
         });
         let pool = Arc::new(TokenPool::new(
@@ -1172,6 +1226,14 @@ mod tests {
         mac.update(&canonical);
         let expected = mac.finalize().into_bytes();
         assert_eq!(decoded.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn v3_write_admission_header_is_not_nested_v2() {
+        let mac = admission_mac_value(&[0x42; 32], "POST", "/v3/rooms/r/envelopes", &[], b"{}");
+        let header = format!("v3.write.{mac}");
+        assert_eq!(header.split('.').count(), 3);
+        assert!(!header.contains(".v2."));
     }
 
     // -- canonical query sorts + percent-encodes ------------------------

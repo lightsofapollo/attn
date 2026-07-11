@@ -103,7 +103,8 @@ Both MACs cover the existing canonical request bytes. Endpoint requirements:
 |---|---|
 | `GET /devices` | read |
 | Cap-less blob download presign | read |
-| WebSocket upgrade | read |
+| Anonymous viewer WebSocket upgrade (`viewer_id`) | read |
+| Registered-device WebSocket upgrade (`device_id`) | read + write |
 | Room rejoin `POST` | write |
 | `POST /devices`, `/envelopes`, `/acks`, `/blobs` | write |
 | `DELETE /rooms/:roomId` | write |
@@ -116,14 +117,25 @@ field against the requested route, so rewriting a valid cap between `/v2` and
 
 A syntactically and cryptographically valid read proof used on a write route
 returns `403 ATTN_WRITE_CAPABILITY_REQUIRED`. Missing, malformed, wrong-key,
-or wrong-scope proofs return `401 ATTN_ADMISSION_INVALID`. V3 WebSockets use
-`Sec-WebSocket-Protocol: attn.v3, read-hmac.<base64url HMAC>`.
+or wrong-scope proofs return `401 ATTN_ADMISSION_INVALID`. V3 anonymous viewer
+WebSockets use `Sec-WebSocket-Protocol: attn.v3, read-hmac.<base64url HMAC>`.
+Registered v3 device sockets use the exact ordered form
+`attn.v3, read-hmac.<base64url HMAC>, write-hmac.<base64url HMAC>`; both MACs
+cover the same canonical GET request. This prevents a view bearer from opening
+a socket under a public device id learned from the readable directory.
 
-Known limitation: WebSocket admission still requires an already-registered
-device, while `POST /devices` is a write operation. A fresh view-only bearer
-therefore cannot create an anonymous identity in this phase. The constrained
-read-only identity design is deferred; this contract does not weaken device
-registration to solve it.
+V3 read-only bearers connect without weakening device registration through:
+
+`wss://relay/v3/rooms/:roomId/socket?viewer_id=<base64url(16 random bytes)>`
+
+Exactly one of `viewer_id` or `device_id` is required. Viewer sockets use an
+`attn.v3, read-hmac.<base64url HMAC>` admission proof, but are not device
+or participant records: they receive `hello`, non-signal replay, and fresh
+non-signal envelopes only. They never receive signaling or presence, never
+appear in `onlineDeviceIds`, and do not consume `maxPeers`. A separate
+`HARD_MAX_VIEWER_SOCKETS` cap bounds anonymous readers per room; overflow
+closes with 4003. `POST /devices` and every other mutation still require the
+write capability.
 
 ### Owner Distinction
 
@@ -435,9 +447,17 @@ Reads use a presigned `GET` URL fetched via `GET /v2/rooms/:roomId/blobs/:envelo
 
 URL: `wss://relay/v2/rooms/:roomId/socket?device_id=:deviceId`
 
+V3 registered URL: `wss://relay/v3/rooms/:roomId/socket?device_id=:deviceId`
+
+V3 anonymous read URL: `wss://relay/v3/rooms/:roomId/socket?viewer_id=:viewerId`
+
 Subprotocol: `attn.v2`
 
 Admission HMAC is passed via `Sec-WebSocket-Protocol` as a second protocol value: `attn.v2, hmac.<base64url HMAC>`. (Browsers don't allow custom headers on WS handshake.)
+
+V3 viewer subprotocols are exactly `attn.v3, read-hmac.<base64url HMAC>`.
+V3 registered-device subprotocols are exactly
+`attn.v3, read-hmac.<base64url HMAC>, write-hmac.<base64url HMAC>`.
 
 All frames are JSON text frames. Binary frames are reserved.
 
@@ -507,7 +527,7 @@ type ClientFrame =
 
 1. Client opens WS, sends `subscribe { after: lastSeenServerSeq }`.
 2. Server sends `hello { serverSeq, policy, devices, onlineDeviceIds, missedSignalEnvelopeIds }`. `devices` is the immutable registered directory; `onlineDeviceIds` is the authoritative active-socket snapshot used to build the live WebRTC mesh without resurrecting departed registrations. If `after < meta:oldest_retained_seq`, instead sends `error { code: "ATTN_CURSOR_TOO_OLD", resyncFromSeq: <oldest_retained_seq> }` and closes `4005`. Client responds by discarding its cursor and either requesting a snapshot from a peer or re-subscribing from `resyncFromSeq`.
-3. Server pushes `envelope` and `presence` frames as they happen. Each accepted envelope upload also resets the idle alarm.
+3. Server pushes `envelope` and `presence` frames as they happen. V3 anonymous viewers receive only non-signal `envelope` frames; presence and all signaling are suppressed. Each accepted envelope upload also resets the idle alarm.
 4. Server sends `ping` every 30s; if no `pong` within 60s, close `1001`.
 5. The DO uses WebSocket Hibernation: when no traffic for 60s, the DO hibernates, and frames are resumed transparently on the next event.
 

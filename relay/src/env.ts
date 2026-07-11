@@ -21,6 +21,8 @@ export interface Env {
 
   // Hard maxima (string-typed env vars — parse at use site).
   HARD_MAX_PEERS: string;
+  /** Concurrent anonymous v3 viewer sockets per room. Independent of maxPeers. */
+  HARD_MAX_VIEWER_SOCKETS: string;
   HARD_MAX_ROOM_BYTES: string;
   HARD_MAX_EVENT_BYTES: string;
   HARD_MAX_SNAPSHOT_BYTES: string;

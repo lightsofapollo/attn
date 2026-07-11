@@ -305,6 +305,7 @@ function buildRateLimitedResponse(result: RateLimitResult): Response {
 
 interface HardLimits {
   maxPeers: number;
+  maxViewerSockets: number;
   maxSnapshotBytes: number;
   maxEventBytes: number;
   maxEvents: number;
@@ -320,6 +321,10 @@ interface HardLimits {
 function readHardLimits(env: Env): HardLimits {
   return {
     maxPeers: parsePositiveInt(env.HARD_MAX_PEERS, "HARD_MAX_PEERS"),
+    maxViewerSockets: parsePositiveInt(
+      env.HARD_MAX_VIEWER_SOCKETS,
+      "HARD_MAX_VIEWER_SOCKETS",
+    ),
     maxSnapshotBytes: parsePositiveInt(env.HARD_MAX_SNAPSHOT_BYTES, "HARD_MAX_SNAPSHOT_BYTES"),
     maxEventBytes: parsePositiveInt(env.HARD_MAX_EVENT_BYTES, "HARD_MAX_EVENT_BYTES"),
     maxEvents: parsePositiveInt(env.HARD_MAX_EVENTS, "HARD_MAX_EVENTS"),
@@ -3011,10 +3016,11 @@ export class RoomDO extends DurableObject<Env> {
 
     // Existence check before parsing the subprotocol so unknown rooms surface
     // as 404 rather than 401 (matches the device list precedent).
-    const [storedVersion, v2Key, readKeyV3] = await Promise.all([
+    const [storedVersion, v2Key, readKeyV3, writeKeyV3] = await Promise.all([
       this.ctx.storage.get<number>(META.protocolVersion),
       this.ctx.storage.get<Uint8Array>(META.admissionKey),
       this.ctx.storage.get<Uint8Array>(META.readAdmissionKeyV3),
+      this.ctx.storage.get<Uint8Array>(META.writeAdmissionKeyV3),
     ]);
     const roomVersion = storedVersion ?? (v2Key === undefined ? undefined : 2);
     if (roomVersion === undefined) {
@@ -3088,9 +3094,22 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
 
-    // Parse Sec-WebSocket-Protocol → ["attn.v2", "hmac.<b64url>"].
+    // Determine the requested identity mode before parsing the subprotocol.
+    // We deliberately defer shape errors until after read admission so an
+    // unauthenticated caller cannot use identifier errors as a room oracle.
+    const deviceIds = url.searchParams.getAll("device_id");
+    const viewerIds = url.searchParams.getAll("viewer_id");
+    const hasDeviceId = deviceIds.length > 0;
+    const hasViewerId = viewerIds.length > 0;
+    const v3RegisteredDevice = routeVersion === 3
+      && deviceIds.length === 1
+      && viewerIds.length === 0;
+
+    // V2 retains its original protocol. V3 viewers prove read possession;
+    // v3 registered devices must additionally prove write possession so a
+    // view bearer cannot impersonate any public directory device id.
     const protocolHeader = request.headers.get("Sec-WebSocket-Protocol");
-    const parsedProtocol = parseAttnProtocol(protocolHeader, routeVersion);
+    const parsedProtocol = parseAttnProtocol(protocolHeader, routeVersion, v3RegisteredDevice);
     if (parsedProtocol === undefined) {
       // Without a parseable subprotocol we can't even negotiate `attn.v2`, so
       // we refuse the upgrade outright. This is the only admission-failure
@@ -3100,7 +3119,9 @@ export class RoomDO extends DurableObject<Env> {
         401,
         "ATTN_ADMISSION_INVALID",
         routeVersion === 3
-          ? "Sec-WebSocket-Protocol must be 'attn.v3, read-hmac.<base64url>'"
+          ? v3RegisteredDevice
+            ? "registered v3 socket protocol must be exactly 'attn.v3, read-hmac.<base64url>, write-hmac.<base64url>'"
+            : "viewer v3 socket protocol must be exactly 'attn.v3, read-hmac.<base64url>'"
           : "Sec-WebSocket-Protocol must be 'attn.v2, hmac.<base64url>'",
       );
     }
@@ -3109,7 +3130,7 @@ export class RoomDO extends DurableObject<Env> {
     const hmacOk = await verifyAdmissionHmac({
       method: "GET",
       url,
-      providedHmac: parsedProtocol.hmac,
+      providedHmac: parsedProtocol.readHmac,
       admissionKey: storedAdmissionKey,
     });
     if (!hmacOk) {
@@ -3130,10 +3151,100 @@ export class RoomDO extends DurableObject<Env> {
       });
     }
 
-    // device_id query parameter is required so we can tag the socket.
-    const deviceId = url.searchParams.get("device_id");
-    if (deviceId === null || deviceId === "") {
-      return errorResponse(400, "ATTN_BODY_INVALID", "missing device_id query parameter");
+    if (v3RegisteredDevice) {
+      if (writeKeyV3 === undefined || parsedProtocol.writeHmac === undefined) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing socket write admission key`);
+      }
+      const writeHmacOk = await verifyAdmissionHmac({
+        method: "GET",
+        url,
+        providedHmac: parsedProtocol.writeHmac,
+        admissionKey: writeKeyV3,
+      });
+      if (!writeHmacOk) {
+        const pair = new WebSocketPair();
+        const [c, s] = [pair[0], pair[1]];
+        s.accept();
+        try {
+          s.close(CLOSE_ADMISSION_INVALID, "write admission HMAC invalid");
+        } catch {
+          // swallow
+        }
+        const policyForTag = await this.ctx.storage.get<RoomPolicy>(META.policy);
+        return new Response(null, {
+          status: 101,
+          webSocket: c,
+          headers: buildSocketUpgradeHeaders(policyForTag, routeVersion),
+        });
+      }
+    }
+
+    // Registered peers use device_id exactly as in v2. V3 additionally admits
+    // anonymous read-only sockets through viewer_id. Keeping the two query
+    // forms mutually exclusive is important: a caller must not be able to
+    // acquire viewer treatment while presenting an unregistered device id.
+    if (hasDeviceId === hasViewerId || deviceIds.length > 1 || viewerIds.length > 1) {
+      return errorResponse(
+        400,
+        "ATTN_BODY_INVALID",
+        routeVersion === 3
+          ? "socket requires exactly one of device_id or viewer_id"
+          : "socket requires exactly one device_id",
+      );
+    }
+
+    const viewerId = viewerIds[0];
+    if (viewerId !== undefined) {
+      if (routeVersion !== 3) {
+        return errorResponse(400, "ATTN_BODY_INVALID", "viewer_id is only valid on v3 sockets");
+      }
+      if (!isViewerId(viewerId)) {
+        return errorResponse(
+          400,
+          "ATTN_BODY_INVALID",
+          "viewer_id must be a canonical 16-byte base64url value",
+        );
+      }
+
+      const policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
+      if (policy === undefined) {
+        return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
+      }
+      const maxViewerSockets = readHardLimits(this.env).maxViewerSockets;
+      const viewerSocketCount = this.ctx.getWebSockets().reduce((count, socket) => {
+        return count + (readAttachment(socket)?.kind === "viewer" ? 1 : 0);
+      }, 0);
+
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      this.ctx.acceptWebSocket(server, [`v3:${encodeOpaqueSegment(viewerId)}`]);
+      writeAttachment(server, {
+        kind: "viewer",
+        viewerId,
+        subscribed: false,
+        lastPongTs: 0,
+      });
+
+      // Anonymous readers have their own bounded pool. They neither consume
+      // maxPeers nor displace registered participants from a room.
+      if (viewerSocketCount >= maxViewerSockets) {
+        try {
+          server.close(CLOSE_RATE_LIMIT, "viewer socket limit reached");
+        } catch {
+          // best-effort close after accepting so browser clients see 4003
+        }
+      }
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+        headers: buildSocketUpgradeHeaders(policy, routeVersion),
+      });
+    }
+
+    const deviceId = deviceIds[0]!;
+    if (!isProtocolId(deviceId, DEVICE_ID_MAX_CHARS)) {
+      return errorResponse(400, "ATTN_BODY_INVALID", "device_id is malformed");
     }
 
     // Look up the device's participantId. Per spec the WS open is for an
@@ -3158,7 +3269,7 @@ export class RoomDO extends DurableObject<Env> {
     const connectedDevices = new Set<string>();
     for (const existing of this.ctx.getWebSockets()) {
       const attached = readAttachment(existing);
-      if (attached !== undefined) connectedDevices.add(attached.deviceId);
+      if (attached?.kind === "device") connectedDevices.add(attached.deviceId);
     }
     // If THIS deviceId is already connected we let it in (the prior socket
     // will be replaced — the spec doesn't speak to multi-tab per device, so we
@@ -3178,6 +3289,7 @@ export class RoomDO extends DurableObject<Env> {
       `p2:${encodeOpaqueSegment(participantId)}`,
     ]);
     writeAttachment(server, {
+      kind: "device",
       deviceId,
       participantId,
       subscribed: false,
@@ -3259,7 +3371,7 @@ export class RoomDO extends DurableObject<Env> {
     _wasClean: boolean,
   ): Promise<void> {
     const att = readAttachment(ws);
-    if (att !== undefined) {
+    if (att?.kind === "device") {
       this.broadcastPresence(
         { event: "leave", deviceId: att.deviceId, participantId: att.participantId },
         ws,
@@ -3273,7 +3385,7 @@ export class RoomDO extends DurableObject<Env> {
   /** Hibernation entry-point on socket-level error. Same handling as close. */
   override async webSocketError(ws: WebSocket, _err: unknown): Promise<void> {
     const att = readAttachment(ws);
-    if (att !== undefined) {
+    if (att?.kind === "device") {
       this.broadcastPresence(
         { event: "leave", deviceId: att.deviceId, participantId: att.participantId },
         ws,
@@ -3327,7 +3439,9 @@ export class RoomDO extends DurableObject<Env> {
       failSocketCorrupt(ws);
       return;
     }
-    const missedSignalEnvelopeIds = await this.collectMissedSignalIds(att.deviceId, after);
+    const missedSignalEnvelopeIds = att.kind === "device"
+      ? await this.collectMissedSignalIds(att.deviceId, after)
+      : [];
     if (missedSignalEnvelopeIds instanceof Response) {
       failSocketCorrupt(ws);
       return;
@@ -3339,7 +3453,10 @@ export class RoomDO extends DurableObject<Env> {
     }
     const onlineDeviceIds = [...new Set(
       this.ctx.getWebSockets()
-        .map((socket) => readAttachment(socket)?.deviceId)
+        .map((socket) => {
+          const attachment = readAttachment(socket);
+          return attachment?.kind === "device" ? attachment.deviceId : undefined;
+        })
         .filter((deviceId): deviceId is string => deviceId !== undefined),
     )].sort();
     const hello: ServerFrame = {
@@ -3356,7 +3473,7 @@ export class RoomDO extends DurableObject<Env> {
     // for signal envelopes — only deliver to the addressed deviceId.
     for (const record of orderedReplay) {
       if (record.serverSeq <= after) continue;
-      if (!deliverableTo(record, att.deviceId)) continue;
+      if (!deliverableTo(record, att)) continue;
       const frame: ServerFrame = { type: "envelope", envelope: record, serverSeq: record.serverSeq };
       sendJson(ws, frame);
     }
@@ -3401,7 +3518,7 @@ export class RoomDO extends DurableObject<Env> {
         const att = readAttachment(sock);
         if (att === undefined) continue;
         if (!att.subscribed) continue;
-        if (!deliverableTo(record, att.deviceId)) continue;
+        if (!deliverableTo(record, att)) continue;
         sendRaw(sock, json);
       }
     }
@@ -3425,7 +3542,7 @@ export class RoomDO extends DurableObject<Env> {
     for (const sock of this.ctx.getWebSockets()) {
       if (sock === originator) continue;
       const att = readAttachment(sock);
-      if (att === undefined) continue;
+      if (att?.kind !== "device") continue;
       sendRaw(sock, json);
     }
   }
@@ -4532,15 +4649,28 @@ export const WS_CLOSE_CODES = {
   cursorTooOld: CLOSE_CURSOR_TOO_OLD,
 } as const;
 
-/** Persisted per-socket state. Survives hibernation via serializeAttachment. */
-interface WSAttachment {
-  deviceId: string;
-  participantId: string;
+interface WSAttachmentBase {
   /** True once the socket has received a successful `subscribe` reply. */
   subscribed: boolean;
   /** Last seen pong timestamp (ms). 0 until the first pong. */
   lastPongTs: number;
 }
+
+/** Registered participant socket. Legacy attachments deserialize into this branch. */
+interface DeviceWSAttachment extends WSAttachmentBase {
+  kind: "device";
+  deviceId: string;
+  participantId: string;
+}
+
+/** Anonymous v3 read session. It is deliberately not a room participant. */
+interface ViewerWSAttachment extends WSAttachmentBase {
+  kind: "viewer";
+  viewerId: string;
+}
+
+/** Persisted per-socket state. Survives hibernation via serializeAttachment. */
+type WSAttachment = DeviceWSAttachment | ViewerWSAttachment;
 
 /**
  * Server-emitted frames per relay-spec.md §WebSocket Protocol.
@@ -4598,13 +4728,15 @@ const clientFrameSchema = z.discriminatedUnion("type", [
 // --- WebSocket helpers ---------------------------------------------------
 
 /**
- * Parse Sec-WebSocket-Protocol expected as `attn.v2, hmac.<base64url>`.
- * Returns undefined on any shape mismatch — the caller surfaces as 401.
+ * Parse the socket subprotocol. V3 forms are exact and ordered: viewers carry
+ * only read-hmac, while registered devices carry read-hmac then write-hmac.
+ * V2 retains its historical extra-token tolerance for compatibility.
  */
 function parseAttnProtocol(
   header: string | null,
   version = 2,
-): { hmac: Uint8Array } | undefined {
+  v3RegisteredDevice = false,
+): { readHmac: Uint8Array; writeHmac?: Uint8Array } | undefined {
   if (header === null || header === "") return undefined;
   // Cloudflare's runtime exposes the *comma-joined* original header. We split
   // on `,` and trim each token, matching how browsers serialize the list.
@@ -4613,26 +4745,35 @@ function parseAttnProtocol(
   // Require the canonical subprotocol up front; reject mixed orderings so the
   // canonical request stays deterministic on the client side.
   if (tokens[0] !== `attn.v${version}`) return undefined;
-  const hmacPrefix = version === 3 ? "read-hmac." : "hmac.";
-  let hmacToken: string | undefined;
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i];
-    if (t !== undefined && t.startsWith(hmacPrefix)) {
-      hmacToken = t;
-      break;
+  const decodeToken = (token: string | undefined, prefix: string): Uint8Array | undefined => {
+    if (token === undefined || !token.startsWith(prefix)) return undefined;
+    const encoded = token.slice(prefix.length);
+    if (encoded === "") return undefined;
+    try {
+      const bytes = base64UrlDecode(encoded);
+      return bytes.length === 32 ? bytes : undefined;
+    } catch {
+      return undefined;
     }
+  };
+
+  if (version === 3) {
+    const expectedLength = v3RegisteredDevice ? 3 : 2;
+    if (tokens.length !== expectedLength) return undefined;
+    const readHmac = decodeToken(tokens[1], "read-hmac.");
+    if (readHmac === undefined) return undefined;
+    if (!v3RegisteredDevice) return { readHmac };
+    const writeHmac = decodeToken(tokens[2], "write-hmac.");
+    if (writeHmac === undefined) return undefined;
+    return { readHmac, writeHmac };
   }
-  if (hmacToken === undefined) return undefined;
-  const encoded = hmacToken.slice(hmacPrefix.length);
-  if (encoded === "") return undefined;
-  let bytes: Uint8Array;
-  try {
-    bytes = base64UrlDecode(encoded);
-  } catch {
-    return undefined;
+
+  let hmac: Uint8Array | undefined;
+  for (let i = 1; i < tokens.length; i++) {
+    hmac = decodeToken(tokens[i], "hmac.");
+    if (hmac !== undefined) break;
   }
-  if (bytes.length !== 32) return undefined;
-  return { hmac: bytes };
+  return hmac === undefined ? undefined : { readHmac: hmac };
 }
 
 /**
@@ -4664,13 +4805,27 @@ async function verifyAdmissionHmac(opts: {
 function readAttachment(ws: WebSocket): WSAttachment | undefined {
   const raw = ws.deserializeAttachment() as unknown;
   if (raw === null || typeof raw !== "object") return undefined;
-  const r = raw as Partial<WSAttachment>;
+  const r = raw as Record<string, unknown>;
+  const subscribed = r.subscribed === true;
+  const lastPongTs = typeof r.lastPongTs === "number" ? r.lastPongTs : 0;
+  if (r.kind === "viewer") {
+    if (typeof r.viewerId !== "string" || !isViewerId(r.viewerId)) return undefined;
+    return {
+      kind: "viewer",
+      viewerId: r.viewerId,
+      subscribed,
+      lastPongTs,
+    };
+  }
+  // Attachments created before the tagged union did not carry `kind`.
+  if (r.kind !== undefined && r.kind !== "device") return undefined;
   if (typeof r.deviceId !== "string" || typeof r.participantId !== "string") return undefined;
   return {
+    kind: "device",
     deviceId: r.deviceId,
     participantId: r.participantId,
-    subscribed: r.subscribed === true,
-    lastPongTs: typeof r.lastPongTs === "number" ? r.lastPongTs : 0,
+    subscribed,
+    lastPongTs,
   };
 }
 
@@ -4723,17 +4878,24 @@ function failSocketCorrupt(ws: WebSocket): void {
 }
 
 /**
- * Per-target deliverability check. Signal envelopes deliver only to their
- * target.deviceId; all other kinds broadcast to every connected peer.
+ * Per-target deliverability check. Anonymous viewers receive only opaque
+ * non-signal envelopes. Registered devices retain the v2 targeted/broadcast
+ * signal behavior.
  */
-function deliverableTo(record: EnvelopeRecord, deviceId: string): boolean {
+function deliverableTo(record: EnvelopeRecord, attachment: WSAttachment): boolean {
+  if (attachment.kind === "viewer") return record.kind !== "signal";
   if (record.kind === "signal") {
     // Targeted signal (WebRTC SDP/ICE) → only the addressed device.
     // Broadcast signal (target=null, e.g. live co-typing steps) → every
     // peer. The author also receives its own broadcast back; consumers drop
     // self-echoes via the payload's `from` field.
     if (record.target?.deviceId == null) return true;
-    return record.target.deviceId === deviceId;
+    return record.target.deviceId === attachment.deviceId;
   }
   return true;
+}
+
+/** Canonical base64url-no-pad encoding of exactly 16 random bytes. */
+function isViewerId(value: string): boolean {
+  return /^[A-Za-z0-9_-]{22}$/.test(value);
 }

@@ -95,6 +95,7 @@
     authoringError: null,
     persistence: 'ephemeral',
     storagePersisted: null,
+    canRemember: true,
   });
 
   // Capture once at construction — both props are stable for the lifetime of
@@ -280,6 +281,7 @@
   });
 
   function openComposer(kind: 'comment' | 'suggestion'): void {
+    if (sessionState.grantTier === 'view') return;
     if (kind === 'suggestion' && sessionState.grantTier !== 'suggest') return;
     const view = pmViewForReview;
     const roomId = sessionState.roomId;
@@ -411,6 +413,11 @@
           data-slot="browser-authoring-status"
         >
           <div class="flex min-w-0 items-center gap-2" data-slot="browser-persistence-status">
+            {#if sessionState.grantTier === 'view'}
+              <span class="font-medium text-foreground" data-slot="browser-view-only">View only</span>
+            {:else if !sessionState.canRemember}
+              <span>Temporary link session</span>
+            {:else}
             {#if sessionState.persistence === 'ephemeral'}
               <span>Temporary on this browser</span>
               <button
@@ -439,6 +446,7 @@
                 Forget
               </button>
             {/if}
+            {/if}
           </div>
           <div class="flex min-w-0 items-center justify-end gap-2">
             <span data-slot="browser-connection-status">
@@ -450,7 +458,7 @@
                     ? 'Encrypted mailbox'
                     : 'Offline'}
             </span>
-            {#if !sessionState.authoringReady}
+            {#if sessionState.grantTier !== 'view' && !sessionState.authoringReady}
               <span>Preparing encrypted authoring…</span>
             {/if}
             {#if sessionState.authoringError}
@@ -463,7 +471,9 @@
                 Retry
               </button>
             {/if}
-            <OutboxIndicator isOwner={false} onRetry={() => { void session.retryOutbox(); }} />
+            {#if sessionState.grantTier !== 'view'}
+              <OutboxIndicator isOwner={false} onRetry={() => { void session.retryOutbox(); }} />
+            {/if}
           </div>
         </div>
         <div class="browser-review-editor min-w-0 flex-1 overflow-auto"
@@ -488,7 +498,7 @@
           <ReviewMargin
             view={pmViewForReview}
             readOnly={true}
-            reviewerAuthoring={sessionState.authoringReady}
+            reviewerAuthoring={sessionState.authoringReady && sessionState.grantTier !== 'view'}
             onResolveComment={resolveBrowserComment}
             onReplyComment={replyBrowserComment}
           />

@@ -35,10 +35,13 @@ import {
   base64UrlDecode,
   base64UrlEncode,
   buildAdmissionHeader,
+  buildAdmissionHeaderV3,
   buildAdmissionSubprotocol,
+  buildAdmissionSubprotocolV3,
   contentHash,
   deriveRoomId,
   deriveRoomKeys,
+  deriveReadKeysV3,
   toCanonicalBytes,
   type RoomKeys,
 } from './browser-crypto';
@@ -186,8 +189,8 @@ export interface BrowserSessionState {
   error: BrowserSessionError | null;
   /** True only after the signed ParticipantJoined envelope is acknowledged. */
   authoringReady: boolean;
-  /** Verified v3 directory grant; legacy v2 sessions default to suggest. */
-  grantTier: 'comment' | 'suggest';
+  /** Effective invite tier; legacy v2 sessions retain suggest behavior. */
+  grantTier: 'view' | 'comment' | 'suggest';
   /** Number of sealed event envelopes waiting for relay acknowledgement. */
   outboxPending: number;
   /** Last authoring transport error. Reading remains available. */
@@ -196,6 +199,8 @@ export interface BrowserSessionState {
   persistence: 'ephemeral' | 'saving' | 'remembered' | 'degraded';
   /** Result of navigator.storage.persist(); null before an explicit request. */
   storagePersisted: boolean | null;
+  /** V2 recovery is available; scoped v3 capability persistence lands with durable shares. */
+  canRemember: boolean;
 }
 
 /**
@@ -258,11 +263,6 @@ export interface BrowserSessionOptions {
   outboxMintPow?: BrowserOutboxOptions['mintPow'];
   /** Human-readable encrypted ParticipantJoined display name. */
   displayName?: string;
-  /** Verified bootstrap grant. Defaults to suggest for legacy v2. */
-  grantTier?: 'comment' | 'suggest';
-  /** Owner Ed25519 grant proof; both fields are required when grantTier is set. */
-  grantSignature?: string;
-  ownerSigningKey?: string;
   /** Inject a pre-built identity (tests want deterministic keys). */
   identity?: BrowserDeviceIdentity;
   /** Optional state observer — called on every state mutation. */
@@ -294,7 +294,28 @@ export interface FetchLikeResponse {
   headers?: { get(name: string): string | null };
 }
 
-type ActiveRoomKeys = Omit<RoomKeys, 'rootKey'> & { rootKey?: Uint8Array };
+interface ActiveRoomKeys {
+  version: 2 | 3;
+  rootKey?: Uint8Array;
+  readCapabilityKey?: Uint8Array;
+  eventKey: Uint8Array;
+  snapshotKey: Uint8Array;
+  signalingKey: Uint8Array;
+  readAdmissionKey: Uint8Array;
+  writeAdmissionKey?: Uint8Array;
+}
+
+function activeV2Keys(keys: Omit<RoomKeys, 'rootKey'> & { rootKey?: Uint8Array }): ActiveRoomKeys {
+  return {
+    version: 2,
+    rootKey: keys.rootKey,
+    eventKey: keys.eventKey,
+    snapshotKey: keys.snapshotKey,
+    signalingKey: keys.signalingKey,
+    readAdmissionKey: keys.admissionKey,
+    writeAdmissionKey: keys.admissionKey,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Identity generation
@@ -372,6 +393,16 @@ export function verifyDeviceGrantV3(
   } catch {
     return false;
   }
+}
+
+function uniqueOwnerDevice(devices: Device[]): Device {
+  const owners = devices.filter((device) => device.kind === 'owner');
+  if (owners.length !== 1) throw new Error('v3 device directory requires exactly one owner');
+  const owner = owners[0]!;
+  if (owner.grantTier !== undefined || owner.grantSignature !== undefined) {
+    throw new Error('v3 owner registration must not carry a grant');
+  }
+  return owner;
 }
 
 /**
@@ -473,6 +504,7 @@ export class BrowserSession {
     authoringError: null,
     persistence: 'ephemeral',
     storagePersisted: null,
+    canRemember: true,
   };
   private identity: BrowserDeviceIdentity | null = null;
   private wsClient: BrowserWsClient | null = null;
@@ -500,6 +532,7 @@ export class BrowserSession {
   private readonly pagehideTarget: BrowserWindowLike | null;
   private readonly pagehideHandler = (): void => this.close();
   private transportGeneration = 0;
+  private readonly viewerId = randomOpaqueId();
 
   constructor(opts: BrowserSessionOptions = {}) {
     this.opts = opts;
@@ -554,10 +587,12 @@ export class BrowserSession {
     let keys: ActiveRoomKeys;
     let identity: BrowserDeviceIdentity | null;
     try {
-      [keys, identity] = await Promise.all([
+      const [storedKeys, loadedIdentity] = await Promise.all([
         storage.deriveRoomKeys(roomId),
         storage.loadIdentity(roomId),
       ]);
+      keys = activeV2Keys(storedKeys);
+      identity = loadedIdentity;
     } catch {
       await storage.forgetRoom(roomId).catch(() => undefined);
       storage.close();
@@ -624,6 +659,7 @@ export class BrowserSession {
   }
 
   async createComment(anchor: Anchor, body: string, threadId?: string): Promise<ReviewEvent> {
+    if (this.state.grantTier === 'view') throw new Error('view grant cannot author comments');
     const text = body.trim();
     if (text.length === 0) throw new Error('comment body cannot be empty');
     return this.authorEvent({
@@ -639,6 +675,7 @@ export class BrowserSession {
   }
 
   async resolveComment(threadId: string): Promise<ReviewEvent> {
+    if (this.state.grantTier === 'view') throw new Error('view grant cannot resolve comments');
     if (threadId.length === 0) throw new Error('threadId cannot be empty');
     const identity = this.requireIdentity();
     return this.authorEvent({
@@ -667,6 +704,9 @@ export class BrowserSession {
 
   /** Explicitly persist a non-extractable room capability and sealed recovery state. */
   async rememberRoom(): Promise<void> {
+    if (this.state.grantTier === 'view' || this.keys?.version === 3) {
+      throw new Error('v3 capability persistence is not available yet');
+    }
     if (this.state.persistence === 'remembered' || this.state.persistence === 'degraded') return;
     const roomId = this.state.roomId;
     const keys = this.keys;
@@ -792,56 +832,53 @@ export class BrowserSession {
       return;
     }
 
-    // 2. Derive keys and roomId. The derived `roomId` MUST match the
-    //    invite's `roomId` — if it doesn't the URL is corrupted.
-    let roomKeys: RoomKeys;
-    let derivedRoomId: string;
+    // 2. Derive the versioned read/write capability set. Legacy v2 still
+    // cross-checks roomId from the full room secret. V3 URLs already carry
+    // least-privilege capability keys and never expose the root secret.
+    let roomKeys: ActiveRoomKeys;
     try {
-      roomKeys = deriveRoomKeys(invite.roomSecret);
-      derivedRoomId = deriveRoomId(invite.roomSecret);
+      if (invite.version === 2) {
+        const v2 = deriveRoomKeys(invite.roomSecret);
+        const derivedRoomId = deriveRoomId(invite.roomSecret);
+        if (derivedRoomId !== invite.roomId) {
+          throw new Error(`roomId mismatch: derived ${derivedRoomId} vs invite ${invite.roomId}`);
+        }
+        zero(invite.roomSecret);
+        roomKeys = activeV2Keys(v2);
+      } else {
+        const read = deriveReadKeysV3(invite.readCapabilityKey);
+        roomKeys = {
+          version: 3,
+          readCapabilityKey: read.readCapabilityKey,
+          eventKey: read.eventKey,
+          snapshotKey: read.snapshotKey,
+          signalingKey: read.signalingKey,
+          readAdmissionKey: read.readAdmissionKey,
+          ...(invite.writeAdmissionKey === undefined
+            ? {}
+            : { writeAdmissionKey: new Uint8Array(invite.writeAdmissionKey) }),
+        };
+        zero(invite.readCapabilityKey);
+        if (invite.writeAdmissionKey) zero(invite.writeAdmissionKey);
+        this.setState({ grantTier: invite.tier });
+        this.setState({ canRemember: false });
+      }
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       this.fail('invite_invalid', `key derivation: ${m}`);
-      zero(invite.roomSecret);
+      if (invite.version === 2) zero(invite.roomSecret);
       return;
     }
-    if (derivedRoomId !== invite.roomId) {
-      this.fail(
-        'invite_invalid',
-        `roomId mismatch: derived ${derivedRoomId} vs invite ${invite.roomId}`,
-      );
-      zero(invite.roomSecret);
-      return;
-    }
-    if (this.opts.grantTier !== undefined) {
-      try {
-        if (!this.opts.grantSignature || !this.opts.ownerSigningKey) {
-          throw new Error('v3 grant proof is incomplete');
-        }
-        const valid = verifyDeviceGrantV3(
-          invite.roomId,
-          this.opts.grantTier,
-          this.opts.grantSignature,
-          this.opts.ownerSigningKey,
-        );
-        if (!valid) throw new Error('v3 owner grant signature is invalid');
-        this.setState({ grantTier: this.opts.grantTier });
-      } catch (error) {
-        this.fail('invite_invalid', error instanceof Error ? error.message : String(error));
-        zero(invite.roomSecret);
-        return;
-      }
-    }
-    // Clobber the raw secret — only the subkeys are needed from here on.
-    zero(invite.roomSecret);
     this.keys = roomKeys;
     this.setState({ roomId: invite.roomId });
     const store = await this.ensureStore();
     store.currentRoomId = invite.roomId;
 
-    // 3. Identity (injected or freshly generated). It remains memory-only
-    // unless the user later invokes rememberRoom().
-    this.identity = this.opts.identity ?? generateBrowserIdentity();
+    // 3. View bearers never create a registered identity. Writable sessions
+    // use an ephemeral identity unless the user explicitly remembers v2.
+    if (this.state.grantTier !== 'view') {
+      this.identity = this.opts.identity ?? generateBrowserIdentity();
+    }
 
     // 4. Fetch the authenticated policy before mining registration PoW. Room
     // policy may require more than the protocol floor of 12 bits.
@@ -850,7 +887,20 @@ export class BrowserSession {
       const bootstrap = await this.fetchRoomBootstrap(invite.roomId, roomKeys);
       this.roomPolicy = bootstrap.policy;
       this.bootstrapDevices = bootstrap.devices;
-      await this.registerDevice(invite.roomId, roomKeys, bootstrap.policy.powBits);
+      if (invite.version === 3 && invite.tier !== 'view') {
+        const owner = uniqueOwnerDevice(bootstrap.devices);
+        if (!invite.grantSignature || !verifyDeviceGrantV3(
+          invite.roomId,
+          invite.tier,
+          invite.grantSignature,
+          owner.publicSigningKey,
+        )) {
+          throw new Error('v3 owner grant signature is invalid');
+        }
+      }
+      if (this.state.grantTier !== 'view') {
+        await this.registerDevice(invite, roomKeys, bootstrap.policy.powBits);
+      }
     } catch (err) {
       if (this.isTerminated()) return;
       const m = err instanceof Error ? err.message : String(err);
@@ -957,6 +1007,10 @@ export class BrowserSession {
     skipJoin = false,
     durableOffline = false,
   ): Promise<void> {
+    if (this.state.grantTier === 'view') {
+      this.setState({ authoringReady: false, authoringError: null });
+      return;
+    }
     this.roomPolicy = policy;
     if (this.outbox) {
       try {
@@ -977,7 +1031,7 @@ export class BrowserSession {
     const keys = this.keys;
     const identity = this.identity;
     const roomId = this.state.roomId;
-    if (!keys || !identity || !roomId || policy.expiresAt <= Date.now()) {
+    if (!keys || !keys.writeAdmissionKey || !identity || !roomId || policy.expiresAt <= Date.now()) {
       this.setState({ authoringError: 'This review room is no longer writable.' });
       return;
     }
@@ -989,7 +1043,8 @@ export class BrowserSession {
       relayUrl,
       roomId,
       deviceId: identity.deviceId,
-      admissionKey: keys.admissionKey,
+      admissionKey: keys.writeAdmissionKey,
+      protocolVersion: keys.version,
       powBits: policy.powBits,
       maxEventBytes: policy.maxEventBytes,
       fetchImpl: async (url, init): Promise<BrowserOutboxResponse> =>
@@ -1265,7 +1320,11 @@ export class BrowserSession {
       zero(this.keys.eventKey);
       zero(this.keys.snapshotKey);
       zero(this.keys.signalingKey);
-      zero(this.keys.admissionKey);
+      zero(this.keys.readAdmissionKey);
+      if (this.keys.writeAdmissionKey && this.keys.writeAdmissionKey !== this.keys.readAdmissionKey) {
+        zero(this.keys.writeAdmissionKey);
+      }
+      if (this.keys.readCapabilityKey) zero(this.keys.readCapabilityKey);
       this.keys = null;
     }
     if (this.identity) {
@@ -1279,11 +1338,13 @@ export class BrowserSession {
 
   private async fetchRoomBootstrap(
     roomId: string,
-    keys: RoomKeys,
+    keys: ActiveRoomKeys,
   ): Promise<{ policy: RoomPolicy; devices: Device[] }> {
-    const path = `/v2/rooms/${roomId}/devices`;
+    const path = `/v${keys.version}/rooms/${roomId}/devices`;
     const relay = validateBrowserRelayUrl(this.opts.relayUrl);
-    const admission = admissionHeaderValue(keys.admissionKey, 'GET', path, new Uint8Array());
+    const admission = keys.version === 3
+      ? buildAdmissionHeaderV3(keys.readAdmissionKey, 'read', 'GET', path, new Uint8Array())
+      : admissionHeaderValue(keys.readAdmissionKey, 'GET', path, new Uint8Array());
     const response = await this.fetchImpl()(`${relay}${path}`, {
       method: 'GET',
       headers: { 'Attn-Admission': admission },
@@ -1302,13 +1363,26 @@ export class BrowserSession {
     return { policy: parsed.policy, devices: parsed.devices };
   }
 
-  private async registerDevice(roomId: string, keys: RoomKeys, powBits: number): Promise<void> {
+  private async registerDevice(invite: ParsedInvite, keys: ActiveRoomKeys, powBits: number): Promise<void> {
     if (!this.identity) throw new Error('identity missing');
-    const body = buildRegisterDeviceBody(this.identity);
+    if (!keys.writeAdmissionKey) throw new Error('write capability missing');
+    const roomId = invite.roomId;
+    if (invite.version === 3 && invite.tier === 'view') {
+      throw new Error('view invite cannot register a device');
+    }
+    let body: RegisterDeviceBody | RegisterDeviceBodyV3;
+    if (invite.version === 3) {
+      if (invite.tier === 'view') throw new Error('view invite cannot register a device');
+      body = buildRegisterDeviceBodyV3(this.identity, invite.tier, invite.grantSignature ?? '');
+    } else {
+      body = buildRegisterDeviceBody(this.identity);
+    }
     const bodyJson = JSON.stringify(body);
     const bodyBytes = new TextEncoder().encode(bodyJson);
-    const path = `/v2/rooms/${roomId}/devices`;
-    const admission = admissionHeaderValue(keys.admissionKey, 'POST', path, bodyBytes);
+    const path = `/v${keys.version}/rooms/${roomId}/devices`;
+    const admission = keys.version === 3
+      ? buildAdmissionHeaderV3(keys.writeAdmissionKey, 'write', 'POST', path, bodyBytes)
+      : admissionHeaderValue(keys.writeAdmissionKey, 'POST', path, bodyBytes);
     const relay = validateBrowserRelayUrl(this.opts.relayUrl);
     const url = `${relay}${path}`;
     this.powAbortController = new AbortController();
@@ -1347,20 +1421,30 @@ export class BrowserSession {
   }
 
   private buildWsClient(roomId: string, keys: ActiveRoomKeys): BrowserWsClient {
-    if (!this.identity) throw new Error('identity missing');
     const relay = validateBrowserRelayUrl(this.opts.relayUrl);
-    const url = buildWsUrl(relay, roomId, this.identity.deviceId);
-    const path = socketPath(roomId);
+    const viewOnly = this.state.grantTier === 'view';
+    const identityId = viewOnly ? this.viewerId : this.requireIdentity().deviceId;
+    const identityKind = viewOnly ? 'viewer' : 'device';
+    const url = buildWsUrl(relay, roomId, identityId, keys.version, identityKind);
+    const path = socketPath(roomId, keys.version);
+    const queryName = viewOnly ? 'viewer_id' : 'device_id';
     // The WS handshake admission HMAC is over METHOD=GET, path, empty body —
     // exactly what `buildAdmissionSubprotocol` produces (the `Sec-WebSocket-
     // Protocol` value carries it; browsers can't set custom headers on a WS
     // upgrade).
-    const subprotocol = buildAdmissionSubprotocol(keys.admissionKey, 'GET', path, [
-      ['device_id', this.identity.deviceId],
-    ]);
+    const query: Array<[string, string]> = [[queryName, identityId]];
+    const subprotocol = keys.version === 3
+      ? buildAdmissionSubprotocolV3(
+          keys.readAdmissionKey,
+          'GET',
+          path,
+          query,
+          viewOnly ? undefined : keys.writeAdmissionKey,
+        )
+      : buildAdmissionSubprotocol(keys.readAdmissionKey, 'GET', path, query);
     const client = new BrowserWsClient({
       roomId,
-      localDeviceId: this.identity.deviceId,
+      localDeviceId: identityId,
       url,
       subprotocol,
       afterSeq: this.persistedCursor,
@@ -1382,6 +1466,10 @@ export class BrowserSession {
             this.onlineDeviceIds.add(deviceId);
           }
           void this.persistDirectoryAndRoom(this.bootstrapDevices, frame.policy).catch(() => undefined);
+          if (viewOnly) {
+            this.setState({ authoringReady: false, authoringError: null });
+            return;
+          }
           const generation = this.transportGeneration;
           void (async () => {
             await this.initializeAuthoring(frame.policy);
@@ -1411,6 +1499,7 @@ export class BrowserSession {
         },
         onPolicyChanged: (policy) => {
           this.roomPolicy = policy;
+          if (viewOnly) return;
           const generation = this.transportGeneration;
           void (async () => {
             await this.initializeAuthoring(policy);
@@ -1423,6 +1512,7 @@ export class BrowserSession {
           });
         },
         onPresence: (event, deviceId) => {
+          if (viewOnly) return;
           if (event === 'leave') {
             this.onlineDeviceIds.delete(deviceId);
             this.peerMesh?.removePeer(deviceId);
@@ -1465,9 +1555,11 @@ export class BrowserSession {
     }
     this.signerRefreshAttempts.add(envelope.envelopeId);
     try {
-      const path = `/v2/rooms/${roomId}/devices`;
+      const path = `/v${keys.version}/rooms/${roomId}/devices`;
       const relay = validateBrowserRelayUrl(this.opts.relayUrl);
-      const admission = admissionHeaderValue(keys.admissionKey, 'GET', path, new Uint8Array());
+      const admission = keys.version === 3
+        ? buildAdmissionHeaderV3(keys.readAdmissionKey, 'read', 'GET', path, new Uint8Array())
+        : admissionHeaderValue(keys.readAdmissionKey, 'GET', path, new Uint8Array());
       const response = await this.fetchImpl()(`${relay}${path}`, {
         method: 'GET',
         headers: { 'Attn-Admission': admission },
@@ -1568,7 +1660,8 @@ export class BrowserSession {
           recovered = await resolveBrowserR2Snapshot({
             relayUrl: validateBrowserRelayUrl(this.opts.relayUrl),
             roomId,
-            admissionKey: keys.admissionKey,
+            admissionKey: keys.readAdmissionKey,
+            protocolVersion: keys.version,
             snapshotKey: keys.snapshotKey,
             wrapper: envelope,
             fetchImpl: this.opts.r2FetchImpl ?? ((input, init) => fetch(input, init)),

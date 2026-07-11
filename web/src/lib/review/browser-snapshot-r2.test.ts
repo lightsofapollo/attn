@@ -177,6 +177,27 @@ test('opens a native-compatible happy vector through a same-origin relative capa
   equal(cached === null ? null : [...cached], [...vector.sealed], 'cache receives sealed bytes only');
 });
 
+test('v3 snapshot presign uses read-scoped admission and version-bound capability path', async () => {
+  const vector = makeVector({ envelopeId: 'env-r2-v3' });
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const result = await resolveBrowserR2Snapshot({
+    ...baseOptions(vector, async (url, init) => {
+      calls.push({ url, init });
+      if (calls.length === 1) {
+        return presign(`/v3/rooms/${ROOM}/blobs/${vector.wrapper.envelopeId}?cap=${CAP}`);
+      }
+      return binaryResponse(vector.sealed);
+    }),
+    protocolVersion: 3,
+  });
+  equal([...result], [...vector.plaintext], 'v3 recovered plaintext');
+  equal(calls[0]!.url, `${RELAY}/v3/rooms/${ROOM}/blobs/${vector.wrapper.envelopeId}`, 'v3 presign URL');
+  assert(
+    (calls[0]!.init.headers as Record<string, string>)['Attn-Admission']?.startsWith('v3.read.'),
+    'v3 read-scoped presign header',
+  );
+});
+
 test('reuses a verified sealed cache entry without any network fetch', async () => {
   const vector = makeVector({ envelopeId: 'env-r2-cache' });
   let fetches = 0;

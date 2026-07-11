@@ -47,7 +47,7 @@ use tokio::sync::RwLock;
 
 use crate::daemon::runtime_dir;
 use crate::review::crypto::ids::{derive_envelope_id_for_event, derive_event_id};
-use crate::review::crypto::kdf::{RoomKeys, derive_room_id, derive_room_keys};
+use crate::review::crypto::kdf::{RoomKeys, derive_room_id, derive_room_id_v3, derive_room_keys};
 use crate::review::crypto::pow::TokenPool;
 use crate::review::crypto::signing::{DeviceSigningKey, DeviceVerifyingKey, SignError, sign_event};
 use crate::review::envelope::{AssembleInput, assemble_event_envelope};
@@ -459,6 +459,7 @@ pub struct ParsedInviteFragmentV3 {
     pub tier: InviteTierV3,
     pub read_capability_key: [u8; 32],
     pub write_admission_key: Option<[u8; 32]>,
+    pub grant_signature: Option<[u8; 64]>,
 }
 
 /// Build a strict canonical v3 capability fragment, including the leading `#`.
@@ -466,21 +467,26 @@ pub fn build_invite_fragment_v3(
     tier: InviteTierV3,
     read_capability_key: &[u8; 32],
     write_admission_key: Option<&[u8; 32]>,
+    grant_signature: Option<&[u8; 64]>,
 ) -> Result<String, BootstrapError> {
     let read = URL_SAFE_NO_PAD.encode(read_capability_key);
-    match (tier, write_admission_key) {
-        (InviteTierV3::View, None) => Ok(format!("#v=3&tier=view&read={read}")),
-        (InviteTierV3::View, Some(_)) => Err(BootstrapError::InviteParse(
-            "view tier must not include write capability".into(),
+    match (tier, write_admission_key, grant_signature) {
+        (InviteTierV3::View, None, None) => Ok(format!("#v=3&tier=view&read={read}")),
+        (InviteTierV3::View, _, _) => Err(BootstrapError::InviteParse(
+            "view tier must not include write capability or grant".into(),
         )),
-        (InviteTierV3::Comment | InviteTierV3::Suggest, Some(write)) => Ok(format!(
-            "#v=3&tier={}&read={read}&write={}",
+        (InviteTierV3::Comment | InviteTierV3::Suggest, Some(write), Some(grant)) => Ok(format!(
+            "#v=3&tier={}&read={read}&write={}&grant={}",
             tier.as_str(),
-            URL_SAFE_NO_PAD.encode(write)
+            URL_SAFE_NO_PAD.encode(write),
+            URL_SAFE_NO_PAD.encode(grant),
         )),
-        (InviteTierV3::Comment | InviteTierV3::Suggest, None) => Err(BootstrapError::InviteParse(
-            format!("{} tier requires write capability", tier.as_str()),
-        )),
+        (InviteTierV3::Comment | InviteTierV3::Suggest, _, _) => {
+            Err(BootstrapError::InviteParse(format!(
+                "{} tier requires write capability and owner grant",
+                tier.as_str()
+            )))
+        }
     }
 }
 
@@ -496,7 +502,7 @@ pub fn parse_invite_fragment_v3(fragment: &str) -> Result<ParsedInviteFragmentV3
             .split_once('=')
             .filter(|(key, value)| !key.is_empty() && !value.is_empty() && !value.contains('='))
             .ok_or_else(|| BootstrapError::InviteParse("malformed v3 fragment field".into()))?;
-        if !matches!(key, "v" | "tier" | "read" | "write") {
+        if !matches!(key, "v" | "tier" | "read" | "write" | "grant") {
             return Err(BootstrapError::InviteParse(format!(
                 "unknown v3 fragment field: {key}"
             )));
@@ -540,8 +546,28 @@ pub fn parse_invite_fragment_v3(fragment: &str) -> Result<ParsedInviteFragmentV3
     };
     let read_capability_key = decode("read")?;
     let write_admission_key = fields.get("write").map(|_| decode("write")).transpose()?;
-    let canonical =
-        build_invite_fragment_v3(tier, &read_capability_key, write_admission_key.as_ref())?;
+    let grant_signature = fields
+        .get("grant")
+        .map(|encoded| {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(encoded.as_bytes())
+                .map_err(|error| {
+                    BootstrapError::InviteParse(format!("grant base64url decode: {error}"))
+                })?;
+            bytes.try_into().map_err(|bytes: Vec<u8>| {
+                BootstrapError::InviteParse(format!(
+                    "grant must decode to 64 bytes, got {}",
+                    bytes.len()
+                ))
+            })
+        })
+        .transpose()?;
+    let canonical = build_invite_fragment_v3(
+        tier,
+        &read_capability_key,
+        write_admission_key.as_ref(),
+        grant_signature.as_ref(),
+    )?;
     if canonical != fragment {
         return Err(BootstrapError::InviteParse(
             "v3 fragment is not in canonical field order or encoding".into(),
@@ -551,7 +577,186 @@ pub fn parse_invite_fragment_v3(fragment: &str) -> Result<ParsedInviteFragmentV3
         tier,
         read_capability_key,
         write_admission_key,
+        grant_signature,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedInviteV3 {
+    pub room_id: RoomId,
+    pub fragment: ParsedInviteFragmentV3,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedInviteAny {
+    V2(ParsedInvite),
+    V3(ParsedInviteV3),
+}
+
+pub fn parse_invite_any(invite: &str) -> Result<ParsedInviteAny, BootstrapError> {
+    let rest = invite
+        .strip_prefix("attn://review/")
+        .ok_or_else(|| BootstrapError::InviteParse(format!("missing prefix: {invite}")))?;
+    let (room_id, fragment) = rest
+        .split_once('#')
+        .ok_or_else(|| BootstrapError::InviteParse("missing invite fragment".into()))?;
+    if room_id.is_empty() {
+        return Err(BootstrapError::InviteParse("empty roomId".into()));
+    }
+    if fragment.starts_with("v=3&") {
+        let room_id = serde_json::from_value(serde_json::Value::String(room_id.to_owned()))
+            .expect("RoomId deserializes from any string");
+        return Ok(ParsedInviteAny::V3(ParsedInviteV3 {
+            room_id,
+            fragment: parse_invite_fragment_v3(&format!("#{fragment}"))?,
+        }));
+    }
+    parse_invite(invite).map(ParsedInviteAny::V2)
+}
+
+fn canonical_device_grant_v3(
+    room_id: &RoomId,
+    tier: InviteTierV3,
+) -> Result<Vec<u8>, BootstrapError> {
+    let grant_tier = match tier {
+        InviteTierV3::Comment => "comment",
+        InviteTierV3::Suggest => "suggest",
+        InviteTierV3::View => {
+            return Err(BootstrapError::InviteParse(
+                "view tier has no device grant".into(),
+            ));
+        }
+    };
+    crate::review::crypto::canonical::to_canonical_bytes(&serde_json::json!({
+        "grantTier": grant_tier,
+        "purpose": "attn device grant v3",
+        "roomId": room_id.as_str(),
+        "v": 3,
+    }))
+    .map_err(|error| BootstrapError::Crypto(format!("canonicalize device grant: {error}")))
+}
+
+pub fn build_invite_url_v3(
+    room_id: &RoomId,
+    room_secret: &[u8; 32],
+    tier: InviteTierV3,
+    owner_signing_key: &DeviceSigningKey,
+) -> Result<String, BootstrapError> {
+    use crate::review::crypto::kdf::derive_room_key_tree_v3;
+    use ed25519_dalek::Signer as _;
+    let tree = derive_room_key_tree_v3(room_secret);
+    let grant = if tier == InviteTierV3::View {
+        None
+    } else {
+        let key = ed25519_dalek::SigningKey::from_bytes(&owner_signing_key.to_bytes());
+        Some(
+            key.sign(&canonical_device_grant_v3(room_id, tier)?)
+                .to_bytes(),
+        )
+    };
+    let fragment = build_invite_fragment_v3(
+        tier,
+        tree.read_keys.read_capability_key.as_bytes(),
+        (tier != InviteTierV3::View).then_some(tree.write_admission_key.as_bytes()),
+        grant.as_ref(),
+    )?;
+    Ok(format!("attn://review/{}{fragment}", room_id.as_str()))
+}
+
+pub fn verify_invite_grant_v3(
+    invite: &ParsedInviteV3,
+    owner_public_key: &[u8; 32],
+) -> Result<(), BootstrapError> {
+    if invite.fragment.tier == InviteTierV3::View {
+        return invite
+            .fragment
+            .grant_signature
+            .is_none()
+            .then_some(())
+            .ok_or_else(|| BootstrapError::InviteParse("view invite carried a grant".into()));
+    }
+    let signature = invite
+        .fragment
+        .grant_signature
+        .ok_or_else(|| BootstrapError::InviteParse("writable invite missing owner grant".into()))?;
+    use ed25519_dalek::Verifier as _;
+    let owner = ed25519_dalek::VerifyingKey::from_bytes(owner_public_key)
+        .map_err(|error| BootstrapError::Crypto(format!("owner public key: {error}")))?;
+    owner
+        .verify(
+            &canonical_device_grant_v3(&invite.room_id, invite.fragment.tier)?,
+            &ed25519_dalek::Signature::from_bytes(&signature),
+        )
+        .map_err(|_| BootstrapError::InviteParse("owner grant signature invalid".into()))
+}
+
+pub fn build_browser_invite_url_v3(
+    room_id: &RoomId,
+    room_secret: &[u8; 32],
+    tier: InviteTierV3,
+    owner_signing_key: &DeviceSigningKey,
+) -> Result<String, BootstrapError> {
+    let native = build_invite_url_v3(room_id, room_secret, tier, owner_signing_key)?;
+    build_browser_invite_url_v3_from_base(&browser_review_base_url()?, room_id, &native)
+}
+
+fn build_browser_invite_url_v3_from_base(
+    base: &reqwest::Url,
+    room_id: &RoomId,
+    native: &str,
+) -> Result<String, BootstrapError> {
+    let fragment = native
+        .split_once('#')
+        .map(|(_, fragment)| fragment)
+        .expect("v3 invite always has a fragment");
+    let mut url = base.clone();
+    let base_path = url.path().trim_end_matches('/').to_owned();
+    url.set_path(&format!("{base_path}/{}", room_id.as_str()));
+    url.set_fragment(Some(fragment));
+    Ok(url.to_string())
+}
+
+/// Re-emit a capability-scoped invite for an already-persisted owner share.
+/// `target` may be its room id or the exact shared path from local-shares.json.
+pub fn build_existing_share_invite_v3(
+    store_root: &std::path::Path,
+    identity: &DeviceIdentity,
+    target: &str,
+    tier: InviteTierV3,
+    browser: bool,
+) -> Result<String, BootstrapError> {
+    let shares = load_local_shares(store_root)?;
+    let room_id_str = shares
+        .iter()
+        .find_map(|(room_id, record)| {
+            (room_id == target || record.path == target).then_some(room_id.clone())
+        })
+        .ok_or_else(|| {
+            BootstrapError::InvalidShare(format!(
+                "no existing local share matches room or path {target:?}"
+            ))
+        })?;
+    let room_id = serde_json::from_value(serde_json::Value::String(room_id_str))
+        .expect("RoomId deserializes from any string");
+    let room = ReviewStore::open_at(store_root.to_path_buf())
+        .map_err(|error| BootstrapError::Store(format!("open review store: {error}")))?
+        .load_room(&room_id)
+        .map_err(|error| BootstrapError::Store(format!("load room: {error}")))?
+        .ok_or_else(|| {
+            BootstrapError::InvalidShare("local share room metadata is missing".into())
+        })?;
+    if room.v != 3 || load_room_access_v3(store_root, &room_id)?.is_none() {
+        return Err(BootstrapError::InvalidShare(
+            "legacy v2 shares cannot emit v3 tiered invites; create a new share".into(),
+        ));
+    }
+    let secret = load_room_secret(store_root, &room_id)?;
+    let signing_key = identity.signing_key()?;
+    if browser {
+        build_browser_invite_url_v3(&room_id, &secret, tier, &signing_key)
+    } else {
+        build_invite_url_v3(&room_id, &secret, tier, &signing_key)
+    }
 }
 
 /// Translate a `RoomMode` to its wire-format string. Matches the IPC mode
@@ -703,6 +908,16 @@ struct CreateRoomBody<'a> {
     /// the relay; a future relay-spec revision will codify this header.
     #[serde(rename = "admissionKey")]
     admission_key: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRoomBodyV3<'a> {
+    v: u32,
+    policy: &'a WirePolicy,
+    owner_signing_key: &'a str,
+    read_admission_key: String,
+    write_admission_key: String,
 }
 
 /// Wire-form `RoomPolicy` exactly matching relay-spec.md §`POST /v2/rooms/:roomId`.
@@ -870,6 +1085,10 @@ pub struct ShareOutcome {
     pub invite: String,
     /// HTTPS link for the hosted reviewer. The secret remains fragment-only.
     pub browser_invite: String,
+    pub view_invite: String,
+    pub suggest_invite: String,
+    pub browser_view_invite: String,
+    pub browser_suggest_invite: String,
     /// Absolute path (file or folder) the owner shared, exactly as the frontend
     /// passed it to `reviewShare` (`path.to_string_lossy()`). The Share dialog
     /// matches this against the active target to recognise its own room (see
@@ -894,6 +1113,7 @@ pub struct ShareOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinOutcome {
     pub room_id: RoomId,
+    pub local_grant_tier: Option<crate::review::transport::inbound::GrantTier>,
 }
 
 /// Result of `Bootstrapper::send_event_sync` — the signed event for local
@@ -994,9 +1214,9 @@ impl Bootstrapper {
         identity: &DeviceIdentity,
         now_ms: u64,
     ) -> Result<(), BootstrapError> {
-        self.announce_participant(
+        self.announce_participant_with_event_key(
             room_id,
-            room_keys,
+            *room_keys.event_key.as_bytes(),
             policy,
             identity,
             ParticipantKind::Owner,
@@ -1012,6 +1232,25 @@ impl Bootstrapper {
         &self,
         room_id: &RoomId,
         room_keys: &RoomKeys,
+        policy: &RoomPolicy,
+        identity: &DeviceIdentity,
+        kind: ParticipantKind,
+        now_ms: u64,
+    ) -> Result<(), BootstrapError> {
+        self.announce_participant_with_event_key(
+            room_id,
+            *room_keys.event_key.as_bytes(),
+            policy,
+            identity,
+            kind,
+            now_ms,
+        )
+    }
+
+    fn announce_participant_with_event_key(
+        &self,
+        room_id: &RoomId,
+        event_key: [u8; 32],
         policy: &RoomPolicy,
         identity: &DeviceIdentity,
         kind: ParticipantKind,
@@ -1039,7 +1278,7 @@ impl Bootstrapper {
             device,
         };
         let joined_envelope = assemble_event_envelope(AssembleInput {
-            event_key: *room_keys.event_key.as_bytes(),
+            event_key,
             signing_key: identity.signing_key()?,
             room_id: room_id.clone(),
             author_id: participant_id,
@@ -1075,7 +1314,6 @@ impl Bootstrapper {
         let identity_dir = self.config.identity_dir()?;
         let identity = load_or_create_identity_in(&identity_dir)?;
         let secret = load_room_secret(self.store.root(), room_id)?;
-        let keys = derive_room_keys(&secret);
         let now_ms = unix_now_ms();
         let policy = self
             .store
@@ -1084,7 +1322,20 @@ impl Bootstrapper {
             .flatten()
             .map(|r| r.policy)
             .unwrap_or_else(|| default_room_policy(now_ms));
-        self.announce_participant(room_id, &keys, &policy, &identity, kind, now_ms)
+        if let Some(access) = load_room_access_v3(self.store.root(), room_id)? {
+            let read = crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key);
+            self.announce_participant_with_event_key(
+                room_id,
+                *read.event_key.as_bytes(),
+                &policy,
+                &identity,
+                kind,
+                now_ms,
+            )
+        } else {
+            let keys = derive_room_keys(&secret);
+            self.announce_participant(room_id, &keys, &policy, &identity, kind, now_ms)
+        }
     }
 
     pub async fn share(
@@ -1111,6 +1362,7 @@ impl Bootstrapper {
         if let Some(existing) = self.find_existing_share(&path, now_ms, &browser_review_base)? {
             let secret = load_room_secret(self.store.root(), &existing.room_id)?;
             let keys = derive_room_keys(&secret);
+            let v3_access = load_room_access_v3(self.store.root(), &existing.room_id)?;
             let policy = self
                 .store
                 .load_room(&existing.room_id)
@@ -1128,21 +1380,60 @@ impl Bootstrapper {
             // the binding is stale: forget it and fall through to mint a FRESH
             // room, so a re-Share always yields a working invite instead of
             // hanging the dialog on "generated when the room is ready".
-            let create_res = self
-                .create_room(&existing.room_id, &policy, &identity, &keys.admission_key)
-                .await;
-            let reestablished = match create_res {
-                Ok(()) => self
-                    .register_device(&existing.room_id, &identity, "owner", &keys.admission_key)
+            let reestablished = if let Some(access) = v3_access {
+                let tree = crate::review::crypto::kdf::derive_room_key_tree_v3(&secret);
+                self.create_room_v3(
+                    &existing.room_id,
+                    &policy,
+                    &identity,
+                    tree.read_keys.read_admission_key.as_bytes(),
+                    tree.write_admission_key.as_bytes(),
+                )
+                .await
+                .is_ok()
+                    && self
+                        .register_device_v3(
+                            &existing.room_id,
+                            &identity,
+                            "owner",
+                            "attn-native",
+                            None,
+                            None,
+                            access
+                                .write_admission_key
+                                .as_ref()
+                                .unwrap_or(tree.write_admission_key.as_bytes()),
+                        )
+                        .await
+                        .is_ok()
+            } else {
+                self.create_room(&existing.room_id, &policy, &identity, &keys.admission_key)
                     .await
-                    .is_ok(),
-                Err(_) => false,
+                    .is_ok()
+                    && self
+                        .register_device(&existing.room_id, &identity, "owner", &keys.admission_key)
+                        .await
+                        .is_ok()
             };
             if reestablished {
                 // Re-announce the owner on every re-Share: backfills rooms
                 // shared before the owner self-announce existed and picks up
                 // a display name changed since the original share.
-                self.announce_owner(&existing.room_id, &keys, &policy, &identity, now_ms)?;
+                if let Some(access) = load_room_access_v3(self.store.root(), &existing.room_id)? {
+                    let read = crate::review::crypto::kdf::derive_read_keys_v3(
+                        &access.read_capability_key,
+                    );
+                    self.announce_participant_with_event_key(
+                        &existing.room_id,
+                        *read.event_key.as_bytes(),
+                        &policy,
+                        &identity,
+                        ParticipantKind::Owner,
+                        now_ms,
+                    )?;
+                } else {
+                    self.announce_owner(&existing.room_id, &keys, &policy, &identity, now_ms)?;
+                }
                 return Ok(existing);
             }
             tracing::warn!(
@@ -1157,8 +1448,8 @@ impl Bootstrapper {
         let mut room_secret = [0u8; 32];
         getrandom::getrandom(&mut room_secret)
             .map_err(|e| BootstrapError::Crypto(format!("room secret rng: {e}")))?;
-        let room_id = derive_room_id(&room_secret);
-        let room_keys = derive_room_keys(&room_secret);
+        let room_id = derive_room_id_v3(&room_secret);
+        let room_keys = crate::review::crypto::kdf::derive_room_key_tree_v3(&room_secret);
 
         let policy = {
             let mut p = default_room_policy(now_ms);
@@ -1168,12 +1459,26 @@ impl Bootstrapper {
 
         // 3. Register the room with the relay. Idempotent on roomId; returns
         //    200 with the stored policy if it already exists.
-        self.create_room(&room_id, &policy, &identity, &room_keys.admission_key)
-            .await?;
+        self.create_room_v3(
+            &room_id,
+            &policy,
+            &identity,
+            room_keys.read_keys.read_admission_key.as_bytes(),
+            room_keys.write_admission_key.as_bytes(),
+        )
+        .await?;
 
         // 4. Publish the owner device.
-        self.register_device(&room_id, &identity, "owner", &room_keys.admission_key)
-            .await?;
+        self.register_device_v3(
+            &room_id,
+            &identity,
+            "owner",
+            "attn-native",
+            None,
+            None,
+            room_keys.write_admission_key.as_bytes(),
+        )
+        .await?;
 
         // 5. Sign + enqueue a RoomCreated envelope so the room's append-only
         //    log starts with the right genesis event. The outbox processor
@@ -1202,7 +1507,7 @@ impl Bootstrapper {
         )
         .map_err(|e| BootstrapError::Crypto(format!("derive RoomCreated event id: {e}")))?;
         let envelope = assemble_event_envelope(AssembleInput {
-            event_key: *room_keys.event_key.as_bytes(),
+            event_key: *room_keys.read_keys.event_key.as_bytes(),
             signing_key,
             room_id: room_id.clone(),
             author_id: participant_id.clone(),
@@ -1221,7 +1526,14 @@ impl Bootstrapper {
             .map_err(|e| BootstrapError::Store(format!("append RoomCreated outbox: {e}")))?;
 
         // 5b. Announce the owner identity (display name) into the room log.
-        self.announce_owner(&room_id, &room_keys, &policy, &identity, now_ms)?;
+        self.announce_participant_with_event_key(
+            &room_id,
+            *room_keys.read_keys.event_key.as_bytes(),
+            &policy,
+            &identity,
+            ParticipantKind::Owner,
+            now_ms,
+        )?;
 
         // 6. Persist the room state on disk. We snapshot a `ReviewRoom` with
         //    no documents/snapshots yet — that wiring lands when SnapshotCreated
@@ -1230,7 +1542,7 @@ impl Bootstrapper {
         //    so a re-Share of the same path can short-circuit (see
         //    `find_existing_share`).
         let review_room = ReviewRoom {
-            v: 2,
+            v: 3,
             room_id: room_id.clone(),
             created_at: now_ms,
             created_by: participant_id.clone(),
@@ -1244,6 +1556,16 @@ impl Bootstrapper {
             .map_err(|e| BootstrapError::Store(format!("save_room: {e}")))?;
         let is_dir = path.is_dir();
         save_room_secret(self.store.root(), &room_id, &room_secret)?;
+        save_room_access_v3(
+            self.store.root(),
+            &room_id,
+            &RoomAccessV3 {
+                read_capability_key: *room_keys.read_keys.read_capability_key.as_bytes(),
+                write_admission_key: Some(*room_keys.write_admission_key.as_bytes()),
+                grant_tier: None,
+                grant_signature: None,
+            },
+        )?;
         record_local_share(self.store.root(), &room_id, &path, is_dir)?;
 
         // 6b. Publish the initial snapshot(s) so reviewers get the doc bytes the
@@ -1285,14 +1607,28 @@ impl Bootstrapper {
         // 7. Build invite. `room_secret` is consumed when we encode it into the
         //    URL — after this point it only lives encrypted in the room file
         //    cache + on the relay (in the admissionKey form).
-        let invite = build_invite_url(&room_id, &room_secret);
+        let owner_key = identity.signing_key()?;
+        let invite =
+            build_invite_url_v3(&room_id, &room_secret, InviteTierV3::Comment, &owner_key)?;
+        let view_invite =
+            build_invite_url_v3(&room_id, &room_secret, InviteTierV3::View, &owner_key)?;
+        let suggest_invite =
+            build_invite_url_v3(&room_id, &room_secret, InviteTierV3::Suggest, &owner_key)?;
         let browser_invite =
-            build_browser_invite_url_from_base(&browser_review_base, &room_id, &room_secret);
+            build_browser_invite_url_v3_from_base(&browser_review_base, &room_id, &invite)?;
+        let browser_view_invite =
+            build_browser_invite_url_v3_from_base(&browser_review_base, &room_id, &view_invite)?;
+        let browser_suggest_invite =
+            build_browser_invite_url_v3_from_base(&browser_review_base, &room_id, &suggest_invite)?;
 
         Ok(ShareOutcome {
             room_id,
             invite,
             browser_invite,
+            view_invite,
+            suggest_invite,
+            browser_view_invite,
+            browser_suggest_invite,
             owner_display_path: path.to_string_lossy().to_string(),
             newly_created: true,
             owner_signing_key: identity.public_signing_key.clone(),
@@ -1329,21 +1665,52 @@ impl Bootstrapper {
                 _ => continue,
             };
             let secret = load_room_secret(self.store.root(), &room_id)?;
-            let invite = build_invite_url(&room_id, &secret);
-            let browser_invite =
-                build_browser_invite_url_from_base(browser_review_base, &room_id, &secret);
             // For the re-Share path we don't have the owner identity in
             // scope, so resolve it the same way `share()` does. The dialog
             // needs the signing key to render the fingerprint regardless of
             // whether this Share is a fresh mint or a cached re-emit.
             let identity_dir = self.config.identity_dir()?;
             let identity = load_or_create_identity_in(&identity_dir)?;
+            let owner_key = identity.signing_key()?;
+            let (invite, view_invite, suggest_invite) = if room.as_ref().is_some_and(|r| r.v == 3) {
+                (
+                    build_invite_url_v3(&room_id, &secret, InviteTierV3::Comment, &owner_key)?,
+                    build_invite_url_v3(&room_id, &secret, InviteTierV3::View, &owner_key)?,
+                    build_invite_url_v3(&room_id, &secret, InviteTierV3::Suggest, &owner_key)?,
+                )
+            } else {
+                let legacy = build_invite_url(&room_id, &secret);
+                (legacy.clone(), legacy.clone(), legacy)
+            };
+            let browser_invite = if room.as_ref().is_some_and(|r| r.v == 3) {
+                build_browser_invite_url_v3_from_base(browser_review_base, &room_id, &invite)?
+            } else {
+                build_browser_invite_url_from_base(browser_review_base, &room_id, &secret)
+            };
+            let browser_view_invite = if room.as_ref().is_some_and(|r| r.v == 3) {
+                build_browser_invite_url_v3_from_base(browser_review_base, &room_id, &view_invite)?
+            } else {
+                browser_invite.clone()
+            };
+            let browser_suggest_invite = if room.as_ref().is_some_and(|r| r.v == 3) {
+                build_browser_invite_url_v3_from_base(
+                    browser_review_base,
+                    &room_id,
+                    &suggest_invite,
+                )?
+            } else {
+                browser_invite.clone()
+            };
             let policy_mode = policy.mode;
             let expires_at = policy.expires_at;
             return Ok(Some(ShareOutcome {
                 room_id,
                 invite,
                 browser_invite,
+                view_invite,
+                suggest_invite,
+                browser_view_invite,
+                browser_suggest_invite,
                 owner_display_path: path.to_string_lossy().to_string(),
                 newly_created: false,
                 owner_signing_key: identity.public_signing_key.clone(),
@@ -1428,6 +1795,11 @@ impl Bootstrapper {
         client: DeviceClient,
         verifying_keys: Option<Arc<RwLock<std::collections::HashMap<String, DeviceVerifyingKey>>>>,
     ) -> Result<JoinOutcome, BootstrapError> {
+        if let ParsedInviteAny::V3(parsed) = parse_invite_any(invite)? {
+            return self
+                .join_v3_with_identity(parsed, identity, kind, client, verifying_keys)
+                .await;
+        }
         let now_ms = unix_now_ms();
         let parsed = parse_invite(invite)?;
         let room_keys = derive_room_keys(&parsed.room_secret);
@@ -1564,6 +1936,159 @@ impl Bootstrapper {
 
         Ok(JoinOutcome {
             room_id: parsed.room_id,
+            local_grant_tier: None,
+        })
+    }
+
+    async fn join_v3_with_identity(
+        &self,
+        parsed: ParsedInviteV3,
+        identity: &DeviceIdentity,
+        kind: ParticipantKind,
+        client: DeviceClient,
+        verifying_keys: Option<VerifyingKeyCache>,
+    ) -> Result<JoinOutcome, BootstrapError> {
+        let grant_tier = match parsed.fragment.tier {
+            InviteTierV3::View => {
+                return Err(BootstrapError::InvalidShare(
+                    "native view-only joins are not supported; open this invite in the browser"
+                        .into(),
+                ));
+            }
+            InviteTierV3::Comment => crate::review::transport::inbound::GrantTier::Comment,
+            InviteTierV3::Suggest => crate::review::transport::inbound::GrantTier::Suggest,
+        };
+        let write_key = parsed.fragment.write_admission_key.ok_or_else(|| {
+            BootstrapError::InviteParse("writable v3 invite missing write capability".into())
+        })?;
+        let grant = parsed.fragment.grant_signature.ok_or_else(|| {
+            BootstrapError::InviteParse("writable v3 invite missing owner grant".into())
+        })?;
+        let read_keys =
+            crate::review::crypto::kdf::derive_read_keys_v3(&parsed.fragment.read_capability_key);
+        let wire_kind = match kind {
+            ParticipantKind::Owner => "owner",
+            ParticipantKind::Reviewer => "reviewer",
+            ParticipantKind::Agent => "agent",
+        };
+        let wire_client = match client {
+            DeviceClient::AttnNative => "attn-native",
+            DeviceClient::AttnBrowser => "attn-browser",
+            DeviceClient::AgentCli => "agent-cli",
+        };
+        self.register_device_v3(
+            &parsed.room_id,
+            identity,
+            wire_kind,
+            wire_client,
+            Some(grant_tier),
+            Some(&grant),
+            &write_key,
+        )
+        .await?;
+        let directory = self
+            .list_devices_v3(&parsed.room_id, read_keys.read_admission_key.as_bytes())
+            .await?;
+        if let Some(cache) = verifying_keys {
+            let mut guard = cache.write().await;
+            for device in directory {
+                let raw = URL_SAFE_NO_PAD
+                    .decode(device.public_signing_key.as_bytes())
+                    .map_err(|error| {
+                        BootstrapError::Crypto(format!("directory key decode: {error}"))
+                    })?;
+                let bytes: [u8; 32] = raw.as_slice().try_into().map_err(|_| {
+                    BootstrapError::Crypto("directory key must decode to 32 bytes".into())
+                })?;
+                let key = DeviceVerifyingKey::from_bytes(&bytes)?;
+                guard.insert(key.signing_key_id_base64url(), key);
+            }
+        }
+
+        let now_ms = unix_now_ms();
+        let policy = default_room_policy(now_ms);
+        let participant_id = identity.typed_participant_id();
+        let device_id = identity.typed_device_id();
+        let capabilities = match (kind, grant_tier) {
+            (ParticipantKind::Reviewer, crate::review::transport::inbound::GrantTier::Comment) => {
+                vec![
+                    Capability::ReadSnapshot,
+                    Capability::WriteComment,
+                    Capability::ResolveComment,
+                ]
+            }
+            (ParticipantKind::Agent, crate::review::transport::inbound::GrantTier::Comment) => {
+                vec![Capability::ReadSnapshot, Capability::WriteComment]
+            }
+            _ => agent_capabilities(kind),
+        };
+        let body = ReviewEventBody::ParticipantJoined {
+            participant: Participant {
+                participant_id: participant_id.clone(),
+                display_name: identity.effective_display_name(),
+                kind,
+                public_signing_key: identity.public_signing_key.clone(),
+                capabilities,
+            },
+            device: Device {
+                device_id: device_id.clone(),
+                participant_id: participant_id.clone(),
+                public_encryption_key: identity.public_encryption_key.clone(),
+                public_signing_key: identity.public_signing_key.clone(),
+                client,
+                created_at: now_ms,
+            },
+        };
+        let envelope = assemble_event_envelope(AssembleInput {
+            event_key: *read_keys.event_key.as_bytes(),
+            signing_key: identity.signing_key()?,
+            room_id: parsed.room_id.clone(),
+            author_id: participant_id.clone(),
+            device_id,
+            created_at_ms: now_ms,
+            expires_at_ms: policy.expires_at,
+            parent_event_ids: vec![],
+            snapshot_id: None,
+            body,
+            kind: EnvelopeKind::Event,
+            client_nonce: None,
+        })
+        .map_err(|error| BootstrapError::Crypto(format!("assemble v3 join: {error}")))?;
+        self.store
+            .append_outbox(&parsed.room_id, &envelope)
+            .map_err(|error| BootstrapError::Store(format!("append v3 join outbox: {error}")))?;
+        if self
+            .store
+            .load_room(&parsed.room_id)
+            .map_err(|error| BootstrapError::Store(format!("load v3 room: {error}")))?
+            .is_none()
+        {
+            self.store
+                .save_room(&ReviewRoom {
+                    v: 3,
+                    room_id: parsed.room_id.clone(),
+                    created_at: now_ms,
+                    created_by: participant_id,
+                    policy,
+                    documents: Default::default(),
+                    snapshots: Default::default(),
+                    event_heads: vec![],
+                })
+                .map_err(|error| BootstrapError::Store(format!("save v3 room: {error}")))?;
+        }
+        save_room_access_v3(
+            self.store.root(),
+            &parsed.room_id,
+            &RoomAccessV3 {
+                read_capability_key: parsed.fragment.read_capability_key,
+                write_admission_key: Some(write_key),
+                grant_tier: Some(grant_tier),
+                grant_signature: Some(URL_SAFE_NO_PAD.encode(grant)),
+            },
+        )?;
+        Ok(JoinOutcome {
+            room_id: parsed.room_id,
+            local_grant_tier: Some(grant_tier),
         })
     }
 
@@ -1610,9 +2135,15 @@ impl Bootstrapper {
         cache: &VerifyingKeyCache,
         authorizations: Option<&AuthorizationCache>,
     ) -> Result<usize, BootstrapError> {
-        let room_secret = load_room_secret(self.store.root(), room_id)?;
-        let room_keys = derive_room_keys(&room_secret);
-        let directory = self.list_devices(room_id, &room_keys.admission_key).await?;
+        let directory = if let Some(access) = load_room_access_v3(self.store.root(), room_id)? {
+            let read = crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key);
+            self.list_devices_v3(room_id, read.read_admission_key.as_bytes())
+                .await?
+        } else {
+            let room_secret = load_room_secret(self.store.root(), room_id)?;
+            let room_keys = derive_room_keys(&room_secret);
+            self.list_devices(room_id, &room_keys.admission_key).await?
+        };
         let persisted_device_keys = self.persisted_device_key_bindings(room_id)?;
         let mut guard = cache.write().await;
         let mut authorization_guard = match authorizations {
@@ -1937,7 +2468,23 @@ impl Bootstrapper {
         let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
             .map_err(|e| BootstrapError::Crypto(format!("canonical snapshot: {e}")))?;
         let blob_hash = content_hash(&blob_bytes);
-        let room_keys = derive_room_keys(&room_secret);
+        let v3_access = load_room_access_v3(self.store.root(), room_id)?;
+        let (snapshot_key, upload_admission_key, protocol_version) = if let Some(access) =
+            v3_access.as_ref()
+        {
+            let read = crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key);
+            let write = access.write_admission_key.ok_or_else(|| {
+                BootstrapError::InvalidShare("view-only room cannot publish snapshots".into())
+            })?;
+            (*read.snapshot_key.as_bytes(), write, 3)
+        } else {
+            let keys = derive_room_keys(&room_secret);
+            (
+                *keys.snapshot_key.as_bytes(),
+                *keys.admission_key.as_bytes(),
+                2,
+            )
+        };
         let identity_dir = self.config.identity_dir()?;
         let identity = load_or_create_identity_in(&identity_dir)?;
         let participant_id = identity.typed_participant_id();
@@ -1956,7 +2503,7 @@ impl Bootstrapper {
 
         let blob_envelope = assemble_snapshot_blob_envelope(
             &blob_bytes,
-            room_keys.snapshot_key.as_bytes(),
+            &snapshot_key,
             room_id,
             &participant_id,
             &device_id,
@@ -1992,7 +2539,7 @@ impl Bootstrapper {
                 .map_err(|e| BootstrapError::Crypto(format!("canonical blob ref: {e}")))?;
             let wrapper = assemble_snapshot_blob_envelope(
                 &ref_bytes,
-                room_keys.snapshot_key.as_bytes(),
+                &snapshot_key,
                 room_id,
                 &participant_id,
                 &device_id,
@@ -2001,14 +2548,14 @@ impl Bootstrapper {
                 expires_at as i64,
             )
             .map_err(|e| BootstrapError::Crypto(format!("assemble blob wrapper: {e}")))?;
-            let sealed_body =
-                seal_snapshot_r2_body(room_keys.snapshot_key.as_bytes(), &blob_bytes, &wrapper)
-                    .map_err(|e| BootstrapError::Crypto(format!("seal R2 body: {e}")))?;
+            let sealed_body = seal_snapshot_r2_body(&snapshot_key, &blob_bytes, &wrapper)
+                .map_err(|e| BootstrapError::Crypto(format!("seal R2 body: {e}")))?;
 
-            let presigned = relay_blobs::presign_blob_upload(
+            let presigned = relay_blobs::presign_blob_upload_versioned(
                 &self.http,
                 &self.config.relay_url,
-                room_keys.admission_key.as_bytes(),
+                &upload_admission_key,
+                protocol_version,
                 room_id,
                 &wrapper.envelope_id,
                 &participant_id,
@@ -2129,8 +2676,14 @@ impl Bootstrapper {
     ) -> Result<SendEventOutcome, BootstrapError> {
         let identity_dir = self.config.identity_dir()?;
         let identity = load_or_create_identity_in(&identity_dir)?;
-        let room_secret = load_room_secret(self.store.root(), room_id)?;
-        let room_keys = derive_room_keys(&room_secret);
+        let event_key = if let Some(access) = load_room_access_v3(self.store.root(), room_id)? {
+            *crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key)
+                .event_key
+                .as_bytes()
+        } else {
+            let room_secret = load_room_secret(self.store.root(), room_id)?;
+            *derive_room_keys(&room_secret).event_key.as_bytes()
+        };
 
         // Read the policy's expiry off room.json so envelopes don't
         // outlive the room itself.
@@ -2175,7 +2728,7 @@ impl Bootstrapper {
 
         let signing_key_again = identity.signing_key()?;
         let envelope = assemble_event_envelope(AssembleInput {
-            event_key: *room_keys.event_key.as_bytes(),
+            event_key,
             signing_key: signing_key_again,
             room_id: room_id.clone(),
             author_id: participant_id,
@@ -2205,6 +2758,68 @@ impl Bootstrapper {
     // -----------------------------------------------------------------
     // Relay HTTP helpers
     // -----------------------------------------------------------------
+
+    async fn create_room_v3(
+        &self,
+        room_id: &RoomId,
+        policy: &RoomPolicy,
+        identity: &DeviceIdentity,
+        read_admission_key: &[u8; 32],
+        write_admission_key: &[u8; 32],
+    ) -> Result<(), BootstrapError> {
+        let body = CreateRoomBodyV3 {
+            v: 3,
+            policy: &WirePolicy::from_model(policy),
+            owner_signing_key: &identity.public_signing_key,
+            read_admission_key: URL_SAFE_NO_PAD.encode(read_admission_key),
+            write_admission_key: URL_SAFE_NO_PAD.encode(write_admission_key),
+        };
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|error| BootstrapError::Crypto(format!("serialize v3 room: {error}")))?;
+        let path = format!("/v3/rooms/{}", room_id.as_str());
+        let owner_signature =
+            owner_sig_header_value(&identity.signing_key()?, "POST", &path, &body_bytes);
+        let owner_key_id = identity.verifying_key()?.signing_key_id_base64url();
+        let pow = TokenPool::new(
+            room_id.as_str().to_owned(),
+            owner_key_id,
+            BOOTSTRAP_POW_DIFFICULTY,
+            BOOTSTRAP_POW_TTL_MS,
+        )
+        .take("POST", &path)
+        .await
+        .map_err(|error| BootstrapError::Crypto(format!("v3 room pow: {error}")))?;
+        let response = self
+            .http
+            .post(format!(
+                "{}{}",
+                self.config.relay_url.trim_end_matches('/'),
+                path
+            ))
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )
+            .header(
+                "Attn-Admission",
+                admission_header_value_v3(write_admission_key, "write", "POST", &path, &body_bytes),
+            )
+            .header("Attn-Owner-Signature", owner_signature)
+            .header("Attn-PoW", pow)
+            .body(body_bytes)
+            .send()
+            .await
+            .map_err(|error| BootstrapError::Network(format!("POST v3 room: {error}")))?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| BootstrapError::Network(format!("read v3 room: {error}")))?;
+        match status.as_u16() {
+            200 | 201 => Ok(()),
+            status => Err(relay_error(status, &bytes)),
+        }
+    }
 
     async fn create_room(
         &self,
@@ -2410,6 +3025,118 @@ impl Bootstrapper {
             other => Err(relay_error(other, &raw)),
         }
     }
+
+    // These arguments intentionally mirror the authenticated registration
+    // boundary; keeping identity, wire attribution, owner grant, and write
+    // capability explicit makes call-site privilege review straightforward.
+    #[allow(clippy::too_many_arguments)]
+    async fn register_device_v3(
+        &self,
+        room_id: &RoomId,
+        identity: &DeviceIdentity,
+        kind: &str,
+        client: &str,
+        grant_tier: Option<crate::review::transport::inbound::GrantTier>,
+        grant_signature: Option<&[u8; 64]>,
+        write_admission_key: &[u8; 32],
+    ) -> Result<(), BootstrapError> {
+        let mut body = RegisterDeviceBody {
+            device_id: identity.device_id.clone(),
+            participant_id: identity.participant_id.clone(),
+            public_signing_key: identity.public_signing_key.clone(),
+            public_encryption_key: identity.public_encryption_key.clone(),
+            client: client.to_owned(),
+            kind: kind.to_owned(),
+            grant_tier,
+            grant_signature: grant_signature.map(|signature| URL_SAFE_NO_PAD.encode(signature)),
+            self_signature: String::new(),
+        };
+        use ed25519_dalek::Signer as _;
+        let signer = ed25519_dalek::SigningKey::from_bytes(&identity.signing_key()?.to_bytes());
+        body.self_signature = URL_SAFE_NO_PAD.encode(
+            signer
+                .sign(&canonical_register_device_bytes(&body)?)
+                .to_bytes(),
+        );
+        let path = format!("/v3/rooms/{}/devices", room_id.as_str());
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|error| BootstrapError::Crypto(format!("serialize v3 device: {error}")))?;
+        let pow = TokenPool::new(
+            room_id.as_str().to_owned(),
+            identity.device_id.clone(),
+            BOOTSTRAP_POW_DIFFICULTY,
+            BOOTSTRAP_POW_TTL_MS,
+        )
+        .take("POST", &path)
+        .await
+        .map_err(|error| BootstrapError::Crypto(format!("v3 device pow: {error}")))?;
+        let response = self
+            .http
+            .post(format!(
+                "{}{}",
+                self.config.relay_url.trim_end_matches('/'),
+                path
+            ))
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )
+            .header(
+                "Attn-Admission",
+                admission_header_value_v3(write_admission_key, "write", "POST", &path, &body_bytes),
+            )
+            .header("Attn-PoW", pow)
+            .body(body_bytes)
+            .send()
+            .await
+            .map_err(|error| BootstrapError::Network(format!("POST v3 device: {error}")))?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| BootstrapError::Network(format!("read v3 device: {error}")))?;
+        match status.as_u16() {
+            200 | 204 => Ok(()),
+            status => Err(relay_error(status, &bytes)),
+        }
+    }
+
+    async fn list_devices_v3(
+        &self,
+        room_id: &RoomId,
+        read_admission_key: &[u8; 32],
+    ) -> Result<Vec<DirectoryDevice>, BootstrapError> {
+        let path = format!("/v3/rooms/{}/devices", room_id.as_str());
+        let response = self
+            .http
+            .get(format!(
+                "{}{}",
+                self.config.relay_url.trim_end_matches('/'),
+                path
+            ))
+            .header(
+                "Attn-Admission",
+                admission_header_value_v3(read_admission_key, "read", "GET", &path, &[]),
+            )
+            .send()
+            .await
+            .map_err(|error| BootstrapError::Network(format!("GET v3 devices: {error}")))?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| BootstrapError::Network(format!("read v3 devices: {error}")))?;
+        if status.as_u16() != 200 {
+            return Err(relay_error(status.as_u16(), &bytes));
+        }
+        serde_json::from_slice::<ListDevicesResponse>(&bytes)
+            .map(|response| response.devices)
+            .map_err(|error| BootstrapError::Relay {
+                status: 200,
+                code: "ATTN_RESPONSE_DECODE".into(),
+                message: error.to_string(),
+            })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2451,12 +3178,37 @@ fn admission_header_value(
     url_path: &str,
     body: &[u8],
 ) -> String {
+    format!(
+        "v2.{}",
+        admission_mac_value(admission_key, method, url_path, body)
+    )
+}
+
+fn admission_mac_value(
+    admission_key: &[u8; 32],
+    method: &str,
+    url_path: &str,
+    body: &[u8],
+) -> String {
     let canonical = build_canonical_request(method, url_path, body);
     let mut mac =
         <Hmac<Sha256>>::new_from_slice(admission_key).expect("HMAC accepts any key length");
     mac.update(&canonical);
     let tag = mac.finalize().into_bytes();
-    format!("v2.{}", URL_SAFE_NO_PAD.encode(tag))
+    URL_SAFE_NO_PAD.encode(tag)
+}
+
+fn admission_header_value_v3(
+    admission_key: &[u8; 32],
+    scope: &str,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> String {
+    format!(
+        "v3.{scope}.{}",
+        admission_mac_value(admission_key, method, path, body)
+    )
 }
 
 /// Build the `Attn-Owner-Signature` header per relay-spec.md §Owner Distinction
@@ -2603,6 +3355,51 @@ fn local_shares_index_path(root: &std::path::Path) -> PathBuf {
 
 fn room_secret_path(root: &std::path::Path, room_id: &RoomId) -> PathBuf {
     shares_dir(root).join(format!("{}.secret", room_id.as_str()))
+}
+
+fn room_access_v3_path(root: &std::path::Path, room_id: &RoomId) -> PathBuf {
+    shares_dir(root).join(format!("{}.access-v3.json", room_id.as_str()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomAccessV3 {
+    pub read_capability_key: [u8; 32],
+    pub write_admission_key: Option<[u8; 32]>,
+    pub grant_tier: Option<crate::review::transport::inbound::GrantTier>,
+    pub grant_signature: Option<String>,
+}
+
+fn save_room_access_v3(
+    root: &std::path::Path,
+    room_id: &RoomId,
+    access: &RoomAccessV3,
+) -> Result<(), BootstrapError> {
+    let dir = shares_dir(root);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| BootstrapError::Store(format!("create {}: {error}", dir.display())))?;
+    let path = room_access_v3_path(root, room_id);
+    let bytes = serde_json::to_vec(access)
+        .map_err(|error| BootstrapError::Store(format!("encode {}: {error}", path.display())))?;
+    std::fs::write(&path, bytes)
+        .map_err(|error| BootstrapError::Store(format!("write {}: {error}", path.display())))
+}
+
+pub(crate) fn load_room_access_v3(
+    root: &std::path::Path,
+    room_id: &RoomId,
+) -> Result<Option<RoomAccessV3>, BootstrapError> {
+    let path = room_access_v3_path(root, room_id);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| BootstrapError::Store(format!("decode {}: {error}", path.display()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(BootstrapError::Store(format!(
+            "read {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 fn load_local_shares(
@@ -3142,6 +3939,7 @@ mod tests {
             InviteTierV3::View,
             tree.read_keys.read_capability_key.as_bytes(),
             None,
+            None,
         )
         .expect("build view fragment");
         let parsed = parse_invite_fragment_v3(&fragment).expect("parse view fragment");
@@ -3156,6 +3954,139 @@ mod tests {
             read_only.snapshot_key.as_bytes(),
             tree.read_keys.snapshot_key.as_bytes()
         );
+    }
+
+    #[test]
+    fn v3_tier_urls_roundtrip_and_owner_grants_are_room_bound() {
+        let secret = [0x35; 32];
+        let room_id = derive_room_id(&secret);
+        let owner = DeviceSigningKey::from_bytes(&[0x71; 32]).expect("owner key");
+        let owner_public = owner.verifying_key().to_bytes();
+        let base = parse_browser_review_base_url(Some("https://example.test/review"))
+            .expect("browser base");
+
+        for tier in [
+            InviteTierV3::View,
+            InviteTierV3::Comment,
+            InviteTierV3::Suggest,
+        ] {
+            let native = build_invite_url_v3(&room_id, &secret, tier, &owner).expect("native");
+            let ParsedInviteAny::V3(parsed) = parse_invite_any(&native).expect("parse") else {
+                panic!("expected v3 invite");
+            };
+            assert_eq!(parsed.fragment.tier, tier);
+            verify_invite_grant_v3(&parsed, &owner_public).expect("valid owner grant");
+
+            let browser =
+                build_browser_invite_url_v3_from_base(&base, &room_id, &native).expect("browser");
+            let browser_url = reqwest::Url::parse(&browser).expect("browser url");
+            assert_eq!(browser_url.path(), format!("/review/{}", room_id.as_str()));
+            assert_eq!(
+                browser_url.fragment(),
+                native.split_once('#').map(|(_, value)| value)
+            );
+        }
+
+        let comment =
+            build_invite_url_v3(&room_id, &secret, InviteTierV3::Comment, &owner).expect("comment");
+        let ParsedInviteAny::V3(mut parsed) = parse_invite_any(&comment).expect("parse") else {
+            unreachable!();
+        };
+        let other_room: RoomId =
+            serde_json::from_value(serde_json::Value::String("cross-room-target".into())).unwrap();
+        parsed.room_id = other_room;
+        assert!(verify_invite_grant_v3(&parsed, &owner_public).is_err());
+        parsed.room_id = room_id;
+        parsed.fragment.grant_signature.as_mut().unwrap()[0] ^= 1;
+        assert!(verify_invite_grant_v3(&parsed, &owner_public).is_err());
+    }
+
+    #[test]
+    fn v3_access_metadata_survives_restart_roundtrip() {
+        let root = TempDir::new().expect("tempdir");
+        let room_id: RoomId =
+            serde_json::from_value(serde_json::Value::String("room-v3".into())).unwrap();
+        let access = RoomAccessV3 {
+            read_capability_key: [1; 32],
+            write_admission_key: Some([2; 32]),
+            grant_tier: Some(crate::review::transport::inbound::GrantTier::Comment),
+            grant_signature: Some(URL_SAFE_NO_PAD.encode([3; 64])),
+        };
+        save_room_access_v3(root.path(), &room_id, &access).expect("save");
+        assert_eq!(
+            load_room_access_v3(root.path(), &room_id).expect("reload"),
+            Some(access)
+        );
+    }
+
+    #[test]
+    fn existing_share_invite_requires_real_v3_room_metadata() {
+        let root = TempDir::new().expect("tempdir");
+        let store = ReviewStore::open_at(root.path().to_path_buf()).expect("store");
+        let secret = [0x45; 32];
+        let room_id = derive_room_id_v3(&secret);
+        let shared_path = root.path().join("plan.md");
+        std::fs::write(&shared_path, "# Plan\n").unwrap();
+        let identity = DeviceIdentity::generate().expect("identity");
+        let participant_id = identity.typed_participant_id();
+        let mut room = ReviewRoom {
+            v: 2,
+            room_id: room_id.clone(),
+            created_at: 1,
+            created_by: participant_id,
+            policy: default_room_policy(unix_now_ms()),
+            documents: Default::default(),
+            snapshots: Default::default(),
+            event_heads: vec![],
+        };
+        store.save_room(&room).unwrap();
+        save_room_secret(store.root(), &room_id, &secret).unwrap();
+        record_local_share(store.root(), &room_id, &shared_path, false).unwrap();
+        let target = shared_path.to_string_lossy();
+        assert!(
+            build_existing_share_invite_v3(
+                store.root(),
+                &identity,
+                &target,
+                InviteTierV3::Comment,
+                false,
+            )
+            .expect_err("legacy share rejected")
+            .to_string()
+            .contains("legacy v2")
+        );
+
+        room.v = 3;
+        store.save_room(&room).unwrap();
+        let tree = crate::review::crypto::kdf::derive_room_key_tree_v3(&secret);
+        save_room_access_v3(
+            store.root(),
+            &room_id,
+            &RoomAccessV3 {
+                read_capability_key: *tree.read_keys.read_capability_key.as_bytes(),
+                write_admission_key: Some(*tree.write_admission_key.as_bytes()),
+                grant_tier: None,
+                grant_signature: None,
+            },
+        )
+        .unwrap();
+        let invite = build_existing_share_invite_v3(
+            store.root(),
+            &identity,
+            &target,
+            InviteTierV3::Suggest,
+            false,
+        )
+        .expect("v3 invite");
+        assert!(invite.contains("tier=suggest"));
+    }
+
+    #[test]
+    fn v3_admission_header_has_exact_scope_prefix() {
+        let header = admission_header_value_v3(&[7; 32], "write", "POST", "/v3/rooms/r", b"{}");
+        assert!(header.starts_with("v3.write."));
+        assert_eq!(header.split('.').count(), 3);
+        assert!(!header.contains(".v2."));
     }
 
     #[test]
@@ -3378,7 +4309,7 @@ mod tests {
         // Wiremock returns the request path back to us at runtime, so the
         // simplest path is to register catch-alls that match any roomId.
         Mock::given(method("POST"))
-            .and(path_regex_for_room_create())
+            .and(path_regex_for_room_create_v3())
             .and(header_exists("Attn-Admission"))
             .and(header_exists("Attn-Owner-Signature"))
             .respond_with(|req: &Request| {
@@ -3404,7 +4335,7 @@ mod tests {
             .await;
 
         Mock::given(method("POST"))
-            .and(path_regex_for_devices())
+            .and(path_regex_for_devices_v3())
             .and(header_exists("Attn-Admission"))
             .and(header_exists("Attn-PoW"))
             .respond_with(ResponseTemplate::new(204))
@@ -3448,6 +4379,9 @@ mod tests {
             .expect("load room")
             .expect("room present");
         assert_eq!(loaded_room.event_heads.len(), 1);
+        assert_eq!(loaded_room.v, 3);
+        let persisted_secret = load_room_secret(store.root(), &outcome.room_id).expect("secret");
+        assert_eq!(derive_room_id_v3(&persisted_secret), outcome.room_id);
         assert_eq!(loaded_room.policy.mode, RoomMode::Async);
         assert!(
             loaded_room.policy.allow_browser,
@@ -3481,8 +4415,12 @@ mod tests {
 
         // The blob envelope opens under the room's snapshotKey and carries
         // the canonical SnapshotPlaintext bytes (markdown + anchor index).
-        let parsed = parse_invite(&outcome.invite).expect("parse invite");
-        let keys = derive_room_keys(&parsed.room_secret);
+        let ParsedInviteAny::V3(parsed) = parse_invite_any(&outcome.invite).expect("parse invite")
+        else {
+            panic!("new share must emit v3 invite")
+        };
+        let keys =
+            crate::review::crypto::kdf::derive_read_keys_v3(&parsed.fragment.read_capability_key);
         let aad = crate::review::envelope::envelope_aad(&envelopes[2]);
         let nonce_bytes = URL_SAFE_NO_PAD
             .decode(envelopes[2].nonce.as_bytes())
@@ -3546,7 +4484,7 @@ mod tests {
             make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
 
         Mock::given(method("POST"))
-            .and(path_regex_for_room_create())
+            .and(path_regex_for_room_create_v3())
             .respond_with(|req: &Request| {
                 ResponseTemplate::new(201).set_body_json(serde_json::json!({
                     "roomId": req.url.path().rsplit('/').next().unwrap_or(""),
@@ -3560,7 +4498,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path_regex_for_devices())
+            .and(path_regex_for_devices_v3())
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
@@ -3585,8 +4523,12 @@ mod tests {
             .find(|e| e.kind == EnvelopeKind::SnapshotBlob)
             .expect("a snapshot_blob envelope is enqueued for the shared HTML doc");
 
-        let parsed = parse_invite(&outcome.invite).expect("parse invite");
-        let keys = derive_room_keys(&parsed.room_secret);
+        let ParsedInviteAny::V3(parsed) = parse_invite_any(&outcome.invite).expect("parse invite")
+        else {
+            panic!("new share must emit v3 invite")
+        };
+        let keys =
+            crate::review::crypto::kdf::derive_read_keys_v3(&parsed.fragment.read_capability_key);
         let aad = crate::review::envelope::envelope_aad(blob_env);
         let nonce_bytes = URL_SAFE_NO_PAD
             .decode(blob_env.nonce.as_bytes())
@@ -3621,7 +4563,7 @@ mod tests {
             make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
 
         Mock::given(method("POST"))
-            .and(path_regex_for_room_create())
+            .and(path_regex_for_room_create_v3())
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "roomId": "x",
                 "createdAt": 0u64,
@@ -3633,7 +4575,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path_regex_for_devices())
+            .and(path_regex_for_devices_v3())
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
@@ -3655,13 +4597,16 @@ mod tests {
             outcome.owner_display_path, expected_display_path,
             "ShareOutcome must carry the exact path the owner shared so the dialog recognises its own room",
         );
-        assert!(outcome.invite.contains("#key="));
+        assert!(outcome.invite.contains("#v=3&tier=comment&"));
+        assert!(outcome.view_invite.contains("tier=view"));
+        assert!(outcome.suggest_invite.contains("tier=suggest"));
         let native_fragment = outcome.invite.split_once('#').expect("native fragment").1;
         let browser_url = reqwest::Url::parse(&outcome.browser_invite).expect("browser invite");
         assert_eq!(browser_url.query(), None);
         assert_eq!(browser_url.fragment(), Some(native_fragment));
-        // The invite must round-trip through `parse_invite`.
-        let parsed = parse_invite(&outcome.invite).expect("parse");
+        let ParsedInviteAny::V3(parsed) = parse_invite_any(&outcome.invite).expect("parse") else {
+            panic!("new share must emit v3 invite")
+        };
         assert_eq!(parsed.room_id, outcome.room_id);
     }
 
@@ -3678,7 +4623,7 @@ mod tests {
         // leave the owner dialing a dead room. So we expect TWO creates + two
         // registers across the two Shares.
         Mock::given(method("POST"))
-            .and(path_regex_for_room_create())
+            .and(path_regex_for_room_create_v3())
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "roomId": "x",
                 "createdAt": 0u64,
@@ -3691,7 +4636,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path_regex_for_devices())
+            .and(path_regex_for_devices_v3())
             .respond_with(ResponseTemplate::new(204))
             .expect(2)
             .mount(&server)
@@ -4277,7 +5222,7 @@ mod tests {
         let capture = captured.clone();
 
         Mock::given(method("POST"))
-            .and(path_regex(r"^/v2/rooms/[A-Za-z0-9_-]{20,32}$"))
+            .and(path_regex(r"^/v3/rooms/[A-Za-z0-9_-]{20,32}$"))
             .and(header_exists("Attn-Owner-Signature"))
             .respond_with(move |req: &Request| {
                 let owner_sig = req
@@ -4312,7 +5257,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path_regex_for_devices())
+            .and(path_regex_for_devices_v3())
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
@@ -4389,6 +5334,14 @@ mod tests {
         wiremock::matchers::path_regex(r"^/v2/rooms/[A-Za-z0-9_-]{20,32}/devices$")
     }
 
+    fn path_regex_for_room_create_v3() -> wiremock::matchers::PathRegexMatcher {
+        wiremock::matchers::path_regex(r"^/v3/rooms/[A-Za-z0-9_-]{20,32}$")
+    }
+
+    fn path_regex_for_devices_v3() -> wiremock::matchers::PathRegexMatcher {
+        wiremock::matchers::path_regex(r"^/v3/rooms/[A-Za-z0-9_-]{20,32}/devices$")
+    }
+
     // ----- R2 spillover lane (large snapshots) ----------------------------
 
     #[tokio::test]
@@ -4399,7 +5352,7 @@ mod tests {
             make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
 
         Mock::given(method("POST"))
-            .and(path_regex_for_room_create())
+            .and(path_regex_for_room_create_v3())
             .respond_with(|req: &Request| {
                 ResponseTemplate::new(201).set_body_json(serde_json::json!({
                     "roomId": req.url.path().rsplit('/').next().unwrap_or(""),
@@ -4413,7 +5366,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path_regex_for_devices())
+            .and(path_regex_for_devices_v3())
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
@@ -4421,7 +5374,7 @@ mod tests {
         // envelopeId, exactly like relay r2.ts does.
         Mock::given(method("POST"))
             .and(wiremock::matchers::path_regex(
-                r"^/v2/rooms/[A-Za-z0-9_-]{20,32}/blobs$",
+                r"^/v3/rooms/[A-Za-z0-9_-]{20,32}/blobs$",
             ))
             .and(header_exists("Attn-Admission"))
             .and(header_exists("Attn-PoW"))
@@ -4445,7 +5398,7 @@ mod tests {
             .await;
         Mock::given(method("PUT"))
             .and(wiremock::matchers::path_regex(
-                r"^/v2/rooms/[A-Za-z0-9_-]{20,32}/blobs/[A-Za-z0-9_-]+$",
+                r"^/v3/rooms/[A-Za-z0-9_-]{20,32}/blobs/[A-Za-z0-9_-]+$",
             ))
             .respond_with(ResponseTemplate::new(204))
             .expect(1)
@@ -4477,8 +5430,17 @@ mod tests {
         );
 
         // The wrapper opens under snapshotKey to a BlobRef pointing at R2.
-        let parsed = parse_invite(&outcome.invite).expect("parse invite");
-        let keys = derive_room_keys(&parsed.room_secret);
+        let parsed = parse_invite_any(&outcome.invite).expect("parse invite");
+        let snapshot_key = match parsed {
+            ParsedInviteAny::V3(parsed) => *crate::review::crypto::kdf::derive_read_keys_v3(
+                &parsed.fragment.read_capability_key,
+            )
+            .snapshot_key
+            .as_bytes(),
+            ParsedInviteAny::V2(parsed) => *derive_room_keys(&parsed.room_secret)
+                .snapshot_key
+                .as_bytes(),
+        };
         let aad = crate::review::envelope::envelope_aad(&envelopes[2]);
         let nonce_bytes = URL_SAFE_NO_PAD
             .decode(envelopes[2].nonce.as_bytes())
@@ -4488,13 +5450,8 @@ mod tests {
         let ciphertext = URL_SAFE_NO_PAD
             .decode(envelopes[2].ciphertext.as_bytes())
             .expect("ciphertext decodes");
-        let ref_bytes = crate::review::crypto::aead::open(
-            keys.snapshot_key.as_bytes(),
-            &nonce,
-            &ciphertext,
-            &aad,
-        )
-        .expect("wrapper opens under snapshotKey");
+        let ref_bytes = crate::review::crypto::aead::open(&snapshot_key, &nonce, &ciphertext, &aad)
+            .expect("wrapper opens under snapshotKey");
         let blob_ref: crate::review::model::BlobRef =
             serde_json::from_slice(&ref_bytes).expect("wrapper plaintext is a BlobRef");
         assert_eq!(blob_ref.storage, crate::review::model::BlobStorage::R2);

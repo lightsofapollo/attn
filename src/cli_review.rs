@@ -21,7 +21,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use crate::daemon::runtime_dir;
 use crate::review::agent_identity::{
@@ -118,6 +118,18 @@ pub enum ReviewSubcommand {
         ttl: Option<String>,
     },
 
+    /// Re-emit a capability-scoped v3 invite for an existing local share.
+    Invite {
+        /// Exact shared path or persisted room id.
+        path_or_room: String,
+        /// Human invites default to comment-only. Agents should request suggest.
+        #[arg(long, value_enum, default_value_t = InviteTierArg::Comment)]
+        tier: InviteTierArg,
+        /// Emit the hosted HTTPS URL instead of an attn:// deep link.
+        #[arg(long)]
+        browser: bool,
+    },
+
     /// Print suggestion verdicts derived from persisted review events across
     /// every local room. JSON has the stable shape
     /// `{"rooms":{"<room_id>":{"suggestions":{"<suggestion_id>":{"status":"pending|accepted|rejected","resulting_hash":"<hash>"}}}}}`.
@@ -196,6 +208,13 @@ pub enum ReviewSubcommand {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InviteTierArg {
+    View,
+    Comment,
+    Suggest,
+}
+
 /// Default relay URL when `--relay-url` isn't passed and `ATTN_RELAY_URL`
 /// isn't set. Points at the dev relay so a local `wrangler dev` works
 /// without extra setup.
@@ -227,6 +246,11 @@ pub fn run(args: ReviewArgs) -> Result<()> {
         ReviewSubcommand::Share { path, mode, ttl } => {
             run_share_via_daemon(&path, &mode, ttl.as_deref())
         }
+        ReviewSubcommand::Invite {
+            path_or_room,
+            tier,
+            browser,
+        } => run_invite(&path_or_room, tier, browser),
         ReviewSubcommand::Verdicts {
             json,
             all,
@@ -244,6 +268,24 @@ pub fn run(args: ReviewArgs) -> Result<()> {
             relay_url,
         } => run_agent(share.as_deref(), &mode, relay_url.as_deref()),
     }
+}
+
+fn run_invite(target: &str, tier: InviteTierArg, browser: bool) -> Result<()> {
+    use crate::review::bootstrap::{InviteTierV3, build_existing_share_invite_v3};
+    let base = runtime_dir().context("resolve runtime directory for invite")?;
+    let identity = load_identity_from(&base)
+        .context("load owner identity")?
+        .context("no owner identity exists yet; share a room first")?;
+    let store = ReviewStore::open().context("open persisted review store")?;
+    let tier = match tier {
+        InviteTierArg::View => InviteTierV3::View,
+        InviteTierArg::Comment => InviteTierV3::Comment,
+        InviteTierArg::Suggest => InviteTierV3::Suggest,
+    };
+    let invite = build_existing_share_invite_v3(store.root(), &identity, target, tier, browser)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    println!("{invite}");
+    Ok(())
 }
 
 fn run_submit_suggestion_from_diff(from_diff: &str, room: Option<&str>) -> Result<()> {
@@ -439,7 +481,7 @@ fn run_agent(share: Option<&str>, mode: &str, relay_url_override: Option<&str>) 
 /// the invite). Reuse the same `parse_invite` the daemon runs so the CLI
 /// rejects exactly what the daemon would.
 fn validate_invite_for_join(invite: &str) -> Result<()> {
-    crate::review::bootstrap::parse_invite(invite).map_err(|e| {
+    crate::review::bootstrap::parse_invite_any(invite).map_err(|e| {
         anyhow::anyhow!(
             "invalid review invite ({e}).\n\
              Expected an invite URL like attn://review/<roomId>#key=<secret> — \
@@ -667,6 +709,45 @@ mod tests {
     #[derive(Subcommand)]
     enum TestCommand {
         Review(ReviewArgs),
+    }
+
+    #[test]
+    fn invite_cli_defaults_comment_and_parses_browser_suggest() {
+        let parsed = TestCli::try_parse_from(["attn", "review", "invite", "room-a"])
+            .expect("default invite");
+        assert!(matches!(
+            parsed.command,
+            TestCommand::Review(ReviewArgs {
+                command: ReviewSubcommand::Invite {
+                    tier: InviteTierArg::Comment,
+                    browser: false,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        let parsed = TestCli::try_parse_from([
+            "attn",
+            "review",
+            "invite",
+            "/tmp/plan.md",
+            "--tier",
+            "suggest",
+            "--browser",
+        ])
+        .expect("suggest browser invite");
+        assert!(matches!(
+            parsed.command,
+            TestCommand::Review(ReviewArgs {
+                command: ReviewSubcommand::Invite {
+                    tier: InviteTierArg::Suggest,
+                    browser: true,
+                    ..
+                },
+                ..
+            })
+        ));
     }
 
     #[test]

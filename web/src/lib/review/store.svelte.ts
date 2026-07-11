@@ -84,6 +84,10 @@ export interface ReviewRoomSummary {
     roomId: RoomId;
     inviteUrl: string;
     browserInviteUrl: string;
+    viewInviteUrl: string;
+    suggestInviteUrl: string;
+    browserViewInviteUrl: string;
+    browserSuggestInviteUrl: string;
     ownerSigningKey: string;
     ownerDisplayPath: string;
     mode: 'live' | 'async' | 'hybrid';
@@ -177,6 +181,10 @@ export class ReviewStore {
     roomId: RoomId;
     inviteUrl: string;
     browserInviteUrl: string;
+    viewInviteUrl: string;
+    suggestInviteUrl: string;
+    browserViewInviteUrl: string;
+    browserSuggestInviteUrl: string;
     ownerSigningKey: string;
     ownerDisplayPath: string;
     mode: 'live' | 'async' | 'hybrid';
@@ -630,6 +638,10 @@ export class ReviewStore {
     roomId: RoomId;
     inviteUrl: string;
     browserInviteUrl: string;
+    viewInviteUrl: string;
+    suggestInviteUrl: string;
+    browserViewInviteUrl: string;
+    browserSuggestInviteUrl: string;
     ownerDisplayPath: string;
     ownerSigningKey: string;
     mode: 'live' | 'async' | 'hybrid';
@@ -646,6 +658,10 @@ export class ReviewStore {
       roomId: payload.roomId,
       inviteUrl: payload.inviteUrl,
       browserInviteUrl: payload.browserInviteUrl,
+      viewInviteUrl: payload.viewInviteUrl,
+      suggestInviteUrl: payload.suggestInviteUrl,
+      browserViewInviteUrl: payload.browserViewInviteUrl,
+      browserSuggestInviteUrl: payload.browserSuggestInviteUrl,
       ownerSigningKey: payload.ownerSigningKey,
       ownerDisplayPath: payload.ownerDisplayPath,
       mode: payload.mode,

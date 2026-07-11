@@ -798,6 +798,21 @@ export function buildAdmissionHeader(
   return `v2.${base64UrlEncode(tag)}`;
 }
 
+/** Build a scoped v3 admission header. */
+export function buildAdmissionHeaderV3(
+  admissionKey: Uint8Array,
+  scope: 'read' | 'write',
+  method: string,
+  urlPath: string,
+  body: Uint8Array,
+): string {
+  if (admissionKey.length !== 32) throw new Error('admissionKey must be 32 bytes');
+  const canon = canonicalRequestBytes(method, urlPath, [], body);
+  const tag = hmac(sha256, admissionKey, canon);
+  canon.fill(0);
+  return `v3.${scope}.${base64UrlEncode(tag)}`;
+}
+
 /**
  * Build the `Sec-WebSocket-Protocol` value `"attn.v2, hmac.<base64url HMAC>"`
  * the browser passes when opening the WS to the relay. Equivalent to
@@ -815,4 +830,26 @@ export function buildAdmissionSubprotocol(
   const canon = canonicalRequestBytes(method, urlPath, queryPairs, new Uint8Array(0));
   const tag = hmac(sha256, admissionKey, canon);
   return `attn.v2, hmac.${base64UrlEncode(tag)}`;
+}
+
+/** Build the v3 read-scoped WebSocket admission subprotocol. */
+export function buildAdmissionSubprotocolV3(
+  readAdmissionKey: Uint8Array,
+  method: string,
+  urlPath: string,
+  queryPairs: Array<[string, string]>,
+  writeAdmissionKey?: Uint8Array,
+): string {
+  if (readAdmissionKey.length !== 32) throw new Error('readAdmissionKey must be 32 bytes');
+  if (writeAdmissionKey !== undefined && writeAdmissionKey.length !== 32) {
+    throw new Error('writeAdmissionKey must be 32 bytes');
+  }
+  const canon = canonicalRequestBytes(method, urlPath, queryPairs, new Uint8Array(0));
+  const readTag = hmac(sha256, readAdmissionKey, canon);
+  const writeTag = writeAdmissionKey === undefined ? undefined : hmac(sha256, writeAdmissionKey, canon);
+  canon.fill(0);
+  if (writeAdmissionKey === undefined) {
+    return `attn.v3, read-hmac.${base64UrlEncode(readTag)}`;
+  }
+  return `attn.v3, read-hmac.${base64UrlEncode(readTag)}, write-hmac.${base64UrlEncode(writeTag!)}`;
 }

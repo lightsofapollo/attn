@@ -210,10 +210,11 @@ impl MailboxWsClient {
             _ => return Ok(()),
         };
 
-        let presigned = relay_blobs::presign_blob_download(
+        let presigned = relay_blobs::presign_blob_download_versioned(
             &self.http,
             &self.config.relay_url,
-            &self.config.admission_key,
+            &self.config.read_admission_key,
+            self.config.protocol_version,
             room_id,
             &envelope_id,
         )
@@ -399,6 +400,27 @@ pub(crate) fn build_subprotocol(
     format!("attn.v2, hmac.{}", URL_SAFE_NO_PAD.encode(tag))
 }
 
+pub(crate) fn build_subprotocol_v3(
+    read_admission_key: &[u8; 32],
+    write_admission_key: &[u8; 32],
+    method: &str,
+    url_path: &str,
+    query_pairs: &[(String, String)],
+) -> String {
+    let canonical = canonical_request_bytes(method, url_path, query_pairs, b"");
+    let mut read_mac =
+        <Hmac<Sha256>>::new_from_slice(read_admission_key).expect("HMAC accepts any key length");
+    read_mac.update(&canonical);
+    let mut write_mac =
+        <Hmac<Sha256>>::new_from_slice(write_admission_key).expect("HMAC accepts any key length");
+    write_mac.update(&canonical);
+    format!(
+        "attn.v3, read-hmac.{}, write-hmac.{}",
+        URL_SAFE_NO_PAD.encode(read_mac.finalize().into_bytes()),
+        URL_SAFE_NO_PAD.encode(write_mac.finalize().into_bytes())
+    )
+}
+
 /// Duplicate of `super::canonical_request_bytes` — pulled inline so this
 /// module compiles without a `pub(crate)` leak of the canonicalization helpers.
 /// The shape is identical (METHOD || "\n" || PATH || "\n" || CANON_QUERY ||
@@ -458,6 +480,15 @@ fn rfc3986_encode(s: &str) -> String {
 /// Anything else is left as-is so a caller can override (e.g. test fixtures
 /// that hand in `ws://127.0.0.1:NNNN` directly).
 pub(crate) fn build_ws_url(relay_url: &str, room_id: &str, device_id: &str) -> String {
+    build_ws_url_versioned(relay_url, room_id, device_id, 2)
+}
+
+pub(crate) fn build_ws_url_versioned(
+    relay_url: &str,
+    room_id: &str,
+    device_id: &str,
+    version: u32,
+) -> String {
     let trimmed = relay_url.trim_end_matches('/');
     let with_scheme = if let Some(rest) = trimmed.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -467,7 +498,7 @@ pub(crate) fn build_ws_url(relay_url: &str, room_id: &str, device_id: &str) -> S
         trimmed.to_string()
     };
     format!(
-        "{with_scheme}/v2/rooms/{room_id}/socket?device_id={device_id}",
+        "{with_scheme}/v{version}/rooms/{room_id}/socket?device_id={device_id}",
         room_id = rfc3986_encode(room_id),
         device_id = rfc3986_encode(device_id),
     )
@@ -478,7 +509,11 @@ pub(crate) fn build_ws_url(relay_url: &str, room_id: &str, device_id: &str) -> S
 /// addressed device. We surface it as a separate `query_pairs` arg so the
 /// canonicalizer (which sort+encodes) handles the formatting.
 pub(crate) fn socket_path(room_id: &str) -> String {
-    format!("/v2/rooms/{}/socket", room_id)
+    socket_path_versioned(room_id, 2)
+}
+
+pub(crate) fn socket_path_versioned(room_id: &str, version: u32) -> String {
+    format!("/v{version}/rooms/{room_id}/socket")
 }
 
 /// Round-trip a typed id newtype to its inner string. Mirrors the helper in
@@ -679,14 +714,26 @@ impl MailboxWsClient {
         // "attn.v2, hmac.<base64url>" form. tokio-tungstenite's `connect_async`
         // would otherwise set its own protocol header.
         let device_id_str = id_to_string(&self.config.device_id);
-        let path = socket_path(self.config.room_id.as_str());
+        let path =
+            socket_path_versioned(self.config.room_id.as_str(), self.config.protocol_version);
         let query: Vec<(String, String)> = vec![("device_id".to_string(), device_id_str.clone())];
-        let subprotocol = build_subprotocol(&self.config.admission_key, "GET", &path, &query);
+        let subprotocol = if self.config.protocol_version == 3 {
+            build_subprotocol_v3(
+                &self.config.read_admission_key,
+                &self.config.admission_key,
+                "GET",
+                &path,
+                &query,
+            )
+        } else {
+            build_subprotocol(&self.config.admission_key, "GET", &path, &query)
+        };
 
-        let url = build_ws_url(
+        let url = build_ws_url_versioned(
             &self.config.relay_url,
             self.config.room_id.as_str(),
             &device_id_str,
+            self.config.protocol_version,
         );
         let mut request = match url.as_str().into_client_request() {
             Ok(req) => req,
@@ -1338,6 +1385,8 @@ mod tests {
             room_id: id::<RoomId>(TEST_ROOM),
             device_id: id::<DeviceId>(TEST_DEVICE),
             admission_key: [0x42u8; 32],
+            read_admission_key: [0x42u8; 32],
+            protocol_version: 2,
             pow_difficulty: 12,
         });
         MailboxWsClient::new(cfg, pipeline, store, events_tx)
@@ -1369,6 +1418,20 @@ mod tests {
         let tail = header.trim_start_matches("attn.v2, hmac.");
         let decoded = URL_SAFE_NO_PAD.decode(tail).expect("base64url");
         assert_eq!(decoded.len(), 32, "HMAC-SHA-256 produces 32 bytes");
+    }
+
+    #[test]
+    fn v3_device_subprotocol_has_exact_dual_proof_wire_shape() {
+        let header = build_subprotocol_v3(
+            &[0x42; 32],
+            &[0x43; 32],
+            "GET",
+            "/v3/rooms/room-1/socket",
+            &[("device_id".into(), "d-1".into())],
+        );
+        assert!(header.starts_with("attn.v3, read-hmac."));
+        assert!(header.contains(", write-hmac."));
+        assert!(!header.contains("hmac.v2."));
     }
 
     #[test]

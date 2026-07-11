@@ -55,7 +55,7 @@ async function bootstrapHostedReview(): Promise<void> {
       },
     });
   } catch (error) {
-    if (parsedInvite) zero(parsedInvite.roomSecret);
+    if (parsedInvite?.version === 2) zero(parsedInvite.roomSecret);
     throw error;
   }
 }

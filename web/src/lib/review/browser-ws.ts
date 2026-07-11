@@ -1022,7 +1022,13 @@ function eventAllowedForRole(
  * `ws.rs::rfc3986_encode` — `encodeURIComponent` would leave `!*'()` raw and
  * diverge from the admission HMAC canonicalisation).
  */
-export function buildWsUrl(relayUrl: string, roomId: string, deviceId: string): string {
+export function buildWsUrl(
+  relayUrl: string,
+  roomId: string,
+  identityId: string,
+  version: 2 | 3 = 2,
+  identityKind: 'device' | 'viewer' = 'device',
+): string {
   const trimmed = relayUrl.replace(/\/+$/, '');
   let withScheme = trimmed;
   if (trimmed.startsWith('https://')) {
@@ -1031,8 +1037,9 @@ export function buildWsUrl(relayUrl: string, roomId: string, deviceId: string): 
     withScheme = 'ws://' + trimmed.slice('http://'.length);
   }
   const eRoom = rfc3986EncodeForUrl(roomId);
-  const eDevice = rfc3986EncodeForUrl(deviceId);
-  return `${withScheme}/v2/rooms/${eRoom}/socket?device_id=${eDevice}`;
+  const encodedIdentity = rfc3986EncodeForUrl(identityId);
+  const queryName = identityKind === 'viewer' ? 'viewer_id' : 'device_id';
+  return `${withScheme}/v${version}/rooms/${eRoom}/socket?${queryName}=${encodedIdentity}`;
 }
 
 function rfc3986EncodeForUrl(s: string): string {
@@ -1054,6 +1061,6 @@ function rfc3986EncodeForUrl(s: string): string {
 }
 
 /** Path component used in the admission HMAC canonicalisation. */
-export function socketPath(roomId: string): string {
-  return `/v2/rooms/${roomId}/socket`;
+export function socketPath(roomId: string, version: 2 | 3 = 2): string {
+  return `/v${version}/rooms/${roomId}/socket`;
 }

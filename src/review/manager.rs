@@ -167,6 +167,10 @@ pub enum ReviewUpdate {
         /// HTTPS invite for the hosted reviewer. The room secret remains in
         /// the URL fragment and is never sent to the static host.
         browser_invite_url: String,
+        view_invite_url: String,
+        suggest_invite_url: String,
+        browser_view_invite_url: String,
+        browser_suggest_invite_url: String,
         /// Absolute path the owner shared, so the dialog can recognise its own
         /// room without relying on a frontend-captured intent. Serialised as
         /// `ownerDisplayPath`.
@@ -1530,11 +1534,22 @@ impl ReviewManager {
             });
         };
 
-        let secret = match load_room_secret(self.store.root(), room_id) {
-            Ok(s) => s,
-            Err(e) => return emit_err(format!("load room secret: {e}")),
-        };
-        let keys = derive_room_keys(&secret);
+        let signaling_key =
+            match crate::review::bootstrap::load_room_access_v3(self.store.root(), room_id) {
+                Ok(Some(access)) => {
+                    *crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key)
+                        .signaling_key
+                        .as_bytes()
+                }
+                Ok(None) => {
+                    let secret = match load_room_secret(self.store.root(), room_id) {
+                        Ok(secret) => secret,
+                        Err(error) => return emit_err(format!("load room secret: {error}")),
+                    };
+                    *derive_room_keys(&secret).signaling_key.as_bytes()
+                }
+                Err(error) => return emit_err(format!("load v3 room access: {error}")),
+            };
 
         let identity = match bootstrapper
             .config()
@@ -1553,7 +1568,7 @@ impl ReviewManager {
                 from: device_id.clone(),
                 payload: payload.to_string(),
             },
-            keys.signaling_key.as_bytes(),
+            &signaling_key,
             room_id,
             &participant_id,
             &device_id,
@@ -1641,6 +1656,10 @@ impl ReviewManager {
                     room_id: outcome.room_id,
                     invite_url: outcome.invite,
                     browser_invite_url: outcome.browser_invite,
+                    view_invite_url: outcome.view_invite,
+                    suggest_invite_url: outcome.suggest_invite,
+                    browser_view_invite_url: outcome.browser_view_invite,
+                    browser_suggest_invite_url: outcome.browser_suggest_invite,
                     owner_display_path: outcome.owner_display_path,
                     owner_signing_key: outcome.owner_signing_key,
                     mode: outcome.mode,
@@ -1682,6 +1701,7 @@ impl ReviewManager {
         match result {
             Ok(outcome) => {
                 let room_id = outcome.room_id;
+                self.set_local_grant_tier(room_id.clone(), outcome.local_grant_tier);
                 // Start the transport runtime BEFORE emitting status so
                 // by the time the frontend reacts to "Joined" the WS
                 // subscriber is already listening. If init fails we
@@ -1778,21 +1798,51 @@ impl ReviewManager {
         let identity = crate::review::bootstrap::load_or_create_identity_in(&identity_dir)?;
         let device_id = identity.typed_device_id();
 
-        // Room secret (32 bytes). Derives all per-room keys: AEAD for
-        // event / snapshot / signaling, plus the HMAC admission key.
-        let room_secret = load_room_secret(self.store.root(), room_id)?;
-        let room_keys = derive_room_keys(&room_secret);
+        // Prefer persisted v3 capability metadata. Legacy rooms continue to
+        // derive the v2 tree from their owner/reviewer room secret.
+        let v3_access = crate::review::bootstrap::load_room_access_v3(self.store.root(), room_id)?;
+        if let Some(access) = v3_access.as_ref() {
+            self.set_local_grant_tier(room_id.clone(), access.grant_tier);
+        }
+        let (event_key, snapshot_key, signaling_key, mailbox_config) = if let Some(access) =
+            v3_access.as_ref()
+        {
+            let read = crate::review::crypto::kdf::derive_read_keys_v3(&access.read_capability_key);
+            let config = MailboxConfig::from_v3_access(
+                bootstrap.config().relay_url.clone(),
+                room_id.clone(),
+                device_id.clone(),
+                access,
+                12,
+            )?;
+            (
+                *read.event_key.as_bytes(),
+                *read.snapshot_key.as_bytes(),
+                *read.signaling_key.as_bytes(),
+                config,
+            )
+        } else {
+            let room_secret = load_room_secret(self.store.root(), room_id)?;
+            let room_keys = derive_room_keys(&room_secret);
+            let config = MailboxConfig::from_room_secret(
+                bootstrap.config().relay_url.clone(),
+                room_id.clone(),
+                device_id.clone(),
+                &room_secret,
+                12,
+            );
+            (
+                *room_keys.event_key.as_bytes(),
+                *room_keys.snapshot_key.as_bytes(),
+                *room_keys.signaling_key.as_bytes(),
+                config,
+            )
+        };
 
         // MailboxConfig + TokenPool — shared between the outbox processor
         // and the WS subscriber so admission HMAC + PoW caching are
         // consistent across both paths.
-        let mailbox_config = Arc::new(MailboxConfig::from_room_secret(
-            bootstrap.config().relay_url.clone(),
-            room_id.clone(),
-            device_id.clone(),
-            &room_secret,
-            12, // MIN_POW_BITS — relay clamps anyway
-        ));
+        let mailbox_config = Arc::new(mailbox_config);
         let token_pool = Arc::new(TokenPool::new(
             room_id.as_str().to_string(),
             device_id.as_str().to_string(),
@@ -1887,9 +1937,9 @@ impl ReviewManager {
             Arc::clone(&self.store),
             verifying_keys.clone(),
             authorizations.clone(),
-            *room_keys.event_key.as_bytes(),
-            *room_keys.snapshot_key.as_bytes(),
-            *room_keys.signaling_key.as_bytes(),
+            event_key,
+            snapshot_key,
+            signaling_key,
         ));
 
         // Refresher invoked when an inbound envelope arrives from a peer
@@ -1931,9 +1981,9 @@ impl ReviewManager {
         // case; the N-peer star lands in a later stage.
         let webrtc_author_id = identity.typed_participant_id();
         let webrtc_local_device = device_id.clone();
-        let webrtc_event_key = *room_keys.event_key.as_bytes();
-        let webrtc_snapshot_key = *room_keys.snapshot_key.as_bytes();
-        let webrtc_signaling_key = *room_keys.signaling_key.as_bytes();
+        let webrtc_event_key = event_key;
+        let webrtc_snapshot_key = snapshot_key;
+        let webrtc_signaling_key = signaling_key;
         let webrtc_room_id = room_id.clone();
 
         // Outbound signaling forwarder: drain the transport's signaling_tx into
@@ -4877,6 +4927,22 @@ mod bootstrap_integration_tests {
     async fn mount_create_and_register(server: &MockServer) {
         Mock::given(method("POST"))
             .and(wiremock::matchers::path_regex(
+                r"^/v3/rooms/[A-Za-z0-9_-]+$",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "roomId": "any",
+                "createdAt": 0u64,
+                "expiresAt": 0u64,
+                "policy": {},
+                "ownerSigningKeyId": "k",
+                "serverSeq": 0,
+            })))
+            .mount(server)
+            .await;
+        // The join compatibility assertion below deliberately exercises a
+        // persisted v2 invite while new shares use v3.
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
                 r"^/v2/rooms/[A-Za-z0-9_-]+$",
             ))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
@@ -4892,6 +4958,13 @@ mod bootstrap_integration_tests {
         Mock::given(method("POST"))
             .and(wiremock::matchers::path_regex(
                 r"^/v2/rooms/[A-Za-z0-9_-]+/devices$",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/v3/rooms/[A-Za-z0-9_-]+/devices$",
             ))
             .respond_with(ResponseTemplate::new(204))
             .mount(server)
@@ -4934,6 +5007,10 @@ mod bootstrap_integration_tests {
             ReviewUpdate::ShareReady {
                 invite_url,
                 browser_invite_url,
+                view_invite_url,
+                suggest_invite_url,
+                browser_view_invite_url,
+                browser_suggest_invite_url,
                 owner_signing_key,
                 mode,
                 expires_at,
@@ -4947,6 +5024,10 @@ mod bootstrap_integration_tests {
                     browser_invite_url.starts_with("https://attn.sh/review/"),
                     "ShareReady browser_invite_url shape, got: {browser_invite_url}"
                 );
+                assert!(view_invite_url.contains("tier=view"));
+                assert!(suggest_invite_url.contains("tier=suggest"));
+                assert!(browser_view_invite_url.contains("tier=view"));
+                assert!(browser_suggest_invite_url.contains("tier=suggest"));
                 assert_eq!(mode, "async", "wire mode string round-trips");
                 assert!(!owner_signing_key.is_empty(), "owner key surfaced");
                 assert!(expires_at > 0, "expires_at populated");
@@ -4963,7 +5044,15 @@ mod bootstrap_integration_tests {
             }
             other => panic!("expected RoomStatusChanged second, got {other:?}"),
         }
-        assert!(rx.try_recv().is_err(), "no spurious third update");
+        // Starting the live runtime is best-effort. With no WebSocket mock,
+        // its expected transport error can race onto the channel here.
+        if let Ok(third) = rx.try_recv() {
+            assert!(
+                matches!(&third, ReviewUpdate::LocalGrantTierChanged { .. })
+                    || matches!(&third, ReviewUpdate::Error { code, .. } if code == "ATTN_TRANSPORT_INIT" || code == "ATTN_WS"),
+                "unexpected third update: {third:?}"
+            );
+        }
         let _ = invite;
         // Identity must be on disk.
         let identity = load_identity_from(id_tmp.path())
@@ -4997,6 +5086,7 @@ mod bootstrap_integration_tests {
         // WS health, so drain updates until we observe it.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut joined = false;
+        let mut seen = Vec::new();
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
@@ -5013,13 +5103,16 @@ mod bootstrap_integration_tests {
                 }
                 // Ignore the expected transient WS-dial failure and any other
                 // pre-"Joined" updates.
-                Ok(_) => continue,
+                Ok(update) => {
+                    seen.push(format!("{update:?}"));
+                    continue;
+                }
                 Err(_) => break,
             }
         }
         assert!(
             joined,
-            "expected a RoomStatusChanged {{ status: \"Joined\" }} update"
+            "expected a RoomStatusChanged {{ status: \"Joined\" }} update; saw {seen:?}"
         );
     }
 

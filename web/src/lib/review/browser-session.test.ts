@@ -756,7 +756,9 @@ defineCase('happy path: invite → POST /devices → WS hello → connected', as
       `should pass through connecting; got ${orderedStatuses.join(',')}`,
     );
     assertEq(store.currentRoomId, ROOM_ID as unknown as RoomId, 'store.currentRoomId set');
-    const internalKeys = (session as unknown as { keys: typeof KEYS | null }).keys;
+    const internalKeys = (session as unknown as {
+      keys: (typeof KEYS & { readAdmissionKey: Uint8Array; writeAdmissionKey?: Uint8Array }) | null;
+    }).keys;
     assert(internalKeys !== null, 'derived room keys retained while connected');
     session.close();
     for (const [label, bytes] of Object.entries({
@@ -764,12 +766,151 @@ defineCase('happy path: invite → POST /devices → WS hello → connected', as
       eventKey: internalKeys.eventKey,
       snapshotKey: internalKeys.snapshotKey,
       signalingKey: internalKeys.signalingKey,
-      admissionKey: internalKeys.admissionKey,
+      readAdmissionKey: internalKeys.readAdmissionKey,
+      writeAdmissionKey: internalKeys.writeAdmissionKey!,
       signingSecret: identity.signingSecret,
       encryptionSecret: identity.encryptionSecret,
     })) {
       assert(bytes.every((byte) => byte === 0), `${label} zeroed on close`);
     }
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('v3 view uses anonymous read socket and performs zero mutations', async () => {
+  const server = await startMockServer();
+  try {
+    let requestCount = 0;
+    let socketProtocol = '';
+    let socketUrl = '';
+    server.onClient((ws, protocol) => {
+      socketProtocol = protocol;
+      ws.on('message', (raw) => {
+        if (JSON.parse(String(raw)).type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello',
+          serverSeq: 0,
+          policy: POLICY,
+          devices: [OWNER_DEVICE],
+          onlineDeviceIds: [OWNER_DEVICE.deviceId],
+          missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    const session = new BrowserSession({
+      parsedInvite: {
+        version: 3,
+        tier: 'view',
+        roomId: ROOM_ID,
+        readCapabilityKey: new Uint8Array(32).fill(0x41),
+      },
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      store: makeStubStore(),
+      fetchImpl: async (url, init) => {
+        requestCount += 1;
+        assertEq(init.method, 'GET', 'view performs GET only');
+        assert(url.endsWith(`/v3/rooms/${ROOM_ID}/devices`), 'view reads v3 directory');
+        assert(init.headers?.['Attn-Admission']?.startsWith('v3.read.'), 'read-scoped admission');
+        return { status: 200, text: async () => JSON.stringify({ policy: POLICY, devices: [OWNER_DEVICE] }) };
+      },
+      webSocketFactory: (url, protocols) => {
+        socketUrl = url;
+        return nodeFactory(url, protocols);
+      },
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 100,
+    });
+    await session.start();
+    for (let i = 0; i < 50 && session.getState().status !== 'connected'; i++) await delay(10);
+    assertEq(session.getState().status, 'connected', 'view connects');
+    assertEq(session.getState().grantTier, 'view', 'view tier retained');
+    assertEq(session.getState().authoringReady, false, 'view never authors');
+    assertEq(requestCount, 1, 'no registration/outbox mutation');
+    assert(/\/v3\/rooms\/[^/]+\/socket\?viewer_id=[A-Za-z0-9_-]{22}$/u.test(socketUrl), 'canonical anonymous viewer URL');
+    assert(socketProtocol.includes('attn.v3') && socketProtocol.includes('read-hmac.'), 'v3 read socket');
+    session.close();
+  } finally {
+    await server.close();
+  }
+});
+
+defineCase('v3 comment registration binds URL grant and uses write admission', async () => {
+  const server = await startMockServer();
+  try {
+    const grantSignature = base64UrlEncode(
+      ed25519.sign(canonicalDeviceGrantV3(ROOM_ID, 'comment'), OWNER_KEYPAIR.secret),
+    );
+    const captured: { registration: Record<string, unknown> | null } = { registration: null };
+    let socketProtocol = '';
+    server.onClient((ws, protocol) => {
+      socketProtocol = protocol;
+      ws.on('message', (raw) => {
+        if (JSON.parse(String(raw)).type !== 'subscribe') return;
+        ws.send(JSON.stringify({
+          type: 'hello',
+          serverSeq: 0,
+          policy: POLICY,
+          devices: [OWNER_DEVICE],
+          missedSignalEnvelopeIds: [],
+        }));
+      });
+    });
+    const session = new BrowserSession({
+      parsedInvite: {
+        version: 3,
+        tier: 'comment',
+        roomId: ROOM_ID,
+        readCapabilityKey: new Uint8Array(32).fill(0x42),
+        writeAdmissionKey: new Uint8Array(32).fill(0x43),
+        grantSignature,
+      },
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      identity: deterministicIdentity(),
+      powToken: 'test-pow-token',
+      store: makeStubStore(),
+      fetchImpl: async (url, init) => {
+        if (init.method === 'GET') {
+          assert(init.headers?.['Attn-Admission']?.startsWith('v3.read.'), 'directory uses read scope');
+          return { status: 200, text: async () => JSON.stringify({ policy: POLICY, devices: [OWNER_DEVICE] }) };
+        }
+        if (url.endsWith('/devices')) {
+          assert(init.headers?.['Attn-Admission']?.startsWith('v3.write.'), 'registration uses write scope');
+          captured.registration = JSON.parse(init.body ?? '{}');
+          return { status: 204, text: async () => '' };
+        }
+        return { status: 200, text: async () => JSON.stringify({ accepted: [] }) };
+      },
+      webSocketFactory: nodeFactory,
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 100,
+    });
+    await session.start();
+    assert(captured.registration !== null, 'v3 device registration captured');
+    const registration = captured.registration;
+    assertEq(registration?.grantTier, 'comment', 'registration tier');
+    assertEq(registration?.grantSignature, grantSignature, 'registration owner grant');
+    assert(typeof registration?.selfSignature === 'string', 'device binds grant in self signature');
+    for (let i = 0; i < 50 && socketProtocol.length === 0; i++) await delay(10);
+    assert(socketProtocol.includes('read-hmac.'), 'device socket proves read capability');
+    assert(socketProtocol.includes('write-hmac.'), 'device socket proves write capability');
+    let rejected = false;
+    try {
+      await session.createSuggestion({
+        anchor: {
+          v: 2,
+          fileId: 'file-tier',
+          snapshotId: 'snapshot-tier',
+          baseHash: 'hash-tier',
+          position: { byteRange: [0, 1], lineRange: [1, 1] },
+        },
+        operation: { kind: 'replace', expectedText: 'a', replacement: 'b' },
+      });
+    } catch {
+      rejected = true;
+    }
+    assert(rejected, 'comment session hard-blocks suggestion');
+    session.close();
   } finally {
     await server.close();
   }

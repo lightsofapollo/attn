@@ -70,7 +70,33 @@ pub async fn presign_blob_upload(
     device_id: &DeviceId,
     ciphertext_bytes: u64,
 ) -> Result<PresignedUpload, TransportError> {
-    let path = format!("/v2/rooms/{}/blobs", room_id.as_str());
+    presign_blob_upload_versioned(
+        http,
+        relay_url,
+        admission_key,
+        2,
+        room_id,
+        envelope_id,
+        author_id,
+        device_id,
+        ciphertext_bytes,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn presign_blob_upload_versioned(
+    http: &reqwest::Client,
+    relay_url: &str,
+    admission_key: &[u8; 32],
+    version: u32,
+    room_id: &RoomId,
+    envelope_id: &str,
+    author_id: &ParticipantId,
+    device_id: &DeviceId,
+    ciphertext_bytes: u64,
+) -> Result<PresignedUpload, TransportError> {
+    let path = format!("/v{version}/rooms/{}/blobs", room_id.as_str());
     let url = format!("{}{}", relay_url.trim_end_matches('/'), path);
     let body = serde_json::json!({
         "envelopeId": envelope_id,
@@ -91,16 +117,21 @@ pub async fn presign_blob_upload(
     .await
     .map_err(|e| TransportError::Io(format!("mint blob pow: {e}")))?;
 
+    let admission = if version == 3 {
+        format!(
+            "v3.write.{}",
+            admission_mac(admission_key, "POST", &path, &body_bytes)
+        )
+    } else {
+        admission_header(admission_key, "POST", &path, &body_bytes)
+    };
     let resp = http
         .post(&url)
         .header(
             reqwest::header::CONTENT_TYPE,
             "application/json; charset=utf-8",
         )
-        .header(
-            "Attn-Admission",
-            admission_header(admission_key, "POST", &path, &body_bytes),
-        )
+        .header("Attn-Admission", admission)
         .header("Attn-PoW", pow_token)
         .body(body_bytes)
         .send()
@@ -154,14 +185,34 @@ pub async fn presign_blob_download(
     room_id: &RoomId,
     envelope_id: &str,
 ) -> Result<PresignedDownload, TransportError> {
-    let path = format!("/v2/rooms/{}/blobs/{}", room_id.as_str(), envelope_id);
+    presign_blob_download_versioned(http, relay_url, admission_key, 2, room_id, envelope_id).await
+}
+
+pub async fn presign_blob_download_versioned(
+    http: &reqwest::Client,
+    relay_url: &str,
+    admission_key: &[u8; 32],
+    version: u32,
+    room_id: &RoomId,
+    envelope_id: &str,
+) -> Result<PresignedDownload, TransportError> {
+    let path = format!(
+        "/v{version}/rooms/{}/blobs/{}",
+        room_id.as_str(),
+        envelope_id
+    );
     let url = format!("{}{}", relay_url.trim_end_matches('/'), path);
+    let admission = if version == 3 {
+        format!(
+            "v3.read.{}",
+            admission_mac(admission_key, "GET", &path, &[])
+        )
+    } else {
+        admission_header(admission_key, "GET", &path, &[])
+    };
     let resp = http
         .get(&url)
-        .header(
-            "Attn-Admission",
-            admission_header(admission_key, "GET", &path, &[]),
-        )
+        .header("Attn-Admission", admission)
         .send()
         .await
         .map_err(|e| TransportError::Io(format!("GET {url}: {e}")))?;
@@ -209,6 +260,10 @@ pub async fn get_blob(
 /// routes carry signed query parameters — the `?cap=` token on PUT/GET is
 /// the capability itself, not an admission input.
 fn admission_header(admission_key: &[u8; 32], method: &str, path: &str, body: &[u8]) -> String {
+    format!("v2.{}", admission_mac(admission_key, method, path, body))
+}
+
+fn admission_mac(admission_key: &[u8; 32], method: &str, path: &str, body: &[u8]) -> String {
     let body_hash = Sha256::digest(body);
     let mut canonical = Vec::with_capacity(method.len() + path.len() + body_hash.len() + 3);
     canonical.extend_from_slice(method.to_ascii_uppercase().as_bytes());
@@ -221,7 +276,7 @@ fn admission_header(admission_key: &[u8; 32], method: &str, path: &str, body: &[
         <Hmac<Sha256>>::new_from_slice(admission_key).expect("HMAC accepts any key length");
     mac.update(&canonical);
     let tag = mac.finalize().into_bytes();
-    format!("v2.{}", URL_SAFE_NO_PAD.encode(tag))
+    URL_SAFE_NO_PAD.encode(tag)
 }
 
 /// Translate a non-2xx relay response into a `TransportError` that keeps the
@@ -242,5 +297,19 @@ fn relay_error(op: &str, status: u16, body: &[u8]) -> TransportError {
             parsed.error.code, parsed.error.message
         )),
         Err(_) => TransportError::Io(format!("{op}: relay {status} (body: {} bytes)", body.len())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v3_download_uses_read_scope_without_nested_v2_prefix() {
+        let path = "/v3/rooms/room-v3/blobs/env-v3";
+        let header = format!("v3.read.{}", admission_mac(&[0x31; 32], "GET", path, &[]));
+        assert!(header.starts_with("v3.read."));
+        assert!(!header.contains(".v2."));
+        assert_eq!(header.split('.').count(), 3);
     }
 }

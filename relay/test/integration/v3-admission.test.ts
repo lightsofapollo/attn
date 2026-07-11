@@ -187,10 +187,21 @@ describe("additive /v3 scoped admission", () => {
 
     const socketUrl = `${roomUrl}/socket?device_id=view-only-unregistered`;
     const socketAdmission = await scopedHeader("read", readKey, "GET", socketUrl);
-    const socket = await SELF.fetch(socketUrl, {
+    const readOnlyDeviceSocket = await SELF.fetch(socketUrl, {
       headers: {
         Upgrade: "websocket",
         "Sec-WebSocket-Protocol": `attn.v3, read-hmac.${socketAdmission.split(".")[2]}`,
+      },
+    });
+    expect(readOnlyDeviceSocket.status).toBe(401);
+    expect((await readOnlyDeviceSocket.json() as { error: { code: string } }).error.code)
+      .toBe("ATTN_ADMISSION_INVALID");
+
+    const socketWriteAdmission = await scopedHeader("write", writeKey, "GET", socketUrl);
+    const socket = await SELF.fetch(socketUrl, {
+      headers: {
+        Upgrade: "websocket",
+        "Sec-WebSocket-Protocol": `attn.v3, read-hmac.${socketAdmission.split(".")[2]}, write-hmac.${socketWriteAdmission.split(".")[2]}`,
       },
     });
     expect(socket.status).toBe(404);

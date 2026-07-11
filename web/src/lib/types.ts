@@ -895,6 +895,10 @@ export interface ReviewShareReady {
   inviteUrl: string;
   /** HTTPS invite for the hosted reviewer; the secret is fragment-only. */
   browserInviteUrl: string;
+  viewInviteUrl: string;
+  suggestInviteUrl: string;
+  browserViewInviteUrl: string;
+  browserSuggestInviteUrl: string;
   /** Absolute path the owner shared (file or folder); the dialog matches it
    *  against the active target to recognise its own room. */
   ownerDisplayPath: string;

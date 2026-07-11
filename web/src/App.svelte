@@ -2050,6 +2050,10 @@
           roomId: payload.roomId,
           inviteUrl: payload.inviteUrl,
           browserInviteUrl: payload.browserInviteUrl,
+          viewInviteUrl: payload.viewInviteUrl,
+          suggestInviteUrl: payload.suggestInviteUrl,
+          browserViewInviteUrl: payload.browserViewInviteUrl,
+          browserSuggestInviteUrl: payload.browserSuggestInviteUrl,
           ownerDisplayPath: payload.ownerDisplayPath,
           ownerSigningKey: payload.ownerSigningKey,
           mode: payload.mode,
@@ -2776,6 +2780,10 @@
   filePath={shareTargetPath ?? activePath}
   existingInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.inviteUrl ?? '') : ''}
   existingBrowserInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.browserInviteUrl ?? '') : ''}
+  existingViewInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.viewInviteUrl ?? '') : ''}
+  existingSuggestInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.suggestInviteUrl ?? '') : ''}
+  existingBrowserViewInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.browserViewInviteUrl ?? '') : ''}
+  existingBrowserSuggestInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.browserSuggestInviteUrl ?? '') : ''}
   ownerSigningKey={shareTargetIsCurrent ? (reviewStore.currentShare?.ownerSigningKey ?? '') : ''}
   existingRoomId={shareTargetIsCurrent ? (reviewStore.currentShare?.roomId ?? null) : null}
   shareErrorMessage={reviewStore.lastError?.message ?? ''}

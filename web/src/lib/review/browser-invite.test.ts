@@ -13,6 +13,7 @@ import {
   zero,
   InviteParseError,
   composeInviteFragmentV3,
+  composeInviteUrlV3,
   parseInviteFragmentV3,
   type BrowserWindowLike,
   type ParsedInvite,
@@ -98,6 +99,11 @@ function fixtureSecret(): Uint8Array {
   return out;
 }
 
+function legacySecret(invite: ParsedInvite): Uint8Array {
+  if (invite.version !== 2) throw new Error('expected legacy v2 invite');
+  return invite.roomSecret;
+}
+
 /** base64url-no-pad of `fixtureSecret()`, computed once. */
 const FIXTURE_KEY_B64URL = (() => {
   const bytes = fixtureSecret();
@@ -169,15 +175,15 @@ defineCase('parseInviteUrl accepts native attn://review/<id>#key=<b64>', () => {
   const url = `attn://review/room-abc#key=${FIXTURE_KEY_B64URL}`;
   const parsed = parseInviteUrl(url);
   assertEq(parsed.roomId, 'room-abc', 'roomId');
-  assertEq(parsed.roomSecret.length, 32, 'roomSecret length');
-  assertBytesEq(parsed.roomSecret, fixtureSecret(), 'roomSecret bytes');
+  assertEq(legacySecret(parsed).length, 32, 'roomSecret length');
+  assertBytesEq(legacySecret(parsed), fixtureSecret(), 'roomSecret bytes');
 });
 
 defineCase('parseInviteUrl accepts https://attn.dev/review/<id>#key=<b64>', () => {
   const url = `https://attn.dev/review/room-xyz#key=${FIXTURE_KEY_B64URL}`;
   const parsed = parseInviteUrl(url);
   assertEq(parsed.roomId, 'room-xyz', 'roomId');
-  assertBytesEq(parsed.roomSecret, fixtureSecret(), 'roomSecret bytes');
+  assertBytesEq(legacySecret(parsed), fixtureSecret(), 'roomSecret bytes');
 });
 
 defineCase('parseInviteUrl rejects when fragment is missing entirely', () => {
@@ -256,12 +262,12 @@ defineCase('composeInviteUrl roundtrips through parseInviteUrl', () => {
   );
   const parsed = parseInviteUrl(composed);
   assertEq(parsed.roomId, 'room-rt', 'parsed roomId');
-  assertBytesEq(parsed.roomSecret, secret, 'parsed secret');
+  assertBytesEq(legacySecret(parsed), secret, 'parsed secret');
 
   const composedHttps = composeInviteUrl('https://attn.dev/review', 'room-rt', secret);
   const parsedHttps = parseInviteUrl(composedHttps);
   assertEq(parsedHttps.roomId, 'room-rt', 'browser parsed roomId');
-  assertBytesEq(parsedHttps.roomSecret, secret, 'browser parsed secret');
+  assertBytesEq(legacySecret(parsedHttps), secret, 'browser parsed secret');
 });
 
 defineCase('composeInviteUrl normalizes trailing slash on base', () => {
@@ -294,7 +300,7 @@ defineCase('parseAndStripInviteFromUrl strips the fragment via replaceState', ()
   const parsed: ParsedInvite | null = parseAndStripInviteFromUrl(win);
   assert(parsed !== null, 'parsed not null');
   assertEq(parsed!.roomId, 'room-strip', 'roomId');
-  assertBytesEq(parsed!.roomSecret, fixtureSecret(), 'secret bytes');
+  assertBytesEq(legacySecret(parsed!), fixtureSecret(), 'secret bytes');
 
   assertEq(win.replaceStateCalls.length, 1, 'replaceState called once');
   const call = win.replaceStateCalls[0]!;
@@ -402,30 +408,66 @@ defineCase('v2 and v3 event leaves are domain-separated', () => {
 
 defineCase('v3 writable tiers require and preserve independent write key', () => {
   const tree = deriveRoomKeyTreeV3(fixtureSecret());
+  const grant = new Uint8Array(64).fill(0x5a);
   for (const tier of ['comment', 'suggest'] as const) {
     const fragment = composeInviteFragmentV3(
       tier,
       tree.readKeys.readCapabilityKey,
       tree.writeAdmissionKey,
+      grant,
     );
     const parsed = parseInviteFragmentV3(fragment);
     assertEq(parsed.tier, tier, `${tier} tier`);
     assertBytesEq(parsed.writeAdmissionKey!, tree.writeAdmissionKey, `${tier} write key`);
+    assert(parsed.grantSignature !== undefined, `${tier} owner grant`);
   }
+});
+
+defineCase('complete v3 URL parses and strips a room-bound writable grant', () => {
+  const tree = deriveRoomKeyTreeV3(fixtureSecret());
+  const grant = new Uint8Array(64).fill(0x6b);
+  const url = composeInviteUrlV3(
+    'https://attn.dev/review',
+    'room-v3-url',
+    'comment',
+    tree.readKeys.readCapabilityKey,
+    tree.writeAdmissionKey,
+    grant,
+  );
+  const parsed = parseInviteUrl(url);
+  assertEq(parsed.version, 3, 'v3 version');
+  if (parsed.version !== 3) throw new Error('expected v3 invite');
+  assertEq(parsed.tier, 'comment', 'comment tier');
+  assertBytesEq(parsed.writeAdmissionKey!, tree.writeAdmissionKey, 'write key');
+  assert(parsed.grantSignature !== undefined, 'grant retained');
 });
 
 defineCase('v3 fragments reject duplicate, unknown, mismatch, length, and noncanonical input', () => {
   const tree = deriveRoomKeyTreeV3(fixtureSecret());
+  const grant = new Uint8Array(64).fill(0x5a);
   const read = composeInviteFragmentV3('view', tree.readKeys.readCapabilityKey).split('read=')[1]!;
   const write = (() => {
-    const fragment = composeInviteFragmentV3('comment', tree.readKeys.readCapabilityKey, tree.writeAdmissionKey);
-    return fragment.split('&write=')[1]!;
+    const fragment = composeInviteFragmentV3(
+      'comment',
+      tree.readKeys.readCapabilityKey,
+      tree.writeAdmissionKey,
+      grant,
+    );
+    return fragment.split('&write=')[1]!.split('&grant=')[0]!;
   })();
+  const grantEncoded = composeInviteFragmentV3(
+    'comment',
+    tree.readKeys.readCapabilityKey,
+    tree.writeAdmissionKey,
+    grant,
+  ).split('&grant=')[1]!;
   const rejected = [
     `#v=3&tier=view&read=${read}&read=${read}`,
     `#v=3&tier=view&read=${read}&future=x`,
     `#v=3&tier=view&read=${read}&write=${write}`,
     `#v=3&tier=comment&read=${read}`,
+    `#v=3&tier=comment&read=${read}&write=${write}`,
+    `#v=3&tier=view&read=${read}&grant=${grantEncoded}`,
     '#v=3&tier=view&read=AQ',
     `#tier=view&v=3&read=${read}`,
     `#v=2&tier=view&read=${read}`,

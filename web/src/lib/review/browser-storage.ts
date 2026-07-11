@@ -38,6 +38,7 @@ import {
   validateWorkspaceRootKey,
 } from './browser-workspace-crypto';
 import { WorkspaceStore } from './browser-workspace-store';
+import { WorkspaceShareStore } from './browser-workspace-share';
 import {
   WorkspaceLeaseManager,
   type WorkspaceLeaseManagerOptions,
@@ -268,6 +269,7 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
   private readonly navigatorImpl: BrowserStorageNavigator | null;
   private readonly now: () => number;
   private workspaceStore: WorkspaceStore | null = null;
+  private shareStore: WorkspaceShareStore | null = null;
 
   private constructor(
     db: IDBDatabase,
@@ -308,6 +310,14 @@ export class BrowserStorage implements BrowserInboxPersistence, BrowserOutboxPer
   /** Cross-tab writer leases over this database (attn-7xl.2.6). */
   leases(options: WorkspaceLeaseManagerOptions = {}): WorkspaceLeaseManager {
     return new WorkspaceLeaseManager(this.db, { now: this.now, ...options });
+  }
+
+  /** Workspace share ownership + wrapped invite capabilities (attn-7xl.4.2). */
+  get shares(): WorkspaceShareStore {
+    if (!this.shareStore) {
+      this.shareStore = new WorkspaceShareStore(this.db, this.cryptoImpl, this.now);
+    }
+    return this.shareStore;
   }
 
   /** Atomic workspace/file transaction APIs (attn-7xl.2.3/.2.4). */

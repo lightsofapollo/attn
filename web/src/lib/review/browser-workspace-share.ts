@@ -84,6 +84,7 @@ export interface DurableShareCapabilityState {
   manifestDigest: string;
   currentRoomId?: string;
   expiresAt?: number;
+  drainCursor?: number;
   lifecycle: 'active' | 'revoke_pending';
 }
 
@@ -783,6 +784,7 @@ export class WorkspaceShareStore {
     capId: string,
     durableShare: DurableShareCapabilityState,
     fence: WorkspaceFence,
+    policy?: unknown,
   ): Promise<ShareRecordView> {
     validateWorkspaceRootKey(rootKey);
     const state = validateDurableShareCapability(durableShare);
@@ -795,9 +797,13 @@ export class WorkspaceShareStore {
     if (capability.durableShare && capability.durableShare.shareId !== state.shareId) {
       throw new StorageConflictError('durable share id is immutable');
     }
+    if (policy !== undefined && (typeof policy !== 'object' || policy === null)) {
+      throw new BrowserStorageError('durable share policy is invalid');
+    }
     const sealed = await this.sealRecordCapability(rootKey, original, {
       ...capability,
       durableShare: state,
+      ...(policy === undefined ? {} : { policy }),
     });
     const tx = this.db.transaction(
       [STORE_WORKSPACE_SHARE_CAPS, STORE_WORKSPACE_LEASES],
@@ -1030,6 +1036,7 @@ function validateDurableShareCapability(value: unknown): DurableShareCapabilityS
     || typeof state.manifestDigest !== 'string'
     || (state.currentRoomId !== undefined && typeof state.currentRoomId !== 'string')
     || (state.expiresAt !== undefined && (!Number.isSafeInteger(state.expiresAt) || state.expiresAt < 0))
+    || (state.drainCursor !== undefined && (!Number.isSafeInteger(state.drainCursor) || state.drainCursor < 0))
     || (state.lifecycle !== 'active' && state.lifecycle !== 'revoke_pending')
   ) {
     throw new BrowserStorageError('sealed durable share is invalid');

@@ -2,6 +2,7 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { IDBFactory } from 'fake-indexeddb';
 
 import {
   base64UrlEncode,
@@ -9,7 +10,7 @@ import {
   deriveShareLinkKeys,
 } from '../src/lib/review/browser-crypto';
 import { createOwnedRoomV3, deleteOwnedRoomV3 } from '../src/lib/review/browser-owner-bootstrap';
-import { mineBrowserPow } from '../src/lib/review/browser-pow';
+import { mineBrowserPow, type BrowserPowInputs } from '../src/lib/review/browser-pow';
 import {
   BrowserShareOwnerRelayClient,
   EMPTY_SHARE_MANIFEST_DIGEST,
@@ -17,9 +18,15 @@ import {
   sealDurableShareSnapshot,
 } from '../src/lib/review/browser-share-owner';
 import { openShareCapabilityBundle } from '../src/lib/review/browser-share';
-import { decryptDurableShareSnapshot } from '../src/lib/review/browser-share-production';
+import {
+  BrowserDurableSharePersistence,
+  createProductionDurableShareSession,
+  decryptDurableShareSnapshot,
+} from '../src/lib/review/browser-share-production';
+import type { BrowserShareSessionState } from '../src/lib/review/browser-share-session';
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const repoRoot = path.resolve(webRoot, '..');
 const relayRoot = path.resolve(webRoot, '..', 'relay');
 const port = 8792;
 const relayUrl = `http://127.0.0.1:${port}`;
@@ -32,7 +39,7 @@ let relayLog = '';
 relay.stdout.on('data', chunk => { relayLog += String(chunk); });
 relay.stderr.on('data', chunk => { relayLog += String(chunk); });
 
-function inlineMintPow(input: Parameters<typeof mineBrowserPow>[0]): Promise<string> {
+function inlineMintPow(input: Omit<BrowserPowInputs, 'expiresAt' | 'rand' | 'counterStart'>): Promise<string> {
   const rand = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)));
   return Promise.resolve(mineBrowserPow({ ...input, expiresAt: Date.now() + 60_000, rand }).token);
 }
@@ -48,6 +55,37 @@ let failures = 0;
 function check(value: unknown, label: string): void {
   if (value) console.log(`PASS ${label}`);
   else { failures += 1; console.error(`FAIL ${label}`); }
+}
+
+async function nativeReviewerJoins(input: {
+  shareId: string;
+  roomId: string;
+  linkSecret: Uint8Array;
+}): Promise<boolean> {
+  const child = spawn('cargo', [
+    'test', '--test', 'durable_share_native_e2e',
+    'browser_owned_share_native_reviewer_real_stack',
+    '--', '--ignored', '--exact', '--nocapture',
+  ], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      ATTN_RELAY_URL: relayUrl,
+      ATTN_BROWSER_OWNER_SHARE_ID: input.shareId,
+      ATTN_BROWSER_OWNER_ROOM_ID: input.roomId,
+      ATTN_BROWSER_OWNER_LINK_SECRET: base64UrlEncode(input.linkSecret),
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  child.stdout.on('data', chunk => { output += String(chunk); });
+  child.stderr.on('data', chunk => { output += String(chunk); });
+  const status = await new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', resolve);
+  });
+  if (status !== 0) console.error(output.split('\n').slice(-40).join('\n'));
+  return status === 0;
 }
 
 try {
@@ -118,6 +156,66 @@ try {
       readCapabilityKey: room.keys.readKeys.readCapabilityKey, roomKeys: room.keys.readKeys },
   }, fileId, snapshotId, downloaded);
   check(opened.content === '# Live browser owner\n', 'view bearer resolves and decrypts browser-owned snapshot');
+
+  const emptyCommentMailbox = await client.fetchMailbox(shareSecret, 'comment', 0);
+  check(emptyCommentMailbox.items.length === 0 && emptyCommentMailbox.nextAfter === 0,
+    'browser owner authenticates the isolated comment mailbox query');
+  await client.ackMailbox(0);
+  check(true, 'browser owner signs the mailbox ACK query');
+
+  const commentKeys = deriveShareLinkKeys(shareSecret, 'comment');
+  try {
+    let browserReviewerState: BrowserShareSessionState | null = null;
+    const persistence = await BrowserDurableSharePersistence.open(new IDBFactory());
+    const browserReviewer = await createProductionDurableShareSession({
+      relayUrl,
+      invite: { shareId, linkSecret: new Uint8Array(commentKeys.linkSecret) },
+      tier: 'comment',
+      persistence,
+      disableWebRtc: true,
+      liveStore: {
+        currentRoomId: null,
+        applyEvent: () => undefined,
+        applySnapshot: () => undefined,
+        setCurrentFile: () => undefined,
+        setCurrentSnapshot: () => undefined,
+      },
+      registrationMintPow: input => inlineMintPow(input),
+      outboxMintPow: input => inlineMintPow(input),
+      mailboxMintPow: input => inlineMintPow({
+        roomId: input.shareId,
+        deviceId: input.deviceId,
+        method: 'POST',
+        path: input.path,
+        difficulty: 12,
+      }),
+      onState: state => { browserReviewerState = state; },
+    });
+    await browserReviewer.start();
+    const browserDeadline = Date.now() + 20_000;
+    while (Date.now() < browserDeadline
+      && (browserReviewerState?.status !== 'ready' || !browserReviewerState.ownerOnline)) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const browserJoined = browserReviewerState?.status === 'ready' && browserReviewerState.ownerOnline;
+    check(browserJoined, 'production browser reviewer resolves and joins the browser-owned room live');
+    if (!browserJoined) console.error('browser reviewer state:', browserReviewerState);
+    browserReviewer.close();
+
+    check(await nativeReviewerJoins({
+      shareId,
+      roomId: room.roomId,
+      linkSecret: commentKeys.linkSecret,
+    }), 'native reviewer resolves the browser stable bearer and joins its v3 room');
+  } finally {
+    commentKeys.linkSecret.fill(0);
+    commentKeys.bundleKey.fill(0);
+    commentKeys.readAdmissionKey.fill(0);
+    commentKeys.writeAdmissionKey?.fill(0);
+  }
+
+  check(!relayLog.includes('# Live browser owner') && !relayLog.includes(base64UrlEncode(shareSecret)),
+    'relay logs contain neither plaintext snapshot nor stable owner secret');
 
   await client.revoke();
   check((await fetch(`${relayUrl}${sharePath}`, { headers: {

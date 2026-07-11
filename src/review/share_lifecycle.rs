@@ -3901,6 +3901,9 @@ mod tests {
             &events[1].body,
             ReviewEventBody::CommentCreated { body, .. } if body == "valid comment after poison"
         ));
+    }
+
+    #[tokio::test]
     async fn public_share_resolver_authenticates_comment_bundle_and_builds_v3_invite() {
         let server = MockServer::start().await;
         let owner_root = [0x42; 32];
@@ -3971,7 +3974,7 @@ mod tests {
             build_invite_fragment_v3(InviteTierV3::Comment, &read, Some(&write), Some(&grant))
                 .expect("comment fragment");
         assert_eq!(invite, format!("attn://review/{room_id}{fragment}"));
-     }
+    }
 
     #[tokio::test]
     async fn http_client_scopes_bundle_read_and_owner_revoke_headers() {

@@ -96,7 +96,7 @@ async function run(): Promise<void> {
   const record = {
     v: 3, shareId, ownerSigningKey, epoch: 0, revision: 0,
     snapshots: [], placeholders: [], manifestDigest: EMPTY_SHARE_MANIFEST_DIGEST,
-    updatedAt: 1, expiresAt: 2,
+    updatedAt: 1, expiresAt: 2, mailbox: { count: 0, bytes: 0, latestSeq: 0 },
   };
   const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
     requests.push({ url: String(url), init: init ?? {} });

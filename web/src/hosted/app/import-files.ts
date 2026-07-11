@@ -17,6 +17,14 @@ const MARKDOWN_EXTENSIONS = /\.(?:md|markdown)$/iu;
 const ZIP_EXTENSION = /\.zip$/iu;
 /** Per-file input cap: larger inputs are rejected, never silently truncated. */
 export const MAX_IMPORT_FILE_BYTES = 64 * 1024 * 1024;
+export const MAX_IMPORT_ARCHIVE_BYTES = 64 * 1024 * 1024;
+export const MAX_IMPORT_EXPANDED_BYTES = 128 * 1024 * 1024;
+export const MAX_IMPORT_ARCHIVE_ENTRIES = 1024;
+
+export interface ZipEntryBudget {
+  entries: number;
+  expandedBytes: number;
+}
 
 export function kindForFile(name: string): WorkspaceEntryKind {
   return MARKDOWN_EXTENSIONS.test(name) ? 'markdown' : 'asset';
@@ -83,18 +91,32 @@ export function mediaTypeForName(name: string): string | undefined {
  * import rather than silently dropping content. fflate is loaded on demand.
  */
 export async function expandZip(zip: PickedFile): Promise<PickedFile[]> {
+  if (zip.bytes.length > MAX_IMPORT_ARCHIVE_BYTES) {
+    throw new EntryPathSafeError(
+      `${zip.name} is larger than the ${Math.round(MAX_IMPORT_ARCHIVE_BYTES / (1024 * 1024))} MB archive limit`,
+    );
+  }
   const { unzipSync } = await import('fflate');
   let entries: Record<string, Uint8Array>;
+  const budget: ZipEntryBudget = { entries: 0, expandedBytes: 0 };
   try {
-    entries = unzipSync(zip.bytes);
-  } catch {
+    entries = unzipSync(zip.bytes, {
+      filter: (entry) => acceptZipEntry(entry, budget),
+    });
+  } catch (error) {
+    if (error instanceof EntryPathSafeError) throw error;
     throw new EntryPathSafeError(`${zip.name} is not a readable zip archive`);
   }
   const files: PickedFile[] = [];
+  let actualExpandedBytes = 0;
   for (const [rawPath, bytes] of Object.entries(entries)) {
     if (rawPath.endsWith('/')) continue; // directory marker
     if (rawPath.startsWith('__MACOSX/') || rawPath.split('/').pop() === '.DS_Store') continue;
     const name = rawPath.split('/').pop() ?? rawPath;
+    actualExpandedBytes += bytes.length;
+    if (!Number.isSafeInteger(actualExpandedBytes) || actualExpandedBytes > MAX_IMPORT_EXPANDED_BYTES) {
+      throw new EntryPathSafeError('The expanded archive is larger than the 128 MB import limit');
+    }
     files.push({
       name,
       relativePath: rawPath,
@@ -106,6 +128,34 @@ export async function expandZip(zip: PickedFile): Promise<PickedFile[]> {
     throw new EntryPathSafeError(`${zip.name} contains no files`);
   }
   return files;
+}
+
+export function acceptZipEntry(
+  entry: { name: string; originalSize: number },
+  budget: ZipEntryBudget,
+): boolean {
+  if (entry.name.endsWith('/') || entry.name.startsWith('__MACOSX/')
+    || entry.name.split('/').pop() === '.DS_Store') return false;
+  normalizeEntryPath(entry.name);
+  if (!Number.isSafeInteger(entry.originalSize) || entry.originalSize < 0) {
+    throw new EntryPathSafeError('The archive contains an invalid entry size');
+  }
+  if (entry.originalSize > MAX_IMPORT_FILE_BYTES) {
+    throw new EntryPathSafeError(
+      `${entry.name} is larger than the ${Math.round(MAX_IMPORT_FILE_BYTES / (1024 * 1024))} MB import limit`,
+    );
+  }
+  const entries = budget.entries + 1;
+  const expandedBytes = budget.expandedBytes + entry.originalSize;
+  if (entries > MAX_IMPORT_ARCHIVE_ENTRIES) {
+    throw new EntryPathSafeError(`The archive contains more than ${MAX_IMPORT_ARCHIVE_ENTRIES} files`);
+  }
+  if (!Number.isSafeInteger(expandedBytes) || expandedBytes > MAX_IMPORT_EXPANDED_BYTES) {
+    throw new EntryPathSafeError('The expanded archive is larger than the 128 MB import limit');
+  }
+  budget.entries = entries;
+  budget.expandedBytes = expandedBytes;
+  return true;
 }
 
 /** Expand zips (each into its files) and pass everything else through. */

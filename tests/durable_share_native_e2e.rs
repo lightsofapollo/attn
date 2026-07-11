@@ -174,6 +174,54 @@ async fn destroy_actual_room(store: &DurableShareStore, state: &HarnessState) {
 }
 
 #[tokio::test]
+#[ignore = "orchestrated by the browser-owner live relay harness"]
+async fn browser_owned_share_native_reviewer_real_stack() {
+    let relay_url = required("ATTN_RELAY_URL");
+    let share_id = required("ATTN_BROWSER_OWNER_SHARE_ID");
+    let expected_room_id = required("ATTN_BROWSER_OWNER_ROOM_ID");
+    let link_secret: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(required("ATTN_BROWSER_OWNER_LINK_SECRET"))
+        .expect("decode browser-owned stable bearer")
+        .try_into()
+        .expect("32-byte browser-owned stable bearer");
+    let invite = attn::review::share_lifecycle::resolve_public_share_to_room_invite(
+        &relay_url,
+        &share_id,
+        &attn::review::share_lifecycle::ShareLinkSecret::new(link_secret),
+    )
+    .await
+    .expect("native resolves browser-owned stable share");
+    assert!(
+        invite.starts_with(&format!(
+            "attn://review/{expected_room_id}#v=3&tier=comment&"
+        )),
+        "resolver must preserve the browser-owned room and comment tier"
+    );
+
+    let temporary = tempfile::tempdir().expect("native reviewer tempdir");
+    let store = Arc::new(
+        ReviewStore::open_at(temporary.path().join("reviews")).expect("native review store"),
+    );
+    let bootstrap = Bootstrapper::new(
+        store,
+        Arc::new(BootstrapConfig {
+            relay_url,
+            identity_dir: Some(temporary.path().join("identity")),
+        }),
+    )
+    .expect("native reviewer bootstrapper");
+    let joined = bootstrap
+        .join(&invite, None)
+        .await
+        .expect("native reviewer joins browser-owned room");
+    assert_eq!(joined.room_id.as_str(), expected_room_id);
+    assert_eq!(
+        joined.local_grant_tier,
+        Some(attn::review::transport::inbound::GrantTier::Comment)
+    );
+}
+
+#[tokio::test]
 #[ignore = "orchestrated by scripts/test-share-e2e.sh against a live local relay"]
 async fn durable_share_native_real_stack_phase() {
     let phase = required("ATTN_SHARE_E2E_PHASE");

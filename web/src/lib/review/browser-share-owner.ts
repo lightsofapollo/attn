@@ -45,6 +45,23 @@ export interface BrowserShareRelayRecord {
   manifestDigest: string;
   updatedAt: number;
   expiresAt: number;
+  mailbox: { count: number; bytes: number; latestSeq: number };
+}
+
+export interface BrowserShareMailboxItem {
+  seq: number;
+  envelopeId: string;
+  bytes: number;
+  payload: unknown;
+  epoch: number;
+  bundleId: string;
+  tier: 'comment' | 'suggest';
+}
+
+export interface BrowserShareMailboxPage {
+  items: BrowserShareMailboxItem[];
+  nextAfter: number;
+  bundle: { bundleId: string; tier: 'comment' | 'suggest'; sealedBundle: string };
 }
 
 export interface BrowserShareUpsertRequest {
@@ -325,6 +342,58 @@ export class BrowserShareOwnerRelayClient {
     }
   }
 
+  async fetchMailbox(
+    shareSecret: Uint8Array,
+    tier: 'comment' | 'suggest',
+    after: number,
+  ): Promise<BrowserShareMailboxPage> {
+    if (!Number.isSafeInteger(after) || after < 0) throw new Error('mailbox cursor is invalid');
+    const keys = deriveShareLinkKeys(shareSecret, tier);
+    const path = `${this.sharePath()}/mailbox`;
+    const query: Array<[string, string]> = [['after', String(after)], ['limit', '100']];
+    try {
+      const response = await this.fetchImpl(`${this.relay}${path}?${new URLSearchParams(query)}`, {
+        method: 'GET',
+        headers: {
+          'Attn-Share-Bundle': keys.bundleId,
+          'Attn-Admission': buildAdmissionHeaderV3(
+            keys.readAdmissionKey,
+            'read',
+            'GET',
+            path,
+            new Uint8Array(0),
+            query,
+          ),
+        },
+        signal: this.signal,
+        credentials: 'omit',
+        cache: 'no-store',
+        redirect: 'error',
+        referrerPolicy: 'no-referrer',
+      });
+      if (!response.ok) throw new BrowserShareOwnerRelayError(response.status, 'durable mailbox fetch');
+      return validateMailboxPage(await response.json(), keys.bundleId, tier, after);
+    } finally {
+      keys.linkSecret.fill(0);
+      keys.bundleKey.fill(0);
+      keys.readAdmissionKey.fill(0);
+      keys.writeAdmissionKey?.fill(0);
+    }
+  }
+
+  async ackMailbox(through: number): Promise<void> {
+    if (!Number.isSafeInteger(through) || through < 0) throw new Error('mailbox ACK cursor is invalid');
+    const query: Array<[string, string]> = [['through', String(through)]];
+    const response = await this.ownerRequest(
+      'DELETE',
+      `${this.sharePath()}/mailbox`,
+      new Uint8Array(0),
+      undefined,
+      query,
+    );
+    if (!response.ok) throw new BrowserShareOwnerRelayError(response.status, 'durable mailbox ACK');
+  }
+
   async revoke(): Promise<void> {
     const response = await this.ownerRequest('DELETE', this.sharePath(), new Uint8Array(0));
     if (!response.ok && response.status !== 404 && response.status !== 410) {
@@ -347,6 +416,7 @@ export class BrowserShareOwnerRelayClient {
     path: string,
     bytes: Uint8Array,
     body?: BodyInit | Uint8Array,
+    query: Array<[string, string]> = [],
   ): Promise<Response> {
     const pow = await this.mintPow({
       roomId: this.options.shareId,
@@ -355,7 +425,8 @@ export class BrowserShareOwnerRelayClient {
       path,
       difficulty: 12,
     }, this.signal);
-    return this.fetchImpl(`${this.relay}${path}`, {
+    const suffix = query.length === 0 ? '' : `?${new URLSearchParams(query)}`;
+    return this.fetchImpl(`${this.relay}${path}${suffix}`, {
       method,
       headers: {
         ...(body === undefined ? {} : {
@@ -368,6 +439,7 @@ export class BrowserShareOwnerRelayClient {
           method,
           path,
           bytes,
+          query,
         ),
         'Attn-PoW': pow,
         'Attn-Device-Id': this.options.identity.deviceId,
@@ -397,6 +469,7 @@ async function decodeRecord(response: Response, expectedShareId: string): Promis
     || !Array.isArray(value.snapshots) || !Array.isArray(value.placeholders)
     || typeof value.manifestDigest !== 'string' || !Number.isSafeInteger(value.updatedAt)
     || !Number.isSafeInteger(value.expiresAt)
+    || !isMailboxSummary(value.mailbox)
     || (value.currentRoomId !== undefined && typeof value.currentRoomId !== 'string')
   ) {
     throw new Error('durable share response is invalid');
@@ -406,6 +479,46 @@ async function decodeRecord(response: Response, expectedShareId: string): Promis
     throw new Error('durable share manifest digest is invalid');
   }
   return { ...(value as BrowserShareRelayRecord), snapshots };
+}
+
+function isMailboxSummary(value: unknown): value is BrowserShareRelayRecord['mailbox'] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const summary = value as Partial<BrowserShareRelayRecord['mailbox']>;
+  return Number.isSafeInteger(summary.count) && (summary.count ?? -1) >= 0
+    && Number.isSafeInteger(summary.bytes) && (summary.bytes ?? -1) >= 0
+    && Number.isSafeInteger(summary.latestSeq) && (summary.latestSeq ?? -1) >= 0;
+}
+
+function validateMailboxPage(
+  value: unknown,
+  bundleId: string,
+  tier: 'comment' | 'suggest',
+  after: number,
+): BrowserShareMailboxPage {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('durable mailbox page is invalid');
+  }
+  const page = value as Partial<BrowserShareMailboxPage>;
+  if (!Array.isArray(page.items) || !Number.isSafeInteger(page.nextAfter)
+    || (page.nextAfter ?? -1) < after || typeof page.bundle !== 'object' || page.bundle === null
+    || page.bundle.bundleId !== bundleId || page.bundle.tier !== tier
+    || typeof page.bundle.sealedBundle !== 'string') {
+    throw new Error('durable mailbox page is invalid');
+  }
+  const items = page.items.map((raw) => {
+    const item = raw as Partial<BrowserShareMailboxItem>;
+    if (!Number.isSafeInteger(item.seq) || (item.seq ?? 0) <= after
+      || typeof item.envelopeId !== 'string' || !Number.isSafeInteger(item.bytes) || (item.bytes ?? 0) < 1
+      || item.epoch === undefined || !Number.isSafeInteger(item.epoch)
+      || item.bundleId !== bundleId || item.tier !== tier || item.payload === undefined) {
+      throw new Error('durable mailbox item is invalid');
+    }
+    return item as BrowserShareMailboxItem;
+  });
+  if ((items.at(-1)?.seq ?? after) !== page.nextAfter) {
+    throw new Error('durable mailbox cursor does not match its page');
+  }
+  return { items, nextAfter: page.nextAfter, bundle: page.bundle as BrowserShareMailboxPage['bundle'] };
 }
 
 function validateSnapshotRef(value: Partial<ManagedShareSnapshotRef>): ManagedShareSnapshotRef {

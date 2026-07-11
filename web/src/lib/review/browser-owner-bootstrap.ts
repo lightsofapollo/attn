@@ -39,6 +39,7 @@ import {
   canonicalDeviceGrantV3,
   generateBrowserIdentity,
   type BrowserDeviceIdentity,
+  type RegisterDeviceBodyV3,
 } from './browser-session';
 import { validateBrowserRelayUrl } from './browser-relay-url';
 import type { RoomPolicy } from './browser-ws';
@@ -373,6 +374,59 @@ async function registerOwnerDeviceV3(input: {
   if (response.status !== 200 && response.status !== 204) {
     const message = await response.text().catch(() => '');
     throw new OwnerBootstrapError('register', `owner registration failed: ${message.slice(0, 200)}`, response.status);
+  }
+}
+
+/** Forward one already self-signed, owner-granted visitor registration. */
+export async function registerFrozenReviewerDeviceV3(input: {
+  relayUrl: string;
+  roomId: string;
+  writeAdmissionKey: Uint8Array;
+  registration: RegisterDeviceBodyV3;
+  fetchImpl?: typeof fetch;
+  mintPow?: (pow: OwnerPowRequest, signal: AbortSignal) => Promise<string>;
+  signal?: AbortSignal;
+}): Promise<void> {
+  const relay = validateBrowserRelayUrl(input.relayUrl);
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const mintPow = input.mintPow ?? ((request, signal) => mintBrowserPowInWorker(request, { signal }));
+  const abort = input.signal ?? new AbortController().signal;
+  const path = `/v3/rooms/${input.roomId}/devices`;
+  const body = JSON.stringify(input.registration);
+  const bytes = new TextEncoder().encode(body);
+  try {
+    const pow = await mintPow({
+      roomId: input.roomId,
+      deviceId: input.registration.deviceId,
+      method: 'POST',
+      path,
+      difficulty: OWNER_BOOTSTRAP_POW_DIFFICULTY,
+    }, abort);
+    const response = await fetchImpl(`${relay}${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'Attn-Admission': buildAdmissionHeaderV3(
+          input.writeAdmissionKey,
+          'write',
+          'POST',
+          path,
+          bytes,
+        ),
+        'Attn-PoW': pow,
+      },
+      body,
+      signal: abort,
+      credentials: 'omit',
+      cache: 'no-store',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+    });
+    if (response.status !== 200 && response.status !== 204) {
+      throw new OwnerBootstrapError('register', `frozen reviewer registration failed (${response.status})`, response.status);
+    }
+  } finally {
+    bytes.fill(0);
   }
 }
 

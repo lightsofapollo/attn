@@ -5,11 +5,17 @@
 // recreated without changing `/s/<shareId>#key=…` links.
 
 import { ed25519 } from '@noble/curves/ed25519.js';
-import type { AnchorIndex, Capability, RoomPolicy } from '../types';
+import type { AnchorIndex, Capability, ReviewEvent, RoomPolicy } from '../types';
 import {
+  aeadOpen,
+  base64UrlDecode,
   base64UrlEncode,
+  deriveEventEnvelopeId,
+  deriveEventId,
   deriveRoomIdV3,
+  deriveShareLinkKeys,
   deriveShareEpochRoomSecret,
+  verifyEventSignature,
 } from './browser-crypto';
 import { assembleBrowserEvent } from './browser-envelope';
 import {
@@ -17,6 +23,7 @@ import {
   defaultOwnerPolicy,
   deleteOwnedRoom,
   deleteOwnedRoomV3,
+  registerFrozenReviewerDeviceV3,
   type CreateOwnedRoomOptions,
   type OwnedRoomBootstrap,
   type OwnedRoomBootstrapV3,
@@ -25,11 +32,14 @@ import { BrowserOutbox, type BrowserOutboxPersistence } from './browser-outbox';
 import { validateBrowserRelayUrl } from './browser-relay-url';
 import {
   canonicalDeviceGrantV3,
+  canonicalRegisterDeviceBytes,
   generateBrowserIdentity,
   ownerCredentialsFromInviteCapability,
   ownerCredentialsV3FromInviteCapability,
+  verifyDeviceGrantV3,
   type BrowserOwnerCredentials,
   type BrowserOwnerCredentialsV3,
+  type RegisterDeviceBodyV3,
 } from './browser-session';
 import {
   publishBrowserSnapshots,
@@ -47,6 +57,7 @@ import {
   sealDurableShareSnapshot,
   type BrowserShareOwnerRelayOptions,
   type BrowserShareRelayRecord,
+  type BrowserShareMailboxPage,
   type BrowserShareUpsertRequest,
   type ManagedShareSnapshotRef,
   type ShareTierInvites,
@@ -62,6 +73,7 @@ import {
 import { compareManifestPathsUtf8 } from './browser-workspace-manifest';
 import { normalizeEntryPath, type ShareScopeKind } from './browser-workspace-schema';
 import type { LeaseHandle } from './browser-workspace-lease';
+import type { MailboxEnvelope } from './browser-ws';
 
 export const BROWSER_SHARE_TTL_ONE_HOUR = 60 * 60 * 1000;
 export const BROWSER_SHARE_TTL_ONE_DAY = 24 * BROWSER_SHARE_TTL_ONE_HOUR;
@@ -108,6 +120,8 @@ export interface BrowserShareOwnerRelayPort {
   fetchWithViewCapability(shareSecret: Uint8Array): Promise<BrowserShareRelayRecord>;
   uploadSnapshot(fileId: string, snapshotId: string, ciphertext: Uint8Array): Promise<ManagedShareSnapshotRef>;
   deleteSnapshot(fileId: string): Promise<void>;
+  fetchMailbox(shareSecret: Uint8Array, tier: 'comment' | 'suggest', after: number): Promise<BrowserShareMailboxPage>;
+  ackMailbox(through: number): Promise<void>;
   revoke(): Promise<void>;
 }
 
@@ -124,6 +138,7 @@ export interface BrowserWorkspaceSharingDependencies {
   now?: () => number;
   randomBytes?: (length: number) => Uint8Array;
   indexBuilder?: (markdown: Uint8Array, snapshotId: string) => Promise<AnchorIndex>;
+  registerFrozenDevice?: typeof registerFrozenReviewerDeviceV3;
 }
 
 const OWNER_CAPABILITIES: Capability[] = [
@@ -149,6 +164,26 @@ export class BrowserWorkspaceSharingCoordinator {
   async inspect(_browserReviewBase: string): Promise<BrowserWorkspaceShareView | null> {
     const record = await this.inspectRecord();
     return record ? this.view(record) : null;
+  }
+
+  /** Owner-tab startup reconciliation: renew routing and drain offline mail. */
+  async reconcileActive(): Promise<BrowserWorkspaceShareView | null> {
+    const record = await this.inspectRecord();
+    if (!record) return null;
+    const rootKey = await this.requireRootKey();
+    const capability = await this.storage.shares.openShare(rootKey, this.workspaceId, record.capId);
+    const durable = capability.durableShare;
+    if (!durable || durable.lifecycle !== 'active'
+      || (durable.expiresAt !== undefined && durable.expiresAt <= this.timestamp())) {
+      return this.view(record);
+    }
+    return this.ensurePublished({
+      relayUrl: record.relayUrl,
+      browserReviewBase: 'https://attn.sh',
+      scopeKind: record.scopeKind,
+      paths: capability.sharePaths ?? [],
+      mode: (capability.policy as RoomPolicy).mode,
+    });
   }
 
   async ensurePublished(request: BrowserWorkspaceShareRequest): Promise<BrowserWorkspaceShareView> {
@@ -181,7 +216,19 @@ export class BrowserWorkspaceSharingCoordinator {
         && record.publication === 'published'
         && (capability.durableShare.expiresAt ?? 0) > this.timestamp()
       ) {
-        return this.view(record);
+        // Reasserting an active share is also its renewal path. Refresh the
+        // sealed ordinary-room policy before touching RoomDO so a missing
+        // 24-hour epoch room can be recreated under the same stable share.
+        const policy = { ...(capability.policy as RoomPolicy) };
+        policy.expiresAt = this.timestamp() + BROWSER_SHARE_TTL_ONE_DAY;
+        record = await this.storage.shares.updateDurableShareFenced(
+          rootKey,
+          this.workspaceId,
+          record.capId,
+          capability.durableShare,
+          this.fence,
+          policy,
+        );
       } else if (
         capability.durableShare.lifecycle === 'revoke_pending'
         || (capability.durableShare.expiresAt ?? Number.MAX_SAFE_INTEGER) <= this.timestamp()
@@ -216,6 +263,7 @@ export class BrowserWorkspaceSharingCoordinator {
         epoch: 0,
         revision: 0,
         manifestDigest: EMPTY_SHARE_MANIFEST_DIGEST,
+        drainCursor: 0,
         lifecycle: 'active',
       };
       capability = inviteCapabilityFrom({
@@ -262,11 +310,13 @@ export class BrowserWorkspaceSharingCoordinator {
       zeroCredentialsV3(credentials);
       throw new StorageConflictError('relay room does not match prepared v3 ownership');
     }
+    const roomWasCreated = bootstrap.created;
     zeroBootstrapKeys(bootstrap);
 
     const outbox = this.makeOutbox(record.relayUrl, credentials);
     try {
       await outbox.initialize();
+      await this.drainDurableMailbox(rootKey, record, credentials, outbox);
       if (capability.pendingPublication) {
         await resumeBrowserSnapshotPublication(outbox, {
           sink: this.storage.shares.publicationSink(rootKey),
@@ -275,7 +325,7 @@ export class BrowserWorkspaceSharingCoordinator {
           fence: this.fence,
           revisionSource: this.storage.workspaces,
         });
-      } else if (record.publication !== 'published') {
+      } else if (record.publication !== 'published' || roomWasCreated) {
         const sources = await this.loadSources(paths);
         try {
           const genesisAt = Math.max(this.timestamp(), record.createdAt);
@@ -374,6 +424,8 @@ export class BrowserWorkspaceSharingCoordinator {
     credentials: BrowserOwnerCredentialsV3,
   ): Promise<void> {
     const capability = await this.storage.shares.openShare(rootKey, this.workspaceId, record.capId);
+    const durable = capability.durableShare;
+    if (!durable) throw new StorageConflictError('durable share ownership is missing');
     const manifest = capability.publishedManifest;
     if (!manifest) throw new StorageConflictError('published room is missing its exact manifest');
     const client = this.makeShareRelay(record.relayUrl, credentials);
@@ -452,15 +504,20 @@ export class BrowserWorkspaceSharingCoordinator {
 
     remote = await client.fetchWithViewCapability(credentials.shareSecret);
     const exact = remote.currentRoomId === record.roomId
-      && remote.epoch === credentials.epoch;
-    const active = exact ? remote : await client.upsert({
+      && remote.epoch === credentials.epoch
+      && remote.revision === durable.revision
+      && remote.manifestDigest === durable.manifestDigest;
+    const revision = exact ? remote.revision : remote.revision + 1;
+    const active = await client.upsert({
       v: 3,
       ownerSigningKey: base64UrlEncode(credentials.identity.signingPublic),
-      bundles: buildShareBundleMutations(
-        this.bundleContext(credentials, remote.revision + 1, remote.manifestDigest),
-      ),
+      bundles: exact
+        ? []
+        : buildShareBundleMutations(
+            this.bundleContext(credentials, revision, remote.manifestDigest),
+          ),
       epoch: credentials.epoch,
-      revision: remote.revision + 1,
+      revision,
       currentRoomId: record.roomId,
       snapshots: remote.snapshots,
       placeholders: remote.placeholders,
@@ -475,7 +532,66 @@ export class BrowserWorkspaceSharingCoordinator {
       manifestDigest: active.manifestDigest,
       currentRoomId: record.roomId,
       expiresAt: active.expiresAt,
+      drainCursor: durable.drainCursor ?? 0,
       lifecycle: 'active',
+    }, this.fence);
+  }
+
+  private async drainDurableMailbox(
+    rootKey: CryptoKey,
+    record: ShareRecordView,
+    credentials: BrowserOwnerCredentialsV3,
+    outbox: BrowserWorkspaceShareOutbox,
+  ): Promise<void> {
+    const client = this.makeShareRelay(record.relayUrl, credentials);
+    const remote = await client.fetchWithViewCapability(credentials.shareSecret).catch((error) => {
+      if (error instanceof BrowserShareOwnerRelayError && error.status === 404) return null;
+      throw error;
+    });
+    if (!remote || remote.mailbox.count === 0) return;
+    const rootCapability = await this.storage.shares.openShare(rootKey, this.workspaceId, record.capId);
+    const durable = rootCapability.durableShare;
+    if (!durable) throw new StorageConflictError('durable share ownership is missing');
+    const after = durable.drainCursor ?? 0;
+    const items = new Map<number, BrowserShareMailboxPage['items'][number]>();
+    for (const tier of ['comment', 'suggest'] as const) {
+      let cursor = after;
+      for (;;) {
+        const page = await client.fetchMailbox(credentials.shareSecret, tier, cursor);
+        for (const item of page.items) {
+          if (items.has(item.seq)) throw new StorageConflictError('durable mailbox repeated a sequence');
+          items.set(item.seq, item);
+        }
+        if (page.items.length === 0) break;
+        if (page.nextAfter <= cursor) throw new StorageConflictError('durable mailbox cursor did not advance');
+        cursor = page.nextAfter;
+      }
+    }
+    if (items.size !== remote.mailbox.count) {
+      throw new StorageConflictError('durable mailbox selectors did not cover the retained prefix');
+    }
+    const ordered = [...items.values()].sort((left, right) => left.seq - right.seq);
+    for (let index = 0; index < ordered.length; index += 1) {
+      if (ordered[index]!.seq !== after + index + 1) {
+        throw new StorageConflictError('durable mailbox sequence is not contiguous');
+      }
+    }
+    const submissions = ordered.map((item) => preflightReviewSubmission(item, credentials, remote));
+    for (const submission of submissions) {
+      await (this.dependencies.registerFrozenDevice ?? registerFrozenReviewerDeviceV3)({
+        relayUrl: record.relayUrl,
+        roomId: credentials.roomId,
+        writeAdmissionKey: credentials.keys.admissionKey,
+        registration: submission.registration,
+      });
+      await outbox.enqueueBatchDurably(submission.envelopes);
+      await outbox.flushNow();
+    }
+    const through = ordered.at(-1)!.seq;
+    await client.ackMailbox(through);
+    await this.storage.shares.updateDurableShareFenced(rootKey, this.workspaceId, record.capId, {
+      ...durable,
+      drainCursor: through,
     }, this.fence);
   }
 
@@ -677,6 +793,121 @@ function validateRequest(request: BrowserWorkspaceShareRequest): void {
   if (!['file', 'entries', 'workspace'].includes(request.scopeKind)) {
     throw new BrowserStorageError('share scope is invalid');
   }
+}
+
+function preflightReviewSubmission(
+  item: BrowserShareMailboxPage['items'][number],
+  credentials: BrowserOwnerCredentialsV3,
+  remote: BrowserShareRelayRecord,
+): { registration: RegisterDeviceBodyV3; envelopes: MailboxEnvelope[] } {
+  if (!isRecord(item.payload)) throw new StorageConflictError('durable mailbox payload is invalid');
+  const payload = item.payload;
+  if (payload.v !== 3 || payload.type !== 'review_submission'
+    || payload.envelopeId !== item.envelopeId || payload.shareId !== credentials.shareId
+    || payload.epoch !== credentials.epoch || payload.roomId !== credentials.roomId
+    || payload.tier !== item.tier || item.epoch !== credentials.epoch
+    || !Array.isArray(payload.envelopes) || payload.envelopes.length < 2 || payload.envelopes.length > 8
+    || !isRecord(payload.deviceRegistration)) {
+    throw new StorageConflictError('durable review submission routing is invalid');
+  }
+  const keys = deriveShareLinkKeys(credentials.shareSecret, item.tier);
+  try {
+    if (keys.bundleId !== item.bundleId) {
+      throw new StorageConflictError('durable review submission selected the wrong sibling bearer');
+    }
+  } finally {
+    keys.linkSecret.fill(0);
+    keys.bundleKey.fill(0);
+    keys.readAdmissionKey.fill(0);
+    keys.writeAdmissionKey?.fill(0);
+  }
+  const raw = payload.deviceRegistration;
+  if (typeof raw.deviceId !== 'string' || typeof raw.participantId !== 'string'
+    || typeof raw.publicSigningKey !== 'string' || typeof raw.publicEncryptionKey !== 'string'
+    || raw.client !== 'attn-browser' || raw.kind !== 'reviewer' || raw.grantTier !== item.tier
+    || typeof raw.grantSignature !== 'string' || typeof raw.selfSignature !== 'string') {
+    throw new StorageConflictError('durable review submission registration is invalid');
+  }
+  const registration = raw as unknown as RegisterDeviceBodyV3;
+  const publicKey = base64UrlDecode(registration.publicSigningKey);
+  const encryptionKey = base64UrlDecode(registration.publicEncryptionKey);
+  const selfSignature = base64UrlDecode(registration.selfSignature);
+  try {
+    if (publicKey.length !== 32 || encryptionKey.length !== 32 || selfSignature.length !== 64
+      || !ed25519.verify(selfSignature, canonicalRegisterDeviceBytes(registration), publicKey)
+      || !verifyDeviceGrantV3(
+        credentials.roomId,
+        registration.grantTier,
+        registration.grantSignature,
+        remote.ownerSigningKey,
+      )) {
+      throw new StorageConflictError('durable review submission registration proof is invalid');
+    }
+    const envelopes = payload.envelopes.map((value, index) => {
+      if (!isRecord(value) || value.v !== 2 || value.kind !== 'event'
+        || value.roomId !== credentials.roomId || value.deviceId !== registration.deviceId
+        || value.authorId !== registration.participantId || typeof value.envelopeId !== 'string'
+        || !Number.isSafeInteger(value.createdAt) || !Number.isSafeInteger(value.expiresAt)
+        || typeof value.nonce !== 'string' || typeof value.ciphertext !== 'string'
+        || !Number.isSafeInteger(value.ciphertextBytes)) {
+        throw new StorageConflictError('durable review submission envelope is invalid');
+      }
+      const envelope = value as unknown as MailboxEnvelope;
+      const plaintext = aeadOpen(
+        credentials.keys.eventKey,
+        base64UrlDecode(envelope.nonce),
+        base64UrlDecode(envelope.ciphertext),
+        {
+          v: 2,
+          roomId: credentials.roomId,
+          envelopeId: envelope.envelopeId,
+          kind: 'event',
+          authorId: envelope.authorId,
+          deviceId: envelope.deviceId,
+          createdAt: envelope.createdAt,
+        },
+      );
+      try {
+        const event = JSON.parse(new TextDecoder().decode(plaintext)) as ReviewEvent;
+        if (!isRecord(event) || !isRecord(event.meta) || !isRecord(event.auth)
+          || event.meta.v !== 2 || event.meta.roomId !== credentials.roomId
+          || event.meta.authorId !== registration.participantId
+          || event.meta.deviceId !== registration.deviceId
+          || event.meta.createdAt !== envelope.createdAt
+          || typeof event.meta.eventId !== 'string'
+          || deriveEventEnvelopeId(credentials.roomId, event.meta.eventId) !== envelope.envelopeId
+          || deriveEventId(event.meta, event.body) !== event.meta.eventId) {
+          throw new StorageConflictError('durable review event binding is invalid');
+        }
+        verifyEventSignature(event.meta, event.body, event.auth, publicKey);
+        if (index === 0) {
+          if (event.body.type !== 'participant_joined'
+            || event.body.participant.participantId !== registration.participantId
+            || event.body.participant.kind !== 'reviewer'
+            || event.body.participant.publicSigningKey !== registration.publicSigningKey
+            || event.body.device.deviceId !== registration.deviceId
+            || event.body.device.publicSigningKey !== registration.publicSigningKey
+            || event.body.device.publicEncryptionKey !== registration.publicEncryptionKey) {
+            throw new StorageConflictError('durable reviewer attestation event is invalid');
+          }
+        } else if (event.body.type !== 'comment_created' && event.body.type !== 'suggestion_created') {
+          throw new StorageConflictError('durable review submission contains an unauthorized event');
+        }
+      } finally {
+        plaintext.fill(0);
+      }
+      return structuredClone(envelope);
+    });
+    return { registration: structuredClone(registration), envelopes };
+  } finally {
+    publicKey.fill(0);
+    encryptionKey.fill(0);
+    selfSignature.fill(0);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function zeroSources(sources: readonly BrowserSnapshotEntry[]): void {

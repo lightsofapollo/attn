@@ -1,0 +1,18 @@
+# Phase 03 validation record — browser-owned encrypted sharing
+
+Date: 2026-07-11 (attn-7xl.4.7)
+
+Reproducible from the repository root unless noted.
+
+| Gate (03-browser-sharing.md §Validation) | Command | Result |
+|---|---|---|
+| Svelte/TypeScript and production bundles | `cd web && npm run check && npm run build:browser && npm run check:route-bundles` | 0 errors, 0 warnings; browser + service-worker builds pass; landing/app statically reach only 8/12 files and do not preload editor or crypto chunks |
+| Browser protocol/storage/authority suites | `cd web && npm test` | 78 test files, 0 failures — includes native-compatible v3 bootstrap, canonical snapshot/manifest publication with Markdown and inert binary assets, fenced owner authority, stable ShareDO ownership, renewal/recreate, offline mailbox preflight/forward/ACK, rollback, stop/recreate, and tier isolation |
+| Rust stable-link resolver and owner lifecycle | `cargo check && cargo test --lib share_lifecycle` | native resolver authenticates the selected ShareDO record, manifest, sealed tier bundle, room pointer, and v3 capability fragment; 14/14 lifecycle tests pass |
+| Browser owner → browser/native reviewers against real relay | `cd web && npm run test:share-owner:live` | real Wrangler RoomDO + ShareDO: browser creates/owns v3 room, uploads retained ciphertext, flips stable pointer, authenticates mailbox query/ACK, the production browser reviewer and native Rust both resolve the browser comment bearer and join the same room, then owner revoke/teardown succeeds; relay log scan contains neither snapshot plaintext nor stable owner secret |
+| Native owner ↔ production browser, offline mailbox, restart, watch upgrade, revoke | `scripts/test-share-e2e.sh` | full real-stack lifecycle passes: browser decrypts retained native snapshot and joins live; offline browser comment survives missing RoomDO; restarted native owner recreates the deterministic epoch, imports/forwards/ACKs, browser upgrades without reload, and revoke terminates the session |
+| Multi-file publication | `scripts/test-folder-share-e2e.sh` | 3/3: two nested Markdown files publish in one room, non-Markdown input is excluded by this legacy native gate, and a newly-created Markdown file publishes live. Browser publisher unit coverage separately proves canonical workspace manifests and inert binary assets without UTF-8 coercion |
+| Live direct transport and owner/reviewer editing | `scripts/test-webrtc-live-e2e.sh` | 12/12: authenticated daemon join, mutual presence, both badges `live_direct`, comment delivery over DataChannel, convergent co-typing, reviewer edit arrives as a tracked suggestion, accepted-only autosave, and suggestion survives reseed risk |
+| Share-sheet UX, mobile, and accessibility | `cd web && npx playwright test e2e/hosted-share-sheet.spec.ts --config playwright.routes.config.ts` | 7/7: independent view/comment/suggest bearers, matching browser/native/CLI tier forms, Web Share + clipboard fallback, axe clean, ≥44 px mobile permission targets, and keyboard-focused destructive confirmation |
+| Cloudflare staging | `cd web && npm run deploy:staging` then `ATTN_ROUTES_BASE_URL=https://staging.attn.sh npx playwright test --config playwright.routes.config.ts` | deployed worker version `fb0ebc57-8e38-4b12-8f97-e1dc79f45291`; staging asset/relay-origin verification passes; full routes/authoring/offline/share/mobile/a11y matrix 64/64 |
+| Production `attn.sh` cutover and real iPhone/iPad matrix | — | **Not performed** — production remains explicitly human-gated in attn-7xl.7; current-device Safari validation remains tracked with attn-7xl.2.9 |

@@ -271,6 +271,7 @@ export class BrowserOwnerWorkspaceRuntime {
       this.pagehideTarget?.addEventListener('pagehide', this.pagehideHandler);
       let discovered: Awaited<ReturnType<BrowserOwnerWorkspaceRuntime['discoverPublishedShare']>>;
       try {
+        await this.sharingCoordinator().reconcileActive();
         discovered = await this.discoverPublishedShare();
       } catch (error) {
         this.startLocalHeartbeat();

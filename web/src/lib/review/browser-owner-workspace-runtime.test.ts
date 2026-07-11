@@ -125,7 +125,7 @@ class MemoryShareRelay implements BrowserShareOwnerRelayPort {
       ...(request.currentRoomId === null ? {} : { currentRoomId: request.currentRoomId }),
       snapshots: structuredClone(request.snapshots), placeholders: [],
       manifestDigest: digestShareSnapshotManifest(request.snapshots), updatedAt: 1_800_000_000_000,
-      expiresAt: 1_900_000_000_000 };
+      expiresAt: 1_900_000_000_000, mailbox: { count: 0, bytes: 0, latestSeq: 0 } };
     return structuredClone(this.record);
   }
   async fetchWithViewCapability(): Promise<BrowserShareRelayRecord> {
@@ -148,6 +148,8 @@ class MemoryShareRelay implements BrowserShareOwnerRelayPort {
     this.record = { ...this.record, snapshots, revision: this.record.revision + 1,
       manifestDigest: digestShareSnapshotManifest(snapshots) };
   }
+  async fetchMailbox(): Promise<never> { throw new Error('empty mailbox must not be fetched'); }
+  async ackMailbox(): Promise<void> { throw new Error('empty mailbox must not be ACKed'); }
   async revoke(): Promise<void> { this.record = null; }
 }
 
@@ -620,15 +622,15 @@ defineCase('ensureShare resumes persisted pending ciphertext before activating a
     },
   }));
   await second.start();
-  equal(second.getState().roomId, null, 'unpromoted share does not start authority on route open');
-  const resumed = await second.ensureShare(shareRequest());
+  const resumed = await second.inspectShare('https://attn.example/review');
+  assert(resumed, 'route startup promotes the recoverable share');
   equal(createCalls, 2, 'persisted resume idempotently rejoins the same relay room');
   equal(publishCalls, 1, 'persisted resume does not assemble fresh ciphertext');
   equal(JSON.stringify(outboxes[1]?.envelopes), exactPendingBatch, 'resume adopts exact pending batch');
   equal(resumed.roomId, pending.roomId, 'resume keeps prepared room identity');
   equal(resumed.capId, pending.capId, 'resume keeps prepared capability identity');
   assert(resumed.invite, 'invite appears after resumed publication promotes');
-  equal(authorityStarts, 1, 'authority starts only after resumed promotion');
+  equal(authorityStarts, 1, 'authority starts after automatic resumed promotion');
   equal(second.getState().liveEditingAvailable, true, 'resumed runtime activates live authority');
   await second.close();
   storage.close();

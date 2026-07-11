@@ -45,7 +45,9 @@ if [ -n "${ATTN_EXTERNAL_RELAY:-}" ]; then
 else
     [ -d "$PROJECT_DIR/relay/node_modules" ] || (cd relay && npm ci >/dev/null)
     log "Starting relay on :$RELAY_PORT"
-    ( cd "$PROJECT_DIR/relay" && exec npx wrangler dev --local --port "$RELAY_PORT" ) >"$RELAY_LOG" 2>&1 & RELAY_PID=$!
+    ( cd "$PROJECT_DIR/relay" && exec npx wrangler dev --local --port "$RELAY_PORT" \
+        --var QUOTA_ALLOW_UNATTRIBUTED_CREATES:true \
+        --var BLOB_CAP_SIGNING_KEY:folder-share-e2e-blob-key-material-32 ) >"$RELAY_LOG" 2>&1 & RELAY_PID=$!
     deadline=$(( $(date +%s) + 60 )); while [ "$(date +%s)" -lt "$deadline" ]; do curl -fsS "$RELAY_URL/health" >/dev/null 2>&1 && break; kill -0 "$RELAY_PID" 2>/dev/null || { log "relay died"; exit 1; }; sleep 0.3; done
 fi
 log "Relay healthy"

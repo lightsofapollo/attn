@@ -57,6 +57,12 @@
     hasUnsavedChanges(): boolean;
     resetToMarkdown(nextMarkdown: string): void;
     commitSaved(): void;
+    undoStep(): void;
+    redoStep(): void;
+    toggleBold(): void;
+    toggleItalic(): void;
+    toggleHeading(level: number): void;
+    toggleBulletList(): void;
   }
   let EditorComponent = $state<typeof EditorComponentType | null>(null);
   let editorRef = $state<EditorExports | undefined>();
@@ -122,6 +128,52 @@
   });
 
   let lightboxClose = $state<HTMLButtonElement | undefined>();
+
+  // ————— iOS editing (attn-7xl.3.5) —————
+  // The formatting bar rides directly above the visual keyboard using
+  // visualViewport, never a guessed keyboard height.
+  let editBarOffset = $state(0);
+  let renamingTitle = $state(false);
+  let titleValue = $state('');
+
+  $effect(() => {
+    if (!editing) {
+      editBarOffset = 0;
+      return;
+    }
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const update = (): void => {
+      editBarOffset = Math.max(
+        0,
+        window.innerHeight - viewport.height - viewport.offsetTop,
+      );
+    };
+    update();
+    viewport.addEventListener('resize', update);
+    viewport.addEventListener('scroll', update);
+    return () => {
+      viewport.removeEventListener('resize', update);
+      viewport.removeEventListener('scroll', update);
+    };
+  });
+
+  async function commitTitleRename(): Promise<void> {
+    renamingTitle = false;
+    const next = titleValue.trim();
+    if (next.length === 0 || next === workspace.name) return;
+    try {
+      await service.renameWorkspace(workspace.id, next);
+      window.location.reload();
+    } catch {
+      // Rename failures surface on the next durable state read.
+    }
+  }
+
+  /** Sheets must never stack under the keyboard: blur first (ios-ux §6). */
+  function blurEditor(): void {
+    (document.activeElement as HTMLElement | null)?.blur?.();
+  }
 
   $effect(() => {
     if (lightboxOpen) lightboxClose?.focus();
@@ -363,7 +415,33 @@
       </a>
     </div>
     <div class="doc-name">
-      {workspace.name}
+      {#if renamingTitle}
+        <input
+          class="rail-input title-input"
+          type="text"
+          aria-label="Workspace title"
+          bind:value={titleValue}
+          onkeydown={(event) => {
+            if (event.key === 'Enter') void commitTitleRename();
+            if (event.key === 'Escape') renamingTitle = false;
+          }}
+          onblur={() => void commitTitleRename()}
+        />
+      {:else if editing}
+        <button
+          class="title-button"
+          type="button"
+          aria-label="Rename workspace"
+          onclick={() => {
+            titleValue = workspace.name;
+            renamingTitle = true;
+          }}
+        >
+          {workspace.name}
+        </button>
+      {:else}
+        {workspace.name}
+      {/if}
       <span class="save-state" data-save-state={saveState} data-commits={commitCount}>· {saveState}</span>
     </div>
     <div class="share-action">
@@ -603,10 +681,24 @@
   </div>
 
   <nav class="thumb-dock" aria-label="Document actions">
-    <button type="button" bind:this={dockFilesButton} onclick={() => (filesSheetOpen = true)}>
+    <button
+      type="button"
+      bind:this={dockFilesButton}
+      onclick={() => {
+        blurEditor();
+        filesSheetOpen = true;
+      }}
+    >
       Files
     </button>
-    <button type="button" bind:this={dockReviewButton} onclick={() => (reviewSheetOpen = true)}>
+    <button
+      type="button"
+      bind:this={dockReviewButton}
+      onclick={() => {
+        blurEditor();
+        reviewSheetOpen = true;
+      }}
+    >
       Review · {workspace.reviewCards.length}
     </button>
     {#if editing}
@@ -621,6 +713,18 @@
     <button type="button" onclick={() => (shareOpen = true)}>Share</button>
   </nav>
 </div>
+
+{#if editing}
+  <div class="edit-bar" style={`--kb-offset: ${editBarOffset}px`} role="toolbar" aria-label="Formatting">
+    <button type="button" aria-label="Bold" onclick={() => editorRef?.toggleBold()}><strong>B</strong></button>
+    <button type="button" aria-label="Italic" onclick={() => editorRef?.toggleItalic()}><em>I</em></button>
+    <button type="button" aria-label="Heading" onclick={() => editorRef?.toggleHeading(2)}>H2</button>
+    <button type="button" aria-label="Bullet list" onclick={() => editorRef?.toggleBulletList()}>••</button>
+    <button type="button" aria-label="Undo" onclick={() => editorRef?.undoStep()}>↺</button>
+    <button type="button" aria-label="Redo" onclick={() => editorRef?.redoStep()}>↻</button>
+    <span class="edit-bar-state" data-save-state={saveState}>{saveState}</span>
+  </div>
+{/if}
 
 {#if lightboxOpen && previewUrl && activeEntry}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

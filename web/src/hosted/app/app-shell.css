@@ -982,3 +982,76 @@ a.workspace-row:hover {
   max-width: 100%;
   height: auto;
 }
+
+/* ————— iOS edit bar (attn-7xl.3.5) ————— */
+
+.edit-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--kb-offset, 0px);
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.25rem calc(0.5rem + env(safe-area-inset-left, 0px)) 0.25rem
+    calc(0.5rem + env(safe-area-inset-right, 0px));
+  border-top: 1px solid var(--rule);
+  background: var(--nav-veil);
+  backdrop-filter: blur(15px);
+  -webkit-backdrop-filter: blur(15px);
+  font-family: var(--sans);
+}
+
+.edit-bar button {
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  font: 650 0.95rem var(--sans);
+  cursor: pointer;
+}
+
+.edit-bar button:hover {
+  background: color-mix(in srgb, var(--sheet) 70%, transparent);
+}
+
+.edit-bar-state {
+  margin-left: auto;
+  color: var(--muted);
+  font: 0.7rem var(--mono);
+  padding-right: 0.4rem;
+}
+
+.title-button {
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  cursor: text;
+  padding: 0.2rem 0.3rem;
+  border-radius: 6px;
+  border-bottom: 1px dashed var(--rule);
+}
+
+.title-input {
+  max-width: 16rem;
+  font: 700 0.95rem var(--serif);
+}
+
+@media (max-width: 900px) {
+  /* The compact header stays visible while the page scrolls (ios-ux §3). */
+  .editor-top {
+    position: sticky;
+    top: 0;
+    z-index: 25;
+  }
+
+  /* The bar rides above the thumb dock, then above the keyboard when the
+     visual viewport shrinks. */
+  .edit-bar {
+    bottom: calc(var(--kb-offset, 0px) + 56px + env(safe-area-inset-bottom, 0px));
+  }
+}

@@ -13,7 +13,8 @@
   } from 'prosemirror-search';
   import { tick, untrack } from 'svelte';
   import { keymap } from 'prosemirror-keymap';
-  import { baseKeymap, selectAll } from 'prosemirror-commands';
+  import { baseKeymap, selectAll, setBlockType, toggleMark } from 'prosemirror-commands';
+  import { wrapInList, liftListItem } from 'prosemirror-schema-list';
   import { history, redo, undo } from 'prosemirror-history';
   import { collab } from 'prosemirror-collab';
   import { remoteCursorsPlugin } from './prosemirror/remote-cursors';
@@ -623,6 +624,43 @@
 
   export function openFind(): void {
     void openFindPanel();
+  }
+
+  // ————— touch formatting commands (attn-7xl.3.5) —————
+  // Used by the mobile edit bar; each command keeps focus in the editor so
+  // the iOS keyboard stays up.
+
+  export function toggleBold(): void {
+    if (!view) return;
+    toggleMark(schema.marks.strong)(view.state, view.dispatch);
+    view.focus();
+  }
+
+  export function toggleItalic(): void {
+    if (!view) return;
+    toggleMark(schema.marks.em)(view.state, view.dispatch);
+    view.focus();
+  }
+
+  export function toggleHeading(level: number): void {
+    if (!view) return;
+    const cursor = view.state.selection.$from;
+    const isSame =
+      cursor.parent.type === schema.nodes.heading && cursor.parent.attrs.level === level;
+    const command = isSame
+      ? setBlockType(schema.nodes.paragraph)
+      : setBlockType(schema.nodes.heading, { level });
+    command(view.state, view.dispatch);
+    view.focus();
+  }
+
+  export function toggleBulletList(): void {
+    if (!view) return;
+    const applied = wrapInList(schema.nodes.bullet_list)(view.state, view.dispatch);
+    if (!applied) {
+      liftListItem(schema.nodes.list_item)(view.state, view.dispatch);
+    }
+    view.focus();
   }
 
   // Create the EditorView ONCE, on mount. The only tracked dependency is

@@ -42,7 +42,7 @@ test('landing hash intent creates without any dialog', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/untitled\.md$/u);
-  await expect(page.locator('[data-save-state]')).toHaveAttribute(
+  await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
     'data-save-state',
     'Saved on this device',
   );
@@ -113,7 +113,7 @@ test('editing autosaves durable revisions and recovers after reload', async ({ p
   await expect(page.locator('[data-commits]')).not.toHaveAttribute('data-commits', '0', {
     timeout: 15_000,
   });
-  await expect(page.locator('[data-save-state]')).toHaveAttribute(
+  await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
     'data-save-state',
     'Saved on this device',
     { timeout: 15_000 },

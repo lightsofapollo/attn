@@ -105,3 +105,47 @@ test('view-only mode replaces Edit with Open native and keeps the reader useful'
   await dock.getByRole('button', { name: 'Share' }).click();
   await expect(page.getByRole('dialog', { name: /Share/u })).toBeVisible();
 });
+
+test('mobile edit mode: formatting bar above the keyboard viewport, 44px targets, live save state', async ({ page }) => {
+  test.slow(); // first hit dev-transforms the whole ProseMirror graph
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app#new');
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await page.locator('.thumb-dock').getByRole('button', { name: 'Edit' }).click();
+  await expect(page.locator('.writing-sheet .ProseMirror')).toBeVisible({ timeout: 120_000 });
+
+  const bar = page.getByRole('toolbar', { name: 'Formatting' });
+  await expect(bar).toBeVisible();
+  for (const name of ['Bold', 'Italic', 'Heading', 'Bullet list', 'Undo', 'Redo']) {
+    const box = await bar.getByRole('button', { name }).boundingBox();
+    expect(box!.height, `${name} target height`).toBeGreaterThanOrEqual(44);
+    expect(box!.width, `${name} target width`).toBeGreaterThanOrEqual(44);
+  }
+  // The save state is visible inside the bar (above the keyboard region).
+  await expect(bar.locator('.edit-bar-state')).toBeVisible();
+
+  // Formatting commands apply to the document.
+  await page.locator('.writing-sheet .ProseMirror').click();
+  await page.keyboard.type('emphasis target');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a');
+  await bar.getByRole('button', { name: 'Bold' }).click();
+  await bar.getByRole('button', { name: 'Heading' }).click();
+  await page.locator('.thumb-dock').getByRole('button', { name: 'Done' }).click();
+  await expect(page.locator('[data-body-text]')).toContainText('## **emphasis target**');
+});
+
+test('workspace title is a separate edit target in edit mode', async ({ page }) => {
+  test.slow();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app#new');
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await page.locator('.thumb-dock').getByRole('button', { name: 'Edit' }).click();
+  await page.getByRole('button', { name: 'Rename workspace' }).click({ timeout: 120_000 });
+  const input = page.getByRole('textbox', { name: 'Workspace title' });
+  await input.fill('Field notes');
+  await input.press('Enter');
+  await expect(page.locator('.doc-name')).toContainText('Field notes');
+  // Durable: the desk shows the new name.
+  await page.goto('/app');
+  await expect(page.locator('.workspace-row').first()).toContainText('Field notes');
+});

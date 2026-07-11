@@ -685,7 +685,7 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                 );
                 let (status, body) = share_open_response(dispatched.is_ok());
                 if dispatched.is_err() {
-                    tracing::warn!(share_id = %invite.share_id, "durable share open is not implemented");
+                    tracing::warn!(share_id = %invite.share_id, "durable share open failed");
                 }
                 return wry::http::Response::builder()
                     .status(status)
@@ -1163,7 +1163,7 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                         )
                         .is_err()
                         {
-                            tracing::warn!(share_id = %invite.share_id, "durable share open is not implemented");
+                            tracing::warn!(share_id = %invite.share_id, "durable share open failed");
                         }
                         platform::activate_app();
                         window.set_visible(true);

@@ -823,6 +823,23 @@ impl ReviewManager {
         // Bootstrap pipeline owns Share + Join when wired in. Everything else
         // still goes through `stub_update_for` (filled in by follow-up issues).
         match (&cmd, self.bootstrap.as_ref(), self.runtime.as_ref()) {
+            (
+                ReviewCommand::OpenDurableShare {
+                    share_id,
+                    link_secret,
+                },
+                Some(_),
+                Some(_),
+            ) => {
+                if let Err(error) = self.open_durable_share(share_id, link_secret) {
+                    (self.update_tx)(ReviewUpdate::Error {
+                        room_id: None,
+                        code: "ATTN_DURABLE_SHARE_OPEN".into(),
+                        message: error.to_string(),
+                    });
+                }
+                return;
+            }
             (ReviewCommand::CreateDurableShare { path }, _, Some(runtime)) => {
                 let result = self
                     .durable_shares
@@ -1204,6 +1221,34 @@ impl ReviewManager {
             self.start_room_runtime(&link.room_id)?;
         }
         Ok(links)
+    }
+
+    /// Resolve a stable public link and hand its exact tier-scoped v3 room
+    /// invite to the existing native Join pipeline.
+    pub fn open_durable_share(
+        &self,
+        share_id: &str,
+        link_secret: &crate::review::share_lifecycle::ShareLinkSecret,
+    ) -> anyhow::Result<()> {
+        let bootstrap = self
+            .bootstrap
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review bootstrap unavailable"))?;
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("review runtime unavailable"))?;
+        let invite = runtime
+            .block_on(
+                crate::review::share_lifecycle::resolve_public_share_to_room_invite(
+                    &bootstrap.config().relay_url,
+                    share_id,
+                    link_secret,
+                ),
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        self.submit(ReviewCommand::Join { invite });
+        Ok(())
     }
 
     pub fn emit_durable_command_result(

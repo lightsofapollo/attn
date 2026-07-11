@@ -2,14 +2,19 @@ import { ed25519 } from '@noble/curves/ed25519.js';
 import {
   OwnerBootstrapError,
   createOwnedRoom,
+  createOwnedRoomV3,
   defaultOwnerPolicy,
   deleteOwnedRoom,
+  deleteOwnedRoomV3,
 } from './browser-owner-bootstrap';
 import {
   base64UrlDecode,
   buildAdmissionHeader,
+  buildAdmissionHeaderV3,
   buildOwnerSignatureHeader,
   deriveRoomId,
+  deriveRoomIdV3,
+  deriveRoomKeyTreeV3,
   deriveRoomKeys,
 } from './browser-crypto';
 import { generateBrowserIdentity } from './browser-session';
@@ -71,7 +76,7 @@ function stubRelay(handlers: {
       ),
       body: typeof init?.body === 'string' ? init.body : '',
     });
-    if (method === 'POST' && /\/v2\/rooms\/[^/]+$/u.test(url)) {
+    if (method === 'POST' && /\/v[23]\/rooms\/[^/]+$/u.test(url)) {
       const status = handlers.createStatus ?? 201;
       return new Response(
         JSON.stringify({
@@ -164,6 +169,56 @@ defineCase('create sends the exact native wire shape with verifiable headers', a
   assertEqual(registerBody.client, 'attn-browser', 'browser client');
   assert(register.headers['Attn-Admission']?.startsWith('v2.'), 'register admission');
   assertEqual(result.created, true, '201 => created');
+});
+
+defineCase('v3 create uses split read/write admission and room-bound grants', async () => {
+  const { fetchImpl, requests } = stubRelay({});
+  const result = await createOwnedRoomV3({ relayUrl: RELAY, fetchImpl, mintPow });
+  assertEqual(requests.length, 2, 'v3 create then register');
+  const create = requests[0]!;
+  const body = JSON.parse(create.body);
+  const path = `/v3/rooms/${result.roomId}`;
+  assertEqual(create.url, `${RELAY}${path}`, 'v3 create route');
+  assertEqual(body.v, 3, 'v3 body');
+  assertEqual(deriveRoomIdV3(result.roomSecret), result.roomId, 'v3 room id');
+  const keys = deriveRoomKeyTreeV3(result.roomSecret);
+  const bodyBytes = new TextEncoder().encode(create.body);
+  assertEqual(
+    create.headers['Attn-Admission'],
+    buildAdmissionHeaderV3(keys.writeAdmissionKey, 'write', 'POST', path, bodyBytes),
+    'v3 write admission binds create',
+  );
+  assert(body.readAdmissionKey !== body.writeAdmissionKey, 'split admission leaves differ');
+  assertEqual(base64UrlDecode(result.commentGrantSignature).length, 64, 'comment grant bytes');
+  assertEqual(base64UrlDecode(result.suggestGrantSignature).length, 64, 'suggest grant bytes');
+  const register = requests[1]!;
+  assert(register.url.includes('/v3/rooms/'), 'v3 device route');
+  assert(register.headers['Attn-Admission']?.startsWith('v3.write.'), 'v3 register write admission');
+});
+
+defineCase('v3 delete signs and write-authenticates the exact route', async () => {
+  const identity = generateBrowserIdentity();
+  const roomSecret = new Uint8Array(32).fill(31);
+  const roomId = deriveRoomIdV3(roomSecret);
+  const keys = deriveRoomKeyTreeV3(roomSecret);
+  const { fetchImpl, requests } = stubRelay({ deleteStatus: 204 });
+  const stopped = await deleteOwnedRoomV3({
+    relayUrl: RELAY,
+    roomId,
+    identity,
+    writeAdmissionKey: keys.writeAdmissionKey,
+    fetchImpl,
+    mintPow,
+  });
+  assertEqual(stopped, true, 'v3 delete accepted');
+  const request = requests[0]!;
+  const path = `/v3/rooms/${roomId}`;
+  assertEqual(request.url, `${RELAY}${path}`, 'v3 delete route');
+  assertEqual(
+    request.headers['Attn-Admission'],
+    buildAdmissionHeaderV3(keys.writeAdmissionKey, 'write', 'DELETE', path, new Uint8Array(0)),
+    'v3 delete admission',
+  );
 });
 
 defineCase('explicit long session carries the relay 7-day opt-in', async () => {

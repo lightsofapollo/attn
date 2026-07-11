@@ -908,9 +908,9 @@ pub fn dispatch_review_join(invite: &str, review_manager: Option<&Arc<ReviewMana
     );
 }
 
-/// Receive a native durable-share deep link at the daemon boundary without
-/// logging its fragment capability. The lifecycle resolver consumes this
-/// intent once persisted share state is wired by Workstream A.
+/// Receive a native durable-share deep link without logging its fragment.
+/// Resolution blocks only on the manager's dedicated review runtime, then
+/// hands a least-privilege v3 room invite to the normal Join pipeline.
 pub fn dispatch_share_open_intent(
     invite: &ParsedShareInvite,
     review_manager: Option<&Arc<ReviewManager>>,
@@ -927,12 +927,18 @@ pub fn dispatch_share_open_intent(
             ),
         );
     };
-    manager.submit(command);
-    Err(
-        crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(
-            "durable share resolver adapter is not wired".into(),
-        ),
-    )
+    if let ReviewCommand::OpenDurableShare {
+        share_id,
+        link_secret,
+    } = &command
+    {
+        manager
+            .open_durable_share(share_id, link_secret)
+            .map_err(|error| {
+                crate::review::share_lifecycle::ShareLifecycleError::Relay(error.to_string())
+            })?;
+    }
+    Ok(())
 }
 
 /// Start listening on the unix socket. Spawns a thread that accepts connections
@@ -1526,12 +1532,14 @@ mod tests {
         let result = dispatch_share_open_intent(&invite, Some(&manager));
         assert!(matches!(
             result,
-            Err(crate::review::share_lifecycle::ShareLifecycleError::NotImplemented(_))
+            Err(crate::review::share_lifecycle::ShareLifecycleError::Relay(
+                _
+            ))
         ));
-        let open = rx.try_recv().expect("open update");
-        let rendered = format!("{open:?}");
-        assert!(rendered.contains("AAECAwQFBgcICQoLDA0ODw"));
-        assert!(!rendered.contains(&encoded_secret));
+        assert!(
+            rx.try_recv().is_err(),
+            "failed routing emits no secret-bearing update"
+        );
 
         let absent = dispatch_share_open_intent(&invite, None);
         assert!(matches!(

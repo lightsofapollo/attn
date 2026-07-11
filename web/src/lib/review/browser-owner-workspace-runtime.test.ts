@@ -6,6 +6,8 @@ import {
   base64UrlEncode,
   contentHash,
   deriveRoomId,
+  deriveRoomIdV3,
+  deriveRoomKeyTreeV3,
   deriveRoomKeys,
 } from './browser-crypto';
 import {
@@ -13,7 +15,7 @@ import {
   type BrowserOwnerWorkspaceAuthority,
   type BrowserOwnerWorkspaceRuntimeOptions,
 } from './browser-owner-workspace-runtime';
-import type { CreateOwnedRoomOptions, OwnedRoomBootstrap } from './browser-owner-bootstrap';
+import type { CreateOwnedRoomOptions, OwnedRoomBootstrapV3 } from './browser-owner-bootstrap';
 import type {
   BrowserOwnerAuthorityFile,
   BrowserOwnerAuthorityOptions,
@@ -28,7 +30,15 @@ import {
   type PublishBrowserSnapshotsOptions,
 } from './browser-snapshot-publisher';
 import { inviteCapabilityFrom } from './browser-workspace-share';
+import {
+  BrowserShareOwnerRelayError,
+  digestShareSnapshotManifest,
+  type BrowserShareRelayRecord,
+  type BrowserShareUpsertRequest,
+  type ManagedShareSnapshotRef,
+} from './browser-share-owner';
 import type {
+  BrowserShareOwnerRelayPort,
   BrowserWorkspaceShareOutbox,
   BrowserWorkspaceShareRequest,
 } from './browser-workspace-sharing';
@@ -89,20 +99,67 @@ function opaque(fill: number): string {
   return base64UrlEncode(new Uint8Array(16).fill(fill));
 }
 
-function bootstrapFromOptions(options: CreateOwnedRoomOptions): OwnedRoomBootstrap {
+function bootstrapFromOptions(options: CreateOwnedRoomOptions): OwnedRoomBootstrapV3 {
   assert(options.roomSecret, 'sharing coordinator supplies its prepared room secret');
   assert(options.identity, 'sharing coordinator supplies its prepared owner identity');
   assert(options.policy, 'sharing coordinator supplies its prepared room policy');
   const roomSecret = new Uint8Array(options.roomSecret);
   return {
-    roomId: deriveRoomId(roomSecret),
+    roomId: deriveRoomIdV3(roomSecret),
     roomSecret,
-    keys: deriveRoomKeys(roomSecret),
+    keys: deriveRoomKeyTreeV3(roomSecret),
     identity: options.identity,
     policy: options.policy,
+    commentGrantSignature: base64UrlEncode(new Uint8Array(64).fill(3)),
+    suggestGrantSignature: base64UrlEncode(new Uint8Array(64).fill(5)),
     created: true,
   };
 }
+
+class MemoryShareRelay implements BrowserShareOwnerRelayPort {
+  private record: BrowserShareRelayRecord | null = null;
+  constructor(private readonly shareId: string) {}
+  async upsert(request: BrowserShareUpsertRequest): Promise<BrowserShareRelayRecord> {
+    this.record = { v: 3, shareId: this.shareId, ownerSigningKey: request.ownerSigningKey,
+      epoch: request.epoch, revision: request.revision,
+      ...(request.currentRoomId === null ? {} : { currentRoomId: request.currentRoomId }),
+      snapshots: structuredClone(request.snapshots), placeholders: [],
+      manifestDigest: digestShareSnapshotManifest(request.snapshots), updatedAt: 1_800_000_000_000,
+      expiresAt: 1_900_000_000_000 };
+    return structuredClone(this.record);
+  }
+  async fetchWithViewCapability(): Promise<BrowserShareRelayRecord> {
+    if (!this.record) throw new BrowserShareOwnerRelayError(404, 'fetch');
+    return structuredClone(this.record);
+  }
+  async uploadSnapshot(fileId: string, snapshotId: string, ciphertext: Uint8Array): Promise<ManagedShareSnapshotRef> {
+    assert(this.record, 'dark share exists');
+    const ref = { fileId, snapshotId, ciphertextBytes: ciphertext.length,
+      ciphertextSha256: base64UrlEncode(sha256(ciphertext)), uploadedAt: 1_800_000_000_001 };
+    const snapshots = [...this.record.snapshots.filter(value => value.fileId !== fileId), ref]
+      .sort((a, b) => a.fileId.localeCompare(b.fileId));
+    this.record = { ...this.record, snapshots, revision: this.record.revision + 1,
+      manifestDigest: digestShareSnapshotManifest(snapshots) };
+    return ref;
+  }
+  async deleteSnapshot(fileId: string): Promise<void> {
+    if (!this.record) return;
+    const snapshots = this.record.snapshots.filter(value => value.fileId !== fileId);
+    this.record = { ...this.record, snapshots, revision: this.record.revision + 1,
+      manifestDigest: digestShareSnapshotManifest(snapshots) };
+  }
+  async revoke(): Promise<void> { this.record = null; }
+}
+
+function memoryShareRelayFactory() {
+  let relay: MemoryShareRelay | null = null;
+  return (options: { shareId: string }) => (relay ??= new MemoryShareRelay(options.shareId));
+}
+
+const testIndexBuilder = async (markdown: Uint8Array) => ({
+  docHash: base64UrlEncode(sha256(markdown)), canonicalEncoding: 'utf8-bytes' as const,
+  lineCount: new TextDecoder().decode(markdown).split('\n').length, blocks: [], headings: [],
+});
 
 class AckingShareOutbox implements BrowserWorkspaceShareOutbox {
   readonly envelopes: MailboxEnvelope[] = [];
@@ -162,13 +219,7 @@ function shareRequest(): BrowserWorkspaceShareRequest {
 function snapshotPublisher(options: PublishBrowserSnapshotsOptions): Promise<unknown> {
   return publishBrowserSnapshots({
     ...options,
-    indexBuilder: async (markdown) => ({
-      docHash: base64UrlEncode(sha256(markdown)),
-      canonicalEncoding: 'utf8-bytes',
-      lineCount: new TextDecoder().decode(markdown).split('\n').length,
-      blocks: [],
-      headings: [],
-    }),
+    indexBuilder: testIndexBuilder,
   });
 }
 
@@ -470,6 +521,8 @@ defineCase('ensureShare activates authority on the runtime-owned lease without r
       randomBytes,
       createRoom: async (options) => bootstrapFromOptions(options),
       publish: snapshotPublisher,
+      indexBuilder: testIndexBuilder,
+      shareRelayFactory: memoryShareRelayFactory(),
       outboxFactory: ({ storage: outboxStorage, credentials }) =>
         new AckingShareOutbox(outboxStorage, credentials.roomId, events),
     },
@@ -522,6 +575,8 @@ defineCase('ensureShare resumes persisted pending ciphertext before activating a
       publishCalls += 1;
       return snapshotPublisher(options);
     },
+    indexBuilder: testIndexBuilder,
+    shareRelayFactory: memoryShareRelayFactory(),
     outboxFactory: ({ storage: outboxStorage, credentials }) => {
       const outbox = new AckingShareOutbox(
         outboxStorage,
@@ -567,7 +622,7 @@ defineCase('ensureShare resumes persisted pending ciphertext before activating a
   await second.start();
   equal(second.getState().roomId, null, 'unpromoted share does not start authority on route open');
   const resumed = await second.ensureShare(shareRequest());
-  equal(createCalls, 1, 'persisted resume does not recreate the relay room');
+  equal(createCalls, 2, 'persisted resume idempotently rejoins the same relay room');
   equal(publishCalls, 1, 'persisted resume does not assemble fresh ciphertext');
   equal(JSON.stringify(outboxes[1]?.envelopes), exactPendingBatch, 'resume adopts exact pending batch');
   equal(resumed.roomId, pending.roomId, 'resume keeps prepared room identity');
@@ -603,6 +658,8 @@ defineCase('stopShare tears down authority, resets runtime state, and recreates 
         return true;
       },
       publish: snapshotPublisher,
+      indexBuilder: testIndexBuilder,
+      shareRelayFactory: memoryShareRelayFactory(),
       outboxFactory: ({ storage: outboxStorage, credentials }) =>
         new AckingShareOutbox(outboxStorage, credentials.roomId, events),
     },

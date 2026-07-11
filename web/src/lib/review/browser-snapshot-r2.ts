@@ -36,6 +36,7 @@ export type SnapshotUploadPowRequest = Omit<
 >;
 
 export interface UploadBrowserR2SnapshotOptions {
+  protocolVersion?: 2 | 3;
   relayUrl: string;
   roomId: string;
   admissionKey: Uint8Array;
@@ -88,7 +89,8 @@ export async function uploadBrowserR2Snapshot(
 ): Promise<void> {
   validateUploadInputs(options);
   const relay = parseRelayOrigin(options.relayUrl);
-  const path = `/v2/rooms/${encodeURIComponent(options.roomId)}/blobs`;
+  const version = options.protocolVersion ?? 2;
+  const path = `/v${version}/rooms/${encodeURIComponent(options.roomId)}/blobs`;
   const bodyJson = JSON.stringify({
     envelopeId: options.envelopeId,
     authorId: options.authorId,
@@ -118,7 +120,9 @@ export async function uploadBrowserR2Snapshot(
       method: 'POST',
       headers: {
         'content-type': 'application/json; charset=utf-8',
-        'Attn-Admission': buildAdmissionHeader(options.admissionKey, 'POST', path, bodyBytes),
+        'Attn-Admission': version === 3
+          ? buildAdmissionHeaderV3(options.admissionKey, 'write', 'POST', path, bodyBytes)
+          : buildAdmissionHeader(options.admissionKey, 'POST', path, bodyBytes),
         'Attn-PoW': pow,
       },
       body: bodyJson,

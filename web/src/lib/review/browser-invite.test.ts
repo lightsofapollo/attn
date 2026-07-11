@@ -316,7 +316,7 @@ defineCase('composeInviteForms produces equivalent browser, native, and CLI form
   const browser = parseInviteUrl(forms.browserUrl);
   const native = parseInviteUrl(forms.nativeUrl);
   assertEq(browser.roomId, native.roomId, 'forms bind the same room');
-  assertBytesEq(browser.roomSecret, native.roomSecret, 'forms carry the same secret');
+  assertBytesEq(legacySecret(browser), legacySecret(native), 'forms carry the same secret');
 });
 
 defineCase('composeInviteForms accepts staging HTTPS and exact loopback HTTP', () => {

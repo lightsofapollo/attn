@@ -108,6 +108,7 @@ export interface BrowserSnapshotPublicationResult {
 }
 
 export interface PublishBrowserSnapshotsOptions {
+  protocolVersion?: 2 | 3;
   relayUrl: string;
   roomId: string;
   roomSecret: Uint8Array;
@@ -375,6 +376,7 @@ async function prepareSnapshot(
         throw new Error('encrypted snapshot exceeds the room snapshot limit');
       }
       await (options.uploadR2 ?? uploadBrowserR2Snapshot)({
+        protocolVersion: options.protocolVersion,
         relayUrl: options.relayUrl,
         roomId: options.roomId,
         admissionKey: options.keys.admissionKey,

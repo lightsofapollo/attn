@@ -21,18 +21,18 @@ async function createReadyShare(page: Page) {
   return dialog;
 }
 
-test('defaults to the focused current-file, 24-hour hybrid flow', async ({ page }) => {
+test('defaults to the focused current-file and hybrid delivery flow', async ({ page }) => {
   const dialog = await openShare(page);
 
   await expect(dialog.getByRole('heading', { name: 'Share for review' })).toBeFocused();
   await expect(dialog.getByRole('radio', { name: /Current file/u })).toBeChecked();
   await expect(dialog.locator('.share-manifest')).toContainText('1 entry');
   await expect(dialog.locator('.share-manifest')).toContainText('1 Markdown');
-  await expect(dialog.getByText('Access and lifetime Hybrid · 24 hours')).toBeVisible();
+  await expect(dialog.getByText('Delivery mode Hybrid')).toBeVisible();
 
-  await dialog.getByText('Access and lifetime Hybrid · 24 hours').click();
+  await dialog.getByText('Delivery mode Hybrid').click();
   await expect(dialog.getByRole('radio', { name: /^Hybrid/u })).toBeChecked();
-  await expect(dialog.getByRole('radio', { name: '24 hours' })).toBeChecked();
+  await expect(dialog).toContainText('Stable links renew for 90 days');
 });
 
 test('durability states gate sharing honestly', async ({ page }) => {
@@ -53,7 +53,7 @@ test('durability states gate sharing honestly', async ({ page }) => {
   await expect(quotaDialog.getByRole('button', { name: 'Create review link' })).toBeDisabled();
 });
 
-test('browser, native, and CLI forms carry one secret; copy, stop, and recreate work', async ({ page }) => {
+test('each tier matches across browser, native, and CLI while sibling bearers stay distinct', async ({ page }) => {
   await page.addInitScript(() => {
     Object.defineProperty(Navigator.prototype, 'clipboard', {
       configurable: true,
@@ -65,26 +65,36 @@ test('browser, native, and CLI forms carry one secret; copy, stop, and recreate 
     });
   });
   const dialog = await createReadyShare(page);
-
-  const browserCode = dialog.locator('.share-link-row code');
-  await expect(browserCode).toContainText('#key=••••');
-  await dialog.getByRole('button', { name: 'Show' }).click();
-  const browserUrl = (await browserCode.textContent()) ?? '';
-
+  await expect(dialog.getByRole('radio', { name: /Comment/u })).toBeChecked();
   await dialog.getByText('Native app and CLI options').click();
-  const inviteCodes = dialog.locator('.share-invite-option code');
-  const nativeUrl = (await inviteCodes.nth(0).textContent()) ?? '';
-  const cliCommand = (await inviteCodes.nth(1).textContent()) ?? '';
-  const browserSecret = new URL(browserUrl).hash;
-  const nativeSecret = new URL(nativeUrl).hash;
-  expect(nativeSecret).toBe(browserSecret);
-  expect(cliCommand).toContain(nativeUrl);
-  await expect(dialog.getByRole('link', { name: 'Open in attn' })).toHaveAttribute('href', nativeUrl);
-  await expect(dialog.locator('[role="status"]')).toHaveCount(1);
-  await expect(dialog.getByRole('link', { name: 'Open in attn' })).toHaveAttribute('href', nativeUrl);
-  await expect(dialog.getByRole('status')).toHaveCount(1);
-
-  await dialog.getByRole('button', { name: 'Copy browser link' }).click();
+  const tierSecrets: string[] = [];
+  let shareId = '';
+  for (const tier of ['View-only', 'Comment', 'Suggest']) {
+    await dialog.getByRole('radio', { name: new RegExp(tier, 'u') }).check();
+    const browserCode = dialog.locator('.share-link-row code');
+    await expect(browserCode).toContainText('#key=••••');
+    await dialog.getByRole('button', { name: 'Show' }).click();
+    const browserUrl = (await browserCode.textContent()) ?? '';
+    const inviteCodes = dialog.locator('.share-invite-option code');
+    const nativeUrl = (await inviteCodes.nth(0).textContent()) ?? '';
+    const cliCommand = (await inviteCodes.nth(1).textContent()) ?? '';
+    const browser = new URL(browserUrl);
+    const native = new URL(nativeUrl);
+    expect(browser.pathname).toMatch(/^\/s\/[A-Za-z0-9_-]+$/u);
+    expect(native.protocol).toBe('attn:');
+    expect(native.hostname).toBe('share');
+    expect(native.hash).toBe(browser.hash);
+    expect(cliCommand).toContain(nativeUrl);
+    shareId ||= browser.pathname.split('/').at(-1) ?? '';
+    expect(browser.pathname).toBe(`/s/${shareId}`);
+    tierSecrets.push(browser.hash);
+    await dialog.getByRole('button', { name: 'Hide' }).click();
+  }
+  expect(new Set(tierSecrets).size).toBe(3);
+  await dialog.getByRole('radio', { name: /Comment/u }).check();
+  await dialog.getByRole('button', { name: 'Show' }).click();
+  const browserUrl = (await dialog.locator('.share-link-row code').textContent()) ?? '';
+  await dialog.getByRole('button', { name: /Copy Comment link/u }).click();
   expect(await page.evaluate(() =>
     (globalThis as typeof globalThis & { __attnCopied?: string }).__attnCopied,
   )).toBe(browserUrl);
@@ -113,11 +123,11 @@ test('uses Web Share when available and remains axe-clean at mobile width', asyn
   await dialog.getByRole('button', { name: 'Create review link' }).click();
   await expect(dialog.getByRole('heading', { name: 'Review link ready' })).toBeVisible();
 
-  await dialog.getByRole('button', { name: 'Share link' }).click();
+  await dialog.getByRole('button', { name: /Share Comment link/u }).click();
   const payload = await page.evaluate(() =>
     (globalThis as typeof globalThis & { __attnShared?: ShareData }).__attnShared,
   );
-  expect(payload?.url).toMatch(/^https:\/\/attn\.sh\/review\/.+#key=.+/u);
+  expect(payload?.url).toMatch(/^https:\/\/attn\.sh\/s\/.+#key=.+/u);
 
   const overflow = await page.evaluate(() => {
     const root = document.scrollingElement;
@@ -148,22 +158,21 @@ test('falls back to clipboard when Web Share rejects', async ({ page }) => {
     });
   });
   const dialog = await createReadyShare(page);
-  await dialog.getByRole('button', { name: 'Share link' }).click();
+  await dialog.getByRole('button', { name: /Share Comment link/u }).click();
   const copied = await page.evaluate(() =>
     (globalThis as typeof globalThis & { __attnCopied?: string }).__attnCopied,
   );
-  expect(copied).toMatch(/^https:\/\/attn\.sh\/review\/.+#key=.+/u);
+  expect(copied).toMatch(/^https:\/\/attn\.sh\/s\/.+#key=.+/u);
   await expect(dialog.getByRole('status').filter({ hasText: /browser link was copied/u }).first()).toBeVisible();
 });
 
-test('mobile lifetime choice rows meet 44px touch targets', async ({ page }) => {
+test('mobile permission tier rows meet 44px touch targets', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 700 });
-  const dialog = await openShare(page);
-  await dialog.getByText('Access and lifetime Hybrid · 24 hours').click();
-  const ttlHeights = await dialog.locator('.share-ttl-options label').evaluateAll((labels) =>
+  const dialog = await createReadyShare(page);
+  const tierHeights = await dialog.locator('.share-tier-picker label').evaluateAll((labels) =>
     labels.map((label) => label.getBoundingClientRect().height),
   );
-  for (const height of ttlHeights) expect(height).toBeGreaterThanOrEqual(44);
+  for (const height of tierHeights) expect(height).toBeGreaterThanOrEqual(44);
 });
 
 test('destructive confirmation takes keyboard focus', async ({ page }) => {

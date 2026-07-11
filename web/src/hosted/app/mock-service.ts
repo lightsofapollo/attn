@@ -21,10 +21,24 @@ import type {
 import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
 
 const MOCK_INVITE = {
-  roomId: 'yPJpJifC1HUQgHsJ_7speQ',
-  browserUrl: 'https://attn.sh/review/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
-  nativeUrl: 'attn://review/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
-  cliCommand: "npx attnmd review join 'attn://review/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc'",
+  view: {
+    tier: 'view',
+    browserUrl: 'https://attn.sh/s/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
+    nativeUrl: 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
+    cliCommand: "npx attnmd review join 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc'",
+  },
+  comment: {
+    tier: 'comment',
+    browserUrl: 'https://attn.sh/s/yPJpJifC1HUQgHsJ_7speQ#key=CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
+    nativeUrl: 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
+    cliCommand: "npx attnmd review join 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg'",
+  },
+  suggest: {
+    tier: 'suggest',
+    browserUrl: 'https://attn.sh/s/yPJpJifC1HUQgHsJ_7speQ#key=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk',
+    nativeUrl: 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk',
+    cliCommand: "npx attnmd review join 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk'",
+  },
 } as const;
 
 /** 'real' (no ?shell= param) boots the storage-backed service; every other
@@ -344,7 +358,8 @@ export class MockWorkspaceService implements WorkspaceAppService {
         this.mockShare = {
           workspaceId,
           capId: 'BwcHBwcHBwcHBwcHBwcHBw',
-          roomId: invite.roomId,
+          shareId: 'yPJpJifC1HUQgHsJ_7speQ',
+          roomId: 'nC6t29PRD0NcUGsRpkBpFg',
           scopeKind: selection.kind,
           paths,
           publication: 'published',
@@ -354,7 +369,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
           resumable: false,
           invite,
         };
-        return structuredClone(this.mockShare);
+        return structuredClone(this.mockShare!);
       },
       stopShare: async () => { this.mockShare = null; },
       release: async () => undefined,

@@ -40,10 +40,14 @@ import {
   buildAdmissionSubprotocolV3,
   contentHash,
   deriveRoomId,
+  deriveRoomIdV3,
+  deriveRoomKeyTreeV3,
   deriveRoomKeys,
   deriveReadKeysV3,
+  deriveShareEpochRoomSecret,
   toCanonicalBytes,
   type RoomKeys,
+  type RoomKeyTreeV3,
 } from './browser-crypto';
 import {
   decodeCanonicalBase64Url,
@@ -179,11 +183,22 @@ export interface BrowserDeviceIdentity {
 
 /** Already-owned browser room material. The session validates and copies it. */
 export interface BrowserOwnerCredentials {
+  protocolVersion?: 2 | 3;
   roomId: string;
   roomSecret: Uint8Array;
   keys: RoomKeys;
+  /** Present only for v3; `keys.admissionKey` is the write leaf. */
+  readAdmissionKey?: Uint8Array;
+  readCapabilityKey?: Uint8Array;
   identity: BrowserDeviceIdentity;
   policy: RoomPolicy;
+}
+
+export interface BrowserOwnerCredentialsV3 extends BrowserOwnerCredentials {
+  protocolVersion: 3;
+  shareSecret: Uint8Array;
+  shareId: string;
+  epoch: number;
 }
 
 export interface BrowserCollabDelivery {
@@ -357,6 +372,23 @@ function activeV2Keys(keys: Omit<RoomKeys, 'rootKey'> & { rootKey?: Uint8Array }
   };
 }
 
+function activeOwnerKeys(credentials: BrowserOwnerCredentials): ActiveRoomKeys {
+  if ((credentials.protocolVersion ?? 2) === 2) return activeV2Keys(credentials.keys);
+  if (!credentials.readAdmissionKey || !credentials.readCapabilityKey) {
+    throw new Error('v3 owner read capability is unavailable');
+  }
+  return {
+    version: 3,
+    rootKey: credentials.keys.rootKey,
+    readCapabilityKey: credentials.readCapabilityKey,
+    eventKey: credentials.keys.eventKey,
+    snapshotKey: credentials.keys.snapshotKey,
+    signalingKey: credentials.keys.signalingKey,
+    readAdmissionKey: credentials.readAdmissionKey,
+    writeAdmissionKey: credentials.keys.admissionKey,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Identity generation
 // ---------------------------------------------------------------------------
@@ -453,6 +485,74 @@ export function ownerCredentialsFromInviteCapability(
   }
 }
 
+/** Reconstruct one durable share's exact v3 epoch owner from sealed state. */
+export function ownerCredentialsV3FromInviteCapability(
+  capability: InviteCapability,
+  expectedRoomId: string,
+): BrowserOwnerCredentialsV3 {
+  const durable = capability.durableShare;
+  if (!durable || durable.protocolVersion !== 3) {
+    throw new Error('sealed owner capability is not a durable v3 share');
+  }
+  let roomSecret: Uint8Array | null = null;
+  let shareSecret: Uint8Array | null = null;
+  let signingSecret: Uint8Array | null = null;
+  let encryptionSecret: Uint8Array | null = null;
+  try {
+    roomSecret = decodeCanonicalSecret(capability.roomSecret, 'room secret');
+    shareSecret = decodeCanonicalSecret(durable.shareSecret, 'share secret');
+    const derivedEpochSecret = deriveShareEpochRoomSecret(shareSecret, durable.epoch);
+    try {
+      if (base64UrlEncode(derivedEpochSecret) !== base64UrlEncode(roomSecret)) {
+        throw new Error('sealed v3 epoch secret does not match the share root');
+      }
+    } finally {
+      derivedEpochSecret.fill(0);
+    }
+    const roomId = deriveRoomIdV3(roomSecret);
+    if (roomId !== expectedRoomId || durable.currentRoomId !== undefined && durable.currentRoomId !== roomId) {
+      throw new Error('sealed v3 owner roomId does not match its binding');
+    }
+    signingSecret = decodeCanonicalSecret(capability.ownerSigningSecret, 'owner signing secret');
+    encryptionSecret = decodeCanonicalSecret(capability.ownerEncryptionSecret, 'owner encryption secret');
+    const signingPublic = ed25519.getPublicKey(signingSecret);
+    const publicEncryptionKey = x25519.getPublicKey(encryptionSecret);
+    const tree = deriveRoomKeyTreeV3(roomSecret);
+    return {
+      protocolVersion: 3,
+      roomId,
+      roomSecret,
+      shareSecret,
+      keys: {
+        rootKey: tree.rootKey,
+        eventKey: tree.readKeys.eventKey,
+        snapshotKey: tree.readKeys.snapshotKey,
+        signalingKey: tree.readKeys.signalingKey,
+        admissionKey: tree.writeAdmissionKey,
+      },
+      readAdmissionKey: tree.readKeys.readAdmissionKey,
+      readCapabilityKey: tree.readKeys.readCapabilityKey,
+      identity: {
+        deviceId: capability.ownerDeviceId,
+        participantId: capability.ownerParticipantId,
+        signingSecret,
+        signingPublic,
+        encryptionSecret,
+        publicEncryptionKey,
+      },
+      policy: validateRoomPolicy(capability.policy),
+      shareId: durable.shareId,
+      epoch: durable.epoch,
+    };
+  } catch (error) {
+    roomSecret?.fill(0);
+    shareSecret?.fill(0);
+    signingSecret?.fill(0);
+    encryptionSecret?.fill(0);
+    throw error;
+  }
+}
+
 function decodeCanonicalSecret(value: unknown, label: string): Uint8Array {
   if (typeof value !== 'string') throw new Error(`sealed ${label} is invalid`);
   let bytes: Uint8Array;
@@ -518,18 +618,36 @@ function cloneAndValidateOwnerCredentials(
   if (!(input.roomSecret instanceof Uint8Array) || input.roomSecret.length !== 32) {
     throw new Error('owner roomSecret must be 32 bytes');
   }
-  if (deriveRoomId(input.roomSecret) !== input.roomId) {
+  const protocolVersion = input.protocolVersion ?? 2;
+  if ((protocolVersion === 3 ? deriveRoomIdV3(input.roomSecret) : deriveRoomId(input.roomSecret)) !== input.roomId) {
     throw new Error('owner roomSecret does not derive the bound roomId');
   }
-  const derived = deriveRoomKeys(input.roomSecret);
+  const derivedTree = protocolVersion === 3 ? deriveRoomKeyTreeV3(input.roomSecret) : null;
+  const derived = derivedTree === null ? deriveRoomKeys(input.roomSecret) : {
+    rootKey: derivedTree.rootKey,
+    eventKey: derivedTree.readKeys.eventKey,
+    snapshotKey: derivedTree.readKeys.snapshotKey,
+    signalingKey: derivedTree.readKeys.signalingKey,
+    admissionKey: derivedTree.writeAdmissionKey,
+  };
   try {
     for (const key of ['rootKey', 'eventKey', 'snapshotKey', 'signalingKey', 'admissionKey'] as const) {
       if (!(input.keys[key] instanceof Uint8Array) || !equalBytes(input.keys[key], derived[key])) {
         throw new Error(`owner ${key} does not match roomSecret`);
       }
     }
+    if (protocolVersion === 3 && (
+      !(input.readAdmissionKey instanceof Uint8Array)
+      || !(input.readCapabilityKey instanceof Uint8Array)
+      || !equalBytes(input.readAdmissionKey, derivedTree!.readKeys.readAdmissionKey)
+      || !equalBytes(input.readCapabilityKey, derivedTree!.readKeys.readCapabilityKey)
+    )) {
+      throw new Error('owner v3 read capability does not match roomSecret');
+    }
   } finally {
     zeroRoomKeys(derived);
+    derivedTree?.readKeys.readAdmissionKey.fill(0);
+    derivedTree?.readKeys.readCapabilityKey.fill(0);
   }
   const identity = input.identity;
   if (!identity.deviceId || !identity.participantId) throw new Error('owner identity ids are invalid');
@@ -562,6 +680,7 @@ function cloneAndValidateOwnerCredentials(
   // copies, so rejected credentials cannot strand cloned secret material.
   const policy = validateRoomPolicy(input.policy);
   return {
+    protocolVersion,
     roomId: input.roomId,
     roomSecret: new Uint8Array(input.roomSecret),
     keys: {
@@ -571,6 +690,12 @@ function cloneAndValidateOwnerCredentials(
       signalingKey: new Uint8Array(input.keys.signalingKey),
       admissionKey: new Uint8Array(input.keys.admissionKey),
     },
+    ...(protocolVersion === 3
+      ? {
+          readAdmissionKey: new Uint8Array(input.readAdmissionKey!),
+          readCapabilityKey: new Uint8Array(input.readCapabilityKey!),
+        }
+      : {}),
     identity: {
       deviceId: identity.deviceId,
       participantId: identity.participantId,
@@ -1355,7 +1480,7 @@ export class BrowserSession {
       this.fail('device_register', error instanceof Error ? error.message : String(error));
       return;
     }
-    const activeKeys = activeV2Keys(credentials.keys);
+    const activeKeys = activeOwnerKeys(credentials);
     this.ownerRoomSecret = credentials.roomSecret;
     this.keys = activeKeys;
     this.identity = credentials.identity;

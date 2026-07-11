@@ -30,6 +30,7 @@ import {
 } from './browser-review-actions';
 import {
   ownerCredentialsFromInviteCapability,
+  ownerCredentialsV3FromInviteCapability,
   type BrowserOwnerCredentials,
   type BrowserSessionOptions,
 } from './browser-session';
@@ -698,7 +699,9 @@ export class BrowserOwnerWorkspaceRuntime {
       );
     }
     const { share, capability } = candidates[0]!;
-    const credentials = ownerCredentialsFromInviteCapability(capability, share.roomId);
+    const credentials = capability.durableShare
+      ? ownerCredentialsV3FromInviteCapability(capability, share.roomId)
+      : ownerCredentialsFromInviteCapability(capability, share.roomId);
     try {
       const manifest = capability.publishedManifest;
       if (!manifest) throw new StorageConflictError('active share has no promoted manifest');
@@ -894,6 +897,7 @@ export class BrowserOwnerWorkspaceRuntime {
       }
       const publisher = this.options.publisher ?? publishBrowserSnapshots;
       await publisher({
+        protocolVersion: credentials.protocolVersion,
         relayUrl: share.relayUrl,
         roomId: share.roomId,
         roomSecret: credentials.roomSecret,
@@ -1135,6 +1139,11 @@ function zeroOwnerCredentials(credentials: BrowserOwnerCredentials | null): void
   credentials.keys.snapshotKey.fill(0);
   credentials.keys.signalingKey.fill(0);
   credentials.keys.admissionKey.fill(0);
+  credentials.readAdmissionKey?.fill(0);
+  credentials.readCapabilityKey?.fill(0);
+  if ('shareSecret' in credentials && credentials.shareSecret instanceof Uint8Array) {
+    credentials.shareSecret.fill(0);
+  }
   credentials.identity.signingSecret.fill(0);
   credentials.identity.signingPublic.fill(0);
   credentials.identity.encryptionSecret.fill(0);

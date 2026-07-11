@@ -2,7 +2,6 @@
   import {
     SHARE_MODE_OPTIONS,
     SHARE_TTL_ONE_DAY,
-    SHARE_TTL_OPTIONS,
     createShareRequest,
     durabilityState,
     entriesForScope,
@@ -24,6 +23,7 @@
   } from './types';
 
   type SheetPhase = 'loading' | 'configure' | 'progress' | 'ready' | 'stopped';
+  const SHARE_TIERS = ['view', 'comment', 'suggest'] as const;
 
   interface Props {
     workspace?: WorkspaceDetail;
@@ -92,6 +92,7 @@
   let riskAcknowledged = $state(false);
 
   let revealLink = $state(false);
+  let selectedTier = $state<'view' | 'comment' | 'suggest'>('comment');
   let inviteOptionsOpen = $state(false);
   let stopConfirm = $state(false);
   let stopBusy = $state(false);
@@ -114,7 +115,8 @@
     durability.allowed && scopeValid && Boolean(workspace) && Boolean(onCreate),
   );
   const invite = $derived(share?.invite ?? null);
-  const maskedBrowserUrl = $derived(invite ? maskInviteUrl(invite.browserUrl) : '');
+  const selectedInvite = $derived(invite?.[selectedTier] ?? null);
+  const maskedBrowserUrl = $derived(selectedInvite ? maskInviteUrl(selectedInvite.browserUrl) : '');
   const webShareAvailable = $derived(supportsWebShare());
 
   const durabilityCopy = $derived.by(() => {
@@ -168,6 +170,7 @@
     if (view.scopeKind === 'file') configuredFilePath = view.paths[0];
     selectedPaths = [...view.paths];
     revealLink = false;
+    selectedTier = 'comment';
     inviteOptionsOpen = false;
     stopConfirm = false;
 
@@ -325,23 +328,35 @@
   }
 
   async function shareBrowserInvite(): Promise<void> {
-    if (!invite) return;
+    if (!selectedInvite) return;
     if (!supportsWebShare()) {
-      await copyText(invite.browserUrl, 'Browser link copied.');
+      await copyText(selectedInvite.browserUrl, `${tierLabel(selectedTier)} link copied.`);
       return;
     }
     try {
       await navigator.share({
         title: 'Review in attn',
         text: `Review ${name} in attn.`,
-        url: invite.browserUrl,
+        url: selectedInvite.browserUrl,
       });
       statusMessage = 'Review link shared.';
     } catch (error) {
       if (error && typeof error === 'object' && 'name' in error && error.name === 'AbortError') return;
-      const copied = await copyText(invite.browserUrl, 'Sharing was unavailable, so the browser link was copied.');
+      const copied = await copyText(selectedInvite.browserUrl, 'Sharing was unavailable, so the browser link was copied.');
       if (!copied) statusMessage = 'Sharing was unavailable. Reveal the link to copy it manually.';
     }
+  }
+
+  function tierLabel(tier: 'view' | 'comment' | 'suggest'): string {
+    return tier === 'view' ? 'View-only' : tier === 'comment' ? 'Comment' : 'Suggest';
+  }
+
+  function tierDescription(tier: 'view' | 'comment' | 'suggest'): string {
+    return tier === 'view'
+      ? 'Read the shared workspace'
+      : tier === 'comment'
+        ? 'Read and leave comments'
+        : 'Read, comment, and propose edits';
   }
 
   function supportsWebShare(): boolean {
@@ -498,7 +513,7 @@
         </section>
 
         <details class="share-advanced" bind:open={advancedOpen}>
-          <summary>Access and lifetime <span>{SHARE_MODE_OPTIONS.find((option) => option.value === mode)?.label} · {SHARE_TTL_OPTIONS.find((option) => option.value === ttlMs)?.label}</span></summary>
+          <summary>Delivery mode <span>{SHARE_MODE_OPTIONS.find((option) => option.value === mode)?.label}</span></summary>
           <div class="share-advanced-body">
             <fieldset>
               <legend>Review access</legend>
@@ -509,17 +524,7 @@
                 </label>
               {/each}
             </fieldset>
-            <fieldset>
-              <legend>Link lifetime</legend>
-              <div class="share-ttl-options">
-                {#each SHARE_TTL_OPTIONS as option (option.value)}
-                  <label class:chosen={ttlMs === option.value}>
-                    <input type="radio" name="share-ttl" value={option.value} bind:group={ttlMs} />
-                    <span>{option.label}</span>
-                  </label>
-                {/each}
-              </div>
-            </fieldset>
+            <p class="share-lifetime-note">Stable links renew for 90 days when the browser owner reconnects. Stop sharing revokes View, Comment, and Suggest together.</p>
           </div>
         </details>
 
@@ -575,42 +580,55 @@
             <p>{ownerStatus ?? 'Browser owner active'} · {remainingTimeLabel(share.expiresAt)}</p>
           </div>
         </div>
-        <div class="share-link-row">
-          <code aria-label={revealLink ? 'Full browser invite link' : 'Browser invite link with encryption key hidden'}>{revealLink ? invite.browserUrl : maskedBrowserUrl}</code>
-          <button class="button" type="button" aria-pressed={revealLink} onclick={() => revealLink = !revealLink}>{revealLink ? 'Hide' : 'Show'}</button>
-        </div>
-        <p class="share-secret-note">Anyone with the complete link can review. The fragment contains the room key; attn services do not receive it.</p>
+        <fieldset class="share-tier-picker">
+          <legend>Choose what this link allows</legend>
+          {#each SHARE_TIERS as tier}
+            <label class:active={selectedTier === tier}>
+              <input type="radio" name="share-tier" value={tier} bind:group={selectedTier} />
+              <span><strong>{tierLabel(tier)}</strong><small>{tierDescription(tier)}</small></span>
+              {#if tier === 'comment'}<em>Default</em>{/if}
+            </label>
+          {/each}
+        </fieldset>
 
-        <div class="share-ready-actions">
-          <button class="button primary" type="button" onclick={() => void shareBrowserInvite()}>{webShareAvailable ? 'Share link' : 'Copy browser link'}</button>
-          {#if webShareAvailable}
-            <button class="button" type="button" onclick={() => void copyText(invite.browserUrl, 'Browser link copied.')}>Copy link</button>
-          {/if}
-        </div>
+        {#if selectedInvite}
+          <div class="share-link-row">
+            <code aria-label={revealLink ? `Full ${tierLabel(selectedTier)} browser invite link` : `${tierLabel(selectedTier)} browser invite link with capability hidden`}>{revealLink ? selectedInvite.browserUrl : maskedBrowserUrl}</code>
+            <button class="button" type="button" aria-pressed={revealLink} onclick={() => revealLink = !revealLink}>{revealLink ? 'Hide' : 'Show'}</button>
+          </div>
+          <p class="share-secret-note">Anyone with the complete link gets {tierDescription(selectedTier).toLowerCase()}. Capability keys stay in the fragment; attn services cannot recover them or read the workspace.</p>
+
+          <div class="share-ready-actions">
+            <button class="button primary" type="button" onclick={() => void shareBrowserInvite()}>{webShareAvailable ? `Share ${tierLabel(selectedTier)} link` : `Copy ${tierLabel(selectedTier)} link`}</button>
+            {#if webShareAvailable}
+              <button class="button" type="button" onclick={() => void copyText(selectedInvite.browserUrl, `${tierLabel(selectedTier)} link copied.`)}>Copy link</button>
+            {/if}
+          </div>
+        {/if}
         {#if statusMessage !== 'Encrypted review link ready.'}
           <p class="share-feedback">{statusMessage}</p>
         {/if}
 
-        <details class="share-invite-options" bind:open={inviteOptionsOpen}>
+        {#if selectedInvite}<details class="share-invite-options" bind:open={inviteOptionsOpen}>
           <summary>Native app and CLI options</summary>
           <div class="share-invite-option">
-            <div><strong>attn app</strong><code>{invite.nativeUrl}</code></div>
+            <div><strong>attn app · {tierLabel(selectedTier)}</strong><code>{selectedInvite.nativeUrl}</code></div>
             <div class="share-invite-actions">
-              <a class="button" href={invite.nativeUrl}>Open in attn</a>
-              <button class="button" type="button" onclick={() => void copyText(invite.nativeUrl, 'Native app link copied.')}>Copy</button>
+              <a class="button" href={selectedInvite.nativeUrl}>Open in attn</a>
+              <button class="button" type="button" onclick={() => void copyText(selectedInvite.nativeUrl, 'Native app link copied.')}>Copy</button>
             </div>
           </div>
           <div class="share-invite-option">
-            <div><strong>Command line</strong><code>{invite.cliCommand}</code></div>
-            <button class="button" type="button" onclick={() => void copyText(invite.cliCommand, 'CLI command copied.')}>Copy</button>
+            <div><strong>Command line</strong><code>{selectedInvite.cliCommand}</code></div>
+            <button class="button" type="button" onclick={() => void copyText(selectedInvite.cliCommand, 'CLI command copied.')}>Copy</button>
           </div>
-        </details>
+        </details>{/if}
 
         <section class="share-stop-zone" aria-labelledby="stop-sharing-title">
           {#if !stopConfirm}
             <div>
               <h3 id="stop-sharing-title">Stop this review</h3>
-              <p>Owner-signed teardown makes the current link stop working.</p>
+              <p>Owner-signed teardown revokes all three stable links and the current review room.</p>
             </div>
             <button
               class="button danger"

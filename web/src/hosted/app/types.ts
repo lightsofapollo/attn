@@ -106,16 +106,23 @@ import type { Anchor, ReviewEvent } from '../../lib/types';
 export type WorkspaceShareMode = 'live' | 'async' | 'hybrid';
 export type WorkspaceShareTtlMs = 3_600_000 | 86_400_000 | 604_800_000;
 
-export interface WorkspaceShareInvite {
-  roomId: string;
+export interface WorkspaceShareTierInvite {
+  tier: 'view' | 'comment' | 'suggest';
   browserUrl: string;
   nativeUrl: string;
   cliCommand: string;
 }
 
+export interface WorkspaceShareInvite {
+  view: WorkspaceShareTierInvite;
+  comment: WorkspaceShareTierInvite;
+  suggest: WorkspaceShareTierInvite;
+}
+
 export interface WorkspaceShareView {
   workspaceId: string;
   capId: string;
+  shareId: string;
   roomId: string;
   scopeKind: 'file' | 'entries' | 'workspace';
   paths: string[];

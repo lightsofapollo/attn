@@ -17,10 +17,14 @@ import {
   PUSH_BINDING_STORE,
   PUSH_DB_NAME,
   PUSH_DB_VERSION,
+  PUSH_PENDING_STORE,
+  consumePendingPushEvents,
+  forgetPushBinding,
+  hasPushBinding,
   pullRememberedPushBindings,
   rememberPushBinding,
 } from './browser-push-worker';
-import type { Device } from './browser-ws';
+import type { Device, WebSocketLike } from './browser-ws';
 
 interface Case { name: string; run: () => void | Promise<void> }
 const cases: Case[] = [];
@@ -83,6 +87,41 @@ async function storedBinding(): Promise<Record<string, unknown>> {
       request.onerror = () => reject(request.error);
     });
   } finally { db.close(); }
+}
+
+async function storedPending(): Promise<Record<string, unknown>[]> {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = fakeIndexedDB.open(PUSH_DB_NAME, PUSH_DB_VERSION);
+    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+  });
+  try {
+    const tx = db.transaction(PUSH_PENDING_STORE, 'readonly');
+    return await new Promise<Record<string, unknown>[]>((resolve, reject) => {
+      const request = tx.objectStore(PUSH_PENDING_STORE).getAll();
+      request.onsuccess = () => resolve(request.result as Record<string, unknown>[]);
+      request.onerror = () => reject(request.error);
+    });
+  } finally { db.close(); }
+}
+
+async function mutatePushDb(run: (bindings: IDBObjectStore, pending: IDBObjectStore) => Promise<void>): Promise<void> {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = fakeIndexedDB.open(PUSH_DB_NAME, PUSH_DB_VERSION);
+    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+  });
+  try {
+    const tx = db.transaction([PUSH_BINDING_STORE, PUSH_PENDING_STORE], 'readwrite');
+    await run(tx.objectStore(PUSH_BINDING_STORE), tx.objectStore(PUSH_PENDING_STORE));
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve(); tx.onabort = () => reject(tx.error); tx.onerror = () => undefined;
+    });
+  } finally { db.close(); }
+}
+
+function idbValue<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+  });
 }
 
 function mailPage(device: Device, envelope: unknown, seq = 1): unknown {
@@ -162,8 +201,173 @@ test('content is decrypted and verified locally, counted, and cursor advances', 
   assert(!requestText.includes(base64UrlEncode(rootForEnvelope)), 'root capability reached the network request');
   const stored = await storedBinding();
   assert(stored.cursor === 1, 'durable cursor did not advance');
+  const pending = await storedPending();
+  assert(pending.length === 1, 'verified ciphertext was not handed off durably');
+  const storageText = JSON.stringify(pending);
+  assert(!storageText.includes('plaintext that must never reach fetch'), 'plaintext was persisted in IndexedDB');
+  const replayed: Array<Record<string, unknown>> = [];
+  await consumePendingPushEvents('binding-share', event => { replayed.push(event as unknown as Record<string, unknown>); },
+    { indexedDB: fakeIndexedDB });
+  assert(replayed.length === 1 && (replayed[0]!.body as Record<string, unknown>).type === 'comment_created',
+    'fragmentless replay did not decrypt and verify the pending comment');
+  assert((await storedPending()).length === 0, 'pending ciphertext was not ACK-deleted after apply');
   eventKey.fill(0); rootForEnvelope.fill(0);
   identity.signingSecret.fill(0); identity.encryptionSecret.fill(0);
+});
+
+test('forget crypto-erases the capability and pending ciphertext together', async () => {
+  await resetDb();
+  const root = new Uint8Array(32).fill(41); const eventKey = await deriveEventKey(root);
+  const identity = generateBrowserIdentity(); const device = buildRegisterDeviceBody(identity, 'owner') as Device;
+  await installBinding(new Uint8Array(root), new Uint8Array(32).fill(42), [device]);
+  const event = assembleBrowserEvent({ eventKey, signingSecret: identity.signingSecret,
+    signingPublic: identity.signingPublic, roomId: ROOM_ID, authorId: identity.participantId,
+    deviceId: identity.deviceId, createdAt: 401, expiresAt: Date.now() + 60_000,
+    nonce: new Uint8Array(24).fill(12), body: { type: 'comment_created', threadId: 'forget-me',
+      anchor: { v: 2, fileId: 'file-1', snapshotId: 'snapshot-1', baseHash: 'hash-1',
+        position: { byteRange: [0, 1], lineRange: [1, 1] } }, body: 'FORGET-STORAGE-CANARY' } });
+  await pullRememberedPushBindings({ indexedDB: fakeIndexedDB,
+    fetch: (async () => Response.json(mailPage(device, event.envelope))) as typeof fetch });
+  assert((await storedPending()).length === 1, 'test did not create pending ciphertext');
+  await forgetPushBinding('binding-share', fakeIndexedDB);
+  assert((await storedPending()).length === 0, 'forget retained pending ciphertext');
+  assert(!await hasPushBinding('binding-share', fakeIndexedDB), 'forget retained capability binding');
+  eventKey.fill(0); root.fill(0); identity.signingSecret.fill(0); identity.encryptionSecret.fill(0);
+});
+
+test('rotation during a wake cannot relabel ciphertext or advance the replacement cursor', async () => {
+  await resetDb();
+  const root = new Uint8Array(32).fill(43); const eventKey = await deriveEventKey(root);
+  const identity = generateBrowserIdentity(); const device = buildRegisterDeviceBody(identity, 'owner') as Device;
+  await installBinding(new Uint8Array(root), new Uint8Array(32).fill(44), [device]);
+  const event = assembleBrowserEvent({ eventKey, signingSecret: identity.signingSecret,
+    signingPublic: identity.signingPublic, roomId: ROOM_ID, authorId: identity.participantId,
+    deviceId: identity.deviceId, createdAt: 501, expiresAt: Date.now() + 60_000,
+    nonce: new Uint8Array(24).fill(13), body: { type: 'comment_created', threadId: 'rotation-race',
+      anchor: { v: 2, fileId: 'file-1', snapshotId: 'snapshot-1', baseHash: 'hash-1',
+        position: { byteRange: [0, 1], lineRange: [1, 1] } }, body: 'ROTATION-RACE-CANARY' } });
+  const summaries = await pullRememberedPushBindings({ indexedDB: fakeIndexedDB,
+    fetch: (async () => {
+      await mutatePushDb(async bindings => {
+        const current = await idbValue<Record<string, unknown>>(bindings.get('binding-share'));
+        bindings.put({ ...current, generation: 'U'.repeat(22), cursor: 0 });
+      });
+      return Response.json(mailPage(device, event.envelope));
+    }) as typeof fetch });
+  const current = await storedBinding();
+  assert(summaries.length === 0 && current.generation === 'U'.repeat(22) && current.epoch === 4
+    && current.roomId === ROOM_ID && current.cursor === 0,
+    'old wake advanced or relabeled the replacement binding');
+  assert((await storedPending()).length === 0, 'old ciphertext was stored under the replacement generation');
+  eventKey.fill(0); root.fill(0); identity.signingSecret.fill(0); identity.encryptionSecret.fill(0);
+});
+
+test('an old room socket cannot advance a reinstalled binding generation', async () => {
+  await resetDb();
+  const root = new Uint8Array(32).fill(49); const eventKey = await deriveEventKey(root);
+  const identity = generateBrowserIdentity(); const device = buildRegisterDeviceBody(identity, 'owner') as Device;
+  await rememberPushBinding({ bindingId: 'binding-room', kind: 'room', resourceId: ROOM_ID, roomId: ROOM_ID,
+    deviceId: DEVICE_ID, relayUrl: 'https://relay.example', protocolVersion: 3,
+    roomReadCapabilityBytes: new Uint8Array(root), readAdmissionKeyBytes: new Uint8Array(32).fill(50),
+    writeAdmissionKeyBytes: new Uint8Array(32).fill(51), fileName: 'room.md', deepLinkPath: `/review/${ROOM_ID}`,
+    ownerSigningKey: device.publicSigningKey, devices: [device] }, { indexedDB: fakeIndexedDB });
+  const event = assembleBrowserEvent({ eventKey, signingSecret: identity.signingSecret,
+    signingPublic: identity.signingPublic, roomId: ROOM_ID, authorId: identity.participantId,
+    deviceId: identity.deviceId, createdAt: 801, expiresAt: Date.now() + 60_000,
+    nonce: new Uint8Array(24).fill(16), body: { type: 'comment_created', threadId: 'room-generation-race',
+      anchor: { v: 2, fileId: 'file-1', snapshotId: 'snapshot-1', baseHash: 'hash-1',
+        position: { byteRange: [0, 1], lineRange: [1, 1] } }, body: 'ROOM-RACE-CANARY' } });
+  let socket!: WebSocketLike; let sent = false;
+  const webSocketFactory = (): WebSocketLike => {
+    socket = { readyState: 1, onopen: null, onmessage: null, onclose: null, onerror: null,
+      close: () => { socket.readyState = 3; }, send: data => {
+        if (sent || !String(data).includes('subscribe')) return; sent = true;
+        void (async () => {
+          await mutatePushDb(async bindings => {
+            const current = await idbValue<Record<string, unknown>>(bindings.get('binding-room'));
+            bindings.put({ ...current, generation: 'V'.repeat(22), cursor: 0 });
+          });
+          socket.onmessage?.({ data: JSON.stringify({ type: 'hello', serverSeq: 1,
+            policy: { mode: 'hybrid', maxPeers: 4, maxSnapshotBytes: 1_000_000, maxEventBytes: 8192,
+              maxEvents: 100, expiresAt: Date.now() + 60_000, powBits: 16, deleteEventsAfterOwnerAck: false,
+              allowBrowser: true, allowRemoteAgents: false }, devices: [device] }) });
+          socket.onmessage?.({ data: JSON.stringify({ type: 'envelope', envelope: event.envelope, serverSeq: 1 }) });
+          socket.onclose?.({ code: 1000, reason: 'done' });
+        })();
+      } };
+    queueMicrotask(() => socket.onopen?.({})); return socket;
+  };
+  await pullRememberedPushBindings({ indexedDB: fakeIndexedDB, webSocketFactory });
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = fakeIndexedDB.open(PUSH_DB_NAME, PUSH_DB_VERSION);
+    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+  });
+  const tx = db.transaction(PUSH_BINDING_STORE, 'readonly');
+  const current = await idbValue<Record<string, unknown>>(tx.objectStore(PUSH_BINDING_STORE).get('binding-room')); db.close();
+  assert(current.generation === 'V'.repeat(22) && current.cursor === 0,
+    'old room socket advanced the reinstalled binding');
+  eventKey.fill(0); root.fill(0); identity.signingSecret.fill(0); identity.encryptionSecret.fill(0);
+});
+
+test('pending handoff backpressures before cursor advance and never evicts unconsumed ciphertext', async () => {
+  await resetDb();
+  const root = new Uint8Array(32).fill(45); const eventKey = await deriveEventKey(root);
+  const identity = generateBrowserIdentity(); const device = buildRegisterDeviceBody(identity, 'owner') as Device;
+  await installBinding(new Uint8Array(root), new Uint8Array(32).fill(46), [device]);
+  const event = assembleBrowserEvent({ eventKey, signingSecret: identity.signingSecret,
+    signingPublic: identity.signingPublic, roomId: ROOM_ID, authorId: identity.participantId,
+    deviceId: identity.deviceId, createdAt: 601, expiresAt: Date.now() + 60_000,
+    nonce: new Uint8Array(24).fill(14), body: { type: 'comment_created', threadId: 'capacity',
+      anchor: { v: 2, fileId: 'file-1', snapshotId: 'snapshot-1', baseHash: 'hash-1',
+        position: { byteRange: [0, 1], lineRange: [1, 1] } }, body: 'CAPACITY-CANARY' } });
+  const pages = Array.from({ length: 64 }, (_, index) => {
+    const page = mailPage(device, event.envelope, index + 1) as { items: Record<string, unknown>[] };
+    return page.items[0]!;
+  });
+  let wake = 0;
+  const fetchImpl = (async () => {
+    wake += 1;
+    if (wake === 1) return Response.json({ items: pages, nextAfter: 64 });
+    return Response.json(mailPage(device, event.envelope, 65));
+  }) as typeof fetch;
+  await pullRememberedPushBindings({ indexedDB: fakeIndexedDB, fetch: fetchImpl });
+  assert((await storedBinding()).cursor === 64 && (await storedPending()).length === 64,
+    'first bounded wake did not durably hand off all 64 items');
+  await pullRememberedPushBindings({ indexedDB: fakeIndexedDB, fetch: fetchImpl });
+  assert((await storedBinding()).cursor === 64 && (await storedPending()).length === 64,
+    'capacity pressure advanced the cursor or evicted unconsumed ciphertext');
+  eventKey.fill(0); root.fill(0); identity.signingSecret.fill(0); identity.encryptionSecret.fill(0);
+});
+
+test('an old consumer cannot delete a new-generation record at the same sequence', async () => {
+  await resetDb();
+  const root = new Uint8Array(32).fill(47); const eventKey = await deriveEventKey(root);
+  const identity = generateBrowserIdentity(); const device = buildRegisterDeviceBody(identity, 'owner') as Device;
+  await installBinding(new Uint8Array(root), new Uint8Array(32).fill(48), [device]);
+  const event = assembleBrowserEvent({ eventKey, signingSecret: identity.signingSecret,
+    signingPublic: identity.signingPublic, roomId: ROOM_ID, authorId: identity.participantId,
+    deviceId: identity.deviceId, createdAt: 701, expiresAt: Date.now() + 60_000,
+    nonce: new Uint8Array(24).fill(15), body: { type: 'comment_created', threadId: 'delete-cas',
+      anchor: { v: 2, fileId: 'file-1', snapshotId: 'snapshot-1', baseHash: 'hash-1',
+        position: { byteRange: [0, 1], lineRange: [1, 1] } }, body: 'DELETE-CAS-CANARY' } });
+  await pullRememberedPushBindings({ indexedDB: fakeIndexedDB,
+    fetch: (async () => Response.json(mailPage(device, event.envelope))) as typeof fetch });
+  const oldPending = (await storedPending())[0]!;
+  let rotated = false;
+  await consumePendingPushEvents('binding-share', async () => {
+    await mutatePushDb(async (bindings, pending) => {
+      const current = await idbValue<Record<string, unknown>>(bindings.get('binding-share'));
+      const generation = 'T'.repeat(22);
+      bindings.put({ ...current, generation, epoch: 5, revision: 0, manifestDigest: 'S'.repeat(43), roomId: 'room-new', cursor: 1 });
+      const next = { ...oldPending, key: `binding-share:${generation}:0000000000000001:${'N'.repeat(43)}`,
+        generation, contentHash: 'N'.repeat(43), epoch: 5, roomId: 'room-new' };
+      pending.add(next); rotated = true;
+    });
+  }, { indexedDB: fakeIndexedDB });
+  const remaining = await storedPending();
+  assert(rotated && remaining.length === 1 && remaining[0]?.generation === 'T'.repeat(22),
+    'old consumer deleted the new same-sequence generation');
+  eventKey.fill(0); root.fill(0); identity.signingSecret.fill(0); identity.encryptionSecret.fill(0);
 });
 
 test('forged ciphertext is not notified but is cursor-bounded against replay DoS', async () => {

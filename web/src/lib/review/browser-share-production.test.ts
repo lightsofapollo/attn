@@ -3,14 +3,133 @@ import { deriveReadKeysV3, toCanonicalBytes } from './browser-crypto';
 import { parseAndStripShareInvite } from './browser-share';
 import { createBrowserDurableShareResolver, createShareMailboxTransport, decryptDurableShareSnapshot,
   DurableShareBrowserSessionFacade, reviewSnapshotFromDurable, subscribeToDurableShareChanges,
+  RememberedPushShareSessionFacade,
   type BrowserDurableSharePersistence } from './browser-share-production';
+import { indexedDB as fakeIndexedDB } from 'fake-indexeddb';
 import { StaleShareEpochError } from './browser-share-session';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
+import { sha256 } from '@noble/hashes/sha2.js';
+import { advancePushBindingFloor, getPushBinding, rememberPushBinding, replacePushBinding } from './browser-push-worker';
 
 function assert(value: unknown, message: string): asserts value { if (!value) throw new Error(message); }
 const secret = new Uint8Array(32).fill(7);
 const shareId = base64UrlEncode(new Uint8Array(16).fill(3));
 const inviteUrl = `https://attn.sh/s/${shareId}#key=${base64UrlEncode(secret)}`;
+
+{
+  const facade = new RememberedPushShareSessionFacade({ relayUrl: 'https://relay.example',
+    bindingId: 'missing-push-binding', indexedDB: fakeIndexedDB,
+    fetchImpl: async () => { throw new Error('absent binding must not reach relay'); } });
+  await facade.start();
+  assert(facade.getState().status === 'error' && facade.getState().error?.kind === 'invite_invalid',
+    'fragmentless push click without a local binding did not fail safely');
+  console.log('PASS fragmentless push click requires a local non-extractable binding');
+}
+
+{
+  const root = new Uint8Array(32).fill(21); const derived = deriveReadKeysV3(root);
+  const fileId = 'push-file'; const snapshotId = 'push-snapshot'; const epoch = 2;
+  const aad = toCanonicalBytes({ v: 3, purpose: 'attn durable share snapshot v3', shareId, epoch, fileId, snapshotId });
+  const plain = toCanonicalBytes({ v: 3, fileId, snapshotId, docType: 'markdown', content: '# from push' });
+  const nonce = new Uint8Array(24).fill(22); const encrypted = xchacha20poly1305(derived.snapshotKey, nonce, aad).encrypt(plain);
+  const sealed = new Uint8Array(24 + encrypted.length); sealed.set(nonce); sealed.set(encrypted, 24);
+  const hash = base64UrlEncode(sha256(sealed));
+  const ref = { fileId, snapshotId, ciphertextBytes: sealed.length, ciphertextSha256: hash, uploadedAt: 10 };
+  const manifestDigest = base64UrlEncode(sha256(toCanonicalBytes([ref])));
+  const ownerKey = base64UrlEncode(new Uint8Array(32).fill(23)); const bundleId = 'abcdefghijklmnopqrstuv';
+  const bindingId = `share_${bundleId}_push-reviewer`;
+  await rememberPushBinding({ bindingId, kind: 'share', resourceId: shareId, roomId: 'push-room', deviceId: 'push-reviewer',
+    relayUrl: 'https://relay.example', protocolVersion: 3, roomReadCapabilityBytes: new Uint8Array(root),
+    readAdmissionKeyBytes: new Uint8Array(32).fill(24), writeAdmissionKeyBytes: new Uint8Array(32).fill(25),
+    bundleId, epoch, revision: 4, manifestDigest, fileName: 'push.md', deepLinkPath: `/s/${bindingId}`, ownerSigningKey: ownerKey,
+    devices: [{ deviceId: 'owner', participantId: 'owner', publicEncryptionKey: base64UrlEncode(new Uint8Array(32).fill(26)),
+      publicSigningKey: ownerKey, client: 'attn-native', kind: 'owner', selfSignature: base64UrlEncode(new Uint8Array(64).fill(27)) }] },
+  { indexedDB: fakeIndexedDB });
+  const facade = new RememberedPushShareSessionFacade({ relayUrl: 'https://relay.example', bindingId, indexedDB: fakeIndexedDB,
+    store: { currentRoomId: null, applyEvent: () => undefined, applySnapshot: () => undefined,
+      setCurrentFile: () => undefined, setCurrentSnapshot: () => undefined },
+    fetchImpl: async (input) => String(input).includes('/snapshots/')
+      ? new Response(sealed, { headers: { 'Attn-Share-Bundle': bundleId, 'Attn-Snapshot-Id': snapshotId } })
+      : Response.json({ v: 3, shareId, ownerSigningKey: ownerKey, epoch, revision: 4, snapshots: [ref],
+          manifestDigest, bundle: { bundleId, tier: 'comment', sealedBundle: 'opaque' } }) });
+  await facade.start();
+  assert(facade.getState().status === 'connected' && facade.getState().snapshotContent === '# from push',
+    `fragmentless notification click did not recover: ${JSON.stringify(facade.getState())}`);
+  facade.close();
+  const oversizedRecord = new RememberedPushShareSessionFacade({ relayUrl: 'https://relay.example', bindingId,
+    indexedDB: fakeIndexedDB, fetchImpl: async () => new Response('{}', { headers: { 'Content-Length': String(512 * 1024 + 1) } }) });
+  await oversizedRecord.start();
+  assert(oversizedRecord.getState().status === 'error', 'oversized remembered share record was allocated or accepted');
+  const overCapRef = { ...ref, ciphertextBytes: 5 * 1024 * 1024 + 1 };
+  const overCapDigest = base64UrlEncode(sha256(toCanonicalBytes([overCapRef]))); let overCapSnapshotFetches = 0;
+  const oversizedManifest = new RememberedPushShareSessionFacade({ relayUrl: 'https://relay.example', bindingId,
+    indexedDB: fakeIndexedDB, fetchImpl: async input => {
+      if (String(input).includes('/snapshots/')) { overCapSnapshotFetches += 1; return new Response(); }
+      return Response.json({ v: 3, shareId, ownerSigningKey: ownerKey, epoch, revision: 5,
+        snapshots: [overCapRef], manifestDigest: overCapDigest, bundle: { bundleId, tier: 'comment', sealedBundle: 'opaque' } });
+    } });
+  await oversizedManifest.start();
+  assert(oversizedManifest.getState().status === 'error' && overCapSnapshotFetches === 0,
+    'over-cap manifest snapshot reached the network');
+  const largeRef = { ...ref, ciphertextBytes: 5 * 1024 * 1024,
+    ciphertextSha256: base64UrlEncode(new Uint8Array(32).fill(33)) };
+  const largeDigest = base64UrlEncode(sha256(toCanonicalBytes([largeRef]))); let streamCancelled = false;
+  const oversizedSnapshot = new RememberedPushShareSessionFacade({ relayUrl: 'https://relay.example', bindingId,
+    indexedDB: fakeIndexedDB, fetchImpl: async input => String(input).includes('/snapshots/')
+      ? new Response(new ReadableStream<Uint8Array>({ start(controller) {
+          controller.enqueue(new Uint8Array(4 * 1024 * 1024)); controller.enqueue(new Uint8Array(2 * 1024 * 1024));
+        }, cancel() { streamCancelled = true; } }),
+        { headers: { 'Attn-Share-Bundle': bundleId, 'Attn-Snapshot-Id': snapshotId } })
+      : Response.json({ v: 3, shareId, ownerSigningKey: ownerKey, epoch, revision: 5,
+          snapshots: [largeRef], manifestDigest: largeDigest, bundle: { bundleId, tier: 'comment', sealedBundle: 'opaque' } }) });
+  await oversizedSnapshot.start();
+  assert(oversizedSnapshot.getState().status === 'error' && streamCancelled,
+    'oversized snapshot stream was not cancelled at the bound');
+  let mismatchedFetches = 0;
+  const mismatched = new RememberedPushShareSessionFacade({ relayUrl: 'https://other-relay.example', bindingId,
+    indexedDB: fakeIndexedDB, fetchImpl: async () => { mismatchedFetches += 1; return new Response(); } });
+  await mismatched.start();
+  assert(mismatched.getState().status === 'error' && mismatchedFetches === 0,
+    'remembered admission was sent to a mismatched configured relay');
+  const rollback = new RememberedPushShareSessionFacade({ relayUrl: 'https://relay.example', bindingId,
+    indexedDB: fakeIndexedDB, fetchImpl: async () => Response.json({ v: 3, shareId, ownerSigningKey: ownerKey,
+      epoch, revision: 3, snapshots: [ref], manifestDigest, bundle: { bundleId, tier: 'comment', sealedBundle: 'opaque' } }) });
+  await rollback.start();
+  assert(rollback.getState().status === 'error', 'remembered revision rollback was accepted');
+  const oldFloor = await getPushBinding(bindingId, fakeIndexedDB);
+  assert(oldFloor?.revision === 4, 'test did not capture the rev4 floor');
+  const advancedDigest = base64UrlEncode(new Uint8Array(32).fill(28));
+  await replacePushBinding({ bindingId, kind: 'share', resourceId: shareId, roomId: 'push-room', deviceId: 'push-reviewer',
+    relayUrl: 'https://relay.example', protocolVersion: 3, roomReadCapabilityBytes: new Uint8Array(32).fill(21),
+    readAdmissionKeyBytes: new Uint8Array(32).fill(24), writeAdmissionKeyBytes: new Uint8Array(32).fill(25),
+    bundleId, epoch, revision: 5, manifestDigest: advancedDigest, fileName: 'push.md', deepLinkPath: `/s/${bindingId}`,
+    ownerSigningKey: ownerKey, devices: oldFloor.devices }, { indexedDB: fakeIndexedDB });
+  let staleAdvanceRejected = false;
+  try { await advancePushBindingFloor(bindingId, { expectedEpoch: epoch, expectedBundleId: bundleId,
+    expectedRoomId: 'push-room', expectedRelayUrl: 'https://relay.example', expectedRevision: 4,
+    expectedManifestDigest: manifestDigest, candidateRevision: 4, candidateManifestDigest: manifestDigest }, fakeIndexedDB); }
+  catch { staleAdvanceRejected = true; }
+  assert(staleAdvanceRejected && (await getPushBinding(bindingId, fakeIndexedDB))?.revision === 5,
+    'cold rev4 completion overwrote a concurrent rev5 rotation');
+  const epochDigest = base64UrlEncode(new Uint8Array(32).fill(29));
+  await replacePushBinding({ bindingId, kind: 'share', resourceId: shareId, roomId: 'push-room-new', deviceId: 'push-reviewer',
+    relayUrl: 'https://relay.example', protocolVersion: 3, roomReadCapabilityBytes: new Uint8Array(32).fill(30),
+    readAdmissionKeyBytes: new Uint8Array(32).fill(31), writeAdmissionKeyBytes: new Uint8Array(32).fill(32),
+    bundleId, epoch: 3, revision: 1, manifestDigest: epochDigest, fileName: 'push.md', deepLinkPath: `/s/${bindingId}`,
+    ownerSigningKey: ownerKey, devices: oldFloor.devices }, { indexedDB: fakeIndexedDB });
+  let oldEpochRejected = false;
+  try { await advancePushBindingFloor(bindingId, { expectedEpoch: epoch, expectedBundleId: bundleId,
+    expectedRoomId: 'push-room', expectedRelayUrl: 'https://relay.example', expectedRevision: 4,
+    expectedManifestDigest: manifestDigest, candidateRevision: 5, candidateManifestDigest: advancedDigest }, fakeIndexedDB); }
+  catch { oldEpochRejected = true; }
+  assert(oldEpochRejected && (await getPushBinding(bindingId, fakeIndexedDB))?.epoch === 3,
+    'old-epoch cold resume overwrote a new-epoch binding');
+  aad.fill(0); plain.fill(0); sealed.fill(0); root.fill(0);
+  console.log('PASS fragmentless push click recovers without a URL bearer');
+  console.log('PASS fragmentless record, manifest, and snapshot reads are allocation-bounded');
+  console.log('PASS fragmentless resume pins relay origin and revision/manifest floor');
+  console.log('PASS cold-resume floor CAS rejects concurrent revision and epoch rotations');
+}
 
 {
   const mapped = reviewSnapshotFromDurable({ fileId: 'file-a', snapshotId: 'snapshot-a', docType: 'markdown', content: '# x' }, 'resolved-room');

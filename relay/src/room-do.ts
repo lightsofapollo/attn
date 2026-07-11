@@ -1916,7 +1916,8 @@ export class RoomDO extends DurableObject<Env> {
     let parsedSubscription: ReturnType<typeof parsePushSubscriptionInput>;
     if (request.method === "POST") {
       try {
-        parsedSubscription = parsePushSubscriptionInput(JSON.parse(new TextDecoder().decode(bodyBytes)));
+        parsedSubscription = parsePushSubscriptionInput(JSON.parse(new TextDecoder().decode(bodyBytes)), Date.now(),
+          this.env.TEST_PUSH_ENDPOINT_ORIGIN);
       } catch {
         parsedSubscription = undefined;
       }

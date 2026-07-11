@@ -1,6 +1,7 @@
 import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
+import { canonicalize, type CanonicalValue } from "../../src/canonical";
 import type { Env } from "../../src/env";
 import { deleteRoomBlobs, shareArtifactObjectKey, shareArtifactPrefix } from "../../src/r2";
 import { generateEd25519Keypair, ownerSignatureHeader } from "../helpers/owner-sig";
@@ -270,7 +271,7 @@ describe("durable v3 shares", () => {
     const snapshotRef = await snapshotUpload.json() as Record<string, unknown>;
     const expectedManifestDigest = base64UrlEncode(new Uint8Array(await crypto.subtle.digest(
       "SHA-256",
-      new TextEncoder().encode(JSON.stringify([snapshotRef])),
+      new TextEncoder().encode(canonicalize([snapshotRef as CanonicalValue])),
     )));
     const revised = await SELF.fetch(url, { headers: {
       "Attn-Share-Bundle": bundles[0].bundleId,

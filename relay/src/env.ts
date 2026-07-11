@@ -73,4 +73,7 @@ export interface Env {
 
   /** Private P-256 JWK. Configure only through `wrangler secret put`. */
   VAPID_PRIVATE_JWK?: string;
+
+  /** Exact loopback HTTP origin allowed only by local Web Push E2E. */
+  TEST_PUSH_ENDPOINT_ORIGIN?: string;
 }

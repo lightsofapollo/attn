@@ -7,6 +7,7 @@ import { entryHtmlPath, hostedEntryForPath } from './src/lib/hosted/routes';
 
 const webRoot = fileURLToPath(new URL('.', import.meta.url));
 const hostedRoot = path.join(webRoot, 'hosted');
+const pushE2e = process.env.ATTN_PUSH_E2E === '1';
 
 // Mirror the Cloudflare worker's deep-path rewrites (worker.ts) in dev and
 // preview so `/app/w/:workspaceId/:filePath` and `/review/:roomId` resolve to
@@ -99,6 +100,7 @@ export default defineConfig({
         landing: path.join(hostedRoot, 'index.html'),
         app: path.join(hostedRoot, 'app/index.html'),
         review: path.join(hostedRoot, 'review/index.html'),
+        ...(pushE2e ? { pushE2e: path.join(hostedRoot, 'push-e2e/index.html') } : {}),
       },
     },
   },

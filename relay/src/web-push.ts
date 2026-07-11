@@ -47,11 +47,11 @@ export function pushLastSentKey(deviceId: string): string {
   return `${PUSH_LAST_SENT_PREFIX}${deviceId}`;
 }
 
-export function parsePushSubscriptionInput(value: unknown, now = Date.now()): PushSubscriptionInput | undefined {
+export function parsePushSubscriptionInput(value: unknown, now = Date.now(), testEndpointOrigin?: string): PushSubscriptionInput | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const candidate = value as Record<string, unknown>;
   if (!hasExactKeys(candidate, ["endpoint", "expirationTime", "keys", "v"]) || candidate.v !== 3) return undefined;
-  if (typeof candidate.endpoint !== "string" || !isAllowedPushEndpoint(candidate.endpoint)) return undefined;
+  if (typeof candidate.endpoint !== "string" || !isAllowedPushEndpoint(candidate.endpoint, testEndpointOrigin)) return undefined;
   if (candidate.expirationTime !== null && (
     typeof candidate.expirationTime !== "number"
     || !Number.isSafeInteger(candidate.expirationTime)
@@ -90,7 +90,7 @@ export function publicPushSubscription(value: StoredPushSubscription): PublicPus
  * was pinged.
  */
 export async function sendPayloadlessPush(env: Env, endpoint: string, now = Date.now()): Promise<PushSendResult> {
-  if (!isAllowedPushEndpoint(endpoint)) return "retained";
+  if (!isAllowedPushEndpoint(endpoint, env.TEST_PUSH_ENDPOINT_ORIGIN)) return "retained";
   const config = await pushPublicConfig(env);
   if (!config.enabled || config.vapidPublicKey === undefined || env.VAPID_PRIVATE_JWK === undefined) return "disabled";
 
@@ -151,18 +151,29 @@ function isCanonicalP256dh(value: unknown): value is string {
   return base64UrlDecode(value)[0] === 0x04;
 }
 
-function isAllowedPushEndpoint(value: string): boolean {
+function isAllowedPushEndpoint(value: string, testEndpointOrigin?: string): boolean {
   if (value.length < 1 || value.length > MAX_ENDPOINT_CHARS) return false;
   try {
     const url = new URL(value);
-    return url.protocol === "https:"
+    const localTest = testEndpointOrigin !== undefined && isCanonicalLoopbackTestOrigin(testEndpointOrigin)
+      && url.protocol === "http:" && url.origin === testEndpointOrigin;
+    return (url.protocol === "https:"
       && url.username === ""
       && url.password === ""
       && url.hash === ""
-      && ALLOWED_PUSH_ENDPOINT_HOSTS.some(host => url.hostname === host || url.hostname.endsWith(`.${host}`));
+      && ALLOWED_PUSH_ENDPOINT_HOSTS.some(host => url.hostname === host || url.hostname.endsWith(`.${host}`)))
+      || (localTest && url.username === "" && url.password === "" && url.hash === "");
   } catch {
     return false;
   }
+}
+
+function isCanonicalLoopbackTestOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.origin === value && url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost")
+      && url.username === "" && url.password === "" && url.pathname === "/";
+  } catch { return false; }
 }
 
 function isValidVapidSubject(value: unknown): value is string {

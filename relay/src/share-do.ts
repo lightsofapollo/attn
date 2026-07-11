@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { base64UrlDecode, base64UrlEncode, canonicalRequest, constantTimeEquals, verifyAdmissionV3 } from "./admission";
 import { INTERNAL_EDGE_ORIGIN_HEADER, parseEdgeOriginContext } from "./browser-origin";
+import { canonicalize } from "./canonical";
 import type { Env } from "./env";
 import { encodeOpaqueSegment } from "./opaque-key";
 import { verifyOwnerSignature } from "./owner-sig";
@@ -168,7 +169,7 @@ export class ShareDO extends DurableObject<Env> {
       .sort((left, right) => left.fileId.localeCompare(right.fileId));
     return base64UrlEncode(new Uint8Array(await crypto.subtle.digest(
       "SHA-256",
-      new TextEncoder().encode(JSON.stringify(canonical)),
+      new TextEncoder().encode(canonicalize(canonical)),
     )));
   }
 
@@ -1057,7 +1058,7 @@ export class ShareDO extends DurableObject<Env> {
     } catch {
       return jsonError(400, "ATTN_BODY_INVALID", "push subscription body is invalid JSON");
     }
-    const parsed = parsePushSubscriptionInput(parsedJson);
+    const parsed = parsePushSubscriptionInput(parsedJson, Date.now(), this.env.TEST_PUSH_ENDPOINT_ORIGIN);
     if (parsed === undefined) return jsonError(400, "ATTN_BODY_INVALID", "push subscription body is invalid");
     if (existing !== undefined && existing.bundleId !== selected.bundleId) {
       return jsonError(409, "ATTN_PUSH_SUBSCRIPTION_BINDING_CONFLICT", "push device is bound to another share bundle");

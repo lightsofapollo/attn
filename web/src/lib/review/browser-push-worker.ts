@@ -8,6 +8,7 @@ import {
   INFO_SNAPSHOT,
   INFO_SNAPSHOT_V3,
   base64UrlEncode,
+  toCanonicalBytes,
 } from './browser-crypto';
 import {
   BrowserWsClient,
@@ -16,12 +17,15 @@ import {
   type MailboxEnvelope,
   type WebSocketLike,
 } from './browser-ws';
+import type { ReviewEvent } from '../types';
 
 export const PUSH_DB_NAME = 'attn-browser-push';
-export const PUSH_DB_VERSION = 1;
+export const PUSH_DB_VERSION = 2;
 export const PUSH_BINDING_STORE = 'bindings';
+export const PUSH_PENDING_STORE = 'pending_envelopes';
 export const MAX_PUSH_BINDINGS_PER_WAKE = 8;
 export const MAX_ENVELOPES_PER_PULL = 64;
+export const MAX_PENDING_PUSH_ITEMS = 64;
 const MAX_SHARE_RESPONSE_BYTES = 512 * 1024;
 const ROOM_PULL_TIMEOUT_MS = 6_000;
 const ROOM_QUIET_MS = 200;
@@ -44,6 +48,8 @@ export interface RememberPushBindingInput {
   writeAdmissionKeyBytes?: Uint8Array;
   bundleId?: string;
   epoch?: number;
+  revision?: number;
+  manifestDigest?: string;
   fileName: string;
   deepLinkPath: string;
   /** Owner key pinned by the authenticated invite/capability bundle. */
@@ -53,6 +59,8 @@ export interface RememberPushBindingInput {
 
 export interface PushBindingRecord {
   bindingId: string;
+  /** Random persisted CAS token; changes on every capability replacement. */
+  generation: string;
   kind: PushBindingKind;
   resourceId: string;
   roomId: string;
@@ -65,6 +73,8 @@ export interface PushBindingRecord {
   writeAdmissionKey?: CryptoKey;
   bundleId?: string;
   epoch?: number;
+  revision?: number;
+  manifestDigest?: string;
   fileName: string;
   deepLinkPath: string;
   ownerSigningKey: string;
@@ -83,6 +93,20 @@ export interface PushNotificationSummary {
   verdicts: number;
 }
 
+interface PendingPushEnvelopeRecord {
+  key: string;
+  bindingId: string;
+  bundleId: string;
+  epoch: number;
+  roomId: string;
+  generation: string;
+  contentHash: string;
+  seq: number;
+  deviceRegistration: Device;
+  envelopes: MailboxEnvelope[];
+  storedAt: number;
+}
+
 export interface PushWorkerDependencies {
   indexedDB?: IDBFactory;
   crypto?: Crypto;
@@ -98,7 +122,19 @@ export interface PushWorkerDependencies {
 export async function rememberPushBinding(
   input: RememberPushBindingInput,
   dependencies: Pick<PushWorkerDependencies, 'indexedDB' | 'crypto' | 'now'> = {},
-): Promise<void> {
+): Promise<void> { await storePushBinding(input, dependencies, false); }
+
+/** Atomically replaces a logical binding and returns its previous good record for rollback. */
+export async function replacePushBinding(
+  input: RememberPushBindingInput,
+  dependencies: Pick<PushWorkerDependencies, 'indexedDB' | 'crypto' | 'now'> = {},
+): Promise<PushBindingRecord | null> { return storePushBinding(input, dependencies, true); }
+
+async function storePushBinding(
+  input: RememberPushBindingInput,
+  dependencies: Pick<PushWorkerDependencies, 'indexedDB' | 'crypto' | 'now'>,
+  replace: boolean,
+): Promise<PushBindingRecord | null> {
   validateRememberInput(input);
   const cryptoImpl = dependencies.crypto ?? globalThis.crypto;
   if (!cryptoImpl?.subtle) throw new Error('WebCrypto is unavailable');
@@ -118,8 +154,13 @@ export async function rememberPushBinding(
     const tx = db.transaction(PUSH_BINDING_STORE, 'readwrite');
     // Never reset a durable cursor by silently replacing a remembered
     // capability. Rotation is an explicit forget + remember operation.
-    tx.objectStore(PUSH_BINDING_STORE).add({
+    const store = tx.objectStore(PUSH_BINDING_STORE);
+    const previous = replace ? await requestValue<PushBindingRecord | undefined>(store.get(input.bindingId)) : undefined;
+    const generationBytes = cryptoImpl.getRandomValues(new Uint8Array(16));
+    const generation = base64UrlEncode(generationBytes); generationBytes.fill(0);
+    const record = {
       bindingId: input.bindingId,
+      generation,
       kind: input.kind,
       resourceId: input.resourceId,
       roomId: input.roomId,
@@ -131,6 +172,8 @@ export async function rememberPushBinding(
       ...(writeAdmissionKey === undefined ? {} : { writeAdmissionKey }),
       ...(input.bundleId === undefined ? {} : { bundleId: input.bundleId }),
       ...(input.epoch === undefined ? {} : { epoch: input.epoch }),
+      ...(input.revision === undefined ? {} : { revision: input.revision }),
+      ...(input.manifestDigest === undefined ? {} : { manifestDigest: input.manifestDigest }),
       fileName: input.fileName,
       deepLinkPath: input.deepLinkPath,
       ownerSigningKey: input.ownerSigningKey,
@@ -138,8 +181,10 @@ export async function rememberPushBinding(
       attestedSigningKeyIds: [],
       cursor: 0,
       updatedAt: (dependencies.now ?? Date.now)(),
-    } satisfies PushBindingRecord);
+    } satisfies PushBindingRecord;
+    if (replace) store.put(record); else store.add(record);
     await transactionDone(tx);
+    return previous ?? null;
   } finally {
     rootBytes.fill(0);
     readBytes.fill(0);
@@ -151,6 +196,47 @@ export async function rememberPushBinding(
   }
 }
 
+export async function restorePushBinding(
+  bindingId: string,
+  previous: PushBindingRecord | null,
+  indexedDBImpl: IDBFactory = globalThis.indexedDB,
+): Promise<void> {
+  const db = await openPushDatabase(indexedDBImpl);
+  try {
+    const tx = db.transaction(PUSH_BINDING_STORE, 'readwrite');
+    const store = tx.objectStore(PUSH_BINDING_STORE);
+    if (previous) store.put(previous); else store.delete(bindingId);
+    await transactionDone(tx);
+  } finally { db.close(); }
+}
+
+export async function advancePushBindingFloor(
+  bindingId: string,
+  input: {
+    expectedEpoch: number; expectedBundleId: string; expectedRoomId: string; expectedRelayUrl: string;
+    expectedRevision: number; expectedManifestDigest: string;
+    candidateRevision: number; candidateManifestDigest: string;
+  },
+  indexedDBImpl: IDBFactory = globalThis.indexedDB,
+): Promise<void> {
+  const db = await openPushDatabase(indexedDBImpl);
+  try {
+    const tx = db.transaction(PUSH_BINDING_STORE, 'readwrite'); const store = tx.objectStore(PUSH_BINDING_STORE);
+    const current = await requestValue<PushBindingRecord | undefined>(store.get(bindingId));
+    if (!current) { tx.abort(); throw new Error('push binding disappeared'); }
+    const identityMatches = current.epoch === input.expectedEpoch && current.bundleId === input.expectedBundleId &&
+      current.roomId === input.expectedRoomId && current.relayUrl === input.expectedRelayUrl;
+    const alreadyCandidate = current.revision === input.candidateRevision && current.manifestDigest === input.candidateManifestDigest;
+    const exactExpected = current.revision === input.expectedRevision && current.manifestDigest === input.expectedManifestDigest;
+    if (!identityMatches || (!alreadyCandidate && !exactExpected) || input.candidateRevision < input.expectedRevision ||
+      (input.candidateRevision === input.expectedRevision && input.candidateManifestDigest !== input.expectedManifestDigest)) {
+      tx.abort(); throw new Error('push binding rollback floor rejected candidate');
+    }
+    if (!alreadyCandidate) store.put({ ...current, revision: input.candidateRevision, manifestDigest: input.candidateManifestDigest });
+    await transactionDone(tx);
+  } finally { db.close(); }
+}
+
 export async function forgetPushBinding(
   bindingId: string,
   indexedDBImpl: IDBFactory = globalThis.indexedDB,
@@ -158,9 +244,147 @@ export async function forgetPushBinding(
   requireId(bindingId, 'bindingId');
   const db = await openPushDatabase(indexedDBImpl);
   try {
-    const tx = db.transaction(PUSH_BINDING_STORE, 'readwrite');
+    const tx = db.transaction([PUSH_BINDING_STORE, PUSH_PENDING_STORE], 'readwrite');
     tx.objectStore(PUSH_BINDING_STORE).delete(bindingId);
+    await deletePendingForBinding(tx.objectStore(PUSH_PENDING_STORE), bindingId);
     await transactionDone(tx);
+  } finally {
+    db.close();
+  }
+}
+
+/** Atomically erase one binding and report how many bindings still share the origin subscription. */
+export async function forgetPushBindingAndCount(
+  bindingId: string,
+  indexedDBImpl: IDBFactory = globalThis.indexedDB,
+): Promise<number> {
+  requireId(bindingId, 'bindingId');
+  const db = await openPushDatabase(indexedDBImpl);
+  try {
+    const tx = db.transaction([PUSH_BINDING_STORE, PUSH_PENDING_STORE], 'readwrite');
+    const store = tx.objectStore(PUSH_BINDING_STORE);
+    store.delete(bindingId);
+    await deletePendingForBinding(tx.objectStore(PUSH_PENDING_STORE), bindingId);
+    const remaining = await requestValue<number>(store.count());
+    await transactionDone(tx);
+    return remaining;
+  } finally { db.close(); }
+}
+
+/** Returns structured-cloned non-extractable keys; raw capability bytes never leave WebCrypto. */
+export async function getPushBinding(
+  bindingId: string,
+  indexedDBImpl: IDBFactory = globalThis.indexedDB,
+): Promise<PushBindingRecord | null> {
+  requireId(bindingId, 'bindingId');
+  const db = await openPushDatabase(indexedDBImpl);
+  try {
+    const tx = db.transaction(PUSH_BINDING_STORE, 'readonly');
+    const value = await requestValue<PushBindingRecord | undefined>(tx.objectStore(PUSH_BINDING_STORE).get(bindingId));
+    await transactionDone(tx);
+    return value && isValidStoredBinding(value) ? value : null;
+  } finally { db.close(); }
+}
+
+/**
+ * Replays worker-verified ciphertext after a fragmentless notification click.
+ * Plaintext exists only for the duration of `onEvent`; the IndexedDB handoff
+ * contains the exact encrypted mailbox item and is deleted only after apply.
+ */
+export async function consumePendingPushEvents(
+  bindingId: string,
+  onEvent: (event: ReviewEvent) => void | Promise<void>,
+  dependencies: Pick<PushWorkerDependencies, 'indexedDB' | 'crypto' | 'now'> = {},
+): Promise<number> {
+  requireId(bindingId, 'bindingId');
+  const db = await openPushDatabase(dependencies.indexedDB ?? globalThis.indexedDB);
+  try {
+    const binding = await readBinding(db, bindingId);
+    if (!binding || !isValidStoredBinding(binding)) return 0;
+    const allPending = await readPendingForBinding(db, bindingId);
+    const pending: PendingPushEnvelopeRecord[] = [];
+    const generation = pendingGeneration(binding);
+    for (const item of allPending) {
+      if (item.bundleId === binding.bundleId && item.epoch === binding.epoch && item.roomId === binding.roomId
+        && item.generation === generation) pending.push(item);
+      else await deletePendingRecord(db, item);
+    }
+    if (pending.length === 0) return 0;
+    const cryptoImpl = dependencies.crypto ?? globalThis.crypto;
+    const [eventKey, snapshotKey, signalingKey] = await deriveRoomKeys(binding, cryptoImpl);
+    let applied = 0;
+    const client = new BrowserWsClient({
+      roomId: binding.roomId,
+      localDeviceId: binding.deviceId,
+      url: 'wss://invalid.local/',
+      subprotocol: 'attn.v3, read-hmac.invalid',
+      afterSeq: 0,
+      eventKey,
+      snapshotKey,
+      signalingKey,
+      initialDevices: new Map(binding.devices.map((device, index) => [`stored-${index}`, device])),
+      initialAttestedSigningKeyIds: binding.attestedSigningKeyIds,
+      callbacks: { onEnvelope: async decoded => {
+        try {
+          const event = parseVerifiedEvent(decoded.envelope, decoded.plaintext);
+          if (event) { await onEvent(event); applied += 1; }
+        } finally { decoded.plaintext.fill(0); }
+      } },
+    });
+    try {
+      for (const item of pending) {
+        client.mergeDevices([item.deviceRegistration]);
+        for (const envelope of item.envelopes) await client.replayEnvelope(envelope, item.seq);
+        await deletePendingRecord(db, item);
+      }
+      return applied;
+    } finally {
+      client.close(); eventKey.fill(0); snapshotKey.fill(0); signalingKey.fill(0);
+    }
+  } finally { db.close(); }
+}
+
+export async function pushBindingAdmissionHeader(
+  binding: PushBindingRecord,
+  scope: 'read' | 'write',
+  method: string,
+  path: string,
+  query = new URLSearchParams(),
+  body = new Uint8Array(),
+  cryptoImpl: Crypto = globalThis.crypto,
+): Promise<string> {
+  const key = scope === 'read' ? binding.readAdmissionKey : binding.writeAdmissionKey;
+  if (!key) throw new Error('push binding is not writable');
+  validateCryptoKey(key, 'HMAC', 'sign');
+  const canonical = await canonicalRequest(method, path, query, body, cryptoImpl);
+  try {
+    const mac = new Uint8Array(await cryptoImpl.subtle.sign('HMAC', key, ownedBuffer(canonical)));
+    try { return `v3.${scope}.${base64UrlEncode(mac)}`; } finally { mac.fill(0); }
+  } finally { canonical.fill(0); }
+}
+
+export async function derivePushBindingSnapshotKey(
+  binding: PushBindingRecord,
+  cryptoImpl: Crypto = globalThis.crypto,
+): Promise<Uint8Array> {
+  if (binding.protocolVersion !== 3) throw new Error('durable share push binding must use v3');
+  return deriveBits(cryptoImpl, binding.roomReadCapability, INFO_SNAPSHOT_V3);
+}
+
+/** Read-only consent-state probe. It never exports or clones stored keys. */
+export async function hasPushBinding(
+  bindingId: string,
+  indexedDBImpl: IDBFactory = globalThis.indexedDB,
+): Promise<boolean> {
+  requireId(bindingId, 'bindingId');
+  const db = await openPushDatabase(indexedDBImpl);
+  try {
+    const tx = db.transaction(PUSH_BINDING_STORE, 'readonly');
+    const value = await requestValue<PushBindingRecord | undefined>(
+      tx.objectStore(PUSH_BINDING_STORE).get(bindingId),
+    );
+    await transactionDone(tx);
+    return value !== undefined;
   } finally {
     db.close();
   }
@@ -251,6 +475,7 @@ async function pullRoomBinding(
   let quietTimer: ReturnType<typeof setTimeout> | undefined;
   let hardTimer: ReturnType<typeof setTimeout> | undefined;
   let settled = false;
+  let expectedCursor = binding.cursor;
   const done = new Promise<void>((resolve) => {
     const finish = (): void => {
       if (settled) return;
@@ -282,8 +507,9 @@ async function pullRoomBinding(
         onEnvelope: async (decoded) => {
           try {
             countEventPlaintext(decoded.envelope, decoded.plaintext, summary);
-            await advanceState(db, binding.bindingId, decoded.serverSeq,
+            await advanceState(db, binding, expectedCursor, decoded.serverSeq,
               client?.getAttestedSigningKeyIds() ?? [], dependencies.now ?? Date.now);
+            expectedCursor = decoded.serverSeq;
             frames += 1;
           } finally {
             decoded.plaintext.fill(0);
@@ -348,12 +574,17 @@ async function pullShareBinding(
   });
   try {
     let operations = 0;
+    let expectedCursor = binding.cursor;
+    const generation = pendingGeneration(binding);
     for (const item of page) {
       if (operations + item.envelopes.length > MAX_ENVELOPES_PER_PULL) break;
       client.mergeDevices([item.deviceRegistration]);
       for (const envelope of item.envelopes) await client.replayEnvelope(envelope, item.seq);
       operations += item.envelopes.length;
-      await advanceState(db, binding.bindingId, item.seq, client.getAttestedSigningKeyIds(), dependencies.now ?? Date.now);
+      const contentHash = await pendingContentHash(item, cryptoImpl);
+      await advanceShareState(db, binding, expectedCursor, generation, contentHash, item,
+        client.getAttestedSigningKeyIds(), dependencies.now ?? Date.now);
+      expectedCursor = item.seq;
     }
     return summary;
   } finally {
@@ -400,16 +631,24 @@ function countEventPlaintext(
   plaintext: Uint8Array,
   summary: PushNotificationSummary,
 ): void {
-  if (envelope.kind !== 'event' || plaintext.byteLength > 256 * 1024) return;
-  let value: unknown;
-  try { value = JSON.parse(new TextDecoder().decode(plaintext)); } catch { return; }
-  if (!isRecord(value) || !isRecord(value.body) || typeof value.body.type !== 'string') return;
+  const value = parseVerifiedEvent(envelope, plaintext);
+  if (!value) return;
   switch (value.body.type) {
     case 'comment_created': summary.comments += 1; break;
     case 'suggestion_created': summary.suggestions += 1; break;
     case 'suggestion_accepted':
     case 'suggestion_rejected': summary.verdicts += 1; break;
   }
+}
+
+function parseVerifiedEvent(envelope: MailboxEnvelope, plaintext: Uint8Array): ReviewEvent | null {
+  if (envelope.kind !== 'event' || plaintext.byteLength > 256 * 1024) return null;
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder().decode(plaintext)); } catch { return null; }
+  if (!isRecord(value) || !isRecord(value.meta) || !isRecord(value.body) || !isRecord(value.auth)
+    || typeof value.meta.eventId !== 'string' || typeof value.meta.roomId !== 'string'
+    || typeof value.body.type !== 'string') return null;
+  return value as unknown as ReviewEvent;
 }
 
 async function deriveRoomKeys(binding: PushBindingRecord, cryptoImpl: Crypto): Promise<[Uint8Array, Uint8Array, Uint8Array]> {
@@ -507,7 +746,8 @@ async function readBoundedBody(response: Response, maxBytes: number): Promise<Ui
 
 async function advanceState(
   db: IDBDatabase,
-  bindingId: string,
+  expected: PushBindingRecord,
+  expectedCursor: number,
   candidate: number,
   attestedSigningKeyIds: readonly string[],
   now: () => number,
@@ -515,10 +755,50 @@ async function advanceState(
   if (!Number.isSafeInteger(candidate) || candidate < 1) throw new Error('push cursor is invalid');
   const tx = db.transaction(PUSH_BINDING_STORE, 'readwrite');
   const store = tx.objectStore(PUSH_BINDING_STORE);
-  const record = await requestValue<PushBindingRecord | undefined>(store.get(bindingId));
+  const record = await requestValue<PushBindingRecord | undefined>(store.get(expected.bindingId));
   if (!record) { tx.abort(); throw new Error('push binding disappeared'); }
+  if (!samePushBindingGeneration(record, expected) || record.cursor !== expectedCursor) {
+    tx.abort(); throw new Error('push binding changed during room wake');
+  }
   const attestations = [...new Set(attestedSigningKeyIds)].filter(value => /^[A-Za-z0-9_-]{43}$/u.test(value)).sort();
   if (candidate > record.cursor) store.put({ ...record, cursor: candidate, attestedSigningKeyIds: attestations, updatedAt: now() });
+  await transactionDone(tx);
+}
+
+async function advanceShareState(
+  db: IDBDatabase,
+  expected: PushBindingRecord,
+  expectedCursor: number,
+  generation: string,
+  contentHash: string,
+  item: { seq: number; deviceRegistration: Device; envelopes: MailboxEnvelope[] },
+  attestedSigningKeyIds: readonly string[],
+  now: () => number,
+): Promise<void> {
+  if (!Number.isSafeInteger(item.seq) || item.seq < 1) throw new Error('push cursor is invalid');
+  const tx = db.transaction([PUSH_BINDING_STORE, PUSH_PENDING_STORE], 'readwrite');
+  const bindings = tx.objectStore(PUSH_BINDING_STORE);
+  const pendingStore = tx.objectStore(PUSH_PENDING_STORE);
+  const record = await requestValue<PushBindingRecord | undefined>(bindings.get(expected.bindingId));
+  if (!record) { tx.abort(); throw new Error('push binding disappeared'); }
+  if (!samePushBindingGeneration(record, expected) || record.cursor !== expectedCursor || pendingGeneration(record) !== generation) {
+    tx.abort(); throw new Error('push binding changed during wake');
+  }
+  if (item.seq > record.cursor) {
+    const existing = (await requestValue<PendingPushEnvelopeRecord[]>(pendingStore.getAll()))
+      .filter(value => value.bindingId === expected.bindingId);
+    if (existing.length >= MAX_PENDING_PUSH_ITEMS) {
+      tx.abort(); throw new Error('push pending handoff is full');
+    }
+    const attestations = [...new Set(attestedSigningKeyIds)].filter(value => /^[A-Za-z0-9_-]{43}$/u.test(value)).sort();
+    bindings.put({ ...record, cursor: item.seq, attestedSigningKeyIds: attestations, updatedAt: now() });
+    const key = `${expected.bindingId}:${generation}:${String(item.seq).padStart(16, '0')}:${contentHash}`;
+    if (!record.bundleId || record.epoch === undefined) { tx.abort(); throw new Error('share push binding is incomplete'); }
+    pendingStore.add({ key, bindingId: expected.bindingId, bundleId: record.bundleId, epoch: record.epoch, roomId: record.roomId,
+      generation, contentHash, seq: item.seq,
+      deviceRegistration: structuredClone(item.deviceRegistration), envelopes: structuredClone(item.envelopes),
+      storedAt: now() } satisfies PendingPushEnvelopeRecord);
+  }
   await transactionDone(tx);
 }
 
@@ -537,6 +817,36 @@ async function readAllBindings(db: IDBDatabase): Promise<PushBindingRecord[]> {
   return records;
 }
 
+async function readBinding(db: IDBDatabase, bindingId: string): Promise<PushBindingRecord | undefined> {
+  const tx = db.transaction(PUSH_BINDING_STORE, 'readonly');
+  const value = await requestValue<PushBindingRecord | undefined>(tx.objectStore(PUSH_BINDING_STORE).get(bindingId));
+  await transactionDone(tx);
+  return value;
+}
+
+async function readPendingForBinding(db: IDBDatabase, bindingId: string): Promise<PendingPushEnvelopeRecord[]> {
+  const tx = db.transaction(PUSH_PENDING_STORE, 'readonly');
+  const values = await requestValue<PendingPushEnvelopeRecord[]>(tx.objectStore(PUSH_PENDING_STORE).getAll());
+  await transactionDone(tx);
+  return values.filter(value => value.bindingId === bindingId)
+    .sort((a, b) => a.seq - b.seq || a.key.localeCompare(b.key))
+    .slice(0, MAX_PENDING_PUSH_ITEMS);
+}
+
+async function deletePendingRecord(db: IDBDatabase, expected: PendingPushEnvelopeRecord): Promise<void> {
+  const tx = db.transaction(PUSH_PENDING_STORE, 'readwrite');
+  const store = tx.objectStore(PUSH_PENDING_STORE);
+  const value = await requestValue<PendingPushEnvelopeRecord | undefined>(store.get(expected.key));
+  if (value?.bindingId === expected.bindingId && value.generation === expected.generation
+    && value.seq === expected.seq && value.contentHash === expected.contentHash) store.delete(expected.key);
+  await transactionDone(tx);
+}
+
+async function deletePendingForBinding(store: IDBObjectStore, bindingId: string): Promise<void> {
+  const values = await requestValue<PendingPushEnvelopeRecord[]>(store.getAll());
+  for (const value of values) if (value.bindingId === bindingId) store.delete(value.key);
+}
+
 function openPushDatabase(factory: IDBFactory): Promise<IDBDatabase> {
   if (!factory) return Promise.reject(new Error('IndexedDB is unavailable'));
   return new Promise((resolve, reject) => {
@@ -546,8 +856,14 @@ function openPushDatabase(factory: IDBFactory): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(PUSH_BINDING_STORE)) {
         db.createObjectStore(PUSH_BINDING_STORE, { keyPath: 'bindingId' });
       }
+      if (!db.objectStoreNames.contains(PUSH_PENDING_STORE)) {
+        db.createObjectStore(PUSH_PENDING_STORE, { keyPath: 'key' });
+      }
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      request.result.onversionchange = () => request.result.close();
+      resolve(request.result);
+    };
     request.onerror = () => reject(request.error ?? new Error('push database open failed'));
     request.onblocked = () => reject(new Error('push database upgrade blocked'));
   });
@@ -577,7 +893,7 @@ function validateRememberInput(input: RememberPushBindingInput): void {
   }
   canonicalRelayUrl(input.relayUrl);
   validateFileName(input.fileName);
-  validateDeepLink(input.deepLinkPath, input.kind, input.resourceId);
+  validateDeepLink(input.deepLinkPath, input.kind, input.resourceId, input.bindingId);
   if (!/^[A-Za-z0-9_-]{43}$/u.test(input.ownerSigningKey) || !Array.isArray(input.devices)) {
     throw new Error('push owner directory is invalid');
   }
@@ -587,7 +903,9 @@ function validateRememberInput(input: RememberPushBindingInput): void {
   }
   if (input.kind === 'share') {
     if (input.protocolVersion !== 3 || !input.bundleId || !BUNDLE_ID.test(input.bundleId)
-      || !Number.isSafeInteger(input.epoch) || (input.epoch ?? -1) < 0) throw new Error('share binding is incomplete');
+      || !Number.isSafeInteger(input.epoch) || (input.epoch ?? -1) < 0
+      || (input.revision !== undefined && (!Number.isSafeInteger(input.revision) || input.revision < 0))
+      || (input.manifestDigest !== undefined && !/^[A-Za-z0-9_-]{43}$/u.test(input.manifestDigest))) throw new Error('share binding is incomplete');
   } else if (input.bundleId !== undefined || input.epoch !== undefined) {
     throw new Error('room binding must not carry share routing');
   }
@@ -602,7 +920,8 @@ function isValidStoredBinding(value: PushBindingRecord): boolean {
     validateCryptoKey(value.roomReadCapability, 'HKDF', 'deriveBits');
     validateCryptoKey(value.readAdmissionKey, 'HMAC', 'sign');
     if (value.writeAdmissionKey) validateCryptoKey(value.writeAdmissionKey, 'HMAC', 'sign');
-    return Number.isSafeInteger(value.cursor) && value.cursor >= 0 && Array.isArray(value.devices)
+    return /^[A-Za-z0-9_-]{22}$/u.test(value.generation)
+      && Number.isSafeInteger(value.cursor) && value.cursor >= 0 && Array.isArray(value.devices)
       && Array.isArray(value.attestedSigningKeyIds)
       && value.attestedSigningKeyIds.every(keyId => typeof keyId === 'string' && /^[A-Za-z0-9_-]{43}$/u.test(keyId));
   } catch { return false; }
@@ -614,9 +933,11 @@ function validateCryptoKey(key: CryptoKey, algorithm: string, usage: KeyUsage): 
   }
 }
 
-function validateDeepLink(path: string, kind: PushBindingKind, id: string): void {
-  const expected = kind === 'share' ? `/s/${encodeURIComponent(id)}` : `/review/${encodeURIComponent(id)}`;
-  if (path !== expected || path.includes('?') || path.includes('#')) throw new Error('push deep link is not canonical');
+function validateDeepLink(path: string, kind: PushBindingKind, id: string, bindingId: string): void {
+  const expected = kind === 'share'
+    ? new Set([`/s/${encodeURIComponent(id)}`, `/s/${encodeURIComponent(bindingId)}`])
+    : new Set([`/review/${encodeURIComponent(id)}`]);
+  if (!expected.has(path) || path.includes('?') || path.includes('#')) throw new Error('push deep link is not canonical');
 }
 
 function validateFileName(value: string): void {
@@ -632,6 +953,29 @@ function canonicalRelayUrl(value: string): string {
     throw new Error('push relay URL must be an origin');
   }
   return url.origin;
+}
+
+function samePushBindingGeneration(current: PushBindingRecord, expected: PushBindingRecord): boolean {
+  return current.generation === expected.generation && current.bindingId === expected.bindingId && current.kind === expected.kind
+    && current.resourceId === expected.resourceId && current.roomId === expected.roomId
+    && current.deviceId === expected.deviceId && current.relayUrl === expected.relayUrl
+    && current.protocolVersion === expected.protocolVersion && current.bundleId === expected.bundleId
+    && current.epoch === expected.epoch && current.revision === expected.revision
+    && current.manifestDigest === expected.manifestDigest;
+}
+
+function pendingGeneration(binding: PushBindingRecord): string {
+  if (!/^[A-Za-z0-9_-]{22}$/u.test(binding.generation)) throw new Error('push binding generation is invalid');
+  return binding.generation;
+}
+
+async function pendingContentHash(
+  item: { seq: number; deviceRegistration: Device; envelopes: MailboxEnvelope[] },
+  cryptoImpl: Crypto,
+): Promise<string> {
+  const bytes = toCanonicalBytes({ seq: item.seq, deviceRegistration: item.deviceRegistration, envelopes: item.envelopes });
+  try { return base64UrlEncode(new Uint8Array(await cryptoImpl.subtle.digest('SHA-256', ownedBuffer(bytes)))); }
+  finally { bytes.fill(0); }
 }
 
 function requireId(value: string, label: string): void {

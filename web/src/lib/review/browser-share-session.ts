@@ -207,6 +207,11 @@ export class BrowserShareSession {
     return { ...this.state, snapshots: [...this.state.snapshots], staleDrafts: this.state.staleDrafts.map(cloneDraft) };
   }
 
+  /** Package integration seam. Consumers must copy capability bytes synchronously. */
+  currentResolutionForIntegration(): ResolvedDurableShare | null {
+    return this.resolution;
+  }
+
   async start(): Promise<void> {
     if (this.state.status !== 'idle' && this.state.status !== 'error') return;
     const generation = ++this.generation;

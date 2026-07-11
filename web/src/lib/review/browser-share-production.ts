@@ -40,6 +40,21 @@ import type {
 import { BrowserShareSession, StaleShareEpochError, type BrowserShareSessionOptions,
   type BrowserShareSessionState } from './browser-share-session';
 import { BROWSER_POW_DIFFICULTY, mintBrowserPowInWorker } from './browser-pow';
+import {
+  BrowserPushConsentController,
+  type BrowserPushBindingContext,
+  type BrowserPushConsentOptions,
+  type BrowserPushConsentState,
+} from './browser-push-consent';
+import type { Device } from './browser-ws';
+import {
+  advancePushBindingFloor,
+  consumePendingPushEvents,
+  derivePushBindingSnapshotKey,
+  getPushBinding,
+  pushBindingAdmissionHeader,
+  type PushBindingRecord,
+} from './browser-push-worker';
 import type { Anchor, Capability, ReviewEvent, ReviewEventBody, ReviewSnapshot, SuggestionDraft } from '../types';
 
 const DB_NAME = 'attn-browser-durable-shares';
@@ -50,6 +65,8 @@ const SHARE_RECORD_KEYS = new Set([
   'v','shareId','ownerSigningKey','epoch','revision','currentRoomId','snapshots','placeholders',
   'updatedAt','expiresAt','manifestDigest','bundle','mailbox','features',
 ]);
+const MAX_REMEMBERED_SHARE_RECORD_BYTES = 512 * 1024;
+const MAX_REMEMBERED_SNAPSHOT_BYTES = 5 * 1024 * 1024;
 
 export interface DurableShareCapability {
   ownerSigningKey: string;
@@ -100,10 +117,15 @@ export interface ProductionDurableShareSessionOptions extends BrowserDurableShar
   disableWebRtc?: boolean;
   /** PoW execution seam for non-Window production-boundary harnesses. */
   mailboxMintPow?: (input: { shareId: string; deviceId: string; path: string; signal?: AbortSignal }) => Promise<string>;
+  /** Browser seams used by the focused consent harness. */
+  pushConsentDependencies?: Omit<BrowserPushConsentOptions, 'getBindingContext' | 'canEnable' | 'isBindingContextCurrent' | 'onState'>;
+  onPushConsentState?: (state: BrowserPushConsentState) => void;
 }
 
+type ProductionBrowserShareSession = BrowserShareSession & { readonly pushConsent: BrowserPushConsentController };
+
 /** Complete production durable-share session using one identity for offline and live paths. */
-export async function createProductionDurableShareSession(options: ProductionDurableShareSessionOptions): Promise<BrowserShareSession> {
+export async function createProductionDurableShareSession(options: ProductionDurableShareSessionOptions): Promise<ProductionBrowserShareSession> {
   const { resolver, linkKeys, persistence } = await createBrowserDurableShareResolver(options);
   const identity = generateBrowserIdentity();
   const joinedByBundle = new Map<string, ReturnType<typeof assembleBrowserEvent>>();
@@ -179,14 +201,70 @@ export async function createProductionDurableShareSession(options: ProductionDur
       linkKeys.linkSecret.fill(0); linkKeys.bundleKey.fill(0); linkKeys.readAdmissionKey.fill(0); linkKeys.writeAdmissionKey?.fill(0);
     },
   };
-  return new BrowserShareSession(sessionOptions);
+  const session = new BrowserShareSession(sessionOptions);
+  const getBindingContext = async (signal?: AbortSignal): Promise<BrowserPushBindingContext> => {
+    const resolution = session.currentResolutionForIntegration();
+    if (!resolution || resolution.bundle.tier === 'view') throw new Error('view-only shares cannot enable notifications');
+    const capability = resolution.bundle.roomCapability as DurableShareCapability;
+    if (!capability.writeAdmissionKey || !linkKeys.writeAdmissionKey) throw new Error('share write capability is unavailable');
+    // Copy every capability before the first await. A watch refresh may swap
+    // and zero the committed resolution while the directory request is live.
+    const roomReadCapabilityBytes = new Uint8Array(capability.readCapabilityKey);
+    const readAdmissionKeyBytes = new Uint8Array(linkKeys.readAdmissionKey);
+    const writeAdmissionKeyBytes = new Uint8Array(linkKeys.writeAdmissionKey);
+    const roomDirectoryAdmission = new Uint8Array(capability.roomKeys.readAdmissionKey);
+    const shareId = resolution.record.shareId;
+    const bundleId = resolution.record.bundleId;
+    const roomId = resolution.bundle.roomId;
+    const epoch = resolution.record.epoch;
+    const revision = resolution.record.revision;
+    const manifestDigest = resolution.bundle.manifestDigest;
+    const ownerSigningKey = capability.ownerSigningKey;
+    const first = resolution.snapshots[0];
+    const metadata = first && isRecord(first.metadata) ? first.metadata : {};
+    const fileName = typeof metadata.ownerDisplayPath === 'string'
+      ? metadata.ownerDisplayPath.split('/').filter(Boolean).at(-1) ?? first!.fileId
+      : first?.fileId ?? 'shared review';
+    try {
+      const roomPath = `/v3/rooms/${encodeURIComponent(roomId)}/devices`;
+      const response = await (options.fetchImpl ?? fetch)(new URL(roomPath, options.relayUrl).href, { signal, headers: {
+        'Attn-Admission': buildAdmissionHeaderV3(roomDirectoryAdmission, 'read', 'GET', roomPath, new Uint8Array()),
+      } });
+      const raw = await strictJson(response, 'push device directory');
+      if (!isRecord(raw) || !Array.isArray(raw.devices)) throw new Error('push device directory is invalid');
+      const devices = structuredClone(raw.devices) as Device[];
+      return { shareId, bundleId, roomId, epoch, revision, manifestDigest, deviceId: identity.deviceId, relayUrl: options.relayUrl,
+        roomReadCapabilityBytes, readAdmissionKeyBytes, writeAdmissionKeyBytes,
+        ownerSigningKey, devices, fileName };
+    } catch (error) {
+      roomReadCapabilityBytes.fill(0); readAdmissionKeyBytes.fill(0); writeAdmissionKeyBytes.fill(0);
+      throw error;
+    } finally {
+      roomDirectoryAdmission.fill(0);
+    }
+  };
+  const pushConsent = new BrowserPushConsentController({
+    ...options.pushConsentDependencies,
+    getBindingContext,
+    canEnable: () => options.tier !== 'view',
+    isBindingContextCurrent: context => {
+      const current = session.currentResolutionForIntegration();
+      return current !== null && current.record.bundleId === context.bundleId &&
+        current.record.epoch === context.epoch && current.record.revision === context.revision &&
+        current.bundle.manifestDigest === context.manifestDigest && current.bundle.roomId === context.roomId;
+    },
+    onState: options.onPushConsentState,
+  });
+  return Object.assign(session, { pushConsent });
 }
 
 /** BrowserReviewApp-compatible facade over the durable resolver/session. */
 export class DurableShareBrowserSessionFacade {
   readonly closeOnDestroy = true;
-  private session: BrowserShareSession | null = null;
+  private session: ProductionBrowserShareSession | null = null;
   private observer: ((state: import('./browser-session').BrowserSessionState) => void) | null = null;
+  private pushObserver: ((state: BrowserPushConsentState) => void) | null = null;
+  private pushState: BrowserPushConsentState = { status: 'checking', message: null, enabled: false };
   private generation = 0;
   private closed = false;
   private startAbort: AbortController | null = null;
@@ -196,6 +274,8 @@ export class DurableShareBrowserSessionFacade {
     storagePersisted: null, canRemember: false };
   constructor(private readonly options: Omit<ProductionDurableShareSessionOptions, 'tier'>) {}
   setStateObserver(observer: (state: import('./browser-session').BrowserSessionState) => void): void { this.observer = observer; observer(this.state); }
+  setPushConsentObserver(observer: (state: BrowserPushConsentState) => void): void { this.pushObserver = observer; observer(this.pushState); }
+  getPushConsentState(): BrowserPushConsentState { return { ...this.pushState }; }
   getState(): import('./browser-session').BrowserSessionState { return this.state; }
   async start(): Promise<void> {
     if (this.closed || this.session) return;
@@ -206,6 +286,11 @@ export class DurableShareBrowserSessionFacade {
       if (this.closed || generation !== this.generation) return;
       const candidate = await createProductionDurableShareSession({ ...this.options, tier, signal: abort.signal,
       onState: state => { if (!this.closed && generation === this.generation) this.mapState(state); },
+      onPushConsentState: state => {
+        if (!this.closed && generation === this.generation) {
+          this.pushState = state; this.pushObserver?.(state);
+        }
+      },
       onSnapshot: (snapshot, roomId) => { if (!this.closed && generation === this.generation) void this.installSnapshot(snapshot, roomId); },
       onOptimisticEvent: event => { void this.installEvent(event); }, onLiveState: state => {
         if (!this.closed && generation === this.generation) { this.state = state; this.observer?.(state); }
@@ -213,13 +298,14 @@ export class DurableShareBrowserSessionFacade {
       if (this.closed || generation !== this.generation) { candidate.close(); return; }
       this.session = candidate;
       await candidate.start();
+      await candidate.pushConsent.initialize();
     } finally {
       this.options.invite.linkSecret.fill(0);
       if (this.startAbort === abort) this.startAbort = null;
     }
   }
   close(): void { if (this.closed) return; this.closed = true; ++this.generation; this.startAbort?.abort(); this.startAbort = null;
-    this.options.invite.linkSecret.fill(0); this.session?.close(); this.session = null; }
+    this.options.invite.linkSecret.fill(0); this.session?.pushConsent.close(); this.session?.close(); this.session = null; }
   async createComment(anchor: Anchor, body: string, threadId?: string): Promise<ReviewEvent> {
     const event = await this.requireSession().createComment(anchor, body, threadId);
     if (!event) throw new Error('comment was queued without an optimistic event');
@@ -229,9 +315,19 @@ export class DurableShareBrowserSessionFacade {
   async resolveComment(threadId: string): Promise<ReviewEvent> { return this.requireSession().resolveComment(threadId); }
   async createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent> { return this.requireSession().createSuggestion(draft); }
   async retryOutbox(): Promise<void> { await this.requireSession().retryOutbox(); }
+  async enablePushFromUserGesture(): Promise<void> {
+    const controller = this.requireSession().pushConsent;
+    await controller.enableFromUserGesture();
+    this.pushState = controller.getState(); this.pushObserver?.(this.pushState);
+  }
+  async disablePushFromUserGesture(): Promise<void> {
+    const controller = this.requireSession().pushConsent;
+    await controller.disableFromUserGesture();
+    this.pushState = controller.getState(); this.pushObserver?.(this.pushState);
+  }
   async rememberRoom(): Promise<void> { throw new Error('durable share state is already scoped to this browser'); }
   async forgetRoom(): Promise<void> { throw new Error('use the share link to reopen this review'); }
-  private requireSession(): BrowserShareSession { if (!this.session) throw new Error('durable share is not ready'); return this.session; }
+  private requireSession(): ProductionBrowserShareSession { if (!this.session) throw new Error('durable share is not ready'); return this.session; }
   private mapState(next: BrowserShareSessionState): void {
     const snapshot = next.snapshots[0];
     this.state = { ...this.state,
@@ -254,6 +350,109 @@ export class DurableShareBrowserSessionFacade {
     const { reviewStore } = await import('./store.svelte.js');
     reviewStore.currentRoomId = value.roomId; reviewStore.applySnapshot(value);
     reviewStore.setCurrentFile(value.fileId); reviewStore.setCurrentSnapshot(value.snapshotId);
+  }
+}
+
+/** Fragmentless notification-click recovery from a locally remembered, non-extractable binding. */
+export class RememberedPushShareSessionFacade {
+  readonly closeOnDestroy = true;
+  private observer: ((state: import('./browser-session').BrowserSessionState) => void) | null = null;
+  private closed = false;
+  private abort: AbortController | null = null;
+  private state: import('./browser-session').BrowserSessionState = { status: 'idle', connection: 'offline', directError: null,
+    roomId: null, snapshotContent: null, snapshotDocType: 'markdown', snapshotId: null, fileId: null, error: null,
+    authoringReady: false, grantTier: 'view', outboxPending: 0, authoringError: null, persistence: 'remembered',
+    storagePersisted: true, canRemember: false };
+  constructor(private readonly options: { relayUrl: string; bindingId: string; indexedDB?: IDBFactory; fetchImpl?: typeof fetch; store?: ReviewStoreSink }) {}
+  setStateObserver(observer: (state: import('./browser-session').BrowserSessionState) => void): void { this.observer = observer; observer(this.state); }
+  getState(): import('./browser-session').BrowserSessionState { return this.state; }
+  async start(): Promise<void> {
+    if (this.closed || this.state.status !== 'idle') return;
+    this.patch({ status: 'connecting' });
+    const abort = new AbortController(); this.abort = abort;
+    try {
+      const binding = await getPushBinding(this.options.bindingId, this.options.indexedDB);
+      if (!binding || binding.kind !== 'share' || !binding.bundleId || binding.epoch === undefined) {
+        throw new Error('This notification is no longer remembered in this browser.');
+      }
+      if (canonicalRememberedRelay(this.options.relayUrl) !== binding.relayUrl) {
+        throw new Error('Remembered notification relay does not match this app configuration.');
+      }
+      const snapshots = await this.loadSnapshots(binding, abort.signal);
+      if (this.closed) return;
+      const first = snapshots[0];
+      const store = this.options.store ?? (await import('./store.svelte.js')).reviewStore;
+      store.currentRoomId = binding.roomId;
+      for (const snapshot of snapshots) store.applySnapshot(reviewSnapshotFromDurable(snapshot, binding.roomId));
+      if (first) { store.setCurrentFile(first.fileId); store.setCurrentSnapshot(first.snapshotId); }
+      await consumePendingPushEvents(binding.bindingId, event => store.applyEvent(event), {
+        indexedDB: this.options.indexedDB,
+      });
+      if (this.closed) return;
+      this.patch({ status: 'connected', connection: 'mailbox', roomId: binding.roomId,
+        snapshotContent: first?.content ?? null, snapshotDocType: first?.docType ?? 'markdown',
+        snapshotId: first?.snapshotId ?? null, fileId: first?.fileId ?? null });
+    } catch (error) {
+      if (!this.closed) this.patch({ status: 'error', error: { kind: 'invite_invalid', message: safeProductionMessage(error) } });
+    } finally { if (this.abort === abort) this.abort = null; }
+  }
+  close(): void { this.closed = true; this.abort?.abort(); this.abort = null; }
+  async createComment(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
+  async replyToComment(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
+  async resolveComment(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
+  async createSuggestion(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
+  async retryOutbox(): Promise<void> {}
+  async rememberRoom(): Promise<void> {}
+  async forgetRoom(): Promise<void> { throw new Error('disable notifications from the original share link'); }
+  private patch(next: Partial<import('./browser-session').BrowserSessionState>): void { this.state = { ...this.state, ...next }; this.observer?.(this.state); }
+  private async loadSnapshots(binding: PushBindingRecord, signal: AbortSignal): Promise<DurableShareSnapshot[]> {
+    const path = `/v3/shares/${encodeURIComponent(binding.resourceId)}`;
+    const response = await (this.options.fetchImpl ?? fetch)(new URL(path, this.options.relayUrl), { signal, headers: {
+      'Attn-Share-Bundle': binding.bundleId!,
+      'Attn-Admission': await pushBindingAdmissionHeader(binding, 'read', 'GET', path),
+    } });
+    const raw = await strictBoundedJson(response, 'remembered share', MAX_REMEMBERED_SHARE_RECORD_BYTES);
+    if (!isRecord(raw) || raw.shareId !== binding.resourceId || raw.ownerSigningKey !== binding.ownerSigningKey ||
+      raw.epoch !== binding.epoch || !isRecord(raw.bundle) || raw.bundle.bundleId !== binding.bundleId ||
+      !Array.isArray(raw.snapshots) || raw.snapshots.length > 64 || typeof raw.manifestDigest !== 'string' ||
+      !Number.isSafeInteger(raw.revision) || binding.revision === undefined || binding.manifestDigest === undefined ||
+      (raw.revision as number) < binding.revision ||
+      ((raw.revision as number) === binding.revision && raw.manifestDigest !== binding.manifestDigest)) {
+      throw new Error('remembered share binding changed');
+    }
+    const refs = raw.snapshots.map(parseRememberedSnapshotRef).sort((a, b) => a.fileId.localeCompare(b.fileId) || a.snapshotId.localeCompare(b.snapshotId));
+    const manifest = toCanonicalBytes(refs.map(ref => ({ fileId: ref.fileId, snapshotId: ref.snapshotId,
+      ciphertextBytes: ref.ciphertextBytes, ciphertextSha256: ref.ciphertextSha256, uploadedAt: ref.uploadedAt })));
+    try { if (digest(manifest) !== raw.manifestDigest) throw new Error('remembered share manifest failed authentication'); }
+    finally { manifest.fill(0); }
+    const snapshotKey = await derivePushBindingSnapshotKey(binding);
+    try {
+      const snapshots: DurableShareSnapshot[] = [];
+      for (const ref of refs) {
+        const snapshotPath = `${path}/snapshots/${encodeURIComponent(ref.fileId)}`;
+        const snapshotResponse = await (this.options.fetchImpl ?? fetch)(new URL(snapshotPath, this.options.relayUrl), { signal, headers: {
+          'Attn-Share-Bundle': binding.bundleId!,
+          'Attn-Admission': await pushBindingAdmissionHeader(binding, 'read', 'GET', snapshotPath),
+        } });
+        if (!snapshotResponse.ok) throw new Error(`remembered snapshot fetch failed (${snapshotResponse.status})`);
+        if (snapshotResponse.headers.get('Attn-Share-Bundle') !== binding.bundleId ||
+          snapshotResponse.headers.get('Attn-Snapshot-Id') !== ref.snapshotId) {
+          throw new Error('remembered snapshot selector mismatch');
+        }
+        const ciphertext = await readBoundedResponse(snapshotResponse, MAX_REMEMBERED_SNAPSHOT_BYTES,
+          'remembered snapshot', ref.ciphertextBytes);
+        try {
+          if (ciphertext.byteLength !== ref.ciphertextBytes || digest(ciphertext) !== ref.ciphertextSha256) throw new Error('remembered snapshot digest mismatch');
+          snapshots.push(decryptRememberedSnapshot(binding.resourceId, binding.epoch!, binding.roomId, snapshotKey, ref.fileId, ref.snapshotId, ciphertext));
+        } finally { ciphertext.fill(0); }
+      }
+      await advancePushBindingFloor(binding.bindingId, {
+        expectedEpoch: binding.epoch!, expectedBundleId: binding.bundleId!, expectedRoomId: binding.roomId,
+        expectedRelayUrl: binding.relayUrl, expectedRevision: binding.revision!, expectedManifestDigest: binding.manifestDigest!,
+        candidateRevision: raw.revision as number, candidateManifestDigest: raw.manifestDigest,
+      }, this.options.indexedDB);
+      return snapshots;
+    } finally { snapshotKey.fill(0); }
   }
 }
 
@@ -564,11 +763,84 @@ function disposeLinkKeys(keys: ShareLinkKeys): void {
   keys.linkSecret.fill(0); keys.bundleKey.fill(0); keys.readAdmissionKey.fill(0); keys.writeAdmissionKey?.fill(0);
 }
 function disposeSnapshot(snapshot: DurableShareSnapshot): void { snapshot.content = ''; snapshot.metadata = undefined; }
+function parseRememberedSnapshotRef(value: unknown): { fileId: string; snapshotId: string; ciphertextBytes: number; ciphertextSha256: string; uploadedAt: number } {
+  if (!isRecord(value) || typeof value.fileId !== 'string' || typeof value.snapshotId !== 'string' ||
+    !Number.isSafeInteger(value.ciphertextBytes) || (value.ciphertextBytes as number) < 41 ||
+    (value.ciphertextBytes as number) > MAX_REMEMBERED_SNAPSHOT_BYTES ||
+    typeof value.ciphertextSha256 !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(value.ciphertextSha256) ||
+    !Number.isSafeInteger(value.uploadedAt)) {
+    throw new Error('remembered snapshot manifest is invalid');
+  }
+  return { fileId: value.fileId, snapshotId: value.snapshotId,
+    ciphertextBytes: value.ciphertextBytes as number, ciphertextSha256: value.ciphertextSha256,
+    uploadedAt: value.uploadedAt as number };
+}
+function decryptRememberedSnapshot(shareId: string, epoch: number, _roomId: string, snapshotKey: Uint8Array,
+  fileId: string, snapshotId: string, sealed: Uint8Array): DurableShareSnapshot {
+  const aad = toCanonicalBytes({ v: 3, purpose: 'attn durable share snapshot v3', shareId, epoch, fileId, snapshotId });
+  let plaintext: Uint8Array | null = null;
+  try {
+    plaintext = xchacha20poly1305(snapshotKey, sealed.subarray(0, 24), aad).decrypt(sealed.subarray(24));
+    const value = JSON.parse(new TextDecoder().decode(plaintext)) as unknown;
+    if (!isRecord(value) || value.v !== 3 || value.fileId !== fileId || value.snapshotId !== snapshotId ||
+      (value.docType !== 'markdown' && value.docType !== 'html') || typeof value.content !== 'string') {
+      throw new Error('remembered snapshot plaintext is invalid');
+    }
+    return { fileId, snapshotId, docType: value.docType, content: value.content,
+      ...(value.metadata === undefined ? {} : { metadata: structuredClone(value.metadata) }) };
+  } finally { aad.fill(0); plaintext?.fill(0); }
+}
+function safeProductionMessage(error: unknown): string { return error instanceof Error ? error.message : 'remembered share could not be opened'; }
+function canonicalRememberedRelay(value: string): string {
+  const url = new URL(value);
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== '/' && url.pathname !== '') ||
+    (url.protocol !== 'https:' && !(url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1')))) {
+    throw new Error('remembered relay configuration is invalid');
+  }
+  return url.origin;
+}
 function digest(bytes: Uint8Array): string { const value = sha256(bytes); try { return base64UrlEncode(value); } finally { value.fill(0); } }
 function randomProtocolId(): string { return base64UrlEncode(crypto.getRandomValues(new Uint8Array(16))); }
 async function strictJson(response: Response, label: string): Promise<unknown> {
   if (!response.ok) throw new Error(`${label} fetch failed (${response.status})`);
   return response.json();
+}
+async function strictBoundedJson(response: Response, label: string, maxBytes: number): Promise<unknown> {
+  const bytes = await readBoundedResponse(response, maxBytes, label);
+  try { return JSON.parse(new TextDecoder().decode(bytes)) as unknown; }
+  finally { bytes.fill(0); }
+}
+async function readBoundedResponse(response: Response, maxBytes: number, label: string, exactBytes?: number): Promise<Uint8Array> {
+  if (!response.ok) throw new Error(`${label} fetch failed (${response.status})`);
+  const declaredRaw = response.headers.get('Content-Length');
+  if (declaredRaw !== null) {
+    const declared = Number(declaredRaw);
+    if (!Number.isSafeInteger(declared) || declared < 0 || declared > maxBytes ||
+      (exactBytes !== undefined && declared !== exactBytes)) throw new Error(`${label} response length is invalid`);
+  }
+  if (!response.body) {
+    if (exactBytes !== undefined && exactBytes !== 0) throw new Error(`${label} response length is invalid`);
+    return new Uint8Array();
+  }
+  const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes || (exactBytes !== undefined && total > exactBytes)) {
+        await reader.cancel().catch(() => undefined); throw new Error(`${label} response exceeds bound`);
+      }
+      chunks.push(value);
+    }
+    if (exactBytes !== undefined && total !== exactBytes) throw new Error(`${label} response length is invalid`);
+    const result = new Uint8Array(total); let offset = 0;
+    for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+    for (const chunk of chunks) chunk.fill(0);
+    return result;
+  } catch (error) {
+    for (const chunk of chunks) chunk.fill(0);
+    throw error;
+  }
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function cloneEntry<T extends PersistedShareOutboxEntry>(entry: T): T {

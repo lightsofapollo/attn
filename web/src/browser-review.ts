@@ -66,14 +66,17 @@ async function bootstrapHostedReview(): Promise<void> {
 async function bootstrapDurableShare(): Promise<void> {
   let invite: ParsedShareInvite | null = null;
   try {
-    invite = parseAndStripShareInvite(window);
     const relayUrl = validateBrowserRelayUrl(import.meta.env.VITE_ATTN_RELAY_URL);
     const [svelte, appModule, production] = await Promise.all([import('svelte'), import('./BrowserReviewApp.svelte'),
       import('./lib/review/browser-share-production'), import('./browser-review-styles')]);
     const target = document.getElementById('app');
     if (!target) throw new Error('missing browser review mount element');
     target.style.display = '';
-    const session = new production.DurableShareBrowserSessionFacade({ relayUrl, invite });
+    const pathId = window.location.pathname.match(/^\/s\/([A-Za-z0-9_-]+)\/?$/u)?.[1];
+    if (!pathId) throw new Error('invalid durable share path');
+    const session = window.location.hash.length > 1
+      ? new production.DurableShareBrowserSessionFacade({ relayUrl, invite: (invite = parseAndStripShareInvite(window)) })
+      : new production.RememberedPushShareSessionFacade({ relayUrl, bindingId: pathId });
     svelte.mount(appModule.default, { target, props: { session } });
   } catch (error) {
     invite?.linkSecret.fill(0);

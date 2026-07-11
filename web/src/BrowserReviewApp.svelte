@@ -44,7 +44,8 @@
     requestReviewDecorationsRebuild,
   } from './lib/prosemirror/review-decorations';
   import { BrowserSession, type BrowserSessionState } from './lib/review/browser-session';
-  import type { DurableShareBrowserSessionFacade } from './lib/review/browser-share-production';
+  import type { DurableShareBrowserSessionFacade, RememberedPushShareSessionFacade } from './lib/review/browser-share-production';
+  import type { BrowserPushConsentState } from './lib/review/browser-push-consent';
   import type { ParsedInvite } from './lib/review/browser-invite';
   import { hasTextSelection } from './lib/review/popover-anchor';
   import { resolveAnchor } from './lib/review/resolver';
@@ -57,7 +58,7 @@
      * WebSocketLike factory. Production callers leave this undefined and the
      * component constructs its own session from `window.location`.
      */
-    session?: BrowserSession | DurableShareBrowserSessionFacade;
+    session?: BrowserSession | DurableShareBrowserSessionFacade | RememberedPushShareSessionFacade;
     /** Forwarded to `BrowserSession` when `session` is not provided. */
     relayUrl?: string;
     /** Parsed synchronously by the hosted bootstrap before UI chunks load. */
@@ -109,7 +110,7 @@
   const initialInviteError = untrack(() => inviteError);
   const initialRememberedRoomId = untrack(() => rememberedRoomId);
 
-  function buildSession(): BrowserSession | DurableShareBrowserSessionFacade {
+  function buildSession(): BrowserSession | DurableShareBrowserSessionFacade | RememberedPushShareSessionFacade {
     if (initialInjected) return initialInjected;
     return new BrowserSession({
       relayUrl: initialRelayUrl,
@@ -123,6 +124,9 @@
   }
 
   const session = buildSession();
+  const pushCapable = 'getPushConsentState' in session && 'setPushConsentObserver' in session &&
+    'enablePushFromUserGesture' in session && 'disablePushFromUserGesture' in session;
+  let pushConsent = $state<BrowserPushConsentState>({ status: pushCapable ? 'checking' : 'unsupported', message: null, enabled: false });
   // The hosted shell dedicates a permanent 320px rail to review threads, so
   // keep the shared margin in its expanded/card mode instead of the native
   // app's collapsed 48px avatar-gutter mode.
@@ -134,6 +138,10 @@
   if (initialInjected) {
     if ('setStateObserver' in initialInjected) initialInjected.setStateObserver((next) => { sessionState = next; });
     sessionState = initialInjected.getState();
+  }
+  if (pushCapable) {
+    const durable = session as DurableShareBrowserSessionFacade;
+    durable.setPushConsentObserver((next) => { pushConsent = next; });
   }
 
   void session.start().catch((err: unknown) => {
@@ -338,7 +346,21 @@
   }
 
   async function forgetBrowserRoom(): Promise<void> {
+    if (pushCapable && pushConsent.enabled) {
+      await (session as DurableShareBrowserSessionFacade).disablePushFromUserGesture();
+      if ((session as DurableShareBrowserSessionFacade).getPushConsentState().status !== 'off') return;
+    }
     await session.forgetRoom();
+  }
+
+  async function togglePushConsent(): Promise<void> {
+    if (!pushCapable) return;
+    const durable = session as DurableShareBrowserSessionFacade;
+    if (pushConsent.enabled) {
+      await durable.disablePushFromUserGesture();
+    } else {
+      await durable.enablePushFromUserGesture();
+    }
   }
 
   onMount(() => {
@@ -424,7 +446,7 @@
                   : 'Can suggest'}
             </span>
             {#if sessionState.grantTier !== 'view' && !sessionState.canRemember}
-              <span>Temporary link session</span>
+              <span>{pushCapable && pushConsent.enabled ? 'Remembered for notifications' : 'Open from this link'}</span>
             {:else if sessionState.grantTier !== 'view' && sessionState.persistence === 'ephemeral'}
               <span>Temporary on this browser</span>
               <button
@@ -452,6 +474,40 @@
               >
                 Forget
               </button>
+            {/if}
+            {#if pushCapable && sessionState.grantTier !== 'view'}
+              <span class="h-3 w-px bg-border" aria-hidden="true"></span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={pushConsent.enabled}
+                aria-describedby={pushConsent.message ? 'browser-push-message' : undefined}
+                class="rounded border border-border px-2 py-0.5 text-foreground hover:bg-muted disabled:cursor-wait disabled:opacity-60"
+                data-slot="browser-push-toggle"
+                data-push-status={pushConsent.status}
+                disabled={pushConsent.status === 'checking' || pushConsent.status === 'enabling' || pushConsent.status === 'disabling'}
+                onclick={() => { void togglePushConsent(); }}
+              >
+                {pushConsent.status === 'on'
+                  ? 'Notifications on'
+                  : pushConsent.status === 'enabling'
+                    ? 'Enabling notifications…'
+                    : pushConsent.status === 'disabling'
+                      ? 'Turning notifications off…'
+                      : pushConsent.status === 'install_hint'
+                        ? 'Install to enable notifications'
+                        : pushConsent.enabled
+                          ? 'Retry turning notifications off'
+                        : 'Remember & notify me'}
+              </button>
+              {#if pushConsent.message}
+                <span
+                  id="browser-push-message"
+                  class={pushConsent.status === 'error' || pushConsent.status === 'denied' ? 'text-destructive' : ''}
+                  role="status"
+                  data-slot="browser-push-message"
+                >{pushConsent.message}</span>
+              {/if}
             {/if}
           </div>
           <div class="flex min-w-0 items-center justify-end gap-2">

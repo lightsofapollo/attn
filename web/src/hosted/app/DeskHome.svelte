@@ -1,16 +1,26 @@
 <script lang="ts">
   import AppHeader from './AppHeader.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
-  import type { SharingState, WorkspaceService } from './types';
+  import { importName, toImportFiles, type PickedFile } from './import-files';
+  import type { ImportFileInput, SharingState, StorageHealth, WorkspaceSummary } from './types';
 
   interface Props {
-    service: WorkspaceService;
+    health: StorageHealth;
+    workspaces: WorkspaceSummary[];
+    onCreate: () => void;
+    onImport: (name: string, files: ImportFileInput[]) => Promise<void>;
+    onRename: (workspaceId: string, name: string) => Promise<void>;
+    onDelete: (workspaceId: string) => Promise<void>;
   }
 
-  const { service }: Props = $props();
-  const health = $derived(service.storageHealth());
-  const workspaces = $derived(service.listWorkspaces());
+  const { health, workspaces, onCreate, onImport, onRename, onDelete }: Props = $props();
   const storageUnavailable = $derived(health.mode === 'unavailable');
+
+  let fileInput = $state<HTMLInputElement | undefined>();
+  let renamingId = $state<string | null>(null);
+  let renameValue = $state('');
+  let confirmingDeleteId = $state<string | null>(null);
+  let importError = $state<string | null>(null);
 
   function sharingLabel(sharing: SharingState): string {
     switch (sharing) {
@@ -21,6 +31,41 @@
       case 'local-only':
         return 'Local only';
     }
+  }
+
+  async function onFilesPicked(): Promise<void> {
+    const files = fileInput?.files;
+    if (!files || files.length === 0) return;
+    importError = null;
+    try {
+      const picked: PickedFile[] = [];
+      for (const file of Array.from(files)) {
+        picked.push({
+          name: file.name,
+          relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
+          type: file.type,
+          bytes: new Uint8Array(await file.arrayBuffer()),
+        });
+      }
+      await onImport(importName(picked), toImportFiles(picked));
+    } catch (error) {
+      importError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (fileInput) fileInput.value = '';
+    }
+  }
+
+  function startRename(workspace: WorkspaceSummary): void {
+    renamingId = workspace.id;
+    renameValue = workspace.name;
+    confirmingDeleteId = null;
+  }
+
+  async function commitRename(): Promise<void> {
+    if (renamingId && renameValue.trim().length > 0) {
+      await onRename(renamingId, renameValue.trim());
+    }
+    renamingId = null;
   }
 </script>
 
@@ -41,41 +86,114 @@
     </div>
 
     <div class="quick-actions">
-      <a
+      <button
         class="quick"
-        href="/app#new"
+        type="button"
         data-action="new-workspace"
-        aria-disabled={storageUnavailable ? 'true' : undefined}
+        disabled={storageUnavailable}
+        onclick={onCreate}
       >
         <span>One click · starts with untitled.md</span>
         <big>＋ New workspace</big>
-      </a>
-      <a class="quick" href="/open">
+      </button>
+      <button
+        class="quick"
+        type="button"
+        data-action="import-workspace"
+        disabled={storageUnavailable}
+        onclick={() => fileInput?.click()}
+      >
         <span>Markdown, images, folders, or zip</span>
         <big>↥ Import workspace</big>
-      </a>
+      </button>
       <a class="quick" href="/app#join" data-action="join-review">
         <span>Browser or native link</span>
         <big>↗ Join a review</big>
       </a>
     </div>
+    <input
+      bind:this={fileInput}
+      type="file"
+      multiple
+      accept=".md,.markdown,image/*,application/zip,.zip,*/*"
+      style="display: none"
+      aria-hidden="true"
+      tabindex="-1"
+      onchange={onFilesPicked}
+    />
+    {#if importError}
+      <p role="alert" style="color: var(--rust-deep); font: 0.9rem/1.5 var(--sans);">
+        Import failed: {importError}
+      </p>
+    {/if}
 
     {#if workspaces.length > 0}
       <div class="folio-label">Recently on this device</div>
       {#each workspaces as workspace (workspace.id)}
-        <a class="workspace-row" href={`/app/w/${workspace.id}/${workspace.openPath}`}>
-          <strong>{workspace.name}</strong>
+        <div class="workspace-row" data-workspace-id={workspace.id}>
+          {#if renamingId === workspace.id}
+            <input
+              class="rename-input"
+              type="text"
+              aria-label="Workspace name"
+              bind:value={renameValue}
+              onkeydown={(event) => {
+                if (event.key === 'Enter') void commitRename();
+                if (event.key === 'Escape') renamingId = null;
+              }}
+              onblur={() => void commitRename()}
+            />
+          {:else}
+            <a class="row-open" href={`/app/w/${workspace.id}/${workspace.openPath}`}>
+              <strong>{workspace.name}</strong>
+            </a>
+          {/if}
           <span class="detail">
             {workspace.markdownCount + workspace.assetCount}
             {workspace.markdownCount + workspace.assetCount === 1 ? 'file' : 'files'}
           </span>
           <span class="detail">{workspace.lastEditedLabel}</span>
-          {#if workspace.sharing === 'shared'}
-            <span class="local-badge"><span class="dot" aria-hidden="true"></span> Shared</span>
-          {:else}
-            <span>{sharingLabel(workspace.sharing)}</span>
-          {/if}
-        </a>
+          <span class="row-tail">
+            {#if workspace.sharing === 'shared'}
+              <span class="local-badge"><span class="dot" aria-hidden="true"></span> Shared</span>
+            {:else}
+              <span>{sharingLabel(workspace.sharing)}</span>
+            {/if}
+            <button class="row-action" type="button" onclick={() => startRename(workspace)}>
+              Rename
+            </button>
+            <button
+              class="row-action danger"
+              type="button"
+              onclick={() => (confirmingDeleteId = workspace.id)}
+            >
+              Delete
+            </button>
+          </span>
+        </div>
+        {#if confirmingDeleteId === workspace.id}
+          <div class="confirm-clear" role="alertdialog" aria-label={`Delete ${workspace.name}?`}>
+            <strong>Delete “{workspace.name}” from this device?</strong>
+            <p style="margin: 0.3rem 0 0; color: var(--muted);">
+              This cannot be undone. Export it first if you need a copy.
+            </p>
+            <div class="actions">
+              <button class="button" type="button" onclick={() => (confirmingDeleteId = null)}>
+                Cancel
+              </button>
+              <button
+                class="button danger"
+                type="button"
+                onclick={async () => {
+                  await onDelete(workspace.id);
+                  confirmingDeleteId = null;
+                }}
+              >
+                Delete workspace
+              </button>
+            </div>
+          </div>
+        {/if}
       {/each}
     {:else if !storageUnavailable}
       <div class="folio-label">Your first sheet</div>

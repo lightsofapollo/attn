@@ -10,6 +10,9 @@
  * active types are download-only. */
 export type EntryPresentation = 'editable' | 'preview' | 'download-only';
 
+/** Entry kinds mirror the storage schema without importing it. */
+export type WorkspaceEntryKind = 'markdown' | 'asset';
+
 export interface WorkspaceEntry {
   /** Normalized relative path within the workspace, e.g. `docs/notes.md`. */
   path: string;
@@ -76,14 +79,30 @@ export interface ShareScope {
   label: string;
 }
 
-/** Injected service the shells render from. The mock implementation is
- * synchronous fixture data; the storage-backed implementation keeps this
- * exact surface. */
-export interface WorkspaceService {
+/** A file handed to import (already read into memory by the picker). */
+export interface ImportFileInput {
+  path: string;
+  bytes: Uint8Array;
+  kind: WorkspaceEntryKind;
+  mediaType?: string;
+}
+
+/**
+ * Injected async view-service the shells render from (attn-7xl.3.2). The
+ * mock implementation serves the `?shell=` scenarios; the storage-backed
+ * adapter (real-service.ts) is the default and is loaded via dynamic import
+ * so the app entry's static graph stays free of the crypto/storage modules.
+ */
+export interface WorkspaceAppService {
   storageHealth(): StorageHealth;
-  listWorkspaces(): WorkspaceSummary[];
-  getWorkspace(workspaceId: string): WorkspaceDetail | undefined;
-  /** The one-click landing intent: a fresh workspace holding `untitled.md`. */
-  newWorkspaceDraft(): WorkspaceDetail;
+  listWorkspaces(): Promise<WorkspaceSummary[]>;
+  getWorkspace(workspaceId: string): Promise<WorkspaceDetail | undefined>;
+  /** Decoded head body for a Markdown entry; null for assets. */
+  readBodyText(workspaceId: string, path: string): Promise<string | null>;
+  /** One-click create: untitled.md, no dialog, zero network requests. */
+  createWorkspace(): Promise<WorkspaceDetail>;
+  importFiles(name: string, files: ImportFileInput[]): Promise<WorkspaceDetail>;
+  renameWorkspace(workspaceId: string, name: string): Promise<void>;
+  deleteWorkspace(workspaceId: string): Promise<void>;
   shareScopeFor(workspace: WorkspaceDetail): ShareScope;
 }

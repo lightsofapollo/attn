@@ -4,48 +4,139 @@
   import EditorShell from './EditorShell.svelte';
   import OpenPage from './OpenPage.svelte';
   import StoragePage from './StoragePage.svelte';
-  import type { WorkspaceService } from './types';
+  import type {
+    ImportFileInput,
+    StorageHealth,
+    WorkspaceAppService,
+    WorkspaceDetail,
+    WorkspaceSummary,
+  } from './types';
 
   interface Props {
-    service: WorkspaceService;
+    service: WorkspaceAppService;
     route: AppRoute | undefined;
-    /** The landing's one-click intent (`/app#new`): open a fresh untitled
-     * workspace draft directly in the editor with no dialog. */
+    /** The landing's one-click intent (`/app#new`): atomically create a
+     * fresh untitled workspace and open its editor with no dialog. */
     newIntent: boolean;
   }
 
   const { service, route, newIntent }: Props = $props();
 
-  const workspace = $derived(
-    route?.view === 'workspace' ? service.getWorkspace(route.workspaceId) : undefined,
-  );
+  let phase = $state<'loading' | 'ready' | 'error'>('loading');
+  let errorMessage = $state<string | null>(null);
+  // svelte-ignore state_referenced_locally — the service is a stable prop;
+  // this seeds the initial value and load() refreshes it.
+  let health = $state<StorageHealth>(service.storageHealth());
+  let workspaces = $state<WorkspaceSummary[]>([]);
+  let detail = $state<WorkspaceDetail | undefined>(undefined);
+  let activePath = $state<string | undefined>(undefined);
+  let bodyText = $state<string | null>(null);
+  let editorMode = $state(false);
+  let isNewDraft = $state(false);
+
+  async function load(): Promise<void> {
+    try {
+      health = service.storageHealth();
+      if (newIntent) {
+        await createAndOpen();
+        return;
+      }
+      if (route?.view === 'workspace') {
+        detail = await service.getWorkspace(route.workspaceId);
+        if (detail) {
+          activePath = route.filePath ?? detail.openPath;
+          bodyText = await service.readBodyText(detail.id, activePath);
+          editorMode = true;
+        }
+      } else {
+        workspaces = await service.listWorkspaces();
+      }
+      phase = 'ready';
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+      phase = 'error';
+    }
+  }
+
+  async function createAndOpen(): Promise<void> {
+    detail = await service.createWorkspace();
+    activePath = detail.openPath;
+    bodyText = '';
+    editorMode = true;
+    isNewDraft = true;
+    history.replaceState(null, '', `/app/w/${detail.id}/${detail.openPath}`);
+    phase = 'ready';
+  }
+
+  async function onCreate(): Promise<void> {
+    phase = 'loading';
+    try {
+      await createAndOpen();
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+      phase = 'error';
+    }
+  }
+
+  async function onImport(name: string, files: ImportFileInput[]): Promise<void> {
+    const imported = await service.importFiles(name, files);
+    window.location.assign(`/app/w/${imported.id}/${imported.openPath}`);
+  }
+
+  async function onRename(workspaceId: string, name: string): Promise<void> {
+    await service.renameWorkspace(workspaceId, name);
+    workspaces = await service.listWorkspaces();
+  }
+
+  async function onDelete(workspaceId: string): Promise<void> {
+    await service.deleteWorkspace(workspaceId);
+    workspaces = await service.listWorkspaces();
+  }
+
+  void load();
 </script>
 
-{#if newIntent}
-  <EditorShell {service} workspace={service.newWorkspaceDraft()} activePath="untitled.md" isNewDraft />
-{:else if route?.view === 'workspace'}
-  {#if workspace}
-    <EditorShell {service} {workspace} activePath={route.filePath} />
-  {:else}
-    <div class="app-shell" data-app-view="missing">
-      <main class="desk">
-        <div class="desk-title">
-          <div>
-            <div class="eyebrow">Not on this device</div>
-            <h1>That workspace isn’t here</h1>
-          </div>
+{#if phase === 'loading'}
+  <div class="app-shell" data-app-view="loading">
+    <main class="desk">
+      <p class="eyebrow" role="status">Opening your desk…</p>
+    </main>
+  </div>
+{:else if phase === 'error'}
+  <div class="app-shell" data-app-view="error">
+    <main class="desk">
+      <div class="desk-title">
+        <div>
+          <div class="eyebrow">Something went wrong</div>
+          <h1>Your desk couldn’t open</h1>
         </div>
-        <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--muted);">
-          Local workspaces live in the browser profile that created them. Import a backup, or go
-          back to <a href="/app" style="text-decoration: underline;">your desk</a>.
-        </p>
-      </main>
-    </div>
-  {/if}
+      </div>
+      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--muted);" role="alert">
+        {errorMessage}
+      </p>
+    </main>
+  </div>
+{:else if editorMode && detail}
+  <EditorShell {service} workspace={detail} {activePath} {bodyText} {isNewDraft} />
+{:else if route?.view === 'workspace'}
+  <div class="app-shell" data-app-view="missing">
+    <main class="desk">
+      <div class="desk-title">
+        <div>
+          <div class="eyebrow">Not on this device</div>
+          <h1>That workspace isn’t here</h1>
+        </div>
+      </div>
+      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--muted);">
+        Local workspaces live in the browser profile that created them. Import a backup, or go
+        back to <a href="/app" style="text-decoration: underline;">your desk</a>.
+      </p>
+    </main>
+  </div>
 {:else if route?.view === 'storage'}
-  <StoragePage {service} />
+  <StoragePage {health} {workspaces} />
 {:else if route?.view === 'open'}
-  <OpenPage {service} />
+  <OpenPage {health} {onImport} />
 {:else}
-  <DeskHome {service} />
+  <DeskHome {health} {workspaces} {onCreate} {onImport} {onRename} {onDelete} />
 {/if}

@@ -9,20 +9,24 @@
 //   /app?shell=empty     first visit, no workspaces yet
 
 import type {
+  ImportFileInput,
   ShareScope,
   StorageHealth,
+  WorkspaceAppService,
   WorkspaceDetail,
-  WorkspaceService,
   WorkspaceSummary,
 } from './types';
 
-export type ShellScenario = 'default' | 'private' | 'blocked' | 'quota' | 'empty';
+/** 'real' (no ?shell= param) boots the storage-backed service; every other
+ * scenario runs this mock so degraded states stay directly reachable. */
+export type ShellScenario = 'real' | 'demo' | 'private' | 'blocked' | 'quota' | 'empty';
 
 export function shellScenarioFromSearch(search: string): ShellScenario {
   const value = new URLSearchParams(search).get('shell');
+  if (value === null) return 'real';
   return value === 'private' || value === 'blocked' || value === 'quota' || value === 'empty'
     ? value
-    : 'default';
+    : 'demo';
 }
 
 const PRODUCT_DIRECTION: WorkspaceDetail = {
@@ -86,16 +90,18 @@ const RESEARCH_FOLIO: WorkspaceDetail = {
   reviewCards: [],
 };
 
-export class MockWorkspaceService implements WorkspaceService {
+export class MockWorkspaceService implements WorkspaceAppService {
   private readonly scenario: ShellScenario;
   private readonly workspaces: WorkspaceDetail[];
 
   constructor(scenario: ShellScenario) {
     this.scenario = scenario;
+    // Clone the fixtures so per-instance mutation (rename/delete) can never
+    // leak into other instances through the module constants.
     this.workspaces =
       scenario === 'empty' || scenario === 'blocked'
         ? []
-        : [PRODUCT_DIRECTION, LAUNCH_NOTES, RESEARCH_FOLIO];
+        : structuredClone([PRODUCT_DIRECTION, LAUNCH_NOTES, RESEARCH_FOLIO]);
   }
 
   storageHealth(): StorageHealth {
@@ -108,20 +114,83 @@ export class MockWorkspaceService implements WorkspaceService {
         return { mode: 'quota-pressure', usedLabel: '101 MB', quotaLabel: '104 MB', usedFraction: 0.97 };
       case 'empty':
         return { mode: 'best-effort', usedLabel: '0 B', quotaLabel: '104 MB', usedFraction: 0 };
-      case 'default':
+      case 'demo':
+      case 'real':
         return { mode: 'persistent', usedLabel: '18.7 MB', quotaLabel: '104 MB', usedFraction: 0.18 };
     }
   }
 
-  listWorkspaces(): WorkspaceSummary[] {
+  async listWorkspaces(): Promise<WorkspaceSummary[]> {
     return this.workspaces;
   }
 
-  getWorkspace(workspaceId: string): WorkspaceDetail | undefined {
+  async getWorkspace(workspaceId: string): Promise<WorkspaceDetail | undefined> {
     return this.workspaces.find((workspace) => workspace.id === workspaceId);
   }
 
-  newWorkspaceDraft(): WorkspaceDetail {
+  async readBodyText(workspaceId: string, path: string): Promise<string | null> {
+    const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
+    const entry = workspace?.entries.find((candidate) => candidate.path === path);
+    if (!entry || entry.presentation !== 'editable') return null;
+    if (workspace?.id === 'ws-product' && path === 'direction.md') {
+      return [
+        '# Product direction',
+        '',
+        'Attn should feel like a private writing desk, not a cloud drive with the login form removed.',
+        '',
+        '## The source stays here',
+        '',
+        'A local workspace is the source of truth. Sharing creates a review room around a revision; it does not move ownership to the relay.',
+        '',
+        '- Create without a network request.',
+        '- Autosave to the browser before showing “Saved.”',
+        '- Export ordinary Markdown at any time.',
+      ].join('\n');
+    }
+    return `# ${workspace?.name ?? 'Untitled'}\n`;
+  }
+
+  async createWorkspace(): Promise<WorkspaceDetail> {
+    const draft = this.newWorkspaceDraft();
+    this.workspaces.unshift(draft);
+    return draft;
+  }
+
+  async importFiles(name: string, files: ImportFileInput[]): Promise<WorkspaceDetail> {
+    const markdown = files.filter((file) => file.kind === 'markdown');
+    const detail: WorkspaceDetail = {
+      id: `ws-import-${this.workspaces.length}`,
+      name,
+      openPath: markdown[0]?.path ?? files[0]?.path ?? 'untitled.md',
+      markdownCount: markdown.length,
+      assetCount: files.length - markdown.length,
+      lastEditedLabel: 'Just now',
+      sharing: 'local-only',
+      sizeLabel: '—',
+      backupLabel: 'Never backed up',
+      saveState: 'Saved on this device',
+      entries: files.map((file) => ({
+        path: file.path,
+        presentation: file.kind === 'markdown' ? 'editable' : 'preview',
+        sizeLabel: `${file.bytes.length} B`,
+      })),
+      reviewCards: [],
+    };
+    this.workspaces.unshift(detail);
+    return detail;
+  }
+
+  async renameWorkspace(workspaceId: string, name: string): Promise<void> {
+    const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
+    if (workspace) workspace.name = name;
+  }
+
+  async deleteWorkspace(workspaceId: string): Promise<void> {
+    const index = this.workspaces.findIndex((candidate) => candidate.id === workspaceId);
+    if (index >= 0) this.workspaces.splice(index, 1);
+  }
+
+  private newWorkspaceDraft(): WorkspaceDetail {
     const saveState = this.scenario === 'quota' ? 'Storage needs attention' : 'Saved on this device';
     return {
       id: 'ws-untitled',

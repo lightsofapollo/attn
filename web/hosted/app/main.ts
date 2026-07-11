@@ -1,8 +1,10 @@
-// Local workspace app entry (attn-7xl.1.1/.3). Renders the designed page
-// shells against an injected mock workspace service; attn-7xl.3 swaps the
-// mock for the storage-backed service without changing the shells. This
-// chunk must stay free of the editor/markdown/crypto graphs —
-// scripts/check-route-bundles.mjs gates the built output.
+// Local workspace app entry (attn-7xl.1.1/.3/.3.2). Boots the storage-backed
+// workspace service by default; `?shell=<scenario>` keeps the mock service so
+// every degraded state stays directly reachable for tests and screenshots.
+//
+// The real service pulls the crypto/storage graph, so it is loaded via
+// dynamic import — scripts/check-route-bundles.mjs gates the app entry's
+// STATIC graph against those modules.
 import '@fontsource-variable/source-serif-4';
 import '@fontsource-variable/source-sans-3';
 import '@fontsource-variable/source-code-pro';
@@ -12,21 +14,41 @@ import { mount } from 'svelte';
 import { parseAppRoute } from '../../src/lib/hosted/routes';
 import AppShell from '../../src/hosted/app/AppShell.svelte';
 import { MockWorkspaceService, shellScenarioFromSearch } from '../../src/hosted/app/mock-service';
+import type { WorkspaceAppService } from '../../src/hosted/app/types';
 import { initTheme } from '../../src/hosted/theme.svelte';
 
-initTheme();
+async function bootstrap(): Promise<void> {
+  initTheme();
+  const target = document.getElementById('app');
+  if (!target) throw new Error('missing app mount element');
 
-const route = parseAppRoute(window.location.pathname);
-const service = new MockWorkspaceService(shellScenarioFromSearch(window.location.search));
-const target = document.getElementById('app');
-if (!target) throw new Error('missing app mount element');
+  const scenario = shellScenarioFromSearch(window.location.search);
+  let service: WorkspaceAppService;
+  if (scenario === 'real') {
+    const { RealWorkspaceAppService } = await import('../../src/hosted/app/real-service');
+    service = await RealWorkspaceAppService.open();
+  } else {
+    service = new MockWorkspaceService(scenario);
+  }
 
-mount(AppShell, {
-  target,
-  props: {
-    service,
-    route,
-    newIntent: route?.view === 'home' && window.location.hash === '#new',
-  },
+  const route = parseAppRoute(window.location.pathname);
+  mount(AppShell, {
+    target,
+    props: {
+      service,
+      route,
+      newIntent: route?.view === 'home' && window.location.hash === '#new',
+    },
+  });
+  document.body.dataset.hydrated = 'true';
+}
+
+void bootstrap().catch((error: unknown) => {
+  const target = document.getElementById('app');
+  if (!target) return;
+  target.textContent =
+    'This browser currently blocks local document storage, so the desk could not open.';
+  target.setAttribute('role', 'alert');
+  document.body.dataset.hydrated = 'true';
+  console.error('[attn] desk bootstrap failed', error);
 });
-document.body.dataset.hydrated = 'true';

@@ -1,15 +1,14 @@
 <script lang="ts">
   import AppHeader from './AppHeader.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
-  import type { WorkspaceService } from './types';
+  import type { StorageHealth, WorkspaceSummary } from './types';
 
   interface Props {
-    service: WorkspaceService;
+    health: StorageHealth;
+    workspaces: WorkspaceSummary[];
   }
 
-  const { service }: Props = $props();
-  const health = $derived(service.storageHealth());
-  const workspaces = $derived(service.listWorkspaces());
+  const { health, workspaces }: Props = $props();
   const meterWarn = $derived(health.mode === 'quota-pressure');
 
   // Destructive action uses an in-app confirmation panel, never a browser

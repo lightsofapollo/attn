@@ -13,14 +13,14 @@ async function expectNoHorizontalScroll(page: Page): Promise<void> {
 }
 
 test('desk home lists recent workspaces with storage health', async ({ page }) => {
-  await page.goto('/app');
+  await page.goto('/app?shell=demo');
   await expect(page.locator('h1')).toHaveText('Your desk');
   await expect(page.locator('[data-storage-mode]')).toHaveAttribute('data-storage-mode', 'persistent');
   await expect(page.locator('.local-badge').first()).toContainText('On this device');
   await expect(page.locator('.quick')).toHaveCount(3);
-  await expect(page.locator('a.workspace-row')).toHaveCount(3);
-  await expect(page.locator('a.workspace-row').first()).toContainText('Product direction');
-  // Storage link navigates to the storage page.
+  await expect(page.locator('.workspace-row')).toHaveCount(3);
+  await expect(page.locator('.workspace-row').first()).toContainText('Product direction');
+  // Storage link navigates to the storage page (real service).
   await page.getByRole('link', { name: 'Storage', exact: true }).click();
   await expect(page).toHaveURL(/\/app\/storage$/u);
   await expect(page.locator('h1')).toHaveText('Storage & recovery');
@@ -38,7 +38,7 @@ test('landing one-click intent opens an untitled draft editor', async ({ page })
 });
 
 test('editor shell renders rails, entries, and review margin', async ({ page }) => {
-  await page.goto('/app/w/ws-product/direction.md');
+  await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await expect(page.locator('.doc-name')).toContainText('Product direction');
   await expect(page.locator('.file-rail .file')).toHaveCount(6); // 5 entries + add action
   await expect(page.locator('.file-rail .file.active')).toContainText('direction.md');
@@ -49,16 +49,16 @@ test('editor shell renders rails, entries, and review margin', async ({ page }) 
 });
 
 test('asset entries render preview and download-only placeholders', async ({ page }) => {
-  await page.goto('/app/w/ws-product/images/desk.png');
+  await page.goto('/app/w/ws-product/images/desk.png?shell=demo');
   await expect(page.locator('.writing-sheet .eyebrow')).toHaveText('Asset preview');
   await expect(page.locator('.asset-preview')).toContainText('renders inline');
-  await page.goto('/app/w/ws-product/data/notes.json');
+  await page.goto('/app/w/ws-product/data/notes.json?shell=demo');
   await expect(page.locator('.writing-sheet .eyebrow')).toHaveText('Download only');
   await expect(page.locator('.asset-preview')).toContainText('never executed');
 });
 
 test('share sheet opens as a dialog and returns focus on close', async ({ page }) => {
-  await page.goto('/app/w/ws-product/direction.md');
+  await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await page.getByRole('button', { name: 'Share', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: /Share Product direction/u });
   await expect(dialog).toBeVisible();
@@ -72,7 +72,7 @@ test('share sheet opens as a dialog and returns focus on close', async ({ page }
 });
 
 test('storage page confirms destructive clear in-app', async ({ page }) => {
-  await page.goto('/app/storage');
+  await page.goto('/app/storage?shell=demo');
   await expect(page.locator('.status-box strong')).toContainText('Protected from automatic cleanup');
   await expect(page.locator('.storage-panel .workspace-row')).toHaveCount(3);
   await page.getByRole('button', { name: 'Clear all local attn data' }).click();
@@ -103,7 +103,7 @@ test('blocked-storage scenario keeps the desk viewable', async ({ page }) => {
   await expect(page.locator('[data-degraded="unavailable"]')).toContainText(
     'This browser currently blocks local document storage.',
   );
-  await expect(page.locator('a.workspace-row')).toHaveCount(0);
+  await expect(page.locator('.workspace-row')).toHaveCount(0);
 });
 
 test('quota pressure blocks writes without hiding the document', async ({ page }) => {
@@ -118,7 +118,7 @@ test('quota pressure blocks writes without hiding the document', async ({ page }
 
 test('mobile editor is reader-first with dock and sheets', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/app/w/ws-product/direction.md');
+  await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await expect(page.locator('.file-rail')).toBeHidden();
   await expect(page.locator('.review-rail')).toBeHidden();
   const dock = page.locator('.thumb-dock');
@@ -135,7 +135,7 @@ test('mobile editor is reader-first with dock and sheets', async ({ page }) => {
   await expectNoHorizontalScroll(page);
 });
 
-for (const path of ['/app', '/app/w/ws-product/direction.md', '/app/storage', '/open']) {
+for (const path of ['/app', '/app/w/ws-product/direction.md?shell=demo', '/app/storage', '/open']) {
   test(`no horizontal scroll at 320px: ${path}`, async ({ page }) => {
     await page.setViewportSize({ width: 320, height: 700 });
     await page.goto(path);
@@ -146,7 +146,7 @@ for (const path of ['/app', '/app/w/ws-product/direction.md', '/app/storage', '/
 
 test('share sheet fits 320px without page overflow', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 700 });
-  await page.goto('/app/w/ws-product/direction.md');
+  await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await page.locator('.thumb-dock').getByRole('button', { name: 'Share' }).click();
   await expect(page.getByRole('dialog', { name: /Share Product direction/u })).toBeVisible();
   await expectNoHorizontalScroll(page);
@@ -154,10 +154,10 @@ test('share sheet fits 320px without page overflow', async ({ page }) => {
 
 test('capture shell screenshots for design review', async ({ page }) => {
   const shots: Array<[string, string, { open?: 'share' }?]> = [
-    ['/app', 'desk'],
-    ['/app/w/ws-product/direction.md', 'editor'],
-    ['/app/w/ws-product/direction.md', 'share', { open: 'share' }],
-    ['/app/storage', 'storage'],
+    ['/app?shell=demo', 'desk'],
+    ['/app/w/ws-product/direction.md?shell=demo', 'editor'],
+    ['/app/w/ws-product/direction.md?shell=demo', 'share', { open: 'share' }],
+    ['/app/storage?shell=demo', 'storage'],
     ['/open', 'open'],
     ['/app?shell=private', 'desk-private'],
   ];

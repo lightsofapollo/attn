@@ -10,7 +10,12 @@ const remoteBaseUrl = process.env.ATTN_ROUTES_BASE_URL;
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: ['hosted-routes.spec.ts', 'hosted-shells.spec.ts', 'hosted-a11y.spec.ts'],
+  testMatch: [
+    'hosted-routes.spec.ts',
+    'hosted-shells.spec.ts',
+    'hosted-a11y.spec.ts',
+    'hosted-authoring.spec.ts',
+  ],
   timeout: 60_000,
   expect: { timeout: 20_000 },
   fullyParallel: false,

@@ -2,16 +2,18 @@
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
   import ShareSheet from './ShareSheet.svelte';
-  import type { StorageHealth, WorkspaceDetail, WorkspaceEntry, WorkspaceService } from './types';
+  import type { StorageHealth, WorkspaceAppService, WorkspaceDetail, WorkspaceEntry } from './types';
 
   interface Props {
-    service: WorkspaceService;
+    service: WorkspaceAppService;
     workspace: WorkspaceDetail;
     activePath: string | undefined;
+    /** Decoded head body when the active entry is Markdown; null otherwise. */
+    bodyText?: string | null;
     isNewDraft?: boolean;
   }
 
-  const { service, workspace, activePath, isNewDraft = false }: Props = $props();
+  const { service, workspace, activePath, bodyText = null, isNewDraft = false }: Props = $props();
 
   const health: StorageHealth = $derived(service.storageHealth());
   const activeEntry = $derived(
@@ -144,20 +146,14 @@
         {:else}
           <div class="eyebrow">Working draft</div>
           <h1>{workspace.name}</h1>
-          <p>
-            Attn should feel like a private writing desk, not a cloud drive with the login form
-            removed.
-          </p>
-          <h2>The source stays here</h2>
-          <p>
-            A local workspace is the source of truth. Sharing creates a review room around a
-            revision; it does not move ownership to the relay.
-          </p>
-          <ul>
-            <li>Create without a network request.</li>
-            <li>Autosave to the browser before showing “Saved.”</li>
-            <li>Export ordinary Markdown at any time.</li>
-          </ul>
+          {#if bodyText !== null && bodyText.length > 0}
+            <!-- Markdown source view; the editing surface lands in attn-7xl.3.3. -->
+            <div class="plain-md" data-body-text>{bodyText}</div>
+          {:else if bodyText !== null}
+            <p class="placeholder">Start writing…</p>
+          {:else}
+            <p class="placeholder">This entry has no Markdown body.</p>
+          {/if}
         {/if}
       </article>
     </main>

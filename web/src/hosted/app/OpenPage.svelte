@@ -1,14 +1,40 @@
 <script lang="ts">
   import AppHeader from './AppHeader.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
-  import type { WorkspaceService } from './types';
+  import { importName, toImportFiles, type PickedFile } from './import-files';
+  import type { ImportFileInput, StorageHealth } from './types';
 
   interface Props {
-    service: WorkspaceService;
+    health: StorageHealth;
+    onImport: (name: string, files: ImportFileInput[]) => Promise<void>;
   }
 
-  const { service }: Props = $props();
-  const health = $derived(service.storageHealth());
+  const { health, onImport }: Props = $props();
+
+  let fileInput = $state<HTMLInputElement | undefined>();
+  let importError = $state<string | null>(null);
+
+  async function onFilesPicked(): Promise<void> {
+    const files = fileInput?.files;
+    if (!files || files.length === 0) return;
+    importError = null;
+    try {
+      const picked: PickedFile[] = [];
+      for (const file of Array.from(files)) {
+        picked.push({
+          name: file.name,
+          relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
+          type: file.type,
+          bytes: new Uint8Array(await file.arrayBuffer()),
+        });
+      }
+      await onImport(importName(picked), toImportFiles(picked));
+    } catch (error) {
+      importError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (fileInput) fileInput.value = '';
+    }
+  }
 </script>
 
 <div class="app-shell" data-app-view="open">
@@ -35,8 +61,25 @@
       </p>
       <div class="formats">.md · images &amp; assets · folder · .zip · .attn-workspace (soon)</div>
       <div class="storage-actions" style="justify-content: center;">
-        <button class="button primary" type="button">Choose files</button>
+        <button class="button primary" type="button" onclick={() => fileInput?.click()}>
+          Choose files
+        </button>
       </div>
+      <input
+        bind:this={fileInput}
+        type="file"
+        multiple
+        accept=".md,.markdown,image/*,application/zip,.zip,*/*"
+        style="display: none"
+        aria-hidden="true"
+        tabindex="-1"
+        onchange={onFilesPicked}
+      />
+      {#if importError}
+        <p role="alert" style="color: var(--rust-deep); font: 0.9rem/1.5 var(--sans);">
+          Import failed: {importError}
+        </p>
+      {/if}
     </div>
   </main>
 </div>

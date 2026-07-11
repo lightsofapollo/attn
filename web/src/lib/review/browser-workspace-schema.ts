@@ -13,6 +13,14 @@
 // attn-7xl.2.2). Store only already-sealed bytes in the sealed fields.
 
 import { BrowserStorageError } from './browser-storage-errors';
+import {
+  EntryPathError,
+  MAX_ENTRY_PATH_BYTES,
+  MAX_ENTRY_PATH_SEGMENTS,
+  normalizeEntryPath as normalizeEntryPathShared,
+} from '../hosted/entry-path';
+
+export { MAX_ENTRY_PATH_BYTES, MAX_ENTRY_PATH_SEGMENTS };
 
 /** Bump when any workspace record shape changes; validators pin it. */
 export const WORKSPACE_RECORD_VERSION = 1;
@@ -36,8 +44,6 @@ export const GC_CREATED_INDEX = 'by_created';
 // ————— size caps —————
 
 export const MAX_WORKSPACE_NAME_BYTES = 256;
-export const MAX_ENTRY_PATH_BYTES = 1024;
-export const MAX_ENTRY_PATH_SEGMENTS = 64;
 /** Sealed revision bodies at or under this stay inline in IndexedDB; larger
  * bodies use the OPFS tier (attn-7xl.2.4) or the IndexedDB blob fallback. */
 export const MAX_INLINE_SEALED_BODY_BYTES = 512 * 1024;
@@ -173,39 +179,18 @@ export interface WorkspaceLeaseRecord {
 
 // ————— path rules —————
 
-// Control characters, DEL, and backslash are never valid in a segment.
-const PATH_SEGMENT_FORBIDDEN = /[\u0000-\u001f\u007f\\]/u;
-
 /**
- * Normalize and validate a workspace-relative path. Paths are NFC-normalized,
- * '/'-separated, and never absolute or escaping. Throws BrowserStorageError
- * on any violation; returns the canonical form used as the store key.
+ * Canonical path normalization lives in src/lib/hosted/entry-path.ts (shared
+ * with the app bundle, which must stay free of this module's graph). This
+ * wrapper converts violations into storage errors.
  */
 export function normalizeEntryPath(raw: string): string {
-  if (typeof raw !== 'string' || raw.length === 0) {
-    throw new BrowserStorageError('entry path is required');
+  try {
+    return normalizeEntryPathShared(raw);
+  } catch (error) {
+    if (error instanceof EntryPathError) throw new BrowserStorageError(error.message);
+    throw error;
   }
-  const normalized = raw.normalize('NFC');
-  const bytes = new TextEncoder().encode(normalized);
-  if (bytes.length > MAX_ENTRY_PATH_BYTES) {
-    throw new BrowserStorageError(`entry path exceeds ${MAX_ENTRY_PATH_BYTES} bytes`);
-  }
-  const segments = normalized.split('/');
-  if (segments.length > MAX_ENTRY_PATH_SEGMENTS) {
-    throw new BrowserStorageError('entry path has too many segments');
-  }
-  for (const segment of segments) {
-    if (segment.length === 0) {
-      throw new BrowserStorageError('entry path must be relative with non-empty segments');
-    }
-    if (segment === '.' || segment === '..') {
-      throw new BrowserStorageError('entry path must not contain dot segments');
-    }
-    if (PATH_SEGMENT_FORBIDDEN.test(segment)) {
-      throw new BrowserStorageError('entry path contains forbidden characters');
-    }
-  }
-  return normalized;
 }
 
 // ————— validation —————

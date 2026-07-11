@@ -798,3 +798,62 @@ a.workspace-row:hover {
     padding: 0.5rem 0.7rem;
   }
 }
+
+/* ————— desk row actions (attn-7xl.3.2) ————— */
+
+.row-open {
+  color: var(--ink);
+}
+
+.row-open:hover strong {
+  text-decoration: underline;
+}
+
+.row-tail {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  justify-content: flex-end;
+}
+
+.row-action {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: 650 0.78rem var(--sans);
+  cursor: pointer;
+  padding: 0.3rem 0.4rem;
+  border-radius: 6px;
+}
+
+.row-action:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--sheet) 70%, transparent);
+}
+
+.row-action.danger:hover {
+  color: var(--rust-deep);
+}
+
+.rename-input {
+  font: 700 1.18rem var(--serif);
+  color: var(--ink);
+  background: var(--sheet);
+  border: 1px solid var(--rust);
+  border-radius: 6px;
+  padding: 0.35rem 0.55rem;
+  max-width: 100%;
+}
+
+.quick:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Plain Markdown source view until the editor lands (attn-7xl.3.3). */
+.plain-md {
+  margin: 1.4rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 1.02rem/1.7 var(--serif);
+}

@@ -30,7 +30,7 @@ async function expectNoAxeViolations(page: Page, context: string): Promise<void>
 for (const [path, name] of [
   ['/', 'landing'],
   ['/app', 'desk'],
-  ['/app/w/ws-product/direction.md', 'editor'],
+  ['/app/w/ws-product/direction.md?shell=demo', 'editor'],
   ['/app/storage', 'storage'],
   ['/open', 'open'],
   ['/app?shell=private', 'desk (private browsing)'],
@@ -44,7 +44,7 @@ for (const [path, name] of [
 }
 
 test('axe: share sheet open', async ({ page }) => {
-  await page.goto('/app/w/ws-product/direction.md');
+  await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await page.getByRole('button', { name: 'Share', exact: true }).click();
   await expect(page.getByRole('dialog', { name: /Share Product direction/u })).toBeVisible();
   await expectNoAxeViolations(page, 'share sheet');
@@ -52,7 +52,7 @@ test('axe: share sheet open', async ({ page }) => {
 
 test('axe: mobile editor with files sheet', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto('/app/w/ws-product/direction.md');
+  await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await page.locator('.thumb-dock').getByRole('button', { name: 'Files' }).click();
   await expect(page.getByRole('dialog', { name: /Files · 5/u })).toBeVisible();
   await expectNoAxeViolations(page, 'mobile files sheet');
@@ -73,7 +73,7 @@ test('keyboard-only: landing reaches both CTAs', async ({ page }) => {
 });
 
 test('keyboard-only: share sheet opens, traps start focus, and closes', async ({ page }) => {
-  await page.goto('/app/w/ws-product/direction.md');
+  await page.goto('/app/w/ws-product/direction.md?shell=demo');
   const share = page.getByRole('button', { name: 'Share', exact: true });
   await share.focus();
   await page.keyboard.press('Enter');

@@ -90,7 +90,8 @@ for (const [path, view, headingHint] of [
   ['/app/w/ws-product/direction.md', 'workspace', 'Product direction'],
 ] as const) {
   test(`app entry serves ${path} without redirecting`, async ({ page }) => {
-    const response = await page.goto(path);
+    // The fixture workspace lives in the mock service (?shell=demo).
+    const response = await page.goto(`${path}?shell=demo`);
     expect(response?.status()).toBe(200);
     await expect(page.locator('body[data-route="app"]')).toBeVisible();
     await expect(page.locator('[data-app-view]')).toHaveAttribute('data-app-view', view);

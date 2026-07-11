@@ -191,6 +191,60 @@ export class MockWorkspaceService implements WorkspaceAppService {
     if (index >= 0) this.workspaces.splice(index, 1);
   }
 
+  async createMarkdownEntry(workspaceId: string, path: string): Promise<void> {
+    const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
+    workspace?.entries.push({ path, presentation: 'editable', sizeLabel: '0 B' });
+  }
+
+  async addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void> {
+    const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
+    for (const file of files) {
+      workspace?.entries.push({
+        path: file.path,
+        presentation: file.kind === 'markdown' ? 'editable' : 'preview',
+        sizeLabel: `${file.bytes.length} B`,
+      });
+    }
+  }
+
+  async renameEntry(workspaceId: string, fromPath: string, toPath: string): Promise<void> {
+    const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
+    const entry = workspace?.entries.find((candidate) => candidate.path === fromPath);
+    if (entry) entry.path = toPath;
+  }
+
+  async deleteEntry(workspaceId: string, path: string): Promise<void> {
+    const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
+    if (!workspace) return;
+    workspace.entries = workspace.entries.filter((candidate) => candidate.path !== path);
+  }
+
+  async readEntryBytes(
+    _workspaceId: string,
+    path: string,
+  ): Promise<{ bytes: Uint8Array; mediaType?: string } | null> {
+    // A 1x1 transparent PNG so demo previews render.
+    const png = Uint8Array.from(
+      atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='),
+      (char) => char.charCodeAt(0),
+    );
+    return { bytes: png, mediaType: path.endsWith('.png') ? 'image/png' : 'application/octet-stream' };
+  }
+
+  async exportWorkspace(workspaceId: string): Promise<ImportFileInput[]> {
+    const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
+    if (!workspace) return [];
+    const files: ImportFileInput[] = [];
+    for (const entry of workspace.entries) {
+      files.push({
+        path: entry.path,
+        bytes: new TextEncoder().encode(`demo: ${entry.path}`),
+        kind: entry.presentation === 'editable' ? 'markdown' : 'asset',
+      });
+    }
+    return files;
+  }
+
   async beginEditing(): Promise<EditingSession | null> {
     return {
       commitText: async () => undefined,

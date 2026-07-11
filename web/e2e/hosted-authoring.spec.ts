@@ -145,3 +145,72 @@ test('a second tab is honestly read-only while one tab edits', async ({ page, co
   await second.getByRole('button', { name: 'Edit', exact: true }).click();
   await expect(second.locator('.writing-sheet .ProseMirror')).toBeVisible();
 });
+
+test('multi-file rail: create, add asset with inline preview, rename, delete, export zip', async ({ page }) => {
+  await page.goto('/app#new');
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+
+  // Create a nested Markdown file from the rail.
+  await page.locator('[data-action="new-markdown"]').click();
+  await page.getByRole('textbox', { name: 'New Markdown file path' }).fill('docs/notes');
+  await page.getByRole('textbox', { name: 'New Markdown file path' }).press('Enter');
+  await expect(page).toHaveURL(/\/docs\/notes\.md$/u);
+  await expect(page.locator('.file-rail .file.active')).toContainText('docs/notes.md');
+
+  // Add a PNG asset — it must render inline from decrypted bytes.
+  const chooser = page.waitForEvent('filechooser');
+  await page.locator('[data-action="add-assets"]').click();
+  // 1x1 transparent PNG.
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  await (await chooser).setFiles([{ name: 'pixel.png', mimeType: 'image/png', buffer: png }]);
+  await expect(page.locator('.file-rail .file.asset')).toContainText('pixel.png');
+  await page.locator('.file-rail .file.asset').click();
+  await expect(page.locator('.asset-image')).toBeVisible();
+  const naturalWidth = await page
+    .locator('.asset-image')
+    .evaluate((img) => (img as HTMLImageElement).naturalWidth);
+  expect(naturalWidth).toBe(1); // decoded — the decrypted bytes are a real PNG
+
+  // Rename the asset to a nested path.
+  await page.getByRole('button', { name: 'Rename' }).click();
+  const renameInput = page.getByRole('textbox', { name: 'New path' });
+  await renameInput.fill('images/pixel.png');
+  await renameInput.press('Enter');
+  await expect(page).toHaveURL(/\/images\/pixel\.png$/u);
+  await expect(page.locator('.asset-image')).toBeVisible();
+
+  // Export the whole workspace as a zip with exact paths.
+  const downloadPromise = page.waitForEvent('download');
+  await page.locator('[data-action="export-zip"]').click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toMatch(/\.zip$/u);
+
+  // Delete the asset; the workspace survives with its Markdown files.
+  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.getByRole('button', { name: 'Delete file' }).click();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await expect(page.locator('.file-rail .file.asset')).toHaveCount(0);
+  await expect(page.locator('.file-rail .file-list .file')).toHaveCount(2);
+  await expect(page.locator('.file-rail .file-list')).toContainText('untitled.md');
+  await expect(page.locator('.file-rail .file-list')).toContainText('docs/notes.md');
+});
+
+test('zip import expands into a nested multi-file workspace', async ({ page }) => {
+  await page.goto('/app');
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: /Import workspace/u }).click();
+  const { zipSync } = await import('fflate');
+  const zip = Buffer.from(
+    zipSync({
+      'folio/index.md': new TextEncoder().encode('# Folio index'),
+      'folio/img/dot.png': new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    }),
+  );
+  await (await chooser).setFiles([{ name: 'folio.zip', mimeType: 'application/zip', buffer: zip }]);
+  await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\//u);
+  await expect(page.locator('[data-body-text]')).toContainText('Folio index');
+  await expect(page.locator('.file-rail .file.asset')).toContainText('folio/img/dot.png');
+});

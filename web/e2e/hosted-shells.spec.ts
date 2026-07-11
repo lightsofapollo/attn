@@ -40,7 +40,7 @@ test('landing one-click intent opens an untitled draft editor', async ({ page })
 test('editor shell renders rails, entries, and review margin', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await expect(page.locator('.doc-name')).toContainText('Product direction');
-  await expect(page.locator('.file-rail .file')).toHaveCount(6); // 5 entries + add action
+  await expect(page.locator('.file-rail .file-list .file')).toHaveCount(5);
   await expect(page.locator('.file-rail .file.active')).toContainText('direction.md');
   await expect(page.locator('.file-rail .file.asset')).toHaveCount(2);
   await expect(page.locator('.review-rail .review-card')).toHaveCount(1);
@@ -48,13 +48,15 @@ test('editor shell renders rails, entries, and review margin', async ({ page }) 
   await expectNoHorizontalScroll(page);
 });
 
-test('asset entries render preview and download-only placeholders', async ({ page }) => {
+test('asset entries render inline previews and download-only placeholders', async ({ page }) => {
   await page.goto('/app/w/ws-product/images/desk.png?shell=demo');
   await expect(page.locator('.writing-sheet .eyebrow')).toHaveText('Asset preview');
-  await expect(page.locator('.asset-preview')).toContainText('renders inline');
+  // Safe rasters render inline from (mock-)decrypted bytes.
+  await expect(page.locator('.asset-image')).toBeVisible();
   await page.goto('/app/w/ws-product/data/notes.json?shell=demo');
   await expect(page.locator('.writing-sheet .eyebrow')).toHaveText('Download only');
   await expect(page.locator('.asset-preview')).toContainText('never executed');
+  await expect(page.getByRole('article').getByRole('button', { name: 'Download' })).toBeVisible();
 });
 
 test('share sheet opens as a dialog and returns focus on close', async ({ page }) => {

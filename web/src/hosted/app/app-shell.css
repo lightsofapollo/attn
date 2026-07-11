@@ -879,3 +879,33 @@ a.workspace-row:hover {
   padding-left: 1rem;
   color: var(--muted);
 }
+
+/* ————— file rail actions + inline preview (attn-7xl.3.4) ————— */
+
+.entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.4rem 0 0.8rem;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.rail-input {
+  width: 100%;
+  font: 0.85rem var(--sans);
+  color: var(--ink);
+  background: var(--sheet);
+  border: 1px solid var(--rust);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem;
+  margin: 0.3rem 0;
+}
+
+.asset-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin-top: 1.4rem;
+  border: 1px solid var(--rule);
+}

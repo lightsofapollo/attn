@@ -116,5 +116,17 @@ export interface WorkspaceAppService {
   deleteWorkspace(workspaceId: string): Promise<void>;
   /** Null when another tab holds the writer lease — stay read-only. */
   beginEditing(workspaceId: string): Promise<EditingSession | null>;
+  // ————— multi-file/asset operations (attn-7xl.3.4) —————
+  createMarkdownEntry(workspaceId: string, path: string): Promise<void>;
+  addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void>;
+  renameEntry(workspaceId: string, fromPath: string, toPath: string): Promise<void>;
+  deleteEntry(workspaceId: string, path: string): Promise<void>;
+  /** Decrypted head bytes for preview/download; null when absent. */
+  readEntryBytes(
+    workspaceId: string,
+    path: string,
+  ): Promise<{ bytes: Uint8Array; mediaType?: string } | null>;
+  /** Every live entry with exact bytes, for zip export / download-all. */
+  exportWorkspace(workspaceId: string): Promise<ImportFileInput[]>;
   shareScopeFor(workspace: WorkspaceDetail): ShareScope;
 }

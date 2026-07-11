@@ -3,6 +3,8 @@
   import DegradedBanner from './DegradedBanner.svelte';
   import ShareSheet from './ShareSheet.svelte';
   import { AutosaveController } from './autosave';
+  import { buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
+  import { expandPicked, toImportFiles, type PickedFile } from './import-files';
   import type {
     EditingSession,
     SaveState,
@@ -64,6 +66,124 @@
   let autosave: AutosaveController | null = null;
   // Durable commits completed this session — observable for tests/status.
   let commitCount = $state(0);
+
+  // ————— multi-file rail state (attn-7xl.3.4) —————
+  let addingMarkdown = $state(false);
+  let newMarkdownPath = $state('');
+  let renamingEntry = $state(false);
+  let renameEntryValue = $state('');
+  let confirmingEntryDelete = $state(false);
+  let railError = $state<string | null>(null);
+  let assetInput = $state<HTMLInputElement | undefined>();
+  let previewUrl = $state<string | null>(null);
+
+  // Inline preview: decrypt safe raster bytes into a short-lived blob URL.
+  $effect(() => {
+    const entry = activeEntry;
+    if (!entry || entry.presentation !== 'preview') {
+      previewUrl = null;
+      return;
+    }
+    let cancelled = false;
+    let url: string | null = null;
+    void service.readEntryBytes(workspace.id, entry.path).then((result) => {
+      if (!result || cancelled) return;
+      const copy = new Uint8Array(result.bytes);
+      const blob = new Blob([copy.buffer as ArrayBuffer], {
+        type: result.mediaType ?? 'application/octet-stream',
+      });
+      url = URL.createObjectURL(blob);
+      previewUrl = url;
+    });
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+      previewUrl = null;
+    };
+  });
+
+  async function createMarkdownFile(): Promise<void> {
+    const raw = newMarkdownPath.trim();
+    if (raw.length === 0) return;
+    const path = /\.(?:md|markdown)$/iu.test(raw) ? raw : `${raw}.md`;
+    railError = null;
+    try {
+      await service.createMarkdownEntry(workspace.id, path);
+      window.location.assign(`/app/w/${workspace.id}/${path}`);
+    } catch (error) {
+      railError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function onAssetsPicked(): Promise<void> {
+    const files = assetInput?.files;
+    if (!files || files.length === 0) return;
+    railError = null;
+    try {
+      const picked: PickedFile[] = [];
+      for (const file of Array.from(files)) {
+        picked.push({
+          name: file.name,
+          relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
+          type: file.type,
+          bytes: new Uint8Array(await file.arrayBuffer()),
+        });
+      }
+      await service.addAssetFiles(workspace.id, toImportFiles(await expandPicked(picked)));
+      window.location.reload();
+    } catch (error) {
+      railError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (assetInput) assetInput.value = '';
+    }
+  }
+
+  async function commitEntryRename(): Promise<void> {
+    const entry = activeEntry;
+    const target = renameEntryValue.trim();
+    renamingEntry = false;
+    if (!entry || target.length === 0 || target === entry.path) return;
+    railError = null;
+    try {
+      await service.renameEntry(workspace.id, entry.path, target);
+      window.location.assign(`/app/w/${workspace.id}/${target}`);
+    } catch (error) {
+      railError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function deleteActiveEntry(): Promise<void> {
+    const entry = activeEntry;
+    confirmingEntryDelete = false;
+    if (!entry) return;
+    railError = null;
+    try {
+      await service.deleteEntry(workspace.id, entry.path);
+      window.location.assign(`/app/w/${workspace.id}`);
+    } catch (error) {
+      railError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function downloadActiveEntry(): Promise<void> {
+    const entry = activeEntry;
+    if (!entry) return;
+    const result = await service.readEntryBytes(workspace.id, entry.path);
+    if (!result) return;
+    const basename = entry.path.split('/').pop() ?? entry.path;
+    triggerDownload(document, basename, result.bytes, result.mediaType);
+  }
+
+  async function exportZip(): Promise<void> {
+    railError = null;
+    try {
+      const files = await service.exportWorkspace(workspace.id);
+      const zip = await buildWorkspaceZip(files);
+      triggerDownload(document, zipFileName(workspace.name), zip, 'application/zip');
+    } catch (error) {
+      railError = error instanceof Error ? error.message : String(error);
+    }
+  }
 
   const canEdit = $derived(
     activeEntry?.presentation === 'editable' &&
@@ -247,7 +367,89 @@
           </li>
         {/each}
       </ul>
-      <button class="file rail-add" type="button">＋ Add file or asset</button>
+      {#if activeEntry}
+        <div class="entry-actions" aria-label={`Actions for ${activeEntry.path}`}>
+          {#if renamingEntry}
+            <input
+              class="rail-input"
+              type="text"
+              aria-label="New path"
+              bind:value={renameEntryValue}
+              onkeydown={(event) => {
+                if (event.key === 'Enter') void commitEntryRename();
+                if (event.key === 'Escape') renamingEntry = false;
+              }}
+            />
+          {:else}
+            <button
+              class="row-action"
+              type="button"
+              onclick={() => {
+                renamingEntry = true;
+                renameEntryValue = activeEntry?.path ?? '';
+              }}
+            >
+              Rename
+            </button>
+            <button class="row-action danger" type="button" onclick={() => (confirmingEntryDelete = true)}>
+              Delete
+            </button>
+            <button class="row-action" type="button" onclick={() => void downloadActiveEntry()}>
+              Download
+            </button>
+          {/if}
+        </div>
+        {#if confirmingEntryDelete}
+          <div class="confirm-clear" role="alertdialog" aria-label={`Delete ${activeEntry.path}?`}>
+            <strong>Delete {activeEntry.path}?</strong>
+            <div class="actions">
+              <button class="button" type="button" onclick={() => (confirmingEntryDelete = false)}>
+                Cancel
+              </button>
+              <button class="button danger" type="button" onclick={() => void deleteActiveEntry()}>
+                Delete file
+              </button>
+            </div>
+          </div>
+        {/if}
+      {/if}
+      {#if addingMarkdown}
+        <input
+          class="rail-input"
+          type="text"
+          aria-label="New Markdown file path"
+          placeholder="notes.md"
+          bind:value={newMarkdownPath}
+          onkeydown={(event) => {
+            if (event.key === 'Enter') void createMarkdownFile();
+            if (event.key === 'Escape') addingMarkdown = false;
+          }}
+        />
+      {:else}
+        <button class="file rail-add" type="button" data-action="new-markdown" onclick={() => (addingMarkdown = true)}>
+          ＋ New Markdown
+        </button>
+      {/if}
+      <button class="file rail-add" type="button" data-action="add-assets" onclick={() => assetInput?.click()}>
+        ↥ Add files or assets
+      </button>
+      <button class="file rail-add" type="button" data-action="export-zip" onclick={() => void exportZip()}>
+        ⤓ Export workspace (.zip)
+      </button>
+      <input
+        bind:this={assetInput}
+        type="file"
+        multiple
+        style="display: none"
+        aria-hidden="true"
+        tabindex="-1"
+        onchange={() => void onAssetsPicked()}
+      />
+      {#if railError}
+        <p role="alert" style="color: var(--rust-deep); font: 0.8rem/1.4 var(--sans); margin-top: 0.6rem;">
+          {railError}
+        </p>
+      {/if}
     </aside>
 
     <main class="editor-canvas">
@@ -282,15 +484,24 @@
             {activeEntry.presentation === 'preview' ? 'Asset preview' : 'Download only'}
           </div>
           <h1>{activeEntry.path}</h1>
-          <div class="asset-preview">
-            <strong>{activeEntry.path}</strong>
-            {#if activeEntry.presentation === 'preview'}
-              Safe raster asset · renders inline when storage lands · {activeEntry.sizeLabel}
-            {:else}
-              This format is never executed here. Download it or open it in native attn ·
-              {activeEntry.sizeLabel}
-            {/if}
-          </div>
+          {#if activeEntry.presentation === 'preview' && previewUrl}
+            <img class="asset-image" src={previewUrl} alt={activeEntry.path} />
+          {:else}
+            <div class="asset-preview">
+              <strong>{activeEntry.path}</strong>
+              {#if activeEntry.presentation === 'preview'}
+                Decrypting preview… · {activeEntry.sizeLabel}
+              {:else}
+                This format is never executed here. Download it or open it in native attn ·
+                {activeEntry.sizeLabel}
+              {/if}
+            </div>
+            <div class="storage-actions">
+              <button class="button" type="button" onclick={() => void downloadActiveEntry()}>
+                Download
+              </button>
+            </div>
+          {/if}
         {:else}
           <div class="eyebrow">Working draft</div>
           <h1>{workspace.name}</h1>

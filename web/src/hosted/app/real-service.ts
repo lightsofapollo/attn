@@ -155,6 +155,43 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     };
   }
 
+  async createMarkdownEntry(workspaceId: string, path: string): Promise<void> {
+    await this.service.createMarkdown(workspaceId, path, '');
+  }
+
+  async addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void> {
+    for (const file of files) {
+      if (file.kind === 'markdown') {
+        await this.service.createMarkdown(workspaceId, file.path, new TextDecoder().decode(file.bytes));
+      } else {
+        await this.service.addAsset(workspaceId, file.path, file.bytes, file.mediaType);
+      }
+    }
+  }
+
+  async renameEntry(workspaceId: string, fromPath: string, toPath: string): Promise<void> {
+    await this.service.renameEntry(workspaceId, fromPath, toPath);
+  }
+
+  async deleteEntry(workspaceId: string, path: string): Promise<void> {
+    await this.service.deleteEntry(workspaceId, path);
+  }
+
+  async readEntryBytes(
+    workspaceId: string,
+    path: string,
+  ): Promise<{ bytes: Uint8Array; mediaType?: string } | null> {
+    const loaded = await this.service.loadWorkspace(workspaceId);
+    const entry = loaded?.entries.find((candidate) => candidate.path === path);
+    if (!entry) return null;
+    const bytes = await this.service.readHeadBytes(workspaceId, path);
+    return { bytes, ...(entry.mediaType === undefined ? {} : { mediaType: entry.mediaType }) };
+  }
+
+  async exportWorkspace(workspaceId: string): Promise<ImportFileInput[]> {
+    return this.service.exportWorkspace(workspaceId);
+  }
+
   shareScopeFor(workspace: WorkspaceDetail): ShareScope {
     const entryCount = workspace.entries.length;
     return {

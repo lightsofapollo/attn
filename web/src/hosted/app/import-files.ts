@@ -13,6 +13,9 @@ export interface PickedFile {
 }
 
 const MARKDOWN_EXTENSIONS = /\.(?:md|markdown)$/iu;
+const ZIP_EXTENSION = /\.zip$/iu;
+/** Per-file input cap: larger inputs are rejected, never silently truncated. */
+export const MAX_IMPORT_FILE_BYTES = 64 * 1024 * 1024;
 
 export function kindForFile(name: string): WorkspaceEntryKind {
   return MARKDOWN_EXTENSIONS.test(name) ? 'markdown' : 'asset';
@@ -26,6 +29,11 @@ export function kindForFile(name: string): WorkspaceEntryKind {
  */
 export function toImportFiles(picked: PickedFile[]): ImportFileInput[] {
   return picked.map((file) => {
+    if (file.bytes.length > MAX_IMPORT_FILE_BYTES) {
+      throw new EntryPathSafeError(
+        `${file.name} is larger than the ${Math.round(MAX_IMPORT_FILE_BYTES / (1024 * 1024))} MB import limit`,
+      );
+    }
     const rawPath = file.relativePath && file.relativePath.length > 0 ? file.relativePath : file.name;
     const path = normalizeEntryPath(rawPath);
     const kind = kindForFile(file.name);
@@ -36,6 +44,77 @@ export function toImportFiles(picked: PickedFile[]): ImportFileInput[] {
       ...(kind === 'asset' && file.type ? { mediaType: file.type } : {}),
     };
   });
+}
+
+export class EntryPathSafeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EntryPathSafeError';
+  }
+}
+
+export function isZipFile(name: string): boolean {
+  return ZIP_EXTENSION.test(name);
+}
+
+const MEDIA_BY_EXTENSION: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  json: 'application/json',
+  txt: 'text/plain',
+  html: 'text/html',
+  svg: 'image/svg+xml',
+  pdf: 'application/pdf',
+};
+
+export function mediaTypeForName(name: string): string | undefined {
+  const extension = name.split('.').pop()?.toLowerCase();
+  return extension ? MEDIA_BY_EXTENSION[extension] : undefined;
+}
+
+/**
+ * Expand a picked `.zip` into individual files — the iOS-compatible folder
+ * path. Directory entries are skipped; any invalid path aborts the whole
+ * import rather than silently dropping content. fflate is loaded on demand.
+ */
+export async function expandZip(zip: PickedFile): Promise<PickedFile[]> {
+  const { unzipSync } = await import('fflate');
+  let entries: Record<string, Uint8Array>;
+  try {
+    entries = unzipSync(zip.bytes);
+  } catch {
+    throw new EntryPathSafeError(`${zip.name} is not a readable zip archive`);
+  }
+  const files: PickedFile[] = [];
+  for (const [rawPath, bytes] of Object.entries(entries)) {
+    if (rawPath.endsWith('/')) continue; // directory marker
+    if (rawPath.startsWith('__MACOSX/') || rawPath.split('/').pop() === '.DS_Store') continue;
+    const name = rawPath.split('/').pop() ?? rawPath;
+    files.push({
+      name,
+      relativePath: rawPath,
+      type: mediaTypeForName(name) ?? '',
+      bytes,
+    });
+  }
+  if (files.length === 0) {
+    throw new EntryPathSafeError(`${zip.name} contains no files`);
+  }
+  return files;
+}
+
+/** Expand zips (each into its files) and pass everything else through. */
+export async function expandPicked(picked: PickedFile[]): Promise<PickedFile[]> {
+  const out: PickedFile[] = [];
+  for (const file of picked) {
+    if (isZipFile(file.name)) out.push(...(await expandZip(file)));
+    else out.push(file);
+  }
+  return out;
 }
 
 /** Derive a workspace name from the imported set. */

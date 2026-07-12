@@ -298,9 +298,10 @@ figure.diagram text { font: 600 12px var(--sans); fill: var(--ink); }
 figure.diagram .edge { stroke: var(--muted); fill: none; marker-end: url(#arr); }
 figure.diagram .edge-label { font: 500 10.5px var(--mono); fill: var(--muted); }
 figure.diagram figcaption {
-  font: 600 0.7rem/1.2 var(--sans); letter-spacing: 0.06em; text-transform: uppercase;
-  color: var(--faint); padding-top: 10px;
+  font: 500 0.75rem/1.4 var(--sans); letter-spacing: 0.02em;
+  color: var(--muted); padding-top: 10px;
 }
+figure.diagram figcaption b { font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; font-size: 0.7rem; color: var(--faint); }
 
 /* Frontmatter card — agent docs render their metadata, not a prose wall */
 .frontmatter {
@@ -616,7 +617,7 @@ aside.rail {
   .rail-chip { display: inline-flex; }
   aside.rail {
     position: fixed; top: 52px; right: 0; bottom: 0; width: min(340px, 92vw);
-    z-index: 55; box-shadow: var(--panel-shadow);
+    z-index: 66; box-shadow: var(--panel-shadow); /* above the toast: cards win over transients */
     border-left: 1px solid var(--border);
     transform: translateX(100%); visibility: hidden;
     transition: transform 200ms var(--ease), visibility 0s linear 200ms;
@@ -631,7 +632,9 @@ aside.rail {
   .crumb { display: none; }
 }
 @media (max-width: 700px) {
-  .desk-link, .save-chip, .theme-toggle, #kbdChip { display: none; }
+  .desk-link, .theme-toggle, #kbdChip { display: none; }
+  .save-chip .sc-text { display: none; } /* phones keep the save dot */
+  .save-chip { padding: 5px 7px; }
   header { gap: 10px; }
 }
 
@@ -653,7 +656,7 @@ aside.rail {
       <span class="file" id="crumbFile">launch-plan.md</span>
     </div>
     <div class="spacer"></div>
-    <span class="save-chip" id="saveChip"><span class="dot"></span>Saved · on this device</span>
+    <span class="save-chip" id="saveChip"><span class="dot"></span><span class="sc-text">Saved · on this device</span></span>
     <div class="peers" title="Dana (reviewer), Virgil (agent)">
       <span class="avatar reviewer">D</span>
       <span class="avatar agent">V</span>
@@ -674,11 +677,12 @@ aside.rail {
       <button class="row active" data-file="launch">
         <svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/></svg>
         launch-plan.md
-        <span class="badge" id="fileBadge">2</span>
+        <span class="badge" data-file-badge="launch">2</span>
       </button>
       <button class="row" data-file="metrics">
         <svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/></svg>
         metrics.md
+        <span class="badge" data-file-badge="metrics" style="display:none">0</span>
       </button>
     </div>
     <div class="side-section outline" id="outline">
@@ -709,11 +713,11 @@ aside.rail {
       </details>
 
       <h1>Q3 Launch Plan</h1>
-      <p class="doc-meta">Agent draft · shared for review 2 hours ago · <span id="metaThreads">2 open threads</span></p>
+      <p class="doc-meta">Agent draft · shared for review 2 hours ago · <span data-thread-meta>2 open threads</span></p>
 
       <p>This plan covers the public launch of the mesh CLI: the producer loop demo, the pricing page, and the burst-training benchmark we publish alongside it. The goal is a launch that a <a href="#">single founder can run</a> end-to-end without touching a cloud console.</p>
 
-      <p>The core claim we are making is that <span class="comment-anchor" data-thread="t1" tabindex="0" role="button" aria-label="Comment thread from Dana">training bursts should move to wherever compute is cheapest that hour</span>, and the demo has to make that visible in under ninety seconds. Everything else in this document is subordinate to that moment. The benchmark <del>proves</del><ins data-thread="t2">demonstrates</ins> the arbitrage on a real fine-tune, not a synthetic batch job.</p>
+      <p>The core claim we are making is that <span class="comment-anchor" data-thread="t1" tabindex="0" role="button" aria-label="Comment thread from Dana">training bursts should move to wherever compute is cheapest that hour</span>, and the demo has to make that visible in under ninety seconds. Everything else in this document is subordinate to that moment. The benchmark <del>proves</del><ins data-thread="t2" tabindex="0" role="button" aria-label="Suggestion from Virgil: replace proves with demonstrates">demonstrates</ins> the arbitrage on a real fine-tune, not a synthetic batch job.</p>
 
       <h2 id="h-timeline">Timeline</h2>
       <ul class="marks">
@@ -759,7 +763,7 @@ aside.rail {
             <text class="edge-label" x="448" y="40">cas://</text>
           </g>
         </svg>
-        <figcaption>Figure · launch pipeline — rendered from a ```mermaid block, full pane width</figcaption>
+        <figcaption><b>Figure</b> · launch pipeline, rendered from a mermaid block</figcaption>
       </figure>
 
       <h2 id="h-gates">Rollout gates</h2>
@@ -791,7 +795,7 @@ aside.rail {
 
     <article class="sheet" id="doc-metrics" hidden>
       <h1>Launch metrics</h1>
-      <p class="doc-meta">Agent draft · not yet shared · no open threads</p>
+      <p class="doc-meta">Agent draft · not yet shared · <span data-thread-meta>no open threads</span></p>
       <p>Targets we hold ourselves to in the first thirty days. Numbers come from the relay’s anonymous counters and the CAS manifest log; nothing here identifies a user or a document.</p>
       <h2 id="h-adoption">Adoption targets</h2>
       <table>
@@ -814,7 +818,7 @@ aside.rail {
       <span class="label" style="letter-spacing:.08em">Review</span>
       <span class="count" id="railCount">2 open</span>
       <span class="spacer" style="flex:1"></span>
-      <span style="font:500 .7rem var(--sans); color:var(--faint)" title="Toggle review panel">⌘J</span>
+      <button id="railHide" style="font:500 .7rem var(--sans); color:var(--faint)" title="Hide review panel" aria-label="Hide review panel">⌘J</button>
     </div>
 
     <div class="rail-empty" id="railEmpty" hidden>
@@ -822,7 +826,7 @@ aside.rail {
     </div>
 
     <div class="rail-track" id="railTrack">
-      <div class="rcard" id="card-t1" data-thread="t1" tabindex="-1">
+      <div class="rcard" id="card-t1" data-thread="t1" data-file="launch" tabindex="-1">
         <div class="rcard-head">
           <span class="avatar reviewer">D</span>
           <span class="who">Dana</span>
@@ -837,7 +841,7 @@ aside.rail {
         </div>
       </div>
 
-      <div class="rcard" id="card-t2" data-thread="t2" data-proposed="demonstrates" tabindex="-1">
+      <div class="rcard" id="card-t2" data-thread="t2" data-file="launch" data-proposed="demonstrates" tabindex="-1">
         <div class="rcard-head">
           <span class="avatar agent">V</span>
           <span class="who">Virgil</span>
@@ -855,7 +859,7 @@ aside.rail {
         </div>
       </div>
 
-      <div class="rcard resolved" id="card-t0" tabindex="-1">
+      <div class="rcard resolved" id="card-t0" data-file="launch" tabindex="-1">
         <div class="rcard-head">
           <span class="avatar reviewer">D</span>
           <span class="who">Dana</span>
@@ -897,19 +901,22 @@ aside.rail {
 <!-- Command palette -->
 <div class="veil" id="veil" data-state="closed"></div>
 <div class="palette" id="palette" data-state="closed" role="dialog" aria-modal="true" aria-label="Command palette">
-  <input id="palInput" placeholder="Type a command or file name…" autocomplete="off">
+  <input id="palInput" placeholder="Type a command or file name…" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="palList" aria-autocomplete="list">
+  <div id="palList" role="listbox" aria-label="Commands and files">
   <div class="group" id="palCommands">
-    <span class="label">Commands</span>
-    <button class="pal-item" data-action="jump" data-kw="jump heading outline next section"><svg viewBox="0 0 24 24"><path d="M4 12h16M4 6h16M4 18h10"/></svg>Jump to next heading <span class="hint"><kbd>⌘⇧O</kbd></span></button>
-    <button class="pal-item" data-action="share" data-kw="share link review encrypt"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/></svg>Share this file <span class="hint"><kbd>⌘⇧S</kbd></span></button>
-    <button class="pal-item" data-action="rail" data-kw="review panel rail threads toggle"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M15 5v14"/></svg>Toggle review panel <span class="hint"><kbd>⌘J</kbd></span></button>
-    <button class="pal-item" data-action="resolve-all" data-kw="resolve all threads close"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>Resolve all open threads</button>
-    <button class="pal-item" id="palTheme" data-action="theme" data-kw="theme dark light paper ink switch"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9c-5 0-9-4-9-9z"/></svg><span id="palThemeText">Switch to INK theme</span> <span class="hint"><kbd>T</kbd></span></button>
+    <span class="label" role="presentation">Commands</span>
+    <button class="pal-item" role="option" id="pal-comment" data-action="comment-para" data-kw="comment paragraph annotate note write"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5z"/></svg>Comment on current paragraph <span class="hint"><kbd>⌘.</kbd></span></button>
+    <button class="pal-item" role="option" id="pal-jump" data-action="jump" data-kw="jump heading outline next section"><svg viewBox="0 0 24 24"><path d="M4 12h16M4 6h16M4 18h10"/></svg>Jump to next heading <span class="hint"><kbd>⌘⇧O</kbd></span></button>
+    <button class="pal-item" role="option" id="pal-share" data-action="share" data-kw="share link review encrypt"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/></svg>Share this file <span class="hint"><kbd>⌘⇧S</kbd></span></button>
+    <button class="pal-item" role="option" id="pal-rail" data-action="rail" data-kw="review panel rail threads toggle"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M15 5v14"/></svg>Toggle review panel <span class="hint"><kbd>⌘J</kbd></span></button>
+    <button class="pal-item" role="option" id="pal-resolve" data-action="resolve-all" data-kw="resolve all comments close threads"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg>Resolve all open comments</button>
+    <button class="pal-item" role="option" id="palTheme" data-action="theme" data-kw="theme dark light paper ink switch"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9c-5 0-9-4-9-9z"/></svg><span id="palThemeText">Switch to INK theme</span> <span class="hint"><kbd>T</kbd></span></button>
   </div>
   <div class="group" id="palFiles">
-    <span class="label">Files</span>
-    <button class="pal-item" data-action="file-launch" data-kw="launch plan file open"><svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/></svg>launch-plan.md</button>
-    <button class="pal-item" data-action="file-metrics" data-kw="metrics file open"><svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/></svg>metrics.md</button>
+    <span class="label" role="presentation">Files</span>
+    <button class="pal-item" role="option" id="pal-f-launch" data-action="file-launch" data-kw="launch plan file open"><svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/></svg>launch-plan.md</button>
+    <button class="pal-item" role="option" id="pal-f-metrics" data-action="file-metrics" data-kw="metrics file open"><svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/></svg>metrics.md</button>
+  </div>
   </div>
   <div class="pal-foot">
     <span><kbd>↑↓</kbd> navigate</span><span><kbd>↵</kbd> run</span><span><kbd>esc</kbd> close</span>
@@ -940,8 +947,8 @@ aside.rail {
   // --- Save chip ---
   const saveCycle = () => {
     const chip = $('#saveChip');
-    chip.innerHTML = '<span class="dot" style="background:var(--amber-deep)"></span>Saving…';
-    setTimeout(() => { chip.innerHTML = '<span class="dot"></span>Saved · on this device'; }, 600);
+    chip.innerHTML = '<span class="dot" style="background:var(--amber-deep)"></span><span class="sc-text">Saving…</span>';
+    setTimeout(() => { chip.innerHTML = '<span class="dot"></span><span class="sc-text">Saved · on this device</span>'; }, 600);
   };
 
   // --- Theme (atomic: no transition on the flip itself) ---
@@ -956,23 +963,30 @@ aside.rail {
   $('#btnPaper').onclick = () => setTheme('paper');
   $('#btnInk').onclick = () => setTheme('ink');
 
-  // --- Counts: one source of truth for rail, sidebar badge, doc-meta ---
+  // --- Counts: one source of truth, tracked per file ---
   const updateCounts = () => {
-    const open = $$('#railTrack .rcard:not(.resolved)').length;
-    $('#railCount').textContent = activeFile === 'launch' ? `${open} open` : '0 open';
-    $('#railChipCount').textContent = activeFile === 'launch' ? open : 0;
-    $('#fileBadge').textContent = open;
-    $('#fileBadge').style.display = open ? '' : 'none';
-    $('#metaThreads').textContent = `${open} open thread${open === 1 ? '' : 's'}`;
+    for (const f of ['launch', 'metrics']) {
+      const n = $$(`#railTrack .rcard[data-file="${f}"]:not(.resolved)`).length;
+      const badge = document.querySelector(`[data-file-badge="${f}"]`);
+      badge.textContent = n;
+      badge.style.display = n ? '' : 'none';
+    }
+    const open = $$(`#railTrack .rcard[data-file="${activeFile}"]:not(.resolved)`).length;
+    $('#railCount').textContent = `${open} open`;
+    $('#railChipCount').textContent = open;
+    const meta = document.querySelector(`#doc-${activeFile} [data-thread-meta]`);
+    if (meta) meta.textContent = open ? `${open} open thread${open === 1 ? '' : 's'}` : 'no open threads';
+    $('#railEmpty').hidden = $$(`#railTrack .rcard[data-file="${activeFile}"]`).length > 0;
   };
 
   // --- Rail: margin notes aligned to their anchors ---
   const track = $('#railTrack');
   const alignRail = () => {
+    for (const card of $$('#railTrack .rcard')) card.hidden = card.dataset.file !== activeFile;
     if (matchMedia('(max-width: 900px)').matches) { track.style.height = ''; return; }
     const trackRect = track.getBoundingClientRect();
     let prevBottom = 0;
-    for (const card of $$('#railTrack .rcard')) {
+    for (const card of $$('#railTrack .rcard:not([hidden])')) {
       const id = card.dataset.thread;
       const anchor = id ? document.querySelector(`#main [data-thread="${id}"]`) : null;
       let y = prevBottom + (prevBottom ? 14 : 0);
@@ -993,6 +1007,7 @@ aside.rail {
     else { document.body.classList.toggle('rail-hidden'); requestAnimationFrame(alignRail); }
   };
   $('#railChip').onclick = toggleRail;
+  $('#railHide').onclick = toggleRail;
 
   // --- File switch ---
   let activeFile = 'launch';
@@ -1010,8 +1025,6 @@ aside.rail {
     $('#shareFile').textContent = $('#crumbFile').textContent;
     $('#sideFoot').textContent = f === 'launch' ? '12.4 KB · never leaves this machine' : '1.8 KB · never leaves this machine';
     document.title = `attn — Q3 Launch Plan / ${$('#crumbFile').textContent}`;
-    track.hidden = f !== 'launch';
-    $('#railEmpty').hidden = f === 'launch';
     const outline = $('#outline');
     outline.querySelectorAll('.row').forEach((r) => r.remove());
     for (const [id, label, ln] of OUTLINES[f]) {
@@ -1055,7 +1068,7 @@ aside.rail {
     const r = sel.getRangeAt(0).getBoundingClientRect();
     if (!r.width) return hidePop();
     pendingRange = sel.getRangeAt(0).cloneRange();
-    pop.style.left = Math.max(12, r.left + r.width / 2 - pop.offsetWidth / 2) + 'px';
+    pop.style.left = Math.min(Math.max(12, r.left + r.width / 2 - pop.offsetWidth / 2), innerWidth - pop.offsetWidth - 12) + 'px';
     pop.style.top = Math.max(58, r.top - pop.offsetHeight - 8) + 'px';
     pop.classList.add('open');
   });
@@ -1068,8 +1081,8 @@ aside.rail {
     composerMode = mode;
     $('#composerLabel').textContent = mode === 'comment' ? 'Comment' : 'Suggest a replacement';
     $('#composerText').placeholder = mode === 'comment' ? 'Comment as James…' : 'Replace the selection with…';
-    $('#composerText').value = '';
-    composer.style.left = pop.style.left;
+    // Draft survives an accidental Escape; only Cancel and Post clear it.
+    composer.style.left = Math.min(parseFloat(pop.style.left) || 12, innerWidth - 332) + 'px';
     composer.style.top = pop.style.top;
     hidePop();
     composer.classList.add('open');
@@ -1078,7 +1091,10 @@ aside.rail {
   const closeComposer = () => composer.classList.remove('open');
   $('#popComment').onclick = () => openComposer('comment');
   $('#popSuggest').onclick = () => openComposer('suggest');
-  $('#composerCancel').onclick = closeComposer;
+  $('#composerCancel').onclick = () => { $('#composerText').value = ''; closeComposer(); };
+  $('#composerText').addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); $('#composerPost').click(); }
+  });
   $('#composerPost').onclick = () => {
     const text = $('#composerText').value.trim();
     if (!text || !pendingRange) return closeComposer();
@@ -1097,6 +1113,7 @@ aside.rail {
     const isC = composerMode === 'comment';
     const card = document.createElement('div');
     card.className = 'rcard'; card.id = `card-${id}`; card.dataset.thread = anchored ? id : '';
+    card.dataset.file = activeFile;
     if (!isC) card.dataset.proposed = text;
     card.tabIndex = -1;
     card.innerHTML = `
@@ -1111,6 +1128,7 @@ aside.rail {
         : '<button class="accept" data-act="accept">Accept</button><button data-act="reject">Reject</button>'}</div>`;
     (isC ? card.querySelector('.body') : card.querySelector('.plus')).append(text);
     track.appendChild(card);
+    $('#composerText').value = '';
     closeComposer();
     getSelection()?.removeAllRanges();
     saveCycle(); updateCounts(); alignRail();
@@ -1126,7 +1144,7 @@ aside.rail {
   document.addEventListener('mouseover', (e) => hover(e, true));
   document.addEventListener('mouseout', (e) => hover(e, false));
   $('#main').addEventListener('keydown', (e) => {
-    const anchor = e.target.closest?.('.comment-anchor, .sug-anchor');
+    const anchor = e.target.closest?.('.comment-anchor, .sug-anchor, ins[data-thread]');
     if (anchor && (e.key === 'Enter' || e.key === ' ')) {
       e.preventDefault();
       const card = $(`#card-${anchor.dataset.thread}`);
@@ -1171,7 +1189,8 @@ aside.rail {
       else sug.replaceWith(document.createTextNode(sug.textContent));
     }
     card.classList.add('resolved');
-    noteWithUndo(card, `${accepted ? '✓ Accepted' : '✕ Rejected'} by James · file updated ·`, () => {
+    const changed = !!(ins || sug);
+    noteWithUndo(card, `${accepted ? '✓ Accepted' : '✕ Rejected'} by James${changed ? ' · file updated' : ''} ·`, () => {
       if (para && snapshot !== null) para.innerHTML = snapshot;
       card.classList.remove('resolved');
     });
@@ -1217,7 +1236,17 @@ aside.rail {
     done: `<div class="link-row"><input readonly value="https://attn.sh/r/8fq2vk#B4y…cQ" aria-label="Share link"><button class="s-btn primary" id="shareCopy">Copy</button></div>
            <p class="fine">Anyone with this link can comment. The key after # never reaches the relay.</p>`,
   };
-  const openShare = (open) => sharePop.classList.toggle('open', open ?? !sharePop.classList.contains('open'));
+  let sharePrevFocus = null;
+  const openShare = (open) => {
+    const was = sharePop.classList.contains('open');
+    const now = open ?? !was;
+    sharePop.classList.toggle('open', now);
+    if (now && !was) {
+      sharePrevFocus = document.activeElement;
+      (sharePop.querySelector('#shareBody .s-btn, #shareBody input') || sharePop).focus?.();
+    }
+    if (!now && was) (sharePrevFocus?.isConnected ? sharePrevFocus : $('#shareBtn')).focus?.();
+  };
   $('#shareBtn').onclick = () => openShare();
   $('#shareBody').addEventListener('click', (e) => {
     if (e.target.id === 'shareCreate' || e.target.id === 'shareRetry') {
@@ -1235,10 +1264,18 @@ aside.rail {
   // --- Command palette: real filter, real keys, real actions ---
   const palette = $('#palette'), veil = $('#veil'), palInput = $('#palInput');
   const palItems = () => $$('.pal-item').filter((i) => i.style.display !== 'none');
-  const setSel = (item) => { $$('.pal-item.sel').forEach((i) => i.classList.remove('sel')); item?.classList.add('sel'); };
+  const setSel = (item) => {
+    $$('.pal-item.sel').forEach((i) => { i.classList.remove('sel'); i.setAttribute('aria-selected', 'false'); });
+    item?.classList.add('sel');
+    item?.setAttribute('aria-selected', 'true');
+    palInput.setAttribute('aria-activedescendant', item?.id || '');
+  };
+  let palPrevFocus = null;
   const openPal = (open) => {
+    const was = palette.dataset.state === 'open';
     palette.dataset.state = veil.dataset.state = open ? 'open' : 'closed';
-    if (open) { palInput.value = ''; filterPal(''); palInput.focus(); }
+    if (open && !was) { palPrevFocus = document.activeElement; palInput.value = ''; filterPal(''); palInput.focus(); }
+    if (!open && was) (palPrevFocus?.isConnected ? palPrevFocus : $('#kbdChip')).focus?.();
   };
   const filterPal = (q) => {
     q = q.trim().toLowerCase();
@@ -1263,11 +1300,26 @@ aside.rail {
       if (heads.length) { heads[jumpIdx % heads.length].scrollIntoView({ behavior: reduced() ? 'auto' : 'smooth' }); jumpIdx++; }
     }
     if (action === 'resolve-all') {
-      $$('#railTrack .rcard:not(.resolved)').forEach((card) => {
-        if (card.querySelector('[data-act="accept"]')) resolveSuggestion(card, true);
-        else { card.classList.add('resolved'); noteWithUndo(card, '✓ Resolved by James ·', () => card.classList.remove('resolved')); }
+      // Comments only: "resolve" is a cleanup verb, never a document edit.
+      $$(`#railTrack .rcard[data-file="${activeFile}"]:not(.resolved)`).forEach((card) => {
+        if (card.querySelector('[data-act="accept"]')) return; // open suggestions stay open
+        card.classList.add('resolved');
+        noteWithUndo(card, '✓ Resolved by James ·', () => card.classList.remove('resolved'));
       });
       saveCycle(); updateCounts(); alignRail();
+    }
+    if (action === 'comment-para') {
+      const paras = $$(`#doc-${activeFile} p:not(.doc-meta)`);
+      const mainTop = $('#main').getBoundingClientRect().top;
+      const target = paras.find((el) => el.getBoundingClientRect().bottom > mainTop + 40) || paras[0];
+      if (!target) return;
+      const r = document.createRange();
+      r.selectNodeContents(target);
+      pendingRange = r;
+      const rect = target.getBoundingClientRect();
+      pop.style.left = Math.min(Math.max(12, rect.left), innerWidth - 344) + 'px';
+      pop.style.top = Math.max(58, rect.top - 8) + 'px';
+      openComposer('comment');
     }
     if (action === 'file-launch') switchFile('launch');
     if (action === 'file-metrics') switchFile('metrics');
@@ -1288,16 +1340,26 @@ aside.rail {
   veil.onclick = () => openPal(false);
 
   // --- Global keys: chords work even when the document has focus ---
+  // Escape pops the TOPMOST layer only — never a demolition charge.
+  const closeTopmost = () => {
+    if (palette.dataset.state === 'open') return openPal(false);
+    if (composer.classList.contains('open')) return closeComposer(); // draft survives
+    if (sharePop.classList.contains('open')) return openShare(false);
+    if (pop.classList.contains('open')) return hidePop();
+    if (document.body.classList.contains('rail-open')) return document.body.classList.remove('rail-open');
+  };
   document.addEventListener('keydown', (e) => {
     const mod = e.metaKey || e.ctrlKey;
     if (mod && !e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); openPal(palette.dataset.state !== 'open'); return; }
     if (mod && e.key.toLowerCase() === 'j') { e.preventDefault(); toggleRail(); return; }
-    if (mod && e.shiftKey && e.key.toLowerCase() === 's') { e.preventDefault(); openShare(true); return; }
-    if (mod && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); runAction('jump'); return; }
-    if (mod && e.key === '.') { e.preventDefault(); if (pop.classList.contains('open')) openComposer(e.shiftKey ? 'suggest' : 'comment'); return; }
-    if (e.key === 'Escape') { openPal(false); hidePop(); closeComposer(); openShare(false); return; }
-    // Single-key theme switch: only when nothing interactive has focus.
-    if (e.key.toLowerCase() === 't' && !mod && document.activeElement === document.body) {
+    if (mod && e.shiftKey && e.code === 'KeyS') { e.preventDefault(); openShare(true); return; }
+    if (mod && e.shiftKey && e.code === 'KeyO') { e.preventDefault(); runAction('jump'); return; }
+    // e.code, not e.key: Shift+Period emits key ">" on real keyboards.
+    if (mod && e.code === 'Period') { e.preventDefault(); if (pop.classList.contains('open')) openComposer(e.shiftKey ? 'suggest' : 'comment'); return; }
+    if (e.key === 'Escape') { closeTopmost(); return; }
+    // Single-key theme switch: anywhere except text entry.
+    const a = document.activeElement;
+    if (e.key.toLowerCase() === 't' && !mod && !/^(INPUT|TEXTAREA)$/.test(a.tagName) && !a.isContentEditable) {
       setTheme(root.dataset.theme === 'paper' ? 'ink' : 'paper');
     }
   });

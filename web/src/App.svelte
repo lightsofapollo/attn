@@ -2300,6 +2300,14 @@
     return isEditableShortcutElement(activeEl);
   }
 
+  // Window/document title tracks the open file (Theme v2, attn-u5c): the
+  // native titlebar is hidden on macOS by design, but document.title feeds
+  // assistive tech, automation, and the window switcher.
+  $effect(() => {
+    const name = activePath ? activePath.split('/').filter(Boolean).at(-1) : null;
+    document.title = name ? `${name} — attn` : 'attn';
+  });
+
   // Palette commands (Theme v2, attn-n9j): the palette runs the reviewer's
   // verbs, not just file opens. Handlers are the same ones the keyboard
   // chords call, so palette and shortcuts can never drift apart.
@@ -2753,6 +2761,7 @@
   <ReviewBar
     shareOpen={shareDialogOpen}
     isOwner={reviewStore.currentRoomId === null || collabRole === 'owner'}
+    saveState={mode === 'edit' && activeFileType === 'markdown' ? (editorDirty ? 'dirty' : 'saved') : null}
     onShareClick={openShareDialog}
     onLeaveRoom={handleLeaveRoom}
   />

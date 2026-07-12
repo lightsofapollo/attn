@@ -115,7 +115,20 @@ integration-finishing pass — converge, don't proliferate.
   Cancel/submit clear), scroll-tracking popovers via shared rAF tracker
   (popover-anchor.svelte.ts, mount-scoped listeners), live ledger diff in
   replace mode. svelte-check clean, tests green.
-- 2026-07-12 (HEAD): **attn-9ua DONE.** Owner rail already existed + store-
+- 2026-07-12 (6e44d80): **attn-3dv part 1 DONE** (Rust core: AcceptSplice on
+  journal + revert_accepted_suggestion with clobber guards + 3 tests; 520 lib
+  tests green). Bead stays OPEN for IPC + UI undo grammar + cross-peer reopen
+  protocol design (notes on bead). Binary size gate: 31.90/32.00 MiB PASS.
+- 2026-07-12: **FINAL GATE IN FLIGHT.** Six critique agents launched (A+B for
+  native app / hosted app / landing) against current build; native B returned:
+  74 CLI findings (from 215; fallback literals GONE, z-ladder clean, review
+  components px-free; residue = un-tokenized ins/del diff palette app.css:873-
+  892, 9px tree-row prose-vs-token inconsistency, 10px micro-badge + 0.95rem
+  UI-text clusters). ON RESUME: collect remaining 5 agent results, synthesize
+  3 reports, persist snapshots (slugs: native-app, staging-attn-sh, + new
+  landing slug), check >=35/40 zero-P0/P1 gate, update this log, final push.
+  Native critique instance runs at ATTN_HOME=/tmp/attn-final-critique.
+- 2026-07-12 (HEAD-2): **attn-9ua DONE.** Owner rail already existed + store-
   wired; staging 400 already fixed on main (ef0a2e8; owner-live suite green —
   staging needs a deploy, see attn-7xl.7.4). Added: transport-error alert in
   rail + mobile sheet with Reconnect; mobile Review tab uses live store counts

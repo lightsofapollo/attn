@@ -361,7 +361,16 @@
     checkbox.checked = node.attrs.checked;
     checkbox.disabled = !editable;
     checkbox.setAttribute('aria-disabled', String(!editable));
+    // Keep the editor selection alive when the checkbox is clicked; the
+    // toggle itself binds to `click` below so keyboard (Space) and AT
+    // activation persist too — mousedown never fires for those, which
+    // silently lost keyboard toggles to the next watcher reload (attn-6d2).
     checkbox.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+    });
+    checkbox.addEventListener('click', (e) => {
+      // PM node attrs are the single source of truth: block the input's
+      // native flip and let update() re-sync `checked` from the new attrs.
       e.preventDefault();
       if (!editable) return;
       const pos = getPos();

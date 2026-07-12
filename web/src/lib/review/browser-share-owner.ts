@@ -295,7 +295,8 @@ export class BrowserShareOwnerRelayClient {
     const keys = deriveShareLinkKeys(shareSecret, 'view');
     const path = this.sharePath();
     try {
-      const response = await this.fetchImpl(`${this.relay}${path}`, {
+      const fetchImpl = this.fetchImpl;
+      const response = await fetchImpl(`${this.relay}${path}`, {
         method: 'GET',
         headers: {
           'Attn-Share-Bundle': keys.bundleId,
@@ -352,7 +353,8 @@ export class BrowserShareOwnerRelayClient {
     const path = `${this.sharePath()}/mailbox`;
     const query: Array<[string, string]> = [['after', String(after)], ['limit', '100']];
     try {
-      const response = await this.fetchImpl(`${this.relay}${path}?${new URLSearchParams(query)}`, {
+      const fetchImpl = this.fetchImpl;
+      const response = await fetchImpl(`${this.relay}${path}?${new URLSearchParams(query)}`, {
         method: 'GET',
         headers: {
           'Attn-Share-Bundle': keys.bundleId,
@@ -426,7 +428,8 @@ export class BrowserShareOwnerRelayClient {
       difficulty: 12,
     }, this.signal);
     const suffix = query.length === 0 ? '' : `?${new URLSearchParams(query)}`;
-    return this.fetchImpl(`${this.relay}${path}${suffix}`, {
+    const fetchImpl = this.fetchImpl;
+    return fetchImpl(`${this.relay}${path}${suffix}`, {
       method,
       headers: {
         ...(body === undefined ? {} : {

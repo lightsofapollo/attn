@@ -98,7 +98,8 @@ async function run(): Promise<void> {
     snapshots: [], placeholders: [], manifestDigest: EMPTY_SHARE_MANIFEST_DIGEST,
     updatedAt: 1, expiresAt: 2, mailbox: { count: 0, bytes: 0, latestSeq: 0 },
   };
-  const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
+  const fetchImpl = (async function (this: unknown, url: RequestInfo | URL, init?: RequestInit) {
+    assert(this === undefined, 'native fetch must be called without a client receiver');
     requests.push({ url: String(url), init: init ?? {} });
     return Response.json(record, { status: init?.method === 'POST' ? 201 : 200 });
   }) as typeof fetch;

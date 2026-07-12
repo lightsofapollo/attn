@@ -71,8 +71,7 @@
   margin: 0 0 2rem;
   padding: 1rem 1.2rem;
   border: 1px solid var(--rust);
-  border-left-width: 3px;
-  background: var(--sheet);
+  background: color-mix(in oklch, var(--rust) 6%, var(--sheet));
   font: 0.9rem/1.5 var(--sans);
 }
 

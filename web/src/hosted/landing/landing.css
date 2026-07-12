@@ -115,7 +115,7 @@ p {
   max-width: 620px;
   margin-top: 1.35rem;
   color: var(--hosted-muted);
-  font: 0.69rem/1.35 var(--mono);
+  font: 0.75rem/1.4 var(--mono);
 }
 
 .local-note span {
@@ -196,19 +196,36 @@ p {
   display: block;
   margin-top: 0.25rem;
   color: var(--hosted-muted);
-  font: 0.7rem/1.35 var(--mono);
+  font: 0.75rem/1.4 var(--mono);
 }
 
 .stage-label.local {
   left: 0;
   top: 0;
-  border-left: 3px solid var(--green);
 }
 
 .stage-label.share {
   right: -25px;
   bottom: 0;
-  border-left: 3px solid var(--rust);
+}
+
+/* Accent as a leading dot, not a side-stripe. */
+.stage-label strong::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 0.45rem;
+  border-radius: 50%;
+  transform: translateY(-1px);
+}
+
+.stage-label.local strong::before {
+  background: var(--green);
+}
+
+.stage-label.share strong::before {
+  background: var(--rust);
 }
 
 .entry-strip {
@@ -238,7 +255,7 @@ p {
   font: 0.75rem var(--sans);
 }
 
-.entry h3 {
+.entry h2 {
   margin: 2.7rem 0 0.35rem;
   font-size: 1.7rem;
 }
@@ -276,7 +293,7 @@ p {
 
 .chapter-index {
   color: var(--rust);
-  font: 0.72rem var(--mono);
+  font: 0.75rem var(--mono);
 }
 
 .chapter h2 {
@@ -316,7 +333,7 @@ p {
 
 .step-num {
   color: var(--rust);
-  font: 0.72rem var(--mono);
+  font: 0.75rem var(--mono);
 }
 
 .step h3 {
@@ -629,7 +646,7 @@ footer {
     min-height: 135px;
   }
 
-  .entry h3 {
+  .entry h2 {
     margin-top: 1.8rem;
   }
 

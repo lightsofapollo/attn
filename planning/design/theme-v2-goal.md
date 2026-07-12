@@ -83,3 +83,36 @@ integration-finishing pass — converge, don't proliferate.
   as 483a4b2..; beads attn-5y6…attn-u5c filed with deps. Nothing from the queue
   implemented in the real app yet. Next: claim attn-5y6, inventory token
   consumption in both builds, execute the cutover.
+- 2026-07-12 (f82582d): **attn-5y6 DONE.** web/src/tokens.css is the single source;
+  hosted hex tokens.css deleted, chrome.css alias layer added, INK unified cool,
+  --muted collision resolved via --hosted-muted rename. Verified both builds/themes.
+  Learned: (1) both builds already stamp `.dark` + `data-theme`, so no toggle work;
+  (2) the occluded-window stale-paint bug is real — native screenshots after a
+  theme flip need a forced repaint until attn-hg5 lands; (3) hosted app entries
+  also load app.css via desktop-editor-styles.ts (Tailwind utilities). Next:
+  attn-5e7 (base.css/prosemirror.css: 72ch measure + wide track, fonts→tokens,
+  grain z 9999→40, scrollbars, ::selection, markers, table hairlines).
+- 2026-07-12 (fcb9c28): **attn-n9j DONE.** ⌘K (+⌘P alias), help, and tab-nav
+  moved above the keyboard.ts editing guard — global chords work with editor
+  focus. CommandPalette gained a typed Commands group (6 reviewer verbs wired
+  in App.svelte to the same handlers as the chords). Verified on native daemon;
+  80 web test files pass.
+- 2026-07-12 (9da4229): **attn-hg5 DONE.** Truth Rule: overlay slots display:none
+  at data-state=closed (unlayered, beats tw-animate) — ghost-modal P0 fixed and
+  verified (dialog unmounts, no click-block, on occluded window). theme.ts flips
+  atomically. DESIGN.md: Truth Rule, Topmost-Escape, Wide-Sheet named rules +
+  micro 2px radius token. NOTE: native --screenshot after theme flip may still
+  show stale paint (repaint freeze on occluded windows) — force repaint before
+  screenshotting; interaction is now safe regardless.
+- 2026-07-12 (9d27c7c): **attn-u5c DONE.** Save chip in ReviewBar (dirty/saved,
+  role=status) + document.title tracks the file. Verified live. Note: native
+  mode defaults to 'edit' (App.svelte:134); saves are explicit via saveEdits(),
+  not a background debounce.
+- 2026-07-12 (0864528): **attn-5e7 DONE.** base.css + prosemirror.css carry the
+  wide-sheet split (prose 72ch, wide blocks full-pane, left-set), token-fed fonts/
+  selection/motion, restored list markers, global ink scrollbars, semantic z
+  ladder (grain 40, mermaid modal 70), reduced-motion designed alternative, no
+  transition:all. Verified native render. Next by value: attn-n9j (palette ⌘K +
+  keyboard.ts:133 guard fix), then attn-hg5 (Truth Rule → fixes ghost-modal P0),
+  then remaining components (ll9/5bq/e4l), then unfiled P0s (checkbox persistence,
+  hosted owner rail, #new/#join, landing sweeps), then re-critiques ≥35 ×3.

@@ -61,6 +61,22 @@ new features beyond the list above.
 
 ---
 ## Progress log
+- 2026-07-12 (5967318): **attn-vea DONE** (biggest lever) — markdown input rules
+  (prosemirror-inputrules) + serif .ProseMirror in the SHARED editor. Verified in
+  relay build: typed # → serif H1, **b** → bold, - → list, no literal syntax;
+  unblocks attn-cjn auto-rename (desk auto-names). Native re-checked serif.
+- 2026-07-12 (81e1b0d): **native trio DONE** — ResidentSettings popover Escape+
+  outside-click dismiss (was undismissable); shiki light github-light→vitesse-
+  light (warmer, on-brand); light code ground 0.885→0.972 near-white card so
+  keyword clears AA 3.23→5.21. Verified on daemon.
+- 2026-07-12 (68935cf): **hosted polish DONE** — empty-editor placeholder hint;
+  branded /s/ review-link error card (wordmark + cause + Go-to-desk, key
+  stripped). Verified in relay build.
+- 2026-07-12: THREE confirmation design-reviews launched vs current build
+  (native @ /tmp/attn-gate-final, hosted relay dist-browser, landing). ON
+  RESUME: collect scores, confirm ≥35 each, persist snapshots, final push.
+  Deferred (noted P2, low value): native theme-flip scroll reset; attn-z0t
+  transient save-state; hosted delete-confirm row-anchoring.
 - 2026-07-12: goal created. Found: shared editor has ZERO markdown input rules
   (native reads fine only because it opens a comrak-rendered view; live typing
   wouldn't parse either) — so input rules fix is shared and high-leverage.

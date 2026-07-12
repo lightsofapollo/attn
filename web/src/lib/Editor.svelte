@@ -21,6 +21,7 @@
   import { codeHighlightPlugin } from './prosemirror/code-highlight';
   import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
   import { markdownInputRules } from './prosemirror/markdown-input-rules';
+  import { placeholderPlugin } from './prosemirror/placeholder';
   import { mathNodeView } from './prosemirror/math';
   import { mermaidNodeView } from './prosemirror/mermaid-nodeview';
   import { tablePlugins } from './prosemirror/tables';
@@ -39,6 +40,8 @@
   interface Props {
     markdown: string;
     editable?: boolean;
+    /** Hint shown over a truly-empty document (gate-35). */
+    placeholder?: string;
     onSave?: () => void;
     onCancel?: () => void;
     onLinkNavigate?: (href: string) => void;
@@ -112,6 +115,7 @@
   let {
     markdown,
     editable = false,
+    placeholder = 'Start typing — # for a heading, ⌘K for commands',
     onSave,
     onCancel,
     onLinkNavigate,
@@ -283,6 +287,7 @@
     // Live markdown authoring (attn-vea): typed `# `, `- `, `**b**`, ``` etc.
     // become real nodes/marks, so the editor never shows literal syntax.
     plugins.push(markdownInputRules(schema));
+    plugins.push(placeholderPlugin(placeholder));
     plugins.push(...tablePlugins());
     plugins.push(
       keymap({

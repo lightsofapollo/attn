@@ -98,6 +98,31 @@ void bootstrapHostedReview().catch((error: unknown) => {
   const target = document.getElementById('app');
   if (!target) return;
   target.style.display = '';
-  target.textContent = 'This review link could not be opened.';
+  // Branded, actionable failure state (gate-35): the raw text fallback was an
+  // unstyled dead-end. Cause stays generic (never leak why a key failed), but
+  // the reader gets the brand, reassurance, and a way forward.
   target.setAttribute('role', 'alert');
+  target.replaceChildren();
+  const card = document.createElement('main');
+  card.style.cssText =
+    'max-width:32rem;margin:14vh auto 0;padding:0 1.5rem;font-family:var(--sans);color:var(--ink);text-align:left';
+  const brand = document.createElement('p');
+  brand.textContent = 'attn';
+  brand.style.cssText =
+    "font:700 1.05rem var(--serif);letter-spacing:-0.01em;margin:0 0 1.5rem";
+  brand.innerHTML = 'attn<span style="color:var(--rust)">.</span>';
+  const h = document.createElement('h1');
+  h.textContent = 'This review link could not be opened';
+  h.style.cssText = 'font:600 1.5rem/1.24 var(--serif);letter-spacing:-0.015em;margin:0 0 0.6rem';
+  const p = document.createElement('p');
+  p.textContent =
+    'The link may be malformed, expired, or missing the part after # (the room key, which stays in your browser and never reaches the relay). Nothing was uploaded.';
+  p.style.cssText = 'font:400 0.95rem/1.6 var(--sans);color:var(--hosted-muted);margin:0 0 1.4rem';
+  const back = document.createElement('a');
+  back.href = '/app';
+  back.textContent = 'Go to your desk →';
+  back.style.cssText =
+    'display:inline-flex;align-items:center;min-height:44px;padding:0 1rem;border-radius:8px;background:var(--rust);color:var(--rust-contrast);font:700 0.9rem var(--sans);text-decoration:none';
+  card.append(brand, h, p, back);
+  target.appendChild(card);
 });

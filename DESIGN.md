@@ -56,6 +56,7 @@ typography:
     lineHeight: 1.55
     letterSpacing: "normal"
 rounded:
+  micro: "2px"
   sm: "6px"
   md: "8px"
   lg: "10px"
@@ -169,6 +170,8 @@ Three deliberately separated hues so the three roles are never confused, each tu
 
 **The Fixed-Scale Rule.** Product register: headings are fixed rem, not `clamp()`. Users view at consistent DPI inside panes and windows; a fluid h1 that shrinks in a sidebar looks worse, not better.
 
+**The Wide-Sheet Rule** (decided 2026-07-12). The reading surface is full-width and left-set, never a centered narrow column: wide content — mermaid diagrams, tables, code blocks — spans the whole pane, while running prose (paragraphs, lists, quotes, headings) caps at ~72ch for measure. The `micro` (2px) radius is the mark family for inline review marks, focus rings, and accent bars.
+
 ## 4. Elevation
 
 A hybrid: mostly flat tonal layering (chrome recedes by being a step darker than content, not by floating), with a small, restrained shadow vocabulary reserved for genuinely-lifted surfaces — review cards, dialogs, dropdowns — and soft *inset* shadows that make code blocks and inputs read as pressed into the paper. The paper-grain overlay (a fixed fractal-noise SVG at `--grain-opacity`) sits above everything as the unifying texture; it is not elevation but it is why nothing looks like flat plastic.
@@ -180,6 +183,10 @@ A hybrid: mostly flat tonal layering (chrome recedes by being a step darker than
 
 ### Named Rules
 **The Flat-Until-Lifted Rule.** Surfaces are flat and tonal at rest. A shadow appears only when something is genuinely floating above the page (a card, a dialog, a menu) or genuinely pressed into it (an input, a code block). Shadow is a statement about physical position, never a decorative gradient of depth.
+
+**The Truth Rule** (behavioral, attn-hg5). Pixels always equal state: no user-visible fact — a modal open, a comment arrived, a file saved — may depend on an animation completing or a debounce flushing. Closed overlays are `display: none` in plain CSS (`[data-state="closed"]`); theme flips are atomic (transitions suppressed for the flip frame); animation is enhancement, never the carrier of state. Occluded windows freeze the animation clock, so anything less soft-locks the app.
+
+**The Topmost-Escape Rule.** Escape closes exactly one layer — the topmost (palette → composer → dialog → popover → drawer) — and never destroys a draft. Every overlay stores focus on open and restores it on close.
 
 ## 5. Components
 

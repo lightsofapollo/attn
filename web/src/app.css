@@ -52,6 +52,26 @@
   --color-blockquote-bar: var(--blockquote-bar);
 }
 
+/* The Truth Rule (Theme v2, attn-hg5): a closed overlay must never paint or
+   intercept input, even when its exit animation cannot run — occluded windows
+   freeze WebKit's animation clock, leaving "closed" dialogs on screen and
+   soft-locking clicks (the ghost-modal bug). Visibility is state; animation
+   is enhancement, so exits are instant by design. Unlayered so it beats the
+   tw-animate utility classes. */
+:is(
+  [data-slot="dialog-content"],
+  [data-slot="dialog-overlay"],
+  [data-slot="sheet-content"],
+  [data-slot="sheet-overlay"],
+  [data-slot="dropdown-menu-content"],
+  [data-slot="dropdown-menu-sub-content"],
+  [data-slot="context-menu-content"],
+  [data-slot="context-menu-sub-content"],
+  [data-slot="tooltip-content"]
+)[data-state="closed"] {
+  display: none !important;
+}
+
 [data-sidebar] ul {
   padding-inline-start: 0;
 }

@@ -115,6 +115,12 @@ integration-finishing pass — converge, don't proliferate.
   Cancel/submit clear), scroll-tracking popovers via shared rAF tracker
   (popover-anchor.svelte.ts, mount-scoped listeners), live ledger diff in
   replace mode. svelte-check clean, tests green.
+- 2026-07-12 (HEAD): **attn-9ua DONE.** Owner rail already existed + store-
+  wired; staging 400 already fixed on main (ef0a2e8; owner-live suite green —
+  staging needs a deploy, see attn-7xl.7.4). Added: transport-error alert in
+  rail + mobile sheet with Reconnect; mobile Review tab uses live store counts
+  (was hardcoded reviewCards:[]). LAST QUEUE ITEM: attn-3dv (journal revert).
+  Then re-critique x3 (native, hosted editor, landing) >=35/40 zero-P0/P1.
 - 2026-07-12 (bce54ba): **attn-ri1 DONE** (#join panel with invite validation,
   behaviorally verified; key fragment preserved and stripped by review entry).
 - 2026-07-12 (HEAD): **attn-5j5 DONE** (landing sweep: stripes->dots, h2 order,

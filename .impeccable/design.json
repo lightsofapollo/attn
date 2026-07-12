@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-10T00:00:00Z",
+  "generatedAt": "2026-07-12T18:00:00Z",
   "title": "Design System: attn",
   "extensions": {
     "colorMeta": {
@@ -8,52 +8,152 @@
         "role": "primary",
         "displayName": "Terracotta Pencil",
         "canonical": "oklch(0.48 0.14 28)",
-        "tonalRamp": ["oklch(0.20 0.08 28)", "oklch(0.28 0.11 28)", "oklch(0.36 0.13 28)", "oklch(0.42 0.15 28)", "oklch(0.48 0.14 28)", "oklch(0.58 0.13 30)", "oklch(0.70 0.10 34)", "oklch(0.92 0.03 40)"]
+        "tonalRamp": [
+          "oklch(0.20 0.08 28)",
+          "oklch(0.28 0.11 28)",
+          "oklch(0.36 0.13 28)",
+          "oklch(0.42 0.15 28)",
+          "oklch(0.48 0.14 28)",
+          "oklch(0.58 0.13 30)",
+          "oklch(0.70 0.10 34)",
+          "oklch(0.92 0.03 40)"
+        ]
       },
       "paper-bg": {
         "role": "neutral",
         "displayName": "Paper",
         "canonical": "oklch(0.905 0.010 78)",
-        "tonalRamp": ["oklch(0.16 0.008 60)", "oklch(0.26 0.009 66)", "oklch(0.40 0.010 70)", "oklch(0.56 0.010 74)", "oklch(0.72 0.010 76)", "oklch(0.86 0.011 78)", "oklch(0.905 0.010 78)", "oklch(0.965 0.006 80)"]
+        "tonalRamp": [
+          "oklch(0.16 0.008 60)",
+          "oklch(0.26 0.009 66)",
+          "oklch(0.40 0.010 70)",
+          "oklch(0.56 0.010 74)",
+          "oklch(0.72 0.010 76)",
+          "oklch(0.86 0.011 78)",
+          "oklch(0.905 0.010 78)",
+          "oklch(0.965 0.006 80)"
+        ]
       },
       "ink": {
         "role": "neutral",
         "displayName": "Ink",
         "canonical": "oklch(0.14 0.008 55)",
-        "tonalRamp": ["oklch(0.14 0.008 55)", "oklch(0.22 0.010 58)", "oklch(0.32 0.012 65)", "oklch(0.44 0.012 65)", "oklch(0.58 0.011 68)", "oklch(0.72 0.010 72)", "oklch(0.85 0.008 76)", "oklch(0.95 0.006 78)"]
+        "tonalRamp": [
+          "oklch(0.14 0.008 55)",
+          "oklch(0.22 0.010 58)",
+          "oklch(0.32 0.012 65)",
+          "oklch(0.44 0.012 65)",
+          "oklch(0.58 0.011 68)",
+          "oklch(0.72 0.010 72)",
+          "oklch(0.85 0.008 76)",
+          "oklch(0.95 0.006 78)"
+        ]
       },
       "suggestion-green": {
         "role": "secondary",
         "displayName": "Ledger Green",
         "canonical": "oklch(0.58 0.15 150)",
-        "tonalRamp": ["oklch(0.22 0.07 150)", "oklch(0.30 0.10 150)", "oklch(0.40 0.13 150)", "oklch(0.49 0.15 150)", "oklch(0.58 0.15 150)", "oklch(0.68 0.14 150)", "oklch(0.80 0.11 150)", "oklch(0.93 0.05 150)"]
+        "tonalRamp": [
+          "oklch(0.22 0.07 150)",
+          "oklch(0.30 0.10 150)",
+          "oklch(0.40 0.13 150)",
+          "oklch(0.49 0.15 150)",
+          "oklch(0.58 0.15 150)",
+          "oklch(0.68 0.14 150)",
+          "oklch(0.80 0.11 150)",
+          "oklch(0.93 0.05 150)"
+        ]
       },
       "comment-amber": {
         "role": "secondary",
         "displayName": "Margin Amber",
         "canonical": "oklch(0.62 0.13 82)",
-        "tonalRamp": ["oklch(0.24 0.06 82)", "oklch(0.33 0.09 82)", "oklch(0.44 0.11 82)", "oklch(0.53 0.13 82)", "oklch(0.62 0.13 82)", "oklch(0.72 0.12 84)", "oklch(0.83 0.09 86)", "oklch(0.94 0.04 88)"]
+        "tonalRamp": [
+          "oklch(0.24 0.06 82)",
+          "oklch(0.33 0.09 82)",
+          "oklch(0.44 0.11 82)",
+          "oklch(0.53 0.13 82)",
+          "oklch(0.62 0.13 82)",
+          "oklch(0.72 0.12 84)",
+          "oklch(0.83 0.09 86)",
+          "oklch(0.94 0.04 88)"
+        ]
       },
-      "peer-owner": { "role": "tertiary", "displayName": "Owner Clay", "canonical": "oklch(0.58 0.14 32)", "tonalRamp": [] },
-      "peer-reviewer": { "role": "tertiary", "displayName": "Reviewer Steel", "canonical": "oklch(0.56 0.11 235)", "tonalRamp": [] },
-      "peer-agent": { "role": "tertiary", "displayName": "Agent Violet", "canonical": "oklch(0.57 0.13 295)", "tonalRamp": [] }
+      "peer-owner": {
+        "role": "tertiary",
+        "displayName": "Owner Clay",
+        "canonical": "oklch(0.58 0.14 32)",
+        "tonalRamp": []
+      },
+      "peer-reviewer": {
+        "role": "tertiary",
+        "displayName": "Reviewer Steel",
+        "canonical": "oklch(0.56 0.11 235)",
+        "tonalRamp": []
+      },
+      "peer-agent": {
+        "role": "tertiary",
+        "displayName": "Agent Violet",
+        "canonical": "oklch(0.57 0.13 295)",
+        "tonalRamp": []
+      }
     },
     "typographyMeta": {
-      "display": { "displayName": "Display", "purpose": "Document title at the top of the reading column. Serif, fixed rem." },
-      "body": { "displayName": "Body", "purpose": "The reading surface. Serif, 1.72 line-height for restful long-form markdown." },
-      "label": { "displayName": "Label", "purpose": "Table headers, meta chips, sidebar markers. Sans, uppercase, tracked." },
-      "mono": { "displayName": "Mono", "purpose": "Code blocks and inline code. Source Code Pro." }
+      "display": {
+        "displayName": "Display",
+        "purpose": "Document title at the top of the reading column. Serif, fixed rem."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "The reading surface. Serif, 1.72 line-height for restful long-form markdown."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Table headers, meta chips, sidebar markers. Sans, uppercase, tracked."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Code blocks and inline code. Source Code Pro."
+      }
     },
     "shadows": [
-      { "name": "review-card-lift", "value": "0 16px 42px oklch(0.20 0.02 55 / 16%), 0 1px 0 oklch(1 0 0 / 45%) inset", "purpose": "Margin review cards — ambient drop plus top inset highlight so the card reads as physical paper." },
-      { "name": "panel-soft", "value": "0 20px 60px rgba(48, 41, 34, 0.10)", "purpose": "Floating dialogs and shared-window chrome." },
-      { "name": "panel-strong", "value": "0 30px 90px rgba(48, 41, 34, 0.16)", "purpose": "Elevated dialogs / hero window framing." },
-      { "name": "pressed-inset", "value": "inset 0 1px 3px oklch(0 0 0 / 4%)", "purpose": "Code blocks and inputs — pressed into the paper, not raised." }
+      {
+        "name": "review-card-lift",
+        "value": "0 16px 42px oklch(0.20 0.02 55 / 16%), 0 1px 0 oklch(1 0 0 / 45%) inset",
+        "purpose": "Margin review cards \u2014 ambient drop plus top inset highlight so the card reads as physical paper."
+      },
+      {
+        "name": "panel-soft",
+        "value": "0 20px 60px rgba(48, 41, 34, 0.10)",
+        "purpose": "Floating dialogs and shared-window chrome."
+      },
+      {
+        "name": "panel-strong",
+        "value": "0 30px 90px rgba(48, 41, 34, 0.16)",
+        "purpose": "Elevated dialogs / hero window framing."
+      },
+      {
+        "name": "pressed-inset",
+        "value": "inset 0 1px 3px oklch(0 0 0 / 4%)",
+        "purpose": "Code blocks and inputs \u2014 pressed into the paper, not raised."
+      }
     ],
     "motion": [
-      { "name": "ease-state", "value": "ease", "purpose": "Default 120-180ms easing for hover/border/background state changes." },
-      { "name": "duration-fast", "value": "120ms", "purpose": "Chrome hover/focus feedback." },
-      { "name": "duration-standard", "value": "180ms", "purpose": "Button lift, background transitions." }
+      {
+        "name": "ease-state",
+        "value": "ease",
+        "purpose": "Default 120-180ms easing for hover/border/background state changes."
+      },
+      {
+        "name": "duration-fast",
+        "value": "120ms",
+        "purpose": "Chrome hover/focus feedback."
+      },
+      {
+        "name": "duration-standard",
+        "value": "180ms",
+        "purpose": "Button lift, background transitions."
+      }
     ],
     "breakpoints": []
   },
@@ -62,7 +162,7 @@
       "name": "Primary Button",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "Solid terracotta action button — primary CTA and confirm actions.",
+      "description": "Solid terracotta action button \u2014 primary CTA and confirm actions.",
       "html": "<button class=\"ds-btn-primary\">Share for review</button>",
       "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 0.55rem; min-height: 46px; padding: 0.7rem 1.05rem; border: 1px solid var(--primary, oklch(0.48 0.14 28)); border-radius: 8px; background: var(--primary, oklch(0.48 0.14 28)); color: var(--primary-foreground, oklch(0.98 0.005 78)); font-family: 'Source Sans 3 Variable', system-ui, sans-serif; font-weight: 700; font-size: 0.91rem; cursor: pointer; transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease; } .ds-btn-primary:hover { transform: translateY(-2px); background: oklch(0.42 0.15 28); border-color: oklch(0.42 0.15 28); } .ds-btn-primary:focus-visible { outline: 2px solid oklch(0.48 0.14 28); outline-offset: 2px; }"
     },
@@ -70,7 +170,7 @@
       "name": "Secondary Button",
       "kind": "button",
       "refersTo": "button-secondary",
-      "description": "Translucent sheet-fill button with hairline border — non-primary actions.",
+      "description": "Translucent sheet-fill button with hairline border \u2014 non-primary actions.",
       "html": "<button class=\"ds-btn-secondary\">Cancel</button>",
       "css": ".ds-btn-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 0.55rem; min-height: 46px; padding: 0.7rem 1.05rem; border: 1px solid oklch(0.14 0.008 55 / 18%); border-radius: 8px; background: oklch(0.89 0.012 76 / 45%); color: oklch(0.14 0.008 55); font-family: 'Source Sans 3 Variable', system-ui, sans-serif; font-weight: 700; font-size: 0.91rem; cursor: pointer; transition: transform 0.18s ease, border-color 0.18s ease; } .ds-btn-secondary:hover { transform: translateY(-2px); border-color: oklch(0.14 0.008 55); } .ds-btn-secondary:focus-visible { outline: 2px solid oklch(0.48 0.14 28); outline-offset: 2px; }"
     },
@@ -78,7 +178,7 @@
       "name": "Search Input",
       "kind": "input",
       "refersTo": "input-field",
-      "description": "Sidebar search / text field — pressed-paper fill with inset highlight.",
+      "description": "Sidebar search / text field \u2014 pressed-paper fill with inset highlight.",
       "html": "<input class=\"ds-input\" placeholder=\"Search files\" />",
       "css": ".ds-input { width: 100%; height: 32px; padding: 6px 12px; border-radius: 10px; border: 1px solid oklch(0.14 0.008 55 / 12%); background: oklch(0.905 0.010 78 / 84%); color: oklch(0.14 0.008 55); font-family: 'Source Sans 3 Variable', system-ui, sans-serif; font-size: 0.82rem; font-weight: 600; box-shadow: inset 0 1px 0 oklch(1 0 0 / 35%); transition: border-color 0.12s ease, box-shadow 0.12s ease; } .ds-input::placeholder { color: oklch(0.32 0.012 65); } .ds-input:focus-visible { outline: none; border-color: oklch(0.14 0.008 55 / 24%); box-shadow: inset 0 1px 0 oklch(1 0 0 / 45%); }"
     },
@@ -94,8 +194,8 @@
       "name": "Review Margin Card",
       "kind": "card",
       "refersTo": "review-card",
-      "description": "The signature container — a slip of raised paper carrying a comment or suggestion, with a small accent identifying which.",
-      "html": "<div class=\"ds-review-card\"><span class=\"ds-review-card__accent\"></span><div class=\"ds-review-card__body\"><span class=\"ds-avatar ds-avatar--reviewer\" style=\"width:1.25rem;height:1.25rem;font-size:0.62rem\">R</span> Tighten this sentence — the clause runs long.</div></div>",
+      "description": "The signature container \u2014 a slip of raised paper carrying a comment or suggestion, with a small accent identifying which.",
+      "html": "<div class=\"ds-review-card\"><span class=\"ds-review-card__accent\"></span><div class=\"ds-review-card__body\"><span class=\"ds-avatar ds-avatar--reviewer\" style=\"width:1.25rem;height:1.25rem;font-size:0.62rem\">R</span> Tighten this sentence \u2014 the clause runs long.</div></div>",
       "css": ".ds-review-card { position: relative; display: flex; gap: 10px; padding: 16px; border-radius: 10px; border: 1px solid oklch(0.14 0.008 55 / 22%); background: oklch(0.94 0.010 76 / 96%); color: oklch(0.14 0.008 55); box-shadow: 0 16px 42px oklch(0.20 0.02 55 / 16%), 0 1px 0 oklch(1 0 0 / 45%) inset; font-family: 'Source Serif 4 Variable', Georgia, serif; font-size: 0.95rem; line-height: 1.5; } .ds-review-card__accent { flex: 0 0 auto; width: 4px; align-self: stretch; border-radius: 999px; background: oklch(0.58 0.15 150); } .ds-review-card__body { display: flex; align-items: baseline; gap: 8px; }"
     },
     {
@@ -109,26 +209,53 @@
   ],
   "narrative": {
     "northStar": "The Lit Reading Room",
-    "overview": "attn is a private study where documents are read closely and marked by hand — warm paper under a desk lamp, ink that dried a century ago, a single red pencil for the one mark that matters. The surface is unmistakably editorial, but the behavior under it is a precision instrument that responds like Linear or Raycast: instant, exact, keyboard-first. Warm surface, sharp behavior. The system runs two themes from one identity — PAPER (warm parchment, light) and INK (cool blue-black, dark) — the same room at two times of day, the accent shifting warm terracotta to steel blue. It rejects three neighbors: cloud-SaaS review tools, IDEs, and rounded-pastel productivity apps.",
+    "overview": "attn is a private study where documents are read closely and marked by hand \u2014 warm paper under a desk lamp, ink that dried a century ago, a single red pencil for the one mark that matters. The surface is unmistakably editorial, but the behavior under it is a precision instrument that responds like Linear or Raycast: instant, exact, keyboard-first. Warm surface, sharp behavior. The system runs two themes from one identity \u2014 PAPER (warm parchment, light) and INK (cool blue-black, dark) \u2014 the same room at two times of day, the accent shifting warm terracotta to steel blue. It rejects three neighbors: cloud-SaaS review tools, IDEs, and rounded-pastel productivity apps.",
     "keyCharacteristics": [
-      "Serif for reading, sans for chrome, mono for code — a strict three-role split.",
-      "One accent (terracotta / steel), spent only on action, selection, and state — never decoration.",
+      "Serif for reading, sans for chrome, mono for code \u2014 a strict three-role split.",
+      "One accent (terracotta / steel), spent only on action, selection, and state \u2014 never decoration.",
       "A real paper grain overlay unifies every surface, including the browser build.",
       "Fixed rem type scale (product register): headings don't fluidly resize in a pane.",
       "A dedicated review vocabulary: inline tracked-change marks, margin cards, role-colored peer avatars."
     ],
     "rules": [
-      { "name": "The One Pencil Rule", "body": "The primary accent is a red pencil, not a highlighter. It appears on primary action, current selection, and focus — nowhere else. If two things on a screen are terracotta, one is wrong.", "section": "colors" },
-      { "name": "The Quarantine Rule", "body": "Green, amber, and the peer hues belong to the collaboration layer only. They never appear as decoration on base chrome.", "section": "colors" },
-      { "name": "The Warm-Paper, Not-Cream Rule", "body": "The ground holds chroma ≤ 0.012. Warmth is carried by the accent and the serif, not by the background.", "section": "colors" },
-      { "name": "The Read/Do Rule", "body": "If the user is reading it, it's serif. If the user is operating it, it's sans. A button never uses the serif; a document heading never uses the sans.", "section": "typography" },
-      { "name": "The Fixed-Scale Rule", "body": "Product register: headings are fixed rem, not clamp(). A fluid h1 that shrinks in a sidebar looks worse, not better.", "section": "typography" },
-      { "name": "The Flat-Until-Lifted Rule", "body": "Surfaces are flat and tonal at rest. A shadow appears only when something is genuinely floating or genuinely pressed. Shadow states physical position, never decorative depth.", "section": "elevation" }
+      {
+        "name": "The One Pencil Rule",
+        "body": "The primary accent is a red pencil, not a highlighter. It appears on primary action, current selection, and focus \u2014 nowhere else. If two things on a screen are terracotta, one is wrong.",
+        "section": "colors"
+      },
+      {
+        "name": "The Quarantine Rule",
+        "body": "Green, amber, and the peer hues belong to the collaboration layer only. They never appear as decoration on base chrome.",
+        "section": "colors"
+      },
+      {
+        "name": "The Warm-Paper, Not-Cream Rule",
+        "body": "The ground holds chroma \u2264 0.012. Warmth is carried by the accent and the serif, not by the background.",
+        "section": "colors"
+      },
+      {
+        "name": "The Read/Do Rule",
+        "body": "If the user is reading it, it's serif. If the user is operating it, it's sans. A button never uses the serif; a document heading never uses the sans.",
+        "section": "typography"
+      },
+      {
+        "name": "The Fixed-Scale Rule",
+        "body": "Product register: headings are fixed rem, not clamp(). A fluid h1 that shrinks in a sidebar looks worse, not better.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-Until-Lifted Rule",
+        "body": "Surfaces are flat and tonal at rest. A shadow appears only when something is genuinely floating or genuinely pressed. Shadow states physical position, never decorative depth.",
+        "section": "elevation"
+      },
+      "The Truth Rule: pixels always equal state \u2014 no visible fact may depend on an animation completing or a debounce flushing; closed overlays are display:none in plain CSS; theme flips are atomic.",
+      "The Topmost-Escape Rule: Escape closes exactly one layer (palette \u2192 composer \u2192 dialog \u2192 popover \u2192 drawer) and never destroys a draft; overlays store focus on open and restore it on close.",
+      "The Wide-Sheet Rule: the reading surface is full-width and left-set; wide content (mermaid, tables, code) spans the pane while running prose caps at ~72ch."
     ],
     "dos": [
-      "Do keep the terracotta/steel accent to action, selection, and focus only — the One Pencil Rule.",
-      "Do use serif for everything read and sans for everything operated — no exceptions.",
-      "Do hold the paper ground at chroma ≤ 0.012; carry warmth through the accent and the serif.",
+      "Do keep the terracotta/steel accent to action, selection, and focus only \u2014 the One Pencil Rule.",
+      "Do use serif for everything read and sans for everything operated \u2014 no exceptions.",
+      "Do hold the paper ground at chroma \u2264 0.012; carry warmth through the accent and the serif.",
       "Do keep the review hues quarantined to the collaboration layer, distinguished by meaning and attribution.",
       "Do specify default / hover / focus-visible / active / disabled for every interactive component.",
       "Do honor prefers-reduced-motion; keep state transitions 120-250ms and let motion convey state, not choreography.",

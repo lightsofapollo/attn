@@ -6,11 +6,16 @@
   shape so App.svelte wires both consistently.
 -->
 
+<script lang="ts" module>
+  let commentDraftCache: { key: string; body: string } | null = null;
+</script>
+
 <script lang="ts">
+  import { untrack } from 'svelte';
   import type { EditorView } from 'prosemirror-view';
   import { anchorFromSelection, type ConstructAnchorContext } from './review/anchors';
   import { shouldSubmitOnEnter } from './review/composer-keys';
-  import { getPopoverAnchor, type PopoverAnchor } from './review/popover-anchor';
+  import { createAnchorTracker } from './review/popover-anchor.svelte';
   import { reviewCreateComment } from './ipc';
   import type { Anchor, RoomId } from './types';
 
@@ -42,10 +47,25 @@
   }: Props = $props();
 
   const quote = $derived(view.state.doc.textBetween(from, to, '\n', '​'));
-  const anchorPos = $derived<PopoverAnchor>(getPopoverAnchor(view, from, to));
+  // Tracks the selection through scroll; listener lives only while the
+  // composer is mounted (attn-5bq).
+  const anchorTracker = createAnchorTracker(() => view, () => from, () => to);
+  const anchorPos = $derived(anchorTracker.current);
 
-  let body = $state('');
+  const draftKey = $derived(`${roomId}:${from}:${to}`);
+  // Intentional open-time restore: props are fixed for this mount.
+  let body = $state(
+    untrack(() =>
+      commentDraftCache?.key === `${roomId}:${from}:${to}` ? commentDraftCache.body : '',
+    ),
+  );
   let textareaEl: HTMLTextAreaElement | undefined = $state(undefined);
+
+  // Escape/outside-click keep the draft; Cancel and submit clear it
+  // (the Topmost-Escape rule, attn-5bq).
+  $effect(() => {
+    commentDraftCache = { key: draftKey, body };
+  });
 
   $effect(() => {
     queueMicrotask(() => textareaEl?.focus());
@@ -67,6 +87,7 @@
       const anchor = anchorFromSelection(view, from, to, anchorContext);
       if (onCreateComment) await onCreateComment(anchor, trimmed);
       else await reviewCreateComment(roomId, anchor, trimmed);
+      commentDraftCache = null;
       onSubmitted?.();
       onClose();
     } catch (error) {
@@ -77,6 +98,8 @@
   }
 
   function handleCancel(): void {
+    // Explicit Cancel discards the draft; Escape (below) preserves it.
+    commentDraftCache = null;
     onClose();
   }
 
@@ -87,7 +110,9 @@
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      handleCancel();
+      // Close without discarding: the draft cache restores on reopen
+      // (Topmost-Escape rule).
+      onClose();
       return;
     }
     // Cmd/Ctrl+Enter submits from anywhere in the dialog (buttons

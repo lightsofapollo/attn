@@ -31,8 +31,19 @@
   No emoji, no window.confirm/alert per CLAUDE.md.
 -->
 
+<script lang="ts" module>
+  interface SuggestionDraftCache {
+    key: string;
+    kind: ComposerOperationKind;
+    replacementText: string;
+    insertText: string;
+    note: string;
+  }
+  let draftCache: SuggestionDraftCache | null = null;
+</script>
+
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import type { EditorView } from 'prosemirror-view';
   import type { ConstructAnchorContext } from './review/anchors';
   import { shouldSubmitOnEnter } from './review/composer-keys';
@@ -104,10 +115,25 @@
   // Form state
   // ---------------------------------------------------------------------------
 
-  let kind = $state<OperationKind>('replace');
-  let replacementText = $state('');
-  let insertText = $state('');
-  let note = $state('');
+  const draftKey = $derived(`${roomId}:${from}:${to}`);
+  // Intentional open-time restore: props are fixed for this mount.
+  const restored = untrack(() =>
+    draftCache?.key === `${roomId}:${from}:${to}` ? draftCache : null,
+  );
+  let kind = $state<OperationKind>(restored?.kind ?? 'replace');
+  let replacementText = $state(restored?.replacementText ?? '');
+  let insertText = $state(restored?.insertText ?? '');
+  let note = $state(restored?.note ?? '');
+
+  // Escape and outside-click close WITHOUT losing work; only Cancel and a
+  // successful submit clear the draft (the Topmost-Escape rule).
+  $effect(() => {
+    draftCache = { key: draftKey, kind, replacementText, insertText, note };
+  });
+
+  function clearDraftCache(): void {
+    draftCache = null;
+  }
 
   /** Whether the current mode shows an expected_text (read-only) row. */
   const showsExpectedText = $derived(kind === 'replace' || kind === 'delete');
@@ -149,9 +175,23 @@
 
   onMount(() => {
     recomputePosition();
-    const onResize = (): void => recomputePosition();
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    let raf = 0;
+    const reposition = (): void => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        recomputePosition();
+      });
+    };
+    window.addEventListener('resize', reposition);
+    // Track the anchor through document scroll (attn-5bq): scroll doesn't
+    // bubble but does capture; listener lives only while the popover does.
+    document.addEventListener('scroll', reposition, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener('resize', reposition);
+      document.removeEventListener('scroll', reposition, { capture: true });
+      if (raf) cancelAnimationFrame(raf);
+    };
   });
 
   // ---------------------------------------------------------------------------
@@ -176,6 +216,7 @@
       const draft = buildDraft();
       if (onCreateSuggestion) await onCreateSuggestion(draft);
       else await reviewCreateSuggestion(roomId, draft);
+      clearDraftCache();
       onSubmit?.(draft);
       onClose();
     } catch (error) {
@@ -186,6 +227,7 @@
   }
 
   function handleCancel(): void {
+    clearDraftCache();
     onClose();
   }
 
@@ -196,6 +238,8 @@
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
+      // Close without discarding: the draft cache restores on reopen
+      // (Topmost-Escape rule).
       onClose();
       return;
     }
@@ -339,6 +383,22 @@
         data-slot="suggestion-composer-text"
         onkeydown={handleFieldKeydown}
       ></textarea>
+      {#if replacementText.trim().length > 0}
+        <!-- Live diff preview (attn-5bq): the ledger vocabulary — the author
+             sees exactly the marks the owner will review. -->
+        <div
+          class="mt-1 overflow-hidden rounded-sm border border-border/60 font-mono text-xs"
+          data-slot="suggestion-composer-diff"
+          aria-label="Suggested change preview"
+        >
+          <div class="bg-[var(--suggestion-deletion)] px-2 py-1">
+            <span aria-hidden="true">− </span><del class="no-underline line-through">{quotePreview}</del>
+          </div>
+          <div class="bg-[var(--suggestion-bg)] px-2 py-1">
+            <span aria-hidden="true">+ </span><ins class="no-underline">{replacementText}</ins>
+          </div>
+        </div>
+      {/if}
     </div>
   {:else if kind === 'insert_before' || kind === 'insert_after'}
     <div class="flex flex-col gap-1" data-slot="suggestion-composer-text-row">

@@ -13,7 +13,7 @@
 
 <script lang="ts">
   import type { EditorView } from 'prosemirror-view';
-  import { getPopoverAnchor, type PopoverAnchor } from './review/popover-anchor';
+  import { createAnchorTracker } from './review/popover-anchor.svelte';
 
   interface Props {
     view: EditorView;
@@ -26,10 +26,10 @@
 
   const { view, from, to, onComment, onSuggest, canSuggest = true }: Props = $props();
 
-  // A compact bar, so position it tightly above the selection.
-  const pos = $derived<PopoverAnchor>(
-    getPopoverAnchor(view, from, to, { width: 188, height: 38 }),
-  );
+  // A compact bar, positioned tightly above the selection and tracking it
+  // through scroll (attn-5bq: popovers must never detach from their text).
+  const anchor = createAnchorTracker(() => view, () => from, () => to, { width: 188, height: 38 });
+  const pos = $derived(anchor.current);
 </script>
 
 <div

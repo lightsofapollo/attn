@@ -104,18 +104,18 @@
     font-size: 0.8rem;
     line-height: 1.1;
     text-align: left;
-    color: var(--muted-foreground, #6b7280);
+    color: var(--muted-foreground);
     transition: background-color 0.12s ease, color 0.12s ease;
   }
 
   .review-tree-row:hover {
-    background: var(--accent, rgba(0, 0, 0, 0.05));
+    background: var(--accent);
     color: var(--accent-foreground, inherit);
   }
 
   .review-tree-file.active {
-    background: color-mix(in srgb, var(--primary, #2563eb) 12%, transparent);
-    color: var(--primary, #2563eb);
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+    color: var(--primary);
     font-weight: 500;
   }
 

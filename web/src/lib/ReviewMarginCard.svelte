@@ -658,11 +658,11 @@
     /* 13px left ≈ the old 3px border + 10px padding, so content lands at
        the same x while the strip overlays the first 3px of padding. */
     padding: 10px 12px 10px 13px;
-    background: var(--review-card-surface, var(--popover, var(--background, #fff)));
+    background: var(--review-card-surface, var(--popover, var(--background)));
     color: var(--popover-foreground, inherit);
-    border: 1px solid var(--review-card-border, var(--border, rgba(0, 0, 0, 0.10)));
+    border: 1px solid var(--review-card-border, var(--border));
     border-radius: 6px;
-    font-size: 12px;
+    font-size: 0.85rem;
     line-height: 1.4;
     cursor: pointer;
     text-align: left;
@@ -687,8 +687,8 @@
     box-shadow:
       inset 3px 0 0 0 var(--rmc-accent, transparent),
       var(--review-card-shadow, 0 10px 28px rgba(0, 0, 0, 0.14)),
-      0 0 0 1px color-mix(in oklch, var(--primary, #2563eb) 46%, transparent);
-    border-color: var(--accent-foreground, var(--primary, #2563eb));
+      0 0 0 1px color-mix(in oklch, var(--primary) 46%, transparent);
+    border-color: var(--accent-foreground, var(--primary));
   }
 
   .review-margin-card[data-pending-dismiss='true'] {
@@ -698,11 +698,11 @@
 
   /* Kind accents — fallbacks when no inline author color is set. */
   .review-margin-card[data-kind='comment'] {
-    --rmc-accent: var(--review-card-comment-accent, var(--comment-highlight, #d9a600));
+    --rmc-accent: var(--review-card-comment-accent, var(--comment-highlight));
   }
 
   .review-margin-card[data-kind='suggestion'] {
-    --rmc-accent: var(--review-card-suggestion-accent, var(--suggestion-bg, #16a34a));
+    --rmc-accent: var(--review-card-suggestion-accent, var(--suggestion-bg));
   }
 
   /* State accents (after the kind rules so they win the cascade; the
@@ -710,11 +710,11 @@
      inherits the stale highlight tint so the card reads consistently
      with the inline mark. */
   .review-margin-card[data-state='stale'] {
-    --rmc-accent: var(--destructive, #dc2626);
+    --rmc-accent: var(--destructive);
   }
 
   .review-margin-card[data-state='ambiguous'] {
-    --rmc-accent: var(--confidence-low, rgba(0, 0, 0, 0.18));
+    --rmc-accent: var(--confidence-low);
   }
 
   .rmc-header {
@@ -722,7 +722,7 @@
     align-items: center;
     gap: 5px;
     margin-bottom: 4px;
-    font-size: 11px;
+    font-size: 0.7rem;
   }
 
   /* Author avatar — monogram on the author's presence color, matching
@@ -735,8 +735,8 @@
     width: 16px;
     height: 16px;
     border-radius: 9999px;
-    color: #fff;
-    font-size: 9px;
+    color: var(--monogram);
+    font-size: 0.7rem;
     font-weight: 600;
     line-height: 1;
   }
@@ -759,7 +759,7 @@
 
   .rmc-kind,
   .rmc-badge {
-    font-size: 10px;
+    font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 1px 6px;
@@ -769,40 +769,40 @@
   }
 
   .rmc-kind-suggestion {
-    background: color-mix(in oklch, var(--review-card-suggestion-accent, #16a34a) 20%, transparent);
-    color: color-mix(in oklch, var(--review-card-suggestion-accent, #16a34a) 78%, var(--foreground, currentColor));
-    border-color: color-mix(in oklch, var(--review-card-suggestion-accent, #16a34a) 34%, transparent);
+    background: color-mix(in oklch, var(--review-card-suggestion-accent) 20%, transparent);
+    color: color-mix(in oklch, var(--review-card-suggestion-accent) 78%, var(--foreground, currentColor));
+    border-color: color-mix(in oklch, var(--review-card-suggestion-accent) 34%, transparent);
   }
 
   .rmc-kind-comment {
-    background: color-mix(in oklch, var(--review-card-comment-accent, #d9a600) 20%, transparent);
-    color: color-mix(in oklch, var(--review-card-comment-accent, #d9a600) 78%, var(--foreground, currentColor));
-    border-color: color-mix(in oklch, var(--review-card-comment-accent, #d9a600) 34%, transparent);
+    background: color-mix(in oklch, var(--review-card-comment-accent) 20%, transparent);
+    color: color-mix(in oklch, var(--review-card-comment-accent) 78%, var(--foreground, currentColor));
+    border-color: color-mix(in oklch, var(--review-card-comment-accent) 34%, transparent);
   }
 
   .rmc-badge-moved {
-    background: var(--confidence-med, rgba(0, 0, 0, 0.10));
+    background: var(--confidence-med);
   }
 
   .rmc-badge-ambiguous {
-    background: var(--confidence-low, rgba(0, 0, 0, 0.06));
+    background: var(--confidence-low);
   }
 
   .rmc-badge-stale {
-    background: var(--destructive, #dc2626);
-    color: var(--destructive-foreground, #fff);
+    background: var(--destructive);
+    color: var(--destructive-foreground);
   }
 
   .rmc-badge-resolved {
-    background: var(--muted, rgba(0, 0, 0, 0.06));
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
+    background: var(--muted);
+    color: var(--muted-foreground);
   }
 
   .rmc-quote {
     margin: 0 0 6px;
     padding: 0;
     color: color-mix(in oklch, var(--foreground, currentColor) 70%, var(--muted-foreground, currentColor));
-    font-size: 11px;
+    font-size: 0.7rem;
     font-style: italic;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -814,10 +814,11 @@
   .rmc-stale-quote {
     margin: 0 0 6px;
     padding: 4px 8px;
-    background: var(--muted, rgba(0, 0, 0, 0.04));
-    border-left: 2px solid var(--destructive, #dc2626);
+    background: var(--suggestion-deletion);
+    border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
+    border-radius: 2px;
     color: var(--foreground, inherit);
-    font-size: 11px;
+    font-size: 0.7rem;
     font-style: italic;
     display: -webkit-box;
     -webkit-line-clamp: 3;
@@ -829,23 +830,23 @@
 
   .rmc-stale-quote-empty {
     font-style: italic;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
+    color: var(--muted-foreground);
   }
 
   /* In-flight hint while the user is supposed to be selecting in PM. */
   .rmc-stale-hint {
     margin: 0 0 8px;
     padding: 6px 8px;
-    background: var(--accent, rgba(37, 99, 235, 0.08));
-    border-radius: 4px;
-    font-size: 11px;
+    background: var(--accent);
+    border-radius: 6px;
+    font-size: 0.7rem;
     color: var(--accent-foreground, var(--foreground, inherit));
   }
 
   .review-margin-card[data-awaiting-reanchor='true'] {
     box-shadow:
       inset 3px 0 0 0 var(--rmc-accent, transparent),
-      0 0 0 2px var(--destructive, #dc2626);
+      0 0 0 2px var(--destructive);
   }
 
   .rmc-body {
@@ -863,22 +864,22 @@
 
   .rmc-replies {
     margin: 0 0 8px;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
-    font-size: 11px;
+    color: var(--muted-foreground);
+    font-size: 0.7rem;
   }
 
   .rmc-reply-list {
     list-style: none;
     margin: 0 0 8px;
     padding: 0;
-    border-top: 1px solid var(--border, rgba(0, 0, 0, 0.08));
+    border-top: 1px solid var(--border);
   }
 
   .rmc-reply {
     display: flex;
     gap: 6px;
     padding: 6px 0 0;
-    font-size: 12px;
+    font-size: 0.85rem;
     line-height: 1.35;
   }
 
@@ -896,7 +897,7 @@
   .rmc-reply-composer {
     margin-top: 8px;
     padding-top: 8px;
-    border-top: 1px solid var(--border, rgba(0, 0, 0, 0.08));
+    border-top: 1px solid var(--border);
   }
 
   .rmc-reply-input {
@@ -905,12 +906,12 @@
     /* No manual resize handle — rows=4 supplies the minimum height and
        Enter/Shift+Enter handle the rest (attn-2aj). */
     resize: none;
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
-    border-radius: 4px;
-    background: var(--background, #fff);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--background);
     color: var(--foreground, inherit);
     padding: 6px 8px;
-    font-size: 12px;
+    font-size: 0.85rem;
   }
 
   /* Theme-token focus instead of the native (blue) WebKit ring — mirrors
@@ -920,14 +921,14 @@
      intentional act. */
   .rmc-reply-input:focus {
     outline: none;
-    border-color: var(--ring, rgba(0, 0, 0, 0.3));
+    border-color: var(--ring);
     box-shadow: 0 0 0 3px
-      color-mix(in oklch, var(--ring, rgba(0, 0, 0, 0.3)) 50%, transparent);
+      color-mix(in oklch, var(--ring) 50%, transparent);
   }
 
   .rmc-reply-error {
     margin: 0;
-    color: var(--color-danger, #b42318);
+    color: var(--color-danger);
     font-size: 0.75rem;
     line-height: 1.25;
   }
@@ -946,13 +947,13 @@
 
   .rmc-action-feedback {
     margin: 8px 0 0;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.62));
-    font-size: 11px;
+    color: var(--muted-foreground);
+    font-size: 0.7rem;
     line-height: 1.35;
   }
 
   .rmc-action-error {
-    color: var(--color-danger, var(--destructive, #b42318));
+    color: var(--color-danger, var(--destructive));
   }
 
   .rmc-btn {
@@ -960,13 +961,13 @@
     border: 1px solid color-mix(in oklch, var(--foreground, currentColor) 18%, transparent);
     color: inherit;
     padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 11px;
+    border-radius: 6px;
+    font-size: 0.7rem;
     cursor: pointer;
   }
 
   .rmc-btn:hover {
-    background: var(--muted, rgba(0, 0, 0, 0.04));
+    background: var(--muted);
   }
 
   .rmc-btn:disabled {
@@ -975,13 +976,13 @@
   }
 
   .rmc-btn-primary {
-    background: var(--primary, #2563eb);
-    color: var(--primary-foreground, #fff);
-    border-color: var(--primary, #2563eb);
+    background: var(--primary);
+    color: var(--primary-foreground);
+    border-color: var(--primary);
   }
 
   .rmc-btn-primary:hover {
     filter: brightness(0.96);
-    background: var(--primary, #2563eb);
+    background: var(--primary);
   }
 </style>

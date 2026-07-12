@@ -151,7 +151,7 @@ export class BrowserWorkspaceService {
       collab: options.collab ?? {
         selfClientId: holderId,
         selfLabel: 'You',
-        selfColor: '#7c5cff',
+        selfColor: '#8a63b8',
       },
       ...(options.sessionOptions === undefined ? {} : { sessionOptions: options.sessionOptions }),
       ...(options.heartbeatIntervalMs === undefined

@@ -479,9 +479,9 @@
   .three-way-expand {
     width: min(880px, calc(100vw - 32px));
     max-height: min(60vh, 600px);
-    background: var(--popover, #fff);
+    background: var(--popover);
     color: var(--popover-foreground, inherit);
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+    border: 1px solid var(--border);
     border-radius: 8px;
     box-shadow: 0 16px 48px rgba(0, 0, 0, 0.18);
     display: flex;
@@ -496,8 +496,8 @@
     justify-content: space-between;
     gap: 8px;
     padding: 10px 14px;
-    border-bottom: 1px solid var(--border, rgba(0, 0, 0, 0.08));
-    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
   }
 
   .three-way-header-meta {
@@ -514,7 +514,7 @@
   .three-way-age,
   .three-way-drift,
   .three-way-confidence {
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.6));
+    color: var(--muted-foreground);
   }
 
   .three-way-confidence[data-confidence-band='med'] {
@@ -532,16 +532,16 @@
   .three-way-close {
     background: transparent;
     border: 0;
-    font-size: 18px;
+    font-size: 1.1rem;
     line-height: 1;
     cursor: pointer;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.6));
+    color: var(--muted-foreground);
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: 6px;
   }
 
   .three-way-close:hover {
-    background: var(--muted, rgba(0, 0, 0, 0.06));
+    background: var(--muted);
   }
 
   .three-way-close:disabled {
@@ -553,7 +553,7 @@
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
     gap: 1px;
-    background: var(--border, rgba(0, 0, 0, 0.08));
+    background: var(--border);
     flex: 1 1 auto;
     min-height: 0;
     overflow: hidden;
@@ -563,22 +563,22 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
-    background: var(--popover, #fff);
+    background: var(--popover);
     padding: 10px 12px;
     overflow: hidden;
   }
 
   .three-way-pane-title {
-    font-size: 11px;
+    font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     margin: 0 0 2px;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.6));
+    color: var(--muted-foreground);
   }
 
   .three-way-pane-sub {
-    font-size: 11px;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.5));
+    font-size: 0.7rem;
+    color: var(--muted-foreground);
     margin: 0 0 8px;
   }
 
@@ -595,7 +595,7 @@
       'Source Code Pro',
       monospace
     );
-    font-size: 12px;
+    font-size: 0.85rem;
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
@@ -640,16 +640,16 @@
       'Source Code Pro',
       monospace
     );
-    font-size: 12px;
+    font-size: 0.85rem;
     line-height: 1.45;
     padding: 8px;
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.16));
-    border-radius: 4px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
     /* No manual resize handle (attn-2aj). This pane edits multi-line
        replacement text, so plain Enter stays a newline here — submit is
        Cmd/Ctrl+Enter or the Confirm button. */
     resize: none;
-    background: var(--background, #fff);
+    background: var(--background);
     color: inherit;
   }
 
@@ -664,10 +664,10 @@
     grid-template-columns: 1fr 1fr;
     gap: 12px;
     padding: 8px 14px;
-    border-top: 1px solid var(--border, rgba(0, 0, 0, 0.08));
-    background: var(--muted, rgba(0, 0, 0, 0.02));
+    border-top: 1px solid var(--border);
+    background: var(--muted);
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 11px;
+    font-size: 0.7rem;
     line-height: 1.4;
     max-height: 5lh;
     overflow: auto;
@@ -676,17 +676,17 @@
   .three-way-delta-label {
     font-weight: 600;
     margin-right: 6px;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.6));
+    color: var(--muted-foreground);
   }
 
   .three-way-actions {
     display: flex;
     gap: 8px;
     padding: 10px 14px;
-    border-top: 1px solid var(--border, rgba(0, 0, 0, 0.08));
+    border-top: 1px solid var(--border);
     position: sticky;
     bottom: 0;
-    background: var(--popover, #fff);
+    background: var(--popover);
   }
 
   .three-way-btn {
@@ -694,16 +694,16 @@
     align-items: center;
     gap: 6px;
     background: transparent;
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.16));
+    border: 1px solid var(--border);
     color: inherit;
     padding: 6px 10px;
-    font-size: 12px;
-    border-radius: 4px;
+    font-size: 0.85rem;
+    border-radius: 6px;
     cursor: pointer;
   }
 
   .three-way-btn:hover {
-    background: var(--muted, rgba(0, 0, 0, 0.05));
+    background: var(--muted);
   }
 
   .three-way-btn:disabled {
@@ -714,21 +714,21 @@
   .three-way-apply-error {
     margin: 0;
     padding: 8px 14px;
-    border-top: 1px solid var(--border, rgba(0, 0, 0, 0.08));
-    color: var(--color-danger, var(--destructive, #b42318));
-    font-size: 12px;
+    border-top: 1px solid var(--border);
+    color: var(--color-danger, var(--destructive));
+    font-size: 0.85rem;
     line-height: 1.4;
   }
 
   .three-way-btn-primary {
-    background: var(--primary, #2563eb);
-    color: var(--primary-foreground, #fff);
-    border-color: var(--primary, #2563eb);
+    background: var(--primary);
+    color: var(--primary-foreground);
+    border-color: var(--primary);
   }
 
   .three-way-btn-primary:hover {
     filter: brightness(0.95);
-    background: var(--primary, #2563eb);
+    background: var(--primary);
   }
 
   .three-way-btn-ghost {
@@ -737,11 +737,11 @@
 
   .three-way-kbd {
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 11px;
-    background: var(--muted, rgba(0, 0, 0, 0.08));
+    font-size: 0.7rem;
+    background: var(--muted);
     color: var(--muted-foreground, inherit);
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
-    border-radius: 3px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
     padding: 0 4px;
     line-height: 1.4;
   }

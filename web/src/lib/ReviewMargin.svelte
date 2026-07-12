@@ -1145,8 +1145,8 @@
   .review-margin-tray {
     position: relative;
     z-index: 2;
-    background: var(--background, #fff);
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.10));
+    background: var(--background);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 6px;
     margin: 8px 12px;
@@ -1155,11 +1155,11 @@
   }
 
   .rmt-header {
-    font-size: 11px;
+    font-size: 0.7rem;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
+    color: var(--muted-foreground);
     padding: 4px 6px 6px;
   }
 
@@ -1177,7 +1177,7 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
-    color: var(--accent-foreground, var(--muted-foreground, #888));
+    color: var(--accent-foreground, var(--muted-foreground));
     z-index: 0;
   }
 
@@ -1206,11 +1206,11 @@
     height: 28px;
     max-width: calc(100% - 24px);
     padding: 0 10px;
-    background: var(--muted, rgba(0, 0, 0, 0.04));
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.10));
+    background: var(--muted);
+    border: 1px solid var(--border);
     border-radius: 9999px;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
-    font-size: 11px;
+    color: var(--muted-foreground);
+    font-size: 0.7rem;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1218,7 +1218,7 @@
   }
 
   .review-margin-resolved-chip:hover {
-    background: var(--accent, rgba(0, 0, 0, 0.06));
+    background: var(--accent);
     color: var(--foreground, inherit);
   }
 
@@ -1232,8 +1232,8 @@
     width: 16px;
     height: 16px;
     border-radius: 9999px;
-    color: #fff;
-    font-size: 9px;
+    color: var(--monogram);
+    font-size: 0.7rem;
     font-weight: 600;
     line-height: 1;
   }
@@ -1248,8 +1248,8 @@
     max-width: none;
     padding: 0;
     justify-content: center;
-    border-color: var(--chip-author-color, var(--border, rgba(0, 0, 0, 0.10)));
-    color: var(--chip-author-color, var(--muted-foreground, rgba(0, 0, 0, 0.55)));
+    border-color: var(--chip-author-color, var(--border));
+    color: var(--chip-author-color, var(--muted-foreground));
   }
 
   .review-margin-resolved-chip[data-variant='icon']:hover {
@@ -1271,10 +1271,10 @@
     box-sizing: border-box;
     width: 28px;
     height: 28px;
-    border: 2px solid var(--background, #fff);
+    border: 2px solid var(--background);
     border-radius: 9999px;
-    color: #fff;
-    font-size: 12px;
+    color: var(--monogram);
+    font-size: 0.85rem;
     font-weight: 600;
     line-height: 1;
     cursor: pointer;
@@ -1296,26 +1296,26 @@
     width: auto;
     box-sizing: border-box;
     padding: 6px 12px;
-    background: var(--muted, rgba(0, 0, 0, 0.04));
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.10));
+    background: var(--muted);
+    border: 1px solid var(--border);
     border-radius: 9999px;
-    font-size: 11px;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
+    font-size: 0.7rem;
+    color: var(--muted-foreground);
     cursor: pointer;
     text-align: center;
     z-index: 2;
   }
 
   .review-margin-resolved-pill:hover {
-    background: var(--accent, rgba(0, 0, 0, 0.06));
+    background: var(--accent);
     color: var(--foreground, inherit);
   }
 
   /* Empty state — no threads, no orphan rows. */
   .review-margin-empty {
     padding: 14px 12px;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
-    font-size: 12px;
+    color: var(--muted-foreground);
+    font-size: 0.85rem;
     text-align: center;
   }
 
@@ -1327,11 +1327,11 @@
     left: 12px;
     right: 12px;
     padding: 10px 12px;
-    background: var(--popover, var(--background, #fff));
-    border: 1px solid var(--destructive, #dc2626);
+    background: var(--popover, var(--background));
+    border: 1px solid var(--destructive);
     border-radius: 6px;
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.15);
-    font-size: 12px;
+    font-size: 0.85rem;
     z-index: 3;
   }
 
@@ -1348,26 +1348,26 @@
 
   .rmro-btn {
     background: transparent;
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.14));
+    border: 1px solid var(--border);
     color: inherit;
     padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 11px;
+    border-radius: 6px;
+    font-size: 0.7rem;
     cursor: pointer;
   }
 
   .rmro-btn:hover {
-    background: var(--muted, rgba(0, 0, 0, 0.04));
+    background: var(--muted);
   }
 
   .rmro-btn-primary {
-    background: var(--primary, #2563eb);
-    color: var(--primary-foreground, #fff);
-    border-color: var(--primary, #2563eb);
+    background: var(--primary);
+    color: var(--primary-foreground);
+    border-color: var(--primary);
   }
 
   .rmro-btn-primary:hover {
     filter: brightness(0.96);
-    background: var(--primary, #2563eb);
+    background: var(--primary);
   }
 </style>

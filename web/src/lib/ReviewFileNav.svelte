@@ -66,8 +66,8 @@
   /* Active tab gets the app's primary accent treatment, matching the
      snapshot/peer chips elsewhere in the review chrome. */
   .review-file-tab.active {
-    border-color: var(--primary, #2563eb);
-    background: color-mix(in srgb, var(--primary, #2563eb) 12%, transparent);
-    color: var(--primary, #2563eb);
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+    color: var(--primary);
   }
 </style>

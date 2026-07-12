@@ -271,7 +271,7 @@
       Suggest edit
     </span>
     <blockquote
-      class="max-h-[3.5rem] overflow-hidden rounded-sm border-l-2 border-primary/60 bg-muted/40 px-2 py-1 text-xs italic text-foreground"
+      class="max-h-[3.5rem] overflow-hidden rounded-[2px] bg-[var(--comment-highlight)] px-2 py-1 font-serif text-xs text-foreground"
       data-slot="suggestion-composer-quote"
     >
       {quotePreview || '(empty selection)'}

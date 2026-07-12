@@ -621,7 +621,7 @@
       // the kind only if somehow empty), so peers see a real name not "Reviewer".
       selfLabel: userProfile.effectiveName || (isOwner ? 'Owner' : 'Reviewer'),
       // Caret colors mirror the presence chips: owner warm, reviewer cool.
-      selfColor: isOwner ? '#d97706' : '#2563eb',
+      selfColor: isOwner ? '#b05b41' : '#4a7fa5',
       // Owner only: seed an authority for a file a reviewer reaches before the
       // owner has opened it, from that file's base snapshot.
       getSeedDoc: isOwner ? collabSeedDocFor : undefined,

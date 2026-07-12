@@ -341,7 +341,7 @@
       },
       selfClientId: clientId,
       selfLabel: 'Reviewer',
-      selfColor: '#2563eb',
+      selfColor: '#4a7fa5',
       isAuthorityDevice: (deviceId) => authenticatedOwnerDeviceIds.has(deviceId),
       getLocation: () => ({
         fileId: seed.fileId,

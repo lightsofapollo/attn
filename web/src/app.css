@@ -233,7 +233,7 @@
     color: color-mix(in oklch, var(--sidebar-foreground) 76%, transparent);
     border: 1px solid transparent;
     background: transparent;
-    transition: all 140ms ease;
+    transition: color var(--t) var(--ease), background var(--t) var(--ease), border-color var(--t) var(--ease);
   }
 
   .sidebar-mode-button:hover {
@@ -563,7 +563,7 @@
     text-align: left;
     color: color-mix(in oklch, var(--foreground) 82%, transparent);
     background: transparent;
-    transition: all 120ms ease;
+    transition: color 120ms var(--ease), background 120ms var(--ease);
   }
 
   .sidebar-outline-item:hover {

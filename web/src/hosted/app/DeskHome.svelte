@@ -25,7 +25,7 @@
   function sharingLabel(sharing: SharingState): string {
     switch (sharing) {
       case 'shared':
-        return 'Shared';
+        return 'Shared · relay sees only ciphertext';
       case 'backed-up':
         return 'Backed up';
       case 'local-only':
@@ -156,7 +156,7 @@
           <span class="detail">{workspace.lastEditedLabel}</span>
           <span class="row-tail">
             {#if workspace.sharing === 'shared'}
-              <span class="local-badge"><span class="dot" aria-hidden="true"></span> Shared</span>
+              <span class="local-badge" title="The relay stores encrypted envelopes only; the key stays in the link fragment."><span class="dot" aria-hidden="true"></span> Shared · relay sees only ciphertext</span>
             {:else}
               <span>{sharingLabel(workspace.sharing)}</span>
             {/if}

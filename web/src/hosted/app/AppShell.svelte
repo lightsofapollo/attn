@@ -155,7 +155,7 @@
           <h1>Your desk couldn’t open</h1>
         </div>
       </div>
-      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--muted);" role="alert">
+      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--hosted-muted);" role="alert">
         {errorMessage}
       </p>
     </main>
@@ -171,7 +171,7 @@
           <h1>That workspace isn’t here</h1>
         </div>
       </div>
-      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--muted);">
+      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--hosted-muted);">
         Local workspaces live in the browser profile that created them. Import a backup, or go
         back to <a href="/app" style="text-decoration: underline;">your desk</a>.
       </p>

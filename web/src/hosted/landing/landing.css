@@ -1,6 +1,6 @@
 /* Landing-specific design language (attn-7xl.1.2), migrated from site/ and
    the approved concept in planning/web-authoring/landing-v2.html. Shared
-   tokens, base styles, and buttons live in ../tokens.css (imported first by
+   tokens, base styles, and buttons live in ../chrome.css (imported first by
    the landing entry module). */
 
 html {
@@ -48,7 +48,7 @@ html {
 }
 
 .nav-link {
-  color: var(--muted);
+  color: var(--hosted-muted);
   font-size: 0.86rem;
 }
 
@@ -97,7 +97,7 @@ p {
 .hero-lede {
   max-width: 610px;
   margin: 0;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 1.18rem/1.6 var(--sans);
 }
 
@@ -114,7 +114,7 @@ p {
   gap: 0.75rem;
   max-width: 620px;
   margin-top: 1.35rem;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.69rem/1.35 var(--mono);
 }
 
@@ -195,7 +195,7 @@ p {
 .stage-label small {
   display: block;
   margin-top: 0.25rem;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.7rem/1.35 var(--mono);
 }
 
@@ -234,7 +234,7 @@ p {
 }
 
 .entry small {
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.75rem var(--sans);
 }
 
@@ -245,7 +245,7 @@ p {
 
 .entry p {
   margin: 0;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.84rem/1.45 var(--sans);
 }
 
@@ -290,7 +290,7 @@ p {
 .chapter-intro {
   max-width: 670px;
   margin: 1.5rem 0 0;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 1.05rem/1.65 var(--sans);
 }
 
@@ -326,7 +326,7 @@ p {
 
 .step p {
   margin: 0;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.92rem/1.55 var(--sans);
 }
 
@@ -361,7 +361,7 @@ p {
 }
 
 .proof-copy p {
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.95rem/1.6 var(--sans);
 }
 
@@ -412,7 +412,7 @@ p {
 
 .surface p {
   max-width: 46ch;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.96rem/1.6 var(--sans);
 }
 
@@ -448,7 +448,7 @@ p {
 }
 
 .native-section p {
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 1rem/1.65 var(--sans);
 }
 
@@ -470,7 +470,7 @@ p {
   padding: 0.2rem 0.45rem;
   border-radius: 6px;
   background: transparent;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 700 0.72rem var(--sans);
   cursor: pointer;
 }
@@ -505,7 +505,7 @@ footer {
   align-items: center;
   justify-content: space-between;
   gap: 2rem;
-  color: var(--muted);
+  color: var(--hosted-muted);
   font: 0.78rem var(--sans);
 }
 

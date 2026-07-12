@@ -175,7 +175,7 @@
         {#if confirmingDeleteId === workspace.id}
           <div class="confirm-clear" role="alertdialog" aria-label={`Delete ${workspace.name}?`}>
             <strong>Delete “{workspace.name}” from this device?</strong>
-            <p style="margin: 0.3rem 0 0; color: var(--muted);">
+            <p style="margin: 0.3rem 0 0; color: var(--hosted-muted);">
               This cannot be undone. Export it first if you need a copy.
             </p>
             <div class="actions">

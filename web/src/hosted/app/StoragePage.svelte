@@ -132,7 +132,7 @@
             </button>
           </div>
         {:else}
-          <p style="color: var(--muted); font: 0.92rem/1.5 var(--sans);">
+          <p style="color: var(--hosted-muted); font: 0.92rem/1.5 var(--sans);">
             No local workspaces in this browser profile yet.
           </p>
         {/each}
@@ -160,7 +160,7 @@
         {/if}
 
         <h2 style="margin-top: 3rem;">Remembered review rooms</h2>
-        <p style="color: var(--muted); font: 0.88rem/1.5 var(--sans); max-width: 52ch;">
+        <p style="color: var(--hosted-muted); font: 0.88rem/1.5 var(--sans); max-width: 52ch;">
           Forgetting a room crypto-erases its local key first — the sealed copy on this device
           becomes permanently unreadable. The room itself keeps running for other participants.
         </p>
@@ -180,7 +180,7 @@
           {#if confirmingForget === roomId}
             <div class="confirm-clear" role="alertdialog" aria-label={`Forget room ${roomId}?`}>
               <strong>Forget this room on this device?</strong>
-              <p style="margin: 0.3rem 0 0; color: var(--muted);">
+              <p style="margin: 0.3rem 0 0; color: var(--hosted-muted);">
                 The local key is deleted first, so the remembered copy can never be read again
                 here. Your invite link (if you still have it) can rejoin while the room lives.
               </p>
@@ -202,7 +202,7 @@
             </div>
           {/if}
         {:else}
-          <p style="color: var(--muted); font: 0.92rem/1.5 var(--sans);">
+          <p style="color: var(--hosted-muted); font: 0.92rem/1.5 var(--sans);">
             No remembered review rooms in this browser profile.
           </p>
         {/each}
@@ -216,7 +216,7 @@
             <span style={`width: ${Math.round(health.usedFraction * 100)}%`}></span>
           </div>
           <small>{health.usedLabel} used of about {health.quotaLabel} available</small>
-          <p style="margin-top: 0.6rem; font: 0.72rem var(--mono); color: var(--muted);">
+          <p style="margin-top: 0.6rem; font: 0.72rem var(--mono); color: var(--hosted-muted);">
             Large files use the browser's origin file system when available and fall back to
             encrypted database storage when it isn't. Either way, content is sealed.
           </p>
@@ -234,7 +234,7 @@
         {:else}
           <div class="confirm-clear" role="alertdialog" aria-label="Confirm clearing all local attn data">
             <strong>Delete every local workspace in this browser?</strong>
-            <p style="margin: 0.3rem 0 0; color: var(--muted);">
+            <p style="margin: 0.3rem 0 0; color: var(--hosted-muted);">
               This cannot be undone. Shared rooms are not recalled, but their local source copies
               are removed.
             </p>

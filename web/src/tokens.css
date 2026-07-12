@@ -1,0 +1,210 @@
+/* ============================================================
+   attn design tokens — the single source for BOTH builds.
+   Canonical OKLCH per DESIGN.md; reviewed values from the Theme v2
+   reference prototype (planning/design/prototypes/editor-polish.html,
+   AA-verified in both themes). Imported by src/app.css (native + hosted
+   editor/review) and src/hosted/chrome.css (landing + desk).
+   Dark mode: the `.dark` class on <html>; both builds stamp it
+   (web/src/lib/theme.ts, web/src/hosted/theme.svelte.ts).
+   ============================================================ */
+
+/* ============================================
+   PAPER — default theme (warm parchment)
+   ============================================ */
+:root {
+  --radius: 0.625rem;
+
+  /* Type — serif for reading, sans for chrome, mono for code */
+  --serif: 'Source Serif 4 Variable', 'Source Serif 4', Georgia, serif;
+  --sans: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+  --mono: 'Source Code Pro Variable', 'Source Code Pro', 'SF Mono', Consolas, monospace;
+
+  /* Motion — one signature: fast, exact, ease-out-quart */
+  --ease: cubic-bezier(0.165, 0.84, 0.44, 1);
+  --t: 140ms;
+
+  /* Surfaces */
+  --code-block: oklch(0.885 0.012 73);
+  --background: oklch(0.905 0.010 78);
+  --foreground: oklch(0.14 0.008 55);
+  --card: oklch(0.89 0.012 76);
+  --card-foreground: oklch(0.14 0.008 55);
+  --popover: oklch(0.89 0.012 76);
+  --popover-foreground: oklch(0.14 0.008 55);
+  --surface-raised: oklch(0.94 0.010 76);
+  --surface-raised-2: oklch(0.965 0.008 78);
+
+  /* Accent — warm terracotta */
+  --primary: oklch(0.48 0.14 28);
+  --primary-hover: oklch(0.42 0.15 28);
+  --primary-foreground: oklch(0.98 0.005 78);
+  --link: oklch(0.38 0.04 55);
+  --link-hover: oklch(0.30 0.05 55);
+  --link-visited: oklch(0.42 0.03 45);
+  --link-underline: oklch(0.38 0.04 55 / 40%);
+  --selection: oklch(0.62 0.13 82 / 32%);
+
+  /* Semantic surfaces */
+  --secondary: oklch(0.89 0.012 76);
+  --secondary-foreground: oklch(0.14 0.008 55);
+  --muted: oklch(0.88 0.012 75);
+  --muted-foreground: oklch(0.32 0.012 65);
+  --faint-foreground: oklch(0.46 0.012 65);
+  --accent: oklch(0.14 0.008 55 / 7%);
+  --accent-foreground: oklch(0.14 0.008 55);
+  --destructive: oklch(0.55 0.20 27);
+  --amber-deep: oklch(0.36 0.09 78);
+  --monogram: oklch(1 0 0);
+
+  /* Chrome */
+  --border: oklch(0.14 0.008 55 / 18%);
+  --input: oklch(0.14 0.008 55 / 18%);
+  --ring: oklch(0.32 0.012 65);
+
+  /* Sidebar */
+  --sidebar: oklch(0.855 0.012 75);
+  --sidebar-foreground: oklch(0.26 0.012 65);
+  --sidebar-primary: oklch(0.26 0.012 65);
+  --sidebar-primary-foreground: oklch(0.98 0.005 78);
+  --sidebar-accent: oklch(0.14 0.008 55 / 10%);
+  --sidebar-accent-foreground: oklch(0.14 0.008 55);
+  --sidebar-border: transparent;
+  --sidebar-ring: oklch(0.44 0.012 65);
+
+  /* Paper-specific */
+  --grain-opacity: 0.035;
+  --blockquote-bar: oklch(0.44 0.012 65 / 48%);
+
+  /* ----- Review surfaces (Phase 0c) -----
+     Inline decoration backgrounds, panel chrome, peer avatars,
+     and confidence/stale states for collaboration overlays. */
+
+  /* Inline anchor tints — sit behind running text, must stay subtle. */
+  --comment-highlight: oklch(0.82 0.12 85 / 22%);
+  --suggestion-bg: oklch(0.78 0.13 150 / 18%);
+  --suggestion-deletion: oklch(0.55 0.20 27 / 22%);
+
+  /* Confidence ramp — same warm-accent hue, descending presence. */
+  --confidence-high: oklch(0.62 0.16 35 / 42%);
+  --confidence-med: oklch(0.66 0.12 45 / 26%);
+  --confidence-low: oklch(0.70 0.06 55 / 14%);
+
+  /* "Moved" badge pill — muted neutral on warm background. */
+  --moved-badge-bg: oklch(0.78 0.04 65);
+  --moved-badge-fg: oklch(0.22 0.012 55);
+
+  /* Right-rail review panel chrome. */
+  --panel-surface: oklch(0.92 0.010 76);
+  --panel-border: oklch(0.14 0.008 55 / 14%);
+  --review-card-surface: oklch(0.94 0.010 76 / 96%);
+  --review-card-border: oklch(0.14 0.008 55 / 22%);
+  --review-card-shadow: 0 16px 42px oklch(0.20 0.02 55 / 16%), 0 1px 0 oklch(1 0 0 / 45%) inset;
+  --review-card-comment-accent: oklch(0.62 0.13 82);
+  --review-card-suggestion-accent: oklch(0.58 0.15 150);
+
+  /* Peer avatar accents — owner uses primary, reviewer cool, agent distinct
+     violet. Lightness tuned so white monogram text clears WCAG AA 4.5:1
+     (these tokens back small-text chips: PeerStrip, margin avatar chips,
+     card avatars — attn-42y). */
+  --peer-avatar-bg-owner: oklch(0.58 0.14 32);
+  --peer-avatar-bg-reviewer: oklch(0.56 0.11 235);
+  --peer-avatar-bg-agent: oklch(0.57 0.13 295);
+
+  /* Stale anchor — dimmed/desaturated foreground. */
+  --stale-anchor-fg: oklch(0.55 0.008 55 / 65%);
+}
+
+/* ============================================
+   INK — opt-in dark theme (cool blue-black study).
+   Chroma is real (0.012–0.014, hue 255–257), not a grey flip;
+   faint/muted tiers raised for WCAG AA (Theme v2 critique fixes).
+   ============================================ */
+.dark {
+  /* Surfaces */
+  --code-block: oklch(0.19 0.014 256);
+  --background: oklch(0.148 0.014 255);
+  --foreground: oklch(0.87 0.008 250);
+  --card: oklch(0.195 0.014 256);
+  --card-foreground: oklch(0.87 0.008 250);
+  --popover: oklch(0.195 0.014 256);
+  --popover-foreground: oklch(0.87 0.008 250);
+  --surface-raised: oklch(0.22 0.014 256);
+  --surface-raised-2: oklch(0.245 0.014 256);
+
+  /* Accent — steel blue */
+  --primary: oklch(0.72 0.10 220);
+  --primary-hover: oklch(0.78 0.10 220);
+  --primary-foreground: oklch(0.12 0.005 260);
+  --link: oklch(0.74 0.06 235);
+  --link-hover: oklch(0.80 0.06 235);
+  --link-visited: oklch(0.66 0.04 250);
+  --link-underline: oklch(0.74 0.06 235 / 40%);
+  --selection: oklch(0.72 0.10 220 / 30%);
+
+  /* Semantic surfaces */
+  --secondary: oklch(0.195 0.014 256);
+  --secondary-foreground: oklch(0.87 0.008 250);
+  --muted: oklch(0.175 0.012 257);
+  --muted-foreground: oklch(0.66 0.010 250);
+  --faint-foreground: oklch(0.64 0.010 250);
+  --accent: oklch(1 0 0 / 3%);
+  --accent-foreground: oklch(0.87 0.008 250);
+  --destructive: oklch(0.65 0.18 22);
+  --amber-deep: oklch(0.82 0.10 82);
+  --monogram: oklch(1 0 0);
+
+  /* Chrome */
+  --border: oklch(0.87 0.008 250 / 16%);
+  --input: oklch(0.87 0.008 250 / 16%);
+  --ring: oklch(0.66 0.010 250);
+
+  /* Sidebar */
+  --sidebar: oklch(0.172 0.014 257);
+  --sidebar-foreground: oklch(0.66 0.010 250);
+  --sidebar-primary: oklch(0.66 0.010 250);
+  --sidebar-primary-foreground: oklch(0.12 0.005 260);
+  --sidebar-accent: oklch(1 0 0 / 5%);
+  --sidebar-accent-foreground: oklch(0.87 0.008 250);
+  --sidebar-border: transparent;
+  --sidebar-ring: oklch(0.66 0.010 250);
+
+  /* Ink-specific */
+  --grain-opacity: 0.02;
+  --blockquote-bar: oklch(0.66 0.010 250 / 40%);
+
+  /* ----- Review surfaces (Phase 0c) -----
+     Dark-mode counterparts: brighter chroma at lower alpha so tints
+     remain visible against the deep editor background. */
+
+  /* Inline anchor tints. */
+  --comment-highlight: oklch(0.78 0.14 88 / 18%);
+  --suggestion-bg: oklch(0.72 0.16 152 / 16%);
+  --suggestion-deletion: oklch(0.65 0.18 22 / 22%);
+
+  /* Confidence ramp — cool steel hue to match dark primary. */
+  --confidence-high: oklch(0.74 0.12 218 / 40%);
+  --confidence-med: oklch(0.70 0.08 225 / 24%);
+  --confidence-low: oklch(0.66 0.04 240 / 14%);
+
+  /* "Moved" badge pill. */
+  --moved-badge-bg: oklch(0.30 0.012 250);
+  --moved-badge-fg: oklch(0.88 0.008 250);
+
+  /* Right-rail review panel chrome. */
+  --panel-surface: oklch(0.185 0.012 257);
+  --panel-border: oklch(1 0 0 / 8%);
+  --review-card-surface: oklch(0.22 0.014 256 / 97%);
+  --review-card-border: oklch(0.78 0.025 250 / 20%);
+  --review-card-shadow: 0 18px 52px oklch(0 0 0 / 34%), 0 1px 0 oklch(1 0 0 / 8%) inset;
+  --review-card-comment-accent: oklch(0.78 0.13 86);
+  --review-card-suggestion-accent: oklch(0.74 0.16 150);
+
+  /* Peer avatar accents. Lightness tuned for white text at WCAG AA 4.5:1
+     (see the light-block note). */
+  --peer-avatar-bg-owner: oklch(0.58 0.12 32);
+  --peer-avatar-bg-reviewer: oklch(0.56 0.10 230);
+  --peer-avatar-bg-agent: oklch(0.57 0.12 295);
+
+  /* Stale anchor. */
+  --stale-anchor-fg: oklch(0.60 0.010 250 / 60%);
+}

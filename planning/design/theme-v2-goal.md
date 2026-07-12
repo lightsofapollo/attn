@@ -111,6 +111,10 @@ integration-finishing pass — converge, don't proliferate.
   (NO scroll listeners — James asked for this; layout reads only on resize/
   mutation). Note: ReviewMargin already had anchor-aligned scroll-tracked cards;
   ll9 was retint+hug only. Suites green (80 web files, test:review 0 FAIL).
+- 2026-07-12 (78359b0): **attn-5bq DONE.** Draft caches (Escape keeps work,
+  Cancel/submit clear), scroll-tracking popovers via shared rAF tracker
+  (popover-anchor.svelte.ts, mount-scoped listeners), live ledger diff in
+  replace mode. svelte-check clean, tests green.
 - 2026-07-12 (9d27c7c): **attn-u5c DONE.** Save chip in ReviewBar (dirty/saved,
   role=status) + document.title tracks the file. Verified live. Note: native
   mode defaults to 'edit' (App.svelte:134); saves are explicit via saveEdits(),

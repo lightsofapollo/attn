@@ -67,9 +67,9 @@ test('share sheet opens as a dialog and returns focus on close', async ({ page }
   await page.getByRole('button', { name: 'Share for review' }).click();
   const dialog = page.getByRole('dialog', { name: 'Share for review' });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText('Choose the review scope');
+  await expect(dialog).toContainText('What do you want to share?');
   await expect(dialog).toContainText('1 entry · 18 KB');
-  await expect(dialog).toContainText('The encryption key stays in the invite link');
+  await expect(dialog).toContainText('Create an encrypted link to the files you choose');
   // The dialog heading owns initial focus; Escape closes and restores focus.
   await expect(dialog.getByRole('heading', { name: 'Share for review' })).toBeFocused();
   await page.keyboard.press('Escape');

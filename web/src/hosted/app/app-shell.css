@@ -1134,7 +1134,7 @@ a.workspace-row:hover {
 }
 
 .share-sheet {
-  width: min(720px, 100%);
+  width: min(680px, 100%);
   max-height: calc(100dvh - 4rem);
   overflow: auto;
 }
@@ -1150,6 +1150,11 @@ a.workspace-row:hover {
 
 .share-head h2:focus {
   outline: 0;
+}
+
+.share-head h2 {
+  font-size: 2rem;
+  letter-spacing: -0.02em;
 }
 
 .share-head p {
@@ -1180,20 +1185,7 @@ a.workspace-row:hover {
 }
 
 .share-panel-heading {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  gap: 0.75rem;
-  align-items: start;
-}
-
-.share-panel-heading .step-badge {
-  width: 25px;
-  height: 25px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--rule);
-  border-radius: 50%;
-  font: 0.7rem var(--mono);
+  display: block;
 }
 
 .share-panel h3,
@@ -1216,15 +1208,45 @@ a.workspace-row:hover {
 }
 
 .share-storage-actions {
-  margin: 0.8rem 0 0 2.35rem;
+  margin: 0.8rem 0 0;
 }
 
 .share-check {
   display: flex;
   align-items: flex-start;
-  gap: 0.6rem;
-  margin: 0.9rem 0 0 2.35rem;
-  font: 0.84rem/1.45 var(--sans);
+  gap: 0.7rem;
+  min-height: 58px;
+  margin: 0.85rem 0 0;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  font: 0.84rem/1.4 var(--sans);
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.share-check:hover {
+  border-color: var(--ink);
+}
+
+.share-check.confirmed {
+  border-color: var(--rust);
+  background: color-mix(in srgb, var(--rust) 7%, var(--sheet));
+}
+
+.share-check strong,
+.share-check small {
+  display: block;
+}
+
+.share-check strong {
+  font-size: 0.88rem;
+}
+
+.share-check small {
+  margin-top: 0.18rem;
+  color: var(--hosted-muted);
+  font-size: 0.7rem;
 }
 
 .share-check input,
@@ -1235,7 +1257,13 @@ a.workspace-row:hover {
 }
 
 .share-check input {
-  margin-top: 0.18rem;
+  appearance: auto;
+  flex: 0 0 1.15rem;
+  width: 1.15rem;
+  height: 1.15rem;
+  margin: 0.12rem 0 0;
+  opacity: 1;
+  visibility: visible;
 }
 
 .share-warning,
@@ -1246,7 +1274,14 @@ a.workspace-row:hover {
 }
 
 .share-warning {
-  margin-left: 2.35rem;
+  margin-left: 0;
+}
+
+.share-safety {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--paper) 64%, var(--sheet));
 }
 
 .share-choice-grid {
@@ -1367,9 +1402,7 @@ a.workspace-row:hover {
 }
 
 .share-advanced-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.65fr);
-  gap: 1rem;
+  display: block;
   padding-bottom: 1rem;
 }
 

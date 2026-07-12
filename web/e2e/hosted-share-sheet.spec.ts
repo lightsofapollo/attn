@@ -28,11 +28,13 @@ test('defaults to the focused current-file and hybrid delivery flow', async ({ p
   await expect(dialog.getByRole('radio', { name: /Current file/u })).toBeChecked();
   await expect(dialog.locator('.share-manifest')).toContainText('1 entry');
   await expect(dialog.locator('.share-manifest')).toContainText('1 Markdown');
-  await expect(dialog.getByText('Delivery mode Hybrid')).toBeVisible();
+  const advanced = dialog.locator('.share-advanced > summary');
+  await expect(advanced).toContainText('Advanced settings');
+  await expect(advanced).toContainText('Hybrid delivery');
 
-  await dialog.getByText('Delivery mode Hybrid').click();
+  await advanced.click();
   await expect(dialog.getByRole('radio', { name: /^Hybrid/u })).toBeChecked();
-  await expect(dialog).toContainText('Stable links renew for 90 days');
+  await expect(dialog).toContainText('Hybrid is recommended');
 });
 
 test('durability states gate sharing honestly', async ({ page }) => {
@@ -40,7 +42,7 @@ test('durability states gate sharing honestly', async ({ page }) => {
   await page.getByRole('button', { name: 'Share for review' }).click();
   const privateDialog = page.getByRole('dialog', { name: 'Share for review' });
   const create = privateDialog.getByRole('button', { name: 'Create review link' });
-  await expect(privateDialog).toContainText('Private browsing is session-only');
+  await expect(privateDialog).toContainText('Private browsing can erase this workspace');
   await expect(create).toBeDisabled();
   await privateDialog.getByRole('checkbox', { name: /I understand this browser may erase/u }).check();
   await expect(create).toBeEnabled();
@@ -51,6 +53,34 @@ test('durability states gate sharing honestly', async ({ page }) => {
   const quotaDialog = page.getByRole('dialog', { name: 'Share for review' });
   await expect(quotaDialog.getByRole('alert')).toContainText('Sharing stays unavailable');
   await expect(quotaDialog.getByRole('button', { name: 'Create review link' })).toBeDisabled();
+});
+
+test('persistence denial leaves an obvious safety confirmation and can complete sharing', async ({ page }) => {
+  await page.goto('/app/w/ws-product/direction.md?shell=best-effort');
+  await page.getByRole('button', { name: 'Share for review' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Share for review' });
+  const create = dialog.getByRole('button', { name: 'Create review link' });
+  const confirmation = dialog.getByRole('checkbox', {
+    name: /I have a backup or accept the risk/u,
+  });
+
+  await expect(create).toBeDisabled();
+  await dialog.getByRole('button', { name: 'Protect local data' }).click();
+  await expect(dialog).toContainText('Protected storage was not granted');
+  await expect(confirmation).toBeVisible();
+  const confirmationSize = await confirmation.evaluate((input) => {
+    const rect = input.getBoundingClientRect();
+    return { width: rect.width, height: rect.height };
+  });
+  expect(confirmationSize.width).toBeGreaterThanOrEqual(16);
+  expect(confirmationSize.height).toBeGreaterThanOrEqual(16);
+  await expect(dialog).toContainText('Confirm the safety note to continue.');
+
+  await dialog.getByText('I have a backup or accept the risk').click();
+  await expect(confirmation).toBeChecked();
+  await expect(create).toBeEnabled();
+  await create.click();
+  await expect(dialog.getByRole('heading', { name: 'Review link ready' })).toBeVisible();
 });
 
 test('each tier matches across browser, native, and CLI while sibling bearers stay distinct', async ({ page }) => {

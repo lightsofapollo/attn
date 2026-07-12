@@ -4,6 +4,7 @@
 // degraded scenario so every designed failure state is directly reachable:
 //
 //   /app?shell=private   Safari Private Browsing (session-only storage)
+//   /app?shell=best-effort persistent storage request is denied
 //   /app?shell=blocked   Lockdown/capability failure (no local storage)
 //   /app?shell=quota     quota pressure (writes blocked, head preserved)
 //   /app?shell=empty     first visit, no workspaces yet
@@ -43,12 +44,12 @@ const MOCK_INVITE = {
 
 /** 'real' (no ?shell= param) boots the storage-backed service; every other
  * scenario runs this mock so degraded states stay directly reachable. */
-export type ShellScenario = 'real' | 'demo' | 'private' | 'blocked' | 'quota' | 'empty';
+export type ShellScenario = 'real' | 'demo' | 'private' | 'best-effort' | 'blocked' | 'quota' | 'empty';
 
 export function shellScenarioFromSearch(search: string): ShellScenario {
   const value = new URLSearchParams(search).get('shell');
   if (value === null) return 'real';
-  return value === 'private' || value === 'blocked' || value === 'quota' || value === 'empty'
+  return value === 'private' || value === 'best-effort' || value === 'blocked' || value === 'quota' || value === 'empty'
     ? value
     : 'demo';
 }
@@ -133,6 +134,8 @@ export class MockWorkspaceService implements WorkspaceAppService {
     switch (this.scenario) {
       case 'private':
         return { mode: 'session-only', usedLabel: '2.1 MB', quotaLabel: 'this session', usedFraction: 0.02 };
+      case 'best-effort':
+        return { mode: 'best-effort', usedLabel: '18.7 MB', quotaLabel: '104 MB', usedFraction: 0.18 };
       case 'blocked':
         return { mode: 'unavailable', usedLabel: '0 B', quotaLabel: 'unavailable', usedFraction: 0 };
       case 'quota':
@@ -293,7 +296,9 @@ export class MockWorkspaceService implements WorkspaceAppService {
   }
 
   async requestPersistence(): Promise<boolean | null> {
-    return this.scenario === 'private' || this.scenario === 'blocked' ? false : true;
+    return this.scenario === 'private' || this.scenario === 'best-effort' || this.scenario === 'blocked'
+      ? false
+      : true;
   }
 
   async listRememberedRooms(): Promise<string[]> {

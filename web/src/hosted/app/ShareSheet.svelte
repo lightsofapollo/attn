@@ -119,19 +119,30 @@
   const maskedBrowserUrl = $derived(selectedInvite ? maskInviteUrl(selectedInvite.browserUrl) : '');
   const webShareAvailable = $derived(supportsWebShare());
 
-  const durabilityCopy = $derived.by(() => {
+  const safetyCopy = $derived.by(() => {
     switch (effectivePersistenceMode) {
       case 'persistent':
-        return 'Persistent storage is active on this device. A normal backup is still a good idea before sharing.';
+        return '';
       case 'best-effort':
-        return 'This browser may clear local data. Request persistent storage, or acknowledge the risk after making a backup.';
+        return persistDenied
+          ? 'Protected storage was not granted. Keep a backup, or confirm that you accept the risk.'
+          : 'This browser may clear local workspaces. Protect this one, download a backup, or accept the risk.';
       case 'session-only':
-        return 'Private browsing is session-only. The owner room cannot be recovered if this session closes.';
+        return 'Private browsing can erase this workspace when the session closes.';
       case 'quota-pressure':
-        return 'Storage is nearly full. Free space or export and reopen this workspace before sharing.';
+        return 'Storage is nearly full. Free space or export this workspace before sharing.';
       case 'unavailable':
-        return 'Local storage is unavailable. A recoverable owner room cannot be created from this browser.';
+        return 'Local storage is unavailable, so this browser cannot create a recoverable review room.';
     }
+  });
+
+  const configurationHint = $derived.by(() => {
+    if (!scopeValid) return 'Include at least one Markdown file.';
+    if (durability.hardBlocked) return 'Sharing is unavailable until local storage is healthy.';
+    if (durability.needsAcknowledgement && !riskAcknowledged) {
+      return 'Confirm the safety note to continue.';
+    }
+    return 'Encrypted before it leaves this browser.';
   });
 
   $effect(() => {
@@ -405,7 +416,7 @@
       <div>
         <div class="eyebrow">End-to-end encrypted</div>
         <h2 id="share-sheet-title" tabindex="-1" bind:this={headingElement}>Share for review</h2>
-        <p id="share-sheet-description">Choose exactly what reviewers can open. The encryption key stays in the invite link.</p>
+        <p id="share-sheet-description">Create an encrypted link to the files you choose.</p>
       </div>
       <button class="button share-close" type="button" onclick={requestClose} aria-label="Close share sheet">Close</button>
     </header>
@@ -420,46 +431,11 @@
           </div>
         </div>
       {:else if phase === 'configure'}
-        <section class:share-blocked={durability.hardBlocked} class="share-panel" aria-labelledby="source-safety-title">
-          <div class="share-panel-heading">
-            <span class="step-badge" aria-hidden="true">1</span>
-            <div>
-              <h3 id="source-safety-title">Keep the owner source safe</h3>
-              <p>{durabilityCopy}</p>
-            </div>
-          </div>
-          <div class="storage-actions share-storage-actions">
-            {#if durability.canRequestPersistence && onRequestPersist}
-              <button class="button" type="button" disabled={persistBusy} onclick={() => void requestPersist()}>
-                {persistBusy ? 'Requesting…' : 'Request persistent storage'}
-              </button>
-            {/if}
-            {#if onBackup}
-              <button class="button" type="button" disabled={backupBusy} onclick={() => void downloadBackup()}>
-                {backupBusy ? 'Preparing backup…' : backedUp ? 'Backup downloaded ✓' : 'Download backup'}
-              </button>
-            {/if}
-          </div>
-          {#if persistDenied}
-            <p class="share-warning">Persistent storage was not granted. You can still continue after acknowledging the risk.</p>
-          {/if}
-          {#if durability.needsAcknowledgement && !persistGranted}
-            <label class="share-check">
-              <input type="checkbox" bind:checked={riskAcknowledged} />
-              <span>I understand this browser may erase the owner source and I have made, or do not need, a backup.</span>
-            </label>
-          {/if}
-          {#if durability.hardBlocked}
-            <p class="share-error" role="alert">Sharing stays unavailable in this storage state, even with a risk acknowledgement.</p>
-          {/if}
-        </section>
-
         <section class="share-panel" aria-labelledby="share-scope-title">
           <div class="share-panel-heading">
-            <span class="step-badge" aria-hidden="true">2</span>
             <div>
-              <h3 id="share-scope-title">Choose the review scope</h3>
-              <p>Relative paths are preserved. Every share must include at least one Markdown file.</p>
+              <h3 id="share-scope-title">What do you want to share?</h3>
+              <p>Reviewers only receive the items you choose.</p>
             </div>
           </div>
           <fieldset class="share-choice-grid">
@@ -476,11 +452,11 @@
             </label>
             <label class:chosen={scopeChoice === 'entries'}>
               <input type="radio" name="share-scope" value="entries" bind:group={scopeChoice} />
-              <span><strong>Selected entries</strong><small>Pick files and assets below</small></span>
+              <span><strong>Choose files</strong><small>Select files and assets</small></span>
             </label>
             <label class:chosen={scopeChoice === 'workspace'}>
               <input type="radio" name="share-scope" value="workspace" bind:group={scopeChoice} />
-              <span><strong>Whole workspace</strong><small>All {entries.length} entries</small></span>
+              <span><strong>Whole workspace</strong><small>All {entries.length} items</small></span>
             </label>
           </fieldset>
 
@@ -512,11 +488,52 @@
           {/if}
         </section>
 
+        {#if effectivePersistenceMode !== 'persistent'}
+          <section
+            class:share-blocked={durability.hardBlocked}
+            class="share-panel share-safety"
+            aria-labelledby="source-safety-title"
+          >
+            <div class="share-panel-heading">
+              <div>
+                <h3 id="source-safety-title">Before you create the link</h3>
+                <p aria-live="polite">{safetyCopy}</p>
+              </div>
+            </div>
+            {#if durability.canRequestPersistence || onBackup}
+              <div class="storage-actions share-storage-actions">
+                {#if durability.canRequestPersistence && onRequestPersist && !persistDenied}
+                  <button class="button" type="button" disabled={persistBusy} onclick={() => void requestPersist()}>
+                    {persistBusy ? 'Protecting…' : 'Protect local data'}
+                  </button>
+                {/if}
+                {#if onBackup}
+                  <button class="button" type="button" disabled={backupBusy} onclick={() => void downloadBackup()}>
+                    {backupBusy ? 'Preparing…' : backedUp ? 'Backup downloaded ✓' : 'Download backup'}
+                  </button>
+                {/if}
+              </div>
+            {/if}
+            {#if durability.needsAcknowledgement && !persistGranted}
+              <label class:confirmed={riskAcknowledged} class="share-check">
+                <input type="checkbox" bind:checked={riskAcknowledged} />
+                <span>
+                  <strong>I have a backup or accept the risk</strong>
+                  <small>I understand this browser may erase the owner source.</small>
+                </span>
+              </label>
+            {/if}
+            {#if durability.hardBlocked}
+              <p class="share-error" role="alert">Sharing stays unavailable until local storage is healthy.</p>
+            {/if}
+          </section>
+        {/if}
+
         <details class="share-advanced" bind:open={advancedOpen}>
-          <summary>Delivery mode <span>{SHARE_MODE_OPTIONS.find((option) => option.value === mode)?.label}</span></summary>
+          <summary>Advanced settings <span>{SHARE_MODE_OPTIONS.find((option) => option.value === mode)?.label} delivery</span></summary>
           <div class="share-advanced-body">
             <fieldset>
-              <legend>Review access</legend>
+              <legend>Delivery</legend>
               {#each SHARE_MODE_OPTIONS as option (option.value)}
                 <label>
                   <input type="radio" name="share-mode" value={option.value} bind:group={mode} />
@@ -524,7 +541,7 @@
                 </label>
               {/each}
             </fieldset>
-            <p class="share-lifetime-note">Stable links renew for 90 days when the browser owner reconnects. Stop sharing revokes View, Comment, and Suggest together.</p>
+            <p class="share-lifetime-note">Hybrid is recommended. Review links renew when this browser reconnects, and Stop sharing revokes every permission level.</p>
           </div>
         </details>
 
@@ -532,7 +549,7 @@
           <p class="share-error" role="alert">{operationError}</p>
         {/if}
         <div class="share-config-foot">
-          <p>Nothing is uploaded until you create the encrypted review room.</p>
+          <p>{configurationHint}</p>
           <button class="button primary" type="button" disabled={!configurationReady} onclick={() => void publishShare()}>
             Create review link
           </button>

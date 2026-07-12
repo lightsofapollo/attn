@@ -676,7 +676,7 @@ test('first share is gated on durability until acknowledged', async ({ page }) =
   await expect(dialog).toBeVisible();
   const createLink = dialog.getByRole('button', { name: 'Create review link' });
   await expect(createLink).toBeDisabled();
-  await expect(dialog).toContainText('Private browsing is session-only');
+  await expect(dialog).toContainText('Private browsing can erase this workspace');
   await dialog.getByRole('checkbox', { name: /I understand this browser may erase/u }).check();
   await expect(createLink).toBeEnabled();
 });

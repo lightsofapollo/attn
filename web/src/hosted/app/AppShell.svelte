@@ -136,6 +136,21 @@
     workspaces = await service.listWorkspaces();
   }
 
+  async function refreshOpenWorkspace(nextActivePath = activePath): Promise<void> {
+    if (!detail) return;
+    const refreshed = await service.getWorkspace(detail.id);
+    if (!refreshed) return;
+    const nextPath = nextActivePath && refreshed.entries.some((entry) => entry.path === nextActivePath)
+      ? nextActivePath
+      : refreshed.openPath;
+    const nextBody = await service.readBodyText(refreshed.id, nextPath);
+    detail = refreshed;
+    activePath = nextPath;
+    bodyText = nextBody;
+    workspaces = await service.listWorkspaces();
+    history.replaceState(null, '', `/app/w/${refreshed.id}/${nextPath}`);
+  }
+
   async function onDelete(workspaceId: string): Promise<void> {
     await service.deleteWorkspace(workspaceId);
     workspaces = await service.listWorkspaces();
@@ -165,7 +180,15 @@
     </main>
   </div>
 {:else if editorMode && detail}
-  <EditorShell {service} workspace={detail} {workspaces} {activePath} {bodyText} {isNewDraft} />
+  <EditorShell
+    {service}
+    workspace={detail}
+    {workspaces}
+    {activePath}
+    {bodyText}
+    {isNewDraft}
+    onWorkspaceRefresh={refreshOpenWorkspace}
+  />
 {:else if route?.view === 'workspace'}
   <div class="app-shell" data-app-view="missing">
     <main class="desk">

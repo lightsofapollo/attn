@@ -161,9 +161,13 @@ test('desktop Markdown formatting is visible, keyboard-correct, and supports inp
   await editor.click();
   await page.keyboard.type('Keyboard formatting');
   await page.keyboard.press('ControlOrMeta+A');
+  const sidebar = page
+    .locator('[data-slot="sidebar"]')
+    .filter({ has: page.locator('[data-slot="sidebar-inner"]') });
+  await expect(sidebar).toHaveAttribute('data-state', 'expanded');
   await page.keyboard.press('ControlOrMeta+b');
   await expect(editor.locator('strong')).toContainText('Keyboard formatting');
-  await expect(page.locator('.project-sidebar')).toBeVisible();
+  await expect(sidebar).toHaveAttribute('data-state', 'expanded');
 
   await toolbar.getByRole('button', { name: 'Heading 2' }).click();
   await expect(editor.locator('h2')).toContainText('Keyboard formatting');
@@ -298,6 +302,36 @@ test('editing autosaves durable revisions and recovers after reload', async ({ p
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 });
 
+test('active Markdown rename stays mounted and autosave follows the new path', async ({ page }) => {
+  await page.goto('/app#new');
+  const editor = documentEditor(page);
+  const navigationCount = await page.evaluate(() => performance.getEntriesByType('navigation').length);
+
+  await page.getByRole('button', { name: 'untitled.md', exact: true }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Rename…', exact: true }).click();
+  await page.getByRole('textbox', { name: 'New path' }).fill('renamed.md');
+  await page.getByRole('textbox', { name: 'New path' }).press('Enter');
+
+  await expect(page).toHaveURL(/\/renamed\.md$/u);
+  await expect(page.getByRole('button', { name: 'renamed.md', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => performance.getEntriesByType('navigation').length)).toBe(
+    navigationCount,
+  );
+
+  await editor.click();
+  await page.keyboard.type('Text saved after the rename.');
+  await expect(page.locator('[data-commits]')).not.toHaveAttribute('data-commits', '0', {
+    timeout: 15_000,
+  });
+  await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
+    'data-save-state',
+    'Saved on this device',
+    { timeout: 15_000 },
+  );
+  await page.reload();
+  await expect(documentEditor(page)).toContainText('Text saved after the rename.');
+});
+
 test('pending text is reported immediately and guards an immediate reload', async ({ page }) => {
   await page.goto('/app#new');
   const editor = documentEditor(page);
@@ -374,9 +408,10 @@ test('export drains pending text before reading workspace bytes', async ({ page 
   );
 });
 
-test('workspace rename reload keeps the same tab writable', async ({ page }) => {
+test('workspace rename stays mounted and keeps the same tab writable', async ({ page }) => {
   await page.goto('/app#new');
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
+  const navigationCount = await page.evaluate(() => performance.getEntriesByType('navigation').length);
 
   await page.getByRole('button', { name: 'Rename workspace' }).click();
   const input = page.getByRole('textbox', { name: 'Workspace title' });
@@ -388,6 +423,9 @@ test('workspace rename reload keeps the same tab writable', async ({ page }) => 
   );
   await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
+  expect(await page.evaluate(() => performance.getEntriesByType('navigation').length)).toBe(
+    navigationCount,
+  );
 });
 
 test('a duplicated tab gets a distinct identity and stays read-only while one tab edits', async ({ page, context }) => {
@@ -470,10 +508,16 @@ test('multi-file workspace: create, add, context-rename, context-delete, and exp
   await page.getByRole('button', { name: 'pixel.png', exact: true }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Rename…', exact: true }).click();
   const renameInput = page.getByRole('textbox', { name: 'New path' });
+  const navigationCountBeforeRename = await page.evaluate(() =>
+    performance.getEntriesByType('navigation').length,
+  );
   await renameInput.fill('images/pixel.png');
   await renameInput.press('Enter');
   await expect(page).toHaveURL(/\/images\/pixel\.png$/u);
   await expect(page.locator('.asset-image')).toBeVisible();
+  expect(await page.evaluate(() => performance.getEntriesByType('navigation').length)).toBe(
+    navigationCountBeforeRename,
+  );
 
   // Export the whole workspace as a zip with exact paths.
   const downloadPromise = page.waitForEvent('download');

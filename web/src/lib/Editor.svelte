@@ -13,14 +13,6 @@
   } from 'prosemirror-search';
   import { tick, untrack } from 'svelte';
   import { keymap } from 'prosemirror-keymap';
-  import {
-    emDash,
-    ellipsis,
-    inputRules,
-    smartQuotes,
-    textblockTypeInputRule,
-    wrappingInputRule,
-  } from 'prosemirror-inputrules';
   import { baseKeymap, selectAll, setBlockType, toggleMark } from 'prosemirror-commands';
   import { wrapInList, liftListItem } from 'prosemirror-schema-list';
   import { history, redo, undo } from 'prosemirror-history';
@@ -31,6 +23,7 @@
   import { mathNodeView } from './prosemirror/math';
   import { mermaidNodeView } from './prosemirror/mermaid-nodeview';
   import { tablePlugins } from './prosemirror/tables';
+  import { markdownAuthoringPlugins } from './prosemirror/markdown-authoring';
   import { editSave } from './ipc';
   import { markdownParser, markdownSerializer, schema } from './schema';
   import {
@@ -271,22 +264,7 @@
   function buildPlugins(md: string) {
     const plugins = [
       history(),
-      inputRules({
-        rules: [
-          ...smartQuotes,
-          ellipsis,
-          emDash,
-          textblockTypeInputRule(/^(#{1,6})\s$/u, schema.nodes.heading, (match) => ({
-            level: match[1]?.length ?? 1,
-          })),
-          textblockTypeInputRule(/^```$/u, schema.nodes.code_block),
-          wrappingInputRule(/^\s*>\s$/u, schema.nodes.blockquote),
-          wrappingInputRule(/^\s*([-+*])\s$/u, schema.nodes.bullet_list),
-          wrappingInputRule(/^(\d+)\.\s$/u, schema.nodes.ordered_list, (match) => ({
-            order: Number(match[1] ?? 1),
-          })),
-        ],
-      }),
+      ...markdownAuthoringPlugins(schema),
       search(),
       // Track-changes state (enabled per-role below). Harmless when disabled.
       suggestChanges(),
@@ -318,8 +296,6 @@
     plugins.push(...tablePlugins());
     plugins.push(
       keymap({
-        'Mod-b': toggleMark(schema.marks.strong),
-        'Mod-i': toggleMark(schema.marks.em),
         'Mod-z': undo,
         'Mod-y': redo,
         'Mod-Shift-z': redo,

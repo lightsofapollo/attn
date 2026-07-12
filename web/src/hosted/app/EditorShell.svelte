@@ -39,6 +39,7 @@
     /** Decoded head body when the active entry is Markdown; null otherwise. */
     bodyText?: string | null;
     isNewDraft?: boolean;
+    onWorkspaceRefresh: (activePath?: string) => Promise<void>;
   }
 
   const {
@@ -48,6 +49,7 @@
     activePath,
     bodyText = null,
     isNewDraft = false,
+    onWorkspaceRefresh,
   }: Props = $props();
 
   const health: StorageHealth = $derived(service.storageHealth());
@@ -135,6 +137,7 @@
   let loadedCollabGenerationKey: string | null = null;
   let boundCollabKey: string | null = null;
   let autosave: AutosaveController | null = null;
+  let autosavePath: string | null = null;
   // Durable commits completed this session — observable for tests/status.
   let commitCount = $state(0);
 
@@ -350,7 +353,7 @@
     try {
       if (!await flushPendingEditor()) return;
       await service.renameWorkspace(workspace.id, next);
-      window.location.reload();
+      await onWorkspaceRefresh(activeEntry?.path);
     } catch {
       // Rename failures surface on the next durable state read.
     }
@@ -461,11 +464,7 @@
     try {
       if (!await flushPendingEditor()) return;
       await service.renameEntry(workspace.id, sourcePath, target);
-      if (sourcePath === activeEntry?.path) {
-        window.location.assign(`/app/w/${workspace.id}/${target}`);
-      } else {
-        window.location.reload();
-      }
+      await onWorkspaceRefresh(sourcePath === activeEntry?.path ? target : activeEntry?.path);
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
@@ -558,16 +557,23 @@
       editDenied = state.leaseRole === 'passive';
       if (!state.writable) editing = false;
     });
-    if (!autosave && activeEntry?.presentation === 'editable') {
-      const path = activeEntry.path;
-      autosave = new AutosaveController({
-        commit: async (text) => {
-          await granted.commitText(path, text);
-          commitCount += 1;
-        },
-        onState: (state) => (saveState = state),
-      });
-    }
+    bindAutosave(granted, activeEntry);
+  }
+
+  function bindAutosave(granted: EditingSession, entry: WorkspaceEntry | undefined): void {
+    const path = entry?.presentation === 'editable' ? entry.path : null;
+    if (autosavePath === path && autosave) return;
+    autosave?.dispose();
+    autosave = null;
+    autosavePath = path;
+    if (!path) return;
+    autosave = new AutosaveController({
+      commit: async (text) => {
+        await granted.commitText(path, text);
+        commitCount += 1;
+      },
+      onState: (state) => (saveState = state),
+    });
   }
 
   async function ensureOwnerSession(): Promise<EditingSession | null> {
@@ -599,8 +605,16 @@
       unsubscribeOwner = null;
       autosave?.dispose();
       autosave = null;
+      autosavePath = null;
       void session?.release();
     };
+  });
+
+  $effect(() => {
+    const granted = session;
+    const entry = activeEntry;
+    if (!granted) return;
+    untrack(() => bindAutosave(granted, entry));
   });
 
   $effect(() => {

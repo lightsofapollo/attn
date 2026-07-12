@@ -46,7 +46,22 @@ class SidebarState {
 	}
 
 	handleShortcutKeydown = (e: KeyboardEvent) => {
-		if (e.key === SIDEBAR_KEYBOARD_SHORTCUT && (e.metaKey || e.ctrlKey)) {
+		// Editor commands get first ownership of Mod+B. ProseMirror prevents the
+		// event after running its keymap; the window-level shell shortcut must not
+		// then interpret the same keystroke as a sidebar command. Editable controls
+		// also keep common browser/editor shortcuts local to their surface.
+		const target = e.target instanceof Element ? e.target : null;
+		const editingTarget = target?.closest(
+			'input, textarea, select, [contenteditable="true"], [role="textbox"]',
+		);
+		if (
+			!e.defaultPrevented
+			&& !e.isComposing
+			&& !e.repeat
+			&& !editingTarget
+			&& e.key.toLowerCase() === SIDEBAR_KEYBOARD_SHORTCUT
+			&& (e.metaKey || e.ctrlKey)
+		) {
 			e.preventDefault();
 			this.toggle();
 		}

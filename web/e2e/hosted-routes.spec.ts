@@ -14,6 +14,67 @@ function captureAssetRequests(page: Page): string[] {
   return urls;
 }
 
+const LANDING_CAPTURE_IMAGES = '.product-stage img, .share-proof .capture img, .native-shot img';
+
+async function waitForLandingCaptureImages(page: Page, theme: 'light' | 'dark'): Promise<void> {
+  const images = page.locator(LANDING_CAPTURE_IMAGES);
+  await expect(images).toHaveCount(3);
+
+  // `fullPage` screenshots do not guarantee that below-the-fold lazy images
+  // have entered the loading viewport. Visit and decode each capture so a
+  // theme swap can never leave a blank or stale frame in the visual baseline.
+  for (let index = 0; index < 3; index += 1) {
+    const image = images.nth(index);
+    await image.scrollIntoViewIfNeeded();
+    await image.evaluate(async (element) => {
+      const img = element as HTMLImageElement;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const sourceAtStart = img.currentSrc;
+        if (!img.complete) {
+          await new Promise<void>((resolve, reject) => {
+            img.addEventListener('load', () => resolve(), { once: true });
+            img.addEventListener('error', () => reject(new Error(`failed to load ${img.currentSrc}`)), {
+              once: true,
+            });
+          });
+        }
+        try {
+          await img.decode();
+        } catch (error) {
+          // WebKit aborts decode when responsive source selection settles.
+          // Retry the newly selected source instead of capturing mid-swap.
+          if (!(error instanceof DOMException) || error.name !== 'EncodingError') throw error;
+        }
+        if (img.complete && img.naturalWidth > 0 && img.currentSrc === sourceAtStart) return;
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+      throw new Error(`image source did not settle: ${img.currentSrc}`);
+    });
+  }
+
+  await expect
+    .poll(async () =>
+      images.evaluateAll(
+        (elements, expectedTheme) =>
+          elements.every((element) =>
+            (element as HTMLImageElement).currentSrc.includes(`-${expectedTheme}-`),
+          ),
+        theme,
+      ),
+    )
+    .toBe(true);
+  // Let the sticky navigation's compositor layer settle back at the document
+  // origin. Capturing in the same frame as the final lazy-image scroll places
+  // the nav halfway down a full-page screenshot in Chromium/WebKit.
+  await page.evaluate(async () => {
+    window.scrollTo({ top: 0 });
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+  });
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+}
+
 test('landing serves at / without editor, crypto, or other-entry chunks', async ({ page }) => {
   const requests = captureAssetRequests(page);
   const response = await page.goto('/');
@@ -46,11 +107,20 @@ test('landing theme toggle flips palette, swaps captures, and persists', async (
   const initialTheme = await page.evaluate(() => document.documentElement.dataset.theme);
   expect(initialTheme).toBe('light'); // Playwright defaults to prefers-color-scheme: light
   await expect(heroShot).toHaveAttribute('src', /collab-light/u);
+  await waitForLandingCaptureImages(page, 'light');
+  expect(
+    await page.locator(LANDING_CAPTURE_IMAGES).evaluateAll((images) =>
+      images.every((image) => image.getAttribute('width') === '1920' && image.getAttribute('height') === '1440'),
+    ),
+  ).toBe(true);
+  expect(await heroShot.evaluate((image) => (image as HTMLImageElement).currentSrc)).toMatch(/\.avif$/u);
   await page.getByRole('button', { name: 'Toggle theme' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await expect(heroShot).toHaveAttribute('src', /collab-dark/u);
+  await waitForLandingCaptureImages(page, 'dark');
   await page.reload();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await waitForLandingCaptureImages(page, 'dark');
 });
 
 test('landing has no horizontal scrolling at 320 CSS px', async ({ page }) => {
@@ -67,13 +137,16 @@ test('landing has no horizontal scrolling at 320 CSS px', async ({ page }) => {
 test('capture landing screenshots for design review', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('body')).toHaveAttribute('data-hydrated', 'true');
+  await waitForLandingCaptureImages(page, 'light');
   await page.screenshot({ path: 'test-results/landing-desktop-light.png', fullPage: true });
   await page.getByRole('button', { name: 'Toggle theme' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await waitForLandingCaptureImages(page, 'dark');
   await page.screenshot({ path: 'test-results/landing-desktop-dark.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'Toggle theme' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await waitForLandingCaptureImages(page, 'light');
   await page.screenshot({ path: 'test-results/landing-iphone-light.png', fullPage: true });
 });
 

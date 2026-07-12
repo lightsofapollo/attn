@@ -75,12 +75,16 @@ test('desktop editor fills the canvas and has no edit mode toggle', async ({ pag
     return {
       viewportHeight: viewportRect.height,
       editorHeight: editorRect.height,
+      availableEditorHeight: viewportRect.bottom - editorRect.top,
       bottomGap: viewportRect.bottom - editorRect.bottom,
       clickX: editorRect.left + editorRect.width / 2,
       clickY: editorRect.bottom - 48,
     };
   });
-  expect(geometry.editorHeight).toBeGreaterThan(geometry.viewportHeight * 0.9);
+  // Degraded/private-storage banners legitimately consume space above the
+  // editor in WebKit. The activation surface must fill what remains, rather
+  // than an arbitrary percentage of the entire viewport.
+  expect(geometry.editorHeight).toBeGreaterThan(geometry.availableEditorHeight * 0.9);
   expect(Math.abs(geometry.bottomGap)).toBeLessThanOrEqual(1);
 
   await page.mouse.click(geometry.clickX, geometry.clickY);
@@ -188,6 +192,82 @@ test('editing autosaves durable revisions and recovers after reload', async ({ p
   await expect(page.locator('[data-body-text]')).toContainText('survive a reload');
   await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
+});
+
+test('pending text is reported immediately and guards an immediate reload', async ({ page }) => {
+  await page.goto('/app#new');
+  const editor = documentEditor(page);
+  await editor.click();
+  await page.keyboard.type('Pending text must never look saved.');
+
+  await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
+    'data-save-state',
+    'Saving…',
+  );
+  let sawLeaveWarning = false;
+  page.once('dialog', async (dialog) => {
+    sawLeaveWarning = dialog.type() === 'beforeunload';
+    await dialog.dismiss();
+  });
+  await page.evaluate(() => window.location.reload());
+  if (sawLeaveWarning) {
+    // Chromium exposes the native warning. Dismissing it keeps the exact
+    // in-memory document in place while the flush finishes.
+    await expect(editor).toContainText('Pending text must never look saved.');
+    await expect(page.locator('[data-commits]')).not.toHaveAttribute('data-commits', '0', {
+      timeout: 15_000,
+    });
+    await page.reload();
+  } else {
+    // WebKit does not surface beforeunload dialogs in headless automation;
+    // its pagehide drain must therefore make the immediate reload durable.
+    await page.waitForLoadState('domcontentloaded');
+  }
+  await expect(documentEditor(page)).toContainText('Pending text must never look saved.');
+});
+
+test('file switching drains pending editor text before navigation', async ({ page }) => {
+  await page.goto('/app#new');
+  const originalEditor = documentEditor(page);
+  await originalEditor.click();
+  await page.keyboard.type('Persist before creating another file.');
+
+  // File creation is itself a hard navigation and must first drain the
+  // current editor, even though the debounce has not elapsed.
+  await page.locator('[data-action="new-markdown"]').click();
+  await page.getByRole('textbox', { name: 'New Markdown file path' }).fill('notes');
+  await page.getByRole('textbox', { name: 'New Markdown file path' }).press('Enter');
+  await expect(page).toHaveURL(/\/notes\.md$/u);
+
+  await page.getByRole('button', { name: 'untitled.md', exact: true }).click();
+  await expect(page).toHaveURL(/\/untitled\.md$/u);
+  await expect(documentEditor(page)).toContainText('Persist before creating another file.');
+  const editor = documentEditor(page);
+  await editor.click();
+  await page.keyboard.type('Persist before the click.');
+  await page.getByRole('button', { name: 'notes.md', exact: true }).click();
+  await expect(page).toHaveURL(/\/notes\.md$/u);
+
+  await page.getByRole('button', { name: 'untitled.md', exact: true }).click();
+  await expect(documentEditor(page)).toContainText('Persist before the click.');
+});
+
+test('export drains pending text before reading workspace bytes', async ({ page }) => {
+  await page.goto('/app#new');
+  const editor = documentEditor(page);
+  await editor.click();
+  await page.keyboard.type('Fresh text belongs in the export.');
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.locator('[data-action="export-zip"]').click();
+  const download = await downloadPromise;
+  const zipPath = await download.path();
+  const { unzipSync } = await import('fflate');
+  const fs = await import('node:fs');
+  const exported = unzipSync(new Uint8Array(fs.readFileSync(zipPath!)));
+  expect(new TextDecoder().decode(exported['untitled.md']!)).toContain(
+    'Fresh text belongs in the export.',
+  );
 });
 
 test('workspace rename reload keeps the same tab writable', async ({ page }) => {

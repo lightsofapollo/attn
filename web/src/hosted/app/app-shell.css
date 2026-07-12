@@ -776,9 +776,25 @@ a.workspace-row:hover {
   }
 
   .writing-sheet {
+    display: flex;
+    flex-direction: column;
     border: 0;
     box-shadow: none;
     min-height: calc(100dvh - 58px);
+  }
+
+  .writing-sheet > .hosted-editor-surface,
+  .writing-sheet .editor-container,
+  .writing-sheet .prosemirror-mount {
+    display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+  }
+
+  .writing-sheet .ProseMirror {
+    min-height: 100%;
+    flex: 1;
   }
 
   .writing-sheet p,

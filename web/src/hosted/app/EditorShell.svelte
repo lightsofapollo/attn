@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import type { EditorView } from 'prosemirror-view';
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
@@ -73,6 +73,15 @@
   });
 
   // ————— editing (attn-7xl.3.3) —————
+  // Workspace leases live for 15 seconds. A browser normally releases one on
+  // pagehide, but WebKit may discard the closing document before that async
+  // IndexedDB transaction completes. An explicit retry therefore spans one
+  // full lease window plus scheduling grace; every attempt still goes through
+  // the atomic fenced acquisition, so concurrent waiters elect one writer.
+  const LEASE_HANDOFF_TIMEOUT_MS = 16_500;
+  const LEASE_HANDOFF_INITIAL_DELAY_MS = 150;
+  const LEASE_HANDOFF_MAX_DELAY_MS = 1_000;
+
   // svelte-ignore state_referenced_locally — props seed the initial values.
   let displayText = $state<string | null>(bodyText);
   // svelte-ignore state_referenced_locally
@@ -138,6 +147,12 @@
   let confirmingEntryDelete = $state(false);
   let railError = $state<string | null>(null);
   let assetInput = $state<HTMLInputElement | undefined>();
+  let newMarkdownInput = $state<HTMLInputElement | undefined>();
+  let newMarkdownButton = $state<HTMLButtonElement | undefined>();
+  let renameEntryInput = $state<HTMLInputElement | undefined>();
+  let renameEntryButton = $state<HTMLButtonElement | undefined>();
+  let deleteEntryTrigger: HTMLButtonElement | null = null;
+  let deleteCancelButton = $state<HTMLButtonElement | undefined>();
   let previewUrl = $state<string | null>(null);
 
   // ————— iOS reader behaviors (attn-7xl.3.7) —————
@@ -192,6 +207,65 @@
   let editBarOffset = $state(0);
   let renamingTitle = $state(false);
   let titleValue = $state('');
+  let titleInput = $state<HTMLInputElement | undefined>();
+  let titleButton = $state<HTMLButtonElement | undefined>();
+
+  async function focusAndSelect(input: HTMLInputElement | undefined): Promise<void> {
+    await tick();
+    input?.focus();
+    input?.select();
+  }
+
+  async function beginTitleRename(): Promise<void> {
+    titleValue = workspace.name;
+    renamingTitle = true;
+    await tick();
+    await focusAndSelect(titleInput);
+  }
+
+  async function cancelTitleRename(): Promise<void> {
+    renamingTitle = false;
+    await tick();
+    titleButton?.focus();
+  }
+
+  async function beginEntryRename(): Promise<void> {
+    renameEntryValue = activeEntry?.path ?? '';
+    renamingEntry = true;
+    await tick();
+    await focusAndSelect(renameEntryInput);
+  }
+
+  async function cancelEntryRename(): Promise<void> {
+    renamingEntry = false;
+    await tick();
+    renameEntryButton?.focus();
+  }
+
+  async function beginAddMarkdown(): Promise<void> {
+    addingMarkdown = true;
+    await tick();
+    await focusAndSelect(newMarkdownInput);
+  }
+
+  async function cancelAddMarkdown(): Promise<void> {
+    addingMarkdown = false;
+    await tick();
+    newMarkdownButton?.focus();
+  }
+
+  async function beginEntryDelete(trigger: HTMLButtonElement): Promise<void> {
+    deleteEntryTrigger = trigger;
+    confirmingEntryDelete = true;
+    await tick();
+    deleteCancelButton?.focus();
+  }
+
+  async function cancelEntryDelete(): Promise<void> {
+    confirmingEntryDelete = false;
+    await tick();
+    deleteEntryTrigger?.focus();
+  }
 
   $effect(() => {
     if (!editing) {
@@ -220,6 +294,7 @@
     const next = titleValue.trim();
     if (next.length === 0 || next === workspace.name) return;
     try {
+      if (!await flushPendingEditor()) return;
       await service.renameWorkspace(workspace.id, next);
       window.location.reload();
     } catch {
@@ -277,6 +352,7 @@
     const path = /\.(?:md|markdown)$/iu.test(raw) ? raw : `${raw}.md`;
     railError = null;
     try {
+      if (!await flushPendingEditor()) return;
       await service.createMarkdownEntry(workspace.id, path);
       window.location.assign(`/app/w/${workspace.id}/${path}`);
     } catch (error) {
@@ -298,6 +374,7 @@
           bytes: new Uint8Array(await file.arrayBuffer()),
         });
       }
+      if (!await flushPendingEditor()) return;
       await service.addAssetFiles(workspace.id, toImportFiles(await expandPicked(picked)));
       window.location.reload();
     } catch (error) {
@@ -314,6 +391,7 @@
     if (!entry || target.length === 0 || target === entry.path) return;
     railError = null;
     try {
+      if (!await flushPendingEditor()) return;
       await service.renameEntry(workspace.id, entry.path, target);
       window.location.assign(`/app/w/${workspace.id}/${target}`);
     } catch (error) {
@@ -327,6 +405,7 @@
     if (!entry) return;
     railError = null;
     try {
+      if (!await flushPendingEditor()) return;
       await service.deleteEntry(workspace.id, entry.path);
       window.location.assign(`/app/w/${workspace.id}`);
     } catch (error) {
@@ -337,6 +416,7 @@
   async function downloadActiveEntry(): Promise<void> {
     const entry = activeEntry;
     if (!entry) return;
+    if (!await flushPendingEditor()) return;
     const result = await service.readEntryBytes(workspace.id, entry.path);
     if (!result) return;
     const basename = entry.path.split('/').pop() ?? entry.path;
@@ -346,6 +426,7 @@
   async function exportZip(): Promise<void> {
     railError = null;
     try {
+      if (!await flushPendingEditor()) return;
       const files = await service.exportWorkspace(workspace.id);
       const manifest = buildManifest(workspace.name, files, Date.now());
       const zip = await buildWorkspaceZip(files, manifest);
@@ -516,17 +597,25 @@
     if (editing || editorLoading || !activeEntry) return;
     const retryingDeniedLease = editDenied;
     editorLoading = true;
-    editDenied = false;
+    // Keep the read-only explanation visible while a requested handoff waits
+    // for WebKit's stale lease to expire. Initial edit attempts still start
+    // without the banner and reveal it only when another writer is confirmed.
+    if (!retryingDeniedLease) editDenied = false;
     try {
       await ensureEditorGraph(ownerState?.roomId != null);
       let granted = await ensureOwnerSession();
-      // Closing another tab releases its fenced IndexedDB lease
-      // asynchronously. An explicit retry should absorb that brief handoff
-      // instead of making the user click repeatedly.
+      // Closing another tab usually releases its fenced IndexedDB lease
+      // immediately. WebKit can drop that cleanup transaction, so an explicit
+      // retry also waits through the bounded expiry/election fallback.
       if (!granted && retryingDeniedLease) {
-        for (let attempt = 0; attempt < 7 && !granted; attempt += 1) {
-          await new Promise((resolve) => window.setTimeout(resolve, 150));
+        const deadline = Date.now() + LEASE_HANDOFF_TIMEOUT_MS;
+        let delay = LEASE_HANDOFF_INITIAL_DELAY_MS;
+        while (!granted) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          await new Promise((resolve) => window.setTimeout(resolve, Math.min(delay, remaining)));
           granted = await ensureOwnerSession();
+          delay = Math.min(LEASE_HANDOFF_MAX_DELAY_MS, delay * 2);
         }
       }
       if (!granted) {
@@ -576,6 +665,20 @@
     if (text === displayText) return;
     displayText = text;
     autosave.noteChange(text);
+  }
+
+  async function flushPendingEditor(): Promise<boolean> {
+    // Pull directly from ProseMirror before every workspace operation. The
+    // plugin normally observes the same transaction synchronously, but this
+    // keeps the durability boundary correct for programmatic editor commands.
+    onEditorChanged();
+    const controller = autosave;
+    if (!controller) return true;
+    const committed = await controller.flush();
+    if (!committed) {
+      railError = 'Save the current document before continuing.';
+    }
+    return committed;
   }
 
   function handleEditorReady(view: EditorView): void {
@@ -668,7 +771,7 @@
   async function exitEdit(): Promise<void> {
     if (!editing) return;
     if (editorRef) displayText = editorRef.getMarkdown();
-    await autosave?.flush();
+    if (!await flushPendingEditor()) return;
     editing = false;
   }
 
@@ -686,10 +789,21 @@
       // only exits the editor surface; it intentionally keeps route authority.
       void session?.release();
     };
+    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+      if (!autosave?.dirty) return;
+      flush();
+      // IndexedDB durability cannot be completed after the document is torn
+      // down. Keep the page in place (or show the browser's native warning)
+      // until the pending revision has landed.
+      event.preventDefault();
+      event.returnValue = '';
+    };
     document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('beforeunload', onBeforeUnload);
     window.addEventListener('pagehide', onPageHide);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('beforeunload', onBeforeUnload);
       window.removeEventListener('pagehide', onPageHide);
       flush();
       void session?.release();
@@ -700,8 +814,9 @@
     return `/app/w/${workspace.id}/${entry.path}`;
   }
 
-  function navigateDesktopTree(relativePath: string): void {
+  async function navigateDesktopTree(relativePath: string): Promise<void> {
     if (!relativePath || relativePath === activeEntry?.path) return;
+    if (!await flushPendingEditor()) return;
     window.location.assign(`/app/w/${workspace.id}/${relativePath}`);
   }
 
@@ -732,7 +847,9 @@
   }
 
   async function createWorkspaceShare(request: WorkspaceShareRequest) {
-    await autosave?.flush();
+    if (!await flushPendingEditor()) {
+      throw new Error('Save the current document before sharing.');
+    }
     const granted = await ensureOwnerSession();
     if (!granted) throw new Error('Another tab owns this workspace.');
     return granted.ensureShare(request);
@@ -778,7 +895,7 @@
             type="button"
             disabled={editorLoading}
             onclick={() => void enterEdit()}
-          >Retry edit</button>
+          >{editorLoading ? 'Waiting for tab…' : 'Retry edit'}</button>
         {/if}
       </div>
     {/if}
@@ -868,26 +985,25 @@
   <div class="hosted-header-actions">
     {#if renamingTitle}
       <input
+        bind:this={titleInput}
         class="hosted-title-input"
         type="text"
         aria-label="Workspace title"
         bind:value={titleValue}
         onkeydown={(event) => {
           if (event.key === 'Enter') void commitTitleRename();
-          if (event.key === 'Escape') renamingTitle = false;
+          if (event.key === 'Escape') void cancelTitleRename();
         }}
         onblur={() => void commitTitleRename()}
       />
     {:else}
       <button
+        bind:this={titleButton}
         class="hosted-workspace-title"
         type="button"
         aria-label="Rename workspace"
         title="Rename workspace"
-        onclick={() => {
-          titleValue = workspace.name;
-          renamingTitle = true;
-        }}
+        onclick={() => void beginTitleRename()}
       >{workspace.name}</button>
     {/if}
     <span class="save-state hosted-save-state" data-save-state={saveState} data-commits={commitCount}>
@@ -902,32 +1018,39 @@
       <div class="hosted-entry-actions" aria-label={`Actions for ${activeEntry.path}`}>
         {#if renamingEntry}
           <input
+            bind:this={renameEntryInput}
             class="hosted-sidebar-input"
             type="text"
             aria-label="New path"
             bind:value={renameEntryValue}
             onkeydown={(event) => {
               if (event.key === 'Enter') void commitEntryRename();
-              if (event.key === 'Escape') renamingEntry = false;
+              if (event.key === 'Escape') void cancelEntryRename();
             }}
           />
         {:else}
           <button
+            bind:this={renameEntryButton}
             type="button"
-            onclick={() => {
-              renamingEntry = true;
-              renameEntryValue = activeEntry?.path ?? '';
-            }}
+            onclick={() => void beginEntryRename()}
           >Rename</button>
           <button type="button" onclick={() => void downloadActiveEntry()}>Download</button>
-          <button class="danger" type="button" onclick={() => (confirmingEntryDelete = true)}>Delete</button>
+          <button class="danger" type="button" onclick={(event) => void beginEntryDelete(event.currentTarget)}>Delete</button>
         {/if}
       </div>
       {#if confirmingEntryDelete}
-        <div class="hosted-delete-confirm" role="alertdialog" aria-label={`Delete ${activeEntry.path}?`}>
+        <div
+          class="hosted-delete-confirm"
+          role="alertdialog"
+          tabindex="-1"
+          aria-label={`Delete ${activeEntry.path}?`}
+          onkeydown={(event) => {
+            if (event.key === 'Escape') void cancelEntryDelete();
+          }}
+        >
           <span>Delete {activeEntry.path}?</span>
           <div>
-            <button type="button" onclick={() => (confirmingEntryDelete = false)}>Cancel</button>
+            <button bind:this={deleteCancelButton} type="button" onclick={() => void cancelEntryDelete()}>Cancel</button>
             <button class="danger" type="button" onclick={() => void deleteActiveEntry()}>Delete file</button>
           </div>
         </div>
@@ -935,6 +1058,7 @@
     {/if}
     {#if addingMarkdown}
       <input
+        bind:this={newMarkdownInput}
         class="hosted-sidebar-input"
         type="text"
         aria-label="New Markdown file path"
@@ -942,11 +1066,11 @@
         bind:value={newMarkdownPath}
         onkeydown={(event) => {
           if (event.key === 'Enter') void createMarkdownFile();
-          if (event.key === 'Escape') addingMarkdown = false;
+          if (event.key === 'Escape') void cancelAddMarkdown();
         }}
       />
     {:else}
-      <button class="hosted-sidebar-action" type="button" data-action="new-markdown" onclick={() => (addingMarkdown = true)}>
+      <button bind:this={newMarkdownButton} class="hosted-sidebar-action" type="button" data-action="new-markdown" onclick={() => void beginAddMarkdown()}>
         <span aria-hidden="true">＋</span>
         <span>New Markdown</span>
       </button>
@@ -1022,25 +1146,24 @@
     <div class="doc-name">
       {#if editing && renamingTitle}
         <input
+          bind:this={titleInput}
           class="mobile-title-input"
           type="text"
           aria-label="Workspace title"
           bind:value={titleValue}
           onkeydown={(event) => {
             if (event.key === 'Enter') void commitTitleRename();
-            if (event.key === 'Escape') renamingTitle = false;
+            if (event.key === 'Escape') void cancelTitleRename();
           }}
           onblur={() => void commitTitleRename()}
         />
       {:else if editing}
         <button
+          bind:this={titleButton}
           class="mobile-workspace-title"
           type="button"
           aria-label="Rename workspace"
-          onclick={() => {
-            titleValue = workspace.name;
-            renamingTitle = true;
-          }}
+          onclick={() => void beginTitleRename()}
         >{workspace.name}</button>
       {:else}
         <strong>{workspace.name}</strong>
@@ -1088,7 +1211,7 @@
     {#if editing}
       <button type="button" onclick={() => void exitEdit()}>Done</button>
     {:else if canEdit}
-      <button type="button" disabled={editorLoading} onclick={() => void enterEdit()}>{editDenied ? 'Retry edit' : 'Edit'}</button>
+      <button type="button" disabled={editorLoading} onclick={() => void enterEdit()}>{editorLoading && editDenied ? 'Waiting…' : editDenied ? 'Retry edit' : 'Edit'}</button>
     {:else}
       <!-- Editing is unavailable here; the reader stays first-class and the
            native app is the honest handoff (ios-ux.md §6). -->
@@ -1163,6 +1286,11 @@
             class:active={entry.path === activeEntry?.path}
             href={entryHref(entry)}
             aria-current={entry.path === activeEntry?.path ? 'page' : undefined}
+            onclick={(event) => {
+              if (entry.path === activeEntry?.path) return;
+              event.preventDefault();
+              void navigateDesktopTree(entry.path);
+            }}
           >
             {entryGlyph(entry)}{entry.path}
             <span class="file-size">{entry.sizeLabel}</span>

@@ -55,6 +55,13 @@ test('durability states gate sharing honestly', async ({ page }) => {
 
 test('each tier matches across browser, native, and CLI while sibling bearers stay distinct', async ({ page }) => {
   await page.addInitScript(() => {
+    // This case validates the clipboard fallback specifically. WebKit exposes
+    // navigator.share in headless mode, so make the delivery capability
+    // deterministic instead of asserting a browser-dependent button label.
+    Object.defineProperty(Navigator.prototype, 'share', {
+      configurable: true,
+      value: undefined,
+    });
     Object.defineProperty(Navigator.prototype, 'clipboard', {
       configurable: true,
       get: () => ({

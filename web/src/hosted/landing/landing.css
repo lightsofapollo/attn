@@ -168,10 +168,15 @@ p {
   letter-spacing: 0.2em;
 }
 
+.window picture {
+  display: block;
+  height: calc(100% - 28px);
+}
+
 .window img {
   display: block;
   width: 100%;
-  height: calc(100% - 28px);
+  height: 100%;
   object-fit: cover;
   object-position: center top;
 }
@@ -348,6 +353,7 @@ p {
 .capture img {
   display: block;
   width: 100%;
+  height: auto;
 }
 
 .proof-copy {
@@ -490,6 +496,7 @@ p {
 .native-shot img {
   display: block;
   width: 100%;
+  height: auto;
 }
 
 footer {
@@ -684,4 +691,3 @@ footer {
     flex-direction: column;
   }
 }
-

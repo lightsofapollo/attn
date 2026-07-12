@@ -1,9 +1,27 @@
 <script lang="ts">
   import { getTheme } from '../theme.svelte';
+  import ResponsiveScreenshot from './ResponsiveScreenshot.svelte';
   import collabLight from './assets/collab-light.png';
   import collabDark from './assets/collab-dark.png';
+  import collabLight768 from './assets/collab-light-768.avif';
+  import collabLight1280 from './assets/collab-light-1280.avif';
+  import collabLight1920 from './assets/collab-light-1920.avif';
+  import collabDark768 from './assets/collab-dark-768.avif';
+  import collabDark1280 from './assets/collab-dark-1280.avif';
+  import collabDark1920 from './assets/collab-dark-1920.avif';
 
-  const collabShot = $derived(getTheme() === 'dark' ? collabDark : collabLight);
+  const collabShots = {
+    light: {
+      fallback: collabLight,
+      avifSrcset: `${collabLight768} 768w, ${collabLight1280} 1280w, ${collabLight1920} 1920w`,
+    },
+    dark: {
+      fallback: collabDark,
+      avifSrcset: `${collabDark768} 768w, ${collabDark1280} 1280w, ${collabDark1920} 1920w`,
+    },
+  } as const;
+
+  const collabShot = $derived(collabShots[getTheme()]);
 </script>
 
 <section class="hero">
@@ -30,7 +48,14 @@
 
   <div class="product-stage" aria-label="A real attn review with local and shared state labels">
     <div class="window">
-      <img src={collabShot} alt="A real attn document with an inline review comment and suggestion" />
+      <ResponsiveScreenshot
+        fallback={collabShot.fallback}
+        avifSrcset={collabShot.avifSrcset}
+        sizes="(max-width: 680px) calc(100vw - 2rem), (max-width: 1180px) calc(100vw - 2.8rem), 48vw"
+        alt="A real attn document with an inline review comment and suggestion"
+        loading="eager"
+        fetchpriority="high"
+      />
     </div>
     <aside class="stage-label local">
       <strong>Source · local</strong><small>Saved on this device</small>

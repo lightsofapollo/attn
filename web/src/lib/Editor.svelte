@@ -38,6 +38,8 @@
   interface Props {
     markdown: string;
     editable?: boolean;
+    /** Accessible name announced for the ProseMirror editing surface. */
+    ariaLabel?: string;
     onSave?: () => void;
     onCancel?: () => void;
     onLinkNavigate?: (href: string) => void;
@@ -111,6 +113,7 @@
   let {
     markdown,
     editable = false,
+    ariaLabel = 'Document editor',
     onSave,
     onCancel,
     onLinkNavigate,
@@ -171,6 +174,15 @@
   const LARGE_MARKDOWN_CHAR_LIMIT = 350_000;
   const SAFE_MODE_PREVIEW_CHAR_LIMIT = 50_000;
   let pendingLocalSaveNormalized: string | null = null;
+
+  function editorAttributes(): Record<string, string> {
+    return {
+      role: 'textbox',
+      'aria-label': ariaLabel,
+      'aria-multiline': 'true',
+      'aria-readonly': String(!editable),
+    };
+  }
 
   function normalizeMarkdownForCompare(md: string): string {
     return md
@@ -683,6 +695,7 @@
       view = new EditorView(el, {
         state,
         editable: () => editable,
+        attributes: editorAttributes(),
         handleDOMEvents: {
           click: (_view, event) => handleEditorClick(event as MouseEvent),
           keydown: (editorView, event) => handleEditorKeydown(editorView, event as KeyboardEvent),
@@ -775,7 +788,13 @@
   // React to editable changes
   $effect(() => {
     if (view) {
-      view.setProps({ editable: () => editable });
+      // Keep assistive-technology state in sync with ProseMirror's editable
+      // callback. contenteditable alone is not exposed as a labelled textbox
+      // consistently across Chromium, WebKit, and native webviews.
+      view.setProps({
+        editable: () => editable,
+        attributes: editorAttributes(),
+      });
       for (const checkbox of view.dom.querySelectorAll<HTMLInputElement>(
         '.task-checkbox input[type="checkbox"]',
       )) {

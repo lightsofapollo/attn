@@ -4,6 +4,7 @@
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
   import ShareSheet from './ShareSheet.svelte';
+  import CommandPalette, { type HostedCommand } from './CommandPalette.svelte';
   import { AutosaveController } from './autosave';
   import type { reviewStore as ReviewStoreInstance } from '../../lib/review/store.svelte';
   import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
@@ -41,6 +42,7 @@
     workspace.entries.find((entry) => entry.path === activePath) ?? workspace.entries[0],
   );
   let shareOpen = $state(false);
+  let paletteOpen = $state(false);
   let filesSheetOpen = $state(false);
   let reviewSheetOpen = $state(false);
   let shareButton = $state<HTMLButtonElement | undefined>();
@@ -769,6 +771,38 @@
     queueMicrotask(() => trigger?.focus());
   }
 
+  // ————— command palette (⌘K) —————
+  const paletteCommands = $derived.by<HostedCommand[]>(() => {
+    const cmds: HostedCommand[] = [
+      { id: 'share', label: 'Share for review', hint: '⌘K', keywords: 'invite link publish reviewer',
+        run: () => openShare(shareButton) },
+      { id: 'edit', label: editing ? 'Stop editing' : 'Edit this document', keywords: 'write compose done',
+        run: () => void (editing ? exitEdit() : enterEdit()) },
+      { id: 'new', label: 'New Markdown file', keywords: 'create add document',
+        run: () => void createMarkdownFile() },
+      { id: 'export', label: 'Export workspace', hint: '.zip', keywords: 'download backup save',
+        run: () => void exportZip() },
+    ];
+    for (const entry of workspace.entries) {
+      if (entry.path === activeEntry?.path) continue;
+      cmds.push({
+        id: `open:${entry.path}`,
+        label: `Open ${entry.path}`,
+        hint: entry.sizeLabel,
+        keywords: 'file jump go to',
+        run: () => navigateDesktopTree(entry.path),
+      });
+    }
+    return cmds;
+  });
+
+  function onGlobalKeydown(event: KeyboardEvent): void {
+    if ((event.metaKey || event.ctrlKey) && event.code === 'KeyK') {
+      event.preventDefault();
+      paletteOpen = !paletteOpen;
+    }
+  }
+
   async function inspectWorkspaceShare() {
     const granted = await ensureOwnerSession();
     if (!granted) return null;
@@ -798,6 +832,10 @@
     dockReviewButton?.focus();
   }
 </script>
+
+<svelte:window onkeydown={onGlobalKeydown} />
+
+<CommandPalette bind:open={paletteOpen} commands={paletteCommands} />
 
 {#snippet documentSurface()}
   <div class:hosted-native-document={desktopLayout} class:writing-sheet={!desktopLayout}>

@@ -1,7 +1,8 @@
 <script lang="ts">
   import AppHeader from './AppHeader.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
-  import { expandPicked, prepareImport, type PickedFile } from './import-files';
+  import { expandPicked, prepareImport } from './import-files';
+  import { fileDrop, filesToPicked } from './file-drop';
   import type { ImportFileInput, StorageHealth } from './types';
 
   interface Props {
@@ -14,27 +15,21 @@
   let fileInput = $state<HTMLInputElement | undefined>();
   let importError = $state<string | null>(null);
 
-  async function onFilesPicked(): Promise<void> {
-    const files = fileInput?.files;
-    if (!files || files.length === 0) return;
+  async function importFiles(files: Iterable<File>): Promise<void> {
     importError = null;
     try {
-      const picked: PickedFile[] = [];
-      for (const file of Array.from(files)) {
-        picked.push({
-          name: file.name,
-          relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
-          type: file.type,
-          bytes: new Uint8Array(await file.arrayBuffer()),
-        });
-      }
-      const prepared = prepareImport(await expandPicked(picked));
+      const prepared = prepareImport(await expandPicked(await filesToPicked(files)));
       await onImport(prepared.name, prepared.files);
     } catch (error) {
       importError = error instanceof Error ? error.message : String(error);
     } finally {
       if (fileInput) fileInput.value = '';
     }
+  }
+
+  function onFilesPicked(): void {
+    const files = fileInput?.files;
+    if (files && files.length > 0) void importFiles(Array.from(files));
   }
 </script>
 
@@ -54,7 +49,7 @@
       <p>Everything imports to this device only</p>
     </div>
 
-    <div class="drop-zone">
+    <div class="drop-zone" use:fileDrop={{ onFiles: (files) => void importFiles(files) }}>
       <h2>Drop files to import</h2>
       <p>
         Markdown files, referenced images and assets, whole folders where the browser supports

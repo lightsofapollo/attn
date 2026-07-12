@@ -8,7 +8,8 @@
   import { AutosaveController } from './autosave';
   import type { reviewStore as ReviewStoreInstance } from '../../lib/review/store.svelte';
   import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
-  import { expandPicked, toImportFiles, type PickedFile } from './import-files';
+  import { expandPicked, toImportFiles } from './import-files';
+  import { fileDrop, filesToPicked } from './file-drop';
   import type {
     EditingSession,
     SaveState,
@@ -315,27 +316,21 @@
     }
   }
 
-  async function onAssetsPicked(): Promise<void> {
-    const files = assetInput?.files;
-    if (!files || files.length === 0) return;
+  async function importFiles(files: Iterable<File>): Promise<void> {
     railError = null;
     try {
-      const picked: PickedFile[] = [];
-      for (const file of Array.from(files)) {
-        picked.push({
-          name: file.name,
-          relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
-          type: file.type,
-          bytes: new Uint8Array(await file.arrayBuffer()),
-        });
-      }
-      await service.addAssetFiles(workspace.id, toImportFiles(await expandPicked(picked)));
+      await service.addAssetFiles(workspace.id, toImportFiles(await expandPicked(await filesToPicked(files))));
       window.location.reload();
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     } finally {
       if (assetInput) assetInput.value = '';
     }
+  }
+
+  function onAssetsPicked(): void {
+    const files = assetInput?.files;
+    if (files && files.length > 0) void importFiles(Array.from(files));
   }
 
   async function commitEntryRename(): Promise<void> {
@@ -1085,7 +1080,13 @@
 {/snippet}
 
 {#if desktopLayout}
-  <div class="hosted-desktop-editor" data-app-view="workspace" data-workspace-id={workspace.id}>
+  <div
+    class="hosted-desktop-editor"
+    data-app-view="workspace"
+    data-workspace-id={workspace.id}
+    data-drop-label="Drop files to add to this workspace"
+    use:fileDrop={{ onFiles: (files) => void importFiles(files) }}
+  >
     {#if HostedDesktopWorkspaceFrame}
       <HostedDesktopWorkspaceFrame
         workspaceId={workspace.id}
@@ -1150,7 +1151,14 @@
   <!-- The constrained layout remains reader-first: one document column,
        thumb actions, and bottom sheets for files/review. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <main class="editor-canvas" bind:this={canvasEl} tabindex="0" aria-label="Document">
+  <main
+    class="editor-canvas"
+    bind:this={canvasEl}
+    tabindex="0"
+    aria-label="Document"
+    data-drop-label="Drop files to add to this workspace"
+    use:fileDrop={{ onFiles: (files) => void importFiles(files) }}
+  >
     {@render documentSurface()}
   </main>
   <nav class="thumb-dock" aria-label="Document actions">

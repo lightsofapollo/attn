@@ -622,6 +622,11 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
     // browser/Slack launches or foregrounds attn and joins the room.
     #[cfg(target_os = "macos")]
     let opened_review_manager = review_manager.clone();
+
+    // OS file drops onto the window open the dropped path in-place, reusing the
+    // same `OpenPath`/`SwitchProject` dispatch a second `attn <file>` invocation
+    // uses. Without this handler wry lets the webview navigate to the file URL.
+    let drag_drop_proxy = event_loop.create_proxy();
     let mut webview_builder = WebViewBuilder::new()
         .with_initialization_script(&initialization_script)
         // Runs in ALL frames (main_only = false) so it actually executes inside
@@ -646,6 +651,23 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                 let _ = open::that(&url);
                 false
             }
+        })
+        .with_drag_drop_handler(move |event| {
+            // Only act on the final drop; Enter/Over/Leave keep default so the
+            // OS still shows the copy cursor. A dropped directory switches the
+            // project root; a dropped file opens it directly.
+            if let wry::DragDropEvent::Drop { paths, .. } = event {
+                if let Some(path) = paths.into_iter().next() {
+                    let user_event = if path.is_dir() {
+                        UserEvent::SwitchProject(path)
+                    } else {
+                        UserEvent::OpenPath(path)
+                    };
+                    let _ = drag_drop_proxy.send_event(user_event);
+                    return true;
+                }
+            }
+            false
         })
         .with_custom_protocol("attn".to_string(), move |_webview_id, request| {
             let uri = request.uri().to_string();

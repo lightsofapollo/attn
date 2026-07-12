@@ -1579,6 +1579,35 @@ a.workspace-row:hover {
   padding: clamp(2.5rem, 8vw, 5rem) 1.5rem;
   text-align: center;
   font-family: var(--sans);
+  transition: border-color 140ms var(--ease), background-color 140ms var(--ease);
+}
+
+.drop-zone[data-drag-over] {
+  border-color: var(--rust);
+  border-style: solid;
+  background: color-mix(in srgb, var(--rust) 8%, var(--sheet));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drop-zone { transition: none; }
+}
+
+/* Workspace-surface file drop: a transient full-surface target that only
+   paints while an OS file drag is over the editor (set by use:fileDrop). */
+[data-drop-label][data-drag-over]::after {
+  content: attr(data-drop-label);
+  position: fixed;
+  inset: 0.75rem;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--rust);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--rust) 9%, var(--paper));
+  color: var(--ink);
+  font: 600 1.15rem/1.4 var(--sans);
+  text-align: center;
+  pointer-events: none;
 }
 
 .drop-zone h2 {

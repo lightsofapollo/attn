@@ -161,9 +161,9 @@ export class BrowserWorkspaceSharingCoordinator {
       ?? ((length) => crypto.getRandomValues(new Uint8Array(length)));
   }
 
-  async inspect(_browserReviewBase: string): Promise<BrowserWorkspaceShareView | null> {
+  async inspect(browserReviewBase: string): Promise<BrowserWorkspaceShareView | null> {
     const record = await this.inspectRecord();
-    return record ? this.view(record) : null;
+    return record ? this.view(record, browserReviewBase) : null;
   }
 
   /** Owner-tab startup reconciliation: renew routing and drain offline mail. */
@@ -363,7 +363,7 @@ export class BrowserWorkspaceSharingCoordinator {
       await this.publishDurableProjection(rootKey, promoted, credentials);
       const active = await this.inspectRecord();
       if (!active) throw new StorageConflictError('durable share disappeared after promotion');
-      return this.view(active);
+      return this.view(active, request.browserReviewBase);
     } finally {
       outbox.close();
       zeroCredentialsV3(credentials);
@@ -626,7 +626,10 @@ export class BrowserWorkspaceSharingCoordinator {
     return active[0] ?? null;
   }
 
-  private async view(record: ShareRecordView): Promise<BrowserWorkspaceShareView> {
+  private async view(
+    record: ShareRecordView,
+    browserReviewBase = 'https://attn.sh/review',
+  ): Promise<BrowserWorkspaceShareView> {
     const rootKey = await this.requireRootKey();
     const capability = await this.storage.shares.openShare(rootKey, this.workspaceId, record.capId);
     const durable = capability.durableShare;
@@ -639,7 +642,11 @@ export class BrowserWorkspaceSharingCoordinator {
     if (published && durable && !expired) {
       const credentials = ownerCredentialsV3FromInviteCapability(capability, record.roomId);
       try {
-        invites = composeShareTierInvites(durable.shareId, credentials.shareSecret);
+        invites = composeShareTierInvites(
+          durable.shareId,
+          credentials.shareSecret,
+          new URL(browserReviewBase).origin,
+        );
       } finally {
         zeroCredentialsV3(credentials);
       }

@@ -44,6 +44,7 @@ test('native and browser durable share URLs round-trip', () => {
   for (const url of [
     composeShareInvite(shareId, secret),
     composeShareInvite(shareId, secret, 'https://attn.sh'),
+    composeShareInvite(shareId, secret, 'https://staging.attn.sh'),
   ]) {
     const parsed = parseShareInvite(url);
     assert(parsed.shareId === shareId, 'shareId mismatch');

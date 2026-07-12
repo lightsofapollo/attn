@@ -34,6 +34,8 @@ export class ShareInviteParseError extends Error {
   }
 }
 
+const BROWSER_SHARE_HOSTS = new Set(['attn.sh', 'staging.attn.sh']);
+
 export function parseShareInvite(raw: string): ParsedShareInvite {
   if (typeof raw !== 'string' || raw.length === 0) fail('share URL must be non-empty');
   let url: URL;
@@ -49,14 +51,14 @@ export function parseShareInvite(raw: string): ParsedShareInvite {
   ) {
     shareId = url.pathname.slice(1);
   } else if (
-    url.protocol === 'https:' && url.hostname === 'attn.sh' && url.port === '' &&
+    url.protocol === 'https:' && BROWSER_SHARE_HOSTS.has(url.hostname) && url.port === '' &&
     url.username === '' && url.password === '' && url.search === ''
   ) {
     const match = /^\/s\/([^/]+)$/u.exec(url.pathname);
     if (!match) fail('browser share URL must use /s/<shareId>');
     shareId = match[1]!;
   } else {
-    fail('share URL must use attn://share or https://attn.sh without credentials, port, or query');
+    fail('share URL must use attn://share or an attn browser origin without credentials, port, or query');
   }
   validateShareId(shareId);
   if (!url.hash.startsWith('#key=')) fail('share fragment must be exactly key=<secret>');
@@ -64,7 +66,7 @@ export function parseShareInvite(raw: string): ParsedShareInvite {
   if (encoded.includes('&') || encoded.includes('=')) fail('share fragment is not canonical');
   const canonical = url.protocol === 'attn:'
     ? `attn://share/${shareId}#key=${encoded}`
-    : `https://attn.sh/s/${shareId}#key=${encoded}`;
+    : `${url.origin}/s/${shareId}#key=${encoded}`;
   if (raw !== canonical) fail('share URL must use its exact canonical spelling');
   let linkSecret: Uint8Array;
   try {
@@ -98,7 +100,7 @@ export function composeShareInvite(
   }
   if (
     url.protocol !== 'https:' ||
-    url.hostname !== 'attn.sh' ||
+    !BROWSER_SHARE_HOSTS.has(url.hostname) ||
     url.port !== '' ||
     url.username !== '' ||
     url.password !== '' ||

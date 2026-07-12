@@ -216,7 +216,10 @@ test('publishes one dark ShareDO projection, retained snapshot, then stable tier
       outboxFactory: ({ storage: db, credentials }) => (outbox = new AckingOutbox(db, credentials.roomId)),
       shareRelayFactory: options => (relay ??= new MemoryShareRelay(options.shareId)),
     });
-    const view = await coordinator.ensurePublished(request('entries', ['notes/main.md', 'assets/image.png']));
+    const view = await coordinator.ensurePublished({
+      ...request('entries', ['notes/main.md', 'assets/image.png']),
+      browserReviewBase: 'https://staging.attn.sh/review',
+    });
     assert(view.invite, 'v3 share completed');
     const observedCreate = required<CreateOwnedRoomOptions>(createOptions, 'create observed');
     const observedOutbox = required<AckingOutbox>(outbox, 'outbox observed');
@@ -227,7 +230,7 @@ test('publishes one dark ShareDO projection, retained snapshot, then stable tier
     assert(observedRelay.upserts.at(-1)!.currentRoomId === view.roomId, 'final projection flips room pointer');
     assert(observedRelay.record!.snapshots.length === 1, 'markdown retained while binary remains live-room inert');
     const urls = [view.invite.view.browserUrl, view.invite.comment.browserUrl, view.invite.suggest.browserUrl];
-    assert(urls.every(url => url.startsWith(`https://attn.sh/s/${view.shareId}#key=`)), 'stable /s links');
+    assert(urls.every(url => url.startsWith(`https://staging.attn.sh/s/${view.shareId}#key=`)), 'environment-matched stable /s links');
     assert(new Set(urls).size === 3, 'tier bearers are independent');
     const tree = deriveRoomKeyTreeV3(observedCreate.roomSecret!);
     const roomCreated = decryptEvent(observedOutbox.envelopes[0]!, tree.readKeys.eventKey);

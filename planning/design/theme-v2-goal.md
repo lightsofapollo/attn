@@ -104,6 +104,13 @@ integration-finishing pass — converge, don't proliferate.
   micro 2px radius token. NOTE: native --screenshot after theme flip may still
   show stale paint (repaint freeze on occluded windows) — force repaint before
   screenshotting; interaction is now safe regardless.
+- 2026-07-12 (f880a23): **attn-ll9 DONE.** Review-component retint (109 blue
+  fallbacks purged, px→ramp, radii, monograms, stripe→wash, presence colors →
+  brand hues) + rail restyled to paper-margin look + hug/retreat implemented in
+  WorkspaceEditorFrame with IntersectionObserver+ResizeObserver+MutationObserver
+  (NO scroll listeners — James asked for this; layout reads only on resize/
+  mutation). Note: ReviewMargin already had anchor-aligned scroll-tracked cards;
+  ll9 was retint+hug only. Suites green (80 web files, test:review 0 FAIL).
 - 2026-07-12 (9d27c7c): **attn-u5c DONE.** Save chip in ReviewBar (dirty/saved,
   role=status) + document.title tracks the file. Verified live. Note: native
   mode defaults to 'edit' (App.svelte:134); saves are explicit via saveEdits(),

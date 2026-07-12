@@ -115,6 +115,11 @@ integration-finishing pass — converge, don't proliferate.
   Cancel/submit clear), scroll-tracking popovers via shared rAF tracker
   (popover-anchor.svelte.ts, mount-scoped listeners), live ledger diff in
   replace mode. svelte-check clean, tests green.
+- 2026-07-12 (168f9ae): **attn-e4l DONE.** Desk rows say 'Shared · relay sees
+  only ciphertext' (decision #2); share-error copy gains 'Nothing left this
+  machine.' Native ShareDialog shape already matched e4l. Remaining queue:
+  attn-3dv (journal revert) + unfiled P0s (checkbox persistence, hosted owner
+  rail, #new/#join, landing) + 3 re-critiques >=35.
 - 2026-07-12 (9d27c7c): **attn-u5c DONE.** Save chip in ReviewBar (dirty/saved,
   role=status) + document.title tracks the file. Verified live. Note: native
   mode defaults to 'edit' (App.svelte:134); saves are explicit via saveEdits(),

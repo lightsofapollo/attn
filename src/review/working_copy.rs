@@ -79,6 +79,13 @@ pub enum SaveSource {
         room_id: RoomId,
         suggestion_id: EventId,
     },
+    /// Owner undid a previously accepted suggestion (attn-3dv). The write
+    /// restores the pre-accept content via the accept revision's recorded
+    /// inverse splice.
+    RevertedSuggestion {
+        room_id: RoomId,
+        suggestion_id: EventId,
+    },
     /// File-watcher observed an external write (e.g. another editor saved
     /// the file). Not a write source — the caller (watcher) uses this when
     /// recording a `LocalRevision` so the revision journal sees the change.
@@ -102,6 +109,7 @@ impl SaveSource {
                 RevisionSource::ProsemirrorEdit
             }
             SaveSource::AcceptedSuggestion { .. } => RevisionSource::AcceptedSuggestion,
+            SaveSource::RevertedSuggestion { .. } => RevisionSource::RevertedSuggestion,
             SaveSource::ExternalFileChange => RevisionSource::ExternalFileChange,
             SaveSource::SnapshotLoaded => RevisionSource::SnapshotLoaded,
         }

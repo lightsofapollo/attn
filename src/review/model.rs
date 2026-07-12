@@ -756,6 +756,10 @@ pub enum RevisionSource {
     SnapshotLoaded,
     ProsemirrorEdit,
     AcceptedSuggestion,
+    /// Owner reverted a previously accepted suggestion (Theme v2, attn-3dv):
+    /// the inverse splice recorded on the accept's `patch_text` was applied
+    /// back, restoring the pre-accept content.
+    RevertedSuggestion,
     ExternalFileChange,
     ManualReanchor,
 }

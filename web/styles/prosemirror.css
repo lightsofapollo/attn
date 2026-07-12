@@ -79,6 +79,9 @@
   margin: 0;
   padding: 0.35rem clamp(1rem, 2.5vw, 2.25rem) 2rem;
   outline: none;
+  /* The reading column is the document — always serif (Read/Do rule), even
+     when the hosted desktop shell sets its chrome font to sans (attn-vea). */
+  font-family: var(--serif);
   white-space: pre-wrap;
   word-wrap: break-word;
   overflow-x: hidden;

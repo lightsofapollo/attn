@@ -20,6 +20,7 @@
   import { remoteCursorsPlugin } from './prosemirror/remote-cursors';
   import { codeHighlightPlugin } from './prosemirror/code-highlight';
   import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
+  import { markdownInputRules } from './prosemirror/markdown-input-rules';
   import { mathNodeView } from './prosemirror/math';
   import { mermaidNodeView } from './prosemirror/mermaid-nodeview';
   import { tablePlugins } from './prosemirror/tables';
@@ -279,6 +280,9 @@
     if (md.length <= LARGE_MARKDOWN_CHAR_LIMIT) {
       plugins.push(codeHighlightPlugin());
     }
+    // Live markdown authoring (attn-vea): typed `# `, `- `, `**b**`, ``` etc.
+    // become real nodes/marks, so the editor never shows literal syntax.
+    plugins.push(markdownInputRules(schema));
     plugins.push(...tablePlugins());
     plugins.push(
       keymap({

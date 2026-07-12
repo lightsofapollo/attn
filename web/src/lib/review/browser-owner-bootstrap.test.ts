@@ -65,7 +65,8 @@ function stubRelay(handlers: {
   deleteStatus?: number;
 }): { fetchImpl: typeof fetch; requests: RecordedRequest[] } {
   const requests: RecordedRequest[] = [];
-  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const fetchImpl = (async function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+    assertEqual(this, undefined, 'fetch must be called without an options-object receiver');
     const url = String(input);
     const method = init?.method ?? 'GET';
     requests.push({

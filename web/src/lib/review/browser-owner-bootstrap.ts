@@ -317,7 +317,11 @@ async function registerOwnerDevice(input: {
     },
     input.abort,
   );
-  const response = await input.fetchImpl(`${input.relay}${path}`, {
+  // Native `window.fetch` is binding-sensitive in WebKit and Chromium. Pull
+  // it off the input object before calling so `this` stays undefined instead
+  // of becoming the helper options object (`Illegal invocation`).
+  const fetchImpl = input.fetchImpl;
+  const response = await fetchImpl(`${input.relay}${path}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json; charset=utf-8',
@@ -356,7 +360,8 @@ async function registerOwnerDeviceV3(input: {
     path,
     difficulty: OWNER_BOOTSTRAP_POW_DIFFICULTY,
   }, input.abort);
-  const response = await input.fetchImpl(`${input.relay}${path}`, {
+  const fetchImpl = input.fetchImpl;
+  const response = await fetchImpl(`${input.relay}${path}`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json; charset=utf-8',

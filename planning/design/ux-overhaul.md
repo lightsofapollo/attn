@@ -124,7 +124,15 @@ Motion signature (dialogs, palette, saved chip, card arrival) with reduced-motio
 - Rebrand/rename, marketing site restructure (the shell already works).
 - Native mobile app work (mobile *web* is covered by the shared fixes).
 
+### Decisions (James, 2026-07-12)
+The reference implementation for all of these is `planning/design/prototypes/editor-polish.html` (critique trend 22 → 31 → fixes applied).
+
+1. **Rail hugs the prose edge, retreats for wide blocks.** The review rail sits just right of the 72ch prose measure; when a wide block (mermaid figure, table, code) is meaningfully in view (≥80px) it slides to the pane edge. Implemented + verified in the prototype.
+2. **Share truth:** once a share link exists, the per-file storage line becomes **"Shared · relay sees only ciphertext"** (replacing "never leaves this machine" for that file).
+3. **Undo-after-accept is a real revert** built on the `LocalRevision` journal (it already records `AcceptedSuggestion` + hashes): undo restores prior content and reopens the thread.
+4. **Owner mode stays direct-edit** (no suggest-first default); the compensating requirement is the save/dirty indicator so background serialization is never silent.
+5. **Mermaid:** already shipped (`mermaid@11` + `web/src/lib/prosemirror/mermaid-nodeview.ts`); the wide-track CSS must include its container alongside `pre`/`table`.
+
 ### Open questions for James
 1. **Workspaces vs documents** (hosted): flatten the desk to auto-named documents and materialize "workspace" only on folder import? (Critique Q1 — I lean yes, but it's an IA cutover.)
-2. **Owner's default mode:** should the owner's editor default to *suggesting* (like reviewers), with direct-edit as the deliberate mode? (Native critique Q1 — bigger product question, Phase-independent.)
-3. INK unification changes the hosted dark look users may have seen — cut over silently or note it?
+2. INK unification changes the hosted dark look users may have seen — cut over silently or note it?

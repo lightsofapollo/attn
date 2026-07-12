@@ -429,6 +429,8 @@ aside.rail {
   border-left: 1px solid var(--border-faint);
   background: var(--bg);
   display: flex; flex-direction: column;
+  /* Hug the prose edge on wide windows; retreat when a wide block is in view. */
+  transition: transform 240ms var(--ease);
 }
 .rail-head { display: flex; align-items: baseline; gap: 8px; padding-bottom: 12px; position: relative; z-index: 2; background: var(--bg); }
 .rail-head .count { font: 700 0.7rem var(--sans); color: var(--accent); }
@@ -998,8 +1000,31 @@ aside.rail {
     }
     track.style.height = (prevBottom + 80) + 'px';
   };
-  $('#main').addEventListener('scroll', () => { alignRail(); hidePop(); }, { passive: true });
-  addEventListener('resize', alignRail);
+  // Rail hug: sit just right of the 72ch prose edge; slide to the pane edge
+  // whenever a wide block (diagram / table / code) is in the viewport.
+  const rail = $('#rail');
+  const updateRailHug = () => {
+    if (matchMedia('(max-width: 1100px)').matches) { rail.style.transform = ''; return; }
+    if (document.body.classList.contains('rail-hidden')) return;
+    const mainEl = $('#main');
+    const mainRect = mainEl.getBoundingClientRect();
+    const para = document.querySelector(`#doc-${activeFile} p:not(.doc-meta)`);
+    if (!para) { rail.style.transform = ''; return; }
+    const proseRight = para.getBoundingClientRect().right;
+    // rect.left includes the current transform; add it back to get the natural position
+    const shift = Math.max(0, rail.getBoundingClientRect().left + currentShift - proseRight - 28);
+    // A wide block must be meaningfully in view (≥80px) before the rail gives way.
+    const wide = [...document.querySelectorAll(`#doc-${activeFile} pre, #doc-${activeFile} table, #doc-${activeFile} figure.diagram`)]
+      .some((el) => { const r = el.getBoundingClientRect(); return r.bottom > mainRect.top + 80 && r.top < mainRect.bottom - 80; });
+    const target = (wide || shift < 40) ? 0 : shift;
+    if (target !== currentShift) {
+      currentShift = target;
+      rail.style.transform = target ? `translateX(-${target}px)` : '';
+    }
+  };
+  let currentShift = 0;
+  $('#main').addEventListener('scroll', () => { alignRail(); updateRailHug(); hidePop(); }, { passive: true });
+  addEventListener('resize', () => { alignRail(); updateRailHug(); });
 
   // --- Rail toggle (⌘J desktop hide, mobile drawer) ---
   const toggleRail = () => {
@@ -1034,7 +1059,7 @@ aside.rail {
       outline.appendChild(b);
     }
     $('#main').scrollTop = 0;
-    updateCounts(); alignRail();
+    updateCounts(); alignRail(); updateRailHug();
   };
   document.querySelector('.files').addEventListener('click', (e) => {
     const row = e.target.closest('.row[data-file]');
@@ -1385,7 +1410,8 @@ aside.rail {
   // --- Boot ---
   updateCounts();
   alignRail();
-  if (document.fonts?.ready) document.fonts.ready.then(alignRail);
+  updateRailHug();
+  if (document.fonts?.ready) document.fonts.ready.then(() => { alignRail(); updateRailHug(); });
 })();
 </script>
 </body>

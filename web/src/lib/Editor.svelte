@@ -20,6 +20,7 @@
   import { remoteCursorsPlugin } from './prosemirror/remote-cursors';
   import { codeHighlightPlugin } from './prosemirror/code-highlight';
   import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
+  import { frontmatterNodeView } from './prosemirror/frontmatter-nodeview';
   import { markdownInputRules } from './prosemirror/markdown-input-rules';
   import { placeholderPlugin } from './prosemirror/placeholder';
   import { mathNodeView } from './prosemirror/math';
@@ -340,6 +341,7 @@
   function buildNodeViews(): Record<string, NodeViewConstructor> {
     const builtIn: Record<string, NodeViewConstructor> = {
       task_list_item: taskListItemNodeView,
+      frontmatter: (node) => frontmatterNodeView(node),
       code_block(node, editorView, getPos) {
         const mermaid = mermaidNodeView(node, editorView, getPos);
         if (mermaid) return mermaid;

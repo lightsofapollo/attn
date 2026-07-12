@@ -115,6 +115,13 @@ integration-finishing pass — converge, don't proliferate.
   Cancel/submit clear), scroll-tracking popovers via shared rAF tracker
   (popover-anchor.svelte.ts, mount-scoped listeners), live ledger diff in
   replace mode. svelte-check clean, tests green.
+- 2026-07-12 (bce54ba): **attn-ri1 DONE** (#join panel with invite validation,
+  behaviorally verified; key fragment preserved and stripped by review entry).
+- 2026-07-12 (HEAD): **attn-5j5 DONE** (landing sweep: stripes->dots, h2 order,
+  tiny text lifted, banner wash). REMAINING BIG: attn-9ua (hosted owner review
+  rail P0 — comment arrival + visible mailbox errors), attn-3dv (journal revert,
+  Rust). Then: /impeccable document (design.json refresh), re-critique x3
+  (native app, hosted editor, landing) with >=35/40 zero-P0/P1 gate, final push.
 - 2026-07-12 (d7b5705): **attn-cjn DONE** (staging #new P0): idempotent #new
   (reuses empty Untitled), desk-count localStorage beacon -> landing hero+nav
   CTA 'Your desk (N)' for returning users, auto-name from first H1 on durable

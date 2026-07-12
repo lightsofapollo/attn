@@ -666,7 +666,7 @@ a.workspace-row:hover {
 
 .hosted-entry-actions .danger,
 .hosted-delete-confirm .danger {
-  color: var(--destructive);
+  color: var(--danger-ink);
 }
 
 .hosted-sidebar-input {

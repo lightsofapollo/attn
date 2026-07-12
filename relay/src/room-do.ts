@@ -387,13 +387,17 @@ export class RoomDO extends DurableObject<Env> {
 
   override async fetch(request: Request): Promise<Response> {
     return this.withOperationLock(async () => {
+      let policyBeforeDelete: RoomPolicy | undefined;
+      if (request.method === "DELETE" && ROOM_PATH_RE.test(new URL(request.url).pathname)) {
+        policyBeforeDelete = await this.ctx.storage.get<RoomPolicy>(META.policy);
+      }
       const response = await this.dispatch(request);
       // CORS handshake (attn-nnj.9.5): every response from this DO is tagged with
       // an `X-Attn-Allow-Browser` header reflecting the room's `policy.allowBrowser`
       // setting. The Worker reads + strips this header on the response edge to
       // decide whether to attach CORS headers. We tag at the DO boundary so the
       // Worker doesn't need its own policy fetch round-trip on every request.
-      return this.tagAllowBrowserOnResponse(request, response);
+      return this.tagAllowBrowserOnResponse(request, response, policyBeforeDelete);
     });
   }
 
@@ -654,6 +658,7 @@ export class RoomDO extends DurableObject<Env> {
   private async tagAllowBrowserOnResponse(
     request: Request,
     response: Response,
+    policyBeforeDelete?: RoomPolicy,
   ): Promise<Response> {
     // Don't touch 101 — the runtime treats the response headers as frozen
     // once the webSocket field is attached. handleSocketUpgrade is
@@ -665,6 +670,18 @@ export class RoomDO extends DurableObject<Env> {
       policy = await this.ctx.storage.get<RoomPolicy>(META.policy);
     } catch {
       policy = undefined;
+    }
+    // Successful room teardown has already erased META.policy. Preserve the
+    // authenticated room's prior browser flag solely for that final 2xx
+    // response so the browser can observe completion instead of reporting a
+    // CORS failure after the delete actually succeeded.
+    if (
+      policy === undefined &&
+      request.method === "DELETE" &&
+      response.status >= 200 &&
+      response.status < 300
+    ) {
+      policy = policyBeforeDelete;
     }
     if (policy === undefined) return response;
 

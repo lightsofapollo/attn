@@ -2,18 +2,59 @@
   import AppHeader from './AppHeader.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
   import { expandPicked, prepareImport, type PickedFile } from './import-files';
+  import { parseInviteUrl } from '../../lib/hosted/invite-url';
   import type { ImportFileInput, SharingState, StorageHealth, WorkspaceSummary } from './types';
 
   interface Props {
     health: StorageHealth;
     workspaces: WorkspaceSummary[];
+    /** Open the Join panel on mount (/app#join, attn-ri1). */
+    joinIntent?: boolean;
     onCreate: () => void;
     onImport: (name: string, files: ImportFileInput[]) => Promise<void>;
     onRename: (workspaceId: string, name: string) => Promise<void>;
     onDelete: (workspaceId: string) => Promise<void>;
   }
 
-  const { health, workspaces, onCreate, onImport, onRename, onDelete }: Props = $props();
+  const { health, workspaces, joinIntent = false, onCreate, onImport, onRename, onDelete }: Props = $props();
+
+  // Join a review (attn-ri1): #join was a dead click — the landing card and
+  // the desk quick link both promised a flow that didn't exist. The panel
+  // accepts a pasted invite (hosted /review or /s link, or a native attn://
+  // URL) and navigates with the fragment — where the room key lives — intact.
+  // svelte-ignore state_referenced_locally — open-time intent, deliberate.
+  let joinOpen = $state(joinIntent);
+  let joinValue = $state('');
+  let joinError = $state<string | null>(null);
+  let joinInput = $state<HTMLInputElement | undefined>();
+
+  function openJoin(event: MouseEvent): void {
+    event.preventDefault();
+    joinOpen = true;
+    joinError = null;
+  }
+
+  // Focus the paste field whichever way the panel opened (#join intent or
+  // the quick-link click).
+  $effect(() => {
+    if (joinOpen) joinInput?.focus();
+  });
+
+  function closeJoin(): void {
+    joinOpen = false;
+    joinError = null;
+    if (window.location.hash === '#join') history.replaceState(null, '', '/app');
+  }
+
+  function submitJoin(event: SubmitEvent): void {
+    event.preventDefault();
+    const invite = parseInviteUrl(joinValue);
+    if (!invite) {
+      joinError = 'That doesn\u2019t look like an attn invite \u2014 paste the full link, including everything after #.';
+      return;
+    }
+    window.location.assign(invite.href);
+  }
   const storageUnavailable = $derived(health.mode === 'unavailable');
 
   let fileInput = $state<HTMLInputElement | undefined>();
@@ -107,11 +148,42 @@
         <span>Markdown, images, folders, or zip</span>
         <big>↥ Import workspace</big>
       </button>
-      <a class="quick" href="/app#join" data-action="join-review">
+      <a class="quick" href="/app#join" data-action="join-review" onclick={openJoin}>
         <span>Browser or native link</span>
         <big>↗ Join a review</big>
       </a>
     </div>
+    {#if joinOpen}
+      <form
+        class="join-panel"
+        data-slot="join-panel"
+        onsubmit={submitJoin}
+        aria-label="Join a review"
+      >
+        <label for="join-invite-input">Paste an invite link</label>
+        <div class="join-row">
+          <!-- svelte-ignore a11y_autofocus — the panel exists to receive the paste. -->
+          <input
+            id="join-invite-input"
+            bind:this={joinInput}
+            bind:value={joinValue}
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="https://attn.sh/s/… or attn://review/…"
+          />
+          <button class="join-go" type="submit">Join</button>
+          <button class="join-cancel" type="button" onclick={closeJoin}>Cancel</button>
+        </div>
+        {#if joinError}
+          <p class="join-error" role="alert">{joinError}</p>
+        {:else}
+          <p class="join-hint">
+            The part after <code>#</code> is the room key — it never reaches the relay.
+          </p>
+        {/if}
+      </form>
+    {/if}
     <input
       bind:this={fileInput}
       type="file"

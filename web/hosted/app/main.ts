@@ -38,6 +38,7 @@ async function bootstrap(): Promise<void> {
       service,
       route,
       newIntent: route?.view === 'home' && window.location.hash === '#new',
+      joinIntent: route?.view === 'home' && window.location.hash === '#join',
     },
   });
   document.body.dataset.hydrated = 'true';

@@ -1968,3 +1968,77 @@ a.workspace-row:hover {
     bottom: calc(var(--kb-offset, 0px) + 56px + env(safe-area-inset-bottom, 0px));
   }
 }
+
+
+/* Join-a-review panel (attn-ri1) */
+.join-panel {
+  margin: 14px 0 0;
+  padding: 16px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--sheet);
+  font-family: var(--sans);
+}
+
+.join-panel label {
+  display: block;
+  margin-bottom: 8px;
+  font: 600 0.85rem var(--sans);
+  color: var(--ink);
+}
+
+.join-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.join-row input {
+  flex: 1;
+  min-width: 240px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 0.85rem var(--mono);
+}
+
+.join-row input:focus-visible {
+  outline: 2px solid var(--rust);
+  outline-offset: 1px;
+}
+
+.join-go,
+.join-cancel {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  font: 700 0.85rem var(--sans);
+  cursor: pointer;
+  background: transparent;
+  color: var(--ink);
+}
+
+.join-go {
+  background: var(--rust);
+  border-color: var(--rust);
+  color: var(--rust-contrast);
+}
+
+.join-go:hover {
+  background: var(--rust-deep);
+  border-color: var(--rust-deep);
+}
+
+.join-error {
+  margin: 8px 0 0;
+  font: 500 0.85rem/1.5 var(--sans);
+  color: var(--rust-deep);
+}
+
+.join-hint {
+  margin: 8px 0 0;
+  font: 500 0.85rem/1.5 var(--sans);
+  color: var(--hosted-muted);
+}

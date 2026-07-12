@@ -18,9 +18,10 @@
     /** The landing's one-click intent (`/app#new`): atomically create a
      * fresh untitled workspace and open its editor with no dialog. */
     newIntent: boolean;
+    joinIntent?: boolean;
   }
 
-  const { service, route, newIntent }: Props = $props();
+  const { service, route, newIntent, joinIntent = false }: Props = $props();
 
   let phase = $state<'loading' | 'ready' | 'error'>('loading');
   let errorMessage = $state<string | null>(null);
@@ -211,5 +212,6 @@
 {:else if route?.view === 'open'}
   <OpenPage {health} {onImport} />
 {:else}
-  <DeskHome {health} {workspaces} {onCreate} {onImport} {onRename} {onDelete} />
+  <DeskHome
+    {joinIntent} {health} {workspaces} {onCreate} {onImport} {onRename} {onDelete} />
 {/if}

@@ -1,0 +1,799 @@
+<!doctype html>
+<html lang="en" data-theme="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>attn — Q3 Launch Plan / launch-plan.md</title>
+<style>
+/* ============================================================
+   attn editor polish prototype — Theme v2 "The Identity Walks In"
+   One OKLCH token source, PAPER + INK, interaction layer branded.
+   ============================================================ */
+
+:root {
+  /* PAPER */
+  --bg: oklch(0.905 0.010 78);
+  --ink: oklch(0.14 0.008 55);
+  --muted: oklch(0.32 0.012 65);
+  --faint: oklch(0.46 0.012 65);
+  --card: oklch(0.89 0.012 76);
+  --card-raised: oklch(0.94 0.010 76 / 96%);
+  --sidebar: oklch(0.855 0.012 75);
+  --code: oklch(0.885 0.012 73);
+  --border: oklch(0.14 0.008 55 / 18%);
+  --border-faint: oklch(0.14 0.008 55 / 10%);
+  --accent: oklch(0.48 0.14 28);            /* terracotta pencil */
+  --accent-hover: oklch(0.42 0.15 28);
+  --accent-fg: oklch(0.98 0.005 78);
+  --link: oklch(0.38 0.04 55);
+  --green: oklch(0.40 0.12 150);            /* ledger green (text-safe) */
+  --green-wash: oklch(0.58 0.15 150 / 16%);
+  --amber-wash: oklch(0.62 0.13 82 / 26%);
+  --amber-strong: oklch(0.52 0.12 82);
+  --del: oklch(0.45 0.18 27);
+  --del-wash: oklch(0.55 0.20 27 / 13%);
+  --peer-owner: oklch(0.58 0.14 32);
+  --peer-reviewer: oklch(0.56 0.11 235);
+  --peer-agent: oklch(0.57 0.13 295);
+  --selection: oklch(0.62 0.13 82 / 32%);
+  --lift: 0 16px 42px oklch(0.20 0.02 55 / 16%), inset 0 1px 0 oklch(1 0 0 / 45%);
+  --panel-shadow: 0 20px 60px oklch(0.25 0.02 55 / 14%);
+  --pressed: inset 0 1px 3px oklch(0 0 0 / 5%);
+  --grain-opacity: 0.035;
+  --monogram: #fff;
+  --serif: 'Source Serif 4 Variable', 'Source Serif 4', Georgia, serif;
+  --sans: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+  --mono: 'Source Code Pro Variable', 'Source Code Pro', 'SF Mono', Consolas, monospace;
+  --ease: cubic-bezier(0.165, 0.84, 0.44, 1); /* ease-out-quart */
+  --t: 140ms;
+  color-scheme: light;
+}
+
+[data-theme="ink"] {
+  /* INK — the cool blue-black study */
+  --bg: oklch(0.145 0.005 260);
+  --ink: oklch(0.87 0.008 250);
+  --muted: oklch(0.66 0.010 250);
+  --faint: oklch(0.54 0.010 250);
+  --card: oklch(0.19 0.008 258);
+  --card-raised: oklch(0.215 0.010 256 / 97%);
+  --sidebar: oklch(0.17 0.007 258);
+  --code: oklch(0.185 0.008 256);
+  --border: oklch(0.87 0.008 250 / 16%);
+  --border-faint: oklch(0.87 0.008 250 / 9%);
+  --accent: oklch(0.72 0.10 220);           /* steel blue */
+  --accent-hover: oklch(0.78 0.10 220);
+  --accent-fg: oklch(0.13 0.01 250);
+  --link: oklch(0.74 0.06 235);
+  --green: oklch(0.74 0.13 150);
+  --green-wash: oklch(0.70 0.14 150 / 17%);
+  --amber-wash: oklch(0.70 0.12 82 / 22%);
+  --amber-strong: oklch(0.78 0.11 82);
+  --del: oklch(0.70 0.16 25);
+  --del-wash: oklch(0.62 0.18 27 / 16%);
+  --peer-owner: oklch(0.66 0.12 32);
+  --peer-reviewer: oklch(0.64 0.10 235);
+  --peer-agent: oklch(0.65 0.12 295);
+  --selection: oklch(0.72 0.10 220 / 30%);
+  --lift: 0 16px 42px oklch(0 0 0 / 45%), inset 0 1px 0 oklch(1 0 0 / 6%);
+  --panel-shadow: 0 20px 60px oklch(0 0 0 / 50%);
+  --pressed: inset 0 1px 3px oklch(0 0 0 / 30%);
+  --grain-opacity: 0.02;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { font-size: 15.5px; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 1rem/1.72 var(--serif);
+  letter-spacing: 0.003em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Paper grain — the unifying texture */
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  z-index: 40; pointer-events: none;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 190px;
+}
+
+::selection { background: var(--selection); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+button { font: 600 0.85rem var(--sans); color: inherit; background: none; border: 0; cursor: pointer; }
+a { color: var(--link); text-decoration: underline; text-decoration-color: oklch(from var(--link) l c h / 40%); text-underline-offset: 2px; }
+a:hover { text-decoration-color: currentColor; }
+
+.label {
+  font: 600 0.7rem/1.2 var(--sans);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ============ Layout ============ */
+.frame {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr) 300px;
+  grid-template-rows: 52px minmax(0, 1fr);
+  grid-template-areas: "header header header" "sidebar main rail";
+  height: 100vh;
+}
+
+/* ============ Header (chrome = sans) ============ */
+header {
+  grid-area: header;
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 14px 0 16px;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--sans);
+  position: relative; z-index: 30;
+}
+.wordmark { font: 700 1rem var(--serif); letter-spacing: -0.01em; margin-right: 2px; }
+.wordmark em { font-style: normal; color: var(--accent); }
+.desk-link {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 600 0.85rem var(--sans); color: var(--muted);
+  text-decoration: none; padding: 6px 9px; border-radius: 6px;
+  transition: background var(--t) var(--ease), color var(--t) var(--ease);
+}
+.desk-link:hover { background: oklch(from var(--ink) l c h / 7%); color: var(--ink); }
+.crumb { display: flex; align-items: baseline; gap: 7px; font: 600 0.85rem var(--sans); min-width: 0; }
+.crumb .sep { color: var(--faint); font-weight: 400; }
+.crumb .file { color: var(--muted); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.spacer { flex: 1; }
+
+.save-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 500 0.7rem var(--sans); color: var(--muted);
+  padding: 5px 10px; border: 1px solid var(--border-faint); border-radius: 999px;
+  transition: color var(--t) var(--ease);
+}
+.save-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+
+.peers { display: flex; }
+.peers .avatar {
+  width: 26px; height: 26px; border-radius: 50%;
+  display: grid; place-items: center;
+  font: 700 0.7rem var(--sans); color: var(--monogram);
+  border: 2px solid var(--card); margin-left: -6px;
+}
+.avatar.reviewer { background: var(--peer-reviewer); }
+.avatar.agent { background: var(--peer-agent); }
+
+.theme-toggle {
+  display: inline-flex; border: 1px solid var(--border); border-radius: 999px; padding: 2px;
+}
+.theme-toggle button {
+  padding: 3px 10px; border-radius: 999px;
+  font: 600 0.7rem var(--sans); letter-spacing: 0.05em;
+  color: var(--muted);
+  transition: background var(--t) var(--ease), color var(--t) var(--ease);
+}
+.theme-toggle button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+
+.kbd-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 9px; border: 1px solid var(--border-faint); border-radius: 6px;
+  font: 500 0.7rem var(--sans); color: var(--muted);
+  transition: border-color var(--t) var(--ease), color var(--t) var(--ease);
+}
+.kbd-chip:hover { border-color: var(--border); color: var(--ink); }
+kbd {
+  font: 600 0.7rem var(--sans);
+  padding: 1px 5px; border: 1px solid var(--border); border-bottom-width: 2px;
+  border-radius: 6px; background: var(--bg);
+}
+
+.btn-primary {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-height: 36px; padding: 0 16px;
+  background: var(--accent); color: var(--accent-fg);
+  border: 1px solid var(--accent); border-radius: 8px;
+  font: 700 0.85rem var(--sans);
+  transition: background var(--t) var(--ease), transform var(--t) var(--ease);
+}
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); transform: translateY(-1px); }
+.btn-primary:active { transform: translateY(0); }
+
+/* ============ Sidebar (second neutral layer) ============ */
+aside.files {
+  grid-area: sidebar;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border-faint);
+  padding: 14px 10px;
+  font-family: var(--sans);
+  overflow-y: auto;
+}
+.side-section { margin-bottom: 20px; }
+.side-section .label { display: block; padding: 0 8px 7px; }
+.row {
+  display: flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 8px; border-radius: 8px;
+  font: 500 0.85rem var(--sans); color: var(--ink);
+  cursor: pointer; position: relative;
+  transition: background var(--t) var(--ease);
+}
+.row:hover { background: oklch(from var(--ink) l c h / 8%); }
+.row.active { background: oklch(from var(--ink) l c h / 12%); font-weight: 600; }
+.row.active::before {
+  content: ''; position: absolute; left: 0; top: 7px; bottom: 7px;
+  width: 2px; border-radius: 2px; background: var(--accent);
+}
+.row svg { width: 15px; height: 15px; stroke: var(--muted); fill: none; stroke-width: 1.5; flex: none; }
+.row.active svg { stroke: var(--accent); }
+.row .badge {
+  margin-left: auto; font: 700 0.7rem var(--sans);
+  background: var(--amber-wash); color: var(--amber-strong);
+  padding: 1px 7px; border-radius: 999px;
+}
+.outline .row { height: 27px; font-size: 0.85rem; color: var(--muted); }
+.outline .row.h3 { padding-left: 22px; }
+.outline .row .ln { margin-left: auto; font: 500 0.7rem var(--mono); color: var(--faint); }
+.side-foot {
+  margin-top: 24px; padding: 10px 8px 0; border-top: 1px solid var(--border-faint);
+  font: 500 0.7rem var(--sans); color: var(--faint);
+}
+
+/* ============ Reading column (the hero) ============ */
+main {
+  grid-area: main;
+  overflow-y: auto;
+  padding: 44px 48px 120px;
+}
+.sheet { max-width: 68ch; margin: 0 auto; }
+
+/* Frontmatter card — agent docs render their metadata, not a prose wall */
+.frontmatter {
+  border: 1px solid var(--border-faint); border-radius: 10px;
+  background: var(--code); box-shadow: var(--pressed);
+  margin: 0 0 30px; overflow: hidden;
+  font-family: var(--sans);
+}
+.frontmatter summary {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px; cursor: pointer; list-style: none;
+  transition: background var(--t) var(--ease);
+}
+.frontmatter summary::-webkit-details-marker { display: none; }
+.frontmatter summary:hover { background: oklch(from var(--ink) l c h / 4%); }
+.frontmatter summary .chev { transition: transform var(--t) var(--ease); color: var(--faint); font-size: 0.7rem; }
+.frontmatter[open] summary .chev { transform: rotate(90deg); }
+.frontmatter .pairs {
+  display: grid; grid-template-columns: auto 1fr; gap: 3px 18px;
+  padding: 4px 14px 12px 33px;
+  font: 400 0.85rem/1.6 var(--mono);
+}
+.frontmatter .pairs dt { color: var(--faint); margin: 0; }
+.frontmatter .pairs dd { color: var(--muted); margin: 0; }
+
+h1 { font: 700 2rem/1.18 var(--serif); letter-spacing: -0.02em; margin: 0 0 6px; text-wrap: balance; }
+h2 { font: 600 1.5rem/1.24 var(--serif); letter-spacing: -0.015em; margin: 2.2em 0 0.5em; text-wrap: balance; }
+.doc-meta { font: 500 0.85rem var(--sans); color: var(--faint); margin: 0 0 34px; }
+p { margin: 0 0 1.1em; }
+
+/* Lists get their markers back — a small rust point */
+ul.marks { padding-left: 1.5em; margin: 0 0 1.2em; list-style: none; }
+ul.marks > li { position: relative; margin-bottom: 0.35em; }
+ul.marks > li::before {
+  content: ''; position: absolute; left: -1.15em; top: 0.72em;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
+  opacity: 0.75;
+}
+
+/* Task list — rust checks that persist */
+ul.tasks { list-style: none; padding-left: 0.2em; margin: 0 0 1.2em; }
+ul.tasks li { display: flex; gap: 10px; align-items: baseline; margin-bottom: 0.4em; }
+.check {
+  width: 16px; height: 16px; flex: none; transform: translateY(2px);
+  border: 1.5px solid var(--muted); border-radius: 2px;
+  display: grid; place-items: center; cursor: pointer;
+  transition: background var(--t) var(--ease), border-color var(--t) var(--ease);
+}
+.check.on { background: var(--accent); border-color: var(--accent); }
+.check.on::after { content: ''; width: 8px; height: 5px; border: 2px solid var(--accent-fg); border-top: 0; border-right: 0; transform: rotate(-45deg) translateY(-1px); }
+li:has(.check.on) span { text-decoration: line-through; text-decoration-color: oklch(from var(--muted) l c h / 60%); color: var(--muted); }
+
+/* Inline review vocabulary */
+ins {
+  text-decoration: none; color: var(--green);
+  background: var(--green-wash); border-radius: 2px; padding: 0 2px;
+}
+del {
+  color: var(--del); background: var(--del-wash);
+  border-radius: 2px; padding: 0 2px;
+  text-decoration: line-through; text-decoration-thickness: 1px;
+}
+.comment-anchor {
+  background: var(--amber-wash);
+  border-radius: 2px; padding: 0 1px;
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+  cursor: pointer;
+  transition: background var(--t) var(--ease);
+}
+.comment-anchor:hover, .comment-anchor.hot { background: oklch(from var(--amber-strong) l c h / 34%); }
+
+/* Code block — pressed into the paper */
+pre {
+  background: var(--code); border: 1px solid var(--border-faint);
+  border-radius: 8px; box-shadow: var(--pressed);
+  padding: 14px 16px; overflow-x: auto;
+  font: 400 0.85rem/1.55 var(--mono);
+  position: relative; margin: 0 0 1.2em;
+}
+pre .lang {
+  position: absolute; top: 9px; right: 12px;
+  font: 600 0.7rem var(--sans); letter-spacing: 0.08em; color: var(--faint);
+}
+code { font-family: var(--mono); font-size: 0.85em; }
+p code, li code { background: var(--code); border: 1px solid var(--border-faint); border-radius: 6px; padding: 0.05em 0.35em; }
+.tok-k { color: var(--accent); font-weight: 600; }
+.tok-s { color: var(--green); }
+.tok-c { color: var(--faint); font-style: italic; }
+
+/* Table — small-caps heads over hairlines */
+table { border-collapse: collapse; width: 100%; margin: 0 0 1.4em; font-size: 1rem; }
+th { text-align: left; padding: 6px 12px 6px 0; border-bottom: 1px solid var(--ink); }
+th .label { color: var(--ink); }
+td { padding: 7px 12px 7px 0; border-bottom: 1px solid var(--border-faint); }
+td.num { font-family: var(--mono); font-size: 0.85rem; }
+
+blockquote {
+  margin: 0 0 1.2em; padding: 2px 0 2px 16px;
+  border-left: 2.5px solid oklch(from var(--muted) l c h / 48%);
+  color: var(--muted); font-style: italic;
+}
+
+/* ============ Review rail ============ */
+aside.rail {
+  grid-area: rail;
+  overflow-y: auto;
+  padding: 20px 18px;
+  font-family: var(--sans);
+  border-left: 1px solid var(--border-faint);
+}
+.rail-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; }
+.rail-head .count { font: 700 0.7rem var(--sans); color: var(--accent); }
+
+.rcard {
+  background: var(--card-raised);
+  border-radius: 10px; padding: 13px 14px 12px;
+  box-shadow: var(--lift);
+  border-top: 1px solid oklch(from var(--ink) l c h / 6%);
+  margin-bottom: 14px;
+  transition: transform var(--t) var(--ease), box-shadow var(--t) var(--ease);
+}
+.rcard.hot { transform: translateX(-3px); }
+.rcard-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.rcard-head .avatar { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font: 700 0.7rem var(--sans); color: var(--monogram); border: 0; margin: 0; }
+.rcard-head .who { font: 600 0.85rem var(--sans); }
+.rcard-head .kind { font: 600 0.7rem var(--sans); letter-spacing: 0.07em; text-transform: uppercase; margin-left: auto; }
+.kind.comment { color: var(--amber-strong); }
+.kind.suggestion { color: var(--green); }
+.rcard .when { font: 500 0.7rem var(--sans); color: var(--faint); }
+.rcard blockquote.qt {
+  border-left: 0; font-style: normal; font-family: var(--serif);
+  background: var(--amber-wash); border-radius: 6px;
+  padding: 3px 8px; margin: 8px 0; font-size: 0.85rem; color: var(--ink);
+}
+.rcard .body { font: 400 0.85rem/1.55 var(--sans); color: var(--ink); margin: 6px 0 10px; }
+.rcard .diff { font: 400 0.85rem/1.5 var(--mono); margin: 8px 0 10px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border-faint); }
+.rcard .diff div { padding: 2px 9px; }
+.rcard .diff .minus { background: var(--del-wash); color: var(--del); }
+.rcard .diff .plus { background: var(--green-wash); color: var(--green); }
+.rcard-actions { display: flex; gap: 6px; }
+.rcard-actions button {
+  padding: 5px 12px; border-radius: 6px; font: 600 0.7rem var(--sans);
+  border: 1px solid var(--border); color: var(--muted);
+  transition: all var(--t) var(--ease);
+}
+.rcard-actions button:hover { color: var(--ink); border-color: var(--ink); }
+.rcard-actions button.accept { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.rcard-actions button.accept:hover { background: var(--accent-hover); }
+.rcard.resolved { opacity: 0.55; }
+.rcard.resolved .rcard-actions { display: none; }
+.rcard .resolved-note { font: 600 0.7rem var(--sans); color: var(--green); }
+
+/* ============ Selection popover ============ */
+.sel-pop {
+  position: fixed; z-index: 60;
+  display: flex; gap: 2px; padding: 3px;
+  background: var(--card-raised); border-radius: 8px;
+  box-shadow: var(--panel-shadow); border: 1px solid var(--border-faint);
+  opacity: 0; transform: translateY(4px) scale(0.98); pointer-events: none;
+  transition: opacity var(--t) var(--ease), transform var(--t) var(--ease);
+}
+.sel-pop.open { opacity: 1; transform: none; pointer-events: auto; }
+.sel-pop button {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 11px; border-radius: 6px; font: 600 0.85rem var(--sans);
+  transition: background var(--t) var(--ease);
+}
+.sel-pop button:hover { background: oklch(from var(--ink) l c h / 8%); }
+.sel-pop .swatch { width: 8px; height: 8px; border-radius: 2px; }
+.sel-pop kbd { font-size: 0.7rem; }
+
+/* ============ Command palette ============ */
+.veil {
+  position: fixed; inset: 0; z-index: 70;
+  background: oklch(from var(--ink) l c h / 30%);
+  display: none;
+}
+.veil[data-state="open"] { display: block; }
+.palette {
+  position: fixed; z-index: 71; left: 50%; top: 15%;
+  width: min(560px, calc(100vw - 40px));
+  transform: translateX(-50%);
+  background: var(--card-raised); border-radius: 14px;
+  box-shadow: var(--panel-shadow); border: 1px solid var(--border-faint);
+  font-family: var(--sans); overflow: hidden;
+  display: none;
+}
+.palette[data-state="open"] { display: block; animation: pal-in var(--t) var(--ease); }
+@keyframes pal-in { from { opacity: 0; transform: translateX(-50%) translateY(6px); } }
+.palette input {
+  width: 100%; border: 0; outline: 0; background: transparent;
+  padding: 15px 18px; font: 500 1rem var(--sans); color: var(--ink);
+  border-bottom: 1px solid var(--border-faint);
+}
+.palette input::placeholder { color: var(--faint); }
+.palette .group { padding: 7px 8px; }
+.palette .group + .group { border-top: 1px solid var(--border-faint); }
+.palette .group .label { display: block; padding: 4px 10px 5px; font-size: 0.7rem; }
+.pal-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; border-radius: 8px; font: 500 0.85rem var(--sans);
+  text-align: left;
+}
+.pal-item:hover, .pal-item.sel { background: oklch(from var(--ink) l c h / 8%); }
+.pal-item svg { width: 15px; height: 15px; stroke: var(--muted); fill: none; stroke-width: 1.5; }
+.pal-item .hint { margin-left: auto; display: flex; gap: 3px; }
+.pal-foot {
+  display: flex; gap: 16px; padding: 9px 16px;
+  border-top: 1px solid var(--border-faint);
+  font: 500 0.7rem var(--sans); color: var(--faint);
+}
+
+/* ============ Toast — a comment's first 60 seconds ============ */
+.toast {
+  position: fixed; z-index: 65; right: 320px; bottom: 26px;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--card-raised); border: 1px solid var(--border-faint);
+  border-radius: 10px; box-shadow: var(--panel-shadow);
+  padding: 11px 14px; font-family: var(--sans);
+  opacity: 0; transform: translateY(10px); pointer-events: none;
+  transition: opacity 200ms var(--ease), transform 200ms var(--ease);
+}
+.toast.open { opacity: 1; transform: none; pointer-events: auto; }
+.toast .t-body { font: 500 0.85rem var(--sans); }
+.toast .t-body b { font-weight: 700; }
+.toast .t-sub { font: 500 0.7rem var(--sans); color: var(--faint); }
+.toast button { color: var(--accent); font-weight: 700; font-size: 0.85rem; padding: 4px 6px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="frame">
+
+  <!-- ================= Header ================= -->
+  <header>
+    <span class="wordmark">attn<em>.</em></span>
+    <a class="desk-link" href="#">← Your desk <span style="opacity:.6">(4)</span></a>
+    <div class="crumb">
+      <span>Q3 Launch Plan</span>
+      <span class="sep">/</span>
+      <span class="file">launch-plan.md</span>
+    </div>
+    <div class="spacer"></div>
+    <span class="save-chip" id="saveChip"><span class="dot"></span>Saved · on this device</span>
+    <div class="peers" title="Dana (reviewer), Virgil (agent)">
+      <span class="avatar reviewer">D</span>
+      <span class="avatar agent">V</span>
+    </div>
+    <div class="theme-toggle" role="group" aria-label="Theme">
+      <button id="btnPaper" aria-pressed="true">PAPER</button>
+      <button id="btnInk" aria-pressed="false">INK</button>
+    </div>
+    <button class="kbd-chip" id="kbdChip">Commands <kbd>⌘K</kbd></button>
+    <button class="btn-primary">Share</button>
+  </header>
+
+  <!-- ================= Sidebar ================= -->
+  <aside class="files">
+    <div class="side-section">
+      <span class="label">Files</span>
+      <div class="row active">
+        <svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/></svg>
+        launch-plan.md
+        <span class="badge">2</span>
+      </div>
+      <div class="row">
+        <svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/></svg>
+        metrics.md
+      </div>
+      <div class="row">
+        <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        notes
+      </div>
+    </div>
+    <div class="side-section outline">
+      <span class="label">Outline</span>
+      <div class="row">Timeline <span class="ln">L14</span></div>
+      <div class="row">Rollout gates <span class="ln">L31</span></div>
+      <div class="row h3">Burst capacity <span class="ln">L38</span></div>
+      <div class="row">Open questions <span class="ln">L52</span></div>
+    </div>
+    <div class="side-foot">12.4 KB · never leaves this machine</div>
+  </aside>
+
+  <!-- ================= Reading column ================= -->
+  <main id="main">
+    <article class="sheet">
+
+      <details class="frontmatter">
+        <summary>
+          <span class="chev">▶</span>
+          <span class="label" style="padding:0">Frontmatter</span>
+          <span style="font:500 0.7rem var(--sans); color:var(--faint)">author: virgil-agent · 4 fields</span>
+        </summary>
+        <dl class="pairs">
+          <dt>author</dt><dd>virgil-agent</dd>
+          <dt>model</dt><dd>gemma3-lora-r64-e3</dd>
+          <dt>date</dt><dd>2026-07-12</dd>
+          <dt>status</dt><dd>draft → review</dd>
+        </dl>
+      </details>
+
+      <h1>Q3 Launch Plan</h1>
+      <p class="doc-meta">Agent draft · shared for review 2 hours ago · 2 open threads</p>
+
+      <p>This plan covers the public launch of the mesh CLI: the producer loop demo, the pricing page, and the burst-training benchmark we publish alongside it. The goal is a launch that a <a href="#">single founder can run</a> end-to-end without touching a cloud console.</p>
+
+      <p>The core claim we are making is that <span class="comment-anchor" data-thread="t1">training bursts should move to wherever compute is cheapest that hour</span>, and the demo has to make that visible in under ninety seconds. Everything else in this document is subordinate to that moment. The benchmark <del>proves</del><ins data-thread="t2">demonstrates</ins> the arbitrage on a real fine-tune, not a synthetic batch job.</p>
+
+      <h2>Timeline</h2>
+      <ul class="marks">
+        <li>Week 1: freeze the CLI surface; record the producer-loop demo against owned metal.</li>
+        <li>Week 2: benchmark run across owned + rented capacity; draft the launch post.</li>
+        <li>Week 3: launch. Post, demo, benchmark, and pricing go live together.</li>
+      </ul>
+
+      <ul class="tasks">
+        <li><span class="check on" role="checkbox" aria-checked="true" tabindex="0"></span><span>Freeze <code>gpu rent</code> flags for the demo path</span></li>
+        <li><span class="check on" role="checkbox" aria-checked="true" tabindex="0"></span><span>Record 90-second producer-loop capture</span></li>
+        <li><span class="check" role="checkbox" aria-checked="false" tabindex="0"></span><span>Publish CAS artifact manifest for the benchmark run</span></li>
+        <li><span class="check" role="checkbox" aria-checked="false" tabindex="0"></span><span>Draft launch post and route it through attn for review</span></li>
+      </ul>
+
+      <h2>Rollout gates</h2>
+      <p>Each gate is a command, not a meeting. The launch holds until all three exit zero:</p>
+
+      <pre><span class="lang">BASH</span><code><span class="tok-c"># gate 1: the demo runs clean from a fresh install</span>
+<span class="tok-k">gpu</span> demo producer-loop <span class="tok-s">--fresh --timeout 90s</span>
+
+<span class="tok-c"># gate 2: burst benchmark reproduces within 5%</span>
+<span class="tok-k">gpu</span> bench burst <span class="tok-s">--manifest cas://launch-q3</span> --tolerance 0.05</code></pre>
+
+      <table>
+        <thead>
+          <tr><th><span class="label">Gate</span></th><th><span class="label">Owner</span></th><th><span class="label">Status</span></th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Fresh-install demo</td><td>James</td><td class="num">green</td></tr>
+          <tr><td>Burst benchmark ±5%</td><td>virgil-agent</td><td class="num">running</td></tr>
+          <tr><td>Pricing page copy</td><td>Dana</td><td class="num">in review</td></tr>
+        </tbody>
+      </table>
+
+      <blockquote>Ship the loop you run every day. If the demo isn’t the real workflow, the launch is a brochure.</blockquote>
+
+      <h2>Open questions</h2>
+      <p>Whether the pricing page leads with owned-metal payback or rented-burst pricing is still open; the benchmark result will decide it. Select any sentence in this draft to leave a comment or propose an edit.</p>
+
+    </article>
+  </main>
+
+  <!-- ================= Review rail ================= -->
+  <aside class="rail" id="rail">
+    <div class="rail-head">
+      <span class="label" style="letter-spacing:.08em">Review</span>
+      <span class="count">2 open</span>
+      <span class="spacer" style="flex:1"></span>
+      <span style="font:500 .7rem var(--sans); color:var(--faint)">⌘J</span>
+    </div>
+
+    <div class="rcard" id="card-t1" data-thread="t1">
+      <div class="rcard-head">
+        <span class="avatar reviewer">D</span>
+        <span class="who">Dana</span>
+        <span class="kind comment">Comment</span>
+      </div>
+      <span class="when">12 minutes ago</span>
+      <blockquote class="qt">“training bursts should move to wherever compute is cheapest that hour”</blockquote>
+      <div class="body">Is “that hour” literal? If placement re-evaluates mid-run we should say so — it’s the strongest part of the claim.</div>
+      <div class="rcard-actions">
+        <button>Reply</button>
+        <button>Resolve</button>
+      </div>
+    </div>
+
+    <div class="rcard" id="card-t2" data-thread="t2">
+      <div class="rcard-head">
+        <span class="avatar agent">V</span>
+        <span class="who">Virgil</span>
+        <span class="kind suggestion">Suggestion</span>
+      </div>
+      <span class="when">2 hours ago · anchored ¶2</span>
+      <div class="diff">
+        <div class="minus">− proves the arbitrage</div>
+        <div class="plus">+ demonstrates the arbitrage</div>
+      </div>
+      <div class="body">“Proves” invites a fight we don’t need in the launch post; the numbers can do that.</div>
+      <div class="rcard-actions">
+        <button class="accept" data-accept="t2">Accept</button>
+        <button data-reject="t2">Reject</button>
+      </div>
+    </div>
+
+    <div class="rcard resolved">
+      <div class="rcard-head">
+        <span class="avatar reviewer">D</span>
+        <span class="who">Dana</span>
+        <span class="kind comment">Comment</span>
+      </div>
+      <span class="when">yesterday</span>
+      <div class="body">Gate table reads well now.</div>
+      <div class="resolved-note">✓ Resolved by James</div>
+    </div>
+  </aside>
+</div>
+
+<!-- Selection popover -->
+<div class="sel-pop" id="selPop" role="toolbar" aria-label="Review actions">
+  <button id="popComment"><span class="swatch" style="background:var(--amber-strong)"></span>Comment <kbd>⌘.</kbd></button>
+  <button id="popSuggest"><span class="swatch" style="background:var(--green)"></span>Suggest <kbd>⌘⇧.</kbd></button>
+</div>
+
+<!-- Command palette -->
+<div class="veil" id="veil" data-state="closed"></div>
+<div class="palette" id="palette" data-state="closed" role="dialog" aria-label="Command palette">
+  <input id="palInput" placeholder="Type a command or file name…" autocomplete="off">
+  <div class="group">
+    <span class="label">Commands</span>
+    <button class="pal-item sel"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New file <span class="hint"><kbd>⌘N</kbd></span></button>
+    <button class="pal-item"><svg viewBox="0 0 24 24"><path d="M4 12h16M4 6h16M4 18h10"/></svg>Jump to heading <span class="hint"><kbd>⌘⇧O</kbd></span></button>
+    <button class="pal-item"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/></svg>Share this file <span class="hint"><kbd>⌘⇧S</kbd></span></button>
+    <button class="pal-item" id="palTheme"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9c-5 0-9-4-9-9z"/></svg>Switch to INK theme <span class="hint"><kbd>T</kbd></span></button>
+  </div>
+  <div class="group">
+    <span class="label">Recent files</span>
+    <button class="pal-item"><svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/></svg>metrics.md</button>
+    <button class="pal-item"><svg viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/></svg>notes/positioning.md</button>
+  </div>
+  <div class="pal-foot">
+    <span><kbd>↑↓</kbd> navigate</span><span><kbd>↵</kbd> run</span><span><kbd>esc</kbd> close</span><span style="margin-left:auto"><kbd>?</kbd> all shortcuts</span>
+  </div>
+</div>
+
+<!-- Arrival toast -->
+<div class="toast" id="toast" role="status">
+  <span class="avatar reviewer" style="width:24px;height:24px;font:700 .6rem var(--sans);border:0;display:grid;place-items:center;border-radius:50%;background:var(--peer-reviewer);color:var(--monogram)">D</span>
+  <span>
+    <span class="t-body"><b>Dana</b> commented on ¶2</span><br>
+    <span class="t-sub">delivered over the encrypted relay</span>
+  </span>
+  <button id="toastGo">View</button>
+</div>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const root = document.documentElement;
+
+  // --- Theme (atomic: no transition on the flip itself) ---
+  const setTheme = (t) => {
+    root.style.setProperty('--t', '0ms');
+    root.dataset.theme = t;
+    $('#btnPaper').setAttribute('aria-pressed', String(t === 'paper'));
+    $('#btnInk').setAttribute('aria-pressed', String(t === 'ink'));
+    $('#palTheme').childNodes[1].textContent = t === 'paper' ? 'Switch to INK theme ' : 'Switch to PAPER theme ';
+    requestAnimationFrame(() => root.style.removeProperty('--t'));
+  };
+  $('#btnPaper').onclick = () => setTheme('paper');
+  $('#btnInk').onclick = () => setTheme('ink');
+
+  // --- Command palette: visibility is state, animation is enhancement ---
+  const palette = $('#palette'), veil = $('#veil');
+  const openPal = (open) => {
+    palette.dataset.state = veil.dataset.state = open ? 'open' : 'closed';
+    if (open) $('#palInput').focus();
+  };
+  $('#kbdChip').onclick = () => openPal(true);
+  veil.onclick = () => openPal(false);
+  $('#palTheme').onclick = () => { setTheme(root.dataset.theme === 'paper' ? 'ink' : 'paper'); openPal(false); };
+
+  document.addEventListener('keydown', (e) => {
+    // Global chords run even when the editor has focus — the guard bug, fixed.
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPal(palette.dataset.state !== 'open'); }
+    if (e.key === 'Escape') { openPal(false); hidePop(); }
+    if (e.key.toLowerCase() === 't' && !e.metaKey && document.activeElement.tagName !== 'INPUT') setTheme(root.dataset.theme === 'paper' ? 'ink' : 'paper');
+  });
+
+  // --- Checkboxes: state persists (and would write through to disk) ---
+  document.querySelectorAll('.check').forEach((c) => {
+    const toggle = () => {
+      c.classList.toggle('on');
+      c.setAttribute('aria-checked', c.classList.contains('on'));
+      const chip = $('#saveChip');
+      chip.innerHTML = '<span class="dot" style="background:var(--amber-strong)"></span>Saving…';
+      setTimeout(() => { chip.innerHTML = '<span class="dot"></span>Saved · on this device'; }, 600);
+    };
+    c.onclick = toggle;
+    c.onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggle(); } };
+  });
+
+  // --- Selection popover: select prose → Comment / Suggest ---
+  const pop = $('#selPop');
+  const hidePop = () => pop.classList.remove('open');
+  document.addEventListener('selectionchange', () => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !$('#main').contains(sel.anchorNode)) return hidePop();
+    const r = sel.getRangeAt(0).getBoundingClientRect();
+    if (!r.width) return hidePop();
+    pop.style.left = Math.max(12, r.left + r.width / 2 - pop.offsetWidth / 2) + 'px';
+    pop.style.top = (r.top - pop.offsetHeight - 8) + 'px';
+    pop.classList.add('open');
+  });
+  $('#popComment').onclick = $('#popSuggest').onclick = hidePop;
+
+  // --- Anchor ↔ card linking ---
+  document.querySelectorAll('[data-thread]').forEach((el) => {
+    const id = el.dataset.thread;
+    el.addEventListener('mouseenter', () => {
+      document.querySelectorAll(`[data-thread="${id}"]`).forEach((n) => n.classList.add('hot'));
+    });
+    el.addEventListener('mouseleave', () => {
+      document.querySelectorAll(`[data-thread="${id}"]`).forEach((n) => n.classList.remove('hot'));
+    });
+  });
+
+  // --- Suggestion accept/reject applies to the prose ---
+  const resolveCard = (id, accepted) => {
+    const card = $(`#card-${id}`);
+    const ins = document.querySelector(`ins[data-thread="${id}"]`);
+    const del = ins && ins.previousElementSibling && ins.previousElementSibling.tagName === 'DEL' ? ins.previousElementSibling : null;
+    if (ins) {
+      if (accepted) { ins.replaceWith(ins.textContent); if (del) del.remove(); }
+      else { ins.remove(); if (del) del.replaceWith(del.textContent); }
+    }
+    card.classList.add('resolved');
+    card.insertAdjacentHTML('beforeend', `<div class="resolved-note">${accepted ? '✓ Accepted' : '✕ Rejected'} by James · file updated</div>`);
+    const count = $('.rail-head .count');
+    count.textContent = '1 open';
+  };
+  document.querySelector('[data-accept]').onclick = () => resolveCard('t2', true);
+  document.querySelector('[data-reject]').onclick = () => resolveCard('t2', false);
+
+  // --- The first 60 seconds of a comment: arrival toast ---
+  setTimeout(() => $('#toast').classList.add('open'), 1600);
+  $('#toastGo').onclick = () => {
+    $('#toast').classList.remove('open');
+    $('#card-t1').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    document.querySelectorAll('[data-thread="t1"]').forEach((n) => n.classList.add('hot'));
+    setTimeout(() => document.querySelectorAll('[data-thread="t1"]').forEach((n) => n.classList.remove('hot')), 1800);
+  };
+  setTimeout(() => $('#toast').classList.remove('open'), 9000);
+})();
+</script>
+</body>
+</html>

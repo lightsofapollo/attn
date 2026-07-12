@@ -115,7 +115,13 @@ integration-finishing pass — converge, don't proliferate.
   Cancel/submit clear), scroll-tracking popovers via shared rAF tracker
   (popover-anchor.svelte.ts, mount-scoped listeners), live ledger diff in
   replace mode. svelte-check clean, tests green.
-- 2026-07-12 (HEAD): **attn-6d2 DONE** (checkbox persistence P0): toggle was
+- 2026-07-12 (d7b5705): **attn-cjn DONE** (staging #new P0): idempotent #new
+  (reuses empty Untitled), desk-count localStorage beacon -> landing hero+nav
+  CTA 'Your desk (N)' for returning users, auto-name from first H1 on durable
+  autosave commit. Behaviorally verified in headless Chromium vs real service;
+  route-bundle gate holds. Filed remaining: attn-ri1 (#join modal), attn-9ua
+  (hosted owner rail P0), attn-5j5 (landing sweep). Also open: attn-3dv.
+- 2026-07-12 (prev): **attn-6d2 DONE** (checkbox persistence P0): toggle was
   mousedown-only; keyboard/AT/synthetic activation never persisted. Moved to
   click path, disk write verified. REMAINING: attn-3dv (journal revert, Rust),
   hosted owner review rail P0 (comment arrival + visible mailbox errors),

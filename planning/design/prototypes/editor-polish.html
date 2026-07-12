@@ -110,6 +110,19 @@ body::after {
 }
 
 ::selection { background: var(--selection); }
+
+/* Scrollbars: thin, trackless, ink-tinted — never a white gutter */
+* { scrollbar-width: thin; scrollbar-color: oklch(from var(--ink) l c h / 25%) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: oklch(from var(--ink) l c h / 22%);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: oklch(from var(--ink) l c h / 38%); border: 3px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 
 button { font: 600 0.85rem var(--sans); color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
@@ -265,7 +278,29 @@ main {
   overflow-y: auto;
   padding: 44px 48px 120px;
 }
-.sheet { max-width: 68ch; margin: 0 auto; }
+/* The sheet is full-width and left-set: prose keeps a readable measure,
+   wide content (diagrams, tables, code) gets the whole pane. */
+.sheet { max-width: none; }
+.sheet p, .sheet ul, .sheet ol, .sheet blockquote, .sheet h1, .sheet h2,
+.sheet .doc-meta, .sheet .frontmatter { max-width: 72ch; }
+.sheet pre, .sheet table, .sheet figure.diagram { max-width: none; }
+
+figure.diagram {
+  margin: 1.6em 0 1.8em;
+  border: 1px solid var(--border-faint); border-radius: 10px;
+  background: var(--code); box-shadow: var(--pressed);
+  padding: 18px 20px 10px;
+}
+figure.diagram svg { width: 100%; height: auto; display: block; }
+figure.diagram .node { fill: var(--card-raised); stroke: var(--border); }
+figure.diagram .node.hot { stroke: var(--accent); stroke-width: 1.5; }
+figure.diagram text { font: 600 12px var(--sans); fill: var(--ink); }
+figure.diagram .edge { stroke: var(--muted); fill: none; marker-end: url(#arr); }
+figure.diagram .edge-label { font: 500 10.5px var(--mono); fill: var(--muted); }
+figure.diagram figcaption {
+  font: 600 0.7rem/1.2 var(--sans); letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--faint); padding-top: 10px;
+}
 
 /* Frontmatter card — agent docs render their metadata, not a prose wall */
 .frontmatter {
@@ -693,6 +728,39 @@ aside.rail {
         <li><span class="check" role="checkbox" aria-checked="false" tabindex="0"></span><span>Publish CAS artifact manifest for the benchmark run</span></li>
         <li><span class="check" role="checkbox" aria-checked="false" tabindex="0"></span><span>Draft launch post and route it through attn for review</span></li>
       </ul>
+
+      <figure class="diagram" aria-label="Launch pipeline diagram">
+        <svg viewBox="0 0 980 150" role="img">
+          <defs>
+            <marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M0 0L8 4L0 8z" fill="currentColor" style="color: var(--muted)"/>
+            </marker>
+          </defs>
+          <g>
+            <rect class="node" x="10" y="50" width="150" height="44" rx="8"/>
+            <text x="85" y="76" text-anchor="middle">curate dataset</text>
+            <rect class="node hot" x="230" y="20" width="180" height="44" rx="8"/>
+            <text x="320" y="46" text-anchor="middle">train · owned metal</text>
+            <rect class="node hot" x="230" y="84" width="180" height="44" rx="8"/>
+            <text x="320" y="110" text-anchor="middle">train · rented burst</text>
+            <rect class="node" x="490" y="50" width="150" height="44" rx="8"/>
+            <text x="565" y="76" text-anchor="middle">CAS artifacts</text>
+            <rect class="node" x="710" y="50" width="110" height="44" rx="8"/>
+            <text x="765" y="76" text-anchor="middle">eval</text>
+            <rect class="node" x="880" y="50" width="90" height="44" rx="8"/>
+            <text x="925" y="76" text-anchor="middle">publish</text>
+            <path class="edge" d="M160 66 C 195 60, 195 46, 226 44"/>
+            <path class="edge" d="M160 78 C 195 84, 195 100, 226 104"/>
+            <path class="edge" d="M410 44 C 450 48, 450 60, 486 64"/>
+            <path class="edge" d="M410 104 C 450 100, 450 84, 486 80"/>
+            <path class="edge" d="M640 72 L 706 72"/>
+            <path class="edge" d="M820 72 L 876 72"/>
+            <text class="edge-label" x="195" y="34">gpu rent</text>
+            <text class="edge-label" x="448" y="40">cas://</text>
+          </g>
+        </svg>
+        <figcaption>Figure · launch pipeline — rendered from a ```mermaid block, full pane width</figcaption>
+      </figure>
 
       <h2 id="h-gates">Rollout gates</h2>
       <p>Each gate is a command, not a meeting. The launch holds until all three exit zero:</p>

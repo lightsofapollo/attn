@@ -52,7 +52,7 @@ Both surfaces currently have zero motion at idle — precision reads as *static*
 
 ### 1.4 Typography: the reading column is the product
 
-- **Serif ~68ch column everywhere prose renders.** Desktop hosted editor (measured 1078px ≈ 135 CPL, sans!) adopts the mobile reader's serif register — the mobile build already proves the intent. Native measure tightens from ~95 CPL to 68–72ch; the surplus width becomes the review margin's home.
+- **Full-width sheet, capped prose measure (decided 2026-07-12).** The reading surface is NOT a centered narrow column: the sheet is left-set and spans the pane so wide content — mermaid diagrams, tables, code blocks — gets the whole width. Only running prose (paragraphs, lists, quotes, headings) caps at ~72ch for readability. Desktop hosted editor (measured 1078px ≈ 135 CPL, sans!) adopts the mobile reader's serif register with this measure cap; native applies the same split. Scrollbars are thin, trackless, ink-tinted — never a default white gutter.
 - Fixed rem ramp per DESIGN.md; the px-regime components (badges, PeerStrip, review cards) fold onto it.
 - Hairline link underlines (`text-decoration-color` at 40%) — links currently sit at ~2.4:1 against body ink, a WCAG 1.4.1 fail on color alone.
 - Dark muted labels raised to ≥ `oklch(0.62 …)` (currently ~4.4:1 at 0.7rem).

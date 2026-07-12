@@ -2615,6 +2615,7 @@
       onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
       onShare={showBreadcrumbShare ? openShareDialog : undefined}
       shareEnabled={showBreadcrumbShare}
+      saveState={mode === 'edit' && activeFileType === 'markdown' ? (editorDirty ? 'dirty' : 'saved') : null}
       onOpenInBrowser={activeFileType === 'html' ? () => openExternal(activePath) : undefined}
     />
   </div>
@@ -2761,7 +2762,6 @@
   <ReviewBar
     shareOpen={shareDialogOpen}
     isOwner={reviewStore.currentRoomId === null || collabRole === 'owner'}
-    saveState={mode === 'edit' && activeFileType === 'markdown' ? (editorDirty ? 'dirty' : 'saved') : null}
     onShareClick={openShareDialog}
     onLeaveRoom={handleLeaveRoom}
   />

@@ -69,12 +69,6 @@
      * so this component stays presentational. See attn-nnj.4.13.
      */
     onOutboxRetry?: () => void;
-    /**
-     * Save-state chip (Theme v2, attn-u5c): 'dirty' while the editor holds
-     * unsaved changes, 'saved' when clean in edit mode, null hides the chip.
-     * The file on disk is the product; its state must always be visible.
-     */
-    saveState?: 'saved' | 'dirty' | null;
     /** CSS right offset in px. Negative values let the parent span side rails. */
     rightOffsetPx?: number;
     /**
@@ -92,7 +86,6 @@
     onLeaveRoom,
     onReconnect,
     onOutboxRetry,
-    saveState = null,
     rightOffsetPx = 16,
     localParticipantId = null,
   }: Props = $props();
@@ -107,9 +100,9 @@
   const rooms = $derived(reviewStore.roomsList);
   const hasActiveRoom = $derived(reviewStore.currentRoomId !== null);
 
-  // Visible whenever a room is active, a remembered room can be selected, a
-  // share is being initiated, or the editor has a save state to report.
-  const visible = $derived(hasActiveRoom || rooms.length > 0 || shareOpen || saveState !== null);
+  // Visible whenever a room is active, a remembered room can be selected, or a
+  // share is being initiated.
+  const visible = $derived(hasActiveRoom || rooms.length > 0 || shareOpen);
 
   // Label for the share pill — post-mint it flips to "Sharing" per §8.
   const shareLabel = $derived(
@@ -148,21 +141,6 @@
       class="review-bar-dock pointer-events-auto inline-flex h-8 max-w-[calc(100vw-1rem)] shrink-0 items-center justify-end gap-1.5 overflow-visible px-0"
       data-slot="review-bar-dock"
     >
-      {#if saveState !== null}
-        <span
-          class="save-chip inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-border/50 bg-background/65 px-2.5 font-sans text-muted-foreground"
-          data-slot="save-chip"
-          data-state={saveState}
-          role="status"
-        >
-          <span
-            class="size-1.5 rounded-full"
-            style={`background: ${saveState === 'dirty' ? 'var(--amber-deep)' : 'var(--review-card-suggestion-accent)'};`}
-            aria-hidden="true"
-          ></span>
-          {saveState === 'dirty' ? 'Editing · unsaved' : 'Saved · on disk'}
-        </span>
-      {/if}
       {#if rooms.length > 0}
         <DropdownMenu bind:open={roomMenuOpen}>
           <DropdownMenuTrigger

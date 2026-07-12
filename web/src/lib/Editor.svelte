@@ -368,16 +368,23 @@
     checkbox.addEventListener('mousedown', (e) => {
       e.preventDefault();
     });
-    checkbox.addEventListener('click', (e) => {
-      // PM node attrs are the single source of truth: block the input's
-      // native flip and let update() re-sync `checked` from the new attrs.
-      e.preventDefault();
-      if (!editable) return;
+    checkbox.addEventListener('click', () => {
+      // Let the native toggle stand — every activation path (mouse, Space,
+      // AT) fires `click` and flips `.checked`, so the pixels are already
+      // correct. We must NOT preventDefault: a checkbox reverts its native
+      // flip AFTER the handler when the default is cancelled, which clobbered
+      // both the explicit set and update() (Truth Rule, attn-6d2). Instead we
+      // dispatch a transaction to make the node attrs MATCH the DOM.
+      if (!editable) {
+        checkbox.checked = node.attrs.checked; // read-only: keep DOM in sync
+        return;
+      }
       const pos = getPos();
       if (pos === undefined) return;
+      const next = checkbox.checked;
       const tr = editorView.state.tr.setNodeMarkup(pos, undefined, {
         ...node.attrs,
-        checked: !node.attrs.checked,
+        checked: next,
       });
       editorView.dispatch(tr);
       // Serialize and send via IPC after checkbox toggle

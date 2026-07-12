@@ -38,7 +38,7 @@
         { keys: ['\u2190'], description: 'Previous file' },
         { keys: ['\u2192'], description: 'Next file' },
         { keys: [mod, 'F'], description: 'Find in document' },
-        { keys: [mod, 'P'], description: 'Command palette' },
+        { keys: [mod, 'K'], description: 'Command palette' },
       ],
     },
     {

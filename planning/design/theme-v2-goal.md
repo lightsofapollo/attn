@@ -115,6 +115,13 @@ integration-finishing pass — converge, don't proliferate.
   Cancel/submit clear), scroll-tracking popovers via shared rAF tracker
   (popover-anchor.svelte.ts, mount-scoped listeners), live ledger diff in
   replace mode. svelte-check clean, tests green.
+- 2026-07-12 (HEAD): **attn-6d2 DONE** (checkbox persistence P0): toggle was
+  mousedown-only; keyboard/AT/synthetic activation never persisted. Moved to
+  click path, disk write verified. REMAINING: attn-3dv (journal revert, Rust),
+  hosted owner review rail P0 (comment arrival + visible mailbox errors),
+  hosted #new idempotency + state-aware CTA + auto-name + #join modal, landing
+  sweep (stripes/heading-skip/11px/dead cards), design.json sidecar refresh,
+  then /impeccable critique x3 with >=35/40 gate.
 - 2026-07-12 (168f9ae): **attn-e4l DONE.** Desk rows say 'Shared · relay sees
   only ciphertext' (decision #2); share-error copy gains 'Nothing left this
   machine.' Native ShareDialog shape already matched e4l. Remaining queue:

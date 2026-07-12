@@ -10,7 +10,7 @@
  *   - `policy.allowBrowser == true`:
  *       - OPTIONS preflight from an allowlisted Origin → 204 with full CORS
  *         headers (Allow-Origin matches the request, Allow-Headers + Methods
- *         contain the v2 surface).
+ *         contain the browser HTTP surface, including snapshot PUTs).
  *       - GET/POST/DELETE/etc. from an allowlisted Origin → CORS headers
  *         attached to the real response.
  *       - WS upgrade from an allowlisted Origin → 101 succeeds; from a
@@ -254,7 +254,7 @@ describe("CORS — OPTIONS preflight", () => {
       "Attn-Share-Bundle, Attn-Share-Tier, Attn-Sealed-Bundle, Attn-Snapshot-Id, Attn-Ciphertext-Sha256",
     );
     expect(res.headers.get("Access-Control-Allow-Methods")).toBe(
-      "GET, POST, DELETE, OPTIONS",
+      "GET, POST, PUT, DELETE, OPTIONS",
     );
     // Vary: Origin must be set so caches don't poison cross-origin replies.
     const vary = res.headers.get("Vary") ?? "";
@@ -314,7 +314,7 @@ describe("CORS — regular HTTP responses", () => {
     expect([200, 401, 404]).toContain(res.status);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://attn.sh");
     expect(res.headers.get("Access-Control-Allow-Methods")).toBe(
-      "GET, POST, DELETE, OPTIONS",
+      "GET, POST, PUT, DELETE, OPTIONS",
     );
     expect(res.headers.get("X-Attn-Allow-Browser")).toBeNull();
     await res.text();

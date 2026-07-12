@@ -90,8 +90,8 @@ const INTERNAL_ALLOW_BROWSER_HEADER = "X-Attn-Allow-Browser";
 const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id, Attn-Device-Proof, Attn-Device-Registration, Attn-Share-Bundle";
 const CORS_EXPOSED_HEADERS = "Attn-Share-Bundle, Attn-Share-Tier, Attn-Sealed-Bundle, Attn-Snapshot-Id, Attn-Ciphertext-Sha256";
 
-/** Methods the relay exposes to browsers — everything in the v2 HTTP surface. */
-const CORS_ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS";
+/** Methods the relay exposes to browsers, including durable snapshot uploads. */
+const CORS_ALLOWED_METHODS = "GET, POST, PUT, DELETE, OPTIONS";
 
 /**
  * Parse `ALLOWED_BROWSER_ORIGINS` into a Set for O(1) membership lookup.

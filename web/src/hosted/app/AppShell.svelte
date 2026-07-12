@@ -62,6 +62,26 @@
   }
 
   async function createAndOpen(): Promise<void> {
+    // #new is idempotent (attn-cjn): reuse the most recent empty, untouched
+    // Untitled workspace instead of minting another — a bookmarked /app#new
+    // or a back-button revisit must not grow the desk.
+    const existing = await service.listWorkspaces();
+    for (const candidate of existing) {
+      if (candidate.name !== 'Untitled') continue;
+      if (candidate.assetCount > 0 || candidate.markdownCount > 1) continue;
+      const candidateDetail = await service.getWorkspace(candidate.id);
+      if (!candidateDetail) continue;
+      const body = await service.readBodyText(candidate.id, candidateDetail.openPath);
+      if (body !== null && body.trim().length > 0) continue;
+      detail = candidateDetail;
+      activePath = candidateDetail.openPath;
+      bodyText = body ?? '';
+      editorMode = true;
+      isNewDraft = true;
+      history.replaceState(null, '', `/app/w/${detail.id}/${detail.openPath}`);
+      phase = 'ready';
+      return;
+    }
     detail = await service.createWorkspace();
     activePath = detail.openPath;
     bodyText = '';

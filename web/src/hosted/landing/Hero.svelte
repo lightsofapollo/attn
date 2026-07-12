@@ -1,5 +1,10 @@
 <script lang="ts">
   import { getTheme } from '../theme.svelte';
+  import { readDeskCount } from '../desk-count';
+
+  // Returning users lead with their desk (attn-cjn); first-timers keep the
+  // zero-friction create. Read once at mount — the count only changes in /app.
+  const deskCount = readDeskCount();
   import collabLight from './assets/collab-light.png';
   import collabDark from './assets/collab-dark.png';
 
@@ -16,10 +21,17 @@
       end-to-end-encrypted review room. No account, and no server can read the words.
     </p>
     <div class="hero-actions">
-      <a class="button primary" href="/app#new" data-action="new-workspace">
-        New workspace <span aria-hidden="true">→</span>
-      </a>
-      <a class="button" href="/app" data-action="open-desk">Open your desk</a>
+      {#if deskCount > 0}
+        <a class="button primary" href="/app" data-action="open-desk">
+          Your desk ({deskCount}) <span aria-hidden="true">→</span>
+        </a>
+        <a class="button" href="/app#new" data-action="new-workspace">New workspace</a>
+      {:else}
+        <a class="button primary" href="/app#new" data-action="new-workspace">
+          New workspace <span aria-hidden="true">→</span>
+        </a>
+        <a class="button" href="/app" data-action="open-desk">Open your desk</a>
+      {/if}
     </div>
     <div class="local-note">
       <span>Creates untitled.md immediately</span>

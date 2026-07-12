@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { readDeskCount } from '../desk-count';
+
+  const deskCount = readDeskCount();
   import { getTheme, toggleTheme } from '../theme.svelte';
 </script>
 
@@ -50,6 +53,10 @@
         </svg>
       {/if}
     </button>
-    <a class="button primary" href="/app#new" data-action="new-workspace">New workspace</a>
+    {#if deskCount > 0}
+      <a class="button primary" href="/app" data-action="open-desk">Your desk ({deskCount})</a>
+    {:else}
+      <a class="button primary" href="/app#new" data-action="new-workspace">New workspace</a>
+    {/if}
   </div>
 </nav>

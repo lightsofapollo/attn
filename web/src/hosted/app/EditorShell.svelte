@@ -215,6 +215,31 @@
     };
   });
 
+  // Auto-name from the first H1 (Theme v2, attn-cjn): "Untitled" is a
+  // transient state, not a permanent pile. Fires once per mount, after a
+  // durable commit, and only while the workspace still has the default name;
+  // the reactive detail object updates every name usage without a reload.
+  let autoNameAttempted = false;
+  async function maybeAutoNameFromHeading(text: string): Promise<void> {
+    if (autoNameAttempted || workspace.name !== 'Untitled') return;
+    const match = text.match(/^#\s+(.+)$/m);
+    const heading = match?.[1]?.trim().replace(/[#*`_]/g, '').trim().slice(0, 80);
+    if (!heading) return;
+    autoNameAttempted = true;
+    try {
+      const { dedupeWorkspaceName } = await import('./import-files');
+      const names = (await service.listWorkspaces())
+        .filter((candidate) => candidate.id !== workspace.id)
+        .map((candidate) => candidate.name);
+      const next = dedupeWorkspaceName(heading, names);
+      await service.renameWorkspace(workspace.id, next);
+      workspace.name = next;
+    } catch {
+      // Transient failure — retry on a later commit.
+      autoNameAttempted = false;
+    }
+  }
+
   async function commitTitleRename(): Promise<void> {
     renamingTitle = false;
     const next = titleValue.trim();
@@ -408,6 +433,7 @@
         commit: async (text) => {
           await granted.commitText(path, text);
           commitCount += 1;
+          void maybeAutoNameFromHeading(text);
         },
         onState: (state) => (saveState = state),
       });

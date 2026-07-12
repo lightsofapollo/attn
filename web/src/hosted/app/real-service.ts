@@ -5,6 +5,7 @@
 // entry loads it via dynamic import only — the route bundle gate forbids it
 // from the static graph.
 
+import { publishDeskCount, readDeskCount } from '../desk-count';
 import type {
   EditingSession,
   ImportFileInput,
@@ -164,7 +165,9 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   }
 
   async listWorkspaces(): Promise<WorkspaceSummary[]> {
-    return this.service.listWorkspaces();
+    const summaries = await this.service.listWorkspaces();
+    publishDeskCount(summaries.length);
+    return summaries;
   }
 
   async getWorkspace(workspaceId: string): Promise<WorkspaceDetail | undefined> {
@@ -201,6 +204,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     const created = await this.service.createWorkspace();
     const detail = await this.getWorkspace(created.workspace.workspaceId);
     if (!detail) throw new Error('created workspace vanished');
+    publishDeskCount(readDeskCount() + 1);
     return detail;
   }
 
@@ -216,6 +220,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   }
 
   async deleteWorkspace(workspaceId: string): Promise<void> {
+    publishDeskCount(Math.max(0, readDeskCount() - 1));
     await this.service.deleteWorkspace(workspaceId);
   }
 

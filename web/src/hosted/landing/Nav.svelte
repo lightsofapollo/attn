@@ -9,7 +9,7 @@
   <a class="brand" href="/"><span class="mark" aria-hidden="true">a.</span>attn</a>
   <div class="nav-right">
     <a class="nav-link" href="#how">How it works</a>
-    <a class="nav-link" href="/app">Your desk</a>
+    {#if deskCount === 0}<a class="nav-link" href="/app">Your desk</a>{/if}
     <a class="nav-link" href="#native">Native app</a>
     <a class="nav-link" href="https://github.com/lightsofapollo/attn">GitHub</a>
     <button class="icon-button" onclick={toggleTheme} aria-label="Toggle theme">

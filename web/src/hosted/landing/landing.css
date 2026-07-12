@@ -38,7 +38,7 @@ html {
   border-radius: 8px;
   background: var(--ink);
   color: var(--sheet);
-  font: 700 0.74rem var(--mono);
+  font: 700 0.75rem var(--mono);
 }
 
 .nav-right {
@@ -272,7 +272,7 @@ p {
   right: 1.2rem;
   top: 1.1rem;
   color: var(--rust);
-  font: 700 0.66rem var(--mono);
+  font: 700 0.75rem var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -408,7 +408,7 @@ p {
 }
 
 .surface-label {
-  font: 700 0.69rem var(--mono);
+  font: 700 0.75rem var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }

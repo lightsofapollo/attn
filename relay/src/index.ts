@@ -316,6 +316,18 @@ export default {
         new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } }),
       );
     }
+    // First room creation is the one room-route preflight that cannot consult
+    // stored policy: the Durable Object has no policy until the POST succeeds.
+    // Permit only the exact bare create route and still require the request
+    // Origin to be in ALLOWED_BROWSER_ORIGINS. Every later room preflight
+    // remains conditioned on the room's stored allowBrowser bit below.
+    if (request.method === "OPTIONS" && ROOM_CREATE_RE.test(url.pathname)) {
+      return corsMiddleware(
+        request,
+        env,
+        new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } }),
+      );
+    }
     if (request.method === "OPTIONS" && !ROOM_ROUTE_RE.test(url.pathname)) {
       return buildPreflightForNonRoomRoute();
     }

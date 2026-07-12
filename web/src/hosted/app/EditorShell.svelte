@@ -5,6 +5,7 @@
   import DegradedBanner from './DegradedBanner.svelte';
   import ShareSheet from './ShareSheet.svelte';
   import { AutosaveController } from './autosave';
+  import type { reviewStore as ReviewStoreInstance } from '../../lib/review/store.svelte';
   import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
   import { expandPicked, toImportFiles, type PickedFile } from './import-files';
   import type {
@@ -94,6 +95,9 @@
   }
   let EditorComponent = $state<typeof EditorComponentType | null>(null);
   let ReviewMarginComponent = $state<typeof ReviewMarginComponentType | null>(null);
+  /** Lazy store handle — the review store belongs to the editor graph, and
+   *  the app entry's static graph must never preload it (route-bundle gate). */
+  let reviewStoreRef = $state<typeof ReviewStoreInstance | null>(null);
   let ReviewApplyExpandComponent = $state<typeof ReviewApplyExpandComponentType | null>(null);
   let editorRef = $state<EditorExports | undefined>();
   let pmViewForReview = $state<EditorView | undefined>();
@@ -415,6 +419,9 @@
         ReviewMarginComponent = marginModule.default;
         ReviewApplyExpandComponent = applyModule.default;
       }));
+      imports.push(import('../../lib/review/store.svelte').then((mod) => {
+        reviewStoreRef = mod.reviewStore;
+      }));
     }
     await Promise.all(imports);
   }
@@ -676,6 +683,20 @@
     if (!currentSession) throw new Error('Review authoring is unavailable.');
     await currentSession.resolveComment(threadId);
   }
+
+  // Surface mailbox/transport failures (attn-9ua): a dead owner session
+  // previously showed an empty rail while the 400 hid in the console. The
+  // encrypted mailbox is the product's core promise — its failures are
+  // first-class UI.
+  const reviewTransportError = $derived.by(() => {
+    const authority = ownerState?.authority;
+    if (authority?.session?.status === 'error') {
+      return authority.session.error?.message
+        ?? 'Couldn\u2019t reach your encrypted mailbox \u2014 review updates are paused.';
+    }
+    if (authority?.status === 'paused' && authority.pauseReason) return authority.pauseReason;
+    return null;
+  });
 
   async function retryReviewDelivery(): Promise<void> {
     const currentSession = session;
@@ -998,6 +1019,14 @@
 
 {#snippet desktopRail()}
   {#if ownerState?.roomId && ReviewMarginComponent}
+    {#if reviewTransportError}
+      <div class="review-delivery-status" role="alert" data-slot="review-transport-error">
+        <span>{reviewTransportError}</span>
+        <button class="row-action" type="button" onclick={() => window.location.reload()}>
+          Reconnect
+        </button>
+      </div>
+    {/if}
     {#if ownerState.authority?.session?.authoringError}
       <div class="review-delivery-status" role="status">
         <span>{ownerState.authority.session.authoringError}</span>
@@ -1105,7 +1134,7 @@
         reviewSheetOpen = true;
       }}
     >
-      Review · {workspace.reviewCards.length}
+      Review · {ownerState?.roomId && reviewStoreRef ? reviewStoreRef.threadsForCurrentFile.length : workspace.reviewCards.length}
     </button>
     {#if editing}
       <button type="button" onclick={() => void exitEdit()}>Done</button>
@@ -1197,10 +1226,18 @@
 
 {#if reviewSheetOpen}
   <BottomSheet
-    title={ownerState?.roomId ? 'Review' : `Review · ${workspace.reviewCards.length}`}
+    title={ownerState?.roomId && reviewStoreRef ? `Review · ${reviewStoreRef.threadsForCurrentFile.length}` : `Review · ${workspace.reviewCards.length}`}
     onclose={closeReviewSheet}
   >
     {#if ownerState?.roomId && ReviewMarginComponent}
+      {#if reviewTransportError}
+        <div class="review-delivery-status" role="alert" data-slot="review-transport-error">
+          <span>{reviewTransportError}</span>
+          <button class="row-action" type="button" onclick={() => window.location.reload()}>
+            Reconnect
+          </button>
+        </div>
+      {/if}
       <div class="review-sheet-margin">
         <ReviewMarginComponent
           view={pmViewForReview}

@@ -105,6 +105,110 @@ test('desktop editor fills the canvas and has no edit mode toggle', async ({ pag
   expect(controlFocus).toEqual({ outlineStyle: 'solid', outlineWidth: '2px' });
 });
 
+test('workspace picker is bounded and provides switch, create, rename, and desk actions', async ({ page }) => {
+  await page.goto('/app#new');
+  await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/untitled\.md$/u);
+  const firstUrl = page.url();
+  await page.getByRole('button', { name: 'Rename workspace' }).click();
+  await page.getByRole('textbox', { name: 'Workspace title' }).fill('First workspace');
+  await page.getByRole('textbox', { name: 'Workspace title' }).press('Enter');
+  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('First workspace');
+
+  const picker = page.getByRole('combobox', { name: 'Project picker' });
+  await picker.click();
+  const menu = page.locator('.sidebar-project-menu');
+  await expect(menu).toBeVisible();
+  const geometry = await menu.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, width: rect.width, viewport: window.innerWidth };
+  });
+  expect(geometry.width).toBeLessThanOrEqual(320);
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: 'test-results/hosted-workspace-picker.png' });
+
+  await page.getByRole('menuitem', { name: 'New workspace' }).click();
+  await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/untitled\.md$/u);
+  expect(page.url()).not.toBe(firstUrl);
+
+  await page.getByRole('combobox', { name: 'Project picker' }).click();
+  await page.getByRole('menuitem', { name: 'Rename workspace' }).click();
+  const title = page.getByRole('textbox', { name: 'Workspace title' });
+  await expect(title).toBeFocused();
+  await title.fill('Second workspace');
+  await title.press('Enter');
+  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('Second workspace');
+
+  await page.getByRole('combobox', { name: 'Project picker' }).click();
+  await page.getByPlaceholder('Search projects...').fill('First workspace');
+  await page.locator('.sidebar-project-menu-item').filter({ hasText: 'First workspace' }).click();
+  await expect(page).toHaveURL(firstUrl);
+
+  await page.getByRole('combobox', { name: 'Project picker' }).click();
+  await page.getByRole('menuitem', { name: 'All workspaces' }).click();
+  await expect(page).toHaveURL(/\/app$/u);
+  await expect(page.locator('.workspace-row')).toHaveCount(2);
+});
+
+test('desktop Markdown formatting is visible, keyboard-correct, and supports input rules', async ({ page }) => {
+  await page.goto('/app#new');
+  const editor = documentEditor(page);
+  const toolbar = page.getByRole('toolbar', { name: 'Markdown formatting' });
+  await expect(toolbar).toBeVisible();
+  await expect(toolbar.getByRole('button', { name: 'Bold' })).toBeEnabled();
+
+  await editor.click();
+  await page.keyboard.type('Keyboard formatting');
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press('ControlOrMeta+b');
+  await expect(editor.locator('strong')).toContainText('Keyboard formatting');
+  await expect(page.locator('.project-sidebar')).toBeVisible();
+
+  await toolbar.getByRole('button', { name: 'Heading 2' }).click();
+  await expect(editor.locator('h2')).toContainText('Keyboard formatting');
+
+  await editor.click();
+  await page.keyboard.press('ControlOrMeta+End');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('# ');
+  await page.keyboard.type('Heading from Markdown');
+  await expect(editor.locator('h1')).toContainText('Heading from Markdown');
+});
+
+test('dragging Markdown onto the desk imports it and the workspace drop target adds files', async ({ page }) => {
+  await page.goto('/app');
+  const importTarget = page.locator('.quick-drop-target');
+  await expect(importTarget).toContainText('Drop Markdown');
+
+  await page.evaluate(() => {
+    const target = document.querySelector<HTMLElement>('.desk');
+    if (!target) throw new Error('desk drop target missing');
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['# Dropped document\n\nBody'], 'dropped.md', { type: 'text/markdown' }));
+    target.dispatchEvent(new DragEvent('dragenter', { bubbles: true, dataTransfer: transfer }));
+  });
+  await expect(importTarget).toHaveAttribute('data-drop-active', 'true');
+  await page.evaluate(() => {
+    const target = document.querySelector<HTMLElement>('.desk');
+    if (!target) throw new Error('desk drop target missing');
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['# Dropped document\n\nBody'], 'dropped.md', { type: 'text/markdown' }));
+    target.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
+  });
+  await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/dropped\.md$/u);
+  await expect(documentEditor(page)).toContainText('Dropped document');
+
+  const workspaceDrop = page.locator('.hosted-sidebar-dropzone');
+  await expect(workspaceDrop).toContainText('Drop files here');
+  await workspaceDrop.evaluate((target) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(['## Added note'], 'added.md', { type: 'text/markdown' }));
+    target.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
+  });
+  await expect(page.getByRole('button', { name: 'added.md', exact: true })).toBeVisible();
+});
+
 test('returning from mobile reader mode restores desktop editing', async ({ page }) => {
   await page.goto('/app#new');
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
@@ -330,11 +434,11 @@ test('mobile reader does not claim the writer lease until Edit is requested', as
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'false');
 });
 
-test('multi-file rail: create, add asset with inline preview, rename, delete, export zip', async ({ page }) => {
+test('multi-file workspace: create, add, context-rename, context-delete, and export', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
 
-  // Create a nested Markdown file from the rail.
+  // Create a nested Markdown file from the sidebar.
   await page.locator('[data-action="new-markdown"]').click();
   await page.getByRole('textbox', { name: 'New Markdown file path' }).fill('docs/notes');
   await page.getByRole('textbox', { name: 'New Markdown file path' }).press('Enter');
@@ -363,7 +467,8 @@ test('multi-file rail: create, add asset with inline preview, rename, delete, ex
   expect(naturalWidth).toBe(1); // decoded — the decrypted bytes are a real PNG
 
   // Rename the asset to a nested path.
-  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await page.getByRole('button', { name: 'pixel.png', exact: true }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Rename…', exact: true }).click();
   const renameInput = page.getByRole('textbox', { name: 'New path' });
   await renameInput.fill('images/pixel.png');
   await renameInput.press('Enter');
@@ -377,7 +482,8 @@ test('multi-file rail: create, add asset with inline preview, rename, delete, ex
   expect(download.suggestedFilename()).toMatch(/\.zip$/u);
 
   // Delete the asset; the workspace survives with its Markdown files.
-  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.getByRole('button', { name: 'pixel.png', exact: true }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Delete…', exact: true }).click();
   await page.getByRole('button', { name: 'Delete file' }).click();
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   await expect(page.getByRole('button', { name: 'pixel.png' })).toHaveCount(0);

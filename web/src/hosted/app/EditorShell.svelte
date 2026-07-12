@@ -6,7 +6,13 @@
   import ShareSheet from './ShareSheet.svelte';
   import { AutosaveController } from './autosave';
   import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
-  import { expandPicked, toImportFiles, type PickedFile } from './import-files';
+  import {
+    expandPicked,
+    pickedFilesFromDrop,
+    pickedFilesFromList,
+    toImportFiles,
+    type PickedFile,
+  } from './import-files';
   import type {
     EditingSession,
     SaveState,
@@ -14,6 +20,7 @@
     WorkspaceAppService,
     WorkspaceDetail,
     WorkspaceEntry,
+    WorkspaceSummary,
     WorkspaceShareRequest,
   } from './types';
   import type EditorComponentType from '../../lib/Editor.svelte';
@@ -27,13 +34,21 @@
   interface Props {
     service: WorkspaceAppService;
     workspace: WorkspaceDetail;
+    workspaces: WorkspaceSummary[];
     activePath: string | undefined;
     /** Decoded head body when the active entry is Markdown; null otherwise. */
     bodyText?: string | null;
     isNewDraft?: boolean;
   }
 
-  const { service, workspace, activePath, bodyText = null, isNewDraft = false }: Props = $props();
+  const {
+    service,
+    workspace,
+    workspaces,
+    activePath,
+    bodyText = null,
+    isNewDraft = false,
+  }: Props = $props();
 
   const health: StorageHealth = $derived(service.storageHealth());
   const activeEntry = $derived(
@@ -143,15 +158,16 @@
   let addingMarkdown = $state(false);
   let newMarkdownPath = $state('');
   let renamingEntry = $state(false);
+  let renamingEntryPath = $state<string | null>(null);
   let renameEntryValue = $state('');
   let confirmingEntryDelete = $state(false);
+  let deletingEntryPath = $state<string | null>(null);
+  let sidebarDropActive = $state(false);
   let railError = $state<string | null>(null);
   let assetInput = $state<HTMLInputElement | undefined>();
   let newMarkdownInput = $state<HTMLInputElement | undefined>();
   let newMarkdownButton = $state<HTMLButtonElement | undefined>();
   let renameEntryInput = $state<HTMLInputElement | undefined>();
-  let renameEntryButton = $state<HTMLButtonElement | undefined>();
-  let deleteEntryTrigger: HTMLButtonElement | null = null;
   let deleteCancelButton = $state<HTMLButtonElement | undefined>();
   let previewUrl = $state<string | null>(null);
 
@@ -210,17 +226,31 @@
   let titleInput = $state<HTMLInputElement | undefined>();
   let titleButton = $state<HTMLButtonElement | undefined>();
 
-  async function focusAndSelect(input: HTMLInputElement | undefined): Promise<void> {
+  async function focusAndSelect(
+    input: HTMLInputElement | undefined,
+    afterFloatingMenu = false,
+  ): Promise<void> {
     await tick();
+    // Context/dropdown primitives restore focus to their trigger as they
+    // close. Wait through that close cycle, then move focus into the newly
+    // mounted field so the menu cannot steal it back or trigger an onblur.
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+    if (afterFloatingMenu) {
+      // Bits UI restores the context/dropdown trigger after its 150ms close
+      // transition. WebKit performs that restoration later than Chromium.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 180));
+    }
     input?.focus();
     input?.select();
   }
 
-  async function beginTitleRename(): Promise<void> {
+  async function beginTitleRename(afterFloatingMenu = false): Promise<void> {
     titleValue = workspace.name;
     renamingTitle = true;
     await tick();
-    await focusAndSelect(titleInput);
+    await focusAndSelect(titleInput, afterFloatingMenu);
   }
 
   async function cancelTitleRename(): Promise<void> {
@@ -229,17 +259,35 @@
     titleButton?.focus();
   }
 
-  async function beginEntryRename(): Promise<void> {
-    renameEntryValue = activeEntry?.path ?? '';
+  function focusEntryRow(path: string | null): void {
+    if (!path) return;
+    const candidates = document.querySelectorAll<HTMLElement>('[data-sidebar="menu-button"][data-path]');
+    for (const candidate of candidates) {
+      const treePath = candidate.dataset.path ?? '';
+      if (treePath === path || treePath.endsWith(`/${path}`)) {
+        candidate.focus();
+        return;
+      }
+    }
+  }
+
+  async function beginEntryRename(path = activeEntry?.path): Promise<void> {
+    if (!path) return;
+    confirmingEntryDelete = false;
+    deletingEntryPath = null;
+    renamingEntryPath = path;
+    renameEntryValue = path;
     renamingEntry = true;
     await tick();
-    await focusAndSelect(renameEntryInput);
+    await focusAndSelect(renameEntryInput, true);
   }
 
   async function cancelEntryRename(): Promise<void> {
+    const path = renamingEntryPath;
     renamingEntry = false;
+    renamingEntryPath = null;
     await tick();
-    renameEntryButton?.focus();
+    focusEntryRow(path);
   }
 
   async function beginAddMarkdown(): Promise<void> {
@@ -254,17 +302,23 @@
     newMarkdownButton?.focus();
   }
 
-  async function beginEntryDelete(trigger: HTMLButtonElement): Promise<void> {
-    deleteEntryTrigger = trigger;
+  async function beginEntryDelete(path = activeEntry?.path): Promise<void> {
+    if (!path) return;
+    renamingEntry = false;
+    renamingEntryPath = null;
+    deletingEntryPath = path;
     confirmingEntryDelete = true;
     await tick();
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 180));
     deleteCancelButton?.focus();
   }
 
   async function cancelEntryDelete(): Promise<void> {
+    const path = deletingEntryPath;
     confirmingEntryDelete = false;
+    deletingEntryPath = null;
     await tick();
-    deleteEntryTrigger?.focus();
+    focusEntryRow(path);
   }
 
   $effect(() => {
@@ -360,66 +414,87 @@
     }
   }
 
-  async function onAssetsPicked(): Promise<void> {
-    const files = assetInput?.files;
-    if (!files || files.length === 0) return;
+  async function addPickedFiles(picked: PickedFile[]): Promise<void> {
+    if (picked.length === 0) return;
     railError = null;
     try {
-      const picked: PickedFile[] = [];
-      for (const file of Array.from(files)) {
-        picked.push({
-          name: file.name,
-          relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
-          type: file.type,
-          bytes: new Uint8Array(await file.arrayBuffer()),
-        });
-      }
       if (!await flushPendingEditor()) return;
       await service.addAssetFiles(workspace.id, toImportFiles(await expandPicked(picked)));
       window.location.reload();
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function onAssetsPicked(): Promise<void> {
+    const files = assetInput?.files;
+    if (!files || files.length === 0) return;
+    try {
+      await addPickedFiles(await pickedFilesFromList(files));
     } finally {
       if (assetInput) assetInput.value = '';
     }
   }
 
+  function onSidebarDragOver(event: DragEvent): void {
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    event.preventDefault();
+    sidebarDropActive = true;
+    event.dataTransfer.dropEffect = 'copy';
+  }
+
+  async function onSidebarDrop(event: DragEvent): Promise<void> {
+    const transfer = event.dataTransfer;
+    if (!transfer) return;
+    event.preventDefault();
+    sidebarDropActive = false;
+    await addPickedFiles(await pickedFilesFromDrop(transfer));
+  }
+
   async function commitEntryRename(): Promise<void> {
-    const entry = activeEntry;
+    const sourcePath = renamingEntryPath;
     const target = renameEntryValue.trim();
     renamingEntry = false;
-    if (!entry || target.length === 0 || target === entry.path) return;
+    renamingEntryPath = null;
+    if (!sourcePath || target.length === 0 || target === sourcePath) return;
     railError = null;
     try {
       if (!await flushPendingEditor()) return;
-      await service.renameEntry(workspace.id, entry.path, target);
-      window.location.assign(`/app/w/${workspace.id}/${target}`);
+      await service.renameEntry(workspace.id, sourcePath, target);
+      if (sourcePath === activeEntry?.path) {
+        window.location.assign(`/app/w/${workspace.id}/${target}`);
+      } else {
+        window.location.reload();
+      }
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
   }
 
-  async function deleteActiveEntry(): Promise<void> {
-    const entry = activeEntry;
+  async function deleteEntry(path = deletingEntryPath ?? activeEntry?.path): Promise<void> {
     confirmingEntryDelete = false;
-    if (!entry) return;
+    deletingEntryPath = null;
+    if (!path) return;
     railError = null;
     try {
       if (!await flushPendingEditor()) return;
-      await service.deleteEntry(workspace.id, entry.path);
-      window.location.assign(`/app/w/${workspace.id}`);
+      await service.deleteEntry(workspace.id, path);
+      if (path === activeEntry?.path) {
+        window.location.assign(`/app/w/${workspace.id}`);
+      } else {
+        window.location.reload();
+      }
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
   }
 
-  async function downloadActiveEntry(): Promise<void> {
-    const entry = activeEntry;
-    if (!entry) return;
+  async function downloadEntry(path = activeEntry?.path): Promise<void> {
+    if (!path) return;
     if (!await flushPendingEditor()) return;
-    const result = await service.readEntryBytes(workspace.id, entry.path);
+    const result = await service.readEntryBytes(workspace.id, path);
     if (!result) return;
-    const basename = entry.path.split('/').pop() ?? entry.path;
+    const basename = path.split('/').pop() ?? path;
     triggerDownload(document, basename, result.bytes, result.mediaType);
   }
 
@@ -820,6 +895,22 @@
     window.location.assign(`/app/w/${workspace.id}/${relativePath}`);
   }
 
+  async function switchWorkspace(workspaceId: string, openPath: string): Promise<void> {
+    if (workspaceId === workspace.id) return;
+    if (!await flushPendingEditor()) return;
+    window.location.assign(`/app/w/${workspaceId}/${openPath}`);
+  }
+
+  async function createNewWorkspace(): Promise<void> {
+    if (!await flushPendingEditor()) return;
+    window.location.assign('/app#new');
+  }
+
+  async function openWorkspaceHome(): Promise<void> {
+    if (!await flushPendingEditor()) return;
+    window.location.assign('/app');
+  }
+
   function entryGlyph(entry: WorkspaceEntry): string {
     if (entry.presentation === 'editable') return '';
     return entry.presentation === 'preview' ? '▧ ' : '◇ ';
@@ -911,6 +1002,44 @@
       </div>
     {/if}
     {#if activeEntry?.presentation === 'editable' && EditorComponent}
+      {#if desktopLayout}
+        <div class="hosted-formatting-strip" role="toolbar" aria-label="Markdown formatting">
+          <span class="hosted-formatting-label">Format</span>
+          <button
+            type="button"
+            aria-label="Bold"
+            title="Bold (⌘B)"
+            disabled={!editing || ownerState?.writable === false}
+            onpointerdown={(event) => event.preventDefault()}
+            onclick={() => editorRef?.toggleBold()}
+          ><strong>B</strong></button>
+          <button
+            type="button"
+            aria-label="Italic"
+            title="Italic (⌘I)"
+            disabled={!editing || ownerState?.writable === false}
+            onpointerdown={(event) => event.preventDefault()}
+            onclick={() => editorRef?.toggleItalic()}
+          ><em>I</em></button>
+          <button
+            type="button"
+            aria-label="Heading 2"
+            title="Heading 2"
+            disabled={!editing || ownerState?.writable === false}
+            onpointerdown={(event) => event.preventDefault()}
+            onclick={() => editorRef?.toggleHeading(2)}
+          >H2</button>
+          <button
+            type="button"
+            aria-label="Bullet list"
+            title="Bullet list"
+            disabled={!editing || ownerState?.writable === false}
+            onpointerdown={(event) => event.preventDefault()}
+            onclick={() => editorRef?.toggleBulletList()}
+          >List</button>
+          <span class="hosted-formatting-hint">Markdown: type #, -, or &gt; followed by space</span>
+        </div>
+      {/if}
       <div
         class="hosted-editor-surface"
         class:hosted-mobile-reader={!desktopLayout}
@@ -962,7 +1091,7 @@
           {/if}
         </div>
         <div class="storage-actions">
-          <button class="button" type="button" onclick={() => void downloadActiveEntry()}>
+          <button class="button" type="button" onclick={() => void downloadEntry()}>
             Download
           </button>
         </div>
@@ -1014,48 +1143,6 @@
 
 {#snippet desktopSidebarFooter()}
   <div class="hosted-sidebar-footer" aria-label="Workspace actions">
-    {#if activeEntry}
-      <div class="hosted-entry-actions" aria-label={`Actions for ${activeEntry.path}`}>
-        {#if renamingEntry}
-          <input
-            bind:this={renameEntryInput}
-            class="hosted-sidebar-input"
-            type="text"
-            aria-label="New path"
-            bind:value={renameEntryValue}
-            onkeydown={(event) => {
-              if (event.key === 'Enter') void commitEntryRename();
-              if (event.key === 'Escape') void cancelEntryRename();
-            }}
-          />
-        {:else}
-          <button
-            bind:this={renameEntryButton}
-            type="button"
-            onclick={() => void beginEntryRename()}
-          >Rename</button>
-          <button type="button" onclick={() => void downloadActiveEntry()}>Download</button>
-          <button class="danger" type="button" onclick={(event) => void beginEntryDelete(event.currentTarget)}>Delete</button>
-        {/if}
-      </div>
-      {#if confirmingEntryDelete}
-        <div
-          class="hosted-delete-confirm"
-          role="alertdialog"
-          tabindex="-1"
-          aria-label={`Delete ${activeEntry.path}?`}
-          onkeydown={(event) => {
-            if (event.key === 'Escape') void cancelEntryDelete();
-          }}
-        >
-          <span>Delete {activeEntry.path}?</span>
-          <div>
-            <button bind:this={deleteCancelButton} type="button" onclick={() => void cancelEntryDelete()}>Cancel</button>
-            <button class="danger" type="button" onclick={() => void deleteActiveEntry()}>Delete file</button>
-          </div>
-        </div>
-      {/if}
-    {/if}
     {#if addingMarkdown}
       <input
         bind:this={newMarkdownInput}
@@ -1075,10 +1162,28 @@
         <span>New Markdown</span>
       </button>
     {/if}
-    <button class="hosted-sidebar-action" type="button" data-action="add-assets" onclick={() => assetInput?.click()}>
-      <span aria-hidden="true">↑</span>
-      <span>Add files or assets</span>
-    </button>
+    <div
+      class="hosted-sidebar-dropzone"
+      class:hosted-sidebar-dropzone-active={sidebarDropActive}
+      role="button"
+      tabindex="0"
+      data-action="add-assets"
+      data-drop-active={sidebarDropActive}
+      ondragenter={onSidebarDragOver}
+      ondragover={onSidebarDragOver}
+      ondragleave={() => (sidebarDropActive = false)}
+      ondrop={(event) => void onSidebarDrop(event)}
+      onclick={() => assetInput?.click()}
+      onkeydown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          assetInput?.click();
+        }
+      }}
+    >
+      <span aria-hidden="true">{sidebarDropActive ? '↓' : '↑'}</span>
+      <span><strong>{sidebarDropActive ? 'Drop to add' : 'Drop files here'}</strong><small>or choose Markdown and assets</small></span>
+    </div>
     <button class="hosted-sidebar-action" type="button" data-action="export-zip" onclick={() => void exportZip()}>
       <span aria-hidden="true">↓</span>
       <span>Export workspace</span>
@@ -1087,6 +1192,7 @@
       bind:this={assetInput}
       type="file"
       multiple
+      accept=".md,.markdown,image/*,application/zip,.zip,*/*"
       class="sr-only"
       aria-hidden="true"
       tabindex="-1"
@@ -1125,6 +1231,7 @@
       <HostedDesktopWorkspaceFrame
         workspaceId={workspace.id}
         workspaceName={workspace.name}
+        {workspaces}
         entries={workspace.entries}
         activeEntryPath={activeEntry?.path}
         {shareOpen}
@@ -1133,6 +1240,13 @@
         content={documentSurface}
         rail={desktopRail}
         onNavigate={navigateDesktopTree}
+        onWorkspaceSwitch={(workspaceId, openPath) => void switchWorkspace(workspaceId, openPath)}
+        onCreateWorkspace={() => void createNewWorkspace()}
+        onRenameWorkspace={() => void beginTitleRename(true)}
+        onOpenWorkspaceHome={() => void openWorkspaceHome()}
+        onRenameEntry={(path) => void beginEntryRename(path)}
+        onDownloadEntry={(path) => void downloadEntry(path)}
+        onDeleteEntry={(path) => void beginEntryDelete(path)}
         onShare={openShare}
         onViewport={(viewport) => (canvasEl = viewport ?? undefined)}
       />
@@ -1224,6 +1338,90 @@
     >Share</button>
   </nav>
 </div>
+{/if}
+
+{#if renamingEntry && renamingEntryPath}
+  <div class="hosted-file-dialog-layer">
+    <button
+      class="hosted-file-dialog-scrim"
+      type="button"
+      aria-label="Cancel file rename"
+      onclick={() => void cancelEntryRename()}
+    ></button>
+    <div
+      class="hosted-file-dialog"
+      role="dialog"
+      tabindex="-1"
+      aria-modal="true"
+      aria-labelledby="rename-file-title"
+      onkeydown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          void cancelEntryRename();
+        }
+      }}
+    >
+      <form
+        class="hosted-file-dialog-form"
+        onsubmit={(event) => {
+          event.preventDefault();
+          void commitEntryRename();
+        }}
+      >
+        <div>
+          <span class="hosted-file-dialog-kicker">File</span>
+          <h2 id="rename-file-title">Rename {renamingEntryPath}</h2>
+        </div>
+        <label for="hosted-file-rename">Workspace-relative path</label>
+        <input
+          id="hosted-file-rename"
+          bind:this={renameEntryInput}
+          type="text"
+          aria-label="New path"
+          bind:value={renameEntryValue}
+        />
+        <div class="hosted-file-dialog-actions">
+          <button type="button" onclick={() => void cancelEntryRename()}>Cancel</button>
+          <button class="primary" type="submit">Rename</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+{#if confirmingEntryDelete && deletingEntryPath}
+  <div class="hosted-file-dialog-layer">
+    <button
+      class="hosted-file-dialog-scrim"
+      type="button"
+      aria-label="Cancel file deletion"
+      onclick={() => void cancelEntryDelete()}
+    ></button>
+    <div
+      class="hosted-file-dialog"
+      role="alertdialog"
+      tabindex="-1"
+      aria-modal="true"
+      aria-labelledby="delete-file-title"
+      aria-describedby="delete-file-description"
+      onkeydown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          void cancelEntryDelete();
+        }
+      }}
+    >
+      <div>
+        <span class="hosted-file-dialog-kicker">Delete file</span>
+        <h2 id="delete-file-title">Delete {deletingEntryPath}?</h2>
+      </div>
+      <p id="delete-file-description">This removes the local file from this workspace. It cannot be undone.</p>
+      <div class="hosted-file-dialog-actions">
+        <button bind:this={deleteCancelButton} type="button" onclick={() => void cancelEntryDelete()}>Cancel</button>
+        <button class="danger" type="button" onclick={() => void deleteEntry()}>Delete file</button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 {#if editing && !desktopLayout}

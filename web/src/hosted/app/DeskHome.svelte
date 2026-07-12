@@ -1,7 +1,13 @@
 <script lang="ts">
   import AppHeader from './AppHeader.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
-  import { expandPicked, prepareImport, type PickedFile } from './import-files';
+  import {
+    expandPicked,
+    pickedFilesFromDrop,
+    pickedFilesFromList,
+    prepareImport,
+    type PickedFile,
+  } from './import-files';
   import type { ImportFileInput, SharingState, StorageHealth, WorkspaceSummary } from './types';
 
   interface Props {
@@ -21,6 +27,9 @@
   let renameValue = $state('');
   let confirmingDeleteId = $state<string | null>(null);
   let importError = $state<string | null>(null);
+  let dragDepth = $state(0);
+  let dropActive = $state(false);
+  let importing = $state(false);
 
   function sharingLabel(sharing: SharingState): string {
     switch (sharing) {
@@ -33,27 +42,53 @@
     }
   }
 
-  async function onFilesPicked(): Promise<void> {
-    const files = fileInput?.files;
-    if (!files || files.length === 0) return;
+  async function importPicked(picked: PickedFile[]): Promise<void> {
+    if (picked.length === 0 || importing) return;
     importError = null;
+    importing = true;
     try {
-      const picked: PickedFile[] = [];
-      for (const file of Array.from(files)) {
-        picked.push({
-          name: file.name,
-          relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
-          type: file.type,
-          bytes: new Uint8Array(await file.arrayBuffer()),
-        });
-      }
       const prepared = prepareImport(await expandPicked(picked));
       await onImport(prepared.name, prepared.files);
     } catch (error) {
       importError = error instanceof Error ? error.message : String(error);
     } finally {
+      importing = false;
       if (fileInput) fileInput.value = '';
     }
+  }
+
+  async function onFilesPicked(): Promise<void> {
+    const files = fileInput?.files;
+    if (!files || files.length === 0) return;
+    await importPicked(await pickedFilesFromList(files));
+  }
+
+  function onDragEnter(event: DragEvent): void {
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    event.preventDefault();
+    dragDepth += 1;
+    dropActive = true;
+  }
+
+  function onDragLeave(event: DragEvent): void {
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) dropActive = false;
+  }
+
+  function onDragOver(event: DragEvent): void {
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  }
+
+  async function onDrop(event: DragEvent): Promise<void> {
+    const transfer = event.dataTransfer;
+    if (!transfer) return;
+    event.preventDefault();
+    dragDepth = 0;
+    dropActive = false;
+    await importPicked(await pickedFilesFromDrop(transfer));
   }
 
   function startRename(workspace: WorkspaceSummary): void {
@@ -76,7 +111,14 @@
       <a class="button" href="/app/storage">Storage</a>
     {/snippet}
   </AppHeader>
-  <main class="desk">
+  <main
+    class="desk"
+    class:desk-drop-active={dropActive}
+    ondragenter={onDragEnter}
+    ondragleave={onDragLeave}
+    ondragover={onDragOver}
+    ondrop={(event) => void onDrop(event)}
+  >
     <DegradedBanner mode={health.mode} />
     <div class="desk-title">
       <div>
@@ -98,14 +140,15 @@
         <big>＋ New workspace</big>
       </button>
       <button
-        class="quick"
+        class="quick quick-drop-target"
         type="button"
         data-action="import-workspace"
-        disabled={storageUnavailable}
+        data-drop-active={dropActive}
+        disabled={storageUnavailable || importing}
         onclick={() => fileInput?.click()}
       >
-        <span>Markdown, images, folders, or zip</span>
-        <big>↥ Import workspace</big>
+        <span>{dropActive ? 'Release to create a local workspace' : 'Drop Markdown, a folder, images, or zip'}</span>
+        <big>{importing ? 'Importing…' : dropActive ? '↓ Drop to import' : '↥ Import workspace'}</big>
       </button>
       <a class="quick" href="/app#join" data-action="join-review">
         <span>Browser or native link</span>

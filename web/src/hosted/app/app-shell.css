@@ -144,6 +144,18 @@
   background: var(--sheet-raised);
 }
 
+.quick-drop-target {
+  outline: 1px dashed color-mix(in oklch, var(--ink) 34%, transparent);
+  outline-offset: -10px;
+  transition: background-color 160ms ease, outline-color 160ms ease;
+}
+
+.quick-drop-target[data-drop-active='true'],
+.desk-drop-active .quick-drop-target {
+  background: color-mix(in oklch, var(--rust) 8%, var(--sheet));
+  outline-color: var(--rust);
+}
+
 .quick big {
   display: block;
   font-family: var(--serif);
@@ -548,6 +560,60 @@ a.workspace-row:hover {
   padding-bottom: 4rem;
 }
 
+.hosted-formatting-strip {
+  position: sticky;
+  z-index: 10;
+  top: 0;
+  display: flex;
+  min-height: 2.5rem;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem max(1rem, calc((100% - 72ch) / 2));
+  border-bottom: 1px solid color-mix(in oklch, var(--border) 68%, transparent);
+  background: color-mix(in oklch, var(--background) 94%, transparent);
+  backdrop-filter: blur(6px);
+  font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+}
+
+.hosted-formatting-strip button {
+  min-width: 2rem;
+  height: 1.9rem;
+  padding: 0 0.5rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  font: 650 0.7rem/1 'Source Sans 3 Variable', 'Source Sans 3', sans-serif;
+  cursor: pointer;
+}
+
+.hosted-formatting-strip button:hover,
+.hosted-formatting-strip button:focus-visible {
+  background: var(--accent);
+}
+
+.hosted-formatting-strip button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.hosted-formatting-label,
+.hosted-formatting-hint {
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+}
+
+.hosted-formatting-label {
+  margin-right: 0.3rem;
+  font-weight: 650;
+}
+
+.hosted-formatting-hint {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 .hosted-document-banner {
   width: min(760px, calc(100% - 2rem));
   margin: 0.75rem auto 0;
@@ -660,35 +726,6 @@ a.workspace-row:hover {
   color: var(--sidebar-accent-foreground);
 }
 
-.hosted-entry-actions {
-  display: flex;
-  gap: 0.2rem;
-  padding-bottom: 0.35rem;
-}
-
-.hosted-entry-actions button,
-.hosted-delete-confirm button {
-  min-height: 1.75rem;
-  padding: 0.25rem 0.45rem;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font-size: 0.7rem;
-  cursor: pointer;
-}
-
-.hosted-entry-actions button:hover,
-.hosted-delete-confirm button:hover {
-  background: var(--sidebar-accent);
-  color: var(--foreground);
-}
-
-.hosted-entry-actions .danger,
-.hosted-delete-confirm .danger {
-  color: var(--destructive);
-}
-
 .hosted-sidebar-input {
   width: 100%;
   height: 2rem;
@@ -700,21 +737,144 @@ a.workspace-row:hover {
   font-size: 0.7rem;
 }
 
-.hosted-delete-confirm {
-  display: grid;
-  gap: 0.35rem;
-  margin-bottom: 0.35rem;
-  padding: 0.55rem;
-  border: 1px solid color-mix(in oklch, var(--destructive) 35%, var(--border));
+.hosted-sidebar-dropzone {
+  display: flex;
+  min-height: 3.15rem;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px dashed color-mix(in oklch, var(--sidebar-foreground) 34%, transparent);
   border-radius: 8px;
-  color: var(--foreground);
+  color: var(--sidebar-foreground);
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.hosted-sidebar-dropzone:hover,
+.hosted-sidebar-dropzone:focus-visible,
+.hosted-sidebar-dropzone-active {
+  border-color: var(--ring);
+  background: var(--sidebar-accent);
+}
+
+.hosted-sidebar-dropzone > span:first-child {
+  width: 1.2rem;
+  text-align: center;
+}
+
+.hosted-sidebar-dropzone > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.hosted-sidebar-dropzone strong {
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.hosted-sidebar-dropzone small {
+  color: var(--muted-foreground);
   font-size: 0.7rem;
 }
 
-.hosted-delete-confirm > div {
+.hosted-file-dialog-layer {
+  position: fixed;
+  z-index: 70;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.hosted-file-dialog-scrim {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: color-mix(in oklch, var(--foreground) 20%, transparent);
+  cursor: default;
+}
+
+.hosted-file-dialog {
+  position: relative;
+  display: grid;
+  width: min(27rem, calc(100vw - 2rem));
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--background);
+  box-shadow: 0 6px 8px color-mix(in oklch, black 18%, transparent);
+  color: var(--foreground);
+  font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+}
+
+.hosted-file-dialog-form {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.hosted-file-dialog h2 {
+  margin: 0.1rem 0 0;
+  font: 600 1.25rem/1.3 'Source Serif 4 Variable', 'Source Serif 4', Georgia, serif;
+}
+
+.hosted-file-dialog p,
+.hosted-file-dialog label {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.hosted-file-dialog-kicker {
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.hosted-file-dialog input {
+  width: 100%;
+  height: 2.5rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--input);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 0.95rem;
+}
+
+.hosted-file-dialog-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 0.25rem;
+  gap: 0.5rem;
+}
+
+.hosted-file-dialog-actions button {
+  min-height: 2.5rem;
+  padding: 0 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 0.85rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.hosted-file-dialog-actions .primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.hosted-file-dialog-actions .danger {
+  border-color: color-mix(in oklch, var(--destructive) 45%, var(--border));
+  color: var(--destructive);
 }
 
 .hosted-sidebar-error {
@@ -1615,6 +1775,11 @@ a.workspace-row:hover {
   padding: clamp(2.5rem, 8vw, 5rem) 1.5rem;
   text-align: center;
   font-family: var(--sans);
+}
+
+.drop-zone-active {
+  border-color: var(--rust);
+  background: color-mix(in oklch, var(--rust) 7%, var(--sheet));
 }
 
 .drop-zone h2 {

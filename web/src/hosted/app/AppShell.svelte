@@ -42,7 +42,10 @@
         return;
       }
       if (route?.view === 'workspace') {
-        detail = await service.getWorkspace(route.workspaceId);
+        [workspaces, detail] = await Promise.all([
+          service.listWorkspaces(),
+          service.getWorkspace(route.workspaceId),
+        ]);
         if (detail) {
           activePath = route.filePath ?? detail.openPath;
           bodyText = await service.readBodyText(detail.id, activePath);
@@ -63,6 +66,7 @@
 
   async function createAndOpen(): Promise<void> {
     detail = await service.createWorkspace();
+    workspaces = await service.listWorkspaces();
     activePath = detail.openPath;
     bodyText = '';
     editorMode = true;
@@ -161,7 +165,7 @@
     </main>
   </div>
 {:else if editorMode && detail}
-  <EditorShell {service} workspace={detail} {activePath} {bodyText} {isNewDraft} />
+  <EditorShell {service} workspace={detail} {workspaces} {activePath} {bodyText} {isNewDraft} />
 {:else if route?.view === 'workspace'}
   <div class="app-shell" data-app-view="missing">
     <main class="desk">

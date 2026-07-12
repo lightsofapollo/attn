@@ -116,13 +116,14 @@ test('authoring controls move focus into transient inputs and restore it on canc
   await page.keyboard.press('Escape');
   await expect(workspaceRename).toBeFocused();
 
-  const fileRename = page.getByRole('button', { name: 'Rename', exact: true });
-  await fileRename.focus();
-  await page.keyboard.press('Enter');
+  const fileRow = page.getByRole('button', { name: 'untitled.md', exact: true });
+  await fileRow.click({ button: 'right' });
+  const fileRename = page.getByRole('menuitem', { name: 'Rename…', exact: true });
+  await fileRename.click();
   const pathInput = page.getByRole('textbox', { name: 'New path' });
   await expect(pathInput).toBeFocused();
   await page.keyboard.press('Escape');
-  await expect(fileRename).toBeFocused();
+  await expect(fileRow).toBeFocused();
 
   const addMarkdown = page.getByRole('button', { name: 'New Markdown' });
   await addMarkdown.focus();
@@ -131,14 +132,14 @@ test('authoring controls move focus into transient inputs and restore it on canc
   await page.keyboard.press('Escape');
   await expect(addMarkdown).toBeFocused();
 
-  const deleteFile = page.getByRole('button', { name: 'Delete', exact: true });
-  await deleteFile.focus();
-  await page.keyboard.press('Enter');
+  await fileRow.click({ button: 'right' });
+  const deleteFile = page.getByRole('menuitem', { name: 'Delete…', exact: true });
+  await deleteFile.click();
   const deleteDialog = page.getByRole('alertdialog', { name: /Delete untitled\.md/u });
   await expect(deleteDialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(deleteDialog).not.toBeVisible();
-  await expect(deleteFile).toBeFocused();
+  await expect(fileRow).toBeFocused();
 });
 
 test('mobile edit mode makes the visible writing canvas a full-height editor target', async ({ page }) => {

@@ -19,12 +19,18 @@
   import {
     DropdownMenu,
     DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
   } from '$lib/components/ui/dropdown-menu';
   import * as Command from '$lib/components/ui/command';
   import { reviewStore } from './review/store.svelte';
   import type { SidebarPresenceLocation } from './sidebar-presence';
   import UnreadBadge from './UnreadBadge.svelte';
+  import Check from '@lucide/svelte/icons/check';
+  import Grid2X2 from '@lucide/svelte/icons/grid-2x2';
+  import Pencil from '@lucide/svelte/icons/pencil';
+  import Plus from '@lucide/svelte/icons/plus';
 
   interface Props {
     entries: TreeNode[];
@@ -33,13 +39,20 @@
     activePath?: string;
     rootPath?: string;
     knownProjects?: string[];
+    projectLabels?: Record<string, string>;
     activeProjectPath?: string;
     remoteSearchQuery?: string;
     remoteSearchItems?: SearchResultItem[];
     onProjectSwitch?: (path: string) => void;
+    onCreateProject?: () => void;
+    onRenameProject?: () => void;
+    onOpenProjectHome?: () => void;
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
     onShare?: (path: string, isDir?: boolean) => void;
+    onRenameEntry?: (path: string) => void;
+    onDownloadEntry?: (path: string) => void;
+    onDeleteEntry?: (path: string) => void;
     sharedPaths?: Set<string>;
     onSearchQuery?: (query: string) => void;
     outline?: { id: string; text: string; level: number; line: number }[];
@@ -61,13 +74,20 @@
     activePath = '',
     rootPath = '',
     knownProjects = [],
+    projectLabels = {},
     activeProjectPath = '',
     remoteSearchQuery = '',
     remoteSearchItems = [],
     onProjectSwitch,
+    onCreateProject,
+    onRenameProject,
+    onOpenProjectHome,
     onNavigate,
     onExpand,
     onShare,
+    onRenameEntry,
+    onDownloadEntry,
+    onDeleteEntry,
     sharedPaths = new Set<string>(),
     onSearchQuery,
     outline = [],
@@ -83,6 +103,7 @@
   let sidebarRootEl: HTMLElement | null = $state(null);
 
   function formatRootLabel(path: string): string {
+    if (projectLabels[path]) return projectLabels[path];
     if (rootLabel && (path === rootPath || path === selectedProject)) return rootLabel;
     if (!path) return 'Workspace';
     const parts = path.split('/').filter(Boolean);
@@ -291,12 +312,38 @@
                         }
                       }}
                     >
-                      {formatRootLabel(projectPath)}
+                      <span class="min-w-0 flex-1 truncate">{formatRootLabel(projectPath)}</span>
+                      {#if projectPath === selectedProject}
+                        <Check class="size-3.5" aria-hidden="true" />
+                      {/if}
                     </Command.Item>
                   {/each}
                 </Command.Group>
               </Command.List>
             </Command.Root>
+            {#if onCreateProject || onRenameProject || onOpenProjectHome}
+              <div class="sidebar-project-menu-actions">
+                <DropdownMenuSeparator />
+                {#if onCreateProject}
+                  <DropdownMenuItem onSelect={onCreateProject}>
+                    <Plus class="size-4" aria-hidden="true" />
+                    New workspace
+                  </DropdownMenuItem>
+                {/if}
+                {#if onRenameProject}
+                  <DropdownMenuItem onSelect={onRenameProject}>
+                    <Pencil class="size-4" aria-hidden="true" />
+                    Rename workspace
+                  </DropdownMenuItem>
+                {/if}
+                {#if onOpenProjectHome}
+                  <DropdownMenuItem onSelect={onOpenProjectHome}>
+                    <Grid2X2 class="size-4" aria-hidden="true" />
+                    All workspaces
+                  </DropdownMenuItem>
+                {/if}
+              </div>
+            {/if}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -341,7 +388,7 @@
         <ScrollArea class="min-h-0 flex-1" scrollbarYClasses="pr-1">
           {#if sidebarView === 'files'}
             {#if reviewMode}
-              <div class="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">
+              <div class="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">
                 <span>Shared files</span>
                 <UnreadBadge
                   count={reviewStore.currentRoomUnread}
@@ -353,7 +400,19 @@
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
                 {#key treeRenderKey}
-                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {sharedPaths} {collaboratorLocations} />
+                  <FileTree
+                    nodes={filteredEntries}
+                    {activePath}
+                    {rootPath}
+                    {onNavigate}
+                    {onExpand}
+                    {onShare}
+                    {onRenameEntry}
+                    {onDownloadEntry}
+                    {onDeleteEntry}
+                    {sharedPaths}
+                    {collaboratorLocations}
+                  />
                 {/key}
               </SidebarMenu>
             {:else}

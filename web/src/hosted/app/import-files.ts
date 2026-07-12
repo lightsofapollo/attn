@@ -13,6 +13,19 @@ export interface PickedFile {
   bytes: Uint8Array;
 }
 
+interface DroppedFileEntry {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+  file?: (success: (file: File) => void, failure?: (error: DOMException) => void) => void;
+  createReader?: () => {
+    readEntries: (
+      success: (entries: DroppedFileEntry[]) => void,
+      failure?: (error: DOMException) => void,
+    ) => void;
+  };
+}
+
 const MARKDOWN_EXTENSIONS = /\.(?:md|markdown)$/iu;
 const ZIP_EXTENSION = /\.zip$/iu;
 /** Per-file input cap: larger inputs are rejected, never silently truncated. */
@@ -20,6 +33,87 @@ export const MAX_IMPORT_FILE_BYTES = 64 * 1024 * 1024;
 export const MAX_IMPORT_ARCHIVE_BYTES = 64 * 1024 * 1024;
 export const MAX_IMPORT_EXPANDED_BYTES = 128 * 1024 * 1024;
 export const MAX_IMPORT_ARCHIVE_ENTRIES = 1024;
+
+async function pickedFile(file: File, relativePath?: string): Promise<PickedFile> {
+  return {
+    name: file.name,
+    relativePath: relativePath
+      ?? (file as File & { webkitRelativePath?: string }).webkitRelativePath,
+    type: file.type,
+    bytes: new Uint8Array(await file.arrayBuffer()),
+  };
+}
+
+/** Convert a picker result into the storage-neutral import shape. */
+export async function pickedFilesFromList(files: FileList | File[]): Promise<PickedFile[]> {
+  return Promise.all(Array.from(files).map((file) => pickedFile(file)));
+}
+
+function entryFile(entry: DroppedFileEntry): Promise<File> {
+  return new Promise((resolve, reject) => {
+    if (!entry.file) {
+      reject(new EntryPathSafeError(`${entry.name} could not be read`));
+      return;
+    }
+    entry.file(resolve, reject);
+  });
+}
+
+async function directoryEntries(entry: DroppedFileEntry): Promise<DroppedFileEntry[]> {
+  const reader = entry.createReader?.();
+  if (!reader) return [];
+  const entries: DroppedFileEntry[] = [];
+  for (;;) {
+    const batch = await new Promise<DroppedFileEntry[]>((resolve, reject) => {
+      reader.readEntries(resolve, reject);
+    });
+    if (batch.length === 0) return entries;
+    entries.push(...batch);
+  }
+}
+
+async function walkDroppedEntry(
+  entry: DroppedFileEntry,
+  parentPath = '',
+): Promise<PickedFile[]> {
+  const path = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+  if (entry.isFile) {
+    return [await pickedFile(await entryFile(entry), path)];
+  }
+  if (!entry.isDirectory) return [];
+  const children = await directoryEntries(entry);
+  const nested = await Promise.all(children.map((child) => walkDroppedEntry(child, path)));
+  return nested.flat();
+}
+
+/**
+ * Convert a browser drop into import files. Chromium/WebKit directory entries
+ * are traversed so dropping a project preserves its relative paths; browsers
+ * without that API fall back to the ordinary FileList.
+ */
+export async function pickedFilesFromDrop(transfer: DataTransfer): Promise<PickedFile[]> {
+  const roots = Array.from(transfer.items)
+    .filter((item) => item.kind === 'file')
+    .map((item) => {
+      const withEntry = item as DataTransferItem & {
+        webkitGetAsEntry?: () => DroppedFileEntry | null;
+      };
+      return (withEntry.webkitGetAsEntry?.() ?? null) as DroppedFileEntry | null;
+    })
+    .filter((entry): entry is DroppedFileEntry => entry !== null);
+  if (roots.length === 0) return pickedFilesFromList(transfer.files);
+  try {
+    const traversed = (await Promise.all(roots.map((entry) => walkDroppedEntry(entry)))).flat();
+    if (traversed.length > 0) return traversed;
+  } catch (error) {
+    // WebKit can expose a FileSystemEntry and then reject entry.file() with
+    // NotFoundError while DataTransfer.files still contains the valid file.
+    // Preserve directory paths when traversal works; otherwise take the
+    // interoperable FileList rather than turning a readable drop into a no-op.
+    if (transfer.files.length === 0) throw error;
+  }
+  return pickedFilesFromList(transfer.files);
+}
 
 export interface ZipEntryBudget {
   entries: number;

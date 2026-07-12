@@ -316,6 +316,20 @@ export default {
         new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } }),
       );
     }
+    // Room-route preflight (e.g. POST /v3/rooms/:id to create a room): a
+    // preflight only asks "may the browser send this request", so answer it
+    // for allowlisted origins without conditioning on the room's allowBrowser
+    // bit — the room may not exist yet on create. The ACTUAL response's CORS
+    // still gates on allowBrowser via the DO; the admission key remains the
+    // authorization boundary. Without this, the create-room preflight 204s
+    // with no CORS headers and every browser owner-share fails cross-origin.
+    if (request.method === "OPTIONS" && ROOM_ROUTE_RE.test(url.pathname)) {
+      return corsMiddleware(
+        request,
+        env,
+        new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } }),
+      );
+    }
     if (request.method === "OPTIONS" && !ROOM_ROUTE_RE.test(url.pathname)) {
       return buildPreflightForNonRoomRoute();
     }

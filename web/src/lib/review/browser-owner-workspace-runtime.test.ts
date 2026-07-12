@@ -212,7 +212,7 @@ function deterministicRandom(): (length: number) => Uint8Array {
 function shareRequest(): BrowserWorkspaceShareRequest {
   return {
     relayUrl: 'https://relay.example',
-    browserReviewBase: 'https://attn.example/review',
+    browserReviewBase: 'https://attn.sh/review',
     scopeKind: 'file',
     paths: ['notes.md'],
   };
@@ -603,7 +603,7 @@ defineCase('ensureShare resumes persisted pending ciphertext before activating a
     failed = error instanceof Error && error.message === 'relay offline';
   }
   assert(failed, 'initial publication stops at the simulated relay outage');
-  const pending = await first.inspectShare('https://attn.example/review');
+  const pending = await first.inspectShare('https://attn.sh/review');
   assert(pending, 'pending ownership remains inspectable');
   equal(pending.publication, 'pending', 'failed publication remains pending');
   equal(pending.invite, null, 'pending publication does not expose an invite');
@@ -622,7 +622,7 @@ defineCase('ensureShare resumes persisted pending ciphertext before activating a
     },
   }));
   await second.start();
-  const resumed = await second.inspectShare('https://attn.example/review');
+  const resumed = await second.inspectShare('https://attn.sh/review');
   assert(resumed, 'route startup promotes the recoverable share');
   equal(createCalls, 2, 'persisted resume idempotently rejoins the same relay room');
   equal(publishCalls, 1, 'persisted resume does not assemble fresh ciphertext');

@@ -72,11 +72,15 @@ new features beyond the list above.
 - 2026-07-12 (68935cf): **hosted polish DONE** — empty-editor placeholder hint;
   branded /s/ review-link error card (wordmark + cause + Go-to-desk, key
   stripped). Verified in relay build.
-- 2026-07-12: THREE confirmation design-reviews launched vs current build
-  (native @ /tmp/attn-gate-final, hosted relay dist-browser, landing). ON
-  RESUME: collect scores, confirm ≥35 each, persist snapshots, final push.
-  Deferred (noted P2, low value): native theme-flip scroll reset; attn-z0t
-  transient save-state; hosted delete-confirm row-anchoring.
+- 2026-07-12: **GATE MET — ALL THREE SURFACES ≥35.** Confirmation design-reviews
+  (fresh agents, current build): **native 37/40, hosted 38/40, landing 37/40**,
+  every targeted fix verified, zero P0/P1/P2 remaining except one native P2
+  (shortcuts-overlay single-Escape) fixed in d5b69f2 post-review. Trends:
+  native 19→29→37, hosted 19→25→38, landing 36→37. Snapshots persisted.
+  Remaining are P3 polish only (dirty=edit-count not diff; dark syntax not a
+  vitesse-twin; code-copy 0.72rem; scroll-spy nav; error-card composition) plus
+  the deferred native theme-flip scroll reset and attn-z0t transient save-state
+  — none gate-blocking. **GOAL COMPLETE.**
 - 2026-07-12: goal created. Found: shared editor has ZERO markdown input rules
   (native reads fine only because it opens a comrak-rendered view; live typing
   wouldn't parse either) — so input rules fix is shared and high-leverage.

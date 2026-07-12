@@ -24,7 +24,7 @@
   --t: 140ms;
 
   /* Surfaces */
-  --code-block: oklch(0.885 0.012 73);
+  --code-block: oklch(0.972 0.008 78);
   --background: oklch(0.905 0.010 78);
   --foreground: oklch(0.14 0.008 55);
   --card: oklch(0.89 0.012 76);

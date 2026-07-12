@@ -32,7 +32,7 @@ function getHighlighter(): Promise<HighlighterCore> {
     highlighterPromise = createHighlighterCore({
       engine: createJavaScriptRegexEngine(),
       themes: [
-        bundledThemes['github-light'],
+        bundledThemes['vitesse-light'],
         bundledThemes['github-dark'],
       ],
       langs: LANGS.map((id) => bundledLanguages[id]),
@@ -64,7 +64,10 @@ function lazyParser(options: {
   return getHighlighter().then((highlighter) => {
     resolvedParser = createParser(highlighter, {
       themes: {
-        light: 'github-light',
+        // vitesse-light: darker, muted tokens that clear WCAG AA on the warm
+        // paper code ground (github-light's keyword was 3.23:1) and read
+        // warmer, on-brand (gate-35).
+        light: 'vitesse-light',
         dark: 'github-dark',
       },
     });

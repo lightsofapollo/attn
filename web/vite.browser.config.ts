@@ -87,6 +87,18 @@ export default defineConfig({
     fs: {
       allow: [webRoot],
     },
+    // Dev-only same-origin relay proxy. Set VITE_ATTN_RELAY_URL to the dev
+    // origin (e.g. http://localhost:5173) and run a local relay on
+    // ATTN_DEV_RELAY_TARGET (default http://localhost:8787): the browser then
+    // makes SAME-ORIGIN /v1|/v2|/v3|/health calls (no CORS) and vite forwards
+    // them to the relay, WebSocket included. This is what makes the share
+    // workflow completable — and Playwright-testable — on localhost.
+    proxy: {
+      '/v3': { target: process.env.ATTN_DEV_RELAY_TARGET ?? 'http://localhost:8787', ws: true, changeOrigin: true },
+      '/v2': { target: process.env.ATTN_DEV_RELAY_TARGET ?? 'http://localhost:8787', ws: true, changeOrigin: true },
+      '/v1': { target: process.env.ATTN_DEV_RELAY_TARGET ?? 'http://localhost:8787', ws: true, changeOrigin: true },
+      '/health': { target: process.env.ATTN_DEV_RELAY_TARGET ?? 'http://localhost:8787', changeOrigin: true },
+    },
   },
   build: {
     outDir: path.join(webRoot, 'dist-browser'),

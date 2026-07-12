@@ -1,3 +1,4 @@
+import { boundFetch } from './bound-fetch';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import {
@@ -93,7 +94,7 @@ export async function discoverDurableShareTier(input: {
   const keys = expandShareLinkKeys(input.invite.linkSecret, 'view');
   const path = `/v3/shares/${encodeURIComponent(input.invite.shareId)}`;
   try {
-    const response = await (input.fetchImpl ?? fetch)(new URL(path, input.relayUrl).href, { signal: input.signal, headers: {
+    const response = await (input.fetchImpl ?? boundFetch)(new URL(path, input.relayUrl).href, { signal: input.signal, headers: {
       'Attn-Share-Bundle': keys.bundleId,
       'Attn-Admission': buildAdmissionHeaderV3(keys.readAdmissionKey, 'read', 'GET', path, new Uint8Array()),
     } });
@@ -240,7 +241,7 @@ export async function createProductionDurableShareSession(options: ProductionDur
       : first?.fileId ?? 'shared review';
     try {
       const roomPath = `/v3/rooms/${encodeURIComponent(roomId)}/devices`;
-      const response = await (options.fetchImpl ?? fetch)(new URL(roomPath, options.relayUrl).href, { signal, headers: {
+      const response = await (options.fetchImpl ?? boundFetch)(new URL(roomPath, options.relayUrl).href, { signal, headers: {
         'Attn-Admission': buildAdmissionHeaderV3(roomDirectoryAdmission, 'read', 'GET', roomPath, new Uint8Array()),
       } });
       const raw = await strictJson(response, 'push device directory');
@@ -424,7 +425,7 @@ export class RememberedPushShareSessionFacade {
   private patch(next: Partial<import('./browser-session').BrowserSessionState>): void { this.state = { ...this.state, ...next }; this.observer?.(this.state); }
   private async loadSnapshots(binding: PushBindingRecord, signal: AbortSignal): Promise<DurableShareSnapshot[]> {
     const path = `/v3/shares/${encodeURIComponent(binding.resourceId)}`;
-    const response = await (this.options.fetchImpl ?? fetch)(new URL(path, this.options.relayUrl), { signal, headers: {
+    const response = await (this.options.fetchImpl ?? boundFetch)(new URL(path, this.options.relayUrl), { signal, headers: {
       'Attn-Share-Bundle': binding.bundleId!,
       'Attn-Admission': await pushBindingAdmissionHeader(binding, 'read', 'GET', path),
     } });
@@ -447,7 +448,7 @@ export class RememberedPushShareSessionFacade {
       const snapshots: DurableShareSnapshot[] = [];
       for (const ref of refs) {
         const snapshotPath = `${path}/snapshots/${encodeURIComponent(ref.fileId)}`;
-        const snapshotResponse = await (this.options.fetchImpl ?? fetch)(new URL(snapshotPath, this.options.relayUrl), { signal, headers: {
+        const snapshotResponse = await (this.options.fetchImpl ?? boundFetch)(new URL(snapshotPath, this.options.relayUrl), { signal, headers: {
           'Attn-Share-Bundle': binding.bundleId!,
           'Attn-Admission': await pushBindingAdmissionHeader(binding, 'read', 'GET', snapshotPath),
         } });
@@ -561,7 +562,7 @@ export async function createBrowserDurableShareResolver(options: BrowserDurableS
   linkKeys: ShareLinkKeys;
   persistence: BrowserDurableSharePersistence;
 }> {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? boundFetch;
   let linkKeys: ShareLinkKeys;
   try { linkKeys = expandShareLinkKeys(options.invite.linkSecret, options.tier); }
   finally { options.invite.linkSecret.fill(0); }
@@ -632,7 +633,7 @@ export function createShareMailboxTransport(input: {
   powDifficulty?: number;
   mintPow?: (input: { shareId: string; deviceId: string; path: string; signal?: AbortSignal }) => Promise<string>;
 }): ShareMailboxTransport {
-  const fetchImpl = input.fetchImpl ?? fetch;
+  const fetchImpl = input.fetchImpl ?? boundFetch;
   return { submit: async request => {
     const path = `/v3/shares/${encodeURIComponent(request.shareId)}/mailbox`;
     const body = JSON.stringify({ epoch: request.epoch, deviceId: input.deviceId,

@@ -19,6 +19,7 @@
 // against native rooms by the reviewer flow, so a browser-created room is
 // indistinguishable from a native-created one on the wire.
 
+import { boundFetch } from './bound-fetch';
 import {
   base64UrlEncode,
   buildAdmissionHeader,
@@ -136,7 +137,7 @@ export interface CreateOwnedRoomOptions {
 
 export async function createOwnedRoom(options: CreateOwnedRoomOptions): Promise<OwnedRoomBootstrap> {
   const relay = validateBrowserRelayUrl(options.relayUrl);
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? boundFetch;
   const now = options.now ?? Date.now;
   const mintPow = options.mintPow ?? ((input, signal) => mintBrowserPowInWorker(input, { signal }));
   const abort = options.signal ?? new AbortController().signal;
@@ -219,7 +220,7 @@ export async function createOwnedRoomV3(
   options: CreateOwnedRoomOptions,
 ): Promise<OwnedRoomBootstrapV3> {
   const relay = validateBrowserRelayUrl(options.relayUrl);
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? boundFetch;
   const now = options.now ?? Date.now;
   const mintPow = options.mintPow ?? ((input, signal) => mintBrowserPowInWorker(input, { signal }));
   const abort = options.signal ?? new AbortController().signal;
@@ -388,7 +389,7 @@ export async function registerFrozenReviewerDeviceV3(input: {
   signal?: AbortSignal;
 }): Promise<void> {
   const relay = validateBrowserRelayUrl(input.relayUrl);
-  const fetchImpl = input.fetchImpl ?? fetch;
+  const fetchImpl = input.fetchImpl ?? boundFetch;
   const mintPow = input.mintPow ?? ((request, signal) => mintBrowserPowInWorker(request, { signal }));
   const abort = input.signal ?? new AbortController().signal;
   const path = `/v3/rooms/${input.roomId}/devices`;
@@ -445,7 +446,7 @@ export async function deleteOwnedRoom(input: {
   signal?: AbortSignal;
 }): Promise<boolean> {
   const relay = validateBrowserRelayUrl(input.relayUrl);
-  const fetchImpl = input.fetchImpl ?? fetch;
+  const fetchImpl = input.fetchImpl ?? boundFetch;
   const mintPow =
     input.mintPow ?? ((request, signal) => mintBrowserPowInWorker(request, { signal }));
   const abort = input.signal ?? new AbortController().signal;
@@ -492,7 +493,7 @@ export async function deleteOwnedRoomV3(input: {
   signal?: AbortSignal;
 }): Promise<boolean> {
   const relay = validateBrowserRelayUrl(input.relayUrl);
-  const fetchImpl = input.fetchImpl ?? fetch;
+  const fetchImpl = input.fetchImpl ?? boundFetch;
   const mintPow = input.mintPow ?? ((request, signal) => mintBrowserPowInWorker(request, { signal }));
   const abort = input.signal ?? new AbortController().signal;
   const path = `/v3/rooms/${input.roomId}`;

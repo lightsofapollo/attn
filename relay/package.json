@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --local --port 8787",
+    "dev": "wrangler dev --local --port 8787 --var QUOTA_ALLOW_UNATTRIBUTED_CREATES:true --var ALLOWED_BROWSER_ORIGINS:http://localhost:5173,http://localhost:5174,https://attn.sh,https://staging.attn.sh",
     "deploy": "wrangler deploy",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

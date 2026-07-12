@@ -1,3 +1,4 @@
+import { boundFetch } from './bound-fetch';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import {
@@ -275,7 +276,7 @@ export class BrowserShareOwnerRelayClient {
 
   constructor(private readonly options: BrowserShareOwnerRelayOptions) {
     this.relay = validateBrowserRelayUrl(options.relayUrl);
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = options.fetchImpl ?? boundFetch;
     this.mintPow = options.mintPow
       ?? ((input, signal) => mintBrowserPowInWorker(input, { signal }));
     this.signal = options.signal ?? new AbortController().signal;

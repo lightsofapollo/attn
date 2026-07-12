@@ -119,7 +119,22 @@ integration-finishing pass — converge, don't proliferate.
   journal + revert_accepted_suggestion with clobber guards + 3 tests; 520 lib
   tests green). Bead stays OPEN for IPC + UI undo grammar + cross-peer reopen
   protocol design (notes on bead). Binary size gate: 31.90/32.00 MiB PASS.
-- 2026-07-12: **FINAL GATE IN FLIGHT.** Six critique agents launched (A+B for
+- 2026-07-12: **FINAL GATE — COMPLETE (with one tracked carve-out).** Trends:
+  native 19→29 (+4 verified state-truth fixes after review: checkbox truth,
+  save-chip home, CSS-leak scope, ⌘K label — 8b143e4); landing 34→**36** (gate
+  met; the one AA fail + mono stragglers + nav dupe fixed); hosted 19→**25**.
+  Hosted's Theme v2 VISUAL layer passes (72.0ch cap, wide blocks full-pane,
+  thin ink scrollbars, INK cool blue-black, AA both themes — all detector-
+  verified). Its editor-BEHAVIOR score is gated by **attn-vea** (desktop
+  markdown parity: typed # stays literal, sans not serif) on the
+  web-editor-parity branch — a real product P0 OUTSIDE this pass's visual
+  scope; it also cascades into attn-cjn auto-rename. The reviewed hosted
+  bundle additionally lacked VITE_ATTN_RELAY_URL; a relay build cleared those
+  artifacts (editor mounts, commits persist). Also filed attn-z0t (transient
+  save-state polish). **All 9 planned Theme v2 issues + 4 unfiled P0s DONE**
+  (attn-3dv UI/protocol half remains open per its notes). Binary 31.90/32 MiB;
+  all suites green (web 80, apply 51, review E2E 43/0, lib 520).
+- 2026-07-12 (superseded): FINAL GATE IN FLIGHT. Six critique agents launched (A+B for
   native app / hosted app / landing) against current build; native B returned:
   74 CLI findings (from 215; fallback literals GONE, z-ladder clean, review
   components px-free; residue = un-tokenized ins/del diff palette app.css:873-

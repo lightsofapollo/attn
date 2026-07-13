@@ -26,6 +26,7 @@
   import type HostedDesktopWorkspaceFrameType from './HostedDesktopWorkspaceFrame.svelte';
   import type { EditorBridge } from '../../lib/prosemirror/collab-session';
   import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
+  import { LEASE_CHANNEL_NAME } from '../../lib/review/browser-workspace-lease';
   import type { RequiresThreeWayVerdict, Thread } from '../../lib/types';
 
   interface Props {
@@ -500,6 +501,23 @@
     });
     return ownerSessionOpening;
   }
+
+  // Multi-tab auto-recovery: the passive (read-only) tab listens for the
+  // owning tab releasing the workspace lease and re-attempts ownership, so the
+  // "another tab is editing" banner clears on its own when the other tab
+  // closes — delivering the banner's promise without a manual "Retry edit".
+  $effect(() => {
+    const wsId = workspace.id;
+    if (typeof BroadcastChannel === 'undefined') return;
+    const channel = new BroadcastChannel(LEASE_CHANNEL_NAME);
+    channel.onmessage = (event: MessageEvent) => {
+      const message = event.data as { workspaceId?: string; event?: string } | null;
+      if (message?.workspaceId !== wsId || message.event !== 'released') return;
+      // Re-attempt ownership; ensureOwnerSession is a no-op if we already hold it.
+      untrack(() => { void ensureOwnerSession(); });
+    };
+    return () => channel.close();
+  });
 
   // Desktop opens editor-first and therefore needs route authority up front.
   // Mobile is deliberately reader-first: merely opening a document must not

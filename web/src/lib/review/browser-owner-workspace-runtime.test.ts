@@ -453,7 +453,8 @@ defineCase('local-only runtime owns one lease, stays writable, and releases exac
   await first.start();
   equal(first.getState().leaseRole, 'owner', 'first lease role');
   equal(first.getState().writable, true, 'local-only writable');
-  equal(first.getState().liveEditingAvailable, false, 'local-only collab disabled');
+  equal(first.getState().liveEditingAvailable, true, 'local-only runtime hosts multi-tab co-editing');
+  equal(first.getState().localCollab, true, 'local co-editing flag reflects the hub');
   const second = new BrowserOwnerWorkspaceRuntime({
     ...runtimeOptions(storage, workspaceId),
     holderId: 'passive-tab',
@@ -680,7 +681,8 @@ defineCase('stopShare tears down authority, resets runtime state, and recreates 
   equal(runtime.getState().status, 'active', 'local-only runtime remains active after stop');
   equal(runtime.getState().leaseRole, 'owner', 'runtime retains workspace lease after stop');
   equal(runtime.getState().writable, true, 'local authoring remains writable after stop');
-  equal(runtime.getState().liveEditingAvailable, false, 'live authority is unavailable after stop');
+  equal(runtime.getState().liveEditingAvailable, true, 'stop falls back to local multi-tab co-editing');
+  equal(runtime.getState().localCollab, true, 'local co-editing hub hosts after stop');
   equal(runtime.getState().roomId, null, 'stopped room identity is cleared');
   equal(runtime.getState().capId, null, 'stopped capability identity is cleared');
   equal(runtime.getState().bindings.length, 0, 'stopped share bindings are cleared');

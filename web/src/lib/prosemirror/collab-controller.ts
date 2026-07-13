@@ -223,6 +223,20 @@ export class CollabController {
     this.onPeerLocation = opts.onPeerLocation ?? null;
   }
 
+  /** The file the local editor is currently bound to (null before setActiveFile). */
+  get activeFile(): FileId | null {
+    return this.activeFileId;
+  }
+
+  /**
+   * Owner: the live authority document for a hosted file, or null when no
+   * authority exists for it. Lets a persistence layer serialize the canonical
+   * doc (e.g. the local multi-tab hub committing headless files).
+   */
+  authorityDoc(fileId: FileId): PmNode | null {
+    return this.hosts.get(fileId)?.host.authority.doc ?? null;
+  }
+
   /** The active file's authority/local version, for diagnostics. */
   get version(): number {
     if (this.isOwner) {

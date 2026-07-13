@@ -13,6 +13,8 @@
   import { autofocus } from '../../lib/hosted/autofocus';
   import type {
     EditingSession,
+    LocalCollabJoinHandle,
+    LocalCollabJoinState,
     SaveState,
     StorageHealth,
     WorkspaceAppService,
@@ -26,7 +28,7 @@
   import type HostedDesktopWorkspaceFrameType from './HostedDesktopWorkspaceFrame.svelte';
   import type { EditorBridge } from '../../lib/prosemirror/collab-session';
   import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
-  import { LEASE_CHANNEL_NAME } from '../../lib/review/browser-workspace-lease';
+  import { LEASE_CHANNEL_NAME } from '../../lib/tab-channels';
   import type { RequiresThreeWayVerdict, Thread } from '../../lib/types';
 
   interface Props {
@@ -68,7 +70,10 @@
   let desktopLayout = $state(
     typeof window !== 'undefined' && window.matchMedia('(min-width: 901px)').matches,
   );
-  let desktopEditRequested = false;
+  // Reactive: resetting it on a later lease win must re-run the desktop
+  // auto-edit effect (which short-circuits on this flag and would otherwise
+  // never track another dependency again).
+  let desktopEditRequested = $state(false);
   let HostedDesktopWorkspaceFrame = $state<typeof HostedDesktopWorkspaceFrameType | null>(null);
 
   $effect(() => {
@@ -122,6 +127,13 @@
   let changeWatcher = $state<unknown[]>([]);
   let session = $state<EditingSession | null>(null);
   let ownerState = $state<BrowserOwnerWorkspaceRuntimeState | null>(null);
+  // Local multi-tab co-editing, follower role (attn-47r): a live wire to the
+  // lease-holding tab's authorities. Non-null only while this tab is denied
+  // the writer lease; becoming the owner closes it.
+  let localJoin: LocalCollabJoinHandle | null = null;
+  let joinState = $state<LocalCollabJoinState | null>(null);
+  let unsubscribeJoin: (() => void) | null = null;
+  const joinLive = $derived(joinState?.status === 'live' && !session);
   let collabSeed = $state<{ fileId: string; epoch: string; markdown: string } | null>(null);
   let collabClientId = $state<string | null>(null);
   let collabEpoch = $state(0);
@@ -141,6 +153,7 @@
       && ownerState.authority?.session?.authoringReady === true,
   );
   const ownerRoomStatus = $derived.by(() => {
+    if (joinLive) return 'Live · editing with another tab';
     const state = ownerState;
     if (!state) return null;
     if (state.leaseRole === 'passive') return 'Read-only tab';
@@ -456,6 +469,10 @@
 
   function installOwnerSession(granted: EditingSession): void {
     session = granted;
+    // A tab that was denied (read-only or live co-editing follower) and later
+    // won the lease must re-enter the desktop editor-first posture — the
+    // auto-edit latch below already fired and lost.
+    desktopEditRequested = false;
     unsubscribeOwner?.();
     unsubscribeOwner = granted.subscribeOwner((state) => {
       ownerState = state;
@@ -488,18 +505,42 @@
   async function ensureOwnerSession(): Promise<EditingSession | null> {
     if (session) return session;
     if (ownerSessionOpening) return ownerSessionOpening;
-    ownerSessionOpening = service.beginEditing(workspace.id).then((granted) => {
+    ownerSessionOpening = service.beginEditing(workspace.id).then(async (granted) => {
       if (!granted) {
         editDenied = true;
         ownerState = null;
         return null;
       }
+      // Takeover while live co-editing: this editor holds the converged doc
+      // (possibly ahead of the dead owner's last commit). Commit it BEFORE
+      // any collab binding so the new hub's seed cache reads this exact
+      // content — otherwise later joiners would seed from a stale base.
+      if (
+        joinState?.status === 'live'
+        && editorRef
+        && activeEntry?.presentation === 'editable'
+      ) {
+        try {
+          await granted.commitText(activeEntry.path, editorRef.getMarkdown());
+        } catch {
+          // The head stays at the last owner commit; co-editing still starts.
+        }
+      }
+      closeLocalJoin();
       installOwnerSession(granted);
       return granted;
     }).finally(() => {
       ownerSessionOpening = null;
     });
     return ownerSessionOpening;
+  }
+
+  function closeLocalJoin(): void {
+    unsubscribeJoin?.();
+    unsubscribeJoin = null;
+    localJoin?.close();
+    localJoin = null;
+    joinState = null;
   }
 
   // Multi-tab auto-recovery: the passive (read-only) tab listens for the
@@ -561,6 +602,102 @@
     };
   });
 
+  // Local multi-tab co-editing (attn-47r), follower role: while another tab
+  // holds the writer lease, join its authorities as a live CollabClient
+  // instead of settling for the read-only mirror. The handle reconnects on
+  // its own; becoming the owner (ensureOwnerSession) closes it.
+  $effect(() => {
+    const wsId = workspace.id;
+    if (!editDenied || session) return;
+    untrack(() => {
+      if (localJoin) return;
+      void service.joinLocalCollab(wsId).then((handle) => {
+        if (!handle) return;
+        // The deny may have resolved (owner takeover) while we connected.
+        if (session || localJoin || workspace.id !== wsId) {
+          handle.close();
+          return;
+        }
+        localJoin = handle;
+        unsubscribeJoin = handle.subscribe((state) => {
+          joinState = state;
+        });
+      });
+    });
+  });
+
+  // The hub left (owner tab closed or is transitioning): unbind the collab
+  // editor and fall back to the read-only banner until the join reconnects
+  // to a new generation or this tab wins the lease itself.
+  $effect(() => {
+    const state = joinState;
+    if (session || state?.status !== 'connecting') return;
+    untrack(() => {
+      collabSeedRequest += 1;
+      collabSeed = null;
+      collabClientId = null;
+      boundCollabKey = null;
+      loadedCollabGenerationKey = null;
+      collabEpoch += 1;
+      editing = false;
+    });
+  });
+
+  // Follower seed: fetch the authority's base for the active file whenever
+  // the hub generation or the file changes, then remount the editor at v0.
+  $effect(() => {
+    const state = joinState;
+    const entry = activeEntry;
+    if (session || state?.status !== 'live' || entry?.presentation !== 'editable') return;
+    const join = localJoin;
+    if (!join) return;
+    const generationKey = `join:${state.generation}:${entry.path}`;
+    if (loadedCollabGenerationKey === generationKey) return;
+    loadedCollabGenerationKey = generationKey;
+    untrack(() => { void ensureEditorGraph(false); });
+    const request = ++collabSeedRequest;
+    void join.getSeed(entry.path).then((seed) => {
+      if (
+        request !== collabSeedRequest
+        || joinState?.generation !== state.generation
+        || activeEntry?.path !== entry.path
+      ) return;
+      if (!seed) {
+        if (loadedCollabGenerationKey === generationKey) loadedCollabGenerationKey = null;
+        return;
+      }
+      untrack(() => {
+        collabSeed = seed;
+        collabClientId = crypto.randomUUID();
+        boundCollabKey = null;
+        collabEpoch += 1;
+        // Same editor-first posture as the owning desktop tab; mobile stays
+        // reader-first and promotes through its Edit action.
+        if (desktopLayout) editing = true;
+      });
+    });
+  });
+
+  // Follower binding: attach the freshly seeded (v0) editor to the join
+  // controller, which resyncs the file's full step log from the hub.
+  $effect(() => {
+    const state = joinState;
+    const seed = collabSeed;
+    const view = pmViewForReview;
+    const epoch = collabEpoch;
+    if (session || state?.status !== 'live' || !seed || !view || readyCollabEpoch !== epoch) return;
+    const controller = localJoin?.getController();
+    if (!controller) return;
+    const key = `join:${state.generation}:${seed.fileId}:${seed.epoch}:${epoch}`;
+    if (boundCollabKey === key) return;
+    const bridge: EditorBridge = {
+      getState: () => view.state,
+      apply: (transaction) => view.dispatch(transaction),
+    };
+    controller.setActiveFile(seed.fileId, bridge, seed.epoch);
+    boundCollabKey = key;
+  });
+
   // Desktop opens editor-first and therefore needs route authority up front.
   // Mobile is deliberately reader-first: merely opening a document must not
   // block a desktop writer in another tab. It asks for authority only when the
@@ -573,6 +710,7 @@
       unsubscribeOwner = null;
       autosave?.dispose();
       autosave = null;
+      closeLocalJoin();
       void session?.release();
     };
   });
@@ -581,9 +719,13 @@
     const currentSession = session;
     const state = ownerState;
     const entry = activeEntry;
-    if (!currentSession || !state?.roomId || entry?.presentation !== 'editable') {
+    const collabHosted = Boolean(state && (state.roomId || state.localCollab));
+    if (!currentSession || !state || !collabHosted || entry?.presentation !== 'editable') {
+      // While joined as a local co-editing follower, the join effects own
+      // the collab binding state — do not clear it from the owner path.
+      if (joinState) return;
       loadedCollabGenerationKey = null;
-      if (!state?.roomId) {
+      if (!collabHosted) {
         untrack(() => {
           collabSeedRequest += 1;
           collabSeed = null;
@@ -650,6 +792,12 @@
     try {
       await ensureEditorGraph(ownerState?.roomId != null);
       let granted = await ensureOwnerSession();
+      // Live local co-editing needs no lease: edit through the other tab's
+      // authority instead of retrying for ownership.
+      if (!granted && joinLive) {
+        editing = true;
+        return;
+      }
       // Closing another tab releases its fenced IndexedDB lease
       // asynchronously. An explicit retry should absorb that brief handoff
       // instead of making the user click repeatedly.
@@ -660,6 +808,10 @@
         }
       }
       if (!granted) {
+        if (joinLive) {
+          editing = true;
+          return;
+        }
         editDenied = true;
         return;
       }
@@ -695,6 +847,7 @@
           && body !== null
           && editorRef
           && ownerState?.liveEditingAvailable !== true
+          && !joinLive
         ) {
           editorRef.resetToMarkdown(body);
         }
@@ -744,13 +897,20 @@
     readyCollabEpoch = collabEpoch;
   }
 
+  function activeCollabController() {
+    if (session) {
+      return ownerState?.liveEditingAvailable ? session.getController() : null;
+    }
+    return joinLive ? localJoin?.getController() ?? null : null;
+  }
+
   function handleCollabDocChange(): void {
-    if (ownerState?.liveEditingAvailable) session?.getController()?.onLocalChange();
+    activeCollabController()?.onLocalChange();
     onEditorChanged();
   }
 
   function handleCollabSelectionChange(head: number): void {
-    if (ownerState?.liveEditingAvailable) session?.getController()?.broadcastCursor(head);
+    activeCollabController()?.broadcastCursor(head);
   }
 
   async function acceptSuggestion(thread: Thread): Promise<unknown> {
@@ -1121,7 +1281,7 @@
         <DegradedBanner mode={health.mode} />
       </div>
     {/if}
-    {#if editDenied}
+    {#if editDenied && !joinLive}
       <div class="degraded-banner hosted-document-banner" role="status" data-degraded="lease-denied">
         <div>
           <strong>Another tab is editing this workspace.</strong>
@@ -1154,7 +1314,7 @@
             plugins={changeWatcher as never}
             onReady={handleEditorReady}
             onCheckboxToggle={onEditorChanged}
-            collabClientId={ownerState?.liveEditingAvailable
+            collabClientId={ownerState?.liveEditingAvailable || joinLive
               ? collabClientId ?? undefined
               : undefined}
             {collabEpoch}

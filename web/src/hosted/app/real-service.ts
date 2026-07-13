@@ -9,6 +9,7 @@ import { publishDeskCount, readDeskCount } from '../desk-count';
 import type {
   EditingSession,
   ImportFileInput,
+  LocalCollabJoinHandle,
   PersistenceMode,
   ShareScope,
   StorageHealth,
@@ -265,6 +266,22 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   async deleteWorkspace(workspaceId: string): Promise<void> {
     publishDeskCount(Math.max(0, readDeskCount() - 1));
     await this.service.deleteWorkspace(workspaceId);
+  }
+
+  async joinLocalCollab(workspaceId: string): Promise<LocalCollabJoinHandle | null> {
+    const holderId = await browserTabHolderId();
+    const { LocalCollabJoin } = await import('../../lib/review/browser-local-collab');
+    const join = new LocalCollabJoin({
+      workspaceId,
+      holderId,
+      selfLabel: 'Another tab',
+      selfColor: '#8a63b8',
+    });
+    if (!join.available) {
+      join.close();
+      return null;
+    }
+    return join;
   }
 
   async peekWriterLease(workspaceId: string): Promise<number | null> {

@@ -314,6 +314,10 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return null;
   }
 
+  async joinLocalCollab(): Promise<null> {
+    return null;
+  }
+
   subscribeWorkspaceChanges(): () => void {
     return () => undefined;
   }
@@ -324,6 +328,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
       leaseRole: 'owner',
       writable: true,
       liveEditingAvailable: false,
+      localCollab: false,
       reason: null,
       workspaceId,
       roomId: null,

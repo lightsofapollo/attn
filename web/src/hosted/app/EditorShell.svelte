@@ -832,6 +832,36 @@
     void switchTo(relativePath);
   }
 
+  // Tree context-menu Rename/Delete: switch to the target file (in place), then
+  // open the existing footer rename input / delete confirm once it's active.
+  // The pending flag + effect absorbs the async switch (activePath updates a
+  // tick later via AppShell), so the UI opens against the right file.
+  let pendingRename = $state<string | null>(null);
+  let pendingDelete = $state<string | null>(null);
+  async function requestTreeRename(relativePath: string): Promise<void> {
+    if (relativePath !== activeEntry?.path) await switchTo(relativePath);
+    pendingRename = relativePath;
+  }
+  async function requestTreeDelete(relativePath: string): Promise<void> {
+    if (relativePath !== activeEntry?.path) await switchTo(relativePath);
+    pendingDelete = relativePath;
+  }
+  $effect(() => {
+    if (pendingRename && activeEntry?.path === pendingRename) {
+      renameEntryValue = pendingRename;
+      confirmingEntryDelete = false;
+      renamingEntry = true;
+      pendingRename = null;
+    }
+  });
+  $effect(() => {
+    if (pendingDelete && activeEntry?.path === pendingDelete) {
+      renamingEntry = false;
+      confirmingEntryDelete = true;
+      pendingDelete = null;
+    }
+  });
+
   function entryGlyph(entry: WorkspaceEntry): string {
     if (entry.presentation === 'editable') return '';
     return entry.presentation === 'preview' ? '▧ ' : '◇ ';
@@ -1301,6 +1331,8 @@
         rail={desktopRail}
         onNavigate={navigateDesktopTree}
         onShare={openShare}
+        onRename={requestTreeRename}
+        onDelete={requestTreeDelete}
         onViewport={(viewport) => (canvasEl = viewport ?? undefined)}
       />
     {:else}

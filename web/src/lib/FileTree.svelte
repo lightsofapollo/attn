@@ -36,6 +36,8 @@
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
     onShare?: (path: string, isDir?: boolean) => void;
+    onRename?: (path: string) => void;
+    onDelete?: (path: string) => void;
     sharedPaths?: Set<string>;
     collaboratorLocations?: SidebarPresenceLocation[];
   }
@@ -48,6 +50,8 @@
     onNavigate,
     onExpand,
     onShare,
+    onRename,
+    onDelete,
     sharedPaths = new Set<string>(),
     collaboratorLocations = [],
   }: Props = $props();
@@ -297,7 +301,7 @@
         <CollapsibleContent>
           {#if node.children}
             <SidebarMenu class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
-              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {sharedPaths} {collaboratorLocations} />
+              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {collaboratorLocations} />
             </SidebarMenu>
           {/if}
         </CollapsibleContent>
@@ -377,6 +381,19 @@
             <Share2 class="size-4" aria-hidden="true" />
             Share
           </ContextMenuItem>
+          {#if onRename || onDelete}
+            <ContextMenuSeparator />
+            {#if onRename}
+              <ContextMenuItem onSelect={() => onRename?.(node.path)}>
+                Rename
+              </ContextMenuItem>
+            {/if}
+            {#if onDelete}
+              <ContextMenuItem class="text-destructive" onSelect={() => onDelete?.(node.path)}>
+                Delete
+              </ContextMenuItem>
+            {/if}
+          {/if}
         </ContextMenuContent>
       </ContextMenu>
     </SidebarMenuItem>

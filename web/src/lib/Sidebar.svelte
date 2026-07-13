@@ -40,6 +40,8 @@
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
     onShare?: (path: string, isDir?: boolean) => void;
+    onRename?: (path: string) => void;
+    onDelete?: (path: string) => void;
     sharedPaths?: Set<string>;
     onSearchQuery?: (query: string) => void;
     outline?: { id: string; text: string; level: number; line: number }[];
@@ -68,6 +70,8 @@
     onNavigate,
     onExpand,
     onShare,
+    onRename,
+    onDelete,
     sharedPaths = new Set<string>(),
     onSearchQuery,
     outline = [],
@@ -412,7 +416,7 @@
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
                 {#key treeRenderKey}
-                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {sharedPaths} {collaboratorLocations} />
+                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {collaboratorLocations} />
                 {/key}
               </SidebarMenu>
             {:else}

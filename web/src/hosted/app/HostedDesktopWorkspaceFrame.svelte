@@ -28,6 +28,8 @@
     rail: Snippet;
     onNavigate: (path: string) => void;
     onShare: (trigger?: HTMLButtonElement) => void;
+    onRename?: (path: string) => void;
+    onDelete?: (path: string) => void;
     onViewport?: (viewport: HTMLElement | null) => void;
   }
 
@@ -43,6 +45,8 @@
     rail,
     onNavigate,
     onShare,
+    onRename,
+    onDelete,
     onViewport,
   }: Props = $props();
 
@@ -62,6 +66,16 @@
     const relativePath = workspaceRelativePath(workspaceId, treePath);
     if (relativePath) onNavigate(relativePath);
   }
+
+  function renameTree(treePath: string): void {
+    const relativePath = workspaceRelativePath(workspaceId, treePath);
+    if (relativePath) onRename?.(relativePath);
+  }
+
+  function deleteTree(treePath: string): void {
+    const relativePath = workspaceRelativePath(workspaceId, treePath);
+    if (relativePath) onDelete?.(relativePath);
+  }
 </script>
 
 {#snippet sidebar()}
@@ -76,6 +90,8 @@
     showWindowDragRegion={false}
     {footer}
     onNavigate={navigateTree}
+    onRename={onRename ? renameTree : undefined}
+    onDelete={onDelete ? deleteTree : undefined}
   />
 {/snippet}
 

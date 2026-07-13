@@ -7,6 +7,7 @@
   import FolderTree from '@lucide/svelte/icons/folder-tree';
   import TextQuote from '@lucide/svelte/icons/text-quote';
   import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
+  import Check from '@lucide/svelte/icons/check';
   import {
     Sidebar,
     SidebarContent,
@@ -95,6 +96,11 @@
   let selectedProject = $derived(
     activeProjectPath || rootPath || projectOptions[0] || '',
   );
+  // Scale the switcher to the number of projects: a single project is just a
+  // heading (nothing to switch to); a short list needs no filter; a long list
+  // gets a filter field.
+  let hasMultipleProjects = $derived(projectOptions.length > 1);
+  let showProjectFilter = $derived(projectOptions.length >= 8);
   let markdownFileCount = $derived(entries.length ? countMarkdownFiles(entries) : 0);
   let totalFileCount = $derived(entries.length ? countFiles(entries) : 0);
   let outlineCount = $derived(outline.length);
@@ -260,45 +266,58 @@
   >
     <div class="sidebar-header flex items-center justify-between gap-3" style="-webkit-user-select: none">
       <div class="sidebar-project-picker min-w-0 flex-1">
-        <DropdownMenu bind:open={projectPickerOpen}>
-          <DropdownMenuTrigger
-            class="sidebar-project-select"
-            aria-label="Project picker"
-            role="combobox"
-            aria-expanded={projectPickerOpen}
-          >
-            <span class="sidebar-project-select-label" title={selectedProject}>
-              {formatRootLabel(selectedProject)}
-            </span>
-            <ChevronsUpDown class="sidebar-project-switch-icon size-3.5" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" class="sidebar-project-menu p-0">
-            <Command.Root class="sidebar-project-command">
-              <Command.Input placeholder="Search projects..." />
-              <Command.List class="max-h-[240px]">
-                <Command.Empty class="px-3 py-5 text-xs text-muted-foreground">
-                  No projects found.
-                </Command.Empty>
-                <Command.Group>
-                  {#each projectOptions as projectPath (projectPath)}
-                    <Command.Item
-                      value={`${formatRootLabel(projectPath)} ${projectPath}`}
-                      class="sidebar-project-menu-item"
-                      onSelect={() => {
-                        projectPickerOpen = false;
-                        if (projectPath !== selectedProject) {
-                          onProjectSwitch?.(projectPath);
-                        }
-                      }}
-                    >
-                      {formatRootLabel(projectPath)}
-                    </Command.Item>
-                  {/each}
-                </Command.Group>
-              </Command.List>
-            </Command.Root>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {#if hasMultipleProjects}
+          <DropdownMenu bind:open={projectPickerOpen}>
+            <DropdownMenuTrigger
+              class="sidebar-project-select"
+              aria-label="Switch project"
+              role="combobox"
+              aria-expanded={projectPickerOpen}
+            >
+              <span class="sidebar-project-select-label" title={selectedProject}>
+                {formatRootLabel(selectedProject)}
+              </span>
+              <ChevronsUpDown class="sidebar-project-switch-icon size-3.5" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" class="sidebar-project-menu p-0">
+              <Command.Root class="sidebar-project-command">
+                {#if showProjectFilter}
+                  <Command.Input placeholder="Filter projects" />
+                {/if}
+                <Command.List class="max-h-[300px]">
+                  <Command.Empty class="px-3 py-5 text-xs text-muted-foreground">
+                    No projects found.
+                  </Command.Empty>
+                  <Command.Group>
+                    {#each projectOptions as projectPath (projectPath)}
+                      <Command.Item
+                        value={`${formatRootLabel(projectPath)} ${projectPath}`}
+                        class="sidebar-project-menu-item"
+                        data-current={projectPath === selectedProject}
+                        onSelect={() => {
+                          projectPickerOpen = false;
+                          if (projectPath !== selectedProject) {
+                            onProjectSwitch?.(projectPath);
+                          }
+                        }}
+                      >
+                        <Check
+                          class="sidebar-project-check size-3.5"
+                          data-active={projectPath === selectedProject}
+                        />
+                        <span class="sidebar-project-menu-label">{formatRootLabel(projectPath)}</span>
+                      </Command.Item>
+                    {/each}
+                  </Command.Group>
+                </Command.List>
+              </Command.Root>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        {:else}
+          <div class="sidebar-project-static" title={selectedProject}>
+            {formatRootLabel(selectedProject)}
+          </div>
+        {/if}
       </div>
       {#if showOutline}
       <div class="sidebar-mode-toggle" aria-label="Sidebar views">

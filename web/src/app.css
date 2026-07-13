@@ -177,15 +177,28 @@
     max-width: 320px;
   }
 
-  .sidebar-project-command {
-    border-radius: 10px;
-    border: 0;
-    background: color-mix(in oklch, var(--background) 92%, white 8%);
-    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+  /* Single-project surfaces (always the hosted web app) render a quiet
+     heading, not a dropdown — there is nothing to switch to. */
+  .sidebar-project-static {
+    height: 40px;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    color: color-mix(in oklch, var(--foreground) 90%, transparent);
+    font: 650 0.95rem/1.2 "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .dark .sidebar-project-command {
-    background: color-mix(in oklch, var(--background) 94%, white 6%);
+  /* The command is now transparent so the popover is ONE paper card (the
+     dropdown-menu content), not a card stacked inside a card. */
+  .sidebar-project-command {
+    border-radius: inherit;
+    border: 0;
+    background: transparent;
+    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
   }
 
   .sidebar-project-command [data-slot="command-input-wrapper"] {
@@ -205,12 +218,42 @@
   }
 
   .sidebar-project-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     white-space: nowrap;
     overflow: hidden;
-    text-overflow: ellipsis;
     font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
     font-size: 0.95rem;
     line-height: 1.25;
+  }
+
+  .sidebar-project-menu-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* A rust check marks the current project; inactive rows reserve the gutter
+     so labels stay aligned. */
+  .sidebar-project-check {
+    flex: none;
+    opacity: 0;
+    color: var(--primary);
+  }
+  .sidebar-project-check[data-active="true"] {
+    opacity: 1;
+  }
+  .sidebar-project-menu-item[data-current="true"] .sidebar-project-menu-label {
+    font-weight: 650;
+  }
+
+  /* Quiet filter field: a thin underline, no heavy rust focus slab. */
+  .sidebar-project-command [data-slot="command-input"]:focus,
+  .sidebar-project-command [data-slot="command-input"]:focus-visible {
+    outline: none;
+    box-shadow: none;
   }
 
   .sidebar-project-switch-icon {

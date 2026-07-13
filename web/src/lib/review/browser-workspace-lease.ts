@@ -20,7 +20,9 @@ import {
 } from './browser-workspace-schema';
 import type { WorkspaceFence } from './browser-workspace-store';
 
-export const LEASE_CHANNEL_NAME = 'attn-workspace-lease';
+import { LEASE_CHANNEL_NAME } from '../tab-channels';
+
+export { LEASE_CHANNEL_NAME };
 const DEFAULT_LEASE_DURATION_MS = 15_000;
 /** Reserved holder id marking a released lease. Keeping the tombstone (with
  * its token) makes fencing tokens monotonic across release/reacquire and

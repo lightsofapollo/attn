@@ -315,12 +315,25 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return cleared;
   }
 
+  async peekWriterLease(): Promise<number | null> {
+    return null;
+  }
+
+  async joinLocalCollab(): Promise<null> {
+    return null;
+  }
+
+  subscribeWorkspaceChanges(): () => void {
+    return () => undefined;
+  }
+
   async beginEditing(workspaceId: string): Promise<EditingSession | null> {
     const ownerState: BrowserOwnerWorkspaceRuntimeState = {
       status: 'active',
       leaseRole: 'owner',
       writable: true,
       liveEditingAvailable: false,
+      localCollab: false,
       reason: null,
       workspaceId,
       roomId: null,

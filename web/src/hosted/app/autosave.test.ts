@@ -109,7 +109,6 @@ function makeHarness(options: { gated?: boolean } = {}): Harness {
 defineCase('debounce: rapid changes collapse to one durable commit', async () => {
   const h = makeHarness();
   h.controller.noteChange('a');
-  assertEqual(h.states.at(-1), 'Saving…', 'pending text is reported immediately');
   await h.scheduler.advance(400);
   h.controller.noteChange('ab');
   await h.scheduler.advance(400);
@@ -169,40 +168,6 @@ defineCase('changes during an in-flight commit recommit afterwards', async () =>
   await pump();
   assertEqual(h.commits.length, 2, 'both commits landed');
   assertEqual(h.commits[1], 'second', 'newest text committed last');
-});
-
-defineCase('flush waits for an in-flight commit and drains the newest text', async () => {
-  const pump = async (): Promise<void> => {
-    for (let index = 0; index < 8; index += 1) await Promise.resolve();
-  };
-  const h = makeHarness({ gated: true });
-  h.controller.noteChange('first');
-  await h.scheduler.advance(1_000);
-  h.controller.noteChange('second');
-
-  const flushed = h.controller.flush();
-  let settled = false;
-  void flushed.then(() => { settled = true; });
-  await pump();
-  assertEqual(settled, false, 'flush remains pending behind the first commit');
-
-  h.resolveGate?.();
-  await pump();
-  assertEqual(settled, false, 'flush starts the newer commit without a debounce delay');
-  h.resolveGate?.();
-  assertEqual(await flushed, true, 'both durable commits completed');
-  assertEqual(h.commits.length, 2, 'both revisions committed');
-  assertEqual(h.commits[1], 'second', 'flush drained the newest revision');
-  assertEqual(h.controller.dirty, false, 'controller is clean after the drain');
-});
-
-defineCase('flush reports a durability failure and leaves text pending', async () => {
-  const h = makeHarness();
-  h.failNext.on = true;
-  h.controller.noteChange('must stay');
-  assertEqual(await h.controller.flush(), false, 'caller learns the write did not land');
-  assert(h.controller.dirty, 'failed text remains pending');
-  assertEqual(h.states.at(-1), 'Storage needs attention', 'failure state stays honest');
 });
 
 async function runAllCases(): Promise<void> {

@@ -48,6 +48,7 @@ import type { CommittedRevision, CommitRevisionInput } from './browser-workspace
 import type { LeaseHandle, WorkspaceLeaseManagerOptions } from './browser-workspace-lease';
 import type { CollabController } from '../prosemirror/collab-controller';
 import type { BrowserReviewTerminalPort } from './browser-review-actions';
+import { LocalCollabHub } from './browser-local-collab';
 import {
   BrowserWorkspaceSharingCoordinator,
   type BrowserWorkspaceShareRequest,
@@ -69,6 +70,8 @@ export interface BrowserOwnerWorkspaceRuntimeState {
   leaseRole: 'owner' | 'passive' | 'none';
   writable: boolean;
   liveEditingAvailable: boolean;
+  /** Live co-typing across THIS browser's tabs (unshared workspace; no room). */
+  localCollab: boolean;
   reason: string | null;
   workspaceId: string;
   roomId: string | null;
@@ -160,6 +163,7 @@ export class BrowserOwnerWorkspaceRuntime {
   private share: ShareRecordView | null = null;
   private credentials: BrowserOwnerCredentials | null = null;
   private authority: BrowserOwnerWorkspaceAuthority | null = null;
+  private localHub: LocalCollabHub | null = null;
   private controllerValue: CollabController | null = null;
   private mutationTail: Promise<void> = Promise.resolve();
   private closing = false;
@@ -190,6 +194,7 @@ export class BrowserOwnerWorkspaceRuntime {
       leaseRole: 'none',
       writable: false,
       liveEditingAvailable: false,
+      localCollab: false,
       reason: null,
       workspaceId: options.workspaceId,
       roomId: null,
@@ -229,6 +234,9 @@ export class BrowserOwnerWorkspaceRuntime {
   async getCollabSeed(
     path: string,
   ): Promise<{ fileId: string; epoch: string; markdown: string } | null> {
+    // Local multi-tab mode: the hub's seed cache is the single base every
+    // participant (this editor included) binds from.
+    if (this.localHub) return this.localHub.seedFor(path);
     const binding = this.getBinding(path);
     if (!binding) return null;
     const bytes = await this.options.storage.workspaces.getRevisionBody(
@@ -286,11 +294,13 @@ export class BrowserOwnerWorkspaceRuntime {
       }
       if (!discovered) {
         this.startLocalHeartbeat();
+        const localCollab = this.startLocalCollab();
         this.patchState({
           status: 'active',
           leaseRole: 'owner',
           writable: true,
-          liveEditingAvailable: false,
+          liveEditingAvailable: localCollab,
+          localCollab,
           reason: null,
         });
         return this.getState();
@@ -355,6 +365,9 @@ export class BrowserOwnerWorkspaceRuntime {
       const coordinator = this.sharingCoordinator();
       const view = await coordinator.ensurePublished(request);
       if (!this.authority) {
+        // The room authority replaces local multi-tab hosting; follower tabs
+        // fall back to read-only follow mode once the hub says goodbye.
+        await this.stopLocalCollab();
         const discovered = await this.discoverPublishedShare();
         if (!discovered) throw new StorageConflictError('published share could not be reopened');
         try {
@@ -362,6 +375,7 @@ export class BrowserOwnerWorkspaceRuntime {
         } catch (error) {
           await this.deactivateAuthority();
           this.startLocalHeartbeat();
+          this.startLocalCollab();
           this.patchState({
             status: 'error',
             leaseRole: 'owner',
@@ -386,11 +400,12 @@ export class BrowserOwnerWorkspaceRuntime {
       await this.deactivateAuthority();
       await coordinator.eraseLocal(record);
       this.startLocalHeartbeat();
+      const localCollab = this.startLocalCollab();
       this.patchState({
         status: 'active',
         leaseRole: 'owner',
         writable: true,
-        liveEditingAvailable: false,
+        liveEditingAvailable: localCollab,
         reason: null,
         roomId: null,
         capId: null,
@@ -564,6 +579,10 @@ export class BrowserOwnerWorkspaceRuntime {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.closePromise = (async () => {
+      // Flush local co-editing first: its trailing commits enqueue onto the
+      // mutation tail awaited below, and its goodbye lets follower tabs
+      // re-handshake instead of waiting out the lease.
+      await this.stopLocalCollab();
       await this.mutationTail.catch(() => undefined);
       const authority = this.authority;
       this.authority = null;
@@ -997,7 +1016,7 @@ export class BrowserOwnerWorkspaceRuntime {
   }
 
   private refreshController(): void {
-    const next = this.authority?.controller ?? null;
+    const next = this.authority?.controller ?? this.localHub?.controller ?? null;
     if (next === this.controllerValue) return;
     this.controllerValue = next;
     this.stateValue = {
@@ -1038,9 +1057,75 @@ export class BrowserOwnerWorkspaceRuntime {
 
   private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
     if (this.closing) return Promise.reject(new StorageConflictError('owner workspace is closing'));
+    return this.enqueueInternal(operation);
+  }
+
+  /** Serialized like enqueueMutation, but usable during close (hub flush). */
+  private enqueueInternal<T>(operation: () => Promise<T>): Promise<T> {
     const run = this.mutationTail.then(operation, operation);
     this.mutationTail = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  /**
+   * Host local multi-tab co-editing for an UNSHARED workspace: every tab of
+   * this browser profile can live-edit through this tab's authority while the
+   * fenced lease (and therefore every durable commit) stays right here.
+   * Returns false when BroadcastChannel is unavailable.
+   */
+  private startLocalCollab(): boolean {
+    if (this.localHub) return this.localHub.available;
+    const hub = new LocalCollabHub({
+      workspaceId: this.options.workspaceId,
+      holderId: this.options.holderId,
+      selfLabel: this.options.collab.selfLabel,
+      selfColor: this.options.collab.selfColor,
+      ...(this.options.schedule === undefined ? {} : { schedule: this.options.schedule }),
+      ...(this.options.cancelScheduled === undefined
+        ? {}
+        : { cancelScheduled: this.options.cancelScheduled }),
+      readHeadMarkdown: async (path) => {
+        const entry = await this.options.storage.workspaces.getEntry(
+          this.options.workspaceId,
+          path,
+        );
+        if (entry?.kind !== 'markdown') return null;
+        const bytes = await this.options.storage.workspaces.getHeadBody(
+          this.options.workspaceId,
+          path,
+        );
+        try {
+          return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        } finally {
+          bytes.fill(0);
+        }
+      },
+      commitMarkdown: async (path, markdown) => {
+        await this.enqueueInternal(async () => {
+          await this.options.storage.workspaces.commitRevision({
+            workspaceId: this.options.workspaceId,
+            path,
+            body: new TextEncoder().encode(markdown),
+            fence: this.requireFence(),
+          });
+        });
+      },
+    });
+    if (!hub.available) {
+      void hub.close();
+      return false;
+    }
+    this.localHub = hub;
+    this.refreshController();
+    return true;
+  }
+
+  private async stopLocalCollab(): Promise<void> {
+    const hub = this.localHub;
+    if (!hub) return;
+    this.localHub = null;
+    await hub.close();
+    this.refreshController();
   }
 
   private nextPublicationTimestamp(): number {
@@ -1051,7 +1136,9 @@ export class BrowserOwnerWorkspaceRuntime {
   }
 
   private patchState(patch: Partial<BrowserOwnerWorkspaceRuntimeState>): void {
-    this.stateValue = { ...this.stateValue, ...patch };
+    // localCollab mirrors the hub's existence — share transitions and lease
+    // loss tear the hub down, so no individual patch site tracks the flag.
+    this.stateValue = { ...this.stateValue, ...patch, localCollab: this.localHub !== null };
     const snapshot = this.getState();
     this.options.onState?.(snapshot);
     for (const subscriber of this.subscribers) subscriber(snapshot);
@@ -1061,6 +1148,7 @@ export class BrowserOwnerWorkspaceRuntime {
     const authority = this.authority;
     this.authority = null;
     if (authority) await authority.close().catch(() => undefined);
+    await this.stopLocalCollab().catch(() => undefined);
     this.controllerValue = null;
     this.stopLocalHeartbeat();
     this.pagehideTarget?.removeEventListener('pagehide', this.pagehideHandler);
@@ -1084,9 +1172,13 @@ export class BrowserOwnerWorkspaceRuntime {
         }
       }).catch((error) => {
         this.lease = null;
-        this.patchState({
-          status: 'passive', leaseRole: 'passive', writable: false,
-          liveEditingAvailable: false, reason: errorMessage(error),
+        // Fenced off: this tab can no longer commit, so it must also stop
+        // hosting local co-editing (the new lease holder hosts instead).
+        void this.stopLocalCollab().then(() => {
+          this.patchState({
+            status: 'passive', leaseRole: 'passive', writable: false,
+            liveEditingAvailable: false, reason: errorMessage(error),
+          });
         });
       });
     }, interval);

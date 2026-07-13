@@ -21,9 +21,10 @@ use crate::review::crypto::ids::content_hash;
 use crate::review::ids::{ContentHash, EventId, FileId, RoomId};
 use crate::review::model::{
     AnchorIndex, LocalRevision, PositionAnchor, ResolvedAnchor, ResolvedAnchorCandidate,
-    ReviewEventBody, SuggestionOperation,
+    ReviewEventBody, RevisionSource, SuggestionOperation,
 };
 use crate::review::store::ReviewStore;
+use serde::{Deserialize, Serialize};
 use crate::review::working_copy::{SaveRequest, SaveSource, WorkingCopyError, WorkingCopyService};
 use unicode_normalization::UnicodeNormalization;
 
@@ -62,6 +63,12 @@ pub enum ApplyError {
         end: usize,
         len: usize,
     },
+    /// No revertable accept exists for the requested suggestion: the journal
+    /// has no `AcceptedSuggestion` revision for it whose `next_hash` matches
+    /// the current on-disk content (later edits landed, the accept predates
+    /// splice recording, or the id is unknown).
+    #[error("cannot revert suggestion: {reason}")]
+    RevertUnavailable { reason: String },
     /// Disk-side drift: the document on disk hashed to something different
     /// than the bytes the caller resolved the verdict against. The
     /// `WorkingCopyService` stale-hash guard refused to write, and the file
@@ -373,6 +380,12 @@ pub fn apply_ready_verdict(
     // bytes[end..]`. Delete passes replacement="" and a non-zero range;
     // insertions pass replacement=<text> and a zero-length range. No
     // operation-specific branches needed.
+    // Record the inverse of the splice on the revision (attn-3dv): the exact
+    // bytes removed and inserted, so `revert_accepted_suggestion` can restore
+    // the pre-accept content without any external diff machinery.
+    let removed_text = String::from_utf8(current_markdown_bytes[start..end].to_vec())
+        .map_err(|e| ApplyError::Other(format!("replaced span is not UTF-8: {e}")))?;
+
     let mut new_bytes: Vec<u8> = Vec::with_capacity(len + replacement.len());
     new_bytes.extend_from_slice(&current_markdown_bytes[..start]);
     new_bytes.extend_from_slice(replacement.as_bytes());
@@ -401,16 +414,152 @@ pub fn apply_ready_verdict(
     };
     let save_result = ctx.working_copy.save(req)?;
 
-    // (5) Persist the revision. The WorkingCopyService returns it un-
-    // persisted by design (a non-collab save would skip this step); the
+    // (5) Persist the revision, carrying the accept's inverse splice on
+    // `patch_text` (attn-3dv). The WorkingCopyService returns the revision
+    // un-persisted by design (a non-collab save would skip this step); the
     // apply orchestrator always journals so issue 8.5's event emitter can
     // rely on the entry existing.
+    let mut revision = save_result.revision;
+    revision.patch_text = Some(
+        serde_json::to_string(&AcceptSplice {
+            suggestion_id: suggestion_id.clone(),
+            start,
+            removed: removed_text,
+            inserted: replacement.clone(),
+        })
+        .map_err(|e| ApplyError::Other(format!("failed to encode accept splice: {e}")))?,
+    );
     ctx.store
-        .append_revision(&ctx.room_id, &ctx.file_id, &save_result.revision)
+        .append_revision(&ctx.room_id, &ctx.file_id, &revision)
         .map_err(|e| ApplyError::Journal(e.to_string()))?;
 
     Ok(ApplyOutcome {
         suggestion_id,
+        revision,
+        resulting_hash: save_result.next_hash,
+    })
+}
+
+/// The exact splice an accepted suggestion applied, recorded on the accept
+/// revision's `patch_text` so the owner can undo it later (attn-3dv). The
+/// inverse is trivially computable: replace `inserted` at `start` with
+/// `removed`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcceptSplice {
+    pub suggestion_id: EventId,
+    pub start: usize,
+    pub removed: String,
+    pub inserted: String,
+}
+
+/// What `revert_accepted_suggestion` produced.
+#[derive(Debug, Clone)]
+pub struct RevertOutcome {
+    pub suggestion_id: EventId,
+    /// The `RevertedSuggestion` revision appended to the journal.
+    pub revision: LocalRevision,
+    /// Hash of the working copy after the revert — equal to the reverted
+    /// accept's `parent_hash` (the pre-accept content).
+    pub resulting_hash: ContentHash,
+}
+
+/// Undo a previously accepted suggestion (Theme v2 decision #3, attn-3dv).
+///
+/// Preconditions enforced here rather than trusted from the caller:
+/// the journal's latest `AcceptedSuggestion` revision for `suggestion_id`
+/// must carry an `AcceptSplice` AND its `next_hash` must equal the hash of
+/// `current_markdown_bytes` — i.e. nothing else has touched the file since
+/// the accept. Anything less would make "undo" silently clobber later work.
+///
+/// The revert is local-first: it restores the file and journals a
+/// `RevertedSuggestion` revision. Cross-peer thread reopening is a protocol
+/// concern (new event kind) tracked separately; callers surface the local
+/// state change in the UI.
+pub fn revert_accepted_suggestion(
+    ctx: &ApplyContext,
+    suggestion_id: &EventId,
+    current_markdown_bytes: &[u8],
+) -> Result<RevertOutcome, ApplyError> {
+    let current_hash = content_hash_canonical(current_markdown_bytes);
+
+    // Find the newest revertable accept for this suggestion.
+    let mut target: Option<(LocalRevision, AcceptSplice)> = None;
+    let iter = ctx
+        .store
+        .iter_revisions(&ctx.room_id, &ctx.file_id)
+        .map_err(|e| ApplyError::Journal(e.to_string()))?;
+    for entry in iter {
+        let revision = entry.map_err(|e| ApplyError::Journal(e.to_string()))?;
+        if revision.source != RevisionSource::AcceptedSuggestion {
+            continue;
+        }
+        let Some(patch) = revision.patch_text.as_deref() else {
+            continue;
+        };
+        let Ok(splice) = serde_json::from_str::<AcceptSplice>(patch) else {
+            continue;
+        };
+        if &splice.suggestion_id == suggestion_id {
+            target = Some((revision, splice));
+        }
+    }
+    let Some((accept_revision, splice)) = target else {
+        return Err(ApplyError::RevertUnavailable {
+            reason: format!("no recorded accept splice for suggestion {suggestion_id:?}"),
+        });
+    };
+    if accept_revision.next_hash != current_hash {
+        return Err(ApplyError::RevertUnavailable {
+            reason: "the file changed after the accept; undo would clobber later edits".to_string(),
+        });
+    }
+
+    // Invert the splice: the inserted text must still sit at `start`.
+    let start = splice.start;
+    let inserted = splice.inserted.as_bytes();
+    let end = start.saturating_add(inserted.len());
+    if end > current_markdown_bytes.len()
+        || &current_markdown_bytes[start..end] != inserted
+    {
+        return Err(ApplyError::RevertUnavailable {
+            reason: "recorded splice no longer matches the file content".to_string(),
+        });
+    }
+    let mut restored: Vec<u8> =
+        Vec::with_capacity(current_markdown_bytes.len() + splice.removed.len());
+    restored.extend_from_slice(&current_markdown_bytes[..start]);
+    restored.extend_from_slice(splice.removed.as_bytes());
+    restored.extend_from_slice(&current_markdown_bytes[end..]);
+    let restored = String::from_utf8(restored)
+        .map_err(|e| ApplyError::Other(format!("reverted bytes are not UTF-8: {e}")))?;
+
+    let save_result = ctx.working_copy.save(SaveRequest {
+        path: ctx.path.clone(),
+        content: restored,
+        expected_hash: Some(current_hash),
+        source: SaveSource::RevertedSuggestion {
+            room_id: ctx.room_id.clone(),
+            suggestion_id: suggestion_id.clone(),
+        },
+    })?;
+
+    if save_result.next_hash != accept_revision.parent_hash {
+        // Byte-exact inversion should always land on the pre-accept hash;
+        // divergence means canonicalization drift and deserves a loud log,
+        // but the content on disk IS the recorded pre-accept bytes.
+        tracing::warn!(
+            "revert hash {:?} != pre-accept parent {:?}",
+            save_result.next_hash,
+            accept_revision.parent_hash
+        );
+    }
+
+    ctx.store
+        .append_revision(&ctx.room_id, &ctx.file_id, &save_result.revision)
+        .map_err(|e| ApplyError::Journal(e.to_string()))?;
+
+    Ok(RevertOutcome {
+        suggestion_id: suggestion_id.clone(),
         revision: save_result.revision,
         resulting_hash: save_result.next_hash,
     })
@@ -1610,6 +1759,7 @@ mod tests {
 
     use crate::review::ids::RoomId;
     use crate::review::store::ReviewStore;
+use serde::{Deserialize, Serialize};
     use crate::review::working_copy::WorkingCopyService;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1845,6 +1995,78 @@ mod tests {
             crate::review::model::RevisionSource::AcceptedSuggestion,
             "journaled source must reflect the apply path",
         );
+    }
+
+    /// Accept → revert round-trip (attn-3dv): the accept records its inverse
+    /// splice on the journaled revision, and `revert_accepted_suggestion`
+    /// restores the exact pre-accept bytes, journaling a `RevertedSuggestion`
+    /// revision whose next_hash equals the accept's parent_hash.
+    #[test]
+    fn revert_accepted_suggestion_restores_pre_accept_content() {
+        let initial = b"the quick brown fox\n";
+        let (ctx, _tmp) = make_ctx(initial);
+        let verdict = ready_verdict("sug-undo", (10, 15), "auburn");
+        let outcome = apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+
+        // The accept revision carries the recorded splice.
+        let splice: AcceptSplice =
+            serde_json::from_str(outcome.revision.patch_text.as_deref().expect("splice recorded"))
+                .expect("splice parses");
+        assert_eq!(splice.removed, "brown");
+        assert_eq!(splice.inserted, "auburn");
+        assert_eq!(splice.start, 10);
+
+        let after_accept = std::fs::read(&ctx.path).expect("read disk");
+        let revert = revert_accepted_suggestion(&ctx, &event_id("sug-undo"), &after_accept)
+            .expect("revert succeeds");
+
+        // Disk is byte-identical to the pre-accept content.
+        let on_disk = std::fs::read(&ctx.path).expect("read disk");
+        assert_eq!(on_disk, initial);
+        // The revert lands on the accept's parent hash.
+        assert_eq!(revert.resulting_hash, outcome.revision.parent_hash);
+        // Journal: accept then revert, in order, with the right sources.
+        let revs: Vec<_> = ctx
+            .store
+            .iter_revisions(&ctx.room_id, &ctx.file_id)
+            .expect("iter")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("revs");
+        assert_eq!(revs.len(), 2);
+        assert_eq!(
+            revs[1].source,
+            crate::review::model::RevisionSource::RevertedSuggestion
+        );
+    }
+
+    /// Undo must never clobber later work: once another edit lands after the
+    /// accept, the revert refuses with `RevertUnavailable`.
+    #[test]
+    fn revert_refuses_after_later_edits() {
+        let initial = b"the quick brown fox\n";
+        let (ctx, _tmp) = make_ctx(initial);
+        let verdict = ready_verdict("sug-undo2", (10, 15), "auburn");
+        apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
+
+        // A later user edit changes the file (and its hash).
+        let edited = b"THE quick auburn fox\n";
+        std::fs::write(&ctx.path, edited).expect("write later edit");
+
+        let err = revert_accepted_suggestion(&ctx, &event_id("sug-undo2"), edited)
+            .expect_err("revert must refuse");
+        assert!(matches!(err, ApplyError::RevertUnavailable { .. }));
+        // Disk untouched by the refused revert.
+        assert_eq!(std::fs::read(&ctx.path).expect("read"), edited);
+    }
+
+    /// Unknown suggestion ids refuse cleanly.
+    #[test]
+    fn revert_refuses_unknown_suggestion() {
+        let initial = b"the quick brown fox\n";
+        let (ctx, _tmp) = make_ctx(initial);
+        let err = revert_accepted_suggestion(&ctx, &event_id("nope"), initial)
+            .expect_err("nothing to revert");
+        assert!(matches!(err, ApplyError::RevertUnavailable { .. }));
     }
 
     /// Delete path: a `Ready` verdict with replacement="" shrinks the file

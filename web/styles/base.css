@@ -26,7 +26,7 @@ html, body {
     height: 100%;
     background: var(--background);
     color: var(--foreground);
-    font-family: 'Source Serif 4 Variable', 'Source Serif 4', Georgia, serif;
+    font-family: var(--serif);
     font-weight: 400;
     line-height: 1.72;
     -webkit-font-smoothing: antialiased;
@@ -35,13 +35,17 @@ html, body {
     overflow: hidden;
 }
 
+::selection {
+    background: var(--selection);
+}
+
 /* Paper grain texture overlay */
 body::after {
     content: '';
     position: fixed;
     inset: 0;
     pointer-events: none;
-    z-index: 9999;
+    z-index: 40; /* above content, below floating surfaces (popover 60+, modal 70+) */
     opacity: var(--grain-opacity, 0.035);
     background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
     background-size: 200px 200px;
@@ -58,14 +62,20 @@ body::after {
 nav,
 .breadcrumb,
 .directory-listing {
-    font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+    font-family: var(--sans);
 }
 
-/* Reading column */
+/* Reading surface: the sheet is full-width and left-set so wide content
+   (mermaid diagrams, tables, code) gets the whole pane; only running prose
+   caps at a readable ~72ch measure (Theme v2 decision, 2026-07-12). */
 article {
-    max-width: min(105ch, calc(100vw - 2rem));
-    margin: 0 auto;
+    max-width: none;
+    margin: 0;
     padding: 2.5rem clamp(1rem, 2.8vw, 2rem) 6rem;
+}
+
+article > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote) {
+    max-width: 72ch;
 }
 
 /* Typography scale */
@@ -105,11 +115,12 @@ a:focus-visible {
 
 /* Code */
 code {
-    font-family: 'Source Code Pro Variable', 'Source Code Pro', 'SF Mono', Consolas, monospace;
-    font-size: 0.84em;
+    font-family: var(--mono);
+    font-size: 0.85em;
     background: var(--code-block);
     padding: 0.15em 0.32em;
-    border-radius: 3px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in oklch, var(--border) 55%, transparent);
 }
 
 pre {
@@ -133,10 +144,37 @@ pre code {
     font-size: 0.85rem;
 }
 
-/* Lists */
+/* Lists — markers restored over the Tailwind preflight reset: a small rust
+   point for unordered items, muted numerals for ordered. */
 ul, ol {
     margin-bottom: 1rem;
     padding-left: 1.5rem;
+}
+
+ul > li:not(.task-list-item):not(:has(> input[type="checkbox"])) {
+    position: relative;
+}
+
+ul > li:not(.task-list-item):not(:has(> input[type="checkbox"]))::before {
+    content: '';
+    position: absolute;
+    left: -1.05em;
+    top: 0.72em;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--primary);
+    opacity: 0.75;
+}
+
+ol {
+    list-style: decimal;
+}
+
+ol > li::marker {
+    color: var(--muted-foreground);
+    font-family: var(--sans);
+    font-size: 0.9em;
 }
 
 li {
@@ -157,7 +195,7 @@ li:has(> input[type="checkbox"]) {
     margin-left: -1.5rem;
 }
 
-li > input[type="checkbox"] {
+li:has(> input[type="checkbox"]) > input[type="checkbox"] {
     appearance: none;
     -webkit-appearance: none;
     position: absolute;
@@ -167,12 +205,19 @@ li > input[type="checkbox"] {
     width: 1rem;
     height: 1rem;
     border: 1.5px solid var(--muted-foreground);
-    border-radius: 3px;
+    border-radius: 2px;
     background: transparent;
     transition: background 0.15s, border-color 0.15s;
 }
 
-li > input[type="checkbox"]:checked {
+@keyframes attn-check-pop {
+    0% { transform: scale(0.82); }
+    60% { transform: scale(1.1); }
+    100% { transform: scale(1); }
+}
+
+li:has(> input[type="checkbox"]) > input[type="checkbox"]:checked {
+    animation: attn-check-pop 200ms var(--ease);
     background: var(--primary);
     border-color: var(--primary);
     background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3E%3C/svg%3E");
@@ -184,17 +229,17 @@ table {
     width: 100%;
     border-collapse: collapse;
     margin-bottom: 1rem;
-    font-size: 0.9rem;
+    font-size: 1rem;
 }
 
 th, td {
     padding: 0.5rem 0.75rem;
     text-align: left;
-    border-bottom: 1px solid var(--muted);
+    border-bottom: 1px solid var(--border);
 }
 
 th {
-    font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+    font-family: var(--sans);
     font-weight: 600;
     font-size: 0.7rem;
     text-transform: uppercase;
@@ -223,7 +268,8 @@ blockquote p:last-child {
 hr {
     border: none;
     border-top: 1px solid var(--border);
-    margin: 2.5rem auto;
+    /* A small flourish centered on the prose measure, not the full pane. */
+    margin: 2.5rem 0 2.5rem calc(min(72ch, 100%) / 2 - 4rem);
     max-width: 8rem;
 }
 
@@ -244,7 +290,7 @@ img {
 .dir-entry {
     padding: 0.5rem 0.75rem;
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: 6px;
 }
 
 .dir-entry:hover {
@@ -255,31 +301,47 @@ img {
     font-weight: 600;
 }
 
+/* Reduced motion: designed alternative is "instant", never a broken reveal. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+    }
 }
 
-/* Scrollbar styles — intentionally unlayered so they override native scrollbars in WebKit. */
-pre::-webkit-scrollbar {
-  height: 6px;
+}
+
+/* Scrollbars — thin, trackless, ink-tinted; never a default white gutter.
+   Intentionally unlayered so they override native scrollbars in WebKit. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--foreground) 25%, transparent) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
   background: transparent;
 }
 
-pre::-webkit-scrollbar-track {
+::-webkit-scrollbar-track {
   background: transparent;
 }
 
-pre::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.1);
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--foreground) 22%, transparent);
   border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
 }
 
-pre::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.3);
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--foreground) 38%, transparent);
+  border: 3px solid transparent;
+  background-clip: padding-box;
 }
 
-.dark pre::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-}
-
-.dark pre::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.35);
+::-webkit-scrollbar-corner {
+  background: transparent;
 }

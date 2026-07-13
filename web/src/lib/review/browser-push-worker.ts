@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 
+import { boundFetch } from './bound-fetch';
 import {
   INFO_EVENT,
   INFO_EVENT_V3,
@@ -540,7 +541,7 @@ async function pullShareBinding(
 ): Promise<PushNotificationSummary> {
   if (!binding.bundleId || binding.epoch === undefined) throw new Error('share binding is incomplete');
   const cryptoImpl = dependencies.crypto ?? globalThis.crypto;
-  const fetchImpl = dependencies.fetch ?? fetch;
+  const fetchImpl = dependencies.fetch ?? boundFetch;
   const path = `/v3/shares/${encodeURIComponent(binding.resourceId)}/mailbox`;
   const query = new URLSearchParams({ after: String(binding.cursor), limit: String(MAX_ENVELOPES_PER_PULL) });
   const admission = await admissionHeader(binding.readAdmissionKey, 'read', 'GET', path, query, cryptoImpl);

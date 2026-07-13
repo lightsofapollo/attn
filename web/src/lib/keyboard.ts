@@ -127,9 +127,44 @@ export function initKeyboard(config: KeyboardConfig): () => void {
         config.onShareOpen();
         return;
       }
+      // Palette, shortcuts help, and window/tab navigation are global chords:
+      // they must work while the always-editable document has focus, or a
+      // keyboard-first reviewer can never leave the page (Theme v2, attn-n9j).
+      // ⌘K is the primary binding; ⌘P stays as an alias.
+      if (!e.shiftKey && (code === 'KeyK' || code === 'KeyP') && config.onCommandPalette) {
+        e.preventDefault();
+        config.onCommandPalette();
+        return;
+      }
+      if (
+        config.onShortcutsHelp
+        && (code === 'Slash' || code === 'NumpadDivide' || code === 'IntlRo' || code === 'IntlYen'
+          || key === '/' || key === '?' || key === '÷')
+      ) {
+        e.preventDefault();
+        config.onShortcutsHelp();
+        return;
+      }
+      if (!e.shiftKey && code === 'KeyW' && config.onTabClose) {
+        e.preventDefault();
+        config.onTabClose();
+        return;
+      }
+      if (code === 'BracketLeft' && config.onTabPrev) {
+        e.preventDefault();
+        config.onTabPrev();
+        return;
+      }
+      if (code === 'BracketRight' && config.onTabNext) {
+        e.preventDefault();
+        config.onTabNext();
+        return;
+      }
     }
 
     // App-level shortcuts should never steal focus from text-editing surfaces.
+    // Only bindings that ProseMirror must own while focused (undo/redo) or
+    // literal single-character keys (t, arrows) remain below this line.
     if (editingTarget) {
       return;
     }
@@ -163,33 +198,9 @@ export function initKeyboard(config: KeyboardConfig): () => void {
       }
     }
 
-    // Cmd/Ctrl+P opens command palette globally
-    if (key === 'p' && meta && config.onCommandPalette) {
-      e.preventDefault();
-      config.onCommandPalette();
-      return;
-    }
-
-    // Cmd/Ctrl+/ (or Cmd/Ctrl+?) opens keyboard shortcuts help globally
-    if (
-      meta
-      && config.onShortcutsHelp
-      && (
-        code === 'Slash'
-        || code === 'NumpadDivide'
-        || code === 'IntlRo'
-        || code === 'IntlYen'
-        || key === '/'
-        || key === '?'
-        || key === '÷'
-      )
-    ) {
-      e.preventDefault();
-      config.onShortcutsHelp();
-      return;
-    }
-
-    // Tab shortcuts (Cmd+W, Cmd+[, Cmd+])
+    // Undo/redo stay below the editing guard: ProseMirror's own keymap owns
+    // them while the editor is focused — handling them here too would
+    // double-fire. Everything else meta-chorded lives ABOVE the guard.
     if (meta) {
       if (e.key === 'z' && !e.shiftKey && config.onUndo) {
         e.preventDefault();
@@ -201,25 +212,6 @@ export function initKeyboard(config: KeyboardConfig): () => void {
         config.onRedo();
         return;
       }
-      if (e.key === 'w' && config.onTabClose) {
-        e.preventDefault();
-        config.onTabClose();
-        return;
-      }
-      if (e.key === '[' && config.onTabPrev) {
-        e.preventDefault();
-        config.onTabPrev();
-        return;
-      }
-      if (e.key === ']' && config.onTabNext) {
-        e.preventDefault();
-        config.onTabNext();
-        return;
-      }
-      // NOTE: the comment/suggestion (Cmd+.), review-panel (Cmd+J), and share
-      // (Cmd+Shift+S) shortcuts are handled ABOVE the editing-target guard so
-      // they keep working while the live editor is focused. Do not re-add them
-      // here — that would double-fire for the non-editing case.
     }
 
     switch (e.key) {

@@ -1077,7 +1077,13 @@ export class RoomDO extends DurableObject<Env> {
         ownerSigningKeyId,
         serverSeq: 0,
       },
-      { status: 201 },
+      {
+        status: 201,
+        // Signal the room's browser policy so the Worker's corsMiddleware can
+        // attach CORS to this create response — without it a cross-origin
+        // browser owner can't read the 201 and the whole share rolls back.
+        headers: { "X-Attn-Allow-Browser": clamped.policy.allowBrowser ? "true" : "false" },
+      },
     );
   }
 

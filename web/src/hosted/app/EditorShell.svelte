@@ -1,26 +1,25 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import type { EditorView } from 'prosemirror-view';
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
   import ShareSheet from './ShareSheet.svelte';
+  import CommandPalette, { type HostedCommand } from './CommandPalette.svelte';
   import { AutosaveController } from './autosave';
+  import type { reviewStore as ReviewStoreInstance } from '../../lib/review/store.svelte';
   import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
-  import {
-    expandPicked,
-    pickedFilesFromDrop,
-    pickedFilesFromList,
-    toImportFiles,
-    type PickedFile,
-  } from './import-files';
+  import { expandPicked, toImportFiles } from './import-files';
+  import { fileDrop, filesToPicked } from './file-drop';
+  import { autofocus } from '../../lib/hosted/autofocus';
   import type {
     EditingSession,
+    LocalCollabJoinHandle,
+    LocalCollabJoinState,
     SaveState,
     StorageHealth,
     WorkspaceAppService,
     WorkspaceDetail,
     WorkspaceEntry,
-    WorkspaceSummary,
     WorkspaceShareRequest,
   } from './types';
   import type EditorComponentType from '../../lib/Editor.svelte';
@@ -29,27 +28,30 @@
   import type HostedDesktopWorkspaceFrameType from './HostedDesktopWorkspaceFrame.svelte';
   import type { EditorBridge } from '../../lib/prosemirror/collab-session';
   import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
+  import { LEASE_CHANNEL_NAME } from '../../lib/tab-channels';
   import type { RequiresThreeWayVerdict, Thread } from '../../lib/types';
 
   interface Props {
     service: WorkspaceAppService;
     workspace: WorkspaceDetail;
-    workspaces: WorkspaceSummary[];
     activePath: string | undefined;
     /** Decoded head body when the active entry is Markdown; null otherwise. */
     bodyText?: string | null;
     isNewDraft?: boolean;
-    onWorkspaceRefresh: (activePath?: string) => Promise<void>;
+    /** Switch the active file in place (no reload). Provided by AppShell. */
+    onSelectEntry?: (path: string) => void;
+    /** Refresh the workspace after an entry-list change (no reload). */
+    onWorkspaceChanged?: (openPath?: string) => Promise<void>;
   }
 
   const {
     service,
     workspace,
-    workspaces,
     activePath,
     bodyText = null,
     isNewDraft = false,
-    onWorkspaceRefresh,
+    onSelectEntry,
+    onWorkspaceChanged,
   }: Props = $props();
 
   const health: StorageHealth = $derived(service.storageHealth());
@@ -57,6 +59,7 @@
     workspace.entries.find((entry) => entry.path === activePath) ?? workspace.entries[0],
   );
   let shareOpen = $state(false);
+  let paletteOpen = $state(false);
   let filesSheetOpen = $state(false);
   let reviewSheetOpen = $state(false);
   let shareButton = $state<HTMLButtonElement | undefined>();
@@ -67,6 +70,9 @@
   let desktopLayout = $state(
     typeof window !== 'undefined' && window.matchMedia('(min-width: 901px)').matches,
   );
+  // Reactive: resetting it on a later lease win must re-run the desktop
+  // auto-edit effect (which short-circuits on this flag and would otherwise
+  // never track another dependency again).
   let desktopEditRequested = $state(false);
   let HostedDesktopWorkspaceFrame = $state<typeof HostedDesktopWorkspaceFrameType | null>(null);
 
@@ -90,15 +96,6 @@
   });
 
   // ————— editing (attn-7xl.3.3) —————
-  // Workspace leases live for 15 seconds. A browser normally releases one on
-  // pagehide, but WebKit may discard the closing document before that async
-  // IndexedDB transaction completes. An explicit retry therefore spans one
-  // full lease window plus scheduling grace; every attempt still goes through
-  // the atomic fenced acquisition, so concurrent waiters elect one writer.
-  const LEASE_HANDOFF_TIMEOUT_MS = 16_500;
-  const LEASE_HANDOFF_INITIAL_DELAY_MS = 150;
-  const LEASE_HANDOFF_MAX_DELAY_MS = 1_000;
-
   // svelte-ignore state_referenced_locally — props seed the initial values.
   let displayText = $state<string | null>(bodyText);
   // svelte-ignore state_referenced_locally
@@ -120,6 +117,9 @@
   }
   let EditorComponent = $state<typeof EditorComponentType | null>(null);
   let ReviewMarginComponent = $state<typeof ReviewMarginComponentType | null>(null);
+  /** Lazy store handle — the review store belongs to the editor graph, and
+   *  the app entry's static graph must never preload it (route-bundle gate). */
+  let reviewStoreRef = $state<typeof ReviewStoreInstance | null>(null);
   let ReviewApplyExpandComponent = $state<typeof ReviewApplyExpandComponentType | null>(null);
   let editorRef = $state<EditorExports | undefined>();
   let pmViewForReview = $state<EditorView | undefined>();
@@ -127,6 +127,13 @@
   let changeWatcher = $state<unknown[]>([]);
   let session = $state<EditingSession | null>(null);
   let ownerState = $state<BrowserOwnerWorkspaceRuntimeState | null>(null);
+  // Local multi-tab co-editing, follower role (attn-47r): a live wire to the
+  // lease-holding tab's authorities. Non-null only while this tab is denied
+  // the writer lease; becoming the owner closes it.
+  let localJoin: LocalCollabJoinHandle | null = null;
+  let joinState = $state<LocalCollabJoinState | null>(null);
+  let unsubscribeJoin: (() => void) | null = null;
+  const joinLive = $derived(joinState?.status === 'live' && !session);
   let collabSeed = $state<{ fileId: string; epoch: string; markdown: string } | null>(null);
   let collabClientId = $state<string | null>(null);
   let collabEpoch = $state(0);
@@ -137,7 +144,6 @@
   let loadedCollabGenerationKey: string | null = null;
   let boundCollabKey: string | null = null;
   let autosave: AutosaveController | null = null;
-  let autosavePath: string | null = null;
   // Durable commits completed this session — observable for tests/status.
   let commitCount = $state(0);
 
@@ -147,6 +153,7 @@
       && ownerState.authority?.session?.authoringReady === true,
   );
   const ownerRoomStatus = $derived.by(() => {
+    if (joinLive) return 'Live · editing with another tab';
     const state = ownerState;
     if (!state) return null;
     if (state.leaseRole === 'passive') return 'Read-only tab';
@@ -161,17 +168,10 @@
   let addingMarkdown = $state(false);
   let newMarkdownPath = $state('');
   let renamingEntry = $state(false);
-  let renamingEntryPath = $state<string | null>(null);
   let renameEntryValue = $state('');
   let confirmingEntryDelete = $state(false);
-  let deletingEntryPath = $state<string | null>(null);
-  let sidebarDropActive = $state(false);
   let railError = $state<string | null>(null);
   let assetInput = $state<HTMLInputElement | undefined>();
-  let newMarkdownInput = $state<HTMLInputElement | undefined>();
-  let newMarkdownButton = $state<HTMLButtonElement | undefined>();
-  let renameEntryInput = $state<HTMLInputElement | undefined>();
-  let deleteCancelButton = $state<HTMLButtonElement | undefined>();
   let previewUrl = $state<string | null>(null);
 
   // ————— iOS reader behaviors (attn-7xl.3.7) —————
@@ -226,103 +226,6 @@
   let editBarOffset = $state(0);
   let renamingTitle = $state(false);
   let titleValue = $state('');
-  let titleInput = $state<HTMLInputElement | undefined>();
-  let titleButton = $state<HTMLButtonElement | undefined>();
-
-  async function focusAndSelect(
-    input: HTMLInputElement | undefined,
-    afterFloatingMenu = false,
-  ): Promise<void> {
-    await tick();
-    // Context/dropdown primitives restore focus to their trigger as they
-    // close. Wait through that close cycle, then move focus into the newly
-    // mounted field so the menu cannot steal it back or trigger an onblur.
-    await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-    });
-    if (afterFloatingMenu) {
-      // Bits UI restores the context/dropdown trigger after its 150ms close
-      // transition. WebKit performs that restoration later than Chromium.
-      await new Promise<void>((resolve) => window.setTimeout(resolve, 180));
-    }
-    input?.focus();
-    input?.select();
-  }
-
-  async function beginTitleRename(afterFloatingMenu = false): Promise<void> {
-    titleValue = workspace.name;
-    renamingTitle = true;
-    await tick();
-    await focusAndSelect(titleInput, afterFloatingMenu);
-  }
-
-  async function cancelTitleRename(): Promise<void> {
-    renamingTitle = false;
-    await tick();
-    titleButton?.focus();
-  }
-
-  function focusEntryRow(path: string | null): void {
-    if (!path) return;
-    const candidates = document.querySelectorAll<HTMLElement>('[data-sidebar="menu-button"][data-path]');
-    for (const candidate of candidates) {
-      const treePath = candidate.dataset.path ?? '';
-      if (treePath === path || treePath.endsWith(`/${path}`)) {
-        candidate.focus();
-        return;
-      }
-    }
-  }
-
-  async function beginEntryRename(path = activeEntry?.path): Promise<void> {
-    if (!path) return;
-    confirmingEntryDelete = false;
-    deletingEntryPath = null;
-    renamingEntryPath = path;
-    renameEntryValue = path;
-    renamingEntry = true;
-    await tick();
-    await focusAndSelect(renameEntryInput, true);
-  }
-
-  async function cancelEntryRename(): Promise<void> {
-    const path = renamingEntryPath;
-    renamingEntry = false;
-    renamingEntryPath = null;
-    await tick();
-    focusEntryRow(path);
-  }
-
-  async function beginAddMarkdown(): Promise<void> {
-    addingMarkdown = true;
-    await tick();
-    await focusAndSelect(newMarkdownInput);
-  }
-
-  async function cancelAddMarkdown(): Promise<void> {
-    addingMarkdown = false;
-    await tick();
-    newMarkdownButton?.focus();
-  }
-
-  async function beginEntryDelete(path = activeEntry?.path): Promise<void> {
-    if (!path) return;
-    renamingEntry = false;
-    renamingEntryPath = null;
-    deletingEntryPath = path;
-    confirmingEntryDelete = true;
-    await tick();
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 180));
-    deleteCancelButton?.focus();
-  }
-
-  async function cancelEntryDelete(): Promise<void> {
-    const path = deletingEntryPath;
-    confirmingEntryDelete = false;
-    deletingEntryPath = null;
-    await tick();
-    focusEntryRow(path);
-  }
 
   $effect(() => {
     if (!editing) {
@@ -346,14 +249,39 @@
     };
   });
 
+  // Auto-name from the first H1 (Theme v2, attn-cjn): "Untitled" is a
+  // transient state, not a permanent pile. Fires once per mount, after a
+  // durable commit, and only while the workspace still has the default name;
+  // the reactive detail object updates every name usage without a reload.
+  let autoNameAttempted = false;
+  async function maybeAutoNameFromHeading(text: string): Promise<void> {
+    if (autoNameAttempted || workspace.name !== 'Untitled') return;
+    const match = text.match(/^#\s+(.+)$/m);
+    const heading = match?.[1]?.trim().replace(/[#*`_]/g, '').trim().slice(0, 80);
+    if (!heading) return;
+    autoNameAttempted = true;
+    try {
+      const { dedupeWorkspaceName } = await import('./import-files');
+      const names = (await service.listWorkspaces())
+        .filter((candidate) => candidate.id !== workspace.id)
+        .map((candidate) => candidate.name);
+      const next = dedupeWorkspaceName(heading, names);
+      await service.renameWorkspace(workspace.id, next);
+      workspace.name = next;
+    } catch {
+      // Transient failure — retry on a later commit.
+      autoNameAttempted = false;
+    }
+  }
+
   async function commitTitleRename(): Promise<void> {
     renamingTitle = false;
     const next = titleValue.trim();
     if (next.length === 0 || next === workspace.name) return;
     try {
-      if (!await flushPendingEditor()) return;
       await service.renameWorkspace(workspace.id, next);
-      await onWorkspaceRefresh(activeEntry?.path);
+      if (onWorkspaceChanged) await onWorkspaceChanged();
+      else window.location.reload();
     } catch {
       // Rename failures surface on the next durable state read.
     }
@@ -409,98 +337,78 @@
     const path = /\.(?:md|markdown)$/iu.test(raw) ? raw : `${raw}.md`;
     railError = null;
     try {
-      if (!await flushPendingEditor()) return;
       await service.createMarkdownEntry(workspace.id, path);
-      window.location.assign(`/app/w/${workspace.id}/${path}`);
-    } catch (error) {
-      railError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async function addPickedFiles(picked: PickedFile[]): Promise<void> {
-    if (picked.length === 0) return;
-    railError = null;
-    try {
-      if (!await flushPendingEditor()) return;
-      await service.addAssetFiles(workspace.id, toImportFiles(await expandPicked(picked)));
-      window.location.reload();
-    } catch (error) {
-      railError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async function onAssetsPicked(): Promise<void> {
-    const files = assetInput?.files;
-    if (!files || files.length === 0) return;
-    try {
-      await addPickedFiles(await pickedFilesFromList(files));
-    } finally {
-      if (assetInput) assetInput.value = '';
-    }
-  }
-
-  function onSidebarDragOver(event: DragEvent): void {
-    if (!event.dataTransfer?.types.includes('Files')) return;
-    event.preventDefault();
-    sidebarDropActive = true;
-    event.dataTransfer.dropEffect = 'copy';
-  }
-
-  async function onSidebarDrop(event: DragEvent): Promise<void> {
-    const transfer = event.dataTransfer;
-    if (!transfer) return;
-    event.preventDefault();
-    sidebarDropActive = false;
-    await addPickedFiles(await pickedFilesFromDrop(transfer));
-  }
-
-  async function commitEntryRename(): Promise<void> {
-    const sourcePath = renamingEntryPath;
-    const target = renameEntryValue.trim();
-    renamingEntry = false;
-    renamingEntryPath = null;
-    if (!sourcePath || target.length === 0 || target === sourcePath) return;
-    railError = null;
-    try {
-      if (!await flushPendingEditor()) return;
-      await service.renameEntry(workspace.id, sourcePath, target);
-      await onWorkspaceRefresh(sourcePath === activeEntry?.path ? target : activeEntry?.path);
-    } catch (error) {
-      railError = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  async function deleteEntry(path = deletingEntryPath ?? activeEntry?.path): Promise<void> {
-    confirmingEntryDelete = false;
-    deletingEntryPath = null;
-    if (!path) return;
-    railError = null;
-    try {
-      if (!await flushPendingEditor()) return;
-      await service.deleteEntry(workspace.id, path);
-      if (path === activeEntry?.path) {
-        window.location.assign(`/app/w/${workspace.id}`);
+      if (onWorkspaceChanged) {
+        newMarkdownPath = '';
+        addingMarkdown = false;
+        await onWorkspaceChanged(path);
       } else {
-        window.location.reload();
+        window.location.assign(`/app/w/${workspace.id}/${path}`);
       }
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
   }
 
-  async function downloadEntry(path = activeEntry?.path): Promise<void> {
-    if (!path) return;
-    if (!await flushPendingEditor()) return;
-    const result = await service.readEntryBytes(workspace.id, path);
+  async function importFiles(files: Iterable<File>): Promise<void> {
+    railError = null;
+    try {
+      await service.addAssetFiles(workspace.id, toImportFiles(await expandPicked(await filesToPicked(files))));
+      if (onWorkspaceChanged) await onWorkspaceChanged();
+      else window.location.reload();
+    } catch (error) {
+      railError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (assetInput) assetInput.value = '';
+    }
+  }
+
+  function onAssetsPicked(): void {
+    const files = assetInput?.files;
+    if (files && files.length > 0) void importFiles(Array.from(files));
+  }
+
+  async function commitEntryRename(): Promise<void> {
+    const entry = activeEntry;
+    const target = renameEntryValue.trim();
+    renamingEntry = false;
+    if (!entry || target.length === 0 || target === entry.path) return;
+    railError = null;
+    try {
+      await service.renameEntry(workspace.id, entry.path, target);
+      if (onWorkspaceChanged) await onWorkspaceChanged(target);
+      else window.location.assign(`/app/w/${workspace.id}/${target}`);
+    } catch (error) {
+      railError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function deleteActiveEntry(): Promise<void> {
+    const entry = activeEntry;
+    confirmingEntryDelete = false;
+    if (!entry) return;
+    railError = null;
+    try {
+      await service.deleteEntry(workspace.id, entry.path);
+      if (onWorkspaceChanged) await onWorkspaceChanged();
+      else window.location.assign(`/app/w/${workspace.id}`);
+    } catch (error) {
+      railError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function downloadActiveEntry(): Promise<void> {
+    const entry = activeEntry;
+    if (!entry) return;
+    const result = await service.readEntryBytes(workspace.id, entry.path);
     if (!result) return;
-    const basename = path.split('/').pop() ?? path;
+    const basename = entry.path.split('/').pop() ?? entry.path;
     triggerDownload(document, basename, result.bytes, result.mediaType);
   }
 
   async function exportZip(): Promise<void> {
     railError = null;
     try {
-      if (!await flushPendingEditor()) return;
       const files = await service.exportWorkspace(workspace.id);
       const manifest = buildManifest(workspace.name, files, Date.now());
       const zip = await buildWorkspaceZip(files, manifest);
@@ -515,6 +423,13 @@
     activeEntry?.presentation === 'editable' &&
       health.mode !== 'unavailable' &&
       health.mode !== 'quota-pressure',
+  );
+
+  // A Markdown entry that would normally be editable but whose device storage
+  // mode blocks authoring — the honest "you can still read/review" state that
+  // the iOS reader surfaces as a "Viewing safely" banner.
+  const editingUnavailable = $derived(
+    activeEntry?.presentation === 'editable' && !canEdit,
   );
 
   async function ensureEditorGraph(includeReview = false): Promise<void> {
@@ -545,32 +460,43 @@
         ReviewMarginComponent = marginModule.default;
         ReviewApplyExpandComponent = applyModule.default;
       }));
+      imports.push(import('../../lib/review/store.svelte').then((mod) => {
+        reviewStoreRef = mod.reviewStore;
+      }));
     }
     await Promise.all(imports);
   }
 
   function installOwnerSession(granted: EditingSession): void {
     session = granted;
+    // A tab that was denied (read-only or live co-editing follower) and later
+    // won the lease must re-enter the desktop editor-first posture — the
+    // auto-edit latch below already fired and lost.
+    desktopEditRequested = false;
     unsubscribeOwner?.();
     unsubscribeOwner = granted.subscribeOwner((state) => {
       ownerState = state;
       editDenied = state.leaseRole === 'passive';
       if (!state.writable) editing = false;
     });
-    bindAutosave(granted, activeEntry);
+    ensureAutosaveForActiveFile();
   }
 
-  function bindAutosave(granted: EditingSession, entry: WorkspaceEntry | undefined): void {
-    const path = entry?.presentation === 'editable' ? entry.path : null;
-    if (autosavePath === path && autosave) return;
+  // (Re)create the autosave controller bound to the CURRENT active file. Called
+  // on session install and on every in-place file switch, so autosave always
+  // commits to the file on screen — never the previously open one.
+  function ensureAutosaveForActiveFile(): void {
+    const granted = session;
+    const entry = activeEntry;
+    if (!granted || entry?.presentation !== 'editable') return;
     autosave?.dispose();
-    autosave = null;
-    autosavePath = path;
-    if (!path) return;
+    const path = entry.path;
     autosave = new AutosaveController({
       commit: async (text) => {
         await granted.commitText(path, text);
         commitCount += 1;
+        displayText = text;
+        void maybeAutoNameFromHeading(text);
       },
       onState: (state) => (saveState = state),
     });
@@ -579,12 +505,28 @@
   async function ensureOwnerSession(): Promise<EditingSession | null> {
     if (session) return session;
     if (ownerSessionOpening) return ownerSessionOpening;
-    ownerSessionOpening = service.beginEditing(workspace.id).then((granted) => {
+    ownerSessionOpening = service.beginEditing(workspace.id).then(async (granted) => {
       if (!granted) {
         editDenied = true;
         ownerState = null;
         return null;
       }
+      // Takeover while live co-editing: this editor holds the converged doc
+      // (possibly ahead of the dead owner's last commit). Commit it BEFORE
+      // any collab binding so the new hub's seed cache reads this exact
+      // content — otherwise later joiners would seed from a stale base.
+      if (
+        joinState?.status === 'live'
+        && editorRef
+        && activeEntry?.presentation === 'editable'
+      ) {
+        try {
+          await granted.commitText(activeEntry.path, editorRef.getMarkdown());
+        } catch {
+          // The head stays at the last owner commit; co-editing still starts.
+        }
+      }
+      closeLocalJoin();
       installOwnerSession(granted);
       return granted;
     }).finally(() => {
@@ -592,6 +534,169 @@
     });
     return ownerSessionOpening;
   }
+
+  function closeLocalJoin(): void {
+    unsubscribeJoin?.();
+    unsubscribeJoin = null;
+    localJoin?.close();
+    localJoin = null;
+    joinState = null;
+  }
+
+  // Multi-tab auto-recovery: the passive (read-only) tab listens for the
+  // owning tab releasing the workspace lease and re-attempts ownership, so the
+  // "another tab is editing" banner clears on its own when the other tab
+  // closes — delivering the banner's promise without a manual "Retry edit".
+  $effect(() => {
+    const wsId = workspace.id;
+    if (typeof BroadcastChannel === 'undefined') return;
+    const channel = new BroadcastChannel(LEASE_CHANNEL_NAME);
+    channel.onmessage = (event: MessageEvent) => {
+      const message = event.data as { workspaceId?: string; event?: string } | null;
+      if (message?.workspaceId !== wsId || message.event !== 'released') return;
+      // Re-attempt ownership; ensureOwnerSession is a no-op if we already hold it.
+      untrack(() => { void ensureOwnerSession(); });
+    };
+    return () => channel.close();
+  });
+
+  // The doorbell above is best-effort: a tab that crashes — or whose pagehide
+  // close never finishes its async release — leaves the lease dangling and
+  // never broadcasts. The lease still expires (15s), so while denied, wait on
+  // that exact deadline and re-attempt takeover; also re-attempt when this tab
+  // regains focus, so returning to it clears the banner immediately.
+  $effect(() => {
+    const wsId = workspace.id;
+    if (!editDenied) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const attempt = async (): Promise<void> => {
+      const granted = await untrack(() => ensureOwnerSession());
+      if (!disposed && !granted) armExpiryTimer();
+    };
+    const armExpiryTimer = (): void => {
+      void service.peekWriterLease(wsId).then((expiresAt) => {
+        if (disposed || timer !== null) return;
+        const delayMs = Math.max(expiresAt === null ? 0 : expiresAt - Date.now(), 250);
+        timer = setTimeout(() => {
+          timer = null;
+          void attempt();
+        }, delayMs);
+      });
+    };
+    const onFocus = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      void attempt();
+    };
+
+    armExpiryTimer();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      disposed = true;
+      if (timer !== null) clearTimeout(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  });
+
+  // Local multi-tab co-editing (attn-47r), follower role: while another tab
+  // holds the writer lease, join its authorities as a live CollabClient
+  // instead of settling for the read-only mirror. The handle reconnects on
+  // its own; becoming the owner (ensureOwnerSession) closes it.
+  $effect(() => {
+    const wsId = workspace.id;
+    if (!editDenied || session) return;
+    untrack(() => {
+      if (localJoin) return;
+      void service.joinLocalCollab(wsId).then((handle) => {
+        if (!handle) return;
+        // The deny may have resolved (owner takeover) while we connected.
+        if (session || localJoin || workspace.id !== wsId) {
+          handle.close();
+          return;
+        }
+        localJoin = handle;
+        unsubscribeJoin = handle.subscribe((state) => {
+          joinState = state;
+        });
+      });
+    });
+  });
+
+  // The hub left (owner tab closed or is transitioning): unbind the collab
+  // editor and fall back to the read-only banner until the join reconnects
+  // to a new generation or this tab wins the lease itself.
+  $effect(() => {
+    const state = joinState;
+    if (session || state?.status !== 'connecting') return;
+    untrack(() => {
+      collabSeedRequest += 1;
+      collabSeed = null;
+      collabClientId = null;
+      boundCollabKey = null;
+      loadedCollabGenerationKey = null;
+      collabEpoch += 1;
+      editing = false;
+    });
+  });
+
+  // Follower seed: fetch the authority's base for the active file whenever
+  // the hub generation or the file changes, then remount the editor at v0.
+  $effect(() => {
+    const state = joinState;
+    const entry = activeEntry;
+    if (session || state?.status !== 'live' || entry?.presentation !== 'editable') return;
+    const join = localJoin;
+    if (!join) return;
+    const generationKey = `join:${state.generation}:${entry.path}`;
+    if (loadedCollabGenerationKey === generationKey) return;
+    loadedCollabGenerationKey = generationKey;
+    untrack(() => { void ensureEditorGraph(false); });
+    const request = ++collabSeedRequest;
+    void join.getSeed(entry.path).then((seed) => {
+      if (
+        request !== collabSeedRequest
+        || joinState?.generation !== state.generation
+        || activeEntry?.path !== entry.path
+      ) return;
+      if (!seed) {
+        if (loadedCollabGenerationKey === generationKey) loadedCollabGenerationKey = null;
+        return;
+      }
+      untrack(() => {
+        collabSeed = seed;
+        collabClientId = crypto.randomUUID();
+        boundCollabKey = null;
+        collabEpoch += 1;
+        // Same editor-first posture as the owning desktop tab; mobile stays
+        // reader-first and promotes through its Edit action.
+        if (desktopLayout) editing = true;
+      });
+    });
+  });
+
+  // Follower binding: attach the freshly seeded (v0) editor to the join
+  // controller, which resyncs the file's full step log from the hub.
+  $effect(() => {
+    const state = joinState;
+    const seed = collabSeed;
+    const view = pmViewForReview;
+    const epoch = collabEpoch;
+    if (session || state?.status !== 'live' || !seed || !view || readyCollabEpoch !== epoch) return;
+    const controller = localJoin?.getController();
+    if (!controller) return;
+    const key = `join:${state.generation}:${seed.fileId}:${seed.epoch}:${epoch}`;
+    if (boundCollabKey === key) return;
+    const bridge: EditorBridge = {
+      getState: () => view.state,
+      apply: (transaction) => view.dispatch(transaction),
+    };
+    controller.setActiveFile(seed.fileId, bridge, seed.epoch);
+    boundCollabKey = key;
+  });
 
   // Desktop opens editor-first and therefore needs route authority up front.
   // Mobile is deliberately reader-first: merely opening a document must not
@@ -605,25 +710,22 @@
       unsubscribeOwner = null;
       autosave?.dispose();
       autosave = null;
-      autosavePath = null;
+      closeLocalJoin();
       void session?.release();
     };
-  });
-
-  $effect(() => {
-    const granted = session;
-    const entry = activeEntry;
-    if (!granted) return;
-    untrack(() => bindAutosave(granted, entry));
   });
 
   $effect(() => {
     const currentSession = session;
     const state = ownerState;
     const entry = activeEntry;
-    if (!currentSession || !state?.roomId || entry?.presentation !== 'editable') {
+    const collabHosted = Boolean(state && (state.roomId || state.localCollab));
+    if (!currentSession || !state || !collabHosted || entry?.presentation !== 'editable') {
+      // While joined as a local co-editing follower, the join effects own
+      // the collab binding state — do not clear it from the owner path.
+      if (joinState) return;
       loadedCollabGenerationKey = null;
-      if (!state?.roomId) {
+      if (!collabHosted) {
         untrack(() => {
           collabSeedRequest += 1;
           collabSeed = null;
@@ -686,28 +788,30 @@
     if (editing || editorLoading || !activeEntry) return;
     const retryingDeniedLease = editDenied;
     editorLoading = true;
-    // Keep the read-only explanation visible while a requested handoff waits
-    // for WebKit's stale lease to expire. Initial edit attempts still start
-    // without the banner and reveal it only when another writer is confirmed.
-    if (!retryingDeniedLease) editDenied = false;
+    editDenied = false;
     try {
       await ensureEditorGraph(ownerState?.roomId != null);
       let granted = await ensureOwnerSession();
-      // Closing another tab usually releases its fenced IndexedDB lease
-      // immediately. WebKit can drop that cleanup transaction, so an explicit
-      // retry also waits through the bounded expiry/election fallback.
+      // Live local co-editing needs no lease: edit through the other tab's
+      // authority instead of retrying for ownership.
+      if (!granted && joinLive) {
+        editing = true;
+        return;
+      }
+      // Closing another tab releases its fenced IndexedDB lease
+      // asynchronously. An explicit retry should absorb that brief handoff
+      // instead of making the user click repeatedly.
       if (!granted && retryingDeniedLease) {
-        const deadline = Date.now() + LEASE_HANDOFF_TIMEOUT_MS;
-        let delay = LEASE_HANDOFF_INITIAL_DELAY_MS;
-        while (!granted) {
-          const remaining = deadline - Date.now();
-          if (remaining <= 0) break;
-          await new Promise((resolve) => window.setTimeout(resolve, Math.min(delay, remaining)));
+        for (let attempt = 0; attempt < 7 && !granted; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 150));
           granted = await ensureOwnerSession();
-          delay = Math.min(LEASE_HANDOFF_MAX_DELAY_MS, delay * 2);
         }
       }
       if (!granted) {
+        if (joinLive) {
+          editing = true;
+          return;
+        }
         editDenied = true;
         return;
       }
@@ -721,6 +825,41 @@
     }
   }
 
+  // Re-seed the reader/editor when the active file changes IN PLACE (no reload).
+  // Depends only on the activePath/bodyText props, so live edits never trip it.
+  // The editor DOM remounts via `{#key activeEntry.path}`; here we reset the
+  // per-file script state (view text, edit mode, autosave binding).
+  // svelte-ignore state_referenced_locally — seed the switch tracker with the
+  // initial path; subsequent changes are observed inside the effect below.
+  let lastActivePath = activePath;
+  $effect(() => {
+    const path = activePath;
+    const body = bodyText;
+    untrack(() => {
+      displayText = body;
+      if (path === lastActivePath) {
+        // Same file, new body: another tab committed and AppShell re-read it
+        // (follow mode). The mounted editor seeds `markdown` once, so push
+        // the fresh document in — but never while this tab is editing or a
+        // live collab binding owns the view.
+        if (
+          !editing
+          && body !== null
+          && editorRef
+          && ownerState?.liveEditingAvailable !== true
+          && !joinLive
+        ) {
+          editorRef.resetToMarkdown(body);
+        }
+        return;
+      }
+      lastActivePath = path;
+      editing = false;
+      desktopEditRequested = false;
+      ensureAutosaveForActiveFile();
+    });
+  });
+
   // Mobile is reader-first, but it is still a rendered Markdown reader. Load
   // the shared document surface without granting editability; the Edit action
   // later promotes this same view after the owner lease is confirmed.
@@ -733,12 +872,9 @@
   // posture as native attn. Mobile intentionally remains reader-first and
   // enters editing only from its thumb dock.
   $effect(() => {
-    if (!desktopLayout) {
-      desktopEditRequested = false;
-      return;
-    }
     if (
-      desktopEditRequested
+      !desktopLayout
+      || desktopEditRequested
       || editing
       || editorLoading
       || !canEdit
@@ -750,24 +886,10 @@
 
   function onEditorChanged(): void {
     if (!editorRef || !autosave) return;
-    const text = editorRef.getMarkdown();
-    if (text === displayText) return;
-    displayText = text;
-    autosave.noteChange(text);
-  }
-
-  async function flushPendingEditor(): Promise<boolean> {
-    // Pull directly from ProseMirror before every workspace operation. The
-    // plugin normally observes the same transaction synchronously, but this
-    // keeps the durability boundary correct for programmatic editor commands.
-    onEditorChanged();
-    const controller = autosave;
-    if (!controller) return true;
-    const committed = await controller.flush();
-    if (!committed) {
-      railError = 'Save the current document before continuing.';
-    }
-    return committed;
+    // Defer the (potentially large) markdown serialization to the debounced
+    // commit — running it per keystroke made typing latency scale with doc
+    // size. `displayText` is refreshed on commit and on blur (exitEdit).
+    autosave.noteChange(() => editorRef?.getMarkdown() ?? '');
   }
 
   function handleEditorReady(view: EditorView): void {
@@ -775,13 +897,20 @@
     readyCollabEpoch = collabEpoch;
   }
 
+  function activeCollabController() {
+    if (session) {
+      return ownerState?.liveEditingAvailable ? session.getController() : null;
+    }
+    return joinLive ? localJoin?.getController() ?? null : null;
+  }
+
   function handleCollabDocChange(): void {
-    if (ownerState?.liveEditingAvailable) session?.getController()?.onLocalChange();
+    activeCollabController()?.onLocalChange();
     onEditorChanged();
   }
 
   function handleCollabSelectionChange(head: number): void {
-    if (ownerState?.liveEditingAvailable) session?.getController()?.broadcastCursor(head);
+    activeCollabController()?.broadcastCursor(head);
   }
 
   async function acceptSuggestion(thread: Thread): Promise<unknown> {
@@ -846,6 +975,20 @@
     await currentSession.resolveComment(threadId);
   }
 
+  // Surface mailbox/transport failures (attn-9ua): a dead owner session
+  // previously showed an empty rail while the 400 hid in the console. The
+  // encrypted mailbox is the product's core promise — its failures are
+  // first-class UI.
+  const reviewTransportError = $derived.by(() => {
+    const authority = ownerState?.authority;
+    if (authority?.session?.status === 'error') {
+      return authority.session.error?.message
+        ?? 'Couldn\u2019t reach your encrypted mailbox \u2014 review updates are paused.';
+    }
+    if (authority?.status === 'paused' && authority.pauseReason) return authority.pauseReason;
+    return null;
+  });
+
   async function retryReviewDelivery(): Promise<void> {
     const currentSession = session;
     if (!currentSession) return;
@@ -860,7 +1003,7 @@
   async function exitEdit(): Promise<void> {
     if (!editing) return;
     if (editorRef) displayText = editorRef.getMarkdown();
-    if (!await flushPendingEditor()) return;
+    await autosave?.flush();
     editing = false;
   }
 
@@ -878,21 +1021,10 @@
       // only exits the editor surface; it intentionally keeps route authority.
       void session?.release();
     };
-    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
-      if (!autosave?.dirty) return;
-      flush();
-      // IndexedDB durability cannot be completed after the document is torn
-      // down. Keep the page in place (or show the browser's native warning)
-      // until the pending revision has landed.
-      event.preventDefault();
-      event.returnValue = '';
-    };
     document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('beforeunload', onBeforeUnload);
     window.addEventListener('pagehide', onPageHide);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('beforeunload', onBeforeUnload);
       window.removeEventListener('pagehide', onPageHide);
       flush();
       void session?.release();
@@ -903,32 +1035,71 @@
     return `/app/w/${workspace.id}/${entry.path}`;
   }
 
-  async function navigateDesktopTree(relativePath: string): Promise<void> {
-    if (!relativePath || relativePath === activeEntry?.path) return;
-    if (!await flushPendingEditor()) return;
-    window.location.assign(`/app/w/${workspace.id}/${relativePath}`);
+  // Switch files in place (no page reload). Flush the current file's autosave
+  // first so nothing is lost, then let AppShell swap activePath/bodyText.
+  async function switchTo(path: string): Promise<void> {
+    if (!path || path === activeEntry?.path) return;
+    await autosave?.flush();
+    if (onSelectEntry) onSelectEntry(path);
+    else window.location.assign(`/app/w/${workspace.id}/${path}`);
   }
 
-  async function switchWorkspace(workspaceId: string, openPath: string): Promise<void> {
-    if (workspaceId === workspace.id) return;
-    if (!await flushPendingEditor()) return;
-    window.location.assign(`/app/w/${workspaceId}/${openPath}`);
+  function navigateDesktopTree(relativePath: string): void {
+    void switchTo(relativePath);
   }
 
-  async function createNewWorkspace(): Promise<void> {
-    if (!await flushPendingEditor()) return;
-    window.location.assign('/app#new');
+  // Tree context-menu Rename/Delete: switch to the target file (in place), then
+  // open the existing footer rename input / delete confirm once it's active.
+  // The pending flag + effect absorbs the async switch (activePath updates a
+  // tick later via AppShell), so the UI opens against the right file.
+  let pendingRename = $state<string | null>(null);
+  let pendingDelete = $state<string | null>(null);
+  async function requestTreeRename(relativePath: string): Promise<void> {
+    if (relativePath !== activeEntry?.path) await switchTo(relativePath);
+    pendingRename = relativePath;
   }
-
-  async function openWorkspaceHome(): Promise<void> {
-    if (!await flushPendingEditor()) return;
-    window.location.assign('/app');
+  async function requestTreeDelete(relativePath: string): Promise<void> {
+    if (relativePath !== activeEntry?.path) await switchTo(relativePath);
+    pendingDelete = relativePath;
   }
+  $effect(() => {
+    if (pendingRename && activeEntry?.path === pendingRename) {
+      renameEntryValue = pendingRename;
+      confirmingEntryDelete = false;
+      renamingEntry = true;
+      pendingRename = null;
+    }
+  });
+  $effect(() => {
+    if (pendingDelete && activeEntry?.path === pendingDelete) {
+      renamingEntry = false;
+      confirmingEntryDelete = true;
+      pendingDelete = null;
+    }
+  });
 
   function entryGlyph(entry: WorkspaceEntry): string {
     if (entry.presentation === 'editable') return '';
     return entry.presentation === 'preview' ? '▧ ' : '◇ ';
   }
+
+  // Files-sheet grouping (attn-7xl / iOS parity): a monospace badge, the file
+  // basename, a capability subtitle, and the size — grouped Markdown vs Assets.
+  function entryBadge(entry: WorkspaceEntry): string {
+    if (entry.kind === 'markdown') return 'MD';
+    return entry.presentation === 'preview' ? 'IMG' : 'BIN';
+  }
+  function entryBasename(entry: WorkspaceEntry): string {
+    return entry.path.split('/').pop() ?? entry.path;
+  }
+  function entrySubtitle(entry: WorkspaceEntry): string {
+    if (entry.presentation === 'preview') return 'Preview inline';
+    if (entry.presentation === 'download-only') return 'Download only';
+    const slash = entry.path.lastIndexOf('/');
+    return slash > 0 ? entry.path.slice(0, slash) : 'Markdown';
+  }
+  const markdownEntries = $derived(workspace.entries.filter((e) => e.kind === 'markdown'));
+  const assetEntries = $derived(workspace.entries.filter((e) => e.kind === 'asset'));
 
   function openShare(trigger: HTMLButtonElement | undefined): void {
     blurEditor();
@@ -945,6 +1116,116 @@
     queueMicrotask(() => trigger?.focus());
   }
 
+  // ————— command palette (⌘K) —————
+  const paletteCommands = $derived.by<HostedCommand[]>(() => {
+    const cmds: HostedCommand[] = [
+      { id: 'share', label: 'Share for review', hint: '⌘K', keywords: 'invite link publish reviewer',
+        run: () => openShare(shareButton) },
+      { id: 'edit', label: editing ? 'Stop editing' : 'Edit this document', keywords: 'write compose done',
+        run: () => void (editing ? exitEdit() : enterEdit()) },
+      { id: 'new', label: 'New Markdown file', keywords: 'create add document',
+        // Open the sidebar name field (autofocused) — calling
+        // createMarkdownFile() directly here would no-op on an empty name.
+        run: () => { addingMarkdown = true; } },
+      { id: 'export', label: 'Export workspace', hint: '.zip', keywords: 'download backup save',
+        run: () => void exportZip() },
+    ];
+    for (const entry of workspace.entries) {
+      if (entry.path === activeEntry?.path) continue;
+      cmds.push({
+        id: `open:${entry.path}`,
+        label: `Open ${entry.path}`,
+        hint: entry.sizeLabel,
+        keywords: 'file jump go to',
+        run: () => navigateDesktopTree(entry.path),
+      });
+    }
+    return cmds;
+  });
+
+  function onGlobalKeydown(event: KeyboardEvent): void {
+    if ((event.metaKey || event.ctrlKey) && event.code === 'KeyK') {
+      // Don't open the palette behind another modal (Share dialog, bottom
+      // sheets, lightbox) — it would render under the backdrop and steal focus.
+      if (shareOpen || filesSheetOpen || reviewSheetOpen || lightboxOpen) return;
+      event.preventDefault();
+      paletteOpen = !paletteOpen;
+    }
+  }
+
+  // ————— arrival toasts (incoming review events) —————
+  interface ArrivalToast {
+    id: string;
+    text: string;
+    eventId: string;
+  }
+  let arrivalToasts = $state<ArrivalToast[]>([]);
+  const seenReviewEventIds = new Set<string>();
+  let toastsPrimed = false;
+  let toastSeq = 0;
+
+  function dismissToast(id: string): void {
+    arrivalToasts = arrivalToasts.filter((t) => t.id !== id);
+  }
+
+  function pushToast(text: string, eventId: string): void {
+    const id = `toast-${toastSeq++}`;
+    arrivalToasts = [...arrivalToasts, { id, text, eventId }];
+    setTimeout(() => dismissToast(id), 5200);
+  }
+
+  function openReviewFromToast(toast: ArrivalToast): void {
+    dismissToast(toast.id);
+    reviewStoreRef?.setFocusEventId(toast.eventId);
+    if (desktopLayout) {
+      if (reviewStoreRef) reviewStoreRef.panelOpen = true;
+    } else {
+      blurEditor();
+      filesSheetOpen = false;
+      reviewSheetOpen = true;
+    }
+  }
+
+  // Detect newly-arrived comments/suggestions authored by someone other than
+  // the local owner and surface a toast. The first pass only seeds the seen-set
+  // so existing thread history never toasts on open.
+  $effect(() => {
+    const store = reviewStoreRef;
+    if (!store) return;
+    const threads = store.threadsForCurrentFile;
+    const ownerId = store.ownerParticipantId;
+    const arrivals: { authorId: string; kind: 'comment' | 'suggestion'; eventId: string }[] = [];
+    for (const thread of threads) {
+      for (const event of [thread.rootEvent, ...thread.replies]) {
+        const eventId = event.meta.eventId;
+        if (seenReviewEventIds.has(eventId)) continue;
+        seenReviewEventIds.add(eventId);
+        if (!toastsPrimed) continue;
+        if (event.meta.authorId === ownerId) continue;
+        const kind = event.body.type === 'suggestion_created' ? 'suggestion' : 'comment';
+        arrivals.push({ authorId: event.meta.authorId, kind, eventId });
+      }
+    }
+    toastsPrimed = true;
+    for (const arrival of arrivals) {
+      const name = store.displayNameFor(arrival.authorId);
+      pushToast(`${name} ${arrival.kind === 'suggestion' ? 'suggested an edit' : 'commented'}`, arrival.eventId);
+    }
+  });
+
+  // Tapping an inline anchor marker (mobile reader) sets the store's focus
+  // target; open the review sheet in response so the thread comes into view.
+  let lastFocusForSheet: string | null = null;
+  $effect(() => {
+    const focus = reviewStoreRef?.focusEventId ?? null;
+    if (focus === lastFocusForSheet) return;
+    lastFocusForSheet = focus;
+    if (!focus || desktopLayout || editing || reviewSheetOpen) return;
+    blurEditor();
+    filesSheetOpen = false;
+    reviewSheetOpen = true;
+  });
+
   async function inspectWorkspaceShare() {
     const granted = await ensureOwnerSession();
     if (!granted) return null;
@@ -952,9 +1233,7 @@
   }
 
   async function createWorkspaceShare(request: WorkspaceShareRequest) {
-    if (!await flushPendingEditor()) {
-      throw new Error('Save the current document before sharing.');
-    }
+    await autosave?.flush();
     const granted = await ensureOwnerSession();
     if (!granted) throw new Error('Another tab owns this workspace.');
     return granted.ensureShare(request);
@@ -977,31 +1256,37 @@
   }
 </script>
 
+<svelte:window onkeydown={onGlobalKeydown} />
+
+<CommandPalette bind:open={paletteOpen} commands={paletteCommands} />
+
+{#if arrivalToasts.length > 0}
+  <div class="arrival-toasts" aria-live="polite">
+    {#each arrivalToasts as toast (toast.id)}
+      <div class="arrival-toast" role="status">
+        <button class="arrival-toast-body" type="button" onclick={() => openReviewFromToast(toast)}>
+          <span class="arrival-dot"></span>
+          <span>{toast.text}</span>
+        </button>
+        <button class="arrival-toast-close" type="button" aria-label="Dismiss" onclick={() => dismissToast(toast.id)}>×</button>
+      </div>
+    {/each}
+  </div>
+{/if}
+
 {#snippet documentSurface()}
-  <div
-    class:hosted-native-document={desktopLayout}
-    class:hosted-native-editor-document={desktopLayout && activeEntry?.presentation === 'editable'}
-    class:writing-sheet={!desktopLayout}
-  >
+  <div class:hosted-native-document={desktopLayout} class:writing-sheet={!desktopLayout}>
     {#if health.mode !== 'persistent' && health.mode !== 'best-effort'}
       <div class="hosted-document-banner">
         <DegradedBanner mode={health.mode} />
       </div>
     {/if}
-    {#if editDenied}
+    {#if editDenied && !joinLive}
       <div class="degraded-banner hosted-document-banner" role="status" data-degraded="lease-denied">
         <div>
           <strong>Another tab is editing this workspace.</strong>
-          <p>This tab stays read-only until the other tab finishes or closes.</p>
+          <p>Following its changes read-only — editing returns here when the other tab finishes.</p>
         </div>
-        {#if desktopLayout}
-          <button
-            class="hosted-header-button"
-            type="button"
-            disabled={editorLoading}
-            onclick={() => void enterEdit()}
-          >{editorLoading ? 'Waiting for tab…' : 'Retry edit'}</button>
-        {/if}
       </div>
     {/if}
     {#if ownerState?.roomId && !ownerState.liveEditingAvailable}
@@ -1016,63 +1301,27 @@
       </div>
     {/if}
     {#if activeEntry?.presentation === 'editable' && EditorComponent}
-      {#if desktopLayout}
-        <div class="hosted-formatting-strip" role="toolbar" aria-label="Markdown formatting">
-          <span class="hosted-formatting-label">Format</span>
-          <button
-            type="button"
-            aria-label="Bold"
-            title="Bold (⌘B)"
-            disabled={!editing || ownerState?.writable === false}
-            onpointerdown={(event) => event.preventDefault()}
-            onclick={() => editorRef?.toggleBold()}
-          ><strong>B</strong></button>
-          <button
-            type="button"
-            aria-label="Italic"
-            title="Italic (⌘I)"
-            disabled={!editing || ownerState?.writable === false}
-            onpointerdown={(event) => event.preventDefault()}
-            onclick={() => editorRef?.toggleItalic()}
-          ><em>I</em></button>
-          <button
-            type="button"
-            aria-label="Heading 2"
-            title="Heading 2"
-            disabled={!editing || ownerState?.writable === false}
-            onpointerdown={(event) => event.preventDefault()}
-            onclick={() => editorRef?.toggleHeading(2)}
-          >H2</button>
-          <button
-            type="button"
-            aria-label="Bullet list"
-            title="Bullet list"
-            disabled={!editing || ownerState?.writable === false}
-            onpointerdown={(event) => event.preventDefault()}
-            onclick={() => editorRef?.toggleBulletList()}
-          >List</button>
-          <span class="hosted-formatting-hint">Markdown: type #, -, or &gt; followed by space</span>
-        </div>
-      {/if}
       <div
         class="hosted-editor-surface"
         class:hosted-mobile-reader={!desktopLayout}
         data-body-text="rendered"
       >
-        <EditorComponent
-          bind:this={editorRef}
-          markdown={collabSeed?.markdown ?? displayText ?? ''}
-          editable={editing && ownerState?.writable !== false}
-          plugins={changeWatcher as never}
-          onReady={handleEditorReady}
-          onCheckboxToggle={onEditorChanged}
-          collabClientId={ownerState?.liveEditingAvailable
-            ? collabClientId ?? undefined
-            : undefined}
-          {collabEpoch}
-          onCollabDocChange={handleCollabDocChange}
-          onCollabSelectionChange={handleCollabSelectionChange}
-        />
+        {#key activeEntry?.path}
+          <EditorComponent
+            bind:this={editorRef}
+            markdown={collabSeed?.markdown ?? bodyText ?? displayText ?? ''}
+            editable={editing && ownerState?.writable !== false}
+            plugins={changeWatcher as never}
+            onReady={handleEditorReady}
+            onCheckboxToggle={onEditorChanged}
+            collabClientId={ownerState?.liveEditingAvailable || joinLive
+              ? collabClientId ?? undefined
+              : undefined}
+            {collabEpoch}
+            onCollabDocChange={handleCollabDocChange}
+            onCollabSelectionChange={handleCollabSelectionChange}
+          />
+        {/key}
       </div>
     {:else if desktopLayout && activeEntry?.presentation === 'editable'}
       <div class="hosted-editor-loading" role="status">Opening editor…</div>
@@ -1105,7 +1354,7 @@
           {/if}
         </div>
         <div class="storage-actions">
-          <button class="button" type="button" onclick={() => void downloadEntry()}>
+          <button class="button" type="button" onclick={() => void downloadActiveEntry()}>
             Download
           </button>
         </div>
@@ -1128,38 +1377,87 @@
   <div class="hosted-header-actions">
     {#if renamingTitle}
       <input
-        bind:this={titleInput}
+        use:autofocus
         class="hosted-title-input"
         type="text"
         aria-label="Workspace title"
         bind:value={titleValue}
         onkeydown={(event) => {
           if (event.key === 'Enter') void commitTitleRename();
-          if (event.key === 'Escape') void cancelTitleRename();
+          if (event.key === 'Escape') renamingTitle = false;
         }}
         onblur={() => void commitTitleRename()}
       />
     {:else}
       <button
-        bind:this={titleButton}
         class="hosted-workspace-title"
         type="button"
         aria-label="Rename workspace"
         title="Rename workspace"
-        onclick={() => void beginTitleRename()}
+        onclick={() => {
+          titleValue = workspace.name;
+          renamingTitle = true;
+        }}
       >{workspace.name}</button>
     {/if}
-    <span class="save-state hosted-save-state" data-save-state={saveState} data-commits={commitCount}>
+    <span class="save-state hosted-save-state save-chip" data-save-state={saveState} data-commits={commitCount}>
       {ownerRoomStatus ?? saveState}
     </span>
+    {#if canEdit}
+      <button
+        class="hosted-header-button"
+        type="button"
+        data-action="edit"
+        disabled={editorLoading}
+        onclick={() => editing ? void exitEdit() : void enterEdit()}
+      >
+        {editing ? 'Done' : editorLoading ? 'Opening…' : editDenied ? 'Retry edit' : 'Edit'}
+      </button>
+    {/if}
   </div>
 {/snippet}
 
 {#snippet desktopSidebarFooter()}
   <div class="hosted-sidebar-footer" aria-label="Workspace actions">
+    {#if activeEntry}
+      <div class="hosted-entry-actions" aria-label={`Actions for ${activeEntry.path}`}>
+        {#if renamingEntry}
+          <input
+            use:autofocus
+            class="hosted-sidebar-input"
+            type="text"
+            aria-label="New path"
+            bind:value={renameEntryValue}
+            onkeydown={(event) => {
+              if (event.key === 'Enter') void commitEntryRename();
+              if (event.key === 'Escape') renamingEntry = false;
+            }}
+          />
+        {:else}
+          <button
+            type="button"
+            onclick={() => {
+              renamingEntry = true;
+              renameEntryValue = activeEntry?.path ?? '';
+            }}
+          >Rename</button>
+          <button type="button" onclick={() => void downloadActiveEntry()}>Download</button>
+          <button class="danger" type="button" onclick={() => (confirmingEntryDelete = true)}>Delete</button>
+        {/if}
+      </div>
+      {#if confirmingEntryDelete}
+        <div class="hosted-delete-confirm" role="alertdialog" aria-label={`Delete ${activeEntry.path}?`}>
+          <span>Delete {activeEntry.path}?</span>
+          <div>
+            <button type="button" onclick={() => (confirmingEntryDelete = false)}>Cancel</button>
+            <button class="danger" type="button" onclick={() => void deleteActiveEntry()}>Delete file</button>
+          </div>
+        </div>
+      {/if}
+    {/if}
     {#if addingMarkdown}
       <input
-        bind:this={newMarkdownInput}
+        use:autofocus
         class="hosted-sidebar-input"
         type="text"
         aria-label="New Markdown file path"
@@ -1167,37 +1465,19 @@
         bind:value={newMarkdownPath}
         onkeydown={(event) => {
           if (event.key === 'Enter') void createMarkdownFile();
-          if (event.key === 'Escape') void cancelAddMarkdown();
+          if (event.key === 'Escape') addingMarkdown = false;
         }}
       />
     {:else}
-      <button bind:this={newMarkdownButton} class="hosted-sidebar-action" type="button" data-action="new-markdown" onclick={() => void beginAddMarkdown()}>
+      <button class="hosted-sidebar-action" type="button" data-action="new-markdown" onclick={() => (addingMarkdown = true)}>
         <span aria-hidden="true">＋</span>
         <span>New Markdown</span>
       </button>
     {/if}
-    <div
-      class="hosted-sidebar-dropzone"
-      class:hosted-sidebar-dropzone-active={sidebarDropActive}
-      role="button"
-      tabindex="0"
-      data-action="add-assets"
-      data-drop-active={sidebarDropActive}
-      ondragenter={onSidebarDragOver}
-      ondragover={onSidebarDragOver}
-      ondragleave={() => (sidebarDropActive = false)}
-      ondrop={(event) => void onSidebarDrop(event)}
-      onclick={() => assetInput?.click()}
-      onkeydown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          assetInput?.click();
-        }
-      }}
-    >
-      <span aria-hidden="true">{sidebarDropActive ? '↓' : '↑'}</span>
-      <span><strong>{sidebarDropActive ? 'Drop to add' : 'Drop files here'}</strong><small>or choose Markdown and assets</small></span>
-    </div>
+    <button class="hosted-sidebar-action" type="button" data-action="add-assets" onclick={() => assetInput?.click()}>
+      <span aria-hidden="true">↑</span>
+      <span>Add files or assets</span>
+    </button>
     <button class="hosted-sidebar-action" type="button" data-action="export-zip" onclick={() => void exportZip()}>
       <span aria-hidden="true">↓</span>
       <span>Export workspace</span>
@@ -1206,7 +1486,6 @@
       bind:this={assetInput}
       type="file"
       multiple
-      accept=".md,.markdown,image/*,application/zip,.zip,*/*"
       class="sr-only"
       aria-hidden="true"
       tabindex="-1"
@@ -1220,6 +1499,14 @@
 
 {#snippet desktopRail()}
   {#if ownerState?.roomId && ReviewMarginComponent}
+    {#if reviewTransportError}
+      <div class="review-delivery-status" role="alert" data-slot="review-transport-error">
+        <span>{reviewTransportError}</span>
+        <button class="row-action" type="button" onclick={() => window.location.reload()}>
+          Reconnect
+        </button>
+      </div>
+    {/if}
     {#if ownerState.authority?.session?.authoringError}
       <div class="review-delivery-status" role="status">
         <span>{ownerState.authority.session.authoringError}</span>
@@ -1240,12 +1527,17 @@
 {/snippet}
 
 {#if desktopLayout}
-  <div class="hosted-desktop-editor" data-app-view="workspace" data-workspace-id={workspace.id}>
+  <div
+    class="hosted-desktop-editor"
+    data-app-view="workspace"
+    data-workspace-id={workspace.id}
+    data-drop-label="Drop files to add to this workspace"
+    use:fileDrop={{ onFiles: (files) => void importFiles(files) }}
+  >
     {#if HostedDesktopWorkspaceFrame}
       <HostedDesktopWorkspaceFrame
         workspaceId={workspace.id}
         workspaceName={workspace.name}
-        {workspaces}
         entries={workspace.entries}
         activeEntryPath={activeEntry?.path}
         {shareOpen}
@@ -1254,14 +1546,9 @@
         content={documentSurface}
         rail={desktopRail}
         onNavigate={navigateDesktopTree}
-        onWorkspaceSwitch={(workspaceId, openPath) => void switchWorkspace(workspaceId, openPath)}
-        onCreateWorkspace={() => void createNewWorkspace()}
-        onRenameWorkspace={() => void beginTitleRename(true)}
-        onOpenWorkspaceHome={() => void openWorkspaceHome()}
-        onRenameEntry={(path) => void beginEntryRename(path)}
-        onDownloadEntry={(path) => void downloadEntry(path)}
-        onDeleteEntry={(path) => void beginEntryDelete(path)}
         onShare={openShare}
+        onRename={requestTreeRename}
+        onDelete={requestTreeDelete}
         onViewport={(viewport) => (canvasEl = viewport ?? undefined)}
       />
     {:else}
@@ -1274,29 +1561,31 @@
     <div class="doc-name">
       {#if editing && renamingTitle}
         <input
-          bind:this={titleInput}
+          use:autofocus
           class="mobile-title-input"
           type="text"
           aria-label="Workspace title"
           bind:value={titleValue}
           onkeydown={(event) => {
             if (event.key === 'Enter') void commitTitleRename();
-            if (event.key === 'Escape') void cancelTitleRename();
+            if (event.key === 'Escape') renamingTitle = false;
           }}
           onblur={() => void commitTitleRename()}
         />
       {:else if editing}
         <button
-          bind:this={titleButton}
           class="mobile-workspace-title"
           type="button"
           aria-label="Rename workspace"
-          onclick={() => void beginTitleRename()}
+          onclick={() => {
+            titleValue = workspace.name;
+            renamingTitle = true;
+          }}
         >{workspace.name}</button>
       {:else}
         <strong>{workspace.name}</strong>
       {/if}
-      <span class="save-state" data-save-state={saveState} data-commits={commitCount}>· {saveState}</span>
+      <span class="save-state save-chip" data-save-state={saveState} data-commits={commitCount}>{saveState}</span>
     </div>
     <div class="share-action">
       <button
@@ -1312,7 +1601,32 @@
   <!-- The constrained layout remains reader-first: one document column,
        thumb actions, and bottom sheets for files/review. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <main class="editor-canvas" bind:this={canvasEl} tabindex="0" aria-label="Document">
+  <main
+    class="editor-canvas"
+    bind:this={canvasEl}
+    tabindex="0"
+    aria-label="Document"
+    data-drop-label="Drop files to add to this workspace"
+    use:fileDrop={{ onFiles: (files) => void importFiles(files) }}
+  >
+    {#if editingUnavailable}
+      <aside class="viewing-safely" role="status">
+        <svg class="viewing-safely-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M12 3l7 3v5c0 4.4-3 8.3-7 9.5C8 19.3 5 15.4 5 11V6l7-3z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linejoin="round"
+          />
+          <path d="M9.2 12l2 2 3.6-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <div>
+          <strong>Viewing safely.</strong>
+          Editing is unavailable in this browser mode. You can still read, navigate files, review, export, or open native attn.
+        </div>
+      </aside>
+    {/if}
     {@render documentSurface()}
   </main>
   <nav class="thumb-dock" aria-label="Document actions">
@@ -1334,12 +1648,12 @@
         reviewSheetOpen = true;
       }}
     >
-      Review · {workspace.reviewCards.length}
+      Review · {ownerState?.roomId && reviewStoreRef ? reviewStoreRef.threadsForCurrentFile.length : workspace.reviewCards.length}
     </button>
     {#if editing}
       <button type="button" onclick={() => void exitEdit()}>Done</button>
     {:else if canEdit}
-      <button type="button" disabled={editorLoading} onclick={() => void enterEdit()}>{editorLoading && editDenied ? 'Waiting…' : editDenied ? 'Retry edit' : 'Edit'}</button>
+      <button type="button" disabled={editorLoading} onclick={() => void enterEdit()}>{editDenied ? 'Retry edit' : 'Edit'}</button>
     {:else}
       <!-- Editing is unavailable here; the reader stays first-class and the
            native app is the honest handoff (ios-ux.md §6). -->
@@ -1352,90 +1666,6 @@
     >Share</button>
   </nav>
 </div>
-{/if}
-
-{#if renamingEntry && renamingEntryPath}
-  <div class="hosted-file-dialog-layer">
-    <button
-      class="hosted-file-dialog-scrim"
-      type="button"
-      aria-label="Cancel file rename"
-      onclick={() => void cancelEntryRename()}
-    ></button>
-    <div
-      class="hosted-file-dialog"
-      role="dialog"
-      tabindex="-1"
-      aria-modal="true"
-      aria-labelledby="rename-file-title"
-      onkeydown={(event) => {
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          void cancelEntryRename();
-        }
-      }}
-    >
-      <form
-        class="hosted-file-dialog-form"
-        onsubmit={(event) => {
-          event.preventDefault();
-          void commitEntryRename();
-        }}
-      >
-        <div>
-          <span class="hosted-file-dialog-kicker">File</span>
-          <h2 id="rename-file-title">Rename {renamingEntryPath}</h2>
-        </div>
-        <label for="hosted-file-rename">Workspace-relative path</label>
-        <input
-          id="hosted-file-rename"
-          bind:this={renameEntryInput}
-          type="text"
-          aria-label="New path"
-          bind:value={renameEntryValue}
-        />
-        <div class="hosted-file-dialog-actions">
-          <button type="button" onclick={() => void cancelEntryRename()}>Cancel</button>
-          <button class="primary" type="submit">Rename</button>
-        </div>
-      </form>
-    </div>
-  </div>
-{/if}
-
-{#if confirmingEntryDelete && deletingEntryPath}
-  <div class="hosted-file-dialog-layer">
-    <button
-      class="hosted-file-dialog-scrim"
-      type="button"
-      aria-label="Cancel file deletion"
-      onclick={() => void cancelEntryDelete()}
-    ></button>
-    <div
-      class="hosted-file-dialog"
-      role="alertdialog"
-      tabindex="-1"
-      aria-modal="true"
-      aria-labelledby="delete-file-title"
-      aria-describedby="delete-file-description"
-      onkeydown={(event) => {
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          void cancelEntryDelete();
-        }
-      }}
-    >
-      <div>
-        <span class="hosted-file-dialog-kicker">Delete file</span>
-        <h2 id="delete-file-title">Delete {deletingEntryPath}?</h2>
-      </div>
-      <p id="delete-file-description">This removes the local file from this workspace. It cannot be undone.</p>
-      <div class="hosted-file-dialog-actions">
-        <button bind:this={deleteCancelButton} type="button" onclick={() => void cancelEntryDelete()}>Cancel</button>
-        <button class="danger" type="button" onclick={() => void deleteEntry()}>Delete file</button>
-      </div>
-    </div>
-  </div>
 {/if}
 
 {#if editing && !desktopLayout}
@@ -1488,37 +1718,75 @@
 {/if}
 
 {#if filesSheetOpen}
-  <BottomSheet title={`Files · ${workspace.entries.length}`} onclose={closeFilesSheet}>
-    <ul class="file-list">
-      {#each workspace.entries as entry (entry.path)}
-        <li>
-          <a
-            class="file"
-            class:asset={entry.presentation !== 'editable'}
-            class:active={entry.path === activeEntry?.path}
-            href={entryHref(entry)}
-            aria-current={entry.path === activeEntry?.path ? 'page' : undefined}
-            onclick={(event) => {
-              if (entry.path === activeEntry?.path) return;
-              event.preventDefault();
-              void navigateDesktopTree(entry.path);
-            }}
-          >
-            {entryGlyph(entry)}{entry.path}
-            <span class="file-size">{entry.sizeLabel}</span>
-          </a>
-        </li>
-      {/each}
-    </ul>
+  <BottomSheet
+    title={`${markdownEntries.length} Markdown · ${assetEntries.length} ${assetEntries.length === 1 ? 'asset' : 'assets'}`}
+    onclose={closeFilesSheet}
+  >
+    {#each [{ label: 'Markdown', items: markdownEntries }, { label: 'Assets', items: assetEntries }] as group (group.label)}
+      {#if group.items.length > 0}
+        <div class="file-group">
+          <div class="file-group-label">{group.label}</div>
+          <ul class="file-list">
+            {#each group.items as entry (entry.path)}
+              <li>
+                <a
+                  class="file-row"
+                  class:asset={entry.presentation !== 'editable'}
+                  class:active={entry.path === activeEntry?.path}
+                  href={entryHref(entry)}
+                  aria-current={entry.path === activeEntry?.path ? 'page' : undefined}
+                  onclick={(event) => {
+                    // Plain left-click switches in place; modifier-clicks keep
+                    // the native open-in-new-tab behavior.
+                    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                    event.preventDefault();
+                    closeFilesSheet();
+                    void switchTo(entry.path);
+                  }}
+                >
+                  <span class="file-badge">{entryBadge(entry)}</span>
+                  <span class="file-row-name">
+                    <strong>{entryBasename(entry)}</strong>
+                    <small>{entrySubtitle(entry)}</small>
+                  </span>
+                  <span class="file-size">{entry.sizeLabel}</span>
+                </a>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+    {/each}
+    <button class="file-add-row" type="button" onclick={() => assetInput?.click()}>
+      ＋ Add file or asset
+    </button>
+    <input
+      bind:this={assetInput}
+      type="file"
+      multiple
+      accept=".md,.markdown,image/*,application/zip,.zip,*/*"
+      style="display: none"
+      aria-hidden="true"
+      tabindex="-1"
+      onchange={() => void onAssetsPicked()}
+    />
   </BottomSheet>
 {/if}
 
 {#if reviewSheetOpen}
   <BottomSheet
-    title={ownerState?.roomId ? 'Review' : `Review · ${workspace.reviewCards.length}`}
+    title={ownerState?.roomId && reviewStoreRef ? `Review · ${reviewStoreRef.threadsForCurrentFile.length}` : `Review · ${workspace.reviewCards.length}`}
     onclose={closeReviewSheet}
   >
     {#if ownerState?.roomId && ReviewMarginComponent}
+      {#if reviewTransportError}
+        <div class="review-delivery-status" role="alert" data-slot="review-transport-error">
+          <span>{reviewTransportError}</span>
+          <button class="row-action" type="button" onclick={() => window.location.reload()}>
+            Reconnect
+          </button>
+        </div>
+      {/if}
       <div class="review-sheet-margin">
         <ReviewMarginComponent
           view={pmViewForReview}

@@ -20,10 +20,12 @@
   import { remoteCursorsPlugin } from './prosemirror/remote-cursors';
   import { codeHighlightPlugin } from './prosemirror/code-highlight';
   import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
+  import { frontmatterNodeView } from './prosemirror/frontmatter-nodeview';
+  import { markdownInputRules } from './prosemirror/markdown-input-rules';
+  import { placeholderPlugin } from './prosemirror/placeholder';
   import { mathNodeView } from './prosemirror/math';
   import { mermaidNodeView } from './prosemirror/mermaid-nodeview';
   import { tablePlugins } from './prosemirror/tables';
-  import { markdownAuthoringPlugins } from './prosemirror/markdown-authoring';
   import { editSave } from './ipc';
   import { markdownParser, markdownSerializer, schema } from './schema';
   import {
@@ -39,8 +41,8 @@
   interface Props {
     markdown: string;
     editable?: boolean;
-    /** Accessible name announced for the ProseMirror editing surface. */
-    ariaLabel?: string;
+    /** Hint shown over a truly-empty document (gate-35). */
+    placeholder?: string;
     onSave?: () => void;
     onCancel?: () => void;
     onLinkNavigate?: (href: string) => void;
@@ -114,7 +116,7 @@
   let {
     markdown,
     editable = false,
-    ariaLabel = 'Document editor',
+    placeholder = 'Start typing — # for a heading, ⌘K for commands',
     onSave,
     onCancel,
     onLinkNavigate,
@@ -175,15 +177,6 @@
   const LARGE_MARKDOWN_CHAR_LIMIT = 350_000;
   const SAFE_MODE_PREVIEW_CHAR_LIMIT = 50_000;
   let pendingLocalSaveNormalized: string | null = null;
-
-  function editorAttributes(): Record<string, string> {
-    return {
-      role: 'textbox',
-      'aria-label': ariaLabel,
-      'aria-multiline': 'true',
-      'aria-readonly': String(!editable),
-    };
-  }
 
   function normalizeMarkdownForCompare(md: string): string {
     return md
@@ -264,7 +257,6 @@
   function buildPlugins(md: string) {
     const plugins = [
       history(),
-      ...markdownAuthoringPlugins(schema),
       search(),
       // Track-changes state (enabled per-role below). Harmless when disabled.
       suggestChanges(),
@@ -293,6 +285,10 @@
     if (md.length <= LARGE_MARKDOWN_CHAR_LIMIT) {
       plugins.push(codeHighlightPlugin());
     }
+    // Live markdown authoring (attn-vea): typed `# `, `- `, `**b**`, ``` etc.
+    // become real nodes/marks, so the editor never shows literal syntax.
+    plugins.push(markdownInputRules(schema));
+    plugins.push(placeholderPlugin(placeholder));
     plugins.push(...tablePlugins());
     plugins.push(
       keymap({
@@ -345,6 +341,7 @@
   function buildNodeViews(): Record<string, NodeViewConstructor> {
     const builtIn: Record<string, NodeViewConstructor> = {
       task_list_item: taskListItemNodeView,
+      frontmatter: (node) => frontmatterNodeView(node),
       code_block(node, editorView, getPos) {
         const mermaid = mermaidNodeView(node, editorView, getPos);
         if (mermaid) return mermaid;
@@ -375,14 +372,30 @@
     checkbox.checked = node.attrs.checked;
     checkbox.disabled = !editable;
     checkbox.setAttribute('aria-disabled', String(!editable));
+    // Keep the editor selection alive when the checkbox is clicked; the
+    // toggle itself binds to `click` below so keyboard (Space) and AT
+    // activation persist too — mousedown never fires for those, which
+    // silently lost keyboard toggles to the next watcher reload (attn-6d2).
     checkbox.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      if (!editable) return;
+    });
+    checkbox.addEventListener('click', () => {
+      // Let the native toggle stand — every activation path (mouse, Space,
+      // AT) fires `click` and flips `.checked`, so the pixels are already
+      // correct. We must NOT preventDefault: a checkbox reverts its native
+      // flip AFTER the handler when the default is cancelled, which clobbered
+      // both the explicit set and update() (Truth Rule, attn-6d2). Instead we
+      // dispatch a transaction to make the node attrs MATCH the DOM.
+      if (!editable) {
+        checkbox.checked = node.attrs.checked; // read-only: keep DOM in sync
+        return;
+      }
       const pos = getPos();
       if (pos === undefined) return;
+      const next = checkbox.checked;
       const tr = editorView.state.tr.setNodeMarkup(pos, undefined, {
         ...node.attrs,
-        checked: !node.attrs.checked,
+        checked: next,
       });
       editorView.dispatch(tr);
       // Serialize and send via IPC after checkbox toggle
@@ -697,7 +710,6 @@
       view = new EditorView(el, {
         state,
         editable: () => editable,
-        attributes: editorAttributes(),
         handleDOMEvents: {
           click: (_view, event) => handleEditorClick(event as MouseEvent),
           keydown: (editorView, event) => handleEditorKeydown(editorView, event as KeyboardEvent),
@@ -790,13 +802,7 @@
   // React to editable changes
   $effect(() => {
     if (view) {
-      // Keep assistive-technology state in sync with ProseMirror's editable
-      // callback. contenteditable alone is not exposed as a labelled textbox
-      // consistently across Chromium, WebKit, and native webviews.
-      view.setProps({
-        editable: () => editable,
-        attributes: editorAttributes(),
-      });
+      view.setProps({ editable: () => editable });
       for (const checkbox of view.dom.querySelectorAll<HTMLInputElement>(
         '.task-checkbox input[type="checkbox"]',
       )) {

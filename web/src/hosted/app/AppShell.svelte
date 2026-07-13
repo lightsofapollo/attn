@@ -18,9 +18,10 @@
     /** The landing's one-click intent (`/app#new`): atomically create a
      * fresh untitled workspace and open its editor with no dialog. */
     newIntent: boolean;
+    joinIntent?: boolean;
   }
 
-  const { service, route, newIntent }: Props = $props();
+  const { service, route, newIntent, joinIntent = false }: Props = $props();
 
   let phase = $state<'loading' | 'ready' | 'error'>('loading');
   let errorMessage = $state<string | null>(null);
@@ -42,10 +43,7 @@
         return;
       }
       if (route?.view === 'workspace') {
-        [workspaces, detail] = await Promise.all([
-          service.listWorkspaces(),
-          service.getWorkspace(route.workspaceId),
-        ]);
+        detail = await service.getWorkspace(route.workspaceId);
         if (detail) {
           activePath = route.filePath ?? detail.openPath;
           bodyText = await service.readBodyText(detail.id, activePath);
@@ -65,8 +63,27 @@
   }
 
   async function createAndOpen(): Promise<void> {
+    // #new is idempotent (attn-cjn): reuse the most recent empty, untouched
+    // Untitled workspace instead of minting another — a bookmarked /app#new
+    // or a back-button revisit must not grow the desk.
+    const existing = await service.listWorkspaces();
+    for (const candidate of existing) {
+      if (candidate.name !== 'Untitled') continue;
+      if (candidate.assetCount > 0 || candidate.markdownCount > 1) continue;
+      const candidateDetail = await service.getWorkspace(candidate.id);
+      if (!candidateDetail) continue;
+      const body = await service.readBodyText(candidate.id, candidateDetail.openPath);
+      if (body !== null && body.trim().length > 0) continue;
+      detail = candidateDetail;
+      activePath = candidateDetail.openPath;
+      bodyText = body ?? '';
+      editorMode = true;
+      isNewDraft = true;
+      history.replaceState(null, '', `/app/w/${detail.id}/${detail.openPath}`);
+      phase = 'ready';
+      return;
+    }
     detail = await service.createWorkspace();
-    workspaces = await service.listWorkspaces();
     activePath = detail.openPath;
     bodyText = '';
     editorMode = true;
@@ -83,6 +100,89 @@
       errorMessage = error instanceof Error ? error.message : String(error);
       phase = 'error';
     }
+  }
+
+  // Switch the active file WITHOUT a page reload: read the new body, update
+  // state, and push the URL. The editor swaps in place (< 100 ms, no flash)
+  // instead of re-bootstrapping the whole app. `push` is false when the change
+  // comes from a back/forward navigation (the history entry already exists).
+  async function applyEntry(path: string, push: boolean): Promise<void> {
+    if (!detail || path === activePath) return;
+    try {
+      // Read the new body BEFORE mutating any state, so a failed read leaves
+      // the current file open rather than half-switching.
+      const body = await service.readBodyText(detail.id, path);
+      activePath = path;
+      bodyText = body;
+      isNewDraft = false;
+      if (push) history.pushState(null, '', `/app/w/${detail.id}/${path}`);
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+      phase = 'error';
+    }
+  }
+
+  function onSelectEntry(path: string): void {
+    void applyEntry(path, true);
+  }
+
+  // Refresh the in-memory workspace after an entry-list change (create, rename,
+  // delete, import assets) — no page reload. `openPath` opens that file; when
+  // omitted the current file stays open, unless it was just deleted, in which
+  // case we fall back to the workspace's default entry.
+  async function onWorkspaceChanged(openPath?: string): Promise<void> {
+    if (!detail) return;
+    const fresh = await service.getWorkspace(detail.id);
+    if (!fresh) return;
+    detail = fresh;
+    const target =
+      openPath ??
+      (activePath && fresh.entries.some((entry) => entry.path === activePath)
+        ? activePath
+        : fresh.openPath);
+    if (target !== activePath) {
+      bodyText = await service.readBodyText(fresh.id, target);
+      activePath = target;
+    }
+    isNewDraft = false;
+    history.replaceState(null, '', `/app/w/${fresh.id}/${target}`);
+  }
+
+  // Keep the active file in sync with the URL on back/forward.
+  $effect(() => {
+    const handler = () => {
+      if (!detail) return;
+      const match = window.location.pathname.match(/^\/app\/w\/[^/]+\/(.+)$/u);
+      const path = match ? decodeURIComponent(match[1]) : detail.openPath;
+      void applyEntry(path, false);
+    };
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  });
+
+  // Follow the writer: when ANOTHER tab commits to this workspace (the service
+  // never delivers this tab's own changes), re-read from storage so the
+  // read-only tab mirrors the writer live instead of showing a stale snapshot.
+  $effect(() => {
+    const workspaceId = detail?.id;
+    if (!workspaceId) return;
+    return service.subscribeWorkspaceChanges((change) => {
+      if (change.workspaceId !== workspaceId) return;
+      if (change.kind === 'structure') {
+        void onWorkspaceChanged();
+        return;
+      }
+      if (change.path !== undefined && change.path !== activePath) return;
+      void refreshActiveBody(workspaceId);
+    });
+  });
+
+  async function refreshActiveBody(workspaceId: string): Promise<void> {
+    const path = activePath;
+    if (!path) return;
+    const body = await service.readBodyText(workspaceId, path).catch(() => null);
+    // Drop stale reads: the user may have switched files while we read.
+    if (body !== null && activePath === path) bodyText = body;
   }
 
   async function onImport(name: string, files: ImportFileInput[]): Promise<void> {
@@ -136,21 +236,6 @@
     workspaces = await service.listWorkspaces();
   }
 
-  async function refreshOpenWorkspace(nextActivePath = activePath): Promise<void> {
-    if (!detail) return;
-    const refreshed = await service.getWorkspace(detail.id);
-    if (!refreshed) return;
-    const nextPath = nextActivePath && refreshed.entries.some((entry) => entry.path === nextActivePath)
-      ? nextActivePath
-      : refreshed.openPath;
-    const nextBody = await service.readBodyText(refreshed.id, nextPath);
-    detail = refreshed;
-    activePath = nextPath;
-    bodyText = nextBody;
-    workspaces = await service.listWorkspaces();
-    history.replaceState(null, '', `/app/w/${refreshed.id}/${nextPath}`);
-  }
-
   async function onDelete(workspaceId: string): Promise<void> {
     await service.deleteWorkspace(workspaceId);
     workspaces = await service.listWorkspaces();
@@ -174,7 +259,7 @@
           <h1>Your desk couldn’t open</h1>
         </div>
       </div>
-      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--muted);" role="alert">
+      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--hosted-muted);" role="alert">
         {errorMessage}
       </p>
     </main>
@@ -183,11 +268,11 @@
   <EditorShell
     {service}
     workspace={detail}
-    {workspaces}
     {activePath}
     {bodyText}
     {isNewDraft}
-    onWorkspaceRefresh={refreshOpenWorkspace}
+    {onSelectEntry}
+    {onWorkspaceChanged}
   />
 {:else if route?.view === 'workspace'}
   <div class="app-shell" data-app-view="missing">
@@ -198,7 +283,7 @@
           <h1>That workspace isn’t here</h1>
         </div>
       </div>
-      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--muted);">
+      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--hosted-muted);">
         Local workspaces live in the browser profile that created them. Import a backup, or go
         back to <a href="/app" style="text-decoration: underline;">your desk</a>.
       </p>
@@ -218,5 +303,6 @@
 {:else if route?.view === 'open'}
   <OpenPage {health} {onImport} />
 {:else}
-  <DeskHome {health} {workspaces} {onCreate} {onImport} {onRename} {onDelete} />
+  <DeskHome
+    {joinIntent} {health} {workspaces} {onCreate} {onImport} {onRename} {onDelete} />
 {/if}

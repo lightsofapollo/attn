@@ -7,7 +7,7 @@
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import { reviewStore } from '../../lib/review/store.svelte';
   import { RAIL_WIDTH_PX } from '../../lib/review/rail-mode';
-  import type { WorkspaceEntry, WorkspaceSummary } from './types';
+  import type { WorkspaceEntry } from './types';
   import {
     workspaceEntriesToTree,
     workspaceRelativePath,
@@ -19,7 +19,6 @@
   interface Props {
     workspaceId: string;
     workspaceName: string;
-    workspaces: WorkspaceSummary[];
     entries: WorkspaceEntry[];
     activeEntryPath?: string;
     shareOpen: boolean;
@@ -28,21 +27,15 @@
     content: Snippet;
     rail: Snippet;
     onNavigate: (path: string) => void;
-    onWorkspaceSwitch: (workspaceId: string, openPath: string) => void;
-    onCreateWorkspace: () => void;
-    onRenameWorkspace: () => void;
-    onOpenWorkspaceHome: () => void;
-    onRenameEntry: (path: string) => void;
-    onDownloadEntry: (path: string) => void;
-    onDeleteEntry: (path: string) => void;
     onShare: (trigger?: HTMLButtonElement) => void;
+    onRename?: (path: string) => void;
+    onDelete?: (path: string) => void;
     onViewport?: (viewport: HTMLElement | null) => void;
   }
 
   let {
     workspaceId,
     workspaceName,
-    workspaces,
     entries,
     activeEntryPath,
     shareOpen,
@@ -51,14 +44,9 @@
     content,
     rail,
     onNavigate,
-    onWorkspaceSwitch,
-    onCreateWorkspace,
-    onRenameWorkspace,
-    onOpenWorkspaceHome,
-    onRenameEntry,
-    onDownloadEntry,
-    onDeleteEntry,
     onShare,
+    onRename,
+    onDelete,
     onViewport,
   }: Props = $props();
 
@@ -67,10 +55,6 @@
     activeEntryPath ? workspaceTreePath(workspaceId, activeEntryPath) : rootPath,
   );
   const tree = $derived(workspaceEntriesToTree(workspaceId, entries));
-  const projectPaths = $derived(workspaces.map((item) => workspaceVirtualRoot(item.id)));
-  const projectLabels = $derived(
-    Object.fromEntries(workspaces.map((item) => [workspaceVirtualRoot(item.id), item.name])),
-  );
   let viewport = $state<HTMLElement | null>(null);
 
   $effect(() => {
@@ -83,13 +67,14 @@
     if (relativePath) onNavigate(relativePath);
   }
 
-  function switchWorkspace(projectPath: string): void {
-    const target = workspaces.find((item) => workspaceVirtualRoot(item.id) === projectPath);
-    if (target) onWorkspaceSwitch(target.id, target.openPath);
+  function renameTree(treePath: string): void {
+    const relativePath = workspaceRelativePath(workspaceId, treePath);
+    if (relativePath) onRename?.(relativePath);
   }
 
-  function relativeEntryPath(treePath: string): string | null {
-    return workspaceRelativePath(workspaceId, treePath);
+  function deleteTree(treePath: string): void {
+    const relativePath = workspaceRelativePath(workspaceId, treePath);
+    if (relativePath) onDelete?.(relativePath);
   }
 </script>
 
@@ -98,30 +83,15 @@
     entries={tree}
     {activePath}
     {rootPath}
-    knownProjects={projectPaths}
-    {projectLabels}
+    knownProjects={[rootPath]}
     activeProjectPath={rootPath}
     rootLabel={workspaceName}
     showOutline={false}
     showWindowDragRegion={false}
     {footer}
     onNavigate={navigateTree}
-    onProjectSwitch={switchWorkspace}
-    onCreateProject={onCreateWorkspace}
-    onRenameProject={onRenameWorkspace}
-    onOpenProjectHome={onOpenWorkspaceHome}
-    onRenameEntry={(treePath) => {
-      const relativePath = relativeEntryPath(treePath);
-      if (relativePath) onRenameEntry(relativePath);
-    }}
-    onDownloadEntry={(treePath) => {
-      const relativePath = relativeEntryPath(treePath);
-      if (relativePath) onDownloadEntry(relativePath);
-    }}
-    onDeleteEntry={(treePath) => {
-      const relativePath = relativeEntryPath(treePath);
-      if (relativePath) onDeleteEntry(relativePath);
-    }}
+    onRename={onRename ? renameTree : undefined}
+    onDelete={onDelete ? deleteTree : undefined}
   />
 {/snippet}
 

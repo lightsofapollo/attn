@@ -1,25 +1,61 @@
 <script lang="ts">
   import AppHeader from './AppHeader.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
-  import {
-    expandPicked,
-    pickedFilesFromDrop,
-    pickedFilesFromList,
-    prepareImport,
-    type PickedFile,
-  } from './import-files';
+  import { expandPicked, prepareImport, type PickedFile } from './import-files';
+  import { autofocus } from '../../lib/hosted/autofocus';
+  import { parseInviteUrl } from '../../lib/hosted/invite-url';
   import type { ImportFileInput, SharingState, StorageHealth, WorkspaceSummary } from './types';
 
   interface Props {
     health: StorageHealth;
     workspaces: WorkspaceSummary[];
+    /** Open the Join panel on mount (/app#join, attn-ri1). */
+    joinIntent?: boolean;
     onCreate: () => void;
     onImport: (name: string, files: ImportFileInput[]) => Promise<void>;
     onRename: (workspaceId: string, name: string) => Promise<void>;
     onDelete: (workspaceId: string) => Promise<void>;
   }
 
-  const { health, workspaces, onCreate, onImport, onRename, onDelete }: Props = $props();
+  const { health, workspaces, joinIntent = false, onCreate, onImport, onRename, onDelete }: Props = $props();
+
+  // Join a review (attn-ri1): #join was a dead click — the landing card and
+  // the desk quick link both promised a flow that didn't exist. The panel
+  // accepts a pasted invite (hosted /review or /s link, or a native attn://
+  // URL) and navigates with the fragment — where the room key lives — intact.
+  // svelte-ignore state_referenced_locally — open-time intent, deliberate.
+  let joinOpen = $state(joinIntent);
+  let joinValue = $state('');
+  let joinError = $state<string | null>(null);
+  let joinInput = $state<HTMLInputElement | undefined>();
+
+  function openJoin(event: MouseEvent): void {
+    event.preventDefault();
+    joinOpen = true;
+    joinError = null;
+  }
+
+  // Focus the paste field whichever way the panel opened (#join intent or
+  // the quick-link click).
+  $effect(() => {
+    if (joinOpen) joinInput?.focus();
+  });
+
+  function closeJoin(): void {
+    joinOpen = false;
+    joinError = null;
+    if (window.location.hash === '#join') history.replaceState(null, '', '/app');
+  }
+
+  function submitJoin(event: SubmitEvent): void {
+    event.preventDefault();
+    const invite = parseInviteUrl(joinValue);
+    if (!invite) {
+      joinError = 'That doesn\u2019t look like an attn invite \u2014 paste the full link, including everything after #.';
+      return;
+    }
+    window.location.assign(invite.href);
+  }
   const storageUnavailable = $derived(health.mode === 'unavailable');
 
   let fileInput = $state<HTMLInputElement | undefined>();
@@ -27,14 +63,11 @@
   let renameValue = $state('');
   let confirmingDeleteId = $state<string | null>(null);
   let importError = $state<string | null>(null);
-  let dragDepth = $state(0);
-  let dropActive = $state(false);
-  let importing = $state(false);
 
   function sharingLabel(sharing: SharingState): string {
     switch (sharing) {
       case 'shared':
-        return 'Shared';
+        return 'Shared · relay sees only ciphertext';
       case 'backed-up':
         return 'Backed up';
       case 'local-only':
@@ -42,53 +75,27 @@
     }
   }
 
-  async function importPicked(picked: PickedFile[]): Promise<void> {
-    if (picked.length === 0 || importing) return;
+  async function onFilesPicked(): Promise<void> {
+    const files = fileInput?.files;
+    if (!files || files.length === 0) return;
     importError = null;
-    importing = true;
     try {
+      const picked: PickedFile[] = [];
+      for (const file of Array.from(files)) {
+        picked.push({
+          name: file.name,
+          relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
+          type: file.type,
+          bytes: new Uint8Array(await file.arrayBuffer()),
+        });
+      }
       const prepared = prepareImport(await expandPicked(picked));
       await onImport(prepared.name, prepared.files);
     } catch (error) {
       importError = error instanceof Error ? error.message : String(error);
     } finally {
-      importing = false;
       if (fileInput) fileInput.value = '';
     }
-  }
-
-  async function onFilesPicked(): Promise<void> {
-    const files = fileInput?.files;
-    if (!files || files.length === 0) return;
-    await importPicked(await pickedFilesFromList(files));
-  }
-
-  function onDragEnter(event: DragEvent): void {
-    if (!event.dataTransfer?.types.includes('Files')) return;
-    event.preventDefault();
-    dragDepth += 1;
-    dropActive = true;
-  }
-
-  function onDragLeave(event: DragEvent): void {
-    if (!event.dataTransfer?.types.includes('Files')) return;
-    dragDepth = Math.max(0, dragDepth - 1);
-    if (dragDepth === 0) dropActive = false;
-  }
-
-  function onDragOver(event: DragEvent): void {
-    if (!event.dataTransfer?.types.includes('Files')) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'copy';
-  }
-
-  async function onDrop(event: DragEvent): Promise<void> {
-    const transfer = event.dataTransfer;
-    if (!transfer) return;
-    event.preventDefault();
-    dragDepth = 0;
-    dropActive = false;
-    await importPicked(await pickedFilesFromDrop(transfer));
   }
 
   function startRename(workspace: WorkspaceSummary): void {
@@ -111,14 +118,7 @@
       <a class="button" href="/app/storage">Storage</a>
     {/snippet}
   </AppHeader>
-  <main
-    class="desk"
-    class:desk-drop-active={dropActive}
-    ondragenter={onDragEnter}
-    ondragleave={onDragLeave}
-    ondragover={onDragOver}
-    ondrop={(event) => void onDrop(event)}
-  >
+  <main class="desk">
     <DegradedBanner mode={health.mode} />
     <div class="desk-title">
       <div>
@@ -140,21 +140,51 @@
         <big>＋ New workspace</big>
       </button>
       <button
-        class="quick quick-drop-target"
+        class="quick"
         type="button"
         data-action="import-workspace"
-        data-drop-active={dropActive}
-        disabled={storageUnavailable || importing}
+        disabled={storageUnavailable}
         onclick={() => fileInput?.click()}
       >
-        <span>{dropActive ? 'Release to create a local workspace' : 'Drop Markdown, a folder, images, or zip'}</span>
-        <big>{importing ? 'Importing…' : dropActive ? '↓ Drop to import' : '↥ Import workspace'}</big>
+        <span>Markdown, images, folders, or zip</span>
+        <big>↥ Import workspace</big>
       </button>
-      <a class="quick" href="/app#join" data-action="join-review">
+      <a class="quick" href="/app#join" data-action="join-review" onclick={openJoin}>
         <span>Browser or native link</span>
         <big>↗ Join a review</big>
       </a>
     </div>
+    {#if joinOpen}
+      <form
+        class="join-panel"
+        data-slot="join-panel"
+        onsubmit={submitJoin}
+        aria-label="Join a review"
+      >
+        <label for="join-invite-input">Paste an invite link</label>
+        <div class="join-row">
+          <!-- svelte-ignore a11y_autofocus — the panel exists to receive the paste. -->
+          <input
+            id="join-invite-input"
+            bind:this={joinInput}
+            bind:value={joinValue}
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="https://attn.sh/s/… or attn://review/…"
+          />
+          <button class="join-go" type="submit">Join</button>
+          <button class="join-cancel" type="button" onclick={closeJoin}>Cancel</button>
+        </div>
+        {#if joinError}
+          <p class="join-error" role="alert">{joinError}</p>
+        {:else}
+          <p class="join-hint">
+            The part after <code>#</code> is the room key — it never reaches the relay.
+          </p>
+        {/if}
+      </form>
+    {/if}
     <input
       bind:this={fileInput}
       type="file"
@@ -177,6 +207,7 @@
         <div class="workspace-row" data-workspace-id={workspace.id}>
           {#if renamingId === workspace.id}
             <input
+              use:autofocus
               class="rename-input"
               type="text"
               aria-label="Workspace name"
@@ -199,7 +230,7 @@
           <span class="detail">{workspace.lastEditedLabel}</span>
           <span class="row-tail">
             {#if workspace.sharing === 'shared'}
-              <span class="local-badge"><span class="dot" aria-hidden="true"></span> Shared</span>
+              <span class="local-badge" title="The relay stores encrypted envelopes only; the key stays in the link fragment."><span class="dot" aria-hidden="true"></span> Shared · relay sees only ciphertext</span>
             {:else}
               <span>{sharingLabel(workspace.sharing)}</span>
             {/if}
@@ -218,7 +249,7 @@
         {#if confirmingDeleteId === workspace.id}
           <div class="confirm-clear" role="alertdialog" aria-label={`Delete ${workspace.name}?`}>
             <strong>Delete “{workspace.name}” from this device?</strong>
-            <p style="margin: 0.3rem 0 0; color: var(--muted);">
+            <p style="margin: 0.3rem 0 0; color: var(--hosted-muted);">
               This cannot be undone. Export it first if you need a copy.
             </p>
             <div class="actions">

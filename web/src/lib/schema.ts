@@ -45,6 +45,27 @@ const codeBlockNode: NodeSpec = {
   },
 };
 
+// YAML frontmatter (--- … ---) at the top of a document. Stored as an atom
+// carrying the raw block so it round-trips byte-exact; rendered by a NodeView
+// as a folded metadata card instead of a run-on serif paragraph.
+const frontmatterNode: NodeSpec = {
+  group: 'block',
+  atom: true,
+  selectable: true,
+  attrs: { value: { default: '' } },
+  parseDOM: [
+    {
+      tag: 'div[data-frontmatter]',
+      getAttrs: (dom) => ({
+        value: (dom as HTMLElement).getAttribute('data-frontmatter') || '',
+      }),
+    },
+  ],
+  toDOM(node): DOMOutputSpec {
+    return ['div', { 'data-frontmatter': node.attrs.value, class: 'frontmatter-block' }];
+  },
+};
+
 const taskListNode: NodeSpec = {
   content: 'task_list_item+',
   group: 'block',
@@ -176,6 +197,7 @@ export const schema = new Schema({
         // Rebuild the OrderedMap with our additions
         let nodes = baseNodes;
         nodes = nodes.update('code_block', codeBlockNode);
+        nodes = nodes.addBefore('text', 'frontmatter', frontmatterNode);
         nodes = nodes.addBefore('text', 'task_list', taskListNode);
         nodes = nodes.addBefore('text', 'task_list_item', taskListItemNode);
         nodes = nodes.addBefore('text', 'table', tableNode);
@@ -324,7 +346,46 @@ function listIsTight(tokens: Token[], i: number): boolean {
   return false;
 }
 
+function frontmatterPlugin(md: MarkdownIt): void {
+  md.block.ruler.before(
+    'table',
+    'front_matter',
+    (state, startLine, endLine, silent) => {
+      // Only a fence on the very first line, at column 0, counts.
+      if (startLine !== 0 || state.blkIndent !== 0 || state.tShift[startLine] !== 0) {
+        return false;
+      }
+      const begin = state.bMarks[startLine];
+      if (state.src.slice(begin, state.eMarks[startLine]).trim() !== '---') return false;
+      // Find the closing fence.
+      let nextLine = startLine + 1;
+      let found = false;
+      for (; nextLine < endLine; nextLine++) {
+        const b = state.bMarks[nextLine] + state.tShift[nextLine];
+        const e = state.eMarks[nextLine];
+        if (state.src.slice(b, e).trim() === '---') {
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+      if (silent) return true;
+      const raw = state.src
+        .slice(state.eMarks[startLine] + 1, state.bMarks[nextLine])
+        .replace(/\n$/, '');
+      const token = state.push('front_matter', '', 0);
+      token.meta = raw;
+      token.map = [startLine, nextLine + 1];
+      token.block = true;
+      state.line = nextLine + 1;
+      return true;
+    },
+    { alt: [] },
+  );
+}
+
 const markdownItInstance = MarkdownIt('default', { html: false });
+markdownItInstance.use(frontmatterPlugin);
 markdownItInstance.use(taskListPlugin);
 
 export const markdownParser = new MarkdownParser(schema, markdownItInstance, {
@@ -347,6 +408,10 @@ export const markdownParser = new MarkdownParser(schema, markdownItInstance, {
   heading: {
     block: 'heading',
     getAttrs: (tok: Token) => ({ level: +tok.tag.slice(1) }),
+  },
+  front_matter: {
+    node: 'frontmatter',
+    getAttrs: (tok: Token) => ({ value: (tok.meta as string) || '' }),
   },
   code_block: { block: 'code_block', noCloseToken: true },
   fence: {
@@ -422,6 +487,11 @@ const baseMarkSerializers = defaultMarkdownSerializer.marks;
 export const markdownSerializer = new MarkdownSerializer(
   {
     ...baseNodeSerializers,
+
+    frontmatter(state: MarkdownSerializerState, node: PmNode) {
+      state.write('---\n' + (node.attrs.value as string) + '\n---');
+      state.closeBlock(node);
+    },
 
     task_list(state: MarkdownSerializerState, node: PmNode) {
       state.renderList(node, '  ', () => '');

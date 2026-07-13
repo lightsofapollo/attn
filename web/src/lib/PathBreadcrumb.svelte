@@ -18,6 +18,10 @@
     onNavigate?: (path: string) => void;
     onShare?: (trigger?: HTMLButtonElement) => void;
     shareEnabled?: boolean;
+    /** Editor save state chip (Theme v2, attn-u5c): lives in the header flow
+     *  next to Share, never in the floating review overlay where it occluded
+     *  the Share control. */
+    saveState?: 'saved' | 'dirty' | null;
     /** When set, shows an "open in browser" icon button in the header cluster
      *  (used for HTML files, which can't be shared but can be opened externally). */
     onOpenInBrowser?: () => void;
@@ -35,6 +39,7 @@
     onNavigate,
     onShare,
     shareEnabled = false,
+    saveState = null,
     onOpenInBrowser,
     avoidWindowControls = false,
     fixed = false,
@@ -120,6 +125,22 @@
     <div class="min-w-0 flex-1" aria-hidden="true"></div>
   {/if}
   {@render actions?.()}
+  {#if saveState}
+    <span
+      class="-mt-3 inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-border/50 bg-background/55 px-2.5 font-sans text-xs text-muted-foreground"
+      style="-webkit-app-region: no-drag"
+      data-slot="save-chip"
+      data-state={saveState}
+      role="status"
+    >
+      <span
+        class="size-1.5 rounded-full"
+        style={`background: ${saveState === 'dirty' ? 'var(--amber-deep)' : 'var(--review-card-suggestion-accent)'};`}
+        aria-hidden="true"
+      ></span>
+      {saveState === 'dirty' ? 'Editing · unsaved' : 'Saved · on disk'}
+    </span>
+  {/if}
   {#if onOpenInBrowser}
     <button
       type="button"

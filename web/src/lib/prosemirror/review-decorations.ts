@@ -159,7 +159,15 @@ export function buildReviewDecorations(
   }
 
   const out: Decoration[] = [];
-  for (const entry of perRange.values()) {
+  // Number the anchored ranges in document order so the mobile reader can show
+  // a stable tappable superscript marker per anchor (1, 2, 3…). Desktop hides
+  // the markers via CSS and relies on the margin cards instead.
+  const orderedEntries = [...perRange.values()].sort(
+    (a, b) => a.from - b.from || a.to - b.to,
+  );
+  let anchorOrdinal = 0;
+  for (const entry of orderedEntries) {
+    anchorOrdinal += 1;
     // Determinism: sort by eventId so multiple stacked marks on the same
     // range always render in the same order across rebuilds (no z-flicker).
     entry.items.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
@@ -182,6 +190,20 @@ export function buildReviewDecorations(
         ),
       );
     }
+    // Numbered marker at the end of the range (mobile-only via CSS). Carries
+    // data-event-id so the existing click handler focuses the thread; the host
+    // opens the mobile review sheet when the focus target changes.
+    const primary = visible[0];
+    if (primary) {
+      const ordinal = anchorOrdinal;
+      out.push(
+        Decoration.widget(entry.to, () => anchorMarkerWidget(ordinal, primary.eventId, primary.kind), {
+          side: 1,
+          key: `${entry.from}:${entry.to}:marker`,
+        }),
+      );
+    }
+
     if (hiddenCount > 0) {
       out.push(
         Decoration.widget(entry.to, () => moreWidget(hiddenCount), {
@@ -408,6 +430,30 @@ function moreWidget(hidden: number): HTMLElement {
   span.textContent = `+${hidden} more`;
   span.setAttribute('aria-label', `${hidden} more review marks at this range`);
   return span;
+}
+
+/**
+ * Numbered anchor marker for the mobile reader. Hidden on desktop via CSS (the
+ * margin cards serve there). It reuses the plugin's `[data-event-id]` click
+ * handler, so tapping it focuses the thread; the host component opens the
+ * mobile review sheet in response to the focus change.
+ */
+function anchorMarkerWidget(
+  ordinal: number,
+  eventId: EventId,
+  kind: ReviewMarkKind,
+): HTMLElement {
+  const sup = document.createElement('sup');
+  sup.className = 'attn-review-anchor-marker';
+  sup.textContent = String(ordinal);
+  sup.setAttribute('data-event-id', eventId);
+  sup.setAttribute('data-review-kind', kind);
+  sup.setAttribute('role', 'button');
+  sup.setAttribute(
+    'aria-label',
+    `Review ${kind === 'comment' ? 'comment' : 'suggestion'} ${ordinal}`,
+  );
+  return sup;
 }
 
 // ---------------------------------------------------------------------------

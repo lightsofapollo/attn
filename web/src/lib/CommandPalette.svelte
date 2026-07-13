@@ -1,3 +1,19 @@
+<script lang="ts" module>
+  import type { Component } from 'svelte';
+
+  /** A palette command: files open, commands run (Theme v2, attn-n9j). */
+  export interface PaletteCommand {
+    id: string;
+    label: string;
+    /** Key caps rendered as <Kbd> chips, e.g. ['⌘', '⇧', 'S']. */
+    hint?: string[];
+    /** Extra match terms for filtering beyond the label. */
+    keywords?: string;
+    icon?: Component;
+    run: () => void;
+  }
+</script>
+
 <script lang="ts">
   import type { FileType, SearchResultItem } from './types';
   import * as Command from '$lib/components/ui/command/index.js';
@@ -8,12 +24,14 @@
   import VideoIcon from '@lucide/svelte/icons/video';
   import MusicIcon from '@lucide/svelte/icons/music';
   import FileCodeIcon from '@lucide/svelte/icons/file-code';
+  import TerminalIcon from '@lucide/svelte/icons/terminal';
 
   interface Props {
     open: boolean;
     rootPath?: string;
     remoteSearchQuery?: string;
     remoteSearchItems?: SearchResultItem[];
+    commands?: PaletteCommand[];
     onSearchQuery?: (query: string) => void;
     onSelect: (path: string) => void;
   }
@@ -23,6 +41,7 @@
     rootPath = '',
     remoteSearchQuery = '',
     remoteSearchItems = [],
+    commands = [],
     onSearchQuery,
     onSelect,
   }: Props = $props();
@@ -129,6 +148,11 @@
     onSelect(path);
   }
 
+  function handleCommand(command: PaletteCommand): void {
+    open = false;
+    command.run();
+  }
+
   function iconForType(fileType: FileType): typeof FileIcon {
     switch (fileType) {
       case 'markdown': return FileTextIcon;
@@ -147,20 +171,49 @@
 
 <Command.Dialog
   bind:open
-  title="Open File"
-  description="Search files to open"
+  title="Command palette"
+  description="Run a command or open a file"
   contentClass="top-[16vh] translate-y-0"
 >
   <Command.Input
     bind:value={searchQuery}
     oninput={handleInput}
     class="font-sans text-[0.97rem] tracking-[0.01em] placeholder:tracking-normal"
-    placeholder="Search files..."
+    placeholder="Type a command or file name…"
   />
   <Command.List class="max-h-[min(62vh,34rem)] px-2 pb-2 pt-1">
     <Command.Empty class="font-sans py-10 text-muted-foreground">
-      No matching files in this workspace.
+      No matches — try a command name or a file path.
     </Command.Empty>
+    {#if commands.length > 0}
+      <Command.Group
+        heading="Commands"
+        class="font-sans [&_[data-command-group-heading]]:text-muted-foreground/90 [&_[data-command-group-heading]]:px-2 [&_[data-command-group-heading]]:py-1 [&_[data-command-group-heading]]:font-semibold [&_[data-command-group-heading]]:tracking-[0.08em] [&_[data-command-group-heading]]:uppercase"
+      >
+        {#each commands as command (command.id)}
+          {@const Icon = command.icon ?? TerminalIcon}
+          <Command.Item
+            value={`command:${command.id} ${command.label} ${command.keywords ?? ''}`}
+            class="group/item font-sans rounded-md border border-transparent px-2 py-2.5 aria-selected:border-border aria-selected:bg-accent/70"
+            onSelect={() => handleCommand(command)}
+          >
+            <span class="bg-muted/70 text-muted-foreground inline-flex size-6 shrink-0 items-center justify-center rounded-sm border border-border/60 transition-colors aria-selected:bg-background">
+              <Icon class="size-3.5 shrink-0 opacity-90" />
+            </span>
+            <span class="min-w-0 flex-1 truncate text-[0.96rem] font-medium leading-none tracking-[0.01em]">
+              {command.label}
+            </span>
+            {#if command.hint}
+              <span class="inline-flex items-center gap-1">
+                {#each command.hint as cap (cap)}
+                  <Kbd>{cap}</Kbd>
+                {/each}
+              </span>
+            {/if}
+          </Command.Item>
+        {/each}
+      </Command.Group>
+    {/if}
     {#each grouped as [dir, groupFiles] (dir)}
       <Command.Group
         heading={dirLabel(dir)}
@@ -193,10 +246,10 @@
     {/if}
   </Command.List>
   <div class="border-border/70 text-muted-foreground bg-muted/25 flex items-center justify-between border-t px-3 py-2 font-sans text-xs">
-    <span>Open files quickly</span>
+    <span>Commands and files</span>
     <span class="inline-flex items-center gap-1.5">
       <Kbd>{mod}</Kbd>
-      <Kbd>P</Kbd>
+      <Kbd>K</Kbd>
     </span>
   </div>
 </Command.Dialog>

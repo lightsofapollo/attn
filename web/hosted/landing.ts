@@ -4,7 +4,7 @@
 import '@fontsource-variable/source-serif-4';
 import '@fontsource-variable/source-sans-3';
 import '@fontsource-variable/source-code-pro';
-import '../src/hosted/tokens.css';
+import '../src/hosted/chrome.css';
 import '../src/hosted/landing/landing.css';
 import { mount } from 'svelte';
 import Landing from '../src/hosted/landing/Landing.svelte';

@@ -1,3 +1,4 @@
+import { boundFetch } from './bound-fetch';
 import { base64UrlDecode, buildAdmissionHeaderV3 } from './browser-crypto';
 import { base64UrlEncode } from './browser-crypto';
 import { BROWSER_POW_DIFFICULTY, mintBrowserPowInWorker } from './browser-pow';
@@ -333,7 +334,7 @@ export class BrowserPushConsentController {
 
   private notification(): NotificationApi { return this.options.notification ?? Notification; }
   private navigator(): PushConsentNavigator { return this.options.navigator ?? navigator; }
-  private fetchImpl(): typeof fetch { return this.options.fetch ?? fetch; }
+  private fetchImpl(): typeof fetch { return this.options.fetch ?? boundFetch; }
   private indexedDB(): IDBFactory { return this.options.indexedDB ?? indexedDB; }
   private async serviceWorkerRegistration(): Promise<ServiceWorkerRegistration> {
     const ready = this.navigator().serviceWorker?.ready;

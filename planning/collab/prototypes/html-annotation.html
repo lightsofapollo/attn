@@ -1,0 +1,1525 @@
+<!doctype html>
+<html lang="en" data-theme="paper">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>attn — HTML annotation prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700;1,8..60,400&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* ============================================================
+   attn design tokens — PAPER (light) / INK (dark)
+   Faithful to web/styles theme: OKLCH, Source Serif/Sans/Code.
+   ============================================================ */
+:root,
+[data-theme="paper"] {
+  --background: oklch(0.905 0.010 78);
+  --foreground: oklch(0.14 0.008 55);
+  --card: oklch(0.89 0.012 76);
+  --popover: oklch(0.91 0.012 76);
+  --popover-foreground: oklch(0.14 0.008 55);
+  --code-block: oklch(0.885 0.012 73);
+  --sidebar: oklch(0.855 0.012 75);
+  --primary: oklch(0.48 0.14 28);
+  --primary-foreground: oklch(0.98 0.005 78);
+  --link: oklch(0.38 0.04 55);
+  --destructive: oklch(0.55 0.20 27);
+  --border: oklch(0.14 0.008 55 / 18%);
+  --muted: oklch(0.88 0.012 75);
+  --muted-foreground: oklch(0.32 0.012 65);
+  --accent: oklch(0.14 0.008 55 / 7%);
+  --ring: oklch(0.32 0.012 65);
+
+  --panel-surface: oklch(0.92 0.010 76);
+  --panel-border: oklch(0.14 0.008 55 / 14%);
+  --review-card-surface: oklch(0.945 0.010 76 / 96%);
+  --review-card-border: oklch(0.14 0.008 55 / 22%);
+  --review-card-shadow: 0 16px 42px oklch(0.20 0.02 55 / 16%), 0 1px 0 oklch(1 0 0 / 45%) inset;
+
+  --comment-accent: oklch(0.62 0.13 82);     /* warm gold — text comments */
+  --element-accent: oklch(0.55 0.11 235);    /* cool blue — element pins   */
+  --comment-highlight: oklch(0.82 0.13 85 / 30%);
+  --comment-highlight-active: oklch(0.80 0.16 82 / 52%);
+
+  --avatar-owner: oklch(0.58 0.14 32);
+  --avatar-reviewer: oklch(0.56 0.11 235);
+  --avatar-agent: oklch(0.57 0.13 295);
+
+  --grain-opacity: 0.04;
+  --radius: 0.625rem;
+
+  color-scheme: light;
+}
+
+[data-theme="ink"] {
+  --background: oklch(0.145 0.005 260);
+  --foreground: oklch(0.85 0.008 250);
+  --card: oklch(0.165 0.006 260);
+  --popover: oklch(0.185 0.006 260);
+  --popover-foreground: oklch(0.85 0.008 250);
+  --code-block: oklch(0.105 0.006 258);
+  --sidebar: oklch(0.13 0.006 260);
+  --primary: oklch(0.72 0.10 220);
+  --primary-foreground: oklch(0.12 0.005 260);
+  --link: oklch(0.70 0.03 250);
+  --destructive: oklch(0.65 0.18 22);
+  --border: oklch(1 0 0 / 8%);
+  --muted: oklch(0.12 0.006 258);
+  --muted-foreground: oklch(0.55 0.008 250);
+  --accent: oklch(1 0 0 / 6%);
+  --ring: oklch(0.55 0.06 230);
+
+  --panel-surface: oklch(0.16 0.006 260);
+  --panel-border: oklch(1 0 0 / 8%);
+  --review-card-surface: oklch(0.195 0.007 260 / 94%);
+  --review-card-border: oklch(1 0 0 / 12%);
+  --review-card-shadow: 0 18px 52px oklch(0 0 0 / 40%), 0 1px 0 oklch(1 0 0 / 8%) inset;
+
+  --comment-accent: oklch(0.74 0.13 86);
+  --element-accent: oklch(0.70 0.11 230);
+  --comment-highlight: oklch(0.78 0.16 88 / 24%);
+  --comment-highlight-active: oklch(0.80 0.18 86 / 44%);
+
+  --avatar-owner: oklch(0.62 0.14 32);
+  --avatar-reviewer: oklch(0.64 0.12 235);
+  --avatar-agent: oklch(0.66 0.13 295);
+
+  --grain-opacity: 0.02;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Source Sans 3", -apple-system, system-ui, sans-serif;
+  font-size: 15.5px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+/* paper grain overlay */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  mix-blend-mode: var(--grain-blend, multiply);
+}
+[data-theme="ink"] body::after { --grain-blend: screen; }
+
+/* ============================================================
+   Top chrome
+   ============================================================ */
+.topbar {
+  height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 16px;
+  background: color-mix(in oklch, var(--sidebar) 86%, transparent);
+  border-bottom: 1px solid var(--panel-border);
+  backdrop-filter: blur(12px) saturate(1.1);
+  position: relative;
+  z-index: 50;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+.brand .dot {
+  width: 9px; height: 9px; border-radius: 9999px;
+  background: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 22%, transparent);
+}
+.doctype {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 4px;
+  color: var(--element-accent);
+  background: color-mix(in oklch, var(--element-accent) 16%, transparent);
+  border: 1px solid color-mix(in oklch, var(--element-accent) 30%, transparent);
+}
+.filename {
+  font-family: "Source Code Pro", monospace;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+.origin-tag {
+  font-family: "Source Code Pro", monospace;
+  font-size: 10.5px;
+  color: var(--muted-foreground);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  opacity: 0.8;
+}
+.origin-tag .lock { font-size: 11px; }
+
+.spacer { flex: 1 1 auto; }
+
+/* dual-affordance legend (no mode switch) */
+.legend {
+  display: inline-flex; align-items: center; gap: 15px;
+  font-size: 11.5px; font-weight: 500; color: var(--muted-foreground);
+}
+.legend .leg { display: inline-flex; align-items: center; gap: 6px; }
+.legend .leg i { width: 9px; height: 9px; border-radius: 2.5px; display: inline-block; }
+.legend .leg-text i { background: var(--comment-accent); }
+.legend .leg-el i { background: var(--element-accent); }
+
+/* margin gutter pin — appears next to whatever block you hover */
+.gutter-pin {
+  position: absolute; z-index: 9;
+  width: 27px; height: 27px; border-radius: 9999px;
+  display: grid; place-items: center;
+  background: var(--popover); color: var(--element-accent);
+  border: 1px solid color-mix(in oklch, var(--element-accent) 45%, var(--border));
+  box-shadow: 0 5px 16px oklch(0 0 0 / 20%);
+  cursor: pointer;
+  opacity: 0; transform: scale(0.82) translateX(5px);
+  transition: opacity 130ms ease, transform 130ms cubic-bezier(0.22,1,0.36,1), background 130ms ease, color 130ms ease;
+  pointer-events: none;
+}
+.gutter-pin.show { opacity: 1; transform: none; pointer-events: auto; }
+.gutter-pin:hover {
+  background: var(--element-accent); color: #fff;
+  box-shadow: 0 6px 20px color-mix(in oklch, var(--element-accent) 40%, transparent);
+}
+.gutter-pin svg { width: 14px; height: 14px; }
+
+.presence { display: inline-flex; align-items: center; }
+.presence .av { margin-left: -7px; box-shadow: 0 0 0 2px var(--sidebar); }
+.presence .av:first-child { margin-left: 0; }
+
+.iconbtn {
+  appearance: none;
+  width: 30px; height: 30px;
+  display: inline-grid; place-items: center;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: color-mix(in oklch, var(--foreground) 4%, transparent);
+  color: var(--foreground);
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+.iconbtn:hover { background: var(--accent); }
+
+/* avatar */
+.av {
+  width: 22px; height: 22px;
+  border-radius: 9999px;
+  display: inline-grid; place-items: center;
+  color: #fff;
+  font-size: 10px; font-weight: 600;
+  font-family: "Source Sans 3", sans-serif;
+  letter-spacing: 0.01em;
+  user-select: none;
+}
+.av.owner { background: var(--avatar-owner); }
+.av.reviewer { background: var(--avatar-reviewer); }
+.av.agent { background: var(--avatar-agent); }
+
+/* ============================================================
+   Workspace: document column + margin rail share one scroller
+   ============================================================ */
+.workspace {
+  height: calc(100% - 46px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+}
+.workspace-inner {
+  position: relative;
+  display: grid;
+  grid-template-columns: 56px minmax(0, 700px) minmax(300px, 344px);
+  gap: 28px;
+  max-width: 1184px;
+  margin: 0 auto;
+  padding: 46px 28px 50% 28px;
+  justify-content: center;
+  align-items: start;
+}
+
+/* the rendered HTML doc (the "shared document") */
+.doc {
+  position: relative;
+  grid-column: 2;
+  width: 100%;
+  max-width: 700px;
+  font-family: "Source Serif 4", Georgia, serif;
+  line-height: 1.72;
+  letter-spacing: 0.003em;
+  font-size: 1.06rem;
+}
+
+.doc h1 {
+  font-size: 2.1rem; line-height: 1.16; font-weight: 700;
+  letter-spacing: -0.022em; margin: 0 0 0.5rem;
+}
+.doc .dek {
+  font-size: 1.12rem; color: var(--muted-foreground);
+  font-style: italic; margin: 0 0 1.4rem; line-height: 1.5;
+}
+.doc .byline {
+  font-family: "Source Sans 3", sans-serif;
+  font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--muted-foreground); margin: 0 0 2.4rem;
+  padding-bottom: 1.2rem; border-bottom: 1px solid var(--border);
+}
+.doc h2 {
+  font-size: 1.5rem; line-height: 1.24; font-weight: 600;
+  letter-spacing: -0.015em; margin: 2.4rem 0 0.6rem;
+}
+.doc h3 {
+  font-size: 1.2rem; line-height: 1.3; font-weight: 600;
+  letter-spacing: -0.01em; margin: 1.9rem 0 0.4rem;
+}
+.doc p { margin: 0 0 1rem; }
+.doc a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+
+.doc blockquote {
+  margin: 1.6rem 0; padding: 0.2rem 0 0.2rem 1.3rem;
+  border-left: 3px solid color-mix(in oklch, var(--primary) 60%, transparent);
+  font-size: 1.28rem; line-height: 1.45; font-style: italic;
+  color: color-mix(in oklch, var(--foreground) 88%, var(--muted-foreground));
+}
+
+.doc pre {
+  background: var(--code-block);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.125rem;
+  overflow-x: auto;
+  font-family: "Source Code Pro", monospace;
+  font-size: 0.84rem; line-height: 1.55;
+  margin: 1.4rem 0;
+}
+.doc code { font-family: "Source Code Pro", monospace; }
+.doc p code {
+  font-size: 0.84em; padding: 0.12em 0.34em; border-radius: 3px;
+  background: color-mix(in oklch, var(--foreground) 7%, transparent);
+}
+.doc .tok-key { color: oklch(0.55 0.14 28); }
+[data-theme="ink"] .doc .tok-key { color: oklch(0.72 0.12 30); }
+.doc .tok-str { color: oklch(0.52 0.10 150); }
+[data-theme="ink"] .doc .tok-str { color: oklch(0.74 0.12 152); }
+.doc .tok-com { color: var(--muted-foreground); font-style: italic; }
+
+.doc figure {
+  margin: 1.8rem 0; padding: 0;
+}
+.doc figure .frame {
+  border-radius: 10px; overflow: hidden; border: 1px solid var(--border);
+  background:
+    linear-gradient(135deg,
+      color-mix(in oklch, var(--primary) 20%, var(--card)),
+      color-mix(in oklch, var(--element-accent) 24%, var(--card)));
+  aspect-ratio: 16 / 8;
+  display: grid; place-items: center;
+  position: relative;
+}
+.doc figure .frame::before {
+  content: "";
+  position: absolute; inset: 0;
+  background-image: radial-gradient(circle at 1px 1px, oklch(1 0 0 / 18%) 1px, transparent 0);
+  background-size: 16px 16px;
+}
+.doc figure .frame span {
+  position: relative;
+  font-family: "Source Sans 3", sans-serif;
+  font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase;
+  color: oklch(1 0 0 / 78%); font-weight: 600;
+}
+.doc figcaption {
+  font-family: "Source Sans 3", sans-serif;
+  font-size: 0.82rem; color: var(--muted-foreground);
+  margin-top: 0.55rem; text-align: center; font-style: italic;
+}
+
+.doc table {
+  width: 100%; border-collapse: collapse; margin: 1.6rem 0;
+  font-family: "Source Sans 3", sans-serif; font-size: 0.9rem;
+}
+.doc th, .doc td {
+  text-align: left; padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+}
+.doc th {
+  font-weight: 600; font-size: 0.76rem; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--muted-foreground);
+}
+.doc tbody tr:hover { background: var(--accent); }
+
+/* ============================================================
+   Text highlights — CSS Custom Highlight API (non-destructive)
+   ============================================================ */
+::highlight(attn-text) {
+  background-color: var(--comment-highlight);
+  text-decoration: underline 2px color-mix(in oklch, var(--comment-accent) 65%, transparent);
+  text-underline-offset: 3px;
+}
+::highlight(attn-text-active) {
+  background-color: var(--comment-highlight-active);
+  text-decoration: underline 2px var(--comment-accent);
+  text-underline-offset: 3px;
+}
+
+/* fallback span highlight if Highlight API absent */
+.attn-fallback-hl {
+  background-color: var(--comment-highlight);
+  border-radius: 2px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* ============================================================
+   Element overlays (anchor a comment to a whole element)
+   ============================================================ */
+.overlay-layer {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  z-index: 5;
+}
+.el-overlay {
+  position: absolute;
+  border: 1.5px solid color-mix(in oklch, var(--element-accent) 70%, transparent);
+  background: color-mix(in oklch, var(--element-accent) 9%, transparent);
+  border-radius: 6px;
+  /* The fill must NOT capture the mouse, or it blocks selecting/​commenting on
+     the text and nested elements underneath. Only the small chips (the tag and
+     the count) are interactive — they're the handle for focusing this thread. */
+  pointer-events: none;
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+.el-overlay:hover,
+.el-overlay.active {
+  background: color-mix(in oklch, var(--element-accent) 16%, transparent);
+  border-color: var(--element-accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--element-accent) 20%, transparent);
+}
+.el-overlay .tag {
+  position: absolute; top: -10px; left: 8px;
+  font-family: "Source Code Pro", monospace;
+  font-size: 9.5px; font-weight: 500; letter-spacing: 0.02em;
+  padding: 1px 6px; border-radius: 9999px;
+  background: var(--element-accent); color: #fff;
+  white-space: nowrap;
+  max-width: 88%; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: auto; cursor: pointer;   /* interactive handle */
+}
+/* scope-specific overlay treatments so nested anchors stay legible:
+   a row is a translucent band (low z); a cell is a tighter inset box that
+   sits ABOVE the row band (high z) so both read at once. */
+.el-overlay--row  { z-index: 5; border-style: solid;
+  background: color-mix(in oklch, var(--element-accent) 7%, transparent); }
+.el-overlay--cell { z-index: 7; border-width: 2px; border-radius: 5px;
+  background: color-mix(in oklch, var(--element-accent) 13%, transparent); }
+.el-overlay--cell .tag { top: -10px; left: -1px; }
+.el-overlay--block { z-index: 6; }
+
+/* count badge when an element carries more than one comment */
+.el-overlay .ov-count {
+  position: absolute; top: -9px; right: -9px;
+  min-width: 17px; height: 17px; padding: 0 4px;
+  display: inline-grid; place-items: center;
+  font-family: "Source Sans 3", sans-serif; font-size: 10px; font-weight: 700;
+  color: #fff; background: var(--element-accent);
+  border: 1.5px solid var(--background); border-radius: 9999px;
+  box-shadow: 0 1px 3px oklch(0 0 0 / 25%);
+  pointer-events: auto; cursor: pointer;   /* interactive handle */
+}
+
+/* hover-pick affordance (outline of what the gutter pin will anchor) */
+.pick-hover {
+  position: absolute;
+  border: 1.5px dashed color-mix(in oklch, var(--element-accent) 80%, transparent);
+  background: color-mix(in oklch, var(--element-accent) 8%, transparent);
+  border-radius: 6px;
+  pointer-events: none;
+  z-index: 10;
+  transition: all 60ms linear;
+}
+.pick-hover--cell { border-radius: 5px; background: color-mix(in oklch, var(--element-accent) 12%, transparent); }
+.pick-hover .tag {
+  position: absolute; top: -11px; left: 0;
+  font-family: "Source Code Pro", monospace;
+  font-size: 9.5px; padding: 1px 6px; border-radius: 9999px;
+  background: var(--element-accent); color: #fff; white-space: nowrap;
+}
+
+/* scope breadcrumb flyout (cell ‹ row ‹ table) off the gutter pin */
+.scope-flyout {
+  position: absolute; z-index: 60;
+  display: none; flex-direction: column; gap: 2px;
+  min-width: 184px; padding: 4px;
+  background: var(--popover); color: var(--popover-foreground);
+  border: 1px solid var(--border); border-radius: 9px;
+  box-shadow: 0 16px 40px oklch(0 0 0 / 26%), 0 1px 0 oklch(1 0 0 / 25%) inset;
+}
+.scope-flyout.show { display: flex; animation: pop 120ms cubic-bezier(0.22,1,0.36,1) both; }
+.scope-item {
+  appearance: none; border: 0; cursor: pointer; text-align: left;
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 7px;
+  padding: 6px 8px; border-radius: 6px;
+  background: transparent; color: var(--foreground);
+  font-family: "Source Sans 3", sans-serif; font-size: 12px;
+  transition: background 110ms ease;
+}
+.scope-item:hover { background: var(--accent); }
+.scope-item .sc-dot {
+  width: 8px; height: 8px; border-radius: 2.5px;
+  background: var(--element-accent);
+}
+.scope-item.scope-cell .sc-dot { border-radius: 2px; }
+.scope-item.scope-row  .sc-dot { border-radius: 2px; transform: scaleX(1.7); }
+.scope-item.scope-block .sc-dot { border-radius: 9999px; }
+.scope-item .sc-title { font-weight: 600; white-space: nowrap; }
+.scope-item .sc-prev {
+  font-size: 10.5px; color: var(--muted-foreground);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.scope-item .sc-count {
+  font-size: 9.5px; font-weight: 700; color: #fff;
+  background: color-mix(in oklch, var(--element-accent) 80%, var(--foreground));
+  min-width: 15px; height: 15px; padding: 0 4px;
+  display: inline-grid; place-items: center; border-radius: 9999px;
+}
+
+/* count pip on the gutter pin itself (target already has comments) */
+.gutter-pin { position: absolute; }
+.gutter-pin .pin-count {
+  position: absolute; top: -5px; right: -5px;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  display: inline-grid; place-items: center;
+  font-family: "Source Sans 3", sans-serif; font-size: 9px; font-weight: 700;
+  color: #fff; background: var(--element-accent);
+  border: 1.5px solid var(--popover); border-radius: 9999px;
+}
+
+/* ============================================================
+   Margin rail + cards
+   ============================================================ */
+.rail {
+  position: relative;
+  grid-column: 3;
+  align-self: stretch;
+}
+.rail-empty {
+  position: sticky; top: 8px;
+  font-family: "Source Sans 3", sans-serif;
+  font-size: 12px; color: var(--muted-foreground);
+  padding: 10px 12px; line-height: 1.5;
+  border: 1px dashed var(--border); border-radius: 8px;
+}
+
+.card {
+  position: absolute;
+  left: 0; right: 0;
+  font-family: "Source Sans 3", sans-serif;
+  font-size: 12px; line-height: 1.4;
+  background: var(--review-card-surface);
+  backdrop-filter: blur(10px) saturate(1.1);
+  border: 1px solid var(--review-card-border);
+  border-radius: 6px;
+  padding: 9px 11px 9px 12px;
+  box-shadow: var(--review-card-shadow);
+  cursor: pointer;
+  opacity: 0.94;
+  transition: top 220ms cubic-bezier(0.22, 1, 0.36, 1),
+              opacity 130ms ease, box-shadow 130ms ease,
+              border-color 130ms ease, transform 130ms ease;
+}
+.card::before {
+  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px;
+  width: 3px; border-radius: 9999px;
+  background: var(--card-accent, var(--comment-accent));
+}
+.card.kind-text { --card-accent: var(--comment-accent); }
+.card.kind-element { --card-accent: var(--element-accent); }
+.card:hover { opacity: 1; }
+.card.active {
+  opacity: 1;
+  border-color: color-mix(in oklch, var(--card-accent) 55%, var(--review-card-border));
+  box-shadow: var(--review-card-shadow),
+              0 0 0 1px color-mix(in oklch, var(--card-accent) 50%, transparent);
+  transform: translateX(-3px);
+}
+
+.card-head {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 6px;
+}
+.card-head .av { width: 17px; height: 17px; font-size: 9px; }
+.card-head .name { font-weight: 600; }
+.card-head .age { color: color-mix(in oklch, var(--foreground) 56%, var(--muted-foreground)); font-size: 11px; }
+.card-head .kbadge {
+  font-size: 9px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 9999px;
+}
+.kind-text .kbadge {
+  color: color-mix(in oklch, var(--comment-accent) 80%, var(--foreground));
+  background: color-mix(in oklch, var(--comment-accent) 18%, transparent);
+}
+.kind-element .kbadge {
+  color: color-mix(in oklch, var(--element-accent) 82%, var(--foreground));
+  background: color-mix(in oklch, var(--element-accent) 18%, transparent);
+}
+
+.card .quote {
+  font-size: 11px; font-style: italic;
+  color: color-mix(in oklch, var(--foreground) 66%, var(--muted-foreground));
+  margin: 0 0 5px;
+  display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical;
+  overflow: hidden;
+  padding-left: 7px; border-left: 2px solid color-mix(in oklch, var(--card-accent) 45%, transparent);
+}
+.card .target {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: "Source Code Pro", monospace; font-size: 10px;
+  color: color-mix(in oklch, var(--element-accent) 85%, var(--foreground));
+  background: color-mix(in oklch, var(--element-accent) 10%, transparent);
+  padding: 1px 6px; border-radius: 4px; margin: 0 0 6px;
+}
+.card .body {
+  margin: 0 0 8px;
+  display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden;
+}
+.card .actions { display: flex; gap: 6px; justify-content: flex-end; }
+.card .actions button {
+  appearance: none; font: inherit; font-size: 11px;
+  padding: 3px 9px; border-radius: 4px; cursor: pointer;
+  border: 1px solid color-mix(in oklch, var(--foreground) 16%, transparent);
+  background: color-mix(in oklch, var(--background) 40%, transparent);
+  color: var(--foreground);
+  transition: filter 120ms ease, background 120ms ease;
+}
+.card .actions button:hover { background: var(--accent); }
+.card .actions button.primary {
+  background: var(--primary); color: var(--primary-foreground);
+  border-color: var(--primary);
+}
+.card .actions button.primary:hover { filter: brightness(1.06); }
+
+.card.resolved { opacity: 0.6; }
+.card.resolved .body { text-decoration: line-through; text-decoration-color: var(--muted-foreground); }
+
+/* entrance */
+@keyframes cardin {
+  from { opacity: 0; transform: translateY(6px) scale(0.99); }
+  to   { opacity: 0.94; transform: none; }
+}
+.card.enter { animation: cardin 320ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* connector line shown for the active card */
+.connector {
+  position: absolute; z-index: 4; pointer-events: none;
+  height: 1px;
+  background: color-mix(in oklch, var(--card-accent, var(--comment-accent)) 60%, transparent);
+  opacity: 0; transition: opacity 130ms ease;
+}
+.connector.show { opacity: 0.55; }
+
+/* ============================================================
+   Selection action pill + composer popover
+   ============================================================ */
+.sel-pill {
+  position: fixed; z-index: 200;
+  display: none;
+  align-items: center; gap: 7px;
+  background: var(--popover); color: var(--popover-foreground);
+  border: 1px solid var(--border); border-radius: 9999px;
+  padding: 5px 12px 5px 10px;
+  font-family: "Source Sans 3", sans-serif; font-size: 12px; font-weight: 600;
+  box-shadow: 0 10px 30px oklch(0 0 0 / 22%);
+  cursor: pointer;
+  animation: pop 140ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.sel-pill.show { display: inline-flex; }
+.sel-pill .av { width: 18px; height: 18px; font-size: 9px; }
+
+@keyframes pop {
+  from { opacity: 0; transform: scale(0.92) translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.composer {
+  position: fixed; z-index: 300;
+  display: none;
+  width: 340px;
+  background: var(--popover); color: var(--popover-foreground);
+  border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 22px 60px oklch(0 0 0 / 28%), 0 1px 0 oklch(1 0 0 / 30%) inset;
+  padding: 13px;
+  animation: pop 150ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.composer.show { display: block; }
+.composer .c-head {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 9px;
+}
+.composer .c-head .av { width: 20px; height: 20px; font-size: 9px; }
+.composer .c-head .who { font-size: 12px; font-weight: 600; }
+.composer .c-head .knote {
+  margin-left: auto; font-size: 9.5px; font-weight: 600;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 1px 7px; border-radius: 9999px;
+}
+.composer.kt .knote { color: color-mix(in oklch,var(--comment-accent) 82%,var(--foreground)); background: color-mix(in oklch,var(--comment-accent) 18%,transparent); }
+.composer.ke .knote { color: color-mix(in oklch,var(--element-accent) 84%,var(--foreground)); background: color-mix(in oklch,var(--element-accent) 18%,transparent); }
+
+.composer .ctx {
+  font-size: 11px; font-style: italic;
+  color: color-mix(in oklch, var(--foreground) 66%, var(--muted-foreground));
+  margin: 0 0 9px; padding-left: 8px;
+  border-left: 2px solid color-mix(in oklch, var(--primary) 55%, transparent);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.composer .ctx.code {
+  font-family: "Source Code Pro", monospace; font-style: normal; font-size: 10px;
+}
+.composer textarea {
+  width: 100%; resize: none; min-height: 74px;
+  font-family: "Source Sans 3", sans-serif; font-size: 13px; line-height: 1.45;
+  color: var(--foreground);
+  background: var(--background);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 9px;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+.composer textarea:focus {
+  outline: none;
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 45%, transparent);
+}
+.composer .c-actions {
+  display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px;
+}
+.composer .c-actions button {
+  appearance: none; font: inherit; font-size: 12px; font-weight: 500;
+  padding: 5px 13px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--background); color: var(--foreground);
+  transition: filter 120ms ease, background 120ms ease, opacity 120ms ease;
+}
+.composer .c-actions button:hover { background: var(--accent); }
+.composer .c-actions button.primary {
+  background: var(--primary); color: var(--primary-foreground); border-color: var(--primary);
+}
+.composer .c-actions button.primary:hover { filter: brightness(1.06); }
+.composer .c-actions button.primary:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
+
+.backdrop {
+  position: fixed; inset: 0; z-index: 290; display: none;
+}
+.backdrop.show { display: block; }
+
+/* toast for unsupported API */
+.notice {
+  position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+  z-index: 400; display: none;
+  font-family: "Source Sans 3", sans-serif; font-size: 12px;
+  background: var(--destructive); color: #fff;
+  padding: 7px 14px; border-radius: 8px;
+  box-shadow: 0 10px 30px oklch(0 0 0 / 25%);
+}
+</style>
+</head>
+<body>
+
+<!-- ================= TOP CHROME ================= -->
+<header class="topbar">
+  <div class="brand"><span class="dot"></span> attn</div>
+  <span class="doctype">html</span>
+  <span class="filename">field-notes.html</span>
+  <span class="origin-tag"><span class="lock">🔒</span> isolated origin · 127.0.0.1:7843</span>
+
+  <span class="spacer"></span>
+
+  <div class="legend" aria-label="How to comment">
+    <span class="leg leg-text"><i></i> select text</span>
+    <span class="leg leg-el"><i></i> hover the margin ✎ for an element</span>
+  </div>
+
+  <div class="presence" title="3 reviewers present">
+    <span class="av owner">JL</span>
+    <span class="av reviewer">MR</span>
+    <span class="av agent">AI</span>
+  </div>
+
+  <button class="iconbtn" id="theme-toggle" title="Toggle PAPER / INK">
+    <svg id="theme-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+  </button>
+</header>
+
+<!-- ================= WORKSPACE ================= -->
+<div class="workspace" id="workspace">
+  <div class="workspace-inner">
+
+    <!-- the rendered, shared HTML document -->
+    <article class="doc" id="doc">
+      <div class="overlay-layer" id="overlay-layer"></div>
+
+      <h1>On the Quiet Power of Margins</h1>
+      <p class="dek">Every document carries a second document beside it — the conversation in the margin. We rebuilt it for the web.</p>
+      <p class="byline">Field Notes · Collaboration team · 6 min read</p>
+
+      <p>The margin is the oldest collaborative surface we have. Medieval scribes argued with their sources in the gutter; readers for centuries have pressed their disagreements into the white space beside a paragraph. The text stays fixed and authoritative while the margin stays loose, personal, and alive. <a href="#">A good annotation system</a> is really just a way to keep those two registers — the work and the talk about the work — visible at the same time.</p>
+
+      <p>When the surface being annotated is rendered HTML rather than plain prose, the problem gets interesting. HTML has structure: a paragraph is a node, an image is a node, a table is a node. We can anchor a comment to <em>a run of text</em> or to <em>a whole element</em>, and those are genuinely different gestures with different meanings.</p>
+
+      <blockquote>A comment on a sentence is an argument. A comment on a figure is a verdict.</blockquote>
+
+      <h2>Two ways to point</h2>
+      <p>Text anchoring uses a quote selector: the exact words, plus a little context on either side so the anchor survives small edits. Element anchoring uses a CSS selector that resolves to a single node. Both serialize into the same envelope, so a thread doesn't care which kind of anchor it hangs from.</p>
+
+      <pre><code><span class="tok-com">// one envelope, two anchor flavors</span>
+<span class="tok-key">type</span> Anchor =
+  | { kind: <span class="tok-str">"text"</span>; quote; prefix; suffix }
+  | { kind: <span class="tok-str">"element"</span>; cssSelector; tagName };</code></pre>
+
+      <p>The highlight itself is drawn with the <code>CSS Custom Highlight API</code> — no wrapper spans injected into the document, so the page you are annotating is never mutated. That matters when the HTML came from somewhere you don't fully trust.</p>
+
+      <figure>
+        <div class="frame"><span>Figure 1 · anchor resolution flow</span></div>
+        <figcaption>A selection becomes a layered anchor, then resolves back to a range on every peer.</figcaption>
+      </figure>
+
+      <h2>What survives an edit</h2>
+      <p>The hard part isn't drawing the highlight — it's keeping it attached when the document changes underneath it. Each anchor carries several fallback layers, tried in order of confidence:</p>
+
+      <table>
+        <thead><tr><th>Layer</th><th>Matches on</th><th>Confidence</th></tr></thead>
+        <tbody>
+          <tr><td>Exact quote</td><td>verbatim text + context</td><td>0.90</td></tr>
+          <tr><td>Block fingerprint</td><td>structural hash + offset</td><td>0.85</td></tr>
+          <tr><td>Fuzzy quote</td><td>edit-distance match</td><td>0.50–0.75</td></tr>
+          <tr><td>Line proximity</td><td>nearest original line</td><td>0.35</td></tr>
+        </tbody>
+      </table>
+
+      <p>When every layer fails, the thread doesn't vanish — it drops into an orphan tray at the top of the rail, waiting for a human to re-anchor it. Nothing is ever silently lost. That single rule, more than any clever matching, is what makes people trust the margin enough to actually use it.</p>
+
+      <h3>Try it</h3>
+      <p>Select any sentence in this document to leave a comment, or switch to <strong>Pick element</strong> in the toolbar and click the figure, the code block, or the table. Your note appears in the rail on the right, aligned to whatever you pointed at.</p>
+    </article>
+
+    <!-- margin rail -->
+    <div class="rail" id="rail">
+      <div class="rail-empty" id="rail-empty" style="display:none">No comments yet. Select text or pick an element to start a thread.</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- selection action pill -->
+<div class="sel-pill" id="sel-pill">
+  <span class="av owner">JL</span> Comment
+</div>
+
+<!-- composer -->
+<div class="backdrop" id="backdrop"></div>
+<div class="composer" id="composer">
+  <div class="c-head">
+    <span class="av owner">JL</span>
+    <span class="who">James Lal</span>
+    <span class="knote" id="composer-knote">Comment</span>
+  </div>
+  <div class="ctx" id="composer-ctx"></div>
+  <textarea id="composer-text" placeholder="Add a comment…"></textarea>
+  <div class="c-actions">
+    <button id="composer-cancel">Cancel</button>
+    <button id="composer-submit" class="primary" disabled>Comment</button>
+  </div>
+</div>
+
+<div class="notice" id="notice">This browser lacks the CSS Custom Highlight API — text highlights use a fallback.</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const doc = document.getElementById("doc");
+  const rail = document.getElementById("rail");
+  const railEmpty = document.getElementById("rail-empty");
+  const overlayLayer = document.getElementById("overlay-layer");
+  const workspace = document.getElementById("workspace");
+  const selPill = document.getElementById("sel-pill");
+  const composer = document.getElementById("composer");
+  const composerText = document.getElementById("composer-text");
+  const composerCtx = document.getElementById("composer-ctx");
+  const composerKnote = document.getElementById("composer-knote");
+  const composerSubmit = document.getElementById("composer-submit");
+  const composerCancel = document.getElementById("composer-cancel");
+  const backdrop = document.getElementById("backdrop");
+
+  const HAS_HIGHLIGHT_API = typeof CSS !== "undefined" && "highlights" in CSS;
+  if (!HAS_HIGHLIGHT_API) {
+    const n = document.getElementById("notice");
+    n.style.display = "block";
+    setTimeout(() => (n.style.display = "none"), 5000);
+  }
+
+  // ---- Highlight registries (text) -----------------------------------------
+  let hlBase = null, hlActive = null;
+  if (HAS_HIGHLIGHT_API) {
+    hlBase = new Highlight();
+    hlActive = new Highlight();
+    CSS.highlights.set("attn-text", hlBase);
+    CSS.highlights.set("attn-text-active", hlActive);
+  }
+
+  // ---- State ----------------------------------------------------------------
+  let idSeq = 1;
+  /** annotations: {id, kind:'text'|'element', author:{name,initials,role},
+      age, body, range?, quote?, el?, selector?, tag?, resolved, _cardEl, _overlayEl} */
+  const annotations = [];
+
+  const AUTHORS = {
+    you: { name: "James Lal", initials: "JL", role: "owner" },
+    mara: { name: "Mara Reyes", initials: "MR", role: "reviewer" },
+    agent: { name: "Reviewer Agent", initials: "AI", role: "agent" },
+  };
+
+  // ---- Helpers --------------------------------------------------------------
+  function rowIndex(tr) {
+    const section = tr.parentElement;
+    if (!section) return 1;
+    return Array.from(section.children).filter(c => c.tagName === "TR").indexOf(tr) + 1;
+  }
+  function rowSelector(tr) {
+    const section = tr.parentElement;             // thead / tbody
+    const table = tr.closest("table");
+    const parts = [table ? selectorFor(table) : "table"];
+    if (section) parts.push(section.tagName.toLowerCase());
+    parts.push(`tr:nth-of-type(${rowIndex(tr)})`);
+    return parts.join(" > ");
+  }
+  function rowPreview(tr) {
+    const cells = Array.from(tr.querySelectorAll("th,td")).map(c => c.textContent.trim());
+    const header = !!tr.closest("thead");
+    const n = rowIndex(tr);
+    const first = cells[0] || "";
+    return `${header ? "header row" : "row " + n} · ${first}${cells[1] ? " · " + cells[1] : ""}`;
+  }
+  const isCell = (el) => el.tagName === "TD" || el.tagName === "TH";
+  function cellSelector(td) {
+    const tr = td.closest("tr");
+    const sames = Array.from(tr.children).filter(c => c.tagName === td.tagName);
+    return `${rowSelector(tr)} > ${td.tagName.toLowerCase()}:nth-of-type(${sames.indexOf(td) + 1})`;
+  }
+  function cellPreview(td) {
+    const tr = td.closest("tr");
+    const col = Array.from(tr.children).indexOf(td);
+    const headRow = td.closest("table")?.querySelector("thead tr");
+    const colName = headRow?.children[col]?.textContent.trim();
+    const val = td.textContent.trim();
+    return colName ? `${colName}: ${val}` : val;
+  }
+  function selectorFor(el) {
+    if (el.id) return "#" + el.id;
+    if (el.tagName === "TR") return rowSelector(el);
+    if (isCell(el)) return cellSelector(el);
+    const tag = el.tagName.toLowerCase();
+    const cls = (el.className && typeof el.className === "string")
+      ? "." + el.className.trim().split(/\s+/)[0] : "";
+    const parent = el.parentElement;
+    let nth = "";
+    if (parent) {
+      const sames = Array.from(parent.children).filter(c => c.tagName === el.tagName);
+      if (sames.length > 1) nth = `:nth-of-type(${sames.indexOf(el) + 1})`;
+    }
+    return tag + cls + nth;
+  }
+  function labelFor(el) {
+    if (el.tagName === "TR") return el.closest("thead") ? "header row" : "table row";
+    if (isCell(el)) return "table cell";
+    const tag = el.tagName.toLowerCase();
+    const map = { figure: "figure", pre: "code block", table: "table",
+                  blockquote: "blockquote", h1: "heading", h2: "heading", h3: "heading" };
+    return map[tag] || tag;
+  }
+
+  // The set of structural scopes you can anchor to, from finest to coarsest.
+  const SCOPE = ["TD","TH","TR","LI","FIGURE","PRE","TABLE","BLOCKQUOTE",
+                 "H1","H2","H3","H4","P","IMG","FIGCAPTION","UL","OL"];
+  function candidateChain(el) {
+    const chain = [];
+    let cur = el;
+    while (cur && cur !== doc) {
+      if (SCOPE.includes(cur.tagName)) chain.push(cur);
+      cur = cur.parentElement;
+    }
+    return chain; // innermost → outermost, e.g. [td, tr, table]
+  }
+  // The gutter pin defaults to the band-level scope (row/block), not an
+  // individual cell — the pin lives in the left margin, so a row reads naturally.
+  function defaultTarget(chain) {
+    return chain.find(e => !isCell(e)) || chain[0];
+  }
+  function scopeKind(el) {
+    if (isCell(el)) return "cell";
+    if (el.tagName === "TR") return "row";
+    return "block";
+  }
+  function scopeTitle(el) {
+    if (isCell(el)) return "cell";
+    if (el.tagName === "TR") return el.closest("thead") ? "header row" : "row " + rowIndex(el);
+    if (el.tagName === "LI") return "list item";
+    return labelFor(el);
+  }
+  function scopePreview(el) {
+    if (el.tagName === "TR") return rowPreview(el);
+    if (isCell(el)) return cellPreview(el);
+    return null;
+  }
+
+  // ---- Text selection flow --------------------------------------------------
+  let pendingRange = null;
+
+  function onSelectionChange() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) { hidePill(); return; }
+    const range = sel.getRangeAt(0);
+    if (!doc.contains(range.commonAncestorContainer)) { hidePill(); return; }
+    if (range.toString().trim().length < 2) { hidePill(); return; }
+    pendingRange = range.cloneRange();
+    const rect = range.getBoundingClientRect();
+    showPill(rect.left + rect.width / 2, rect.top - 12);
+  }
+  document.addEventListener("selectionchange", () => {
+    // debounce to mouseup-ish settle
+    clearTimeout(onSelectionChange._t);
+    onSelectionChange._t = setTimeout(onSelectionChange, 10);
+  });
+
+  function showPill(x, y) {
+    selPill.style.left = x + "px";
+    selPill.style.top = y + "px";
+    selPill.style.transform = "translate(-50%, -100%)";
+    selPill.classList.add("show");
+  }
+  function hidePill() { selPill.classList.remove("show"); }
+
+  selPill.addEventListener("mousedown", (e) => {
+    // prevent selection collapse before we read it
+    e.preventDefault();
+  });
+  selPill.addEventListener("click", () => {
+    if (!pendingRange) return;
+    openComposer({ kind: "text", range: pendingRange.cloneRange(),
+                   quote: pendingRange.toString().trim() });
+    hidePill();
+  });
+
+  // ---- Element gutter affordance (always live, no mode switch) --------------
+  // A pin appears in the left margin aligned to the band-level scope (row/block)
+  // under the cursor. Hovering the pin opens a scope breadcrumb so you can drill
+  // *into* a cell or *out* to the whole table — and it shows how many comments
+  // each scope already carries, so adding one "inside" a commented element is
+  // explicit rather than accidental.
+  const gutterPin = document.createElement("button");
+  gutterPin.className = "gutter-pin";
+  gutterPin.setAttribute("aria-label", "Comment on this element");
+  gutterPin.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 9 9 0 0 1-4-1L3 20l1.5-5.5A8.5 8.5 0 1 1 21 11.5z"/><path d="M12 8v6M9 11h6"/></svg><span class="pin-count" hidden></span>';
+  doc.parentElement.appendChild(gutterPin);
+
+  const flyout = document.createElement("div");
+  flyout.className = "scope-flyout";
+  doc.parentElement.appendChild(flyout);
+
+  let outlineEl = null, gutterChain = [], gutterDefault = null, gutterHideT = null;
+
+  function showOutline(block) {
+    const r = block.getBoundingClientRect();
+    const dr = doc.getBoundingClientRect();
+    if (!outlineEl) {
+      outlineEl = document.createElement("div");
+      outlineEl.innerHTML = '<span class="tag"></span>';
+      overlayLayer.appendChild(outlineEl);
+    }
+    outlineEl.className = "pick-hover pick-hover--" + scopeKind(block);
+    outlineEl.style.left = (r.left - dr.left - 3) + "px";
+    outlineEl.style.top = (r.top - dr.top - 3) + "px";
+    outlineEl.style.width = (r.width + 6) + "px";
+    outlineEl.style.height = (r.height + 6) + "px";
+    outlineEl.querySelector(".tag").textContent = selectorFor(block);
+  }
+  function hideOutline() { if (outlineEl) { outlineEl.remove(); outlineEl = null; } }
+
+  function positionGutter(block) {
+    const r = block.getBoundingClientRect();
+    const wr = doc.parentElement.getBoundingClientRect();
+    const dr = doc.getBoundingClientRect();
+    gutterPin.style.top = (r.top - wr.top + 1) + "px";
+    gutterPin.style.left = (dr.left - wr.left - 36) + "px";
+    const n = annosOnEl(block).length;
+    const pc = gutterPin.querySelector(".pin-count");
+    if (n > 0) { pc.hidden = false; pc.textContent = n; } else pc.hidden = true;
+  }
+
+  function buildFlyout() {
+    flyout.innerHTML = "";
+    gutterChain.forEach((el) => {
+      const item = document.createElement("button");
+      item.className = "scope-item scope-" + scopeKind(el);
+      const n = annosOnEl(el).length;
+      const prev = scopePreview(el);
+      item.innerHTML =
+        `<span class="sc-dot"></span>` +
+        `<span class="sc-title">${scopeTitle(el)}</span>` +
+        (prev ? `<span class="sc-prev">${prev}</span>` : "") +
+        (n ? `<span class="sc-count" title="${n} comment${n > 1 ? "s" : ""} here">${n}</span>` : "");
+      item.addEventListener("mouseenter", () => showOutline(el));
+      item.addEventListener("click", (e) => { e.preventDefault(); openScope(el); });
+      flyout.appendChild(item);
+    });
+  }
+  function showFlyout() {
+    if (gutterChain.length <= 1) return;   // nothing to disambiguate
+    buildFlyout();
+    const pr = gutterPin.getBoundingClientRect();
+    const wr = doc.parentElement.getBoundingClientRect();
+    flyout.style.top = (pr.top - wr.top - 4) + "px";
+    flyout.style.left = (pr.right - wr.left + 9) + "px";
+    flyout.classList.add("show");
+  }
+  function hideFlyout() { flyout.classList.remove("show"); }
+
+  function selectionActive() {
+    const s = window.getSelection();
+    return s && !s.isCollapsed && s.rangeCount && doc.contains(s.anchorNode);
+  }
+  function scheduleHideGutter() {
+    clearTimeout(gutterHideT);
+    gutterHideT = setTimeout(hideGutter, 200);
+  }
+  function cancelHideGutter() { clearTimeout(gutterHideT); }
+  function hideGutter() {
+    clearTimeout(gutterHideT);
+    gutterPin.classList.remove("show"); hideOutline(); hideFlyout();
+  }
+
+  function openScope(el) {
+    const r = el.getBoundingClientRect();
+    openComposer({
+      kind: "element", el,
+      selector: selectorFor(el), tag: labelFor(el), preview: scopePreview(el),
+      anchorX: r.left + r.width / 2, anchorY: r.top,
+    });
+    hideGutter();
+  }
+
+  doc.addEventListener("mousemove", (e) => {
+    if (composer.classList.contains("show")) return;
+    if (selectionActive()) { hideGutter(); return; }   // text selection wins
+    const chain = candidateChain(e.target);
+    if (!chain.length) { scheduleHideGutter(); return; }
+    gutterChain = chain;
+    gutterDefault = defaultTarget(chain);
+    cancelHideGutter();
+    positionGutter(gutterDefault);
+    gutterPin.classList.add("show");
+  });
+  doc.addEventListener("mouseleave", scheduleHideGutter);
+  gutterPin.addEventListener("mouseenter", () => {
+    cancelHideGutter();
+    if (gutterDefault) showOutline(gutterDefault);
+    showFlyout();
+  });
+  gutterPin.addEventListener("mouseleave", scheduleHideGutter);
+  flyout.addEventListener("mouseenter", cancelHideGutter);
+  flyout.addEventListener("mouseleave", scheduleHideGutter);
+  gutterPin.addEventListener("click", (e) => {
+    e.preventDefault();
+    if (gutterDefault) openScope(gutterDefault);
+  });
+
+  // ---- Composer -------------------------------------------------------------
+  let composerCtxState = null;
+  function openComposer(ctx) {
+    composerCtxState = ctx;
+    composerText.value = "";
+    composerSubmit.disabled = true;
+
+    if (ctx.kind === "text") {
+      composer.classList.remove("ke"); composer.classList.add("kt");
+      composerKnote.textContent = "Comment on text";
+      composerCtx.className = "ctx";
+      composerCtx.textContent = "“" + ctx.quote + "”";
+      const r = ctx.range.getBoundingClientRect();
+      positionComposer(r.left + r.width / 2, r.bottom + 10);
+    } else {
+      composer.classList.remove("kt"); composer.classList.add("ke");
+      const noun = isCell(ctx.el) ? "cell" : ctx.el.tagName === "TR" ? "row" : labelFor(ctx.el);
+      const existing = annosOnEl(ctx.el).length;
+      composerKnote.textContent = existing > 0
+        ? `+1 · ${existing} on this ${noun}`
+        : "Comment on " + noun;
+      composerCtx.className = "ctx code";
+      composerCtx.textContent = ctx.preview
+        ? ctx.preview + "    ·    " + ctx.selector
+        : "<" + ctx.el.tagName.toLowerCase() + ">  " + ctx.selector;
+      positionComposer(ctx.anchorX, ctx.anchorY + 10);
+    }
+    composer.classList.add("show");
+    backdrop.classList.add("show");
+    setTimeout(() => composerText.focus(), 30);
+  }
+  function positionComposer(x, y) {
+    const w = 340, margin = 12;
+    let left = x - w / 2;
+    left = Math.max(margin, Math.min(left, window.innerWidth - w - margin));
+    let top = y;
+    const h = 200;
+    if (top + h > window.innerHeight - margin) top = Math.max(margin, y - h - 24);
+    composer.style.left = left + "px";
+    composer.style.top = top + "px";
+  }
+  composerText.addEventListener("input", () => {
+    composerSubmit.disabled = composerText.value.trim().length === 0;
+  });
+  composerText.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitComposer(); }
+    if (e.key === "Escape") closeComposer();
+  });
+  composerCancel.addEventListener("click", closeComposer);
+  composerSubmit.addEventListener("click", submitComposer);
+  backdrop.addEventListener("click", closeComposer);
+
+  function closeComposer() {
+    composer.classList.remove("show");
+    backdrop.classList.remove("show");
+    composerCtxState = null;
+    window.getSelection()?.removeAllRanges();
+  }
+  function submitComposer() {
+    const body = composerText.value.trim();
+    if (!body || !composerCtxState) return;
+    const ctx = composerCtxState;
+    if (ctx.kind === "text") {
+      addAnnotation({ kind: "text", author: AUTHORS.you, age: "just now",
+                      body, range: ctx.range, quote: ctx.quote }, true);
+    } else {
+      addAnnotation({ kind: "element", author: AUTHORS.you, age: "just now",
+                      body, el: ctx.el, selector: ctx.selector, tag: ctx.tag,
+                      preview: ctx.preview }, true);
+    }
+    closeComposer();
+  }
+
+  // ---- Annotation lifecycle -------------------------------------------------
+  function addAnnotation(a, animate) {
+    a.id = idSeq++;
+    a.resolved = false;
+    annotations.push(a);
+
+    if (a.kind === "text" && HAS_HIGHLIGHT_API) {
+      hlBase.add(a.range);
+    } else if (a.kind === "text") {
+      // fallback: wrap (best effort) — keep prototype simple, skip wrapping
+    }
+    buildCard(a, animate);
+    if (a.kind === "element") {
+      const entry = ensureOverlay(a.el);
+      a._overlayEl = entry.node;
+      refreshOverlayBadge(a.el);
+    }
+    layout();
+    updateEmpty();
+  }
+
+  function buildCard(a, animate) {
+    const card = document.createElement("div");
+    card.className = "card kind-" + a.kind + (animate ? " enter" : "");
+    card.dataset.id = a.id;
+
+    const kindLabel = a.kind === "text" ? "text"
+      : isCell(a.el) ? "cell" : a.el.tagName === "TR" ? "row" : "element";
+    const head = document.createElement("div");
+    head.className = "card-head";
+    head.innerHTML =
+      `<span class="av ${a.author.role}">${a.author.initials}</span>` +
+      `<span class="name">${a.author.name.split(" ")[0]}</span>` +
+      `<span class="age">${a.age}</span>` +
+      `<span class="kbadge">${kindLabel}</span>`;
+    card.appendChild(head);
+
+    if (a.kind === "text") {
+      const q = document.createElement("div");
+      q.className = "quote";
+      q.textContent = a.quote;
+      card.appendChild(q);
+    } else {
+      const t = document.createElement("div");
+      t.className = "target";
+      t.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M3 3h7v7H3zM14 14h7v7h-7z"/></svg> ${a.selector}`;
+      card.appendChild(t);
+      if (a.preview) {
+        const pv = document.createElement("div");
+        pv.className = "quote";
+        pv.textContent = a.preview;
+        card.appendChild(pv);
+      }
+    }
+
+    const body = document.createElement("div");
+    body.className = "body";
+    body.textContent = a.body;
+    card.appendChild(body);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    actions.innerHTML = `<button data-act="resolve">Resolve</button><button class="primary" data-act="reply">Reply</button>`;
+    card.appendChild(actions);
+
+    actions.addEventListener("click", (e) => {
+      const act = e.target.closest("button")?.dataset.act;
+      if (act === "resolve") { a.resolved = !a.resolved; card.classList.toggle("resolved", a.resolved); }
+      e.stopPropagation();
+    });
+
+    card.addEventListener("mouseenter", () => setActive(a, true));
+    card.addEventListener("mouseleave", () => setActive(a, false));
+    card.addEventListener("click", () => focusAnnotation(a));
+
+    rail.appendChild(card);
+    a._cardEl = card;
+  }
+
+  // ---- Element overlays: one box per target element, stacks a count ---------
+  // Multiple comments on the same element share ONE overlay with an "N" badge,
+  // instead of piling identical boxes. A cell comment inside a commented row
+  // gets its own (smaller, inset) overlay that sits above the row band.
+  const overlayByEl = new Map(); // el -> { el, node }
+  function annosOnEl(el) {
+    return annotations.filter(a => a.kind === "element" && a.el === el);
+  }
+  function ensureOverlay(el) {
+    let entry = overlayByEl.get(el);
+    if (entry) return entry;
+    const node = document.createElement("div");
+    node.className = "el-overlay el-overlay--" + scopeKind(el);
+    node.innerHTML = `<span class="tag">${selectorFor(el)}</span><span class="ov-count" hidden></span>`;
+    // Listeners go on the interactive chips, not the node — the node's fill is
+    // pointer-events:none so it never blocks selecting text underneath it.
+    node.querySelectorAll(".tag, .ov-count").forEach((handle) => {
+      handle.addEventListener("mouseenter", () => setActiveEl(el, true));
+      handle.addEventListener("mouseleave", () => setActiveEl(el, false));
+      handle.addEventListener("click", (e) => { e.stopPropagation(); focusEl(el); });
+    });
+    overlayLayer.appendChild(node);
+    entry = { el, node };
+    overlayByEl.set(el, entry);
+    return entry;
+  }
+  function refreshOverlayBadge(el) {
+    const entry = overlayByEl.get(el);
+    if (!entry) return;
+    const n = annosOnEl(el).length;
+    const c = entry.node.querySelector(".ov-count");
+    if (n > 1) { c.hidden = false; c.textContent = n; } else c.hidden = true;
+  }
+
+  // ---- Active / focus linking ----------------------------------------------
+  let connectorEl = null;
+  function setActive(a, on) {            // driven by hovering a rail card
+    if (a._cardEl) a._cardEl.classList.toggle("active", on);
+    if (a.kind === "text") {
+      if (HAS_HIGHLIGHT_API) { if (on) hlActive.add(a.range); else hlActive.delete(a.range); }
+    } else {
+      const entry = overlayByEl.get(a.el);
+      if (entry) entry.node.classList.toggle("active", on);
+    }
+    if (on) drawConnector(a); else hideConnector();
+  }
+  function setActiveEl(el, on) {          // driven by hovering an element overlay
+    const entry = overlayByEl.get(el);
+    if (entry) entry.node.classList.toggle("active", on);
+    const list = annosOnEl(el);
+    list.forEach(a => { if (a._cardEl) a._cardEl.classList.toggle("active", on); });
+    if (on && list[0]) drawConnector(list[0]); else hideConnector();
+  }
+  function focusEl(el) { const list = annosOnEl(el); if (list[0]) focusAnnotation(list[0]); }
+  function focusAnnotation(a) {
+    setActive(a, true);
+    const ref = a.kind === "text" ? a.range : a.el;
+    const rect = ref.getBoundingClientRect();
+    const wsRect = workspace.getBoundingClientRect();
+    if (rect.top < wsRect.top + 60 || rect.bottom > wsRect.bottom - 20) {
+      workspace.scrollBy({ top: rect.top - wsRect.top - 120, behavior: "smooth" });
+    }
+    setTimeout(() => setActive(a, false), 1400);
+  }
+
+  function drawConnector(a) {
+    if (!a._cardEl) return;
+    hideConnector();
+    const ref = a.kind === "text" ? a.range : a.el;
+    const rrect = ref.getBoundingClientRect();
+    const crect = a._cardEl.getBoundingClientRect();
+    const wsInner = doc.parentElement.getBoundingClientRect();
+    connectorEl = document.createElement("div");
+    connectorEl.className = "connector show";
+    connectorEl.style.setProperty("--card-accent",
+      a.kind === "text" ? "var(--comment-accent)" : "var(--element-accent)");
+    const y = rrect.top + rrect.height / 2 - wsInner.top;
+    const x1 = rrect.right - wsInner.left;
+    const x2 = crect.left - wsInner.left;
+    connectorEl.style.top = y + "px";
+    connectorEl.style.left = x1 + "px";
+    connectorEl.style.width = Math.max(0, x2 - x1) + "px";
+    doc.parentElement.appendChild(connectorEl);
+  }
+  function hideConnector() { if (connectorEl) { connectorEl.remove(); connectorEl = null; } }
+
+  // ---- Layout: align cards to anchors with push-down collision --------------
+  function layout() {
+    const railRect = rail.getBoundingClientRect();
+    const docRect = doc.getBoundingClientRect();
+
+    // position element overlays (one per target el; content coords rel. to doc)
+    for (const entry of overlayByEl.values()) {
+      const r = entry.el.getBoundingClientRect();
+      entry.node.style.left = (r.left - docRect.left - 2) + "px";
+      entry.node.style.top = (r.top - docRect.top - 2) + "px";
+      entry.node.style.width = (r.width + 4) + "px";
+      entry.node.style.height = (r.height + 4) + "px";
+    }
+
+    // desired card tops, by anchor Y (relative to rail)
+    const items = annotations.map((a) => {
+      const ref = a.kind === "text" ? a.range : a.el;
+      const r = ref.getBoundingClientRect();
+      return { a, desired: Math.max(0, r.top - railRect.top) };
+    }).sort((x, y) => x.desired - y.desired);
+
+    let cursor = 0;
+    const GAP = 10;
+    for (const it of items) {
+      const h = it.a._cardEl.offsetHeight || 96;
+      const top = Math.max(it.desired, cursor);
+      it.a._cardEl.style.top = top + "px";
+      cursor = top + h + GAP;
+    }
+  }
+
+  function updateEmpty() {
+    railEmpty.style.display = annotations.length ? "none" : "block";
+  }
+
+  // recompute on resize + after fonts load
+  let rafPending = false;
+  function scheduleLayout() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => { rafPending = false; layout(); });
+  }
+  window.addEventListener("resize", scheduleLayout);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(scheduleLayout);
+  workspace.addEventListener("scroll", () => { if (connectorEl) hideConnector(); hideGutter(); });
+
+  // ---- Theme toggle ---------------------------------------------------------
+  document.getElementById("theme-toggle").addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme");
+    document.documentElement.setAttribute("data-theme", cur === "paper" ? "ink" : "paper");
+    scheduleLayout();
+  });
+
+  // ---- Seed data (so the rail looks "in context" immediately) ---------------
+  function rangeFromText(needle, occurrence = 1) {
+    const walker = document.createTreeWalker(doc, NodeFilter.SHOW_TEXT, null);
+    let node, seen = 0;
+    while ((node = walker.nextNode())) {
+      let idx = node.nodeValue.indexOf(needle);
+      while (idx !== -1) {
+        seen++;
+        if (seen === occurrence) {
+          const r = document.createRange();
+          r.setStart(node, idx);
+          r.setEnd(node, idx + needle.length);
+          return r;
+        }
+        idx = node.nodeValue.indexOf(needle, idx + 1);
+      }
+    }
+    return null;
+  }
+
+  function seed() {
+    const seeds = [];
+
+    const r1 = rangeFromText("The margin is the oldest collaborative surface we have");
+    if (r1) seeds.push({ kind: "text", author: AUTHORS.mara, age: "2h",
+      range: r1, quote: r1.toString(),
+      body: "Love this opening — but can we lead with the HTML-specific angle sooner? Readers land here for the rendered-doc problem." });
+
+    const fig = doc.querySelector("figure");
+    if (fig) seeds.push({ kind: "element", author: AUTHORS.agent, age: "41m",
+      el: fig, selector: selectorFor(fig), tag: "figure",
+      body: "Figure 1 is a placeholder. Suggest replacing with the actual resolver state diagram before we publish." });
+
+    const pre = doc.querySelector("pre");
+    if (pre) seeds.push({ kind: "element", author: AUTHORS.you, age: "18m",
+      el: pre, selector: selectorFor(pre), tag: "code block",
+      body: "Worth showing the prefix/suffix fields here too so the example matches the table below." });
+
+    // a comment anchored to a specific TABLE ROW
+    const fuzzyRow = Array.from(doc.querySelectorAll("tbody tr"))
+      .find(tr => tr.textContent.includes("Fuzzy quote"));
+    if (fuzzyRow) seeds.push({ kind: "element", author: AUTHORS.agent, age: "23m",
+      el: fuzzyRow, selector: selectorFor(fuzzyRow), tag: "table row",
+      preview: rowPreview(fuzzyRow),
+      body: "The 0.50–0.75 band is too wide — a fuzzy match at 0.50 shouldn't silently re-anchor. Split this row into two confidence tiers?" });
+
+    // a CELL comment inside that same already-commented row (nested anchors)
+    const confCell = fuzzyRow && fuzzyRow.querySelector("td:last-child");
+    if (confCell) seeds.push({ kind: "element", author: AUTHORS.you, age: "5m",
+      el: confCell, selector: selectorFor(confCell), tag: "table cell",
+      preview: cellPreview(confCell),
+      body: "On the number itself: 0.50 as the floor feels low — we saw false re-anchors below ~0.6. Pin the threshold discussion here." });
+
+    const r2 = rangeFromText("Nothing is ever silently lost");
+    if (r2) seeds.push({ kind: "text", author: AUTHORS.mara, age: "9m",
+      range: r2, quote: r2.toString(),
+      body: "This is the line. Pull it as the section subhead?" });
+
+    for (const s of seeds) {
+      s.id = idSeq++; s.resolved = false; annotations.push(s);
+      if (s.kind === "text" && HAS_HIGHLIGHT_API) hlBase.add(s.range);
+      buildCard(s, false);
+      if (s.kind === "element") {
+        const entry = ensureOverlay(s.el);
+        s._overlayEl = entry.node;
+        refreshOverlayBadge(s.el);
+      }
+    }
+    updateEmpty();
+    scheduleLayout();
+    // settle once more after layout/fonts
+    setTimeout(scheduleLayout, 120);
+    setTimeout(scheduleLayout, 400);
+  }
+
+  seed();
+})();
+</script>
+</body>
+</html>

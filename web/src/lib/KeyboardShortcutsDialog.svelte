@@ -38,7 +38,7 @@
         { keys: ['\u2190'], description: 'Previous file' },
         { keys: ['\u2192'], description: 'Next file' },
         { keys: [mod, 'F'], description: 'Find in document' },
-        { keys: [mod, 'P'], description: 'Command palette' },
+        { keys: [mod, 'K'], description: 'Command palette' },
       ],
     },
     {
@@ -97,6 +97,16 @@
   title="Keyboard Shortcuts"
   description="Browse and filter shortcuts"
   class="font-sans"
+  onkeydowncapture={(e: KeyboardEvent) => {
+    // Escape always closes on the first press (Topmost-Escape rule): cmdk
+    // otherwise consumes the first Escape to clear the filter, so this
+    // overlay was the odd one out vs the palette + settings panel.
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      open = false;
+    }
+  }}
 >
   <Command.Input
     class="font-sans text-[0.97rem] tracking-[0.01em] placeholder:tracking-normal"

@@ -28,6 +28,29 @@
   let enabled = $state(false);
   let busy = $state(false);
   let error = $state('');
+  let rootEl = $state<HTMLDivElement | undefined>();
+
+  // Dismissal (Topmost-Escape rule, attn gate-35): the panel was
+  // undismissable — Escape and outside-click now close it (the gear toggle
+  // already does). Listeners live only while it is open.
+  $effect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        open = false;
+      }
+    };
+    const onDown = (e: MouseEvent): void => {
+      if (rootEl && e.target instanceof Node && !rootEl.contains(e.target)) open = false;
+    };
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('pointerdown', onDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('pointerdown', onDown, true);
+    };
+  });
 
   $effect(() => {
     enabled = installed;
@@ -61,7 +84,7 @@
 </script>
 
 {#if supported}
-  <div class="fixed bottom-3 right-3 z-50" data-slot="resident-settings">
+  <div class="fixed bottom-3 right-3 z-50" data-slot="resident-settings" bind:this={rootEl}>
     {#if open}
       <section
         class="mb-2 w-72 rounded-lg border border-border bg-background/95 p-3 shadow-xl backdrop-blur"

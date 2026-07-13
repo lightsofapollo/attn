@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { readDeskCount } from '../desk-count';
+
+  const deskCount = readDeskCount();
   import { getTheme, toggleTheme } from '../theme.svelte';
 </script>
 
@@ -6,7 +9,7 @@
   <a class="brand" href="/"><span class="mark" aria-hidden="true">a.</span>attn</a>
   <div class="nav-right">
     <a class="nav-link" href="#how">How it works</a>
-    <a class="nav-link" href="/app">Your desk</a>
+    {#if deskCount === 0}<a class="nav-link" href="/app">Your desk</a>{/if}
     <a class="nav-link" href="#native">Native app</a>
     <a class="nav-link" href="https://github.com/lightsofapollo/attn">GitHub</a>
     <button class="icon-button" onclick={toggleTheme} aria-label="Toggle theme">
@@ -50,6 +53,10 @@
         </svg>
       {/if}
     </button>
-    <a class="button primary" href="/app#new" data-action="new-workspace">New workspace</a>
+    {#if deskCount > 0}
+      <a class="button primary" href="/app" data-action="open-desk">Your desk ({deskCount})</a>
+    {:else}
+      <a class="button primary" href="/app#new" data-action="new-workspace">New workspace</a>
+    {/if}
   </div>
 </nav>

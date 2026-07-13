@@ -419,7 +419,7 @@
      the shape distinction survives at 20 px. Color comes from the inline
      `--peer-avatar-bg-agent` style; the path is shape-only. */
   :global(.peer-chip-hex) {
-    border-radius: 4px;
+    border-radius: 6px;
     clip-path: polygon(
       25% 0%,
       75% 0%,
@@ -439,7 +439,7 @@
   /* Agent glyph keeps the same baseline as letter monograms despite being
      a different character class. */
   :global(.peer-chip-glyph) {
-    font-size: 12px;
+    font-size: 0.85rem;
     line-height: 1;
   }
 </style>

@@ -17,8 +17,18 @@ export function getTheme(): ThemeName {
 }
 
 export function setTheme(theme: ThemeName): void {
-  document.documentElement.dataset.theme = theme;
+  // Atomic flip (Truth Rule, attn-hg5): suppress transitions for one frame so
+  // the theme never renders half-applied — a frozen animation clock (occluded
+  // window) otherwise strands mid-transition colors on screen.
+  const root = document.documentElement;
+  root.style.setProperty('--t', '0ms');
+  root.style.setProperty('transition', 'none');
+  root.dataset.theme = theme;
   applyDarkClass(theme);
+  requestAnimationFrame(() => {
+    root.style.removeProperty('--t');
+    root.style.removeProperty('transition');
+  });
   themeChange(theme);
 }
 

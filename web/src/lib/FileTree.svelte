@@ -20,10 +20,7 @@
     CollapsibleTrigger,
   } from '$lib/components/ui/collapsible';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
-  import Download from '@lucide/svelte/icons/download';
-  import Pencil from '@lucide/svelte/icons/pencil';
   import Share2 from '@lucide/svelte/icons/share-2';
-  import Trash2 from '@lucide/svelte/icons/trash-2';
   import { resolveFileIcon, resolveFolderIcon } from '$lib/icon-resolver';
   import { getIconPack, subscribeIconPack } from '$lib/icon-pack';
   import {
@@ -39,9 +36,8 @@
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
     onShare?: (path: string, isDir?: boolean) => void;
-    onRenameEntry?: (path: string) => void;
-    onDownloadEntry?: (path: string) => void;
-    onDeleteEntry?: (path: string) => void;
+    onRename?: (path: string) => void;
+    onDelete?: (path: string) => void;
     sharedPaths?: Set<string>;
     collaboratorLocations?: SidebarPresenceLocation[];
   }
@@ -54,9 +50,8 @@
     onNavigate,
     onExpand,
     onShare,
-    onRenameEntry,
-    onDownloadEntry,
-    onDeleteEntry,
+    onRename,
+    onDelete,
     sharedPaths = new Set<string>(),
     collaboratorLocations = [],
   }: Props = $props();
@@ -306,20 +301,7 @@
         <CollapsibleContent>
           {#if node.children}
             <SidebarMenu class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
-              <FileTree
-                nodes={node.children}
-                {activePath}
-                depth={depth + 1}
-                {rootPath}
-                {onNavigate}
-                {onExpand}
-                {onShare}
-                {onRenameEntry}
-                {onDownloadEntry}
-                {onDeleteEntry}
-                {sharedPaths}
-                {collaboratorLocations}
-              />
+              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {collaboratorLocations} />
             </SidebarMenu>
           {/if}
         </CollapsibleContent>
@@ -380,27 +362,6 @@
           <ContextMenuItem onSelect={() => handleContextOpen(node.path, true)}>
             Open in new tab
           </ContextMenuItem>
-          {#if onRenameEntry || onDownloadEntry || onDeleteEntry}
-            <ContextMenuSeparator />
-            {#if onRenameEntry}
-              <ContextMenuItem onSelect={() => onRenameEntry(node.path)}>
-                <Pencil class="size-4" aria-hidden="true" />
-                Rename…
-              </ContextMenuItem>
-            {/if}
-            {#if onDownloadEntry}
-              <ContextMenuItem onSelect={() => onDownloadEntry(node.path)}>
-                <Download class="size-4" aria-hidden="true" />
-                Download
-              </ContextMenuItem>
-            {/if}
-            {#if onDeleteEntry}
-              <ContextMenuItem variant="destructive" onSelect={() => onDeleteEntry(node.path)}>
-                <Trash2 class="size-4" aria-hidden="true" />
-                Delete…
-              </ContextMenuItem>
-            {/if}
-          {/if}
           <ContextMenuSeparator />
           <ContextMenuItem onSelect={() => handleCopyRelativePath(node.path)}>
             Copy relative path
@@ -420,6 +381,19 @@
             <Share2 class="size-4" aria-hidden="true" />
             Share
           </ContextMenuItem>
+          {#if onRename || onDelete}
+            <ContextMenuSeparator />
+            {#if onRename}
+              <ContextMenuItem onSelect={() => onRename?.(node.path)}>
+                Rename
+              </ContextMenuItem>
+            {/if}
+            {#if onDelete}
+              <ContextMenuItem class="text-destructive" onSelect={() => onDelete?.(node.path)}>
+                Delete
+              </ContextMenuItem>
+            {/if}
+          {/if}
         </ContextMenuContent>
       </ContextMenu>
     </SidebarMenuItem>

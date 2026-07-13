@@ -193,9 +193,9 @@
     display: block;
     margin: 4px 0 6px;
     padding: 6px;
-    border: 1px dashed var(--border, rgba(0, 0, 0, 0.12));
-    border-radius: 4px;
-    background: var(--muted, rgba(0, 0, 0, 0.02));
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    background: var(--muted);
   }
 
   .ambiguous-picker[data-picked='true'] {
@@ -205,8 +205,8 @@
   .ap-reason {
     margin: 0 0 6px;
     padding: 0 2px;
-    font-size: 11px;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
+    font-size: 0.7rem;
+    color: var(--muted-foreground);
   }
 
   .ap-list {
@@ -220,8 +220,8 @@
   }
 
   .ap-list:focus-visible {
-    box-shadow: 0 0 0 2px var(--ring, rgba(37, 99, 235, 0.35));
-    border-radius: 3px;
+    box-shadow: 0 0 0 2px var(--ring);
+    border-radius: 2px;
   }
 
   .ap-row {
@@ -230,8 +230,8 @@
   }
 
   .ap-row[data-selected='true'] .ap-row-btn {
-    background: var(--accent, rgba(37, 99, 235, 0.08));
-    border-color: var(--accent-foreground, var(--primary, #2563eb));
+    background: var(--accent);
+    border-color: var(--accent-foreground, var(--primary));
   }
 
   .ap-row-btn {
@@ -242,9 +242,9 @@
     width: 100%;
     box-sizing: border-box;
     padding: 6px 8px;
-    background: var(--popover, var(--background, #fff));
-    border: 1px solid var(--border, rgba(0, 0, 0, 0.1));
-    border-radius: 4px;
+    background: var(--popover, var(--background));
+    border: 1px solid var(--border);
+    border-radius: 6px;
     color: inherit;
     cursor: pointer;
     text-align: left;
@@ -253,7 +253,7 @@
   }
 
   .ap-row-btn:hover {
-    background: var(--muted, rgba(0, 0, 0, 0.04));
+    background: var(--muted);
   }
 
   .ap-row-btn:disabled {
@@ -263,7 +263,7 @@
 
   .ap-row-preview {
     display: block;
-    font-size: 12px;
+    font-size: 0.85rem;
     color: var(--foreground, inherit);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -274,8 +274,8 @@
     display: flex;
     align-items: baseline;
     gap: 4px;
-    font-size: 11px;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
+    font-size: 0.7rem;
+    color: var(--muted-foreground);
   }
 
   .ap-row-confidence {
@@ -294,8 +294,8 @@
   .ap-status {
     margin: 6px 0 0;
     padding: 0 2px;
-    font-size: 11px;
+    font-size: 0.7rem;
     font-style: italic;
-    color: var(--muted-foreground, rgba(0, 0, 0, 0.55));
+    color: var(--muted-foreground);
   }
 </style>

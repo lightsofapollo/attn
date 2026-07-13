@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="en" data-theme="paper">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>attn — prototype review loop (interactive demo)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700;1,8..60,400&family=Source+Code+Pro:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+/* ============================================================
+   attn tokens — PAPER (light) / INK (dark). OKLCH, faithful to app.
+   ============================================================ */
+:root, [data-theme="paper"] {
+  --background: oklch(0.905 0.010 78);
+  --foreground: oklch(0.14 0.008 55);
+  --card: oklch(0.89 0.012 76);
+  --popover: oklch(0.94 0.012 76);
+  --code-block: oklch(0.885 0.012 73);
+  --sidebar: oklch(0.855 0.012 75);
+  --primary: oklch(0.48 0.14 28);
+  --primary-foreground: oklch(0.98 0.005 78);
+  --link: oklch(0.38 0.04 55);
+  --border: oklch(0.14 0.008 55 / 16%);
+  --border-strong: oklch(0.14 0.008 55 / 32%);
+  --muted: oklch(0.88 0.012 75);
+  --muted-foreground: oklch(0.36 0.012 65);
+  --accent: oklch(0.14 0.008 55 / 7%);
+  --panel-surface: oklch(0.92 0.010 76);
+  --review-card-surface: oklch(0.955 0.010 76 / 97%);
+  --review-card-border: oklch(0.14 0.008 55 / 20%);
+  --review-card-shadow: 0 14px 38px oklch(0.20 0.02 55 / 14%), 0 1px 0 oklch(1 0 0 / 50%) inset;
+  --comment-accent: oklch(0.62 0.13 82);    /* gold — text */
+  --element-accent: oklch(0.52 0.12 248);   /* blue — element/proposal */
+  --agent-accent: oklch(0.55 0.15 300);     /* violet — agent */
+  --success: oklch(0.55 0.13 150);          /* green — decision */
+  --avatar-owner: oklch(0.56 0.14 32);
+  --grain-opacity: 0.035; --grain-blend: multiply;
+  --radius: 14px;
+  color-scheme: light;
+}
+[data-theme="ink"] {
+  --background: oklch(0.145 0.005 260);
+  --foreground: oklch(0.86 0.008 250);
+  --card: oklch(0.175 0.006 260);
+  --popover: oklch(0.205 0.006 260);
+  --code-block: oklch(0.115 0.006 258);
+  --sidebar: oklch(0.13 0.006 260);
+  --primary: oklch(0.72 0.10 220);
+  --primary-foreground: oklch(0.12 0.005 260);
+  --link: oklch(0.74 0.03 250);
+  --border: oklch(1 0 0 / 9%);
+  --border-strong: oklch(1 0 0 / 20%);
+  --muted: oklch(0.20 0.006 258);
+  --muted-foreground: oklch(0.60 0.008 250);
+  --accent: oklch(1 0 0 / 6%);
+  --panel-surface: oklch(0.165 0.006 260);
+  --review-card-surface: oklch(0.205 0.007 260 / 95%);
+  --review-card-border: oklch(1 0 0 / 13%);
+  --review-card-shadow: 0 18px 50px oklch(0 0 0 / 45%), 0 1px 0 oklch(1 0 0 / 7%) inset;
+  --comment-accent: oklch(0.76 0.13 86);
+  --element-accent: oklch(0.70 0.12 244);
+  --agent-accent: oklch(0.72 0.14 300);
+  --success: oklch(0.70 0.13 152);
+  --avatar-owner: oklch(0.64 0.14 32);
+  --grain-opacity: 0.02; --grain-blend: screen;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background:
+    radial-gradient(120% 120% at 50% -10%, oklch(1 0 0 / 6%), transparent 60%),
+    var(--background);
+  color: var(--foreground);
+  font-family: "Source Sans 3", system-ui, sans-serif;
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  display: flex; flex-direction: column; align-items: center;
+  min-height: 100%; padding: 22px 18px 30px;
+  gap: 16px;
+}
+body::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+  opacity: var(--grain-opacity); mix-blend-mode: var(--grain-blend);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* intro line above the window */
+.kicker { text-align: center; max-width: 1180px; }
+.kicker h2 { font-family: "Source Serif 4", serif; font-weight: 600; font-size: 19px; margin: 0 0 3px; letter-spacing: -0.01em; }
+.kicker p { margin: 0; color: var(--muted-foreground); font-size: 13.5px; }
+
+/* ===================== App window ===================== */
+.app {
+  position: relative;
+  width: min(1180px, 100%);
+  height: 740px;
+  background: var(--background);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 30px 80px oklch(0.2 0.02 55 / 22%), 0 2px 0 oklch(1 0 0 / 30%) inset;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+[data-theme="ink"] .app { box-shadow: 0 30px 90px oklch(0 0 0 / 55%); }
+
+.titlebar {
+  flex: 0 0 auto; height: 50px; display: flex; align-items: center; gap: 14px;
+  padding: 0 14px; border-bottom: 1px solid var(--border);
+  background: var(--sidebar);
+}
+.lights { display: flex; gap: 7px; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+.lights i:nth-child(1){ background: oklch(0.65 0.18 25); }
+.lights i:nth-child(2){ background: oklch(0.80 0.15 85); }
+.lights i:nth-child(3){ background: oklch(0.72 0.16 145); }
+.title-id { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.title-id b { font-family: "Source Serif 4", serif; font-weight: 600; }
+.title-id .path { color: var(--muted-foreground); font-family: "Source Code Pro", monospace; font-size: 12px; }
+.title-id .chip { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--accent); color: var(--muted-foreground); border: 1px solid var(--border); }
+.tb-spacer { flex: 1; }
+
+.presence { display: flex; align-items: center; gap: -6px; }
+.who {
+  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 3px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 999px;
+  font-size: 12px; font-weight: 600; margin-left: 6px; transition: box-shadow .3s;
+}
+.who .dot { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  color: #fff; font-size: 11px; font-weight: 700; }
+.who.owner .dot { background: var(--avatar-owner); }
+.who.agent .dot { background: var(--agent-accent); }
+.who.agent { position: relative; }
+.who.agent .status { width: 7px; height: 7px; border-radius: 50%; background: var(--muted-foreground); }
+.who.agent.thinking { box-shadow: 0 0 0 2px color-mix(in oklab, var(--agent-accent) 55%, transparent); }
+.who.agent.thinking .status { background: var(--agent-accent); animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100%{ opacity:.35; transform: scale(.8);} 50%{ opacity:1; transform: scale(1.25);} }
+
+.btn {
+  font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--card); color: var(--foreground);
+  padding: 6px 11px; border-radius: 9px; display: inline-flex; align-items: center; gap: 7px;
+  transition: transform .12s, background .2s, box-shadow .2s;
+}
+.btn:hover { background: var(--accent); }
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; }
+.btn.play { background: linear-gradient(180deg, var(--element-accent), color-mix(in oklab, var(--element-accent) 80%, black));
+  color: #fff; border-color: transparent; box-shadow: 0 4px 14px color-mix(in oklab, var(--element-accent) 45%, transparent); }
+.btn.play:hover { filter: brightness(1.07); }
+.iconbtn { width: 30px; height: 30px; padding: 0; justify-content: center; border-radius: 8px; }
+
+/* ===================== Body grid ===================== */
+.bodygrid {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 168px minmax(0,1fr) 348px;
+}
+.filmstrip { border-right: 1px solid var(--border); background: var(--sidebar); padding: 12px 10px; overflow: auto; }
+.fs-h { font-size: 10.5px; text-transform: uppercase; letter-spacing: .09em; color: var(--muted-foreground); font-weight: 700; margin: 2px 4px 9px; }
+.thumb { position: relative; border: 1.5px solid var(--border); border-radius: 10px; background: var(--card);
+  padding: 8px; margin-bottom: 9px; cursor: pointer; transition: transform .2s, border-color .2s, box-shadow .2s, opacity .35s;
+  opacity: 0; transform: translateY(6px); }
+.thumb.in { opacity: 1; transform: none; }
+.thumb:hover { border-color: var(--border-strong); }
+.thumb.active { border-color: var(--element-accent); box-shadow: 0 0 0 3px color-mix(in oklab, var(--element-accent) 22%, transparent); }
+.thumb .mini { height: 56px; border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between; padding: 7px; margin-bottom: 6px; }
+.thumb .mini .mtitle { height: 7px; width: 70%; border-radius: 3px; }
+.thumb .mini .mbtn { height: 12px; width: 46%; border-radius: 4px; }
+.thumb .lab { font-size: 11.5px; font-weight: 700; display: flex; align-items: center; justify-content: space-between; }
+.thumb .lab .num { font-family: "Source Code Pro", monospace; color: var(--muted-foreground); font-weight: 500; }
+.thumb .prov { font-size: 10px; color: var(--muted-foreground); margin-top: 2px; display: flex; align-items: center; gap: 4px; }
+.thumb .prov .pp { width: 6px; height: 6px; border-radius: 50%; background: var(--agent-accent); }
+.thumb.child { margin-left: 14px; border-left: 2px solid var(--element-accent); }
+.thumb.child::before { content: ""; position: absolute; left: -14px; top: -6px; width: 12px; height: 26px;
+  border-left: 1.5px solid var(--border-strong); border-bottom: 1.5px solid var(--border-strong); border-bottom-left-radius: 6px; }
+.thumb.materializing { pointer-events: none; }
+.thumb.materializing .mini { position: relative; background: var(--muted); }
+.thumb.materializing .mini::after { content: ""; position: absolute; inset: 0;
+  background: linear-gradient(100deg, transparent 20%, oklch(1 0 0 / 35%) 50%, transparent 80%);
+  background-size: 200% 100%; animation: shimmer 1.1s infinite; }
+@keyframes shimmer { 0%{ background-position: 180% 0; } 100%{ background-position: -80% 0; } }
+
+/* mini variant palettes */
+.mini.editorial { background: oklch(0.95 0.01 80); }
+.mini.editorial .mtitle { background: oklch(0.45 0.04 50); } .mini.editorial .mbtn { background: oklch(0.55 0.05 50); }
+.mini.brutalist { background: oklch(0.97 0 0); border: 1.5px solid #111; }
+.mini.brutalist .mtitle { background: #111; } .mini.brutalist .mbtn { background: #111; border-radius: 0; }
+.mini.organic { background: linear-gradient(135deg, oklch(0.93 0.06 40), oklch(0.90 0.07 25)); }
+.mini.organic .mtitle { background: oklch(0.5 0.12 30); } .mini.organic .mbtn { background: oklch(0.62 0.18 30); border-radius: 999px; }
+.mini.proposed { background: oklch(0.97 0 0); border: 1.5px solid #111; }
+.mini.proposed .mtitle { background:#111;} .mini.proposed .mbtn { width: 86%; height: 16px; background: linear-gradient(90deg, oklch(0.7 0.19 50), oklch(0.62 0.2 25)); border-radius: 4px; }
+
+/* ===================== Stage ===================== */
+.stage { display: flex; flex-direction: column; min-width: 0; background:
+  repeating-linear-gradient(0deg, transparent, transparent 23px, var(--border) 23px, var(--border) 24px),
+  var(--background); }
+[data-theme="ink"] .stage { background: var(--code-block); }
+.viewport-bar { flex: 0 0 auto; height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 14px;
+  border-bottom: 1px solid var(--border); background: color-mix(in oklab, var(--background) 70%, transparent); backdrop-filter: blur(4px); }
+.vp-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.vp-toggle button { font: inherit; font-size: 12px; font-weight: 600; border: 0; background: transparent; color: var(--muted-foreground);
+  padding: 4px 10px; cursor: pointer; }
+.vp-toggle button.on { background: var(--foreground); color: var(--background); }
+.vp-meta { font-size: 12px; color: var(--muted-foreground); font-family: "Source Code Pro", monospace; }
+.preview-badge { margin-left: auto; font-size: 11px; font-weight: 700; color: #fff; background: var(--element-accent);
+  padding: 3px 9px; border-radius: 999px; opacity: 0; transform: translateY(-3px); transition: .3s; }
+.preview-badge.show { opacity: 1; transform: none; }
+
+.stage-scroll { flex: 1; min-height: 0; overflow: auto; display: flex; justify-content: center; padding: 26px 22px; }
+.frame { width: 100%; max-width: 760px; background: #fff; border-radius: 12px; overflow: hidden;
+  box-shadow: 0 18px 50px oklch(0.2 0.02 55 / 22%); transition: max-width .5s cubic-bezier(.4,0,.2,1); align-self: flex-start; }
+.frame[data-vp="mobile"] { max-width: 380px; }
+
+/* ===== the artifact under review (a landing hero) ===== */
+.artifact { color: #1a1a1a; font-family: "Source Sans 3", sans-serif; }
+.artifact nav { display: flex; align-items: center; justify-content: space-between; padding: 18px 26px; font-size: 14px; }
+.artifact nav .logo { font-weight: 700; }
+.artifact nav .navlinks { color: #666; }
+.artifact .hero { padding: 30px 30px 40px; }
+.artifact h1 { font-size: 40px; line-height: 1.05; margin: 6px 0 14px; letter-spacing: -0.02em; }
+.artifact .sub { font-size: 16px; color: #555; max-width: 44ch; margin: 0 0 24px; line-height: 1.5; }
+.artifact .cta { font: inherit; font-size: 15px; font-weight: 700; cursor: pointer; border: 0;
+  padding: 12px 22px; border-radius: 10px; background: #1a1a1a; color: #fff;
+  transition: all .55s cubic-bezier(.34,1.2,.4,1); }
+.artifact .visual { height: 150px; margin: 0 30px 30px; border-radius: 12px; background: linear-gradient(135deg,#eee,#ddd); }
+
+/* editorial */
+.artifact[data-variant="editorial"] { font-family: "Source Serif 4", serif; background: #faf8f4; }
+.artifact[data-variant="editorial"] nav .logo { font-family: "Source Serif 4", serif; letter-spacing: .02em; }
+.artifact[data-variant="editorial"] h1 { font-weight: 600; font-size: 44px; }
+.artifact[data-variant="editorial"] .cta { background: transparent; color: #1a1a1a; border: 1.5px solid #1a1a1a; border-radius: 2px; font-family: "Source Sans 3"; font-weight: 600; }
+.artifact[data-variant="editorial"] .visual { background: linear-gradient(135deg,#efe9df,#e3dccc); }
+
+/* brutalist */
+.artifact[data-variant="brutalist"] { background: #fff; }
+.artifact[data-variant="brutalist"] nav { border-bottom: 2px solid #111; font-family: "Source Code Pro", monospace; text-transform: uppercase; font-size: 12px; }
+.artifact[data-variant="brutalist"] h1 { font-weight: 800; font-size: 46px; text-transform: uppercase; }
+.artifact[data-variant="brutalist"] .sub { color: #111; font-family: "Source Code Pro", monospace; font-size: 14px; }
+.artifact[data-variant="brutalist"] .cta { border-radius: 0; border: 2px solid #111; background: #111; text-transform: uppercase; font-family: "Source Code Pro", monospace; }
+.artifact[data-variant="brutalist"] .visual { border-radius: 0; border: 2px solid #111; background: repeating-linear-gradient(45deg,#fff,#fff 10px,#eee 10px,#eee 20px); }
+
+/* organic */
+.artifact[data-variant="organic"] { background: linear-gradient(160deg,#fff6f0,#ffeee6); }
+.artifact[data-variant="organic"] h1 { font-weight: 700; }
+.artifact[data-variant="organic"] .cta { border-radius: 999px; background: linear-gradient(90deg, oklch(0.68 0.19 45), oklch(0.6 0.2 22)); box-shadow: 0 8px 20px rgba(220,110,60,.4); }
+.artifact[data-variant="organic"] .visual { border-radius: 24px; background: linear-gradient(135deg, oklch(0.85 0.1 45), oklch(0.8 0.12 20)); }
+
+/* the proposed CSS edit (style-layer only — DOM untouched) */
+.artifact[data-proposed] .cta {
+  display: block; width: 100%; text-align: center; font-size: 24px; padding: 22px;
+  border: 0; border-radius: 14px;
+  background: linear-gradient(95deg, oklch(0.72 0.19 55), oklch(0.62 0.21 22));
+  color: #fff; box-shadow: 0 14px 34px rgba(220,110,40,.5);
+}
+
+/* ===================== Review rail ===================== */
+.rail { border-left: 1px solid var(--border); background: var(--panel-surface); display: flex; flex-direction: column; min-height: 0; }
+.rail-scroll { overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.brief { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px 13px; transition: box-shadow .3s; }
+.brief.flash { box-shadow: 0 0 0 3px color-mix(in oklab, var(--comment-accent) 40%, transparent); }
+.brief h3 { margin: 0 0 7px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted-foreground); }
+.brief .t { font-family: "Source Serif 4", serif; font-weight: 600; font-size: 14px; margin-bottom: 8px; }
+.brief ol { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--muted-foreground); line-height: 1.55; }
+.brief ol li.met { color: var(--success); font-weight: 600; }
+
+.rail-h { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted-foreground); font-weight: 700; margin: 2px 2px -2px; }
+
+/* comment / proposal card */
+.card { background: var(--review-card-surface); border: 1px solid var(--review-card-border); border-radius: 13px;
+  box-shadow: var(--review-card-shadow); padding: 12px; opacity: 0; transform: translateY(8px); transition: .35s; }
+.card.in { opacity: 1; transform: none; }
+.card.focus { box-shadow: 0 0 0 3px color-mix(in oklab, var(--element-accent) 35%, transparent), var(--review-card-shadow); }
+.card .head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.card .av { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-size: 11px; font-weight: 700; background: var(--avatar-owner); }
+.card .nm { font-weight: 700; font-size: 13px; }
+.card .tm { color: var(--muted-foreground); font-size: 11px; margin-left: auto; }
+.card .kind { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; padding: 1px 7px; border-radius: 999px;
+  background: color-mix(in oklab, var(--element-accent) 18%, transparent); color: var(--element-accent); }
+.card .body { font-size: 13.5px; line-height: 1.5; }
+.card .anchorchip { display: inline-flex; align-items: center; gap: 6px; margin-top: 9px; font-size: 11px; font-family: "Source Code Pro", monospace;
+  background: var(--accent); border: 1px solid var(--border); border-radius: 7px; padding: 3px 8px; color: var(--muted-foreground); }
+.card .anchorchip .vp { color: var(--element-accent); font-weight: 600; }
+.card .held { display: none; align-items: center; gap: 6px; margin-top: 9px; font-size: 11.5px; font-weight: 700; color: var(--success); }
+.card.survived .held { display: inline-flex; animation: popin .4s; }
+@keyframes popin { from{ opacity:0; transform: scale(.85);} to{ opacity:1; transform: none;} }
+.card .prov { display: none; margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--muted-foreground); }
+.card.materialized .prov { display: block; }
+.card .prov b { color: var(--agent-accent); }
+.card .actions { display: none; gap: 8px; margin-top: 11px; }
+.card.materialized .actions { display: flex; }
+.card .vp-warn { display: none; margin-top: 9px; font-size: 11.5px; color: var(--comment-accent); font-weight: 600; }
+.card.vp-mismatch .vp-warn { display: block; }
+
+/* composer */
+.composer { background: var(--popover); border: 1px solid var(--border-strong); border-radius: 13px; padding: 12px;
+  box-shadow: var(--review-card-shadow); opacity: 0; transform: translateY(8px); transition: .3s; display: none; }
+.composer.in { display: block; opacity: 1; transform: none; }
+.composer .ch { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; font-size: 12px; font-weight: 700; }
+.composer .ch .pill { font-size: 10px; padding: 1px 8px; border-radius: 999px; background: color-mix(in oklab, var(--element-accent) 18%, transparent); color: var(--element-accent); }
+.composer .field { width: 100%; min-height: 58px; border: 1px solid var(--border); border-radius: 9px; background: var(--background);
+  color: var(--foreground); font: inherit; font-size: 13.5px; padding: 9px 10px; resize: none; line-height: 1.45; }
+.composer .field .caret { border-right: 2px solid var(--element-accent); animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50%{ opacity: 0; } }
+.composer .row { display: flex; gap: 8px; margin-top: 9px; align-items: center; }
+.composer .hint { font-size: 11px; color: var(--muted-foreground); }
+
+/* decision panel */
+.decision { background: linear-gradient(180deg, color-mix(in oklab, var(--success) 12%, var(--card)), var(--card));
+  border: 1px solid color-mix(in oklab, var(--success) 45%, var(--border)); border-radius: 13px; padding: 13px;
+  box-shadow: var(--review-card-shadow); display: none; }
+.decision.in { display: block; animation: popin .45s; }
+.decision h3 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--success); display: flex; align-items: center; gap: 7px; }
+.decision .win { font-family: "Source Serif 4", serif; font-weight: 700; font-size: 16px; }
+.decision .win .id { font-family: "Source Code Pro", monospace; font-size: 12px; color: var(--muted-foreground); font-weight: 500; }
+.decision .why { font-size: 12.5px; color: var(--muted-foreground); margin-top: 6px; line-height: 1.5; }
+.decision .sig { display: flex; align-items: center; gap: 7px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted-foreground); font-family: "Source Code Pro", monospace; }
+.decision .sig .lock { color: var(--success); }
+.decision .frozen { margin-top: 9px; font-size: 12px; font-weight: 700; color: var(--agent-accent); display: flex; align-items: center; gap: 7px; }
+
+/* ===================== overlays (cursor / anchor / connector) ===================== */
+.overlay { position: absolute; inset: 0; pointer-events: none; z-index: 50; }
+.cursor { position: absolute; left: 0; top: 0; z-index: 60; opacity: 0;
+  transition: transform .75s cubic-bezier(.5,0,.2,1), opacity .3s; filter: drop-shadow(0 2px 3px rgba(0,0,0,.45)); }
+.cursor.show { opacity: 1; }
+.cursor .label { position: absolute; left: 18px; top: 16px; white-space: nowrap; font-size: 11px; font-weight: 700;
+  color: #fff; background: var(--avatar-owner); padding: 2px 7px; border-radius: 6px; }
+.ripple { position: absolute; width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--element-accent); z-index: 59; opacity: 0; }
+.ripple.go { animation: rip .55s ease-out; }
+@keyframes rip { 0%{ opacity:.9; transform: translate(-50%,-50%) scale(.4);} 100%{ opacity:0; transform: translate(-50%,-50%) scale(2.4);} }
+.anchor-hl { position: absolute; z-index: 45; border: 2px solid var(--element-accent); border-radius: 9px;
+  background: color-mix(in oklab, var(--element-accent) 12%, transparent); opacity: 0; transition: opacity .3s, all .4s;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--element-accent) 16%, transparent); }
+.anchor-hl.show { opacity: 1; }
+svg.connector { position: absolute; inset: 0; z-index: 44; pointer-events: none; opacity: 0; transition: opacity .3s; }
+svg.connector.show { opacity: 1; }
+svg.connector path { fill: none; stroke: var(--element-accent); stroke-width: 1.6; stroke-dasharray: 4 3; }
+
+/* narration / scrubber */
+.narration { width: min(1180px,100%); display: flex; align-items: center; gap: 14px; }
+.steps { display: flex; gap: 6px; }
+.steps i { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); transition: .3s; }
+.steps i.on { background: var(--element-accent); transform: scale(1.35); }
+.steps i.done { background: var(--muted-foreground); }
+.caption { flex: 1; font-size: 14px; min-height: 22px; }
+.caption b { font-family: "Source Serif 4", serif; }
+.caption .q { color: var(--element-accent); font-weight: 700; }
+.idlehint { color: var(--muted-foreground); font-style: italic; }
+
+@media (max-width: 1080px) {
+  .bodygrid { grid-template-columns: 130px minmax(0,1fr) 300px; }
+}
+</style>
+</head>
+<body>
+
+<div class="kicker">
+  <h2>The prototype review loop</h2>
+  <p>Point at a rendered draft → say “maybe like this?” → see it instantly → the agent makes it real → the comment survives → converge on a signed decision. <b>Press ▶ Play the loop.</b></p>
+</div>
+
+<div class="app" id="app">
+  <div class="titlebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="title-id">
+      <b>attn</b><span class="path">marginalia-hero/</span><span class="chip">variant set · 3</span>
+    </div>
+    <div class="tb-spacer"></div>
+    <div class="presence" id="presence">
+      <span class="who owner"><span class="dot">J</span>Jane</span>
+      <span class="who agent" id="agentchip"><span class="dot">C</span>Claude<span class="status"></span></span>
+    </div>
+    <button class="btn play" id="play">▶ Play the loop</button>
+    <button class="btn iconbtn" id="theme" title="Toggle theme">◐</button>
+  </div>
+
+  <div class="bodygrid">
+    <!-- filmstrip -->
+    <div class="filmstrip" id="filmstrip">
+      <div class="fs-h">Variants</div>
+      <div class="thumb" data-v="editorial">
+        <div class="mini editorial"><div class="mtitle"></div><div class="mbtn"></div></div>
+        <div class="lab">Editorial <span class="num">01</span></div>
+        <div class="prov"><span class="pp"></span>by Claude</div>
+      </div>
+      <div class="thumb" data-v="brutalist">
+        <div class="mini brutalist"><div class="mtitle"></div><div class="mbtn"></div></div>
+        <div class="lab">Brutalist <span class="num">02</span></div>
+        <div class="prov"><span class="pp"></span>by Claude</div>
+      </div>
+      <div class="thumb" data-v="organic">
+        <div class="mini organic"><div class="mtitle"></div><div class="mbtn"></div></div>
+        <div class="lab">Organic <span class="num">03</span></div>
+        <div class="prov"><span class="pp"></span>by Claude</div>
+      </div>
+      <div class="thumb child" id="thumb-child" data-v="proposed" style="display:none">
+        <div class="mini proposed"><div class="mtitle"></div><div class="mbtn"></div></div>
+        <div class="lab">Brutalist <span class="num">02b</span></div>
+        <div class="prov"><span class="pp"></span>Jane → Claude</div>
+      </div>
+    </div>
+
+    <!-- stage -->
+    <div class="stage">
+      <div class="viewport-bar">
+        <div class="vp-toggle" id="vptoggle">
+          <button data-vp="desktop" class="on">Desktop</button>
+          <button data-vp="mobile">Mobile</button>
+        </div>
+        <span class="vp-meta" id="vpmeta">02 · brutalist</span>
+        <span class="preview-badge" id="previewbadge">● live preview</span>
+      </div>
+      <div class="stage-scroll">
+        <div class="frame" id="frame" data-vp="desktop">
+          <div class="artifact" id="artifact" data-variant="editorial">
+            <nav><span class="logo">Marginalia</span><span class="navlinks">Library · Notes · About</span></nav>
+            <div class="hero">
+              <h1>Read like you mean it.</h1>
+              <p class="sub">A quiet reading room for the web. Save anything, annotate in the margins, and return to what matters.</p>
+              <button class="cta" id="cta">Start reading free</button>
+            </div>
+            <div class="visual"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- rail -->
+    <div class="rail">
+      <div class="rail-scroll" id="rail">
+        <div class="brief" id="brief">
+          <h3>Brief</h3>
+          <div class="t">Marginalia — homepage hero</div>
+          <ol>
+            <li>Calm, editorial tone</li>
+            <li id="crit2">One clear primary action</li>
+            <li id="crit3">Strong visual hierarchy</li>
+          </ol>
+        </div>
+
+        <div class="rail-h">Thread</div>
+
+        <!-- composer (proposal) -->
+        <div class="composer" id="composer">
+          <div class="ch"><span class="pill">Proposal</span> on <span style="font-family:'Source Code Pro',monospace">.cta</span></div>
+          <div class="field" id="composerfield"></div>
+          <div class="row">
+            <button class="btn primary" id="proposebtn" style="font-size:12px">Propose ↵</button>
+            <span class="hint">instant preview · agent materializes a variant</span>
+          </div>
+        </div>
+
+        <!-- the comment/proposal card -->
+        <div class="card" id="card">
+          <div class="head">
+            <span class="av">J</span><span class="nm">Jane</span>
+            <span class="kind">proposal</span><span class="tm">now</span>
+          </div>
+          <div class="body" id="cardbody">make this CTA full-bleed, 2× bigger, warm gradient</div>
+          <span class="anchorchip">▸ .cta <span class="vp">@desktop</span></span>
+          <span class="held">✓ anchor held through the edit</span>
+          <div class="vp-warn">↳ this note was captured on desktop — switch to see it</div>
+          <div class="prov">Realized by <b>Claude</b> as <b>02b</b>, forked from 02 · comment carried forward</div>
+          <div class="actions">
+            <button class="btn primary" id="gowith" style="font-size:12px">✓ Going with this</button>
+            <button class="btn" style="font-size:12px">Tweak</button>
+          </div>
+        </div>
+
+        <!-- decision -->
+        <div class="decision" id="decision">
+          <h3>◆ Direction chosen</h3>
+          <div class="win">Brutalist <span class="id">· 02b</span></div>
+          <div class="why">Single full-bleed CTA gives the strongest hierarchy and one unmistakable action — <b style="color:var(--success)">meets criteria 2 &amp; 3</b>. Keep Editorial's calmer subhead.</div>
+          <div class="sig"><span class="lock">⬢</span> signed · Jane · 09:42 · ed25519:a17f…c9</div>
+          <div class="frozen">❄ target frozen → Claude building against it</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- overlays -->
+  <div class="overlay" id="overlay">
+    <div class="anchor-hl" id="hl"></div>
+    <svg class="connector" id="connector"><path id="connpath" d=""></path></svg>
+    <div class="ripple" id="ripple"></div>
+    <div class="cursor" id="cursor">
+      <svg width="20" height="22" viewBox="0 0 20 22"><path d="M0 0 L0 16 L4.5 12 L7.5 19 L10 18 L7 11 L13 11 Z" fill="#fff" stroke="#222" stroke-width="1"/></svg>
+      <span class="label">Jane</span>
+    </div>
+  </div>
+</div>
+
+<div class="narration">
+  <div class="steps" id="steps"></div>
+  <div class="caption" id="caption"><span class="idlehint">Ready — press ▶ Play the loop to watch the full review cycle, or click variants and elements yourself.</span></div>
+  <button class="btn" id="replay" style="display:none">↺ Replay</button>
+</div>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const app = $('#app'), artifact = $('#artifact'), cta = $('#cta');
+  const cursor = $('#cursor'), ripple = $('#ripple'), hl = $('#hl');
+  const connector = $('#connector'), connpath = $('#connpath');
+  const card = $('#card'), composer = $('#composer'), composerfield = $('#composerfield');
+  const decision = $('#decision'), agentchip = $('#agentchip'), brief = $('#brief');
+  const childThumb = $('#thumb-child'), previewbadge = $('#previewbadge');
+  const vpmeta = $('#vpmeta'), frame = $('#frame'), caption = $('#caption'), stepsEl = $('#steps');
+  const VARIANTS = { editorial:'01 · editorial', brutalist:'02 · brutalist', organic:'03 · organic', proposed:'02b · brutalist (proposed)' };
+
+  // ---- theme ----
+  $('#theme').onclick = () => {
+    const r = document.documentElement;
+    r.dataset.theme = r.dataset.theme === 'ink' ? 'paper' : 'ink';
+  };
+
+  // ---- geometry helpers (relative to .app) ----
+  const rel = (el) => {
+    const a = app.getBoundingClientRect(), r = el.getBoundingClientRect();
+    return { x: r.left - a.left, y: r.top - a.top, w: r.width, h: r.height,
+             cx: r.left - a.left + r.width/2, cy: r.top - a.top + r.height/2 };
+  };
+  function moveCursorTo(el, dx=0, dy=0) {
+    const p = rel(el); cursor.classList.add('show');
+    cursor.style.transform = `translate(${p.cx + dx}px, ${p.cy + dy}px)`;
+  }
+  function clickFx() {
+    const m = cursor.style.transform.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+    if (!m) return;
+    ripple.style.left = m[1] + 'px'; ripple.style.top = m[2] + 'px';
+    ripple.classList.remove('go'); void ripple.offsetWidth; ripple.classList.add('go');
+  }
+  function showAnchor(el) {
+    const p = rel(el);
+    hl.style.left = (p.x - 5) + 'px'; hl.style.top = (p.y - 5) + 'px';
+    hl.style.width = (p.w + 10) + 'px'; hl.style.height = (p.h + 10) + 'px';
+    hl.classList.add('show');
+    drawConnector(el, card);
+  }
+  function drawConnector(anchorEl, cardEl) {
+    const a = rel(anchorEl), c = rel(cardEl);
+    const x1 = a.x + a.w + 5, y1 = a.cy, x2 = c.x, y2 = c.y + 26;
+    const mx = (x1 + x2) / 2;
+    connpath.setAttribute('d', `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
+    connector.classList.add('show');
+  }
+  // keep connector aligned on scroll/resize while a card is anchored
+  let anchored = false;
+  const rail = $('#rail');
+  function reflow(){ if (anchored && hl.classList.contains('show')) { showAnchor(cta); } }
+  rail.addEventListener('scroll', reflow);
+  $('.stage-scroll').addEventListener('scroll', reflow);
+  window.addEventListener('resize', reflow);
+
+  // ---- variant control ----
+  function setVariant(v, { proposed=false } = {}) {
+    const base = (v === 'proposed') ? 'brutalist' : v;
+    artifact.dataset.variant = base;
+    if (proposed || v === 'proposed') artifact.dataset.proposed = '1'; else artifact.removeAttribute('data-proposed');
+    vpmeta.textContent = VARIANTS[v] || (base);
+    document.querySelectorAll('.thumb').forEach(t => t.classList.toggle('active', t.dataset.v === v));
+    previewbadge.classList.toggle('show', (proposed && v !== 'proposed'));
+    if (anchored) requestAnimationFrame(() => showAnchor(cta));
+  }
+  // manual interaction
+  document.querySelectorAll('.thumb').forEach(t => {
+    t.addEventListener('click', () => { if (t.style.display === 'none') return; setVariant(t.dataset.v); });
+  });
+  $('#vptoggle').querySelectorAll('button').forEach(b => {
+    b.onclick = () => {
+      $('#vptoggle').querySelectorAll('button').forEach(x => x.classList.remove('on'));
+      b.classList.add('on'); frame.dataset.vp = b.dataset.vp;
+      card.classList.toggle('vp-mismatch', b.dataset.vp === 'mobile' && card.classList.contains('in'));
+      setTimeout(reflow, 520);
+    };
+  });
+  // manual: click the CTA to open composer
+  cta.addEventListener('click', () => {
+    if (playing) return;
+    anchored = true; showAnchor(cta);
+    composer.classList.add('in');
+  });
+  $('#proposebtn').onclick = () => { if (!playing) manualPropose(); };
+  function manualPropose() {
+    composerfield.textContent = composerfield.textContent || 'make this CTA full-bleed, 2× bigger, warm gradient';
+    $('#cardbody').textContent = composerfield.textContent;
+    composer.classList.remove('in'); card.classList.add('in'); anchored = true; showAnchor(cta);
+    setVariant(artifact.dataset.variant, { proposed:true });
+    card.classList.add('survived');
+  }
+
+  // ---- scene engine ----
+  let runId = 0, playing = false;
+  const sleep = (ms) => { const my = runId; return new Promise((res, rej) => setTimeout(() => my === runId ? res() : rej('x'), ms)); };
+  const STEP_COUNT = 8;
+  for (let i = 0; i < STEP_COUNT; i++) { const d = document.createElement('i'); stepsEl.appendChild(d); }
+  const dots = [...stepsEl.children];
+  function step(n, text) {
+    dots.forEach((d, i) => { d.classList.toggle('on', i === n); d.classList.toggle('done', i < n); });
+    caption.innerHTML = text;
+  }
+  async function typeInto(el, text, speed=42) {
+    el.innerHTML = '<span class="caret">&nbsp;</span>';
+    for (let i = 0; i < text.length; i++) { el.innerHTML = text.slice(0, i+1) + '<span class="caret">&nbsp;</span>'; await sleep(speed); }
+    el.textContent = text;
+  }
+  function resetAll() {
+    anchored = false;
+    hl.classList.remove('show'); connector.classList.remove('show'); cursor.classList.remove('show');
+    composer.classList.remove('in'); composerfield.textContent = '';
+    card.classList.remove('in','survived','materialized','focus','vp-mismatch');
+    decision.classList.remove('in'); previewbadge.classList.remove('show');
+    agentchip.classList.remove('thinking');
+    childThumb.style.display = 'none'; childThumb.classList.remove('materializing','in');
+    brief.classList.remove('flash');
+    $('#crit2').classList.remove('met'); $('#crit3').classList.remove('met');
+    document.querySelectorAll('.thumb:not(.child)').forEach(t => t.classList.remove('in'));
+    $('#vptoggle').querySelectorAll('button').forEach((x,i) => x.classList.toggle('on', i===0));
+    frame.dataset.vp = 'desktop';
+    artifact.removeAttribute('data-proposed');
+    setVariant('editorial');
+    document.querySelectorAll('.thumb').forEach(t => t.classList.remove('active'));
+  }
+
+  async function play() {
+    runId++; const my = runId; playing = true;
+    $('#play').textContent = '■ Stop'; $('#replay').style.display = 'none';
+    resetAll();
+    try {
+      // 0 — the brief
+      step(0, '<b>A shared review room.</b> The brief sets the bar everyone — human and agent — works against.');
+      await sleep(700); brief.classList.add('flash'); await sleep(1500); brief.classList.remove('flash'); await sleep(400);
+
+      // 1 — agent drops 3 variants
+      step(1, '<b>Claude generated three directions</b> and dropped them in the set — plain files on disk.');
+      const tnames = ['editorial','brutalist','organic'];
+      for (const n of tnames) { document.querySelector(`.thumb[data-v="${n}"]`).classList.add('in'); await sleep(420); }
+      setVariant('editorial'); await sleep(900);
+
+      // 2 — flicker compare
+      step(2, '<b>Flick between them</b> — same artifact, three takes. Flicker-compare catches subtle differences.');
+      const fs = $('#filmstrip');
+      moveCursorTo(document.querySelector('.thumb[data-v="brutalist"]')); await sleep(800); clickFx(); setVariant('brutalist'); await sleep(700);
+      moveCursorTo(document.querySelector('.thumb[data-v="organic"]')); await sleep(750); clickFx(); setVariant('organic'); await sleep(700);
+      moveCursorTo(document.querySelector('.thumb[data-v="brutalist"]')); await sleep(750); clickFx(); setVariant('brutalist'); await sleep(800);
+
+      // 3 — point at the element
+      step(3, '<b>Point at what to change.</b> Click the rendered element — no inspector, no selectors to type.');
+      moveCursorTo(cta); await sleep(900); clickFx(); await sleep(150);
+      anchored = true; showAnchor(cta); await sleep(900);
+
+      // 4 — say it in plain words
+      step(4, 'Say it in plain words: <span class="q">“maybe like this?”</span>');
+      composer.classList.add('in'); await sleep(500);
+      await typeInto(composerfield, 'make this CTA full-bleed, 2× bigger, warm gradient');
+      $('#cardbody').textContent = 'make this CTA full-bleed, 2× bigger, warm gradient';
+      await sleep(500);
+      moveCursorTo($('#proposebtn')); await sleep(700); clickFx(); await sleep(200);
+
+      // 5 — instant preview (client-side CSS, zero round-trip)
+      step(5, '<b>Instant preview.</b> Your idea is applied client-side immediately — zero round-trip, zero DOM churn.');
+      composer.classList.remove('in'); card.classList.add('in'); await sleep(80);
+      setVariant('brutalist', { proposed:true }); showAnchor(cta);
+      await sleep(1500);
+
+      // 6 — agent materializes + comment survives
+      step(6, '<b>Claude is a member of the room</b> — it makes the proposal real as a child variant…');
+      agentchip.classList.add('thinking');
+      childThumb.style.display = ''; childThumb.classList.add('materializing'); requestAnimationFrame(()=>childThumb.classList.add('in'));
+      await sleep(2200);
+      childThumb.classList.remove('materializing');
+      agentchip.classList.remove('thinking');
+      setVariant('proposed'); card.classList.add('materialized');
+      await sleep(600);
+      card.classList.add('survived'); card.classList.add('focus'); showAnchor(cta);
+      step(6, '…and the comment <b>survived the edit</b> — it was a style-layer change, so the anchor never moved.');
+      await sleep(2300); card.classList.remove('focus');
+
+      // 7 — responsive beat
+      step(7, '<b>Check it across breakpoints.</b> The note knows it was made on desktop.');
+      const mobileBtn = $('#vptoggle').querySelector('[data-vp="mobile"]');
+      moveCursorTo(mobileBtn); await sleep(750); clickFx();
+      $('#vptoggle').querySelectorAll('button').forEach(x=>x.classList.remove('on')); mobileBtn.classList.add('on');
+      frame.dataset.vp = 'mobile'; card.classList.add('vp-mismatch'); await sleep(600); showAnchor(cta);
+      await sleep(1900);
+      const deskBtn = $('#vptoggle').querySelector('[data-vp="desktop"]');
+      moveCursorTo(deskBtn); await sleep(650); clickFx();
+      $('#vptoggle').querySelectorAll('button').forEach(x=>x.classList.remove('on')); deskBtn.classList.add('on');
+      frame.dataset.vp = 'desktop'; card.classList.remove('vp-mismatch'); await sleep(560); showAnchor(cta);
+      await sleep(700);
+
+      // 8 — converge on a signed decision
+      step(8 % STEP_COUNT, '<b>Converge.</b> One signed decision the agent builds against — winner, rationale, attribution.');
+      // (reuse last dot as "decision")
+      dots.forEach((d,i)=>{ d.classList.toggle('on', i===STEP_COUNT-1); d.classList.toggle('done', i<STEP_COUNT-1); });
+      moveCursorTo($('#gowith')); await sleep(800); clickFx(); await sleep(250);
+      $('#crit2').classList.add('met'); $('#crit3').classList.add('met');
+      decision.classList.add('in');
+      hl.classList.remove('show'); connector.classList.remove('show');
+      await sleep(900);
+      caption.innerHTML = '<b>That’s the loop:</b> point → preview → materialize → <span class="q">survive</span> → decide. All on plain files, locally, with the agent in the room.';
+      cursor.classList.remove('show');
+      await sleep(400);
+    } catch (e) { /* cancelled */ return; }
+    finally {
+      if (my === runId) { playing = false; $('#play').textContent = '▶ Play the loop'; $('#replay').style.display = ''; }
+    }
+  }
+
+  $('#play').onclick = () => { if (playing) { runId++; playing = false; $('#play').textContent = '▶ Play the loop'; } else { play(); } };
+  $('#replay').onclick = () => play();
+
+  // initial state
+  setVariant('editorial');
+  document.querySelectorAll('.thumb:not(.child)').forEach(t => t.classList.add('in'));
+})();
+</script>
+</body>
+</html>

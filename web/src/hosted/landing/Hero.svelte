@@ -1,27 +1,14 @@
 <script lang="ts">
   import { getTheme } from '../theme.svelte';
-  import ResponsiveScreenshot from './ResponsiveScreenshot.svelte';
+  import { readDeskCount } from '../desk-count';
+
+  // Returning users lead with their desk (attn-cjn); first-timers keep the
+  // zero-friction create. Read once at mount — the count only changes in /app.
+  const deskCount = readDeskCount();
   import collabLight from './assets/collab-light.png';
   import collabDark from './assets/collab-dark.png';
-  import collabLight768 from './assets/collab-light-768.avif';
-  import collabLight1280 from './assets/collab-light-1280.avif';
-  import collabLight1920 from './assets/collab-light-1920.avif';
-  import collabDark768 from './assets/collab-dark-768.avif';
-  import collabDark1280 from './assets/collab-dark-1280.avif';
-  import collabDark1920 from './assets/collab-dark-1920.avif';
 
-  const collabShots = {
-    light: {
-      fallback: collabLight,
-      avifSrcset: `${collabLight768} 768w, ${collabLight1280} 1280w, ${collabLight1920} 1920w`,
-    },
-    dark: {
-      fallback: collabDark,
-      avifSrcset: `${collabDark768} 768w, ${collabDark1280} 1280w, ${collabDark1920} 1920w`,
-    },
-  } as const;
-
-  const collabShot = $derived(collabShots[getTheme()]);
+  const collabShot = $derived(getTheme() === 'dark' ? collabDark : collabLight);
 </script>
 
 <section class="hero">
@@ -34,10 +21,17 @@
       end-to-end-encrypted review room. No account, and no server can read the words.
     </p>
     <div class="hero-actions">
-      <a class="button primary" href="/app#new" data-action="new-workspace">
-        New workspace <span aria-hidden="true">→</span>
-      </a>
-      <a class="button" href="/app" data-action="open-desk">Open your desk</a>
+      {#if deskCount > 0}
+        <a class="button primary" href="/app" data-action="open-desk">
+          Your desk ({deskCount}) <span aria-hidden="true">→</span>
+        </a>
+        <a class="button" href="/app#new" data-action="new-workspace">New workspace</a>
+      {:else}
+        <a class="button primary" href="/app#new" data-action="new-workspace">
+          New workspace <span aria-hidden="true">→</span>
+        </a>
+        <a class="button" href="/app" data-action="open-desk">Open your desk</a>
+      {/if}
     </div>
     <div class="local-note">
       <span>Creates untitled.md immediately</span>
@@ -48,14 +42,7 @@
 
   <div class="product-stage" aria-label="A real attn review with local and shared state labels">
     <div class="window">
-      <ResponsiveScreenshot
-        fallback={collabShot.fallback}
-        avifSrcset={collabShot.avifSrcset}
-        sizes="(max-width: 680px) calc(100vw - 2rem), (max-width: 1180px) calc(100vw - 2.8rem), 48vw"
-        alt="A real attn document with an inline review comment and suggestion"
-        loading="eager"
-        fetchpriority="high"
-      />
+      <img src={collabShot} alt="A real attn document with an inline review comment and suggestion" />
     </div>
     <aside class="stage-label local">
       <strong>Source · local</strong><small>Saved on this device</small>

@@ -176,6 +176,44 @@ export interface EditingSession {
   release(): Promise<void>;
 }
 
+/**
+ * Follower handle for local multi-tab live co-editing (attn-47r): a
+ * reconnecting CollabClient wire to whichever tab currently hosts the
+ * workspace's authorities. `status: 'live'` means a hub answered and the
+ * controller is bound to its generation; every state change requires the
+ * caller to rebind + reseed (generations never mix step logs).
+ */
+export interface LocalCollabJoinState {
+  status: 'connecting' | 'live';
+  generation: string | null;
+  ownerHolderId: string | null;
+}
+
+export interface LocalCollabSeedView {
+  fileId: string;
+  epoch: string;
+  markdown: string;
+}
+
+export interface LocalCollabJoinHandle {
+  getState(): LocalCollabJoinState;
+  subscribe(listener: (state: LocalCollabJoinState) => void): () => void;
+  getController(): CollabController | null;
+  getSeed(path: string): Promise<LocalCollabSeedView | null>;
+  close(): void;
+}
+
+/**
+ * A change another tab committed to shared local storage. `content` means a
+ * document body changed (`path` when known); `structure` means the entry
+ * list or workspace metadata changed (create/rename/delete/import).
+ */
+export interface WorkspaceChange {
+  workspaceId: string;
+  kind: 'content' | 'structure';
+  path?: string;
+}
+
 export interface WorkspaceAppService {
   storageHealth(): StorageHealth;
   listWorkspaces(): Promise<WorkspaceSummary[]>;
@@ -189,6 +227,24 @@ export interface WorkspaceAppService {
   deleteWorkspace(workspaceId: string): Promise<void>;
   /** Null when another tab holds the writer lease — stay read-only. */
   beginEditing(workspaceId: string): Promise<EditingSession | null>;
+  /**
+   * Join local multi-tab co-editing as a follower (attn-47r). Returns a
+   * reconnecting handle, or null when the environment can't support it —
+   * the caller then falls back to the read-only follow mode.
+   */
+  joinLocalCollab(workspaceId: string): Promise<LocalCollabJoinHandle | null>;
+  /**
+   * Expiry (ms epoch) of another tab's live writer lease, or null when this
+   * tab could acquire now. Lets a read-only tab wait on the exact takeover
+   * deadline instead of polling blindly.
+   */
+  peekWriterLease(workspaceId: string): Promise<number | null>;
+  /**
+   * Advisory doorbell rung after OTHER tabs commit to shared local storage —
+   * self-originated changes are never delivered. Re-read the workspace from
+   * storage on delivery; the message itself carries no document content.
+   */
+  subscribeWorkspaceChanges(listener: (change: WorkspaceChange) => void): () => void;
   // ————— multi-file/asset operations (attn-7xl.3.4) —————
   createMarkdownEntry(workspaceId: string, path: string): Promise<void>;
   addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void>;

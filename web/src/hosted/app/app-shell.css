@@ -71,8 +71,7 @@
   margin: 0 0 2rem;
   padding: 1rem 1.2rem;
   border: 1px solid var(--rust);
-  border-left-width: 3px;
-  background: var(--sheet);
+  background: color-mix(in oklch, var(--rust) 6%, var(--sheet));
   font: 0.9rem/1.5 var(--sans);
 }
 
@@ -142,18 +141,6 @@
 
 .quick:hover {
   background: var(--sheet-raised);
-}
-
-.quick-drop-target {
-  outline: 1px dashed color-mix(in oklch, var(--ink) 34%, transparent);
-  outline-offset: -10px;
-  transition: background-color 160ms ease, outline-color 160ms ease;
-}
-
-.quick-drop-target[data-drop-active='true'],
-.desk-drop-active .quick-drop-target {
-  background: color-mix(in oklch, var(--rust) 8%, var(--sheet));
-  outline-color: var(--rust);
 }
 
 .quick big {
@@ -371,6 +358,102 @@ a.workspace-row:hover {
   font: 0.7rem var(--mono);
 }
 
+/* Grouped files sheet (iOS parity): Markdown / Assets sections, badge + name +
+   capability subtitle + size rows, and an in-sheet add affordance. */
+/* Suppress the global prose bullet (base.css `ul > li::before`) leaking into
+   the sheet's file list — these rows are chrome, not markdown. */
+.bottom-sheet .file-list > li::before {
+  content: none;
+}
+.file-group {
+  padding: 0.45rem 0 0.6rem;
+}
+.file-group + .file-group {
+  border-top: 1px solid var(--rule);
+}
+.file-group-label {
+  margin: 0 0 0.45rem;
+  color: var(--hosted-muted);
+  font: 700 0.62rem/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-height: 48px;
+  padding: 0.45rem 0.5rem;
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  text-decoration: none;
+}
+.file-row:hover {
+  background: color-mix(in srgb, var(--sheet) 70%, transparent);
+}
+.file-row.active {
+  background: var(--sheet);
+}
+.file-badge {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 26px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  color: var(--hosted-muted);
+  font: 700 0.6rem/1 var(--mono);
+}
+.file-row.active .file-badge {
+  border-color: var(--rust);
+  color: var(--rust);
+}
+.file-row-name {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.file-row-name strong {
+  overflow: hidden;
+  font: 600 0.9rem var(--sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-row-name small {
+  overflow: hidden;
+  color: var(--hosted-muted);
+  font: 0.72rem var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-row .file-size {
+  flex: none;
+  color: var(--hosted-muted);
+  font: 0.72rem var(--mono);
+}
+.file-add-row {
+  width: 100%;
+  min-height: 48px;
+  margin-top: 0.5rem;
+  border: 1px dashed var(--rule);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--hosted-muted);
+  font: 650 0.85rem var(--sans);
+  cursor: pointer;
+  transition: border-color 140ms var(--ease), color 140ms var(--ease);
+}
+.file-add-row:hover {
+  border-color: var(--rust);
+  color: var(--ink);
+}
+@media (prefers-reduced-motion: reduce) {
+  .file-add-row { transition: none; }
+}
+
 .rail-add {
   margin-top: 1rem;
   color: var(--hosted-muted);
@@ -526,7 +609,14 @@ a.workspace-row:hover {
   background: var(--background);
 }
 
+/* A flex column from the (rendered-height) document wrapper down to the
+   editable surface, so the ProseMirror grows to fill the viewport and clicking
+   anywhere below the last line still places the caret — no dead, non-editable
+   space. Flex distributes the wrapper's actual height (unlike `%`, which needs
+   a definite-height ancestor the stretched chain doesn't provide). */
 .hosted-native-document {
+  display: flex;
+  flex-direction: column;
   min-height: 100%;
   padding: 0.35rem 0 4rem;
   color: var(--foreground);
@@ -534,84 +624,25 @@ a.workspace-row:hover {
 }
 
 .hosted-native-document .editor-container {
-  min-height: 100%;
-}
-
-.hosted-native-editor-document {
+  flex: 1 1 auto;
   display: flex;
-  min-height: 100%;
   flex-direction: column;
-  padding-bottom: 0;
-}
-
-.hosted-native-editor-document > .hosted-editor-surface,
-.hosted-native-editor-document .editor-container,
-.hosted-native-editor-document .prosemirror-mount {
-  display: flex;
   min-height: 0;
-  flex: 1;
-  flex-direction: column;
 }
 
-.hosted-native-editor-document .ProseMirror {
-  width: 100%;
-  min-height: 100%;
-  flex: 1;
-  padding-bottom: 4rem;
-}
-
-.hosted-formatting-strip {
-  position: sticky;
-  z-index: 10;
-  top: 0;
+.hosted-native-document .editor-container > .prosemirror-mount {
+  flex: 1 1 auto;
   display: flex;
-  min-height: 2.5rem;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0.3rem max(1rem, calc((100% - 72ch) / 2));
-  border-bottom: 1px solid color-mix(in oklch, var(--border) 68%, transparent);
-  background: color-mix(in oklch, var(--background) 94%, transparent);
-  backdrop-filter: blur(6px);
-  font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+  flex-direction: column;
+  min-height: 0;
 }
 
-.hosted-formatting-strip button {
-  min-width: 2rem;
-  height: 1.9rem;
-  padding: 0 0.5rem;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--foreground);
-  font: 650 0.7rem/1 'Source Sans 3 Variable', 'Source Sans 3', sans-serif;
-  cursor: pointer;
+.hosted-native-document .prosemirror-mount > .ProseMirror {
+  flex: 1 1 auto;
 }
 
-.hosted-formatting-strip button:hover,
-.hosted-formatting-strip button:focus-visible {
-  background: var(--accent);
-}
-
-.hosted-formatting-strip button:disabled {
-  cursor: not-allowed;
-  opacity: 0.42;
-}
-
-.hosted-formatting-label,
-.hosted-formatting-hint {
-  color: var(--muted-foreground);
-  font-size: 0.7rem;
-}
-
-.hosted-formatting-label {
-  margin-right: 0.3rem;
-  font-weight: 650;
-}
-
-.hosted-formatting-hint {
-  margin-left: auto;
-  white-space: nowrap;
+.hosted-native-document > .hosted-editor-surface {
+  display: contents;
 }
 
 .hosted-document-banner {
@@ -677,6 +708,141 @@ a.workspace-row:hover {
   white-space: nowrap;
 }
 
+/* Save-state chip: a pill carrying the local-first "on this device" status
+   with a status dot (green saved / amber in-flight / rust needs-attention).
+   Restores the prototype's editor-polish save chip. */
+.save-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 8px;
+  border: 1px solid color-mix(in oklch, var(--rule) 70%, transparent);
+  border-radius: 999px;
+  font: 500 0.7rem/1.2 var(--sans);
+  color: var(--hosted-muted);
+  white-space: nowrap;
+}
+.save-chip::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  transition: background-color 160ms var(--ease);
+}
+.save-chip[data-save-state="Saving…"]::before,
+.save-chip[data-save-state="Owner offline · Review still available"]::before {
+  background: var(--amber-deep);
+}
+.save-chip[data-save-state="Storage needs attention"]::before {
+  background: var(--rust);
+}
+.hosted-save-state.save-chip {
+  font-family: var(--sans);
+  max-width: 15rem;
+}
+@media (prefers-reduced-motion: reduce) {
+  .save-chip::before { transition: none; }
+}
+
+/* iOS view-only reassurance banner. Calm steel-blue (an intentional
+   design-system addition — distinct from rust=action and green=saved) with a
+   FULL border, not the prototype's banned left-stripe. Body stays --ink for
+   AA contrast. */
+.viewing-safely {
+  /* Single intentional design-system addition: a calm view-only accent,
+     semantically distinct from rust (action) and green (saved). */
+  --view-only: oklch(0.55 0.06 230);
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  margin: 0 0 1.6rem;
+  padding: 0.8rem 0.95rem;
+  border: 1px solid color-mix(in oklch, var(--view-only) 75%, transparent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklch, var(--view-only) 12%, var(--paper));
+  color: var(--ink);
+  font: 0.82rem/1.45 var(--sans);
+}
+.viewing-safely strong { font-weight: 650; }
+
+/* Arrival toasts: incoming peer comments/suggestions. Bottom-center, clear of
+   the mobile thumb dock; tap to jump to the thread. */
+.arrival-toasts {
+  position: fixed;
+  z-index: 65;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 5.5rem);
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(23rem, calc(100vw - 2rem));
+}
+@media (min-width: 901px) {
+  .arrival-toasts {
+    left: auto;
+    right: 1.25rem;
+    bottom: 1.25rem;
+    transform: none;
+  }
+}
+.arrival-toast {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  background: var(--sheet-raised);
+  box-shadow: var(--shadow-strong);
+  animation: arrival-in 160ms var(--ease);
+}
+@keyframes arrival-in {
+  from { opacity: 0; transform: translateY(8px); }
+}
+.arrival-toast-body {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.7rem 0.5rem 0.7rem 0.85rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 500 0.85rem var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+.arrival-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rust);
+}
+.arrival-toast-close {
+  flex: none;
+  width: 2.1rem;
+  border: 0;
+  border-left: 1px solid var(--rule);
+  background: transparent;
+  color: var(--hosted-muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+.arrival-toast-close:hover { color: var(--ink); }
+@media (prefers-reduced-motion: reduce) {
+  .arrival-toast { animation: none; }
+}
+.viewing-safely-icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--view-only);
+}
+
 .hosted-header-button {
   height: 1.75rem;
   padding: 0 0.65rem;
@@ -726,6 +892,35 @@ a.workspace-row:hover {
   color: var(--sidebar-accent-foreground);
 }
 
+.hosted-entry-actions {
+  display: flex;
+  gap: 0.2rem;
+  padding-bottom: 0.35rem;
+}
+
+.hosted-entry-actions button,
+.hosted-delete-confirm button {
+  min-height: 1.75rem;
+  padding: 0.25rem 0.45rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.hosted-entry-actions button:hover,
+.hosted-delete-confirm button:hover {
+  background: var(--sidebar-accent);
+  color: var(--foreground);
+}
+
+.hosted-entry-actions .danger,
+.hosted-delete-confirm .danger {
+  color: var(--danger-ink);
+}
+
 .hosted-sidebar-input {
   width: 100%;
   height: 2rem;
@@ -737,144 +932,21 @@ a.workspace-row:hover {
   font-size: 0.7rem;
 }
 
-.hosted-sidebar-dropzone {
-  display: flex;
-  min-height: 3.15rem;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.5rem 0.6rem;
-  border: 1px dashed color-mix(in oklch, var(--sidebar-foreground) 34%, transparent);
+.hosted-delete-confirm {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 0.35rem;
+  padding: 0.55rem;
+  border: 1px solid color-mix(in oklch, var(--destructive) 35%, var(--border));
   border-radius: 8px;
-  color: var(--sidebar-foreground);
-  cursor: pointer;
-  transition: border-color 160ms ease, background-color 160ms ease;
-}
-
-.hosted-sidebar-dropzone:hover,
-.hosted-sidebar-dropzone:focus-visible,
-.hosted-sidebar-dropzone-active {
-  border-color: var(--ring);
-  background: var(--sidebar-accent);
-}
-
-.hosted-sidebar-dropzone > span:first-child {
-  width: 1.2rem;
-  text-align: center;
-}
-
-.hosted-sidebar-dropzone > span:last-child {
-  display: grid;
-  min-width: 0;
-  gap: 0.1rem;
-}
-
-.hosted-sidebar-dropzone strong {
-  font-size: 0.7rem;
-  font-weight: 650;
-}
-
-.hosted-sidebar-dropzone small {
-  color: var(--muted-foreground);
-  font-size: 0.7rem;
-}
-
-.hosted-file-dialog-layer {
-  position: fixed;
-  z-index: 70;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 1rem;
-}
-
-.hosted-file-dialog-scrim {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  background: color-mix(in oklch, var(--foreground) 20%, transparent);
-  cursor: default;
-}
-
-.hosted-file-dialog {
-  position: relative;
-  display: grid;
-  width: min(27rem, calc(100vw - 2rem));
-  gap: 0.85rem;
-  padding: 1rem;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--background);
-  box-shadow: 0 6px 8px color-mix(in oklch, black 18%, transparent);
   color: var(--foreground);
-  font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
-}
-
-.hosted-file-dialog-form {
-  display: grid;
-  gap: 0.85rem;
-}
-
-.hosted-file-dialog h2 {
-  margin: 0.1rem 0 0;
-  font: 600 1.25rem/1.3 'Source Serif 4 Variable', 'Source Serif 4', Georgia, serif;
-}
-
-.hosted-file-dialog p,
-.hosted-file-dialog label {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: 0.85rem;
-  line-height: 1.45;
-}
-
-.hosted-file-dialog-kicker {
-  color: var(--muted-foreground);
   font-size: 0.7rem;
-  font-weight: 650;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
 }
 
-.hosted-file-dialog input {
-  width: 100%;
-  height: 2.5rem;
-  padding: 0 0.75rem;
-  border: 1px solid var(--input);
-  border-radius: 8px;
-  background: var(--background);
-  color: var(--foreground);
-  font-size: 0.95rem;
-}
-
-.hosted-file-dialog-actions {
+.hosted-delete-confirm > div {
   display: flex;
   justify-content: flex-end;
-  gap: 0.5rem;
-}
-
-.hosted-file-dialog-actions button {
-  min-height: 2.5rem;
-  padding: 0 0.8rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--foreground);
-  font-size: 0.85rem;
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.hosted-file-dialog-actions .primary {
-  border-color: var(--primary);
-  background: var(--primary);
-  color: var(--primary-foreground);
-}
-
-.hosted-file-dialog-actions .danger {
-  border-color: color-mix(in oklch, var(--destructive) 45%, var(--border));
-  color: var(--destructive);
+  gap: 0.25rem;
 }
 
 .hosted-sidebar-error {
@@ -936,25 +1008,9 @@ a.workspace-row:hover {
   }
 
   .writing-sheet {
-    display: flex;
-    flex-direction: column;
     border: 0;
     box-shadow: none;
     min-height: calc(100dvh - 58px);
-  }
-
-  .writing-sheet > .hosted-editor-surface,
-  .writing-sheet .editor-container,
-  .writing-sheet .prosemirror-mount {
-    display: flex;
-    min-height: 0;
-    flex: 1;
-    flex-direction: column;
-  }
-
-  .writing-sheet .ProseMirror {
-    min-height: 100%;
-    flex: 1;
   }
 
   .writing-sheet p,
@@ -1134,7 +1190,7 @@ a.workspace-row:hover {
 }
 
 .share-sheet {
-  width: min(680px, 100%);
+  width: min(720px, 100%);
   max-height: calc(100dvh - 4rem);
   overflow: auto;
 }
@@ -1150,11 +1206,6 @@ a.workspace-row:hover {
 
 .share-head h2:focus {
   outline: 0;
-}
-
-.share-head h2 {
-  font-size: 2rem;
-  letter-spacing: -0.02em;
 }
 
 .share-head p {
@@ -1185,7 +1236,20 @@ a.workspace-row:hover {
 }
 
 .share-panel-heading {
-  display: block;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.share-panel-heading .step-badge {
+  width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--rule);
+  border-radius: 50%;
+  font: 0.7rem var(--mono);
 }
 
 .share-panel h3,
@@ -1208,45 +1272,15 @@ a.workspace-row:hover {
 }
 
 .share-storage-actions {
-  margin: 0.8rem 0 0;
+  margin: 0.8rem 0 0 2.35rem;
 }
 
 .share-check {
   display: flex;
   align-items: flex-start;
-  gap: 0.7rem;
-  min-height: 58px;
-  margin: 0.85rem 0 0;
-  padding: 0.75rem 0.85rem;
-  border: 1px solid var(--rule);
-  background: var(--paper);
-  font: 0.84rem/1.4 var(--sans);
-  cursor: pointer;
-  transition: border-color 160ms ease, background-color 160ms ease;
-}
-
-.share-check:hover {
-  border-color: var(--ink);
-}
-
-.share-check.confirmed {
-  border-color: var(--rust);
-  background: color-mix(in srgb, var(--rust) 7%, var(--sheet));
-}
-
-.share-check strong,
-.share-check small {
-  display: block;
-}
-
-.share-check strong {
-  font-size: 0.88rem;
-}
-
-.share-check small {
-  margin-top: 0.18rem;
-  color: var(--hosted-muted);
-  font-size: 0.7rem;
+  gap: 0.6rem;
+  margin: 0.9rem 0 0 2.35rem;
+  font: 0.84rem/1.45 var(--sans);
 }
 
 .share-check input,
@@ -1257,13 +1291,7 @@ a.workspace-row:hover {
 }
 
 .share-check input {
-  appearance: auto;
-  flex: 0 0 1.15rem;
-  width: 1.15rem;
-  height: 1.15rem;
-  margin: 0.12rem 0 0;
-  opacity: 1;
-  visibility: visible;
+  margin-top: 0.18rem;
 }
 
 .share-warning,
@@ -1274,14 +1302,7 @@ a.workspace-row:hover {
 }
 
 .share-warning {
-  margin-left: 0;
-}
-
-.share-safety {
-  margin-top: 1rem;
-  padding: 1rem;
-  border: 1px solid var(--rule);
-  background: color-mix(in srgb, var(--paper) 64%, var(--sheet));
+  margin-left: 2.35rem;
 }
 
 .share-choice-grid {
@@ -1402,7 +1423,9 @@ a.workspace-row:hover {
 }
 
 .share-advanced-body {
-  display: block;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.65fr);
+  gap: 1rem;
   padding-bottom: 1rem;
 }
 
@@ -1808,11 +1831,35 @@ a.workspace-row:hover {
   padding: clamp(2.5rem, 8vw, 5rem) 1.5rem;
   text-align: center;
   font-family: var(--sans);
+  transition: border-color 140ms var(--ease), background-color 140ms var(--ease);
 }
 
-.drop-zone-active {
+.drop-zone[data-drag-over] {
   border-color: var(--rust);
-  background: color-mix(in oklch, var(--rust) 7%, var(--sheet));
+  border-style: solid;
+  background: color-mix(in srgb, var(--rust) 8%, var(--sheet));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drop-zone { transition: none; }
+}
+
+/* Workspace-surface file drop: a transient full-surface target that only
+   paints while an OS file drag is over the editor (set by use:fileDrop). */
+[data-drop-label][data-drag-over]::after {
+  content: attr(data-drop-label);
+  position: fixed;
+  inset: 0.75rem;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--rust);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--rust) 9%, var(--paper));
+  color: var(--ink);
+  font: 600 1.15rem/1.4 var(--sans);
+  text-align: center;
+  pointer-events: none;
 }
 
 .drop-zone h2 {
@@ -2200,4 +2247,78 @@ a.workspace-row:hover {
   .edit-bar {
     bottom: calc(var(--kb-offset, 0px) + 56px + env(safe-area-inset-bottom, 0px));
   }
+}
+
+
+/* Join-a-review panel (attn-ri1) */
+.join-panel {
+  margin: 14px 0 0;
+  padding: 16px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--sheet);
+  font-family: var(--sans);
+}
+
+.join-panel label {
+  display: block;
+  margin-bottom: 8px;
+  font: 600 0.85rem var(--sans);
+  color: var(--ink);
+}
+
+.join-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.join-row input {
+  flex: 1;
+  min-width: 240px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 0.85rem var(--mono);
+}
+
+.join-row input:focus-visible {
+  outline: 2px solid var(--rust);
+  outline-offset: 1px;
+}
+
+.join-go,
+.join-cancel {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  font: 700 0.85rem var(--sans);
+  cursor: pointer;
+  background: transparent;
+  color: var(--ink);
+}
+
+.join-go {
+  background: var(--rust);
+  border-color: var(--rust);
+  color: var(--rust-contrast);
+}
+
+.join-go:hover {
+  background: var(--rust-deep);
+  border-color: var(--rust-deep);
+}
+
+.join-error {
+  margin: 8px 0 0;
+  font: 500 0.85rem/1.5 var(--sans);
+  color: var(--rust-deep);
+}
+
+.join-hint {
+  margin: 8px 0 0;
+  font: 500 0.85rem/1.5 var(--sans);
+  color: var(--hosted-muted);
 }

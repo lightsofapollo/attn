@@ -1,3 +1,4 @@
+import { boundFetch } from './bound-fetch';
 import {
   aeadSeal,
   aeadOpen,
@@ -103,7 +104,7 @@ export async function uploadBrowserR2Snapshot(
     options.mintPow ??
     ((input: SnapshotUploadPowRequest, abortSignal: AbortSignal) =>
       mintBrowserPowInWorker(input, { signal: abortSignal }));
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? boundFetch;
   let presignResponse: Response;
   try {
     const pow = await mint(

@@ -345,7 +345,7 @@
       {#if isError}
         <div class="flex flex-col gap-2 py-1.5 text-sm" data-slot="share-error">
           <span class="text-destructive">
-            {shareErrorMessage || "Couldn't reach the review relay — the share didn't complete."}
+            {shareErrorMessage || "Couldn't reach the review relay — the share didn't complete. Nothing left this machine."}
           </span>
           <button
             type="button"

@@ -51,7 +51,14 @@
     initFontScale,
     resetFontScale as resetGlobalFontScale,
   } from './lib/font-scale';
-  import { initTheme } from './lib/theme';
+  import { cycleTheme, initTheme } from './lib/theme';
+  import type { PaletteCommand } from './lib/CommandPalette.svelte';
+  import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
+  import PenLineIcon from '@lucide/svelte/icons/pen-line';
+  import Share2Icon from '@lucide/svelte/icons/share-2';
+  import PanelRightIcon from '@lucide/svelte/icons/panel-right';
+  import SunMoonIcon from '@lucide/svelte/icons/sun-moon';
+  import KeyboardIcon from '@lucide/svelte/icons/keyboard';
   import { createTab, findTabByPath, type Tab } from './lib/tabs';
   import Editor from './lib/Editor.svelte';
   import Sidebar from './lib/Sidebar.svelte';
@@ -614,7 +621,7 @@
       // the kind only if somehow empty), so peers see a real name not "Reviewer".
       selfLabel: userProfile.effectiveName || (isOwner ? 'Owner' : 'Reviewer'),
       // Caret colors mirror the presence chips: owner warm, reviewer cool.
-      selfColor: isOwner ? '#d97706' : '#2563eb',
+      selfColor: isOwner ? '#b05b41' : '#4a7fa5',
       // Owner only: seed an authority for a file a reviewer reaches before the
       // owner has opened it, from that file's base snapshot.
       getSeedDoc: isOwner ? collabSeedDocFor : undefined,
@@ -1077,12 +1084,14 @@
   });
 
   // Touch reactive store reads here so Svelte schedules a rebuild whenever
-  // the anchor-resolution map, event log, or focus target changes.
+  // the anchor-resolution map, event log, or focus target changes. Hover is
+  // deliberately excluded — `buildDecorations` never reads `hoveredEventId`
+  // (hover is CSS-only on `data-event-id`), so it triggered a full rebuild
+  // on every mouseover for an identical result.
   $effect(() => {
     void reviewStore.anchorResolutions;
     void reviewStore.events;
     void reviewStore.focusEventId;
-    void reviewStore.hoveredEventId;
     if (!pmViewForReview) return;
     requestReviewDecorationsRebuild(pmViewForReview);
   });
@@ -2293,6 +2302,71 @@
     return isEditableShortcutElement(activeEl);
   }
 
+  // Window/document title tracks the open file (Theme v2, attn-u5c): the
+  // native titlebar is hidden on macOS by design, but document.title feeds
+  // assistive tech, automation, and the window switcher.
+  $effect(() => {
+    const name = activePath ? activePath.split('/').filter(Boolean).at(-1) : null;
+    document.title = name ? `${name} — attn` : 'attn';
+  });
+
+  // Palette commands (Theme v2, attn-n9j): the palette runs the reviewer's
+  // verbs, not just file opens. Handlers are the same ones the keyboard
+  // chords call, so palette and shortcuts can never drift apart.
+  const paletteMod = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
+  const paletteCommands: PaletteCommand[] = [
+    {
+      id: 'comment',
+      label: 'Comment on selection',
+      hint: [paletteMod, '.'],
+      keywords: 'comment annotate note review thread',
+      icon: MessageSquareTextIcon,
+      run: () => openCommentComposer(),
+    },
+    {
+      id: 'suggest',
+      label: 'Suggest an edit',
+      hint: [paletteMod, '⇧', '.'],
+      keywords: 'suggest edit replace propose change',
+      icon: PenLineIcon,
+      run: () => openSuggestionComposer(),
+    },
+    {
+      id: 'share',
+      label: 'Share this file for review…',
+      hint: [paletteMod, '⇧', 'S'],
+      keywords: 'share review link encrypted room invite',
+      icon: Share2Icon,
+      run: () => openShareDialog(),
+    },
+    {
+      id: 'review-panel',
+      label: 'Toggle review panel',
+      hint: [paletteMod, 'J'],
+      keywords: 'review panel rail threads margin toggle',
+      icon: PanelRightIcon,
+      run: () => reviewStore.togglePanel(),
+    },
+    {
+      id: 'theme',
+      label: 'Switch theme (Paper / Ink)',
+      hint: ['T'],
+      keywords: 'theme dark light paper ink appearance',
+      icon: SunMoonIcon,
+      run: () => cycleTheme(),
+    },
+    {
+      id: 'shortcuts',
+      label: 'Keyboard shortcuts',
+      hint: [paletteMod, '/'],
+      keywords: 'keyboard shortcuts help keys bindings',
+      icon: KeyboardIcon,
+      run: () => {
+        shortcutsOpen = true;
+      },
+    },
+  ];
+
   function handleGlobalShortcutsHelpHotkey(e: KeyboardEvent): void {
     if (!isShortcutsHelpHotkey(e)) return;
     if (isEditableShortcutTarget(e.target)) return;
@@ -2543,6 +2617,7 @@
       onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
       onShare={showBreadcrumbShare ? openShareDialog : undefined}
       shareEnabled={showBreadcrumbShare}
+      saveState={mode === 'edit' && activeFileType === 'markdown' ? (editorDirty ? 'dirty' : 'saved') : null}
       onOpenInBrowser={activeFileType === 'html' ? () => openExternal(activePath) : undefined}
     />
   </div>
@@ -2900,6 +2975,7 @@
   {rootPath}
   remoteSearchQuery={commandPaletteSearchQuery}
   remoteSearchItems={commandPaletteSearchResults}
+  commands={paletteCommands}
   onSearchQuery={handleCommandPaletteSearchQuery}
   onSelect={(path) => openPath(path, detectFileType(path))}
 />

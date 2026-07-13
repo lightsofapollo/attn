@@ -47,11 +47,11 @@
     {#if state.actions.length > 0}
       <div class="actions">
         {#each state.actions as action (action)}
-          {#if action === 'Review storage'}
-            <a class="button" href="/app/storage">{action}</a>
-          {:else}
-            <button class="button" type="button">{action}</button>
-          {/if}
+          <!-- Every action routes to the storage page, which owns the working
+               export / backup / persistence controls. These were previously
+               dead <button>s with no handler — silent no-ops on the exact
+               "back up before you lose data" prompt. -->
+          <a class="button" href="/app/storage">{action}</a>
         {/each}
       </div>
     {/if}

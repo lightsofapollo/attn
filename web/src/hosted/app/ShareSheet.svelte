@@ -207,8 +207,22 @@
     }
     try {
       const existing = await onInspect();
-      if (existing) applyShareView(existing);
-      else phase = 'configure';
+      if (existing) {
+        applyShareView(existing);
+        return;
+      }
+      // Auto-publish on open (gate-35 redesign): clicking Share goes straight
+      // to a copyable link — no configure ceremony, no risk checkbox. Only a
+      // genuine hard block (quota/unavailable) or no shareable Markdown stops
+      // at the configure fallback. Best-effort storage auto-acknowledges and
+      // requests persistence in the background instead of gating on a checkbox.
+      if (durability.hardBlocked || !scopeValid || !onCreate) {
+        phase = 'configure';
+        return;
+      }
+      riskAcknowledged = true;
+      if (durability.canRequestPersistence && onRequestPersist) void requestPersist();
+      await publishShare();
     } catch {
       phase = 'configure';
       operationError = 'The existing share status could not be checked. You can try again.';

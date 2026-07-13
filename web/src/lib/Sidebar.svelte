@@ -4,14 +4,14 @@
   import FileTree from './FileTree.svelte';
   import ReviewFileTree from './ReviewFileTree.svelte';
   import { dragWindow } from './ipc';
-  import FolderTree from '@lucide/svelte/icons/folder-tree';
-  import TextQuote from '@lucide/svelte/icons/text-quote';
   import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
+  import Check from '@lucide/svelte/icons/check';
+  import Search from '@lucide/svelte/icons/search';
+  import X from '@lucide/svelte/icons/x';
   import {
     Sidebar,
     SidebarContent,
     SidebarFooter,
-    SidebarInput,
     SidebarMenu,
     SidebarRail,
   } from '$lib/components/ui/sidebar';
@@ -19,18 +19,12 @@
   import {
     DropdownMenu,
     DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuSeparator,
     DropdownMenuTrigger,
   } from '$lib/components/ui/dropdown-menu';
   import * as Command from '$lib/components/ui/command';
   import { reviewStore } from './review/store.svelte';
   import type { SidebarPresenceLocation } from './sidebar-presence';
   import UnreadBadge from './UnreadBadge.svelte';
-  import Check from '@lucide/svelte/icons/check';
-  import Grid2X2 from '@lucide/svelte/icons/grid-2x2';
-  import Pencil from '@lucide/svelte/icons/pencil';
-  import Plus from '@lucide/svelte/icons/plus';
 
   interface Props {
     entries: TreeNode[];
@@ -39,20 +33,15 @@
     activePath?: string;
     rootPath?: string;
     knownProjects?: string[];
-    projectLabels?: Record<string, string>;
     activeProjectPath?: string;
     remoteSearchQuery?: string;
     remoteSearchItems?: SearchResultItem[];
     onProjectSwitch?: (path: string) => void;
-    onCreateProject?: () => void;
-    onRenameProject?: () => void;
-    onOpenProjectHome?: () => void;
     onNavigate?: (path: string, newTab: boolean) => void;
     onExpand?: (path: string) => void;
     onShare?: (path: string, isDir?: boolean) => void;
-    onRenameEntry?: (path: string) => void;
-    onDownloadEntry?: (path: string) => void;
-    onDeleteEntry?: (path: string) => void;
+    onRename?: (path: string) => void;
+    onDelete?: (path: string) => void;
     sharedPaths?: Set<string>;
     onSearchQuery?: (query: string) => void;
     outline?: { id: string; text: string; level: number; line: number }[];
@@ -74,20 +63,15 @@
     activePath = '',
     rootPath = '',
     knownProjects = [],
-    projectLabels = {},
     activeProjectPath = '',
     remoteSearchQuery = '',
     remoteSearchItems = [],
     onProjectSwitch,
-    onCreateProject,
-    onRenameProject,
-    onOpenProjectHome,
     onNavigate,
     onExpand,
     onShare,
-    onRenameEntry,
-    onDownloadEntry,
-    onDeleteEntry,
+    onRename,
+    onDelete,
     sharedPaths = new Set<string>(),
     onSearchQuery,
     outline = [],
@@ -101,9 +85,29 @@
   let sidebarView: 'files' | 'outline' = $state('files');
   let query = $state('');
   let sidebarRootEl: HTMLElement | null = $state(null);
+  let filterInputEl = $state<HTMLInputElement | null>(null);
+
+  // Keyboard-first discoverability: `/` focuses the file filter, unless the
+  // user is already typing in a field or the editor. Honest hint shown in the
+  // filter; `/` never collides with the editor's own ⌘F find-in-document.
+  function isTypingTarget(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+  $effect(() => {
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isTypingTarget(event.target)) return;
+      event.preventDefault();
+      filterInputEl?.focus();
+    };
+    document.addEventListener('keydown', onKeydown);
+    return () => document.removeEventListener('keydown', onKeydown);
+  });
 
   function formatRootLabel(path: string): string {
-    if (projectLabels[path]) return projectLabels[path];
     if (rootLabel && (path === rootPath || path === selectedProject)) return rootLabel;
     if (!path) return 'Workspace';
     const parts = path.split('/').filter(Boolean);
@@ -116,6 +120,11 @@
   let selectedProject = $derived(
     activeProjectPath || rootPath || projectOptions[0] || '',
   );
+  // Scale the switcher to the number of projects: a single project is just a
+  // heading (nothing to switch to); a short list needs no filter; a long list
+  // gets a filter field.
+  let hasMultipleProjects = $derived(projectOptions.length > 1);
+  let showProjectFilter = $derived(projectOptions.length >= 8);
   let markdownFileCount = $derived(entries.length ? countMarkdownFiles(entries) : 0);
   let totalFileCount = $derived(entries.length ? countFiles(entries) : 0);
   let outlineCount = $derived(outline.length);
@@ -275,28 +284,30 @@
     ></div>
   {/if}
 
-  <div
-    class="sidebar-controls"
-    data-sidebar-controls="true"
-  >
-    <div class="sidebar-header flex items-center justify-between gap-3" style="-webkit-user-select: none">
-      <div class="sidebar-project-picker min-w-0 flex-1">
+  <div class="sidebar-controls" data-sidebar-controls="true">
+    <!-- Project identity: a quiet small-caps label (editorial furniture), not a
+         button. It becomes an interactive switcher only when there is more
+         than one project to switch to. -->
+    <div class="sidebar-project-row" style="-webkit-user-select: none">
+      {#if hasMultipleProjects}
         <DropdownMenu bind:open={projectPickerOpen}>
           <DropdownMenuTrigger
-            class="sidebar-project-select"
-            aria-label="Project picker"
+            class="sidebar-project-trigger"
+            aria-label="Switch project"
             role="combobox"
             aria-expanded={projectPickerOpen}
           >
-            <span class="sidebar-project-select-label" title={selectedProject}>
+            <span class="sidebar-project-name" title={selectedProject}>
               {formatRootLabel(selectedProject)}
             </span>
-            <ChevronsUpDown class="sidebar-project-switch-icon size-3.5" />
+            <ChevronsUpDown class="sidebar-project-chevron size-3" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" class="sidebar-project-menu p-0">
             <Command.Root class="sidebar-project-command">
-              <Command.Input placeholder="Search projects..." />
-              <Command.List class="max-h-[240px]">
+              {#if showProjectFilter}
+                <Command.Input placeholder="Filter projects" />
+              {/if}
+              <Command.List class="max-h-[300px]">
                 <Command.Empty class="px-3 py-5 text-xs text-muted-foreground">
                   No projects found.
                 </Command.Empty>
@@ -305,6 +316,7 @@
                     <Command.Item
                       value={`${formatRootLabel(projectPath)} ${projectPath}`}
                       class="sidebar-project-menu-item"
+                      data-current={projectPath === selectedProject}
                       onSelect={() => {
                         projectPickerOpen = false;
                         if (projectPath !== selectedProject) {
@@ -312,73 +324,77 @@
                         }
                       }}
                     >
-                      <span class="min-w-0 flex-1 truncate">{formatRootLabel(projectPath)}</span>
-                      {#if projectPath === selectedProject}
-                        <Check class="size-3.5" aria-hidden="true" />
-                      {/if}
+                      <Check
+                        class="sidebar-project-check size-3.5"
+                        data-active={projectPath === selectedProject}
+                      />
+                      <span class="sidebar-project-menu-label">{formatRootLabel(projectPath)}</span>
                     </Command.Item>
                   {/each}
                 </Command.Group>
               </Command.List>
             </Command.Root>
-            {#if onCreateProject || onRenameProject || onOpenProjectHome}
-              <div class="sidebar-project-menu-actions">
-                <DropdownMenuSeparator />
-                {#if onCreateProject}
-                  <DropdownMenuItem onSelect={onCreateProject}>
-                    <Plus class="size-4" aria-hidden="true" />
-                    New workspace
-                  </DropdownMenuItem>
-                {/if}
-                {#if onRenameProject}
-                  <DropdownMenuItem onSelect={onRenameProject}>
-                    <Pencil class="size-4" aria-hidden="true" />
-                    Rename workspace
-                  </DropdownMenuItem>
-                {/if}
-                {#if onOpenProjectHome}
-                  <DropdownMenuItem onSelect={onOpenProjectHome}>
-                    <Grid2X2 class="size-4" aria-hidden="true" />
-                    All workspaces
-                  </DropdownMenuItem>
-                {/if}
-              </div>
-            {/if}
           </DropdownMenuContent>
         </DropdownMenu>
-      </div>
-      {#if showOutline}
-      <div class="sidebar-mode-toggle" aria-label="Sidebar views">
-        <button
-          type="button"
-          class="sidebar-mode-button"
-          class:sidebar-mode-button--active={sidebarView === 'files'}
-          aria-label="Files"
-          title="Files"
-          onclick={() => { sidebarView = 'files'; }}
-        >
-          <FolderTree class="size-3.5" />
-        </button>
-        <button
-          type="button"
-          class="sidebar-mode-button"
-          class:sidebar-mode-button--active={sidebarView === 'outline'}
-          aria-label="Outline"
-          title="Outline"
-          onclick={() => { sidebarView = 'outline'; }}
-        >
-          <TextQuote class="size-3.5" />
-        </button>
-      </div>
+      {:else}
+        <span class="sidebar-project-name sidebar-project-name--static" title={selectedProject}>
+          {formatRootLabel(selectedProject)}
+        </span>
       {/if}
     </div>
-    <div class="sidebar-search-wrap p-0">
-      <SidebarInput
-        class="sidebar-search !h-8 !px-3 !py-1.5 !text-[0.82rem] !leading-tight"
+
+    <!-- View control (native): text tabs, rust underline marks the current one
+         — the same "rust = current" vocabulary as the file tick. -->
+    {#if showOutline}
+      <div class="sidebar-view-tabs" aria-label="Sidebar views">
+        <button
+          type="button"
+          class="sidebar-view-tab"
+          class:is-current={sidebarView === 'files'}
+          aria-pressed={sidebarView === 'files'}
+          onclick={() => { sidebarView = 'files'; }}
+        >Files</button>
+        <button
+          type="button"
+          class="sidebar-view-tab"
+          class:is-current={sidebarView === 'outline'}
+          aria-pressed={sidebarView === 'outline'}
+          onclick={() => { sidebarView = 'outline'; }}
+        >Outline</button>
+      </div>
+    {/if}
+
+    <!-- Filter: borderless furniture that only draws its box on focus; a search
+         glyph, an honest `/` hint, and a clear affordance once typing. -->
+    <div class="sidebar-filter" data-has-query={query.length > 0}>
+      <Search class="sidebar-filter-icon size-3.5" />
+      <input
+        bind:this={filterInputEl}
         bind:value={query}
+        class="sidebar-filter-input"
+        type="text"
+        autocomplete="off"
+        spellcheck="false"
         placeholder={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}
         aria-label={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}
+        onkeydown={(event) => {
+          if (event.key === 'Escape') {
+            if (query.length > 0) { query = ''; } else { filterInputEl?.blur(); }
+          }
+        }}
       />
+      {#if query.length > 0}
+        <button
+          type="button"
+          class="sidebar-filter-clear"
+          aria-label="Clear filter"
+          onclick={() => { query = ''; filterInputEl?.focus(); }}
+        >
+          <X class="size-3" />
+        </button>
+      {:else}
+        <kbd class="sidebar-filter-hint" aria-hidden="true">/</kbd>
+      {/if}
     </div>
   </div>
 
@@ -388,7 +404,7 @@
         <ScrollArea class="min-h-0 flex-1" scrollbarYClasses="pr-1">
           {#if sidebarView === 'files'}
             {#if reviewMode}
-              <div class="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">
+              <div class="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">
                 <span>Shared files</span>
                 <UnreadBadge
                   count={reviewStore.currentRoomUnread}
@@ -400,19 +416,7 @@
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
                 {#key treeRenderKey}
-                  <FileTree
-                    nodes={filteredEntries}
-                    {activePath}
-                    {rootPath}
-                    {onNavigate}
-                    {onExpand}
-                    {onShare}
-                    {onRenameEntry}
-                    {onDownloadEntry}
-                    {onDeleteEntry}
-                    {sharedPaths}
-                    {collaboratorLocations}
-                  />
+                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {collaboratorLocations} />
                 {/key}
               </SidebarMenu>
             {:else}

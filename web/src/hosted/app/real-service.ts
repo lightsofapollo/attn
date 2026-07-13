@@ -13,6 +13,7 @@ import type {
   ShareScope,
   StorageHealth,
   WorkspaceAppService,
+  WorkspaceChange,
   WorkspaceDetail,
   WorkspaceEntry,
   WorkspaceSummary,
@@ -32,6 +33,9 @@ const INLINE_SAFE_MEDIA = /^image\/(?:png|jpeg|gif|webp|avif)$/iu;
 const TAB_HOLDER_STORAGE_KEY = 'attn:browser-tab-holder:v1';
 const TAB_IDENTITY_CHANNEL = 'attn:browser-tab-identity:v1';
 const TAB_IDENTITY_PROBE_MS = 75;
+const WORKSPACE_CHANGE_CHANNEL = 'attn:workspace-changes:v1';
+
+type WorkspaceChangeMessage = WorkspaceChange & { senderId: string };
 
 type TabIdentityMessage =
   | { type: 'probe'; holderId: string; probeId: string }
@@ -125,9 +129,46 @@ async function browserTabHolderId(): Promise<string> {
 
 export class RealWorkspaceAppService implements WorkspaceAppService {
   private readonly service: BrowserWorkspaceService;
+  // One shared instance for both posting and listening: a BroadcastChannel
+  // never delivers a message back to the instance that posted it, so this
+  // tab's own commits never echo into its subscribers.
+  private readonly changeChannel: BroadcastChannel | null;
 
   private constructor(service: BrowserWorkspaceService) {
     this.service = service;
+    this.changeChannel = typeof BroadcastChannel === 'undefined'
+      ? null
+      : new BroadcastChannel(WORKSPACE_CHANGE_CHANNEL);
+  }
+
+  /** Ring the cross-tab doorbell after a durable mutation. Advisory only. */
+  private announce(change: WorkspaceChange): void {
+    try {
+      this.changeChannel?.postMessage({
+        ...change,
+        senderId: tabHolderId ?? '',
+      } satisfies WorkspaceChangeMessage);
+    } catch {
+      // Followers fall back to their next storage read; never fail the write.
+    }
+  }
+
+  subscribeWorkspaceChanges(listener: (change: WorkspaceChange) => void): () => void {
+    const channel = this.changeChannel;
+    if (!channel) return () => undefined;
+    const onMessage = (event: MessageEvent): void => {
+      const message = event.data as Partial<WorkspaceChangeMessage> | null;
+      if (!message || typeof message.workspaceId !== 'string') return;
+      if (message.kind !== 'content' && message.kind !== 'structure') return;
+      if (message.senderId === tabHolderId) return;
+      listener({
+        workspaceId: message.workspaceId,
+        kind: message.kind,
+        ...(typeof message.path === 'string' ? { path: message.path } : {}),
+      });
+    };
+    channel.addEventListener('message', onMessage);
+    return () => channel.removeEventListener('message', onMessage);
   }
 
   static async open(options: BrowserWorkspaceServiceOptions = {}): Promise<RealWorkspaceAppService> {
@@ -142,6 +183,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   }
 
   close(): void {
+    this.changeChannel?.close();
     this.service.close();
   }
 
@@ -217,6 +259,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
 
   async renameWorkspace(workspaceId: string, name: string): Promise<void> {
     await this.service.renameWorkspace(workspaceId, name);
+    this.announce({ workspaceId, kind: 'structure' });
   }
 
   async deleteWorkspace(workspaceId: string): Promise<void> {
@@ -238,6 +281,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
       await runtime.close();
       return null;
     }
+    const announce = (change: WorkspaceChange): void => this.announce(change);
     return {
       async commitText(path: string, text: string): Promise<void> {
         // The runtime serializes this with accepted suggestions and authority
@@ -247,13 +291,22 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
           path,
           body: new TextEncoder().encode(text),
         });
+        announce({ workspaceId, kind: 'content', path });
       },
       getOwnerState: () => runtime.getState(),
       subscribeOwner: (listener) => runtime.subscribe(listener),
       getController: () => runtime.controller,
       getCollabSeed: (path) => runtime.getCollabSeed(path),
-      acceptSuggestion: (input) => runtime.accept(input),
-      applySuggestion: (input) => runtime.applySuggestion(input),
+      acceptSuggestion: async (input) => {
+        const result = await runtime.accept(input);
+        announce({ workspaceId, kind: 'content', path: input.path });
+        return result;
+      },
+      applySuggestion: async (input) => {
+        const result = await runtime.applySuggestion(input);
+        announce({ workspaceId, kind: 'content', path: input.path });
+        return result;
+      },
       rejectSuggestion: (input) => runtime.reject(input),
       replyToComment: (anchor, body, threadId) => runtime.replyToComment(anchor, body, threadId),
       resolveComment: (threadId) => runtime.resolveComment(threadId),
@@ -288,6 +341,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
 
   async createMarkdownEntry(workspaceId: string, path: string): Promise<void> {
     await this.service.createMarkdown(workspaceId, path, '');
+    this.announce({ workspaceId, kind: 'structure' });
   }
 
   async addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void> {
@@ -298,14 +352,17 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
         await this.service.addAsset(workspaceId, file.path, file.bytes, file.mediaType);
       }
     }
+    if (files.length > 0) this.announce({ workspaceId, kind: 'structure' });
   }
 
   async renameEntry(workspaceId: string, fromPath: string, toPath: string): Promise<void> {
     await this.service.renameEntry(workspaceId, fromPath, toPath);
+    this.announce({ workspaceId, kind: 'structure' });
   }
 
   async deleteEntry(workspaceId: string, path: string): Promise<void> {
     await this.service.deleteEntry(workspaceId, path);
+    this.announce({ workspaceId, kind: 'structure' });
   }
 
   async readEntryBytes(

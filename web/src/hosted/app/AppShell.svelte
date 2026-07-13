@@ -160,6 +160,31 @@
     return () => window.removeEventListener('popstate', handler);
   });
 
+  // Follow the writer: when ANOTHER tab commits to this workspace (the service
+  // never delivers this tab's own changes), re-read from storage so the
+  // read-only tab mirrors the writer live instead of showing a stale snapshot.
+  $effect(() => {
+    const workspaceId = detail?.id;
+    if (!workspaceId) return;
+    return service.subscribeWorkspaceChanges((change) => {
+      if (change.workspaceId !== workspaceId) return;
+      if (change.kind === 'structure') {
+        void onWorkspaceChanged();
+        return;
+      }
+      if (change.path !== undefined && change.path !== activePath) return;
+      void refreshActiveBody(workspaceId);
+    });
+  });
+
+  async function refreshActiveBody(workspaceId: string): Promise<void> {
+    const path = activePath;
+    if (!path) return;
+    const body = await service.readBodyText(workspaceId, path).catch(() => null);
+    // Drop stale reads: the user may have switched files while we read.
+    if (body !== null && activePath === path) bodyText = body;
+  }
+
   async function onImport(name: string, files: ImportFileInput[]): Promise<void> {
     // Duplicate workspace names get an explicit numbered variant; imports
     // never overwrite or silently merge into an existing workspace.

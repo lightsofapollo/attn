@@ -176,6 +176,17 @@ export interface EditingSession {
   release(): Promise<void>;
 }
 
+/**
+ * A change another tab committed to shared local storage. `content` means a
+ * document body changed (`path` when known); `structure` means the entry
+ * list or workspace metadata changed (create/rename/delete/import).
+ */
+export interface WorkspaceChange {
+  workspaceId: string;
+  kind: 'content' | 'structure';
+  path?: string;
+}
+
 export interface WorkspaceAppService {
   storageHealth(): StorageHealth;
   listWorkspaces(): Promise<WorkspaceSummary[]>;
@@ -195,6 +206,12 @@ export interface WorkspaceAppService {
    * deadline instead of polling blindly.
    */
   peekWriterLease(workspaceId: string): Promise<number | null>;
+  /**
+   * Advisory doorbell rung after OTHER tabs commit to shared local storage —
+   * self-originated changes are never delivered. Re-read the workspace from
+   * storage on delivery; the message itself carries no document content.
+   */
+  subscribeWorkspaceChanges(listener: (change: WorkspaceChange) => void): () => void;
   // ————— multi-file/asset operations (attn-7xl.3.4) —————
   createMarkdownEntry(workspaceId: string, path: string): Promise<void>;
   addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void>;

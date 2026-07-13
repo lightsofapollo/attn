@@ -685,7 +685,21 @@
     const body = bodyText;
     untrack(() => {
       displayText = body;
-      if (path === lastActivePath) return;
+      if (path === lastActivePath) {
+        // Same file, new body: another tab committed and AppShell re-read it
+        // (follow mode). The mounted editor seeds `markdown` once, so push
+        // the fresh document in — but never while this tab is editing or a
+        // live collab binding owns the view.
+        if (
+          !editing
+          && body !== null
+          && editorRef
+          && ownerState?.liveEditingAvailable !== true
+        ) {
+          editorRef.resetToMarkdown(body);
+        }
+        return;
+      }
       lastActivePath = path;
       editing = false;
       desktopEditRequested = false;
@@ -1111,7 +1125,7 @@
       <div class="degraded-banner hosted-document-banner" role="status" data-degraded="lease-denied">
         <div>
           <strong>Another tab is editing this workspace.</strong>
-          <p>This tab stays read-only until the other tab finishes or closes.</p>
+          <p>Following its changes read-only — editing returns here when the other tab finishes.</p>
         </div>
       </div>
     {/if}

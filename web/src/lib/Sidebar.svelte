@@ -342,21 +342,19 @@
     <!-- View control (native): text tabs, rust underline marks the current one
          — the same "rust = current" vocabulary as the file tick. -->
     {#if showOutline}
-      <div class="sidebar-view-tabs" role="tablist" aria-label="Sidebar views">
+      <div class="sidebar-view-tabs" aria-label="Sidebar views">
         <button
           type="button"
           class="sidebar-view-tab"
           class:is-current={sidebarView === 'files'}
-          role="tab"
-          aria-selected={sidebarView === 'files'}
+          aria-pressed={sidebarView === 'files'}
           onclick={() => { sidebarView = 'files'; }}
         >Files</button>
         <button
           type="button"
           class="sidebar-view-tab"
           class:is-current={sidebarView === 'outline'}
-          role="tab"
-          aria-selected={sidebarView === 'outline'}
+          aria-pressed={sidebarView === 'outline'}
           onclick={() => { sidebarView = 'outline'; }}
         >Outline</button>
       </div>
@@ -375,6 +373,11 @@
         spellcheck="false"
         placeholder={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}
         aria-label={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}
+        onkeydown={(event) => {
+          if (event.key === 'Escape') {
+            if (query.length > 0) { query = ''; } else { filterInputEl?.blur(); }
+          }
+        }}
       />
       {#if query.length > 0}
         <button

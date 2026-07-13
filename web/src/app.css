@@ -346,11 +346,16 @@
     background: transparent;
     color: color-mix(in oklch, var(--sidebar-foreground) 92%, transparent);
     font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
-    font-size: 0.82rem;
+    /* Tailwind preflight forces `input { font-size: inherit }` from a winning
+       layer, so the size needs `!important` to land at the chrome scale rather
+       than inheriting the 15.5px reading size. */
+    font-size: 0.82rem !important;
     line-height: 1.2;
   }
+  /* The placeholder IS the filter's only label — keep it at AA (≥4.5:1). */
   .sidebar-filter-input::placeholder {
-    color: color-mix(in oklch, var(--sidebar-foreground) 55%, transparent);
+    color: color-mix(in oklch, var(--sidebar-foreground) 74%, transparent);
+    opacity: 1;
   }
   /* The focus affordance lives on the container box (`:focus-within`), so the
      input opts out of the global rust focus ring (`* { outline-ring }` reset) —
@@ -363,7 +368,7 @@
   .sidebar-filter-hint {
     flex: none;
     padding: 1px 5px;
-    border-radius: 4px;
+    border-radius: 6px;
     border: 1px solid color-mix(in oklch, var(--sidebar-foreground) 16%, transparent);
     color: color-mix(in oklch, var(--sidebar-foreground) 55%, transparent);
     font-family: "Source Code Pro Variable", "Source Code Pro", monospace;
@@ -378,7 +383,7 @@
     width: 18px;
     height: 18px;
     border: 0;
-    border-radius: 4px;
+    border-radius: 6px;
     background: transparent;
     color: color-mix(in oklch, var(--sidebar-foreground) 60%, transparent);
     cursor: pointer;

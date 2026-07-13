@@ -10,6 +10,7 @@
   import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
   import { expandPicked, toImportFiles } from './import-files';
   import { fileDrop, filesToPicked } from './file-drop';
+  import { autofocus } from '../../lib/hosted/autofocus';
   import type {
     EditingSession,
     SaveState,
@@ -859,7 +860,9 @@
       { id: 'edit', label: editing ? 'Stop editing' : 'Edit this document', keywords: 'write compose done',
         run: () => void (editing ? exitEdit() : enterEdit()) },
       { id: 'new', label: 'New Markdown file', keywords: 'create add document',
-        run: () => void createMarkdownFile() },
+        // Open the sidebar name field (autofocused) — calling
+        // createMarkdownFile() directly here would no-op on an empty name.
+        run: () => { addingMarkdown = true; } },
       { id: 'export', label: 'Export workspace', hint: '.zip', keywords: 'download backup save',
         run: () => void exportZip() },
     ];
@@ -878,6 +881,9 @@
 
   function onGlobalKeydown(event: KeyboardEvent): void {
     if ((event.metaKey || event.ctrlKey) && event.code === 'KeyK') {
+      // Don't open the palette behind another modal (Share dialog, bottom
+      // sheets, lightbox) — it would render under the backdrop and steal focus.
+      if (shareOpen || filesSheetOpen || reviewSheetOpen || lightboxOpen) return;
       event.preventDefault();
       paletteOpen = !paletteOpen;
     }
@@ -1107,6 +1113,7 @@
   <div class="hosted-header-actions">
     {#if renamingTitle}
       <input
+        use:autofocus
         class="hosted-title-input"
         type="text"
         aria-label="Workspace title"
@@ -1152,6 +1159,7 @@
       <div class="hosted-entry-actions" aria-label={`Actions for ${activeEntry.path}`}>
         {#if renamingEntry}
           <input
+            use:autofocus
             class="hosted-sidebar-input"
             type="text"
             aria-label="New path"
@@ -1185,6 +1193,7 @@
     {/if}
     {#if addingMarkdown}
       <input
+        use:autofocus
         class="hosted-sidebar-input"
         type="text"
         aria-label="New Markdown file path"
@@ -1286,6 +1295,7 @@
     <div class="doc-name">
       {#if editing && renamingTitle}
         <input
+          use:autofocus
           class="mobile-title-input"
           type="text"
           aria-label="Workspace title"

@@ -68,6 +68,11 @@
     } else if (event.key === 'Enter') {
       event.preventDefault();
       run(filtered[selected]);
+    } else if (event.key === 'Tab') {
+      // The input is the only focusable control; trap Tab so focus can't walk
+      // behind the veil while the palette claims to be modal.
+      event.preventDefault();
+      inputEl?.focus();
     }
   }
 </script>

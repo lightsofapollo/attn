@@ -2,6 +2,7 @@
   import AppHeader from './AppHeader.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
   import { expandPicked, prepareImport, type PickedFile } from './import-files';
+  import { autofocus } from '../../lib/hosted/autofocus';
   import { parseInviteUrl } from '../../lib/hosted/invite-url';
   import type { ImportFileInput, SharingState, StorageHealth, WorkspaceSummary } from './types';
 
@@ -206,6 +207,7 @@
         <div class="workspace-row" data-workspace-id={workspace.id}>
           {#if renamingId === workspace.id}
             <input
+              use:autofocus
               class="rename-input"
               type="text"
               aria-label="Workspace name"

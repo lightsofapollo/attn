@@ -108,11 +108,18 @@
   // comes from a back/forward navigation (the history entry already exists).
   async function applyEntry(path: string, push: boolean): Promise<void> {
     if (!detail || path === activePath) return;
-    const body = await service.readBodyText(detail.id, path);
-    activePath = path;
-    bodyText = body;
-    isNewDraft = false;
-    if (push) history.pushState(null, '', `/app/w/${detail.id}/${path}`);
+    try {
+      // Read the new body BEFORE mutating any state, so a failed read leaves
+      // the current file open rather than half-switching.
+      const body = await service.readBodyText(detail.id, path);
+      activePath = path;
+      bodyText = body;
+      isNewDraft = false;
+      if (push) history.pushState(null, '', `/app/w/${detail.id}/${path}`);
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+      phase = 'error';
+    }
   }
 
   function onSelectEntry(path: string): void {

@@ -159,13 +159,17 @@ export function buildShareBundleMutations(input: ShareEpochBundleContext): Share
 }
 
 /** Materialize public strings only while the Share sheet is open. */
-export function composeShareTierInvites(shareId: string, shareSecret: Uint8Array): ShareTierInvites {
+export function composeShareTierInvites(
+  shareId: string,
+  shareSecret: Uint8Array,
+  browserOrigin = 'https://attn.sh',
+): ShareTierInvites {
   const result = {} as ShareTierInvites;
   for (const tier of ['view', 'comment', 'suggest'] as const) {
     const keys = deriveShareLinkKeys(shareSecret, tier);
     try {
       const nativeUrl = composeShareInvite(shareId, keys.linkSecret);
-      const browserUrl = composeShareInvite(shareId, keys.linkSecret, 'https://attn.sh/');
+      const browserUrl = composeShareInvite(shareId, keys.linkSecret, browserOrigin);
       result[tier] = {
         tier,
         browserUrl,

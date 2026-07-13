@@ -90,8 +90,8 @@ const INTERNAL_ALLOW_BROWSER_HEADER = "X-Attn-Allow-Browser";
 const CORS_ALLOWED_HEADERS = "Content-Type, Attn-Admission, Attn-Owner-Signature, Attn-PoW, Attn-Device-Id, Attn-Device-Proof, Attn-Device-Registration, Attn-Share-Bundle";
 const CORS_EXPOSED_HEADERS = "Attn-Share-Bundle, Attn-Share-Tier, Attn-Sealed-Bundle, Attn-Snapshot-Id, Attn-Ciphertext-Sha256";
 
-/** Methods the relay exposes to browsers — everything in the v2 HTTP surface. */
-const CORS_ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS";
+/** Methods the relay exposes to browsers, including durable snapshot uploads. */
+const CORS_ALLOWED_METHODS = "GET, POST, PUT, DELETE, OPTIONS";
 
 /**
  * Parse `ALLOWED_BROWSER_ORIGINS` into a Set for O(1) membership lookup.
@@ -316,14 +316,12 @@ export default {
         new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } }),
       );
     }
-    // Room-route preflight (e.g. POST /v3/rooms/:id to create a room): a
-    // preflight only asks "may the browser send this request", so answer it
-    // for allowlisted origins without conditioning on the room's allowBrowser
-    // bit — the room may not exist yet on create. The ACTUAL response's CORS
-    // still gates on allowBrowser via the DO; the admission key remains the
-    // authorization boundary. Without this, the create-room preflight 204s
-    // with no CORS headers and every browser owner-share fails cross-origin.
-    if (request.method === "OPTIONS" && ROOM_ROUTE_RE.test(url.pathname)) {
+    // First room creation is the one room-route preflight that cannot consult
+    // stored policy: the Durable Object has no policy until the POST succeeds.
+    // Permit only the exact bare create route and still require the request
+    // Origin to be in ALLOWED_BROWSER_ORIGINS. Every later room preflight
+    // remains conditioned on the room's stored allowBrowser bit below.
+    if (request.method === "OPTIONS" && ROOM_CREATE_RE.test(url.pathname)) {
       return corsMiddleware(
         request,
         env,

@@ -10,7 +10,7 @@
  *   - `policy.allowBrowser == true`:
  *       - OPTIONS preflight from an allowlisted Origin → 204 with full CORS
  *         headers (Allow-Origin matches the request, Allow-Headers + Methods
- *         contain the v2 surface).
+ *         contain the browser HTTP surface, including snapshot PUTs).
  *       - GET/POST/DELETE/etc. from an allowlisted Origin → CORS headers
  *         attached to the real response.
  *       - WS upgrade from an allowlisted Origin → 101 succeeds; from a
@@ -181,6 +181,38 @@ function ensureFixtureEnv(): void {
 // --- OPTIONS preflight ----------------------------------------------------
 
 describe("CORS — OPTIONS preflight", () => {
+  it("allowlisted browser can preflight first room creation before policy exists", async () => {
+    ensureFixtureEnv();
+    for (const version of ["v2", "v3"] as const) {
+      const roomId = uniqueRoomId(`cors-create-${version}`);
+      const res = await SELF.fetch(`${URL_BASE}/${version}/rooms/${roomId}`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: ALLOWED_STAGING_ORIGIN,
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "Content-Type, Attn-Owner-Signature, Attn-PoW",
+        },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe(ALLOWED_STAGING_ORIGIN);
+      expect(res.headers.get("Access-Control-Allow-Methods")).toContain("POST");
+      expect(res.headers.get("Access-Control-Allow-Headers")).toContain("Attn-Owner-Signature");
+    }
+  });
+
+  it("first room creation preflight still rejects a non-allowlisted Origin", async () => {
+    const roomId = uniqueRoomId("cors-create-disallowed");
+    const res = await SELF.fetch(`${URL_BASE}/v3/rooms/${roomId}`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: DISALLOWED_ORIGIN,
+        "Access-Control-Request-Method": "POST",
+      },
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
   it("browser-disabled room: 204 with NO CORS headers", async () => {
     const roomId = uniqueRoomId("cors-no-browser");
     await createRoom({ roomId, allowBrowser: false });
@@ -222,7 +254,7 @@ describe("CORS — OPTIONS preflight", () => {
       "Attn-Share-Bundle, Attn-Share-Tier, Attn-Sealed-Bundle, Attn-Snapshot-Id, Attn-Ciphertext-Sha256",
     );
     expect(res.headers.get("Access-Control-Allow-Methods")).toBe(
-      "GET, POST, DELETE, OPTIONS",
+      "GET, POST, PUT, DELETE, OPTIONS",
     );
     // Vary: Origin must be set so caches don't poison cross-origin replies.
     const vary = res.headers.get("Vary") ?? "";
@@ -282,7 +314,7 @@ describe("CORS — regular HTTP responses", () => {
     expect([200, 401, 404]).toContain(res.status);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://attn.sh");
     expect(res.headers.get("Access-Control-Allow-Methods")).toBe(
-      "GET, POST, DELETE, OPTIONS",
+      "GET, POST, PUT, DELETE, OPTIONS",
     );
     expect(res.headers.get("X-Attn-Allow-Browser")).toBeNull();
     await res.text();

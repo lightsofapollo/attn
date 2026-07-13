@@ -357,6 +357,7 @@ interface DeleteRoomOpts {
   omitAdmission?: boolean;
   omitPow?: boolean;
   omitOwnerSig?: boolean;
+  origin?: string;
 }
 
 async function deleteRoom(opts: DeleteRoomOpts): Promise<Response> {
@@ -387,6 +388,7 @@ async function deleteRoom(opts: DeleteRoomOpts): Promise<Response> {
     );
     headers["Attn-Owner-Signature"] = base64UrlEncode(sig);
   }
+  if (opts.origin !== undefined) headers.Origin = opts.origin;
   return SELF.fetch(url, { method: "DELETE", headers });
 }
 
@@ -513,6 +515,7 @@ describe("DELETE /v2/rooms/:roomId — happy path", () => {
     const admissionKey = await createRoom({
       roomId,
       ownerKp,
+      policy: { allowBrowser: true },
     });
     await registerDevice({
       roomId,
@@ -530,8 +533,10 @@ describe("DELETE /v2/rooms/:roomId — happy path", () => {
       roomId,
       admissionKey,
       ownerSig: { privateKey: ownerKp.privateKey },
+      origin: "https://staging.attn.sh",
     });
     expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://staging.attn.sh");
 
     // DO storage should be empty.
     const after = await countStorageKeys(roomId);

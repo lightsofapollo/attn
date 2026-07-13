@@ -772,18 +772,19 @@ describe("durable v3 shares", () => {
     expect(ownerId).not.toBe("");
   });
 
-  it("answers browser preflight before Durable Object dispatch", async () => {
-    const response = await SELF.fetch("https://relay.example/v3/shares/preflight-share", {
+  it("allows browser snapshot PUT preflight before Durable Object dispatch", async () => {
+    const response = await SELF.fetch("https://relay.example/v3/shares/preflight-share/snapshots/readme/snapshot", {
       method: "OPTIONS",
       headers: {
         Origin: "https://attn.sh",
-        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Method": "PUT",
         "Access-Control-Request-Headers": "Attn-Admission, Attn-PoW, Attn-Owner-Signature, Attn-Device-Id, Content-Type",
       },
     });
     expect(response.status).toBe(204);
     expect(response.headers.get("Access-Control-Allow-Origin")).toBe("https://attn.sh");
     expect(response.headers.get("Access-Control-Allow-Headers")).toContain("Attn-Device-Id");
+    expect(response.headers.get("Access-Control-Allow-Methods")).toContain("PUT");
   });
 
   it("rejects equal capability keys", async () => {

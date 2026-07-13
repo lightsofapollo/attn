@@ -690,14 +690,25 @@
     const editorViewport = v?.dom.closest<HTMLElement>(
       '[data-slot="scroll-area-viewport"]',
     ) ?? null;
-    const handler = (): void => {
+    const recompute = (): void => {
       bumpRecalc();
       // Card tops are viewport-anchored container coords now, so the
       // virtualization band is simply the container's own box.
       viewportTop = 0;
       viewportHeight = containerEl?.clientHeight ?? 0;
     };
-    handler();
+    // Coalesce to one recompute per animation frame. Each recompute invalidates
+    // anchorYs, which calls view.coordsAtPos() (a forced reflow) per thread —
+    // running that on every raw scroll event caused jank in busy review rooms.
+    let rafId: number | null = null;
+    const handler = (): void => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        recompute();
+      });
+    };
+    recompute();
     editorViewport?.addEventListener('scroll', handler, { passive: true });
     window.addEventListener('resize', handler);
     let resizeObserver: ResizeObserver | null = null;
@@ -706,6 +717,7 @@
       resizeObserver.observe(v.dom);
     }
     return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
       editorViewport?.removeEventListener('scroll', handler);
       window.removeEventListener('resize', handler);
       resizeObserver?.disconnect();

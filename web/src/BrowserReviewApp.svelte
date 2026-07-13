@@ -214,12 +214,15 @@
   });
 
   // Touch reactive store reads so Svelte schedules a rebuild whenever the
-  // anchor resolution map, event log, or focus target changes.
+  // anchor resolution map, event log, or focus target changes. Hover is
+  // deliberately NOT a dependency — `buildDecorations` never reads
+  // `hoveredEventId` (hover is styled via CSS on `data-event-id`), so
+  // including it dispatched a full DecorationSet rebuild on every mouseover
+  // for a byte-identical result.
   $effect(() => {
     void reviewStore.anchorResolutions;
     void reviewStore.events;
     void reviewStore.focusEventId;
-    void reviewStore.hoveredEventId;
     if (!pmViewForReview) return;
     requestReviewDecorationsRebuild(pmViewForReview);
   });

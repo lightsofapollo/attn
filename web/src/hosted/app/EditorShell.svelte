@@ -265,7 +265,8 @@
     if (next.length === 0 || next === workspace.name) return;
     try {
       await service.renameWorkspace(workspace.id, next);
-      window.location.reload();
+      if (onWorkspaceChanged) await onWorkspaceChanged();
+      else window.location.reload();
     } catch {
       // Rename failures surface on the next durable state read.
     }
@@ -475,6 +476,7 @@
       commit: async (text) => {
         await granted.commitText(path, text);
         commitCount += 1;
+        displayText = text;
         void maybeAutoNameFromHeading(text);
       },
       onState: (state) => (saveState = state),
@@ -656,10 +658,10 @@
 
   function onEditorChanged(): void {
     if (!editorRef || !autosave) return;
-    const text = editorRef.getMarkdown();
-    if (text === displayText) return;
-    displayText = text;
-    autosave.noteChange(text);
+    // Defer the (potentially large) markdown serialization to the debounced
+    // commit — running it per keystroke made typing latency scale with doc
+    // size. `displayText` is refreshed on commit and on blur (exitEdit).
+    autosave.noteChange(() => editorRef?.getMarkdown() ?? '');
   }
 
   function handleEditorReady(view: EditorView): void {

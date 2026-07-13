@@ -28,7 +28,10 @@ export class AutosaveController {
   private readonly now: () => number;
 
   private cancelTimer: (() => void) | null = null;
-  private pendingText: string | null = null;
+  // A lazy provider so callers can defer expensive serialization (e.g. a full
+  // markdown re-serialize) until the debounce actually fires — not on every
+  // keystroke. A plain string is wrapped into a constant provider.
+  private pendingProvider: (() => string) | null = null;
   private dirtySince: number | null = null;
   private committing = false;
   private disposed = false;
@@ -47,10 +50,14 @@ export class AutosaveController {
     this.now = options.now ?? Date.now;
   }
 
-  /** Record the latest text; (re)schedule a bounded-debounce commit. */
-  noteChange(text: string): void {
+  /**
+   * Record a pending change; (re)schedule a bounded-debounce commit. Pass a
+   * `() => string` provider to defer serialization until the commit actually
+   * runs (cheap per-keystroke); a plain string is committed as-is.
+   */
+  noteChange(text: string | (() => string)): void {
     if (this.disposed) return;
-    this.pendingText = text;
+    this.pendingProvider = typeof text === 'function' ? text : () => text;
     if (this.dirtySince === null) this.dirtySince = this.now();
     this.cancelTimer?.();
     const pendingFor = this.now() - this.dirtySince;
@@ -66,7 +73,7 @@ export class AutosaveController {
   }
 
   get dirty(): boolean {
-    return this.pendingText !== null;
+    return this.pendingProvider !== null;
   }
 
   dispose(): void {
@@ -80,28 +87,30 @@ export class AutosaveController {
       // A commit is in flight; the fresh text recommits when it settles.
       return;
     }
-    const text = this.pendingText;
-    if (text === null) return;
-    this.pendingText = null;
+    const provider = this.pendingProvider;
+    if (provider === null) return;
+    this.pendingProvider = null;
     this.dirtySince = null;
     this.committing = true;
     this.onState('Saving…');
+    // Serialize exactly once, here — not per keystroke.
+    const text = provider();
     try {
       await this.commit(text);
-      if (this.pendingText === null) {
+      if (this.pendingProvider === null) {
         this.onState('Saved on this device');
       }
     } catch {
-      // The durable head is still the previous commit; keep the text pending
-      // so the next change or flush retries.
-      if (this.pendingText === null) {
-        this.pendingText = text;
+      // The durable head is still the previous commit; keep the change pending
+      // so the next change or flush retries (re-serializing the latest state).
+      if (this.pendingProvider === null) {
+        this.pendingProvider = provider;
         this.dirtySince = this.now();
       }
       this.onState('Storage needs attention');
     } finally {
       this.committing = false;
-      if (this.pendingText !== null && !this.disposed) {
+      if (this.pendingProvider !== null && !this.disposed) {
         // Newer text arrived mid-commit (or the commit failed): reschedule.
         this.cancelTimer?.();
         this.cancelTimer = this.schedule(() => void this.runCommit(), this.debounceMs);

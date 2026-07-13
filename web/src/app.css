@@ -706,6 +706,32 @@
     letter-spacing: 0.02em;
   }
 
+  /* Numbered inline anchor markers — mobile reader only. Desktop relies on the
+     margin cards, so the markers stay hidden there to avoid clutter. */
+  .attn-review-anchor-marker {
+    display: none;
+  }
+  @media (max-width: 900px) {
+    .attn-review-anchor-marker {
+      display: inline-grid;
+      place-items: center;
+      width: 17px;
+      height: 17px;
+      margin-left: 0.18rem;
+      border-radius: 999px;
+      background: var(--rust);
+      color: var(--rust-contrast);
+      font: 700 0.58rem var(--sans);
+      vertical-align: text-top;
+      cursor: pointer;
+      user-select: none;
+    }
+    .attn-review-anchor-marker[data-review-kind="suggestion"],
+    .attn-review-anchor-marker[data-review-kind="suggestion-deletion"] {
+      background: var(--green);
+    }
+  }
+
 }
 
 @layer base {

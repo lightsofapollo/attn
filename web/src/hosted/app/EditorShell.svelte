@@ -388,6 +388,13 @@
       health.mode !== 'quota-pressure',
   );
 
+  // A Markdown entry that would normally be editable but whose device storage
+  // mode blocks authoring — the honest "you can still read/review" state that
+  // the iOS reader surfaces as a "Viewing safely" banner.
+  const editingUnavailable = $derived(
+    activeEntry?.presentation === 'editable' && !canEdit,
+  );
+
   async function ensureEditorGraph(includeReview = false): Promise<void> {
     const imports: Promise<unknown>[] = [];
     if (!EditorComponent) {
@@ -751,6 +758,24 @@
     return entry.presentation === 'preview' ? '▧ ' : '◇ ';
   }
 
+  // Files-sheet grouping (attn-7xl / iOS parity): a monospace badge, the file
+  // basename, a capability subtitle, and the size — grouped Markdown vs Assets.
+  function entryBadge(entry: WorkspaceEntry): string {
+    if (entry.kind === 'markdown') return 'MD';
+    return entry.presentation === 'preview' ? 'IMG' : 'BIN';
+  }
+  function entryBasename(entry: WorkspaceEntry): string {
+    return entry.path.split('/').pop() ?? entry.path;
+  }
+  function entrySubtitle(entry: WorkspaceEntry): string {
+    if (entry.presentation === 'preview') return 'Preview inline';
+    if (entry.presentation === 'download-only') return 'Download only';
+    const slash = entry.path.lastIndexOf('/');
+    return slash > 0 ? entry.path.slice(0, slash) : 'Markdown';
+  }
+  const markdownEntries = $derived(workspace.entries.filter((e) => e.kind === 'markdown'));
+  const assetEntries = $derived(workspace.entries.filter((e) => e.kind === 'asset'));
+
   function openShare(trigger: HTMLButtonElement | undefined): void {
     blurEditor();
     filesSheetOpen = false;
@@ -798,6 +823,79 @@
     }
   }
 
+  // ————— arrival toasts (incoming review events) —————
+  interface ArrivalToast {
+    id: string;
+    text: string;
+    eventId: string;
+  }
+  let arrivalToasts = $state<ArrivalToast[]>([]);
+  const seenReviewEventIds = new Set<string>();
+  let toastsPrimed = false;
+  let toastSeq = 0;
+
+  function dismissToast(id: string): void {
+    arrivalToasts = arrivalToasts.filter((t) => t.id !== id);
+  }
+
+  function pushToast(text: string, eventId: string): void {
+    const id = `toast-${toastSeq++}`;
+    arrivalToasts = [...arrivalToasts, { id, text, eventId }];
+    setTimeout(() => dismissToast(id), 5200);
+  }
+
+  function openReviewFromToast(toast: ArrivalToast): void {
+    dismissToast(toast.id);
+    reviewStoreRef?.setFocusEventId(toast.eventId);
+    if (desktopLayout) {
+      if (reviewStoreRef) reviewStoreRef.panelOpen = true;
+    } else {
+      blurEditor();
+      filesSheetOpen = false;
+      reviewSheetOpen = true;
+    }
+  }
+
+  // Detect newly-arrived comments/suggestions authored by someone other than
+  // the local owner and surface a toast. The first pass only seeds the seen-set
+  // so existing thread history never toasts on open.
+  $effect(() => {
+    const store = reviewStoreRef;
+    if (!store) return;
+    const threads = store.threadsForCurrentFile;
+    const ownerId = store.ownerParticipantId;
+    const arrivals: { authorId: string; kind: 'comment' | 'suggestion'; eventId: string }[] = [];
+    for (const thread of threads) {
+      for (const event of [thread.rootEvent, ...thread.replies]) {
+        const eventId = event.meta.eventId;
+        if (seenReviewEventIds.has(eventId)) continue;
+        seenReviewEventIds.add(eventId);
+        if (!toastsPrimed) continue;
+        if (event.meta.authorId === ownerId) continue;
+        const kind = event.body.type === 'suggestion_created' ? 'suggestion' : 'comment';
+        arrivals.push({ authorId: event.meta.authorId, kind, eventId });
+      }
+    }
+    toastsPrimed = true;
+    for (const arrival of arrivals) {
+      const name = store.displayNameFor(arrival.authorId);
+      pushToast(`${name} ${arrival.kind === 'suggestion' ? 'suggested an edit' : 'commented'}`, arrival.eventId);
+    }
+  });
+
+  // Tapping an inline anchor marker (mobile reader) sets the store's focus
+  // target; open the review sheet in response so the thread comes into view.
+  let lastFocusForSheet: string | null = null;
+  $effect(() => {
+    const focus = reviewStoreRef?.focusEventId ?? null;
+    if (focus === lastFocusForSheet) return;
+    lastFocusForSheet = focus;
+    if (!focus || desktopLayout || editing || reviewSheetOpen) return;
+    blurEditor();
+    filesSheetOpen = false;
+    reviewSheetOpen = true;
+  });
+
   async function inspectWorkspaceShare() {
     const granted = await ensureOwnerSession();
     if (!granted) return null;
@@ -831,6 +929,20 @@
 <svelte:window onkeydown={onGlobalKeydown} />
 
 <CommandPalette bind:open={paletteOpen} commands={paletteCommands} />
+
+{#if arrivalToasts.length > 0}
+  <div class="arrival-toasts" aria-live="polite">
+    {#each arrivalToasts as toast (toast.id)}
+      <div class="arrival-toast" role="status">
+        <button class="arrival-toast-body" type="button" onclick={() => openReviewFromToast(toast)}>
+          <span class="arrival-dot"></span>
+          <span>{toast.text}</span>
+        </button>
+        <button class="arrival-toast-close" type="button" aria-label="Dismiss" onclick={() => dismissToast(toast.id)}>×</button>
+      </div>
+    {/each}
+  </div>
+{/if}
 
 {#snippet documentSurface()}
   <div class:hosted-native-document={desktopLayout} class:writing-sheet={!desktopLayout}>
@@ -955,7 +1067,7 @@
         }}
       >{workspace.name}</button>
     {/if}
-    <span class="save-state hosted-save-state" data-save-state={saveState} data-commits={commitCount}>
+    <span class="save-state hosted-save-state save-chip" data-save-state={saveState} data-commits={commitCount}>
       {ownerRoomStatus ?? saveState}
     </span>
     {#if canEdit}
@@ -1135,7 +1247,7 @@
       {:else}
         <strong>{workspace.name}</strong>
       {/if}
-      <span class="save-state" data-save-state={saveState} data-commits={commitCount}>· {saveState}</span>
+      <span class="save-state save-chip" data-save-state={saveState} data-commits={commitCount}>{saveState}</span>
     </div>
     <div class="share-action">
       <button
@@ -1159,6 +1271,24 @@
     data-drop-label="Drop files to add to this workspace"
     use:fileDrop={{ onFiles: (files) => void importFiles(files) }}
   >
+    {#if editingUnavailable}
+      <aside class="viewing-safely" role="status">
+        <svg class="viewing-safely-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M12 3l7 3v5c0 4.4-3 8.3-7 9.5C8 19.3 5 15.4 5 11V6l7-3z"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linejoin="round"
+          />
+          <path d="M9.2 12l2 2 3.6-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <div>
+          <strong>Viewing safely.</strong>
+          Editing is unavailable in this browser mode. You can still read, navigate files, review, export, or open native attn.
+        </div>
+      </aside>
+    {/if}
     {@render documentSurface()}
   </main>
   <nav class="thumb-dock" aria-label="Document actions">
@@ -1250,23 +1380,50 @@
 {/if}
 
 {#if filesSheetOpen}
-  <BottomSheet title={`Files · ${workspace.entries.length}`} onclose={closeFilesSheet}>
-    <ul class="file-list">
-      {#each workspace.entries as entry (entry.path)}
-        <li>
-          <a
-            class="file"
-            class:asset={entry.presentation !== 'editable'}
-            class:active={entry.path === activeEntry?.path}
-            href={entryHref(entry)}
-            aria-current={entry.path === activeEntry?.path ? 'page' : undefined}
-          >
-            {entryGlyph(entry)}{entry.path}
-            <span class="file-size">{entry.sizeLabel}</span>
-          </a>
-        </li>
-      {/each}
-    </ul>
+  <BottomSheet
+    title={`${markdownEntries.length} Markdown · ${assetEntries.length} ${assetEntries.length === 1 ? 'asset' : 'assets'}`}
+    onclose={closeFilesSheet}
+  >
+    {#each [{ label: 'Markdown', items: markdownEntries }, { label: 'Assets', items: assetEntries }] as group (group.label)}
+      {#if group.items.length > 0}
+        <div class="file-group">
+          <div class="file-group-label">{group.label}</div>
+          <ul class="file-list">
+            {#each group.items as entry (entry.path)}
+              <li>
+                <a
+                  class="file-row"
+                  class:asset={entry.presentation !== 'editable'}
+                  class:active={entry.path === activeEntry?.path}
+                  href={entryHref(entry)}
+                  aria-current={entry.path === activeEntry?.path ? 'page' : undefined}
+                >
+                  <span class="file-badge">{entryBadge(entry)}</span>
+                  <span class="file-row-name">
+                    <strong>{entryBasename(entry)}</strong>
+                    <small>{entrySubtitle(entry)}</small>
+                  </span>
+                  <span class="file-size">{entry.sizeLabel}</span>
+                </a>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+    {/each}
+    <button class="file-add-row" type="button" onclick={() => assetInput?.click()}>
+      ＋ Add file or asset
+    </button>
+    <input
+      bind:this={assetInput}
+      type="file"
+      multiple
+      accept=".md,.markdown,image/*,application/zip,.zip,*/*"
+      style="display: none"
+      aria-hidden="true"
+      tabindex="-1"
+      onchange={() => void onAssetsPicked()}
+    />
   </BottomSheet>
 {/if}
 

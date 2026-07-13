@@ -335,7 +335,8 @@ defineCase('exact comment → attn-review-comment class', () => {
     docSize: 1000,
     focusEventId: null,
   });
-  assert(decos.length === 1, `expected 1 decoration, got ${decos.length}`);
+  // Inline mark (index 0) + numbered anchor marker widget (mobile-only via CSS).
+  assert(decos.length === 2, `expected 2 decorations (mark + marker), got ${decos.length}`);
   const cls = decorationClass(decos[0] as unknown as AnyDecoration);
   assert(
     cls.includes('attn-review-comment'),
@@ -345,6 +346,9 @@ defineCase('exact comment → attn-review-comment class', () => {
     !cls.includes('--moved'),
     `exact comment should NOT carry --moved modifier; got "${cls}"`,
   );
+  // The second decoration is the numbered marker widget carrying the event id.
+  const marker = decos[1] as unknown as AnyDecoration;
+  assert(isWidgetDecoration(marker), 'expected a widget decoration for the anchor marker');
 });
 
 defineCase('remapped suggestion at 0.85 → underline/med-confidence class', () => {
@@ -354,10 +358,10 @@ defineCase('remapped suggestion at 0.85 → underline/med-confidence class', () 
     docSize: 1000,
     focusEventId: null,
   });
-  // Two decorations: the inline mark (index 0) PLUS the suggestion ghost-text
-  // widget that renders the proposed insertion. Marks are pushed before ghost
+  // Three decorations: the inline mark (index 0), the numbered anchor marker
+  // widget, and the suggestion ghost-text widget. Marks are pushed before
   // widgets, so decos[0] is the mark.
-  assert(decos.length === 2, `expected 2 decorations (mark + ghost), got ${decos.length}`);
+  assert(decos.length === 3, `expected 3 decorations (mark + marker + ghost), got ${decos.length}`);
   const cls = decorationClass(decos[0] as unknown as AnyDecoration);
   assert(
     cls.includes('attn-review-suggestion--moved'),
@@ -376,7 +380,7 @@ defineCase('high-confidence remapped (≥0.90) keeps the highlight treatment', (
     docSize: 1000,
     focusEventId: null,
   });
-  assert(decos.length === 1, 'expected 1 decoration');
+  assert(decos.length === 2, 'expected 2 decorations (mark + marker)');
   const cls = decorationClass(decos[0] as unknown as AnyDecoration);
   assert(
     cls.includes('attn-review-comment') && !cls.includes('--moved'),
@@ -421,7 +425,8 @@ defineCase('suggestion delete operation → --deletion modifier', () => {
     docSize: 1000,
     focusEventId: null,
   });
-  assert(decos.length === 1, 'expected 1 decoration');
+  // Delete has no ghost text, so: inline mark + numbered marker widget.
+  assert(decos.length === 2, 'expected 2 decorations (mark + marker)');
   const cls = decorationClass(decos[0] as unknown as AnyDecoration);
   assert(
     cls.includes('attn-review-suggestion--deletion'),
@@ -444,8 +449,8 @@ defineCase('4 comments stacked at same range → 3 inline + 1 widget', () => {
     focusEventId: null,
   });
 
-  // 3 inline marks + 1 widget = 4 total decorations
-  assert(decos.length === 4, `expected 4 decorations (3 inline + 1 widget), got ${decos.length}`);
+  // 3 inline marks + 1 numbered marker widget + 1 "+N more" widget = 5.
+  assert(decos.length === 5, `expected 5 decorations (3 inline + 2 widgets), got ${decos.length}`);
 
   let inlineCount = 0;
   let widgetCount = 0;
@@ -458,8 +463,8 @@ defineCase('4 comments stacked at same range → 3 inline + 1 widget', () => {
     `expected 3 inline decorations, got ${inlineCount}`,
   );
   assert(
-    widgetCount === 1,
-    `expected 1 widget decoration, got ${widgetCount}`,
+    widgetCount === 2,
+    `expected 2 widget decorations (marker + overflow), got ${widgetCount}`,
   );
 });
 
@@ -487,7 +492,7 @@ defineCase('focused event emits is-focused class on its mark', () => {
     docSize: 1000,
     focusEventId: 'evt-focus',
   });
-  assert(decos.length === 1, 'expected 1 decoration');
+  assert(decos.length === 2, 'expected 2 decorations (mark + marker)');
   const cls = decorationClass(decos[0] as unknown as AnyDecoration);
   assert(cls.includes('is-focused'), `expected is-focused class, got "${cls}"`);
 });
@@ -499,7 +504,7 @@ defineCase('decoration attributes carry data-event-id and aria-label', () => {
     docSize: 1000,
     focusEventId: null,
   });
-  assert(decos.length === 1, 'expected 1 decoration');
+  assert(decos.length === 2, 'expected 2 decorations (mark + marker)');
   const attrs = decorationAttrs(decos[0] as unknown as AnyDecoration);
   assert(
     attrs['data-event-id'] === 'evt-attrs',

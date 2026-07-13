@@ -358,6 +358,102 @@ a.workspace-row:hover {
   font: 0.7rem var(--mono);
 }
 
+/* Grouped files sheet (iOS parity): Markdown / Assets sections, badge + name +
+   capability subtitle + size rows, and an in-sheet add affordance. */
+/* Suppress the global prose bullet (base.css `ul > li::before`) leaking into
+   the sheet's file list — these rows are chrome, not markdown. */
+.bottom-sheet .file-list > li::before {
+  content: none;
+}
+.file-group {
+  padding: 0.45rem 0 0.6rem;
+}
+.file-group + .file-group {
+  border-top: 1px solid var(--rule);
+}
+.file-group-label {
+  margin: 0 0 0.45rem;
+  color: var(--hosted-muted);
+  font: 700 0.62rem/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-height: 48px;
+  padding: 0.45rem 0.5rem;
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  text-decoration: none;
+}
+.file-row:hover {
+  background: color-mix(in srgb, var(--sheet) 70%, transparent);
+}
+.file-row.active {
+  background: var(--sheet);
+}
+.file-badge {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 26px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  color: var(--hosted-muted);
+  font: 700 0.6rem/1 var(--mono);
+}
+.file-row.active .file-badge {
+  border-color: var(--rust);
+  color: var(--rust);
+}
+.file-row-name {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.file-row-name strong {
+  overflow: hidden;
+  font: 600 0.9rem var(--sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-row-name small {
+  overflow: hidden;
+  color: var(--hosted-muted);
+  font: 0.72rem var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-row .file-size {
+  flex: none;
+  color: var(--hosted-muted);
+  font: 0.72rem var(--mono);
+}
+.file-add-row {
+  width: 100%;
+  min-height: 48px;
+  margin-top: 0.5rem;
+  border: 1px dashed var(--rule);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--hosted-muted);
+  font: 650 0.85rem var(--sans);
+  cursor: pointer;
+  transition: border-color 140ms var(--ease), color 140ms var(--ease);
+}
+.file-add-row:hover {
+  border-color: var(--rust);
+  color: var(--ink);
+}
+@media (prefers-reduced-motion: reduce) {
+  .file-add-row { transition: none; }
+}
+
 .rail-add {
   margin-top: 1rem;
   color: var(--hosted-muted);
@@ -589,6 +685,141 @@ a.workspace-row:hover {
   font: 500 0.7rem/1.2 'Source Code Pro Variable', 'Source Code Pro', monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Save-state chip: a pill carrying the local-first "on this device" status
+   with a status dot (green saved / amber in-flight / rust needs-attention).
+   Restores the prototype's editor-polish save chip. */
+.save-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 8px;
+  border: 1px solid color-mix(in oklch, var(--rule) 70%, transparent);
+  border-radius: 999px;
+  font: 500 0.7rem/1.2 var(--sans);
+  color: var(--hosted-muted);
+  white-space: nowrap;
+}
+.save-chip::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  transition: background-color 160ms var(--ease);
+}
+.save-chip[data-save-state="Saving…"]::before,
+.save-chip[data-save-state="Owner offline · Review still available"]::before {
+  background: var(--amber-deep);
+}
+.save-chip[data-save-state="Storage needs attention"]::before {
+  background: var(--rust);
+}
+.hosted-save-state.save-chip {
+  font-family: var(--sans);
+  max-width: 15rem;
+}
+@media (prefers-reduced-motion: reduce) {
+  .save-chip::before { transition: none; }
+}
+
+/* iOS view-only reassurance banner. Calm steel-blue (an intentional
+   design-system addition — distinct from rust=action and green=saved) with a
+   FULL border, not the prototype's banned left-stripe. Body stays --ink for
+   AA contrast. */
+.viewing-safely {
+  /* Single intentional design-system addition: a calm view-only accent,
+     semantically distinct from rust (action) and green (saved). */
+  --view-only: oklch(0.55 0.06 230);
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  margin: 0 0 1.6rem;
+  padding: 0.8rem 0.95rem;
+  border: 1px solid color-mix(in oklch, var(--view-only) 75%, transparent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklch, var(--view-only) 12%, var(--paper));
+  color: var(--ink);
+  font: 0.82rem/1.45 var(--sans);
+}
+.viewing-safely strong { font-weight: 650; }
+
+/* Arrival toasts: incoming peer comments/suggestions. Bottom-center, clear of
+   the mobile thumb dock; tap to jump to the thread. */
+.arrival-toasts {
+  position: fixed;
+  z-index: 65;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 5.5rem);
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: min(23rem, calc(100vw - 2rem));
+}
+@media (min-width: 901px) {
+  .arrival-toasts {
+    left: auto;
+    right: 1.25rem;
+    bottom: 1.25rem;
+    transform: none;
+  }
+}
+.arrival-toast {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  background: var(--sheet-raised);
+  box-shadow: var(--shadow-strong);
+  animation: arrival-in 160ms var(--ease);
+}
+@keyframes arrival-in {
+  from { opacity: 0; transform: translateY(8px); }
+}
+.arrival-toast-body {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.7rem 0.5rem 0.7rem 0.85rem;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 500 0.85rem var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+.arrival-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--rust);
+}
+.arrival-toast-close {
+  flex: none;
+  width: 2.1rem;
+  border: 0;
+  border-left: 1px solid var(--rule);
+  background: transparent;
+  color: var(--hosted-muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+.arrival-toast-close:hover { color: var(--ink); }
+@media (prefers-reduced-motion: reduce) {
+  .arrival-toast { animation: none; }
+}
+.viewing-safely-icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--view-only);
 }
 
 .hosted-header-button {

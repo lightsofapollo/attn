@@ -609,7 +609,14 @@ a.workspace-row:hover {
   background: var(--background);
 }
 
+/* A flex column from the (rendered-height) document wrapper down to the
+   editable surface, so the ProseMirror grows to fill the viewport and clicking
+   anywhere below the last line still places the caret — no dead, non-editable
+   space. Flex distributes the wrapper's actual height (unlike `%`, which needs
+   a definite-height ancestor the stretched chain doesn't provide). */
 .hosted-native-document {
+  display: flex;
+  flex-direction: column;
   min-height: 100%;
   padding: 0.35rem 0 4rem;
   color: var(--foreground);
@@ -617,7 +624,21 @@ a.workspace-row:hover {
 }
 
 .hosted-native-document .editor-container {
-  min-height: 100%;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.hosted-native-document .editor-container > .prosemirror-mount {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.hosted-native-document .prosemirror-mount > .ProseMirror {
+  flex: 1 1 auto;
 }
 
 .hosted-native-document > .hosted-editor-surface {

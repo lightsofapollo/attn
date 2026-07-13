@@ -87,6 +87,15 @@
   overflow-x: hidden;
 }
 
+/* A text editor's caret IS its focus indicator — never draw the global rust
+   focus ring on the editable surface (it would box the entire document). The
+   `!important` beats the `* { outline-ring }` reset that reaches contenteditable. */
+.ProseMirror:focus,
+.ProseMirror:focus-visible,
+.ProseMirror-focused {
+  outline: none !important;
+}
+
 .ProseMirror > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote) {
   max-width: 72ch;
 }

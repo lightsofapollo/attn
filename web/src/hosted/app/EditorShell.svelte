@@ -34,9 +34,21 @@
     /** Decoded head body when the active entry is Markdown; null otherwise. */
     bodyText?: string | null;
     isNewDraft?: boolean;
+    /** Switch the active file in place (no reload). Provided by AppShell. */
+    onSelectEntry?: (path: string) => void;
+    /** Refresh the workspace after an entry-list change (no reload). */
+    onWorkspaceChanged?: (openPath?: string) => Promise<void>;
   }
 
-  const { service, workspace, activePath, bodyText = null, isNewDraft = false }: Props = $props();
+  const {
+    service,
+    workspace,
+    activePath,
+    bodyText = null,
+    isNewDraft = false,
+    onSelectEntry,
+    onWorkspaceChanged,
+  }: Props = $props();
 
   const health: StorageHealth = $derived(service.storageHealth());
   const activeEntry = $derived(
@@ -310,7 +322,13 @@
     railError = null;
     try {
       await service.createMarkdownEntry(workspace.id, path);
-      window.location.assign(`/app/w/${workspace.id}/${path}`);
+      if (onWorkspaceChanged) {
+        newMarkdownPath = '';
+        addingMarkdown = false;
+        await onWorkspaceChanged(path);
+      } else {
+        window.location.assign(`/app/w/${workspace.id}/${path}`);
+      }
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
@@ -320,7 +338,8 @@
     railError = null;
     try {
       await service.addAssetFiles(workspace.id, toImportFiles(await expandPicked(await filesToPicked(files))));
-      window.location.reload();
+      if (onWorkspaceChanged) await onWorkspaceChanged();
+      else window.location.reload();
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     } finally {
@@ -341,7 +360,8 @@
     railError = null;
     try {
       await service.renameEntry(workspace.id, entry.path, target);
-      window.location.assign(`/app/w/${workspace.id}/${target}`);
+      if (onWorkspaceChanged) await onWorkspaceChanged(target);
+      else window.location.assign(`/app/w/${workspace.id}/${target}`);
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
@@ -354,7 +374,8 @@
     railError = null;
     try {
       await service.deleteEntry(workspace.id, entry.path);
-      window.location.assign(`/app/w/${workspace.id}`);
+      if (onWorkspaceChanged) await onWorkspaceChanged();
+      else window.location.assign(`/app/w/${workspace.id}`);
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
@@ -438,17 +459,26 @@
       editDenied = state.leaseRole === 'passive';
       if (!state.writable) editing = false;
     });
-    if (!autosave && activeEntry?.presentation === 'editable') {
-      const path = activeEntry.path;
-      autosave = new AutosaveController({
-        commit: async (text) => {
-          await granted.commitText(path, text);
-          commitCount += 1;
-          void maybeAutoNameFromHeading(text);
-        },
-        onState: (state) => (saveState = state),
-      });
-    }
+    ensureAutosaveForActiveFile();
+  }
+
+  // (Re)create the autosave controller bound to the CURRENT active file. Called
+  // on session install and on every in-place file switch, so autosave always
+  // commits to the file on screen — never the previously open one.
+  function ensureAutosaveForActiveFile(): void {
+    const granted = session;
+    const entry = activeEntry;
+    if (!granted || entry?.presentation !== 'editable') return;
+    autosave?.dispose();
+    const path = entry.path;
+    autosave = new AutosaveController({
+      commit: async (text) => {
+        await granted.commitText(path, text);
+        commitCount += 1;
+        void maybeAutoNameFromHeading(text);
+      },
+      onState: (state) => (saveState = state),
+    });
   }
 
   async function ensureOwnerSession(): Promise<EditingSession | null> {
@@ -579,6 +609,26 @@
       editorLoading = false;
     }
   }
+
+  // Re-seed the reader/editor when the active file changes IN PLACE (no reload).
+  // Depends only on the activePath/bodyText props, so live edits never trip it.
+  // The editor DOM remounts via `{#key activeEntry.path}`; here we reset the
+  // per-file script state (view text, edit mode, autosave binding).
+  // svelte-ignore state_referenced_locally — seed the switch tracker with the
+  // initial path; subsequent changes are observed inside the effect below.
+  let lastActivePath = activePath;
+  $effect(() => {
+    const path = activePath;
+    const body = bodyText;
+    untrack(() => {
+      displayText = body;
+      if (path === lastActivePath) return;
+      lastActivePath = path;
+      editing = false;
+      desktopEditRequested = false;
+      ensureAutosaveForActiveFile();
+    });
+  });
 
   // Mobile is reader-first, but it is still a rendered Markdown reader. Load
   // the shared document surface without granting editability; the Edit action
@@ -748,9 +798,17 @@
     return `/app/w/${workspace.id}/${entry.path}`;
   }
 
+  // Switch files in place (no page reload). Flush the current file's autosave
+  // first so nothing is lost, then let AppShell swap activePath/bodyText.
+  async function switchTo(path: string): Promise<void> {
+    if (!path || path === activeEntry?.path) return;
+    await autosave?.flush();
+    if (onSelectEntry) onSelectEntry(path);
+    else window.location.assign(`/app/w/${workspace.id}/${path}`);
+  }
+
   function navigateDesktopTree(relativePath: string): void {
-    if (!relativePath || relativePath === activeEntry?.path) return;
-    window.location.assign(`/app/w/${workspace.id}/${relativePath}`);
+    void switchTo(relativePath);
   }
 
   function entryGlyph(entry: WorkspaceEntry): string {
@@ -976,20 +1034,22 @@
         class:hosted-mobile-reader={!desktopLayout}
         data-body-text="rendered"
       >
-        <EditorComponent
-          bind:this={editorRef}
-          markdown={collabSeed?.markdown ?? displayText ?? ''}
-          editable={editing && ownerState?.writable !== false}
-          plugins={changeWatcher as never}
-          onReady={handleEditorReady}
-          onCheckboxToggle={onEditorChanged}
-          collabClientId={ownerState?.liveEditingAvailable
-            ? collabClientId ?? undefined
-            : undefined}
-          {collabEpoch}
-          onCollabDocChange={handleCollabDocChange}
-          onCollabSelectionChange={handleCollabSelectionChange}
-        />
+        {#key activeEntry?.path}
+          <EditorComponent
+            bind:this={editorRef}
+            markdown={collabSeed?.markdown ?? bodyText ?? displayText ?? ''}
+            editable={editing && ownerState?.writable !== false}
+            plugins={changeWatcher as never}
+            onReady={handleEditorReady}
+            onCheckboxToggle={onEditorChanged}
+            collabClientId={ownerState?.liveEditingAvailable
+              ? collabClientId ?? undefined
+              : undefined}
+            {collabEpoch}
+            onCollabDocChange={handleCollabDocChange}
+            onCollabSelectionChange={handleCollabSelectionChange}
+          />
+        {/key}
       </div>
     {:else if desktopLayout && activeEntry?.presentation === 'editable'}
       <div class="hosted-editor-loading" role="status">Opening editor…</div>
@@ -1397,6 +1457,14 @@
                   class:active={entry.path === activeEntry?.path}
                   href={entryHref(entry)}
                   aria-current={entry.path === activeEntry?.path ? 'page' : undefined}
+                  onclick={(event) => {
+                    // Plain left-click switches in place; modifier-clicks keep
+                    // the native open-in-new-tab behavior.
+                    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                    event.preventDefault();
+                    closeFilesSheet();
+                    void switchTo(entry.path);
+                  }}
                 >
                   <span class="file-badge">{entryBadge(entry)}</span>
                   <span class="file-row-name">

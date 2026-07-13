@@ -102,6 +102,57 @@
     }
   }
 
+  // Switch the active file WITHOUT a page reload: read the new body, update
+  // state, and push the URL. The editor swaps in place (< 100 ms, no flash)
+  // instead of re-bootstrapping the whole app. `push` is false when the change
+  // comes from a back/forward navigation (the history entry already exists).
+  async function applyEntry(path: string, push: boolean): Promise<void> {
+    if (!detail || path === activePath) return;
+    const body = await service.readBodyText(detail.id, path);
+    activePath = path;
+    bodyText = body;
+    isNewDraft = false;
+    if (push) history.pushState(null, '', `/app/w/${detail.id}/${path}`);
+  }
+
+  function onSelectEntry(path: string): void {
+    void applyEntry(path, true);
+  }
+
+  // Refresh the in-memory workspace after an entry-list change (create, rename,
+  // delete, import assets) — no page reload. `openPath` opens that file; when
+  // omitted the current file stays open, unless it was just deleted, in which
+  // case we fall back to the workspace's default entry.
+  async function onWorkspaceChanged(openPath?: string): Promise<void> {
+    if (!detail) return;
+    const fresh = await service.getWorkspace(detail.id);
+    if (!fresh) return;
+    detail = fresh;
+    const target =
+      openPath ??
+      (activePath && fresh.entries.some((entry) => entry.path === activePath)
+        ? activePath
+        : fresh.openPath);
+    if (target !== activePath) {
+      bodyText = await service.readBodyText(fresh.id, target);
+      activePath = target;
+    }
+    isNewDraft = false;
+    history.replaceState(null, '', `/app/w/${fresh.id}/${target}`);
+  }
+
+  // Keep the active file in sync with the URL on back/forward.
+  $effect(() => {
+    const handler = () => {
+      if (!detail) return;
+      const match = window.location.pathname.match(/^\/app\/w\/[^/]+\/(.+)$/u);
+      const path = match ? decodeURIComponent(match[1]) : detail.openPath;
+      void applyEntry(path, false);
+    };
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  });
+
   async function onImport(name: string, files: ImportFileInput[]): Promise<void> {
     // Duplicate workspace names get an explicit numbered variant; imports
     // never overwrite or silently merge into an existing workspace.
@@ -182,7 +233,15 @@
     </main>
   </div>
 {:else if editorMode && detail}
-  <EditorShell {service} workspace={detail} {activePath} {bodyText} {isNewDraft} />
+  <EditorShell
+    {service}
+    workspace={detail}
+    {activePath}
+    {bodyText}
+    {isNewDraft}
+    {onSelectEntry}
+    {onWorkspaceChanged}
+  />
 {:else if route?.view === 'workspace'}
   <div class="app-shell" data-app-view="missing">
     <main class="desk">

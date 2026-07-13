@@ -310,6 +310,10 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return cleared;
   }
 
+  async peekWriterLease(): Promise<number | null> {
+    return null;
+  }
+
   async beginEditing(workspaceId: string): Promise<EditingSession | null> {
     const ownerState: BrowserOwnerWorkspaceRuntimeState = {
       status: 'active',

@@ -224,6 +224,13 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     await this.service.deleteWorkspace(workspaceId);
   }
 
+  async peekWriterLease(workspaceId: string): Promise<number | null> {
+    const holderId = await browserTabHolderId();
+    const record = await this.service.leases.current(workspaceId);
+    if (!record || record.holderId === holderId || record.expiresAt <= Date.now()) return null;
+    return record.expiresAt;
+  }
+
   async beginEditing(workspaceId: string): Promise<EditingSession | null> {
     const holderId = await browserTabHolderId();
     const runtime = await this.service.beginOwnerRuntime(workspaceId, holderId);

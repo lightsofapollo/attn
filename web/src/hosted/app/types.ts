@@ -189,6 +189,12 @@ export interface WorkspaceAppService {
   deleteWorkspace(workspaceId: string): Promise<void>;
   /** Null when another tab holds the writer lease — stay read-only. */
   beginEditing(workspaceId: string): Promise<EditingSession | null>;
+  /**
+   * Expiry (ms epoch) of another tab's live writer lease, or null when this
+   * tab could acquire now. Lets a read-only tab wait on the exact takeover
+   * deadline instead of polling blindly.
+   */
+  peekWriterLease(workspaceId: string): Promise<number | null>;
   // ————— multi-file/asset operations (attn-7xl.3.4) —————
   createMarkdownEntry(workspaceId: string, path: string): Promise<void>;
   addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void>;

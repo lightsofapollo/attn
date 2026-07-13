@@ -519,6 +519,48 @@
     return () => channel.close();
   });
 
+  // The doorbell above is best-effort: a tab that crashes — or whose pagehide
+  // close never finishes its async release — leaves the lease dangling and
+  // never broadcasts. The lease still expires (15s), so while denied, wait on
+  // that exact deadline and re-attempt takeover; also re-attempt when this tab
+  // regains focus, so returning to it clears the banner immediately.
+  $effect(() => {
+    const wsId = workspace.id;
+    if (!editDenied) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const attempt = async (): Promise<void> => {
+      const granted = await untrack(() => ensureOwnerSession());
+      if (!disposed && !granted) armExpiryTimer();
+    };
+    const armExpiryTimer = (): void => {
+      void service.peekWriterLease(wsId).then((expiresAt) => {
+        if (disposed || timer !== null) return;
+        const delayMs = Math.max(expiresAt === null ? 0 : expiresAt - Date.now(), 250);
+        timer = setTimeout(() => {
+          timer = null;
+          void attempt();
+        }, delayMs);
+      });
+    };
+    const onFocus = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      void attempt();
+    };
+
+    armExpiryTimer();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      disposed = true;
+      if (timer !== null) clearTimeout(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  });
+
   // Desktop opens editor-first and therefore needs route authority up front.
   // Mobile is deliberately reader-first: merely opening a document must not
   // block a desktop writer in another tab. It asks for authority only when the

@@ -90,106 +90,90 @@
     background-size: auto, 8px 8px;
   }
 
-  .project-sidebar .sidebar-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 0;
-    margin: 0;
-  }
-
+  /* Flush editorial furniture — no floating card. The controls sit directly on
+     the sidebar so the paper grain reads continuously; a hairline rule under
+     the project label (not a bordered panel) separates identity from the tree. */
   .project-sidebar .sidebar-controls[data-sidebar-controls="true"] {
     display: grid;
-    gap: 10px;
-    margin: 0 12px 12px;
-    padding: 10px;
-    border-radius: 12px;
-    border: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent);
-    background: color-mix(in oklch, var(--background) 80%, white 20%);
-    box-shadow:
-      inset 0 1px 0 color-mix(in oklch, white 48%, transparent),
-      0 1px 2px color-mix(in oklch, black 4%, transparent);
-  }
-
-  .dark .project-sidebar .sidebar-controls[data-sidebar-controls="true"] {
-    border-color: color-mix(in oklch, white 10%, transparent);
-    background: color-mix(in oklch, var(--background) 90%, black 10%);
-    box-shadow:
-      inset 0 1px 0 color-mix(in oklch, white 12%, transparent),
-      0 6px 16px color-mix(in oklch, black 36%, transparent);
-  }
-
-  .project-sidebar .sidebar-project-picker {
-    min-width: 0;
-    flex: 1;
-    display: grid;
-    gap: 3px;
-  }
-
-  .sidebar-project-select {
-    width: 100%;
-    min-width: 0;
-    height: 36px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: space-between;
     gap: 8px;
-    border-radius: 10px;
-    border: 1px solid transparent;
+    margin: 0;
+    padding: 10px 12px 8px;
     background: transparent;
-    color: color-mix(in oklch, var(--foreground) 90%, transparent);
-    padding: 0 12px;
-    font-size: 0.95rem;
-    font-weight: 650;
-    line-height: 1.2;
-    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
-    text-align: left;
-    transition: background-color 120ms ease, border-color 120ms ease;
+    border: 0;
+    box-shadow: none;
   }
 
-  .sidebar-project-select:hover {
-    background: color-mix(in oklch, var(--foreground) 4%, transparent);
+  /* Project identity row: the small-caps label + a hairline rule beneath it. */
+  .sidebar-project-row {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid color-mix(in oklch, var(--sidebar-foreground) 12%, transparent);
+  }
+  .dark .sidebar-project-row {
+    border-bottom-color: color-mix(in oklch, white 10%, transparent);
   }
 
-  .dark .sidebar-project-select:hover {
-    background: color-mix(in oklch, white 9%, transparent);
-  }
-
-  .sidebar-project-select:focus {
-    outline: none;
-  }
-
-  .sidebar-project-select:focus-visible {
-    background: color-mix(in oklch, var(--foreground) 6%, transparent);
-  }
-
-  .sidebar-project-select-label {
-    flex: 1;
+  /* The project name uses the real DESIGN.md label token — small-caps chrome,
+     not a heading and not a button. It reads as editorial furniture. */
+  .sidebar-project-name {
+    display: block;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+    font-size: 0.7rem;
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: color-mix(in oklch, var(--sidebar-foreground) 82%, transparent);
+  }
+
+  /* Interactive switcher (2+ projects): the label IS the control — no button
+     body, just a chevron and a hover/focus reveal. */
+  .sidebar-project-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    transition: color var(--t) var(--ease);
+  }
+  .sidebar-project-trigger:hover .sidebar-project-name,
+  .sidebar-project-trigger[aria-expanded="true"] .sidebar-project-name {
+    color: var(--sidebar-foreground);
+  }
+  .sidebar-project-trigger:focus {
+    outline: none;
+  }
+  .sidebar-project-trigger:focus-visible .sidebar-project-name {
+    color: var(--sidebar-foreground);
+    text-decoration: underline;
+    text-decoration-color: var(--primary);
+    text-underline-offset: 3px;
+  }
+  .sidebar-project-chevron {
+    flex: none;
+    opacity: 0.5;
+    color: color-mix(in oklch, var(--sidebar-foreground) 70%, transparent);
+    transition: opacity var(--t) var(--ease);
+  }
+  .sidebar-project-trigger:hover .sidebar-project-chevron,
+  .sidebar-project-trigger[aria-expanded="true"] .sidebar-project-chevron {
+    opacity: 0.9;
   }
 
   .sidebar-project-menu {
     min-width: 220px;
     max-width: 320px;
-  }
-
-  /* Single-project surfaces (always the hosted web app) render a quiet
-     heading, not a dropdown — there is nothing to switch to. */
-  .sidebar-project-static {
-    height: 40px;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    padding: 0 12px;
-    color: color-mix(in oklch, var(--foreground) 90%, transparent);
-    font: 650 0.95rem/1.2 "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* The command is now transparent so the popover is ONE paper card (the
@@ -256,11 +240,6 @@
     box-shadow: none;
   }
 
-  .sidebar-project-switch-icon {
-    opacity: 0.72;
-    color: color-mix(in oklch, var(--sidebar-foreground) 82%, transparent);
-  }
-
   .project-sidebar [data-sidebar="content"] {
     min-height: 0;
   }
@@ -273,47 +252,51 @@
     padding: 0;
   }
 
-  .sidebar-mode-toggle {
+  /* View control: text tabs with a rust underline on the current one — the
+     same "rust = current" vocabulary as the active-file tick, replacing the
+     old segmented icon toggle's separate white-slab idiom. */
+  .sidebar-view-tabs {
     display: flex;
-    align-items: center;
-    gap: 5px;
-    background: color-mix(in oklch, var(--foreground) 6%, transparent);
-    padding: 3px;
-    border-radius: 10px;
+    gap: 16px;
+    padding: 0 1px;
   }
-
-  .dark .sidebar-mode-toggle {
-    background: color-mix(in oklch, white 8%, transparent);
-  }
-
-  .sidebar-mode-button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 26px;
-    height: 26px;
-    border-radius: 7px;
-    color: color-mix(in oklch, var(--sidebar-foreground) 76%, transparent);
-    border: 1px solid transparent;
+  .sidebar-view-tab {
+    position: relative;
+    padding: 2px 0 4px;
+    border: 0;
     background: transparent;
-    transition: color var(--t) var(--ease), background var(--t) var(--ease), border-color var(--t) var(--ease);
+    cursor: pointer;
+    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+    font-size: 0.7rem;
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: color-mix(in oklch, var(--sidebar-foreground) 60%, transparent);
+    transition: color var(--t) var(--ease);
   }
-
-  .sidebar-mode-button:hover {
-    color: color-mix(in oklch, var(--foreground) 86%, transparent);
+  .sidebar-view-tab:hover {
+    color: color-mix(in oklch, var(--sidebar-foreground) 88%, transparent);
   }
-
-  .sidebar-mode-button--active {
-    color: color-mix(in oklch, var(--foreground) 95%, transparent);
-    background: var(--background);
-    border-color: color-mix(in oklch, var(--foreground) 10%, transparent);
-    box-shadow: 0 1px 2px color-mix(in oklch, black 4%, transparent);
+  .sidebar-view-tab.is-current {
+    color: var(--sidebar-foreground);
   }
-
-  .dark .sidebar-mode-button--active {
-    background: color-mix(in oklch, var(--background) 84%, white 16%);
-    border-color: color-mix(in oklch, white 12%, transparent);
-    box-shadow: 0 2px 6px color-mix(in oklch, black 32%, transparent);
+  .sidebar-view-tab.is-current::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--primary);
+  }
+  .sidebar-view-tab:focus-visible {
+    outline: none;
+    color: var(--sidebar-foreground);
+    text-decoration: underline;
+    text-decoration-color: var(--primary);
+    text-underline-offset: 3px;
   }
 
   .sidebar-pane {
@@ -325,47 +308,85 @@
     background: transparent;
   }
 
-  .project-sidebar .sidebar-search-wrap {
-    padding: 0;
+  /* Borderless filter: transparent furniture that draws its box only on focus.
+     One control height; radius on the DESIGN.md scale (md = 8px). */
+  .sidebar-filter {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 8px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: transparent;
+    transition: border-color var(--t) var(--ease), background-color var(--t) var(--ease);
   }
-
-  .sidebar-search {
-    width: 100%;
-    height: 32px;
-    border-radius: 9px;
-    border: 1px solid color-mix(in oklch, var(--foreground) 12%, transparent);
-    background: color-mix(in oklch, var(--background) 84%, white 16%);
-    color: color-mix(in oklch, var(--foreground) 86%, transparent);
-    padding-inline: 12px;
-    padding-block: 6px;
-    font-size: 0.82rem;
-    font-weight: 600;
-    line-height: 1.2;
+  .sidebar-filter:focus-within {
+    border-color: color-mix(in oklch, var(--sidebar-foreground) 16%, transparent);
+    background: color-mix(in oklch, var(--sidebar-foreground) 4%, transparent);
+  }
+  .dark .sidebar-filter:focus-within {
+    border-color: color-mix(in oklch, white 14%, transparent);
+    background: color-mix(in oklch, white 5%, transparent);
+  }
+  .sidebar-filter-icon {
+    flex: none;
+    opacity: 0.5;
+    color: color-mix(in oklch, var(--sidebar-foreground) 70%, transparent);
+    transition: opacity var(--t) var(--ease);
+  }
+  .sidebar-filter:focus-within .sidebar-filter-icon {
+    opacity: 0.75;
+  }
+  .sidebar-filter-input {
+    flex: 1;
+    min-width: 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: color-mix(in oklch, var(--sidebar-foreground) 92%, transparent);
     font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
-    box-shadow: inset 0 1px 0 color-mix(in oklch, white 35%, transparent);
-    transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+    font-size: 0.82rem;
+    line-height: 1.2;
   }
-
-  .dark .sidebar-search {
-    border-color: color-mix(in oklch, white 12%, transparent);
-    background: color-mix(in oklch, var(--background) 92%, black 8%);
-    color: color-mix(in oklch, var(--foreground) 90%, transparent);
-    box-shadow: inset 0 1px 0 color-mix(in oklch, white 12%, transparent);
+  .sidebar-filter-input::placeholder {
+    color: color-mix(in oklch, var(--sidebar-foreground) 55%, transparent);
   }
-
-  .sidebar-search:focus {
-    outline: none;
-    border-color: color-mix(in oklch, var(--foreground) 24%, transparent);
-    box-shadow: inset 0 1px 0 color-mix(in oklch, white 45%, transparent);
+  /* The focus affordance lives on the container box (`:focus-within`), so the
+     input opts out of the global rust focus ring (`* { outline-ring }` reset) —
+     one quiet indicator, not two. `!important` overrides that cross-layer reset. */
+  .sidebar-filter-input:focus,
+  .sidebar-filter-input:focus-visible {
+    outline: none !important;
+    box-shadow: none !important;
   }
-
-  .dark .sidebar-search:focus {
-    border-color: color-mix(in oklch, white 20%, transparent);
-    box-shadow: inset 0 1px 0 color-mix(in oklch, white 16%, transparent);
+  .sidebar-filter-hint {
+    flex: none;
+    padding: 1px 5px;
+    border-radius: 4px;
+    border: 1px solid color-mix(in oklch, var(--sidebar-foreground) 16%, transparent);
+    color: color-mix(in oklch, var(--sidebar-foreground) 55%, transparent);
+    font-family: "Source Code Pro Variable", "Source Code Pro", monospace;
+    font-size: 0.68rem;
+    line-height: 1.4;
   }
-
-  .sidebar-search:focus-visible {
-    outline: none;
+  .sidebar-filter-clear {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: color-mix(in oklch, var(--sidebar-foreground) 60%, transparent);
+    cursor: pointer;
+    transition: color var(--t) var(--ease), background-color var(--t) var(--ease);
+  }
+  .sidebar-filter-clear:hover {
+    color: var(--sidebar-foreground);
+    background: color-mix(in oklch, var(--sidebar-foreground) 8%, transparent);
   }
 
   .sidebar-tree-menu [data-sidebar="menu-button"],
@@ -831,34 +852,6 @@
 
 .sidebar-project-menu[data-slot="dropdown-menu-content"] [data-slot="command-list"] {
   padding: 6px 0;
-}
-
-.project-sidebar .sidebar-project-select {
-  height: 40px;
-  min-height: 40px;
-  padding: 0 12px;
-  border-radius: 11px;
-  font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
-  font-size: 0.95rem;
-  font-weight: 650;
-  line-height: 1.2;
-}
-
-.project-sidebar .sidebar-project-select-label {
-  font-size: 0.95rem;
-  line-height: 1.2;
-}
-
-.project-sidebar .sidebar-mode-toggle {
-  min-height: 32px;
-  padding: 3px;
-  border-radius: 11px;
-}
-
-.project-sidebar .sidebar-mode-button {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
 }
 
 /* ============================================

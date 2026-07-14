@@ -19,11 +19,11 @@
   --sans: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
   --mono: 'Source Code Pro Variable', 'Source Code Pro', 'SF Mono', Consolas, monospace;
 
-  /* Running-prose measure (Wide-Sheet Rule): paragraphs/lists/quotes cap
-     here while wide blocks (tables, mermaid, code) span the full pane.
-     Widened 72ch → 88ch (2026-07-13) so prose doesn't read undersized
-     next to full-pane blocks. */
-  --prose-measure: 88ch;
+  /* Shared content column (Shared-Column Rule, 2026-07-13): prose AND wide
+     blocks (tables, mermaid, code) cap at the same edge; oversized tables
+     scroll inside it. Replaced the split 72ch-prose/full-pane-blocks layout,
+     which read as ragged whenever a wide block was on screen. */
+  --content-measure: 1100px;
 
   /* Motion — one signature: fast, exact, ease-out-quart */
   --ease: cubic-bezier(0.165, 0.84, 0.44, 1);

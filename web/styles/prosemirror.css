@@ -72,9 +72,9 @@
   outline-offset: 1px;
 }
 
-/* Editor surface: full-width and left-set; running prose caps at the
-   --prose-measure token, wide blocks (code, tables, mermaid) span the
-   pane (Theme v2 decision). */
+/* Editor surface: left-set, one shared content column — prose and wide
+   blocks (code, tables, mermaid) cap at the same --content-measure edge;
+   oversized tables scroll within it (Shared-Column Rule, 2026-07-13). */
 .ProseMirror {
   max-width: none;
   margin: 0;
@@ -97,8 +97,8 @@
   outline: none !important;
 }
 
-.ProseMirror > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote) {
-  max-width: var(--prose-measure);
+.ProseMirror > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container) {
+  max-width: var(--content-measure);
 }
 
 @media (max-width: 768px) {
@@ -110,7 +110,7 @@
 /* Shared horizontal scroll treatment for wide prose blocks (code/tables). */
 .ProseMirror .prose-scroll-x {
   position: relative;
-  max-width: 100%;
+  max-width: min(100%, var(--content-measure));
   overflow-x: auto;
   overflow-y: hidden;
   border-radius: 0.6rem;
@@ -629,7 +629,7 @@
   margin: 0 0 1.5rem;
   overflow: hidden;
   font-family: var(--sans);
-  max-width: var(--prose-measure);
+  max-width: var(--content-measure);
 }
 .ProseMirror .frontmatter-card summary {
   display: flex;

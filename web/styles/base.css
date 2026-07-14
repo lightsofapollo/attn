@@ -65,17 +65,17 @@ nav,
     font-family: var(--sans);
 }
 
-/* Reading surface: the sheet is full-width and left-set so wide content
-   (mermaid diagrams, tables, code) gets the whole pane; only running prose
-   caps at a readable measure (Theme v2 decision, 2026-07-12). */
+/* Reading surface: left-set sheet, one shared content column — prose and
+   wide blocks (tables, mermaid, code) all cap at the same edge; oversized
+   tables scroll within it (Shared-Column Rule, 2026-07-13). */
 article {
     max-width: none;
     margin: 0;
     padding: 2.5rem clamp(1rem, 2.8vw, 2rem) 6rem;
 }
 
-article > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote) {
-    max-width: var(--prose-measure);
+article > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container, .prose-scroll-x) {
+    max-width: var(--content-measure);
 }
 
 /* Typography scale */
@@ -269,7 +269,7 @@ hr {
     border: none;
     border-top: 1px solid var(--border);
     /* A small flourish centered on the prose measure, not the full pane. */
-    margin: 2.5rem 0 2.5rem calc(min(var(--prose-measure), 100%) / 2 - 4rem);
+    margin: 2.5rem 0 2.5rem calc(min(var(--content-measure), 100%) / 2 - 4rem);
     max-width: 8rem;
 }
 

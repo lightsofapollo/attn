@@ -150,7 +150,9 @@ export class BrowserWorkspaceService {
       holderId,
       collab: options.collab ?? {
         selfClientId: holderId,
-        selfLabel: 'You',
+        // Broadcast to peers — remote carets render this label, so it must
+        // name this participant from THEIR perspective, never "You".
+        selfLabel: 'Owner',
         selfColor: '#8a63b8',
       },
       ...(options.sessionOptions === undefined ? {} : { sessionOptions: options.sessionOptions }),

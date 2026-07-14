@@ -114,6 +114,9 @@ export interface DurableLiveSession {
   resolveComment(threadId: string): Promise<ReviewEvent>;
   createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent>;
   retryOutbox?(): Promise<void>;
+  /** Live collab broadcast (cursor presence, resync requests) when the
+   * underlying session is a full room session. */
+  sendCollab?(payload: string): Promise<void>;
 }
 
 export interface ShareChangeSubscription { close(): void; }
@@ -307,6 +310,13 @@ export class BrowserShareSession {
     this.requireWritable(resolution);
     for (const pending of [...this.pending.values()]) if (pending.state === 'retryable') await this.sendFrozen(pending);
     await this.live?.retryOutbox?.();
+  }
+
+  /** Reviewer collab broadcast (cursor presence, resync requests) — live room only. */
+  async sendCollab(payload: string): Promise<void> {
+    const live = this.live;
+    if (!live?.sendCollab) throw new Error('live collaboration requires the owner room');
+    return live.sendCollab(payload);
   }
 
   async refreshNow(): Promise<void> { await this.handleShareChange(this.generation); }

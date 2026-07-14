@@ -886,20 +886,21 @@ defineCase('owner commits republish the durable share so /s/ reviewers refresh',
     body: new TextEncoder().encode('owner keeps typing after sharing'),
   });
   assert(scheduled.length > scheduledBeforeCommit, 'commit schedules a debounced republish');
-  scheduled[scheduled.length - 1]!();
-  await waitFor(() => uploaded.length > publishedUploads);
-  const secondCommitUploads = uploaded.length;
-
-  // Trailing debounce: a second commit cancels and replaces the pending run,
-  // so a typing burst flushes exactly once, after the burst.
+  // Trailing debounce: a second commit cancels and replaces the pending run.
   const cancelledBefore = cancelled.length;
-  await runtime.commit({ path: 'notes.md', body: new TextEncoder().encode('burst one') });
-  await runtime.commit({ path: 'notes.md', body: new TextEncoder().encode('burst two') });
+  await runtime.commit({ path: 'notes.md', body: new TextEncoder().encode('typed tail') });
   assert(cancelled.length > cancelledBefore, 'a commit burst reschedules the pending republish');
+  // Mid-session flush must NOT rotate the epoch for plain typing — the live
+  // room carries it; only accept-advanced manifests mirror here.
   scheduled[scheduled.length - 1]!();
-  await waitFor(() => uploaded.length > secondCommitUploads);
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  equal(uploaded.length, publishedUploads, 'mid-session typing does not republish the durable share');
 
+  // Owner leaves: close() publishes the moved heads as a fresh generation and
+  // mirrors it, so late/offline reviewers get the final content.
+  await runtime.commit({ path: 'notes.md', body: new TextEncoder().encode('final content') });
   await runtime.close();
+  await waitFor(() => uploaded.length > publishedUploads);
   storage.close();
 });
 

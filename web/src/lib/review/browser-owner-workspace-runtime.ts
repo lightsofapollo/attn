@@ -593,12 +593,15 @@ export class BrowserOwnerWorkspaceRuntime {
       // re-handshake instead of waiting out the lease.
       await this.stopLocalCollab();
       // A pending debounced republish must not fire after teardown; flush it
-      // now (best-effort) so reviewers get the final content.
+      // now (best-effort) so reviewers get the final content. This is the
+      // one moment plain-typing heads are published as a fresh generation:
+      // the live room is going away with this owner.
       if (this.republishHandle !== null) {
         this.cancelScheduled(this.republishHandle);
         this.republishHandle = null;
         if (this.share && this.lease) {
-          await this.enqueueInternal(() => this.flushShareRepublish()).catch(() => undefined);
+          await this.enqueueInternal(() => this.flushShareRepublish({ allowEpochTransition: true }))
+            .catch(() => undefined);
         }
       }
       await this.mutationTail.catch(() => undefined);
@@ -637,14 +640,26 @@ export class BrowserOwnerWorkspaceRuntime {
     this.republishHandle = this.schedule(() => {
       this.republishHandle = null;
       if (this.closing) return; // close() flushes explicitly
-      void this.enqueueInternal(() => this.flushShareRepublish());
+      void this.enqueueInternal(() => this.flushShareRepublish({ allowEpochTransition: false }));
     }, this.options.shareRepublishDebounceMs ?? 5_000);
   }
 
-  private async flushShareRepublish(): Promise<void> {
+  /**
+   * Mid-session (`allowEpochTransition: false`): only mirror an already
+   * advanced manifest (accepted/applied suggestions) into the durable /s/
+   * record. Plain typing is NOT flushed mid-session — live room collab
+   * carries it to connected reviewers, and late joiners converge by
+   * resyncing the epoch's step log; rotating epochs under an active live
+   * session would churn every follower's binding.
+   * At close (`allowEpochTransition: true`): publish the moved heads as a
+   * fresh generation and mirror it, so reviewers who arrive after this
+   * owner leaves still get the final content.
+   */
+  private async flushShareRepublish(options: { allowEpochTransition: boolean }): Promise<void> {
     if (!this.share || !this.lease) return;
     try {
       if (await this.sharedHeadsMoved()) {
+        if (!options.allowEpochTransition) return;
         const binding = this.stateValue.bindings[0];
         const authority = this.authority;
         if (binding && authority && authority.getState().status === 'active') {

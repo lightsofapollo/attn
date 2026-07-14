@@ -779,7 +779,12 @@
     untrack(() => { void ensureEditorGraph(true); });
     if (!state.liveEditingAvailable) return;
     const generation = state.controllerGeneration;
-    const generationKey = `${generation}:${entry.path}`;
+    // The binding epoch rotates on every published-epoch transition (accepted
+    // suggestions, the idle share republish). It must key the seed: an editor
+    // left on the old epoch keeps hosting/broadcasting into a dead epoch that
+    // room reviewers no longer follow.
+    const bindingEpoch = state.bindings.find((binding) => binding.path === entry.path)?.epoch ?? 'unbound';
+    const generationKey = `${generation}:${bindingEpoch}:${entry.path}`;
     if (loadedCollabGenerationKey === generationKey) return;
     loadedCollabGenerationKey = generationKey;
     const request = ++collabSeedRequest;

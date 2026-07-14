@@ -2140,13 +2140,15 @@ export class BrowserSession {
           this.roomPolicy = policy;
           this.bootstrapDevices = devices;
           this.onlineDeviceIds.clear();
-          const onlineDeviceIds = frame.onlineDeviceIds ?? (
-            this.principal === 'owner' && this.identity
-              ? [this.identity.deviceId]
-              : []
-          );
-          for (const deviceId of onlineDeviceIds) {
+          for (const deviceId of frame.onlineDeviceIds ?? []) {
             this.onlineDeviceIds.add(deviceId);
+          }
+          // The relay's hello lists sockets that have already announced
+          // presence — never the connecting socket itself. An owner must
+          // count its own device or ownerOnline stays false and every
+          // authority broadcast throws "live editing is paused".
+          if (this.principal === 'owner' && this.identity) {
+            this.onlineDeviceIds.add(this.identity.deviceId);
           }
           this.setState({ status: 'connected', connection: 'mailbox' });
           void this.persistDirectoryAndRoom(this.bootstrapDevices, policy).catch(() => undefined);

@@ -112,6 +112,8 @@ export interface ProductionDurableShareSessionOptions extends BrowserDurableShar
   onSnapshot?: (snapshot: DurableShareSnapshot, roomId: string) => void;
   onOptimisticEvent?: (event: ReviewEvent) => void;
   onLiveState?: (state: import('./browser-session').BrowserSessionState) => void;
+  /** Decrypted live collab deliveries (owner step broadcasts, cursors). */
+  onCollab?: (delivery: import('./browser-session').BrowserCollabDelivery) => void | Promise<void>;
   webSocketFactory?: (url: string, protocols: string[]) => WebSocket;
   /** Plain-store seam for non-Svelte production-boundary harnesses. */
   liveStore?: ReviewStoreSink;
@@ -185,7 +187,8 @@ export async function createProductionDurableShareSession(options: ProductionDur
       return new BrowserSession({ relayUrl: options.relayUrl, identity: { ...identity,
         signingSecret: new Uint8Array(identity.signingSecret), signingPublic: new Uint8Array(identity.signingPublic),
         encryptionSecret: new Uint8Array(identity.encryptionSecret), publicEncryptionKey: new Uint8Array(identity.publicEncryptionKey) },
-        onState: options.onLiveState, store: options.liveStore, disableWebRtc: options.disableWebRtc,
+        onState: options.onLiveState, onCollab: options.onCollab,
+        store: options.liveStore, disableWebRtc: options.disableWebRtc,
         ...(options.registrationMintPow === undefined ? {} : { registrationMintPow: options.registrationMintPow }),
         ...(options.outboxMintPow === undefined ? {} : { outboxMintPow: options.outboxMintPow }),
         parsedInvite: { version: 3,
@@ -278,6 +281,7 @@ export class DurableShareBrowserSessionFacade {
   readonly closeOnDestroy = true;
   private session: ProductionBrowserShareSession | null = null;
   private observer: ((state: import('./browser-session').BrowserSessionState) => void) | null = null;
+  private collabObserver: ((delivery: import('./browser-session').BrowserCollabDelivery) => void | Promise<void>) | null = null;
   private pushObserver: ((state: BrowserPushConsentState) => void) | null = null;
   private pushState: BrowserPushConsentState = { status: 'checking', message: null, enabled: false };
   private generation = 0;
@@ -290,6 +294,8 @@ export class DurableShareBrowserSessionFacade {
     storagePersisted: null, canRemember: false };
   constructor(private readonly options: Omit<ProductionDurableShareSessionOptions, 'tier'>) {}
   setStateObserver(observer: (state: import('./browser-session').BrowserSessionState) => void): void { this.observer = observer; observer(this.state); }
+  /** Live collab deliveries (owner step broadcasts, cursors) from the room session. */
+  setCollabObserver(observer: (delivery: import('./browser-session').BrowserCollabDelivery) => void | Promise<void>): void { this.collabObserver = observer; }
   setPushConsentObserver(observer: (state: BrowserPushConsentState) => void): void { this.pushObserver = observer; observer(this.pushState); }
   getPushConsentState(): BrowserPushConsentState { return { ...this.pushState }; }
   getState(): import('./browser-session').BrowserSessionState { return this.state; }
@@ -301,6 +307,7 @@ export class DurableShareBrowserSessionFacade {
       const tier = await discoverDurableShareTier({ ...this.options, signal: abort.signal });
       if (this.closed || generation !== this.generation) return;
       const candidate = await createProductionDurableShareSession({ ...this.options, tier, signal: abort.signal,
+      onCollab: delivery => { if (!this.closed && generation === this.generation) return this.collabObserver?.(delivery); },
       onState: state => { if (!this.closed && generation === this.generation) this.mapState(state); },
       onPushConsentState: state => {
         if (!this.closed && generation === this.generation) {
@@ -330,6 +337,7 @@ export class DurableShareBrowserSessionFacade {
   async replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent> { return this.createComment(anchor, body, threadId); }
   async resolveComment(threadId: string): Promise<ReviewEvent> { return this.requireSession().resolveComment(threadId); }
   async createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent> { return this.requireSession().createSuggestion(draft); }
+  async sendCollab(payload: string): Promise<void> { return this.requireSession().sendCollab(payload); }
   async retryOutbox(): Promise<void> { await this.requireSession().retryOutbox(); }
   async enablePushFromUserGesture(): Promise<void> {
     const controller = this.requireSession().pushConsent;

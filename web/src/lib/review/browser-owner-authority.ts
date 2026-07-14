@@ -890,6 +890,11 @@ export class BrowserOwnerAuthorityService {
     // and replay requests cross into the ProseMirror controller. Suggestions
     // arrive as durable SuggestionCreated events and are applied elsewhere by
     // an explicit owner action.
+    if (typeof window !== 'undefined' && message) {
+      const debug = (window as unknown as { __attnOwnerCollabIn?: Record<string, number> })
+        .__attnOwnerCollabIn ??= {};
+      debug[message.kind] = (debug[message.kind] ?? 0) + 1;
+    }
     if (!message || (message.kind !== 'resync' && message.kind !== 'cursor')) return;
     const barrier = this.transitionCollabBarrier;
     if (barrier) {
@@ -969,12 +974,32 @@ export class BrowserOwnerAuthorityService {
     payload: string,
   ): Promise<void> {
     this.requireCurrentAuthorityGeneration(generation);
+    // Automation/introspection counters, mirroring the reviewer pipeline's
+    // window.__attnReviewCollab — lets E2E probes localize a dark link.
+    const debug = typeof window === 'undefined'
+      ? null
+      : ((window as unknown as { __attnOwnerCollab?: { attempts: number; sent: number; failed: number; lastError: string | null; kinds: string[] } })
+          .__attnOwnerCollab ??= { attempts: 0, sent: 0, failed: 0, lastError: null, kinds: [] });
+    if (debug) {
+      debug.attempts += 1;
+      try {
+        const parsed = JSON.parse(payload) as { kind?: string; epoch?: string };
+        if (debug.kinds.length < 80) debug.kinds.push(`${parsed.kind ?? '?'}@${parsed.epoch?.slice(0, 8) ?? ''}`);
+      } catch { /* introspection only */ }
+    }
     // A send that belongs to an already-persisted host batch may begin while
     // transition quiescence is draining that generation. Track and await it.
     const operation = this.beginAuthorityOperation(generation, true);
     try {
       await session.sendCollab(payload);
+      if (debug) debug.sent += 1;
       this.requireCurrentAuthorityGeneration(generation);
+    } catch (error) {
+      if (debug) {
+        debug.failed += 1;
+        debug.lastError = error instanceof Error ? error.message : String(error);
+      }
+      throw error;
     } finally {
       operation.finish();
     }

@@ -123,11 +123,21 @@
     sessionState = state;
   }
 
+  // Automation/introspection counters for the reviewer collab pipeline —
+  // consumed by staging E2E probes to localize a dark link (delivery →
+  // gate → controller) without instrumenting encrypted transport.
+  interface ReviewerCollabDebug { received: number; routed: number; bound: number; inbound: number; kinds: string[]; seeds: string[] }
+  const collabDebug: ReviewerCollabDebug =
+    ((window as unknown as { __attnReviewCollab?: ReviewerCollabDebug }).__attnReviewCollab ??=
+      { received: 0, routed: 0, bound: 0, inbound: 0, kinds: [], seeds: [] });
+
   async function handleSessionCollab(delivery: BrowserCollabDelivery): Promise<void> {
+    collabDebug.received += 1;
     // BrowserSession has already bound this immutable Device record to the
     // verified directory entry and envelope signature.
     rememberAuthenticatedOwnerDevice(authenticatedOwnerDeviceIds, delivery);
     await reviewerCollabGate.route(delivery);
+    collabDebug.routed += 1;
   }
 
   // Capture once at construction — both props are stable for the lifetime of
@@ -167,6 +177,9 @@
   // we also read the current state here so the initial render is correct.
   if (initialInjected) {
     if ('setStateObserver' in initialInjected) initialInjected.setStateObserver((next) => { sessionState = next; });
+    // Durable /s/ sessions surface live collab through an observer instead of
+    // a constructor option; wiring it makes owner edits stream into the view.
+    if ('setCollabObserver' in initialInjected) initialInjected.setCollabObserver(handleSessionCollab);
     sessionState = initialInjected.getState();
   }
   if (pushCapable) {
@@ -371,7 +384,15 @@
     };
     controller.setActiveFile(seed.fileId, bridge, seed.snapshotId);
     reviewerCollabBoundView = view;
+    collabDebug.bound += 1;
+    if (collabDebug.seeds.length < 20) collabDebug.seeds.push(`${seed.snapshotId.slice(0, 8)}:${seed.markdown.length}b`);
     reviewerCollabGate.bind((delivery) => {
+      collabDebug.inbound += 1;
+      try {
+        const kind = (JSON.parse(delivery.payload) as { kind?: string; epoch?: string }).kind ?? '?';
+        const epoch = (JSON.parse(delivery.payload) as { epoch?: string }).epoch?.slice(0, 8) ?? '';
+        if (collabDebug.kinds.length < 60) collabDebug.kinds.push(`${kind}@${epoch}`);
+      } catch { /* introspection only */ }
       controller.onInbound(delivery.payload, delivery.sender.deviceId);
     });
   });

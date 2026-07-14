@@ -35,7 +35,7 @@
     class: className = '',
   }: Props = $props();
 
-  // Hug rail (Theme v2, attn-ll9): the margin sits just right of the 72ch
+  // Hug rail (Theme v2, attn-ll9): the margin sits just right of the
   // prose edge so cards stay near their anchors; when a wide block (code,
   // table, mermaid) is meaningfully in view (>=80px) it retreats to the pane
   // edge. No scroll listeners: an IntersectionObserver owns wide-block

@@ -651,7 +651,7 @@ a.workspace-row:hover {
 }
 
 .hosted-editor-loading {
-  max-width: 72ch;
+  max-width: var(--prose-measure);
   margin: 0 auto;
   padding: 1rem 2.25rem;
   color: var(--muted-foreground);

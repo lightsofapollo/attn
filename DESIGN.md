@@ -170,7 +170,7 @@ Three deliberately separated hues so the three roles are never confused, each tu
 
 **The Fixed-Scale Rule.** Product register: headings are fixed rem, not `clamp()`. Users view at consistent DPI inside panes and windows; a fluid h1 that shrinks in a sidebar looks worse, not better.
 
-**The Wide-Sheet Rule** (decided 2026-07-12). The reading surface is full-width and left-set, never a centered narrow column: wide content — mermaid diagrams, tables, code blocks — spans the whole pane, while running prose (paragraphs, lists, quotes, headings) caps at ~72ch for measure. The `micro` (2px) radius is the mark family for inline review marks, focus rings, and accent bars.
+**The Wide-Sheet Rule** (decided 2026-07-12). The reading surface is full-width and left-set, never a centered narrow column: wide content — mermaid diagrams, tables, code blocks — spans the whole pane, while running prose (paragraphs, lists, quotes, headings) caps at the `--prose-measure` token (88ch; widened from 72ch 2026-07-13 so prose doesn't read undersized beside full-pane blocks). The `micro` (2px) radius is the mark family for inline review marks, focus rings, and accent bars.
 
 ## 4. Elevation
 

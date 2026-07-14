@@ -67,7 +67,7 @@ nav,
 
 /* Reading surface: the sheet is full-width and left-set so wide content
    (mermaid diagrams, tables, code) gets the whole pane; only running prose
-   caps at a readable ~72ch measure (Theme v2 decision, 2026-07-12). */
+   caps at a readable measure (Theme v2 decision, 2026-07-12). */
 article {
     max-width: none;
     margin: 0;
@@ -75,7 +75,7 @@ article {
 }
 
 article > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote) {
-    max-width: 72ch;
+    max-width: var(--prose-measure);
 }
 
 /* Typography scale */
@@ -269,7 +269,7 @@ hr {
     border: none;
     border-top: 1px solid var(--border);
     /* A small flourish centered on the prose measure, not the full pane. */
-    margin: 2.5rem 0 2.5rem calc(min(72ch, 100%) / 2 - 4rem);
+    margin: 2.5rem 0 2.5rem calc(min(var(--prose-measure), 100%) / 2 - 4rem);
     max-width: 8rem;
 }
 

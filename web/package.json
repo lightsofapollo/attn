@@ -61,6 +61,7 @@
     "@tailwindcss/vite": "^4.2.1",
     "@types/diff": "^7.0.2",
     "@types/ws": "^8.18.1",
+    "agentation-svelte": "^1.0.0",
     "bits-ui": "^2.16.2",
     "catppuccin-vsc-icons": "github:catppuccin/vscode-icons",
     "clsx": "^2.1.1",

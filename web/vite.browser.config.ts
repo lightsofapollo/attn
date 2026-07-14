@@ -35,6 +35,29 @@ function hostedEntryRewrites(): Plugin {
   };
 }
 
+// Dev-only: inject the Agentation feedback toolbar (agentation.com) into every
+// hosted HTML entry. `apply: 'serve'` keeps it out of builds entirely; the
+// /@fs/ path is needed because this config's root is web/hosted while the boot
+// module lives under web/src (already inside server.fs.allow).
+function agentationDevToolbar(): Plugin {
+  return {
+    name: 'attn-agentation-dev-toolbar',
+    apply: 'serve',
+    transformIndexHtml() {
+      return [
+        {
+          tag: 'script',
+          attrs: {
+            type: 'module',
+            src: `/@fs/${path.join(webRoot, 'src/lib/dev/agentation-boot.ts')}`,
+          },
+          injectTo: 'body',
+        },
+      ];
+    },
+  };
+}
+
 // Record which modules land in each emitted chunk so the route bundle gate
 // (scripts/check-route-bundles.mjs) can match forbidden *code* precisely —
 // page copy is allowed to say "ProseMirror" without tripping the gate.
@@ -64,7 +87,7 @@ export default defineConfig({
   envDir: webRoot,
   publicDir: path.join(hostedRoot, 'public'),
   appType: 'mpa',
-  plugins: [hostedEntryRewrites(), chunkModulesManifest(), svelte(), tailwindcss()],
+  plugins: [hostedEntryRewrites(), agentationDevToolbar(), chunkModulesManifest(), svelte(), tailwindcss()],
   resolve: {
     alias: {
       $lib: path.join(webRoot, 'src/lib'),

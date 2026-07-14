@@ -146,3 +146,8 @@ installJsBridge();
 // In dev mode (no native wry IPC), install mock handlers
 installMockIpc();
 mount(App, { target });
+
+// Dev-only: Agentation feedback toolbar (see lib/dev/agentation-boot.ts).
+if (import.meta.env.DEV) {
+  void import('./lib/dev/agentation-boot');
+}

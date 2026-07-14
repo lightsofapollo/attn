@@ -1196,8 +1196,9 @@ a.workspace-row:hover {
   overflow: auto;
 }
 
-/* Compact share header: one quiet row — whitespace separates, not a rule. */
-.share-head-compact {
+/* Compact share header: one quiet row — whitespace separates, not a rule.
+   Doubled class beats the later sticky `.share-head` block's padding. */
+.share-head.share-head-compact {
   display: flex;
   align-items: center;
   justify-content: space-between;

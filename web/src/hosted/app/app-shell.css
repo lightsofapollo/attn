@@ -1202,7 +1202,7 @@ a.workspace-row:hover {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 1.15rem 1.4rem 0.2rem;
+  padding: 1.05rem 1.4rem 0;
   border-bottom: 0;
 }
 
@@ -1216,7 +1216,9 @@ a.workspace-row:hover {
   place-items: center;
   width: 2rem;
   height: 2rem;
-  margin-right: -0.4rem;
+  /* Optically align the glyph (not the hit area) with the content's right
+     edge: button center lands at padding + glyph half-width from the edge. */
+  margin-right: -0.65rem;
   padding: 0;
   border: 0;
   border-radius: 8px;
@@ -1257,7 +1259,7 @@ a.workspace-row:hover {
 }
 
 .share-body {
-  padding: 0.85rem 1.4rem 1.3rem;
+  padding: 0.45rem 1.4rem 1.2rem;
   font-family: var(--sans);
 }
 
@@ -1763,6 +1765,11 @@ a.workspace-row:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Reset the global inline-code treatment — the chip is the only pill. */
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
   color: var(--hosted-muted);
   font: 0.7rem/1.3 var(--mono);
 }
@@ -1782,9 +1789,8 @@ a.workspace-row:hover {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  min-height: 2.2rem;
-  margin-top: 1rem;
-  padding-top: 0.7rem;
+  margin-top: 0;
+  padding-top: 0.85rem;
   border-top: 1px solid var(--rule);
 }
 
@@ -1841,15 +1847,16 @@ a.workspace-row:hover {
 }
 
 .share-invite-options {
-  margin-top: 1rem;
+  margin-top: 1.1rem;
   border-top: 1px solid var(--rule);
 }
 
-/* Quiet disclosure: a muted row with a turning chevron, not a heading. */
+/* Quiet disclosure: a muted row with a turning chevron, not a heading.
+   Symmetric 0.85rem above and below the row keeps the rules evenly spaced. */
 .share-invite-options > summary {
   justify-content: flex-start;
   gap: 0.45rem;
-  padding: 0.65rem 0;
+  padding: 0.85rem 0;
   color: var(--hosted-muted);
   font: 600 0.78rem/1.3 var(--sans);
   list-style: none;

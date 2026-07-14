@@ -23,7 +23,6 @@
   } from './types';
 
   type SheetPhase = 'loading' | 'configure' | 'progress' | 'ready' | 'stopped';
-  const SHARE_TIERS = ['view', 'comment', 'suggest'] as const;
 
   interface Props {
     workspace?: WorkspaceDetail;
@@ -375,14 +374,6 @@
     return tier === 'view' ? 'View-only' : tier === 'comment' ? 'Comment' : 'Suggest';
   }
 
-  function tierDescription(tier: 'view' | 'comment' | 'suggest'): string {
-    return tier === 'view'
-      ? 'Read the shared workspace'
-      : tier === 'comment'
-        ? 'Read and leave comments'
-        : 'Read, comment, and propose edits';
-  }
-
   function supportsWebShare(): boolean {
     if (typeof navigator === 'undefined') return false;
     return typeof (navigator as Navigator & { share?: unknown }).share === 'function';
@@ -428,7 +419,7 @@
     <header class="share-head share-head-compact">
       <h2 id="share-sheet-title" tabindex="-1" bind:this={headingElement}>Share</h2>
       <p id="share-sheet-description" class="sr-only">Create an end-to-end encrypted review link.</p>
-      <button class="button share-close" type="button" onclick={requestClose} aria-label="Close share sheet">Close</button>
+      <button class="share-x" type="button" onclick={requestClose} aria-label="Close share sheet">×</button>
     </header>
 
     <div class="share-body">
@@ -585,33 +576,32 @@
         {/if}
       {:else if phase === 'ready' && invite && share}
         {#if selectedInvite}
-          <div class="share-link-row share-link-row-min">
-            <button
-              class="share-link-display"
-              type="button"
-              aria-pressed={revealLink}
-              title={revealLink ? 'Hide the key' : 'Show the full link'}
-              onclick={() => revealLink = !revealLink}
-            ><code aria-label={revealLink ? `Full ${tierLabel(selectedTier)} invite link` : `${tierLabel(selectedTier)} invite link with the key hidden`}>{revealLink ? selectedInvite.browserUrl : maskedBrowserUrl}</code></button>
+          <p class="share-sentence">
+            Anyone with the link can
+            <span class="share-tier-inline">
+              <span aria-hidden="true">{selectedTier === 'view' ? 'view' : selectedTier === 'comment' ? 'comment' : 'suggest edits'}</span>
+              <select aria-label="What this link allows" bind:value={selectedTier}>
+                <option value="view">view</option>
+                <option value="comment">comment</option>
+                <option value="suggest">suggest edits</option>
+              </select>
+            </span>
+            <span class="share-sentence-meta">End-to-end encrypted · {remainingTimeLabel(share.expiresAt)}</span>
+          </p>
+
+          <div class="share-actions-min">
             <button class="button primary" type="button" onclick={() => void copyText(selectedInvite.browserUrl, `${tierLabel(selectedTier)} link copied.`)}>Copy link</button>
             {#if webShareAvailable}
               <button class="button" type="button" onclick={() => void shareBrowserInvite()} aria-label="Share via system share sheet">Share…</button>
             {/if}
+            <button
+              class="share-link-chip"
+              type="button"
+              aria-pressed={revealLink}
+              title={revealLink ? 'Hide the key' : 'Show the full link'}
+              onclick={() => revealLink = !revealLink}
+            ><code aria-label={revealLink ? `Full ${tierLabel(selectedTier)} invite link` : `${tierLabel(selectedTier)} invite link with the key hidden`}>{revealLink ? selectedInvite.browserUrl : maskedBrowserUrl.replace(/^https:\/\//u, '')}</code></button>
           </div>
-
-          <div class="share-tier-seg" role="radiogroup" aria-label="What this link allows">
-            {#each SHARE_TIERS as tier}
-              <label class:active={selectedTier === tier}>
-                <input type="radio" name="share-tier" value={tier} bind:group={selectedTier} />
-                <span>{tierLabel(tier)}</span>
-              </label>
-            {/each}
-          </div>
-
-          <p class="share-meta">
-            Anyone with the link can {tierDescription(selectedTier).toLowerCase()} ·
-            end-to-end encrypted · {remainingTimeLabel(share.expiresAt)}
-          </p>
         {/if}
         {#if statusMessage !== 'Encrypted review link ready.'}
           <p class="share-feedback">{statusMessage}</p>

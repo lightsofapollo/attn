@@ -23,7 +23,11 @@ import {
   type ParsedInvite,
 } from './lib/review/browser-invite';
 import { validateBrowserRelayUrl } from './lib/review/browser-relay-url';
-import { parseAndStripShareInvite, type ParsedShareInvite } from './lib/review/browser-share';
+import {
+  parseAndStripShareInvite,
+  recoverStrippedShareInvite,
+  type ParsedShareInvite,
+} from './lib/review/browser-share';
 
 async function bootstrapHostedReview(): Promise<void> {
   const durablePath = /^\/s\/([A-Za-z0-9_-]+)\/?$/u.test(window.location.pathname);
@@ -74,9 +78,15 @@ async function bootstrapDurableShare(): Promise<void> {
     target.style.display = '';
     const pathId = window.location.pathname.match(/^\/s\/([A-Za-z0-9_-]+)\/?$/u)?.[1];
     if (!pathId) throw new Error('invalid durable share path');
+    // Fragment present → normal join (stashes the key in history.state).
+    // Fragmentless → first try the key this tab stashed before a reload,
+    // then the fragmentless push-notification binding as the last resort.
+    const recovered = window.location.hash.length > 1 ? null : recoverStrippedShareInvite(window);
     const session = window.location.hash.length > 1
       ? new production.DurableShareBrowserSessionFacade({ relayUrl, invite: (invite = parseAndStripShareInvite(window)) })
-      : new production.RememberedPushShareSessionFacade({ relayUrl, bindingId: pathId });
+      : recovered
+        ? new production.DurableShareBrowserSessionFacade({ relayUrl, invite: (invite = recovered) })
+        : new production.RememberedPushShareSessionFacade({ relayUrl, bindingId: pathId });
     svelte.mount(appModule.default, { target, props: { session } });
   } catch (error) {
     invite?.linkSecret.fill(0);

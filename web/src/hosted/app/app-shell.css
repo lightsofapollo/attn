@@ -1190,9 +1190,23 @@ a.workspace-row:hover {
 }
 
 .share-sheet {
-  width: min(720px, 100%);
+  width: min(600px, 100%);
   max-height: calc(100dvh - 4rem);
   overflow: auto;
+}
+
+/* Compact share header: one row, no eyebrow/description ceremony. */
+.share-head-compact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.1rem 1.7rem 0.9rem;
+}
+
+.share-head-compact h2 {
+  margin: 0;
+  font: 700 1.05rem/1.2 var(--sans);
 }
 
 .share-head {
@@ -1624,14 +1638,131 @@ a.workspace-row:hover {
   margin-top: 1rem;
 }
 
-.share-link-row code {
+.share-link-row-min {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: stretch;
+  margin-top: 0;
+}
+
+.share-link-display {
   min-width: 0;
-  padding: 0.8rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.share-link-display:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.share-link-row code {
+  display: block;
+  min-width: 0;
+  height: 100%;
+  padding: 0.7rem 0.8rem;
   overflow: hidden;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   border: 1px solid var(--rule);
+  border-radius: 8px;
   background: var(--paper);
   font: 0.72rem/1.45 var(--mono);
+}
+
+/* Segmented permission control: one row, no cards. */
+.share-tier-seg {
+  display: inline-flex;
+  margin-top: 0.8rem;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.share-tier-seg label {
+  position: relative;
+  padding: 0.4rem 0.9rem;
+  color: var(--hosted-muted);
+  font: 600 0.78rem/1.2 var(--sans);
+  cursor: pointer;
+  user-select: none;
+}
+
+.share-tier-seg label + label {
+  border-left: 1px solid var(--rule);
+}
+
+.share-tier-seg label.active {
+  color: var(--rust-contrast);
+  background: var(--rust);
+}
+
+.share-tier-seg label:focus-within {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.share-tier-seg input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.share-meta {
+  margin: 0.6rem 0 0;
+  color: var(--hosted-muted);
+  font: 0.76rem/1.5 var(--sans);
+}
+
+/* Quiet footer: teardown is available, not shouting. */
+.share-stop-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 2.2rem;
+  margin-top: 1rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--rule);
+}
+
+.share-stop-link {
+  padding: 0.25rem 0;
+  border: 0;
+  background: none;
+  color: var(--hosted-muted);
+  font: 600 0.78rem/1.2 var(--sans);
+  cursor: pointer;
+}
+
+.share-stop-link:hover:not(:disabled) {
+  color: var(--rust);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.share-stop-link:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.share-stop-warning {
+  color: var(--rust);
+  font: 600 0.78rem/1.3 var(--sans);
+}
+
+.share-progress-compact {
+  align-items: center;
+}
+
+.share-progress-compact p {
+  margin: 0;
 }
 
 .share-secret-note {

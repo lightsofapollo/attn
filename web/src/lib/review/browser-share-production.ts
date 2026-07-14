@@ -391,7 +391,7 @@ export class RememberedPushShareSessionFacade {
     try {
       const binding = await getPushBinding(this.options.bindingId, this.options.indexedDB);
       if (!binding || binding.kind !== 'share' || !binding.bundleId || binding.epoch === undefined) {
-        throw new Error('This notification is no longer remembered in this browser.');
+        throw new Error('This review could not be reopened from this URL alone. Open the complete share link — including the part after # — that was sent to you.');
       }
       if (canonicalRememberedRelay(this.options.relayUrl) !== binding.relayUrl) {
         throw new Error('Remembered notification relay does not match this app configuration.');

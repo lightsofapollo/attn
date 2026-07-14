@@ -19,12 +19,48 @@ export interface ShareInviteWindowLike {
   history: { state?: unknown; replaceState(data: unknown, unused: string, url?: string | URL | null): void };
 }
 
+/** history.state field carrying the stripped link secret so a same-tab
+ * reload (or back/forward) can rejoin instead of dead-ending. history.state
+ * never appears in the URL bar, referrers, or copied links — it lives in the
+ * tab's session history, the same place the fragment sat before the strip. */
+const STRIPPED_KEY_STATE_FIELD = '__attnShareLinkKey';
+
 /** Parse and synchronously strip a durable-share fragment before any network work. */
 export function parseAndStripShareInvite(windowLike: ShareInviteWindowLike): ParsedShareInvite {
   const invite = parseShareInvite(windowLike.location.href);
-  windowLike.history.replaceState(windowLike.history.state ?? null, '',
+  const prior = windowLike.history.state;
+  const carried: Record<string, unknown> =
+    typeof prior === 'object' && prior !== null ? { ...(prior as Record<string, unknown>) } : {};
+  carried[STRIPPED_KEY_STATE_FIELD] = base64UrlEncode(invite.linkSecret);
+  windowLike.history.replaceState(carried, '',
     `${windowLike.location.pathname}${windowLike.location.search}`);
   return invite;
+}
+
+/**
+ * Recover the invite for a fragmentless `/s/<shareId>` boot from the key a
+ * previous `parseAndStripShareInvite` stashed in this tab's history entry.
+ * Returns null when this tab never held the key (fresh paste without the
+ * fragment, notification click, different tab).
+ */
+export function recoverStrippedShareInvite(windowLike: ShareInviteWindowLike): ParsedShareInvite | null {
+  const state = windowLike.history.state;
+  if (typeof state !== 'object' || state === null) return null;
+  const encoded = (state as Record<string, unknown>)[STRIPPED_KEY_STATE_FIELD];
+  if (typeof encoded !== 'string' || encoded.length === 0) return null;
+  const match = /^\/s\/([^/]+)$/u.exec(windowLike.location.pathname);
+  if (!match) return null;
+  let origin: string;
+  try {
+    origin = new URL(windowLike.location.href).origin;
+  } catch {
+    return null;
+  }
+  try {
+    return parseShareInvite(`${origin}/s/${match[1]!}#key=${encoded}`);
+  } catch {
+    return null;
+  }
 }
 
 export class ShareInviteParseError extends Error {

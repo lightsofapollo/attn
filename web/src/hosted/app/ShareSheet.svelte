@@ -46,7 +46,6 @@
     workspace,
     activeEntry,
     health,
-    ownerStatus,
     onInspect,
     onCreate,
     onStop,
@@ -426,23 +425,17 @@
   onclick={handleVeilClick}
 >
   <section class="share-sheet">
-    <header class="share-head">
-      <div>
-        <div class="eyebrow">End-to-end encrypted</div>
-        <h2 id="share-sheet-title" tabindex="-1" bind:this={headingElement}>Share for review</h2>
-        <p id="share-sheet-description">Create an encrypted link to the files you choose.</p>
-      </div>
+    <header class="share-head share-head-compact">
+      <h2 id="share-sheet-title" tabindex="-1" bind:this={headingElement}>Share</h2>
+      <p id="share-sheet-description" class="sr-only">Create an end-to-end encrypted review link.</p>
       <button class="button share-close" type="button" onclick={requestClose} aria-label="Close share sheet">Close</button>
     </header>
 
     <div class="share-body">
       {#if phase === 'loading'}
-        <div class="share-progress" aria-live="polite">
+        <div class="share-progress share-progress-compact" aria-live="polite">
           <span class="share-spinner" aria-hidden="true"></span>
-          <div>
-            <h3>Checking review access…</h3>
-            <p>Looking for an existing encrypted room owned by this browser.</p>
-          </div>
+          <p>Preparing encrypted link…</p>
         </div>
       {:else if phase === 'configure'}
         <section class="share-panel" aria-labelledby="share-scope-title">
@@ -569,29 +562,16 @@
           </button>
         </div>
       {:else if phase === 'progress'}
-        <div class="share-progress" aria-live="polite">
+        <div class="share-progress share-progress-compact" aria-live="polite">
           {#if operationBusy}
             <span class="share-spinner" aria-hidden="true"></span>
           {:else}
             <span class="share-progress-mark" aria-hidden="true">↻</span>
           {/if}
-          <div>
-            <h3>{operationBusy ? 'Publishing encrypted snapshot…' : 'Publishing paused'}</h3>
-            <p>{operationBusy
-              ? 'Keeping paths intact while the browser encrypts and sends this selection.'
-              : share?.resumable
-                ? 'The exact encrypted batch is sealed to this workspace. Resume without re-encrypting it.'
-                : 'The prepared room is sealed to this workspace. Resume to finish publishing safely.'}</p>
-          </div>
+          <p>{operationBusy
+            ? 'Encrypting and publishing…'
+            : 'Publishing paused — your source is still local. Resume safely anytime.'}</p>
         </div>
-        <ol class="share-progress-steps" aria-label="Publishing steps">
-          <li class="complete">Owner keys sealed to this workspace</li>
-          <li
-            class:complete={share?.resumable === true || (!operationBusy && !progressPaused)}
-            class:active={operationBusy}
-          >Snapshot encrypted in this browser</li>
-          <li class:active={operationBusy}>Encrypted room made available</li>
-        </ol>
         {#if operationError}
           <p class="share-error" role="alert">{operationError}</p>
         {/if}
@@ -604,44 +584,41 @@
           </div>
         {/if}
       {:else if phase === 'ready' && invite && share}
-        <div class="share-ready-head">
-          <span class="share-ready-mark" aria-hidden="true">✓</span>
-          <div>
-            <h3>Review link ready</h3>
-            <p>{ownerStatus ?? 'Browser owner active'} · {remainingTimeLabel(share.expiresAt)}</p>
-          </div>
-        </div>
-        <fieldset class="share-tier-picker">
-          <legend>Choose what this link allows</legend>
-          {#each SHARE_TIERS as tier}
-            <label class:active={selectedTier === tier}>
-              <input type="radio" name="share-tier" value={tier} bind:group={selectedTier} />
-              <span><strong>{tierLabel(tier)}</strong><small>{tierDescription(tier)}</small></span>
-              {#if tier === 'comment'}<em>Default</em>{/if}
-            </label>
-          {/each}
-        </fieldset>
-
         {#if selectedInvite}
-          <div class="share-link-row">
-            <code aria-label={revealLink ? `Full ${tierLabel(selectedTier)} browser invite link` : `${tierLabel(selectedTier)} browser invite link with capability hidden`}>{revealLink ? selectedInvite.browserUrl : maskedBrowserUrl}</code>
-            <button class="button" type="button" aria-pressed={revealLink} onclick={() => revealLink = !revealLink}>{revealLink ? 'Hide' : 'Show'}</button>
-          </div>
-          <p class="share-secret-note">Anyone with the complete link gets {tierDescription(selectedTier).toLowerCase()}. Capability keys stay in the fragment; attn services cannot recover them or read the workspace.</p>
-
-          <div class="share-ready-actions">
-            <button class="button primary" type="button" onclick={() => void shareBrowserInvite()}>{webShareAvailable ? `Share ${tierLabel(selectedTier)} link` : `Copy ${tierLabel(selectedTier)} link`}</button>
+          <div class="share-link-row share-link-row-min">
+            <button
+              class="share-link-display"
+              type="button"
+              aria-pressed={revealLink}
+              title={revealLink ? 'Hide the key' : 'Show the full link'}
+              onclick={() => revealLink = !revealLink}
+            ><code aria-label={revealLink ? `Full ${tierLabel(selectedTier)} invite link` : `${tierLabel(selectedTier)} invite link with the key hidden`}>{revealLink ? selectedInvite.browserUrl : maskedBrowserUrl}</code></button>
+            <button class="button primary" type="button" onclick={() => void copyText(selectedInvite.browserUrl, `${tierLabel(selectedTier)} link copied.`)}>Copy link</button>
             {#if webShareAvailable}
-              <button class="button" type="button" onclick={() => void copyText(selectedInvite.browserUrl, `${tierLabel(selectedTier)} link copied.`)}>Copy link</button>
+              <button class="button" type="button" onclick={() => void shareBrowserInvite()} aria-label="Share via system share sheet">Share…</button>
             {/if}
           </div>
+
+          <div class="share-tier-seg" role="radiogroup" aria-label="What this link allows">
+            {#each SHARE_TIERS as tier}
+              <label class:active={selectedTier === tier}>
+                <input type="radio" name="share-tier" value={tier} bind:group={selectedTier} />
+                <span>{tierLabel(tier)}</span>
+              </label>
+            {/each}
+          </div>
+
+          <p class="share-meta">
+            Anyone with the link can {tierDescription(selectedTier).toLowerCase()} ·
+            end-to-end encrypted · {remainingTimeLabel(share.expiresAt)}
+          </p>
         {/if}
         {#if statusMessage !== 'Encrypted review link ready.'}
           <p class="share-feedback">{statusMessage}</p>
         {/if}
 
         {#if selectedInvite}<details class="share-invite-options" bind:open={inviteOptionsOpen}>
-          <summary>Native app and CLI options</summary>
+          <summary>Native app &amp; CLI</summary>
           <div class="share-invite-option">
             <div><strong>attn app · {tierLabel(selectedTier)}</strong><code>{selectedInvite.nativeUrl}</code></div>
             <div class="share-invite-actions">
@@ -655,24 +632,17 @@
           </div>
         </details>{/if}
 
-        <section class="share-stop-zone" aria-labelledby="stop-sharing-title">
+        <footer class="share-stop-row">
           {#if !stopConfirm}
-            <div>
-              <h3 id="stop-sharing-title">Stop this review</h3>
-              <p>Owner-signed teardown revokes all three stable links and the current review room.</p>
-            </div>
             <button
-              class="button danger"
+              class="share-stop-link"
               type="button"
               bind:this={stopSharingButton}
               disabled={!onStop}
               onclick={beginStopConfirmation}
             >Stop sharing</button>
           {:else}
-            <div>
-              <h3 id="stop-sharing-title">Stop sharing now?</h3>
-              <p>Reviewers will lose access. This cannot be undone, but you can create a new room.</p>
-            </div>
+            <span class="share-stop-warning">Reviewers lose access immediately.</span>
             <div class="share-stop-actions">
               <button
                 class="button"
@@ -684,16 +654,15 @@
               <button class="button danger" type="button" disabled={stopBusy} onclick={() => void stopSharing()}>{stopBusy ? 'Stopping…' : 'Stop now'}</button>
             </div>
           {/if}
-        </section>
+        </footer>
         {#if operationError}
           <p class="share-error" role="alert">{operationError}</p>
         {/if}
       {:else if phase === 'stopped'}
         <div class="share-stopped">
-          <span aria-hidden="true">✓</span>
-          <h3>Review access is off</h3>
-          <p>The old room is no longer available. Create a new encrypted room whenever you are ready.</p>
-          <button class="button primary" type="button" onclick={() => { phase = 'configure'; operationError = ''; statusMessage = ''; }}>Create a new review link</button>
+          <h3>Sharing stopped</h3>
+          <p>The old link no longer opens this workspace.</p>
+          <button class="button primary" type="button" onclick={() => { phase = 'configure'; operationError = ''; statusMessage = ''; }}>Create a new link</button>
         </div>
       {/if}
 

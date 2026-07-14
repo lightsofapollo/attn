@@ -193,16 +193,53 @@
     const mobile = window.matchMedia('(max-width: 900px)').matches;
     const scroller = mobile ? (document.scrollingElement as HTMLElement) : canvas;
     const listenTarget: EventTarget = mobile ? window : canvas;
+    // The file body arrives asynchronously (IDB read, editor mount), so a
+    // saved offset clamps against a still-short canvas on first apply. A
+    // ResizeObserver re-applies it as the canvas grows until the target is
+    // reached, the user scrolls, or the retry window closes.
+    let restore: ResizeObserver | null = null;
+    let restoreTimer = 0;
+    let lastApplied = -1;
+    const stopRestore = (): void => {
+      restore?.disconnect();
+      restore = null;
+      if (restoreTimer) {
+        window.clearTimeout(restoreTimer);
+        restoreTimer = 0;
+      }
+    };
+
     if (window.location.hash.length <= 1) {
+      let saved = 0;
       try {
-        const saved = Number(sessionStorage.getItem(key) ?? '');
-        if (Number.isFinite(saved) && saved > 0) scroller.scrollTop = saved;
+        const v = Number(sessionStorage.getItem(key) ?? '');
+        if (Number.isFinite(v) && v > 0) saved = v;
       } catch {
         // Session storage may be blocked; reading position is best-effort.
+      }
+      // The canvas survives in-place file switches, so a file with no saved
+      // position must reset to the top — never inherit the previous file's
+      // scroll offset.
+      scroller.scrollTop = saved;
+      lastApplied = scroller.scrollTop;
+      if (saved > 0 && scroller.scrollTop < saved) {
+        restore = new ResizeObserver(() => {
+          scroller.scrollTop = saved;
+          lastApplied = scroller.scrollTop;
+          if (scroller.scrollTop >= saved - 1) stopRestore();
+        });
+        restore.observe(mobile ? document.body : (canvas.firstElementChild ?? canvas));
+        restoreTimer = window.setTimeout(stopRestore, 3000);
       }
     }
     let ticking = false;
     const onScroll = (): void => {
+      if (restore) {
+        // Our re-applies echo back as scroll events; a user scroll diverges
+        // from the last applied value and takes over.
+        if (Math.abs(scroller.scrollTop - lastApplied) <= 1) return;
+        stopRestore();
+      }
       if (ticking) return;
       ticking = true;
       requestAnimationFrame(() => {
@@ -215,7 +252,10 @@
       });
     };
     listenTarget.addEventListener('scroll', onScroll, { passive: true });
-    return () => listenTarget.removeEventListener('scroll', onScroll);
+    return () => {
+      stopRestore();
+      listenTarget.removeEventListener('scroll', onScroll);
+    };
   });
 
   let lightboxClose = $state<HTMLButtonElement | undefined>();

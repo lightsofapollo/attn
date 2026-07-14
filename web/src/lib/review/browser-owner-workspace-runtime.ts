@@ -111,6 +111,8 @@ export interface BrowserOwnerWorkspaceRuntimeOptions {
   sessionOptions?: Omit<BrowserSessionOptions, 'owner' | 'relayUrl' | 'storage' | 'onCollab' | 'onState'>;
   leaseOptions?: WorkspaceLeaseManagerOptions;
   heartbeatIntervalMs?: number;
+  /** Trailing debounce before the durable share re-projects after a commit. */
+  shareRepublishDebounceMs?: number;
   now?: () => number;
   onState?: (state: BrowserOwnerWorkspaceRuntimeState) => void;
   /** Test seam. Production always constructs BrowserOwnerAuthorityService. */
@@ -170,6 +172,7 @@ export class BrowserOwnerWorkspaceRuntime {
   private closePromise: Promise<void> | null = null;
   private released = false;
   private lastPublicationAt = 0;
+  private republishHandle: unknown = null;
   private readonly reviewedSuggestions = new Map<string, BrowserReviewedSuggestion>();
   private localHeartbeatTimer: unknown = null;
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
@@ -340,7 +343,7 @@ export class BrowserOwnerWorkspaceRuntime {
   }
 
   async commit(input: BrowserOwnerWorkspaceCommitInput): Promise<CommittedRevision> {
-    return this.enqueueMutation(async () => {
+    const committed = await this.enqueueMutation(async () => {
       if (!this.stateValue.writable) {
         throw new StorageConflictError('browser owner workspace is not writable');
       }
@@ -350,6 +353,8 @@ export class BrowserOwnerWorkspaceRuntime {
         fence: this.requireFence(),
       });
     });
+    this.scheduleShareRepublish();
+    return committed;
   }
 
   async inspectShare(browserReviewBase: string): Promise<BrowserWorkspaceShareView | null> {
@@ -416,7 +421,7 @@ export class BrowserOwnerWorkspaceRuntime {
   }
 
   async accept(input: BrowserOwnerWorkspaceAcceptInput): Promise<AcceptBrowserSuggestionResult> {
-    return this.enqueueMutation(async () => {
+    const result = await this.enqueueMutation(async () => {
       const authority = this.requireActiveAuthority();
       const binding = this.requireBinding(input.path);
       const share = this.requireShare();
@@ -491,12 +496,14 @@ export class BrowserOwnerWorkspaceRuntime {
         currentMarkdownBytes.fill(0);
       }
     });
+    if (result.status === 'committed') this.scheduleShareRepublish();
+    return result;
   }
 
   async applySuggestion(
     input: BrowserOwnerWorkspaceApplyInput,
   ): Promise<CommittedBrowserSuggestionResult> {
-    return this.enqueueMutation(async () => {
+    const applied = await this.enqueueMutation(async () => {
       const authority = this.requireActiveAuthority();
       const binding = this.requireBinding(input.path);
       const key = reviewedKey(input.path, input.suggestionId);
@@ -537,6 +544,8 @@ export class BrowserOwnerWorkspaceRuntime {
       if (!result) throw new Error('reviewed suggestion completed without an action result');
       return result;
     });
+    this.scheduleShareRepublish();
+    return applied;
   }
 
   async reject(input: BrowserOwnerWorkspaceRejectInput): Promise<RejectBrowserSuggestionResult> {
@@ -583,6 +592,15 @@ export class BrowserOwnerWorkspaceRuntime {
       // mutation tail awaited below, and its goodbye lets follower tabs
       // re-handshake instead of waiting out the lease.
       await this.stopLocalCollab();
+      // A pending debounced republish must not fire after teardown; flush it
+      // now (best-effort) so reviewers get the final content.
+      if (this.republishHandle !== null) {
+        this.cancelScheduled(this.republishHandle);
+        this.republishHandle = null;
+        if (this.share && this.lease) {
+          await this.enqueueInternal(() => this.flushShareRepublish()).catch(() => undefined);
+        }
+      }
       await this.mutationTail.catch(() => undefined);
       const authority = this.authority;
       this.authority = null;
@@ -601,6 +619,58 @@ export class BrowserOwnerWorkspaceRuntime {
       });
     })();
     return this.closePromise;
+  }
+
+  /**
+   * Keep the durable /s/ share fresh after content changes: reviewers render
+   * the published snapshots and only refetch when the share record's revision
+   * bumps, so an owner who keeps editing after sharing must re-publish.
+   * Freshness takes two steps — publish a new room snapshot generation for
+   * the moved heads (an epoch transition, exactly what accepts do), then
+   * mirror the advanced manifest into the durable share record. Trailing
+   * debounce: continuous typing keeps pushing the flush out, so the epoch
+   * transition (which reseeds the editor binding) only lands in idle gaps.
+   */
+  private scheduleShareRepublish(): void {
+    if (this.closing || !this.share) return;
+    if (this.republishHandle !== null) this.cancelScheduled(this.republishHandle);
+    this.republishHandle = this.schedule(() => {
+      this.republishHandle = null;
+      if (this.closing) return; // close() flushes explicitly
+      void this.enqueueInternal(() => this.flushShareRepublish());
+    }, this.options.shareRepublishDebounceMs ?? 5_000);
+  }
+
+  private async flushShareRepublish(): Promise<void> {
+    if (!this.share || !this.lease) return;
+    try {
+      if (await this.sharedHeadsMoved()) {
+        const binding = this.stateValue.bindings[0];
+        const authority = this.authority;
+        if (binding && authority && authority.getState().status === 'active') {
+          const bindings = await authority.transitionPublishedEpoch(binding.fileId, {
+            publish: ({ publicationOutbox }) => this.publishCurrentGeneration(publicationOutbox),
+          });
+          this.afterTransition(bindings);
+        }
+      }
+      await this.sharingCoordinator().reconcileActive();
+    } catch {
+      // Best-effort freshness: reviewers keep the previous revision and the
+      // next commit reschedules; never surface a republish failure.
+    }
+  }
+
+  /** True when any shared file's local head moved past its published base. */
+  private async sharedHeadsMoved(): Promise<boolean> {
+    for (const binding of this.stateValue.bindings) {
+      const entry = await this.options.storage.workspaces.getEntry(
+        this.options.workspaceId,
+        binding.path,
+      );
+      if (entry && entry.headRevisionId !== binding.revisionId) return true;
+    }
+    return false;
   }
 
   private sharingCoordinator(): BrowserWorkspaceSharingCoordinator {

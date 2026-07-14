@@ -366,10 +366,9 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
       fileId,
       fence: this.options.attachedLease!,
       terminalPort: this,
-      publicationOutbox: {
-        enqueueBatchDurably: async () => 0,
-        flushNow: async () => undefined,
-      },
+      // A real acknowledging outbox: the actual snapshot publisher refuses to
+      // commit a publication whose envelopes were never ACKed.
+      publicationOutbox: new AckingShareOutbox(this.storage, this.options.roomId, this.events),
     };
     try {
       await phases.prepare?.(input);
@@ -824,6 +823,82 @@ defineCase('reviewed three-way context stays runtime-owned until explicit apply'
   const bytes = await storage.workspaces.getHeadBody(seeded.workspaceId, 'notes.md');
   equal(new TextDecoder().decode(bytes), 'merged', 'explicit reviewed replacement applied');
   bytes.fill(0);
+  await runtime.close();
+  storage.close();
+});
+
+defineCase('owner commits republish the durable share so /s/ reviewers refresh', async () => {
+  const now = 1_720_000_000_000;
+  const storage = await openStorage(() => now);
+  const workspaceId = 'share-republish-on-commit';
+  await seedLocal(storage, workspaceId);
+  const events: string[] = [];
+  const uploaded: string[] = [];
+  let relay: MemoryShareRelay | null = null;
+  const shareRelayFactory = (options: { shareId: string }) => {
+    if (!relay) {
+      relay = new MemoryShareRelay(options.shareId);
+      const original = relay.uploadSnapshot.bind(relay);
+      relay.uploadSnapshot = async (fileId, snapshotId, ciphertext) => {
+        uploaded.push(`${fileId}@${snapshotId}`);
+        return original(fileId, snapshotId, ciphertext);
+      };
+    }
+    return relay;
+  };
+  const scheduled: (() => void)[] = [];
+  const cancelled: unknown[] = [];
+  const runtime = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, workspaceId, {
+    now: () => now,
+    schedule: (callback) => { scheduled.push(callback); return scheduled.length; },
+    cancelScheduled: (handle) => { cancelled.push(handle); },
+    authorityFactory: (options) => new FakeAuthority(options, storage, events),
+    publisher: snapshotPublisher,
+    sharing: {
+      now: () => now,
+      randomBytes: deterministicRandom(),
+      // Idempotent rejoin like the real relay: only the first create per room
+      // reports `created`, so mid-session reconciles do not republish genesis.
+      createRoom: (() => {
+        const createdRooms = new Set<string>();
+        return async (options: Parameters<typeof bootstrapFromOptions>[0]) => {
+          const bootstrap = bootstrapFromOptions(options);
+          const created = !createdRooms.has(bootstrap.roomId);
+          createdRooms.add(bootstrap.roomId);
+          return { ...bootstrap, created };
+        };
+      })(),
+      publish: snapshotPublisher,
+      indexBuilder: testIndexBuilder,
+      shareRelayFactory,
+      outboxFactory: ({ storage: outboxStorage, credentials }) =>
+        new AckingShareOutbox(outboxStorage, credentials.roomId, events),
+    },
+  }));
+  await runtime.start();
+  await runtime.ensureShare(shareRequest());
+  const publishedUploads = uploaded.length;
+  assert(publishedUploads > 0, 'publication uploads the initial durable snapshot');
+
+  const scheduledBeforeCommit = scheduled.length;
+  await runtime.commit({
+    path: 'notes.md',
+    body: new TextEncoder().encode('owner keeps typing after sharing'),
+  });
+  assert(scheduled.length > scheduledBeforeCommit, 'commit schedules a debounced republish');
+  scheduled[scheduled.length - 1]!();
+  await waitFor(() => uploaded.length > publishedUploads);
+  const secondCommitUploads = uploaded.length;
+
+  // Trailing debounce: a second commit cancels and replaces the pending run,
+  // so a typing burst flushes exactly once, after the burst.
+  const cancelledBefore = cancelled.length;
+  await runtime.commit({ path: 'notes.md', body: new TextEncoder().encode('burst one') });
+  await runtime.commit({ path: 'notes.md', body: new TextEncoder().encode('burst two') });
+  assert(cancelled.length > cancelledBefore, 'a commit burst reschedules the pending republish');
+  scheduled[scheduled.length - 1]!();
+  await waitFor(() => uploaded.length > secondCommitUploads);
+
   await runtime.close();
   storage.close();
 });

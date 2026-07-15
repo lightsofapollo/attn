@@ -177,6 +177,13 @@ export interface WorkspaceLeaseRecord {
   fencingToken: number;
   /** Wall-clock lease expiry; holders heartbeat before it lapses. */
   expiresAt: number;
+  /**
+   * Per-JS-context nonce (never persisted by the page). A duplicated tab
+   * copies sessionStorage — and with it the holder id — but can never share
+   * this value, so a same-holder acquire from a different context is a
+   * token-bumping takeover rather than a silent second writer.
+   */
+  contextId?: string;
 }
 
 // ————— path rules —————
@@ -416,4 +423,5 @@ export function validateWorkspaceLeaseRecord(
     throw new BrowserStorageError('fencingToken must be a positive safe integer');
   }
   requireTimestamp(record.expiresAt, 'expiresAt');
+  if (record.contextId !== undefined) requireId(record.contextId, 'contextId');
 }

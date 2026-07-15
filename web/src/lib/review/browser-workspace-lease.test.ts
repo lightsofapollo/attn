@@ -60,7 +60,7 @@ interface Harness {
   db: IDBDatabase;
   clock: { value: number };
   messages: LeaseChannelMessage[];
-  manager: (holderClock?: () => number) => WorkspaceLeaseManager;
+  manager: (options?: { contextId?: string }) => WorkspaceLeaseManager;
 }
 
 async function openHarness(): Promise<Harness> {
@@ -83,11 +83,12 @@ async function openHarness(): Promise<Harness> {
     db,
     clock,
     messages,
-    manager: () =>
+    manager: (options = {}) =>
       new WorkspaceLeaseManager(db, {
         leaseDurationMs: 10_000,
         now: () => clock.value,
         channel,
+        ...(options.contextId === undefined ? {} : { contextId: options.contextId }),
       }),
   };
 }
@@ -200,6 +201,51 @@ defineCase('release hands off cleanly and tokens stay monotonic', async () => {
     const b = await manager().acquire(ws, 'tab-b');
     assert(b, 'next holder granted');
     assertEqual(b.fencingToken, 2, 'token increments across release/reacquire');
+  } finally {
+    storage.close();
+  }
+});
+
+defineCase('a duplicated tab (copied holder id) is a takeover, never a co-writer', async () => {
+  const { storage, manager, clock } = await openHarness();
+  try {
+    const ws = await seedWorkspace(storage);
+    // Tab duplication copies sessionStorage, so both contexts present the
+    // SAME holder id. The JS-context nonce cannot be copied, so the second
+    // context must bump the token and fence the first off — matching-token
+    // co-writers would both pass store fencing.
+    const original = manager({ contextId: 'ctx-original' });
+    const duplicate = manager({ contextId: 'ctx-duplicate' });
+    const a = await original.acquire(ws, 'tab-a');
+    assert(a, 'original granted');
+    assertEqual(a.fencingToken, 1, 'original holds the first token');
+    const b = await duplicate.acquire(ws, 'tab-a');
+    assert(b, 'duplicate acquires under the copied holder id');
+    assertEqual(b.fencingToken, 2, 'duplicate context bumps the token');
+    await expectConflict(original.heartbeat(a), 'original heartbeat is fenced');
+    await expectConflict(
+      storage.workspaces.commitRevision({
+        workspaceId: ws,
+        path: 'untitled.md',
+        body: new TextEncoder().encode('stale duplicate-origin write'),
+        fence: a,
+      }),
+      'original context store write is fenced',
+    );
+    const fresh = await storage.workspaces.commitRevision({
+      workspaceId: ws,
+      path: 'untitled.md',
+      body: new TextEncoder().encode('single live writer'),
+      fence: b,
+    });
+    assert(fresh.workspace.clock > 1, 'exactly one context can write');
+    // A reload of the surviving context (same holder, new context) also
+    // takes over its own lease immediately instead of waiting out expiry.
+    clock.value += 1;
+    const reloaded = manager({ contextId: 'ctx-after-reload' });
+    const c = await reloaded.acquire(ws, 'tab-a');
+    assert(c, 'reload reacquires without waiting for expiry');
+    assertEqual(c.fencingToken, 3, 'reload is a token-bumping takeover of itself');
   } finally {
     storage.close();
   }

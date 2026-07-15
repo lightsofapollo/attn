@@ -51,19 +51,37 @@ export interface WorkspaceLeaseManagerOptions {
   leaseDurationMs?: number;
   now?: () => number;
   channel?: LeaseChannel | null;
+  /** Test seam. Production uses one nonce per JS context (page load). */
+  contextId?: string;
 }
+
+/**
+ * One nonce per JS context. sessionStorage-derived holder ids are copied when
+ * a tab is duplicated, so holder identity alone cannot distinguish "same tab
+ * after reload" from "live concurrent copy". This value is never persisted by
+ * the page, so a copy can never present it.
+ */
+const JS_CONTEXT_ID = (() => {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `ctx-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffffff).toString(36)}`;
+  }
+})();
 
 export class WorkspaceLeaseManager {
   private readonly db: IDBDatabase;
   private readonly now: () => number;
   private readonly leaseDurationMs: number;
   private readonly channel: LeaseChannel | null;
+  private readonly contextId: string;
 
   constructor(db: IDBDatabase, options: WorkspaceLeaseManagerOptions = {}) {
     this.db = db;
     this.now = options.now ?? Date.now;
     this.leaseDurationMs = options.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
     this.channel = options.channel === undefined ? defaultChannel() : options.channel;
+    this.contextId = options.contextId ?? JS_CONTEXT_ID;
   }
 
   /**
@@ -83,14 +101,21 @@ export class WorkspaceLeaseManager {
       await done;
       return null;
     }
-    const sameHolder = existing?.holderId === holderId;
-    const fencingToken = sameHolder ? existing!.fencingToken : (existing?.fencingToken ?? 0) + 1;
+    // "Same owner" requires the same JS context, not just the same holder id:
+    // a duplicated tab inherits the holder id via copied sessionStorage. A
+    // same-holder acquire from another context is a takeover — the token
+    // bumps, so the other context's writes fence off instead of both tabs
+    // writing under one valid token. A reload (old context gone) takes over
+    // its own lease immediately the same way.
+    const sameOwner = existing?.holderId === holderId && existing.contextId === this.contextId;
+    const fencingToken = sameOwner ? existing!.fencingToken : (existing?.fencingToken ?? 0) + 1;
     const record: WorkspaceLeaseRecord = {
       v: WORKSPACE_RECORD_VERSION,
       workspaceId,
       holderId,
       fencingToken,
       expiresAt: at + this.leaseDurationMs,
+      contextId: this.contextId,
     };
     store.put(record);
     await done;

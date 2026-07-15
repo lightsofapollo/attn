@@ -27,6 +27,7 @@ import {
 import { quotaPressure } from '../../lib/review/browser-storage-probe';
 import { validateBrowserRelayUrl } from '../../lib/review/browser-relay-url';
 import type { WorkspaceEntryRecord } from '../../lib/review/browser-workspace-schema';
+import type { WorkspaceFence } from '../../lib/review/browser-workspace-store';
 
 /** Safe raster types that may render inline (epic scope note 2026-07-10). */
 const INLINE_SAFE_MEDIA = /^image\/(?:png|jpeg|gif|webp|avif)$/iu;
@@ -110,7 +111,9 @@ async function browserTabHolderId(): Promise<string> {
         }, { once: true });
       } catch {
         // BroadcastChannel can be policy-disabled even when the constructor
-        // exists. Fencing remains safe; only duplicate-tab detection degrades.
+        // exists. The probe is UX-only: even an undetected duplicate cannot
+        // co-write, because the lease manager treats a same-holder acquire
+        // from another JS context as a token-bumping takeover.
         tabIdentityChannel?.close();
         tabIdentityChannel = null;
       }
@@ -259,7 +262,9 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   }
 
   async renameWorkspace(workspaceId: string, name: string): Promise<void> {
-    await this.service.renameWorkspace(workspaceId, name);
+    await this.withWorkspaceFence(workspaceId, (fence) =>
+      this.service.renameWorkspace(workspaceId, name, fence),
+    );
     this.announce({ workspaceId, kind: 'structure' });
   }
 
@@ -356,29 +361,87 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     };
   }
 
+  /**
+   * Run a structural mutation under the workspace writer lease. Structural
+   * changes (create/rename/delete/import) are as destructive as content
+   * commits, so they carry the same fence: a follower tab cannot delete or
+   * rename the file the writer is editing out from under it.
+   *
+   * When this tab already owns the lease (an active editing session),
+   * acquire is an idempotent renewal — same token, the session is untouched
+   * and we leave the lease alone afterwards. Otherwise we take the lease for
+   * exactly this mutation and release it; if another tab is the live writer,
+   * acquire returns null and the mutation fails with an actionable message.
+   */
+  private async withWorkspaceFence<T>(
+    workspaceId: string,
+    action: (fence: WorkspaceFence, renew: () => Promise<void>) => Promise<T>,
+  ): Promise<T> {
+    const holderId = await browserTabHolderId();
+    const before = await this.service.leases.current(workspaceId);
+    let handle = await this.service.leases.acquire(workspaceId, holderId);
+    if (!handle) {
+      throw new Error(
+        'Another tab is editing this project right now. Finish there or wait a moment, then try again.',
+      );
+    }
+    const ridingExistingOwnership =
+      before !== null
+      && before.holderId === holderId
+      && before.fencingToken === handle.fencingToken;
+    try {
+      return await action(
+        { holderId: handle.holderId, fencingToken: handle.fencingToken },
+        async () => {
+          handle = await this.service.leases.heartbeat(handle!);
+        },
+      );
+    } finally {
+      if (!ridingExistingOwnership) {
+        await this.service.leases.release(handle).catch(() => undefined);
+      }
+    }
+  }
+
   async createMarkdownEntry(workspaceId: string, path: string): Promise<void> {
-    await this.service.createMarkdown(workspaceId, path, '');
+    await this.withWorkspaceFence(workspaceId, (fence) =>
+      this.service.createMarkdown(workspaceId, path, '', fence),
+    );
     this.announce({ workspaceId, kind: 'structure' });
   }
 
   async addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void> {
-    for (const file of files) {
-      if (file.kind === 'markdown') {
-        await this.service.createMarkdown(workspaceId, file.path, new TextDecoder().decode(file.bytes));
-      } else {
-        await this.service.addAsset(workspaceId, file.path, file.bytes, file.mediaType);
+    if (files.length === 0) return;
+    await this.withWorkspaceFence(workspaceId, async (fence, renew) => {
+      for (const file of files) {
+        // Multi-file imports can outlive one lease period; keep it beating.
+        await renew();
+        if (file.kind === 'markdown') {
+          await this.service.createMarkdown(
+            workspaceId,
+            file.path,
+            new TextDecoder().decode(file.bytes),
+            fence,
+          );
+        } else {
+          await this.service.addAsset(workspaceId, file.path, file.bytes, file.mediaType, fence);
+        }
       }
-    }
-    if (files.length > 0) this.announce({ workspaceId, kind: 'structure' });
+    });
+    this.announce({ workspaceId, kind: 'structure' });
   }
 
   async renameEntry(workspaceId: string, fromPath: string, toPath: string): Promise<void> {
-    await this.service.renameEntry(workspaceId, fromPath, toPath);
+    await this.withWorkspaceFence(workspaceId, (fence) =>
+      this.service.renameEntry(workspaceId, fromPath, toPath, fence),
+    );
     this.announce({ workspaceId, kind: 'structure' });
   }
 
   async deleteEntry(workspaceId: string, path: string): Promise<void> {
-    await this.service.deleteEntry(workspaceId, path);
+    await this.withWorkspaceFence(workspaceId, (fence) =>
+      this.service.deleteEntry(workspaceId, path, fence),
+    );
     this.announce({ workspaceId, kind: 'structure' });
   }
 

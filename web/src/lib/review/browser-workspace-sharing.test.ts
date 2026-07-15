@@ -130,6 +130,7 @@ class MemoryShareRelay implements BrowserShareOwnerRelayPort {
   ackedThrough = 0;
   async upsert(request: BrowserShareUpsertRequest): Promise<BrowserShareRelayRecord> {
     this.upserts.push(structuredClone(request));
+    this.staged.clear();
     this.record = {
       v: 3, shareId: this.shareId, ownerSigningKey: request.ownerSigningKey,
       epoch: request.epoch, revision: request.revision,
@@ -146,23 +147,16 @@ class MemoryShareRelay implements BrowserShareOwnerRelayPort {
     if (!this.record || this.revoked) throw new BrowserShareOwnerRelayError(404, 'fetch');
     return structuredClone(this.record);
   }
+  // Mirrors the relay's staging contract: uploads never touch the public
+  // record; only the commit upsert changes what a joiner can observe.
+  private uploadCounter = 0;
+  readonly staged = new Map<string, ManagedShareSnapshotRef>();
   async uploadSnapshot(fileId: string, snapshotId: string, ciphertext: Uint8Array): Promise<ManagedShareSnapshotRef> {
     assert(this.record, 'dark share exists before retained upload');
     const ref = { fileId, snapshotId, ciphertextBytes: ciphertext.length,
-      ciphertextSha256: base64UrlEncode(sha256(ciphertext)), uploadedAt: NOW + this.record.revision + 1 };
-    const snapshots = this.record.snapshots.filter(item => item.fileId !== fileId); snapshots.push(ref);
-    snapshots.sort((a, b) => a.fileId.localeCompare(b.fileId));
-    this.record = { ...this.record, snapshots, revision: this.record.revision + 1,
-      manifestDigest: digestShareSnapshotManifest(snapshots) };
+      ciphertextSha256: base64UrlEncode(sha256(ciphertext)), uploadedAt: NOW + (this.uploadCounter += 1) };
+    this.staged.set(fileId, structuredClone(ref));
     return structuredClone(ref);
-  }
-  async deleteSnapshot(fileId: string): Promise<void> {
-    assert(this.record, 'share exists');
-    const snapshots = this.record.snapshots.filter(item => item.fileId !== fileId);
-    if (snapshots.length !== this.record.snapshots.length) {
-      this.record = { ...this.record, snapshots, revision: this.record.revision + 1,
-      manifestDigest: digestShareSnapshotManifest(snapshots) };
-    }
   }
   async fetchMailbox(shareSecret: Uint8Array, tier: 'comment' | 'suggest', after: number) {
     const keys = deriveShareLinkKeys(shareSecret, tier);

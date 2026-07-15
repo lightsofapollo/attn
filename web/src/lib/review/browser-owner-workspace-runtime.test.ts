@@ -132,21 +132,12 @@ class MemoryShareRelay implements BrowserShareOwnerRelayPort {
     if (!this.record) throw new BrowserShareOwnerRelayError(404, 'fetch');
     return structuredClone(this.record);
   }
+  // Staging contract: uploads return a ref without touching the public
+  // record; the commit upsert is the only observable mutation.
   async uploadSnapshot(fileId: string, snapshotId: string, ciphertext: Uint8Array): Promise<ManagedShareSnapshotRef> {
     assert(this.record, 'dark share exists');
-    const ref = { fileId, snapshotId, ciphertextBytes: ciphertext.length,
+    return { fileId, snapshotId, ciphertextBytes: ciphertext.length,
       ciphertextSha256: base64UrlEncode(sha256(ciphertext)), uploadedAt: 1_800_000_000_001 };
-    const snapshots = [...this.record.snapshots.filter(value => value.fileId !== fileId), ref]
-      .sort((a, b) => a.fileId.localeCompare(b.fileId));
-    this.record = { ...this.record, snapshots, revision: this.record.revision + 1,
-      manifestDigest: digestShareSnapshotManifest(snapshots) };
-    return ref;
-  }
-  async deleteSnapshot(fileId: string): Promise<void> {
-    if (!this.record) return;
-    const snapshots = this.record.snapshots.filter(value => value.fileId !== fileId);
-    this.record = { ...this.record, snapshots, revision: this.record.revision + 1,
-      manifestDigest: digestShareSnapshotManifest(snapshots) };
   }
   async fetchMailbox(): Promise<never> { throw new Error('empty mailbox must not be fetched'); }
   async ackMailbox(): Promise<void> { throw new Error('empty mailbox must not be ACKed'); }

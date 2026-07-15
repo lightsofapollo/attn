@@ -1,14 +1,43 @@
 import type { Anchor, AnchorBlockKind, ReviewEvent, SuggestionDraft } from '../types';
-import type {
-  DurableShareSnapshot,
-  DurableShareTier,
-  ResolvedDurableShare,
+import {
+  BrowserShareResolutionError,
+  type DurableShareSnapshot,
+  type DurableShareTier,
+  type ResolvedDurableShare,
 } from './browser-share-resolver';
 
 const PROTOCOL_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const BUNDLE_ID = /^[A-Za-z0-9_-]{22}$/u;
 const SHA256_BASE64URL = /^[A-Za-z0-9_-]{43}$/u;
 const MAX_COMMENT_WIRE_BYTES = 512 * 1024;
+const TRANSIENT_RESOLVE_BACKOFF_MS = [400, 900];
+
+/**
+ * A resolve can race an owner commit: the record read lands on one side of a
+ * commit and a snapshot read on the other, or an old relay is mid-publish.
+ * These read-side inconsistencies self-heal on the next consistent read, so
+ * they get a short bounded retry instead of a terminal error screen.
+ */
+function isTransientResolutionError(error: unknown): boolean {
+  if (error instanceof BrowserShareResolutionError) {
+    return error.code === 'bundle_invalid' || error.code === 'snapshot_invalid';
+  }
+  if (!(error instanceof Error)) return false;
+  // Thrown by openShareCapabilityBundle when the sealed bundle and the record
+  // straddle a publish (e.g. 'capability bundle context mismatch').
+  if (error.name === 'ShareInviteParseError') return true;
+  return error.message.includes('share snapshot selector mismatch')
+    || error.message.includes('share snapshot fetch failed (404');
+}
+
+function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error('share resolve retry aborted')); return; }
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, milliseconds);
+    const onAbort = (): void => { clearTimeout(timer); reject(new Error('share resolve retry aborted')); };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 export interface OfflineCommentDraft {
   draftId: string;
@@ -443,6 +472,18 @@ export class BrowserShareSession {
     this.patch({ error: 'The share changed. Your comment draft was preserved for retry.' });
   }
 
+  private async resolveWithTransientRetry(signal?: AbortSignal): Promise<ResolvedDurableShare> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.options.resolver.resolve(signal);
+      } catch (error) {
+        const backoff = TRANSIENT_RESOLVE_BACKOFF_MS[attempt];
+        if (signal?.aborted || backoff === undefined || !isTransientResolutionError(error)) throw error;
+        await delay(backoff, signal);
+      }
+    }
+  }
+
   private async handleShareChange(generation: number): Promise<void> {
     if (!this.isCurrent(generation)) return;
     if (this.refreshInFlight) { this.refreshQueued = true; return this.refreshInFlight; }
@@ -454,7 +495,7 @@ export class BrowserShareSession {
   }
 
   private async refresh(generation: number, signal?: AbortSignal): Promise<void> {
-    const next = await this.options.resolver.resolve(signal);
+    const next = await this.resolveWithTransientRetry(signal);
     if (!this.isCurrent(generation)) { this.disposeResolution(next); return; }
     let candidate: DurableLiveSession | null = null;
     let committed = false;

@@ -1227,12 +1227,6 @@ pub trait ShareRelayClient: Send + Sync {
         ciphertext: &[u8],
     ) -> Result<ManagedShareSnapshotRef, ShareLifecycleError>;
 
-    async fn delete_snapshot(
-        &self,
-        share_id: &str,
-        file_id: &str,
-    ) -> Result<(), ShareLifecycleError>;
-
     async fn fetch_snapshot(
         &self,
         share_id: &str,
@@ -1522,24 +1516,6 @@ impl ShareRelayClient for HttpShareRelayClient {
             )
             .await?;
         Self::decode_json(response).await
-    }
-
-    async fn delete_snapshot(
-        &self,
-        share_id: &str,
-        file_id: &str,
-    ) -> Result<(), ShareLifecycleError> {
-        let path = format!("/v3/shares/{share_id}/snapshots/{file_id}");
-        let response = self
-            .owner_response(share_id, reqwest::Method::DELETE, &path, &[], vec![])
-            .await?;
-        if response.status().is_success() || response.status().as_u16() == 404 {
-            Ok(())
-        } else {
-            let status = response.status().as_u16();
-            let bytes = response.bytes().await.unwrap_or_default();
-            Err(relay_failure(status, &bytes))
-        }
     }
 
     async fn fetch_snapshot(
@@ -1835,43 +1811,34 @@ impl DurableShareService {
         let snapshot_key = derive_room_key_tree_v3(epoch_secret.as_bytes())
             .read_keys
             .snapshot_key;
-        let stale_file_ids = stale_retained_file_ids(&initial.snapshots, &desired_snapshots);
-        for file_id in &stale_file_ids {
-            self.relay.delete_snapshot(&share_id, file_id).await?;
-        }
-        let uploaded_files = initial
-            .snapshots
-            .iter()
-            .filter(|snapshot| !stale_file_ids.contains(&snapshot.file_id))
-            .map(|snapshot| (snapshot.file_id.as_str(), snapshot.snapshot_id.as_str()))
-            .collect::<std::collections::HashSet<_>>();
+        // Uploads only stage ciphertext on the relay; nothing joiners can
+        // observe changes until the single commit upsert below lands the
+        // manifest, pointer, revision, and re-sealed bundles together. Files
+        // absent from the committed manifest are removed by that same commit.
+        let mut next_manifest: Vec<ManagedShareSnapshotRef> = Vec::new();
         for snapshot in &epoch.snapshots {
-            if uploaded_files.contains(&(snapshot.file_id.as_str(), snapshot.snapshot_id.as_str()))
-            {
+            if let Some(retained) = initial.snapshots.iter().find(|candidate| {
+                candidate.file_id == snapshot.file_id.as_str()
+                    && candidate.snapshot_id == snapshot.snapshot_id.as_str()
+            }) {
+                next_manifest.push(retained.clone());
                 continue;
             }
             let sealed = seal_managed_snapshot(&share_id, 0, snapshot, snapshot_key.as_bytes())?;
-            self.relay
-                .upload_snapshot(
-                    &share_id,
-                    snapshot.file_id.as_str(),
-                    snapshot.snapshot_id.as_str(),
-                    &sealed,
-                )
-                .await?;
+            next_manifest.push(
+                self.relay
+                    .upload_snapshot(
+                        &share_id,
+                        snapshot.file_id.as_str(),
+                        snapshot.snapshot_id.as_str(),
+                        &sealed,
+                    )
+                    .await?,
+            );
         }
-        let current = self.relay.fetch_share(&share_id, &access).await?;
-        if current.snapshots.len() != desired_snapshots.len()
-            || current.snapshots.iter().any(|snapshot| {
-                !desired_snapshots
-                    .contains(&(snapshot.file_id.as_str(), snapshot.snapshot_id.as_str()))
-            })
-        {
-            return Err(ShareLifecycleError::Relay(
-                "retained snapshot manifest did not reconcile exactly before pointer flip".into(),
-            ));
-        }
-        let final_revision = current.revision.checked_add(1).ok_or_else(|| {
+        next_manifest.sort_by(|left, right| left.file_id.cmp(&right.file_id));
+        let manifest_digest = manifest_digest_for(&next_manifest)?;
+        let final_revision = initial.revision.checked_add(1).ok_or_else(|| {
             ShareLifecycleError::Invalid("share revision exhausted during create".into())
         })?;
         let synced_bundles = build_bundles(
@@ -1879,7 +1846,7 @@ impl DurableShareService {
             &share_id,
             0,
             final_revision,
-            &current.manifest_digest,
+            &manifest_digest,
             &epoch,
         )?;
         let synced = ShareUpsertRequest {
@@ -1889,8 +1856,8 @@ impl DurableShareService {
             epoch: 0,
             revision: final_revision,
             current_room_id: Some(epoch.room_id.as_str().to_owned()),
-            snapshots: current.snapshots.clone(),
-            placeholders: current.placeholders.clone(),
+            snapshots: next_manifest,
+            placeholders: initial.placeholders.clone(),
             device_id: epoch.device_id,
         };
         let active = self.relay.create_or_renew(&share_id, &synced).await?;
@@ -2040,25 +2007,16 @@ impl DurableShareService {
             .create_durable_epoch_room(record.owner_path.clone(), epoch_secret)
             .await
             .map_err(bootstrap_failure)?;
-        let mut changed = false;
-        let desired_files = outcome
-            .snapshots
-            .iter()
-            .map(|snapshot| snapshot.file_id.as_str())
-            .collect::<std::collections::HashSet<_>>();
-        for retained in &remote.snapshots {
-            if !desired_files.contains(retained.file_id.as_str()) {
-                self.relay
-                    .delete_snapshot(&record.share_id, &retained.file_id)
-                    .await?;
-                changed = true;
-            }
-        }
+        // Build the desired manifest from retained refs plus freshly staged
+        // uploads; the commit upsert below is the only observable mutation,
+        // and it removes files by omitting them from the committed manifest.
+        let mut next_manifest: Vec<ManagedShareSnapshotRef> = Vec::new();
         for snapshot in &outcome.snapshots {
-            if remote.snapshots.iter().any(|candidate| {
+            if let Some(retained) = remote.snapshots.iter().find(|candidate| {
                 candidate.file_id == snapshot.file_id.as_str()
                     && candidate.snapshot_id == snapshot.snapshot_id.as_str()
             }) {
+                next_manifest.push(retained.clone());
                 continue;
             }
             let sealed = seal_managed_snapshot(
@@ -2067,47 +2025,56 @@ impl DurableShareService {
                 snapshot,
                 snapshot_key.as_bytes(),
             )?;
-            self.relay
-                .upload_snapshot(
-                    &record.share_id,
-                    snapshot.file_id.as_str(),
-                    snapshot.snapshot_id.as_str(),
-                    &sealed,
-                )
-                .await?;
-            changed = true;
+            next_manifest.push(
+                self.relay
+                    .upload_snapshot(
+                        &record.share_id,
+                        snapshot.file_id.as_str(),
+                        snapshot.snapshot_id.as_str(),
+                        &sealed,
+                    )
+                    .await?,
+            );
         }
-        let current = if changed {
-            self.relay
-                .fetch_share(
-                    &record.share_id,
-                    &bundle_access(root_for(record)?, ShareLinkTier::View),
-                )
-                .await?
-        } else {
-            remote.clone()
-        };
-        let request = ShareUpsertRequest {
-            v: 3,
-            owner_signing_key: current.owner_signing_key.clone(),
-            bundles: if changed {
-                build_bundles(
+        next_manifest.sort_by(|left, right| left.file_id.cmp(&right.file_id));
+        let changed = next_manifest != remote.snapshots;
+        let request = if changed {
+            let manifest_digest = manifest_digest_for(&next_manifest)?;
+            let revision = remote.revision.checked_add(1).ok_or_else(|| {
+                ShareLifecycleError::Invalid("share revision exhausted during sync".into())
+            })?;
+            ShareUpsertRequest {
+                v: 3,
+                owner_signing_key: remote.owner_signing_key.clone(),
+                bundles: build_bundles(
                     root_for(record)?,
                     &record.share_id,
                     record.epoch,
-                    current.revision,
-                    &current.manifest_digest,
+                    revision,
+                    &manifest_digest,
                     &outcome,
-                )?
-            } else {
-                vec![]
-            },
-            epoch: record.epoch,
-            revision: current.revision,
-            current_room_id: current.current_room_id.clone(),
-            snapshots: current.snapshots.clone(),
-            placeholders: current.placeholders.clone(),
-            device_id: outcome.device_id,
+                )?,
+                epoch: record.epoch,
+                revision,
+                current_room_id: remote.current_room_id.clone(),
+                snapshots: next_manifest,
+                placeholders: remote.placeholders.clone(),
+                device_id: outcome.device_id,
+            }
+        } else {
+            // Nothing changed: a bare touch renews the pointer lifetime
+            // without moving the committed projection.
+            ShareUpsertRequest {
+                v: 3,
+                owner_signing_key: remote.owner_signing_key.clone(),
+                bundles: vec![],
+                epoch: record.epoch,
+                revision: remote.revision,
+                current_room_id: remote.current_room_id.clone(),
+                snapshots: remote.snapshots.clone(),
+                placeholders: remote.placeholders.clone(),
+                device_id: outcome.device_id,
+            }
         };
         self.relay.create_or_renew(&record.share_id, &request).await
     }
@@ -2493,17 +2460,18 @@ impl DurableShareService {
     }
 }
 
-fn stale_retained_file_ids(
-    remote: &[ManagedShareSnapshotRef],
-    desired: &std::collections::HashSet<(&str, &str)>,
-) -> std::collections::BTreeSet<String> {
-    remote
-        .iter()
-        .filter(|snapshot| {
-            !desired.contains(&(snapshot.file_id.as_str(), snapshot.snapshot_id.as_str()))
-        })
-        .map(|snapshot| snapshot.file_id.clone())
-        .collect()
+/// Digest of a locally assembled manifest, byte-for-byte what the relay
+/// computes over the committed refs. Sealed bundles bind this value, so the
+/// owner derives it from the refs it is about to commit — never from a
+/// mid-flight relay read.
+fn manifest_digest_for(
+    snapshots: &[ManagedShareSnapshotRef],
+) -> Result<String, ShareLifecycleError> {
+    let mut sorted = snapshots.to_vec();
+    sorted.sort_by(|left, right| left.file_id.cmp(&right.file_id));
+    let bytes = crate::review::crypto::canonical::to_canonical_bytes(&sorted)
+        .map_err(|error| ShareLifecycleError::Invalid(format!("share manifest: {error}")))?;
+    Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(&bytes)))
 }
 
 fn retained_manifest_is_exact(
@@ -2845,10 +2813,6 @@ mod tests {
             unreachable!()
         }
 
-        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), ShareLifecycleError> {
-            unreachable!()
-        }
-
         async fn fetch_snapshot(
             &self,
             _: &str,
@@ -2921,10 +2885,6 @@ mod tests {
             _: &str,
             _: &[u8],
         ) -> Result<ManagedShareSnapshotRef, ShareLifecycleError> {
-            unreachable!()
-        }
-
-        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), ShareLifecycleError> {
             unreachable!()
         }
 
@@ -3027,6 +2987,8 @@ mod tests {
             remote.current_room_id = request.current_room_id.clone();
             remote.revision = request.revision;
             remote.owner_signing_key = request.owner_signing_key.clone();
+            // Commit semantics: the upsert's manifest is the projection.
+            remote.snapshots = request.snapshots.clone();
             Ok(remote.clone())
         }
         async fn fetch_mailbox(
@@ -3055,27 +3017,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("upload:{file_id}"));
-            let retained = ManagedShareSnapshotRef {
+            // Staging semantics: the ref is returned but the public record
+            // does not change until the commit upsert.
+            Ok(ManagedShareSnapshotRef {
                 file_id: file_id.into(),
                 snapshot_id: snapshot_id.into(),
                 ciphertext_bytes: ciphertext.len() as u64,
                 ciphertext_sha256: "new-digest".into(),
                 uploaded_at: 2,
-            };
-            self.remote.lock().unwrap().snapshots.push(retained.clone());
-            Ok(retained)
-        }
-        async fn delete_snapshot(&self, _: &str, file_id: &str) -> Result<(), ShareLifecycleError> {
-            self.operations
-                .lock()
-                .unwrap()
-                .push(format!("delete:{file_id}"));
-            self.remote
-                .lock()
-                .unwrap()
-                .snapshots
-                .retain(|snapshot| snapshot.file_id != file_id);
-            Ok(())
+            })
         }
         async fn fetch_snapshot(
             &self,
@@ -3088,7 +3038,7 @@ mod tests {
     }
 
     #[test]
-    fn dark_pointer_recovery_deletes_removed_and_obsolete_retained_snapshots() {
+    fn dark_pointer_recovery_rejects_stale_offline_content() {
         let remote = vec![
             snapshot_ref("edited-file", "old-snapshot"),
             snapshot_ref("deleted-file", "deleted-snapshot"),
@@ -3098,17 +3048,10 @@ mod tests {
             !retained_manifest_is_exact(&remote, &desired),
             "a live-pointer shortcut must reject stale offline content"
         );
-        assert_eq!(
-            stale_retained_file_ids(&remote, &desired),
-            std::collections::BTreeSet::from([
-                "deleted-file".to_string(),
-                "edited-file".to_string(),
-            ])
-        );
     }
 
     #[tokio::test]
-    async fn complete_create_deletes_stale_dark_pointer_artifact_before_flip() {
+    async fn complete_create_commits_manifest_without_stale_dark_pointer_artifact() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"^/v3/rooms/[^/]+$"))
@@ -3176,9 +3119,11 @@ mod tests {
         service.complete_create(intent).await.expect("recovery");
 
         let operations = relay.operations.lock().unwrap().clone();
-        assert_eq!(operations[0], "delete:deleted-file");
-        assert!(operations[1].starts_with("upload:"));
-        assert_eq!(operations[2], "pointer");
+        // No standalone delete: the stale ref simply falls out of the
+        // committed manifest, so upload + one commit is the whole publish.
+        assert!(operations[0].starts_with("upload:"));
+        assert_eq!(operations[1], "pointer");
+        assert_eq!(operations.len(), 2);
         let remote = relay.remote.lock().unwrap();
         assert_eq!(remote.snapshots.len(), 1);
         assert_ne!(remote.snapshots[0].file_id, "deleted-file");
@@ -3489,9 +3434,6 @@ mod tests {
             _: &str,
             _: &[u8],
         ) -> Result<ManagedShareSnapshotRef, ShareLifecycleError> {
-            unreachable!()
-        }
-        async fn delete_snapshot(&self, _: &str, _: &str) -> Result<(), ShareLifecycleError> {
             unreachable!()
         }
         async fn fetch_snapshot(

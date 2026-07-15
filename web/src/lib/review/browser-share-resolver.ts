@@ -111,6 +111,9 @@ export interface BrowserShareResolverOptions<TCapability = unknown> {
     bundleId: string;
     epoch: number;
     revision: number;
+    /** Resolver-computed digest of this record's manifest. Passed per call so
+     * concurrent resolves can never cross-contaminate each other's context. */
+    manifestDigest: string;
     sealedBundle: Uint8Array;
     capability: TCapability;
   }): Promise<DecodedDurableShareBundle> | DecodedDurableShareBundle;
@@ -207,6 +210,7 @@ export class BrowserShareResolver<TCapability = unknown> {
         bundleId: record.bundleId,
         epoch: record.epoch,
         revision: record.revision,
+        manifestDigest,
         sealedBundle,
         capability: this.options.capability,
       });

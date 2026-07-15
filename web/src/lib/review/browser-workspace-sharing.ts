@@ -54,6 +54,7 @@ import {
   EMPTY_SHARE_MANIFEST_DIGEST,
   buildShareBundleMutations,
   composeShareTierInvites,
+  digestShareSnapshotManifest,
   sealDurableShareSnapshot,
   type BrowserShareOwnerRelayOptions,
   type BrowserShareRelayRecord,
@@ -119,7 +120,6 @@ export interface BrowserShareOwnerRelayPort {
   upsert(request: BrowserShareUpsertRequest): Promise<BrowserShareRelayRecord>;
   fetchWithViewCapability(shareSecret: Uint8Array): Promise<BrowserShareRelayRecord>;
   uploadSnapshot(fileId: string, snapshotId: string, ciphertext: Uint8Array): Promise<ManagedShareSnapshotRef>;
-  deleteSnapshot(fileId: string): Promise<void>;
   fetchMailbox(shareSecret: Uint8Array, tier: 'comment' | 'suggest', after: number): Promise<BrowserShareMailboxPage>;
   ackMailbox(through: number): Promise<void>;
   revoke(): Promise<void>;
@@ -448,7 +448,12 @@ export class BrowserWorkspaceSharingCoordinator {
       });
     }
 
+    // Uploads only stage ciphertext on the relay; nothing joiners can observe
+    // changes until the single commit upsert below lands the full manifest
+    // together with bundles sealed against it. Files absent from the
+    // committed manifest are removed by that same commit.
     const sources = await this.loadSources(capability.sharePaths ?? []);
+    const nextManifest: ManagedShareSnapshotRef[] = [];
     try {
       const desired = new Map<string, { snapshotId: string; source: BrowserSnapshotEntry }>();
       for (const entry of manifest.entries) {
@@ -460,15 +465,12 @@ export class BrowserWorkspaceSharingCoordinator {
         if (source.docType === 'asset') continue;
         desired.set(entry.fileId, { snapshotId: entry.snapshotId, source });
       }
-      for (const retained of remote.snapshots) {
-        const wanted = desired.get(retained.fileId);
-        if (!wanted || wanted.snapshotId !== retained.snapshotId) {
-          await client.deleteSnapshot(retained.fileId);
-        }
-      }
-      remote = await client.fetchWithViewCapability(credentials.shareSecret);
       for (const [fileId, wanted] of desired) {
-        if (remote.snapshots.some((candidate) => candidate.fileId === fileId && candidate.snapshotId === wanted.snapshotId)) {
+        const retained = remote.snapshots.find(
+          (candidate) => candidate.fileId === fileId && candidate.snapshotId === wanted.snapshotId,
+        );
+        if (retained) {
+          nextManifest.push(retained);
           continue;
         }
         const content = new TextDecoder('utf-8', { fatal: true }).decode(wanted.source.bytes);
@@ -493,7 +495,7 @@ export class BrowserWorkspaceSharingCoordinator {
           snapshotKey: credentials.keys.snapshotKey,
         });
         try {
-          await client.uploadSnapshot(fileId, wanted.snapshotId, sealed);
+          nextManifest.push(await client.uploadSnapshot(fileId, wanted.snapshotId, sealed));
         } finally {
           sealed.fill(0);
         }
@@ -502,11 +504,11 @@ export class BrowserWorkspaceSharingCoordinator {
       zeroSources(sources);
     }
 
-    remote = await client.fetchWithViewCapability(credentials.shareSecret);
+    nextManifest.sort((left, right) => left.fileId.localeCompare(right.fileId));
+    const manifestDigest = digestShareSnapshotManifest(nextManifest);
     const exact = remote.currentRoomId === record.roomId
       && remote.epoch === credentials.epoch
-      && remote.revision === durable.revision
-      && remote.manifestDigest === durable.manifestDigest;
+      && remote.manifestDigest === manifestDigest;
     const revision = exact ? remote.revision : remote.revision + 1;
     const active = await client.upsert({
       v: 3,
@@ -514,12 +516,12 @@ export class BrowserWorkspaceSharingCoordinator {
       bundles: exact
         ? []
         : buildShareBundleMutations(
-            this.bundleContext(credentials, revision, remote.manifestDigest),
+            this.bundleContext(credentials, revision, manifestDigest),
           ),
       epoch: credentials.epoch,
       revision,
       currentRoomId: record.roomId,
-      snapshots: remote.snapshots,
+      snapshots: nextManifest,
       placeholders: remote.placeholders,
       deviceId: credentials.identity.deviceId,
     });

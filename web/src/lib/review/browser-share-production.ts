@@ -580,7 +580,6 @@ export async function createBrowserDurableShareResolver(options: BrowserDurableS
   const relay = new URL(options.relayUrl);
   const sharePath = `/v3/shares/${encodeURIComponent(options.invite.shareId)}`;
   const shareUrl = new URL(sharePath, relay).href;
-  let currentManifestDigest = '';
   const headers = (method: string, path: string, body = new Uint8Array()): HeadersInit => ({
     'Attn-Share-Bundle': linkKeys.bundleId,
     'Attn-Admission': buildAdmissionHeaderV3(linkKeys.readAdmissionKey, 'read', method, path, body),
@@ -592,12 +591,13 @@ export async function createBrowserDurableShareResolver(options: BrowserDurableS
     fetchRecord: async ({ signal }) => {
       const response = await fetchImpl(shareUrl, { headers: headers('GET', sharePath), signal });
       const raw = await strictJson(response, 'share record');
-      return mapShareRecord(raw, options.invite.shareId, linkKeys.bundleId, options.tier,
-        digestValue => { currentManifestDigest = digestValue; });
+      return mapShareRecord(raw, options.invite.shareId, linkKeys.bundleId, options.tier);
     },
-    decodeBundle: ({ shareId, bundleId, epoch, revision, sealedBundle }) => {
+    // The expected digest comes from the resolver's own computation over this
+    // record's manifest — never from server claims or shared mutable state.
+    decodeBundle: ({ shareId, bundleId, epoch, revision, manifestDigest, sealedBundle }) => {
       const raw = openShareCapabilityBundle(linkKeys.bundleKey, bundleId, {
-        shareId, epoch, revision, manifestDigest: currentManifestDigest, tier: options.tier,
+        shareId, epoch, revision, manifestDigest, tier: options.tier,
       }, base64UrlEncode(sealedBundle));
       return decodedBundle(raw);
     },
@@ -738,12 +738,10 @@ export function subscribeToDurableShareChanges(input: {
   } };
 }
 
-function mapShareRecord(value: unknown, shareId: string, bundleId: string, tier: ShareLinkTier,
-  setManifestDigest: (value: string) => void): DurableShareRecord {
+function mapShareRecord(value: unknown, shareId: string, bundleId: string, tier: ShareLinkTier): DurableShareRecord {
   if (!isRecord(value) || Object.keys(value).some(key => !SHARE_RECORD_KEYS.has(key)) || !isRecord(value.bundle) ||
     value.bundle.bundleId !== bundleId || value.bundle.tier !== tier || typeof value.bundle.sealedBundle !== 'string' ||
     typeof value.manifestDigest !== 'string') throw new Error('share record response is invalid');
-  setManifestDigest(value.manifestDigest);
   return { v: value.v as 3, shareId: value.shareId as string, bundleId, epoch: value.epoch as number,
     revision: value.revision as number, ...(typeof value.currentRoomId === 'string' ? { currentRoomId: value.currentRoomId } : {}),
     snapshots: value.snapshots, selectedBundle: base64UrlDecode(value.bundle.sealedBundle),

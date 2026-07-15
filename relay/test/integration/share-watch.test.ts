@@ -201,24 +201,37 @@ describe("v3 durable share watch", () => {
       expect(JSON.stringify(frame)).not.toContain("bundleId");
     }
 
+    // A staged upload is content-blind AND broadcast-blind: watchers only hear
+    // about the commit upsert that lands the manifest with its sealed bundles.
+    // (If the PUT had broadcast, the next frame below would carry its
+    // premature revision and the assertion would fail.)
     const snapshotUrl = `${url}/snapshots/readme/watch-snapshot`;
     const ciphertext = new Uint8Array([1, 2, 3, 4]);
     const canonical = await canonicalRequest(new Request(snapshotUrl, { method: "PUT", body: ciphertext }), new URL(snapshotUrl).pathname);
     const ownerSig = base64UrlEncode(new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, owner.privateKey, canonical)));
     const snapshotPow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "PUT", path: `/v3/shares/${shareId}/snapshots/readme/watch-snapshot`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}watch-s` });
-    expect((await SELF.fetch(snapshotUrl, { method: "PUT", body: ciphertext, headers: {
+    const stagedUpload = await SELF.fetch(snapshotUrl, { method: "PUT", body: ciphertext, headers: {
       "Content-Type": "application/octet-stream", "Attn-Device-Id": shareId,
       "Attn-Owner-Signature": ownerSig, "Attn-PoW": snapshotPow,
-    } })).status).toBe(201);
+    } });
+    expect(stagedUpload.status).toBe(201);
+    const stagedRef = await stagedUpload.json() as Record<string, unknown>;
+    const commitBody = JSON.stringify({ v: 3, ownerSigningKey: base64UrlEncode(owner.publicKeyBytes), revision: 2, snapshots: [stagedRef] });
+    const commitPow = await mintPowForTests({ roomId: shareId, deviceId: ownerId, method: "POST", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}watch-c` });
+    expect((await SELF.fetch(url, { method: "POST", body: commitBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url, body: commitBody, privateKey: owner.privateKey }),
+      "Attn-PoW": commitPow,
+    } })).status).toBe(200);
     for (const queue of queues) expect(await queue.next()).toEqual({ type: "share_changed", epoch: 1, revision: 2 });
 
-    const deleteSnapshotUrl = `${url}/snapshots/readme`;
-    const deleteSnapshotPow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "DELETE", path: `/v3/shares/${shareId}/snapshots/readme`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}watch-ds` });
-    expect((await SELF.fetch(deleteSnapshotUrl, { method: "DELETE", headers: {
-      "Attn-Device-Id": shareId,
-      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "DELETE", url: deleteSnapshotUrl, privateKey: owner.privateKey }),
-      "Attn-PoW": deleteSnapshotPow,
-    } })).status).toBe(204);
+    const removeBody = JSON.stringify({ v: 3, ownerSigningKey: base64UrlEncode(owner.publicKeyBytes), revision: 3, snapshots: [] });
+    const removePow = await mintPowForTests({ roomId: shareId, deviceId: ownerId, method: "POST", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}watch-d` });
+    expect((await SELF.fetch(url, { method: "POST", body: removeBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url, body: removeBody, privateKey: owner.privateKey }),
+      "Attn-PoW": removePow,
+    } })).status).toBe(200);
     for (const queue of queues) expect(await queue.next()).toEqual({ type: "share_changed", epoch: 1, revision: 3 });
 
     const revokePow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "DELETE", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}watch-r` });

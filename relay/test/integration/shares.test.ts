@@ -102,6 +102,24 @@ async function createShare(label: string): Promise<{
   return { shareId, url, owner, read };
 }
 
+async function commitManifest(
+  fixture: Awaited<ReturnType<typeof createShare>>,
+  revision: number,
+  snapshots: Array<Record<string, unknown>>,
+): Promise<Response> {
+  const body = JSON.stringify({
+    v: 3,
+    ownerSigningKey: base64UrlEncode(fixture.owner.publicKeyBytes),
+    revision,
+    snapshots,
+  });
+  return SELF.fetch(fixture.url, { method: "POST", body, headers: {
+    "Content-Type": "application/json",
+    "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url: fixture.url, body, privateKey: fixture.owner.privateKey }),
+    "Attn-PoW": await createPowHeader(fixture.shareId, fixture.owner.publicKeyBytes, `/v3/shares/${fixture.shareId}`),
+  } });
+}
+
 async function uploadSnapshot(
   fixture: Awaited<ReturnType<typeof createShare>>,
   fileId: string,
@@ -281,23 +299,24 @@ describe("durable v3 shares", () => {
     expect(epochAdvance.status).toBe(409);
     expect((await epochAdvance.json() as { error: { code: string } }).error.code).toBe("ATTN_SHARE_MAIL_PENDING");
 
-    const blockedSnapshotUrl = `${url}/snapshots/readme/blocked-snapshot`;
-    const blockedCiphertext = new Uint8Array([9, 9, 9]);
-    const blockedSnapshot = await SELF.fetch(blockedSnapshotUrl, { method: "PUT", body: blockedCiphertext, headers: {
+    // Snapshot uploads stage without touching the public projection, so they
+    // are allowed even while mail is pending — joiners cannot observe them.
+    const stagedSnapshotUrl = `${url}/snapshots/readme/staged-while-pending`;
+    const stagedCiphertext = new Uint8Array([9, 9, 9]);
+    const stagedPow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "PUT", path: `/v3/shares/${shareId}/snapshots/readme/staged-while-pending`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}tp` });
+    const stagedSnapshot = await SELF.fetch(stagedSnapshotUrl, { method: "PUT", body: stagedCiphertext, headers: {
       "Content-Type": "application/octet-stream",
       "Attn-Device-Id": shareId,
-      "Attn-Owner-Signature": await binaryOwnerSignature("PUT", blockedSnapshotUrl, blockedCiphertext, owner.privateKey),
+      "Attn-Owner-Signature": await binaryOwnerSignature("PUT", stagedSnapshotUrl, stagedCiphertext, owner.privateKey),
+      "Attn-PoW": stagedPow,
     } });
-    expect(blockedSnapshot.status).toBe(409);
-    expect((await blockedSnapshot.json() as { error: { code: string } }).error.code).toBe("ATTN_SHARE_MAIL_PENDING");
-    const blockedDeleteUrl = `${url}/snapshots/readme`;
-    const blockedDelete = await SELF.fetch(blockedDeleteUrl, { method: "DELETE", headers: {
+    expect(stagedSnapshot.status).toBe(201);
+    const removedDeleteUrl = `${url}/snapshots/readme`;
+    const removedDelete = await SELF.fetch(removedDeleteUrl, { method: "DELETE", headers: {
       "Attn-Device-Id": shareId,
-      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "DELETE", url: blockedDeleteUrl, privateKey: owner.privateKey }),
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "DELETE", url: removedDeleteUrl, privateKey: owner.privateKey }),
     } });
-    expect(blockedDelete.status).toBe(409);
-    expect((await blockedDelete.json() as { error: { code: string } }).error.code).toBe("ATTN_SHARE_MAIL_PENDING");
-    expect((await env.RELAY_BLOBS.list({ prefix: shareArtifactPrefix(shareId) })).objects).toHaveLength(0);
+    expect(removedDelete.status).toBe(405);
     const unchanged = await SELF.fetch(url, { headers: {
       "Attn-Share-Bundle": bundles[0].bundleId,
       "Attn-Admission": await admission("read", viewReadKey, "GET", url),
@@ -328,18 +347,19 @@ describe("durable v3 shares", () => {
       "Attn-Owner-Signature": await binaryOwnerSignature("PUT", snapshotUrl, ciphertext, owner.privateKey),
       "Attn-PoW": snapshotPow,
     } });
-    expect(snapshotUpload.status).toBe(201);
+    expect(snapshotUpload.status).toBe(200);
     const snapshotRef = await snapshotUpload.json() as Record<string, unknown>;
     const expectedManifestDigest = base64UrlEncode(new Uint8Array(await crypto.subtle.digest(
       "SHA-256",
       new TextEncoder().encode(canonicalize([snapshotRef as CanonicalValue])),
     )));
+    // Still staged: the public record must not have moved.
     const revised = await SELF.fetch(url, { headers: {
       "Attn-Share-Bundle": bundles[0].bundleId,
       "Attn-Admission": await admission("read", viewReadKey, "GET", url),
     } });
     const revisedJson = await revised.json() as { revision: number; manifestDigest: string };
-    expect(revisedJson).toMatchObject({ revision: 1, manifestDigest: expectedManifestDigest });
+    expect(revisedJson).toMatchObject({ revision: 0, manifestDigest: "T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU" });
 
     const synchronizedBundles = bundles.map(bundle => ({
       ...bundle,
@@ -350,6 +370,7 @@ describe("durable v3 shares", () => {
       ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
       revision: 1,
       bundles: synchronizedBundles,
+      snapshots: [snapshotRef],
     });
     const ownerId = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", owner.publicKeyBytes)));
     const syncPow = await mintPowForTests({ roomId: shareId, deviceId: ownerId, method: "POST", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}tu` });
@@ -401,6 +422,8 @@ describe("durable v3 shares", () => {
     expect(firstRef).toMatchObject({ fileId: "readme", snapshotId: "snapshot-one", ciphertextBytes: first.byteLength });
     expect(firstRef).not.toHaveProperty("artifactId");
     expect(firstRef).not.toHaveProperty("blobKey");
+    expect(firstRef).not.toHaveProperty("stagedAt");
+    expect(firstRef).not.toHaveProperty("shareId");
 
     const prefix = shareArtifactPrefix(fixture.shareId);
     expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
@@ -409,8 +432,14 @@ describe("durable v3 shares", () => {
     await deleteRoomBlobs(env, fixture.shareId);
     expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
 
+    // Staged uploads are invisible to readers until an owner commit.
     const snapshotUrl = `${fixture.url}/snapshots/readme`;
     expect((await SELF.fetch(snapshotUrl)).status).toBe(401);
+    const beforeCommit = await SELF.fetch(snapshotUrl, {
+      headers: { "Attn-Admission": await admission("read", fixture.read, "GET", snapshotUrl) },
+    });
+    expect(beforeCommit.status).toBe(404);
+    expect((await commitManifest(fixture, 1, [firstRef])).status).toBe(200);
     const downloaded = await SELF.fetch(snapshotUrl, {
       headers: { "Attn-Admission": await admission("read", fixture.read, "GET", snapshotUrl) },
     });
@@ -420,6 +449,10 @@ describe("durable v3 shares", () => {
     const second = new TextEncoder().encode("v2");
     const replaced = await uploadSnapshot(fixture, "readme", "snapshot-two", second, `${FIXED_POW_RAND}p2`);
     expect(replaced.status).toBe(200);
+    const secondRef = await replaced.json() as Record<string, unknown>;
+    // Live v1 and staged v2 coexist until the commit supersedes v1.
+    expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(2);
+    expect((await commitManifest(fixture, 2, [secondRef])).status).toBe(200);
     expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
     const shareRead = await SELF.fetch(fixture.url, {
       headers: { "Attn-Admission": await admission("read", fixture.read, "GET", fixture.url) },
@@ -429,32 +462,19 @@ describe("durable v3 shares", () => {
     expect(manifest[0]).toMatchObject({ fileId: "readme", snapshotId: "snapshot-two", ciphertextBytes: 2 });
     expect(manifest[0]).not.toHaveProperty("artifactId");
 
-    const snapshotDeletePow = await mintPowForTests({
-      roomId: fixture.shareId, deviceId: fixture.shareId, method: "DELETE",
-      path: `/v3/shares/${fixture.shareId}/snapshots/readme`, difficulty: 12,
-      expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}p-delete`,
-    });
+    // Removal is a commit without the file; the standalone DELETE is gone so
+    // the manifest can never move ahead of its sealed bundles.
     const deletedSnapshot = await SELF.fetch(snapshotUrl, { method: "DELETE", headers: {
       "Attn-Device-Id": fixture.shareId,
       "Attn-Owner-Signature": await ownerSignatureHeader({ method: "DELETE", url: snapshotUrl, privateKey: fixture.owner.privateKey }),
-      "Attn-PoW": snapshotDeletePow,
     } });
-    expect(deletedSnapshot.status).toBe(204);
-    expect(deletedSnapshot.headers.get("Attn-Share-Revision")).toBe("3");
-    expect(deletedSnapshot.headers.get("Attn-Manifest-Digest")).toBe("T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU");
+    expect(deletedSnapshot.status).toBe(405);
+    expect((await commitManifest(fixture, 3, [])).status).toBe(200);
     expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(0);
-    const absentDeletePow = await mintPowForTests({
-      roomId: fixture.shareId, deviceId: fixture.shareId, method: "DELETE",
-      path: `/v3/shares/${fixture.shareId}/snapshots/readme`, difficulty: 12,
-      expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}p-delete-again`,
+    const removedRead = await SELF.fetch(fixture.url, {
+      headers: { "Attn-Admission": await admission("read", fixture.read, "GET", fixture.url) },
     });
-    const absentDelete = await SELF.fetch(snapshotUrl, { method: "DELETE", headers: {
-      "Attn-Device-Id": fixture.shareId,
-      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "DELETE", url: snapshotUrl, privateKey: fixture.owner.privateKey }),
-      "Attn-PoW": absentDeletePow,
-    } });
-    expect(absentDelete.status).toBe(204);
-    expect(absentDelete.headers.get("Attn-Share-Revision")).toBe("3");
+    expect(await removedRead.json()).toMatchObject({ revision: 3, snapshots: [] });
 
     const deletePow = await mintPowForTests({
       roomId: fixture.shareId,
@@ -555,13 +575,16 @@ describe("durable v3 shares", () => {
 
   it("recovers snapshot-delete ciphertext cleanup after the manifest transaction committed", async () => {
     const fixture = await createShare("share-artifact-delete-recovery");
-    expect((await uploadSnapshot(
+    const uploaded = await uploadSnapshot(
       fixture,
       "removed-file",
       "removed-snapshot",
       new Uint8Array([2, 7, 1, 8]),
       `${FIXED_POW_RAND}delete-recovery`,
-    )).status).toBe(201);
+    );
+    expect(uploaded.status).toBe(201);
+    const uploadedRef = await uploaded.json() as Record<string, unknown>;
+    expect((await commitManifest(fixture, 1, [uploadedRef])).status).toBe(200);
     const stub = env.RELAY_SHARES.get(env.RELAY_SHARES.idFromName(fixture.shareId));
     let objectKey = "";
     await runInDurableObject(stub, async (_instance, state) => {

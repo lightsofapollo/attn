@@ -340,14 +340,6 @@ export class BrowserShareOwnerRelayClient {
     return validateSnapshotRef(value);
   }
 
-  async deleteSnapshot(fileId: string): Promise<void> {
-    const path = `${this.sharePath()}/snapshots/${encodeURIComponent(fileId)}`;
-    const response = await this.ownerRequest('DELETE', path, new Uint8Array(0));
-    if (!response.ok && response.status !== 404) {
-      throw new BrowserShareOwnerRelayError(response.status, 'durable snapshot delete');
-    }
-  }
-
   async fetchMailbox(
     shareSecret: Uint8Array,
     tier: 'comment' | 'suggest',

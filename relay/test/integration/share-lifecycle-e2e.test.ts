@@ -188,6 +188,18 @@ describe("durable share v3 real-stack lifecycle", () => {
       "Attn-PoW": await pow(shareId, ownerDeviceId, "PUT", `/v3/shares/${shareId}/snapshots/readme/snapshot-e0`, "snapshot-e0"),
     } });
     expect(uploaded.status).toBe(201);
+    // The upload only staged the ciphertext; the manifest, revision, and the
+    // (unchanged-identity) bundles go live together in one commit upsert.
+    const uploadedRef = await uploaded.json() as Record<string, unknown>;
+    const commitBody = JSON.stringify({
+      v: 3, ownerSigningKey: ownerKey, epoch: 0, revision: 1, currentRoomId: room0,
+      snapshots: [uploadedRef], deviceId: ownerDeviceId,
+    });
+    expect((await SELF.fetch(shareUrl, { method: "POST", body: commitBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url: shareUrl, body: commitBody, privateKey: owner.privateKey }),
+      "Attn-PoW": await pow(shareId, ownerDeviceId, "POST", `/v3/shares/${shareId}`, "commit-e0"),
+    } })).status).toBe(200);
     expect(await watch.next()).toEqual({ type: "share_changed", epoch: 0, revision: 1 });
 
     // Force loss of the room DO independently of ShareDO. A durable visitor

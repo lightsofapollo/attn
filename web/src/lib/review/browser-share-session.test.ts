@@ -315,6 +315,37 @@ test('subscribe-first gap forces a second resolve', async () => {
   await session.start(); assert(resolves >= 2, 'change in subscribe/resolve gap was lost');
 });
 
+test('transient mid-publish resolution failures retry before surfacing', async () => {
+  let attempts = 0;
+  const resolver = resolverFor({ getRecord: () => record(), getBundle: () => bundle(), onResolve: () => {
+    attempts += 1;
+    if (attempts === 1) throw new BrowserShareResolutionError('snapshot_invalid', 'snapshot ciphertext digest mismatch');
+    if (attempts === 2) {
+      const straddled = new Error('capability bundle context mismatch');
+      straddled.name = 'ShareInviteParseError';
+      throw straddled;
+    }
+  } });
+  const session = new BrowserShareSession(sessionOptions({ resolver }));
+  await session.start();
+  assert(attempts === 3, `expected 3 resolve attempts, saw ${attempts}`);
+  assert(session.getState().status !== 'error', `transient resolve failure surfaced terminally: ${session.getState().error}`);
+  session.close();
+});
+
+test('rollback rejections surface immediately without retry', async () => {
+  let attempts = 0;
+  const resolver = resolverFor({ getRecord: () => record(), getBundle: () => bundle(), onResolve: () => {
+    attempts += 1;
+    throw new BrowserShareResolutionError('epoch_rollback', 'share epoch is older than durable state');
+  } });
+  const session = new BrowserShareSession(sessionOptions({ resolver }));
+  await session.start();
+  assert(attempts === 1, `rollback must not be retried, saw ${attempts} attempts`);
+  assert(session.getState().status === 'error', 'rollback must surface as a terminal error');
+  session.close();
+});
+
 test('view tier rejects every mutation including resolve and retries', async () => {
   const store = new MemoryOutbox(); store.entries.set('stale:draft-1', { state: 'stale', shareId: SHARE_ID, bundleId: BUNDLE,
     draft: { draftId: 'draft-1', anchor: ANCHOR, body: 'saved' } });

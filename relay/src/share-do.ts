@@ -62,6 +62,21 @@ interface StoredShareSnapshotRef extends ShareSnapshotRef {
   artifactId: string;
 }
 
+/**
+ * Snapshot uploads stage here and only enter the public record when an owner
+ * upsert commits the full manifest together with re-sealed bundles. Joiners
+ * therefore never observe a record whose revision/manifest is ahead of its
+ * sealed capability bundles.
+ */
+interface StagedShareSnapshotRef extends StoredShareSnapshotRef {
+  stagedAt: number;
+  /** Retained so abandoned-staging cleanup can address R2 without a record. */
+  shareId: string;
+}
+
+const STAGED_SNAPSHOT_PREFIX = "staging:snapshot:";
+const STAGED_SNAPSHOT_TTL_MS = 60 * 60 * 1000;
+
 interface ShareCleanup {
   shareId: string;
   reason: "revoked" | "expired";
@@ -287,14 +302,28 @@ export class ShareDO extends DurableObject<Env> {
       ...[...subscriptions.entries()].filter(([, value]) => value.expiresAt <= now).flatMap(([key, value]) => [key, pushLastSentKey(value.deviceId)]),
     ];
     await this.deleteKeysChunked(expired);
+    // Staged uploads whose publish never committed: hand their artifacts to
+    // the alarm-owned delete queue atomically so a crash between the two
+    // writes cannot strand R2 ciphertext.
+    const staged = await this.ctx.storage.list<StagedShareSnapshotRef>({ prefix: STAGED_SNAPSHOT_PREFIX });
+    const abandoned = [...staged.entries()].filter(([, value]) => value.stagedAt + STAGED_SNAPSHOT_TTL_MS <= now);
+    if (abandoned.length > 0) {
+      await this.ctx.storage.transaction(async transaction => {
+        for (const [key, value] of abandoned) {
+          await transaction.delete(key);
+          await transaction.put(`artifact:delete:${value.artifactId}`, value.shareId);
+        }
+      });
+    }
     const deadlines = [
       ...(record === undefined ? [] : [record.expiresAt]),
       ...[...pow.values()].filter(expiresAt => expiresAt > now),
       ...[...ids.values()].map(value => value.expiresAt).filter(expiresAt => expiresAt > now),
       ...[...subscriptions.values()].map(value => value.expiresAt).filter(expiresAt => expiresAt > now),
+      ...[...staged.values()].map(value => value.stagedAt + STAGED_SNAPSHOT_TTL_MS).filter(deadline => deadline > now),
     ];
     const superseded = await this.ctx.storage.list<string>({ prefix: "artifact:delete:" });
-    if (superseded.size > 0) deadlines.push(now + CLEANUP_RETRY_MS);
+    if (superseded.size > 0 || abandoned.length > 0) deadlines.push(now + CLEANUP_RETRY_MS);
     if (this.ctx.getWebSockets().length > 0) deadlines.push(now + WATCH_PING_INTERVAL_MS);
     if (deadlines.length > 0) await this.ctx.storage.setAlarm(Math.min(...deadlines));
   }
@@ -355,7 +384,8 @@ export class ShareDO extends DurableObject<Env> {
     if (!Number.isSafeInteger(epoch) || epoch < provisional.epoch) {
       return jsonError(409, "ATTN_SHARE_EPOCH_INVALID", "share epoch must be a non-decreasing safe integer");
     }
-    const snapshots = this.validateSnapshotManifest(body.snapshots, provisional.snapshots, existing !== undefined);
+    const staged = await this.stagedSnapshots();
+    const snapshots = this.validateSnapshotManifest(body.snapshots, provisional.snapshots, staged, existing !== undefined);
     if (snapshots instanceof Response) return snapshots;
     const placeholders = body.placeholders ?? provisional.placeholders;
     if (!Array.isArray(snapshots) || !Array.isArray(placeholders) || snapshots.length > 64 || placeholders.length > 64) {
@@ -390,15 +420,20 @@ export class ShareDO extends DurableObject<Env> {
     });
     const sealedBundlesChanged = JSON.stringify(bundles.map(({ bundleId, sealedBundle }) => ({ bundleId, sealedBundle })))
       !== JSON.stringify((provisional.bundles ?? []).map(({ bundleId, sealedBundle }) => ({ bundleId, sealedBundle })));
-    const completeProjectionChanged = routingIdentityChanged || sealedBundlesChanged || revision !== provisional.revision;
+    const publicRefs = (refs: StoredShareSnapshotRef[]): ShareSnapshotRef[] =>
+      refs.map(({ artifactId: _artifactId, ...snapshot }) => snapshot);
+    const manifestChanged = JSON.stringify(publicRefs(snapshots)) !== JSON.stringify(publicRefs(provisional.snapshots));
+    const completeProjectionChanged = routingIdentityChanged || manifestChanged || sealedBundlesChanged || revision !== provisional.revision;
     if (existing !== undefined && completeProjectionChanged && (await this.ctx.storage.get<number>("mail:count") ?? 0) > 0) {
       return jsonError(409, "ATTN_SHARE_MAIL_PENDING", "drain the durable mailbox before changing share routing or capabilities");
     }
-    if (existing !== undefined && (routingIdentityChanged ? revision !== provisional.revision + 1 : revision !== provisional.revision)) {
+    if (existing !== undefined && ((routingIdentityChanged || manifestChanged) ? revision !== provisional.revision + 1 : revision !== provisional.revision)) {
       return jsonError(
         409,
         "ATTN_SHARE_REVISION_INVALID",
-        routingIdentityChanged ? "routing changes require revision current + 1" : "sealed-bundle synchronization must keep the current revision",
+        (routingIdentityChanged || manifestChanged)
+          ? "routing or manifest changes require revision current + 1"
+          : "sealed-bundle synchronization must keep the current revision",
       );
     }
     const ownerId = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", base64UrlDecode(ownerKey))));
@@ -418,7 +453,33 @@ export class ShareDO extends DurableObject<Env> {
       updatedAt: now,
       expiresAt: now + LIFETIME_MS,
     };
-    await this.ctx.storage.put("share:record", record);
+    // Commit is the only mutation joiners can observe: the manifest, the
+    // sealed bundles, and the revision land in one transaction, together with
+    // the staging hand-off (promoted refs stop being staged; abandoned staged
+    // and superseded live artifacts become alarm-owned delete intents).
+    const committedArtifacts = new Set(record.snapshots.map(snapshot => snapshot.artifactId));
+    const consumeStaging = body.snapshots !== undefined;
+    const orphanedArtifacts = [
+      ...provisional.snapshots.filter(snapshot => !committedArtifacts.has(snapshot.artifactId)),
+      ...(consumeStaging ? [...staged.values()].filter(snapshot => !committedArtifacts.has(snapshot.artifactId)) : []),
+    ].map(snapshot => snapshot.artifactId);
+    await this.ctx.storage.transaction(async transaction => {
+      await transaction.put("share:record", record);
+      if (consumeStaging) {
+        for (const entry of staged.values()) {
+          await transaction.delete(`${STAGED_SNAPSHOT_PREFIX}${entry.fileId}`);
+        }
+      }
+      for (const artifactId of orphanedArtifacts) {
+        await transaction.put(`artifact:delete:${artifactId}`, shareId);
+      }
+      if (orphanedArtifacts.length > 0) {
+        await transaction.setAlarm(now + CLEANUP_RETRY_MS);
+      }
+    });
+    for (const artifactId of orphanedArtifacts) {
+      await this.deleteQueuedArtifact(shareId, artifactId);
+    }
     await this.repinPushSubscriptions(record.expiresAt, now);
     if (existing !== undefined) this.broadcastShareChanged(record);
     await this.pruneMarkersAndSchedule(record, now);
@@ -500,14 +561,17 @@ export class ShareDO extends DurableObject<Env> {
   }
 
   /**
-   * The snapshot manifest is server-managed by PUT /snapshots/:fileId. A
-   * create may declare only an empty manifest; a later owner touch may omit it
-   * or echo the exact public manifest. This prevents a client from pinning
-   * arbitrary caller-selected R2 keys through the generic share mutation.
+   * The snapshot manifest is server-managed: bytes enter through PUT
+   * /snapshots/:fileId/:snapshotId, which stages them without touching the
+   * public record. An owner upsert commits the declared manifest by resolving
+   * every ref against a live or staged snapshot the DO itself stored — a
+   * client can select, but never pin arbitrary caller-chosen R2 keys. A
+   * create may declare only an empty manifest.
    */
   private validateSnapshotManifest(
     candidate: unknown,
     stored: StoredShareSnapshotRef[],
+    staged: Map<string, StagedShareSnapshotRef>,
     exists: boolean,
   ): StoredShareSnapshotRef[] | Response {
     if (candidate === undefined) return stored;
@@ -519,11 +583,41 @@ export class ShareDO extends DurableObject<Env> {
         ? []
         : jsonError(400, "ATTN_SHARE_MANIFEST_MANAGED", "upload snapshots through the share snapshot endpoint");
     }
-    const publicStored = stored.map(({ artifactId: _artifactId, ...snapshot }) => snapshot);
-    if (JSON.stringify(candidate) !== JSON.stringify(publicStored)) {
-      return jsonError(409, "ATTN_SHARE_MANIFEST_MANAGED", "snapshot refs are server-managed");
+    const live = new Map(stored.map(snapshot => [snapshot.fileId, snapshot]));
+    const resolved: StoredShareSnapshotRef[] = [];
+    const seen = new Set<string>();
+    let retainedBytes = 0;
+    for (const raw of candidate) {
+      const entry = raw as Partial<ShareSnapshotRef>;
+      if (typeof entry?.fileId !== "string" || seen.has(entry.fileId)) {
+        return jsonError(409, "ATTN_SHARE_MANIFEST_MANAGED", "snapshot refs are server-managed");
+      }
+      seen.add(entry.fileId);
+      const stagedMatch = staged.get(entry.fileId);
+      const source = stagedMatch !== undefined && stagedMatch.snapshotId === entry.snapshotId
+        ? stagedMatch
+        : live.get(entry.fileId);
+      if (source === undefined) {
+        return jsonError(409, "ATTN_SHARE_MANIFEST_MANAGED", "snapshot refs are server-managed");
+      }
+      const sourceRef: ShareSnapshotRef = {
+        fileId: source.fileId,
+        snapshotId: source.snapshotId,
+        ciphertextBytes: source.ciphertextBytes,
+        ciphertextSha256: source.ciphertextSha256,
+        uploadedAt: source.uploadedAt,
+      };
+      if (JSON.stringify(raw) !== JSON.stringify(sourceRef)) {
+        return jsonError(409, "ATTN_SHARE_MANIFEST_MANAGED", "snapshot refs are server-managed");
+      }
+      retainedBytes += sourceRef.ciphertextBytes;
+      resolved.push({ ...sourceRef, artifactId: source.artifactId });
     }
-    return stored;
+    if (retainedBytes > MAX_SHARE_SNAPSHOT_BYTES) {
+      return jsonError(413, "ATTN_SHARE_SNAPSHOT_BYTES_FULL", "share retained snapshot byte cap reached");
+    }
+    resolved.sort((left, right) => left.fileId.localeCompare(right.fileId));
+    return resolved;
   }
 
   private async handleSnapshot(request: Request, path: string, shareId: string, fileId: string, snapshotId?: string): Promise<Response> {
@@ -534,59 +628,9 @@ export class ShareDO extends DurableObject<Env> {
     if (!record || record.expiresAt <= Date.now()) return jsonError(404, "ATTN_SHARE_NOT_FOUND", "share not found");
     if (request.method === "PUT" && snapshotId !== undefined) return this.uploadSnapshot(request, path, shareId, fileId, snapshotId, record);
     if (request.method === "GET" && snapshotId === undefined) return this.readSnapshot(request, path, shareId, fileId, record);
-    if (request.method === "DELETE" && snapshotId === undefined) return this.deleteSnapshot(request, path, shareId, fileId, record);
+    // No standalone DELETE: removals are expressed by committing a manifest
+    // without the file, so the record and its sealed bundles change together.
     return jsonError(405, "ATTN_METHOD_NOT_ALLOWED", "method not allowed");
-  }
-
-  private async deleteSnapshot(
-    request: Request,
-    path: string,
-    shareId: string,
-    fileId: string,
-    record: ShareRecord,
-  ): Promise<Response> {
-    await this.verifyOwner(request, path, record);
-    if ((record.bundles ?? []).length > 0 && (await this.ctx.storage.get<number>("mail:count") ?? 0) > 0) {
-      return jsonError(409, "ATTN_SHARE_MAIL_PENDING", "drain the durable mailbox before changing the snapshot manifest");
-    }
-    await this.verifyWritePow(request, shareId, request.headers.get("Attn-Device-Id") ?? shareId);
-    const existing = record.snapshots.find(snapshot => snapshot.fileId === fileId);
-    if (existing === undefined) {
-      const headers = new Headers({
-        "X-Attn-Allow-Browser": "true",
-        "Attn-Share-Revision": String(record.revision),
-        "Attn-Manifest-Digest": await this.manifestDigest(record.snapshots),
-      });
-      return new Response(null, { status: 204, headers });
-    }
-    if (record.revision >= Number.MAX_SAFE_INTEGER) {
-      return jsonError(409, "ATTN_SHARE_REVISION_INVALID", "share revision is exhausted");
-    }
-    const now = Date.now();
-    const updatedRecord: ShareRecord = {
-      ...record,
-      snapshots: record.snapshots.filter(snapshot => snapshot.fileId !== fileId),
-      revision: record.revision + 1,
-      updatedAt: now,
-      expiresAt: now + LIFETIME_MS,
-    };
-    // Manifest removal and its R2 cleanup intent are one durable commit. The
-    // alarm is armed in that transaction so a crash before the best-effort
-    // delete below cannot strand ciphertext or resurrect the manifest ref.
-    await this.ctx.storage.transaction(async transaction => {
-      await transaction.put("share:record", updatedRecord);
-      await transaction.put(`artifact:delete:${existing.artifactId}`, shareId);
-      await transaction.setAlarm(now + CLEANUP_RETRY_MS);
-    });
-    await this.repinPushSubscriptions(updatedRecord.expiresAt, now);
-    this.broadcastShareChanged(updatedRecord);
-    await this.deleteQueuedArtifact(shareId, existing.artifactId);
-    await this.pruneMarkersAndSchedule(await this.record(), now);
-    return new Response(null, { status: 204, headers: {
-      "X-Attn-Allow-Browser": "true",
-      "Attn-Share-Revision": String(updatedRecord.revision),
-      "Attn-Manifest-Digest": await this.manifestDigest(updatedRecord.snapshots),
-    } });
   }
 
   private async uploadSnapshot(
@@ -616,9 +660,6 @@ export class ShareDO extends DurableObject<Env> {
       body: boundedBody,
     });
     await this.verifyOwner(authenticatedRequest, path, record);
-    if ((record.bundles ?? []).length > 0 && (await this.ctx.storage.get<number>("mail:count") ?? 0) > 0) {
-      return jsonError(409, "ATTN_SHARE_MAIL_PENDING", "drain the durable mailbox before changing the snapshot manifest");
-    }
     await this.verifyWritePow(authenticatedRequest, shareId, request.headers.get("Attn-Device-Id") ?? shareId);
     const ciphertext = boundedBody;
     const actualDigest = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", ciphertext)));
@@ -628,27 +669,28 @@ export class ShareDO extends DurableObject<Env> {
     if (pending.size > 0) {
       return jsonError(503, "ATTN_SHARE_CLEANUP_PENDING", "superseded snapshot cleanup is unavailable");
     }
-    const previousIndex = record.snapshots.findIndex(snapshot => snapshot.fileId === fileId);
-    if (previousIndex < 0 && record.snapshots.length >= MAX_SNAPSHOT_FILES) {
+    // Caps apply to the projected manifest: live refs overlaid by staged refs.
+    const staged = await this.stagedSnapshots();
+    const effective = new Map(record.snapshots.map(snapshot => [snapshot.fileId, snapshot as StoredShareSnapshotRef]));
+    for (const entry of staged.values()) effective.set(entry.fileId, entry);
+    const previous = effective.get(fileId);
+    if (previous === undefined && effective.size >= MAX_SNAPSHOT_FILES) {
       return jsonError(413, "ATTN_SHARE_MANIFEST_FULL", "share snapshot file cap reached");
     }
-    const previous = previousIndex < 0 ? undefined : record.snapshots[previousIndex];
-    const retainedBytes = record.snapshots.reduce((total, snapshot) => total + snapshot.ciphertextBytes, 0)
+    const retainedBytes = [...effective.values()].reduce((total, snapshot) => total + snapshot.ciphertextBytes, 0)
       - (previous?.ciphertextBytes ?? 0)
       + ciphertext.byteLength;
     if (retainedBytes > MAX_SHARE_SNAPSHOT_BYTES) {
       return jsonError(413, "ATTN_SHARE_SNAPSHOT_BYTES_FULL", "share retained snapshot byte cap reached");
-    }
-    if (record.revision >= Number.MAX_SAFE_INTEGER) {
-      return jsonError(409, "ATTN_SHARE_REVISION_INVALID", "share revision is exhausted");
     }
 
     const artifactId = crypto.randomUUID();
     const objectKey = shareArtifactObjectKey(shareId, artifactId);
     const uploadIntentKey = `artifact:delete:${artifactId}`;
     // Intent first: a crash anywhere after this point leaves an alarm-visible
-    // object key that can be deleted. The manifest switch below atomically
-    // removes this new-object intent and adds the superseded-object intent.
+    // object key that can be deleted. The staging switch below atomically
+    // removes this new-object intent; the object is then owned by the staged
+    // ref until an owner upsert commits or the staging TTL abandons it.
     await this.ctx.storage.put(uploadIntentKey, shareId);
     await this.ctx.storage.setAlarm(Date.now() + CLEANUP_RETRY_MS);
     try {
@@ -659,39 +701,38 @@ export class ShareDO extends DurableObject<Env> {
       return jsonError(503, "ATTN_SHARE_ARTIFACT_UNAVAILABLE", "snapshot storage is unavailable");
     }
     const now = Date.now();
-    const next: StoredShareSnapshotRef = {
+    const next: StagedShareSnapshotRef = {
       fileId,
       snapshotId,
       ciphertextBytes: ciphertext.byteLength,
       ciphertextSha256: actualDigest,
       uploadedAt: now,
       artifactId,
+      stagedAt: now,
+      shareId,
     };
-    const snapshots = [...record.snapshots];
-    if (previousIndex < 0) snapshots.push(next); else snapshots[previousIndex] = next;
-    snapshots.sort((left, right) => left.fileId.localeCompare(right.fileId));
-    const updatedRecord: ShareRecord = {
-      ...record,
-      snapshots,
-      revision: record.revision + 1,
-      updatedAt: now,
-      expiresAt: now + LIFETIME_MS,
-    };
+    const previousStaged = staged.get(fileId);
+    // Staging never touches the public record: no revision bump, no manifest
+    // change, no broadcast. Joiners keep resolving the last committed
+    // projection, whose sealed bundles still match it exactly.
     await this.ctx.storage.transaction(async transaction => {
-      await transaction.put("share:record", {
-        ...updatedRecord,
-      } satisfies ShareRecord);
+      await transaction.put(`${STAGED_SNAPSHOT_PREFIX}${fileId}`, next);
       await transaction.delete(uploadIntentKey);
-      if (previous !== undefined) {
-        await transaction.put(`artifact:delete:${previous.artifactId}`, shareId);
+      if (previousStaged !== undefined) {
+        await transaction.put(`artifact:delete:${previousStaged.artifactId}`, shareId);
       }
     });
-    await this.repinPushSubscriptions(updatedRecord.expiresAt, now);
-    this.broadcastShareChanged(updatedRecord);
-    if (previous !== undefined) await this.deleteQueuedArtifact(shareId, previous.artifactId);
+    if (previousStaged !== undefined) await this.deleteQueuedArtifact(shareId, previousStaged.artifactId);
     await this.pruneMarkersAndSchedule(await this.record(), now);
-    const { artifactId: _artifactId, ...publicRef } = next;
+    const { artifactId: _artifactId, stagedAt: _stagedAt, shareId: _shareId, ...publicRef } = next;
     return shareJson(publicRef, previous === undefined ? 201 : 200);
+  }
+
+  private async stagedSnapshots(): Promise<Map<string, StagedShareSnapshotRef>> {
+    const entries = await this.ctx.storage.list<StagedShareSnapshotRef>({ prefix: STAGED_SNAPSHOT_PREFIX });
+    const staged = new Map<string, StagedShareSnapshotRef>();
+    for (const entry of entries.values()) staged.set(entry.fileId, entry);
+    return staged;
   }
 
   private async readBoundedSnapshotBody(request: Request): Promise<Uint8Array | Response> {

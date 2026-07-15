@@ -972,16 +972,31 @@ filtered by their selected bundle so one public link never enumerates sibling
 bundle IDs, tiers, ciphertext, or sealed capability payloads.
 
 Every share also carries a monotonic safe-integer `revision`. New shares must
-start at revision 0. Snapshot upload is the server-authoritative manifest
-mutation and increments revision by exactly one. The public response includes
+start at revision 0. Snapshot upload (`PUT .../snapshots/:fileId/:snapshotId`)
+only *stages* ciphertext: it validates caps against the projected manifest and
+returns the public ref, but never changes the public record — no revision
+bump, no manifest change, no watch broadcast, and staged bytes are unreadable
+through snapshot GET. The owner upsert is the single commit point: its
+`snapshots` array declares the complete manifest, where every ref must match a
+live or staged snapshot the DO itself stored (byte-exact public fields; the
+relay resolves refs to its own artifact keys, so callers can select but never
+pin arbitrary R2 objects). The commit lands the manifest, the revision, and
+the re-sealed bundles in one durable transaction; refs omitted from the
+committed manifest are removed and their artifacts (plus abandoned staged
+uploads) move to the alarm-owned delete queue. Staged uploads that are never
+committed are collected after a one-hour TTL. Joiners therefore can never
+observe a record whose revision or manifest digest is ahead of its sealed
+capability bundles — the invariant that makes `capability bundle context
+mismatch` a security signal rather than a mid-publish race.
+The public record includes
 `manifestDigest = base64url(SHA-256(UTF8(JSON.stringify(manifest))))`, where
 `manifest` is sorted by `fileId` and every object is emitted in exact field
 order `{fileId,snapshotId,ciphertextBytes,ciphertextSha256,uploadedAt}` (the
 empty manifest digest is `T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU`).
 Generic owner changes to epoch, current-room routing, bundle membership,
-bundle identity/tier, or admissions require `revision == current + 1`.
-After a server snapshot increment, an owner may synchronize only sealed bundle
-bytes while keeping revision equal to the current revision; other no-routing
+bundle identity/tier, admissions, or the snapshot manifest require
+`revision == current + 1`. An owner may synchronize only sealed bundle bytes
+while keeping revision equal to the current revision; other no-routing
 updates cannot advance it. Sealed bundle plaintext binds the same bundle ID,
 revision, and manifest digest, allowing clients to reject same-epoch rollback.
 
@@ -995,12 +1010,11 @@ Legacy records without `bundles` retain the old single-pair authentication;
 once an owner migrates a record to bundles, the legacy keys are removed and
 cannot be mixed back in. While durable mail remains, an owner upsert returns
 `409 ATTN_SHARE_MAIL_PENDING` for any change to the full routing/capability
-projection: epoch, current room pointer, bundle membership, IDs, tiers,
-admissions, or sealed bundle bytes. This enforces drain-before-pointer-flip and
-prevents queued ciphertext from losing its selector or epoch context.
-For the same reason, an owner-authenticated bundle-mode snapshot PUT returns
-`409 ATTN_SHARE_MAIL_PENDING` before PoW, R2 upload, renewal, revision, or
-manifest mutation whenever retained mail exists; the owner drains first.
+projection: epoch, current room pointer, snapshot manifest, bundle membership,
+IDs, tiers, admissions, or sealed bundle bytes. This enforces
+drain-before-pointer-flip and prevents queued ciphertext from losing its
+selector or epoch context. Snapshot PUTs are exempt: staging is unobservable,
+so uploads may proceed while mail is pending — only the commit is fenced.
 
 ### Poll-free share watch
 
@@ -1092,24 +1106,23 @@ therefore covered by the owner signature; the relay hashes the body itself and
 mints the immutable R2 artifact component. Callers never select or receive an
 object key. The relay bounds the request stream before signature hashing and
 persists a cleanup intent before writing R2. A successful upload atomically
-switches the manifest, clears the new-object intent, and records the
-superseded-object cleanup intent; an isolate crash at any boundary therefore
-leaves alarm-recoverable work rather than an orphan. While any cleanup remains
-pending, further uploads fail closed. A successful upload renews the share and atomically replaces that file's public
-`{fileId,snapshotId,ciphertextBytes,ciphertextSha256,uploadedAt}` ref before
-the superseded object is deleted (with durable retry on failure). Reads use
-`GET` on the same route with `v3.read` admission. Limits are 64 files, 5 MiB
-per ciphertext, and 25 MiB across current refs. The generic share `POST` may
-only create an empty manifest or echo the current public manifest, preventing
-arbitrary R2 pinning.
+stages the ref (staging owns the object from then on), clears the new-object
+intent, and queues the superseded previously-staged artifact for cleanup; an
+isolate crash at any boundary therefore leaves alarm-recoverable work rather
+than an orphan. While any cleanup remains pending, further uploads fail
+closed. Staging never renews the share, changes the public manifest, or
+notifies watchers; the ref only becomes readable once an owner upsert commits
+it (see the revision section above). Re-staging the same file before a commit
+supersedes the earlier staged artifact in place. Reads use `GET` on the
+file-level route with `v3.read` admission and always serve the committed
+manifest. Limits are 64 files, 5 MiB per ciphertext, and 25 MiB across the
+projected refs, re-validated at commit. The generic share `POST` may only
+create an empty manifest or declare refs resolving to live/staged snapshots,
+preventing arbitrary R2 pinning.
 
-The owner removes a latest-per-file ref with an owner-signed, PoW-protected
-`DELETE /v3/shares/:shareId/snapshots/:fileId`. Bundle shares apply the same
-pending-mail fence as snapshot upload before consuming PoW. For a present ref,
-one atomic transaction removes it from the manifest, increments revision
-exactly once, renews the share, stores an artifact cleanup intent, and arms the
-cleanup alarm before R2 deletion is attempted. Watchers receive the resulting
-content-blind revision notification. Alarm retry makes the ciphertext deletion
-crash-safe. Deleting an absent file is an authenticated, PoW-consuming `204`
-no-op: revision and digest remain unchanged. Both successful forms return
-`Attn-Share-Revision` and `Attn-Manifest-Digest` response headers.
+There is no standalone snapshot `DELETE`: removal is a commit whose manifest
+omits the file, so the public manifest, revision, and sealed bundles can never
+move independently. `DELETE /v3/shares/:shareId/snapshots/:fileId` returns
+`405`. Removed and abandoned-staged artifacts are queued as cleanup intents in
+the commit transaction and deleted with alarm-backed retry; staged uploads
+whose publish never commits are collected after the staging TTL.

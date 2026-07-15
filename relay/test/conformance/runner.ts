@@ -1074,19 +1074,37 @@ async function actShareArtifactMatrix(scenarioId: string, stepIdx: number): Prom
     } });
   };
 
+  const commitManifest = async (revision: number, snapshots: Array<Record<string, unknown>>): Promise<Response> => {
+    const commitBody = JSON.stringify({
+      v: 3,
+      ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+      revision,
+      snapshots,
+    });
+    return SELF.fetch(shareUrl, { method: "POST", body: commitBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "POST", url: shareUrl, body: commitBody, privateKey: owner.privateKey }),
+      "Attn-PoW": await createPowHeader(shareId, owner.publicKeyBytes, `/v3/shares/${shareId}`),
+    } });
+  };
+
   await assertResponse(await upload("snapshot-one", new Uint8Array([1, 2, 3]), `${FIXED_POW_RAND}a1`), { status: 201 }, `${scenarioId} step #${stepIdx} first artifact upload`);
   const prefix = shareArtifactPrefix(shareId);
   expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
   await deleteRoomBlobs(env, shareId);
   expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
-  await assertResponse(await upload("snapshot-two", new Uint8Array([9]), `${FIXED_POW_RAND}a2`), { status: 200 }, `${scenarioId} step #${stepIdx} superseding artifact upload`);
+  const superseding = await upload("snapshot-two", new Uint8Array([9]), `${FIXED_POW_RAND}a2`);
+  await assertResponse(superseding.clone(), { status: 200 }, `${scenarioId} step #${stepIdx} superseding artifact upload`);
+  const supersedingRef = await superseding.json() as Record<string, unknown>;
+  // Re-staging the same file supersedes the earlier staged artifact in place.
   expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(1);
+  await assertResponse(await commitManifest(1, [supersedingRef]), { status: 200 }, `${scenarioId} step #${stepIdx} manifest commit`);
   const revisedRecord = await assertResponse(
     await SELF.fetch(shareUrl, { headers: { "Attn-Admission": await scopedRead(shareUrl) } }),
     { status: 200 },
     `${scenarioId} step #${stepIdx} revised manifest`,
   ) as { revision: number; manifestDigest: string };
-  expect(revisedRecord.revision).toBe(2);
+  expect(revisedRecord.revision).toBe(1);
   expect(revisedRecord.manifestDigest).toMatch(/^[A-Za-z0-9_-]{43}$/);
 
   const artifactUrl = `${shareUrl}/snapshots/readme`;
@@ -1094,19 +1112,15 @@ async function actShareArtifactMatrix(scenarioId: string, stepIdx: number): Prom
   await assertResponse(fetched.clone(), { status: 200 }, `${scenarioId} step #${stepIdx} artifact read`);
   expect(new Uint8Array(await fetched.arrayBuffer())).toEqual(new Uint8Array([9]));
 
-  const deleteArtifact = async (rand: string): Promise<Response> => SELF.fetch(artifactUrl, { method: "DELETE", headers: {
+  // Removal is a commit without the file; the standalone snapshot DELETE is
+  // gone so the manifest can never move ahead of its sealed bundles.
+  const deleted = await SELF.fetch(artifactUrl, { method: "DELETE", headers: {
     "Attn-Device-Id": shareId,
     "Attn-Owner-Signature": await ownerSignatureHeaderFor({ method: "DELETE", url: artifactUrl, privateKey: owner.privateKey }),
-    "Attn-PoW": await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "DELETE", path: `/v3/shares/${shareId}/snapshots/readme`, difficulty: 12, expiresAt: Date.now() + 300_000, rand }),
   } });
-  const deleted = await deleteArtifact(`${FIXED_POW_RAND}a-delete`);
-  await assertResponse(deleted, { status: 204 }, `${scenarioId} step #${stepIdx} artifact manifest delete`);
-  expect(deleted.headers.get("Attn-Share-Revision")).toBe("3");
-  expect(deleted.headers.get("Attn-Manifest-Digest")).toBe("T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU");
+  await assertResponse(deleted, { status: 405 }, `${scenarioId} step #${stepIdx} standalone snapshot delete removed`);
+  await assertResponse(await commitManifest(2, []), { status: 200 }, `${scenarioId} step #${stepIdx} removal commit`);
   expect((await env.RELAY_BLOBS.list({ prefix })).objects).toHaveLength(0);
-  const absent = await deleteArtifact(`${FIXED_POW_RAND}a-delete-again`);
-  await assertResponse(absent, { status: 204 }, `${scenarioId} step #${stepIdx} absent artifact delete`);
-  expect(absent.headers.get("Attn-Share-Revision")).toBe("3");
 
   const revokePow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "DELETE", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}a3` });
   await assertResponse(await SELF.fetch(shareUrl, { method: "DELETE", headers: {
@@ -1196,26 +1210,34 @@ async function actShareTierBundleMatrix(scenarioId: string, stepIdx: number): Pr
   } });
   const staleJson = await assertResponse(stale, { status: 409, errorCode: "ATTN_SHARE_EPOCH_STALE" }, `${scenarioId} step #${stepIdx} stale epoch fence`) as { currentEpoch: number };
   expect(staleJson.currentEpoch).toBe(0);
-  const blockedSnapshotUrl = `${url}/snapshots/readme/blocked-snapshot`;
-  const blockedBytes = new Uint8Array([7, 7, 7]);
-  const blockedCanonical = await canonicalRequest(new Request(blockedSnapshotUrl, {
+  // Snapshot uploads stage without touching the public projection, so they
+  // are permitted while mail is pending and remain invisible to every reader
+  // until an owner commit lands the manifest with re-sealed bundles.
+  const stagedSnapshotUrl = `${url}/snapshots/readme/staged-snapshot`;
+  const stagedBytes = new Uint8Array([7, 7, 7]);
+  const stagedCanonical = await canonicalRequest(new Request(stagedSnapshotUrl, {
     method: "PUT",
-    body: blockedBytes,
+    body: stagedBytes,
     headers: { "Content-Type": "application/octet-stream" },
-  }), new URL(blockedSnapshotUrl).pathname);
-  const blockedSignature = base64UrlEncode(new Uint8Array(
-    await crypto.subtle.sign({ name: "Ed25519" }, owner.privateKey, blockedCanonical),
+  }), new URL(stagedSnapshotUrl).pathname);
+  const stagedSignature = base64UrlEncode(new Uint8Array(
+    await crypto.subtle.sign({ name: "Ed25519" }, owner.privateKey, stagedCanonical),
   ));
-  await assertResponse(await SELF.fetch(blockedSnapshotUrl, { method: "PUT", body: blockedBytes, headers: {
+  await assertResponse(await SELF.fetch(stagedSnapshotUrl, { method: "PUT", body: stagedBytes, headers: {
     "Content-Type": "application/octet-stream",
     "Attn-Device-Id": shareId,
-    "Attn-Owner-Signature": blockedSignature,
-  } }), { status: 409, errorCode: "ATTN_SHARE_MAIL_PENDING" }, `${scenarioId} step #${stepIdx} pending mail blocks snapshot`);
-  expect((await env.RELAY_BLOBS.list({ prefix: shareArtifactPrefix(shareId) })).objects).toHaveLength(0);
+    "Attn-Owner-Signature": stagedSignature,
+    "Attn-PoW": await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "PUT", path: `/v3/shares/${shareId}/snapshots/readme/staged-snapshot`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}ts` }),
+  } }), { status: 201 }, `${scenarioId} step #${stepIdx} staged upload accepted with pending mail`);
+  expect((await env.RELAY_BLOBS.list({ prefix: shareArtifactPrefix(shareId) })).objects).toHaveLength(1);
+  await assertResponse(await SELF.fetch(`${url}/snapshots/readme`, { headers: {
+    "Attn-Share-Bundle": bundles[0].bundleId,
+    "Attn-Admission": await scoped("read", new Uint8Array(32).fill(0x22), "GET", `${url}/snapshots/readme`),
+  } }), { status: 404, errorCode: "ATTN_SHARE_SNAPSHOT_NOT_FOUND" }, `${scenarioId} step #${stepIdx} staged upload is unreadable`);
   const unchanged = await assertResponse(await SELF.fetch(url, { headers: {
     "Attn-Share-Bundle": bundles[0].bundleId,
     "Attn-Admission": await scoped("read", new Uint8Array(32).fill(0x22), "GET", url),
-  } }), { status: 200 }, `${scenarioId} step #${stepIdx} snapshot rejection is immutable`) as {
+  } }), { status: 200 }, `${scenarioId} step #${stepIdx} staged upload is unobservable`) as {
     revision: number;
     manifestDigest: string;
     snapshots: unknown[];

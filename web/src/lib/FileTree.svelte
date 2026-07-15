@@ -21,6 +21,7 @@
   } from '$lib/components/ui/collapsible';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Share2 from '@lucide/svelte/icons/share-2';
+  import UnreadBadge from './UnreadBadge.svelte';
   import { resolveFileIcon, resolveFolderIcon } from '$lib/icon-resolver';
   import { getIconPack, subscribeIconPack } from '$lib/icon-pack';
   import {
@@ -39,6 +40,7 @@
     onRename?: (path: string) => void;
     onDelete?: (path: string) => void;
     sharedPaths?: Set<string>;
+    unreadByPath?: Readonly<Record<string, number>>;
     collaboratorLocations?: SidebarPresenceLocation[];
   }
 
@@ -53,6 +55,7 @@
     onRename,
     onDelete,
     sharedPaths = new Set<string>(),
+    unreadByPath = {},
     collaboratorLocations = [],
   }: Props = $props();
 
@@ -228,6 +231,10 @@
     }
     return false;
   }
+
+  function unreadForPath(path: string): number {
+    return unreadByPath[path] ?? unreadByPath[normalizePath(path)] ?? 0;
+  }
 </script>
 
 {#each nodes as node (node.path)}
@@ -235,6 +242,7 @@
     {@const exp = isExpanded(node.path)}
     {@const presenceBadge = presenceBadgeFor(node, exp)}
     {@const folderShared = isPathShared(node)}
+    {@const folderUnread = unreadForPath(node.path)}
     <SidebarMenuItem>
       <Collapsible
         open={exp}
@@ -272,6 +280,10 @@
                         <Share2 class="size-3" aria-hidden="true" />
                       </span>
                     {/if}
+                    <UnreadBadge
+                      count={folderUnread}
+                      label={`unread review updates for ${node.name}`}
+                    />
                   </SidebarMenuButton>
                 {/snippet}
               </CollapsibleTrigger>
@@ -301,7 +313,7 @@
         <CollapsibleContent>
           {#if node.children}
             <SidebarMenu class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
-              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {collaboratorLocations} />
+              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {unreadByPath} {collaboratorLocations} />
             </SidebarMenu>
           {/if}
         </CollapsibleContent>
@@ -311,6 +323,7 @@
     {@const icon = getFileIcon(node)}
     {@const presenceBadge = presenceBadgeFor(node, false)}
     {@const fileShared = isPathShared(node)}
+    {@const fileUnread = unreadForPath(node.path)}
     <SidebarMenuItem>
       <ContextMenu>
         <ContextMenuTrigger>
@@ -352,6 +365,10 @@
                   <Share2 class="size-3" aria-hidden="true" />
                 </span>
               {/if}
+              <UnreadBadge
+                count={fileUnread}
+                label={`unread review updates for ${node.name}`}
+              />
             </SidebarMenuButton>
           {/snippet}
         </ContextMenuTrigger>

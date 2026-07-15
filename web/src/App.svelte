@@ -107,6 +107,8 @@
     isReviewerView,
     collabRoleFor,
     collabSeedReady,
+    ownerRoomForPath,
+    ownerUnreadByPath,
     shareTargetMatches,
   } from './lib/review/room-ui';
   import {
@@ -222,8 +224,18 @@
       !shareDialogOpen &&
       reviewStore.currentRoomId === null,
   );
+  let hasReviewerRooms = $derived(
+    reviewStore.roomsList.some((room) => room.role === 'reviewer'),
+  );
+  let reviewBarIsOwner = $derived(
+    shareDialogOpen
+      ? true
+      : reviewStore.activeRoom !== null
+      ? reviewStore.activeRoom.role !== 'reviewer'
+      : !hasReviewerRooms,
+  );
   let showReviewChrome = $derived(
-    reviewStore.currentRoomId !== null || reviewStore.roomsList.length > 0 || shareDialogOpen,
+    reviewStore.currentRoomId !== null || hasReviewerRooms || shareDialogOpen,
   );
 
   let autoSelectedRoomId = $state<string | null>(null);
@@ -231,7 +243,7 @@
     const roomId = shouldAutoSelectOnlyRoom({
       hasActiveTab,
       currentRoomId: reviewStore.currentRoomId,
-      rooms: reviewStore.roomsList,
+      rooms: reviewStore.roomsList.filter((room) => room.role === 'reviewer'),
     });
     if (roomId === null || roomId === autoSelectedRoomId) return;
     autoSelectedRoomId = roomId;
@@ -324,6 +336,47 @@
       set.add(path);
     }
     return set;
+  });
+  let ownerUnreadCountsByPath = $derived(
+    ownerUnreadByPath({
+      rooms: reviewStore.roomsList,
+      snapshots: reviewStore.snapshots,
+      unreadByRoom: reviewStore.unreadByRoom,
+    }),
+  );
+  let ownerRoomIdForActivePath = $derived(
+    ownerRoomForPath({
+      path: activePath,
+      currentRoomId: reviewStore.currentRoomId,
+      rooms: reviewStore.roomsList,
+      snapshots: reviewStore.snapshots,
+    }),
+  );
+
+  // Owner collaboration follows the local file tree. Selecting a shared file
+  // activates its room; selecting an unshared file turns off collaboration
+  // chrome without forgetting any durable room data. A reviewer remains in
+  // their explicitly joined room until P2 moves that choice into Projects.
+  $effect(() => {
+    // The Share dialog can target a context-menu path other than activePath.
+    // Keep its explicitly selected room stable until the invite closes; normal
+    // file-driven focus resumes immediately afterward.
+    if (shareDialogOpen) return;
+    const roomId = ownerRoomIdForActivePath;
+    const activeRoom = reviewStore.activeRoom;
+    if (activeRoom?.role === 'reviewer') return;
+
+    if (roomId !== null) {
+      if (roomId !== reviewStore.currentRoomId) reviewStore.selectRoom(roomId);
+      return;
+    }
+
+    if (activeRoom?.role !== 'owner') return;
+    const activeRoomHasPathMetadata = Boolean(activeRoom.share?.ownerDisplayPath)
+      || reviewStore.snapshots.some(
+        (snapshot) => snapshot.roomId === activeRoom.roomId && Boolean(snapshot.ownerDisplayPath),
+      );
+    if (activeRoomHasPathMetadata) reviewStore.clearRoomSelection();
   });
   // Whether the Share dialog's current target is the file/folder ALREADY shared
   // in the active owned room. When it is, the dialog re-shows that room's
@@ -2421,6 +2474,18 @@
       return;
     }
     shareTargetPath = path;
+    // Re-opening Share for an already-shared context-menu target must show that
+    // room's invite even before activePath catches up. The focus effect pauses
+    // while the dialog is open so a folder target can remain selected too.
+    const targetRoomId = ownerRoomForPath({
+      path,
+      currentRoomId: reviewStore.currentRoomId,
+      rooms: reviewStore.roomsList,
+      snapshots: reviewStore.snapshots,
+    });
+    if (targetRoomId !== null && targetRoomId !== reviewStore.currentRoomId) {
+      reviewStore.selectRoom(targetRoomId);
+    }
     // Navigate to a single file so the owner sees what they're sharing; a
     // folder isn't a document, so leave the owner on their current file.
     if (!isDir && (path !== activePath || activeFileType !== 'markdown')) {
@@ -2763,7 +2828,7 @@
 {#snippet reviewChrome()}
   <ReviewBar
     shareOpen={shareDialogOpen}
-    isOwner={reviewStore.currentRoomId === null || collabRole === 'owner'}
+    isOwner={reviewBarIsOwner}
     onShareClick={openShareDialog}
     onLeaveRoom={handleLeaveRoom}
   />
@@ -2782,6 +2847,7 @@
     outline={outlineHeadings}
     {activeOutlineId}
     {sharedPaths}
+    unreadByPath={ownerUnreadCountsByPath}
     onProjectSwitch={handleProjectSwitch}
     onNavigate={handleSidebarNavigate}
     onExpand={handleTreeExpand}

@@ -8,6 +8,8 @@ import {
   collabRoleFor,
   collabSeedReady,
   isReviewerView,
+  ownerRoomForPath,
+  ownerUnreadByPath,
   roomDisplayName,
   shareTargetMatches,
   shouldActivateRoomStatus,
@@ -84,6 +86,74 @@ defineCase('auto-select does not guess between multiple rooms', () => {
     }) === null,
     'multiple rooms require an explicit choice',
   );
+});
+
+defineCase('owner focus follows the exact published file and ignores reviewer rooms', () => {
+  const rooms = [
+    { roomId: 'reviewer-room' as RoomId, role: 'reviewer' as const, share: { ownerDisplayPath: '/p/plan.md' } },
+    { roomId: 'owner-room' as RoomId, role: 'owner' as const, share: { ownerDisplayPath: '/p/plan.md' } },
+  ];
+  assert(
+    ownerRoomForPath({
+      path: '/p/plan.md',
+      currentRoomId: null,
+      rooms,
+      snapshots: [],
+    }) === 'owner-room',
+    'local file focus must activate the owned room, never a joined room',
+  );
+});
+
+defineCase('owner focus prefers an exact file snapshot over a containing folder share', () => {
+  const rooms = [
+    { roomId: 'folder-room' as RoomId, role: 'owner' as const, share: { ownerDisplayPath: '/p' } },
+    { roomId: 'file-room' as RoomId, role: 'owner' as const, share: { ownerDisplayPath: '/p/plan.md' } },
+  ];
+  assert(
+    ownerRoomForPath({
+      path: '/p/plan.md',
+      currentRoomId: 'folder-room' as RoomId,
+      rooms,
+      snapshots: [
+        { roomId: 'folder-room' as RoomId, ownerDisplayPath: '/p/other.md' },
+        { roomId: 'file-room' as RoomId, ownerDisplayPath: '/p/plan.md' },
+      ],
+    }) === 'file-room',
+    'the most specific published file room must win',
+  );
+});
+
+defineCase('owner focus clears on an unshared path', () => {
+  assert(
+    ownerRoomForPath({
+      path: '/p/private.md',
+      currentRoomId: 'owner-room' as RoomId,
+      rooms: [
+        { roomId: 'owner-room' as RoomId, role: 'owner', share: { ownerDisplayPath: '/p/shared.md' } },
+      ],
+      snapshots: [],
+    }) === null,
+    'an unshared file must not inherit the previously focused room',
+  );
+});
+
+defineCase('owner unread counts land once on file or folder navigation rows', () => {
+  const unread = ownerUnreadByPath({
+    rooms: [
+      { roomId: 'file-room' as RoomId, role: 'owner', share: { ownerDisplayPath: '/p/plan.md' } },
+      { roomId: 'folder-room' as RoomId, role: 'owner' },
+      { roomId: 'reviewer-room' as RoomId, role: 'reviewer', share: { ownerDisplayPath: '/p/joined.md' } },
+    ],
+    snapshots: [
+      { roomId: 'folder-room' as RoomId, ownerDisplayPath: '/p/spec/a.md' },
+      { roomId: 'folder-room' as RoomId, ownerDisplayPath: '/p/spec/b.md' },
+    ],
+    unreadByRoom: { 'file-room': 2, 'folder-room': 3, 'reviewer-room': 9 },
+  });
+  assert(unread['/p/plan.md'] === 2, 'single-file unread belongs on its file row');
+  assert(unread['/p/spec'] === 3, 'multi-file unread rolls up once to the shared folder');
+  assert(unread['/p/spec/a.md'] === undefined, 'folder unread must not repeat on every child');
+  assert(unread['/p/joined.md'] === undefined, 'joined-room unread must not mark local owner files');
 });
 
 // --- attn-0wa: owner must never flip into the shared-doc view ---------------

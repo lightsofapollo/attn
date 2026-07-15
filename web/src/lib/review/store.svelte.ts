@@ -989,6 +989,30 @@ export class ReviewStore {
     return true;
   }
 
+  /**
+   * Stop presenting one room without forgetting its durable local state.
+   * Owners call this when focus moves to an unshared file: rooms, snapshots,
+   * events, and unread counts remain available for focus-following navigation.
+   */
+  clearRoomSelection(): void {
+    if (this.currentRoomId === null) return;
+    this.pendingOutbox = [];
+    this.currentRoomId = null;
+    this.localGrantTier = 'suggest';
+    this.currentShare = null;
+    this.currentFileId = null;
+    this.currentSnapshotId = null;
+    this.status = null;
+    this.connection = 'offline';
+    this.peers = [];
+    this.peerLocations = {};
+    this.focusEventId = null;
+    this.hoveredEventId = null;
+    this.panelOpen = false;
+    this.locallyDismissed = new Set<string>();
+    this.expandedResolvedThreadId = null;
+  }
+
   leaveRoom(roomId: RoomId): void {
     this.forgetRoom(roomId);
   }
@@ -1138,21 +1162,7 @@ export class ReviewStore {
       Object.entries(this.anchorResolutions).filter(([, update]) => update.roomId !== roomId),
     );
     if (this.currentRoomId !== roomId) return;
-    this.pendingOutbox = [];
-    this.currentRoomId = null;
-    this.localGrantTier = 'suggest';
-    this.currentShare = null;
-    this.currentFileId = null;
-    this.currentSnapshotId = null;
-    this.status = null;
-    this.connection = 'offline';
-    this.peers = [];
-    this.peerLocations = {};
-    this.focusEventId = null;
-    this.hoveredEventId = null;
-    this.panelOpen = false;
-    this.locallyDismissed = new Set<string>();
-    this.expandedResolvedThreadId = null;
+    this.clearRoomSelection();
   }
 }
 

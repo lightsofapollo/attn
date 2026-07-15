@@ -55,6 +55,7 @@ defineCase('peer, tab, tree, sidebar, room, and rail surfaces render unread badg
     'PeerStrip.svelte',
     'TabBar.svelte',
     'ReviewFileTree.svelte',
+    'FileTree.svelte',
     'Sidebar.svelte',
     'ReviewBar.svelte',
     'WorkspaceEditorFrame.svelte',

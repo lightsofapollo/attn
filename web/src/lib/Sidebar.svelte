@@ -45,6 +45,7 @@
     onRename?: (path: string) => void;
     onDelete?: (path: string) => void;
     sharedPaths?: Set<string>;
+    unreadByPath?: Readonly<Record<string, number>>;
     onSearchQuery?: (query: string) => void;
     outline?: { id: string; text: string; level: number; line: number }[];
     activeOutlineId?: string;
@@ -82,6 +83,7 @@
     onRename,
     onDelete,
     sharedPaths = new Set<string>(),
+    unreadByPath = {},
     onSearchQuery,
     outline = [],
     activeOutlineId = '',
@@ -447,7 +449,7 @@
         <ScrollArea class="min-h-0 flex-1" scrollbarYClasses="pr-1">
           {#if sidebarView === 'files'}
             {#if reviewMode}
-              <div class="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">
+              <div class="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">
                 <span>Shared files</span>
                 <UnreadBadge
                   count={reviewStore.currentRoomUnread}
@@ -459,7 +461,7 @@
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
                 {#key treeRenderKey}
-                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {collaboratorLocations} />
+                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {unreadByPath} {collaboratorLocations} />
                 {/key}
               </SidebarMenu>
               {#if showBackendMatches && remoteSearchItems.length > 0}

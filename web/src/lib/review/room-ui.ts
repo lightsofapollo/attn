@@ -4,6 +4,15 @@ export interface RoomListEntry {
   roomId: RoomId;
 }
 
+export interface OwnerRoomPathEntry extends RoomListEntry {
+  role: RoomRole;
+  share?: { ownerDisplayPath: string };
+}
+
+export interface RoomPathSnapshot extends RoomListEntry {
+  ownerDisplayPath?: string;
+}
+
 export function shouldActivateRoomStatus(status: string | undefined): boolean {
   return status === 'Joined' || status === 'Live';
 }
@@ -74,6 +83,103 @@ export function shouldAutoSelectOnlyRoom(params: {
   if (params.currentRoomId !== null) return null;
   if (params.rooms.length !== 1) return null;
   return params.rooms[0]?.roomId ?? null;
+}
+
+function normalizeRoomPath(path: string | null | undefined): string {
+  return (path ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+/**
+ * Resolve an owner's active local path to the room that owns its collaboration
+ * state. Exact published-file matches beat containing folder shares; ties keep
+ * the already-selected room stable before falling back to room-list order.
+ * Reviewer rooms are deliberately ignored — joined workspaces keep explicit
+ * project-style navigation until P2 folds them into the sidebar picker.
+ */
+export function ownerRoomForPath(params: {
+  path: string | null | undefined;
+  currentRoomId: RoomId | null;
+  rooms: ReadonlyArray<OwnerRoomPathEntry>;
+  snapshots: ReadonlyArray<RoomPathSnapshot>;
+}): RoomId | null {
+  const target = normalizeRoomPath(params.path);
+  if (!target) return null;
+
+  let bestRoomId: RoomId | null = null;
+  let bestScore = -1;
+
+  for (const room of params.rooms) {
+    if (room.role !== 'owner') continue;
+
+    let score = -1;
+    const sharePath = normalizeRoomPath(room.share?.ownerDisplayPath);
+    if (sharePath) {
+      if (sharePath === target) {
+        score = 2_000_000 + sharePath.length;
+      } else if (target.startsWith(`${sharePath}/`)) {
+        // Longer folder roots are more specific than parent folder shares.
+        score = 1_000_000 + sharePath.length;
+      }
+    }
+
+    for (const snapshot of params.snapshots) {
+      if (snapshot.roomId !== room.roomId) continue;
+      const snapshotPath = normalizeRoomPath(snapshot.ownerDisplayPath);
+      if (snapshotPath === target) {
+        // A published file is the strongest possible path→room signal.
+        score = Math.max(score, 3_000_000 + snapshotPath.length);
+      }
+    }
+
+    if (score < 0) continue;
+    const keepsCurrent = room.roomId === params.currentRoomId;
+    const bestIsCurrent = bestRoomId === params.currentRoomId;
+    if (score > bestScore || (score === bestScore && keepsCurrent && !bestIsCurrent)) {
+      bestRoomId = room.roomId;
+      bestScore = score;
+    }
+  }
+
+  return bestRoomId;
+}
+
+/**
+ * Put native room-level unread counts on the owner's spatial navigation.
+ * Single-file shares land on that file; folder/multi-file shares land once on
+ * the shared folder root so the same count is never repeated on every child.
+ */
+export function ownerUnreadByPath(params: {
+  rooms: ReadonlyArray<OwnerRoomPathEntry>;
+  snapshots: ReadonlyArray<RoomPathSnapshot>;
+  unreadByRoom: Readonly<Record<string, number>>;
+}): Record<string, number> {
+  const result: Record<string, number> = {};
+
+  for (const room of params.rooms) {
+    if (room.role !== 'owner') continue;
+    const unread = Math.max(0, Math.floor(params.unreadByRoom[room.roomId] ?? 0));
+    if (unread === 0) continue;
+
+    let anchorPath = normalizeRoomPath(room.share?.ownerDisplayPath);
+    if (!anchorPath) {
+      const snapshotPaths = Array.from(new Set(
+        params.snapshots
+          .filter((snapshot) => snapshot.roomId === room.roomId)
+          .map((snapshot) => normalizeRoomPath(snapshot.ownerDisplayPath))
+          .filter(Boolean),
+      ));
+      if (snapshotPaths.length === 1) {
+        anchorPath = snapshotPaths[0] ?? '';
+      } else if (snapshotPaths.length > 1) {
+        anchorPath = commonDir(snapshotPaths);
+      }
+    }
+
+    if (!anchorPath) continue;
+    result[anchorPath] = (result[anchorPath] ?? 0) + unread;
+  }
+
+  return result;
 }
 
 export function shortRoomId(roomId: RoomId): string {

@@ -6,6 +6,7 @@
   import WorkspaceEditorFrame from '../../lib/WorkspaceEditorFrame.svelte';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import { reviewStore } from '../../lib/review/store.svelte';
+  import { ownerUnreadByPath } from '../../lib/review/room-ui';
   import { RAIL_WIDTH_PX } from '../../lib/review/rail-mode';
   import type { WorkspaceEntry } from './types';
   import {
@@ -66,6 +67,30 @@
     activeEntryPath ? workspaceTreePath(workspaceId, activeEntryPath) : rootPath,
   );
   const tree = $derived(workspaceEntriesToTree(workspaceId, entries));
+  function toWorkspacePath(path: string): string {
+    const normalized = path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    const root = workspaceVirtualRoot(workspaceId);
+    if (path === root || path.startsWith(`${root}/`)) return path;
+    return workspaceTreePath(workspaceId, normalized);
+  }
+  const sharedPaths = $derived.by(() => {
+    const paths = new Set<string>();
+    for (const snapshot of reviewStore.snapshots) {
+      if (reviewStore.rooms[snapshot.roomId]?.role !== 'owner') continue;
+      if (snapshot.ownerDisplayPath) paths.add(toWorkspacePath(snapshot.ownerDisplayPath));
+    }
+    return paths;
+  });
+  const unreadByPath = $derived.by(() => {
+    const raw = ownerUnreadByPath({
+      rooms: reviewStore.roomsList,
+      snapshots: reviewStore.snapshots,
+      unreadByRoom: reviewStore.unreadByRoom,
+    });
+    return Object.fromEntries(
+      Object.entries(raw).map(([path, count]) => [toWorkspacePath(path), count]),
+    );
+  });
   // Project switcher: every workspace on the desk, addressed by virtual root.
   const switcherProjects = $derived(
     workspaces.length > 0
@@ -128,6 +153,8 @@
     {projectMenuActions}
     showOutline={false}
     showWindowDragRegion={false}
+    {sharedPaths}
+    {unreadByPath}
     {footer}
     onNavigate={navigateTree}
     onRename={onRename ? renameTree : undefined}

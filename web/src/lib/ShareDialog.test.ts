@@ -96,7 +96,7 @@ const ipc = installIpcCapture();
 
 interface StubReviewStore {
   currentRoomId: string | null;
-  rooms: unknown[];
+  rooms: Array<{ roomId: string; role: 'owner' | 'reviewer' }>;
   peers: unknown[];
 }
 
@@ -107,10 +107,11 @@ function makeStubStore(): StubReviewStore {
 /**
  * Mirror of the visibility predicate from ReviewBar.svelte:
  *
- *   visible = reviewStore.currentRoomId !== null || reviewStore.roomsList.length > 0 || shareOpen
+ *   visible = hasActiveRoom || (!isOwner && reviewerRooms.length > 0) || shareOpen
  */
-function reviewBarVisible(store: StubReviewStore, shareOpen: boolean): boolean {
-  return store.currentRoomId !== null || store.rooms.length > 0 || shareOpen;
+function reviewBarVisible(store: StubReviewStore, shareOpen: boolean, isOwner = true): boolean {
+  const reviewerRooms = store.rooms.filter((room) => room.role === 'reviewer');
+  return store.currentRoomId !== null || (!isOwner && reviewerRooms.length > 0) || shareOpen;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,10 +205,19 @@ defineCase('ReviewBar visible while share is being initiated', () => {
 
 defineCase('ReviewBar visible when passive rooms are available', () => {
   const store = makeStubStore();
-  store.rooms = [{ roomId: 'room-resumed' }];
+  store.rooms = [{ roomId: 'room-resumed', role: 'reviewer' }];
   assert(
-    reviewBarVisible(store, false) === true,
-    'expected visible when a resumed room can be selected',
+    reviewBarVisible(store, false, false) === true,
+    'expected visible when a resumed reviewer room can be selected',
+  );
+});
+
+defineCase('ReviewBar hides passive owner rooms because owner focus follows files', () => {
+  const store = makeStubStore();
+  store.rooms = [{ roomId: 'room-owned', role: 'owner' }];
+  assert(
+    reviewBarVisible(store, false, true) === false,
+    'an owned room must not create a second navigation surface',
   );
 });
 

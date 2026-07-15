@@ -97,12 +97,17 @@
 
   let roomMenuOpen = $state(false);
 
-  const rooms = $derived(reviewStore.roomsList);
+  // Owners navigate files; only joined reviewer rooms remain in this temporary
+  // menu until P2 promotes them into the sidebar project picker.
+  const rooms = $derived(
+    isOwner ? [] : reviewStore.roomsList.filter((room) => room.role === 'reviewer'),
+  );
   const hasActiveRoom = $derived(reviewStore.currentRoomId !== null);
 
-  // Visible whenever a room is active, a remembered room can be selected, or a
-  // share is being initiated.
-  const visible = $derived(hasActiveRoom || rooms.length > 0 || shareOpen);
+  // Visible for active per-document status, a joined reviewer room that can be
+  // selected during P1, or a share being initiated. Passive owner rooms never
+  // create their own navigation surface.
+  const visible = $derived(hasActiveRoom || (!isOwner && rooms.length > 0) || shareOpen);
 
   // Label for the share pill — post-mint it flips to "Sharing" per §8.
   const shareLabel = $derived(
@@ -141,7 +146,7 @@
       class="review-bar-dock pointer-events-auto inline-flex h-8 max-w-[calc(100vw-1rem)] shrink-0 items-center justify-end gap-1.5 overflow-visible px-0"
       data-slot="review-bar-dock"
     >
-      {#if rooms.length > 0}
+      {#if !isOwner && rooms.length > 0}
         <DropdownMenu bind:open={roomMenuOpen}>
           <DropdownMenuTrigger
             class="room-menu-trigger inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-border/50 bg-background/65 px-1.5 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"

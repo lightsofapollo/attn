@@ -175,6 +175,10 @@
   let renamingEntry = $state(false);
   let renameEntryValue = $state('');
   let confirmingEntryDelete = $state(false);
+  // Destructive entry actions bind to the path they were opened against.
+  // Navigation clears them; the commit-time guard makes a raced switch a
+  // no-op instead of renaming/deleting whichever file became active.
+  let entryActionPath = $state<string | null>(null);
   let railError = $state<string | null>(null);
   let assetInput = $state<HTMLInputElement | undefined>();
   let previewUrl = $state<string | null>(null);
@@ -508,7 +512,9 @@
     const entry = activeEntry;
     const target = renameEntryValue.trim();
     renamingEntry = false;
-    if (!entry || target.length === 0 || target === entry.path) return;
+    if (!entry || entry.path !== entryActionPath) return;
+    entryActionPath = null;
+    if (target.length === 0 || target === entry.path) return;
     railError = null;
     try {
       await service.renameEntry(workspace.id, entry.path, target);
@@ -522,7 +528,8 @@
   async function deleteActiveEntry(): Promise<void> {
     const entry = activeEntry;
     confirmingEntryDelete = false;
-    if (!entry) return;
+    if (!entry || entry.path !== entryActionPath) return;
+    entryActionPath = null;
     railError = null;
     try {
       await service.deleteEntry(workspace.id, entry.path);
@@ -997,6 +1004,11 @@
       lastActivePath = path;
       editing = false;
       desktopEditRequested = false;
+      // A pending rename/delete opened on the previous file must not survive
+      // the switch and operate on this one.
+      renamingEntry = false;
+      confirmingEntryDelete = false;
+      entryActionPath = null;
       ensureAutosaveForActiveFile();
     });
   });
@@ -1176,6 +1188,15 @@
     return `/app/w/${workspace.id}/${entry.path}`;
   }
 
+  /**
+   * AppShell calls this before a back/forward (popstate) navigation swaps the
+   * active file, so history navigation drains debounce-pending edits exactly
+   * like an in-app tree switch does.
+   */
+  export async function flushPendingEdits(): Promise<void> {
+    await autosave?.flush();
+  }
+
   // Switch files in place (no page reload). Flush the current file's autosave
   // first so nothing is lost, then let AppShell swap activePath/bodyText.
   async function switchTo(path: string): Promise<void> {
@@ -1207,6 +1228,7 @@
     if (pendingRename && activeEntry?.path === pendingRename) {
       renameEntryValue = pendingRename;
       confirmingEntryDelete = false;
+      entryActionPath = pendingRename;
       renamingEntry = true;
       pendingRename = null;
     }
@@ -1214,6 +1236,7 @@
   $effect(() => {
     if (pendingDelete && activeEntry?.path === pendingDelete) {
       renamingEntry = false;
+      entryActionPath = pendingDelete;
       confirmingEntryDelete = true;
       pendingDelete = null;
     }

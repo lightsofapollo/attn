@@ -170,6 +170,44 @@ defineCase('changes during an in-flight commit recommit afterwards', async () =>
   assertEqual(h.commits[1], 'second', 'newest text committed last');
 });
 
+defineCase('flush drains the in-flight commit AND text queued behind it', async () => {
+  const pump = async (): Promise<void> => {
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
+  };
+  const h = makeHarness({ gated: true });
+  h.controller.noteChange('first');
+  await h.scheduler.advance(1_000); // gated commit A is now in flight
+  h.controller.noteChange('second'); // queued behind A
+  const flushed = h.controller.flush();
+  let settled = false;
+  void flushed.then(() => {
+    settled = true;
+  });
+  await pump();
+  assert(!settled, 'flush must not resolve while text is pending behind an in-flight commit');
+  h.resolveGate?.(); // commit A completes
+  await pump(); // flush loop starts commit B (gated again)
+  h.resolveGate?.(); // commit B completes
+  await flushed;
+  assertEqual(h.commits.length, 2, 'flush drained both commits');
+  assertEqual(h.commits[1], 'second', 'no text left behind after flush');
+  assert(!h.controller.dirty, 'controller is clean after a drained flush');
+});
+
+defineCase('a throwing serialization provider fails honestly and does not wedge', async () => {
+  const h = makeHarness();
+  h.controller.noteChange(() => {
+    throw new Error('serialize boom');
+  });
+  await h.controller.flush();
+  assertEqual(h.commits.length, 0, 'nothing committed from a throwing provider');
+  assertEqual(h.states.at(-1), 'Storage needs attention', 'honest failure state');
+  h.controller.noteChange('recovered');
+  await h.controller.flush();
+  assertEqual(h.commits.at(-1), 'recovered', 'controller recovered after the provider throw');
+  assertEqual(h.states.at(-1), 'Saved on this device', 'clean state after recovery');
+});
+
 async function runAllCases(): Promise<void> {
   let passed = 0;
   const failures: string[] = [];

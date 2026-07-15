@@ -107,21 +107,30 @@
     }
   }
 
+  // Bound EditorShell instance so history navigation can drain its autosave.
+  let editorShell = $state<{ flushPendingEdits: () => Promise<void> } | undefined>();
+
   // Switch the active file WITHOUT a page reload: read the new body, update
   // state, and push the URL. The editor swaps in place (< 100 ms, no flash)
   // instead of re-bootstrapping the whole app. `push` is false when the change
   // comes from a back/forward navigation (the history entry already exists).
+  // The generation counter drops stale reads: rapid selections can resolve
+  // out of order, and an older read must never overwrite a newer selection.
+  let applyGeneration = 0;
   async function applyEntry(path: string, push: boolean): Promise<void> {
     if (!detail || path === activePath) return;
+    const generation = ++applyGeneration;
     try {
       // Read the new body BEFORE mutating any state, so a failed read leaves
       // the current file open rather than half-switching.
       const body = await service.readBodyText(detail.id, path);
+      if (generation !== applyGeneration) return;
       activePath = path;
       bodyText = body;
       isNewDraft = false;
       if (push) history.pushState(null, '', `/app/w/${detail.id}/${path}`);
     } catch (error) {
+      if (generation !== applyGeneration) return;
       errorMessage = error instanceof Error ? error.message : String(error);
       phase = 'error';
     }
@@ -155,13 +164,19 @@
     history.replaceState(null, '', `/app/w/${fresh.id}/${target}`);
   }
 
-  // Keep the active file in sync with the URL on back/forward.
+  // Keep the active file in sync with the URL on back/forward. Drain the
+  // editor's debounce-pending edits FIRST — popstate must behave exactly like
+  // an in-app tree switch, or typing then pressing Back within the debounce
+  // window silently discards the pending text.
   $effect(() => {
     const handler = () => {
       if (!detail) return;
       const match = window.location.pathname.match(/^\/app\/w\/[^/]+\/(.+)$/u);
       const path = match ? decodeURIComponent(match[1]) : detail.openPath;
-      void applyEntry(path, false);
+      void (async () => {
+        await editorShell?.flushPendingEdits();
+        await applyEntry(path, false);
+      })();
     };
     window.addEventListener('popstate', handler);
     return () => window.removeEventListener('popstate', handler);
@@ -273,6 +288,7 @@
   </div>
 {:else if editorMode && detail}
   <EditorShell
+    bind:this={editorShell}
     {service}
     workspace={detail}
     {activePath}

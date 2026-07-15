@@ -33,7 +33,7 @@ export class AutosaveController {
   // keystroke. A plain string is wrapped into a constant provider.
   private pendingProvider: (() => string) | null = null;
   private dirtySince: number | null = null;
-  private committing = false;
+  private inFlight: Promise<boolean> | null = null;
   private disposed = false;
 
   constructor(options: AutosaveOptions) {
@@ -65,11 +65,26 @@ export class AutosaveController {
     this.cancelTimer = this.schedule(() => void this.runCommit(), wait);
   }
 
-  /** Commit any pending text immediately (visibility/pagehide/unmount). */
+  /**
+   * Commit any pending text immediately (visibility/pagehide/unmount, file
+   * switch). Drains completely: an in-flight commit is awaited and any text
+   * that accumulated behind it is committed too, so a caller that disposes
+   * the controller right after `flush()` resolves can never drop edits.
+   * Stops early only on commit failure — the text stays pending and the
+   * reported state stays honest.
+   */
   async flush(): Promise<void> {
-    this.cancelTimer?.();
-    this.cancelTimer = null;
-    await this.runCommit();
+    for (;;) {
+      this.cancelTimer?.();
+      this.cancelTimer = null;
+      const inFlight = this.inFlight;
+      if (inFlight !== null) {
+        await inFlight;
+        continue; // Newer text may have landed while awaiting; drain it too.
+      }
+      if (this.pendingProvider === null || this.disposed) return;
+      if (!(await this.runCommit())) return;
+    }
   }
 
   get dirty(): boolean {
@@ -82,21 +97,40 @@ export class AutosaveController {
     this.cancelTimer = null;
   }
 
-  private async runCommit(): Promise<void> {
-    if (this.committing) {
+  private runCommit(): Promise<boolean> {
+    if (this.inFlight !== null) {
       // A commit is in flight; the fresh text recommits when it settles.
-      return;
+      return Promise.resolve(false);
     }
-    const provider = this.pendingProvider;
-    if (provider === null) return;
+    if (this.pendingProvider === null) return Promise.resolve(true);
+    // The wrapper owns the inFlight lifecycle. commitPending can complete
+    // fully synchronously (a throwing provider), so clearing inFlight from
+    // inside it would run BEFORE the assignment below and strand a settled
+    // promise in inFlight forever — wedging every future flush.
+    const task = (async () => {
+      try {
+        return await this.commitPending();
+      } finally {
+        this.inFlight = null;
+      }
+    })();
+    this.inFlight = task;
+    return task;
+  }
+
+  private async commitPending(): Promise<boolean> {
+    const provider = this.pendingProvider!;
     this.pendingProvider = null;
     this.dirtySince = null;
-    this.committing = true;
     this.onState('Saving…');
-    // Serialize exactly once, here — not per keystroke.
-    const text = provider();
+    let succeeded = false;
     try {
+      // Serialize exactly once, here — not per keystroke. Inside the guard:
+      // a throwing provider must fail this commit honestly, not strand the
+      // controller with a permanently 'in flight' commit that never settles.
+      const text = provider();
       await this.commit(text);
+      succeeded = true;
       if (this.pendingProvider === null) {
         this.onState('Saved on this device');
       }
@@ -109,12 +143,12 @@ export class AutosaveController {
       }
       this.onState('Storage needs attention');
     } finally {
-      this.committing = false;
       if (this.pendingProvider !== null && !this.disposed) {
         // Newer text arrived mid-commit (or the commit failed): reschedule.
         this.cancelTimer?.();
         this.cancelTimer = this.schedule(() => void this.runCommit(), this.debounceMs);
       }
     }
+    return succeeded;
   }
 }

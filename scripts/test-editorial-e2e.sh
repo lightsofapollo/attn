@@ -61,7 +61,8 @@ printf '# Editorial E2E\n\nThe quick brown fox jumps over the lazy dog.\n' > "$W
 printf '# rv placeholder\n' > "$W/rv.md"
 
 log "relay :$PORT (hermetic state)"
-( cd "$ROOT/relay" && exec npx wrangler dev --local --port "$PORT" --persist-to "$W/wstate" ) >"$W/relay.log" 2>&1 & RPID=$!
+( cd "$ROOT/relay" && exec npx wrangler dev --local --port "$PORT" --persist-to "$W/wstate" \
+    --var QUOTA_ALLOW_UNATTRIBUTED_CREATES:true ) >"$W/relay.log" 2>&1 & RPID=$!
 deadline=$(( $(date +%s)+60 )); until curl -fsS "$URL/health" >/dev/null 2>&1; do
   [ "$(date +%s)" -lt "$deadline" ] || { bad "relay never healthy"; tail -20 "$W/relay.log"; exit 1; }; sleep 0.3; done
 log "relay healthy"
@@ -84,10 +85,35 @@ owner --click '[data-slot=name-prompt-confirm]' >/dev/null 2>&1
 poll 20000 owner --wait-for '[data-slot=share-invite-url]' --timeout 1000 || { bad "share dialog never opened after name prompt"; exit 1; }
 INVITE=""; d=$(( $(date +%s)+15 ))
 while [ "$(date +%s)" -lt "$d" ]; do
-  INVITE=$(owner --eval "document.querySelector('[data-slot=share-invite-url]')?.value||''" 2>/dev/null | tr -d '"\\' | tr -d '\r\n')
+  INVITE=$(owner --eval "window.__attn_review_store__?.currentShare?.inviteUrl||''" 2>/dev/null | tr -d '"\\' | tr -d '\r\n')
   case "$INVITE" in attn://review/*) break;; esac; sleep 0.3
 done
 case "$INVITE" in attn://review/*) ok "owner minted invite";; *) bad "no invite (got '$INVITE')"; exit 1;; esac
+
+log "owner navigation follows shared files (rooms-as-projects P1)"
+OWNER_ROOM=$(owner --eval "window.__attn_review_store__?.currentShare?.roomId||''" 2>/dev/null | tr -d '"\\' | tr -d '\r\n')
+if [ -n "$OWNER_ROOM" ]; then ok "owner room is active for shared-doc.md"; else bad "owner room id missing after share"; fi
+if [ "$(count owner '.room-menu-trigger')" -eq 0 ]; then ok "owner has no room dropdown"; else bad "owner room dropdown still renders"; fi
+if has owner '[data-path$="/shared-doc.md"] [aria-label="Shared for review"]'; then ok "shared file is marked in the owner tree"; else bad "shared file marker missing from owner tree"; fi
+
+# Close the invite modal, then navigate through the same sidebar a person uses.
+# The unshared file must clear only presentation state; the durable room stays
+# remembered and reactivates when its shared file receives focus again.
+owner --eval "(function(){var dialog=document.querySelector('[data-slot=share-dialog]');var close=Array.from(dialog?.querySelectorAll('button')||[]).find(function(button){return button.textContent?.trim()==='Close';});close?.click();return close?'closed':'missing';})()" >/dev/null 2>&1
+share_closed(){ ! has owner '[data-slot=share-dialog]'; }
+poll 5000 share_closed || bad "share dialog did not close"
+owner --click 'text=rv.md' >/dev/null 2>&1
+owner_room_cleared(){ [ "$(owner --eval "String(window.__attn_review_store__.currentRoomId)" 2>/dev/null | tr -d '"')" = "null" ]; }
+if poll 8000 owner_room_cleared; then ok "unshared file clears owner room presentation"; else bad "unshared file kept owner room active"; fi
+owner_room_remembered(){ [ "$(owner --eval "String(window.__attn_review_store__.roomsList.some(function(room){return room.roomId==='$OWNER_ROOM';}))" 2>/dev/null | tr -d '"')" = "true" ]; }
+if owner_room_remembered; then ok "unshared focus preserves durable owner room data"; else bad "unshared focus forgot the owner room"; fi
+if [ "$(count owner '[data-slot=review-bar-dock]')" -eq 0 ]; then ok "unshared file hides collaboration chrome"; else bad "unshared file still shows collaboration chrome"; fi
+
+owner --click 'text=shared-doc.md' >/dev/null 2>&1
+owner_room_reactivated(){ [ "$(owner --eval "window.__attn_review_store__.currentRoomId||''" 2>/dev/null | tr -d '"\\' | tr -d '\r\n')" = "$OWNER_ROOM" ]; }
+if poll 8000 owner_room_reactivated; then ok "shared file reactivates its owner room"; else bad "shared file did not reactivate its owner room"; fi
+if has owner '[data-slot=review-bar-dock]'; then ok "shared file restores per-document collaboration chrome"; else bad "shared file did not restore collaboration chrome"; fi
+if [ "$(count owner '.room-menu-trigger')" -eq 0 ]; then ok "reactivated owner room still has no dropdown"; else bad "owner dropdown returned after file focus"; fi
 
 log "reviewer sets display name before joining (so the prompt doesn't fire post-join)"
 RVNAME="Riley Reviewer $$"

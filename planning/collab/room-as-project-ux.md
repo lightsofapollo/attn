@@ -201,6 +201,9 @@ proliferate": we're removing a navigation surface, not adding one.
   ReviewBar, and per-room unread counts appear once on the corresponding
   file/folder row. The hosted desktop frame uses the same owner-only ReviewBar
   behavior and tree badges. Reviewer switching remains temporarily unchanged.
+  The hermetic native owner/reviewer harness verifies the full relay-backed
+  flow, including owner file-following, comment/reply/resolve convergence, and
+  reviewer leave (`scripts/test-editorial-e2e.sh`: 27 passed, 0 failed).
 - **P2 (`attn-zqt`) — filed.** Promote joined reviewer rooms into the sidebar
   project switcher and move leave/forget actions onto those project entries.
 - **P3 (`attn-nls`) — filed.** Add cross-project shared/unread discovery, finish

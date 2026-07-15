@@ -30,5 +30,8 @@
     "viewer",
     "cli",
     "desktop"
-  ]
+  ],
+  "dependencies": {
+    "agentation": "^3.0.2"
+  }
 }

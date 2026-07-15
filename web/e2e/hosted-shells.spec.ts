@@ -132,9 +132,9 @@ test('mobile editor is reader-first with dock and sheets', async ({ page }) => {
   const dock = page.locator('.thumb-dock');
   await expect(dock).toBeVisible();
   await dock.getByRole('button', { name: 'Files' }).click();
-  const filesSheet = page.getByRole('dialog', { name: /Files · 5/u });
+  const filesSheet = page.getByRole('dialog', { name: 'Files' });
   await expect(filesSheet).toBeVisible();
-  await expect(filesSheet.locator('.file')).toHaveCount(5);
+  await expect(filesSheet.locator('.file-row')).toHaveCount(5);
   await page.keyboard.press('Escape');
   await expect(filesSheet).not.toBeVisible();
   await expect(dock.getByRole('button', { name: 'Files' })).toBeFocused();
@@ -155,7 +155,7 @@ for (const path of ['/app', '/app/w/ws-product/direction.md?shell=demo', '/app/s
 test('share sheet fits 320px without page overflow', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 700 });
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
-  await page.locator('.thumb-dock').getByRole('button', { name: 'Share' }).click();
+  await page.locator('.editor-top').getByRole('button', { name: 'Share' }).click();
   await expect(page.getByRole('dialog', { name: 'Share for review' })).toBeVisible();
   await expectNoHorizontalScroll(page);
 });
@@ -187,7 +187,7 @@ test('capture shell screenshots for design review', async ({ page }) => {
       await expect(page.locator('.writing-sheet')).toBeVisible();
     }
     if (opts?.open === 'share') {
-      await page.locator('.thumb-dock').getByRole('button', { name: 'Share' }).click();
+      await page.locator('.editor-top').getByRole('button', { name: 'Share' }).click();
     }
     await page.screenshot({ path: `test-results/shell-${name}-mobile.png`, fullPage: true });
   }

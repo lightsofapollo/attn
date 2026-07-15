@@ -111,7 +111,8 @@ test('view-only mode replaces Edit with Open native and keeps the reader useful'
   await dock.getByRole('button', { name: 'Files' }).click();
   await expect(page.getByRole('dialog', { name: /Files/u })).toBeVisible();
   await page.keyboard.press('Escape');
-  await dock.getByRole('button', { name: 'Share' }).click();
+  // Share lives only in the masthead: the owner's rare, doc-level act.
+  await page.locator('.editor-top').getByRole('button', { name: 'Share' }).click();
   await expect(page.getByRole('dialog', { name: /Share/u })).toBeVisible();
 });
 

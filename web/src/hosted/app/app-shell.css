@@ -756,7 +756,7 @@ a.workspace-row:hover {
   position: fixed;
   z-index: 65;
   left: 50%;
-  bottom: calc(env(safe-area-inset-bottom, 0px) + 5.5rem);
+  bottom: calc(var(--dock-h, calc(env(safe-area-inset-bottom, 0px) + 4.5rem)) + 1.25rem);
   transform: translateX(-50%);
   display: flex;
   flex-direction: column;
@@ -946,12 +946,48 @@ a.workspace-row:hover {
 }
 
 @media (max-width: 900px) {
-  .editor-shell {
-    grid-template-rows: 58px 1fr;
+  :root {
+    /* One height the canvas, edit bar, and toasts all clear. */
+    --dock-h: calc(64px + env(safe-area-inset-bottom, 0px));
   }
 
+  /* Block flow, not grid: a sticky grid item can only stick inside its own
+     row (exactly its height), so the sticky masthead silently never stuck.
+     In block flow it pins to the page scrollport as ios-ux §3 intends. */
+  .editor-shell {
+    display: block;
+  }
+
+  /* Frosted masthead: content scrolls under it; a shadow lifts it once the
+     page moves, and a graphite reading-progress hairline draws along its
+     rule. Safe-area padding keeps it honest in standalone/notched mode. */
   .editor-top {
+    display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    min-height: 58px;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+    background: var(--nav-veil);
+    backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    transition: box-shadow 220ms var(--ease);
+  }
+
+  .editor-top.is-scrolled {
+    box-shadow: 0 10px 30px oklch(0.2 0.02 55 / 8%);
+  }
+
+  .editor-top::after {
+    content: '';
+    position: absolute;
+    inset: auto 0 -1px 0;
+    height: 2px;
+    background: color-mix(in oklch, var(--ink) 55%, transparent);
+    transform: scaleX(var(--read-progress, 0));
+    transform-origin: 0 50%;
+    pointer-events: none;
   }
 
   .editor-top .top-brand {
@@ -959,7 +995,65 @@ a.workspace-row:hover {
   }
 
   .editor-top .doc-name {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    padding-top: 0.5rem;
+    padding-bottom: 0.55rem;
     text-align: left;
+    overflow: hidden;
+  }
+
+  /* Crossfade stack: workspace name at rest; the document's own h1 takes
+     the slot once its heading scrolls under the chrome. */
+  .masthead-title {
+    display: grid;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .masthead-title > strong {
+    grid-area: 1 / 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font: 700 1.02rem/1.3 var(--serif);
+    letter-spacing: -0.01em;
+    transition:
+      opacity 220ms var(--ease),
+      transform 220ms var(--ease);
+  }
+
+  .masthead-doc {
+    opacity: 0;
+    transform: translateY(0.5em);
+  }
+
+  .doc-active .masthead-workspace {
+    opacity: 0;
+    transform: translateY(-0.5em);
+  }
+
+  .doc-active .masthead-doc {
+    opacity: 1;
+    transform: none;
+  }
+
+  /* The chip sheds its pill border on the masthead's status line. */
+  .editor-top .save-chip {
+    border: 0;
+    padding: 0;
+    gap: 5px;
+    font-size: 0.67rem;
+    letter-spacing: 0.015em;
+  }
+
+  .editor-top .share-action .button {
+    min-height: 38px;
+    padding: 0.45rem 0.95rem;
+    font-size: 0.85rem;
   }
 
   .editor-shell {
@@ -987,7 +1081,7 @@ a.workspace-row:hover {
   .editor-canvas {
     padding: 0;
     /* Keep the last lines readable above the fixed dock. */
-    padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(var(--dock-h) + 26px);
   }
 
   .writing-sheet {
@@ -1011,26 +1105,100 @@ a.workspace-row:hover {
     bottom: 0;
     z-index: 30;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2px;
     border-top: 1px solid var(--rule);
     background: var(--nav-veil);
-    backdrop-filter: blur(15px);
-    -webkit-backdrop-filter: blur(15px);
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    backdrop-filter: blur(18px) saturate(1.4);
+    -webkit-backdrop-filter: blur(18px) saturate(1.4);
+    padding: 4px calc(6px + env(safe-area-inset-right, 0px))
+      env(safe-area-inset-bottom, 0px) calc(6px + env(safe-area-inset-left, 0px));
     font-family: var(--sans);
   }
 
-  .thumb-dock button {
+  .thumb-dock button,
+  .thumb-dock .dock-link {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
     min-height: 56px;
     border: 0;
+    border-radius: 12px;
     background: transparent;
     color: var(--ink);
-    font: 650 0.78rem var(--sans);
+    font: 650 0.67rem/1 var(--sans);
+    letter-spacing: 0.02em;
     cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+    transition: background 120ms var(--ease);
   }
 
-  .thumb-dock button:hover {
-    background: color-mix(in srgb, var(--sheet) 60%, transparent);
+  .thumb-dock button:hover,
+  .thumb-dock .dock-link:hover {
+    background: color-mix(in oklch, var(--ink) 5%, transparent);
+  }
+
+  .thumb-dock button:active,
+  .thumb-dock .dock-link:active {
+    background: color-mix(in oklch, var(--ink) 9%, transparent);
+  }
+
+  .thumb-dock button:active .dock-icon,
+  .thumb-dock .dock-link:active .dock-icon {
+    transform: translateY(1px) scale(0.92);
+  }
+
+  .thumb-dock button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+}
+
+.dock-icon {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 140ms var(--ease);
+}
+
+.dock-icon-stack {
+  position: relative;
+  display: inline-flex;
+}
+
+.dock-badge {
+  position: absolute;
+  top: -5px;
+  right: -11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  font: 700 0.6rem/1 var(--sans);
+}
+
+.dock-badge.pop {
+  animation: badge-pop 300ms var(--ease);
+}
+
+@keyframes badge-pop {
+  35% {
+    transform: scale(1.3);
   }
 }
 
@@ -1041,15 +1209,75 @@ a.workspace-row:hover {
   background: var(--overlay-veil);
   display: grid;
   align-items: end;
+  animation: veil-in 180ms var(--ease);
 }
 
 .bottom-sheet {
   max-height: 82dvh;
   overflow: auto;
+  overscroll-behavior: contain;
   background: var(--sheet);
-  border-top: 1px solid var(--ink);
-  padding: 1.1rem 1.2rem calc(1.4rem + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--rule);
+  border-radius: 14px 14px 0 0;
+  box-shadow: 0 -24px 60px oklch(0.2 0.02 55 / 20%);
+  padding: 0 1.2rem calc(1.4rem + env(safe-area-inset-bottom, 0px));
   font-family: var(--sans);
+  animation: sheet-in 280ms var(--ease);
+}
+
+/* Snap-back after an uncommitted swipe; suspended while the finger drives. */
+.bottom-sheet:not(.is-dragging) {
+  transition: transform 200ms var(--ease);
+}
+
+/* Same grab-bar vocabulary as the share sheet, with a real (draggable) hit
+   area. Sticky so it stays under the thumb while the sheet content scrolls. */
+.bottom-sheet-grip {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  margin: 0 -1.2rem;
+  padding: 9px 0 7px;
+  background: var(--sheet);
+  touch-action: none;
+  cursor: grab;
+}
+
+.bottom-sheet-grip:active {
+  cursor: grabbing;
+}
+
+.bottom-sheet-grip span {
+  width: 34px;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--ink) 24%, transparent);
+}
+
+@keyframes veil-in {
+  from {
+    background: transparent;
+  }
+}
+
+/* Transform only — never opacity. Headless/occluded renderers freeze the
+   animation clock mid-run, so an opacity entrance can strand the sheet
+   half-transparent (the Truth Rule: visibility never depends on motion). */
+@keyframes sheet-in {
+  from {
+    transform: translateY(32px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bottom-sheet-veil,
+  .bottom-sheet,
+  .share-sheet,
+  .dock-badge.pop {
+    animation: none;
+  }
 }
 
 .bottom-sheet-head {
@@ -1058,6 +1286,17 @@ a.workspace-row:hover {
   justify-content: space-between;
   gap: 1rem;
   margin-bottom: 0.9rem;
+}
+
+.bottom-sheet-heading {
+  min-width: 0;
+}
+
+.bottom-sheet-subtitle {
+  margin: 3px 0 0;
+  color: var(--hosted-muted);
+  font: 500 0.74rem/1.3 var(--sans);
+  letter-spacing: 0.01em;
 }
 
 .bottom-sheet-head h2 {
@@ -2147,6 +2386,7 @@ a.workspace-row:hover {
     border-left: 0;
     border-radius: 14px 14px 0 0;
     padding-bottom: env(safe-area-inset-bottom, 0px);
+    animation: sheet-in 280ms var(--ease);
   }
 
   .share-sheet::before {
@@ -2362,13 +2602,7 @@ a.workspace-row:hover {
   right: 0.8rem;
 }
 
-.dock-link {
-  display: grid;
-  place-items: center;
-  min-height: 56px;
-  color: var(--ink);
-  font: 650 0.7rem var(--sans);
-}
+/* .dock-link layout lives with the thumb dock rules (mobile media block). */
 
 /* Wide content scrolls inside its own frame; the page never pans. */
 .writing-sheet table {
@@ -2422,6 +2656,10 @@ a.workspace-row:hover {
   color: var(--hosted-muted);
   font: 0.7rem var(--mono);
   padding-right: 0.4rem;
+  max-width: 26vw;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .title-button {
@@ -2451,7 +2689,7 @@ a.workspace-row:hover {
   /* The bar rides above the thumb dock, then above the keyboard when the
      visual viewport shrinks. */
   .edit-bar {
-    bottom: calc(var(--kb-offset, 0px) + 56px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(var(--kb-offset, 0px) + var(--dock-h, 0px));
   }
 }
 

@@ -56,7 +56,7 @@ test('axe: mobile editor with files sheet', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await page.locator('.thumb-dock').getByRole('button', { name: 'Files' }).click();
-  await expect(page.getByRole('dialog', { name: /Files · 5/u })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Files' })).toBeVisible();
   await expectNoAxeViolations(page, 'mobile files sheet');
 });
 

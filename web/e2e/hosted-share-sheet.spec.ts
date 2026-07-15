@@ -5,8 +5,8 @@ const WORKSPACE_URL = '/app/w/ws-product/direction.md?shell=demo';
 
 async function openShare(page: Page) {
   await page.goto(WORKSPACE_URL);
-  const dockShare = page.locator('.thumb-dock').getByRole('button', { name: 'Share' });
-  if (await dockShare.isVisible()) await dockShare.click();
+  const headerShare = page.locator('.editor-top').getByRole('button', { name: 'Share' });
+  if (await headerShare.isVisible()) await headerShare.click();
   else await page.getByRole('button', { name: 'Share for review' }).click();
   const dialog = page.getByRole('dialog', { name: 'Share for review' });
   await expect(dialog).toBeVisible();
@@ -155,7 +155,7 @@ test('uses Web Share when available and remains axe-clean at mobile width', asyn
   });
   await page.setViewportSize({ width: 320, height: 700 });
   await page.goto(WORKSPACE_URL);
-  await page.locator('.thumb-dock').getByRole('button', { name: 'Share' }).click();
+  await page.locator('.editor-top').getByRole('button', { name: 'Share' }).click();
   const dialog = page.getByRole('dialog', { name: 'Share for review' });
   await dialog.getByRole('button', { name: 'Create review link' }).click();
   await expect(dialog.getByRole('heading', { name: 'Review link ready' })).toBeVisible();

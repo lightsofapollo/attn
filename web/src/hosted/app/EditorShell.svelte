@@ -69,7 +69,6 @@
   let filesSheetOpen = $state(false);
   let reviewSheetOpen = $state(false);
   let shareButton = $state<HTMLButtonElement | undefined>();
-  let dockShareButton = $state<HTMLButtonElement | undefined>();
   let shareReturnFocus = $state<HTMLButtonElement | undefined>();
   let dockFilesButton = $state<HTMLButtonElement | undefined>();
   let dockReviewButton = $state<HTMLButtonElement | undefined>();
@@ -184,6 +183,90 @@
   let canvasEl = $state<HTMLElement | undefined>();
   let lightboxOpen = $state(false);
   let lightboxTrigger: HTMLElement | null = null;
+
+  // ————— mobile masthead + dock state —————
+  let headerEl = $state<HTMLElement | undefined>();
+  let headerScrolled = $state(false);
+  let docTitle = $state('');
+  let showDocTitle = $state(false);
+
+  const reviewCount = $derived(
+    ownerState?.roomId && reviewStoreRef
+      ? reviewStoreRef.threadsForCurrentFile.length
+      : workspace.reviewCards.length,
+  );
+  let badgePop = $state(false);
+  let lastReviewCount = -1;
+  $effect(() => {
+    const count = reviewCount;
+    if (lastReviewCount >= 0 && count > lastReviewCount) badgePop = true;
+    lastReviewCount = count;
+  });
+
+  // Dock glyphs: 24-grid, 1.7 stroke, round joins — the same quiet line
+  // vocabulary as the viewing-safely shield.
+  const dockGlyphs: Record<string, string[]> = {
+    files: [
+      'M3.75 7.25a2 2 0 0 1 2-2h3.9a1 1 0 0 1 .77.36l1.56 1.89h6.27a2 2 0 0 1 2 2v7.25a2 2 0 0 1-2 2H5.75a2 2 0 0 1-2-2z',
+    ],
+    review: [
+      'M4.75 7A2.25 2.25 0 0 1 7 4.75h10A2.25 2.25 0 0 1 19.25 7v6A2.25 2.25 0 0 1 17 15.25h-5.9l-3.35 3v-3H7A2.25 2.25 0 0 1 4.75 13z',
+      'M8.5 8.9h7',
+      'M8.5 11.6h4.6',
+    ],
+    edit: [
+      'M14.4 5.65 18.35 9.6 8.85 19.1l-4.9 1.45a.35.35 0 0 1-.45-.45L4.95 15.2z',
+      'M12.9 7.15l3.95 3.95',
+    ],
+    done: ['M5.25 12.75 10 17.4 18.75 7.4'],
+    native: [
+      'M10.5 5.75H7.75a2 2 0 0 0-2 2v8.5a2 2 0 0 0 2 2h8.5a2 2 0 0 0 2-2V13.5',
+      'M14.5 4.75h4.75V9.5',
+      'M19 5 12.5 11.5',
+    ],
+  };
+
+  // Mobile masthead scroll behaviors: a reading-progress hairline written
+  // straight to the header's style (scrolling never re-renders Svelte state),
+  // a lifted shadow once scrolled, and the document's own h1 inking into the
+  // title slot after its heading scrolls under the chrome (the iOS
+  // large-title pattern). Purely cosmetic — no state depends on it.
+  $effect(() => {
+    const canvas = canvasEl;
+    const header = headerEl;
+    if (desktopLayout || !canvas || !header) return;
+    void activePath; // retrack: a file switch resets title + progress
+    const scroller = document.scrollingElement as HTMLElement;
+    let ticking = false;
+    const update = (): void => {
+      ticking = false;
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      // Short documents get no progress line: it only means something once
+      // there is a real reading distance to cover.
+      const progress = max > 160 ? Math.min(1, Math.max(0, scroller.scrollTop / max)) : 0;
+      header.style.setProperty('--read-progress', progress.toFixed(4));
+      headerScrolled = scroller.scrollTop > 4;
+      const h1 = canvas.querySelector('h1');
+      const text = h1?.textContent?.trim() ?? '';
+      if (text !== docTitle) docTitle = text;
+      showDocTitle =
+        text.length > 0 &&
+        h1 !== null &&
+        h1.getBoundingClientRect().bottom <= header.getBoundingClientRect().bottom + 8;
+    };
+    const schedule = (): void => {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(update);
+    };
+    schedule();
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule, { passive: true });
+    return () => {
+      window.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+    };
+  });
 
   // Per-workspace/file reading position: best-effort, explicit anchors win.
   const readPositionKey = $derived(
@@ -1446,6 +1529,12 @@
   </div>
 {/snippet}
 
+{#snippet dockGlyph(paths: string[])}
+  <svg class="dock-icon" viewBox="0 0 24 24" aria-hidden="true">
+    {#each paths as d (d)}<path {d} />{/each}
+  </svg>
+{/snippet}
+
 {#snippet desktopHeaderActions()}
   <div class="hosted-header-actions">
     <!-- Quiet chrome: workspace identity (and switching) lives in the sidebar
@@ -1615,7 +1704,7 @@
   </div>
 {:else}
 <div class="editor-shell" data-app-view="workspace" data-workspace-id={workspace.id}>
-  <header class="editor-top">
+  <header class="editor-top" bind:this={headerEl} class:is-scrolled={headerScrolled}>
     <div class="doc-name">
       {#if editing && renamingTitle}
         <input
@@ -1641,7 +1730,13 @@
           }}
         >{workspace.name}</button>
       {:else}
-        <strong>{workspace.name}</strong>
+        <!-- Crossfade stack: the workspace name at rest; the document's own
+             h1 once its heading has scrolled under the chrome. Screen readers
+             always get the stable workspace name. -->
+        <span class="masthead-title" class:doc-active={showDocTitle}>
+          <strong class="masthead-workspace">{workspace.name}</strong>
+          <strong class="masthead-doc" aria-hidden="true">{docTitle}</strong>
+        </span>
       {/if}
       <span class="save-state save-chip" data-save-state={saveState} data-commits={commitCount}>{saveState}</span>
     </div>
@@ -1690,38 +1785,58 @@
   <nav class="thumb-dock" aria-label="Document actions">
     <button
       type="button"
+      aria-haspopup="dialog"
       bind:this={dockFilesButton}
       onclick={() => {
         blurEditor();
         filesSheetOpen = true;
       }}
     >
-      Files
+      {@render dockGlyph(dockGlyphs.files)}
+      <span class="dock-label">Files</span>
     </button>
     <button
       type="button"
+      aria-haspopup="dialog"
       bind:this={dockReviewButton}
       onclick={() => {
         blurEditor();
         reviewSheetOpen = true;
       }}
     >
-      Review · {ownerState?.roomId && reviewStoreRef ? reviewStoreRef.threadsForCurrentFile.length : workspace.reviewCards.length}
+      <span class="dock-icon-stack">
+        {@render dockGlyph(dockGlyphs.review)}
+        {#if reviewCount > 0}
+          <span
+            class="dock-badge"
+            class:pop={badgePop}
+            aria-hidden="true"
+            onanimationend={() => (badgePop = false)}
+          >{reviewCount}</span>
+        {/if}
+      </span>
+      <span class="dock-label">Review<span class="sr-only"> · {reviewCount}</span></span>
     </button>
     {#if editing}
-      <button type="button" onclick={() => void exitEdit()}>Done</button>
+      <button type="button" onclick={() => void exitEdit()}>
+        {@render dockGlyph(dockGlyphs.done)}
+        <span class="dock-label">Done</span>
+      </button>
     {:else if canEdit}
-      <button type="button" disabled={editorLoading} onclick={() => void enterEdit()}>{editDenied ? 'Retry edit' : 'Edit'}</button>
+      <button type="button" disabled={editorLoading} onclick={() => void enterEdit()}>
+        {@render dockGlyph(dockGlyphs.edit)}
+        <span class="dock-label">{editDenied ? 'Retry edit' : 'Edit'}</span>
+      </button>
     {:else}
       <!-- Editing is unavailable here; the reader stays first-class and the
            native app is the honest handoff (ios-ux.md §6). -->
-      <a class="dock-link" href="/#native" data-action="open-native">Open native</a>
+      <a class="dock-link" href="/#native" data-action="open-native">
+        {@render dockGlyph(dockGlyphs.native)}
+        <span class="dock-label">Open native</span>
+      </a>
     {/if}
-    <button
-      type="button"
-      bind:this={dockShareButton}
-      onclick={() => openShare(dockShareButton)}
-    >Share</button>
+    <!-- Share deliberately lives only in the masthead: it is the owner's
+         rare, doc-level act, not a thumb-frequency action. -->
   </nav>
 </div>
 {/if}
@@ -1777,7 +1892,8 @@
 
 {#if filesSheetOpen}
   <BottomSheet
-    title={`${markdownEntries.length} Markdown · ${assetEntries.length} ${assetEntries.length === 1 ? 'asset' : 'assets'}`}
+    title="Files"
+    subtitle={`${markdownEntries.length} Markdown · ${assetEntries.length} ${assetEntries.length === 1 ? 'asset' : 'assets'}`}
     onclose={closeFilesSheet}
   >
     {#each [{ label: 'Markdown', items: markdownEntries }, { label: 'Assets', items: assetEntries }] as group (group.label)}

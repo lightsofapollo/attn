@@ -6,8 +6,13 @@
   body {
     height: auto;
     min-height: 100%;
+    /* clip, not hidden: hidden turns body into a scroll container, which
+       silently kills every position: sticky on the page (the masthead).
+       clip blocks horizontal panning without creating a scroll container.
+       The hidden line stays as the fallback for pre-clip Safari. */
     overflow-x: hidden;
-    overflow-y: auto;
+    overflow-x: clip;
+    overflow-y: visible;
   }
 
   #app {

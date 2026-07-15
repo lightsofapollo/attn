@@ -213,6 +213,26 @@ describe("CORS — OPTIONS preflight", () => {
     expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
   });
 
+  it("bare-room DELETE preflight is policy-conditioned, not create-shortcut approved", async () => {
+    // The bare room path serves both create (POST) and teardown (DELETE).
+    // Only the create method may use the before-policy shortcut; a DELETE
+    // preflight against a browser-disabled room must come back unapproved,
+    // because approving it lets the browser send the destructive request.
+    const roomId = uniqueRoomId("cors-bare-delete");
+    await createRoom({ roomId, allowBrowser: false });
+    const res = await SELF.fetch(`${URL_BASE}/v2/rooms/${roomId}`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: ALLOWED_STAGING_ORIGIN,
+        "Access-Control-Request-Method": "DELETE",
+        "Access-Control-Request-Headers": "Attn-Owner-Signature",
+      },
+    });
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(res.headers.get("Access-Control-Allow-Methods")).toBeNull();
+    expect(res.headers.get("X-Attn-Allow-Browser")).toBeNull();
+  });
+
   it("browser-disabled room: 204 with NO CORS headers", async () => {
     const roomId = uniqueRoomId("cors-no-browser");
     await createRoom({ roomId, allowBrowser: false });

@@ -318,10 +318,19 @@ export default {
     }
     // First room creation is the one room-route preflight that cannot consult
     // stored policy: the Durable Object has no policy until the POST succeeds.
-    // Permit only the exact bare create route and still require the request
-    // Origin to be in ALLOWED_BROWSER_ORIGINS. Every later room preflight
-    // remains conditioned on the room's stored allowBrowser bit below.
-    if (request.method === "OPTIONS" && ROOM_CREATE_RE.test(url.pathname)) {
+    // Permit only the exact bare create route FOR THE CREATE METHOD and still
+    // require the request Origin to be in ALLOWED_BROWSER_ORIGINS. The bare
+    // path also serves DELETE (room teardown), so a method-blind shortcut
+    // would pre-approve destructive cross-origin requests against rooms whose
+    // stored policy forbids browsers — and CORS cannot be un-approved after
+    // the browser has already sent the DELETE. Every non-create room
+    // preflight remains conditioned on the room's stored allowBrowser bit
+    // below.
+    if (
+      request.method === "OPTIONS"
+      && ROOM_CREATE_RE.test(url.pathname)
+      && request.headers.get("Access-Control-Request-Method") === "POST"
+    ) {
       return corsMiddleware(
         request,
         env,

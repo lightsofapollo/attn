@@ -233,6 +233,16 @@
     font-weight: 650;
   }
 
+  /* Workspace actions appended below the project list (hosted picker):
+     same type as the project rows, indented past the check gutter. */
+  .sidebar-project-menu-action {
+    padding-inline-start: calc(0.5rem + 8px + 0.875rem);
+    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+    font-size: 0.95rem;
+    line-height: 1.25;
+    cursor: pointer;
+  }
+
   /* Quiet filter field: a thin underline, no heavy rust focus slab. */
   .sidebar-project-command [data-slot="command-input"]:focus,
   .sidebar-project-command [data-slot="command-input"]:focus-visible {
@@ -690,16 +700,16 @@
   }
 
   .sidebar-outline-empty-title {
-    font-size: 0.68rem;
+    font-size: 0.8rem;
     font-weight: 650;
-    color: color-mix(in oklch, var(--foreground) 90%, transparent);
+    color: var(--foreground);
   }
 
   .sidebar-outline-empty-copy {
     margin-top: 4px;
-    font-size: 0.63rem;
-    line-height: 1.3;
-    color: color-mix(in oklch, var(--sidebar-foreground) 74%, transparent);
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: color-mix(in oklch, var(--sidebar-foreground) 88%, transparent);
   }
 
   /* ----- Review surface utility classes (Phase 0c) -----

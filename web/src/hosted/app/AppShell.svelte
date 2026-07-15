@@ -48,6 +48,8 @@
           activePath = route.filePath ?? detail.openPath;
           bodyText = await service.readBodyText(detail.id, activePath);
           editorMode = true;
+          // Sidebar project switcher: the editor needs the rest of the desk.
+          workspaces = await service.listWorkspaces();
         }
       } else {
         workspaces = await service.listWorkspaces();
@@ -80,6 +82,7 @@
       editorMode = true;
       isNewDraft = true;
       history.replaceState(null, '', `/app/w/${detail.id}/${detail.openPath}`);
+      workspaces = existing;
       phase = 'ready';
       return;
     }
@@ -89,6 +92,8 @@
     editorMode = true;
     isNewDraft = true;
     history.replaceState(null, '', `/app/w/${detail.id}/${detail.openPath}`);
+    // The project switcher lists the whole desk, including the new workspace.
+    workspaces = await service.listWorkspaces();
     phase = 'ready';
   }
 
@@ -135,6 +140,8 @@
     const fresh = await service.getWorkspace(detail.id);
     if (!fresh) return;
     detail = fresh;
+    // Keep the project switcher's labels current (workspace renames).
+    workspaces = await service.listWorkspaces();
     const target =
       openPath ??
       (activePath && fresh.entries.some((entry) => entry.path === activePath)
@@ -273,6 +280,13 @@
     {isNewDraft}
     {onSelectEntry}
     {onWorkspaceChanged}
+    {workspaces}
+    onSwitchWorkspace={(workspaceId) => {
+      const target = workspaces.find((workspace) => workspace.id === workspaceId);
+      window.location.assign(
+        target ? `/app/w/${workspaceId}/${target.openPath}` : `/app/w/${workspaceId}`,
+      );
+    }}
   />
 {:else if route?.view === 'workspace'}
   <div class="app-shell" data-app-view="missing">

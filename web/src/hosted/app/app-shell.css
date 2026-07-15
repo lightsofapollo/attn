@@ -460,6 +460,10 @@ a.workspace-row:hover {
 }
 
 .editor-canvas {
+  /* Grid item: without this, a wide code block's max-content width blows the
+     implicit column track past the viewport and clips every line (min-width
+     defaults to auto in grid). Code blocks scroll inside .prose-scroll-x. */
+  min-width: 0;
   overflow: auto;
   padding: 3rem clamp(1.2rem, 5vw, 6rem);
 }
@@ -667,27 +671,6 @@ a.workspace-row:hover {
   font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
 }
 
-.hosted-workspace-title {
-  max-width: 12rem;
-  overflow: hidden;
-  padding: 0.25rem 0.35rem;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: color-mix(in oklch, var(--foreground) 82%, transparent);
-  font-size: 0.7rem;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.hosted-workspace-title:hover,
-.hosted-workspace-title:focus-visible {
-  background: var(--accent);
-  color: var(--foreground);
-}
-
 .hosted-title-input {
   width: min(12rem, 25vw);
   height: 1.75rem;
@@ -843,62 +826,62 @@ a.workspace-row:hover {
   color: var(--view-only);
 }
 
-.hosted-header-button {
-  height: 1.75rem;
-  padding: 0 0.65rem;
-  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
-  border-radius: 6px;
-  background: color-mix(in oklch, var(--background) 70%, transparent);
-  color: var(--foreground);
-  font-size: 0.7rem;
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.hosted-header-button:hover {
-  background: var(--accent);
-}
-
-.hosted-header-button:disabled {
-  cursor: wait;
-  opacity: 0.55;
-}
-
 .hosted-sidebar-footer {
   display: grid;
   gap: 0.25rem;
   font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
 }
 
-.hosted-sidebar-action {
-  display: flex;
+/* Quiet picker search (matches app.css's layered rule, which the unlayered
+   global `:focus-visible` outline in chrome.css would otherwise override):
+   the field's underline and caret are the focus signal, not a rust slab. */
+.sidebar-project-command [data-slot='command-input']:focus,
+.sidebar-project-command [data-slot='command-input']:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Resting footer: one honest drop target — dashed field, quiet ink. The
+   standing action rows moved to ⌘K and the tree context menu. */
+.hosted-sidebar-dropzone {
+  display: grid;
   width: 100%;
-  min-height: 2rem;
-  align-items: center;
-  gap: 0.55rem;
-  padding: 0.35rem 0.55rem;
-  border: 0;
-  border-radius: 6px;
+  justify-items: center;
+  gap: 0.15rem;
+  padding: 0.75rem 0.55rem;
+  border: 1px dashed color-mix(in oklch, var(--sidebar-foreground) 30%, transparent);
+  border-radius: 8px;
   background: transparent;
-  color: var(--sidebar-foreground);
+  color: var(--muted-foreground);
   font-size: 0.7rem;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
-.hosted-sidebar-action:hover,
-.hosted-sidebar-action:focus-visible {
+.hosted-sidebar-dropzone:hover,
+.hosted-sidebar-dropzone:focus-visible {
+  border-color: color-mix(in oklch, var(--sidebar-primary) 55%, transparent);
   background: var(--sidebar-accent);
   color: var(--sidebar-accent-foreground);
 }
 
-.hosted-entry-actions {
-  display: flex;
-  gap: 0.2rem;
-  padding-bottom: 0.35rem;
+.hosted-dropzone-glyph {
+  font-size: 0.85rem;
+  line-height: 1;
 }
 
-.hosted-entry-actions button,
+.hosted-dropzone-copy {
+  display: grid;
+  gap: 0.05rem;
+  font-weight: 550;
+}
+
+.hosted-dropzone-hint {
+  display: block;
+  color: color-mix(in oklch, var(--muted-foreground) 75%, transparent);
+  font-weight: 400;
+}
+
 .hosted-delete-confirm button {
   min-height: 1.75rem;
   padding: 0.25rem 0.45rem;

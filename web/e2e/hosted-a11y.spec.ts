@@ -108,13 +108,13 @@ test('authoring controls move focus into transient inputs and restore it on canc
   await expect(documentEditor).toHaveAttribute('aria-multiline', 'true');
   await expect(documentEditor).toHaveAttribute('aria-readonly', 'false');
 
-  const workspaceRename = page.getByRole('button', { name: 'Rename workspace' });
-  await workspaceRename.focus();
-  await page.keyboard.press('Enter');
+  const projectPicker = page.getByRole('combobox', { name: 'Project picker' });
+  await projectPicker.click();
+  await page.getByRole('menuitem', { name: 'Rename workspace' }).click();
   const workspaceInput = page.getByRole('textbox', { name: 'Workspace title' });
   await expect(workspaceInput).toBeFocused();
   await page.keyboard.press('Escape');
-  await expect(workspaceRename).toBeFocused();
+  await expect(projectPicker).toBeFocused();
 
   const fileRow = page.getByRole('button', { name: 'untitled.md', exact: true });
   await fileRow.click({ button: 'right' });
@@ -125,12 +125,13 @@ test('authoring controls move focus into transient inputs and restore it on canc
   await page.keyboard.press('Escape');
   await expect(fileRow).toBeFocused();
 
-  const addMarkdown = page.getByRole('button', { name: 'New Markdown' });
-  await addMarkdown.focus();
-  await page.keyboard.press('Enter');
+  // New Markdown moved to the command palette; Escape from the transient
+  // path input returns focus to the sidebar's project picker anchor.
+  await page.keyboard.press('ControlOrMeta+KeyK');
+  await page.getByRole('option', { name: /New Markdown file/u }).click();
   await expect(page.getByRole('textbox', { name: 'New Markdown file path' })).toBeFocused();
   await page.keyboard.press('Escape');
-  await expect(addMarkdown).toBeFocused();
+  await expect(projectPicker).toBeFocused();
 
   await fileRow.click({ button: 'right' });
   const deleteFile = page.getByRole('menuitem', { name: 'Delete…', exact: true });

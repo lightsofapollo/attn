@@ -20,6 +20,12 @@
     workspaceId: string;
     workspaceName: string;
     entries: WorkspaceEntry[];
+    /** All workspaces on this desk — the sidebar project row switches between them. */
+    workspaces?: { id: string; name: string }[];
+    onSwitchWorkspace?: (workspaceId: string) => void;
+    onCreateWorkspace?: () => void;
+    onRenameWorkspace?: () => void;
+    onOpenDesk?: () => void;
     activeEntryPath?: string;
     shareOpen: boolean;
     actions: Snippet;
@@ -37,6 +43,11 @@
     workspaceId,
     workspaceName,
     entries,
+    workspaces = [],
+    onSwitchWorkspace,
+    onCreateWorkspace,
+    onRenameWorkspace,
+    onOpenDesk,
     activeEntryPath,
     shareOpen,
     actions,
@@ -55,6 +66,32 @@
     activeEntryPath ? workspaceTreePath(workspaceId, activeEntryPath) : rootPath,
   );
   const tree = $derived(workspaceEntriesToTree(workspaceId, entries));
+  // Project switcher: every workspace on the desk, addressed by virtual root.
+  const switcherProjects = $derived(
+    workspaces.length > 0
+      ? workspaces.map((workspace) => workspaceVirtualRoot(workspace.id))
+      : [rootPath],
+  );
+  const switcherLabels = $derived(
+    Object.fromEntries(
+      workspaces.map((workspace) => [workspaceVirtualRoot(workspace.id), workspace.name]),
+    ),
+  );
+
+  function switchProject(projectRoot: string): void {
+    const target = workspaces.find(
+      (workspace) => workspaceVirtualRoot(workspace.id) === projectRoot,
+    );
+    if (target && target.id !== workspaceId) onSwitchWorkspace?.(target.id);
+  }
+
+  // Workspace-realm actions live in the picker menu, with the identity they
+  // act on — not scattered across the header or the footer.
+  const projectMenuActions = $derived([
+    ...(onCreateWorkspace ? [{ id: 'new-workspace', label: 'New workspace', run: onCreateWorkspace }] : []),
+    ...(onRenameWorkspace ? [{ id: 'rename-workspace', label: 'Rename workspace', run: onRenameWorkspace }] : []),
+    ...(onOpenDesk ? [{ id: 'all-workspaces', label: 'All workspaces', run: onOpenDesk }] : []),
+  ]);
   let viewport = $state<HTMLElement | null>(null);
 
   $effect(() => {
@@ -83,9 +120,12 @@
     entries={tree}
     {activePath}
     {rootPath}
-    knownProjects={[rootPath]}
+    knownProjects={switcherProjects}
     activeProjectPath={rootPath}
     rootLabel={workspaceName}
+    projectLabels={switcherLabels}
+    onProjectSwitch={switchProject}
+    {projectMenuActions}
     showOutline={false}
     showWindowDragRegion={false}
     {footer}

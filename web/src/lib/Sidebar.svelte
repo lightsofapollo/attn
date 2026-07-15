@@ -19,6 +19,8 @@
   import {
     DropdownMenu,
     DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
   } from '$lib/components/ui/dropdown-menu';
   import * as Command from '$lib/components/ui/command';
@@ -53,6 +55,13 @@
     showWindowDragRegion?: boolean;
     /** Display label for virtual/browser workspace roots. */
     rootLabel?: string;
+    /** Display labels keyed by project path, for roots whose path is not a
+     *  human-readable filesystem path (hosted workspace virtual roots). */
+    projectLabels?: Record<string, string>;
+    /** Workspace-level actions appended to the project picker menu (hosted:
+     *  New workspace / Rename workspace / All workspaces). Their presence
+     *  makes the picker interactive even with a single project. */
+    projectMenuActions?: { id: string; label: string; run: () => void }[];
     /** Browser-owned workspaces do not expose an outline until one is derived. */
     showOutline?: boolean;
   }
@@ -80,6 +89,8 @@
     footer,
     showWindowDragRegion = true,
     rootLabel,
+    projectLabels = {},
+    projectMenuActions = [],
     showOutline = true,
   }: Props = $props();
   let sidebarView: 'files' | 'outline' = $state('files');
@@ -108,7 +119,11 @@
   });
 
   function formatRootLabel(path: string): string {
+    // rootLabel wins for the active project: it tracks live renames, while
+    // projectLabels is a snapshot of the whole desk.
     if (rootLabel && (path === rootPath || path === selectedProject)) return rootLabel;
+    const mapped = projectLabels[path];
+    if (mapped) return mapped;
     if (!path) return 'Workspace';
     const parts = path.split('/').filter(Boolean);
     return parts.at(-1) || path;
@@ -121,10 +136,12 @@
     activeProjectPath || rootPath || projectOptions[0] || '',
   );
   // Scale the switcher to the number of projects: a single project is just a
-  // heading (nothing to switch to); a short list needs no filter; a long list
-  // gets a filter field.
-  let hasMultipleProjects = $derived(projectOptions.length > 1);
-  let showProjectFilter = $derived(projectOptions.length >= 8);
+  // heading (nothing to switch to) unless the menu also carries workspace
+  // actions; a short list needs no filter; a long list gets a filter field.
+  // With actions present the filter is always shown — the menu is a picker,
+  // and search doubles as keyboard-first selection.
+  let hasProjectMenu = $derived(projectOptions.length > 1 || projectMenuActions.length > 0);
+  let showProjectFilter = $derived(projectOptions.length >= 8 || projectMenuActions.length > 0);
   let markdownFileCount = $derived(entries.length ? countMarkdownFiles(entries) : 0);
   let totalFileCount = $derived(entries.length ? countFiles(entries) : 0);
   let outlineCount = $derived(outline.length);
@@ -289,11 +306,11 @@
          button. It becomes an interactive switcher only when there is more
          than one project to switch to. -->
     <div class="sidebar-project-row" style="-webkit-user-select: none">
-      {#if hasMultipleProjects}
+      {#if hasProjectMenu}
         <DropdownMenu bind:open={projectPickerOpen}>
           <DropdownMenuTrigger
             class="sidebar-project-trigger"
-            aria-label="Switch project"
+            aria-label="Project picker"
             role="combobox"
             aria-expanded={projectPickerOpen}
           >
@@ -305,7 +322,7 @@
           <DropdownMenuContent align="start" class="sidebar-project-menu p-0">
             <Command.Root class="sidebar-project-command">
               {#if showProjectFilter}
-                <Command.Input placeholder="Filter projects" />
+                <Command.Input placeholder="Search projects..." />
               {/if}
               <Command.List class="max-h-[300px]">
                 <Command.Empty class="px-3 py-5 text-xs text-muted-foreground">
@@ -334,6 +351,20 @@
                 </Command.Group>
               </Command.List>
             </Command.Root>
+            {#if projectMenuActions.length > 0}
+              <DropdownMenuSeparator />
+              {#each projectMenuActions as action (action.id)}
+                <DropdownMenuItem
+                  class="sidebar-project-menu-action"
+                  onSelect={() => {
+                    projectPickerOpen = false;
+                    action.run();
+                  }}
+                >
+                  {action.label}
+                </DropdownMenuItem>
+              {/each}
+            {/if}
           </DropdownMenuContent>
         </DropdownMenu>
       {:else}
@@ -419,16 +450,9 @@
                   <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {collaboratorLocations} />
                 {/key}
               </SidebarMenu>
-            {:else}
-              <div class="sidebar-outline-empty">
-                <p class="sidebar-outline-empty-title">No files found</p>
-                <p class="sidebar-outline-empty-copy">Try a different filter term.</p>
-              </div>
-            {/if}
-            {#if showBackendMatches}
-              <div class="sidebar-outline-wrap pt-2">
-                {#if remoteSearchItems.length > 0}
-                  <p class="sidebar-outline-empty-copy pb-1">Project-wide matches</p>
+              {#if showBackendMatches && remoteSearchItems.length > 0}
+                <div class="sidebar-outline-wrap pt-2">
+                  <p class="sidebar-outline-empty-copy pb-1">Elsewhere in the project</p>
                   <nav class="sidebar-outline-list" aria-label="Project search results">
                     {#each remoteSearchItems as item (item.path)}
                       <button
@@ -442,16 +466,51 @@
                       </button>
                     {/each}
                   </nav>
-                {:else}
-                  <div class="sidebar-outline-empty">
-                    <p class="sidebar-outline-empty-title">No project-wide matches</p>
-                    <p class="sidebar-outline-empty-copy">No results in unopened folders for “{query.trim()}”.</p>
-                  </div>
-                {/if}
-              </div>
-            {:else if sidebarView === 'files' && normalizedQuery.length > 0}
+                </div>
+              {/if}
+            {:else if normalizedQuery.length > 0}
+              <!-- One state, not two stacked boxes: while the project-wide
+                   search is still in flight the same card says so; once it
+                   resolves it either lists the matches or closes the loop. -->
+              {#if showBackendMatches && remoteSearchItems.length > 0}
+                <div class="sidebar-outline-wrap">
+                  <p class="sidebar-outline-empty-copy pb-1">No matches in open folders — elsewhere in the project:</p>
+                  <nav class="sidebar-outline-list" aria-label="Project search results">
+                    {#each remoteSearchItems as item (item.path)}
+                      <button
+                        type="button"
+                        class="sidebar-outline-item"
+                        class:sidebar-outline-item--active={item.path === activePath}
+                        onclick={() => onNavigate?.(item.path, false)}
+                      >
+                        <span class="sidebar-outline-title">{basename(item.path)}</span>
+                        <span class="sidebar-outline-line">{item.path}</span>
+                      </button>
+                    {/each}
+                  </nav>
+                </div>
+              {:else if showBackendMatches}
+                <div class="sidebar-outline-empty">
+                  <p class="sidebar-outline-empty-title">No files match “{query.trim()}”</p>
+                  <p class="sidebar-outline-empty-copy">Checked the whole project. Try a different term.</p>
+                </div>
+              {:else if onSearchQuery}
+                <div class="sidebar-outline-empty">
+                  <p class="sidebar-outline-empty-title">Nothing in open folders</p>
+                  <p class="sidebar-outline-empty-copy">Searching the rest of the project…</p>
+                </div>
+              {:else}
+                <!-- No project-wide search on this surface (hosted workspaces
+                     are fully listed) — never promise one. -->
+                <div class="sidebar-outline-empty">
+                  <p class="sidebar-outline-empty-title">No files match “{query.trim()}”</p>
+                  <p class="sidebar-outline-empty-copy">Try a different term.</p>
+                </div>
+              {/if}
+            {:else}
               <div class="sidebar-outline-empty">
-                <p class="sidebar-outline-empty-copy">Searching full project...</p>
+                <p class="sidebar-outline-empty-title">No files yet</p>
+                <p class="sidebar-outline-empty-copy">Add or drop files to get started.</p>
               </div>
             {/if}
             {/if}

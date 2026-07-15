@@ -23,6 +23,13 @@ function documentEditor(page: Page) {
   return page.locator('[data-body-text] .ProseMirror');
 }
 
+// Workspace-level actions live in the ⌘K palette (the sidebar footer is a
+// pure drop zone; per-file actions are in the tree context menu).
+async function runPaletteCommand(page: Page, label: RegExp): Promise<void> {
+  await page.keyboard.press('ControlOrMeta+KeyK');
+  await page.getByRole('option', { name: label }).click();
+}
+
 test('one-click create is real: persists across reload with zero relay traffic', async ({ page }) => {
   await page.goto('/app');
   const offOrigin = captureOffOriginRequests(page);
@@ -30,13 +37,13 @@ test('one-click create is real: persists across reload with zero relay traffic',
   // The editor opens in place and the URL is rewritten to the workspace.
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/untitled\.md$/u);
-  await expect(page.getByRole('button', { name: 'Rename workspace' })).toHaveText('Untitled');
+  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('Untitled');
   expect(offOrigin).toEqual([]);
 
   // A full reload restores the workspace from IndexedDB.
   await page.reload();
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('Untitled');
+  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('Untitled');
   await expect(activeSidebarEntry(page)).toContainText('untitled.md');
   await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
@@ -95,24 +102,24 @@ test('desktop editor fills the canvas and has no edit mode toggle', async ({ pag
   await page.keyboard.type('Typed from the blank canvas.');
   await expect(editor).toContainText('Typed from the blank canvas.');
 
-  // Removing the canvas rectangle must not weaken keyboard focus on controls.
-  const renameWorkspace = page.getByRole('button', { name: 'Rename workspace' });
-  await renameWorkspace.focus();
-  const controlFocus = await renameWorkspace.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
-  });
-  expect(controlFocus).toEqual({ outlineStyle: 'solid', outlineWidth: '2px' });
+  // Removing the canvas rectangle must not weaken visible focus on controls:
+  // the sidebar filter draws its box via :focus-within when it holds focus.
+  const filterField = page.locator('.sidebar-filter');
+  const blurredBorder = await filterField.evaluate((el) => getComputedStyle(el).borderColor);
+  await page.getByRole('textbox', { name: 'Filter files' }).focus();
+  const focusedBorder = await filterField.evaluate((el) => getComputedStyle(el).borderColor);
+  expect(focusedBorder).not.toBe(blurredBorder);
 });
 
 test('workspace picker is bounded and provides switch, create, rename, and desk actions', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/untitled\.md$/u);
   const firstUrl = page.url();
-  await page.getByRole('button', { name: 'Rename workspace' }).click();
+  await page.getByRole('combobox', { name: 'Project picker' }).click();
+  await page.getByRole('menuitem', { name: 'Rename workspace' }).click();
   await page.getByRole('textbox', { name: 'Workspace title' }).fill('First workspace');
   await page.getByRole('textbox', { name: 'Workspace title' }).press('Enter');
-  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('First workspace');
+  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('First workspace');
 
   const picker = page.getByRole('combobox', { name: 'Project picker' });
   await picker.click();
@@ -138,7 +145,7 @@ test('workspace picker is bounded and provides switch, create, rename, and desk 
   await expect(title).toBeFocused();
   await title.fill('Second workspace');
   await title.press('Enter');
-  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('Second workspace');
+  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('Second workspace');
 
   await page.getByRole('combobox', { name: 'Project picker' }).click();
   await page.getByPlaceholder('Search projects...').fill('First workspace');
@@ -244,7 +251,7 @@ test('import creates a real multi-file workspace preserving paths', async ({ pag
   ]);
   // Import navigates into the imported workspace's editor.
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\//u);
-  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('direction');
+  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('direction');
   await expect(page.locator('[data-body-text]')).toContainText('Imported direction');
   await expect(page.getByRole('button', { name: 'desk.png' })).toBeVisible();
 });
@@ -372,7 +379,7 @@ test('file switching drains pending editor text before navigation', async ({ pag
 
   // File creation is itself a hard navigation and must first drain the
   // current editor, even though the debounce has not elapsed.
-  await page.locator('[data-action="new-markdown"]').click();
+  await runPaletteCommand(page, /New Markdown file/u);
   await page.getByRole('textbox', { name: 'New Markdown file path' }).fill('notes');
   await page.getByRole('textbox', { name: 'New Markdown file path' }).press('Enter');
   await expect(page).toHaveURL(/\/notes\.md$/u);
@@ -397,7 +404,7 @@ test('export drains pending text before reading workspace bytes', async ({ page 
   await page.keyboard.type('Fresh text belongs in the export.');
 
   const downloadPromise = page.waitForEvent('download');
-  await page.locator('[data-action="export-zip"]').click();
+  await runPaletteCommand(page, /Export workspace/u);
   const download = await downloadPromise;
   const zipPath = await download.path();
   const { unzipSync } = await import('fflate');
@@ -413,12 +420,13 @@ test('workspace rename stays mounted and keeps the same tab writable', async ({ 
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
   const navigationCount = await page.evaluate(() => performance.getEntriesByType('navigation').length);
 
-  await page.getByRole('button', { name: 'Rename workspace' }).click();
+  await page.getByRole('combobox', { name: 'Project picker' }).click();
+  await page.getByRole('menuitem', { name: 'Rename workspace' }).click();
   const input = page.getByRole('textbox', { name: 'Workspace title' });
   await input.fill('Lease handoff');
   await input.press('Enter');
 
-  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText(
+  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText(
     'Lease handoff',
   );
   await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
@@ -477,7 +485,7 @@ test('multi-file workspace: create, add, context-rename, context-delete, and exp
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
 
   // Create a nested Markdown file from the sidebar.
-  await page.locator('[data-action="new-markdown"]').click();
+  await runPaletteCommand(page, /New Markdown file/u);
   await page.getByRole('textbox', { name: 'New Markdown file path' }).fill('docs/notes');
   await page.getByRole('textbox', { name: 'New Markdown file path' }).press('Enter');
   await expect(page).toHaveURL(/\/docs\/notes\.md$/u);
@@ -521,7 +529,7 @@ test('multi-file workspace: create, add, context-rename, context-delete, and exp
 
   // Export the whole workspace as a zip with exact paths.
   const downloadPromise = page.waitForEvent('download');
-  await page.locator('[data-action="export-zip"]').click();
+  await runPaletteCommand(page, /Export workspace/u);
   const download = await downloadPromise;
   expect(download.suggestedFilename()).toMatch(/\.zip$/u);
 
@@ -588,7 +596,7 @@ test('phase gate: create → type → reload → edit → export → reimport wi
   await expect(page.getByRole('button', { name: 'big.bin' })).toBeVisible();
 
   const downloadPromise = page.waitForEvent('download');
-  await page.locator('[data-action="export-zip"]').click();
+  await runPaletteCommand(page, /Export workspace/u);
   const download = await downloadPromise;
   const zipPath = await download.path();
   const { unzipSync } = await import('fflate');
@@ -643,7 +651,7 @@ test('storage page: export marks backup, reimport dedupes names, clear-all erase
     { name: 'backup.zip', mimeType: 'application/zip', buffer: fs.readFileSync(zipPath!) },
   ]);
   await expect(page).toHaveURL(/\/app\/w\//u);
-  await expect(page.getByRole('button', { name: 'Rename workspace' })).toContainText('Untitled 2');
+  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('Untitled 2');
 
   // Clear all local data: in-app confirm, durable erasure.
   await page.goto('/app/storage');

@@ -42,6 +42,10 @@
     onSelectEntry?: (path: string) => void;
     /** Refresh the workspace after an entry-list change (no reload). */
     onWorkspaceChanged?: (openPath?: string) => Promise<void>;
+    /** Every workspace on the desk, for the sidebar project switcher. */
+    workspaces?: { id: string; name: string }[];
+    /** Open another workspace (full navigation — sessions don't survive it). */
+    onSwitchWorkspace?: (workspaceId: string) => void;
   }
 
   const {
@@ -52,6 +56,8 @@
     isNewDraft = false,
     onSelectEntry,
     onWorkspaceChanged,
+    workspaces = [],
+    onSwitchWorkspace,
   }: Props = $props();
 
   const health: StorageHealth = $derived(service.storageHealth());
@@ -312,6 +318,13 @@
       // Transient failure — retry on a later commit.
       autoNameAttempted = false;
     }
+  }
+
+  // Transient inputs must not strand keyboard focus on <body> when cancelled:
+  // return it to the sidebar control that owns the flow (the project picker
+  // for workspace-level flows, the active tree row for entry renames).
+  function focusSidebarAnchor(selector: string): void {
+    queueMicrotask(() => document.querySelector<HTMLElement>(selector)?.focus());
   }
 
   async function commitTitleRename(): Promise<void> {
@@ -1166,15 +1179,25 @@
     const cmds: HostedCommand[] = [
       { id: 'share', label: 'Share for review', hint: '⌘K', keywords: 'invite link publish reviewer',
         run: () => openShare(shareButton) },
-      { id: 'edit', label: editing ? 'Stop editing' : 'Edit this document', keywords: 'write compose done',
-        run: () => void (editing ? exitEdit() : enterEdit()) },
       { id: 'new', label: 'New Markdown file', keywords: 'create add document',
         // Open the sidebar name field (autofocused) — calling
         // createMarkdownFile() directly here would no-op on an empty name.
         run: () => { addingMarkdown = true; } },
+      { id: 'rename-workspace', label: 'Rename workspace', keywords: 'title project name',
+        run: () => { titleValue = workspace.name; renamingTitle = true; } },
       { id: 'export', label: 'Export workspace', hint: '.zip', keywords: 'download backup save',
         run: () => void exportZip() },
     ];
+    // Desktop is editor-first (no Edit/Done mode); this command only matters
+    // where editing hasn't started — mobile, or a denied/lost owner lease.
+    if (canEdit && !editing) {
+      cmds.push({ id: 'edit', label: 'Edit this document', keywords: 'write compose',
+        run: () => void enterEdit() });
+    }
+    if (activeEntry) {
+      cmds.push({ id: 'download', label: `Download ${activeEntry.path}`, hint: activeEntry.sizeLabel,
+        keywords: 'save file export single', run: () => void downloadActiveEntry() });
+    }
     for (const entry of workspace.entries) {
       if (entry.path === activeEntry?.path) continue;
       cmds.push({
@@ -1332,6 +1355,11 @@
           <strong>Another tab is editing this workspace.</strong>
           <p>Following its changes read-only — editing returns here when the other tab finishes.</p>
         </div>
+        <div class="actions">
+          <button class="button" type="button" disabled={editorLoading} onclick={() => void enterEdit()}>
+            {editorLoading ? 'Opening…' : 'Retry edit'}
+          </button>
+        </div>
       </div>
     {/if}
     {#if ownerState?.roomId && !ownerState.liveEditingAvailable}
@@ -1420,6 +1448,11 @@
 
 {#snippet desktopHeaderActions()}
   <div class="hosted-header-actions">
+    <!-- Quiet chrome: workspace identity (and switching) lives in the sidebar
+         project row; renaming lives in ⌘K and on the desk. The input appears
+         here only while a rename is in flight. Desktop is editor-first (the
+         auto-edit effect), so there is no Edit/Done mode toggle — the only
+         edit affordance is the recovery path when the owner lease was denied. -->
     {#if renamingTitle}
       <input
         use:autofocus
@@ -1429,78 +1462,50 @@
         bind:value={titleValue}
         onkeydown={(event) => {
           if (event.key === 'Enter') void commitTitleRename();
-          if (event.key === 'Escape') renamingTitle = false;
+          if (event.key === 'Escape') {
+            renamingTitle = false;
+            focusSidebarAnchor('.sidebar-project-trigger');
+          }
         }}
-        onblur={() => void commitTitleRename()}
+        onblur={() => { if (renamingTitle) void commitTitleRename(); }}
       />
-    {:else}
-      <button
-        class="hosted-workspace-title"
-        type="button"
-        aria-label="Rename workspace"
-        title="Rename workspace"
-        onclick={() => {
-          titleValue = workspace.name;
-          renamingTitle = true;
-        }}
-      >{workspace.name}</button>
     {/if}
     <span class="save-state hosted-save-state save-chip" data-save-state={saveState} data-commits={commitCount}>
       {ownerRoomStatus ?? saveState}
     </span>
-    {#if canEdit}
-      <button
-        class="hosted-header-button"
-        type="button"
-        data-action="edit"
-        disabled={editorLoading}
-        onclick={() => editing ? void exitEdit() : void enterEdit()}
-      >
-        {editing ? 'Done' : editorLoading ? 'Opening…' : editDenied ? 'Retry edit' : 'Edit'}
-      </button>
-    {/if}
   </div>
 {/snippet}
 
 {#snippet desktopSidebarFooter()}
-  <div class="hosted-sidebar-footer" aria-label="Workspace actions">
-    {#if activeEntry}
-      <div class="hosted-entry-actions" aria-label={`Actions for ${activeEntry.path}`}>
-        {#if renamingEntry}
-          <input
-            use:autofocus
-            class="hosted-sidebar-input"
-            type="text"
-            aria-label="New path"
-            bind:value={renameEntryValue}
-            onkeydown={(event) => {
-              if (event.key === 'Enter') void commitEntryRename();
-              if (event.key === 'Escape') renamingEntry = false;
-            }}
-          />
-        {:else}
-          <button
-            type="button"
-            onclick={() => {
-              renamingEntry = true;
-              renameEntryValue = activeEntry?.path ?? '';
-            }}
-          >Rename</button>
-          <button type="button" onclick={() => void downloadActiveEntry()}>Download</button>
-          <button class="danger" type="button" onclick={() => (confirmingEntryDelete = true)}>Delete</button>
-        {/if}
-      </div>
-      {#if confirmingEntryDelete}
-        <div class="hosted-delete-confirm" role="alertdialog" aria-label={`Delete ${activeEntry.path}?`}>
-          <span>Delete {activeEntry.path}?</span>
-          <div>
-            <button type="button" onclick={() => (confirmingEntryDelete = false)}>Cancel</button>
-            <button class="danger" type="button" onclick={() => void deleteActiveEntry()}>Delete file</button>
-          </div>
+  <!-- Resting state: a single drop target. Standing actions moved to where
+       they belong — per-file Rename/Delete in the tree context menu, New
+       Markdown / Export / Download in ⌘K. The inputs below appear only while
+       one of those flows is in flight. -->
+  <div class="hosted-sidebar-footer" aria-label="Add files">
+    {#if renamingEntry && activeEntry}
+      <input
+        use:autofocus
+        class="hosted-sidebar-input"
+        type="text"
+        aria-label="New path"
+        bind:value={renameEntryValue}
+        onkeydown={(event) => {
+          if (event.key === 'Enter') void commitEntryRename();
+          if (event.key === 'Escape') {
+            renamingEntry = false;
+            focusSidebarAnchor('[data-path][data-active="true"]');
+          }
+        }}
+      />
+    {:else if confirmingEntryDelete && activeEntry}
+      <div class="hosted-delete-confirm" role="alertdialog" aria-label={`Delete ${activeEntry.path}?`}>
+        <span>Delete {activeEntry.path}?</span>
+        <div>
+          <button type="button" onclick={() => (confirmingEntryDelete = false)}>Cancel</button>
+          <button class="danger" type="button" onclick={() => void deleteActiveEntry()}>Delete file</button>
         </div>
-      {/if}
-    {/if}
-    {#if addingMarkdown}
+      </div>
+    {:else if addingMarkdown}
       <input
         use:autofocus
         class="hosted-sidebar-input"
@@ -1510,23 +1515,23 @@
         bind:value={newMarkdownPath}
         onkeydown={(event) => {
           if (event.key === 'Enter') void createMarkdownFile();
-          if (event.key === 'Escape') addingMarkdown = false;
+          if (event.key === 'Escape') {
+            addingMarkdown = false;
+            focusSidebarAnchor('.sidebar-project-trigger');
+          }
         }}
       />
     {:else}
-      <button class="hosted-sidebar-action" type="button" data-action="new-markdown" onclick={() => (addingMarkdown = true)}>
-        <span aria-hidden="true">＋</span>
-        <span>New Markdown</span>
+      <button
+        class="hosted-sidebar-dropzone"
+        type="button"
+        data-action="add-assets"
+        onclick={() => assetInput?.click()}
+      >
+        <span class="hosted-dropzone-glyph" aria-hidden="true">⤓</span>
+        <span class="hosted-dropzone-copy">Drop files anywhere<span class="hosted-dropzone-hint">or click to browse</span></span>
       </button>
     {/if}
-    <button class="hosted-sidebar-action" type="button" data-action="add-assets" onclick={() => assetInput?.click()}>
-      <span aria-hidden="true">↑</span>
-      <span>Add files or assets</span>
-    </button>
-    <button class="hosted-sidebar-action" type="button" data-action="export-zip" onclick={() => void exportZip()}>
-      <span aria-hidden="true">↓</span>
-      <span>Export workspace</span>
-    </button>
     <input
       bind:this={assetInput}
       type="file"
@@ -1584,6 +1589,14 @@
         workspaceId={workspace.id}
         workspaceName={workspace.name}
         entries={workspace.entries}
+        {workspaces}
+        {onSwitchWorkspace}
+        onCreateWorkspace={() => window.location.assign('/app#new')}
+        onRenameWorkspace={() => {
+          titleValue = workspace.name;
+          renamingTitle = true;
+        }}
+        onOpenDesk={() => window.location.assign('/app')}
         activeEntryPath={activeEntry?.path}
         {shareOpen}
         actions={desktopHeaderActions}

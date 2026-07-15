@@ -89,6 +89,27 @@ count=$(attn_owner --query '.review-thread' | jq '.count')
 Each helper prefixes the right `ATTN_HOME` automatically — instances stay isolated.
 Smoke-test via `task test:dual`.
 
+## Local hosted share loop
+
+The full browser share flow (owner → invite link → joiner) runs entirely on
+localhost — dev builds allow the app's own origin as a share host (production
+bundles keep the strict attn.sh/staging.attn.sh allowlist):
+
+```bash
+# Terminal 1 — local relay with dev vars (same flags as `npm run dev` in relay/)
+cd relay && npm run dev            # port 8787
+
+# Terminal 2 — hosted app with same-origin relay proxy
+cd web && npm run dev:browser:shares   # port 5173, proxies /v3 → 8787
+```
+
+Open http://localhost:5173/app#new, write, click **Share for review** — the
+sheet mints `http://localhost:5173/s/<id>#key=…` links; open one in another
+tab/profile for the joiner UX. To mint links against a deployed origin
+instead (once its relay runs the current protocol), set
+`VITE_ATTN_SHARE_ORIGIN=https://staging.attn.sh` and point
+`VITE_ATTN_RELAY_URL` at that environment's relay.
+
 ## Build
 
 ```bash

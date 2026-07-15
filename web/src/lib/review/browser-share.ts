@@ -72,6 +72,26 @@ export class ShareInviteParseError extends Error {
 
 const BROWSER_SHARE_HOSTS = new Set(['attn.sh', 'staging.attn.sh']);
 
+/**
+ * Dev-server allowance: the hosted dev origin (e.g. http://localhost:5173,
+ * proxying /v3 to a local relay) may mint and parse its own `/s/` invites so
+ * the whole share loop is exercisable locally. `import.meta.env.DEV` is
+ * statically false in production bundles — this constant folds to null and
+ * the strict host allowlist above is the only rule. Node test runs have no
+ * import.meta.env and likewise stay on the production rules.
+ */
+const DEV_SHARE_ORIGIN: string | null = (() => {
+  try {
+    const env = (import.meta as { env?: { DEV?: boolean } }).env;
+    if (env?.DEV !== true) return null;
+    const origin = globalThis.location?.origin;
+    if (!origin) return null;
+    return new URL(origin).origin;
+  } catch {
+    return null;
+  }
+})();
+
 export function parseShareInvite(raw: string): ParsedShareInvite {
   if (typeof raw !== 'string' || raw.length === 0) fail('share URL must be non-empty');
   let url: URL;
@@ -87,7 +107,8 @@ export function parseShareInvite(raw: string): ParsedShareInvite {
   ) {
     shareId = url.pathname.slice(1);
   } else if (
-    url.protocol === 'https:' && BROWSER_SHARE_HOSTS.has(url.hostname) && url.port === '' &&
+    ((url.protocol === 'https:' && BROWSER_SHARE_HOSTS.has(url.hostname) && url.port === '') ||
+      (DEV_SHARE_ORIGIN !== null && url.origin === DEV_SHARE_ORIGIN)) &&
     url.username === '' && url.password === '' && url.search === ''
   ) {
     const match = /^\/s\/([^/]+)$/u.exec(url.pathname);
@@ -131,15 +152,16 @@ export function requireShareInviteOrigin(browserOrigin: string): URL {
     fail('invalid browser origin');
   }
   if (
-    url.protocol !== 'https:' ||
-    !BROWSER_SHARE_HOSTS.has(url.hostname) ||
-    url.port !== '' ||
     url.username !== '' ||
     url.password !== '' ||
     url.pathname !== '/' ||
     url.search !== '' ||
     url.hash !== ''
   ) {
+    fail('browser origin must be a bare origin');
+  }
+  if (DEV_SHARE_ORIGIN !== null && url.origin === DEV_SHARE_ORIGIN) return url;
+  if (url.protocol !== 'https:' || !BROWSER_SHARE_HOSTS.has(url.hostname) || url.port !== '') {
     fail(`sharing is only available on ${[...BROWSER_SHARE_HOSTS].join(' and ')} (this origin cannot mint invite links)`);
   }
   return url;

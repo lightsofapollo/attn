@@ -497,8 +497,15 @@ export class ShareDO extends DurableObject<Env> {
   }
 
   private validateBundles(candidate: unknown, stored: ShareBundleEntry[]): ShareBundleEntry[] | Response {
-    if (candidate === undefined) return stored;
-    if (!Array.isArray(candidate) || candidate.length < 1 || candidate.length > 3) {
+    // An explicit empty array means the same as omission: keep the stored
+    // bundles. Touch/renewal upserts express "no bundle change" both ways
+    // (serde skips empty vecs; the web client used to send []) — rejecting []
+    // turned every no-op renewal into a silently swallowed 400, which starved
+    // joiners of the share_changed wake-up and pinned them to stale snapshots.
+    if (candidate === undefined || (Array.isArray(candidate) && candidate.length === 0)) {
+      return stored;
+    }
+    if (!Array.isArray(candidate) || candidate.length > 3) {
       return jsonError(400, "ATTN_SHARE_BUNDLES_INVALID", "bundles must contain 1..3 tier entries");
     }
     const allowed = new Set(["bundleId", "tier", "readAdmissionKey", "writeAdmissionKey", "sealedBundle"]);

@@ -514,11 +514,16 @@ export class BrowserWorkspaceSharingCoordinator {
     const active = await client.upsert({
       v: 3,
       ownerSigningKey: base64UrlEncode(credentials.identity.signingPublic),
-      bundles: exact
-        ? []
-        : buildShareBundleMutations(
-            this.bundleContext(credentials, revision, manifestDigest),
-          ),
+      // A no-change touch omits bundles entirely (the relay keeps the stored
+      // set). Sending an explicit [] was rejected as invalid, which silently
+      // starved joiners of their share_changed wake-up.
+      ...(exact
+        ? {}
+        : {
+            bundles: buildShareBundleMutations(
+              this.bundleContext(credentials, revision, manifestDigest),
+            ),
+          }),
       epoch: credentials.epoch,
       revision,
       currentRoomId: record.roomId,

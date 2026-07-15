@@ -757,7 +757,21 @@
     return () => observer.disconnect();
   });
 
-  // Focus card on focusEventId change — scroll into view + pulse.
+  // Focus card on focusEventId change — bring it into view WITHIN the rail's
+  // own scroll container only. scrollIntoView would walk every scrollable
+  // ancestor including the page, yanking the document out from under the
+  // text the user just clicked (the anchor — and its margin-aligned card —
+  // is already where they are looking).
+  function nearestPanelScroller(el: HTMLElement): HTMLElement | null {
+    let node = el.parentElement;
+    while (node && node !== document.body && node !== document.documentElement) {
+      const overflowY = getComputedStyle(node).overflowY;
+      if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
   $effect(() => {
     const id = focusEventId;
     if (!id || !containerEl) return;
@@ -773,9 +787,21 @@
     const el = containerEl.querySelector<HTMLElement>(
       `[data-testid="review-margin-card"][data-thread-id="${CSS.escape(target.id)}"]`,
     );
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
+    if (!el) return;
+    const scroller = nearestPanelScroller(el);
+    // No panel scroller means the page owns the scroll — leave it alone.
+    if (!scroller) return;
+    const scrollerRect = scroller.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const fullyVisible = elRect.top >= scrollerRect.top && elRect.bottom <= scrollerRect.bottom;
+    if (fullyVisible) return;
+    const delta = elRect.top + elRect.height / 2 - (scrollerRect.top + scrollerRect.height / 2);
+    const reduceMotion =
+      typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    scroller.scrollTo({
+      top: scroller.scrollTop + delta,
+      behavior: reduceMotion ? 'auto' : 'smooth',
+    });
   });
 
   // ---------------------------------------------------------------------------

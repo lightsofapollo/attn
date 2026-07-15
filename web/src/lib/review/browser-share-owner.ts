@@ -68,7 +68,8 @@ export interface BrowserShareMailboxPage {
 export interface BrowserShareUpsertRequest {
   v: 3;
   ownerSigningKey: string;
-  bundles: ShareBundleMutation[];
+  /** Omit for touch/renewal upserts — the relay keeps the stored bundles. */
+  bundles?: ShareBundleMutation[];
   epoch: number;
   revision: number;
   currentRoomId: string | null;

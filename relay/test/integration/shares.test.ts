@@ -391,6 +391,31 @@ describe("durable v3 shares", () => {
     expect(snapshotRead.headers.get("Attn-Share-Tier")).toBe("view");
     expect(snapshotRead.headers.get("Attn-Sealed-Bundle")).toBe(synchronizedBundles[0]!.sealedBundle);
     expect(snapshotRead.headers.get("Attn-Sealed-Bundle")).not.toBe(bundles[1].sealedBundle);
+
+    // Touch/renewal upsert with an EXPLICIT empty bundles array keeps the
+    // stored bundles, exactly like omitting the field. Rejecting [] turned
+    // every no-op owner renewal into a silent 400 and starved joiners of
+    // their share_changed wake-up.
+    const touchBody = JSON.stringify({
+      v: 3,
+      ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+      revision: 1,
+      bundles: [],
+    });
+    const touchPow = await mintPowForTests({ roomId: shareId, deviceId: ownerId, method: "POST", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}tt` });
+    const touched = await SELF.fetch(url, { method: "POST", body: touchBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url, body: touchBody, privateKey: owner.privateKey }),
+      "Attn-PoW": touchPow,
+    } });
+    expect(touched.status).toBe(200);
+    expect(await touched.json()).toMatchObject({ revision: 1, manifestDigest: expectedManifestDigest });
+    const stillSelected = await SELF.fetch(url, { headers: {
+      "Attn-Share-Bundle": bundles[0].bundleId,
+      "Attn-Admission": await admission("read", viewReadKey, "GET", url),
+    } });
+    expect((await stillSelected.json() as { bundle: { sealedBundle: string } }).bundle.sealedBundle)
+      .toBe(synchronizedBundles[0]!.sealedBundle);
   });
 
   it("pins only the latest owner-uploaded snapshot per file and removes all ciphertext on revoke", async () => {

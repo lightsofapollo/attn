@@ -197,9 +197,13 @@ export function buildReviewDecorations(
     if (primary) {
       const ordinal = anchorOrdinal;
       out.push(
+        // ProseMirror treats same-key widgets as interchangeable and reuses
+        // their DOM, so every rendered value belongs in the key: a range-only
+        // key would keep the OLD primary's data-event-id/label alive after
+        // the primary event at this range is resolved or replaced.
         Decoration.widget(entry.to, () => anchorMarkerWidget(ordinal, primary.eventId, primary.kind), {
           side: 1,
-          key: `${entry.from}:${entry.to}:marker`,
+          key: `${entry.from}:${entry.to}:marker:${ordinal}:${primary.eventId}:${primary.kind}`,
         }),
       );
     }
@@ -208,7 +212,7 @@ export function buildReviewDecorations(
       out.push(
         Decoration.widget(entry.to, () => moreWidget(hiddenCount), {
           side: 1,
-          key: `${entry.from}:${entry.to}:more`,
+          key: `${entry.from}:${entry.to}:more:${hiddenCount}`,
         }),
       );
     }

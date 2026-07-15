@@ -18,7 +18,7 @@ import type { Node as PmNode } from 'prosemirror-model';
 
 import { markdownParser, markdownSerializer } from '../schema';
 import { CollabController } from '../prosemirror/collab-controller';
-import { LOCAL_COLLAB_CHANNEL_PREFIX } from '../tab-channels';
+import { LOCAL_COLLAB_CHANNEL_PREFIX, openBroadcastChannel } from '../tab-channels';
 import type { FileId } from '../types';
 
 export { LOCAL_COLLAB_CHANNEL_PREFIX };
@@ -68,10 +68,9 @@ interface TimerOptions {
 }
 
 function defaultChannel(workspaceId: string): LocalCollabChannel | null {
-  if (typeof BroadcastChannel === 'undefined') return null;
-  return new BroadcastChannel(
+  return openBroadcastChannel(
     `${LOCAL_COLLAB_CHANNEL_PREFIX}${workspaceId}`,
-  ) as unknown as LocalCollabChannel;
+  ) as unknown as LocalCollabChannel | null;
 }
 
 function randomGeneration(): string {

@@ -117,17 +117,13 @@ export function parseShareInvite(raw: string): ParsedShareInvite {
   return { shareId, linkSecret };
 }
 
-export function composeShareInvite(
-  shareId: string,
-  linkSecret: Uint8Array,
-  browserOrigin?: string,
-): string {
-  validateShareId(shareId);
-  if (!(linkSecret instanceof Uint8Array) || linkSecret.length !== 32) {
-    fail('link secret must be 32 bytes');
-  }
-  const fragment = `key=${base64UrlEncode(linkSecret)}`;
-  if (browserOrigin === undefined) return `attn://share/${shareId}#${fragment}`;
+/**
+ * Enforce composeShareInvite's exact origin rules without composing anything.
+ * Callers with side effects (room creation, snapshot publication) MUST run
+ * this before those side effects: a share must never go live on an origin
+ * that cannot mint its invite links.
+ */
+export function requireShareInviteOrigin(browserOrigin: string): URL {
   let url: URL;
   try {
     url = new URL(browserOrigin);
@@ -144,8 +140,23 @@ export function composeShareInvite(
     url.search !== '' ||
     url.hash !== ''
   ) {
-    fail('browser origin must be a bare HTTPS origin');
+    fail(`sharing is only available on ${[...BROWSER_SHARE_HOSTS].join(' and ')} (this origin cannot mint invite links)`);
   }
+  return url;
+}
+
+export function composeShareInvite(
+  shareId: string,
+  linkSecret: Uint8Array,
+  browserOrigin?: string,
+): string {
+  validateShareId(shareId);
+  if (!(linkSecret instanceof Uint8Array) || linkSecret.length !== 32) {
+    fail('link secret must be 32 bytes');
+  }
+  const fragment = `key=${base64UrlEncode(linkSecret)}`;
+  if (browserOrigin === undefined) return `attn://share/${shareId}#${fragment}`;
+  const url = requireShareInviteOrigin(browserOrigin);
   url.pathname = `/s/${shareId}`;
   url.hash = fragment;
   return url.href;

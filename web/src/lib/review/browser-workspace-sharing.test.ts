@@ -232,6 +232,36 @@ test('publishes one dark ShareDO projection, retained snapshot, then stable tier
   } finally { storage.close(); }
 });
 
+test('dev/preview origins fail sharing up front with zero publication side effects', async () => {
+  const storage = await openStorage();
+  try {
+    const workspaceId = 'ws-v3-dev-origin'; await seedWorkspace(storage, workspaceId);
+    const fence = await acquireFence(storage, workspaceId);
+    let creates = 0; let publishes = 0; let relay: MemoryShareRelay | null = null;
+    const coordinator = new BrowserWorkspaceSharingCoordinator(storage, workspaceId, fence, {
+      now: () => NOW, randomBytes: deterministicRandom(),
+      createRoom: async options => { creates += 1; return bootstrapFromOptions(options); },
+      publish: options => { publishes += 1; return publishBrowserSnapshots({ ...options, indexBuilder }); },
+      indexBuilder,
+      outboxFactory: ({ storage: db, credentials }) => new AckingOutbox(db, credentials.roomId),
+      shareRelayFactory: options => (relay ??= new MemoryShareRelay(options.shareId)),
+    });
+    let message = '';
+    try {
+      await coordinator.ensurePublished({
+        ...request('file', ['notes/main.md']),
+        browserReviewBase: 'http://localhost:5173/review',
+      });
+    } catch (error) { message = error instanceof Error ? error.message : String(error); }
+    assert(message.includes('sharing is only available'), `origin rejection is actionable: ${message}`);
+    // The whole point: rejection happens BEFORE anything went live.
+    assert(creates === 0, 'no relay room was created');
+    assert(publishes === 0, 'no snapshots were published');
+    assert(relay === null, 'no ShareDO projection was touched');
+    assert((await coordinator.inspect('https://attn.sh')) === null, 'no local share record was minted');
+  } finally { storage.close(); }
+});
+
 test('pending ordinary ciphertext resumes exactly before ShareDO promotion', async () => {
   const storage = await openStorage();
   try {

@@ -28,7 +28,7 @@
   import type HostedDesktopWorkspaceFrameType from './HostedDesktopWorkspaceFrame.svelte';
   import type { EditorBridge } from '../../lib/prosemirror/collab-session';
   import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
-  import { LEASE_CHANNEL_NAME } from '../../lib/tab-channels';
+  import { LEASE_CHANNEL_NAME, openBroadcastChannel } from '../../lib/tab-channels';
   import type { RequiresThreeWayVerdict, Thread } from '../../lib/types';
 
   interface Props {
@@ -692,8 +692,8 @@
   // closes — delivering the banner's promise without a manual "Retry edit".
   $effect(() => {
     const wsId = workspace.id;
-    if (typeof BroadcastChannel === 'undefined') return;
-    const channel = new BroadcastChannel(LEASE_CHANNEL_NAME);
+    const channel = openBroadcastChannel(LEASE_CHANNEL_NAME);
+    if (!channel) return;
     channel.onmessage = (event: MessageEvent) => {
       const message = event.data as { workspaceId?: string; event?: string } | null;
       if (message?.workspaceId !== wsId || message.event !== 'released') return;
@@ -1361,21 +1361,29 @@
   }
 
   // Detect newly-arrived comments/suggestions authored by someone other than
-  // the local owner and surface a toast. The first pass only seeds the seen-set
-  // so existing thread history never toasts on open.
+  // the local owner and surface a toast. Seeding walks EVERY file's threads
+  // (store.threads), not just the open file's: priming against the current
+  // file only would replay another file's whole history as "new" arrivals the
+  // first time the user navigates to it. Toasts stay scoped to the open file.
   $effect(() => {
     const store = reviewStoreRef;
     if (!store) return;
-    const threads = store.threadsForCurrentFile;
+    const currentEventIds = new Set<string>();
+    for (const thread of store.threadsForCurrentFile) {
+      for (const event of [thread.rootEvent, ...thread.replies]) {
+        currentEventIds.add(event.meta.eventId);
+      }
+    }
     const ownerId = store.ownerParticipantId;
     const arrivals: { authorId: string; kind: 'comment' | 'suggestion'; eventId: string }[] = [];
-    for (const thread of threads) {
+    for (const thread of store.threads) {
       for (const event of [thread.rootEvent, ...thread.replies]) {
         const eventId = event.meta.eventId;
         if (seenReviewEventIds.has(eventId)) continue;
         seenReviewEventIds.add(eventId);
         if (!toastsPrimed) continue;
         if (event.meta.authorId === ownerId) continue;
+        if (!currentEventIds.has(eventId)) continue;
         const kind = event.body.type === 'suggestion_created' ? 'suggestion' : 'comment';
         arrivals.push({ authorId: event.meta.authorId, kind, eventId });
       }

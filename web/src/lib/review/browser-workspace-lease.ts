@@ -20,7 +20,7 @@ import {
 } from './browser-workspace-schema';
 import type { WorkspaceFence } from './browser-workspace-store';
 
-import { LEASE_CHANNEL_NAME } from '../tab-channels';
+import { LEASE_CHANNEL_NAME, openBroadcastChannel } from '../tab-channels';
 
 export { LEASE_CHANNEL_NAME };
 const DEFAULT_LEASE_DURATION_MS = 15_000;
@@ -219,8 +219,7 @@ export class WorkspaceLeaseManager {
 }
 
 function defaultChannel(): LeaseChannel | null {
-  if (typeof BroadcastChannel === 'undefined') return null;
-  return new BroadcastChannel(LEASE_CHANNEL_NAME);
+  return openBroadcastChannel(LEASE_CHANNEL_NAME);
 }
 
 function requireId(value: unknown, label: string): asserts value is string {

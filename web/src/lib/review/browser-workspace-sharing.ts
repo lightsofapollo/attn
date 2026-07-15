@@ -30,6 +30,7 @@ import {
 } from './browser-owner-bootstrap';
 import { BrowserOutbox, type BrowserOutboxPersistence } from './browser-outbox';
 import { validateBrowserRelayUrl } from './browser-relay-url';
+import { requireShareInviteOrigin } from './browser-share';
 import {
   canonicalDeviceGrantV3,
   canonicalRegisterDeviceBytes,
@@ -801,6 +802,15 @@ function validateRequest(request: BrowserWorkspaceShareRequest): void {
   ].includes(request.ttlMs)) throw new BrowserStorageError('share lifetime is invalid');
   if (!['file', 'entries', 'workspace'].includes(request.scopeKind)) {
     throw new BrowserStorageError('share scope is invalid');
+  }
+  // Fail BEFORE any side effect (room creation, snapshot publication,
+  // durable projection): invite composition at the end of the flow enforces
+  // these exact origin rules, and a share must never go live on an origin
+  // that will then fail to mint its invite links (dev servers, previews).
+  try {
+    requireShareInviteOrigin(new URL(request.browserReviewBase).origin);
+  } catch (error) {
+    throw new BrowserStorageError(error instanceof Error ? error.message : String(error));
   }
 }
 

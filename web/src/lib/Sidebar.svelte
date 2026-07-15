@@ -107,12 +107,24 @@
     const tag = el.tagName;
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
   }
+  // `/` must never reach across a focus boundary: pressed on a dialog, menu,
+  // or lightbox control it would focus the filter BEHIND the modal.
+  function insideOverlay(target: EventTarget | null): boolean {
+    const el = target instanceof Element ? target : null;
+    if (!el) return false;
+    return el.closest(
+      'dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"], [role="menu"], [role="listbox"]',
+    ) !== null;
+  }
   $effect(() => {
     const onKeydown = (event: KeyboardEvent) => {
       if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (isTypingTarget(event.target)) return;
+      if (isTypingTarget(event.target) || insideOverlay(event.target)) return;
+      // A collapsed/hidden sidebar has no visible filter to hand focus to.
+      const input = filterInputEl;
+      if (!input || input.offsetParent === null) return;
       event.preventDefault();
-      filterInputEl?.focus();
+      input.focus();
     };
     document.addEventListener('keydown', onKeydown);
     return () => document.removeEventListener('keydown', onKeydown);

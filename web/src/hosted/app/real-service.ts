@@ -28,6 +28,7 @@ import { quotaPressure } from '../../lib/review/browser-storage-probe';
 import { validateBrowserRelayUrl } from '../../lib/review/browser-relay-url';
 import type { WorkspaceEntryRecord } from '../../lib/review/browser-workspace-schema';
 import type { WorkspaceFence } from '../../lib/review/browser-workspace-store';
+import { openBroadcastChannel } from '../../lib/tab-channels';
 
 /** Safe raster types that may render inline (epic scope note 2026-07-10). */
 const INLINE_SAFE_MEDIA = /^image\/(?:png|jpeg|gif|webp|avif)$/iu;
@@ -140,9 +141,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
 
   private constructor(service: BrowserWorkspaceService) {
     this.service = service;
-    this.changeChannel = typeof BroadcastChannel === 'undefined'
-      ? null
-      : new BroadcastChannel(WORKSPACE_CHANGE_CHANNEL);
+    this.changeChannel = openBroadcastChannel(WORKSPACE_CHANGE_CHANNEL);
   }
 
   /** Ring the cross-tab doorbell after a durable mutation. Advisory only. */

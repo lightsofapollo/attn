@@ -84,6 +84,21 @@
   $effect(() => {
     const query = window.matchMedia('(min-width: 901px)');
     const update = (): void => {
+      untrack(() => {
+        // The layout flip remounts the editor under the other branch. Capture
+        // the live buffer first: the committed body can be a debounce behind,
+        // and a remount seeded from it would roll back (and then re-commit)
+        // stale text.
+        if (query.matches !== desktopLayout && editorRef) {
+          remountSeed = editorRef.getMarkdown();
+          // Rotate the collab identity for the remount: the authority replays
+          // the log onto the fresh v0 editor, and steps stamped with the OLD
+          // id would be swallowed by prosemirror-collab as own-step
+          // confirmations instead of being applied — silently dropping the
+          // user's latest typing from their own document.
+          if (collabClientId !== null) collabClientId = crypto.randomUUID();
+        }
+      });
       desktopLayout = query.matches;
     };
     update();
@@ -103,6 +118,12 @@
   // ————— editing (attn-7xl.3.3) —————
   // svelte-ignore state_referenced_locally — props seed the initial values.
   let displayText = $state<string | null>(bodyText);
+  // Live buffer captured just before a same-file editor remount (layout flip).
+  // Non-reactive on purpose: the remount render reads it once; a file switch
+  // clears it. Collab remounts ignore it — they must re-seed from the collab
+  // base (v0) and catch up by log replay.
+  // svelte-ignore non_reactive_update
+  let remountSeed: string | null = null;
   // svelte-ignore state_referenced_locally
   let saveState = $state<SaveState>(workspace.saveState);
   let editing = $state(false);
@@ -845,9 +866,11 @@
   // Mobile is deliberately reader-first: merely opening a document must not
   // block a desktop writer in another tab. It asks for authority only when the
   // user explicitly taps Edit.
+  // Teardown is keyed to the workspace alone. It must NOT read desktopLayout:
+  // a viewport flip would otherwise release the owner session and dispose the
+  // (possibly dirty) autosave mid-edit, rolling the document back.
   $effect(() => {
     void workspace.id;
-    if (desktopLayout) untrack(() => { void ensureOwnerSession(); });
     return () => {
       unsubscribeOwner?.();
       unsubscribeOwner = null;
@@ -856,6 +879,10 @@
       closeLocalJoin();
       void session?.release();
     };
+  });
+
+  $effect(() => {
+    if (desktopLayout) untrack(() => { void ensureOwnerSession(); });
   });
 
   $effect(() => {
@@ -1002,6 +1029,7 @@
         return;
       }
       lastActivePath = path;
+      remountSeed = null;
       editing = false;
       desktopEditRequested = false;
       // A pending rename/delete opened on the previous file must not survive
@@ -1046,6 +1074,11 @@
   }
 
   function handleEditorReady(view: EditorView): void {
+    // A same-file remount (layout flip) delivers a new view while the collab
+    // binding key is unchanged. Clear it so the binding effect re-attaches the
+    // controller to this view — the old bridge closed over a destroyed one.
+    if (pmViewForReview !== undefined && pmViewForReview !== view) boundCollabKey = null;
+    remountSeed = null;
     pmViewForReview = view;
     readyCollabEpoch = collabEpoch;
   }
@@ -1496,7 +1529,7 @@
         {#key activeEntry?.path}
           <EditorComponent
             bind:this={editorRef}
-            markdown={collabSeed?.markdown ?? bodyText ?? displayText ?? ''}
+            markdown={collabSeed?.markdown ?? remountSeed ?? bodyText ?? displayText ?? ''}
             editable={editing && (ownerState?.writable === true || joinLive)}
             plugins={changeWatcher as never}
             onReady={handleEditorReady}

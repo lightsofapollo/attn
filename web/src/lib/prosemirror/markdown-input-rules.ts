@@ -15,26 +15,63 @@ import {
   ellipsis,
 } from 'prosemirror-inputrules';
 import type { MarkType, NodeType, Schema } from 'prosemirror-model';
-import type { Plugin } from 'prosemirror-state';
+import type { EditorState, Plugin, Transaction } from 'prosemirror-state';
 
 /** `> ` at the start of a textblock wraps it in a blockquote. */
 function blockQuoteRule(nodeType: NodeType): InputRule {
   return wrappingInputRule(/^\s*>\s$/, nodeType);
 }
 
+/**
+ * List rules must not re-fire inside a list: markdown muscle memory types the
+ * marker on every line, and the plain wrapping rule would nest each new item
+ * one level deeper (attn-2zf staircase). When the marker is typed at the head
+ * of an existing list item, swallow it — the list simply continues at the
+ * same level. Deliberate nesting stays on Tab / a later paragraph in the item.
+ */
+type InputRuleHandler = (
+  state: EditorState,
+  match: RegExpMatchArray,
+  start: number,
+  end: number,
+) => Transaction | null;
+
+function guardedListRule(base: InputRule, regexp: RegExp): InputRule {
+  // `handler` is how prosemirror-inputrules stores the rule body; it is not
+  // re-exported through the public types, so reach through a minimal cast.
+  const wrap = (base as unknown as { handler: InputRuleHandler }).handler;
+  return new InputRule(regexp, (state, match, start, end) => {
+    const $start = state.doc.resolve(start);
+    if (
+      $start.depth >= 2 &&
+      $start.node(-1).type.name === 'list_item' &&
+      $start.index(-1) === 0
+    ) {
+      return state.tr.delete(start, end);
+    }
+    // Outside a list item, defer to the stock wrapping behavior.
+    return wrap(state, match, start, end);
+  });
+}
+
 /** `1. ` starts (or joins) an ordered list at the typed number. */
 function orderedListRule(nodeType: NodeType): InputRule {
-  return wrappingInputRule(
-    /^(\d+)\.\s$/,
-    nodeType,
-    (match) => ({ order: Number(match[1]) }),
-    (match, node) => node.childCount + (node.attrs.order as number) === Number(match[1]),
+  const regexp = /^(\d+)\.\s$/;
+  return guardedListRule(
+    wrappingInputRule(
+      regexp,
+      nodeType,
+      (match) => ({ order: Number(match[1]) }),
+      (match, node) => node.childCount + (node.attrs.order as number) === Number(match[1]),
+    ),
+    regexp,
   );
 }
 
 /** `- `, `+ `, or `* ` starts a bullet list. */
 function bulletListRule(nodeType: NodeType): InputRule {
-  return wrappingInputRule(/^\s*([-+*])\s$/, nodeType);
+  const regexp = /^\s*([-+*])\s$/;
+  return guardedListRule(wrappingInputRule(regexp, nodeType), regexp);
 }
 
 /** ` ``` ` at the start of a block becomes a code block. */

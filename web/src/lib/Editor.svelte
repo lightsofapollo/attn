@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { EditorState, Plugin, TextSelection } from 'prosemirror-state';
+  import { EditorState, Plugin, TextSelection, type Command } from 'prosemirror-state';
   import { EditorView, type NodeView, type NodeViewConstructor } from 'prosemirror-view';
   import { Node as PmNode } from 'prosemirror-model';
   import {
@@ -13,8 +13,8 @@
   } from 'prosemirror-search';
   import { tick, untrack } from 'svelte';
   import { keymap } from 'prosemirror-keymap';
-  import { baseKeymap, selectAll, setBlockType, toggleMark } from 'prosemirror-commands';
-  import { wrapInList, liftListItem } from 'prosemirror-schema-list';
+  import { baseKeymap, chainCommands, selectAll, setBlockType, toggleMark } from 'prosemirror-commands';
+  import { wrapInList, liftListItem, sinkListItem, splitListItem } from 'prosemirror-schema-list';
   import { history, redo, undo } from 'prosemirror-history';
   import { collab } from 'prosemirror-collab';
   import { remoteCursorsPlugin } from './prosemirror/remote-cursors';
@@ -361,7 +361,22 @@
     plugins.push(markdownInputRules(schema));
     plugins.push(placeholderPlugin(placeholder));
     plugins.push(...tablePlugins());
+    // List structure keys, ahead of baseKeymap so Enter reaches
+    // splitListItem before splitBlock. Without this, Enter inside a list
+    // splits the paragraph WITHIN the item — the list never continues, and
+    // a retyped `- ` marker nests a fresh list one level down per line
+    // (the attn-2zf staircase).
+    const listKeys: Record<string, Command> = {};
+    const itemTypes = [schema.nodes.list_item, schema.nodes.task_list_item].filter(
+      (t): t is NonNullable<typeof t> => Boolean(t),
+    );
+    if (itemTypes.length > 0) {
+      listKeys['Enter'] = chainCommands(...itemTypes.map((t) => splitListItem(t)));
+      listKeys['Tab'] = chainCommands(...itemTypes.map((t) => sinkListItem(t)));
+      listKeys['Shift-Tab'] = chainCommands(...itemTypes.map((t) => liftListItem(t)));
+    }
     plugins.push(
+      keymap(listKeys),
       keymap({
         'Mod-z': undo,
         'Mod-y': redo,

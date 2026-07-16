@@ -9,6 +9,7 @@ import { collab } from 'prosemirror-collab';
 import { EditorState } from 'prosemirror-state';
 
 import { markdownParser, markdownSerializer, schema } from '../schema';
+import { CollabController } from '../prosemirror/collab-controller';
 import type { EditorBridge } from '../prosemirror/collab-session';
 import {
   LocalCollabHub,
@@ -247,6 +248,119 @@ defineCase('owner and follower editors converge both directions', async () => {
   assert(ownerEditor.text === followerEditor.text, 'editors must converge');
   join.close();
   await fixture.hub.close();
+});
+
+defineCase('published room authority stays live for local follower tabs', async () => {
+  const bus = new FakeBus();
+  const clock = new FakeClock();
+  const markdown = 'published base';
+  const doc = markdownParser.parse(markdown)!;
+  const fileId = 'stable-file-id';
+  const epoch = 'published-snapshot-id';
+  const otherFileId = 'stable-other-file-id';
+  const otherEpoch = 'published-other-snapshot-id';
+  const otherMarkdown = 'other published base';
+  const otherDoc = markdownParser.parse(otherMarkdown)!;
+  const commits: Array<{ path: string; markdown: string }> = [];
+  const controller = new CollabController({
+    isOwner: true,
+    send: () => undefined,
+    selfClientId: 'room-owner',
+    selfLabel: 'You',
+    selfColor: '#8a63b8',
+    getAuthorityEpoch: (candidate) => candidate === fileId
+      ? epoch
+      : candidate === otherFileId
+        ? otherEpoch
+        : null,
+    getAuthoritySeed: (candidate, candidateEpoch) => {
+      if (candidate === fileId && candidateEpoch === epoch) {
+        return { epoch, baseSnapshotId: epoch, doc, checkpoint: null };
+      }
+      if (candidate === otherFileId && candidateEpoch === otherEpoch) {
+        return {
+          epoch: otherEpoch,
+          baseSnapshotId: otherEpoch,
+          doc: otherDoc,
+          checkpoint: null,
+        };
+      }
+      return null;
+    },
+  });
+  const hub = new LocalCollabHub({
+    workspaceId: 'ws-published',
+    holderId: 'tab-owner',
+    selfLabel: 'You',
+    selfColor: '#8a63b8',
+    readHeadMarkdown: async () => null,
+    commitMarkdown: async (path, nextMarkdown) => {
+      commits.push({ path, markdown: nextMarkdown });
+    },
+    controller,
+    seedForPath: async (path) => path === 'notes.md'
+      ? { fileId, epoch, markdown }
+      : path === 'other.md'
+        ? { fileId: otherFileId, epoch: otherEpoch, markdown: otherMarkdown }
+        : null,
+    pathForFileId: (candidate) => candidate === fileId
+      ? 'notes.md'
+      : candidate === otherFileId
+        ? 'other.md'
+        : null,
+    channel: bus.connect(),
+    schedule: clock.schedule,
+    cancelScheduled: clock.cancel,
+  });
+  const join = new LocalCollabJoin({
+    workspaceId: 'ws-published',
+    holderId: 'tab-follower',
+    selfLabel: 'Another tab',
+    selfColor: '#8a63b8',
+    channel: bus.connect(),
+    schedule: clock.schedule,
+    cancelScheduled: clock.cancel,
+  });
+  await tick();
+
+  const ownerSeed = await hub.seedFor('notes.md');
+  const followerSeed = await join.getSeed('notes.md');
+  assert(ownerSeed?.fileId === fileId, 'owner seed keeps the published file id');
+  assert(followerSeed?.fileId === fileId, 'follower seed keeps the published file id');
+  assert(followerSeed?.epoch === epoch, 'follower seed keeps the authenticated epoch');
+
+  const ownerEditor = makeEditor('owner-editor', ownerSeed!.markdown);
+  controller.setActiveFile(fileId, ownerEditor.bridge, epoch);
+  const followerEditor = makeEditor('follower-editor', followerSeed!.markdown);
+  join.getController()!.setActiveFile(fileId, followerEditor.bridge, epoch);
+  await tick();
+
+  ownerEditor.type(' +owner');
+  controller.onLocalChange();
+  await tick();
+  assert(followerEditor.text.includes('+owner'), 'published owner edit reaches local follower');
+
+  followerEditor.type(' +follower');
+  join.getController()!.onLocalChange();
+  await tick();
+  assert(ownerEditor.text.includes('+follower'), 'local follower edit reaches published owner');
+  assert(ownerEditor.text === followerEditor.text, 'published-room tabs converge');
+  assert(commits.length === 0, 'active owner file keeps its normal autosave path');
+
+  const otherSeed = await join.getSeed('other.md');
+  const otherFollower = makeEditor('other-follower-editor', otherSeed!.markdown);
+  join.getController()!.setActiveFile(otherSeed!.fileId, otherFollower.bridge, otherSeed!.epoch);
+  otherFollower.type(' +headless-follower');
+  join.getController()!.onLocalChange();
+  await tick();
+  clock.run();
+  await tick();
+  assert(commits.length === 1, 'headless published edit commits once');
+  assert(commits[0]?.path === 'other.md', 'published file id maps back to its local path');
+  assert(commits[0]?.markdown.includes('+headless-follower'), 'headless published edit persists');
+
+  join.close();
+  await hub.close();
 });
 
 defineCase('follower edits to a headless file debounce-commit from the authority doc', async () => {

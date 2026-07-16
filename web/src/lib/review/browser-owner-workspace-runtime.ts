@@ -166,6 +166,7 @@ export class BrowserOwnerWorkspaceRuntime {
   private credentials: BrowserOwnerCredentials | null = null;
   private authority: BrowserOwnerWorkspaceAuthority | null = null;
   private localHub: LocalCollabHub | null = null;
+  private localCollabSyncGeneration = 0;
   private controllerValue: CollabController | null = null;
   private mutationTail: Promise<void> = Promise.resolve();
   private closing = false;
@@ -240,6 +241,12 @@ export class BrowserOwnerWorkspaceRuntime {
     // Local multi-tab mode: the hub's seed cache is the single base every
     // participant (this editor included) binds from.
     if (this.localHub) return this.localHub.seedFor(path);
+    return this.getPublishedCollabSeed(path);
+  }
+
+  private async getPublishedCollabSeed(
+    path: string,
+  ): Promise<{ fileId: string; epoch: string; markdown: string } | null> {
     const binding = this.getBinding(path);
     if (!binding) return null;
     const bytes = await this.options.storage.workspaces.getRevisionBody(
@@ -370,8 +377,9 @@ export class BrowserOwnerWorkspaceRuntime {
       const coordinator = this.sharingCoordinator();
       const view = await coordinator.ensurePublished(request);
       if (!this.authority) {
-        // The room authority replaces local multi-tab hosting; follower tabs
-        // fall back to read-only follow mode once the hub says goodbye.
+        // Replace the legacy local authority with the published room authority.
+        // A fresh same-browser hub is attached to that controller after start,
+        // so follower tabs re-handshake without falling back to read-only.
         await this.stopLocalCollab();
         const discovered = await this.discoverPublishedShare();
         if (!discovered) throw new StorageConflictError('published share could not be reopened');
@@ -591,6 +599,7 @@ export class BrowserOwnerWorkspaceRuntime {
       // Flush local co-editing first: its trailing commits enqueue onto the
       // mutation tail awaited below, and its goodbye lets follower tabs
       // re-handshake instead of waiting out the lease.
+      this.localCollabSyncGeneration += 1;
       await this.stopLocalCollab();
       // A pending debounced republish must not fire after teardown; flush it
       // now (best-effort) so reviewers get the final content. This is the
@@ -768,10 +777,13 @@ export class BrowserOwnerWorkspaceRuntime {
       bindings: discovered.bindings,
       authority: authority.getState(),
     });
+    this.startLocalCollab();
     return true;
   }
 
   private async deactivateAuthority(): Promise<void> {
+    this.localCollabSyncGeneration += 1;
+    await this.stopLocalCollab();
     const authority = this.authority;
     this.authority = null;
     if (authority) await authority.close().catch(() => undefined);
@@ -1098,6 +1110,27 @@ export class BrowserOwnerWorkspaceRuntime {
       reason: authorityState.pauseReason,
       authority: authorityState,
     });
+    if (leaseLost) {
+      this.localCollabSyncGeneration += 1;
+      void this.stopLocalCollab();
+    } else this.syncPublishedLocalCollab();
+  }
+
+  /** Keep the same-browser channel attached when the room authority replaces
+   * its controller during reconnects or published-epoch transitions. */
+  private syncPublishedLocalCollab(): void {
+    const controller = this.authority?.controller ?? null;
+    if (!controller || this.localHub?.controller === controller) return;
+    const generation = ++this.localCollabSyncGeneration;
+    void this.stopLocalCollab().then(() => {
+      if (
+        generation !== this.localCollabSyncGeneration
+        || this.closing
+        || this.authority?.controller !== controller
+      ) return;
+      this.startLocalCollab();
+      this.patchState({});
+    });
   }
 
   private refreshController(): void {
@@ -1160,6 +1193,11 @@ export class BrowserOwnerWorkspaceRuntime {
    */
   private startLocalCollab(): boolean {
     if (this.localHub) return this.localHub.available;
+    const publishedController = this.authority?.controller ?? null;
+    // Never create a parallel legacy authority while a published authority is
+    // still starting. Its onState callback attaches this channel once the
+    // authenticated controller exists.
+    if (this.authority && !publishedController) return false;
     const hub = new LocalCollabHub({
       workspaceId: this.options.workspaceId,
       holderId: this.options.holderId,
@@ -1194,7 +1232,18 @@ export class BrowserOwnerWorkspaceRuntime {
             fence: this.requireFence(),
           });
         });
+        // A follower may edit a selected file that the owner tab is not
+        // currently viewing. Keep the durable share fresh just as owner-tab
+        // autosave does for the active file.
+        this.scheduleShareRepublish();
       },
+      ...(publishedController
+        ? {
+            controller: publishedController,
+            seedForPath: (path: string) => this.getPublishedCollabSeed(path),
+            pathForFileId: (fileId: string) => this.getBinding(fileId)?.path ?? null,
+          }
+        : {}),
     });
     if (!hub.available) {
       void hub.close();
@@ -1233,6 +1282,7 @@ export class BrowserOwnerWorkspaceRuntime {
     const authority = this.authority;
     this.authority = null;
     if (authority) await authority.close().catch(() => undefined);
+    this.localCollabSyncGeneration += 1;
     await this.stopLocalCollab().catch(() => undefined);
     this.controllerValue = null;
     this.stopLocalHeartbeat();

@@ -30,6 +30,7 @@ const HELLO_RETRY_MIN_MS = 300;
 const HELLO_RETRY_MAX_MS = 2_000;
 const SEED_TIMEOUT_MS = 4_000;
 const COMMIT_DEBOUNCE_MS = 800;
+const MAX_COLLAB_WIRE_ID_BYTES = 256;
 
 export interface LocalCollabSeed {
   fileId: string;
@@ -41,7 +42,14 @@ type LocalCollabBody =
   | { kind: 'hello'; generation: string }
   | { kind: 'hello-request' }
   | { kind: 'seed-request'; path: string }
-  | { kind: 'seed'; generation: string; path: string; markdown: string }
+  | {
+      kind: 'seed';
+      generation: string;
+      path: string;
+      fileId: string;
+      epoch: string;
+      markdown: string;
+    }
   | { kind: 'goodbye'; generation: string }
   | { kind: 'collab'; generation: string; payload: string };
 
@@ -83,6 +91,10 @@ function utf8Length(value: string): number {
   return new TextEncoder().encode(value).length;
 }
 
+function validWireId(value: string): boolean {
+  return value.length > 0 && utf8Length(value) <= MAX_COLLAB_WIRE_ID_BYTES;
+}
+
 /** A path usable as a local collab fileId (bounded so wire ids stay valid). */
 export function localCollabFileId(path: string): FileId | null {
   if (path.length === 0 || utf8Length(path) > MAX_LOCAL_COLLAB_PATH_BYTES) return null;
@@ -114,9 +126,17 @@ function parseEnvelope(data: unknown, workspaceId: string): LocalCollabEnvelope 
         ? (envelope as LocalCollabEnvelope)
         : null;
     case 'seed': {
-      const seed = body as { generation?: unknown; path?: unknown; markdown?: unknown };
+      const seed = body as {
+        generation?: unknown;
+        path?: unknown;
+        fileId?: unknown;
+        epoch?: unknown;
+        markdown?: unknown;
+      };
       return typeof seed.generation === 'string'
         && typeof seed.path === 'string'
+        && typeof seed.fileId === 'string'
+        && typeof seed.epoch === 'string'
         && typeof seed.markdown === 'string'
         ? (envelope as LocalCollabEnvelope)
         : null;
@@ -144,6 +164,13 @@ export interface LocalCollabHubOptions extends TimerOptions {
   readHeadMarkdown(path: string): Promise<string | null>;
   /** Durable fenced commit through the owner runtime's mutation queue. */
   commitMarkdown(path: string, markdown: string): Promise<void>;
+  /** Active published-room controller. When present, local tabs join the same
+   * authenticated authority instead of creating a parallel legacy authority. */
+  controller?: CollabController;
+  /** Exact published seed (stable file id + snapshot epoch) for shared rooms. */
+  seedForPath?: (path: string) => Promise<LocalCollabSeed | null>;
+  /** Resolve a published file id back to its local path for headless commits. */
+  pathForFileId?: (fileId: FileId) => string | null;
   channel?: LocalCollabChannel | null;
   commitDebounceMs?: number;
 }
@@ -167,6 +194,7 @@ export class LocalCollabHub {
   private readonly seedRequests = new Map<string, Promise<LocalCollabSeed | null>>();
   private readonly schedule: LocalCollabSchedule;
   private readonly cancelScheduled: LocalCollabCancel;
+  private readonly unsubscribeControllerSend: (() => void) | null;
   private closed = false;
 
   constructor(options: LocalCollabHubOptions) {
@@ -177,7 +205,7 @@ export class LocalCollabHub {
     this.channel = options.channel === undefined
       ? defaultChannel(options.workspaceId)
       : options.channel;
-    this.controller = new CollabController({
+    this.controller = options.controller ?? new CollabController({
       isOwner: true,
       send: (payload) => this.onControllerSend(payload),
       selfClientId: options.holderId,
@@ -187,6 +215,9 @@ export class LocalCollabHub {
       // authority from the same cached base a seed reply would carry.
       getSeedDoc: (fileId) => this.seeds.get(fileId)?.doc ?? null,
     });
+    this.unsubscribeControllerSend = options.controller
+      ? this.controller.addSendListener((payload) => this.onControllerSend(payload))
+      : null;
     if (this.channel) {
       this.channel.onmessage = (event) => this.onMessage(event.data);
     }
@@ -204,6 +235,11 @@ export class LocalCollabHub {
    * step logs over this exact base, so it must never drift to a newer head.
    */
   async seedFor(path: string): Promise<LocalCollabSeed | null> {
+    if (this.options.seedForPath) {
+      const seed = await this.options.seedForPath(path);
+      if (this.closed || !seed || !validWireId(seed.fileId) || !validWireId(seed.epoch)) return null;
+      return seed;
+    }
     const fileId = localCollabFileId(path);
     if (fileId === null) return null;
     const cached = this.seeds.get(fileId);
@@ -244,6 +280,7 @@ export class LocalCollabHub {
     this.pendingCommits.clear();
     await Promise.allSettled([...this.inflightCommits]);
     this.post({ kind: 'goodbye', generation: this.generation });
+    this.unsubscribeControllerSend?.();
     if (this.channel) {
       this.channel.onmessage = null;
       this.channel.close();
@@ -279,8 +316,10 @@ export class LocalCollabHub {
   private commitNow(fileId: FileId): void {
     const doc = this.controller.authorityDoc(fileId);
     if (!doc) return;
+    const path = this.options.pathForFileId?.(fileId) ?? fileId;
+    if (!path) return;
     const markdown = markdownSerializer.serialize(doc);
-    const commit = this.options.commitMarkdown(fileId, markdown).catch(() => {
+    const commit = this.options.commitMarkdown(path, markdown).catch(() => {
       // Lease loss / close races: the follower that takes over re-commits
       // its live doc, so a failed trailing commit here is not data loss.
     });
@@ -304,6 +343,8 @@ export class LocalCollabHub {
           kind: 'seed',
           generation: this.generation,
           path: body.path,
+          fileId: seed.fileId,
+          epoch: seed.epoch,
           markdown: seed.markdown,
         });
       });
@@ -404,8 +445,7 @@ export class LocalCollabJoin {
   /** Request the authority's base document for a path (current generation). */
   async getSeed(path: string): Promise<LocalCollabSeed | null> {
     if (this.closed || this.stateValue.status !== 'live') return null;
-    const fileId = localCollabFileId(path);
-    if (fileId === null) return null;
+    if (path.length === 0 || utf8Length(path) > 4_096) return null;
     const generation = this.stateValue.generation;
     return new Promise<LocalCollabSeed | null>((resolve) => {
       const waiters = this.seedWaiters.get(path) ?? [];
@@ -490,11 +530,10 @@ export class LocalCollabJoin {
       }
       case 'seed': {
         if (body.generation !== this.stateValue.generation) return;
-        const fileId = localCollabFileId(body.path);
-        if (fileId === null) return;
+        if (!validWireId(body.fileId) || !validWireId(body.epoch)) return;
         this.resolveSeed(body.path, {
-          fileId,
-          epoch: localEpochFor(fileId),
+          fileId: body.fileId,
+          epoch: body.epoch,
           markdown: body.markdown,
         });
         return;

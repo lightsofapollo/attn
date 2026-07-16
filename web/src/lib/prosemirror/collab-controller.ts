@@ -111,6 +111,10 @@ export type SendSignalFn = (payload: string) => unknown;
 export class CollabController {
   private readonly isOwner: boolean;
   private readonly send: SendSignalFn;
+  /** Additional same-device transports (for example BroadcastChannel tabs).
+   * They observe the exact authenticated room wire without replacing the
+   * durable relay transport owned by `send`. */
+  private readonly sendListeners = new Set<SendSignalFn>();
   private readonly selfClientId: string;
   /** Mutable: the NamePrompt can rename the user AFTER collab starts —
    *  see `setSelfLabel`. */
@@ -226,6 +230,13 @@ export class CollabController {
   /** The file the local editor is currently bound to (null before setActiveFile). */
   get activeFile(): FileId | null {
     return this.activeFileId;
+  }
+
+  /** Mirror outbound collaboration frames to an additional transport.
+   * Listener failures are advisory and never pause the primary room wire. */
+  addSendListener(listener: SendSignalFn): () => void {
+    this.sendListeners.add(listener);
+    return () => this.sendListeners.delete(listener);
   }
 
   /**
@@ -571,8 +582,16 @@ export class CollabController {
   }
 
   private sendWire(message: CollabWireMessage): Promise<void> {
+    const payload = JSON.stringify(message);
+    for (const listener of this.sendListeners) {
+      try {
+        void Promise.resolve(listener(payload)).catch(() => undefined);
+      } catch {
+        // Same-device transports are an optimization; the room remains live.
+      }
+    }
     try {
-      return Promise.resolve(this.send(JSON.stringify(message))).then(
+      return Promise.resolve(this.send(payload)).then(
         () => undefined,
       );
     } catch (error) {

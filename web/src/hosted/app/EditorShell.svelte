@@ -1497,7 +1497,7 @@
           <EditorComponent
             bind:this={editorRef}
             markdown={collabSeed?.markdown ?? bodyText ?? displayText ?? ''}
-            editable={editing && ownerState?.writable !== false}
+            editable={editing && (ownerState?.writable === true || joinLive)}
             plugins={changeWatcher as never}
             onReady={handleEditorReady}
             onCheckboxToggle={onEditorChanged}

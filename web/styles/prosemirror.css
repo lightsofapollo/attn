@@ -99,11 +99,14 @@
 
 .ProseMirror > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container) {
   max-width: var(--content-measure);
+  margin-inline: auto;
 }
 
 @media (max-width: 768px) {
   .ProseMirror {
-    padding: 0.3rem 0.35rem 1.4rem;
+    /* Comfortable thumb-width gutters; bottom slack clears the fixed
+       review pill on the phone review page. */
+    padding: 0.3rem 1rem 4.5rem;
   }
 }
 
@@ -111,6 +114,7 @@
 .ProseMirror .prose-scroll-x {
   position: relative;
   max-width: min(100%, var(--content-measure));
+  margin-inline: auto;
   overflow-x: auto;
   overflow-y: hidden;
   border-radius: 0.6rem;

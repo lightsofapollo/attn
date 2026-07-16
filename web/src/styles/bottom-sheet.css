@@ -1,0 +1,139 @@
+/* Bottom sheet (mobile): shared between the hosted owner app and the browser
+   review page, so both surfaces speak the same thumb vocabulary. Extracted
+   from app-shell.css (attn-qez). Uses the hosted chrome aliases when the
+   page loads chrome.css, and falls back to the canonical tokens.css values
+   everywhere else (the review page loads app.css/tokens.css only). */
+
+.bottom-sheet-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: var(--overlay-veil, oklch(0.14 0.008 55 / 38%));
+  display: grid;
+  align-items: end;
+  animation: veil-in 180ms var(--ease);
+}
+
+.bottom-sheet {
+  max-height: 82dvh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--sheet, var(--surface-raised));
+  border-top: 1px solid var(--rule, var(--border));
+  border-radius: 14px 14px 0 0;
+  box-shadow: 0 -24px 60px oklch(0.2 0.02 55 / 20%);
+  padding: 0 1.2rem calc(1.4rem + env(safe-area-inset-bottom, 0px));
+  font-family: var(--sans);
+  animation: sheet-in 280ms var(--ease);
+}
+
+/* Snap-back after an uncommitted swipe; suspended while the finger drives. */
+.bottom-sheet:not(.is-dragging) {
+  transition: transform 200ms var(--ease);
+}
+
+/* Same grab-bar vocabulary as the share sheet, with a real (draggable) hit
+   area. Sticky so it stays under the thumb while the sheet content scrolls. */
+.bottom-sheet-grip {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  margin: 0 -1.2rem;
+  padding: 9px 0 7px;
+  background: var(--sheet, var(--surface-raised));
+  touch-action: none;
+  cursor: grab;
+}
+
+.bottom-sheet-grip:active {
+  cursor: grabbing;
+}
+
+.bottom-sheet-grip span {
+  width: 34px;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--ink, var(--foreground)) 24%, transparent);
+}
+
+@keyframes veil-in {
+  from {
+    background: transparent;
+  }
+}
+
+/* Transform only — never opacity. Headless/occluded renderers freeze the
+   animation clock mid-run, so an opacity entrance can strand the sheet
+   half-transparent (the Truth Rule: visibility never depends on motion). */
+@keyframes sheet-in {
+  from {
+    transform: translateY(32px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bottom-sheet-veil,
+  .bottom-sheet {
+    animation: none;
+  }
+}
+
+.bottom-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+}
+
+.bottom-sheet-heading {
+  min-width: 0;
+}
+
+.bottom-sheet-head h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  color: var(--ink, var(--foreground));
+}
+
+.bottom-sheet-subtitle {
+  margin: 3px 0 0;
+  color: var(--hosted-muted, var(--muted-foreground));
+  font: 500 0.74rem/1.3 var(--sans);
+  letter-spacing: 0.01em;
+}
+
+/* The sheet's Close control, styled for pages that don't load the hosted
+   chrome (same values as chrome.css `.button`, scoped to the sheet head). */
+.bottom-sheet-head .button {
+  display: inline-flex;
+  min-height: 46px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  padding: 0.7rem 1.05rem;
+  border: 1px solid var(--rule, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sheet, var(--surface-raised)) 45%, transparent);
+  color: var(--ink, var(--foreground));
+  font: 700 0.91rem var(--sans);
+  cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.bottom-sheet-head .button:hover {
+  transform: translateY(-2px);
+  border-color: var(--ink, var(--foreground));
+}
+
+/* Host for a ReviewMargin rendered inside a sheet: the margin's cards are
+   absolutely positioned (anchor-aligned), so give them a real canvas. */
+.review-sheet-margin {
+  position: relative;
+  min-height: 55vh;
+}

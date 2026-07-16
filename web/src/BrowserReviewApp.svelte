@@ -31,6 +31,7 @@
   import Editor from './lib/Editor.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
+  import BottomSheet from './hosted/app/BottomSheet.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
@@ -176,6 +177,24 @@
   // keep the shared margin in its expanded/card mode instead of the native
   // app's collapsed 48px avatar-gutter mode.
   reviewStore.panelOpen = true;
+
+  // Phones get the document full-width; threads move behind a thumb control
+  // that opens the same margin as a bottom sheet (attn-qez). Same 901px
+  // breakpoint as the hosted owner shell.
+  let desktopLayout = $state(
+    typeof window !== 'undefined' && window.matchMedia('(min-width: 901px)').matches,
+  );
+  let mobileReviewOpen = $state(false);
+  $effect(() => {
+    const query = window.matchMedia('(min-width: 901px)');
+    const update = (): void => {
+      desktopLayout = query.matches;
+      if (query.matches) mobileReviewOpen = false;
+    };
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  });
 
   // For injected sessions: bridge their state into ours. The test pattern is
   // to construct the session with an `onState` that updates a shared variable;
@@ -795,10 +814,10 @@
         <!-- Folder-share file switcher; renders nothing for single-file shares. -->
         <ReviewFileNav />
         <div
-          class="flex min-h-8 items-center justify-between gap-3 border-b border-border px-3 text-xs text-muted-foreground"
+          class="flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-3 py-1 text-xs text-muted-foreground"
           data-slot="browser-authoring-status"
         >
-          <div class="flex min-w-0 items-center gap-2" data-slot="browser-persistence-status">
+          <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1" data-slot="browser-persistence-status">
             <span class="font-medium text-foreground" data-slot="browser-grant-tier">
               {sessionState.grantTier === 'view'
                 ? 'View only'
@@ -871,7 +890,7 @@
               {/if}
             {/if}
           </div>
-          <div class="flex min-w-0 items-center justify-end gap-2">
+          <div class="flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1">
             <span data-slot="browser-connection-status">
               {sessionState.connection === 'live_direct'
                 ? 'Direct encrypted link'
@@ -934,7 +953,7 @@
           {/if}
         </div>
       </div>
-      {#if displayedDocType !== 'html'}
+      {#if displayedDocType !== 'html' && desktopLayout}
         <aside class="browser-review-margin w-[320px] shrink-0 overflow-y-auto border-l border-border bg-background"
           data-slot="browser-review-margin">
           <ReviewMargin
@@ -947,6 +966,40 @@
         </aside>
       {/if}
     </div>
+    {#if displayedDocType !== 'html' && !desktopLayout}
+      <button
+        type="button"
+        class="fixed bottom-4 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full border border-border bg-surface-raised px-4 py-2.5 text-sm font-semibold text-foreground shadow-lg"
+        data-slot="browser-review-dock"
+        onclick={() => (mobileReviewOpen = true)}
+      >
+        Review
+        {#if reviewStore.marginActiveThreadCount > 0}
+          <span class="rounded-full bg-primary px-1.5 py-0.5 text-xs font-bold leading-none text-primary-foreground">
+            {reviewStore.marginActiveThreadCount}
+          </span>
+        {/if}
+      </button>
+      {#if mobileReviewOpen}
+        <BottomSheet
+          title="Review"
+          subtitle={reviewStore.marginActiveThreadCount === 0
+            ? 'Select any text to comment'
+            : `${reviewStore.marginActiveThreadCount} open ${reviewStore.marginActiveThreadCount === 1 ? 'thread' : 'threads'}`}
+          onclose={() => (mobileReviewOpen = false)}
+        >
+          <div class="review-sheet-margin">
+            <ReviewMargin
+              view={pmViewForReview}
+              readOnly={true}
+              reviewerAuthoring={reviewerAvailability.reviewAuthoring}
+              onResolveComment={resolveBrowserComment}
+              onReplyComment={replyBrowserComment}
+            />
+          </div>
+        </BottomSheet>
+      {/if}
+    {/if}
   {/if}
 </main>
 

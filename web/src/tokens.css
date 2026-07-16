@@ -22,8 +22,11 @@
   /* Shared content column (Shared-Column Rule, 2026-07-13): prose AND wide
      blocks (tables, mermaid, code) cap at the same edge; oversized tables
      scroll inside it. Replaced the split 72ch-prose/full-pane-blocks layout,
-     which read as ragged whenever a wide block was on screen. */
-  --content-measure: 1100px;
+     which read as ragged whenever a wide block was on screen. Tightened
+     1100px → 640px and centered (attn-f5b): 1100px ran ~140 characters a
+     line at desktop widths, far past a readable measure; the unified edge —
+     the actual point of the rule — is preserved. */
+  --content-measure: 640px;
 
   /* Motion — one signature: fast, exact, ease-out-quart */
   --ease: cubic-bezier(0.165, 0.84, 0.44, 1);

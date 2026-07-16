@@ -9,6 +9,7 @@ import '@fontsource-variable/source-serif-4';
 import '@fontsource-variable/source-sans-3';
 import '@fontsource-variable/source-code-pro';
 import '../../src/hosted/chrome.css';
+import '../../src/styles/bottom-sheet.css';
 import '../../src/hosted/app/app-shell.css';
 import { mount } from 'svelte';
 import { parseAppRoute } from '../../src/lib/hosted/routes';

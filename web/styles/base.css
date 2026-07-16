@@ -86,6 +86,7 @@ article {
 
 article > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container, .prose-scroll-x) {
     max-width: var(--content-measure);
+    margin-inline: auto;
 }
 
 /* Typography scale */
@@ -278,8 +279,9 @@ blockquote p:last-child {
 hr {
     border: none;
     border-top: 1px solid var(--border);
-    /* A small flourish centered on the prose measure, not the full pane. */
-    margin: 2.5rem 0 2.5rem calc(min(var(--content-measure), 100%) / 2 - 4rem);
+    /* A small flourish centered on the prose measure, not the full pane.
+       The measure is centered now, so plain auto margins land it there. */
+    margin: 2.5rem auto;
     max-width: 8rem;
 }
 

@@ -97,6 +97,8 @@ test('v3 browser tiers render and expose only their granted composers', async ({
     const page = await tierContext.newPage();
     const capture = attachWireCapture(page);
     await page.goto(entry.url, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('body')).toHaveAttribute('data-route', 'review');
+    expect(await page.evaluate(() => getComputedStyle(document.body, '::after').content)).toBe('none');
     const shell = page.locator('[data-slot="browser-review"]');
     await expect(shell).toHaveAttribute('data-authoring-ready', entry.authoring);
     await expect(shell).toHaveAttribute('data-grant-tier', entry.tier);

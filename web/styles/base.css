@@ -51,6 +51,16 @@ body::after {
     background-size: 200px 200px;
 }
 
+/* The browser reviewer continuously repaints native selection highlights while
+   the pointer moves. Keeping a translucent, filtered, viewport-sized layer
+   above that changing content makes Chromium composite the entire page on each
+   selection tick, which presents as a full-surface flash. Review is a focused
+   reading tool, so drop this decorative layer there; landing/desk chrome keeps
+   its separately-scoped grain treatment. */
+body[data-route="review"]::after {
+    content: none;
+}
+
 #app {
     height: 100%;
     overflow: hidden;

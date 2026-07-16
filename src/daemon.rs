@@ -1129,6 +1129,8 @@ fn handle_client(
                     review_manager,
                     ReviewCommand::Share {
                         path: PathBuf::from(path),
+                        selected_paths: Vec::new(),
+                        primary_path: None,
                         mode,
                         ttl,
                     },
@@ -1476,6 +1478,8 @@ mod tests {
             Some(&manager),
             ReviewCommand::Share {
                 path: PathBuf::from("/tmp/plan.md"),
+                selected_paths: Vec::new(),
+                primary_path: None,
                 mode: "async".to_string(),
                 ttl: None,
             },

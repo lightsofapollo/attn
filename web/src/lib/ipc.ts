@@ -65,6 +65,10 @@ export function searchFiles(query: string): void {
   send({ type: 'search_files', query });
 }
 
+export function reviewListShareableFiles(rootPath: string): void {
+  send({ type: 'review_list_shareable_files', rootPath });
+}
+
 export function editSave(content: string): void {
   send({ type: 'edit_save', content });
 }
@@ -109,10 +113,12 @@ export function dragWindow(e: MouseEvent): void {
 
 export function reviewShare(
   path: string,
+  selectedPaths: string[],
+  primaryPath: string,
   mode: 'live' | 'async' | 'hybrid',
   ttl?: string,
 ): Promise<void> {
-  send({ type: 'review_share', path, mode, ttl });
+  send({ type: 'review_share', path, selectedPaths, primaryPath, mode, ttl });
   return Promise.resolve();
 }
 

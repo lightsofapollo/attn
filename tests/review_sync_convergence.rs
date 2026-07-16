@@ -238,6 +238,8 @@ fn run_scenario(relay_url: &str, mode: &str) -> (bool, bool) {
     let (_doc, path) = temp_markdown();
     owner.mgr.submit(ReviewCommand::Share {
         path,
+        selected_paths: Vec::new(),
+        primary_path: None,
         mode: mode.to_string(),
         ttl: Some("24h".to_string()),
     });
@@ -435,6 +437,8 @@ fn v3_tiers_enforce_comment_and_suggestion_end_to_end() {
     let (_doc, path) = temp_markdown();
     owner.mgr.submit(ReviewCommand::Share {
         path: path.clone(),
+        selected_paths: Vec::new(),
+        primary_path: None,
         mode: "async".into(),
         ttl: Some("24h".into()),
     });

@@ -24,6 +24,8 @@ pub enum UserEvent {
     LoadChildren(PathBuf),
     /// Request a project-wide file search for previewable files.
     SearchFiles(String),
+    /// Request every reviewable document for the native Share picker.
+    ListShareableFiles(PathBuf),
     /// A background scan for one directory's direct children completed.
     ChildrenLoaded {
         root: PathBuf,
@@ -34,6 +36,11 @@ pub enum UserEvent {
     SearchResults {
         root: PathBuf,
         query: String,
+        items: Vec<crate::files::SearchResult>,
+    },
+    /// A background project scan for the Share picker completed.
+    ShareableFilesLoaded {
+        root: PathBuf,
         items: Vec<crate::files::SearchResult>,
     },
     /// A `ReviewManager` produced an update (room status, imported event,

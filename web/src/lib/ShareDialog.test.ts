@@ -15,7 +15,7 @@
 //   1. ReviewBar visibility predicate: hidden when neither currentRoomId
 //      nor shareOpen, visible otherwise.
 //   2. Share-mode → IPC mode collapse (4 user modes → 3 IPC modes + ttl).
-//   3. `reviewShare` IPC emission on Start with the right mode + ttl.
+//   3. `reviewShare` IPC emission includes the exact selected paths and primary file.
 //   4. Cancel does not emit IPC.
 //   5. Verify-key fingerprint computes the expected 12-hex value.
 //   6. Cmd+Shift+S binding fires `onShareOpen` via initKeyboard().
@@ -148,6 +148,7 @@ interface ShareStartParams {
   ttl?: string;
   deleteEventsAfterOwnerAck: boolean;
   filePath: string;
+  selectedPaths: string[];
 }
 
 interface DialogStub {
@@ -162,13 +163,14 @@ async function startShare(
   onStart?: (params: ShareStartParams) => void,
 ): Promise<void> {
   const { mode: ipcMode, ttl } = modeToIpc(d.selectedMode);
-  await reviewShare(d.filePath, ipcMode, ttl);
+  await reviewShare(d.filePath, [d.filePath], d.filePath, ipcMode, ttl);
   onStart?.({
     mode: d.selectedMode,
     ipcMode,
     ttl,
     deleteEventsAfterOwnerAck: d.singleDeviceOnly,
     filePath: d.filePath,
+    selectedPaths: [d.filePath],
   });
   d.open = false;
 }
@@ -257,6 +259,11 @@ defineCase('Start with Live mode emits review_share IPC (mode=live)', async () =
   assert(msg.type === 'review_share', `expected type=review_share, got ${String(msg.type)}`);
   assert(msg.mode === 'live', `expected mode=live, got ${String(msg.mode)}`);
   assert(msg.path === dialog.filePath, `expected path=${dialog.filePath}, got ${String(msg.path)}`);
+  assert(
+    JSON.stringify(msg.selectedPaths) === JSON.stringify([dialog.filePath]),
+    `expected exact selectedPaths, got ${JSON.stringify(msg.selectedPaths)}`,
+  );
+  assert(msg.primaryPath === dialog.filePath, `expected primaryPath=${dialog.filePath}`);
   assert(msg.ttl === undefined, `expected no ttl for live mode, got ${String(msg.ttl)}`);
   assert(dialog.open === false, 'expected dialog.open to flip to false after Start');
   assert(cap.value !== null, 'expected onStart callback to receive params');

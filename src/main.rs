@@ -943,19 +943,20 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                     .filter(|path| dedup.insert(path.clone()))
                     .collect();
 
-                // Folder-share dynamics: when a *.md is created or modified
-                // inside a shared directory (or it's a shared single file),
-                // republish its snapshot so reviewers see new + edited files
-                // live. `republish_snapshot_for_path` is a no-op for unshared
-                // paths and only the owner holds the local-share record, so
-                // firing this for every changed markdown file is safe.
+                // Share dynamics: when a reviewable document is created or
+                // modified, republish it if it belongs to a legacy folder
+                // share or an exact selected-files share. The room lookup is a
+                // no-op for unshared paths, including unselected siblings.
                 if matches!(kind, FsChangeKind::Create | FsChangeKind::Modify)
                     && let Some(mgr) = app_state.lock().ok().and_then(|s| s.review_manager.clone())
                 {
                     for p in &changed_paths {
                         let path = std::path::Path::new(p);
                         if path.extension().is_some_and(|e| {
-                            e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown")
+                            e.eq_ignore_ascii_case("md")
+                                || e.eq_ignore_ascii_case("markdown")
+                                || e.eq_ignore_ascii_case("html")
+                                || e.eq_ignore_ascii_case("htm")
                         }) {
                             mgr.submit(crate::review::manager::ReviewCommand::PublishSnapshot {
                                 path: path.to_path_buf(),
@@ -1014,6 +1015,13 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
             Event::UserEvent(UserEvent::SearchFiles(query)) => {
                 queue_search_refresh(&watcher_proxy, current_tree_root.clone(), query);
             }
+            Event::UserEvent(UserEvent::ListShareableFiles(root)) => {
+                let requested = normalize_input_path(root);
+                if requested != current_tree_root {
+                    return;
+                }
+                queue_shareable_files_refresh(&watcher_proxy, current_tree_root.clone());
+            }
             Event::UserEvent(UserEvent::ChildrenLoaded {
                 root,
                 parent,
@@ -1038,6 +1046,19 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                 let payload = serde_json::json!({
                     "searchResults": {
                         "query": query,
+                        "items": items,
+                    }
+                });
+                let js = format!("window.__attn__.updateContent({payload});");
+                let _ = webview.evaluate_script(&js);
+            }
+            Event::UserEvent(UserEvent::ShareableFilesLoaded { root, items }) => {
+                if root != current_tree_root {
+                    return;
+                }
+                let payload = serde_json::json!({
+                    "shareableFiles": {
+                        "rootPath": root.to_string_lossy(),
                         "items": items,
                     }
                 });
@@ -1421,6 +1442,14 @@ fn queue_search_refresh(proxy: &EventLoopProxy<UserEvent>, root: PathBuf, query:
     std::thread::spawn(move || {
         let items = files::search_previewable_files(&root, &query, 200);
         let _ = proxy.send_event(UserEvent::SearchResults { root, query, items });
+    });
+}
+
+fn queue_shareable_files_refresh(proxy: &EventLoopProxy<UserEvent>, root: PathBuf) {
+    let proxy = proxy.clone();
+    std::thread::spawn(move || {
+        let items = files::list_shareable_files(&root, 5_000);
+        let _ = proxy.send_event(UserEvent::ShareableFilesLoaded { root, items });
     });
 }
 

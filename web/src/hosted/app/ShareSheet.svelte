@@ -75,7 +75,10 @@
   let progressPaused = $state(false);
 
   let selectionInitialized = $state(false);
-  let scopeChoice = $state<ShareScopeChoice>('workspace');
+  // A share is always a curated selection. Keep the legacy scope union for
+  // reopening older shares, but every newly-created share uses `entries` — a
+  // one-file review is simply a selection containing one path.
+  let scopeChoice = $state<ShareScopeChoice>('entries');
   let configuredFilePath = $state<string | undefined>();
   let selectedPaths = $state<string[]>([]);
   let mode = $state<WorkspaceShareMode>('hybrid');
@@ -102,10 +105,7 @@
   );
   const durability = $derived(durabilityState(effectivePersistenceMode, riskAcknowledged));
   const selectedEntries = $derived(
-    entriesForScope(entries, scopeChoice, configuredFilePath, selectedPaths),
-  );
-  const configuredFileEntry = $derived(
-    entries.find((entry) => entry.path === configuredFilePath),
+    entriesForScope(entries, 'entries', configuredFilePath, selectedPaths),
   );
   const manifest = $derived(summarizeEntries(selectedEntries));
   const scopeValid = $derived(manifest.markdownCount > 0);
@@ -153,13 +153,16 @@
   });
 
   $effect(() => {
-    if (selectionInitialized) return;
+    if (selectionInitialized || entries.length === 0) return;
     selectionInitialized = true;
     if (initialActiveEntry?.kind === 'markdown') {
-      scopeChoice = 'file';
+      scopeChoice = 'entries';
       configuredFilePath = initialActiveEntry.path;
       selectedPaths = [initialActiveEntry.path];
+      return;
     }
+    const firstMarkdown = entries.find((entry) => entry.kind === 'markdown');
+    if (firstMarkdown) selectedPaths = [firstMarkdown.path];
   });
 
   $effect(() => {
@@ -209,18 +212,10 @@
         applyShareView(existing);
         return;
       }
-      // Auto-publish on open (gate-35 redesign): clicking Share goes straight
-      // to a copyable link — no configure ceremony, no risk checkbox. Only a
-      // genuine hard block (quota/unavailable) or no shareable Markdown stops
-      // at the configure fallback. Best-effort storage auto-acknowledges and
-      // requests persistence in the background instead of gating on a checkbox.
-      if (durability.hardBlocked || !scopeValid || !onCreate) {
-        phase = 'configure';
-        return;
-      }
-      riskAcknowledged = true;
-      if (durability.canRequestPersistence && onRequestPersist) void requestPersist();
-      await publishShare();
+      // Never publish before the owner sees the exact selection. Disclosure
+      // scope is an intentional confirmation, even when only the active file
+      // is checked by default.
+      phase = 'configure';
     } catch {
       phase = 'configure';
       operationError = 'The existing share status could not be checked. You can try again.';
@@ -266,9 +261,17 @@
       : selectedPaths.filter((candidate) => candidate !== path);
   }
 
+  function selectAllEntries(): void {
+    selectedPaths = entries.map((entry) => entry.path);
+  }
+
+  function clearSelectedEntries(): void {
+    selectedPaths = [];
+  }
+
   function configuredRequest(): WorkspaceShareRequest | null {
     return createShareRequest({
-      scope: scopeChoice,
+      scope: 'entries',
       activePath: configuredFilePath,
       selectedPaths,
       mode,
@@ -417,7 +420,7 @@
 >
   <section class="share-sheet">
     <header class="share-head share-head-compact">
-      <h2 id="share-sheet-title" tabindex="-1" bind:this={headingElement}>Share</h2>
+      <h2 id="share-sheet-title" tabindex="-1" bind:this={headingElement}>Share files for review</h2>
       <p id="share-sheet-description" class="sr-only">Create an end-to-end encrypted review link.</p>
       <button class="share-x" type="button" onclick={requestClose} aria-label="Close share sheet">×</button>
     </header>
@@ -432,50 +435,33 @@
         <section class="share-panel" aria-labelledby="share-scope-title">
           <div class="share-panel-heading">
             <div>
-              <h3 id="share-scope-title">What do you want to share?</h3>
-              <p>Reviewers only receive the items you choose.</p>
+              <h3 id="share-scope-title">Choose files to share</h3>
+              <p>Only checked files are encrypted and sent to reviewers.</p>
+            </div>
+            <div class="share-selection-actions" aria-label="File selection actions">
+              <button type="button" onclick={selectAllEntries}>Select all</button>
+              <button type="button" onclick={clearSelectedEntries}>Clear</button>
             </div>
           </div>
-          <fieldset class="share-choice-grid">
-            <legend class="sr-only">Review scope</legend>
-            <label class:chosen={scopeChoice === 'file'} class:choice-disabled={!configuredFileEntry || configuredFileEntry.kind !== 'markdown'}>
-              <input
-                type="radio"
-                name="share-scope"
-                value="file"
-                bind:group={scopeChoice}
-                disabled={!configuredFileEntry || configuredFileEntry.kind !== 'markdown'}
-              />
-              <span><strong>Current file</strong><small>{configuredFileEntry?.path ?? 'No open Markdown file'}</small></span>
-            </label>
-            <label class:chosen={scopeChoice === 'entries'}>
-              <input type="radio" name="share-scope" value="entries" bind:group={scopeChoice} />
-              <span><strong>Choose files</strong><small>Select files and assets</small></span>
-            </label>
-            <label class:chosen={scopeChoice === 'workspace'}>
-              <input type="radio" name="share-scope" value="workspace" bind:group={scopeChoice} />
-              <span><strong>Whole workspace</strong><small>All {entries.length} items</small></span>
-            </label>
-          </fieldset>
-
-          {#if scopeChoice === 'entries'}
-            <div class="share-entry-list" aria-label="Select workspace entries">
-              {#each entries as entry (entry.path)}
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={selectedPaths.includes(entry.path)}
-                    onchange={(event) => toggleSelectedPath(entry.path, event.currentTarget.checked)}
-                  />
-                  <span class="share-entry-name">{entry.path}</span>
-                  <span class="share-entry-meta">{entry.kind === 'markdown' ? 'Markdown' : entry.presentation === 'preview' ? 'Preview' : 'Download'} · {entry.sizeLabel}</span>
-                </label>
-              {/each}
-            </div>
-          {/if}
+          <div class="share-entry-list" aria-label="Select workspace files">
+            {#each entries as entry (entry.path)}
+              <label class:share-entry-current={entry.path === initialActivePath}>
+                <input
+                  type="checkbox"
+                  checked={selectedPaths.includes(entry.path)}
+                  onchange={(event) => toggleSelectedPath(entry.path, event.currentTarget.checked)}
+                />
+                <span class="share-entry-name">
+                  {entry.path}
+                  {#if entry.path === initialActivePath}<small>Current</small>{/if}
+                </span>
+                <span class="share-entry-meta">{entry.kind === 'markdown' ? 'Markdown' : entry.presentation === 'preview' ? 'Preview' : 'Download'} · {entry.sizeLabel}</span>
+              </label>
+            {/each}
+          </div>
 
           <div class="share-manifest" aria-live="polite">
-            <strong>{manifest.entryCount} {manifest.entryCount === 1 ? 'entry' : 'entries'} · {formatByteCount(manifest.totalBytes)}</strong>
+            <strong>{manifest.entryCount} {manifest.entryCount === 1 ? 'file' : 'files'} selected · {formatByteCount(manifest.totalBytes)}</strong>
             <span>{manifest.markdownCount} Markdown · {manifest.previewableAssetCount} previewable · {manifest.downloadOnlyAssetCount} download-only</span>
           </div>
           {#if !scopeValid}
@@ -549,7 +535,7 @@
         <div class="share-config-foot">
           <p>{configurationHint}</p>
           <button class="button primary" type="button" disabled={!configurationReady} onclick={() => void publishShare()}>
-            Create review link
+            Create review link for {manifest.entryCount} {manifest.entryCount === 1 ? 'file' : 'files'}
           </button>
         </div>
       {:else if phase === 'progress'}
@@ -575,6 +561,10 @@
           </div>
         {/if}
       {:else if phase === 'ready' && invite && share}
+        <div class="share-ready-scope" aria-label="Shared file selection">
+          <strong>{share.paths.length} {share.paths.length === 1 ? 'file' : 'files'} shared</strong>
+          <span>{share.paths.join(' · ')}</span>
+        </div>
         {#if selectedInvite}
           <p class="share-sentence">
             Anyone with the link can
@@ -652,7 +642,7 @@
         <div class="share-stopped">
           <h3>Sharing stopped</h3>
           <p>The old link no longer opens this workspace.</p>
-          <button class="button primary" type="button" onclick={() => { phase = 'configure'; operationError = ''; statusMessage = ''; }}>Create a new link</button>
+          <button class="button primary" type="button" onclick={() => { scopeChoice = 'entries'; phase = 'configure'; operationError = ''; statusMessage = ''; }}>Create a new link</button>
         </div>
       {/if}
 

@@ -1606,6 +1606,20 @@ impl Bootstrapper {
         &self,
         path: PathBuf,
         mode: RoomMode,
+        ttl: Option<String>,
+    ) -> Result<ShareOutcome, BootstrapError> {
+        self.share_selected(path, Vec::new(), None, mode, ttl).await
+    }
+
+    /// Share an exact owner-curated selection under one project root. The
+    /// legacy `share(path)` wrapper passes an empty selection, preserving CLI
+    /// file/folder behavior while native UI callers opt into exact membership.
+    pub async fn share_selected(
+        &self,
+        path: PathBuf,
+        selected_paths: Vec<PathBuf>,
+        primary_path: Option<PathBuf>,
+        mode: RoomMode,
         _ttl: Option<String>,
     ) -> Result<ShareOutcome, BootstrapError> {
         let now_ms = unix_now_ms();
@@ -1614,7 +1628,12 @@ impl Bootstrapper {
         let browser_review_base = browser_review_base_url()?;
         let identity_dir = self.config.identity_dir()?;
         let identity = load_or_create_identity_in(&identity_dir)?;
-        let doc_targets = validate_share_targets(&path)?;
+        let has_explicit_selection = !selected_paths.is_empty();
+        let doc_targets = if !has_explicit_selection {
+            validate_share_targets(&path)?
+        } else {
+            validate_selected_share_targets(&path, &selected_paths, primary_path.as_deref())?
+        };
 
         // 1. Re-Share of the same path: reuse the existing room id + invite, but
         //    RE-ESTABLISH the room on the relay first. The local binding only
@@ -1623,7 +1642,12 @@ impl Bootstrapper {
         //    which left the owner endlessly dialing a dead room (404 storm).
         //    create_room is idempotent on roomId — a no-op when the room exists,
         //    a clean re-create (same id, derived from the secret) when it's gone.
-        if let Some(existing) = self.find_existing_share(&path, now_ms, &browser_review_base)? {
+        if let Some(existing) = self.find_existing_share(
+            &path,
+            (!selected_paths.is_empty()).then_some(doc_targets.as_slice()),
+            now_ms,
+            &browser_review_base,
+        )? {
             let secret = load_room_secret(self.store.root(), &existing.room_id)?;
             let keys = derive_room_keys(&secret);
             let v3_access = load_room_access_v3(self.store.root(), &existing.room_id)?;
@@ -1831,7 +1855,11 @@ impl Bootstrapper {
                 grant_signature: None,
             },
         )?;
-        record_local_share(self.store.root(), &room_id, &path, is_dir)?;
+        if !has_explicit_selection {
+            record_local_share(self.store.root(), &room_id, &path, is_dir)?;
+        } else {
+            record_local_share_selection(self.store.root(), &room_id, &path, &doc_targets)?;
+        }
 
         // 6b. Publish the initial snapshot(s) so reviewers get the doc bytes the
         //     moment they join. A single file → just it; a folder-share → every
@@ -1841,12 +1869,29 @@ impl Bootstrapper {
         //     — the room exists; log and continue.
         let mut published = 0usize;
         let mut publish_errors = Vec::new();
+        let mut manifest_entries = Vec::new();
         for doc_path in doc_targets {
             match self
                 .publish_initial_snapshot(&room_id, &doc_path, now_ms)
                 .await
             {
-                Ok(_) => published += 1,
+                Ok((file_id, snapshot_id)) => {
+                    published += 1;
+                    if has_explicit_selection {
+                        match manifest_entry_for_snapshot(
+                            &self.store,
+                            &room_id,
+                            &doc_path,
+                            &file_id,
+                            &snapshot_id,
+                        ) {
+                            Ok(entry) => manifest_entries.push(entry),
+                            Err(err) => {
+                                publish_errors.push(format!("{}: {err}", doc_path.display()))
+                            }
+                        }
+                    }
+                }
                 Err(err) => {
                     publish_errors.push(format!("{}: {err}", doc_path.display()));
                     tracing::warn!(
@@ -1857,9 +1902,9 @@ impl Bootstrapper {
                 }
             }
         }
-        if published == 0 {
+        if published == 0 || (has_explicit_selection && !publish_errors.is_empty()) {
             return Err(BootstrapError::InvalidShare(format!(
-                "no markdown snapshots could be published for {}{}",
+                "the selected files could not all be published for {}{}",
                 path.display(),
                 if publish_errors.is_empty() {
                     String::new()
@@ -1867,6 +1912,11 @@ impl Bootstrapper {
                     format!(" ({})", publish_errors.join("; "))
                 }
             )));
+        }
+        if has_explicit_selection {
+            manifest_entries.sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+            self.publish_workspace_manifest(&room_id, manifest_entries, now_ms)
+                .await?;
         }
 
         // 7. Build invite. `room_secret` is consumed when we encode it into the
@@ -2210,12 +2260,29 @@ impl Bootstrapper {
     fn find_existing_share(
         &self,
         path: &std::path::Path,
+        selected_targets: Option<&[PathBuf]>,
         now_ms: u64,
         browser_review_base: &reqwest::Url,
     ) -> Result<Option<ShareOutcome>, BootstrapError> {
         let shares = load_local_shares(self.store.root())?;
         for (room_id_str, record) in shares {
             if record.path != path.to_string_lossy() {
+                continue;
+            }
+            let selection_matches = match selected_targets {
+                Some(selected_targets) => {
+                    let mut expected = selected_targets
+                        .iter()
+                        .map(|target| target.to_string_lossy().to_string())
+                        .collect::<Vec<_>>();
+                    let mut recorded = record.selected_paths.clone();
+                    expected.sort();
+                    recorded.sort();
+                    expected == recorded
+                }
+                None => record.selected_paths.is_empty(),
+            };
+            if !selection_matches {
                 continue;
             }
             let room_id: RoomId =
@@ -2994,16 +3061,15 @@ impl Bootstrapper {
     ) -> Result<(FileId, SnapshotId), BootstrapError> {
         use crate::review::anchors::index::build_anchor_index;
         use crate::review::crypto::ids::{content_hash, derive_file_id, derive_snapshot_id};
-        use crate::review::envelope::{assemble_snapshot_blob_envelope, seal_snapshot_r2_body};
-        use crate::review::model::{BlobRef, BlobStorage, DocType, SnapshotNode};
-        use crate::review::transport::blobs as relay_blobs;
+        use crate::review::model::DocType;
 
         let doc_bytes = std::fs::read(path)
             .map_err(|e| BootstrapError::Store(format!("read {}: {e}", path.display())))?;
         let base_hash = content_hash(&doc_bytes);
 
         let room_secret = load_room_secret(self.store.root(), room_id)?;
-        let display_path = path.to_string_lossy().to_string();
+        let display_path = selected_share_wire_path(self.store.root(), room_id, path)?
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
         let (file_id, is_first) = match existing_file_id {
             Some(fid) => (fid, false),
             None => (
@@ -3034,10 +3100,52 @@ impl Bootstrapper {
             manifest: None,
         };
 
+        let published = self
+            .publish_snapshot_plaintext(
+                room_id,
+                file_id.clone(),
+                snapshot_id,
+                Some(display_path),
+                base_hash,
+                plaintext,
+                now_ms,
+            )
+            .await?;
+        // Persist the stable file_id on the first publish so future edits
+        // reuse it (looked up via `find_room_for_path`).
+        if is_first {
+            record_share_file_id(self.store.root(), room_id, path, &file_id)?;
+        }
+        tracing::info!(
+            "published snapshot file={} snapshot={} first={} room={}",
+            published.0.as_str(),
+            published.1.as_str(),
+            is_first,
+            room_id.as_str(),
+        );
+        Ok(published)
+    }
+
+    async fn publish_snapshot_plaintext(
+        &self,
+        room_id: &RoomId,
+        file_id: FileId,
+        snapshot_id: SnapshotId,
+        owner_display_path: Option<String>,
+        base_hash: crate::review::ids::ContentHash,
+        plaintext: SnapshotPlaintext,
+        now_ms: u64,
+    ) -> Result<(FileId, SnapshotId), BootstrapError> {
+        use crate::review::crypto::ids::content_hash;
+        use crate::review::envelope::{assemble_snapshot_blob_envelope, seal_snapshot_r2_body};
+        use crate::review::model::{BlobRef, BlobStorage, SnapshotNode};
+        use crate::review::transport::blobs as relay_blobs;
+
         // ---- Seal the snapshot bytes as a `kind=snapshot_blob` envelope.
         let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
             .map_err(|e| BootstrapError::Crypto(format!("canonical snapshot: {e}")))?;
         let blob_hash = content_hash(&blob_bytes);
+        let room_secret = load_room_secret(self.store.root(), room_id)?;
         let v3_access = load_room_access_v3(self.store.root(), room_id)?;
         let (snapshot_key, upload_admission_key, protocol_version) = if let Some(access) =
             v3_access.as_ref()
@@ -3179,7 +3287,7 @@ impl Bootstrapper {
         let body = ReviewEventBody::SnapshotCreated {
             file_id: file_id.clone(),
             snapshot_id: snapshot_id.clone(),
-            owner_display_path: Some(display_path),
+            owner_display_path,
             parent_snapshot_id: None,
             base_hash,
             encrypted_blob_ref: Some(blob_ref),
@@ -3190,22 +3298,65 @@ impl Bootstrapper {
         };
 
         let outcome = self.send_event_sync(room_id, body, now_ms)?;
-        // Persist the stable file_id on the first publish so future edits
-        // reuse it (looked up via `find_room_for_path`).
-        if is_first {
-            record_share_file_id(self.store.root(), room_id, path, &file_id)?;
-        }
         tracing::info!(
-            "published snapshot file={} snapshot={} blob_bytes={} storage={:?} event_bytes={} first={} room={}",
+            "sealed snapshot file={} snapshot={} blob_bytes={} storage={:?} event_bytes={} room={}",
             file_id.as_str(),
             snapshot_id.as_str(),
             blob_envelope.ciphertext_bytes,
             storage,
             outcome.envelope.ciphertext_bytes,
-            is_first,
             room_id.as_str(),
         );
         Ok((file_id, snapshot_id))
+    }
+
+    async fn publish_workspace_manifest(
+        &self,
+        room_id: &RoomId,
+        entries: Vec<crate::review::model::WorkspaceManifestEntry>,
+        now_ms: u64,
+    ) -> Result<(FileId, SnapshotId), BootstrapError> {
+        use crate::review::crypto::ids::{
+            content_hash, derive_snapshot_id, derive_workspace_manifest_file_id,
+        };
+        use crate::review::model::{
+            DocType, WorkspaceManifestKind, WorkspaceManifestScope, WorkspaceSnapshotManifest,
+        };
+
+        let manifest = WorkspaceSnapshotManifest {
+            v: 1,
+            kind: WorkspaceManifestKind::AttnWorkspaceSnapshot,
+            scope: WorkspaceManifestScope::Entries,
+            entries,
+        };
+        let plaintext = SnapshotPlaintext {
+            doc_type: DocType::WorkspaceManifest,
+            content: None,
+            anchor_index: None,
+            media_type: None,
+            encoding: None,
+            manifest: Some(manifest),
+        };
+        plaintext
+            .validate()
+            .map_err(|error| BootstrapError::Crypto(format!("workspace manifest: {error}")))?;
+        let raw = plaintext.raw_content_bytes().map_err(|error| {
+            BootstrapError::Crypto(format!("canonical workspace manifest: {error}"))
+        })?;
+        let base_hash = content_hash(&raw);
+        let room_secret = load_room_secret(self.store.root(), room_id)?;
+        let file_id = derive_workspace_manifest_file_id(&room_secret);
+        let snapshot_id = derive_snapshot_id(room_id, &file_id, &base_hash, now_ms as i64);
+        self.publish_snapshot_plaintext(
+            room_id,
+            file_id,
+            snapshot_id,
+            None,
+            base_hash,
+            plaintext,
+            now_ms,
+        )
+        .await
     }
 
     /// Republish a snapshot for a file the owner just edited. Looks up the
@@ -3978,6 +4129,10 @@ struct LocalShareRecord {
     /// Grows as new `*.md` files appear in the shared directory.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     files: std::collections::HashMap<String, String>,
+    /// Exact owner-curated membership for entries-scoped native shares.
+    /// Empty means this is a legacy single-file or auto-expanding folder share.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    selected_paths: Vec<String>,
 }
 
 fn shares_dir(root: &std::path::Path) -> PathBuf {
@@ -4064,6 +4219,7 @@ fn record_local_share(
     let prior = all.get(room_id.as_str());
     let prior_file_id = prior.and_then(|r| r.file_id.clone());
     let prior_files = prior.map(|r| r.files.clone()).unwrap_or_default();
+    let prior_selected_paths = prior.map(|r| r.selected_paths.clone()).unwrap_or_default();
     all.insert(
         room_id.as_str().to_string(),
         LocalShareRecord {
@@ -4072,6 +4228,35 @@ fn record_local_share(
             is_dir,
             file_id: prior_file_id,
             files: prior_files,
+            selected_paths: prior_selected_paths,
+        },
+    );
+    write_local_shares(root, &all)
+}
+
+fn record_local_share_selection(
+    root: &std::path::Path,
+    room_id: &RoomId,
+    project_root: &std::path::Path,
+    selected_paths: &[PathBuf],
+) -> Result<(), BootstrapError> {
+    let mut all = load_local_shares(root)?;
+    let prior_files = all
+        .get(room_id.as_str())
+        .map(|record| record.files.clone())
+        .unwrap_or_default();
+    all.insert(
+        room_id.as_str().to_string(),
+        LocalShareRecord {
+            path: project_root.to_string_lossy().to_string(),
+            created_at: unix_now_ms(),
+            is_dir: true,
+            file_id: None,
+            files: prior_files,
+            selected_paths: selected_paths
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
         },
     );
     write_local_shares(root, &all)
@@ -4089,7 +4274,16 @@ fn record_share_file_id(
 ) -> Result<(), BootstrapError> {
     let mut all = load_local_shares(root)?;
     if let Some(record) = all.get_mut(room_id.as_str()) {
-        if record.is_dir {
+        if !record.selected_paths.is_empty() {
+            let canonical_path = path
+                .canonicalize()
+                .unwrap_or_else(|_| path.to_path_buf())
+                .to_string_lossy()
+                .to_string();
+            record
+                .files
+                .insert(canonical_path, file_id.as_str().to_string());
+        } else if record.is_dir {
             record.files.insert(
                 path.to_string_lossy().to_string(),
                 file_id.as_str().to_string(),
@@ -4100,6 +4294,164 @@ fn record_share_file_id(
         write_local_shares(root, &all)?;
     }
     Ok(())
+}
+
+/// Wire paths for owner-curated shares are normalized relative to the project
+/// root. Legacy file/folder shares retain their historical absolute display
+/// path until those links migrate to manifests.
+fn selected_share_wire_path(
+    store_root: &std::path::Path,
+    room_id: &RoomId,
+    path: &std::path::Path,
+) -> Result<Option<String>, BootstrapError> {
+    let all = load_local_shares(store_root)?;
+    let Some(record) = all.get(room_id.as_str()) else {
+        return Ok(None);
+    };
+    if record.selected_paths.is_empty() {
+        return Ok(None);
+    }
+    let canonical_root = std::path::Path::new(&record.path)
+        .canonicalize()
+        .map_err(|error| {
+            BootstrapError::Store(format!(
+                "canonicalize selected share root {}: {error}",
+                record.path
+            ))
+        })?;
+    let canonical_path = path.canonicalize().map_err(|error| {
+        BootstrapError::Store(format!(
+            "canonicalize shared file {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !record
+        .selected_paths
+        .iter()
+        .any(|selected| std::path::Path::new(selected) == canonical_path)
+    {
+        return Ok(None);
+    }
+    normalized_relative_share_path(&canonical_root, &canonical_path).map(Some)
+}
+
+fn normalized_relative_share_path(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<String, BootstrapError> {
+    use unicode_normalization::UnicodeNormalization as _;
+
+    let relative = path.strip_prefix(root).map_err(|_| {
+        BootstrapError::InvalidShare(format!(
+            "shared file {} is outside project {}",
+            path.display(),
+            root.display()
+        ))
+    })?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        let std::path::Component::Normal(value) = component else {
+            return Err(BootstrapError::InvalidShare(format!(
+                "shared file path is not normalized: {}",
+                path.display()
+            )));
+        };
+        parts.push(value.to_str().ok_or_else(|| {
+            BootstrapError::InvalidShare(format!(
+                "shared file path is not valid UTF-8: {}",
+                path.display()
+            ))
+        })?);
+    }
+    if parts.is_empty() {
+        return Err(BootstrapError::InvalidShare(
+            "the project root itself cannot be shared as a file".into(),
+        ));
+    }
+    Ok(parts.join("/").nfc().collect())
+}
+
+/// Convert a root-relative protocol path back to the local absolute path for
+/// the native owner UI. Joined reviewers have no local share record, so they
+/// continue to see the portable relative path.
+pub(crate) fn local_owner_display_path(
+    store_root: &std::path::Path,
+    room_id: &RoomId,
+    wire_path: &str,
+) -> Result<Option<String>, BootstrapError> {
+    let all = load_local_shares(store_root)?;
+    let Some(record) = all.get(room_id.as_str()) else {
+        return Ok(None);
+    };
+    if record.selected_paths.is_empty() {
+        return Ok(None);
+    }
+    let canonical_root = std::path::Path::new(&record.path)
+        .canonicalize()
+        .map_err(|error| {
+            BootstrapError::Store(format!(
+                "canonicalize selected share root {}: {error}",
+                record.path
+            ))
+        })?;
+    for selected in &record.selected_paths {
+        let selected_path = std::path::Path::new(selected);
+        if normalized_relative_share_path(&canonical_root, selected_path)? == wire_path {
+            let local_path = wire_path
+                .split('/')
+                .fold(PathBuf::from(&record.path), |path, segment| {
+                    path.join(segment)
+                });
+            return Ok(Some(local_path.to_string_lossy().to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn manifest_entry_for_snapshot(
+    store: &ReviewStore,
+    room_id: &RoomId,
+    path: &std::path::Path,
+    file_id: &FileId,
+    snapshot_id: &SnapshotId,
+) -> Result<crate::review::model::WorkspaceManifestEntry, BootstrapError> {
+    use crate::review::model::{DocType, WorkspaceManifestEntry, WorkspaceManifestEntryKind};
+
+    let wire_path = selected_share_wire_path(store.root(), room_id, path)?.ok_or_else(|| {
+        BootstrapError::Store(format!(
+            "selected share has no portable path for {}",
+            path.display()
+        ))
+    })?;
+    let snapshot = store
+        .load_snapshot(room_id, snapshot_id)
+        .map_err(|error| BootstrapError::Store(format!("load published snapshot: {error}")))?
+        .ok_or_else(|| BootstrapError::Store("published snapshot is missing".into()))?;
+    let plaintext = snapshot
+        .plaintext
+        .ok_or_else(|| BootstrapError::Store("published snapshot plaintext is missing".into()))?;
+    let kind = match plaintext.doc_type {
+        DocType::Markdown => WorkspaceManifestEntryKind::Markdown,
+        DocType::Html => WorkspaceManifestEntryKind::Html,
+        DocType::Asset | DocType::WorkspaceManifest => {
+            return Err(BootstrapError::InvalidShare(format!(
+                "{} is not a shareable document snapshot",
+                path.display()
+            )));
+        }
+    };
+    let raw = plaintext.raw_content_bytes().map_err(|error| {
+        BootstrapError::Crypto(format!("recover published snapshot bytes: {error}"))
+    })?;
+    Ok(WorkspaceManifestEntry {
+        file_id: file_id.clone(),
+        snapshot_id: snapshot_id.clone(),
+        path: wire_path,
+        kind,
+        media_type: None,
+        byte_length: raw.len() as u64,
+        content_hash: snapshot.base_hash,
+    })
 }
 
 fn write_local_shares(
@@ -4216,6 +4568,87 @@ fn validate_share_targets(path: &std::path::Path) -> Result<Vec<PathBuf>, Bootst
     Ok(targets)
 }
 
+fn validate_selected_share_targets(
+    project_root: &std::path::Path,
+    selected_paths: &[PathBuf],
+    primary_path: Option<&std::path::Path>,
+) -> Result<Vec<PathBuf>, BootstrapError> {
+    const MAX_SELECTED_FILES: usize = 5_000;
+    if selected_paths.is_empty() {
+        return Err(BootstrapError::InvalidShare(
+            "select at least one file to share".into(),
+        ));
+    }
+    if selected_paths.len() > MAX_SELECTED_FILES {
+        return Err(BootstrapError::InvalidShare(format!(
+            "a review may include at most {MAX_SELECTED_FILES} files"
+        )));
+    }
+
+    let canonical_root = project_root.canonicalize().map_err(|error| {
+        BootstrapError::InvalidShare(format!(
+            "cannot open project root {}: {error}",
+            project_root.display()
+        ))
+    })?;
+    if !canonical_root.is_dir() {
+        return Err(BootstrapError::InvalidShare(format!(
+            "{} is not a project directory",
+            project_root.display()
+        )));
+    }
+
+    let canonical_primary = primary_path.and_then(|path| path.canonicalize().ok());
+    let mut seen = std::collections::HashSet::new();
+    let mut targets = Vec::with_capacity(selected_paths.len());
+    for selected in selected_paths {
+        let canonical = selected.canonicalize().map_err(|error| {
+            BootstrapError::InvalidShare(format!(
+                "cannot open selected file {}: {error}",
+                selected.display()
+            ))
+        })?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err(BootstrapError::InvalidShare(format!(
+                "selected file {} is outside project {}",
+                selected.display(),
+                project_root.display()
+            )));
+        }
+        if !canonical.is_file() || !is_shareable_path(&canonical) {
+            return Err(BootstrapError::InvalidShare(format!(
+                "{} is not a shareable Markdown or HTML file",
+                selected.display()
+            )));
+        }
+        if !seen.insert(canonical.clone()) {
+            return Err(BootstrapError::InvalidShare(format!(
+                "selected file appears more than once: {}",
+                selected.display()
+            )));
+        }
+        let bytes = std::fs::read(&canonical).map_err(|error| {
+            BootstrapError::InvalidShare(format!("cannot read {}: {error}", selected.display()))
+        })?;
+        if std::str::from_utf8(&bytes).is_err() {
+            return Err(BootstrapError::InvalidShare(format!(
+                "{} is not UTF-8 text",
+                selected.display()
+            )));
+        }
+        targets.push(canonical);
+    }
+
+    targets.sort();
+    if let Some(primary) = canonical_primary
+        && let Some(index) = targets.iter().position(|path| path == &primary)
+    {
+        let primary = targets.remove(index);
+        targets.insert(0, primary);
+    }
+    Ok(targets)
+}
+
 fn collect_shareable(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -4244,9 +4677,24 @@ fn find_room_for_path(
     path: &std::path::Path,
 ) -> Result<Option<(RoomId, Option<FileId>)>, BootstrapError> {
     let target = path.to_string_lossy().to_string();
+    let canonical_target = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string();
     let all = load_local_shares(root)?;
     for (room_id_str, record) in all {
-        let matched: Option<Option<String>> = if record.is_dir {
+        let matched: Option<Option<String>> = if !record.selected_paths.is_empty() {
+            if record
+                .selected_paths
+                .iter()
+                .any(|selected| selected == &canonical_target)
+            {
+                Some(record.files.get(&canonical_target).cloned())
+            } else {
+                None
+            }
+        } else if record.is_dir {
             if is_shareable_path(path) && path_within(&record.path, path) {
                 Some(record.files.get(&target).cloned())
             } else {
@@ -4513,6 +4961,70 @@ mod tests {
         fs::write(&bad_md, [0xff, 0xfe, 0xfd]).unwrap();
         let err = validate_share_targets(&bad_md).expect_err("binary markdown rejected");
         assert!(err.to_string().contains("UTF-8"));
+    }
+
+    #[test]
+    fn selected_share_is_exact_primary_first_and_does_not_auto_expand() {
+        use std::fs;
+
+        let store_root = TempDir::new().expect("store root");
+        let project = TempDir::new().expect("project");
+        let first = project.path().join("first.md");
+        let primary = project.path().join("primary.md");
+        let private = project.path().join("private.md");
+        fs::write(&first, "# First\n").unwrap();
+        fs::write(&primary, "# Primary\n").unwrap();
+        fs::write(&private, "# Private\n").unwrap();
+
+        let selected = validate_selected_share_targets(
+            project.path(),
+            &[first.clone(), primary.clone()],
+            Some(&primary),
+        )
+        .expect("valid exact selection");
+        assert_eq!(
+            selected,
+            vec![
+                primary.canonicalize().unwrap(),
+                first.canonicalize().unwrap()
+            ]
+        );
+
+        let room: RoomId =
+            serde_json::from_value(serde_json::Value::String("room-selected".into())).unwrap();
+        record_local_share_selection(store_root.path(), &room, project.path(), &selected)
+            .expect("record selection");
+        assert!(
+            find_room_for_path(store_root.path(), &primary)
+                .unwrap()
+                .is_some(),
+            "selected file belongs to the room"
+        );
+        let stable_file_id: FileId =
+            serde_json::from_value(serde_json::Value::String("file-selected".into())).unwrap();
+        record_share_file_id(store_root.path(), &room, &primary, &stable_file_id)
+            .expect("record selected file identity");
+        let (_, recorded_file_id) = find_room_for_path(store_root.path(), &primary)
+            .unwrap()
+            .expect("selected file remains watched");
+        assert_eq!(
+            recorded_file_id.expect("stable file identity"),
+            stable_file_id,
+            "selected-file updates must reuse the original FileId"
+        );
+        assert!(
+            find_room_for_path(store_root.path(), &private)
+                .unwrap()
+                .is_none(),
+            "an unselected sibling must never be picked up by the watcher"
+        );
+
+        let outside = TempDir::new().expect("outside");
+        let outside_file = outside.path().join("outside.md");
+        fs::write(&outside_file, "# Outside\n").unwrap();
+        let error = validate_selected_share_targets(project.path(), &[outside_file], None)
+            .expect_err("outside path rejected");
+        assert!(error.to_string().contains("outside project"));
     }
 
     // --- identity round-trip ----------------------------------------------
@@ -5109,6 +5621,118 @@ mod tests {
             "small fixture stays on the inline mailbox lane"
         );
         assert_eq!(node_ref.byte_length, blob_bytes.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn selected_share_publishes_exact_entries_manifest_with_portable_paths() {
+        let server = MockServer::start().await;
+        let id_dir = TempDir::new().expect("id tempdir");
+        let (_store_tmp, store, boot) =
+            make_bootstrapper(server.uri(), id_dir.path().to_path_buf());
+
+        Mock::given(method("POST"))
+            .and(path_regex_for_room_create_v3())
+            .respond_with(|req: &Request| {
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "roomId": req.url.path().rsplit('/').next().unwrap_or(""),
+                    "createdAt": 1_700_000_000_000u64,
+                    "expiresAt": 1_700_086_400_000u64,
+                    "policy": {},
+                    "ownerSigningKeyId": "k",
+                    "serverSeq": 0,
+                }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex_for_devices_v3())
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let project = TempDir::new().expect("project");
+        let nested = project.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let first = project.path().join("a.md");
+        let primary = nested.join("b.html");
+        let private = project.path().join("private.md");
+        std::fs::write(&first, "# A\n").unwrap();
+        std::fs::write(&primary, "<h1>B</h1>\n").unwrap();
+        std::fs::write(&private, "# Private\n").unwrap();
+
+        let outcome = boot
+            .share_selected(
+                project.path().to_path_buf(),
+                vec![first.clone(), primary.clone()],
+                Some(primary.clone()),
+                RoomMode::Hybrid,
+                None,
+            )
+            .await
+            .expect("selected share");
+
+        let snapshots = store
+            .iter_snapshots(&outcome.room_id)
+            .expect("iter snapshots")
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("decode snapshots");
+        assert_eq!(snapshots.len(), 3, "two entries plus one manifest");
+        let manifest = snapshots
+            .iter()
+            .find_map(|snapshot| {
+                snapshot
+                    .plaintext
+                    .as_ref()
+                    .filter(|value| {
+                        value.doc_type == crate::review::model::DocType::WorkspaceManifest
+                    })
+                    .and_then(|value| value.manifest.as_ref())
+            })
+            .expect("workspace manifest");
+        assert_eq!(
+            manifest.scope,
+            crate::review::model::WorkspaceManifestScope::Entries
+        );
+        assert_eq!(
+            manifest
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.md", "nested/b.html"]
+        );
+        assert!(
+            find_room_for_path(store.root(), &private)
+                .expect("private lookup")
+                .is_none(),
+            "an unselected sibling must not join the room later"
+        );
+        assert_eq!(
+            selected_share_wire_path(store.root(), &outcome.room_id, &primary)
+                .expect("wire path")
+                .as_deref(),
+            Some("nested/b.html")
+        );
+        assert_eq!(
+            local_owner_display_path(store.root(), &outcome.room_id, "nested/b.html")
+                .expect("local path")
+                .as_deref(),
+            Some(primary.to_string_lossy().as_ref())
+        );
+
+        let envelopes = store
+            .iter_outbox(&outcome.room_id)
+            .expect("iter outbox")
+            .collect::<anyhow::Result<Vec<_>>>()
+            .expect("decode outbox");
+        assert_eq!(
+            envelopes.len(),
+            8,
+            "genesis + owner + two entry pairs + manifest pair"
+        );
     }
 
     /// Sharing an `.html` file publishes a read-only snapshot: the plaintext

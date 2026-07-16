@@ -81,7 +81,7 @@ tasks:
         done
 
         echo "Launching attn with HMR enabled (path: ${ATTN_PATH}, relay: ${ATTN_RELAY_URL})"
-        ATTN_DEV_SERVER_URL="${ATTN_DEV_SERVER_URL}" ATTN_RELAY_URL="${ATTN_RELAY_URL}" cargo run -- --no-fork "${ATTN_PATH}"
+        ATTN_DEV_SERVER_URL="${ATTN_DEV_SERVER_URL}" ATTN_RELAY_URL="${ATTN_RELAY_URL}" cargo run --bin attn -- --no-fork "${ATTN_PATH}"
         '
 
   dev:collab:

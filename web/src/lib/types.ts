@@ -84,6 +84,11 @@ export interface SearchResultsPayload {
   items: SearchResultItem[];
 }
 
+export interface ShareableFilesPayload {
+  rootPath: string;
+  items: SearchResultItem[];
+}
+
 /** @deprecated Use TreeNode instead */
 export type FileEntry = TreeNode;
 
@@ -100,6 +105,7 @@ export interface ContentPayload {
   treePatch?: TreePatch;
   treeOps?: TreeOp[];
   searchResults?: SearchResultsPayload;
+  shareableFiles?: ShareableFilesPayload;
 }
 
 export interface UpdatePayload {
@@ -116,6 +122,7 @@ export interface UpdatePayload {
   treePatch?: TreePatch;
   treeOps?: TreeOp[];
   searchResults?: SearchResultsPayload;
+  shareableFiles?: ShareableFilesPayload;
 }
 
 export type IpcMessageType =
@@ -124,6 +131,7 @@ export type IpcMessageType =
   | 'switch_project'
   | 'load_children'
   | 'search_files'
+  | 'review_list_shareable_files'
   | 'edit_save'
   | 'theme_change'
   | 'open_external'
@@ -227,9 +235,19 @@ export interface JsErrorMessage {
 
 export interface ReviewShareMessage {
   type: 'review_share';
+  /** Project root used to derive safe reviewer-facing relative paths. */
   path: string;
+  /** Exact native file selection. Empty/absent preserves legacy file/folder sharing. */
+  selectedPaths?: string[];
+  /** File the reviewer should open first. */
+  primaryPath?: string;
   mode: 'live' | 'async' | 'hybrid';
   ttl?: string;
+}
+
+export interface ReviewListShareableFilesMessage {
+  type: 'review_list_shareable_files';
+  rootPath: string;
 }
 
 export interface ReviewJoinMessage {
@@ -321,6 +339,7 @@ export type IpcMessage =
   | SwitchProjectMessage
   | LoadChildrenMessage
   | SearchFilesMessage
+  | ReviewListShareableFilesMessage
   | EditSaveMessage
   | ThemeChangeMessage
   | OpenExternalMessage

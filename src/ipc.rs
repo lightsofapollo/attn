@@ -29,6 +29,9 @@ pub enum IpcMessage {
     #[serde(rename = "search_files")]
     SearchFiles { query: String },
 
+    #[serde(rename = "review_list_shareable_files", rename_all = "camelCase")]
+    ReviewListShareableFiles { root_path: String },
+
     #[serde(rename = "edit_save")]
     EditSave { content: String },
 
@@ -76,6 +79,10 @@ pub enum IpcMessage {
     #[serde(rename = "review_share", rename_all = "camelCase")]
     ReviewShare {
         path: String,
+        #[serde(default)]
+        selected_paths: Vec<String>,
+        #[serde(default)]
+        primary_path: Option<String>,
         mode: String,
         #[serde(default)]
         ttl: Option<String>,
@@ -297,6 +304,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             IpcMessage::SearchFiles { query } => {
                 let _ = proxy.send_event(UserEvent::SearchFiles(query));
             }
+            IpcMessage::ReviewListShareableFiles { root_path } => {
+                let _ = proxy.send_event(UserEvent::ListShareableFiles(PathBuf::from(root_path)));
+            }
             IpcMessage::EditSave { content } => {
                 // Route the write through WorkingCopyService so collab state
                 // (revision journal, content hash, suggestion-accept hook)
@@ -393,11 +403,19 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             // the command and emits a stub `ReviewUpdate` back through the
             // event loop → `window.__attn__.review*` callback round-trip;
             // real handler bodies land in later issues.
-            IpcMessage::ReviewShare { path, mode, ttl } => {
+            IpcMessage::ReviewShare {
+                path,
+                selected_paths,
+                primary_path,
+                mode,
+                ttl,
+            } => {
                 submit_review_command(
                     state,
                     ReviewCommand::Share {
                         path: PathBuf::from(path),
+                        selected_paths: selected_paths.into_iter().map(PathBuf::from).collect(),
+                        primary_path: primary_path.map(PathBuf::from),
                         mode,
                         ttl,
                     },
@@ -823,9 +841,48 @@ mod tests {
         let raw = r#"{"type":"review_share","path":"/tmp/plan.md","mode":"async"}"#;
         let msg: IpcMessage = serde_json::from_str(raw).expect("parse review_share");
         match msg {
-            IpcMessage::ReviewShare { path, mode, ttl } => {
+            IpcMessage::ReviewShare {
+                path,
+                selected_paths,
+                primary_path,
+                mode,
+                ttl,
+            } => {
                 assert_eq!(path, "/tmp/plan.md");
+                assert!(selected_paths.is_empty());
+                assert!(primary_path.is_none());
                 assert_eq!(mode, "async");
+                assert!(ttl.is_none());
+            }
+            other => panic!("expected ReviewShare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ipc_message_review_share_parses_exact_file_selection() {
+        let raw = r#"{
+            "type":"review_share",
+            "path":"/tmp/project",
+            "selectedPaths":["/tmp/project/a.md","/tmp/project/docs/b.md"],
+            "primaryPath":"/tmp/project/docs/b.md",
+            "mode":"hybrid"
+        }"#;
+        let msg: IpcMessage = serde_json::from_str(raw).expect("parse selected review_share");
+        match msg {
+            IpcMessage::ReviewShare {
+                path,
+                selected_paths,
+                primary_path,
+                mode,
+                ttl,
+            } => {
+                assert_eq!(path, "/tmp/project");
+                assert_eq!(
+                    selected_paths,
+                    vec!["/tmp/project/a.md", "/tmp/project/docs/b.md"]
+                );
+                assert_eq!(primary_path.as_deref(), Some("/tmp/project/docs/b.md"));
+                assert_eq!(mode, "hybrid");
                 assert!(ttl.is_none());
             }
             other => panic!("expected ReviewShare, got {other:?}"),
@@ -977,8 +1034,16 @@ mod tests {
     fn dispatch_review_ipc(body: &str, state: &Arc<Mutex<AppState>>) {
         let msg: IpcMessage = serde_json::from_str(body).expect("parse IpcMessage");
         let cmd = match msg {
-            IpcMessage::ReviewShare { path, mode, ttl } => ReviewCommand::Share {
+            IpcMessage::ReviewShare {
+                path,
+                selected_paths,
+                primary_path,
+                mode,
+                ttl,
+            } => ReviewCommand::Share {
                 path: PathBuf::from(path),
+                selected_paths: selected_paths.into_iter().map(PathBuf::from).collect(),
+                primary_path: primary_path.map(PathBuf::from),
                 mode,
                 ttl,
             },

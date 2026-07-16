@@ -67,6 +67,11 @@ pub enum ReviewCommand {
     /// Share the current path as a new review room.
     Share {
         path: PathBuf,
+        /// Exact files selected by the owner. Empty preserves the legacy
+        /// single-file/folder command used by CLI callers.
+        selected_paths: Vec<PathBuf>,
+        /// Selected document the reviewer should receive first.
+        primary_path: Option<PathBuf>,
         mode: String,
         ttl: Option<String>,
     },
@@ -922,9 +927,25 @@ impl ReviewManager {
                 }
                 return;
             }
-            (ReviewCommand::Share { path, mode, ttl }, Some(bootstrapper), Some(runtime)) => {
+            (
+                ReviewCommand::Share {
+                    path,
+                    selected_paths,
+                    primary_path,
+                    mode,
+                    ttl,
+                },
+                Some(bootstrapper),
+                Some(runtime),
+            ) => {
                 let mode = mode_from_str(mode);
-                let result = runtime.block_on(bootstrapper.share(path.clone(), mode, ttl.clone()));
+                let result = runtime.block_on(bootstrapper.share_selected(
+                    path.clone(),
+                    selected_paths.clone(),
+                    primary_path.clone(),
+                    mode,
+                    ttl.clone(),
+                ));
                 self.emit_share_outcome(result);
                 return;
             }
@@ -3858,11 +3879,31 @@ fn rehydrate_snapshot_event(
         tracing::warn!("workspace manifest hydration rejected: {err}");
         return;
     }
+    let is_manifest = plaintext.doc_type == crate::review::model::DocType::WorkspaceManifest;
     if let ReviewEventBody::SnapshotCreated {
         inline_snapshot, ..
     } = &mut event.body
     {
         *inline_snapshot = Some(plaintext);
+    }
+    // Explicit native shares use portable root-relative paths on the wire.
+    // Only the owner has the private local-share record needed to restore an
+    // absolute path for native file-tree and room-focus behavior.
+    if !is_manifest
+        && let ReviewEventBody::SnapshotCreated {
+            owner_display_path: Some(display_path),
+            ..
+        } = &mut event.body
+    {
+        match crate::review::bootstrap::local_owner_display_path(
+            store.root(),
+            room_id,
+            display_path,
+        ) {
+            Ok(Some(local_path)) => *display_path = local_path,
+            Ok(None) => {}
+            Err(error) => tracing::warn!("could not resolve local owner display path: {error}"),
+        }
     }
 }
 
@@ -5975,6 +6016,8 @@ mod tests {
         let (mgr, rx, _tmp) = make_manager();
         mgr.submit(ReviewCommand::Share {
             path: PathBuf::from("/tmp/plan.md"),
+            selected_paths: Vec::new(),
+            primary_path: None,
             mode: "live".to_string(),
             ttl: None,
         });
@@ -6706,6 +6749,8 @@ mod bootstrap_integration_tests {
         let (_doc_tmp, path) = temp_markdown_file("manager-share.md", "# Manager share\n");
         mgr.submit(ReviewCommand::Share {
             path,
+            selected_paths: Vec::new(),
+            primary_path: None,
             mode: "async".to_string(),
             ttl: None,
         });

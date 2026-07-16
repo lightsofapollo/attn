@@ -94,6 +94,29 @@ test('request construction uses the configured scope, mode, lifetime, and risk f
   })?.selection, { kind: 'workspace' }, 'workspace request');
 });
 
+test('curated shares use entries scope for both one and many selected files', () => {
+  const one = createShareRequest({
+    scope: 'entries',
+    selectedPaths: ['notes.md'],
+    mode: 'hybrid',
+    ttlMs: SHARE_TTL_ONE_DAY,
+    riskAcknowledged: true,
+  });
+  equal(one?.selection, { kind: 'entries', paths: ['notes.md'] }, 'one selected file');
+
+  const many = createShareRequest({
+    scope: 'entries',
+    selectedPaths: ['notes.md', 'image.png'],
+    mode: 'hybrid',
+    ttlMs: SHARE_TTL_ONE_DAY,
+    riskAcknowledged: true,
+  });
+  equal(many?.selection, {
+    kind: 'entries',
+    paths: ['notes.md', 'image.png'],
+  }, 'many selected files');
+});
+
 test('invite masking hides fragment material and utility labels remain stable', () => {
   equal(maskInviteUrl('https://attn.sh/review/room#key=secret-value'),
     'https://attn.sh/review/room#key=••••••••••••••••', 'masked invite');

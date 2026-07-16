@@ -128,6 +128,29 @@ pub fn search_previewable_files(root: &Path, query: &str, max_results: usize) ->
         .collect()
 }
 
+/// Enumerate every reviewable document below `root` for the native Share
+/// picker. Unlike the sidebar search this deliberately excludes media assets:
+/// native review rooms currently publish UTF-8 Markdown and HTML snapshots.
+/// Paths remain absolute on the local IPC boundary and are converted to
+/// root-relative paths only when a workspace manifest crosses the protocol.
+pub fn list_shareable_files(root: &Path, max_results: usize) -> Vec<SearchResult> {
+    if max_results == 0 {
+        return Vec::new();
+    }
+    let mut remaining = MAX_TREE_NODES;
+    let mut candidates = Vec::new();
+    collect_previewable_candidates_limited(root, root, &mut remaining, &mut candidates);
+    candidates
+        .into_iter()
+        .filter(|candidate| matches!(candidate.file_type, FileType::Markdown | FileType::Html))
+        .take(max_results)
+        .map(|candidate| SearchResult {
+            path: candidate.path,
+            file_type: candidate.file_type,
+        })
+        .collect()
+}
+
 pub fn is_previewable(file_type: &FileType) -> bool {
     matches!(
         file_type,
@@ -331,8 +354,8 @@ fn path_for_match(root: &Path, path: &Path, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        FileType, detect_file_type, find_first_previewable_path, read_tree_root_snapshot,
-        search_previewable_files,
+        FileType, detect_file_type, find_first_previewable_path, list_shareable_files,
+        read_tree_root_snapshot, search_previewable_files,
     };
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -397,6 +420,24 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).expect("cleanup temp root");
+    }
+
+    #[test]
+    fn shareable_file_list_is_recursive_and_document_only() {
+        let root = unique_temp_dir();
+        let nested = root.join("planning");
+        std::fs::create_dir_all(&nested).expect("create nested dir");
+        std::fs::write(root.join("README.md"), "# Readme\n").expect("write markdown");
+        std::fs::write(nested.join("review.html"), "<h1>Review</h1>").expect("write html");
+        std::fs::write(nested.join("diagram.png"), [0_u8, 1, 2]).expect("write image");
+
+        let files = list_shareable_files(&root, 20);
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|file| file.path.ends_with("README.md")));
+        assert!(files.iter().any(|file| file.path.ends_with("review.html")));
+        assert!(!files.iter().any(|file| file.path.ends_with("diagram.png")));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

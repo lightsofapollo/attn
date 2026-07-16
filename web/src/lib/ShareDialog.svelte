@@ -7,10 +7,8 @@
   critical path; they live behind an "Advanced" disclosure.
 
   Flow:
-    1. Dialog opens (with `filePath` set).
-    2. If there is no current share for the file, we auto-fire `reviewShare`
-       with `live` mode default. The dialog renders a single Minting…
-       placeholder card while we wait.
+    1. Dialog opens with the current Markdown/HTML file selected.
+    2. The owner confirms an exact N-file selection before publication begins.
     3. The daemon's `ShareReady` IPC populates `reviewStore.currentShare`,
        App.svelte threads `existingInviteUrl` into this dialog, and the URL
        card swaps in with a Copy button + an `attn review join …` CLI snippet
@@ -18,8 +16,7 @@
     4. The URL is auto-copied to the clipboard on first arrival; subsequent
        opens act as inspect-mode (re-Share is idempotent against the cached
        room secret on disk, so no extra round-trip is needed).
-    5. [Done] dismisses. There is no [Start] / [Cancel] anymore — the URL is
-       always ready by the time the user reads it.
+    5. [Done] dismisses after the URL is ready.
 
   Advanced disclosure exposes the original mode picker + verify-key
   fingerprint + single-device toggle for power users.
@@ -35,7 +32,7 @@
   import { Button } from './components/ui/button';
   import { reviewShare } from './ipc';
   import { ownerKeyFingerprint } from './review/fingerprint';
-  import type { RoomId } from './types';
+  import type { RoomId, SearchResultItem } from './types';
 
   // ---------------------------------------------------------------------------
   // Public surface (bound by App.svelte)
@@ -46,6 +43,11 @@
   interface Props {
     open: boolean;
     filePath: string;
+    projectRoot?: string;
+    files?: SearchResultItem[];
+    filesLoading?: boolean;
+    targetIsDirectory?: boolean;
+    existingFilePaths?: string[];
     ownerSigningKey?: string;
     /** Empty until the daemon's ShareReady callback populates it. */
     existingInviteUrl?: string;
@@ -70,11 +72,17 @@
     ttl?: string;
     deleteEventsAfterOwnerAck: boolean;
     filePath: string;
+    selectedPaths: string[];
   }
 
   let {
     open = $bindable(false),
     filePath,
+    projectRoot = '',
+    files = [],
+    filesLoading = false,
+    targetIsDirectory = false,
+    existingFilePaths = [],
     ownerSigningKey = '',
     existingInviteUrl = '',
     existingBrowserInviteUrl = '',
@@ -105,7 +113,9 @@
   let copiedCli = $state(false);
   let copiedFingerprint = $state(false);
   let advancedOpen = $state(false);
-  let phase = $state<'idle' | 'minting' | 'ready' | 'error'>('idle');
+  let phase = $state<'configure' | 'minting' | 'ready' | 'error'>('configure');
+  let selectedPaths = $state<string[]>([]);
+  let fileQuery = $state('');
   let fingerprint = $state('—— —— ——');
   /** Guards the minting phase: if ShareReady never lands, surface an error. */
   let mintTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -146,30 +156,46 @@
       : '',
   );
 
-  // Tracks which target we've already fired a mint for during this open, so an
-  // effect re-run (e.g. ShareReady flipping the existing-invite props) can't
-  // double-mint. Plain (non-reactive) on purpose. Reset when the dialog closes.
-  let mintingTarget: string | null = null;
+  let selectionInitializedFor: string | null = null;
+  const filteredFiles = $derived.by(() => {
+    const query = fileQuery.trim().toLocaleLowerCase();
+    if (!query) return files;
+    return files.filter((file) => relativePath(file.path).toLocaleLowerCase().includes(query));
+  });
+  const selectedCount = $derived(selectedPaths.length);
+  const selectionSummary = $derived(
+    `${selectedCount} ${selectedCount === 1 ? 'file' : 'files'} selected`,
+  );
 
-  // Auto-mint when the dialog's target isn't already shared. The parent only
-  // passes `existingRoomId`/`existingInviteUrl` when the target IS the current
-  // share — so a NEW target (sharing a folder while a file is shared, etc.)
-  // mints a fresh room and the owner switches over to it.
+  // Existing shares open directly to their link. New shares always wait for
+  // an explicit file selection; loading the native project scan must never
+  // race into publication.
   $effect(() => {
     if (!open) {
-      mintingTarget = null;
+      selectionInitializedFor = null;
       return;
     }
     copiedTier = null;
     copiedCli = false;
     copiedFingerprint = false;
     if (existingRoomId !== null && existingInviteUrl.length > 0) {
+      if (existingFilePaths.length > 0) {
+        selectedPaths = [...new Set(existingFilePaths)];
+      }
       phase = 'ready';
       return;
     }
-    if (mintingTarget === filePath) return;
-    mintingTarget = filePath;
-    void autoMint();
+    phase = 'configure';
+    if (filesLoading) return;
+    const selectionKey = `${projectRoot}\u0000${filePath}\u0000${targetIsDirectory}`;
+    if (selectionInitializedFor === selectionKey) return;
+    selectionInitializedFor = selectionKey;
+    fileQuery = '';
+    selectedPaths = targetIsDirectory
+      ? files.filter((file) => pathIsWithin(filePath, file.path)).map((file) => file.path)
+      : files.some((file) => file.path === filePath)
+        ? [filePath]
+        : [];
   });
 
   // Transition → ready when the daemon's ShareReady IPC lands. Recovers from a
@@ -226,8 +252,8 @@
     };
   });
 
-  async function autoMint(): Promise<void> {
-    if (filePath.length === 0) return;
+  async function startMint(): Promise<void> {
+    if (selectedPaths.length === 0) return;
     const { mode: ipcMode, ttl } = modeToIpc(selectedMode);
     onClearError?.();
     phase = 'minting';
@@ -239,19 +265,48 @@
     mintTimeout = setTimeout(() => {
       if (phase === 'minting') phase = 'error';
     }, MINT_TIMEOUT_MS);
-    await reviewShare(filePath, ipcMode, ttl);
+    await reviewShare(projectRoot || filePath, selectedPaths, filePath, ipcMode, ttl);
     onStart?.({
       mode: selectedMode,
       ipcMode,
       ttl,
       deleteEventsAfterOwnerAck: singleDeviceOnly,
       filePath,
+      selectedPaths: [...selectedPaths],
     });
   }
 
   function retryMint(): void {
-    phase = 'idle';
-    void autoMint();
+    void startMint();
+  }
+
+  function togglePath(path: string, checked: boolean): void {
+    selectedPaths = checked
+      ? [...new Set([...selectedPaths, path])]
+      : selectedPaths.filter((candidate) => candidate !== path);
+  }
+
+  function selectVisible(): void {
+    selectedPaths = [...new Set([...selectedPaths, ...filteredFiles.map((file) => file.path)])];
+  }
+
+  function clearSelection(): void {
+    selectedPaths = [];
+  }
+
+  function relativePath(path: string): string {
+    const normalizedRoot = projectRoot.replace(/[\\/]+$/u, '');
+    if (!normalizedRoot) return path;
+    const prefix = `${normalizedRoot}/`;
+    return path.replaceAll('\\', '/').startsWith(prefix.replaceAll('\\', '/'))
+      ? path.replaceAll('\\', '/').slice(prefix.replaceAll('\\', '/').length)
+      : path;
+  }
+
+  function pathIsWithin(parent: string, candidate: string): boolean {
+    const normalizedParent = parent.replaceAll('\\', '/').replace(/\/+$/u, '');
+    const normalizedCandidate = candidate.replaceAll('\\', '/');
+    return normalizedCandidate === normalizedParent || normalizedCandidate.startsWith(`${normalizedParent}/`);
   }
 
   export function modeToIpc(mode: ShareMode): { mode: 'live' | 'async' | 'hybrid'; ttl?: string } {
@@ -312,6 +367,7 @@
   }
 
   const isMinting = $derived(phase === 'minting');
+  const isConfiguring = $derived(phase === 'configure');
   const isReady = $derived(phase === 'ready');
   const isError = $derived(phase === 'error');
 </script>
@@ -321,14 +377,82 @@
     <Dialog.Header>
       <Dialog.Title>Share for review</Dialog.Title>
       <Dialog.Description>
-        <!-- break-all: an unbreakable mono path would otherwise drive the
-             dialog's grid track wider than its padding box on narrow
-             windows — every w-full child then runs into the right padding
-             and gets clipped flush to the border (attn-z46). -->
-        <span class="break-all font-mono text-xs">{filePath || '(no file selected)'}</span>
+        {#if isConfiguring}
+          Choose the exact files reviewers will receive.
+        {:else}
+          <span class="font-medium text-foreground">{selectionSummary}</span>
+        {/if}
       </Dialog.Description>
     </Dialog.Header>
 
+    {#if isConfiguring}
+      <section class="flex min-h-0 flex-col gap-3" aria-labelledby="native-share-files-heading">
+        <div class="flex items-end justify-between gap-3">
+          <div>
+            <h3 id="native-share-files-heading" class="text-sm font-semibold text-foreground">Select files</h3>
+            <p class="mt-0.5 text-xs text-muted-foreground">The current file starts selected. Nothing is shared until you create the link.</p>
+          </div>
+          <div class="flex shrink-0 gap-1 text-xs">
+            <button type="button" class="rounded-md px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" onclick={selectVisible}>Select visible</button>
+            <button type="button" class="rounded-md px-2 py-1.5 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" onclick={clearSelection}>Clear</button>
+          </div>
+        </div>
+
+        <input
+          type="search"
+          class="h-9 w-full rounded-md border border-border bg-background px-3 font-sans text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+          placeholder="Filter project files…"
+          aria-label="Filter files to share"
+          bind:value={fileQuery}
+        />
+
+        <div class="max-h-72 overflow-y-auto rounded-md border border-border bg-background" data-slot="share-file-picker">
+          {#if filesLoading}
+            <div class="flex items-center gap-2 px-3 py-8 text-sm text-muted-foreground" role="status">
+              <span class="inline-block size-3 animate-pulse rounded-full bg-primary/60" aria-hidden="true"></span>
+              Finding reviewable files…
+            </div>
+          {:else if files.length === 0}
+            <p class="px-3 py-8 text-center text-sm text-muted-foreground">No Markdown or HTML files found in this project.</p>
+          {:else if filteredFiles.length === 0}
+            <p class="px-3 py-8 text-center text-sm text-muted-foreground">No files match “{fileQuery}”.</p>
+          {:else}
+            {#each filteredFiles as file (file.path)}
+              <label class="grid min-h-11 cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-border/60 px-3 py-2 last:border-b-0 hover:bg-muted/45">
+                <input
+                  type="checkbox"
+                  class="size-4 accent-primary"
+                  checked={selectedPaths.includes(file.path)}
+                  onchange={(event) => togglePath(file.path, event.currentTarget.checked)}
+                />
+                <span class="min-w-0 truncate font-mono text-xs text-foreground">{relativePath(file.path)}</span>
+                <span class="text-[11px] text-muted-foreground">
+                  {file.path === filePath ? 'Current · ' : ''}{file.fileType === 'html' ? 'Read-only' : 'Markdown'}
+                </span>
+              </label>
+            {/each}
+          {/if}
+        </div>
+
+        <div class="flex items-center justify-between gap-3 text-xs" aria-live="polite">
+          <strong class="font-medium text-foreground">{selectionSummary}</strong>
+          <span class="truncate font-mono text-muted-foreground">{projectRoot}</span>
+        </div>
+      </section>
+    {:else}
+    {#if isReady && selectedPaths.length > 0}
+      <section class="flex min-w-0 flex-col gap-1.5 border-b border-border/60 pb-3" aria-labelledby="native-shared-files-heading" data-slot="share-ready-files">
+        <div class="flex items-center justify-between gap-3 text-xs">
+          <strong id="native-shared-files-heading" class="font-medium text-foreground">Reviewers receive</strong>
+          <span class="text-muted-foreground">{selectionSummary}</span>
+        </div>
+        <div class="max-h-24 overflow-y-auto font-mono text-xs leading-5 text-muted-foreground">
+          {#each selectedPaths as path (path)}
+            <div class="truncate" title={relativePath(path)}>{relativePath(path)}</div>
+          {/each}
+        </div>
+      </section>
+    {/if}
     <!-- ============================================================
          Primary card: the one-liner command. This works for ANYONE —
          npx uses a locally-installed attn if present, else downloads on
@@ -537,15 +661,18 @@
         </label>
       </div>
     {/if}
+    {/if}
 
     <Dialog.Footer>
       <Button
         type="button"
-        onclick={handleDone}
-        disabled={isMinting}
+        onclick={isConfiguring ? startMint : handleDone}
+        disabled={isMinting || (isConfiguring && (filesLoading || selectedCount === 0))}
         data-slot="share-start"
       >
-        {#if isMinting}
+        {#if isConfiguring}
+          Create review link for {selectedCount} {selectedCount === 1 ? 'file' : 'files'}
+        {:else if isMinting}
           Minting…
         {:else}
           Done

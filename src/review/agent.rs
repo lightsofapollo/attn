@@ -106,6 +106,8 @@ pub fn run(share: Option<&str>, mode: &str, relay_url: Option<&str>) -> Result<(
         match std::fs::canonicalize(path) {
             Ok(abs) => manager.submit(ReviewCommand::Share {
                 path: abs,
+                selected_paths: Vec::new(),
+                primary_path: None,
                 mode: mode.to_string(),
                 ttl: Some("24h".to_string()),
             }),
@@ -134,6 +136,8 @@ pub fn run(share: Option<&str>, mode: &str, relay_url: Option<&str>) -> Result<(
                 match std::fs::canonicalize(path) {
                     Ok(abs) => manager.submit(ReviewCommand::Share {
                         path: abs,
+                        selected_paths: Vec::new(),
+                        primary_path: None,
                         mode: m.to_string(),
                         ttl: Some("24h".to_string()),
                     }),

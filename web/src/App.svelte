@@ -32,6 +32,7 @@
     openExternal,
     reviewAcceptSuggestion,
     reviewCollabSend,
+    reviewListShareableFiles,
     reviewViewState,
     reviewStop,
     searchFiles,
@@ -143,6 +144,10 @@
   // every open so the dialog shares the row that was clicked, not whatever
   // file happens to be active (folder shares never navigate the owner).
   let shareTargetPath = $state<string | null>(null);
+  let shareTargetIsDirectory = $state(false);
+  let shareableFiles = $state<SearchResultItem[]>([]);
+  let shareableFilesLoading = $state(false);
+  let shareableFilesRoot = $state('');
   // Onboarding display-name prompt. Shown once when the user first enters a
   // room (share or join) with no name set; also reachable in 'edit' mode via
   // the connection badge. `namePrompted` is a per-session one-shot guard.
@@ -388,11 +393,24 @@
     const target = shareTargetPath ?? activePath ?? '';
     return shareTargetMatches(share.ownerDisplayPath, target);
   });
+  let shareTargetExistingPaths = $derived.by(() => {
+    if (!shareTargetIsCurrent) return [];
+    const roomId = reviewStore.currentShare?.roomId;
+    if (!roomId) return [];
+    return [...new Set(
+      reviewStore.snapshots
+        .filter((snapshot) => snapshot.roomId === roomId && Boolean(snapshot.ownerDisplayPath))
+        .map((snapshot) => snapshot.ownerDisplayPath as string),
+    )];
+  });
   // Reset the share target when the dialog closes so a stale path can't feed
   // shareTargetIsCurrent on the next open; openShareDialogForPath always sets it
   // fresh before reopening, so clearing here is safe.
   $effect(() => {
-    if (!shareDialogOpen) shareTargetPath = null;
+    if (!shareDialogOpen) {
+      shareTargetPath = null;
+      shareTargetIsDirectory = false;
+    }
   });
   const loadedMtimeByPath = new Map<string, number>();
   // Reactive map of disk mtimes for HTML files, keyed by path. Bumping an
@@ -1924,6 +1942,11 @@
           commandPaletteSearchResults = incomingItems;
         }
       }
+      if (data.shareableFiles) {
+        shareableFilesRoot = data.shareableFiles.rootPath;
+        shareableFiles = data.shareableFiles.items;
+        shareableFilesLoading = false;
+      }
       applyTabScopeForProject(activeProjectPath, rootPath);
 
       if (typeof data.markdown === 'string') {
@@ -2022,6 +2045,11 @@
     }
 
     function applyUpdateContent(data: UpdatePayload): void {
+      if (data.shareableFiles) {
+        shareableFilesRoot = data.shareableFiles.rootPath;
+        shareableFiles = data.shareableFiles.items;
+        shareableFilesLoading = false;
+      }
       if (data.rootPath) {
         rootPath = data.rootPath;
       }
@@ -2448,8 +2476,8 @@
   /**
    * Open the Share-for-review modal (attn-nnj.4.10). Triggered by the
    * ReviewBar's [Share] button click handler and by the Cmd+Shift+S
-   * binding routed through initKeyboard. We gate on an active markdown
-   * tab — sharing a directory or a non-markdown asset is meaningless.
+   * binding routed through initKeyboard. We gate on an active reviewable
+   * document — Markdown is collaborative and HTML is shared read-only.
    */
   function openShareDialog(): void {
     if (!activePath) return;
@@ -2459,9 +2487,9 @@
   function openShareDialogForPath(path: string, isDir = false): void {
     if (!path) return;
     const ft = detectFileType(path);
-    // A folder share enumerates its markdown files on the daemon side, so the
-    // path itself isn't a markdown file — only gate single-file shares on type.
-    if (!isDir && ft !== 'markdown') return;
+    // A folder share enumerates its reviewable files on the daemon side, so the
+    // path itself isn't a document — only gate single-file shares on type.
+    if (!isDir && ft !== 'markdown' && ft !== 'html') return;
     // First-time onboarding: confirm/set the display name BEFORE the first
     // share so the published participant carries it (and so the prompt doesn't
     // stack on top of the ShareDialog). Stash the path; resume after the prompt.
@@ -2474,6 +2502,17 @@
       return;
     }
     shareTargetPath = path;
+    shareTargetIsDirectory = isDir;
+    const selectionRoot = rootPath || activeProjectPath || (isDir ? path : path.split('/').slice(0, -1).join('/'));
+    if (selectionRoot) {
+      shareableFilesLoading = true;
+      shareableFilesRoot = selectionRoot;
+      reviewListShareableFiles(selectionRoot);
+    } else {
+      shareableFiles = [{ path, fileType: ft }];
+      shareableFilesLoading = false;
+      shareableFilesRoot = '';
+    }
     // Re-opening Share for an already-shared context-menu target must show that
     // room's invite even before activePath catches up. The focus effect pauses
     // while the dialog is open so a folder target can remain selected too.
@@ -2975,6 +3014,11 @@
 <ShareDialog
   bind:open={shareDialogOpen}
   filePath={shareTargetPath ?? activePath}
+  projectRoot={shareableFilesRoot || rootPath || activeProjectPath}
+  files={shareableFiles}
+  filesLoading={shareableFilesLoading}
+  targetIsDirectory={shareTargetIsDirectory}
+  existingFilePaths={shareTargetExistingPaths}
   existingInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.inviteUrl ?? '') : ''}
   existingBrowserInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.browserInviteUrl ?? '') : ''}
   existingViewInviteUrl={shareTargetIsCurrent ? (reviewStore.currentShare?.viewInviteUrl ?? '') : ''}

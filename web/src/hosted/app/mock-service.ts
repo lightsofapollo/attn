@@ -20,27 +20,28 @@ import type {
   WorkspaceSummary,
 } from './types';
 import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
+import { resolveBrowserReviewBase } from './share-environment';
 
-const MOCK_INVITE = {
-  view: {
-    tier: 'view',
-    browserUrl: 'https://attn.sh/s/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
-    nativeUrl: 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
-    cliCommand: "npx attnmd review join 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc'",
-  },
-  comment: {
-    tier: 'comment',
-    browserUrl: 'https://attn.sh/s/yPJpJifC1HUQgHsJ_7speQ#key=CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
-    nativeUrl: 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
-    cliCommand: "npx attnmd review join 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg'",
-  },
-  suggest: {
-    tier: 'suggest',
-    browserUrl: 'https://attn.sh/s/yPJpJifC1HUQgHsJ_7speQ#key=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk',
-    nativeUrl: 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk',
-    cliCommand: "npx attnmd review join 'attn://share/yPJpJifC1HUQgHsJ_7speQ#key=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk'",
-  },
-} as const;
+const MOCK_SHARE_ID = 'yPJpJifC1HUQgHsJ_7speQ';
+
+function mockInvite() {
+  const browserOrigin = new URL(resolveBrowserReviewBase(
+    import.meta.env.VITE_ATTN_SHARE_ORIGIN,
+    import.meta.env.VITE_ATTN_RELAY_URL,
+    typeof window === 'undefined' ? undefined : window.location.origin,
+  )).origin;
+  const invite = (tier: 'view' | 'comment' | 'suggest', key: string) => ({
+    tier,
+    browserUrl: `${browserOrigin}/s/${MOCK_SHARE_ID}#key=${key}`,
+    nativeUrl: `attn://share/${MOCK_SHARE_ID}#key=${key}`,
+    cliCommand: `npx attnmd review join 'attn://share/${MOCK_SHARE_ID}#key=${key}'`,
+  });
+  return {
+    view: invite('view', 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc'),
+    comment: invite('comment', 'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg'),
+    suggest: invite('suggest', 'CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk'),
+  } as const;
+}
 
 /** 'real' (no ?shell= param) boots the storage-backed service; every other
  * scenario runs this mock so degraded states stay directly reachable. */
@@ -365,7 +366,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
       retryReviewOutbox: async () => undefined,
       inspectShare: async () => this.mockShare ? structuredClone(this.mockShare) : null,
       ensureShare: async (input) => {
-        const invite = MOCK_INVITE;
+        const invite = mockInvite();
         const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
         const selection = input.selection;
         const paths = selection.kind === 'workspace'

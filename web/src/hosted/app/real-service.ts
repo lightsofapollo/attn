@@ -26,6 +26,7 @@ import {
 } from './workspace-service';
 import { quotaPressure } from '../../lib/review/browser-storage-probe';
 import { resolveBrowserRelayUrl } from '../../lib/review/browser-relay-url';
+import { resolveBrowserReviewBase } from './share-environment';
 import type { WorkspaceEntryRecord } from '../../lib/review/browser-workspace-schema';
 import type { WorkspaceFence } from '../../lib/review/browser-workspace-store';
 import { openBroadcastChannel } from '../../lib/tab-channels';
@@ -507,13 +508,9 @@ function toViewEntry(entry: WorkspaceEntryRecord): WorkspaceEntry {
 }
 
 function browserReviewBase(): string {
-  // Explicit override: mint invite links for a DIFFERENT public origin than
-  // the one serving this app (e.g. a localhost owner publishing invites that
-  // point at staging.attn.sh). The invite-origin allowlist still applies.
-  const override = import.meta.env.VITE_ATTN_SHARE_ORIGIN;
-  if (typeof override === 'string' && override.length > 0) {
-    return `${new URL(override).origin}/review`;
-  }
-  if (typeof window === 'undefined') return 'https://attn.sh/review';
-  return `${window.location.origin}/review`;
+  return resolveBrowserReviewBase(
+    import.meta.env.VITE_ATTN_SHARE_ORIGIN,
+    import.meta.env.VITE_ATTN_RELAY_URL,
+    typeof window === 'undefined' ? undefined : window.location.origin,
+  );
 }

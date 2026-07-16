@@ -505,6 +505,12 @@ export class BrowserWorkspaceSharingCoordinator {
       zeroSources(sources);
     }
 
+    // Re-read after uploads before choosing the commit revision. Current
+    // relays stage uploads invisibly, while older deployed relays advanced the
+    // public revision as each retained snapshot landed. Supporting both keeps
+    // a localhost owner from needing a manual Resume during relay rollouts and
+    // also closes the ordinary stale-read race with another owner operation.
+    remote = await client.fetchWithViewCapability(credentials.shareSecret);
     nextManifest.sort((left, right) => left.fileId.localeCompare(right.fileId));
     const manifestDigest = digestShareSnapshotManifest(nextManifest);
     const exact = remote.currentRoomId === record.roomId

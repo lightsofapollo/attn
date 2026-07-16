@@ -180,6 +180,26 @@ class MemoryShareRelay implements BrowserShareOwnerRelayPort {
   async revoke(): Promise<void> { this.revoked = true; }
 }
 
+/** Compatibility fixture for the relay version that committed uploads. */
+class RevisionAdvancingUploadRelay extends MemoryShareRelay {
+  override async uploadSnapshot(
+    fileId: string,
+    snapshotId: string,
+    ciphertext: Uint8Array,
+  ): Promise<ManagedShareSnapshotRef> {
+    const ref = await super.uploadSnapshot(fileId, snapshotId, ciphertext);
+    assert(this.record, 'dark share exists before legacy retained upload');
+    const snapshots = [structuredClone(ref)];
+    this.record = {
+      ...this.record,
+      revision: this.record.revision + 1,
+      snapshots,
+      manifestDigest: digestShareSnapshotManifest(snapshots),
+    };
+    return ref;
+  }
+}
+
 function indexBuilder(markdown: Uint8Array) {
   return Promise.resolve({ docHash: base64UrlEncode(sha256(markdown)), canonicalEncoding: 'utf8-bytes' as const,
     lineCount: new TextDecoder().decode(markdown).split('\n').length, blocks: [], headings: [] });
@@ -229,6 +249,32 @@ test('publishes one dark ShareDO projection, retained snapshot, then stable tier
     const tree = deriveRoomKeyTreeV3(observedCreate.roomSecret!);
     const roomCreated = decryptEvent(observedOutbox.envelopes[0]!, tree.readKeys.eventKey);
     assert(roomCreated.body.type === 'room_created', 'owner genesis leads publication');
+  } finally { storage.close(); }
+});
+
+test('commits on the first attempt when a deployed relay advances snapshot upload revisions', async () => {
+  const storage = await openStorage();
+  try {
+    const workspaceId = 'ws-v3-upload-revision'; await seedWorkspace(storage, workspaceId);
+    const fence = await acquireFence(storage, workspaceId);
+    let relay: RevisionAdvancingUploadRelay | null = null;
+    const coordinator = new BrowserWorkspaceSharingCoordinator(storage, workspaceId, fence, {
+      now: () => NOW, randomBytes: deterministicRandom(),
+      createRoom: async options => bootstrapFromOptions(options),
+      publish: options => publishBrowserSnapshots({ ...options, indexBuilder }),
+      indexBuilder,
+      outboxFactory: ({ storage: db, credentials }) => new AckingOutbox(db, credentials.roomId),
+      shareRelayFactory: options => (relay ??= new RevisionAdvancingUploadRelay(options.shareId)),
+    });
+
+    const view = await coordinator.ensurePublished({
+      ...request('file', ['notes/main.md']),
+      browserReviewBase: 'https://staging.attn.sh/review',
+    });
+    assert(view.invite, 'first publish completes without a manual resume');
+    const observed = required<RevisionAdvancingUploadRelay>(relay, 'share relay observed');
+    assert(observed.upserts.at(-1)?.revision === 2,
+      'commit refetches and advances from the relay upload revision');
   } finally { storage.close(); }
 });
 

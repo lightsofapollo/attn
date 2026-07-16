@@ -8,8 +8,12 @@ import { entryHtmlPath, hostedEntryForPath } from './src/lib/hosted/routes';
 const webRoot = fileURLToPath(new URL('.', import.meta.url));
 const hostedRoot = path.join(webRoot, 'hosted');
 const pushE2e = process.env.ATTN_PUSH_E2E === '1';
-const devRelayTarget = process.env.ATTN_DEV_RELAY_TARGET ?? 'http://localhost:8787';
-const devRelayOrigin = new URL(devRelayTarget).origin;
+const stagingRelayOrigin = 'https://relay-staging.attn.sh';
+const stagingWebOrigin = 'https://staging.attn.sh';
+const devRelayTarget = process.env.ATTN_DEV_RELAY_TARGET ?? stagingRelayOrigin;
+const devRelayTargetOrigin = new URL(devRelayTarget).origin;
+const devRelayOrigin = process.env.ATTN_DEV_RELAY_ORIGIN
+  ?? (devRelayTargetOrigin === stagingRelayOrigin ? stagingWebOrigin : devRelayTargetOrigin);
 const devRelayProxy = {
   target: devRelayTarget,
   ws: true,
@@ -119,15 +123,14 @@ export default defineConfig({
     fs: {
       allow: [webRoot],
     },
-    // Dev-only same-origin relay proxy. Set VITE_ATTN_RELAY_URL to the dev
-    // origin (e.g. http://localhost:5173) and run a local relay on
-    // ATTN_DEV_RELAY_TARGET (default http://localhost:8787): the browser then
-    // makes SAME-ORIGIN /v1|/v2|/v3|/health calls (no CORS) and vite forwards
-    // them to the relay, WebSocket included. This is what makes the share
-    // workflow completable — and Playwright-testable — on localhost.
+    // Dev-only same-origin relay proxy. Ordinary localhost development uses
+    // staging so its public invite links and room storage stay paired. Set
+    // ATTN_DEV_RELAY_TARGET for an explicit local relay; the browser then
+    // makes SAME-ORIGIN /v1|/v2|/v3|/health calls (no CORS) and Vite forwards
+    // them to that relay, WebSocket included.
     proxy: {
       // Browser WebSockets carry the app's arbitrary dev-server port in
-      // `Origin`. Rewrite it to the relay target so the relay can keep an
+      // `Origin`. Rewrite it to the relay environment so it can keep an
       // exact allowlist without every local Vite port being pre-registered.
       '/v3': { ...devRelayProxy },
       '/v2': { ...devRelayProxy },

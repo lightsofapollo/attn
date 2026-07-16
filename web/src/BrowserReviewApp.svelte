@@ -213,13 +213,14 @@
 
   void session.start().catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
+    const revoked = err instanceof Error && err.name === 'ShareGoneError';
     session.close();
-    // start() should never throw — but if it does, surface a network error
+    // start() should never throw — but if it does, surface a terminal error
     // so the UI is not stuck in `connecting`.
     sessionState = {
       ...sessionState,
       status: 'error',
-      error: { kind: 'network', message },
+      error: { kind: revoked ? 'share_revoked' : 'network', message },
     };
   });
 
@@ -777,6 +778,8 @@
         return 'This review room has expired';
       case 'cursor_too_old':
         return 'Session expired — please re-open the invite link';
+      case 'share_revoked':
+        return 'This review has ended';
       case 'device_register':
       case 'network':
       default:

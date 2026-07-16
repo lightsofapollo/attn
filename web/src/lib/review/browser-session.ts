@@ -157,6 +157,7 @@ export interface BrowserSessionError {
     | 'room_deleted'
     | 'room_expired'
     | 'cursor_too_old'
+    | 'share_revoked'
     | 'network';
   message: string;
 }

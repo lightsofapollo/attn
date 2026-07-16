@@ -88,6 +88,14 @@ export interface BrowserDurableShareNetworkOptions {
 }
 
 /** Authenticate with the tier-independent read leaf and learn only this selected bundle's tier. */
+/** The relay no longer knows this share: revoked by the owner or expired. */
+export class ShareGoneError extends Error {
+  constructor() {
+    super('this share link is no longer active');
+    this.name = 'ShareGoneError';
+  }
+}
+
 export async function discoverDurableShareTier(input: {
   relayUrl: string; invite: ParsedShareInvite; fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>; signal?: AbortSignal;
 }): Promise<ShareLinkTier> {
@@ -98,6 +106,7 @@ export async function discoverDurableShareTier(input: {
       'Attn-Share-Bundle': keys.bundleId,
       'Attn-Admission': buildAdmissionHeaderV3(keys.readAdmissionKey, 'read', 'GET', path, new Uint8Array()),
     } });
+    if (response.status === 404 || response.status === 410) throw new ShareGoneError();
     const value = await strictJson(response, 'share tier');
     const tier = isRecord(value) && isRecord(value.bundle) ? value.bundle.tier : undefined;
     if (tier !== 'view' && tier !== 'comment' && tier !== 'suggest') throw new Error('share tier response is invalid');
@@ -353,9 +362,20 @@ export class DurableShareBrowserSessionFacade {
   async forgetRoom(): Promise<void> { throw new Error('use the share link to reopen this review'); }
   private requireSession(): ProductionBrowserShareSession { if (!this.session) throw new Error('durable share is not ready'); return this.session; }
   private mapState(next: BrowserShareSessionState): void {
+    // `terminated` reaching a facade the app did not close is the share being
+    // revoked (or expiring) out from under the reviewer: mapState is gated on
+    // `!this.closed`, so a deliberate teardown never lands here. Surface a
+    // terminal explanation instead of an eternal "Loading review…" (attn-j2c).
+    if (next.status === 'terminated') {
+      this.state = { ...this.state, status: 'error', ownerOnline: false, liveEditingAvailable: false,
+        connection: 'offline', authoringReady: false, outboxPending: 0,
+        error: { kind: 'share_revoked', message: 'The owner stopped sharing this document.' } };
+      this.observer?.(this.state);
+      return;
+    }
     const snapshot = next.snapshots[0];
     this.state = { ...this.state,
-      status: next.status === 'ready' ? 'connected' : next.status === 'error' ? 'error' : next.status === 'terminated' ? 'idle' : 'connecting',
+      status: next.status === 'ready' ? 'connected' : next.status === 'error' ? 'error' : 'connecting',
       ownerOnline: next.ownerOnline, liveEditingAvailable: false,
       connection: next.ownerOnline ? 'live_direct' : next.status === 'ready' ? 'mailbox' : 'offline', roomId: next.roomId,
       snapshotContent: snapshot?.content ?? (next.ownerOnline ? this.state.snapshotContent : null),

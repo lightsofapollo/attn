@@ -33,8 +33,8 @@
 </script>
 
 <div
-  class="selection-toolbar absolute z-40 flex items-center gap-0.5 rounded-md border bg-popover p-1 shadow-lg"
-  style="top: {pos.recommendedPosition.top}px; left: {pos.recommendedPosition.left}px"
+  class="selection-toolbar fixed left-0 top-0 z-40 flex items-center gap-0.5 rounded-md border bg-popover p-1 shadow-lg"
+  style="transform: translate3d({pos.recommendedPosition.left}px, {pos.recommendedPosition.top}px, 0)"
   data-slot="selection-toolbar"
   role="toolbar"
   tabindex="-1"

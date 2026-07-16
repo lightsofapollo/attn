@@ -1007,19 +1007,20 @@
   function refreshSelectionToolbar(): void {
     const view = pmViewForReview;
     if (!view || !hasTextSelection(view)) {
-      toolbarSelection = null;
+      if (toolbarSelection !== null) toolbarSelection = null;
       return;
     }
     if (!reviewStore.currentRoomId) {
-      toolbarSelection = null;
+      if (toolbarSelection !== null) toolbarSelection = null;
       return;
     }
     const snapshot = resolveActiveSnapshotForCompose();
     if (!snapshot || !snapshot.anchorIndex) {
-      toolbarSelection = null;
+      if (toolbarSelection !== null) toolbarSelection = null;
       return;
     }
     const { from, to } = view.state.selection;
+    if (toolbarSelection?.from === from && toolbarSelection.to === to) return;
     toolbarSelection = { from, to };
   }
 
@@ -1072,22 +1073,21 @@
     // ProseMirror state (not the raw DOM selection) so the captured range
     // matches what the composer will author against.
     //
-    // We ALSO re-anchor on scroll + resize: the toolbar is placed at the
-    // selection's on-screen coordinates, so scrolling the editor (or resizing)
-    // moves the selected text out from under it. Without this the toolbar
-    // stayed frozen at its original spot while the text scrolled away. Scroll
-    // is captured (true) so it catches the editor's inner scroll container,
-    // whose scroll events don't bubble to the document.
-    const handler = () => {
-      refreshSelectionToolbar();
+    // Browsers can emit dozens of selectionchange events during one drag.
+    // Coalesce them to the display cadence; the mounted SelectionToolbar owns
+    // scroll/resize re-anchoring through its shared anchor tracker.
+    let refreshRaf = 0;
+    const scheduleRefresh = () => {
+      if (refreshRaf) return;
+      refreshRaf = requestAnimationFrame(() => {
+        refreshRaf = 0;
+        refreshSelectionToolbar();
+      });
     };
-    document.addEventListener('selectionchange', handler);
-    window.addEventListener('scroll', handler, true);
-    window.addEventListener('resize', handler);
+    document.addEventListener('selectionchange', scheduleRefresh);
     return () => {
-      document.removeEventListener('selectionchange', handler);
-      window.removeEventListener('scroll', handler, true);
-      window.removeEventListener('resize', handler);
+      document.removeEventListener('selectionchange', scheduleRefresh);
+      if (refreshRaf) cancelAnimationFrame(refreshRaf);
     };
   });
 

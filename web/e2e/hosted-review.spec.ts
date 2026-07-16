@@ -107,6 +107,7 @@ test('v3 browser tiers render and expose only their granted composers', async ({
       await selectEditorText(page, 'Read-only browser task');
       await expect(page.locator('[data-slot="selection-toolbar-comment"]')).toHaveCount(entry.comment ? 1 : 0);
       await expect(page.locator('[data-slot="selection-toolbar-suggest"]')).toHaveCount(entry.suggest ? 1 : 0);
+      if (entry.tier === 'suggest') await expectStableSelectionDrag(page);
       if (entry.tier === 'comment') {
         const marker = 'TIER-BROWSER-COMMENT-6382';
         await page.locator('[data-slot="selection-toolbar-comment"]').click();
@@ -136,6 +137,68 @@ test('v3 browser tiers render and expose only their granted composers', async ({
 async function selectEditorText(page: Page, needle: string): Promise<void> {
   await setEditorSelection(page, needle);
   await expect(page.locator('[data-slot="selection-toolbar"]')).toBeVisible();
+}
+
+async function expectStableSelectionDrag(page: Page): Promise<void> {
+  const result = await page.evaluate(async () => {
+    interface TestView {
+      dom: HTMLElement;
+      state: {
+        doc: { content: { size: number } };
+        selection: {
+          from: number;
+          to: number;
+          constructor: { create(doc: unknown, from: number, to: number): unknown };
+        };
+        tr: { setSelection(selection: unknown): unknown };
+      };
+      dispatch(transaction: unknown): void;
+    }
+    const target = window as unknown as { __attnPmView?: TestView };
+    const view = target.__attnPmView;
+    const toolbar = document.querySelector<HTMLElement>('[data-slot="selection-toolbar"]');
+    if (!view || !toolbar) return null;
+
+    const originalDom = view.dom;
+    let styleMutations = 0;
+    const observer = new MutationObserver((records) => { styleMutations += records.length; });
+    observer.observe(toolbar, { attributes: true, attributeFilter: ['style'] });
+
+    const nextTo = Math.min(view.state.doc.content.size, view.state.selection.to + 1);
+    const selection = view.state.selection.constructor.create(
+      view.state.doc,
+      view.state.selection.from,
+      nextTo,
+    );
+    view.dispatch(view.state.tr.setSelection(selection));
+    for (let index = 0; index < 40; index += 1) {
+      document.dispatchEvent(new Event('selectionchange'));
+    }
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    });
+    observer.disconnect();
+
+    const activeToolbar = document.querySelector<HTMLElement>('[data-slot="selection-toolbar"]');
+    return {
+      sameView: target.__attnPmView === view,
+      sameDom: target.__attnPmView?.dom === originalDom,
+      sameToolbar: activeToolbar === toolbar,
+      toolbarCount: document.querySelectorAll('[data-slot="selection-toolbar"]').length,
+      toolbarPosition: activeToolbar ? getComputedStyle(activeToolbar).position : '',
+      styleMutations,
+    };
+  });
+
+  expect(result).not.toBeNull();
+  expect(result).toMatchObject({
+    sameView: true,
+    sameDom: true,
+    sameToolbar: true,
+    toolbarCount: 1,
+    toolbarPosition: 'fixed',
+  });
+  expect(result!.styleMutations).toBeLessThanOrEqual(1);
 }
 
 async function setEditorSelection(page: Page, needle: string): Promise<void> {

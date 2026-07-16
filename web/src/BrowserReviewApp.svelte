@@ -488,14 +488,16 @@
   function refreshSelectionToolbar(): void {
     const view = pmViewForReview;
     if (!reviewerAvailability.reviewAuthoring || !view || !hasTextSelection(view)) {
-      toolbarSelection = null;
+      if (toolbarSelection !== null) toolbarSelection = null;
       return;
     }
     if (!activeSnapshotForCompose()) {
-      toolbarSelection = null;
+      if (toolbarSelection !== null) toolbarSelection = null;
       return;
     }
-    toolbarSelection = { from: view.state.selection.from, to: view.state.selection.to };
+    const { from, to } = view.state.selection;
+    if (toolbarSelection?.from === from && toolbarSelection.to === to) return;
+    toolbarSelection = { from, to };
   }
 
   $effect(() => {
@@ -577,14 +579,21 @@
   }
 
   onMount(() => {
-    const refresh = (): void => refreshSelectionToolbar();
-    document.addEventListener('selectionchange', refresh);
-    window.addEventListener('scroll', refresh, true);
-    window.addEventListener('resize', refresh);
+    let refreshRaf = 0;
+    const scheduleRefresh = (): void => {
+      if (refreshRaf) return;
+      refreshRaf = requestAnimationFrame(() => {
+        refreshRaf = 0;
+        refreshSelectionToolbar();
+      });
+    };
+    // Browsers emit selectionchange for every incremental range while the
+    // pointer is moving. Coalesce that burst to one Svelte update per frame;
+    // SelectionToolbar owns scroll/resize re-anchoring once it is visible.
+    document.addEventListener('selectionchange', scheduleRefresh);
     return () => {
-      document.removeEventListener('selectionchange', refresh);
-      window.removeEventListener('scroll', refresh, true);
-      window.removeEventListener('resize', refresh);
+      document.removeEventListener('selectionchange', scheduleRefresh);
+      if (refreshRaf) cancelAnimationFrame(refreshRaf);
     };
   });
 

@@ -17,19 +17,32 @@ export function createAnchorTracker(
   to: () => number,
   opts?: PopoverOptions,
 ): { readonly current: PopoverAnchor } {
-  let current = $state(getPopoverAnchor(view(), from(), to(), opts));
+  let trackedView = view();
+  let trackedFrom = from();
+  let trackedTo = to();
+  let current = $state(getPopoverAnchor(trackedView, trackedFrom, trackedTo, opts));
+  let raf = 0;
+
+  const reposition = (): void => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      current = getPopoverAnchor(view(), from(), to(), opts);
+    });
+  };
 
   $effect(() => {
-    // Re-derive on selection changes too.
-    current = getPopoverAnchor(view(), from(), to(), opts);
-    let raf = 0;
-    const reposition = (): void => {
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        current = getPopoverAnchor(view(), from(), to(), opts);
-      });
-    };
+    const nextView = view();
+    const nextFrom = from();
+    const nextTo = to();
+    if (nextView === trackedView && nextFrom === trackedFrom && nextTo === trackedTo) return;
+    trackedView = nextView;
+    trackedFrom = nextFrom;
+    trackedTo = nextTo;
+    reposition();
+  });
+
+  $effect(() => {
     // Scroll doesn't bubble but does capture; the document pane scrolls.
     document.addEventListener('scroll', reposition, { capture: true, passive: true });
     window.addEventListener('resize', reposition);

@@ -25,7 +25,7 @@ import {
   type BrowserWorkspaceServiceOptions,
 } from './workspace-service';
 import { quotaPressure } from '../../lib/review/browser-storage-probe';
-import { validateBrowserRelayUrl } from '../../lib/review/browser-relay-url';
+import { resolveBrowserRelayUrl } from '../../lib/review/browser-relay-url';
 import type { WorkspaceEntryRecord } from '../../lib/review/browser-workspace-schema';
 import type { WorkspaceFence } from '../../lib/review/browser-workspace-store';
 import { openBroadcastChannel } from '../../lib/tab-channels';
@@ -338,12 +338,12 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
         if (mode === 'unavailable' || mode === 'quota-pressure') {
           throw new Error('Local storage must be writable before creating a review room.');
         }
-        if (mode !== 'persistent' && !input.riskAcknowledged) {
-          throw new Error('Acknowledge the local recovery risk before sharing.');
-        }
         const selection = input.selection;
         return runtime.ensureShare({
-          relayUrl: validateBrowserRelayUrl(import.meta.env.VITE_ATTN_RELAY_URL),
+          relayUrl: resolveBrowserRelayUrl(
+            import.meta.env.VITE_ATTN_RELAY_URL,
+            window.location.origin,
+          ),
           browserReviewBase: browserReviewBase(),
           scopeKind: selection.kind,
           paths: selection.kind === 'workspace'

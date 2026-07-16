@@ -8,6 +8,15 @@ import { entryHtmlPath, hostedEntryForPath } from './src/lib/hosted/routes';
 const webRoot = fileURLToPath(new URL('.', import.meta.url));
 const hostedRoot = path.join(webRoot, 'hosted');
 const pushE2e = process.env.ATTN_PUSH_E2E === '1';
+const devRelayTarget = process.env.ATTN_DEV_RELAY_TARGET ?? 'http://localhost:8787';
+const devRelayOrigin = new URL(devRelayTarget).origin;
+const devRelayProxy = {
+  target: devRelayTarget,
+  ws: true,
+  changeOrigin: true,
+  rewriteWsOrigin: true,
+  headers: { origin: devRelayOrigin },
+};
 
 // Mirror the Cloudflare worker's deep-path rewrites (worker.ts) in dev and
 // preview so `/app/w/:workspaceId/:filePath` and `/review/:roomId` resolve to
@@ -117,10 +126,13 @@ export default defineConfig({
     // them to the relay, WebSocket included. This is what makes the share
     // workflow completable — and Playwright-testable — on localhost.
     proxy: {
-      '/v3': { target: process.env.ATTN_DEV_RELAY_TARGET ?? 'http://localhost:8787', ws: true, changeOrigin: true },
-      '/v2': { target: process.env.ATTN_DEV_RELAY_TARGET ?? 'http://localhost:8787', ws: true, changeOrigin: true },
-      '/v1': { target: process.env.ATTN_DEV_RELAY_TARGET ?? 'http://localhost:8787', ws: true, changeOrigin: true },
-      '/health': { target: process.env.ATTN_DEV_RELAY_TARGET ?? 'http://localhost:8787', changeOrigin: true },
+      // Browser WebSockets carry the app's arbitrary dev-server port in
+      // `Origin`. Rewrite it to the relay target so the relay can keep an
+      // exact allowlist without every local Vite port being pre-registered.
+      '/v3': { ...devRelayProxy },
+      '/v2': { ...devRelayProxy },
+      '/v1': { ...devRelayProxy },
+      '/health': { target: devRelayTarget, changeOrigin: true },
     },
   },
   build: {

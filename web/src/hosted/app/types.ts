@@ -143,7 +143,6 @@ export interface WorkspaceShareRequest {
   selection: WorkspaceShareSelection;
   mode: WorkspaceShareMode;
   ttlMs: WorkspaceShareTtlMs;
-  riskAcknowledged: boolean;
 }
 
 /**

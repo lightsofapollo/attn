@@ -32,8 +32,6 @@
     onInspect?: () => Promise<WorkspaceShareView | null>;
     onCreate?: (request: WorkspaceShareRequest) => Promise<WorkspaceShareView>;
     onStop?: () => Promise<void>;
-    onRequestPersist?: () => Promise<boolean | null>;
-    onBackup?: () => Promise<void>;
     onclose: () => void;
     /** Temporary compatibility for callers that have not moved to WorkspaceDetail yet. */
     workspaceName?: string;
@@ -48,8 +46,6 @@
     onInspect,
     onCreate,
     onStop,
-    onRequestPersist,
-    onBackup,
     onclose,
     workspaceName,
   }: Props = $props();
@@ -85,13 +81,6 @@
   let ttlMs = $state<WorkspaceShareTtlMs>(SHARE_TTL_ONE_DAY);
   let advancedOpen = $state(false);
 
-  let persistGranted = $state(false);
-  let persistBusy = $state(false);
-  let persistDenied = $state(false);
-  let backupBusy = $state(false);
-  let backedUp = $state(false);
-  let riskAcknowledged = $state(false);
-
   let revealLink = $state(false);
   let selectedTier = $state<'view' | 'comment' | 'suggest'>('comment');
   let inviteOptionsOpen = $state(false);
@@ -100,10 +89,7 @@
   let stopSharingButton = $state<HTMLButtonElement | undefined>();
   let keepSharingButton = $state<HTMLButtonElement | undefined>();
 
-  const effectivePersistenceMode = $derived(
-    persistGranted || health.mode === 'persistent' ? 'persistent' : health.mode,
-  );
-  const durability = $derived(durabilityState(effectivePersistenceMode, riskAcknowledged));
+  const durability = $derived(durabilityState(health.mode));
   const selectedEntries = $derived(
     entriesForScope(entries, 'entries', configuredFilePath, selectedPaths),
   );
@@ -117,29 +103,9 @@
   const maskedBrowserUrl = $derived(selectedInvite ? maskInviteUrl(selectedInvite.browserUrl) : '');
   const webShareAvailable = $derived(supportsWebShare());
 
-  const safetyCopy = $derived.by(() => {
-    switch (effectivePersistenceMode) {
-      case 'persistent':
-        return '';
-      case 'best-effort':
-        return persistDenied
-          ? 'Protected storage was not granted. Keep a backup, or confirm that you accept the risk.'
-          : 'This browser may clear local workspaces. Protect this one, download a backup, or accept the risk.';
-      case 'session-only':
-        return 'Private browsing can erase this workspace when the session closes.';
-      case 'quota-pressure':
-        return 'Storage is nearly full. Free space or export this workspace before sharing.';
-      case 'unavailable':
-        return 'Local storage is unavailable, so this browser cannot create a recoverable review room.';
-    }
-  });
-
   const configurationHint = $derived.by(() => {
     if (!scopeValid) return 'Include at least one Markdown file.';
     if (durability.hardBlocked) return 'Sharing is unavailable until local storage is healthy.';
-    if (durability.needsAcknowledgement && !riskAcknowledged) {
-      return 'Confirm the safety note to continue.';
-    }
     return 'Encrypted before it leaves this browser.';
   });
 
@@ -173,10 +139,6 @@
 
   function applyShareView(view: WorkspaceShareView): void {
     share = view;
-    // A sealed owner record can only have been created after the service's
-    // durability preflight. Reopening it must not strand exact resume behind
-    // an acknowledgement control that is only rendered in configure state.
-    riskAcknowledged = true;
     mode = view.mode;
     scopeChoice = view.scopeKind;
     if (view.scopeKind === 'file') configuredFilePath = view.paths[0];
@@ -222,39 +184,6 @@
     }
   }
 
-  async function requestPersist(): Promise<void> {
-    if (!onRequestPersist || persistBusy) return;
-    persistBusy = true;
-    persistDenied = false;
-    try {
-      const granted = await onRequestPersist();
-      if (granted === true) {
-        persistGranted = true;
-        statusMessage = 'Persistent storage granted.';
-      } else {
-        persistDenied = true;
-      }
-    } catch {
-      persistDenied = true;
-    } finally {
-      persistBusy = false;
-    }
-  }
-
-  async function downloadBackup(): Promise<void> {
-    if (!onBackup || backupBusy) return;
-    backupBusy = true;
-    try {
-      await onBackup();
-      backedUp = true;
-      statusMessage = 'Backup downloaded.';
-    } catch {
-      statusMessage = 'The backup could not be downloaded. Try again before sharing.';
-    } finally {
-      backupBusy = false;
-    }
-  }
-
   function toggleSelectedPath(path: string, checked: boolean): void {
     selectedPaths = checked
       ? [...new Set([...selectedPaths, path])]
@@ -276,7 +205,6 @@
       selectedPaths,
       mode,
       ttlMs,
-      riskAcknowledged,
     });
   }
 
@@ -471,47 +399,6 @@
             <p class="share-error" role="alert">Workspace details are unavailable. Close this sheet and reopen the workspace.</p>
           {/if}
         </section>
-
-        {#if effectivePersistenceMode !== 'persistent'}
-          <section
-            class:share-blocked={durability.hardBlocked}
-            class="share-panel share-safety"
-            aria-labelledby="source-safety-title"
-          >
-            <div class="share-panel-heading">
-              <div>
-                <h3 id="source-safety-title">Before you create the link</h3>
-                <p aria-live="polite">{safetyCopy}</p>
-              </div>
-            </div>
-            {#if durability.canRequestPersistence || onBackup}
-              <div class="storage-actions share-storage-actions">
-                {#if durability.canRequestPersistence && onRequestPersist && !persistDenied}
-                  <button class="button" type="button" disabled={persistBusy} onclick={() => void requestPersist()}>
-                    {persistBusy ? 'Protecting…' : 'Protect local data'}
-                  </button>
-                {/if}
-                {#if onBackup}
-                  <button class="button" type="button" disabled={backupBusy} onclick={() => void downloadBackup()}>
-                    {backupBusy ? 'Preparing…' : backedUp ? 'Backup downloaded ✓' : 'Download backup'}
-                  </button>
-                {/if}
-              </div>
-            {/if}
-            {#if durability.needsAcknowledgement && !persistGranted}
-              <label class:confirmed={riskAcknowledged} class="share-check">
-                <input type="checkbox" bind:checked={riskAcknowledged} />
-                <span>
-                  <strong>I have a backup or accept the risk</strong>
-                  <small>I understand this browser may erase the owner source.</small>
-                </span>
-              </label>
-            {/if}
-            {#if durability.hardBlocked}
-              <p class="share-error" role="alert">Sharing stays unavailable until local storage is healthy.</p>
-            {/if}
-          </section>
-        {/if}
 
         <details class="share-advanced" bind:open={advancedOpen}>
           <summary>Advanced settings <span>{SHARE_MODE_OPTIONS.find((option) => option.value === mode)?.label} delivery</span></summary>

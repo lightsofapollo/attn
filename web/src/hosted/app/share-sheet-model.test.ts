@@ -41,22 +41,16 @@ const entries: WorkspaceEntry[] = [
   { path: 'data.bin', kind: 'asset', presentation: 'download-only', sizeBytes: 512, sizeLabel: '512 B' },
 ];
 
-test('durability gate never allows unavailable or quota-pressure modes', () => {
+test('durability gate only blocks unavailable or quota-pressure modes', () => {
   for (const mode of ['unavailable', 'quota-pressure'] as const) {
-    equal(durabilityState(mode, true), {
+    equal(durabilityState(mode), {
       allowed: false,
       hardBlocked: true,
-      needsAcknowledgement: false,
-      canRequestPersistence: false,
     }, `${mode} remains blocked`);
   }
-});
-
-test('best-effort and session-only require explicit risk acknowledgement', () => {
-  equal(durabilityState('best-effort', false).allowed, false, 'best effort starts locked');
-  equal(durabilityState('best-effort', true).allowed, true, 'best effort unlocks after acknowledgement');
-  equal(durabilityState('best-effort', false).canRequestPersistence, true, 'best effort can request persistence');
-  equal(durabilityState('session-only', true).allowed, true, 'private session can be explicitly acknowledged');
+  equal(durabilityState('persistent').allowed, true, 'persistent storage is allowed');
+  equal(durabilityState('best-effort').allowed, true, 'best effort storage is allowed without a gate');
+  equal(durabilityState('session-only').allowed, true, 'private sessions are allowed without a gate');
 });
 
 test('scope resolution and manifest summary preserve exact paths and sizes', () => {
@@ -71,26 +65,23 @@ test('scope resolution and manifest summary preserve exact paths and sizes', () 
   }, 'manifest summary');
 });
 
-test('request construction uses the configured scope, mode, lifetime, and risk flag', () => {
+test('request construction uses the configured scope, mode, and lifetime', () => {
   equal(createShareRequest({
     scope: 'file',
     activePath: 'notes.md',
     selectedPaths: [],
     mode: 'async',
     ttlMs: SHARE_TTL_ONE_HOUR,
-    riskAcknowledged: true,
   }), {
     selection: { kind: 'file', path: 'notes.md' },
     mode: 'async',
     ttlMs: SHARE_TTL_ONE_HOUR,
-    riskAcknowledged: true,
   }, 'file request');
   equal(createShareRequest({
     scope: 'workspace',
     selectedPaths: [],
     mode: 'hybrid',
     ttlMs: SHARE_TTL_ONE_DAY,
-    riskAcknowledged: false,
   })?.selection, { kind: 'workspace' }, 'workspace request');
 });
 
@@ -100,7 +91,6 @@ test('curated shares use entries scope for both one and many selected files', ()
     selectedPaths: ['notes.md'],
     mode: 'hybrid',
     ttlMs: SHARE_TTL_ONE_DAY,
-    riskAcknowledged: true,
   });
   equal(one?.selection, { kind: 'entries', paths: ['notes.md'] }, 'one selected file');
 
@@ -109,7 +99,6 @@ test('curated shares use entries scope for both one and many selected files', ()
     selectedPaths: ['notes.md', 'image.png'],
     mode: 'hybrid',
     ttlMs: SHARE_TTL_ONE_DAY,
-    riskAcknowledged: true,
   });
   equal(many?.selection, {
     kind: 'entries',

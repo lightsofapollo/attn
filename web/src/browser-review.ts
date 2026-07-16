@@ -22,7 +22,7 @@ import {
   zero,
   type ParsedInvite,
 } from './lib/review/browser-invite';
-import { validateBrowserRelayUrl } from './lib/review/browser-relay-url';
+import { resolveBrowserRelayUrl } from './lib/review/browser-relay-url';
 import {
   parseAndStripShareInvite,
   recoverStrippedShareInvite,
@@ -43,7 +43,10 @@ async function bootstrapHostedReview(): Promise<void> {
   }
 
   try {
-    const relayUrl = validateBrowserRelayUrl(import.meta.env.VITE_ATTN_RELAY_URL);
+    const relayUrl = resolveBrowserRelayUrl(
+      import.meta.env.VITE_ATTN_RELAY_URL,
+      window.location.origin,
+    );
     const [svelte, appModule] = await Promise.all([
       import('svelte'),
       import('./BrowserReviewApp.svelte'),
@@ -70,7 +73,10 @@ async function bootstrapHostedReview(): Promise<void> {
 async function bootstrapDurableShare(): Promise<void> {
   let invite: ParsedShareInvite | null = null;
   try {
-    const relayUrl = validateBrowserRelayUrl(import.meta.env.VITE_ATTN_RELAY_URL);
+    const relayUrl = resolveBrowserRelayUrl(
+      import.meta.env.VITE_ATTN_RELAY_URL,
+      window.location.origin,
+    );
     const [svelte, appModule, production] = await Promise.all([import('svelte'), import('./BrowserReviewApp.svelte'),
       import('./lib/review/browser-share-production'), import('./browser-review-styles')]);
     const target = document.getElementById('app');

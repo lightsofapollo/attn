@@ -1916,8 +1916,6 @@
     onCreate={createWorkspaceShare}
     onStop={stopWorkspaceShare}
     onclose={closeShare}
-    onRequestPersist={() => service.requestPersistence()}
-    onBackup={() => exportZip()}
   />
 {/if}
 

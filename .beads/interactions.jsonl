@@ -419,3 +419,5 @@
 {"id":"int-0b778924","kind":"field_change","created_at":"2026-07-16T02:45:42.440802Z","actor":"James Lal","issue_id":"attn-8oj","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}
 {"id":"int-84f22549","kind":"field_change","created_at":"2026-07-16T04:39:08.671043Z","actor":"James Lal","issue_id":"attn-2vz","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-885fb109","kind":"field_change","created_at":"2026-07-16T04:48:12.076492Z","actor":"James Lal","issue_id":"attn-2vz","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}
+{"id":"int-a20723be","kind":"field_change","created_at":"2026-07-16T16:36:31.496126Z","actor":"James Lal","issue_id":"attn-80d","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-7c1c2bb3","kind":"field_change","created_at":"2026-07-16T17:01:21.114708Z","actor":"James Lal","issue_id":"attn-80d","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}

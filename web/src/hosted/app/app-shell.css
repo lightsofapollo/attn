@@ -1495,12 +1495,6 @@ a.workspace-row:hover {
   padding-top: 0;
 }
 
-.share-panel.share-blocked {
-  padding: 1rem;
-  border: 1px solid var(--rust);
-  background: color-mix(in srgb, var(--rust) 6%, var(--sheet));
-}
-
 .share-panel-heading {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1560,27 +1554,10 @@ a.workspace-row:hover {
   font: 0.87rem/1.45 var(--sans);
 }
 
-.share-storage-actions {
-  margin: 0.8rem 0 0 2.35rem;
-}
-
-.share-check {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
-  margin: 0.9rem 0 0 2.35rem;
-  font: 0.84rem/1.45 var(--sans);
-}
-
-.share-check input,
 .share-choice-grid input,
 .share-entry-list input,
 .share-advanced input {
   accent-color: var(--rust);
-}
-
-.share-check input {
-  margin-top: 0.18rem;
 }
 
 .share-warning,

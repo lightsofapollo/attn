@@ -1,4 +1,8 @@
-import { BrowserRelayUrlError, validateBrowserRelayUrl } from './browser-relay-url';
+import {
+  BrowserRelayUrlError,
+  resolveBrowserRelayUrl,
+  validateBrowserRelayUrl,
+} from './browser-relay-url';
 
 function assertEq(actual: unknown, expected: unknown, label: string): void {
   if (actual !== expected) {
@@ -21,6 +25,16 @@ assertEq(validateBrowserRelayUrl('https://relay.example:8443/'), 'https://relay.
 assertEq(validateBrowserRelayUrl('http://localhost:8787'), 'http://localhost:8787', 'localhost');
 assertEq(validateBrowserRelayUrl('http://127.0.0.1:8787'), 'http://127.0.0.1:8787', 'IPv4 loopback');
 assertEq(validateBrowserRelayUrl('http://[::1]:8787'), 'http://[::1]:8787', 'IPv6 loopback');
+assertEq(
+  resolveBrowserRelayUrl(undefined, 'http://127.0.0.1:5199'),
+  'http://127.0.0.1:5199',
+  'loopback browser origin fallback',
+);
+assertEq(
+  resolveBrowserRelayUrl('https://relay.example', 'http://127.0.0.1:5199'),
+  'https://relay.example',
+  'explicit relay wins over loopback fallback',
+);
 
 assertRejects(undefined, 'missing');
 assertRejects('', 'empty');
@@ -30,5 +44,12 @@ assertRejects('ws://localhost:8787', 'ws scheme');
 assertRejects('https://relay.example/v2', 'path');
 assertRejects('https://relay.example?token=x', 'query');
 assertRejects('https://user:pass@relay.example', 'credentials');
+
+try {
+  resolveBrowserRelayUrl(undefined, 'https://attn.example');
+  throw new Error('remote browser origin fallback: expected relay URL rejection');
+} catch (error) {
+  if (!(error instanceof BrowserRelayUrlError)) throw error;
+}
 
 console.log('browser-relay-url: all cases passed');

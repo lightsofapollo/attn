@@ -24,8 +24,6 @@ export interface ShareManifestSummary {
 export interface ShareDurabilityState {
   allowed: boolean;
   hardBlocked: boolean;
-  needsAcknowledgement: boolean;
-  canRequestPersistence: boolean;
 }
 
 export const SHARE_TTL_OPTIONS: ReadonlyArray<{
@@ -59,31 +57,16 @@ export const SHARE_MODE_OPTIONS: ReadonlyArray<{
   },
 ];
 
-export function durabilityState(
-  mode: PersistenceMode,
-  riskAcknowledged: boolean,
-): ShareDurabilityState {
-  if (mode === 'persistent') {
-    return {
-      allowed: true,
-      hardBlocked: false,
-      needsAcknowledgement: false,
-      canRequestPersistence: false,
-    };
-  }
+export function durabilityState(mode: PersistenceMode): ShareDurabilityState {
   if (mode === 'quota-pressure' || mode === 'unavailable') {
     return {
       allowed: false,
       hardBlocked: true,
-      needsAcknowledgement: false,
-      canRequestPersistence: false,
     };
   }
   return {
-    allowed: riskAcknowledged,
+    allowed: true,
     hardBlocked: false,
-    needsAcknowledgement: true,
-    canRequestPersistence: mode === 'best-effort',
   };
 }
 
@@ -134,7 +117,6 @@ export function createShareRequest(input: {
   selectedPaths: readonly string[];
   mode: WorkspaceShareMode;
   ttlMs: WorkspaceShareTtlMs;
-  riskAcknowledged: boolean;
 }): WorkspaceShareRequest | null {
   const selection = selectionForScope(input.scope, input.activePath, input.selectedPaths);
   if (!selection) return null;
@@ -142,7 +124,6 @@ export function createShareRequest(input: {
     selection,
     mode: input.mode,
     ttlMs: input.ttlMs,
-    riskAcknowledged: input.riskAcknowledged,
   };
 }
 

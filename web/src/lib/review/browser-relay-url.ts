@@ -40,3 +40,29 @@ export function validateBrowserRelayUrl(raw: string | undefined): string {
 
   throw new BrowserRelayUrlError('relay URL must use HTTPS (HTTP is loopback-only)');
 }
+
+/**
+ * Resolve the configured relay, using the browser's own loopback origin when
+ * local development relies on Vite's same-origin relay proxy. Deployed builds
+ * still require an explicit relay so a missing production setting cannot
+ * silently redirect protocol traffic to the web origin.
+ */
+export function resolveBrowserRelayUrl(
+  configured: string | undefined,
+  browserOrigin: string | undefined,
+): string {
+  if (configured !== undefined && configured.length > 0) {
+    return validateBrowserRelayUrl(configured);
+  }
+  if (browserOrigin !== undefined) {
+    try {
+      const origin = new URL(browserOrigin);
+      if (LOOPBACK_HOSTS.has(origin.hostname)) {
+        return validateBrowserRelayUrl(origin.origin);
+      }
+    } catch {
+      // Preserve the canonical missing-configuration error below.
+    }
+  }
+  return validateBrowserRelayUrl(configured);
+}

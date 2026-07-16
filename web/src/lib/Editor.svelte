@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { EditorState, Plugin } from 'prosemirror-state';
+  import { EditorState, Plugin, TextSelection } from 'prosemirror-state';
   import { EditorView, type NodeView, type NodeViewConstructor } from 'prosemirror-view';
   import { Node as PmNode } from 'prosemirror-model';
   import {
@@ -26,6 +26,7 @@
   import { mathNodeView } from './prosemirror/math';
   import { mermaidNodeView } from './prosemirror/mermaid-nodeview';
   import { tablePlugins } from './prosemirror/tables';
+  import { recordReviewSelectionDebug } from './review/selection-debug';
   import { editSave } from './ipc';
   import { markdownParser, markdownSerializer, schema } from './schema';
   import {
@@ -96,6 +97,12 @@
      * tears down + rebuilds the view.
      */
     collabEpoch?: number;
+    /**
+     * Stable file identity for continuity across a same-file collab epoch
+     * replacement. When unchanged, selection/focus/scroll survive the
+     * required EditorView rebuild; a different key starts cleanly.
+     */
+    collabContinuityKey?: string;
     /** Fired after every local doc-changing transaction during a collab session. */
     onCollabDocChange?: () => void;
     /** Fired when the local selection (caret) moves during a collab session. */
@@ -128,6 +135,7 @@
     onReady,
     collabClientId,
     collabEpoch = 0,
+    collabContinuityKey,
     onCollabDocChange,
     onCollabSelectionChange,
     suggesting = false,
@@ -177,6 +185,69 @@
   const LARGE_MARKDOWN_CHAR_LIMIT = 350_000;
   const SAFE_MODE_PREVIEW_CHAR_LIMIT = 50_000;
   let pendingLocalSaveNormalized: string | null = null;
+
+  interface CollabRemountContinuity {
+    key: string;
+    anchor: number;
+    head: number;
+    hadFocus: boolean;
+    scroller: HTMLElement | null;
+    scrollTop: number;
+    scrollLeft: number;
+    windowScrollX: number;
+    windowScrollY: number;
+  }
+
+  let collabRemountContinuity: CollabRemountContinuity | null = null;
+
+  function nearestScrollContainer(node: HTMLElement): HTMLElement | null {
+    let parent = node.parentElement;
+    while (parent && parent !== document.body && parent !== document.documentElement) {
+      const style = getComputedStyle(parent);
+      if (/(auto|scroll|overlay)/u.test(style.overflowY + style.overflowX)) return parent;
+      parent = parent.parentElement;
+    }
+    return null;
+  }
+
+  function restoreCollabRemountContinuity(
+    editorView: EditorView,
+    continuity: CollabRemountContinuity,
+  ): void {
+    const max = editorView.state.doc.content.size;
+    const anchor = Math.max(0, Math.min(continuity.anchor, max));
+    const head = Math.max(0, Math.min(continuity.head, max));
+    try {
+      const selection = TextSelection.between(
+        editorView.state.doc.resolve(anchor),
+        editorView.state.doc.resolve(head),
+      );
+      editorView.dispatch(editorView.state.tr.setSelection(selection));
+      if (continuity.hadFocus) editorView.focus();
+    } finally {
+      // `EditorView.focus()` may ask the browser to reveal the new selection.
+      // Restore the exact reading position after the replacement DOM exists.
+      continuity.scroller?.scrollTo({
+        top: continuity.scrollTop,
+        left: continuity.scrollLeft,
+        behavior: 'auto',
+      });
+      if (window.scrollX !== continuity.windowScrollX || window.scrollY !== continuity.windowScrollY) {
+        window.scrollTo({
+          left: continuity.windowScrollX,
+          top: continuity.windowScrollY,
+          behavior: 'auto',
+        });
+      }
+    }
+    recordReviewSelectionDebug('editor-remount-restored', {
+      key: continuity.key.slice(0, 8),
+      from: editorView.state.selection.from,
+      to: editorView.state.selection.to,
+      hadFocus: continuity.hadFocus,
+      scrollTop: continuity.scrollTop,
+    });
+  }
 
   function normalizeMarkdownForCompare(md: string): string {
     return md
@@ -705,6 +776,7 @@
     // Tracked: a `collabEpoch` bump forces a full teardown + rebuild so the
     // live collab session re-seeds at v0 on a different file's base doc.
     void collabEpoch;
+    const continuityKey = collabContinuityKey;
     untrack(() => {
       const state = createState(markdown);
       view = new EditorView(el, {
@@ -742,18 +814,50 @@
         },
         nodeViews: buildNodeViews(),
       });
+      const continuity = collabRemountContinuity;
+      collabRemountContinuity = null;
+      if (view && continuityKey && continuity?.key === continuityKey) {
+        restoreCollabRemountContinuity(view, continuity);
+      }
       lastMarkdown = markdown;
       setDirty(false);
       if (onReady && view) {
         onReady(view);
       }
       viewReady = true;
+      recordReviewSelectionDebug('editor-ready', {
+        epoch: collabEpoch,
+        key: continuityKey?.slice(0, 8) ?? null,
+        from: view?.state.selection.from ?? null,
+        to: view?.state.selection.to ?? null,
+      });
     });
 
     return () => {
       viewReady = false;
-      view?.destroy();
-      view = undefined;
+      const retiringView = view;
+      if (retiringView && continuityKey) {
+        const scroller = nearestScrollContainer(retiringView.dom);
+        collabRemountContinuity = {
+          key: continuityKey,
+          anchor: retiringView.state.selection.anchor,
+          head: retiringView.state.selection.head,
+          hadFocus: retiringView.hasFocus(),
+          scroller,
+          scrollTop: scroller?.scrollTop ?? 0,
+          scrollLeft: scroller?.scrollLeft ?? 0,
+          windowScrollX: window.scrollX,
+          windowScrollY: window.scrollY,
+        };
+      }
+      recordReviewSelectionDebug('editor-teardown', {
+        epoch: collabEpoch,
+        key: continuityKey?.slice(0, 8) ?? null,
+        from: retiringView?.state.selection.from ?? null,
+        to: retiringView?.state.selection.to ?? null,
+      });
+      retiringView?.destroy();
+      if (view === retiringView) view = undefined;
     };
   });
 

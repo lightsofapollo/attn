@@ -31,6 +31,7 @@ import { Plugin, PluginKey, type EditorState } from 'prosemirror-state';
 import { Decoration, DecorationSet, type EditorView } from 'prosemirror-view';
 
 import { reviewStore } from '../review/store.svelte';
+import { recordReviewSelectionDebug } from '../review/selection-debug';
 import type {
   EventId,
   ReviewAnchorResolutionUpdate,
@@ -472,16 +473,41 @@ function handleClick(view: EditorView, event: Event): boolean {
   if (!target) return false;
   const eventId = target.getAttribute('data-event-id');
   if (!eventId) return false;
+  const domSelection = typeof window === 'undefined' ? null : window.getSelection();
+  if (!shouldActivateReviewMarkClick(view.state.selection.empty, domSelection?.isCollapsed ?? true)) {
+    // Browsers may dispatch click after mouseup even when the gesture was a
+    // text-selection drag. Rebuilding the decoration beneath that live range
+    // can detach its DOM endpoints and collapse part (or all) of the selection.
+    recordReviewSelectionDebug('mark-click-ignored-selection', {
+      eventId: eventId.slice(0, 8),
+      pmFrom: view.state.selection.from,
+      pmTo: view.state.selection.to,
+      domCollapsed: domSelection?.isCollapsed ?? null,
+    });
+    return false;
+  }
   reviewStore.setFocusEventId(eventId);
   // Clicking a mark is explicit intent to view its thread — expand the
   // rail if it is collapsed to the chip gutter (attn-42y), mirroring the
   // chip-side expandToThread. ReviewMargin's focus effect then finds the
   // freshly rendered card and scrolls/pulses it.
   reviewStore.panelOpen = true;
-  // Dispatch an immediate rebuild so the focused-mark class lands without
-  // waiting on the host effect.
-  requestReviewDecorationsRebuild(view);
+  recordReviewSelectionDebug('mark-click-activated', {
+    eventId: eventId.slice(0, 8),
+    pmFrom: view.state.selection.from,
+    pmTo: view.state.selection.to,
+  });
+  // The host effect watching focusEventId owns the rebuild. Dispatching here
+  // as well rebuilt the same DecorationSet twice for one click.
   return false;
+}
+
+/** A click activates a thread only when it is not the tail of a selection drag. */
+export function shouldActivateReviewMarkClick(
+  prosemirrorSelectionEmpty: boolean,
+  domSelectionCollapsed: boolean,
+): boolean {
+  return prosemirrorSelectionEmpty && domSelectionCollapsed;
 }
 
 function handleMouseOver(view: EditorView, event: Event): boolean {
@@ -526,4 +552,3 @@ export const __testing__ = {
   HIGH_CONFIDENCE,
   INLINE_CUTOFF,
 };
-

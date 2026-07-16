@@ -113,7 +113,7 @@ type StoreModule = typeof import('../review/store.svelte');
 const sutModule: SutModule = await import('./review-decorations');
 const storeModule: StoreModule = await import('../review/store.svelte');
 
-const { buildReviewDecorations, __testing__ } = sutModule;
+const { buildReviewDecorations, shouldActivateReviewMarkClick, __testing__ } = sutModule;
 const { reviewStore } = storeModule;
 
 // ---------------------------------------------------------------------------
@@ -482,6 +482,25 @@ defineCase('focusEventId on click → store mutation reflected', () => {
   assert(
     reviewStore.focusEventId === null,
     `expected focusEventId cleared, got ${String(reviewStore.focusEventId)}`,
+  );
+});
+
+defineCase('selection-drag click does not activate or rebuild its review mark', () => {
+  assert(
+    !shouldActivateReviewMarkClick(false, false),
+    'non-empty ProseMirror + DOM selection was treated as a click',
+  );
+  assert(
+    !shouldActivateReviewMarkClick(false, true),
+    'non-empty ProseMirror selection was treated as a click',
+  );
+  assert(
+    !shouldActivateReviewMarkClick(true, false),
+    'non-empty DOM selection was treated as a click',
+  );
+  assert(
+    shouldActivateReviewMarkClick(true, true),
+    'an ordinary collapsed click did not activate its review mark',
   );
 });
 

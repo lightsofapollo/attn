@@ -6,6 +6,7 @@ import {
   browserReviewerAvailability,
   browserReviewerViewMatchesEpoch,
   rememberAuthenticatedOwnerDevice,
+  shouldDeferReviewerCollabReseed,
 } from './browser-review-collab';
 
 interface CaseResult { name: string; ok: boolean; detail?: string }
@@ -76,6 +77,21 @@ defineCase('new epoch cannot bind the prior epoch editor view', () => {
   assert(browserReviewerViewMatchesEpoch(4, 4), 'matching editor epoch was rejected');
   assert(!browserReviewerViewMatchesEpoch(4, 5), 'prior editor epoch was accepted');
   assert(!browserReviewerViewMatchesEpoch(-1, 0), 'unmounted editor epoch was accepted');
+});
+
+defineCase('same-file reseed waits for an active text-selection drag', () => {
+  assert(
+    shouldDeferReviewerCollabReseed(true, 'file-a', 'file-a'),
+    'same-file pointer drag did not defer the epoch replacement',
+  );
+  assert(
+    !shouldDeferReviewerCollabReseed(false, 'file-a', 'file-a'),
+    'same-file replacement stayed deferred after pointerup',
+  );
+  assert(
+    !shouldDeferReviewerCollabReseed(true, 'file-a', 'file-b'),
+    'file navigation was incorrectly deferred',
+  );
 });
 
 defineCase('gate waits for controller bind and rebinds deliveries after epoch reset', async () => {

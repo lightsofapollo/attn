@@ -55,6 +55,15 @@ export function browserReviewerViewMatchesEpoch(
     && readyEpoch === currentEpoch;
 }
 
+/** Keep a same-file snapshot replacement from destroying a live pointer drag. */
+export function shouldDeferReviewerCollabReseed(
+  pointerSelecting: boolean,
+  currentFileId: string | null | undefined,
+  nextFileId: string,
+): boolean {
+  return pointerSelecting && currentFileId === nextFileId;
+}
+
 type DeliveryTarget = (delivery: BrowserCollabDelivery) => void;
 
 interface Readiness {

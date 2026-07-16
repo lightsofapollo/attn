@@ -203,6 +203,70 @@ async function expectStableSelectionDrag(page: Page): Promise<void> {
   expect(result!.styleMutations).toBeLessThanOrEqual(1);
 }
 
+async function expectAnnotatedSelectionDragStable(page: Page): Promise<void> {
+  await setEditorSelection(page, 'Hosted review');
+  await expect(page.locator('.attn-review-comment[data-event-id]').first()).toBeVisible();
+  const result = await page.evaluate(async () => {
+    interface TestView {
+      dom: HTMLElement;
+      state: { selection: { from: number; to: number; empty: boolean } };
+    }
+    interface SelectionDebug {
+      events: Array<{ kind: string }>;
+      enable(options?: { console?: boolean }): void;
+      clear(): void;
+    }
+    const target = window as unknown as {
+      __attnPmView?: TestView;
+      __attnSelectionDebug?: SelectionDebug;
+    };
+    const view = target.__attnPmView;
+    const mark = document.querySelector<HTMLElement>('.attn-review-comment[data-event-id]');
+    const editor = document.querySelector<HTMLElement>('[data-slot="browser-review-editor"]');
+    const margin = document.querySelector<HTMLElement>('[data-slot="browser-review-margin"]');
+    const debug = target.__attnSelectionDebug;
+    if (!view || !mark || !editor || !margin || !debug) return null;
+    debug.enable({ console: false });
+    debug.clear();
+    const before = {
+      view,
+      dom: view.dom,
+      from: view.state.selection.from,
+      to: view.state.selection.to,
+      editorScroll: editor.scrollTop,
+      marginScroll: margin.scrollTop,
+    };
+    mark.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    return {
+      sameView: target.__attnPmView === before.view,
+      sameDom: target.__attnPmView?.dom === before.dom,
+      sameSelection:
+        target.__attnPmView?.state.selection.from === before.from
+        && target.__attnPmView?.state.selection.to === before.to,
+      from: target.__attnPmView?.state.selection.from,
+      to: target.__attnPmView?.state.selection.to,
+      empty: target.__attnPmView?.state.selection.empty,
+      sameEditorScroll: editor.scrollTop === before.editorScroll,
+      sameMarginScroll: margin.scrollTop === before.marginScroll,
+      ignoredDragClick: debug.events.some((event) => event.kind === 'mark-click-ignored-selection'),
+      activatedMark: debug.events.some((event) => event.kind === 'mark-click-activated'),
+    };
+  });
+  expect(result).not.toBeNull();
+  expect(result).toMatchObject({
+    sameView: true,
+    sameDom: true,
+    sameSelection: true,
+    empty: false,
+    ignoredDragClick: true,
+    activatedMark: false,
+    sameEditorScroll: true,
+    sameMarginScroll: true,
+  });
+  expect(result!.from).toBeLessThan(result!.to!);
+}
+
 async function setEditorSelection(page: Page, needle: string): Promise<void> {
   const outcome = await page.evaluate((text) => {
     const view = (window as unknown as {
@@ -550,6 +614,7 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
     .locator('[data-testid="review-margin-card"]')
     .filter({ hasText: commentCanary });
   await expect(commentCard).toBeVisible();
+  await expectAnnotatedSelectionDragStable(page);
   const nativeBridgeDebug = await nativeEval<unknown>(
     `({
       reviewEventType: typeof window.__attn__?.reviewEvent,

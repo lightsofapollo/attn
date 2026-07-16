@@ -56,9 +56,14 @@
     browserReviewerAvailability,
     browserReviewerViewMatchesEpoch,
     rememberAuthenticatedOwnerDevice,
+    shouldDeferReviewerCollabReseed,
   } from './lib/review/browser-review-collab';
   import type { ParsedInvite } from './lib/review/browser-invite';
   import { hasTextSelection } from './lib/review/popover-anchor';
+  import {
+    recordReviewSelectionDebug,
+    reviewSelectionDebugEnabled,
+  } from './lib/review/selection-debug';
   import { resolveAnchor } from './lib/review/resolver';
   import type { ConstructAnchorContext } from './lib/review/anchors';
   import type { Anchor, FileId, RoomId, SuggestionDraft } from './lib/types';
@@ -218,6 +223,7 @@
     pmViewForReview = view;
     reviewerCollabReadyEpoch = reviewerCollabEpoch;
     (window as unknown as { __attnPmView?: EditorView }).__attnPmView = view;
+    traceReviewSelection('host-view-ready', {}, view);
     refreshSelectionToolbar();
   }
 
@@ -233,10 +239,15 @@
   // including it dispatched a full DecorationSet rebuild on every mouseover
   // for a byte-identical result.
   $effect(() => {
-    void reviewStore.anchorResolutions;
-    void reviewStore.events;
-    void reviewStore.focusEventId;
+    const resolutions = reviewStore.anchorResolutions;
+    const events = reviewStore.events;
+    const focusEventId = reviewStore.focusEventId;
     if (!pmViewForReview) return;
+    untrack(() => traceReviewSelection('decorations-rebuild', {
+      resolutionCount: Object.keys(resolutions).length,
+      eventCount: events.length,
+      focusEventId: focusEventId?.slice(0, 8) ?? null,
+    }));
     requestReviewDecorationsRebuild(pmViewForReview);
   });
 
@@ -292,6 +303,72 @@
   let reviewerCollabReadyEpoch = $state(-1);
   let reviewerCollabController = $state<CollabController | null>(null);
   let reviewerCollabBoundView: EditorView | undefined;
+  let editorPointerSelecting = $state(false);
+  let nextDebugViewId = 0;
+  const debugViewIds = new WeakMap<EditorView, number>();
+
+  function debugViewId(view: EditorView | undefined): number | null {
+    if (!view) return null;
+    const existing = debugViewIds.get(view);
+    if (existing !== undefined) return existing;
+    nextDebugViewId += 1;
+    debugViewIds.set(view, nextDebugViewId);
+    return nextDebugViewId;
+  }
+
+  function traceReviewSelection(
+    kind: string,
+    detail: Record<string, unknown> = {},
+    explicitView?: EditorView,
+  ): void {
+    if (!reviewSelectionDebugEnabled()) return;
+    // Debug reads must never become dependencies of whichever Svelte effect
+    // happened to emit the trace; diagnostics should observe, not perturb.
+    untrack(() => {
+      const view = explicitView ?? pmViewForReview;
+      const domSelection = window.getSelection();
+      const editorScroller = document.querySelector<HTMLElement>('[data-slot="browser-review-editor"]');
+      const marginScroller = document.querySelector<HTMLElement>('[data-slot="browser-review-margin"]');
+      const active = document.activeElement as HTMLElement | null;
+      const viewRect = view?.dom.getBoundingClientRect();
+      recordReviewSelectionDebug(kind, {
+        ...detail,
+        viewId: debugViewId(view),
+        epoch: reviewerCollabEpoch,
+        readyEpoch: reviewerCollabReadyEpoch,
+        seedSnapshot: reviewerCollabSeed?.snapshotId.slice(0, 8) ?? null,
+        latestSnapshot: displayedSnapshot?.snapshotId.slice(0, 8) ?? null,
+        pointerSelecting: editorPointerSelecting,
+        pm: view ? {
+          from: view.state.selection.from,
+          to: view.state.selection.to,
+          empty: view.state.selection.empty,
+        } : null,
+        dom: domSelection ? {
+          ranges: domSelection.rangeCount,
+          collapsed: domSelection.isCollapsed,
+          anchorInEditor: Boolean(domSelection.anchorNode && view?.dom.contains(domSelection.anchorNode)),
+          focusInEditor: Boolean(domSelection.focusNode && view?.dom.contains(domSelection.focusNode)),
+        } : null,
+        active: active ? {
+          tag: active.tagName.toLowerCase(),
+          slot: active.dataset.slot ?? null,
+          class: active.className?.toString().slice(0, 80) ?? '',
+        } : null,
+        scroll: {
+          editor: editorScroller?.scrollTop ?? null,
+          margin: marginScroller?.scrollTop ?? null,
+          window: window.scrollY,
+        },
+        viewRect: viewRect ? {
+          top: Math.round(viewRect.top),
+          height: Math.round(viewRect.height),
+        } : null,
+        focusEventId: reviewStore.focusEventId?.slice(0, 8) ?? null,
+        toolbar: toolbarSelection !== null,
+      });
+    });
+  }
 
   const reviewerAvailability = $derived.by(() => {
     const availability = browserReviewerAvailability({
@@ -329,6 +406,22 @@
     }
     const key = `${roomId}:${snapshot.fileId}:${snapshot.snapshotId}`;
     if (reviewerCollabSeed?.key === key) return;
+    if (shouldDeferReviewerCollabReseed(
+      editorPointerSelecting,
+      reviewerCollabSeed?.fileId,
+      snapshot.fileId,
+    )) {
+      untrack(() => traceReviewSelection('collab-reseed-deferred', {
+        fromSnapshot: reviewerCollabSeed?.snapshotId.slice(0, 8) ?? null,
+        toSnapshot: snapshot.snapshotId.slice(0, 8),
+      }));
+      return;
+    }
+    untrack(() => traceReviewSelection('collab-reseed', {
+      fromSnapshot: reviewerCollabSeed?.snapshotId.slice(0, 8) ?? null,
+      toSnapshot: snapshot.snapshotId.slice(0, 8),
+      sameFile: reviewerCollabSeed?.fileId === snapshot.fileId,
+    }));
     reviewerCollabGate.reset();
     reviewerCollabController = null;
     reviewerCollabSeed = {
@@ -422,9 +515,11 @@
   function handleReviewerCollabDocChange(): void {
     // Owner broadcasts may update the rendered document, but reviewer
     // transactions are never submitted back into the authority.
+    traceReviewSelection('collab-doc-change');
   }
 
   function handleReviewerCollabSelectionChange(head: number): void {
+    traceReviewSelection('prosemirror-selection', { head });
     if (reviewerAvailability.collabReady) reviewerCollabController?.broadcastCursor(head);
   }
 
@@ -488,16 +583,23 @@
   function refreshSelectionToolbar(): void {
     const view = pmViewForReview;
     if (!reviewerAvailability.reviewAuthoring || !view || !hasTextSelection(view)) {
-      if (toolbarSelection !== null) toolbarSelection = null;
+      if (toolbarSelection !== null) {
+        toolbarSelection = null;
+        traceReviewSelection('toolbar-selection-cleared');
+      }
       return;
     }
     if (!activeSnapshotForCompose()) {
-      if (toolbarSelection !== null) toolbarSelection = null;
+      if (toolbarSelection !== null) {
+        toolbarSelection = null;
+        traceReviewSelection('toolbar-selection-cleared-no-snapshot');
+      }
       return;
     }
     const { from, to } = view.state.selection;
     if (toolbarSelection?.from === from && toolbarSelection.to === to) return;
     toolbarSelection = { from, to };
+    traceReviewSelection('toolbar-selection-updated', { from, to });
   }
 
   $effect(() => {
@@ -585,14 +687,50 @@
       refreshRaf = requestAnimationFrame(() => {
         refreshRaf = 0;
         refreshSelectionToolbar();
+        traceReviewSelection('selection-frame');
+      });
+    };
+    const startsInEditor = (event: PointerEvent): boolean => {
+      const target = event.target;
+      return event.button === 0 && target instanceof Node && Boolean(pmViewForReview?.dom.contains(target));
+    };
+    const handlePointerDown = (event: PointerEvent): void => {
+      if (!startsInEditor(event)) return;
+      editorPointerSelecting = true;
+      traceReviewSelection('pointer-down', { x: Math.round(event.clientX), y: Math.round(event.clientY) });
+    };
+    const finishPointerSelection = (event: PointerEvent): void => {
+      if (!editorPointerSelecting) return;
+      traceReviewSelection(event.type === 'pointercancel' ? 'pointer-cancel' : 'pointer-up', {
+        x: Math.round(event.clientX),
+        y: Math.round(event.clientY),
+      });
+      editorPointerSelecting = false;
+    };
+    const handleScroll = (event: Event): void => {
+      const view = pmViewForReview;
+      if (!reviewSelectionDebugEnabled() || (!editorPointerSelecting && (!view || view.state.selection.empty))) return;
+      const target = event.target as HTMLElement | Document | null;
+      traceReviewSelection('scroll', {
+        source: target instanceof HTMLElement
+          ? target.dataset.slot ?? target.className?.toString().slice(0, 60) ?? target.tagName.toLowerCase()
+          : 'document',
       });
     };
     // Browsers emit selectionchange for every incremental range while the
     // pointer is moving. Coalesce that burst to one Svelte update per frame;
     // SelectionToolbar owns scroll/resize re-anchoring once it is visible.
     document.addEventListener('selectionchange', scheduleRefresh);
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    document.addEventListener('pointerup', finishPointerSelection, true);
+    document.addEventListener('pointercancel', finishPointerSelection, true);
+    document.addEventListener('scroll', handleScroll, true);
     return () => {
       document.removeEventListener('selectionchange', scheduleRefresh);
+      document.removeEventListener('pointerdown', handlePointerDown, true);
+      document.removeEventListener('pointerup', finishPointerSelection, true);
+      document.removeEventListener('pointercancel', finishPointerSelection, true);
+      document.removeEventListener('scroll', handleScroll, true);
       if (refreshRaf) cancelAnimationFrame(refreshRaf);
     };
   });
@@ -787,6 +925,7 @@
                 ? reviewerCollabClientId ?? undefined
                 : undefined}
               collabEpoch={reviewerCollabEpoch}
+              collabContinuityKey={reviewerCollabSeed?.fileId}
               onCollabDocChange={handleReviewerCollabDocChange}
               onCollabSelectionChange={handleReviewerCollabSelectionChange}
               suggesting={false}

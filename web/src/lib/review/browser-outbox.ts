@@ -282,7 +282,17 @@ export class BrowserOutbox {
     if (!this.initialized) await this.initialize();
     await this.persistenceTransition;
     if (this.closed || this.state.terminal || this.queue.length === 0) return;
-    if (this.inFlight) return this.inFlight;
+    if (this.inFlight) {
+      // A finishing drain may have taken its final queue-empty check before
+      // this caller's envelopes were enqueued (its promise is registered
+      // until the trailing `finally`). Joining it alone would report success
+      // while those envelopes sit unsent — the startup share-republish
+      // resume then failed its acknowledgment gate and paused the authority
+      // (attn-w22). Join, then re-check the queue with a fresh flush; the
+      // previous drain's failure belongs to its own callers.
+      await this.inFlight.catch(() => undefined);
+      return this.flushNow();
+    }
     this.clearRetry();
     this.publish({ sending: true });
     const run = this.drain()

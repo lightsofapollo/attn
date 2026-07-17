@@ -1687,6 +1687,16 @@ export class BrowserSession {
     const mintPow =
       this.opts.outboxMintPow ??
       (this.opts.powToken === undefined ? undefined : async () => this.opts.powToken!);
+    // The owner's snapshot-publication commit gate reads the workspace
+    // database: staged rows must leave STORE_OUTBOX and land in STORE_HISTORY
+    // when the relay acknowledges. Only this outbox's persistence adapter
+    // performs that move, so a memory-only owner outbox makes every staged
+    // publication (startup resume, epoch rollover) fail acknowledgment and
+    // pause the authority (attn-w22). Reviewers stay memory-only until an
+    // explicit remember.
+    if (this.principal === 'owner' && !this.storage) {
+      this.storage = await this.openStorage(false);
+    }
     const outbox = new BrowserOutbox({
       relayUrl,
       roomId,

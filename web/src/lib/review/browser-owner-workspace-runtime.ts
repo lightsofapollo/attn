@@ -774,7 +774,13 @@ export class BrowserOwnerWorkspaceRuntime {
       reason: null,
       roomId: discovered.share.roomId,
       capId: discovered.share.capId,
-      bindings: discovered.bindings,
+      // Startup reconcile may have transitioned to a fresh epoch and already
+      // adopted its bindings (afterTransition). Re-patching the discovered
+      // (pre-transition) bindings here rebound the editor to the DEAD epoch:
+      // the reloaded owner then broadcast steps no reviewer followed, and
+      // late joiners rendered the new epoch's snapshot with no live catch-up
+      // (attn-w22).
+      bindings: this.stateValue.bindings,
       authority: authority.getState(),
     });
     this.startLocalCollab();

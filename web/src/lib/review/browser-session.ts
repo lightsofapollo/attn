@@ -909,6 +909,9 @@ export class BrowserSession {
   private peerMesh: BrowserPeerMesh | null = null;
   private joinEnvelopeId: string | null = null;
   private lastCreatedAt = 0;
+  private readonly authoringReadyWaiters = new Set<() => void>();
+  /** Bounded startup grace for publication callers racing the connection. */
+  private static readonly PUBLICATION_READY_TIMEOUT_MS = 15_000;
   private roomPolicy: RoomPolicy | null = null;
   private bootstrapDevices: Device[] = [];
   private readonly onlineDeviceIds = new Set<string>();
@@ -1157,6 +1160,7 @@ export class BrowserSession {
   /** Owner-only snapshot batch adoption for a lease-scoped publication. */
   async enqueuePublicationBatch(envelopes: readonly MailboxEnvelope[]): Promise<number> {
     if (this.principal !== 'owner') throw new Error('only the browser owner may publish snapshots');
+    await this.awaitAuthoringReady(BrowserSession.PUBLICATION_READY_TIMEOUT_MS);
     const outbox = this.outbox;
     if (!outbox || !this.state.authoringReady) {
       throw new Error('browser owner publication outbox is unavailable');
@@ -1167,11 +1171,34 @@ export class BrowserSession {
   /** Flush the exact owner outbox used by snapshot publication. */
   async flushPublicationOutbox(): Promise<void> {
     if (this.principal !== 'owner') throw new Error('only the browser owner may publish snapshots');
+    await this.awaitAuthoringReady(BrowserSession.PUBLICATION_READY_TIMEOUT_MS);
     const outbox = this.outbox;
     if (!outbox || !this.state.authoringReady) {
       throw new Error('browser owner publication outbox is unavailable');
     }
     await outbox.flushNow();
+  }
+
+  /**
+   * Bounded wait for authoring readiness (outbox initialized and the join
+   * envelope flushed). Publication callers race the room connection on a
+   * reload with a staged share republish: a fast relay wins the race, a real
+   * network loses it, and throwing immediately paused the authority with
+   * "publication outbox is unavailable" and no retry (attn-w22).
+   */
+  private awaitAuthoringReady(timeoutMs: number): Promise<void> {
+    if (this.state.authoringReady || this.isTerminated()) return Promise.resolve();
+    return new Promise((resolve) => {
+      const waiter = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        this.authoringReadyWaiters.delete(waiter);
+        resolve();
+      }, timeoutMs);
+      this.authoringReadyWaiters.add(waiter);
+    });
   }
 
   /** Send live collab as one broadcast envelope: direct first, relay always. */
@@ -1562,6 +1589,10 @@ export class BrowserSession {
         this.roomPolicy?.allowBrowser === true &&
         this.roomPolicy.expiresAt > Date.now(),
     };
+    if (this.state.authoringReady || this.isTerminated()) {
+      for (const waiter of this.authoringReadyWaiters) waiter();
+      this.authoringReadyWaiters.clear();
+    }
     this.opts.onState?.(this.state);
   }
 

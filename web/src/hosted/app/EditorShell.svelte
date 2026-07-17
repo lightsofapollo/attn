@@ -146,6 +146,10 @@
   /** Lazy store handle — the review store belongs to the editor graph, and
    *  the app entry's static graph must never preload it (route-bundle gate). */
   let reviewStoreRef = $state<typeof ReviewStoreInstance | null>(null);
+  let resolveAnchorFn = $state<typeof import('../../lib/review/resolver').resolveAnchor | null>(null);
+  let requestDecorationsRebuild = $state<
+    typeof import('../../lib/prosemirror/review-decorations').requestReviewDecorationsRebuild | null
+  >(null);
   let ReviewApplyExpandComponent = $state<typeof ReviewApplyExpandComponentType | null>(null);
   let editorRef = $state<EditorExports | undefined>();
   let pmViewForReview = $state<EditorView | undefined>();
@@ -603,8 +607,10 @@
         import('../../lib/Editor.svelte'),
         import('prosemirror-state'),
         import('./desktop-editor-styles'),
-      ]).then(([editorModule, pmState]) => {
+        import('../../lib/prosemirror/review-decorations'),
+      ]).then(([editorModule, pmState, , decorationsModule]) => {
         EditorComponent = editorModule.default;
+        requestDecorationsRebuild = decorationsModule.requestReviewDecorationsRebuild;
         changeWatcher = [
           new pmState.Plugin({
             view: () => ({
@@ -613,6 +619,10 @@
               },
             }),
           }),
+          // Inline anchor highlights for review threads (attn-o0d): the same
+          // decoration layer the reviewer page installs. Inert until the
+          // store holds resolved anchors for the current room/file.
+          decorationsModule.reviewDecorationsPlugin(),
         ];
       }));
     }
@@ -624,12 +634,72 @@
         ReviewMarginComponent = marginModule.default;
         ReviewApplyExpandComponent = applyModule.default;
       }));
-      imports.push(import('../../lib/review/store.svelte').then((mod) => {
+      imports.push(Promise.all([
+        import('../../lib/review/store.svelte'),
+        import('../../lib/review/resolver'),
+      ]).then(([mod, resolverModule]) => {
+        resolveAnchorFn = resolverModule.resolveAnchor;
         reviewStoreRef = mod.reviewStore;
       }));
     }
     await Promise.all(imports);
   }
+
+  // Resolve every comment/suggestion anchor against the latest published
+  // snapshot for the active file, exactly like the native shell does — the
+  // margin cards and inline decorations have no positions without it
+  // (attn-o0d: the owner document showed no highlight for anchored threads).
+  $effect(() => {
+    const store = reviewStoreRef;
+    const resolve = resolveAnchorFn;
+    if (!store || !resolve) return;
+    const roomId = store.currentRoomId;
+    const fileId = store.currentFileId;
+    const events = store.events;
+    if (!roomId || !fileId) return;
+    const snaps = store.snapshots.filter(
+      (s) => s.roomId === roomId && s.fileId === fileId && s.anchorIndex,
+    );
+    if (snaps.length === 0) return;
+    const snapshot = snaps.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
+    if (!snapshot.anchorIndex || typeof snapshot.content !== 'string') return;
+    untrack(() => {
+      const ctx = {
+        currentIndex: snapshot.anchorIndex!,
+        currentMarkdownBytes: new TextEncoder().encode(snapshot.content as string),
+        currentHash: snapshot.baseHash,
+      };
+      for (const event of events) {
+        const body = event.body;
+        const anchor =
+          body.type === 'comment_created' || body.type === 'suggestion_created'
+            ? body.anchor
+            : null;
+        if (!anchor) continue;
+        if (store.anchorResolutions[event.meta.eventId]) continue;
+        store.applyAnchorResolution({
+          roomId,
+          fileId,
+          eventId: event.meta.eventId,
+          resolved: resolve(anchor, ctx),
+        });
+      }
+    });
+  });
+
+  // Rebuild the inline decorations whenever resolutions, events, or the
+  // focused thread change (mirrors the reviewer page's trigger).
+  $effect(() => {
+    const store = reviewStoreRef;
+    if (!store) return;
+    void store.anchorResolutions;
+    void store.events;
+    void store.focusEventId;
+    const view = pmViewForReview;
+    const rebuild = requestDecorationsRebuild;
+    if (!view || !rebuild) return;
+    rebuild(view);
+  });
 
   function installOwnerSession(granted: EditingSession): void {
     session = granted;

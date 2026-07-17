@@ -172,11 +172,15 @@
 
 {#snippet mainContent()}
   <div class="relative shrink-0">
+    <!-- Pre-share the breadcrumb's quiet icon is the only Share entry point.
+         Once a room is active (or the sheet is up) the ReviewBar's ShareChip
+         owns share status + management, so the icon hides — same gate as the
+         native App.svelte header. -->
     <PathBreadcrumb
       path={activePath}
       {rootPath}
       {actions}
-      onShare={onShare}
+      onShare={reviewStore.currentRoomId === null && !shareOpen ? onShare : undefined}
       shareEnabled={true}
       rightInsetPx={reviewStore.currentRoomId !== null && reviewStore.railMode !== 'expanded'
         ? 328 - RAIL_WIDTH_PX[reviewStore.railMode]

@@ -23,13 +23,13 @@ export interface WorkspaceEntry {
   mediaType?: string;
 }
 
-/** Literal status language from planning/web-authoring/00-web-presence.md. */
+/** Literal status language from planning/web-authoring/00-web-presence.md.
+ *  Share status ("Shared · …") is no longer a save state — it lives in the
+ *  ShareChip / masthead share control. */
 export type SaveState =
   | 'Saved on this device'
   | 'Saving…'
   | 'Storage needs attention'
-  | 'Shared · Direct'
-  | 'Shared · Encrypted relay'
   | 'Owner offline · Review still available';
 
 export type SharingState = 'local-only' | 'shared' | 'backed-up';

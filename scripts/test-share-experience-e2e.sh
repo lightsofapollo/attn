@@ -102,7 +102,7 @@ attn_rev --query '[data-slot=shared-file-tree]' 2>/dev/null | grep -q '"count": 
 attn_rev --query '[data-slot=review-file-nav] .review-file-tab' 2>/dev/null | grep -q '"count": *[2-9]' && ok "#3 top strip lists multiple files" || bad "#3 top strip missing files"
 attn_rev --query '[data-slot=shared-file-tree-folder]' 2>/dev/null | grep -q '"count": *[1-9]' && ok "#3 shared tree shows a subfolder" || bad "#3 shared tree has no subfolder"
 
-attn_owner --query '[data-slot=share-status-files]' 2>/dev/null | grep -q '"count": *[1-9]' && ok "#5 owner status names the shared file(s)" || bad "#5 owner status does not name shared file(s)"
+attn_owner --query '[data-slot=share-chip-files]' 2>/dev/null | grep -q '"count": *[1-9]' && ok "#5 owner status names the shared file(s)" || bad "#5 owner status does not name shared file(s)"
 
 # #4 screenshots (best-effort; macOS debug builds only).
 attn_owner --eval "document.querySelector('[data-slot=review-bar-peers] button')?.click()" >/dev/null 2>&1 || true

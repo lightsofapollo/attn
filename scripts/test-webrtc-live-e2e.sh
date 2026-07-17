@@ -109,7 +109,7 @@ poll 25000 has_peer attn_owner && ok "owner sees a peer" || bad "owner sees no p
 
 # The crux: the connection badge flips to live_direct → the orchestrator
 # negotiated a DataChannel over the relay's signaling channel.
-badge_state() { "$1" --eval "document.querySelector('[data-slot=connection-badge-chip]')?.getAttribute('data-state')||''" 2>/dev/null | tr -d '"'; }
+badge_state() { "$1" --eval "document.querySelector('[data-slot=share-chip]')?.getAttribute('data-state')||''" 2>/dev/null | tr -d '"'; }
 owner_live() { [ "$(badge_state attn_owner)" = "live_direct" ]; }
 rv_live()    { [ "$(badge_state attn_rv)" = "live_direct" ]; }
 log "Waiting for the WebRTC DataChannel (badge → live_direct)"

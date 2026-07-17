@@ -2646,6 +2646,7 @@ export class BrowserSession {
       roomId: meta.roomId,
       fileId: body.fileId,
       snapshotId: body.snapshotId,
+      ownerDisplayPath: body.ownerDisplayPath,
       parentSnapshotId: body.parentSnapshotId,
       createdAt: meta.createdAt,
       createdBy: meta.authorId,

@@ -15,7 +15,7 @@
   Today the parent owns the retry side-effect (there is no `reviewPull` IPC
   yet — issue 4.13 stops at the chrome contract). The popover and pill are
   self-contained: no `bits-ui` Popover dep, mirroring the same anchoring
-  approach used by ConnectionBadge.svelte / SnapshotBadge.svelte so we don't
+  approach used by ShareChip.svelte / SnapshotBadge.svelte so we don't
   re-introduce portal/z-index battles inside the 36 px row.
 
   Visibility: collapses to nothing when `reviewStore.outboxCount === 0` so the
@@ -182,7 +182,7 @@
 
     {#if popoverOpen}
       <!-- Click-shield: clicking outside dismisses (same pattern as
-           ConnectionBadge.svelte / SnapshotBadge.svelte). -->
+           ShareChip.svelte / SnapshotBadge.svelte). -->
       <button
         type="button"
         class="fixed inset-0 z-40 cursor-default bg-transparent"

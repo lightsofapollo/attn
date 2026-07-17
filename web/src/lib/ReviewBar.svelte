@@ -7,10 +7,10 @@
   itself. The dock now overlays the breadcrumb line with the same testable
   slots, but the visible surface is icon + avatar driven.
 
-  Owner asymmetry: the Share button is the owner-only slot. In this issue
-  (4.10) the connection-badge and peer-strip slots are intentionally stubs —
-  attn-nnj.4.11 owns the badge state machine and 4.12 owns the peer chips.
-  Their host elements live here so layout / overflow rules ship in one place.
+  Share status lives in a single control (ShareChip): what is shared, the
+  connection state, the people here, and the management actions all hang off
+  one chip + one popover. Owners get the "Sharing · scope" variant with a
+  Manage action; reviewers get the status word.
 
   Visibility: the row mounts when a room is active, a remembered room can be
   selected, OR the share dialog is open (`shareOpen` prop, parent-controlled).
@@ -29,11 +29,9 @@
   import Check from '@lucide/svelte/icons/check';
   import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
   import LogOut from '@lucide/svelte/icons/log-out';
-  import Share2 from '@lucide/svelte/icons/share-2';
-  import ConnectionBadge from './ConnectionBadge.svelte';
   import OutboxIndicator from './OutboxIndicator.svelte';
   import PeerStrip from './PeerStrip.svelte';
-  import SharedFilesBadge from './SharedFilesBadge.svelte';
+  import ShareChip from './ShareChip.svelte';
   import SnapshotBadge from './SnapshotBadge.svelte';
   import {
     DropdownMenu,
@@ -108,11 +106,6 @@
   // selected during P1, or a share being initiated. Passive owner rooms never
   // create their own navigation surface.
   const visible = $derived(hasActiveRoom || (!isOwner && rooms.length > 0) || shareOpen);
-
-  // Label for the share pill — post-mint it flips to "Sharing" per §8.
-  const shareLabel = $derived(
-    hasActiveRoom ? 'Sharing' : 'Share',
-  );
 
   function handleShareClick(): void {
     onShareClick?.();
@@ -195,32 +188,19 @@
         </DropdownMenu>
       {/if}
 
-      {#if (hasActiveRoom || shareOpen) && isOwner}
-        <button
-          type="button"
-          class="share-pill inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/50 bg-background/55 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-          data-slot="review-bar-share"
-          data-state={reviewStore.currentRoomId !== null ? 'sharing' : 'idle'}
-          aria-label={shareLabel}
-          title={shareLabel}
-          onclick={handleShareClick}
-        >
-          <Share2 class="size-3.5" aria-hidden="true" />
-          <span class="sr-only">{shareLabel}</span>
-        </button>
-        <!-- Names WHAT is shared (file / "N files") so "Sharing" doesn't read
-             as "everything is shared". Self-gates until a file is published. -->
-        <SharedFilesBadge />
-      {/if}
+      <!-- The single share control: names WHAT is shared, carries the
+           connection state, and opens the one popover with files, people,
+           and management actions. Reviewers get the status-word variant. -->
+      <div class="review-bar-share shrink-0" data-slot="review-bar-share">
+        <ShareChip
+          {isOwner}
+          {shareOpen}
+          onManageShare={isOwner ? handleShareClick : undefined}
+          {onReconnect}
+        />
+      </div>
 
       {#if hasActiveRoom}
-        <div
-          class="review-bar-connection shrink-0"
-          data-slot="review-bar-connection"
-        >
-          <ConnectionBadge {onReconnect} />
-        </div>
-
         <span class="h-4 w-px shrink-0 bg-border/70" aria-hidden="true"></span>
 
         <div

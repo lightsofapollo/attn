@@ -33,7 +33,7 @@
   visibility check.
 
   Self-contained popover (no bits-ui dependency): mirrors the approach used
-  by ConnectionBadge.svelte — the host row is narrow and a portal-mounted
+  by the former ConnectionBadge (now ShareChip.svelte) — the host row is narrow and a portal-mounted
   popover would re-introduce z-index battles with the right-rail aside.
 -->
 
@@ -351,7 +351,7 @@
     {#if popoverOpen}
       <!--
         Click-shield: dismisses the popover on any outside click. The same
-        pattern used by ConnectionBadge — keeps the popover entirely local.
+        pattern used by ShareChip — keeps the popover entirely local.
       -->
       <button
         type="button"

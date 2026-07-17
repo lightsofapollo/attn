@@ -182,6 +182,9 @@
       && ownerState?.roomId !== undefined
       && ownerState.authority?.session?.authoringReady === true,
   );
+  // Lease/authoring states only — plain share status ("Shared · relay")
+  // moved into the ShareChip (desktop) and the masthead Share button
+  // (mobile), so the save chip no longer duplicates it.
   const ownerRoomStatus = $derived.by(() => {
     if (joinLive) return 'Live · editing with another tab';
     const state = ownerState;
@@ -189,10 +192,11 @@
     if (state.leaseRole === 'passive') return 'Read-only tab';
     if (!state.roomId) return null;
     if (!state.liveEditingAvailable) return 'Live review paused';
-    return state.authority?.session?.connection === 'live_direct'
-      ? 'Shared · Direct'
-      : 'Shared · Encrypted relay';
+    return null;
   });
+  const sharingActive = $derived(
+    ownerState?.roomId !== null && ownerState?.roomId !== undefined,
+  );
 
   // ————— multi-file rail state (attn-7xl.3.4) —————
   let addingMarkdown = $state(false);
@@ -1904,13 +1908,18 @@
       <span class="save-state save-chip" data-save-state={saveState} data-commits={commitCount}>{ownerRoomStatus ?? saveState}</span>
     </div>
     <div class="share-action">
+      <!-- State-aware: once a review room is live the button carries the
+           share status (dot + "Sharing") and reopens the sheet to manage. -->
       <button
         class="button primary"
+        class:sharing={sharingActive}
         type="button"
         bind:this={shareButton}
+        data-sharing={sharingActive}
         onclick={() => openShare(shareButton)}
       >
-        Share
+        {#if sharingActive}<span class="share-live-dot" aria-hidden="true"></span>{/if}
+        {sharingActive ? 'Sharing' : 'Share'}
       </button>
     </div>
   </header>

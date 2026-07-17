@@ -638,7 +638,7 @@ export class ReviewStore {
    * Apply a live transport connection-state change pushed by Rust over
    * `reviewConnection`. The daemon emits `mailbox` when the relay socket
    * subscribes (a `hello` frame) and `offline` when it disconnects. Drives
-   * the ConnectionBadge. On going offline we also clear the peer roster —
+   * the ShareChip. On going offline we also clear the peer roster —
    * we can't know who's still present once our socket is gone.
    */
   applyConnection(payload: {
@@ -653,7 +653,7 @@ export class ReviewStore {
 
     this.connection = payload.connection;
     // Keep the active full-status object's connection in sync. The
-    // ConnectionBadge reads `status?.connection ?? connection`, and selectRoom
+    // ShareChip reads `status?.connection ?? connection`, and selectRoom
     // seeds `status.connection` from the room's connection at selection time —
     // typically 'offline', before any peer connects. Without this sync a later
     // mailbox/live_direct update lands on `this.connection` but the badge keeps
@@ -812,7 +812,12 @@ export class ReviewStore {
         existing.baseHash === snapshot.baseHash
       ) {
         const next = [...this.snapshots];
-        next[existingIndex] = snapshot;
+        // The pointer event is the only carrier of presentation metadata like
+        // ownerDisplayPath; a hydrated blob that omits it must not erase it.
+        next[existingIndex] = {
+          ...snapshot,
+          ownerDisplayPath: snapshot.ownerDisplayPath ?? existing.ownerDisplayPath,
+        };
         this.snapshots = next;
       }
       return;

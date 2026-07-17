@@ -1,4 +1,4 @@
-// Pure formatter for ConnectionBadge.svelte (attn-nnj.4.11). Lives in a
+// Pure formatter shared by the review-dock popovers (PeerStrip & co). Lives in a
 // separate `.ts` module so tsx-based tests can import it without going
 // through the .svelte compiler.
 //

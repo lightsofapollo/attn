@@ -1047,7 +1047,7 @@ export interface ReviewPresenceChanged {
  * Live transport connection-state change pushed via
  * `window.__attn__.reviewConnection(...)`. The daemon emits `mailbox` when
  * the relay socket subscribes and `offline` on disconnect. Drives the
- * ConnectionBadge. @see store.applyConnection.
+ * ShareChip. @see store.applyConnection.
  */
 export interface ReviewConnectionChanged {
   roomId: RoomId;

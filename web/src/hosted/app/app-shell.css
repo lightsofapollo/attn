@@ -299,6 +299,22 @@ a.workspace-row:hover {
   text-align: right;
 }
 
+/* Once a review is live the button is a status you can reopen, not a
+   call-to-action: outline + dot instead of solid rust. */
+.editor-top .share-action .button.sharing {
+  border-color: color-mix(in srgb, var(--rust) 45%, transparent);
+  background: color-mix(in srgb, var(--rust) 8%, var(--sheet));
+  color: var(--rust-deep);
+}
+
+.share-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--rust);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--rust) 18%, transparent);
+}
+
 .editor-grid {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr) 320px;

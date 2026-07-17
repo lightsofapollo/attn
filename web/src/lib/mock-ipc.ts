@@ -121,7 +121,7 @@ interface AttnBridge {
   reviewPresence?: ReviewPresenceFn;
   /**
    * Push a live transport connection-state change (`mailbox`/`offline`).
-   * Drives the ConnectionBadge. Optional: only the daemon emits it.
+   * Drives the ShareChip status. Optional: only the daemon emits it.
    */
   reviewConnection?: ReviewConnectionFn;
   /** Push the daemon-owned durable unread count for one room. */

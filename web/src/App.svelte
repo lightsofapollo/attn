@@ -2231,7 +2231,7 @@
         reviewStore.applyPresence(payload);
       },
       // Live transport state: `mailbox` on relay subscribe, `offline` on
-      // disconnect. Drives the ConnectionBadge.
+      // disconnect. Drives the ShareChip status.
       reviewConnection(payload: import('./lib/types').ReviewConnectionChanged) {
         const reconnecting =
           payload.roomId === reviewStore.currentRoomId &&

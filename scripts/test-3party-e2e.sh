@@ -208,7 +208,7 @@ if poll 25000 has_n_peers attn_rvB 2;   then ok "rvB sees $(peer_count attn_rvB)
 if poll 25000 has_n_peers attn_rvC 2;   then ok "rvC sees $(peer_count attn_rvC) peer chips (>=2)";   else bad "rvC peers=$(peer_count attn_rvC) (<2)"; fi
 
 # ---------- Phase: Connection badge is status-first (no transport jargon) ----------
-badge_text() { "$1" --eval "document.querySelector('[data-slot=connection-badge-chip]')?.textContent?.trim() || ''" 2>/dev/null | tr -d '"'; }
+badge_text() { "$1" --eval "document.querySelector('[data-slot=share-chip-status]')?.textContent?.trim() || ''" 2>/dev/null | tr -d '"'; }
 badge_status_first() { case "$(badge_text attn_owner)" in Connected|Live) return 0;; *) return 1;; esac; }
 log "Connection badge should read a plain status (Connected/Live), not 'Mailbox'"
 if poll 10000 badge_status_first; then ok "owner badge reads '$(badge_text attn_owner)' (status-first)"; else bad "owner badge reads '$(badge_text attn_owner)' (expected Connected/Live)"; fi
@@ -217,7 +217,7 @@ if poll 10000 badge_status_first; then ok "owner badge reads '$(badge_text attn_
 # Every participant should connect to every other (full mesh), so all three
 # badges reach live_direct and collab flows P2P (relay off the hot path) even
 # with three people. Co-typing below then exercises it over the mesh.
-badge_state() { "$1" --eval "document.querySelector('[data-slot=connection-badge-chip]')?.getAttribute('data-state')||''" 2>/dev/null | tr -d '"'; }
+badge_state() { "$1" --eval "document.querySelector('[data-slot=share-chip]')?.getAttribute('data-state')||''" 2>/dev/null | tr -d '"'; }
 mesh_all_live() { for fn in attn_owner attn_rvB attn_rvC; do [ "$(badge_state "$fn")" = "live_direct" ] || return 1; done; }
 log "Waiting for the full WebRTC mesh (all 3 badges → live_direct)"
 if poll 45000 mesh_all_live; then ok "all 3 peers connected via WebRTC (full mesh, P2P)"; else bad "mesh incomplete: owner=$(badge_state attn_owner) rvB=$(badge_state attn_rvB) rvC=$(badge_state attn_rvC)"; fi

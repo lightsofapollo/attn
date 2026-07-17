@@ -431,22 +431,39 @@ export class BrowserWorkspaceSharingCoordinator {
     if (!manifest) throw new StorageConflictError('published room is missing its exact manifest');
     const client = this.makeShareRelay(record.relayUrl, credentials);
     const context = this.bundleContext(credentials, 0, EMPTY_SHARE_MANIFEST_DIGEST);
+    const createBody = {
+      v: 3,
+      ownerSigningKey: base64UrlEncode(credentials.identity.signingPublic),
+      bundles: buildShareBundleMutations(context),
+      epoch: credentials.epoch,
+      revision: 0,
+      currentRoomId: null,
+      snapshots: [],
+      placeholders: [],
+      deviceId: credentials.identity.deviceId,
+    } satisfies BrowserShareUpsertRequest;
     let remote: BrowserShareRelayRecord;
-    try {
-      remote = await client.fetchWithViewCapability(credentials.shareSecret);
-    } catch (error) {
-      if (!(error instanceof BrowserShareOwnerRelayError) || error.status !== 404) throw error;
-      remote = await client.upsert({
-        v: 3,
-        ownerSigningKey: base64UrlEncode(credentials.identity.signingPublic),
-        bundles: buildShareBundleMutations(context),
-        epoch: credentials.epoch,
-        revision: 0,
-        currentRoomId: null,
-        snapshots: [],
-        placeholders: [],
-        deviceId: credentials.identity.deviceId,
-      });
+    // A durable record that has never committed a relay publish still carries
+    // its minted revision-0/empty-manifest state (the local `publication`
+    // flag promotes earlier and can't distinguish). Probing the relay first
+    // in that state just manufactures a guaranteed 404 on every share
+    // creation (attn-8l8) — create directly; if a concurrent owner operation
+    // won the race, fall back to reading what it wrote.
+    const relayHasRecord = durable.revision > 0
+      || durable.manifestDigest !== EMPTY_SHARE_MANIFEST_DIGEST;
+    if (!relayHasRecord) {
+      try {
+        remote = await client.upsert(createBody);
+      } catch {
+        remote = await client.fetchWithViewCapability(credentials.shareSecret);
+      }
+    } else {
+      try {
+        remote = await client.fetchWithViewCapability(credentials.shareSecret);
+      } catch (error) {
+        if (!(error instanceof BrowserShareOwnerRelayError) || error.status !== 404) throw error;
+        remote = await client.upsert(createBody);
+      }
     }
 
     // Uploads only stage ciphertext on the relay; nothing joiners can observe
@@ -557,15 +574,19 @@ export class BrowserWorkspaceSharingCoordinator {
     credentials: BrowserOwnerCredentialsV3,
     outbox: BrowserWorkspaceShareOutbox,
   ): Promise<void> {
+    const rootCapability = await this.storage.shares.openShare(rootKey, this.workspaceId, record.capId);
+    const durable = rootCapability.durableShare;
+    if (!durable) throw new StorageConflictError('durable share ownership is missing');
+    // A share that has never committed a relay publish has no relay record
+    // and therefore no mailbox — probing it only logs a guaranteed 404
+    // (attn-8l8; same predicate as publishDurableProjection).
+    if (durable.revision === 0 && durable.manifestDigest === EMPTY_SHARE_MANIFEST_DIGEST) return;
     const client = this.makeShareRelay(record.relayUrl, credentials);
     const remote = await client.fetchWithViewCapability(credentials.shareSecret).catch((error) => {
       if (error instanceof BrowserShareOwnerRelayError && error.status === 404) return null;
       throw error;
     });
     if (!remote || remote.mailbox.count === 0) return;
-    const rootCapability = await this.storage.shares.openShare(rootKey, this.workspaceId, record.capId);
-    const durable = rootCapability.durableShare;
-    if (!durable) throw new StorageConflictError('durable share ownership is missing');
     const after = durable.drainCursor ?? 0;
     const items = new Map<number, BrowserShareMailboxPage['items'][number]>();
     for (const tier of ['comment', 'suggest'] as const) {

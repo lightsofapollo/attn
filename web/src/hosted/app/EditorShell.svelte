@@ -425,7 +425,9 @@
         .map((candidate) => candidate.name);
       const next = dedupeWorkspaceName(heading, names);
       await service.renameWorkspace(workspace.id, next);
-      workspace.name = next;
+      // AppShell owns the workspace detail; let it re-read rather than
+      // mutating the prop (ownership_invalid_mutation).
+      await onWorkspaceChanged?.();
     } catch {
       // Transient failure — retry on a later commit.
       autoNameAttempted = false;
@@ -687,6 +689,20 @@
     });
   });
 
+  // Keep the shared connection badge honest on the hosted owner. The store's
+  // transport field is daemon-fed on native and nothing set it here, so the
+  // ReviewBar chip sat on "Offline" while the header pill said Shared · Direct.
+  $effect(() => {
+    const store = reviewStoreRef;
+    if (!store) return;
+    const state = ownerState;
+    const connection = state?.authority?.session?.connection
+      ?? (state?.roomId ? 'mailbox' : 'offline');
+    untrack(() => {
+      store.connection = connection;
+    });
+  });
+
   // Rebuild the inline decorations whenever resolutions, events, or the
   // focused thread change (mirrors the reviewer page's trigger).
   $effect(() => {
@@ -731,6 +747,9 @@
         commitCount += 1;
         displayText = text;
         void maybeAutoNameFromHeading(text);
+        // Keep entry metadata (sizes, updated-at) current for the sidebar and
+        // share sheet — a fresh draft otherwise advertises "0 B" until reload.
+        void onWorkspaceChanged?.();
       },
       onState: (state) => (saveState = state),
     });
@@ -1386,7 +1405,7 @@
   // ————— command palette (⌘K) —————
   const paletteCommands = $derived.by<HostedCommand[]>(() => {
     const cmds: HostedCommand[] = [
-      { id: 'share', label: 'Share for review', hint: '⌘K', keywords: 'invite link publish reviewer',
+      { id: 'share', label: 'Share for review', keywords: 'invite link publish reviewer',
         run: () => openShare(shareButton) },
       { id: 'new', label: 'New Markdown file', keywords: 'create add document',
         // Open the sidebar name field (autofocused) — calling
@@ -1872,7 +1891,10 @@
           <strong class="masthead-doc" aria-hidden="true">{docTitle}</strong>
         </span>
       {/if}
-      <span class="save-state save-chip" data-save-state={saveState} data-commits={commitCount}>{saveState}</span>
+      <!-- Same precedence as the desktop chip: a live share outranks the
+           local save state, so mobile doesn't claim "Saved on this device"
+           while the document is shared. -->
+      <span class="save-state save-chip" data-save-state={saveState} data-commits={commitCount}>{ownerRoomStatus ?? saveState}</span>
     </div>
     <div class="share-action">
       <button

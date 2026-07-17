@@ -390,7 +390,11 @@
 
           <div class="share-manifest" aria-live="polite">
             <strong>{manifest.entryCount} {manifest.entryCount === 1 ? 'file' : 'files'} selected · {formatByteCount(manifest.totalBytes)}</strong>
-            <span>{manifest.markdownCount} Markdown · {manifest.previewableAssetCount} previewable · {manifest.downloadOnlyAssetCount} download-only</span>
+            <span>{[
+              `${manifest.markdownCount} Markdown`,
+              manifest.previewableAssetCount > 0 ? `${manifest.previewableAssetCount} previewable` : null,
+              manifest.downloadOnlyAssetCount > 0 ? `${manifest.downloadOnlyAssetCount} download-only` : null,
+            ].filter(Boolean).join(' · ')}</span>
           </div>
           {#if !scopeValid}
             <p class="share-error" role="alert">Select at least one Markdown file to create a review.</p>
@@ -412,7 +416,7 @@
                 </label>
               {/each}
             </fieldset>
-            <p class="share-lifetime-note">Hybrid is recommended. Review links renew when this browser reconnects, and Stop sharing revokes every permission level.</p>
+            <p class="share-lifetime-note">Hybrid is recommended. The link renews whenever this browser reconnects, and Stop sharing cuts off access for everyone immediately.</p>
           </div>
         </details>
 

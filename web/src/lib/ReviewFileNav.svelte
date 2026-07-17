@@ -16,25 +16,15 @@
 
 <script lang="ts">
   import { reviewStore } from './review/store.svelte';
-  import { deriveFileEntries } from './review/file-nav';
-  import { isRenderableReviewSnapshot } from './review/snapshot-kind';
+  import { deriveFileEntries, latestRenderableSnapshotId } from './review/file-nav';
 
   const files = $derived(deriveFileEntries(reviewStore.snapshots, reviewStore.currentRoomId));
 
   function selectFile(fileId: (typeof files)[number]['fileId']): void {
     reviewStore.setCurrentFile(fileId);
-    let latest = null;
-    for (const snapshot of reviewStore.snapshots) {
-      if (
-        snapshot.roomId === reviewStore.currentRoomId &&
-        snapshot.fileId === fileId &&
-        isRenderableReviewSnapshot(snapshot) &&
-        (latest === null || snapshot.createdAt > latest.createdAt)
-      ) {
-        latest = snapshot;
-      }
-    }
-    reviewStore.setCurrentSnapshot(latest?.snapshotId ?? null);
+    reviewStore.setCurrentSnapshot(
+      latestRenderableSnapshotId(reviewStore.snapshots, reviewStore.currentRoomId, fileId),
+    );
   }
 </script>
 

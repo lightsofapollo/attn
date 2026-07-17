@@ -1,7 +1,10 @@
 <!--
   BrowserReviewApp — top-level Svelte component for the hosted review surface
-  (attn-nnj.9.4). Reviewer-only: NO ShareDialog, NO apply flow, NO sidebar /
-  tabs / project switching. Just the editor + ReviewMargin.
+  (attn-nnj.9.4, layout reworked by attn-238). Reviewer-only: NO ShareDialog,
+  NO apply flow, NO write surface. The shell mirrors the workspace grammar so
+  a share feels like a workspace you were invited into: a file rail on the
+  left for folder shares, a fixed-height header naming the document, and a
+  collapsible comment rail that exists only while threads do.
 
   Lifecycle:
     1. `start()` boots a `BrowserSession`, which parses the invite + opens the
@@ -28,15 +31,19 @@
   import type { EditorView } from 'prosemirror-view';
   import { TextSelection, type Plugin as PMPlugin } from 'prosemirror-state';
   import { getVersion } from 'prosemirror-collab';
+  import MessageSquareText from '@lucide/svelte/icons/message-square-text';
   import Editor from './lib/Editor.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import BottomSheet from './hosted/app/BottomSheet.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
+  import ReviewFileSidebar from './lib/ReviewFileSidebar.svelte';
+  import ReviewerStatusChip from './lib/ReviewerStatusChip.svelte';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
   import SelectionToolbar from './lib/SelectionToolbar.svelte';
-  import OutboxIndicator from './lib/OutboxIndicator.svelte';
+  import { deriveFileEntries } from './lib/review/file-nav';
+  import { reviewerStatusPresentation } from './lib/review/reviewer-status-model';
   import { reviewStore } from './lib/review/store.svelte';
   import {
     reviewDecorationsPlugin,
@@ -173,9 +180,9 @@
   const pushCapable = 'getPushConsentState' in session && 'setPushConsentObserver' in session &&
     'enablePushFromUserGesture' in session && 'disablePushFromUserGesture' in session;
   let pushConsent = $state<BrowserPushConsentState>({ status: pushCapable ? 'checking' : 'unsupported', message: null, enabled: false });
-  // The hosted shell dedicates a permanent 320px rail to review threads, so
-  // keep the shared margin in its expanded/card mode instead of the native
-  // app's collapsed 48px avatar-gutter mode.
+  // The margin always renders in its expanded/card mode here — the reviewer
+  // rail is either open (320px of cards) or unmounted entirely; the native
+  // app's collapsed 48px avatar-gutter mode never applies.
   reviewStore.panelOpen = true;
 
   // Phones get the document full-width; threads move behind a thumb control
@@ -185,6 +192,71 @@
     typeof window !== 'undefined' && window.matchMedia('(min-width: 901px)').matches,
   );
   let mobileReviewOpen = $state(false);
+
+  // ---------------------------------------------------------------------------
+  // Comment rail visibility (desktop). The rail exists only while the current
+  // file has threads — an empty review shows the document full-width with no
+  // filler chrome. It auto-opens once per room when unresolved feedback first
+  // appears (mirrors the native App.svelte auto-open rule), reopens when a
+  // highlight is clicked, and is user-collapsible via the header toggle and
+  // Cmd+J. A deliberate collapse sticks for the room.
+  // ---------------------------------------------------------------------------
+
+  let railOpen = $state(false);
+  let railAutoOpenedRoom = $state<string | null>(null);
+  const currentThreadCount = $derived(reviewStore.threadsForCurrentFile.length);
+  const activeThreadCount = $derived(reviewStore.marginActiveThreadCount);
+  const railVisible = $derived(railOpen && currentThreadCount > 0);
+
+  $effect(() => {
+    const roomId = reviewStore.currentRoomId;
+    if (roomId === null) return;
+    if (activeThreadCount > 0 && railAutoOpenedRoom !== roomId) {
+      railAutoOpenedRoom = roomId;
+      railOpen = true;
+    }
+  });
+
+  // Clicking a highlight in the document focuses its thread — surface it.
+  $effect(() => {
+    if (reviewStore.focusEventId !== null && currentThreadCount > 0) railOpen = true;
+  });
+
+  function toggleRail(): void {
+    railOpen = !railOpen;
+  }
+
+  function handleRailShortcut(event: KeyboardEvent): void {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'j') {
+      if (currentThreadCount === 0) return;
+      event.preventDefault();
+      toggleRail();
+    }
+  }
+
+  // Header identity: the current file's display name (first heading, same
+  // derivation the file rail uses) so the chrome names what you're reading.
+  const fileEntries = $derived(deriveFileEntries(reviewStore.snapshots, reviewStore.currentRoomId));
+  const currentFileName = $derived.by(() => {
+    const fileId = reviewStore.currentFileId ?? sessionState.fileId;
+    return fileEntries.find((f) => f.fileId === fileId)?.name ?? 'Shared document';
+  });
+
+  // One fixed-size chip presentation for everything transient (pending sends,
+  // owner presence, sync failures) — reviewer-status-model.ts is the pure
+  // mapping. Nothing height-changing may live inline in the header: that is
+  // what made the document jump on every posted comment.
+  const statusPresentation = $derived(
+    reviewerStatusPresentation({
+      connection: sessionState.connection,
+      ownerOnline: sessionState.ownerOnline,
+      outboxPending: sessionState.outboxPending,
+      authoringError: sessionState.authoringError,
+      hasSnapshot: sessionState.snapshotContent !== null,
+      authoringReady: sessionState.authoringReady,
+      grantTier: sessionState.grantTier,
+    }),
+  );
   $effect(() => {
     const query = window.matchMedia('(min-width: 901px)');
     const update = (): void => {
@@ -788,6 +860,8 @@
   }
 </script>
 
+<svelte:window onkeydown={handleRailShortcut} />
+
 <main
   class="browser-review-shell flex h-screen flex-col overflow-hidden bg-background text-foreground"
   data-slot="browser-review"
@@ -813,124 +887,63 @@
     </div>
   {:else}
     <div class="browser-review-body flex min-h-0 flex-1 flex-row overflow-hidden">
+      {#if desktopLayout}
+        <!-- Folder shares get a workspace-style file rail; single-file shares
+             render nothing here and the header names the document. -->
+        <ReviewFileSidebar />
+      {/if}
       <div class="browser-review-editor-col flex min-w-0 flex-1 flex-col overflow-hidden">
-        <!-- Folder-share file switcher; renders nothing for single-file shares. -->
-        <ReviewFileNav />
-        <div
-          class="flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-3 py-1 text-xs text-muted-foreground"
-          data-slot="browser-authoring-status"
+        {#if !desktopLayout}
+          <!-- Compact switcher strip on phones (renders nothing single-file). -->
+          <ReviewFileNav />
+        {/if}
+        <!-- Fixed-height header: nothing inside may wrap or grow, so posting a
+             comment can never reflow the document column (the old wrap-prone
+             status row jumped the page on every submit). All transient state
+             lives in the status chip's popover. -->
+        <!-- No overflow-hidden here: the status chip's popover overhangs the
+             header; the doc-name span truncates itself via min-w-0. -->
+        <header
+          class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-border px-3"
+          data-slot="browser-review-header"
         >
-          <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1" data-slot="browser-persistence-status">
-            <span class="select-none font-serif text-sm font-bold leading-none text-foreground" data-slot="browser-brand" aria-label="attn review">attn</span>
-            <span class="h-3 w-px bg-border" aria-hidden="true"></span>
-            <span class="font-medium text-foreground" data-slot="browser-grant-tier">
-              {sessionState.grantTier === 'view'
-                ? 'View only'
-                : sessionState.grantTier === 'comment'
-                  ? 'Can comment'
-                  : 'Can suggest'}
-            </span>
-            {#if sessionState.grantTier !== 'view' && !sessionState.canRemember}
-              <span>{pushCapable && pushConsent.enabled ? 'Remembered for notifications' : 'Keep this link to come back'}</span>
-            {:else if sessionState.grantTier !== 'view' && sessionState.persistence === 'ephemeral'}
-              <span>Temporary on this browser</span>
+          <span class="select-none font-serif text-sm font-bold leading-none text-foreground" data-slot="browser-brand" aria-label="attn review">attn</span>
+          <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
+          <span class="min-w-0 truncate font-sans text-[13px] font-medium text-foreground" data-slot="browser-review-doc-name">
+            {currentFileName}
+          </span>
+          <div class="ml-auto flex shrink-0 items-center gap-1.5">
+            <ReviewerStatusChip
+              presentation={statusPresentation}
+              tier={sessionState.grantTier}
+              persistence={sessionState.persistence}
+              canRemember={sessionState.canRemember}
+              {pushCapable}
+              {pushConsent}
+              collabError={collabSetupError}
+              onRememberRoom={() => { void rememberBrowserRoom(); }}
+              onForgetRoom={() => { void forgetBrowserRoom(); }}
+              onTogglePush={() => { void togglePushConsent(); }}
+              onRetryOutbox={() => { void session.retryOutbox(); }}
+            />
+            {#if desktopLayout && displayedDocType !== 'html' && currentThreadCount > 0}
               <button
                 type="button"
-                class="rounded border border-border px-2 py-0.5 text-foreground hover:bg-muted"
-                data-slot="browser-remember-room"
-                title="Store a non-extractable room key and encrypted recovery state in this browser profile"
-                onclick={() => { void rememberBrowserRoom(); }}
+                class="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                data-slot="browser-review-rail-toggle"
+                aria-pressed={railOpen}
+                aria-label={railOpen ? 'Hide comments' : 'Show comments'}
+                title="{railOpen ? 'Hide comments' : 'Show comments'} (⌘J)"
+                onclick={toggleRail}
               >
-                Remember this room
+                <MessageSquareText class="size-3.5" aria-hidden="true" />
+                {#if activeThreadCount > 0}
+                  <span class="text-[10px] font-semibold" data-slot="browser-review-rail-count">{activeThreadCount}</span>
+                {/if}
               </button>
-            {:else if sessionState.grantTier !== 'view' && sessionState.persistence === 'saving'}
-              <span role="status">Securing local recovery…</span>
-            {:else if sessionState.grantTier !== 'view'}
-              <span>
-                {sessionState.persistence === 'degraded'
-                  ? 'Remembered; browser may evict local data'
-                  : 'Remembered on this browser'}
-              </span>
-              <button
-                type="button"
-                class="rounded border border-border px-2 py-0.5 text-foreground hover:bg-muted"
-                data-slot="browser-forget-room"
-                onclick={() => { void forgetBrowserRoom(); }}
-              >
-                Forget
-              </button>
-            {/if}
-            {#if pushCapable && sessionState.grantTier !== 'view'}
-              <span class="h-3 w-px bg-border" aria-hidden="true"></span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={pushConsent.enabled}
-                aria-describedby={pushConsent.message ? 'browser-push-message' : undefined}
-                class="rounded border border-border px-2 py-0.5 text-foreground hover:bg-muted disabled:cursor-wait disabled:opacity-60"
-                data-slot="browser-push-toggle"
-                data-push-status={pushConsent.status}
-                disabled={pushConsent.status === 'checking' || pushConsent.status === 'enabling' || pushConsent.status === 'disabling'}
-                onclick={() => { void togglePushConsent(); }}
-              >
-                {pushConsent.status === 'on'
-                  ? 'Notifications on'
-                  : pushConsent.status === 'enabling'
-                    ? 'Enabling notifications…'
-                    : pushConsent.status === 'disabling'
-                      ? 'Turning notifications off…'
-                      : pushConsent.status === 'install_hint'
-                        ? 'Install to enable notifications'
-                        : pushConsent.enabled
-                          ? 'Retry turning notifications off'
-                        : 'Remember & notify me'}
-              </button>
-              {#if pushConsent.message}
-                <span
-                  id="browser-push-message"
-                  class={pushConsent.status === 'error' || pushConsent.status === 'denied' ? 'text-destructive' : ''}
-                  role="status"
-                  data-slot="browser-push-message"
-                >{pushConsent.message}</span>
-              {/if}
             {/if}
           </div>
-          <div class="flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1">
-            <span data-slot="browser-connection-status">
-              {sessionState.connection === 'live_direct'
-                ? 'Live · end-to-end encrypted'
-                : sessionState.connection === 'direct_failed' || sessionState.connection === 'mailbox'
-                  ? 'Connected · encrypted relay'
-                  : 'Offline'}
-            </span>
-            {#if reviewerAvailability.ownerStatus}
-              <span data-slot="browser-owner-offline-status" role="status">
-                {reviewerAvailability.ownerStatus}
-              </span>
-            {/if}
-            {#if collabSetupError}
-              <span class="text-destructive" data-slot="browser-collab-error" role="status">
-                {collabSetupError}
-              </span>
-            {/if}
-            {#if sessionState.grantTier !== 'view' && !sessionState.authoringReady}
-              <span>Preparing encrypted authoring…</span>
-            {/if}
-            {#if sessionState.authoringError}
-              <span class="text-destructive" role="status">{sessionState.authoringError}</span>
-              <button
-                type="button"
-                class="rounded border border-border px-2 py-0.5 text-foreground hover:bg-muted"
-                onclick={() => { void session.retryOutbox(); }}
-              >
-                Retry
-              </button>
-            {/if}
-            {#if sessionState.grantTier !== 'view'}
-              <OutboxIndicator isOwner={false} onRetry={() => { void session.retryOutbox(); }} />
-            {/if}
-          </div>
-        </div>
+        </header>
         <div class="browser-review-editor min-w-0 flex-1 overflow-auto"
           data-slot="browser-review-editor">
           {#if displayedDocType === 'html'}
@@ -956,7 +969,7 @@
           {/if}
         </div>
       </div>
-      {#if displayedDocType !== 'html' && desktopLayout}
+      {#if displayedDocType !== 'html' && desktopLayout && railVisible}
         <aside class="browser-review-margin w-[320px] shrink-0 overflow-y-auto border-l border-border bg-background"
           data-slot="browser-review-margin">
           <ReviewMargin

@@ -116,3 +116,28 @@ export function deriveFileEntries(
   entries.sort((a, b) => a.name.localeCompare(b.name));
   return entries;
 }
+
+/**
+ * The snapshot id a file switcher should activate for `fileId` — the latest
+ * renderable snapshot in the room, or null when none exists yet. Shared by
+ * the top-strip nav (mobile / native) and the reviewer file sidebar so both
+ * pick the same version.
+ */
+export function latestRenderableSnapshotId(
+  snapshots: ReviewSnapshot[],
+  currentRoomId: RoomId | null,
+  fileId: FileId,
+): ReviewSnapshot['snapshotId'] | null {
+  let latest: ReviewSnapshot | null = null;
+  for (const snap of snapshots) {
+    if (
+      snap.roomId === currentRoomId &&
+      snap.fileId === fileId &&
+      isRenderableReviewSnapshot(snap) &&
+      (latest === null || snap.createdAt > latest.createdAt)
+    ) {
+      latest = snap;
+    }
+  }
+  return latest?.snapshotId ?? null;
+}

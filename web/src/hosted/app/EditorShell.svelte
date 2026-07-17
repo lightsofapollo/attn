@@ -955,11 +955,15 @@
   // Mobile is deliberately reader-first: merely opening a document must not
   // block a desktop writer in another tab. It asks for authority only when the
   // user explicitly taps Edit.
-  // Teardown is keyed to the workspace alone. It must NOT read desktopLayout:
-  // a viewport flip would otherwise release the owner session and dispose the
-  // (possibly dirty) autosave mid-edit, rolling the document back.
+  // Teardown is keyed to the workspace ID VALUE alone — a $derived memoizes
+  // by value, so neither a viewport flip nor a refreshed workspace detail
+  // object (autosave commits re-read it for entry metadata) re-runs this
+  // cleanup. Reading `workspace.id` directly would track the PROP identity:
+  // every detail refresh then released the owner session mid-edit, and the
+  // share room silently lost its host (attn-707).
+  const sessionWorkspaceId = $derived(workspace.id);
   $effect(() => {
-    void workspace.id;
+    void sessionWorkspaceId;
     return () => {
       unsubscribeOwner?.();
       unsubscribeOwner = null;
@@ -967,10 +971,13 @@
       autosave = null;
       closeLocalJoin();
       void session?.release();
+      session = null;
+      ownerState = null;
     };
   });
 
   $effect(() => {
+    void sessionWorkspaceId;
     if (desktopLayout) untrack(() => { void ensureOwnerSession(); });
   });
 

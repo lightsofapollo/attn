@@ -528,7 +528,11 @@ export class BrowserWorkspaceSharingCoordinator {
     // a localhost owner from needing a manual Resume during relay rollouts and
     // also closes the ordinary stale-read race with another owner operation.
     remote = await client.fetchWithViewCapability(credentials.shareSecret);
-    nextManifest.sort((left, right) => left.fileId.localeCompare(right.fileId));
+    // Reviewer-side manifest validation requires strict code-unit ascending
+    // fileId order; localeCompare collates '-'/'_' (base64url alphabet)
+    // differently and produced manifests multi-file joiners rejected as
+    // 'snapshot manifest entry is invalid'.
+    nextManifest.sort((left, right) => compareManifestPathsUtf8(left.fileId, right.fileId));
     const manifestDigest = digestShareSnapshotManifest(nextManifest);
     const exact = remote.currentRoomId === record.roomId
       && remote.epoch === credentials.epoch

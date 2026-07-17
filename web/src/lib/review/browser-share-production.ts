@@ -1,4 +1,5 @@
 import { boundFetch } from './bound-fetch';
+import { compareManifestPathsUtf8 } from './browser-workspace-manifest';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import {
@@ -466,7 +467,8 @@ export class RememberedPushShareSessionFacade {
       ((raw.revision as number) === binding.revision && raw.manifestDigest !== binding.manifestDigest)) {
       throw new Error('remembered share binding changed');
     }
-    const refs = raw.snapshots.map(parseRememberedSnapshotRef).sort((a, b) => a.fileId.localeCompare(b.fileId) || a.snapshotId.localeCompare(b.snapshotId));
+    const refs = raw.snapshots.map(parseRememberedSnapshotRef).sort((a, b) =>
+      compareManifestPathsUtf8(a.fileId, b.fileId) || compareManifestPathsUtf8(a.snapshotId, b.snapshotId));
     const manifest = toCanonicalBytes(refs.map(ref => ({ fileId: ref.fileId, snapshotId: ref.snapshotId,
       ciphertextBytes: ref.ciphertextBytes, ciphertextSha256: ref.ciphertextSha256, uploadedAt: ref.uploadedAt })));
     try { if (digest(manifest) !== raw.manifestDigest) throw new Error('remembered share manifest failed authentication'); }

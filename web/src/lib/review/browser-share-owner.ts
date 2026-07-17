@@ -13,6 +13,7 @@ import {
 import { mintBrowserPowInWorker, type BrowserPowInputs } from './browser-pow';
 import { composeShareInvite, sealShareCapabilityBundle, type ShareCapabilityBundle } from './browser-share';
 import { validateBrowserRelayUrl } from './browser-relay-url';
+import { compareManifestPathsUtf8 } from './browser-workspace-manifest';
 import type { BrowserDeviceIdentity } from './browser-session';
 
 export const EMPTY_SHARE_MANIFEST_DIGEST = 'T1PNoYwrqgwDVLtfmj7L5e0Sq02OEbqHPC8RFhICuUU';
@@ -238,8 +239,10 @@ export function sealDurableShareSnapshot(input: SealDurableSnapshotInput): Uint8
 }
 
 export function digestShareSnapshotManifest(refs: readonly ManagedShareSnapshotRef[]): string {
+  // Code-unit fileId order — the same total order the reviewer-side manifest
+  // validator enforces. localeCompare disagrees on the base64url alphabet.
   const canonical = toCanonicalBytes([...refs]
-    .sort((left, right) => left.fileId.localeCompare(right.fileId))
+    .sort((left, right) => compareManifestPathsUtf8(left.fileId, right.fileId))
     .map((ref) => ({
       ciphertextBytes: ref.ciphertextBytes,
       ciphertextSha256: ref.ciphertextSha256,

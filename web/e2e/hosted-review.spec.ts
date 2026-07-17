@@ -751,7 +751,7 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
     // V3 capability persistence is intentionally not implemented yet. Keep
     // the UI honest and retain the fragmentless-refresh fail-closed behavior
     // proved above.
-    await expect(page.locator('[data-slot="browser-persistence-status"]')).toContainText('Open from this link');
+    await expect(page.locator('[data-slot="browser-persistence-status"]')).toContainText('Keep this link to come back');
     const unexpectedBrowserErrors = capture.browserErrors.filter(
       (message) => !message.includes('net::ERR_INTERNET_DISCONNECTED'),
     );

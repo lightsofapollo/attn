@@ -194,7 +194,7 @@
     if (typeof ms !== 'number' || !Number.isFinite(ms)) return '';
     const delta = Math.max(0, Date.now() - ms);
     const s = Math.floor(delta / 1000);
-    if (s < 60) return `${s}s`;
+    if (s < 60) return 'just now';
     const m = Math.floor(s / 60);
     if (m < 60) return `${m}m`;
     const h = Math.floor(m / 60);

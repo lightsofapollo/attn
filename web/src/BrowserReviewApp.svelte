@@ -821,6 +821,8 @@
           data-slot="browser-authoring-status"
         >
           <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1" data-slot="browser-persistence-status">
+            <span class="select-none font-serif text-sm font-bold leading-none text-foreground" data-slot="browser-brand" aria-label="attn review">attn</span>
+            <span class="h-3 w-px bg-border" aria-hidden="true"></span>
             <span class="font-medium text-foreground" data-slot="browser-grant-tier">
               {sessionState.grantTier === 'view'
                 ? 'View only'
@@ -829,7 +831,7 @@
                   : 'Can suggest'}
             </span>
             {#if sessionState.grantTier !== 'view' && !sessionState.canRemember}
-              <span>{pushCapable && pushConsent.enabled ? 'Remembered for notifications' : 'Open from this link'}</span>
+              <span>{pushCapable && pushConsent.enabled ? 'Remembered for notifications' : 'Keep this link to come back'}</span>
             {:else if sessionState.grantTier !== 'view' && sessionState.persistence === 'ephemeral'}
               <span>Temporary on this browser</span>
               <button
@@ -896,12 +898,10 @@
           <div class="flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1">
             <span data-slot="browser-connection-status">
               {sessionState.connection === 'live_direct'
-                ? 'Direct encrypted link'
-                : sessionState.connection === 'direct_failed'
-                  ? 'Direct unavailable; encrypted mailbox active'
-                  : sessionState.connection === 'mailbox'
-                    ? 'Encrypted mailbox'
-                    : 'Offline'}
+                ? 'Live · end-to-end encrypted'
+                : sessionState.connection === 'direct_failed' || sessionState.connection === 'mailbox'
+                  ? 'Connected · encrypted relay'
+                  : 'Offline'}
             </span>
             {#if reviewerAvailability.ownerStatus}
               <span data-slot="browser-owner-offline-status" role="status">

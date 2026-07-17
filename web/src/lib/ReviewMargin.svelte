@@ -1114,7 +1114,11 @@
 
   {#if threads.length === 0 && orphanThreads.length === 0}
     <p class="review-margin-empty" data-testid="review-margin-empty">
-      No review threads on this file.
+      {#if reviewerAuthoring}
+        No comments yet. Select any text in the document to start a thread.
+      {:else}
+        No review threads on this file.
+      {/if}
     </p>
   {/if}
 

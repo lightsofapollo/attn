@@ -1001,53 +1001,58 @@
             {/if}
           </div>
         </header>
+        <!-- ONE scroller encloses the document AND the comment margin (Docs
+             structure): the scrollbar lands at the far right of the page —
+             to the RIGHT of the comments — instead of drawing a rail between
+             text and cards. The margin is a sticky, viewport-height column
+             inside the scroller: it never scrolls itself (cards are
+             positioned at live anchor y), wheel anywhere naturally drives
+             the one scroller, and ReviewMargin's viewport-relative math is
+             untouched because sticky pins the container's top. -->
         <div class="browser-review-editor min-w-0 flex-1 overflow-auto"
           data-slot="browser-review-editor">
-          {#if displayedDocType === 'html'}
-            <!-- Read-only HTML doc: render received bytes in a sandboxed iframe.
-                 No editor, no collab, no comment margin (yet). -->
-            <HtmlViewer content={displayedContent ?? ''} allowScripts={false} />
-          {:else}
-            <Editor
-              markdown={reviewerCollabSeed?.markdown ?? displayedContent ?? ''}
-              editable={false}
-              plugins={editorPlugins}
-              onReady={handleEditorReady}
-              collabClientId={reviewerAvailability.collabReady
-                ? reviewerCollabClientId ?? undefined
-                : undefined}
-              collabEpoch={reviewerCollabEpoch}
-              collabContinuityKey={reviewerCollabSeed?.fileId}
-              onCollabDocChange={handleReviewerCollabDocChange}
-              onCollabSelectionChange={handleReviewerCollabSelectionChange}
-              suggesting={false}
-              suggestionAuthor="Reviewer"
-            />
-          {/if}
+          <div class="flex min-h-full flex-row">
+            <div class="min-w-0 flex-1">
+              {#if displayedDocType === 'html'}
+                <!-- Read-only HTML doc: render received bytes in a sandboxed iframe.
+                     No editor, no collab, no comment margin (yet). -->
+                <HtmlViewer content={displayedContent ?? ''} allowScripts={false} />
+              {:else}
+                <Editor
+                  markdown={reviewerCollabSeed?.markdown ?? displayedContent ?? ''}
+                  editable={false}
+                  plugins={editorPlugins}
+                  onReady={handleEditorReady}
+                  collabClientId={reviewerAvailability.collabReady
+                    ? reviewerCollabClientId ?? undefined
+                    : undefined}
+                  collabEpoch={reviewerCollabEpoch}
+                  collabContinuityKey={reviewerCollabSeed?.fileId}
+                  onCollabDocChange={handleReviewerCollabDocChange}
+                  onCollabSelectionChange={handleReviewerCollabSelectionChange}
+                  suggesting={false}
+                  suggestionAuthor="Reviewer"
+                />
+              {/if}
+            </div>
+            {#if displayedDocType !== 'html' && desktopLayout && railVisible}
+              <aside
+                class="browser-review-margin sticky top-0 w-[320px] shrink-0 self-start overflow-hidden"
+                style="height: calc(100dvh - 2.75rem);"
+                data-slot="browser-review-margin"
+              >
+                <ReviewMargin
+                  view={pmViewForReview}
+                  readOnly={true}
+                  reviewerAuthoring={reviewerAvailability.reviewAuthoring}
+                  onResolveComment={resolveBrowserComment}
+                  onReplyComment={replyBrowserComment}
+                />
+              </aside>
+            {/if}
+          </div>
         </div>
       </div>
-      {#if displayedDocType !== 'html' && desktopLayout && railVisible}
-        <!-- The margin is NOT its own scroll zone (Google-Docs rule): cards
-             are positioned at their anchors' live viewport y, so the aside
-             never scrolls itself — wheeling over it drives the document
-             scroller, same as the native WorkspaceEditorFrame rail. No
-             border either: an empty stretch of margin is whitespace, and
-             cards float on the paper. -->
-        <aside class="browser-review-margin w-[320px] shrink-0 overflow-hidden"
-          data-slot="browser-review-margin"
-          onwheel={(event) => {
-            const scroller = document.querySelector('[data-slot="browser-review-editor"]');
-            if (scroller) scroller.scrollTop += event.deltaY;
-          }}>
-          <ReviewMargin
-            view={pmViewForReview}
-            readOnly={true}
-            reviewerAuthoring={reviewerAvailability.reviewAuthoring}
-            onResolveComment={resolveBrowserComment}
-            onReplyComment={replyBrowserComment}
-          />
-        </aside>
-      {/if}
     </div>
     {#if displayedDocType !== 'html' && !desktopLayout}
       <button

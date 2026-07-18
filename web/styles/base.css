@@ -84,15 +84,8 @@ article {
     padding: 2.5rem clamp(1rem, 2.8vw, 2rem) 6rem;
 }
 
-/* Two-tier column (attn-vt4): prose at the readable measure, wide technical
-   blocks break out to their own cap — mirrors prosemirror.css. */
-article > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote) {
+article > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container, .prose-scroll-x) {
     max-width: var(--content-measure);
-    margin-inline: auto;
-}
-
-article > :is(pre, table, .mermaid-container, .prose-scroll-x) {
-    max-width: min(100%, var(--content-measure-wide));
     margin-inline: auto;
 }
 

@@ -446,12 +446,14 @@ describe("durable v3 shares", () => {
       "SHA-256",
       new TextEncoder().encode(canonicalize(refs as CanonicalValue[])),
     )));
+    // Deliberately post in LOCALE order — pre-cutover clients stored records
+    // this way, and the public projection must still serve canonical order.
     const multiBody = JSON.stringify({
       v: 3,
       ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
       revision: 2,
       bundles: synchronizedBundles,
-      snapshots: codeUnitOrder,
+      snapshots: localeOrder,
     });
     const multiPow = await mintPowForTests({ roomId: shareId, deviceId: ownerId, method: "POST", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}tw3` });
     const multi = await SELF.fetch(url, { method: "POST", body: multiBody, headers: {
@@ -460,10 +462,24 @@ describe("durable v3 shares", () => {
       "Attn-PoW": multiPow,
     } });
     expect(multi.status).toBe(200);
-    const multiJson = await multi.json() as { revision: number; manifestDigest: string };
+    const multiJson = await multi.json() as {
+      revision: number; manifestDigest: string; snapshots: Array<{ fileId: string }>;
+    };
     expect(multiJson.revision).toBe(2);
     expect(multiJson.manifestDigest).toBe(await digestOf(codeUnitOrder));
     expect(multiJson.manifestDigest).not.toBe(await digestOf(localeOrder));
+    // The served ARRAY order is canonical too — the reviewer validator
+    // enforces strict code-unit ascending order on the wire, so stored
+    // locale-order records must heal at the serve boundary.
+    expect(multiJson.snapshots.map((ref) => ref.fileId))
+      .toEqual(codeUnitOrder.map((ref) => ref.fileId));
+    const reread = await SELF.fetch(url, { headers: {
+      "Attn-Share-Bundle": bundles[0].bundleId,
+      "Attn-Admission": await admission("read", viewReadKey, "GET", url),
+    } });
+    const rereadJson = await reread.json() as { snapshots: Array<{ fileId: string }> };
+    expect(rereadJson.snapshots.map((ref) => ref.fileId))
+      .toEqual(codeUnitOrder.map((ref) => ref.fileId));
   });
 
   it("pins only the latest owner-uploaded snapshot per file and removes all ciphertext on revoke", async () => {

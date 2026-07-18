@@ -211,7 +211,14 @@ export class ShareDO extends DurableObject<Env> {
     const push = await pushPublicConfig(this.env);
     return {
       ...safe,
-      snapshots: snapshots.map(({ artifactId: _artifactId, ...snapshot }) => snapshot),
+      // Serve the manifest in canonical code-unit fileId order regardless of
+      // stored order: the reviewer-side validator enforces strict ascending
+      // order on the wire, and records written by pre-cutover clients were
+      // stored in localeCompare order — sorting the public projection heals
+      // every existing record without a rewrite (attn-qtz).
+      snapshots: snapshots
+        .map(({ artifactId: _artifactId, ...snapshot }) => snapshot)
+        .sort((left, right) => (left.fileId < right.fileId ? -1 : left.fileId > right.fileId ? 1 : 0)),
       manifestDigest: await this.manifestDigest(snapshots),
       ...(selected === undefined ? {} : {
         bundle: {

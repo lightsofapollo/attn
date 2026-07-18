@@ -268,6 +268,56 @@ defineCase('concurrent acquires resolve to exactly one writer', async () => {
   }
 });
 
+defineCase('takeover claims an unexpired lease and fences the previous holder', async () => {
+  const { storage, manager, messages } = await openHarness();
+  try {
+    const ws = await seedWorkspace(storage);
+    const a = await manager({ contextId: 'ctx-a' }).acquire(ws, 'tab-a');
+    assert(a, 'tab-a granted');
+    const b = await manager({ contextId: 'ctx-b' }).takeover(ws, 'tab-b');
+    assertEqual(b.fencingToken, a.fencingToken + 1, 'takeover bumps the token');
+    // The fenced-off previous holder's writes must now be rejected.
+    await expectConflict(
+      storage.workspaces.commitRevision({
+        workspaceId: ws,
+        path: 'untitled.md',
+        body: new TextEncoder().encode('stale write'),
+        fence: a,
+      }),
+      'previous holder is fenced after takeover',
+    );
+    const fenced = await storage.workspaces.commitRevision({
+      workspaceId: ws,
+      path: 'untitled.md',
+      body: new TextEncoder().encode('new holder write'),
+      fence: b,
+    });
+    assert(fenced.workspace.clock > 1, 'new holder writes under the taken lease');
+    assert(
+      messages.some((m) => m.event === 'acquired' && m.holderId === 'tab-b'),
+      'takeover broadcasts acquired',
+    );
+  } finally {
+    storage.close();
+  }
+});
+
+defineCase('requestHandoff rings the doorbell without touching the record', async () => {
+  const { storage, manager, messages } = await openHarness();
+  try {
+    const ws = await seedWorkspace(storage);
+    const a = await manager().acquire(ws, 'tab-a');
+    assert(a, 'tab-a granted');
+    manager().requestHandoff(ws, 'tab-b');
+    const rung = messages.find((m) => m.event === 'handoff-request');
+    assert(rung && rung.workspaceId === ws && rung.holderId === 'tab-b', 'doorbell posted');
+    const record = await manager().current(ws);
+    assert(record?.holderId === 'tab-a', 'record untouched by the doorbell');
+  } finally {
+    storage.close();
+  }
+});
+
 async function runAllCases(): Promise<void> {
   let passed = 0;
   const failures: string[] = [];

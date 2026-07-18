@@ -316,6 +316,14 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return cleared;
   }
 
+  async requestWriterHandoff(): Promise<void> {}
+
+  async yieldEditing(): Promise<void> {}
+
+  async acknowledgeWriterHandoff(): Promise<void> {}
+
+  async forceWriterLease(): Promise<void> {}
+
   async peekWriterLease(): Promise<number | null> {
     return null;
   }

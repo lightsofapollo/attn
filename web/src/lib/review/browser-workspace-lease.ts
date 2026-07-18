@@ -36,7 +36,14 @@ export interface LeaseHandle extends WorkspaceFence {
 
 export interface LeaseChannelMessage {
   workspaceId: string;
-  event: 'acquired' | 'released';
+  /**
+   * 'handoff-request' is the seamless-editing doorbell (user feedback: the
+   * "Another tab is editing" wall must never appear): a denied tab asks the
+   * live holder to flush + release so the requester can acquire immediately
+   * instead of waiting out the 15s expiry. Like every channel message it is
+   * advisory — correctness stays with the IndexedDB record + fencing token.
+   */
+  event: 'acquired' | 'released' | 'handoff-request' | 'handoff-ack';
   holderId: string;
   fencingToken: number;
 }
@@ -89,6 +96,47 @@ export class WorkspaceLeaseManager {
    * holder's unexpired lease exists — the caller stays a read-only tab.
    */
   async acquire(workspaceId: string, holderId: string): Promise<LeaseHandle | null> {
+    return this.claim(workspaceId, holderId, false);
+  }
+
+  /**
+   * Forced claim for seamless handoff: takes the lease even while another
+   * holder's record is unexpired. The token bump fences the previous
+   * holder's in-flight writes, so this is always SAFE — the polite
+   * handoff-request + grace period beforehand is about not discarding the
+   * previous holder's un-flushed autosave, not about correctness.
+   */
+  async takeover(workspaceId: string, holderId: string): Promise<LeaseHandle> {
+    const handle = await this.claim(workspaceId, holderId, true);
+    if (!handle) throw new BrowserStorageError('forced lease takeover cannot be denied');
+    return handle;
+  }
+
+  /** Ask the current holder (if any live tab) to flush + release. */
+  requestHandoff(workspaceId: string, holderId: string): void {
+    requireId(workspaceId, 'workspaceId');
+    requireId(holderId, 'holderId');
+    this.notify({ workspaceId, event: 'handoff-request', holderId, fencingToken: 0 });
+  }
+
+  /**
+   * Holder's immediate answer to a handoff request: "yielding — hold on."
+   * Requesters that hear this extend their polite grace instead of forcing
+   * a takeover while the holder is still flushing (a big document's flush
+   * can outlast a short grace, and forcing mid-flush fences the flush off
+   * and loses the holder's final keystrokes).
+   */
+  acknowledgeHandoff(workspaceId: string, holderId: string): void {
+    requireId(workspaceId, 'workspaceId');
+    requireId(holderId, 'holderId');
+    this.notify({ workspaceId, event: 'handoff-ack', holderId, fencingToken: 0 });
+  }
+
+  private async claim(
+    workspaceId: string,
+    holderId: string,
+    force: boolean,
+  ): Promise<LeaseHandle | null> {
     requireId(workspaceId, 'workspaceId');
     requireId(holderId, 'holderId');
     const at = this.timestamp();
@@ -97,7 +145,7 @@ export class WorkspaceLeaseManager {
     const store = tx.objectStore(STORE_WORKSPACE_LEASES);
     const existing = await requestValue<WorkspaceLeaseRecord | undefined>(store.get(workspaceId));
     if (existing) validateWorkspaceLeaseRecord(existing);
-    if (existing && existing.holderId !== holderId && existing.expiresAt > at) {
+    if (!force && existing && existing.holderId !== holderId && existing.expiresAt > at) {
       await done;
       return null;
     }

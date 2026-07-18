@@ -873,6 +873,7 @@
         joinState?.status === 'live'
         && editorRef
         && activeEntry?.presentation === 'editable'
+        && Date.now() - lastReleasedSeenAt > 5_000
       ) {
         try {
           await granted.commitText(activeEntry.path, editorRef.getMarkdown());
@@ -887,6 +888,52 @@
       ownerSessionOpening = null;
     });
     return ownerSessionOpening;
+  }
+
+  // Seamless handoff (user feedback: the "Another tab is editing" wall must
+  // never appear). When another tab rings the handoff doorbell, this tab —
+  // if it is the live owner — flushes pending keystrokes and closes its
+  // owner runtime so the requester can acquire the lease immediately. The
+  // guard timestamp stops our own denied-recovery loop from re-grabbing the
+  // freshly released lease before the requester gets it.
+  const YIELD_GUARD_MS = 2_500;
+  let lastYieldAt = 0;
+  // Intent signal for the handoff doorbell: the user touched THIS tab
+  // (click, keypress, or focusing it) since it last gave up the pen. Focus
+  // alone can be reported by several windows at once (and pings back and
+  // forth); interaction-since-yield is what "the user is working here"
+  // actually looks like.
+  let lastInteractionAt = 0;
+  function noteInteraction(): void {
+    lastInteractionAt = Date.now();
+  }
+  // Timestamp of the last 'released' broadcast for this workspace. A recent
+  // release means the previous owner yielded GRACEFULLY (flushed its
+  // autosave before releasing) — storage is authoritative and the takeover
+  // commit below must not overwrite it with this tab's possibly-lagging
+  // co-editing mirror. No recent release = the owner died; the converged
+  // live doc in this editor is then the best copy (attn-47r semantics).
+  let lastReleasedSeenAt = 0;
+  /** Last 'handoff-ack' heard: a holder is actively flushing — never force
+   *  a takeover while this is fresh. */
+  let lastHandoffAckAt = 0;
+  async function yieldOwnerSession(): Promise<void> {
+    if (!session) return;
+    lastYieldAt = Date.now();
+    try {
+      await autosave?.flush();
+    } catch {
+      // Content stays at the last committed autosave; the yield proceeds.
+    }
+    unsubscribeOwner?.();
+    unsubscribeOwner = null;
+    autosave?.dispose();
+    autosave = null;
+    session = null;
+    ownerState = null;
+    editing = false;
+    editDenied = true;
+    await service.yieldEditing(workspace.id).catch(() => undefined);
   }
 
   function closeLocalJoin(): void {
@@ -907,7 +954,27 @@
     if (!channel) return;
     channel.onmessage = (event: MessageEvent) => {
       const message = event.data as { workspaceId?: string; event?: string } | null;
-      if (message?.workspaceId !== wsId || message.event !== 'released') return;
+      if (message?.workspaceId !== wsId) return;
+      if (message.event === 'handoff-request') {
+        // Another tab wants to edit: yield gracefully if we hold the pen,
+        // acking first so the requester keeps waiting instead of forcing a
+        // takeover mid-flush.
+        untrack(() => {
+          if (!session) return;
+          void service.acknowledgeWriterHandoff(wsId);
+          void yieldOwnerSession();
+        });
+        return;
+      }
+      if (message.event === 'handoff-ack') {
+        lastHandoffAckAt = Date.now();
+        return;
+      }
+      if (message.event !== 'released') return;
+      lastReleasedSeenAt = Date.now();
+      // If WE just yielded, this released broadcast is our own — leave the
+      // lease free for the requester instead of instantly re-grabbing it.
+      if (Date.now() - lastYieldAt < YIELD_GUARD_MS) return;
       // Re-attempt ownership; ensureOwnerSession is a no-op if we already hold it.
       untrack(() => { void ensureOwnerSession(); });
     };
@@ -924,10 +991,43 @@
     if (!editDenied) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let forceTimer: ReturnType<typeof setTimeout> | null = null;
 
     const attempt = async (): Promise<void> => {
+      // Just yielded to another tab: stay out of its way; the expiry timer
+      // keeps this tab's recovery armed for when the requester finishes.
+      if (Date.now() - lastYieldAt < YIELD_GUARD_MS) {
+        if (!disposed) armExpiryTimer();
+        return;
+      }
       const granted = await untrack(() => ensureOwnerSession());
-      if (!disposed && !granted) armExpiryTimer();
+      if (disposed || granted) return;
+      if (document.hasFocus() && lastInteractionAt >= lastYieldAt) {
+        // The user is actually working in this tab (interacted since it
+        // last yielded): ring the handoff doorbell — a live holder flushes
+        // + releases and the 'released' broadcast wins us the lease; a
+        // dead holder never answers, so take it by force after a short
+        // grace instead of waiting out the 15s expiry.
+        void service.requestWriterHandoff(wsId);
+        armForceTimer();
+      }
+      armExpiryTimer();
+    };
+    const armForceTimer = (): void => {
+      if (forceTimer !== null) return;
+      forceTimer = setTimeout(() => {
+        forceTimer = null;
+        if (disposed || !document.hasFocus()) return;
+        if (Date.now() - lastHandoffAckAt < 10_000) {
+          // A live holder acked and is flushing — re-check instead of
+          // fencing off its final commit.
+          armForceTimer();
+          return;
+        }
+        void service.forceWriterLease(wsId)
+          .then(() => untrack(() => ensureOwnerSession()))
+          .catch(() => undefined);
+      }, 2_000);
     };
     const armExpiryTimer = (): void => {
       void service.peekWriterLease(wsId).then((expiresAt) => {
@@ -940,19 +1040,35 @@
       });
     };
     const onFocus = (): void => {
+      noteInteraction();
       if (timer !== null) {
         clearTimeout(timer);
         timer = null;
       }
       void attempt();
     };
+    // Clicking or typing in a denied tab IS the takeover request — claim
+    // immediately instead of waiting for the next timer tick.
+    let interactionThrottle = 0;
+    const onInteraction = (): void => {
+      noteInteraction();
+      const now = Date.now();
+      if (now - interactionThrottle < 500) return;
+      interactionThrottle = now;
+      void attempt();
+    };
 
-    armExpiryTimer();
+    void attempt();
     window.addEventListener('focus', onFocus);
+    window.addEventListener('pointerdown', onInteraction, { capture: true, passive: true });
+    window.addEventListener('keydown', onInteraction, { capture: true, passive: true });
     return () => {
       disposed = true;
       if (timer !== null) clearTimeout(timer);
+      if (forceTimer !== null) clearTimeout(forceTimer);
       window.removeEventListener('focus', onFocus);
+      window.removeEventListener('pointerdown', onInteraction, { capture: true });
+      window.removeEventListener('keydown', onInteraction, { capture: true });
     };
   });
 
@@ -1828,8 +1944,8 @@
     {#if editDenied && !joinLive}
       <div class="degraded-banner hosted-document-banner" role="status" data-degraded="lease-denied">
         <div>
-          <strong>Another tab is editing this workspace.</strong>
-          <p>Following its changes read-only — editing returns here when the other tab finishes.</p>
+          <strong>Following another tab&rsquo;s edits.</strong>
+          <p>Click anywhere or start typing to continue editing in this tab.</p>
         </div>
         <div class="actions">
           <button class="button" type="button" disabled={editorLoading} onclick={() => void enterEdit()}>

@@ -239,6 +239,26 @@ export interface WorkspaceAppService {
    */
   peekWriterLease(workspaceId: string): Promise<number | null>;
   /**
+   * Seamless-editing doorbell: ask whichever live tab holds the writer
+   * lease to flush + release it. Advisory (BroadcastChannel); pair with
+   * `forceWriterLease` after a grace period for dead holders.
+   */
+  requestWriterHandoff(workspaceId: string): Promise<void>;
+  /**
+   * Holder-side answer to a handoff request: flush and close this tab's
+   * owner runtime so the lease frees for the requesting tab. No-op when
+   * this tab is not the live owner.
+   */
+  yieldEditing(workspaceId: string): Promise<void>;
+  /** Holder-side "yielding — hold on" broadcast answering a handoff request. */
+  acknowledgeWriterHandoff(workspaceId: string): Promise<void>;
+  /**
+   * Forced lease takeover for seamless editing. Always safe (the fencing
+   * token bump invalidates the previous holder's writes); call only after
+   * a handoff request went unanswered so a live holder gets to flush first.
+   */
+  forceWriterLease(workspaceId: string): Promise<void>;
+  /**
    * Advisory doorbell rung after OTHER tabs commit to shared local storage —
    * self-originated changes are never delivered. Re-read the workspace from
    * storage on delivery; the message itself carries no document content.

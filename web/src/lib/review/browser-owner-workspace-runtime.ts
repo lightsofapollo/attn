@@ -592,6 +592,14 @@ export class BrowserOwnerWorkspaceRuntime {
     await this.requireDurableReviewAuthority().retryOutbox();
   }
 
+  /** True from the moment close() starts until the runtime is fully closed.
+   *  beginOwnerRuntime must never hand out a runtime in this window — a
+   *  session installed on a closing runtime is a zombie that wedges the
+   *  tab's ownership recovery. */
+  isClosing(): boolean {
+    return this.closing;
+  }
+
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;

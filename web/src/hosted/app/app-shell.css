@@ -1021,12 +1021,15 @@ a.workspace-row:hover {
   }
 
   .editor-top .doc-name {
+    /* One row, one center line (user feedback: the save chip and the Share
+       button must be the same height and visibly aligned — the stacked
+       title-over-status layout made the button read as floating higher). */
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 3px;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
     padding-top: 0.5rem;
-    padding-bottom: 0.55rem;
+    padding-bottom: 0.5rem;
     text-align: left;
     overflow: hidden;
   }
@@ -1067,18 +1070,21 @@ a.workspace-row:hover {
     transform: none;
   }
 
-  /* The chip sheds its pill border on the masthead's status line. */
+  /* Chip stays a pill, sized to the exact height of the Share button so
+     the masthead reads as one aligned row of controls. */
   .editor-top .save-chip {
-    border: 0;
-    padding: 0;
+    flex: none;
+    height: 2rem;
+    padding: 0 10px;
     gap: 5px;
     font-size: 0.67rem;
     letter-spacing: 0.015em;
+    max-width: 45vw;
   }
 
   .editor-top .share-action .button {
-    min-height: 38px;
-    padding: 0.45rem 0.95rem;
+    min-height: 2rem;
+    padding: 0.3rem 0.85rem;
     font-size: 0.85rem;
   }
 

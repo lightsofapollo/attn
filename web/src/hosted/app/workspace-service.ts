@@ -143,7 +143,13 @@ export class BrowserWorkspaceService {
     >> = {},
   ): Promise<BrowserOwnerWorkspaceRuntime> {
     const existing = this.ownerRuntimes.get(workspaceId);
-    if (existing && existing.getState().status !== 'closed') return existing;
+    if (existing && existing.getState().status !== 'closed' && !existing.isClosing()) {
+      return existing;
+    }
+    // A runtime mid-close (seamless lease yield) must finish tearing down
+    // before a fresh one claims — otherwise the caller gets a zombie whose
+    // lease is being released out from under it.
+    if (existing && existing.isClosing()) await existing.close();
     const runtime = new BrowserOwnerWorkspaceRuntime({
       storage: this.storage,
       workspaceId,
@@ -164,6 +170,20 @@ export class BrowserWorkspaceService {
     this.ownerRuntimes.set(workspaceId, runtime);
     await runtime.start();
     return runtime;
+  }
+
+  /**
+   * Graceful lease yield for seamless multi-tab editing: close this tab's
+   * owner runtime (flushes local collab + share republish, releases the
+   * lease, broadcasts 'released') so the requesting tab can acquire
+   * immediately. The closed runtime stays in the cache; beginOwnerRuntime
+   * re-creates on the next claim because its status is 'closed'.
+   */
+  async yieldOwnerRuntime(workspaceId: string): Promise<void> {
+    const runtime = this.ownerRuntimes.get(workspaceId);
+    if (!runtime || runtime.getState().status === 'closed') return;
+    if (runtime.getState().leaseRole !== 'owner') return;
+    await runtime.close();
   }
 
   // ————— capabilities —————

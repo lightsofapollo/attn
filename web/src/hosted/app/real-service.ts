@@ -30,7 +30,8 @@ import { resolveBrowserRelayUrl } from '../../lib/review/browser-relay-url';
 import { resolveBrowserReviewBase } from './share-environment';
 import type { WorkspaceEntryRecord } from '../../lib/review/browser-workspace-schema';
 import type { WorkspaceFence } from '../../lib/review/browser-workspace-store';
-import { openBroadcastChannel } from '../../lib/tab-channels';
+import { LEASE_CHANNEL_NAME, openBroadcastChannel } from '../../lib/tab-channels';
+import type { LeaseHandle } from '../../lib/review/browser-workspace-lease';
 
 /** Safe raster types that may render inline (epic scope note 2026-07-10). */
 const INLINE_SAFE_MEDIA = /^image\/(?:png|jpeg|gif|webp|avif)$/iu;
@@ -297,6 +298,74 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     return record.expiresAt;
   }
 
+  async yieldEditing(workspaceId: string): Promise<void> {
+    await this.service.yieldOwnerRuntime(workspaceId);
+  }
+
+  async requestWriterHandoff(workspaceId: string): Promise<void> {
+    const holderId = await browserTabHolderId();
+    this.service.leases.requestHandoff(workspaceId, holderId);
+  }
+
+  async acknowledgeWriterHandoff(workspaceId: string): Promise<void> {
+    const holderId = await browserTabHolderId();
+    this.service.leases.acknowledgeHandoff(workspaceId, holderId);
+  }
+
+  async forceWriterLease(workspaceId: string): Promise<void> {
+    const holderId = await browserTabHolderId();
+    await this.service.leases.takeover(workspaceId, holderId);
+  }
+
+  /**
+   * Seamless lease claim (user feedback: the "Another tab is editing" wall
+   * must never appear). Try a polite acquire; when another live tab holds
+   * the lease, ring the handoff doorbell and give the holder a short grace
+   * to flush + release (the 'released' broadcast resolves the wait early);
+   * a holder that never answers — crashed or suspended — is fenced off by
+   * a forced takeover. Editing follows the tab the user is acting in.
+   */
+  private async acquireLeaseSeamlessly(
+    workspaceId: string,
+    holderId: string,
+    graceMs = 1_500,
+  ): Promise<LeaseHandle> {
+    const leases = this.service.leases;
+    const first = await leases.acquire(workspaceId, holderId);
+    if (first) return first;
+    leases.requestHandoff(workspaceId, holderId);
+    const released = new Promise<void>((resolve) => {
+      const channel = openBroadcastChannel(LEASE_CHANNEL_NAME);
+      if (!channel) {
+        resolve();
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout>;
+      const finish = (): void => {
+        clearTimeout(timer);
+        channel.close();
+        resolve();
+      };
+      timer = setTimeout(finish, graceMs);
+      channel.onmessage = (event: MessageEvent) => {
+        const message = event.data as { workspaceId?: string; event?: string } | null;
+        if (message?.workspaceId !== workspaceId) return;
+        if (message.event === 'handoff-ack') {
+          // The holder is flushing — big documents outlast the short grace,
+          // so extend the wait rather than fencing off its final commit.
+          clearTimeout(timer);
+          timer = setTimeout(finish, 10_000);
+          return;
+        }
+        if (message.event === 'released') finish();
+      };
+    });
+    await released;
+    const second = await leases.acquire(workspaceId, holderId);
+    if (second) return second;
+    return leases.takeover(workspaceId, holderId);
+  }
+
   async beginEditing(workspaceId: string): Promise<EditingSession | null> {
     const holderId = await browserTabHolderId();
     const runtime = await this.service.beginOwnerRuntime(workspaceId, holderId);
@@ -383,12 +452,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   ): Promise<T> {
     const holderId = await browserTabHolderId();
     const before = await this.service.leases.current(workspaceId);
-    let handle = await this.service.leases.acquire(workspaceId, holderId);
-    if (!handle) {
-      throw new Error(
-        'Another tab is editing this project right now. Finish there or wait a moment, then try again.',
-      );
-    }
+    let handle: LeaseHandle | null = await this.acquireLeaseSeamlessly(workspaceId, holderId);
     const ridingExistingOwnership =
       before !== null
       && before.holderId === holderId

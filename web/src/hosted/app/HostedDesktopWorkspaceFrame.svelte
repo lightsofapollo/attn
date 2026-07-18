@@ -227,8 +227,11 @@
          exactly one viewport tall; its top spacer clears the floating
          ReviewBar, and its header carries the collapse toggle that used to
          live on the outer frame aside. -->
-    <div class="flex min-h-full flex-row">
-      <div class="min-w-0 flex-1">
+    <div class="flex min-h-full flex-row justify-center">
+      <!-- Document column caps at the content measure so [document + margin]
+           center together — comments adjacent to the text, not the window
+           edge (Docs adjacency; the native frame's hug-rail equivalent). -->
+      <div class="min-w-0 flex-1" style="max-width: calc(var(--content-measure) + 4.5rem);">
         {@render content()}
       </div>
       {#if reviewStore.railMode !== 'hidden'}

@@ -1011,8 +1011,12 @@
              untouched because sticky pins the container's top. -->
         <div class="browser-review-editor min-w-0 flex-1 overflow-auto"
           data-slot="browser-review-editor">
-          <div class="flex min-h-full flex-row">
-            <div class="min-w-0 flex-1">
+          <!-- The document column caps at the content measure and the pair
+               [document + margin] centers as ONE unit, so comments sit
+               adjacent to the text instead of pinned to the far window edge
+               with dead paper between (Docs adjacency). -->
+          <div class="flex min-h-full flex-row justify-center">
+            <div class="min-w-0 flex-1" style="max-width: calc(var(--content-measure) + 4.5rem);">
               {#if displayedDocType === 'html'}
                 <!-- Read-only HTML doc: render received bytes in a sandboxed iframe.
                      No editor, no collab, no comment margin (yet). -->

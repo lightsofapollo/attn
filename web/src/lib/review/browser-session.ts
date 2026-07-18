@@ -1695,6 +1695,7 @@ export class BrowserSession {
         this.outbox.updatePolicy({
           powBits: policy.powBits,
           maxEventBytes: policy.maxEventBytes,
+          maxSnapshotBytes: policy.maxSnapshotBytes,
         });
       } catch (error) {
         this.setState({
@@ -1735,6 +1736,11 @@ export class BrowserSession {
       protocolVersion: keys.version,
       powBits: policy.powBits,
       maxEventBytes: policy.maxEventBytes,
+      // Without this the outbox falls back to maxEventBytes (256 KiB) and
+      // rejects perfectly valid snapshots: any document over ~256 KiB
+      // paused live review with ATTN_ENVELOPE_TOO_LARGE even though the
+      // relay's snapshot cap is 5 MiB (attn user report, 2026-07-18).
+      maxSnapshotBytes: policy.maxSnapshotBytes,
       fetchImpl: async (url, init): Promise<BrowserOutboxResponse> =>
         this.fetchImpl()(url, init),
       ...(mintPow === undefined ? {} : { mintPow }),

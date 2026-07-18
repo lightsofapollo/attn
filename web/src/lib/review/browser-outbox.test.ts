@@ -77,6 +77,58 @@ function makeOutbox(
   });
 }
 
+test('snapshot_blob validates against maxSnapshotBytes, not the event cap', async () => {
+  // Regression: the session dropped policy.maxSnapshotBytes when building
+  // the outbox, so the snapshot fell back to the 256 KiB event cap and any
+  // document over ~256 KiB paused live review with ATTN_ENVELOPE_TOO_LARGE
+  // despite the relay's 5 MiB snapshot cap.
+  const outbox = new BrowserOutbox({
+    relayUrl: 'https://relay.example.test',
+    roomId: ROOM,
+    deviceId: DEVICE,
+    admissionKey: new Uint8Array(32).fill(0x42),
+    powBits: 12,
+    maxEventBytes: 1024,
+    maxSnapshotBytes: 5 * 1024 * 1024,
+    now: () => NOW,
+    fetchImpl: async () => response(201, { accepted: [] }),
+    mintPow: async () => 'pow-snapshot-cap',
+    backoffInitialMs: 60_000,
+    backoffMaxMs: 60_000,
+  });
+  const big: MailboxEnvelope = {
+    ...envelope('snapshot-big'),
+    kind: 'snapshot_blob',
+    ciphertextBytes: 300_000,
+  };
+  assert(outbox.enqueue(big), 'snapshot over the event cap but under the snapshot cap must enqueue');
+  const overCap: MailboxEnvelope = {
+    ...envelope('snapshot-over'),
+    kind: 'snapshot_blob',
+    ciphertextBytes: 5 * 1024 * 1024 + 1,
+  };
+  let rejected = false;
+  try {
+    outbox.enqueue(overCap);
+  } catch (error) {
+    rejected = true;
+    assert(
+      error instanceof Error && error.message.includes('room limit is 5242880'),
+      'over-cap snapshot must report the snapshot cap, not the event cap',
+    );
+  }
+  assert(rejected, 'snapshot over the snapshot cap must be rejected');
+  const event: MailboxEnvelope = { ...envelope('event-big'), ciphertextBytes: 2048 };
+  let eventRejected = false;
+  try {
+    outbox.enqueue(event);
+  } catch {
+    eventRejected = true;
+  }
+  assert(eventRejected, 'events must still validate against maxEventBytes');
+  outbox.close();
+});
+
 test('v3 outbox uses write-scoped admission and v3 route', async () => {
   let requestUrl = '';
   let admission = '';

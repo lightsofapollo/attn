@@ -28,7 +28,7 @@ import {
   type PeerSplit,
   type StaleAnchorEntry,
 } from './selectors';
-import { userProfile } from './profile.svelte';
+import { userProfile } from '../profile.svelte';
 import { computeRailMode, type RailMode } from './rail-mode';
 import { shouldActivateRoomStatus, shouldForgetRoomStatus } from './room-ui';
 import {
@@ -426,6 +426,10 @@ export class ReviewStore {
    */
   participantNames: Record<string, string> = $derived.by(() => {
     const names: Record<string, string> = {};
+    // Latest by authored time, NOT array order: `events` is arrival-ordered,
+    // and relay history replays after a reconnecting session's fresh
+    // re-announce — array order would resurrect a stale name (attn-sur).
+    const namedAt: Record<string, number> = {};
     for (const ev of this.events) {
       // Scope to the active room — without this, same-named ids from a
       // previous room in the buffer could bleed names across rooms.
@@ -433,7 +437,10 @@ export class ReviewStore {
       if (ev.body.type === 'participant_joined') {
         const p = ev.body.participant;
         const name = p.displayName?.trim();
-        if (name) names[p.participantId] = name;
+        if (name && (namedAt[p.participantId] ?? -1) <= ev.meta.createdAt) {
+          names[p.participantId] = name;
+          namedAt[p.participantId] = ev.meta.createdAt;
+        }
       }
     }
     return names;

@@ -23,6 +23,7 @@
   import Wifi from '@lucide/svelte/icons/wifi';
   import Zap from '@lucide/svelte/icons/zap';
   import type { BrowserPushConsentState } from './review/browser-push-consent';
+  import { userProfile } from './profile.svelte';
   import {
     reviewerTierLabel,
     type ReviewerStatusPresentation,
@@ -143,6 +144,27 @@
       </header>
 
       <section class="border-t border-border/50 px-3 py-2.5" aria-label="Your access">
+        {#if tier !== 'view'}
+          <div class="flex items-center justify-between gap-2 pb-1" data-slot="reviewer-status-identity">
+            <p class="min-w-0 truncate text-[11px] text-muted-foreground">
+              Commenting as
+              <span class="font-medium text-foreground" data-slot="reviewer-status-self-name">
+                {userProfile.displayName ?? 'Browser reviewer'}
+              </span>
+            </p>
+            <button
+              type="button"
+              class="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+              data-slot="reviewer-status-edit-name"
+              onclick={() => {
+                userProfile.requestEdit();
+                popoverOpen = false;
+              }}
+            >
+              Edit
+            </button>
+          </div>
+        {/if}
         <p class="text-[11px] text-muted-foreground">
           Your access:
           <span class="font-medium text-foreground" data-slot="browser-grant-tier">{reviewerTierLabel(tier)}</span>

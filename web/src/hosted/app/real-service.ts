@@ -25,6 +25,7 @@ import {
   type BrowserWorkspaceServiceOptions,
 } from './workspace-service';
 import { quotaPressure } from '../../lib/review/browser-storage-probe';
+import { readStoredDisplayName } from '../../lib/browser-profile';
 import { resolveBrowserRelayUrl } from '../../lib/review/browser-relay-url';
 import { resolveBrowserReviewBase } from './share-environment';
 import type { WorkspaceEntryRecord } from '../../lib/review/browser-workspace-schema';
@@ -354,6 +355,9 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
               : selection.paths,
           mode: input.mode,
           ttlMs: input.ttlMs,
+          // Owner genesis announces this name to every reviewer; without it
+          // the room's ParticipantJoined fell back to "Browser owner".
+          ownerDisplayName: readStoredDisplayName() ?? undefined,
         });
       },
       stopShare: () => runtime.stopShare(),

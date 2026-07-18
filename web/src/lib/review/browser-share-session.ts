@@ -143,6 +143,8 @@ export interface DurableLiveSession {
   resolveComment(threadId: string): Promise<ReviewEvent>;
   createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent>;
   retryOutbox?(): Promise<void>;
+  /** Re-announce ParticipantJoined with the current display name. */
+  announceProfile?(): Promise<void>;
   /** Live collab broadcast (cursor presence, resync requests) when the
    * underlying session is a full room session. */
   sendCollab?(payload: string): Promise<void>;
@@ -318,6 +320,11 @@ export class BrowserShareSession {
 
   async replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent | undefined> {
     return this.createComment(anchor, body, threadId);
+  }
+
+  /** Rename mid-session: forward to the live room session when one exists. */
+  async announceProfile(): Promise<void> {
+    await this.live?.announceProfile?.();
   }
 
   async resolveComment(threadId: string): Promise<ReviewEvent> {

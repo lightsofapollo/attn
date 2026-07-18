@@ -6,8 +6,14 @@
 // reactive view the UI binds to. `save()` persists via IPC and optimistically
 // updates local state so the badge / prompt react immediately.
 
-import { reviewSetDisplayName } from '../ipc';
-import type { ReviewProfileInit } from '../types';
+import { reviewSetDisplayName } from './ipc';
+import { readStoredDisplayName, writeStoredDisplayName } from './browser-profile';
+import type { ReviewProfileInit } from './types';
+
+/** True when running hosted in a plain browser (no wry IPC bridge). */
+function isBrowserHosted(): boolean {
+  return typeof window !== 'undefined' && window.ipc === undefined;
+}
 
 class UserProfile {
   /** The user's explicitly chosen name, or `null` if running on the default. */
@@ -53,6 +59,7 @@ class UserProfile {
   save(name: string): void {
     const trimmed = name.trim();
     void reviewSetDisplayName(trimmed);
+    if (isBrowserHosted()) writeStoredDisplayName(trimmed || null);
     if (trimmed) {
       this.displayName = trimmed;
       this.isSet = true;
@@ -64,3 +71,14 @@ class UserProfile {
 }
 
 export const userProfile = new UserProfile();
+
+// Hosted surfaces have no daemon identity to hydrate from — recover the
+// browser-persisted name so comments, carets, and the people list carry it
+// across visits (attn-sur). Native overwrites this via hydrate() at startup.
+if (isBrowserHosted()) {
+  const stored = readStoredDisplayName();
+  if (stored) {
+    userProfile.displayName = stored;
+    userProfile.isSet = true;
+  }
+}

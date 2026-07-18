@@ -77,8 +77,9 @@ async function bootstrapDurableShare(): Promise<void> {
       import.meta.env.VITE_ATTN_RELAY_URL,
       window.location.origin,
     );
-    const [svelte, appModule, production] = await Promise.all([import('svelte'), import('./BrowserReviewApp.svelte'),
-      import('./lib/review/browser-share-production'), import('./browser-review-styles')]);
+    const [svelte, appModule, production, , profile] = await Promise.all([import('svelte'), import('./BrowserReviewApp.svelte'),
+      import('./lib/review/browser-share-production'), import('./browser-review-styles'),
+      import('./lib/browser-profile')]);
     const target = document.getElementById('app');
     if (!target) throw new Error('missing browser review mount element');
     target.style.display = '';
@@ -88,10 +89,14 @@ async function bootstrapDurableShare(): Promise<void> {
     // Fragmentless → first try the key this tab stashed before a reload,
     // then the fragmentless push-notification binding as the last resort.
     const recovered = window.location.hash.length > 1 ? null : recoverStrippedShareInvite(window);
+    // Resolved lazily so a name confirmed via the in-app prompt applies to
+    // the very first ParticipantJoined this session announces (attn-sur).
+    const getDisplayName = (): string | undefined =>
+      profile.readStoredDisplayName() ?? undefined;
     const session = window.location.hash.length > 1
-      ? new production.DurableShareBrowserSessionFacade({ relayUrl, invite: (invite = parseAndStripShareInvite(window)) })
+      ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, invite: (invite = parseAndStripShareInvite(window)) })
       : recovered
-        ? new production.DurableShareBrowserSessionFacade({ relayUrl, invite: (invite = recovered) })
+        ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, invite: (invite = recovered) })
         : new production.RememberedPushShareSessionFacade({ relayUrl, bindingId: pathId });
     svelte.mount(appModule.default, { target, props: { session } });
   } catch (error) {

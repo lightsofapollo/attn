@@ -37,8 +37,10 @@
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import BottomSheet from './hosted/app/BottomSheet.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
+  import NamePrompt from './lib/NamePrompt.svelte';
   import ReviewFileSidebar from './lib/ReviewFileSidebar.svelte';
   import ReviewerStatusChip from './lib/ReviewerStatusChip.svelte';
+  import { userProfile } from './lib/profile.svelte';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
   import SelectionToolbar from './lib/SelectionToolbar.svelte';
@@ -171,6 +173,7 @@
       parsedInvite: initialParsedInvite,
       inviteError: initialInviteError,
       rememberedRoomId: initialRememberedRoomId,
+      getDisplayName: () => userProfile.displayName ?? undefined,
       onState: handleSessionState,
       onCollab: handleSessionCollab,
     });
@@ -234,6 +237,39 @@
       toggleRail();
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Reviewer identity (attn-sur). One-shot onboarding prompt when a writable
+  // share loads without a chosen name — the name is announced to the room in
+  // ParticipantJoined, so capturing it before first feedback matters. The
+  // status-chip popover's Edit affordance re-opens the same prompt.
+  // ---------------------------------------------------------------------------
+
+  let namePromptOpen = $state(false);
+  let namePromptMode = $state<'onboard' | 'edit'>('onboard');
+  let namePrompted = $state(false);
+
+  $effect(() => {
+    if (
+      sessionState.grantTier !== 'view' &&
+      sessionState.status === 'connected' &&
+      !userProfile.isSet &&
+      !namePrompted &&
+      !namePromptOpen
+    ) {
+      namePrompted = true;
+      namePromptMode = 'onboard';
+      namePromptOpen = true;
+    }
+  });
+
+  $effect(() => {
+    if (userProfile.editRequested) {
+      userProfile.editRequested = false;
+      namePromptMode = 'edit';
+      namePromptOpen = true;
+    }
+  });
 
   // Header identity: the current file's display name (first heading, same
   // derivation the file rail uses) so the chrome names what you're reading.
@@ -542,7 +578,7 @@
         return session.sendCollab(payload);
       },
       selfClientId: clientId,
-      selfLabel: 'Reviewer',
+      selfLabel: userProfile.displayName ?? 'Reviewer',
       selfColor: '#4a7fa5',
       isAuthorityDevice: (deviceId) => authenticatedOwnerDeviceIds.has(deviceId),
       getLocation: () => ({
@@ -1047,6 +1083,21 @@
     onSubmitted={collapseComposeSelection}
   />
 {/if}
+
+<NamePrompt
+  bind:open={namePromptOpen}
+  suggestion={userProfile.suggestion}
+  mode={namePromptMode}
+  onConfirm={(name) => {
+    userProfile.save(name);
+    // The session may have already announced the default name during
+    // authoring init — re-announce so peers see this comment author
+    // correctly from the very first thread.
+    if ('announceProfile' in session && typeof session.announceProfile === 'function') {
+      void session.announceProfile();
+    }
+  }}
+/>
 
 {#if suggestionComposer}
   <SuggestionComposer

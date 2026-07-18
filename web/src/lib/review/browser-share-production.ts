@@ -129,6 +129,8 @@ export interface ProductionDurableShareSessionOptions extends BrowserDurableShar
   liveStore?: ReviewStoreSink;
   /** Disable opportunistic WebRTC where the host has no RTCPeerConnection. */
   disableWebRtc?: boolean;
+  /** Reviewer display name for ParticipantJoined, resolved at announce time. */
+  getDisplayName?: () => string | undefined;
   /** PoW execution seam for non-Window production-boundary harnesses. */
   mailboxMintPow?: (input: { shareId: string; deviceId: string; path: string; signal?: AbortSignal }) => Promise<string>;
   registrationMintPow?: BrowserSessionOptions['registrationMintPow'];
@@ -167,7 +169,9 @@ export async function createProductionDurableShareSession(options: ProductionDur
         if (resolution.bundle.tier === 'suggest') capabilities.push('write_suggestion');
         const createdAt = nextCreatedAt();
         const body: ReviewEventBody = { type: 'participant_joined', participant: {
-          participantId: identity.participantId, displayName: 'Browser reviewer', kind: 'reviewer',
+          participantId: identity.participantId,
+          displayName: options.getDisplayName?.()?.trim() || 'Browser reviewer',
+          kind: 'reviewer',
           publicSigningKey: base64UrlEncode(identity.signingPublic), capabilities,
         }, device: { deviceId: identity.deviceId, participantId: identity.participantId,
           publicEncryptionKey: base64UrlEncode(identity.publicEncryptionKey), publicSigningKey: base64UrlEncode(identity.signingPublic),
@@ -199,6 +203,7 @@ export async function createProductionDurableShareSession(options: ProductionDur
         encryptionSecret: new Uint8Array(identity.encryptionSecret), publicEncryptionKey: new Uint8Array(identity.publicEncryptionKey) },
         onState: options.onLiveState, onCollab: options.onCollab,
         store: options.liveStore, disableWebRtc: options.disableWebRtc,
+        getDisplayName: options.getDisplayName,
         ...(options.registrationMintPow === undefined ? {} : { registrationMintPow: options.registrationMintPow }),
         ...(options.outboxMintPow === undefined ? {} : { outboxMintPow: options.outboxMintPow }),
         parsedInvite: { version: 3,
@@ -349,6 +354,8 @@ export class DurableShareBrowserSessionFacade {
   async createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent> { return this.requireSession().createSuggestion(draft); }
   async sendCollab(payload: string): Promise<void> { return this.requireSession().sendCollab(payload); }
   async retryOutbox(): Promise<void> { await this.requireSession().retryOutbox(); }
+  /** Rename mid-session (attn-sur): re-announce with the current name. */
+  async announceProfile(): Promise<void> { await this.requireSession().announceProfile(); }
   async enablePushFromUserGesture(): Promise<void> {
     const controller = this.requireSession().pushConsent;
     await controller.enableFromUserGesture();

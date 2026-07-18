@@ -48,7 +48,7 @@ for (const [path, name] of [
 test('axe: share sheet open', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await page.getByRole('button', { name: 'Share for review' }).click();
-  await expect(page.getByRole('dialog', { name: 'Share for review' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Share files for review' })).toBeVisible();
   await expectNoAxeViolations(page, 'share sheet');
 });
 
@@ -82,9 +82,9 @@ test('keyboard-only: share sheet opens, traps start focus, and closes', async ({
   const share = page.getByRole('button', { name: 'Share for review' });
   await share.focus();
   await page.keyboard.press('Enter');
-  const dialog = page.getByRole('dialog', { name: 'Share for review' });
+  const dialog = page.getByRole('dialog', { name: 'Share files for review' });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole('heading', { name: 'Share for review' })).toBeFocused();
+  await expect(dialog.getByRole('heading', { name: 'Share files for review' })).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(dialog).not.toBeVisible();
   await expect(share).toBeFocused();

@@ -330,8 +330,12 @@ export interface BrowserSessionOptions {
   outboxMintPow?: BrowserOutboxOptions['mintPow'];
   /** Canonical Rust/WASM anchor builder seam; loaded lazily in production. */
   anchorIndexBuilder?: (markdown: Uint8Array, snapshotId: string) => Promise<AnchorIndex>;
-  /** Human-readable encrypted ParticipantJoined display name. */
-  displayName?: string;
+  /**
+   * Human-readable encrypted ParticipantJoined display name, resolved at
+   * announce time (a getter, not a snapshot — the name prompt may confirm
+   * after construction but before authoring init).
+   */
+  getDisplayName?: () => string | undefined;
   /** Inject a pre-built identity (tests want deterministic keys). */
   identity?: BrowserDeviceIdentity;
   /** Optional state observer — called on every state mutation. */
@@ -1781,7 +1785,7 @@ export class BrowserSession {
       type: 'participant_joined',
       participant: {
         participantId: identity.participantId,
-        displayName: this.opts.displayName?.trim() || 'Browser reviewer',
+        displayName: this.opts.getDisplayName?.()?.trim() || 'Browser reviewer',
         kind: 'reviewer',
         publicSigningKey: base64UrlEncode(identity.signingPublic),
         capabilities,
@@ -1816,6 +1820,66 @@ export class BrowserSession {
     if (durableOffline) {
       this.setState({ authoringReady: true, authoringError: null });
     }
+    void outbox.flushNow().catch(() => undefined);
+  }
+
+  /**
+   * Re-announce this participant with the CURRENT display name (attn-sur).
+   * The store's participant reducer is last-write-wins per participantId, so
+   * peers pick the rename up immediately. The initial announce happens during
+   * authoring init and may race the name prompt — this closes that gap when
+   * the user confirms a name after the session already introduced itself.
+   * Safe no-op before authoring is ready (the init announce reads the getter).
+   */
+  async announceProfile(): Promise<void> {
+    const outbox = this.outbox;
+    const identity = this.identity;
+    const keys = this.keys;
+    const policy = this.roomPolicy;
+    const roomId = this.state.roomId;
+    if (!outbox || !identity || !keys || !policy || !roomId) return;
+    if (!this.state.authoringReady || this.state.grantTier === 'view') return;
+    const createdAt = this.nextCreatedAt();
+    const capabilities: Capability[] = [
+      'read_snapshot',
+      'write_comment',
+      'resolve_comment',
+    ];
+    if (this.state.grantTier === 'suggest') capabilities.push('write_suggestion');
+    const joined: ReviewEventBody = {
+      type: 'participant_joined',
+      participant: {
+        participantId: identity.participantId,
+        displayName: this.opts.getDisplayName?.()?.trim() ||
+          (this.principal === 'owner' ? 'Browser owner' : 'Browser reviewer'),
+        kind: this.principal,
+        publicSigningKey: base64UrlEncode(identity.signingPublic),
+        capabilities,
+      },
+      device: {
+        deviceId: identity.deviceId,
+        participantId: identity.participantId,
+        publicEncryptionKey: base64UrlEncode(identity.publicEncryptionKey),
+        publicSigningKey: base64UrlEncode(identity.signingPublic),
+        client: 'attn-browser',
+        createdAt,
+      },
+    };
+    const assembled = assembleBrowserEvent({
+      eventKey: keys.eventKey,
+      signingSecret: identity.signingSecret,
+      signingPublic: identity.signingPublic,
+      roomId,
+      authorId: identity.participantId,
+      deviceId: identity.deviceId,
+      createdAt,
+      expiresAt: policy.expiresAt,
+      body: joined,
+    });
+    if (this.storage) await outbox.enqueueDurably(assembled.envelope);
+    else outbox.enqueue(assembled.envelope);
+    const store = await this.ensureStore();
+    store.applyEvent(assembled.event);
     void outbox.flushNow().catch(() => undefined);
   }
 

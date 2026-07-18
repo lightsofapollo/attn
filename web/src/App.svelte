@@ -74,7 +74,7 @@
   import ReviewBar from './lib/ReviewBar.svelte';
   import ShareDialog from './lib/ShareDialog.svelte';
   import NamePrompt from './lib/NamePrompt.svelte';
-  import { userProfile } from './lib/review/profile.svelte';
+  import { userProfile } from './lib/profile.svelte';
   import Users from '@lucide/svelte/icons/users';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';

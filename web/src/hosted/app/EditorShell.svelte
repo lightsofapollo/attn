@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import type { EditorView } from 'prosemirror-view';
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
+  import NamePrompt from '../../lib/NamePrompt.svelte';
   import ShareSheet from './ShareSheet.svelte';
+  import { userProfile } from '../../lib/profile.svelte';
   import CommandPalette, { type HostedCommand } from './CommandPalette.svelte';
   import { AutosaveController } from './autosave';
   import type { reviewStore as ReviewStoreInstance } from '../../lib/review/store.svelte';
@@ -751,6 +753,39 @@
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Owner display name (attn-sur). The genesis ParticipantJoined announces
+  // this name to every reviewer, so confirm it when a room first exists —
+  // and honor the ShareChip popover's Edit affordance, which sets
+  // `userProfile.editRequested` (it was a dead button on the hosted shell).
+  // ---------------------------------------------------------------------------
+
+  let namePromptOpen = $state(false);
+  let namePromptMode = $state<'onboard' | 'edit'>('onboard');
+  let namePrompted = $state(false);
+
+  $effect(() => {
+    if (
+      ownerState?.roomId &&
+      !shareOpen && // never stack over the share sheet — ask after it closes
+      !userProfile.isSet &&
+      !namePrompted &&
+      !namePromptOpen
+    ) {
+      namePrompted = true;
+      namePromptMode = 'onboard';
+      namePromptOpen = true;
+    }
+  });
+
+  $effect(() => {
+    if (userProfile.editRequested) {
+      userProfile.editRequested = false;
+      namePromptMode = 'edit';
+      namePromptOpen = true;
+    }
+  });
+
   // Auto-expand the review rail the first time the room has UNRESOLVED
   // feedback (ports App.svelte's native rule). Without this the hosted
   // owner's rail sat in its collapsed 48px gutter and a reviewer's incoming
@@ -1471,7 +1506,21 @@
     shareOpen = false;
     const trigger = shareReturnFocus ?? shareButton;
     shareReturnFocus = undefined;
-    queueMicrotask(() => trigger?.focus());
+    // The pre-share breadcrumb icon unmounts while the sheet is open (the
+    // ShareChip anchors it instead), so the captured trigger may be a
+    // detached node by now — focus() on it silently no-ops and keyboard
+    // focus strands at <body>. Wait for re-render, then focus the live
+    // trigger: the original if it survived, else the chip / remounted icon.
+    void tick().then(() => {
+      if (trigger?.isConnected) {
+        trigger.focus();
+        return;
+      }
+      const fallback =
+        document.querySelector<HTMLButtonElement>('[data-slot="share-chip"]') ??
+        document.querySelector<HTMLButtonElement>('button[aria-label="Share for review"]');
+      fallback?.focus();
+    });
   }
 
   // ————— command palette (⌘K) —————
@@ -1636,6 +1685,13 @@
 
 <CommandPalette bind:open={paletteOpen} commands={paletteCommands} />
 
+<NamePrompt
+  bind:open={namePromptOpen}
+  suggestion={userProfile.suggestion}
+  mode={namePromptMode}
+  onConfirm={(name) => userProfile.save(name)}
+/>
+
 {#if arrivalToasts.length > 0}
   <div class="arrival-toasts" aria-live="polite">
     {#each arrivalToasts as toast (toast.id)}
@@ -1666,6 +1722,25 @@
         <div class="actions">
           <button class="button" type="button" disabled={editorLoading} onclick={() => void enterEdit()}>
             {editorLoading ? 'Opening…' : 'Retry edit'}
+          </button>
+        </div>
+      </div>
+    {/if}
+    {#if ownerState?.status === 'error' && !ownerState.roomId}
+      <!-- Share resume/publish failed with no room to fall back on (attn-dkr):
+           a relay rejection here (expired room, storage cap) used to vanish —
+           the ShareChip simply never appeared. Say it, with the actual reason. -->
+      <div class="degraded-banner hosted-document-banner" role="alert" data-degraded="share-resume-failed">
+        <div>
+          <strong>Live sharing is unavailable.</strong>
+          <p>
+            {(ownerState.reason ?? 'The review room could not be reached.').replace(/[:\s]+$/u, '.')}
+            Your document is safe on this device.
+          </p>
+        </div>
+        <div class="actions">
+          <button class="button" type="button" onclick={() => window.location.reload()}>
+            Retry
           </button>
         </div>
       </div>

@@ -1,97 +1,74 @@
+// ShareSheet contract (post-redesign: file checkboxes + sentence-pattern
+// permissions + quiet chrome). Runs against the `?shell=` mock scenarios via
+// playwright.routes.config.ts. attn-y6y: the previous revision asserted the
+// retired "Share for review" dialog (scope radios, tier radio rows, the
+// storage risk-gate checkboxes) — this one matches the shipped sheet.
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 
 const WORKSPACE_URL = '/app/w/ws-product/direction.md?shell=demo';
+const DIALOG_NAME = 'Share files for review';
+const CREATE_BUTTON = /Create review link for \d+ files?/u;
 
-async function openShare(page: Page) {
-  await page.goto(WORKSPACE_URL);
+async function openShare(page: Page, url: string = WORKSPACE_URL) {
+  await page.goto(url);
   const headerShare = page.locator('.editor-top').getByRole('button', { name: 'Share' });
   if (await headerShare.isVisible()) await headerShare.click();
   else await page.getByRole('button', { name: 'Share for review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Share for review' });
+  const dialog = page.getByRole('dialog', { name: DIALOG_NAME });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole('button', { name: 'Create review link' })).toBeVisible();
   return dialog;
 }
 
 async function createReadyShare(page: Page) {
   const dialog = await openShare(page);
-  await dialog.getByRole('button', { name: 'Create review link' }).click();
-  await expect(dialog.getByRole('heading', { name: 'Review link ready' })).toBeVisible();
+  await dialog.getByRole('button', { name: CREATE_BUTTON }).click();
+  await expect(dialog.locator('.share-ready-scope')).toContainText('shared');
   return dialog;
 }
 
-test('defaults to the focused current-file and hybrid delivery flow', async ({ page }) => {
+test('defaults to the focused current file with hybrid delivery behind Advanced', async ({ page }) => {
   const dialog = await openShare(page);
 
-  await expect(dialog.getByRole('heading', { name: 'Share for review' })).toBeFocused();
-  await expect(dialog.getByRole('radio', { name: /Current file/u })).toBeChecked();
-  await expect(dialog.locator('.share-manifest')).toContainText('1 entry');
+  await expect(dialog.getByRole('heading', { name: DIALOG_NAME })).toBeFocused();
+  // The active document is pre-checked; sharing is opt-in per file.
+  await expect(dialog.locator('.share-entry-current input[type="checkbox"]')).toBeChecked();
+  await expect(dialog.locator('.share-manifest')).toContainText('1 file selected');
   await expect(dialog.locator('.share-manifest')).toContainText('1 Markdown');
+  await expect(dialog.getByRole('button', { name: CREATE_BUTTON })).toBeEnabled();
+
   const advanced = dialog.locator('.share-advanced > summary');
   await expect(advanced).toContainText('Advanced settings');
   await expect(advanced).toContainText('Hybrid delivery');
-
   await advanced.click();
   await expect(dialog.getByRole('radio', { name: /^Hybrid/u })).toBeChecked();
   await expect(dialog).toContainText('Hybrid is recommended');
 });
 
-test('durability states gate sharing honestly', async ({ page }) => {
-  await page.goto('/app/w/ws-product/direction.md?shell=private');
-  await page.getByRole('button', { name: 'Share for review' }).click();
-  const privateDialog = page.getByRole('dialog', { name: 'Share for review' });
-  const create = privateDialog.getByRole('button', { name: 'Create review link' });
-  await expect(privateDialog).toContainText('Private browsing can erase this workspace');
-  await expect(create).toBeDisabled();
-  await privateDialog.getByRole('checkbox', { name: /I understand this browser may erase/u }).check();
-  await expect(create).toBeEnabled();
-
-  await page.keyboard.press('Escape');
-  await page.goto('/app/w/ws-product/direction.md?shell=quota');
-  await page.getByRole('button', { name: 'Share for review' }).click();
-  const quotaDialog = page.getByRole('dialog', { name: 'Share for review' });
-  await expect(quotaDialog.getByRole('alert')).toContainText('Sharing stays unavailable');
-  await expect(quotaDialog.getByRole('button', { name: 'Create review link' })).toBeDisabled();
+test('select-all and clear drive the manifest and create gate', async ({ page }) => {
+  const dialog = await openShare(page);
+  await dialog.getByRole('button', { name: 'Select all' }).click();
+  await expect(dialog.locator('.share-manifest')).not.toContainText('1 file selected');
+  await dialog.getByRole('button', { name: 'Clear' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('Select at least one Markdown file');
+  await expect(dialog.getByRole('button', { name: CREATE_BUTTON })).toBeDisabled();
 });
 
-test('persistence denial leaves an obvious safety confirmation and can complete sharing', async ({ page }) => {
-  await page.goto('/app/w/ws-product/direction.md?shell=best-effort');
-  await page.getByRole('button', { name: 'Share for review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Share for review' });
-  const create = dialog.getByRole('button', { name: 'Create review link' });
-  const confirmation = dialog.getByRole('checkbox', {
-    name: /I have a backup or accept the risk/u,
-  });
+test('durability states gate sharing honestly', async ({ page }) => {
+  // Quota pressure hard-blocks creation with a plain-language reason.
+  const quotaDialog = await openShare(page, '/app/w/ws-product/direction.md?shell=quota');
+  await expect(quotaDialog).toContainText('Sharing is unavailable until local storage is healthy.');
+  await expect(quotaDialog.getByRole('button', { name: CREATE_BUTTON })).toBeDisabled();
+  await page.keyboard.press('Escape');
 
-  await expect(create).toBeDisabled();
-  await dialog.getByRole('button', { name: 'Protect local data' }).click();
-  await expect(dialog).toContainText('Protected storage was not granted');
-  await expect(confirmation).toBeVisible();
-  const confirmationSize = await confirmation.evaluate((input) => {
-    const rect = input.getBoundingClientRect();
-    return { width: rect.width, height: rect.height };
-  });
-  expect(confirmationSize.width).toBeGreaterThanOrEqual(16);
-  expect(confirmationSize.height).toBeGreaterThanOrEqual(16);
-  await expect(dialog).toContainText('Confirm the safety note to continue.');
-
-  await dialog.getByText('I have a backup or accept the risk').click();
-  await expect(confirmation).toBeChecked();
-  await expect(create).toBeEnabled();
-  await create.click();
-  await expect(dialog.getByRole('heading', { name: 'Review link ready' })).toBeVisible();
+  // Session-only storage (private browsing) shares without a risk-gate — the
+  // redesign deliberately removed the confirmation checkbox flow.
+  const privateDialog = await openShare(page, '/app/w/ws-product/direction.md?shell=private');
+  await expect(privateDialog.getByRole('button', { name: CREATE_BUTTON })).toBeEnabled();
 });
 
 test('each tier matches across browser, native, and CLI while sibling bearers stay distinct', async ({ page }) => {
   await page.addInitScript(() => {
-    // This case validates the clipboard fallback specifically. WebKit exposes
-    // navigator.share in headless mode, so make the delivery capability
-    // deterministic instead of asserting a browser-dependent button label.
-    Object.defineProperty(Navigator.prototype, 'share', {
-      configurable: true,
-      value: undefined,
-    });
     Object.defineProperty(Navigator.prototype, 'clipboard', {
       configurable: true,
       get: () => ({
@@ -102,16 +79,20 @@ test('each tier matches across browser, native, and CLI while sibling bearers st
     });
   });
   const dialog = await createReadyShare(page);
-  await expect(dialog.getByRole('radio', { name: /Comment/u })).toBeChecked();
-  await dialog.getByText('Native app and CLI options').click();
+  const tierSelect = dialog.getByRole('combobox', { name: 'What this link allows' });
+  await expect(tierSelect).toHaveValue('comment');
+
+  const linkChip = dialog.locator('.share-link-chip');
+  await dialog.getByText('Native app & CLI').click();
   const tierSecrets: string[] = [];
   let shareId = '';
-  for (const tier of ['View-only', 'Comment', 'Suggest']) {
-    await dialog.getByRole('radio', { name: new RegExp(tier, 'u') }).check();
-    const browserCode = dialog.locator('.share-link-row code');
-    await expect(browserCode).toContainText('#key=••••');
-    await dialog.getByRole('button', { name: 'Show' }).click();
-    const browserUrl = (await browserCode.textContent()) ?? '';
+  for (const tier of ['view', 'comment', 'suggest']) {
+    await tierSelect.selectOption(tier);
+    // Key stays masked until deliberately revealed.
+    await expect(linkChip).toHaveAttribute('aria-pressed', 'false');
+    await expect(linkChip.locator('code')).toContainText('•');
+    await linkChip.click();
+    const browserUrl = (await linkChip.locator('code').textContent()) ?? '';
     const inviteCodes = dialog.locator('.share-invite-option code');
     const nativeUrl = (await inviteCodes.nth(0).textContent()) ?? '';
     const cliCommand = (await inviteCodes.nth(1).textContent()) ?? '';
@@ -125,23 +106,29 @@ test('each tier matches across browser, native, and CLI while sibling bearers st
     shareId ||= browser.pathname.split('/').at(-1) ?? '';
     expect(browser.pathname).toBe(`/s/${shareId}`);
     tierSecrets.push(browser.hash);
-    await dialog.getByRole('button', { name: 'Hide' }).click();
+    await linkChip.click();
   }
   expect(new Set(tierSecrets).size).toBe(3);
-  await dialog.getByRole('radio', { name: /Comment/u }).check();
-  await dialog.getByRole('button', { name: 'Show' }).click();
-  const browserUrl = (await dialog.locator('.share-link-row code').textContent()) ?? '';
-  await dialog.getByRole('button', { name: /Copy Comment link/u }).click();
+
+  await tierSelect.selectOption('comment');
+  await linkChip.click();
+  const browserUrl = (await linkChip.locator('code').textContent()) ?? '';
+  await dialog.getByRole('button', { name: 'Copy link' }).click();
   expect(await page.evaluate(() =>
     (globalThis as typeof globalThis & { __attnCopied?: string }).__attnCopied,
   )).toBe(browserUrl);
+});
 
+test('stop sharing confirms destructively, then a new link can be minted', async ({ page }) => {
+  const dialog = await createReadyShare(page);
   await dialog.getByRole('button', { name: 'Stop sharing' }).click();
+  await expect(dialog).toContainText('Reviewers lose access immediately.');
+  await expect(dialog.getByRole('button', { name: 'Keep sharing' })).toBeFocused();
   await dialog.getByRole('button', { name: 'Stop now' }).click();
-  await expect(dialog.getByRole('heading', { name: 'Review access is off' })).toBeVisible();
-  await dialog.getByRole('button', { name: 'Create a new review link' }).click();
-  await dialog.getByRole('button', { name: 'Create review link' }).click();
-  await expect(dialog.getByRole('heading', { name: 'Review link ready' })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Sharing stopped' })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Create a new link' }).click();
+  await dialog.getByRole('button', { name: CREATE_BUTTON }).click();
+  await expect(dialog.locator('.share-ready-scope')).toContainText('shared');
 });
 
 test('uses Web Share when available and remains axe-clean at mobile width', async ({ page }) => {
@@ -156,15 +143,15 @@ test('uses Web Share when available and remains axe-clean at mobile width', asyn
   await page.setViewportSize({ width: 320, height: 700 });
   await page.goto(WORKSPACE_URL);
   await page.locator('.editor-top').getByRole('button', { name: 'Share' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Share for review' });
-  await dialog.getByRole('button', { name: 'Create review link' }).click();
-  await expect(dialog.getByRole('heading', { name: 'Review link ready' })).toBeVisible();
+  const dialog = page.getByRole('dialog', { name: DIALOG_NAME });
+  await dialog.getByRole('button', { name: CREATE_BUTTON }).click();
+  await expect(dialog.locator('.share-ready-scope')).toContainText('shared');
 
-  await dialog.getByRole('button', { name: /Share Comment link/u }).click();
+  await dialog.getByRole('button', { name: 'Share via system share sheet' }).click();
   const payload = await page.evaluate(() =>
     (globalThis as typeof globalThis & { __attnShared?: ShareData }).__attnShared,
   );
-  expect(payload?.url).toMatch(/^https:\/\/attn\.sh\/s\/.+#key=.+/u);
+  expect(payload?.url).toMatch(/^https:\/\/(?:staging\.)?attn\.sh\/s\/.+#key=.+/u);
 
   const overflow = await page.evaluate(() => {
     const root = document.scrollingElement;
@@ -195,26 +182,20 @@ test('falls back to clipboard when Web Share rejects', async ({ page }) => {
     });
   });
   const dialog = await createReadyShare(page);
-  await dialog.getByRole('button', { name: /Share Comment link/u }).click();
+  await dialog.getByRole('button', { name: 'Share via system share sheet' }).click();
   const copied = await page.evaluate(() =>
     (globalThis as typeof globalThis & { __attnCopied?: string }).__attnCopied,
   );
-  expect(copied).toMatch(/^https:\/\/attn\.sh\/s\/.+#key=.+/u);
+  expect(copied).toMatch(/^https:\/\/(?:staging\.)?attn\.sh\/s\/.+#key=.+/u);
   await expect(dialog.getByRole('status').filter({ hasText: /browser link was copied/u }).first()).toBeVisible();
 });
 
-test('mobile permission tier rows meet 44px touch targets', async ({ page }) => {
+test('mobile file rows meet 44px touch targets', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 700 });
-  const dialog = await createReadyShare(page);
-  const tierHeights = await dialog.locator('.share-tier-picker label').evaluateAll((labels) =>
+  const dialog = await openShare(page);
+  const rowHeights = await dialog.locator('.share-entry-list label').evaluateAll((labels) =>
     labels.map((label) => label.getBoundingClientRect().height),
   );
-  for (const height of tierHeights) expect(height).toBeGreaterThanOrEqual(44);
-});
-
-test('destructive confirmation takes keyboard focus', async ({ page }) => {
-  const dialog = await openShare(page);
-  await dialog.getByRole('button', { name: 'Create review link' }).click();
-  await dialog.getByRole('button', { name: 'Stop sharing' }).click();
-  await expect(dialog.getByRole('button', { name: 'Keep sharing' })).toBeFocused();
+  expect(rowHeights.length).toBeGreaterThan(0);
+  for (const height of rowHeights) expect(height).toBeGreaterThanOrEqual(44);
 });

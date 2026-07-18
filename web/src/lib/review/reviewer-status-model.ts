@@ -78,7 +78,7 @@ export function reviewerStatusPresentation(
             // and broadcasting — which may be relay-mediated, so never claim a
             // peer-to-peer mechanism here (the owner-side ShareChip does,
             // where live_direct really is a DataChannel).
-            'Live — the owner is here and changes appear instantly.'
+            'The owner is here — changes appear instantly.'
           : base.detail,
     tone: base.tone,
     notes,

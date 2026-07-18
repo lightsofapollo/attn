@@ -24,7 +24,7 @@
   import Wifi from '@lucide/svelte/icons/wifi';
   import Zap from '@lucide/svelte/icons/zap';
   import { reviewStore } from './review/store.svelte';
-  import { userProfile } from './review/profile.svelte';
+  import { userProfile } from './profile.svelte';
   import { deriveSharedFiles } from './review/shared-tree';
   import {
     SHARE_CHIP_DESCRIPTORS,

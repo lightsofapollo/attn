@@ -232,9 +232,15 @@
         {@render content()}
       </div>
       {#if reviewStore.railMode !== 'hidden'}
+        <!-- The aside reserves the FULL margin width for the whole life of
+             the review context: toggling collapsed↔expanded only changes
+             what renders inside, so the document column never reflows or
+             recenters (Docs rule — the page doesn't move when comments
+             open). The inner column narrows to the gutter width when
+             collapsed; the spare width is plain paper. -->
         <aside
           class="right-rail sticky top-0 flex shrink-0 flex-col self-start overflow-hidden"
-          style={`width: ${RAIL_WIDTH_PX[reviewStore.railMode]}px; height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
+          style={`width: ${RAIL_WIDTH_PX.expanded}px; height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={reviewStore.railMode}
           data-slot="right-rail"
@@ -242,6 +248,7 @@
         >
           <div
             class={`flex h-10 shrink-0 items-center pt-2 ${reviewStore.panelOpen ? 'justify-end pr-2' : 'justify-center'}`}
+            style={`width: ${RAIL_WIDTH_PX[reviewStore.railMode]}px;`}
             data-slot="rail-header"
           >
             <button
@@ -266,7 +273,10 @@
               />
             </button>
           </div>
-          <div class="relative mb-2 min-h-0 flex-1 overflow-hidden">
+          <div
+            class="relative mb-2 min-h-0 flex-1 overflow-hidden"
+            style={`width: ${RAIL_WIDTH_PX[reviewStore.railMode]}px;`}
+          >
             {@render rail()}
           </div>
         </aside>

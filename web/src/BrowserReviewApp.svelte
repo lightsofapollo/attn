@@ -1035,19 +1035,25 @@
                 />
               {/if}
             </div>
-            {#if displayedDocType !== 'html' && desktopLayout && railVisible}
+            {#if displayedDocType !== 'html' && desktopLayout && currentThreadCount > 0}
+              <!-- Reserved for the whole life of the thread set: closing the
+                   rail only unmounts the cards, so the document column never
+                   reflows on toggle (Docs rule — the page doesn't move). -->
               <aside
                 class="browser-review-margin sticky top-0 w-[320px] shrink-0 self-start overflow-hidden"
                 style="height: calc(100dvh - 2.75rem);"
                 data-slot="browser-review-margin"
+                data-open={railVisible}
               >
-                <ReviewMargin
-                  view={pmViewForReview}
-                  readOnly={true}
-                  reviewerAuthoring={reviewerAvailability.reviewAuthoring}
-                  onResolveComment={resolveBrowserComment}
-                  onReplyComment={replyBrowserComment}
-                />
+                {#if railVisible}
+                  <ReviewMargin
+                    view={pmViewForReview}
+                    readOnly={true}
+                    reviewerAuthoring={reviewerAvailability.reviewAuthoring}
+                    onResolveComment={resolveBrowserComment}
+                    onReplyComment={replyBrowserComment}
+                  />
+                {/if}
               </aside>
             {/if}
           </div>

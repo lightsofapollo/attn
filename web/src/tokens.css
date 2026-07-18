@@ -30,9 +30,12 @@
      mermaid, tables, and code that 640px strangles. Prose keeps a readable
      measure (720px ≈ 74ch serif); WIDE BLOCKS break out to their own cap.
      This supersedes the single shared edge — the prose column stays calm,
-     and diagrams get the room the viewport actually has. */
-  --content-measure: 720px;
-  --content-measure-wide: 1040px;
+     and diagrams get the room the viewport actually has. Widened again on
+     follow-up feedback (720/1040 read "pretty similar" on a wide monitor):
+     the daily use is technical review on large displays, so the prose lane
+     runs long-measure and wide blocks take most of the pane. */
+  --content-measure: 820px;
+  --content-measure-wide: 1280px;
 
   /* Motion — one signature: fast, exact, ease-out-quart */
   --ease: cubic-bezier(0.165, 0.84, 0.44, 1);

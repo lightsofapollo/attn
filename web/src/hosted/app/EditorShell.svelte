@@ -1734,7 +1734,7 @@
         <div>
           <strong>Live sharing is unavailable.</strong>
           <p>
-            {(ownerState.reason ?? 'The review room could not be reached.').replace(/[:\s]+$/u, '.')}
+            {(ownerState.reason ?? 'The review room could not be reached').replace(/[:\s.]+$/u, '')}.
             Your document is safe on this device.
           </p>
         </div>

@@ -1686,6 +1686,28 @@ a.workspace-row:hover {
   font-size: 0.78rem;
 }
 
+/* Ownership gate (share sheet): another tab holds the writer lease, so
+   publishing is blocked here — explain and offer the claim action. */
+.share-ownership-note {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  justify-content: space-between;
+  margin-top: 0.75rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+}
+.share-ownership-note p {
+  margin: 0;
+  font: 400 0.85rem/1.45 var(--sans);
+  color: var(--foreground);
+}
+.share-ownership-note .button {
+  flex-shrink: 0;
+}
+
 .share-config-foot {
   display: flex;
   align-items: center;

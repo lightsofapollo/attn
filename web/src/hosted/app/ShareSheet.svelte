@@ -32,6 +32,12 @@
     onInspect?: () => Promise<WorkspaceShareView | null>;
     onCreate?: (request: WorkspaceShareRequest) => Promise<WorkspaceShareView>;
     onStop?: () => Promise<void>;
+    /** True while another tab holds the workspace writer lease — sharing
+     *  publishes from the editing tab, so creation is gated with a claim
+     *  action instead of failing into a resume loop. */
+    ownershipBlocked?: boolean;
+    /** Attempt to claim the writer lease on this tab; true on success. */
+    onClaimOwnership?: () => Promise<boolean>;
     onclose: () => void;
     /** Temporary compatibility for callers that have not moved to WorkspaceDetail yet. */
     workspaceName?: string;
@@ -46,6 +52,8 @@
     onInspect,
     onCreate,
     onStop,
+    ownershipBlocked = false,
+    onClaimOwnership,
     onclose,
     workspaceName,
   }: Props = $props();
@@ -86,6 +94,22 @@
   let inviteOptionsOpen = $state(false);
   let stopConfirm = $state(false);
   let stopBusy = $state(false);
+  let claimBusy = $state(false);
+
+  async function claimOwnership(): Promise<void> {
+    if (!onClaimOwnership || claimBusy) return;
+    claimBusy = true;
+    try {
+      const granted = await onClaimOwnership();
+      if (!granted) {
+        statusMessage = 'The other tab is still editing. Close it (or finish there) and try again.';
+      } else {
+        statusMessage = 'This tab can publish now.';
+      }
+    } finally {
+      claimBusy = false;
+    }
+  }
   let stopSharingButton = $state<HTMLButtonElement | undefined>();
   let keepSharingButton = $state<HTMLButtonElement | undefined>();
 
@@ -427,12 +451,25 @@
         {#if operationError}
           <p class="share-error" role="alert">{operationError}</p>
         {/if}
-        <div class="share-config-foot">
-          <p>{configurationHint}</p>
-          <button class="button primary" type="button" disabled={!configurationReady} onclick={() => void publishShare()}>
-            Create review link for {manifest.entryCount} {manifest.entryCount === 1 ? 'file' : 'files'}
-          </button>
-        </div>
+        {#if ownershipBlocked}
+          <div class="share-ownership-note" role="status" data-slot="share-ownership-blocked">
+            <p>
+              <strong>Another tab is editing this workspace.</strong>
+              Sharing publishes from the editing tab — switch to it, or close it
+              and claim editing here.
+            </p>
+            <button class="button" type="button" disabled={claimBusy || !onClaimOwnership} onclick={() => void claimOwnership()}>
+              {claimBusy ? 'Checking…' : 'Claim editing here'}
+            </button>
+          </div>
+        {:else}
+          <div class="share-config-foot">
+            <p>{configurationHint}</p>
+            <button class="button primary" type="button" disabled={!configurationReady} onclick={() => void publishShare()}>
+              Create review link for {manifest.entryCount} {manifest.entryCount === 1 ? 'file' : 'files'}
+            </button>
+          </div>
+        {/if}
       {:else if phase === 'progress'}
         <div class="share-progress share-progress-compact" aria-live="polite">
           {#if operationBusy}
@@ -448,11 +485,22 @@
           <p class="share-error" role="alert">{operationError}</p>
         {/if}
         {#if progressPaused}
+          {#if ownershipBlocked}
+            <div class="share-ownership-note" role="status" data-slot="share-ownership-blocked">
+              <p>
+                <strong>Another tab is editing this workspace.</strong>
+                Resume from that tab, or claim editing here first.
+              </p>
+              <button class="button" type="button" disabled={claimBusy || !onClaimOwnership} onclick={() => void claimOwnership()}>
+                {claimBusy ? 'Checking…' : 'Claim editing here'}
+              </button>
+            </div>
+          {/if}
           <div class="share-foot">
             <button class="button" type="button" disabled={!onStop || stopBusy} onclick={() => void stopSharing()}>
               {stopBusy ? 'Discarding…' : 'Discard and start over'}
             </button>
-            <button class="button primary" type="button" disabled={!onCreate || operationBusy} onclick={() => void publishShare()}>Resume publishing</button>
+            <button class="button primary" type="button" disabled={!onCreate || operationBusy || ownershipBlocked} onclick={() => void publishShare()}>Resume publishing</button>
           </div>
         {/if}
       {:else if phase === 'ready' && invite && share}

@@ -196,8 +196,8 @@
       {actions}
       onShare={reviewStore.currentRoomId === null && !shareOpen ? onShare : undefined}
       shareEnabled={true}
-      rightInsetPx={reviewStore.currentRoomId !== null && reviewStore.railMode !== 'expanded'
-        ? 328 - RAIL_WIDTH_PX[reviewStore.railMode]
+      rightInsetPx={(reviewStore.currentRoomId !== null || shareOpen) && reviewStore.railMode !== 'expanded'
+        ? 328 - (reviewStore.currentRoomId !== null ? RAIL_WIDTH_PX[reviewStore.railMode] : 0)
         : 16}
     />
   </div>

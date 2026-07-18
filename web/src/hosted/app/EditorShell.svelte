@@ -2192,6 +2192,8 @@
     onInspect={inspectWorkspaceShare}
     onCreate={createWorkspaceShare}
     onStop={stopWorkspaceShare}
+    ownershipBlocked={editDenied}
+    onClaimOwnership={async () => (await ensureOwnerSession()) !== null}
     onclose={closeShare}
   />
 {/if}

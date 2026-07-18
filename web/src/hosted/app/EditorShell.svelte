@@ -23,6 +23,7 @@
     WorkspaceDetail,
     WorkspaceEntry,
     WorkspaceShareRequest,
+    WorkspaceShareView,
   } from './types';
   import type EditorComponentType from '../../lib/Editor.svelte';
   import type ReviewMarginComponentType from '../../lib/ReviewMargin.svelte';
@@ -1495,6 +1496,7 @@
   const assetEntries = $derived(workspace.entries.filter((e) => e.kind === 'asset'));
 
   function openShare(trigger: HTMLButtonElement | undefined): void {
+    probeOwnerTab();
     blurEditor();
     filesSheetOpen = false;
     reviewSheetOpen = false;
@@ -1651,23 +1653,133 @@
     reviewSheetOpen = true;
   });
 
+  // ————— share from any tab (attn-x6v) —————
+  // Exactly one tab holds the workspace's room authority and fenced storage
+  // writer — that invariant is load-bearing for E2E collab correctness — but
+  // it is an implementation detail, not a user constraint. Any tab's share
+  // sheet routes its operation over a BroadcastChannel to the owning tab,
+  // which performs it and returns the share view. The claim-ownership gate
+  // survives only for the case where no owning tab is alive to answer.
+  const SHARE_OPS_CHANNEL = 'attn:share-ops:v1';
+  type ShareOpsMessage =
+    | { kind: 'share-owner-ping'; id: string; workspaceId: string }
+    | { kind: 'share-owner-pong'; id: string; workspaceId: string }
+    | { kind: 'share-op'; id: string; workspaceId: string; op: 'inspect' | 'ensure' | 'stop'; request?: WorkspaceShareRequest }
+    | { kind: 'share-op-result'; id: string; workspaceId: string; ok: boolean; view?: WorkspaceShareView | null; error?: string };
+
+  let shareOpsChannel: BroadcastChannel | null = null;
+  let ownerTabPresent = $state(false);
+  const pendingShareOps = new Map<string, { resolve: (view: WorkspaceShareView | null) => void; reject: (error: Error) => void }>();
+  const pendingOwnerPings = new Set<string>();
+
+  $effect(() => {
+    const wsId = workspace.id;
+    const channel = openBroadcastChannel(SHARE_OPS_CHANNEL);
+    shareOpsChannel = channel;
+    if (!channel) return;
+    channel.onmessage = (event: MessageEvent) => {
+      const msg = event.data as ShareOpsMessage | null;
+      if (!msg || msg.workspaceId !== wsId) return;
+      if (msg.kind === 'share-owner-ping') {
+        if (session) channel.postMessage({ kind: 'share-owner-pong', id: msg.id, workspaceId: wsId } satisfies ShareOpsMessage);
+        return;
+      }
+      if (msg.kind === 'share-owner-pong') {
+        if (pendingOwnerPings.delete(msg.id)) ownerTabPresent = true;
+        return;
+      }
+      if (msg.kind === 'share-op') {
+        const owner = session;
+        if (!owner) return;
+        void (async () => {
+          try {
+            let view: WorkspaceShareView | null = null;
+            if (msg.op === 'inspect') view = await owner.inspectShare();
+            else if (msg.op === 'ensure') view = await owner.ensureShare(msg.request!);
+            else await owner.stopShare();
+            channel.postMessage({ kind: 'share-op-result', id: msg.id, workspaceId: wsId, ok: true, view } satisfies ShareOpsMessage);
+          } catch (error) {
+            channel.postMessage({
+              kind: 'share-op-result', id: msg.id, workspaceId: wsId, ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            } satisfies ShareOpsMessage);
+          }
+        })();
+        return;
+      }
+      if (msg.kind === 'share-op-result') {
+        const pending = pendingShareOps.get(msg.id);
+        if (!pending) return;
+        pendingShareOps.delete(msg.id);
+        ownerTabPresent = true;
+        if (msg.ok) pending.resolve(msg.view ?? null);
+        else pending.reject(new Error(msg.error ?? 'The editing tab could not complete the share operation.'));
+      }
+    };
+    return () => {
+      channel.close();
+      shareOpsChannel = null;
+    };
+  });
+
+  function proxyShareOp(
+    op: 'inspect' | 'ensure' | 'stop',
+    request: WorkspaceShareRequest | undefined,
+    timeoutMs: number,
+  ): Promise<WorkspaceShareView | null> {
+    const channel = shareOpsChannel;
+    if (!channel) return Promise.reject(new Error('Another tab owns this workspace.'));
+    const id = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingShareOps.delete(id);
+        reject(new Error('Another tab owns this workspace.'));
+      }, timeoutMs);
+      pendingShareOps.set(id, {
+        resolve: (view) => { clearTimeout(timer); resolve(view); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      });
+      channel.postMessage({
+        kind: 'share-op', id, workspaceId: workspace.id, op,
+        ...(request === undefined ? {} : { request }),
+      } satisfies ShareOpsMessage);
+    });
+  }
+
+  /** Ask whether any tab currently owns this workspace; updates the gate. */
+  function probeOwnerTab(): void {
+    const channel = shareOpsChannel;
+    if (!channel || session) return;
+    const id = crypto.randomUUID();
+    pendingOwnerPings.add(id);
+    channel.postMessage({ kind: 'share-owner-ping', id, workspaceId: workspace.id } satisfies ShareOpsMessage);
+    setTimeout(() => pendingOwnerPings.delete(id), 2000);
+  }
+
   async function inspectWorkspaceShare() {
     const granted = await ensureOwnerSession();
-    if (!granted) return null;
-    return granted.inspectShare();
+    if (granted) return granted.inspectShare();
+    return proxyShareOp('inspect', undefined, 8_000).catch(() => null);
   }
 
   async function createWorkspaceShare(request: WorkspaceShareRequest) {
     await autosave?.flush();
     const granted = await ensureOwnerSession();
-    if (!granted) throw new Error('Another tab owns this workspace.');
-    return granted.ensureShare(request);
+    if (granted) return granted.ensureShare(request);
+    // Publishing includes PoW minting and snapshot uploads in the owning
+    // tab — give it real time before declaring the owner unreachable.
+    const view = await proxyShareOp('ensure', request, 90_000);
+    if (!view) throw new Error('Another tab owns this workspace.');
+    return view;
   }
 
   async function stopWorkspaceShare(): Promise<void> {
     const granted = await ensureOwnerSession();
-    if (!granted) throw new Error('Another tab owns this workspace.');
-    await granted.stopShare();
+    if (granted) {
+      await granted.stopShare();
+      return;
+    }
+    await proxyShareOp('stop', undefined, 30_000);
   }
 
   function closeFilesSheet(): void {
@@ -2192,7 +2304,7 @@
     onInspect={inspectWorkspaceShare}
     onCreate={createWorkspaceShare}
     onStop={stopWorkspaceShare}
-    ownershipBlocked={editDenied}
+    ownershipBlocked={editDenied && !ownerTabPresent}
     onClaimOwnership={async () => (await ensureOwnerSession()) !== null}
     onclose={closeShare}
   />

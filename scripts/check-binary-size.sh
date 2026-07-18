@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/check-binary-size.sh
-# Asserts the release binary stays under the collab v2 32 MiB target.
+# Asserts the release binary stays under the collab v2 40 MiB target.
 # Per planning/collab/amendments.md §Decision #1, webrtc-rs is the main risk:
 # adding it (with its transitive tokio/rustls/sctp/dtls stack) is what
 # threatens the budget. This gate fails the build before that lands silently.
@@ -11,7 +11,7 @@
 # Run after `cargo build --release` and before merging any large dep addition.
 #
 # Usage: scripts/check-binary-size.sh [MAX_MIB]
-#   MAX_MIB defaults to 32 (the agreed Decision #1 target).
+#   MAX_MIB defaults to 40 (the agreed Decision #1 target).
 #   Override via positional arg or MAX_MIB env var.
 #
 # Waiver:
@@ -47,9 +47,9 @@ else
 fi
 
 # Allow MAX_MIB via positional arg OR env var; positional arg wins. Default is
-# the agreed Decision #1 budget (32 MiB) — NOT 50; CI + Taskfile call this with
+# the agreed Decision #1 budget (40 MiB) — NOT 50; CI + Taskfile call this with
 # no arg, so the default IS the enforced gate.
-MAX_MIB="${1:-${MAX_MIB:-32}}"
+MAX_MIB="${1:-${MAX_MIB:-40}}"
 MAX_BYTES=$((MAX_MIB * 1024 * 1024))
 
 # Waiver — accept both names. BINARY_SIZE_WAIVER is the documented one;

@@ -1010,8 +1010,18 @@
         </div>
       </div>
       {#if displayedDocType !== 'html' && desktopLayout && railVisible}
-        <aside class="browser-review-margin w-[320px] shrink-0 overflow-y-auto border-l border-border bg-background"
-          data-slot="browser-review-margin">
+        <!-- The margin is NOT its own scroll zone (Google-Docs rule): cards
+             are positioned at their anchors' live viewport y, so the aside
+             never scrolls itself — wheeling over it drives the document
+             scroller, same as the native WorkspaceEditorFrame rail. No
+             border either: an empty stretch of margin is whitespace, and
+             cards float on the paper. -->
+        <aside class="browser-review-margin w-[320px] shrink-0 overflow-hidden"
+          data-slot="browser-review-margin"
+          onwheel={(event) => {
+            const scroller = document.querySelector('[data-slot="browser-review-editor"]');
+            if (scroller) scroller.scrollTop += event.deltaY;
+          }}>
           <ReviewMargin
             view={pmViewForReview}
             readOnly={true}

@@ -395,6 +395,13 @@
   // `layoutCards` sorts by anchorY internally, so input order is free.
   // The fitBottom pass then lifts cards whose anchors are on screen so
   // they are never cut off at the rail's bottom edge.
+  // Docs-style active-card rule: the focused thread aligns exactly to its
+  // anchor; neighbors move out of its way instead of pushing it down.
+  const priorityThreadId = $derived.by(() => {
+    if (!focusEventId) return undefined;
+    return threads.find((t) => t.rootEvent.meta.eventId === focusEventId)?.id;
+  });
+
   const placements: MarginCardPlacement[] = $derived.by(() => {
     const inputs: MarginCardInput[] = [];
     for (const t of anchoredThreads) {
@@ -407,7 +414,10 @@
       if (y === undefined) continue;
       inputs.push({ id: t.id, anchorY: clampRailTop(y), height: heightFor(t) });
     }
-    const placed = layoutCards(inputs);
+    const placed = layoutCards(
+      inputs,
+      priorityThreadId === undefined ? undefined : { priorityId: priorityThreadId },
+    );
     const containerH = containerEl?.clientHeight ?? 0;
     if (containerH <= 0) return placed;
     const heights = new Map(inputs.map((i) => [i.id, i.height]));
@@ -1216,7 +1226,11 @@
   {/if}
   {/if}
 
-  {#if threads.length === 0 && orphanThreads.length === 0}
+  {#if threads.length === 0 && orphanThreads.length === 0 && reviewStore.currentRoomId === null}
+    <!-- Google-Docs rule: inside a shared room an empty margin renders
+         NOTHING — whitespace, not a dead panel with filler copy. The hint
+         survives only for the local (roomless) review panel, where opening
+         it is an explicit act that deserves an explanation. -->
     <p class="review-margin-empty" data-testid="review-margin-empty">
       {#if reviewerAuthoring}
         No comments yet. Select any text in the document to start a thread.

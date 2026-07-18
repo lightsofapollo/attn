@@ -32,6 +32,12 @@ export interface MarginCardPlacement {
 export interface LayoutOptions {
   /** Vertical gap between stacked cards in px. Default 8. */
   gutter?: number;
+  /**
+   * Card to align EXACTLY at its anchor (Google-Docs active-comment rule):
+   * the focused card sits at `anchorY`; earlier cards cascade UP out of its
+   * way, later cards re-stack below it. Ignored when absent from `cards`.
+   */
+  priorityId?: string;
 }
 
 /**
@@ -67,6 +73,44 @@ export function layoutCards(
     };
     placed.set(card.id, placement);
     previousBottom = top + card.height;
+  }
+
+  // Active-card priority (Docs rule): pin the focused card at its anchor,
+  // cascade the cards above it UP out of the way (they may go above the
+  // container and clip — they belong with their text), and re-stack the
+  // cards below from the pinned card's bottom edge.
+  const priorityIndex =
+    options?.priorityId === undefined
+      ? -1
+      : sorted.findIndex((card) => card.id === options.priorityId);
+  if (priorityIndex >= 0) {
+    const priority = sorted[priorityIndex];
+    placed.set(priority.id, {
+      id: priority.id,
+      anchorY: priority.anchorY,
+      top: priority.anchorY,
+      offset: false,
+    });
+    let limit = priority.anchorY;
+    for (let i = priorityIndex - 1; i >= 0; i -= 1) {
+      const card = sorted[i];
+      const current = placed.get(card.id)!;
+      const top = Math.min(current.top, limit - gutter - card.height);
+      placed.set(card.id, { ...current, top, offset: top !== card.anchorY });
+      limit = top;
+    }
+    let below = priority.anchorY + priority.height;
+    for (let i = priorityIndex + 1; i < sorted.length; i += 1) {
+      const card = sorted[i];
+      const top = Math.max(card.anchorY, below + gutter);
+      placed.set(card.id, {
+        id: card.id,
+        anchorY: card.anchorY,
+        top,
+        offset: top !== card.anchorY,
+      });
+      below = top + card.height;
+    }
   }
 
   // Return in original caller order so consumers don't have to re-sort.

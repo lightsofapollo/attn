@@ -201,6 +201,47 @@ defineCase('fitBottom: mid-viewport cards are untouched and order is preserved',
   assert(fitted[1]!.top === 504, `low card fitted: top=${fitted[1]!.top}`);
 });
 
+defineCase('priorityId: focused card pins to its anchor, earlier cards cascade up', () => {
+  // Without priority, b gets pushed down below a. With priority on b, b sits
+  // exactly at its anchor and a is lifted out of its way (even above a's own
+  // anchor — Docs behavior; it clips with its text).
+  const inputs = [
+    { id: 'a', anchorY: 100, height: 96 },
+    { id: 'b', anchorY: 120, height: 96 },
+  ];
+  const plain = layoutCards(inputs);
+  assert(plain[1]!.top === 204, `no priority: b pushed to ${plain[1]!.top}`);
+  const focused = layoutCards(inputs, { priorityId: 'b' });
+  assert(focused[1]!.top === 120 && focused[1]!.offset === false, 'b pinned at anchor');
+  assert(focused[0]!.top === 16, `a lifted above: top=${focused[0]!.top}`);
+  assert(focused[0]!.offset === true, 'a flagged offset for the connector');
+});
+
+defineCase('priorityId: cards after the focused card re-stack from its bottom', () => {
+  const inputs = [
+    { id: 'a', anchorY: 100, height: 96 },
+    { id: 'b', anchorY: 110, height: 96 },
+    { id: 'c', anchorY: 130, height: 96 },
+  ];
+  const focused = layoutCards(inputs, { priorityId: 'a' });
+  assert(focused[0]!.top === 100, 'a at anchor');
+  assert(focused[1]!.top === 204, `b below a: ${focused[1]!.top}`);
+  assert(focused[2]!.top === 308, `c below b: ${focused[2]!.top}`);
+});
+
+defineCase('priorityId: unknown or absent id degrades to the plain layout', () => {
+  const inputs = [
+    { id: 'a', anchorY: 100, height: 96 },
+    { id: 'b', anchorY: 120, height: 96 },
+  ];
+  const ghost = layoutCards(inputs, { priorityId: 'nope' });
+  const plain = layoutCards(inputs);
+  assert(
+    ghost.every((p, i) => p.top === plain[i]!.top && p.offset === plain[i]!.offset),
+    'identical placements',
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------

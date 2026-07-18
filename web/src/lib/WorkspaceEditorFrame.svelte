@@ -147,9 +147,12 @@
       <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
         {@render content()}
       </div>
+      <!-- No border on the margin (Docs rule): an empty stretch is
+           whitespace on the paper, not a panel — the cards carry their own
+           edges. The rail still never scrolls; wheel forwards to the doc. -->
       <aside
         bind:this={railEl}
-        class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden border-l border-border/40 bg-background transition-transform duration-200 data-[mode=hidden]:border-none"
+        class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden bg-background transition-transform duration-200"
         style={`width: ${RAIL_WIDTH_PX[railMode]}px; transition-timing-function: var(--ease);`}
         data-state={panelOpen ? 'open' : 'closed'}
         data-mode={railMode}
@@ -160,7 +163,7 @@
       >
         {#if railMode !== 'hidden'}
           <div
-            class={`flex h-10 shrink-0 items-center border-b border-border/40 ${panelOpen ? 'justify-end pr-2' : 'justify-center'}`}
+            class={`flex h-10 shrink-0 items-center ${panelOpen ? 'justify-end pr-2' : 'justify-center'}`}
             data-slot="rail-header"
           >
             <button

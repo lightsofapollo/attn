@@ -20,6 +20,7 @@ import {
 import { assembleBrowserEvent, assembleSnapshotBlobEnvelope } from './browser-envelope';
 import type { BrowserDeviceIdentity } from './browser-session';
 import type { WorkspaceFence } from './browser-workspace-store';
+import { compressSnapshotIfSmaller } from './snapshot-compression';
 import {
   sealSnapshotR2Body,
   uploadBrowserR2Snapshot,
@@ -334,12 +335,16 @@ async function prepareSnapshot(
   ownerDisplayPath?: string,
 ): Promise<{ blobRef: BlobRef; envelopes: [MailboxEnvelope, MailboxEnvelope] }> {
   const plaintext = toCanonicalBytes(value);
+  // BlobRef integrity (byteLength/contentHash) is computed over the LOGICAL
+  // plaintext; the compressed form below is transport-only and invisible
+  // above the seal boundary.
   const blobHash = contentHash(plaintext);
+  const wire = await compressSnapshotIfSmaller(plaintext);
   const clientNonce = randomExact(random, 16, 'client nonce');
   let sealedBody: Uint8Array | null = null;
   try {
     const candidate = assembleSnapshotBlobEnvelope({
-      plaintext,
+      plaintext: wire,
       snapshotKey: options.keys.snapshotKey,
       roomId: options.roomId,
       authorId: options.identity.participantId,
@@ -371,7 +376,7 @@ async function prepareSnapshot(
       } finally {
         refBytes.fill(0);
       }
-      sealedBody = sealSnapshotR2Body({ snapshotKey: options.keys.snapshotKey, plaintext, wrapper });
+      sealedBody = sealSnapshotR2Body({ snapshotKey: options.keys.snapshotKey, plaintext: wire, wrapper });
       if (sealedBody.length > options.policy.maxSnapshotBytes) {
         throw new Error('encrypted snapshot exceeds the room snapshot limit');
       }
@@ -419,6 +424,7 @@ async function prepareSnapshot(
     });
     return { blobRef, envelopes: [wrapper, event.envelope] };
   } finally {
+    if (wire !== plaintext) wire.fill(0);
     plaintext.fill(0);
     clientNonce.fill(0);
     sealedBody?.fill(0);

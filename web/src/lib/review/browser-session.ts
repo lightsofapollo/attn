@@ -30,6 +30,7 @@
 //
 //   cd web && npx tsx src/lib/review/browser-session.test.ts
 
+import { decompressSnapshotIfNeeded } from './snapshot-compression';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
   base64UrlDecode,
@@ -2544,9 +2545,19 @@ export class BrowserSession {
       // cache + pending queues make the receiver defensive to either order.
       const blobId = envelope.envelopeId;
       const waiting = this.pendingSnapshots.get(blobId);
-      let snapshot = parseBrowserSnapshotPlaintext(plaintext);
-      let snapshotBytes = snapshot ? new Uint8Array(plaintext) : null;
-      const wrapperIsR2 = snapshot === null && parseR2BlobRefPlaintext(plaintext, envelope.envelopeId);
+      // Transparent gzip: the owner compresses the plaintext before sealing
+      // when it wins; a decode failure here is treated exactly like a failed
+      // plaintext parse below (invalid blob), never a crash.
+      let inflated: Uint8Array;
+      try {
+        inflated = await decompressSnapshotIfNeeded(plaintext);
+      } catch {
+        inflated = plaintext;
+      }
+      let snapshot = parseBrowserSnapshotPlaintext(inflated);
+      let snapshotBytes = snapshot ? new Uint8Array(inflated) : null;
+      const wrapperIsR2 = snapshot === null && parseR2BlobRefPlaintext(inflated, envelope.envelopeId);
+      if (inflated !== plaintext) zero(inflated);
       zero(plaintext);
       if (wrapperIsR2) {
         const keys = this.keys;
@@ -2574,8 +2585,10 @@ export class BrowserSession {
                 }
               : {}),
           });
-          snapshot = parseBrowserSnapshotPlaintext(recovered);
-          if (snapshot) snapshotBytes = new Uint8Array(recovered);
+          const recoveredInflated = await decompressSnapshotIfNeeded(recovered);
+          snapshot = parseBrowserSnapshotPlaintext(recoveredInflated);
+          if (snapshot) snapshotBytes = new Uint8Array(recoveredInflated);
+          if (recoveredInflated !== recovered) zero(recoveredInflated);
         } catch (error) {
           const message = error instanceof Error ? error.message : 'R2 snapshot recovery failed';
           if (this.state.snapshotContent === null) {

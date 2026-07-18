@@ -466,6 +466,16 @@ impl InboundPipeline {
             });
         }
         let plaintext = self.open_blob(envelope, &self.snapshot_key)?;
+        // Transparent gzip (see review::compression): inflate before the
+        // R2-ref sniff and before persisting, so the store always holds
+        // logical plaintext bytes matching the signed BlobRef hash.
+        let plaintext = match crate::review::compression::decompress_if_needed(
+            &plaintext,
+            crate::review::compression::MAX_DECOMPRESSED_SNAPSHOT_BYTES,
+        ) {
+            Ok(inflated) => inflated.into_owned(),
+            Err(reason) => return Err(InboundError::Store(format!("snapshot inflate: {reason}"))),
+        };
         let is_r2_ref = matches!(
             serde_json::from_slice::<crate::review::model::BlobRef>(&plaintext),
             Ok(blob_ref) if blob_ref.storage == crate::review::model::BlobStorage::R2

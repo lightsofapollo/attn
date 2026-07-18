@@ -441,7 +441,10 @@ pub fn assemble_snapshot_blob_envelope(
         created_at: created_at_ms,
     };
 
-    let (aead_nonce, ciphertext) = aead::seal(snapshot_key, plaintext, &aad)?;
+    // Transparent gzip before the seal (readers sniff the magic after
+    // decrypt) — see review::compression for the shared wire rule.
+    let wire = crate::review::compression::compress_if_smaller(plaintext);
+    let (aead_nonce, ciphertext) = aead::seal(snapshot_key, &wire, &aad)?;
 
     Ok(MailboxEnvelope {
         v: 2,
@@ -492,7 +495,8 @@ pub fn seal_snapshot_r2_body(
     wrapper: &MailboxEnvelope,
 ) -> Result<Vec<u8>, EnvelopeError> {
     let aad = envelope_aad(wrapper);
-    let (nonce, ciphertext) = aead::seal(snapshot_key, plaintext, &aad)?;
+    let wire = crate::review::compression::compress_if_smaller(plaintext);
+    let (nonce, ciphertext) = aead::seal(snapshot_key, &wire, &aad)?;
     let mut body = Vec::with_capacity(nonce.len() + ciphertext.len());
     body.extend_from_slice(&nonce);
     body.extend_from_slice(&ciphertext);
@@ -517,7 +521,14 @@ pub fn open_snapshot_r2_body(
         .try_into()
         .expect("split_at(NONCE_LEN) yields exactly NONCE_LEN bytes");
     let aad = envelope_aad(wrapper);
-    Ok(aead::open(snapshot_key, &nonce, ciphertext, &aad)?)
+    let plaintext = aead::open(snapshot_key, &nonce, ciphertext, &aad)?;
+    match crate::review::compression::decompress_if_needed(
+        &plaintext,
+        crate::review::compression::MAX_DECOMPRESSED_SNAPSHOT_BYTES,
+    ) {
+        Ok(inflated) => Ok(inflated.into_owned()),
+        Err(reason) => Err(EnvelopeError::Canonical(reason)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1167,7 +1178,16 @@ mod tests {
     fn r2_blob_body_round_trips_and_binds_to_wrapper() {
         let keys = derive_room_keys(&TEST_ROOM_SECRET);
         let snapshot_key = *keys.snapshot_key.as_bytes();
-        let snapshot_bytes = vec![0xABu8; 4096];
+        // Near-incompressible junk so compress_if_smaller keeps the raw
+        // bytes and the structural length assertion below stays exact.
+        let mut seed: u32 = 0x9e37_79b9;
+        let mut snapshot_bytes = vec![0u8; 4096];
+        for byte in &mut snapshot_bytes {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *byte = (seed & 0xff) as u8;
+        }
 
         // Wrapper envelope: plaintext would be the canonical-JSON BlobRef;
         // its content is irrelevant to the body binding.

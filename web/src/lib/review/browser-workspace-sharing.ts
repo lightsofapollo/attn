@@ -502,7 +502,7 @@ export class BrowserWorkspaceSharingCoordinator {
                 wanted.snapshotId,
               )
           : undefined;
-        const sealed = sealDurableShareSnapshot({
+        const sealed = await sealDurableShareSnapshot({
           shareId: credentials.shareId,
           epoch: credentials.epoch,
           fileId,

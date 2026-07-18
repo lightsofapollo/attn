@@ -2698,11 +2698,14 @@ fn seal_managed_snapshot(
     getrandom::getrandom(&mut nonce)
         .map_err(|error| ShareLifecycleError::Invalid(format!("snapshot nonce rng: {error}")))?;
     let cipher = XChaCha20Poly1305::new(snapshot_key.into());
+    // Transparent gzip before the seal (readers sniff after decrypt) —
+    // shared wire rule in review::compression.
+    let wire = crate::review::compression::compress_if_smaller(&plaintext);
     let ciphertext = cipher
         .encrypt(
             (&nonce).into(),
             Payload {
-                msg: &plaintext,
+                msg: wire.as_ref(),
                 aad: &aad,
             },
         )

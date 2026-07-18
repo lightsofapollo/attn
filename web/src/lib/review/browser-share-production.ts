@@ -1,3 +1,4 @@
+import { decompressSnapshotIfNeeded } from './snapshot-compression';
 import { boundFetch } from './bound-fetch';
 import { compareManifestPathsUtf8 } from './browser-workspace-manifest';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
@@ -498,7 +499,7 @@ export class RememberedPushShareSessionFacade {
           'remembered snapshot', ref.ciphertextBytes);
         try {
           if (ciphertext.byteLength !== ref.ciphertextBytes || digest(ciphertext) !== ref.ciphertextSha256) throw new Error('remembered snapshot digest mismatch');
-          snapshots.push(decryptRememberedSnapshot(binding.resourceId, binding.epoch!, binding.roomId, snapshotKey, ref.fileId, ref.snapshotId, ciphertext));
+          snapshots.push(await decryptRememberedSnapshot(binding.resourceId, binding.epoch!, binding.roomId, snapshotKey, ref.fileId, ref.snapshotId, ciphertext));
         } finally { ciphertext.fill(0); }
       }
       await advancePushBindingFloor(binding.bindingId, {
@@ -788,15 +789,17 @@ function decodedBundle(bundle: ShareCapabilityBundle): DecodedDurableShareBundle
     ...(bundle.tier === 'view' ? {} : { shareMailboxCapability: capability }) };
 }
 
-export function decryptDurableShareSnapshot(shareId: string, epoch: number, bundle: DecodedDurableShareBundle,
-  fileId: string, snapshotId: string, sealed: Uint8Array): DurableShareSnapshot {
+export async function decryptDurableShareSnapshot(shareId: string, epoch: number, bundle: DecodedDurableShareBundle,
+  fileId: string, snapshotId: string, sealed: Uint8Array): Promise<DurableShareSnapshot> {
   if (sealed.length < 41) throw new Error('durable share snapshot is truncated');
   const capability = bundle.roomCapability as DurableShareCapability;
   const aad = toCanonicalBytes({ v: 3, purpose: 'attn durable share snapshot v3', shareId, epoch, fileId, snapshotId });
   let plaintext: Uint8Array | null = null;
+  let inflated: Uint8Array | null = null;
   try {
     plaintext = xchacha20poly1305(capability.roomKeys.snapshotKey, sealed.subarray(0, 24), aad).decrypt(sealed.subarray(24));
-    const value = JSON.parse(new TextDecoder().decode(plaintext)) as unknown;
+    inflated = await decompressSnapshotIfNeeded(plaintext);
+    const value = JSON.parse(new TextDecoder().decode(inflated)) as unknown;
     if (!isRecord(value) || Object.keys(value).some(key => !['v','fileId','snapshotId','docType','content','metadata'].includes(key)) ||
       value.v !== 3 || value.fileId !== fileId || value.snapshotId !== snapshotId ||
       (value.docType !== 'markdown' && value.docType !== 'html') || typeof value.content !== 'string') {
@@ -804,7 +807,7 @@ export function decryptDurableShareSnapshot(shareId: string, epoch: number, bund
     }
     return { fileId, snapshotId, docType: value.docType, content: value.content,
       ...(value.metadata === undefined ? {} : { metadata: structuredClone(value.metadata) }) };
-  } finally { aad.fill(0); plaintext?.fill(0); }
+  } finally { aad.fill(0); if (inflated !== plaintext) inflated?.fill(0); plaintext?.fill(0); }
 }
 
 function disposeBundle(bundle: DecodedDurableShareBundle): void {
@@ -828,20 +831,22 @@ function parseRememberedSnapshotRef(value: unknown): { fileId: string; snapshotI
     ciphertextBytes: value.ciphertextBytes as number, ciphertextSha256: value.ciphertextSha256,
     uploadedAt: value.uploadedAt as number };
 }
-function decryptRememberedSnapshot(shareId: string, epoch: number, _roomId: string, snapshotKey: Uint8Array,
-  fileId: string, snapshotId: string, sealed: Uint8Array): DurableShareSnapshot {
+async function decryptRememberedSnapshot(shareId: string, epoch: number, _roomId: string, snapshotKey: Uint8Array,
+  fileId: string, snapshotId: string, sealed: Uint8Array): Promise<DurableShareSnapshot> {
   const aad = toCanonicalBytes({ v: 3, purpose: 'attn durable share snapshot v3', shareId, epoch, fileId, snapshotId });
   let plaintext: Uint8Array | null = null;
+  let inflated: Uint8Array | null = null;
   try {
     plaintext = xchacha20poly1305(snapshotKey, sealed.subarray(0, 24), aad).decrypt(sealed.subarray(24));
-    const value = JSON.parse(new TextDecoder().decode(plaintext)) as unknown;
+    inflated = await decompressSnapshotIfNeeded(plaintext);
+    const value = JSON.parse(new TextDecoder().decode(inflated)) as unknown;
     if (!isRecord(value) || value.v !== 3 || value.fileId !== fileId || value.snapshotId !== snapshotId ||
       (value.docType !== 'markdown' && value.docType !== 'html') || typeof value.content !== 'string') {
       throw new Error('remembered snapshot plaintext is invalid');
     }
     return { fileId, snapshotId, docType: value.docType, content: value.content,
       ...(value.metadata === undefined ? {} : { metadata: structuredClone(value.metadata) }) };
-  } finally { aad.fill(0); plaintext?.fill(0); }
+  } finally { aad.fill(0); if (inflated !== plaintext) inflated?.fill(0); plaintext?.fill(0); }
 }
 function safeProductionMessage(error: unknown): string { return error instanceof Error ? error.message : 'remembered share could not be opened'; }
 function canonicalRememberedRelay(value: string): string {

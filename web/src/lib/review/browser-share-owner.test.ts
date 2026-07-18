@@ -69,7 +69,7 @@ async function run(): Promise<void> {
 
   const snapshotId = base64UrlEncode(new Uint8Array(16).fill(13));
   const fileId = base64UrlEncode(new Uint8Array(16).fill(15));
-  const sealed = sealDurableShareSnapshot({
+  const sealed = await sealDurableShareSnapshot({
     shareId,
     epoch: 0,
     fileId,
@@ -79,7 +79,7 @@ async function run(): Promise<void> {
     snapshotKey: room.readKeys.snapshotKey,
     nonce: new Uint8Array(24).fill(17),
   });
-  const decoded = decryptDurableShareSnapshot(shareId, 0, {
+  const decoded = await decryptDurableShareSnapshot(shareId, 0, {
     v: 3,
     shareId,
     bundleId: mutations[0]!.bundleId,

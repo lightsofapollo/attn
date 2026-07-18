@@ -12,6 +12,7 @@ pub mod agent_identity;
 pub mod anchors;
 pub mod apply;
 pub mod bootstrap;
+pub mod compression;
 pub mod crypto;
 pub mod diff_suggestions;
 pub mod envelope;

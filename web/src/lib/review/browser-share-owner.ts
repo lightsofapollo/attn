@@ -1,3 +1,4 @@
+import { compressSnapshotIfSmaller } from './snapshot-compression';
 import { boundFetch } from './bound-fetch';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -209,8 +210,10 @@ export interface SealDurableSnapshotInput {
   nonce?: Uint8Array;
 }
 
-/** Native-compatible nonce || XChaCha20-Poly1305 retained snapshot. */
-export function sealDurableShareSnapshot(input: SealDurableSnapshotInput): Uint8Array {
+/** Native-compatible nonce || XChaCha20-Poly1305 retained snapshot. The
+ *  canonical-JSON plaintext is gzipped before sealing when that wins
+ *  (readers sniff the gzip magic after decrypt — see snapshot-compression). */
+export async function sealDurableShareSnapshot(input: SealDurableSnapshotInput): Promise<Uint8Array> {
   const nonce = input.nonce ? new Uint8Array(input.nonce) : randomAeadNonce();
   if (input.snapshotKey.length !== 32 || nonce.length !== 24) {
     nonce.fill(0);
@@ -233,8 +236,9 @@ export function sealDurableShareSnapshot(input: SealDurableSnapshotInput): Uint8
     ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
   });
   let ciphertext: Uint8Array | null = null;
+  const wire = await compressSnapshotIfSmaller(plaintext);
   try {
-    ciphertext = xchacha20poly1305(input.snapshotKey, nonce, aad).encrypt(plaintext);
+    ciphertext = xchacha20poly1305(input.snapshotKey, nonce, aad).encrypt(wire);
     const sealed = new Uint8Array(nonce.length + ciphertext.length);
     sealed.set(nonce, 0);
     sealed.set(ciphertext, nonce.length);
@@ -242,6 +246,7 @@ export function sealDurableShareSnapshot(input: SealDurableSnapshotInput): Uint8
   } finally {
     nonce.fill(0);
     aad.fill(0);
+    if (wire !== plaintext) wire.fill(0);
     plaintext.fill(0);
     ciphertext?.fill(0);
   }

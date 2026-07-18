@@ -43,6 +43,7 @@ name = "attn"
 path = "src/main.rs"
 
 [dependencies]
+flate2 = "1"
 wry = "0.49"
 tao = "0.32"
 clap = { version = "4", features = ["derive"] }

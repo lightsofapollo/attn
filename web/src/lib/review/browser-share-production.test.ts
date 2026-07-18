@@ -172,11 +172,11 @@ const inviteUrl = `https://attn.sh/s/${shareId}#key=${base64UrlEncode(secret)}`;
   const bundle = { v: 3 as const, shareId, bundleId: 'B'.repeat(22), epoch: 4, revision: 1,
     manifestDigest: 'M'.repeat(43), roomId: 'room-a', tier: 'view' as const,
     roomCapability: { ownerSigningKey: 'O'.repeat(43), readCapabilityKey, roomKeys } };
-  const opened = decryptDurableShareSnapshot(shareId, 4, bundle, 'file-a', 'snapshot-a', sealed);
+  const opened = await decryptDurableShareSnapshot(shareId, 4, bundle, 'file-a', 'snapshot-a', sealed);
   assert(opened.content === '# exact' && (opened.metadata as { baseHash?: string }).baseHash === 'H'.repeat(43),
     'pinned durable snapshot did not open');
   let rejected = false;
-  try { decryptDurableShareSnapshot(shareId, 5, bundle, 'file-a', 'snapshot-a', sealed); } catch { rejected = true; }
+  try { await decryptDurableShareSnapshot(shareId, 5, bundle, 'file-a', 'snapshot-a', sealed); } catch { rejected = true; }
   assert(rejected, 'durable snapshot AAD did not bind epoch');
   console.log('PASS durable snapshot pins nonce||XChaCha AAD and exact plaintext');
 }

@@ -5587,6 +5587,12 @@ mod tests {
             &aad,
         )
         .expect("blob opens under snapshotKey");
+        let blob_bytes = crate::review::compression::decompress_if_needed(
+            &blob_bytes,
+            crate::review::compression::MAX_DECOMPRESSED_SNAPSHOT_BYTES,
+        )
+        .expect("blob inflates")
+        .into_owned();
         let plaintext: SnapshotPlaintext =
             serde_json::from_slice(&blob_bytes).expect("blob is a SnapshotPlaintext");
         assert_eq!(plaintext.content.as_deref(), Some("# Plan\n"));
@@ -5807,6 +5813,12 @@ mod tests {
             &aad,
         )
         .expect("blob opens under snapshotKey");
+        let blob_bytes = crate::review::compression::decompress_if_needed(
+            &blob_bytes,
+            crate::review::compression::MAX_DECOMPRESSED_SNAPSHOT_BYTES,
+        )
+        .expect("blob inflates")
+        .into_owned();
         let plaintext: SnapshotPlaintext =
             serde_json::from_slice(&blob_bytes).expect("blob is a SnapshotPlaintext");
         assert_eq!(plaintext.doc_type, crate::review::model::DocType::Html);
@@ -6722,7 +6734,20 @@ mod tests {
 
         // Big enough that the sealed SnapshotPlaintext ciphertext clears the
         // relay's 1 MiB inline threshold even before the anchor index.
-        let big_markdown = format!("# Big\n\n{}\n", "x".repeat(1_200_000));
+        // Near-incompressible on purpose: compression runs before the R2
+        // spill decision, so repetitive filler would (correctly) stay in
+        // the mailbox lane now. Base64-alphabet xorshift junk only shaves
+        // ~25% under gzip; 2 MB stays above the 1 MiB spill threshold.
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut seed: u32 = 0x9e37_79b9;
+        let mut junk = String::with_capacity(2_000_000);
+        for _ in 0..2_000_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            junk.push(alphabet[(seed & 63) as usize] as char);
+        }
+        let big_markdown = format!("# Big\n\n{junk}\n");
         let (_doc_tmp, path) = temp_markdown_file("big.md", &big_markdown);
         let outcome = boot
             .share(path, RoomMode::Async, None)

@@ -1,3 +1,4 @@
+import { decompressSnapshotIfNeeded } from './snapshot-compression';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { aeadOpen, base64UrlDecode, base64UrlEncode, contentHash, deriveFileId, deriveRoomKeys, deriveSnapshotId } from './browser-crypto';
@@ -135,13 +136,15 @@ function matchingRevisionSource(entries: Array<{
   };
 }
 
-function open(envelope: MailboxEnvelope, key: Uint8Array): Record<string, unknown> {
+async function open(envelope: MailboxEnvelope, key: Uint8Array): Promise<Record<string, unknown>> {
   const plaintext = aeadOpen(key, base64UrlDecode(envelope.nonce), base64UrlDecode(envelope.ciphertext), {
     v: 2, roomId: envelope.roomId!, envelopeId: envelope.envelopeId, kind: envelope.kind,
     authorId: envelope.authorId, deviceId: envelope.deviceId, createdAt: envelope.createdAt,
   });
-  try { return JSON.parse(new TextDecoder().decode(plaintext)) as Record<string, unknown>; }
-  finally { plaintext.fill(0); }
+  // Mirror of the receiver: snapshot plaintexts may arrive gzipped.
+  const inflated = await decompressSnapshotIfNeeded(plaintext);
+  try { return JSON.parse(new TextDecoder().decode(inflated)) as Record<string, unknown>; }
+  finally { if (inflated !== plaintext) inflated.fill(0); plaintext.fill(0); }
 }
 
 test('file and snapshot IDs match the Rust byte composition from first principles', async () => {
@@ -192,15 +195,15 @@ test('mailbox publishes blob before signed pointer and marks only after ACK', as
   equal(outbox.envelopes.map((e) => e.kind), ['snapshot_blob', 'event', 'snapshot_blob', 'event'], 'entry pair precedes manifest pair');
   equal(sink.commits, 1, 'published after successful flush');
   assert(!JSON.stringify(outbox.envelopes).includes('Secret title'), 'wire is content-blind');
-  const snapshot = open(outbox.envelopes[0]!, keys.snapshotKey);
+  const snapshot = await open(outbox.envelopes[0]!, keys.snapshotKey);
   equal(snapshot.docType, 'markdown', 'snapshot doc type');
   equal(snapshot.content, markdown, 'snapshot content decrypts');
-  const event = open(outbox.envelopes[1]!, keys.eventKey);
+  const event = await open(outbox.envelopes[1]!, keys.eventKey);
   const body = event.body as Record<string, unknown>;
   equal(body.type, 'snapshot_created', 'signed pointer type');
   assert(!('inlineSnapshot' in body), 'plaintext is never inline');
   equal((body.encryptedBlobRef as Record<string, unknown>).blobId, result.blobRef.blobId, 'pointer binds blob');
-  const manifest = open(outbox.envelopes[2]!, keys.snapshotKey);
+  const manifest = await open(outbox.envelopes[2]!, keys.snapshotKey);
   equal(manifest.docType, 'workspace_manifest', 'manifest is the final blob');
   equal(((manifest.manifest as Record<string, unknown>).entries as unknown[]).length, 1, 'manifest lists entry');
 });
@@ -392,11 +395,11 @@ test('binary asset with NUL publishes base64url and canonical metadata without U
     outbox, now: () => now, randomBytes, indexBuilder,
   });
   equal(results.map((result) => result.kind), ['asset', 'workspace_manifest'], 'asset then manifest');
-  const asset = open(outbox.envelopes[0]!, keys.snapshotKey);
+  const asset = await open(outbox.envelopes[0]!, keys.snapshotKey);
   equal(asset.content, base64UrlEncode(bytes), 'arbitrary bytes use unpadded base64url');
   equal(asset.encoding, 'base64url', 'encoding is explicit');
   equal(asset.mediaType, 'application/octet-stream', 'media type retained');
-  const manifest = open(outbox.envelopes[2]!, keys.snapshotKey);
+  const manifest = await open(outbox.envelopes[2]!, keys.snapshotKey);
   const entry = ((manifest.manifest as Record<string, unknown>).entries as Array<Record<string, unknown>>)[0]!;
   equal(entry.byteLength, bytes.length, 'manifest hashes raw byte length');
   equal(entry.contentHash, contentHash(bytes), 'manifest hashes raw bytes');
@@ -432,14 +435,25 @@ test('failure before ACK stays pending and resume marks without republishing', a
 });
 
 test('R2 spill seals body, queues wrapper, and republish reuses FileId', async () => {
-  const large = new Uint8Array(1024 * 1024 + 64).fill(65);
+  // Near-incompressible on purpose: compression now runs before the R2
+  // spill decision, so a compressible fixture would (correctly) stay in
+  // the mailbox. Deterministic xorshift bytes mapped to a base64 alphabet
+  // stay valid UTF-8 markdown while gzip only shaves ~25%; 2 MiB of it
+  // stays comfortably above the 1 MiB spill threshold after compression.
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const large = new Uint8Array(2 * 1024 * 1024);
+  let seed = 0x9e3779b9;
+  for (let i = 0; i < large.length; i += 1) {
+    seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0;
+    large[i] = alphabet.charCodeAt(seed & 63);
+  }
   const firstOutbox = new FakeOutbox();
   let uploaded = 0;
   const [first] = await publishBrowserSnapshots({
     relayUrl: 'https://relay.example', roomId: 'room-r2', roomSecret, keys, identity, policy,
     entries: [{ path: 'large.md', bytes: large, docType: 'markdown' }], outbox: firstOutbox,
     now: () => now, randomBytes, indexBuilder,
-    uploadR2: async (input) => { uploaded += 1; assert(input.sealedBody.length > large.length, 'R2 body sealed'); },
+    uploadR2: async (input) => { uploaded += 1; assert(input.sealedBody.length > 1024 * 1024, 'R2 body sealed above the spill threshold (compressed wire)'); },
   });
   assert(first, 'first result');
   equal(first.blobRef.storage, 'r2', 'R2 selected above threshold');

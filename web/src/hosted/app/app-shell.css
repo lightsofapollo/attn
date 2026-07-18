@@ -741,9 +741,11 @@ a.workspace-row:hover {
    line at one size instead of two mismatched pills (user feedback). */
 .hosted-save-state.save-chip {
   height: 1.75rem;
-  /* Seats the chip on the ReviewBar row line (bar offset top-1.5 within
-     its own layer) so both pills share one center. */
-  margin-top: 7px;
+  /* Seats the chip on the shared header line: the breadcrumb action
+     buttons (share / open-in-browser) and the ReviewBar chips both center
+     at ~25px; the chip's own container sits 1.7px higher, hence the
+     fractional nudge. Measured, not derived. */
+  margin-top: 9.5px;
   padding: 0 10px;
   font-family: var(--sans);
   font-size: 11px;

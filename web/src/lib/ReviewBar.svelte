@@ -28,6 +28,7 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
   import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
+  import MessageSquareText from '@lucide/svelte/icons/message-square-text';
   import LogOut from '@lucide/svelte/icons/log-out';
   import OutboxIndicator from './OutboxIndicator.svelte';
   import PeerStrip from './PeerStrip.svelte';
@@ -75,6 +76,12 @@
      * a `(you)` label. `null` until the bridge populates it.
      */
     localParticipantId?: ParticipantId | null;
+    /**
+     * Show the comments show/hide button in the dock (hosted owner surface).
+     * The reviewer page carries the same affordance in its own header; the
+     * native frame keeps its rail-local toggle, so this defaults off.
+     */
+    railToggle?: boolean;
   }
 
   let {
@@ -86,6 +93,7 @@
     onOutboxRetry,
     rightOffsetPx = 16,
     localParticipantId = null,
+    railToggle = false,
   }: Props = $props();
 
   // SnapshotBadge needs the local participant's kind to flip between owner
@@ -223,13 +231,39 @@
         >
           <OutboxIndicator {isOwner} onRetry={onOutboxRetry} />
         </div>
+
+        {#if railToggle}
+          <!-- Same grammar as the reviewer header's show/hide: comment icon
+               + active-thread count. Replaces the floating panel icon that
+               used to sit inside the margin itself. -->
+          <button
+            type="button"
+            class="relative inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-border/50 bg-background/65 px-1.5 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            data-slot="review-bar-rail-toggle"
+            aria-pressed={reviewStore.panelOpen}
+            aria-label={reviewStore.panelOpen ? 'Hide comments' : 'Show comments'}
+            title="{reviewStore.panelOpen ? 'Hide comments' : 'Show comments'} (⌘J)"
+            onclick={() => reviewStore.togglePanel()}
+          >
+            <MessageSquareText class="size-3.5" aria-hidden="true" />
+            {#if reviewStore.marginActiveThreadCount > 0}
+              <span class="rail-toggle-count tabular-nums">{reviewStore.marginActiveThreadCount}</span>
+            {/if}
+            <UnreadBadge
+              count={reviewStore.currentRoomUnread}
+              label="unread review updates"
+              class="absolute -right-1.5 -top-1.5"
+            />
+          </button>
+        {/if}
       {/if}
     </div>
   </div>
 {/if}
 
 <style>
-  .room-menu-count {
+  .room-menu-count,
+  .rail-toggle-count {
     font-size: 0.6875rem;
     line-height: 1;
   }

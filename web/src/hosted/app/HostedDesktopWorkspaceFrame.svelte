@@ -1,9 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
-  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import PathBreadcrumb from '../../lib/PathBreadcrumb.svelte';
-  import UnreadBadge from '../../lib/UnreadBadge.svelte';
   import ReviewBar from '../../lib/ReviewBar.svelte';
   import Sidebar from '../../lib/Sidebar.svelte';
   import WorkspaceEditorFrame from '../../lib/WorkspaceEditorFrame.svelte';
@@ -197,6 +194,7 @@
     {shareOpen}
     isOwner={true}
     onShareClick={onShare}
+    railToggle={true}
   />
 {/snippet}
 
@@ -249,33 +247,10 @@
           data-slot="right-rail"
           aria-label="Review margin"
         >
-          <div
-            class={`flex h-10 shrink-0 items-center pt-2 ${reviewStore.panelOpen ? 'justify-end pr-2' : 'justify-center'}`}
-            style={`width: ${RAIL_WIDTH_PX[reviewStore.railMode]}px;`}
-            data-slot="rail-header"
-          >
-            <button
-              type="button"
-              class="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-              data-slot="rail-toggle"
-              data-state={reviewStore.panelOpen ? 'expanded' : 'collapsed'}
-              aria-label={reviewStore.panelOpen ? 'Collapse comments rail' : 'Expand comments rail'}
-              title={`${reviewStore.panelOpen ? 'Collapse' : 'Expand'} comments (⌘J)`}
-              aria-expanded={reviewStore.panelOpen}
-              onclick={() => reviewStore.togglePanel()}
-            >
-              {#if reviewStore.panelOpen}
-                <PanelRightClose class="size-4" aria-hidden="true" />
-              {:else}
-                <PanelRightOpen class="size-4" aria-hidden="true" />
-              {/if}
-              <UnreadBadge
-                count={reviewStore.currentRoomUnread}
-                label="unread review updates"
-                class="absolute -right-1.5 -top-1.5"
-              />
-            </button>
-          </div>
+          <!-- Show/hide now lives in the ReviewBar dock (the reviewer-header
+               grammar the user prefers); this spacer just clears the floating
+               bar so the first card never slides under it. -->
+          <div class="h-10 shrink-0" aria-hidden="true"></div>
           <div
             class="relative mb-2 min-h-0 flex-1 overflow-hidden"
             style={`width: ${RAIL_WIDTH_PX[reviewStore.railMode]}px;`}

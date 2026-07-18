@@ -136,7 +136,25 @@ async function run(): Promise<void> {
   // Ensure the plaintext shape stays canonical and free of accidental fields.
   const canonical = toCanonicalBytes({ v: 3, fileId, snapshotId, docType: 'markdown', content: '# Browser owner\n' });
   assert(canonical.length > 0, 'canonical snapshot bytes');
-  console.log('browser-share-owner: 6 passed, 0 failed');
+
+  // Regression (attn-qtz): a legacy record whose stored digest predates the
+  // code-unit manifest ordering must DECODE (flagged invalid) instead of
+  // throwing — a hard throw paused publishing forever with no way to heal.
+  const validView = await client.fetchWithViewCapability(shareSecret);
+  assert(validView.manifestDigestValid === true, 'fresh record digest verifies');
+  const legacyRecord = { ...record, manifestDigest: 'legacy-order-digest-that-cannot-verify' };
+  const legacyFetch = (async () => Response.json(legacyRecord, { status: 200 })) as typeof fetch;
+  const legacyClient = new BrowserShareOwnerRelayClient({
+    relayUrl: 'https://relay.example',
+    shareId,
+    identity,
+    fetchImpl: legacyFetch,
+    mintPow: async () => 'pow',
+  });
+  const legacyView = await legacyClient.fetchWithViewCapability(shareSecret);
+  assert(legacyView.manifestDigestValid === false, 'legacy digest flagged, not fatal');
+  assert(legacyView.revision === 0 && legacyView.epoch === 0, 'record fields still usable for the healing commit');
+  console.log('browser-share-owner: 9 passed, 0 failed');
 }
 
 run().catch((error) => {

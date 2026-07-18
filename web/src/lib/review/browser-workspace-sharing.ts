@@ -534,8 +534,11 @@ export class BrowserWorkspaceSharingCoordinator {
     // 'snapshot manifest entry is invalid'.
     nextManifest.sort((left, right) => compareManifestPathsUtf8(left.fileId, right.fileId));
     const manifestDigest = digestShareSnapshotManifest(nextManifest);
+    // A legacy record with an unverifiable stored digest must never count as
+    // exact — commit the rewrite so the relay record heals (attn-qtz).
     const exact = remote.currentRoomId === record.roomId
       && remote.epoch === credentials.epoch
+      && remote.manifestDigestValid
       && remote.manifestDigest === manifestDigest;
     const revision = exact ? remote.revision : remote.revision + 1;
     const active = await client.upsert({

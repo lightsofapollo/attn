@@ -45,6 +45,15 @@ export interface BrowserShareRelayRecord {
   snapshots: ManagedShareSnapshotRef[];
   placeholders: unknown[];
   manifestDigest: string;
+  /**
+   * False when the stored digest does not match a recompute over the record's
+   * own snapshot refs — a legacy record whose digest predates the code-unit
+   * manifest ordering (e2c6df5). The OWNER treats this as "rewrite on next
+   * commit" rather than an error: the next upsert republishes the manifest
+   * with a fresh digest. Joiner-side integrity is unaffected — reviewers
+   * verify the owner-signed sealed bundle, not this cleartext field.
+   */
+  manifestDigestValid: boolean;
   updatedAt: number;
   expiresAt: number;
   mailbox: { count: number; bytes: number; latestSeq: number };
@@ -479,10 +488,13 @@ async function decodeRecord(response: Response, expectedShareId: string): Promis
     throw new Error('durable share response is invalid');
   }
   const snapshots = value.snapshots.map(validateSnapshotRef);
-  if (digestShareSnapshotManifest(snapshots) !== value.manifestDigest) {
-    throw new Error('durable share manifest digest is invalid');
-  }
-  return { ...(value as BrowserShareRelayRecord), snapshots };
+  // A mismatch is NOT fatal for the owner (attn-qtz): records written before
+  // the code-unit manifest ordering (e2c6df5) carry a localeCompare-order
+  // digest that can never re-verify. The owner's next commit rewrites the
+  // manifest with a fresh digest, so flag it and let the publish flow heal
+  // instead of pausing publication forever.
+  const manifestDigestValid = digestShareSnapshotManifest(snapshots) === value.manifestDigest;
+  return { ...(value as Omit<BrowserShareRelayRecord, 'manifestDigestValid'>), snapshots, manifestDigestValid };
 }
 
 function isMailboxSummary(value: unknown): value is BrowserShareRelayRecord['mailbox'] {

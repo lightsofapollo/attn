@@ -136,7 +136,7 @@ class MemoryShareRelay implements BrowserShareOwnerRelayPort {
       epoch: request.epoch, revision: request.revision,
       ...(request.currentRoomId === null ? {} : { currentRoomId: request.currentRoomId }),
       snapshots: structuredClone(request.snapshots), placeholders: structuredClone(request.placeholders),
-      manifestDigest: digestShareSnapshotManifest(request.snapshots), updatedAt: NOW,
+      manifestDigest: digestShareSnapshotManifest(request.snapshots), manifestDigestValid: true, updatedAt: NOW,
       expiresAt: NOW + 90 * 24 * 60 * 60 * 1000,
       mailbox: { count: 0, bytes: 0, latestSeq: 0 },
     };
@@ -195,6 +195,7 @@ class RevisionAdvancingUploadRelay extends MemoryShareRelay {
       revision: this.record.revision + 1,
       snapshots,
       manifestDigest: digestShareSnapshotManifest(snapshots),
+      manifestDigestValid: true,
     };
     return ref;
   }

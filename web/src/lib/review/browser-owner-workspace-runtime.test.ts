@@ -124,7 +124,7 @@ class MemoryShareRelay implements BrowserShareOwnerRelayPort {
       epoch: request.epoch, revision: request.revision,
       ...(request.currentRoomId === null ? {} : { currentRoomId: request.currentRoomId }),
       snapshots: structuredClone(request.snapshots), placeholders: [],
-      manifestDigest: digestShareSnapshotManifest(request.snapshots), updatedAt: 1_800_000_000_000,
+      manifestDigest: digestShareSnapshotManifest(request.snapshots), manifestDigestValid: true, updatedAt: 1_800_000_000_000,
       expiresAt: 1_900_000_000_000, mailbox: { count: 0, bytes: 0, latestSeq: 0 } };
     return structuredClone(this.record);
   }

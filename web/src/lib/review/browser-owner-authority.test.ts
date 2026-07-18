@@ -127,6 +127,7 @@ function sessionState(status: BrowserSessionState['status'] = 'connected'): Brow
   return {
     principal: 'owner',
     ownerOnline: true,
+    peers: [],
     liveEditingAvailable: true,
     status,
     connection: 'mailbox',

@@ -214,10 +214,25 @@ export interface BrowserCollabDelivery {
  * Reactive snapshot of the session that the UI can render off of. Pure plain
  * object — we wire it into a `$state` field at the component layer.
  */
+/**
+ * One registered room device other than this session's own, with live
+ * presence. Derived from the authenticated device directory + relay
+ * hello/presence frames; display names are resolved by the consumer (the
+ * `ParticipantJoined` event log owns identities, not the transport).
+ */
+export interface BrowserPeerPresence {
+  participantId: string;
+  deviceId: string;
+  kind: 'owner' | 'reviewer' | 'agent';
+  online: boolean;
+}
+
 export interface BrowserSessionState {
   principal: 'owner' | 'reviewer';
   /** Authenticated owner-device presence, separate from relay connectivity. */
   ownerOnline: boolean;
+  /** Every other registered device in the room, with live presence. */
+  peers: BrowserPeerPresence[];
   /** True only while the owner authority and a transport are both online. */
   liveEditingAvailable: boolean;
   status: BrowserSessionStatus;
@@ -880,6 +895,7 @@ export class BrowserSession {
   private state: BrowserSessionState = {
     principal: 'reviewer',
     ownerOnline: false,
+    peers: [],
     liveEditingAvailable: false,
     status: 'idle',
     connection: 'offline',
@@ -1576,10 +1592,20 @@ export class BrowserSession {
         .map((device) => device.deviceId),
     );
     const ownerOnline = [...ownerDeviceIds].some((deviceId) => this.onlineDeviceIds.has(deviceId));
+    const selfDeviceId = this.identity?.deviceId ?? null;
+    const peers: BrowserPeerPresence[] = this.bootstrapDevices
+      .filter((device) => device.deviceId !== selfDeviceId)
+      .map((device) => ({
+        participantId: device.participantId,
+        deviceId: device.deviceId,
+        kind: device.kind,
+        online: this.onlineDeviceIds.has(device.deviceId),
+      }));
     this.state = {
       ...next,
       principal: this.principal,
       ownerOnline,
+      peers,
       liveEditingAvailable:
         this.principal === 'owner' &&
         ownerOnline &&
@@ -2262,6 +2288,13 @@ export class BrowserSession {
             (device) =>
               device.deviceId === deviceId && device.participantId === participantId,
           );
+          if (import.meta.env?.DEV) {
+            const target = globalThis as unknown as { __attnPresenceDebug?: unknown[] };
+            (target.__attnPresenceDebug ??= []).push({
+              event, deviceId: deviceId.slice(0, 8), participantId: participantId.slice(0, 8),
+              authenticated: Boolean(authenticated), principal: this.principal, at: Date.now(),
+            });
+          }
           if (!authenticated) {
             if (event === 'join' && !viewOnly) {
               const generation = this.transportGeneration;
@@ -2274,7 +2307,15 @@ export class BrowserSession {
                 this.onlineDeviceIds.add(deviceId);
                 this.peerMesh?.syncDevices(this.activeWebRtcDevices());
                 this.setState({});
-              }).catch(() => undefined);
+              }).catch((error: unknown) => {
+                if (import.meta.env?.DEV) {
+                  const target = globalThis as unknown as { __attnPresenceDebug?: unknown[] };
+                  (target.__attnPresenceDebug ??= []).push({
+                    phase: 'refresh-failed',
+                    error: error instanceof Error ? error.message : String(error),
+                  });
+                }
+              });
             }
             return;
           }
@@ -2352,7 +2393,12 @@ export class BrowserSession {
       this.wsClient?.mergeDevices(parsed.devices);
       this.bootstrapDevices = [...(this.wsClient?.getDevices().values() ?? [])];
       this.peerMesh?.syncDevices(this.activeWebRtcDevices());
-      if (this.roomPolicy) await this.persistDirectoryAndRoom(this.bootstrapDevices, this.roomPolicy);
+      // Local persistence is a cache — its failure must never reject the
+      // refresh, because the presence-join path chains "mark peer online" on
+      // this promise and a storage veto would freeze the roster at away.
+      if (this.roomPolicy) {
+        await this.persistDirectoryAndRoom(this.bootstrapDevices, this.roomPolicy).catch(() => undefined);
+      }
     })();
     this.directoryRefresh = refresh;
     try {

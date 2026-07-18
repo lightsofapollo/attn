@@ -108,6 +108,7 @@
   let sessionState = $state<BrowserSessionState>({
     principal: 'reviewer',
     ownerOnline: false,
+    peers: [],
     liveEditingAvailable: false,
     status: 'idle',
     connection: 'offline',
@@ -868,6 +869,9 @@
   data-authoring-ready={sessionState.authoringReady ? 'true' : 'false'}
   data-outbox-pending={sessionState.outboxPending}
   data-connection={sessionState.connection}
+  data-owner-online={sessionState.ownerOnline ? 'true' : 'false'}
+  data-peers-online={sessionState.peers.filter((p) => p.online).length}
+  data-peers-total={sessionState.peers.length}
   data-direct-error={sessionState.directError ?? ''}
   data-grant-tier={sessionState.grantTier}
   data-live-editing={reviewerAvailability.liveEditing ? 'true' : 'false'}
@@ -1007,6 +1011,7 @@
           <div class="review-sheet-margin">
             <ReviewMargin
               view={pmViewForReview}
+              layout="stacked"
               readOnly={true}
               reviewerAuthoring={reviewerAvailability.reviewAuthoring}
               onResolveComment={resolveBrowserComment}

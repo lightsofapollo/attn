@@ -1959,6 +1959,11 @@ function validateDevice(device: Device): void {
   const signing = decodeLength(device.publicSigningKey, 32, 'Ed25519 public key');
   const encryption = decodeLength(device.publicEncryptionKey, 32, 'X25519 public key');
   const signature = decodeLength(device.selfSignature, 64, 'device self-signature');
+  // MUST mirror browser-ws.ts `registrationBytes`: v3 grant-registered
+  // devices (durable-share reviewers) sign over their grant fields too.
+  // Omitting them rejected every /s/ joiner's record with "self-signature is
+  // invalid", which broke directory persistence AND — because the presence
+  // join path awaits persistence — kept live reviewers marked away forever.
   const canonical = toCanonicalBytes({
     client: device.client,
     deviceId: device.deviceId,
@@ -1966,6 +1971,8 @@ function validateDevice(device: Device): void {
     participantId: device.participantId,
     publicEncryptionKey: device.publicEncryptionKey,
     publicSigningKey: device.publicSigningKey,
+    ...(device.grantTier === undefined ? {} : { grantTier: device.grantTier }),
+    ...(device.grantSignature === undefined ? {} : { grantSignature: device.grantSignature }),
   });
   try {
     if (!ed25519.verify(signature, canonical, signing)) {

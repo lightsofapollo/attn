@@ -32,13 +32,13 @@
 
 {#if files.length >= 2}
   <aside
-    class="review-file-sidebar flex w-56 shrink-0 flex-col overflow-hidden border-r border-border bg-muted/20"
+    class="review-file-sidebar attn-chrome flex w-56 shrink-0 flex-col overflow-hidden border-r border-border bg-muted/20"
     data-slot="review-file-sidebar"
     aria-label="Shared files"
   >
     <header class="shrink-0 px-3 pb-2 pt-3">
       <p class="font-sans text-sm font-semibold text-foreground">Shared with you</p>
-      <p class="mt-0.5 text-[11px] text-muted-foreground">
+      <p class="pt-0.5 text-[11px] text-muted-foreground">
         {files.length} files · end-to-end encrypted
       </p>
     </header>

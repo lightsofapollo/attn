@@ -136,7 +136,7 @@
       ></button>
 
       <div
-        class="absolute right-0 top-full z-[60] mt-1 w-80 rounded-lg border border-border bg-popover text-popover-foreground shadow-md"
+        class="attn-chrome absolute right-0 top-full z-[60] mt-1 w-80 rounded-lg border border-border bg-popover text-popover-foreground shadow-md"
         data-slot="share-chip-popover"
         role="dialog"
         aria-label="Share details"
@@ -153,11 +153,11 @@
             <p class="text-sm font-medium {descriptor.tone === 'offline' ? 'text-muted-foreground' : 'text-primary'}">
               {descriptor.label}
             </p>
-            <p class="mt-0.5 text-xs text-muted-foreground" data-slot="share-chip-detail">
+            <p class="pt-0.5 text-xs text-muted-foreground" data-slot="share-chip-detail">
               {descriptor.detail}
             </p>
             {#if outboxPending > 0}
-              <p class="mt-1 text-[11px] text-muted-foreground" data-slot="share-chip-outbox">
+              <p class="pt-1 text-[11px] text-muted-foreground" data-slot="share-chip-outbox">
                 {outboxPending} change{outboxPending === 1 ? '' : 's'} waiting to sync…
               </p>
             {/if}
@@ -166,7 +166,7 @@
 
         {#if files.length > 0}
           <section class="border-t border-border/50 px-3 py-2.5" aria-label="Shared files">
-            <h3 class="mb-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <h3 class="pb-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
               {isOwner
                 ? `Reviewers can see ${files.length === 1 ? 'this file' : `these ${files.length} files`}`
                 : `Shared with you · ${files.length === 1 ? '1 file' : `${files.length} files`}`}
@@ -212,8 +212,12 @@
               Edit
             </button>
           </div>
-          {#if peers.length > 0}
-            <ul class="m-0 mt-1.5 flex list-none flex-col gap-1 p-0 text-[11px]" data-slot="share-chip-peer-list">
+          {#if peers.length === 0}
+            <p class="pt-1.5 text-[11px] text-muted-foreground" data-slot="share-chip-no-peers">
+              No one else is here right now.
+            </p>
+          {:else}
+            <ul class="m-0 flex list-none flex-col gap-1 p-0 pt-1.5 text-[11px]" data-slot="share-chip-peer-list">
               {#each peers as peer (peer.deviceId)}
                 <li
                   class="flex items-center justify-between gap-2"

@@ -357,3 +357,33 @@ img {
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* ---------------------------------------------------------------------------
+   Chrome islands.
+
+   This stylesheet types the DOCUMENT — bare p/h1-h6/ul/li get reading-surface
+   margins and the rust list bullet. App chrome (popovers, dropdowns, status
+   cards) rendered inside the same tree inherits all of it: 2rem heading
+   gaps, 1rem paragraph tails, and absolutely-positioned ::before dots
+   escaping the card edge. Mark any chrome subtree with .attn-chrome to opt
+   its semantic HTML out of document typography wholesale, instead of
+   re-fixing each element (the historical div-swap whack-a-mole).
+
+   The !important on the bullet is deliberate: the document rule's :not()
+   chain out-specifies any class-scoped override. */
+.attn-chrome :is(p, h1, h2, h3, h4, h5, h6, ul, ol, li) {
+  margin: 0;
+}
+
+.attn-chrome :is(ul, ol) {
+  padding-left: 0;
+  list-style: none;
+}
+
+.attn-chrome :is(ul, ol) > li::before {
+  content: none !important;
+}
+
+.attn-chrome :is(ul, ol) > li::marker {
+  content: none;
+}

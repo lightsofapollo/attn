@@ -74,6 +74,14 @@
   interface Props {
     /** The underlying ProseMirror view used for coordsAtPos. */
     view?: EditorView | undefined;
+    /**
+     * `anchored` (default) positions each card at its anchor's editor y —
+     * the right-rail overlay design. `stacked` renders a plain document-order
+     * list instead, for hosts with no geometric relationship to the editor
+     * (the mobile bottom sheet — an anchored card deep in the document would
+     * land below the sheet's fold and the sheet opens looking empty).
+     */
+    layout?: 'anchored' | 'stacked';
     /** Cap for in-DOM card rendering before virtualization kicks in. */
     maxRenderedCards?: number;
     /** Hide every mutation surface while keeping thread navigation readable. */
@@ -93,6 +101,7 @@
   // Default cap is 50 per the task spec / §6 performance rule.
   let {
     view,
+    layout = 'anchored',
     maxRenderedCards = 50,
     readOnly = false,
     reviewerAuthoring = false,
@@ -238,6 +247,24 @@
   const layoutResolvedThreads: Thread[] = $derived(
     resolvedThreads.filter((t) => resolvedChipsVisible || t.id === expandedResolvedId),
   );
+
+  // Stacked layout (mobile bottom sheet): a plain document-order list.
+  // Anchored + layout-visible resolved threads, ordered by their anchor's pm
+  // position (position-less ones last, then by creation time). No collision
+  // pass, no absolute positioning — the sheet has no geometric relationship
+  // to the editor, so anchor-y placement just pushes cards below its fold.
+  const stacked = $derived(layout === 'stacked' && !collapsed);
+  const stackedThreads: Thread[] = $derived.by(() => {
+    if (!stacked) return [];
+    const pool = [...anchoredThreads, ...layoutResolvedThreads];
+    const posOf = (t: Thread): number => pmStartForThread(t) ?? Number.MAX_SAFE_INTEGER;
+    pool.sort((a, b) => {
+      const d = posOf(a) - posOf(b);
+      if (d !== 0) return d;
+      return a.rootEvent.meta.createdAt - b.rootEvent.meta.createdAt;
+    });
+    return pool.slice(0, maxRenderedCards);
+  });
 
   // Template lookup for the unified placements list.
   const threadById: Map<string, Thread> = $derived.by(() => {
@@ -922,7 +949,7 @@
 
 <div
   bind:this={containerEl}
-  class="review-margin"
+  class="review-margin attn-chrome"
   data-slot="review-margin"
   data-rail-mode={collapsed ? 'collapsed' : 'expanded'}
 >
@@ -1005,6 +1032,82 @@
     </section>
   {/if}
 
+  {#if stacked}
+    <!-- Stacked list (mobile bottom sheet): document-order cards in plain
+         flow. Same card variants and handlers as the anchored branch — only
+         the geometry differs. -->
+    <ul class="review-margin-stack" data-testid="review-margin-stack">
+      {#each stackedThreads as t (t.id)}
+        <li class="review-margin-stack-item">
+          {#if !t.resolved}
+            <ReviewMarginCard
+              {readOnly}
+              {reviewerAuthoring}
+              thread={t}
+              kind={kindFor(t)}
+              cardState={stateFor(t)}
+              active={focusEventId === t.rootEvent.meta.eventId}
+              hovered={hoveredEventId === t.rootEvent.meta.eventId}
+              offset={false}
+              authorName={authorNameFor(t)}
+              authorKind={authorKindFor(t)}
+              quotePreview={quotePreviewFor(t)}
+              onActivate={() => activateThread(t)}
+              onAccept={suggestionActionPort.accept ? () => acceptSuggestion(t) : undefined}
+              onReject={suggestionActionPort.reject ? () => rejectSuggestion(t) : undefined}
+              onResolve={() => { void resolveThread(t.id); }}
+              onReply={(body) => replyToThread(t, body)}
+              pendingDismiss={locallyDismissed.has(t.id)}
+            />
+          {:else if t.id === expandedResolvedId}
+            <ReviewMarginCard
+              {readOnly}
+              {reviewerAuthoring}
+              thread={t}
+              kind={kindFor(t)}
+              cardState={stateFor(t)}
+              active={focusEventId === t.rootEvent.meta.eventId}
+              hovered={hoveredEventId === t.rootEvent.meta.eventId}
+              offset={false}
+              authorName={authorNameFor(t)}
+              authorKind={authorKindFor(t)}
+              quotePreview={quotePreviewFor(t)}
+              onActivate={() => { void collapseResolved(t); }}
+            />
+          {:else}
+            <button
+              type="button"
+              class="review-margin-resolved-chip stacked"
+              data-testid="review-margin-resolved-chip"
+              data-variant="label"
+              data-thread-id={t.id}
+              style="border-color: var(--peer-avatar-bg-{authorKindFor(t)});"
+              aria-label={`Resolved ${kindFor(t)} by ${authorNameFor(t)} — view details`}
+              aria-expanded="false"
+              onclick={() => { void expandResolved(t); }}
+            >
+              <span
+                class="rmrc-avatar"
+                style="background-color: var(--peer-avatar-bg-{authorKindFor(t)});"
+                aria-hidden="true"
+              >{avatarGlyphFor(t)}</span>
+              ✓ {authorNameFor(t)} · resolved
+            </button>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+    {#if showResolvedPill}
+      <button
+        type="button"
+        class="review-margin-resolved-pill stacked"
+        data-testid="review-margin-resolved-pill"
+        onclick={() => { showAllResolved = true; }}
+      >
+        {resolvedThreads.length} resolved · show
+      </button>
+    {/if}
+  {:else}
   <!-- SVG connector layer for offset cards (§1.3 step 3) -->
   {#if connectorLines.length > 0}
     <svg
@@ -1110,6 +1213,7 @@
     >
       {resolvedThreads.length} resolved · show
     </button>
+  {/if}
   {/if}
 
   {#if threads.length === 0 && orphanThreads.length === 0}
@@ -1233,6 +1337,29 @@
     right: 12px;
     left: 12px;
     z-index: 1;
+  }
+
+  /* Stacked list (mobile bottom sheet): plain flow, document order. */
+  .review-margin-stack {
+    list-style: none;
+    margin: 0;
+    padding: 4px 0 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .review-margin-resolved-chip.stacked {
+    position: static;
+    max-width: 100%;
+    align-self: flex-start;
+  }
+
+  .review-margin-resolved-pill.stacked {
+    position: static;
+    display: block;
+    width: 100%;
+    margin: 2px 0 8px;
   }
 
   /* Resolved chip (attn-d7y). Labeled pill at its anchor in the expanded

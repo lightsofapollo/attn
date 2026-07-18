@@ -58,7 +58,11 @@ defineCase('healthy relay session presents as Connected with no notes', () => {
 });
 
 defineCase('live_direct presents as Live; direct_failed still reads Connected', () => {
-  assert(reviewerStatusPresentation(input({ connection: 'live_direct' })).label === 'Live', 'live');
+  const live = reviewerStatusPresentation(input({ connection: 'live_direct' }));
+  assert(live.label === 'Live', 'live');
+  // The hosted share path flags live whenever the owner broadcasts — which
+  // may be relay-mediated — so the reviewer detail never claims a mechanism.
+  assert(!/peer-to-peer|p2p|datachannel/i.test(live.detail), 'no transport mechanism claim');
   const failed = reviewerStatusPresentation(input({ connection: 'direct_failed' }));
   assert(failed.label === 'Connected', 'direct_failed is not an error to the user');
   assert(!/fail|error/i.test(failed.label), 'no failure language');

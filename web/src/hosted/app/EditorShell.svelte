@@ -29,7 +29,7 @@
   import type { EditorBridge } from '../../lib/prosemirror/collab-session';
   import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
   import { LEASE_CHANNEL_NAME, openBroadcastChannel } from '../../lib/tab-channels';
-  import type { RequiresThreeWayVerdict, Thread } from '../../lib/types';
+  import type { DeviceId, ParticipantId, RequiresThreeWayVerdict, Thread } from '../../lib/types';
 
   interface Props {
     service: WorkspaceAppService;
@@ -705,6 +705,67 @@
     untrack(() => {
       store.connection = connection;
     });
+  });
+
+  // Feed the peer roster the same way (attn-sjz). Native gets peers from the
+  // daemon's status/presence payloads; the hosted owner's authority session
+  // exposes the registered device directory + live presence, and the store's
+  // ParticipantJoined event log owns display names. The fingerprint guard
+  // matters: ownerState republishes on every session tick, and blindly
+  // assigning a fresh array would re-render PeerStrip/ShareChip each time.
+  let lastPeerFingerprint = '';
+  $effect(() => {
+    const store = reviewStoreRef;
+    if (!store) return;
+    // Native presence semantics: the roster is who is here NOW (the daemon
+    // deletes leavers from the roster). The session's device directory keeps
+    // every registration ever made — ephemeral /s/ joiners mint a new device
+    // per visit — so feeding it unfiltered piled up dead "away" rows.
+    const sessionPeers = (ownerState?.authority?.session?.peers ?? []).filter((p) => p.online);
+    void store.events; // re-resolve names when a ParticipantJoined arrives
+    untrack(() => {
+      const mapped = sessionPeers.map((peer) => {
+        const resolved = store.displayNameFor(peer.participantId);
+        const displayName =
+          resolved === peer.participantId
+            ? peer.kind === 'agent'
+              ? 'Agent'
+              : peer.kind === 'owner'
+                ? 'Owner'
+                : 'Reviewer'
+            : resolved;
+        return {
+          participantId: peer.participantId as ParticipantId,
+          deviceId: peer.deviceId as DeviceId,
+          displayName,
+          kind: peer.kind,
+          online: peer.online,
+        };
+      });
+      const fingerprint = mapped
+        .map((p) => `${p.deviceId}:${p.online}:${p.displayName}:${p.kind}`)
+        .join('|');
+      if (fingerprint === lastPeerFingerprint) return;
+      lastPeerFingerprint = fingerprint;
+      store.peers = mapped;
+    });
+  });
+
+  // Auto-expand the review rail the first time the room has UNRESOLVED
+  // feedback (ports App.svelte's native rule). Without this the hosted
+  // owner's rail sat in its collapsed 48px gutter and a reviewer's incoming
+  // comment landed as a barely-visible avatar chip — feedback effectively
+  // arrived invisibly. One-shot per room so a deliberate collapse sticks.
+  let reviewRailAutoOpenedRoom: string | null = null;
+  $effect(() => {
+    const store = reviewStoreRef;
+    if (!store) return;
+    const roomId = store.currentRoomId;
+    if (roomId === null) return;
+    if (store.marginActiveThreadCount > 0 && reviewRailAutoOpenedRoom !== roomId) {
+      reviewRailAutoOpenedRoom = roomId;
+      if (!store.panelOpen) store.panelOpen = true;
+    }
   });
 
   // Rebuild the inline decorations whenever resolutions, events, or the
@@ -2134,6 +2195,7 @@
       <div class="review-sheet-margin">
         <ReviewMarginComponent
           view={pmViewForReview}
+          layout="stacked"
           readOnly={!ownerState.liveEditingAvailable}
           reviewerAuthoring={durableReviewAvailable}
           suggestionActions={ownerState.liveEditingAvailable

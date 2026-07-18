@@ -73,7 +73,13 @@ export function reviewerStatusPresentation(
     detail:
       input.connection === 'offline'
         ? 'Offline — feedback you write is kept and sends when you reconnect.'
-        : base.detail,
+        : input.connection === 'live_direct'
+          ? // The hosted share path reports live whenever the owner is present
+            // and broadcasting — which may be relay-mediated, so never claim a
+            // peer-to-peer mechanism here (the owner-side ShareChip does,
+            // where live_direct really is a DataChannel).
+            'Live — the owner is here and changes appear instantly.'
+          : base.detail,
     tone: base.tone,
     notes,
     canRetry: false,

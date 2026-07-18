@@ -555,6 +555,58 @@ class MemorySealedFilesystem implements SealedBlobFileSystem {
   }
 }
 
+defineCase('persists v3 grant-registered devices (signature covers grant fields)', async () => {
+  // Regression (attn-sjz): durable-share reviewers sign over grantTier +
+  // grantSignature (browser-ws `registrationBytes`). validateDevice used a
+  // grant-less canonical, so every /s/ joiner's record was rejected as
+  // "self-signature is invalid" — which broke directory persistence and,
+  // because the presence-join path awaits it, froze live peers at away.
+  const { factory, name } = testDatabase();
+  const storage = await BrowserStorage.open({
+    indexedDB: factory,
+    databaseName: name,
+    createIfMissing: true,
+  });
+  try {
+    const roomId = 'room-grant';
+    await storage.installRoomKey(roomId, rootBytes(7));
+    await storage.putRoom({ roomId, policy: POLICY, lastCreatedAt: 0, storagePersisted: true });
+    const local = identity(7, 'grant');
+    const granted: Device = {
+      deviceId: local.deviceId,
+      participantId: local.participantId,
+      publicEncryptionKey: base64UrlEncode(local.publicEncryptionKey),
+      publicSigningKey: base64UrlEncode(local.signingPublic),
+      client: 'attn-browser',
+      kind: 'reviewer',
+      grantTier: 'comment',
+      grantSignature: base64UrlEncode(new Uint8Array(64).fill(3)),
+      selfSignature: '',
+    };
+    granted.selfSignature = base64UrlEncode(
+      ed25519.sign(
+        toCanonicalBytes({
+          client: granted.client,
+          deviceId: granted.deviceId,
+          kind: granted.kind,
+          participantId: granted.participantId,
+          publicEncryptionKey: granted.publicEncryptionKey,
+          publicSigningKey: granted.publicSigningKey,
+          grantTier: granted.grantTier,
+          grantSignature: granted.grantSignature,
+        }),
+        local.signingSecret,
+      ),
+    );
+    await storage.putDevice(roomId, granted);
+    const listed = await storage.listDevices(roomId);
+    assertEqual(listed.length, 1, 'grant device persisted');
+    assertEqual(listed[0].grantTier, 'comment', 'grant tier survives the round-trip');
+  } finally {
+    storage.close();
+  }
+});
+
 defineCase('isolates rooms, crypto-erases forgotten state, and roundtrips only sealed blobs', async () => {
   const { factory, name } = testDatabase();
   const filesystem = new MemorySealedFilesystem();

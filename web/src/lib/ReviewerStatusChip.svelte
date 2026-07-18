@@ -109,7 +109,7 @@
     ></button>
 
     <div
-      class="absolute right-0 top-full z-[60] mt-1 w-80 rounded-lg border border-border bg-popover text-popover-foreground shadow-md"
+      class="attn-chrome absolute right-0 top-full z-[60] mt-1 w-80 rounded-lg border border-border bg-popover text-popover-foreground shadow-md"
       data-slot="reviewer-status-popover"
       role="dialog"
       aria-label="Review session details"
@@ -128,14 +128,14 @@
           <p class="text-sm font-medium {attention ? 'text-destructive' : offline ? 'text-muted-foreground' : 'text-primary'}">
             {presentation.label}
           </p>
-          <p class="mt-0.5 text-xs text-muted-foreground" data-slot="reviewer-status-detail">
+          <p class="pt-0.5 text-xs text-muted-foreground" data-slot="reviewer-status-detail">
             {presentation.detail}
           </p>
           {#each presentation.notes as note (note)}
-            <p class="mt-1 text-[11px] text-muted-foreground" data-slot="reviewer-status-note">{note}</p>
+            <p class="pt-1 text-[11px] text-muted-foreground" data-slot="reviewer-status-note">{note}</p>
           {/each}
           {#if collabError}
-            <p class="mt-1 text-[11px] text-destructive" role="status" data-slot="reviewer-status-collab-error">
+            <p class="pt-1 text-[11px] text-destructive" role="status" data-slot="reviewer-status-collab-error">
               {collabError}
             </p>
           {/if}
@@ -147,7 +147,7 @@
           Your access:
           <span class="font-medium text-foreground" data-slot="browser-grant-tier">{reviewerTierLabel(tier)}</span>
         </p>
-        <p class="mt-0.5 text-[11px] text-muted-foreground">End-to-end encrypted — the relay only sees ciphertext.</p>
+        <p class="pt-0.5 text-[11px] text-muted-foreground">End-to-end encrypted — the relay only sees ciphertext.</p>
       </section>
 
       {#if tier !== 'view'}
@@ -220,7 +220,7 @@
             {#if pushConsent.message}
               <p
                 id="browser-push-message"
-                class="mt-1 text-[11px] {pushConsent.status === 'error' || pushConsent.status === 'denied' ? 'text-destructive' : 'text-muted-foreground'}"
+                class="pt-1 text-[11px] {pushConsent.status === 'error' || pushConsent.status === 'denied' ? 'text-destructive' : 'text-muted-foreground'}"
                 role="status"
                 data-slot="browser-push-message"
               >{pushConsent.message}</p>

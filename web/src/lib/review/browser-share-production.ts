@@ -297,7 +297,7 @@ export class DurableShareBrowserSessionFacade {
   private generation = 0;
   private closed = false;
   private startAbort: AbortController | null = null;
-  private state: import('./browser-session').BrowserSessionState = { principal: 'reviewer', ownerOnline: false,
+  private state: import('./browser-session').BrowserSessionState = { principal: 'reviewer', ownerOnline: false, peers: [],
     liveEditingAvailable: false, status: 'idle', connection: 'offline', directError: null,
     roomId: null, snapshotContent: null, snapshotDocType: 'markdown', snapshotId: null, fileId: null, error: null,
     authoringReady: false, grantTier: 'view', outboxPending: 0, authoringError: null, persistence: 'ephemeral',
@@ -405,7 +405,7 @@ export class RememberedPushShareSessionFacade {
   private observer: ((state: import('./browser-session').BrowserSessionState) => void) | null = null;
   private closed = false;
   private abort: AbortController | null = null;
-  private state: import('./browser-session').BrowserSessionState = { principal: 'reviewer', ownerOnline: false,
+  private state: import('./browser-session').BrowserSessionState = { principal: 'reviewer', ownerOnline: false, peers: [],
     liveEditingAvailable: false, status: 'idle', connection: 'offline', directError: null,
     roomId: null, snapshotContent: null, snapshotDocType: 'markdown', snapshotId: null, fileId: null, error: null,
     authoringReady: false, grantTier: 'view', outboxPending: 0, authoringError: null, persistence: 'remembered',

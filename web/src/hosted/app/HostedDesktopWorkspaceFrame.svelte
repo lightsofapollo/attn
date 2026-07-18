@@ -1,6 +1,9 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import PathBreadcrumb from '../../lib/PathBreadcrumb.svelte';
+  import UnreadBadge from '../../lib/UnreadBadge.svelte';
   import ReviewBar from '../../lib/ReviewBar.svelte';
   import Sidebar from '../../lib/Sidebar.svelte';
   import WorkspaceEditorFrame from '../../lib/WorkspaceEditorFrame.svelte';
@@ -131,6 +134,19 @@
     ...(onOpenDesk ? [{ id: 'all-workspaces', label: 'All workspaces', run: onOpenDesk }] : []),
   ]);
   let viewport = $state<HTMLElement | null>(null);
+  // The sticky margin column must be exactly one viewport tall so the
+  // bottom-fit pass inside ReviewMargin sees the real visible height.
+  let railViewportHeight = $state(0);
+  $effect(() => {
+    const el = viewport;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      railViewportHeight = el.clientHeight;
+    });
+    observer.observe(el);
+    railViewportHeight = el.clientHeight;
+    return () => observer.disconnect();
+  });
 
   $effect(() => {
     onViewport?.(viewport);
@@ -196,9 +212,7 @@
       {actions}
       onShare={reviewStore.currentRoomId === null && !shareOpen ? onShare : undefined}
       shareEnabled={true}
-      rightInsetPx={(reviewStore.currentRoomId !== null || shareOpen) && reviewStore.railMode !== 'expanded'
-        ? 328 - (reviewStore.currentRoomId !== null ? RAIL_WIDTH_PX[reviewStore.railMode] : 0)
-        : 16}
+      rightInsetPx={reviewStore.currentRoomId !== null || shareOpen ? 328 : 16}
     />
   </div>
   <ScrollArea
@@ -206,21 +220,69 @@
     orientation="vertical"
     bind:viewportRef={viewport}
   >
-    {@render content()}
+    <!-- ONE scroll context encloses the document AND the review margin
+         (Docs structure, matching the reviewer page): the overlay scrollbar
+         lands at the far right of the pane — right of the comments — and
+         wheel anywhere drives the same scroller. The margin is sticky and
+         exactly one viewport tall; its top spacer clears the floating
+         ReviewBar, and its header carries the collapse toggle that used to
+         live on the outer frame aside. -->
+    <div class="flex min-h-full flex-row">
+      <div class="min-w-0 flex-1">
+        {@render content()}
+      </div>
+      {#if reviewStore.railMode !== 'hidden'}
+        <aside
+          class="right-rail sticky top-0 flex shrink-0 flex-col self-start overflow-hidden"
+          style={`width: ${RAIL_WIDTH_PX[reviewStore.railMode]}px; height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
+          data-state={reviewStore.panelOpen ? 'open' : 'closed'}
+          data-mode={reviewStore.railMode}
+          data-slot="right-rail"
+          aria-label="Review margin"
+        >
+          <div
+            class={`flex h-10 shrink-0 items-center pt-2 ${reviewStore.panelOpen ? 'justify-end pr-2' : 'justify-center'}`}
+            data-slot="rail-header"
+          >
+            <button
+              type="button"
+              class="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              data-slot="rail-toggle"
+              data-state={reviewStore.panelOpen ? 'expanded' : 'collapsed'}
+              aria-label={reviewStore.panelOpen ? 'Collapse comments rail' : 'Expand comments rail'}
+              title={`${reviewStore.panelOpen ? 'Collapse' : 'Expand'} comments (⌘J)`}
+              aria-expanded={reviewStore.panelOpen}
+              onclick={() => reviewStore.togglePanel()}
+            >
+              {#if reviewStore.panelOpen}
+                <PanelRightClose class="size-4" aria-hidden="true" />
+              {:else}
+                <PanelRightOpen class="size-4" aria-hidden="true" />
+              {/if}
+              <UnreadBadge
+                count={reviewStore.currentRoomUnread}
+                label="unread review updates"
+                class="absolute -right-1.5 -top-1.5"
+              />
+            </button>
+          </div>
+          <div class="relative mb-2 min-h-0 flex-1 overflow-hidden">
+            {@render rail()}
+          </div>
+        </aside>
+      {/if}
+    </div>
   </ScrollArea>
 {/snippet}
+
+{#snippet emptyRail()}{/snippet}
 
 <WorkspaceEditorFrame
   class="hosted-workspace-frame"
   {sidebar}
   {chrome}
   content={mainContent}
-  {rail}
-  railMode={reviewStore.railMode}
+  rail={emptyRail}
+  railMode="hidden"
   panelOpen={reviewStore.panelOpen}
-  unreadCount={reviewStore.currentRoomUnread}
-  onToggleRail={() => reviewStore.togglePanel()}
-  onRailWheel={(deltaY) => {
-    if (viewport) viewport.scrollTop += deltaY;
-  }}
 />

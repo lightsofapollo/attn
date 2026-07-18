@@ -735,8 +735,18 @@ a.workspace-row:hover {
 .save-chip[data-save-state="Storage needs attention"]::before {
   background: var(--rust);
 }
+/* Desktop variant: match the ShareChip's metrics exactly — same 1.75rem
+   pill height, same 11px sans, and the same -0.75rem pull-up the breadcrumb
+   share icon uses, so the save chip and the ReviewBar chips sit on ONE
+   line at one size instead of two mismatched pills (user feedback). */
 .hosted-save-state.save-chip {
+  height: 1.75rem;
+  /* Seats the chip on the ReviewBar row line (bar offset top-1.5 within
+     its own layer) so both pills share one center. */
+  margin-top: 7px;
+  padding: 0 10px;
   font-family: var(--sans);
+  font-size: 11px;
   max-width: 15rem;
 }
 @media (prefers-reduced-motion: reduce) {

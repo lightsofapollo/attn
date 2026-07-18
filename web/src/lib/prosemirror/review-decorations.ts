@@ -92,6 +92,65 @@ export function requestReviewDecorationsRebuild(view: EditorView): void {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Pending-anchor highlight — the range a composer is being written against.
+//
+// The browser only paints text selection in the focused element, so the
+// moment the comment/suggestion composer's textarea takes focus the editor's
+// native selection vanishes — the text being commented on visually
+// de-highlights until submit re-decorates it, which reads as a jarring blink.
+// Google Docs keeps the target range tinted for the whole compose. This
+// plugin paints the pending range with the selection color while a composer
+// is open; positions map through doc changes (live collab keeps flowing).
+// ---------------------------------------------------------------------------
+
+interface PendingAnchorRange {
+  from: number;
+  to: number;
+}
+
+export const pendingAnchorKey = new PluginKey<PendingAnchorRange | null>('pending-anchor-highlight');
+
+export function pendingAnchorHighlightPlugin(): Plugin<PendingAnchorRange | null> {
+  return new Plugin<PendingAnchorRange | null>({
+    key: pendingAnchorKey,
+    state: {
+      init: () => null,
+      apply: (tr, current) => {
+        const meta = tr.getMeta(pendingAnchorKey) as
+          | { range: PendingAnchorRange | null }
+          | undefined;
+        if (meta !== undefined) return meta.range;
+        if (current && tr.docChanged) {
+          const from = tr.mapping.map(current.from, 1);
+          const to = tr.mapping.map(current.to, -1);
+          return from < to ? { from, to } : null;
+        }
+        return current;
+      },
+    },
+    props: {
+      decorations: (state) => {
+        const range = pendingAnchorKey.getState(state);
+        if (!range) return DecorationSet.empty;
+        return DecorationSet.create(state.doc, [
+          Decoration.inline(range.from, range.to, { class: 'pending-anchor-highlight' }),
+        ]);
+      },
+    },
+  });
+}
+
+/** Keep the compose target visibly selected while the composer owns focus. */
+export function setPendingAnchorRange(view: EditorView, from: number, to: number): void {
+  view.dispatch(view.state.tr.setMeta(pendingAnchorKey, { range: { from, to } }));
+}
+
+export function clearPendingAnchorRange(view: EditorView): void {
+  if (pendingAnchorKey.getState(view.state) === null) return;
+  view.dispatch(view.state.tr.setMeta(pendingAnchorKey, { range: null }));
+}
+
 // Inputs to `buildDecorationsFromStore` so the function stays pure and
 // directly testable without spinning up the reviewStore singleton.
 export interface ReviewDecorationInputs {

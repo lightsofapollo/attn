@@ -51,6 +51,7 @@
     RESOLVED_CHIP_HEIGHT,
   } from './review/rail-mode';
   import { reviewStore } from './review/store.svelte';
+  import { nearestScrollableAncestor } from './scroll-viewport';
   import {
     selectSuggestionActionPort,
     shouldDismissSuggestionAfterAction,
@@ -719,14 +720,15 @@
   // then yields fresh viewport coords and the cards track their anchors
   // 1:1, Google-Docs style. A ResizeObserver on the editor DOM catches
   // typing/content reflows that shift anchor positions without scrolling.
-  // The aside itself no longer scrolls (overflow-hidden in App.svelte), so
-  // document scroll is the single source of vertical movement.
+  // The aside itself no longer scrolls, so document scroll is the single
+  // source of vertical movement. The viewport is found by walking computed
+  // overflow — NOT by the ScrollArea slot selector, which does not exist on
+  // the reviewer /s/ page (its plain overflow-auto scroller left the margin
+  // with no scroll listener at all: cards froze while the text moved).
   $effect(() => {
     if (!containerEl) return;
     const v = view;
-    const editorViewport = v?.dom.closest<HTMLElement>(
-      '[data-slot="scroll-area-viewport"]',
-    ) ?? null;
+    const editorViewport = v ? nearestScrollableAncestor(v.dom) : null;
     const recompute = (): void => {
       bumpRecalc();
       // Card tops are viewport-anchored container coords now, so the
@@ -800,13 +802,7 @@
   // text the user just clicked (the anchor — and its margin-aligned card —
   // is already where they are looking).
   function nearestPanelScroller(el: HTMLElement): HTMLElement | null {
-    let node = el.parentElement;
-    while (node && node !== document.body && node !== document.documentElement) {
-      const overflowY = getComputedStyle(node).overflowY;
-      if (overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay') return node;
-      node = node.parentElement;
-    }
-    return null;
+    return nearestScrollableAncestor(el);
   }
 
   $effect(() => {

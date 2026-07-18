@@ -113,8 +113,11 @@
     shareTargetMatches,
   } from './lib/review/room-ui';
   import {
+    clearPendingAnchorRange,
+    pendingAnchorHighlightPlugin,
     requestReviewDecorationsRebuild,
     reviewDecorationsPlugin,
+    setPendingAnchorRange,
   } from './lib/prosemirror/review-decorations';
   import { resolveAnchor } from './lib/review/resolver';
   import type { EditorView } from 'prosemirror-view';
@@ -444,7 +447,21 @@
   // store-driven $effect can dispatch rebuild signals without subscribing
   // to runes inside the plugin's `apply` handler.
   const reviewPlugin: PMPlugin = reviewDecorationsPlugin();
-  const editorPlugins: PMPlugin[] = [reviewPlugin];
+  const editorPlugins: PMPlugin[] = [reviewPlugin, pendingAnchorHighlightPlugin()];
+
+  // Keep the compose target visibly highlighted while a composer owns focus.
+  // The browser stops painting the editor's selection the moment the
+  // composer textarea focuses, so the text being commented on blinked out
+  // and re-appeared on submit — jarring. The pending-anchor decoration
+  // holds the selection tint for the whole compose (Docs behavior).
+  $effect(() => {
+    const active = commentComposer ?? suggestionComposer;
+    const view = pmViewForReview;
+    if (!view) return;
+    if (active) setPendingAnchorRange(active.view, active.from, active.to);
+    else clearPendingAnchorRange(view);
+  });
+
   let pmViewForReview: EditorView | undefined = $state(undefined);
 
   function handleEditorReady(view: EditorView): void {

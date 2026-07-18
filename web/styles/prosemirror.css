@@ -685,3 +685,10 @@
 .prose-scroll-x::-webkit-scrollbar {
   height: 8px;
 }
+
+/* The range a comment/suggestion composer is being written against — holds
+   the selection tint while the composer owns focus (the browser stops
+   painting the editor's native selection the moment focus leaves it). */
+.ProseMirror .pending-anchor-highlight {
+  background: var(--selection);
+}

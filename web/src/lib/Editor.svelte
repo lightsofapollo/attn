@@ -13,6 +13,7 @@
   } from 'prosemirror-search';
   import { tick, untrack } from 'svelte';
   import { keymap } from 'prosemirror-keymap';
+  import { nearestScrollableAncestor } from './scroll-viewport';
   import { baseKeymap, chainCommands, selectAll, setBlockType, toggleMark } from 'prosemirror-commands';
   import { wrapInList, liftListItem, sinkListItem, splitListItem } from 'prosemirror-schema-list';
   import { history, redo, undo } from 'prosemirror-history';
@@ -538,10 +539,12 @@
   function ensureSelectionVisible(): void {
     if (!view) return;
 
-    const viewport = (
+    const viewport = ((
       view.dom.closest('[data-slot="scroll-area-viewport"]')
       ?? view.dom.closest('.attn-content-viewport')
-    ) as HTMLElement | null;
+    ) as HTMLElement | null)
+      // Reviewer /s/ page scrolls a plain overflow-auto div — no slot.
+      ?? nearestScrollableAncestor(view.dom);
     if (!viewport) return;
 
     const coords = view.coordsAtPos(view.state.selection.head, 1);

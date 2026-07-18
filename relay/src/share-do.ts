@@ -192,7 +192,14 @@ export class ShareDO extends DurableObject<Env> {
         ciphertextSha256,
         uploadedAt,
       }))
-      .sort((left, right) => left.fileId.localeCompare(right.fileId));
+      // Code-unit fileId order — the SAME total order the owner client's
+      // digestShareSnapshotManifest and the reviewer manifest validator use
+      // (web e2c6df5). localeCompare collates the base64url '-'/'_' alphabet
+      // differently, so the relay-served digest could never re-verify on
+      // multi-file shares and owner publishing paused forever (attn-qtz /
+      // attn-40t: this cutover must ship relay + web together). For ASCII
+      // fileIds, JS relational string compare IS code-unit order.
+      .sort((left, right) => (left.fileId < right.fileId ? -1 : left.fileId > right.fileId ? 1 : 0));
     return base64UrlEncode(new Uint8Array(await crypto.subtle.digest(
       "SHA-256",
       new TextEncoder().encode(canonicalize(canonical)),

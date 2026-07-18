@@ -416,6 +416,54 @@ describe("durable v3 shares", () => {
     } });
     expect((await stillSelected.json() as { bundle: { sealedBundle: string } }).bundle.sealedBundle)
       .toBe(synchronizedBundles[0]!.sealedBundle);
+
+    // Regression (attn-qtz): the served manifestDigest must use CODE-UNIT
+    // fileId order — the same total order the owner client and the reviewer
+    // manifest validator use. 'a1' vs 'B2' orders differently under ICU
+    // (a before B) than under code units (B before a); with localeCompare the
+    // relay digest could never re-verify client-side and owner publishing
+    // paused forever on multi-file shares.
+    const extraRefs: Record<string, unknown>[] = [];
+    for (const [fileId, rand] of [["a1", "tw1"], ["B2", "tw2"]] as const) {
+      const extraUrl = `${url}/snapshots/${fileId}/multi-${fileId}`;
+      const extraBytes = new Uint8Array([7, fileId.charCodeAt(0)]);
+      const extraPow = await mintPowForTests({ roomId: shareId, deviceId: shareId, method: "PUT", path: `/v3/shares/${shareId}/snapshots/${fileId}/multi-${fileId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}${rand}` });
+      const extraUpload = await SELF.fetch(extraUrl, { method: "PUT", body: extraBytes, headers: {
+        "Content-Type": "application/octet-stream",
+        "Attn-Device-Id": shareId,
+        "Attn-Owner-Signature": await binaryOwnerSignature("PUT", extraUrl, extraBytes, owner.privateKey),
+        "Attn-PoW": extraPow,
+      } });
+      // First upload for a brand-new fileId stages as a create.
+      expect(extraUpload.status).toBe(201);
+      extraRefs.push(await extraUpload.json() as Record<string, unknown>);
+    }
+    const allRefs = [...extraRefs, snapshotRef] as Array<Record<string, unknown> & { fileId: string }>;
+    const codeUnitOrder = [...allRefs].sort((l, r) => (l.fileId < r.fileId ? -1 : l.fileId > r.fileId ? 1 : 0));
+    const localeOrder = [...allRefs].sort((l, r) => l.fileId.localeCompare(r.fileId));
+    expect(codeUnitOrder.map((ref) => ref.fileId)).not.toEqual(localeOrder.map((ref) => ref.fileId));
+    const digestOf = async (refs: unknown[]) => base64UrlEncode(new Uint8Array(await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(canonicalize(refs as CanonicalValue[])),
+    )));
+    const multiBody = JSON.stringify({
+      v: 3,
+      ownerSigningKey: base64UrlEncode(owner.publicKeyBytes),
+      revision: 2,
+      bundles: synchronizedBundles,
+      snapshots: codeUnitOrder,
+    });
+    const multiPow = await mintPowForTests({ roomId: shareId, deviceId: ownerId, method: "POST", path: `/v3/shares/${shareId}`, difficulty: 12, expiresAt: Date.now() + 300_000, rand: `${FIXED_POW_RAND}tw3` });
+    const multi = await SELF.fetch(url, { method: "POST", body: multiBody, headers: {
+      "Content-Type": "application/json",
+      "Attn-Owner-Signature": await ownerSignatureHeader({ method: "POST", url, body: multiBody, privateKey: owner.privateKey }),
+      "Attn-PoW": multiPow,
+    } });
+    expect(multi.status).toBe(200);
+    const multiJson = await multi.json() as { revision: number; manifestDigest: string };
+    expect(multiJson.revision).toBe(2);
+    expect(multiJson.manifestDigest).toBe(await digestOf(codeUnitOrder));
+    expect(multiJson.manifestDigest).not.toBe(await digestOf(localeOrder));
   });
 
   it("pins only the latest owner-uploaded snapshot per file and removes all ciphertext on revoke", async () => {

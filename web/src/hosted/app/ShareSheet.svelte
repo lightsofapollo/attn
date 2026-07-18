@@ -224,9 +224,13 @@
     statusMessage = 'Encrypting this selection and publishing the review snapshot…';
     try {
       applyShareView(await onCreate(request));
-    } catch {
+    } catch (error) {
       progressPaused = true;
-      operationError = 'Publishing did not finish. Your source is still local, and it is safe to resume.';
+      // Say WHY: the generic copy alone hid the real failure (a wedged
+      // legacy digest went undiagnosed for days behind it). Error messages
+      // in this path are relay/validation phrases, never secrets.
+      const reason = error instanceof Error && error.message ? ` (${error.message})` : '';
+      operationError = `Publishing did not finish${reason}. Your source is still local, and it is safe to resume.`;
       statusMessage = 'Publishing paused.';
       if (onInspect) {
         try {

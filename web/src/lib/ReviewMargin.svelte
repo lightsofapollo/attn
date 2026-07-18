@@ -822,8 +822,13 @@
     );
     if (!el) return;
     const scroller = nearestPanelScroller(el);
-    // No panel scroller means the page owns the scroll — leave it alone.
-    if (!scroller) return;
+    // Only a scroller INSIDE the rail may move. In the anchored (sticky
+    // margin) architecture the nearest scrollable ancestor is the page
+    // scroller itself — scrolling it here yanks the document away from the
+    // text the user just commented on (and can overshoot past both the
+    // anchor and the card). Card visibility in anchored mode is already
+    // guaranteed by the fitBottom pass, so skipping is safe.
+    if (!scroller || !containerEl.contains(scroller)) return;
     const scrollerRect = scroller.getBoundingClientRect();
     const elRect = el.getBoundingClientRect();
     const fullyVisible = elRect.top >= scrollerRect.top && elRect.bottom <= scrollerRect.bottom;
@@ -921,7 +926,7 @@
     const card = containerEl?.querySelector<HTMLElement>(
       `[data-testid="review-margin-card"][data-thread-id="${CSS.escape(t.id)}"]`,
     );
-    card?.focus();
+    card?.focus({ preventScroll: true });
   }
 
   /**
@@ -935,7 +940,7 @@
     const chip = containerEl?.querySelector<HTMLElement>(
       `[data-testid="review-margin-resolved-chip"][data-thread-id="${CSS.escape(t.id)}"]`,
     );
-    chip?.focus();
+    chip?.focus({ preventScroll: true });
   }
 
   /**
@@ -949,7 +954,7 @@
     const card = containerEl?.querySelector<HTMLElement>(
       `[data-testid="review-margin-card"][data-thread-id="${CSS.escape(t.id)}"]`,
     );
-    card?.focus();
+    card?.focus({ preventScroll: true });
   }
 </script>
 

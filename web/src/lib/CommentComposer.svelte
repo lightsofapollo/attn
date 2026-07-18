@@ -68,7 +68,7 @@
   });
 
   $effect(() => {
-    queueMicrotask(() => textareaEl?.focus());
+    queueMicrotask(() => textareaEl?.focus({ preventScroll: true }));
   });
 
   // In-flight guard: the await is a no-op today (fire-and-forget IPC) but

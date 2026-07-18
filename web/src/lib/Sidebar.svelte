@@ -63,6 +63,9 @@
      *  New workspace / Rename workspace / All workspaces). Their presence
      *  makes the picker interactive even with a single project. */
     projectMenuActions?: { id: string; label: string; run: () => void }[];
+    /** Project roots with an active review share — the picker marks them so
+     *  what's shared is legible next to local-only workspaces (attn-vt4). */
+    sharedProjects?: Set<string>;
     /** Browser-owned workspaces do not expose an outline until one is derived. */
     showOutline?: boolean;
   }
@@ -93,6 +96,7 @@
     rootLabel,
     projectLabels = {},
     projectMenuActions = [],
+    sharedProjects = new Set<string>(),
     showOutline = true,
   }: Props = $props();
   let sidebarView: 'files' | 'outline' = $state('files');
@@ -360,6 +364,18 @@
                         data-active={projectPath === selectedProject}
                       />
                       <span class="sidebar-project-menu-label">{formatRootLabel(projectPath)}</span>
+                      {#if sharedProjects.has(projectPath)}
+                        <!-- Same rust-dot vocabulary as the ShareChip: this
+                             workspace has an active review link. -->
+                        <span
+                          class="sidebar-project-shared"
+                          data-slot="sidebar-project-shared"
+                          title="Shared for review"
+                        >
+                          <span class="sidebar-project-shared-dot" aria-hidden="true"></span>
+                          Shared
+                        </span>
+                      {/if}
                     </Command.Item>
                   {/each}
                 </Command.Group>

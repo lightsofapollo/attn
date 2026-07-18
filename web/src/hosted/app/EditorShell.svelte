@@ -45,7 +45,7 @@
     /** Refresh the workspace after an entry-list change (no reload). */
     onWorkspaceChanged?: (openPath?: string) => Promise<void>;
     /** Every workspace on the desk, for the sidebar project switcher. */
-    workspaces?: { id: string; name: string }[];
+    workspaces?: { id: string; name: string; sharing?: 'local-only' | 'shared' | 'backed-up' }[];
     /** Open another workspace (full navigation — sessions don't survive it). */
     onSwitchWorkspace?: (workspaceId: string) => void;
   }

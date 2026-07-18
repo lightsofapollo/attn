@@ -233,6 +233,26 @@
     font-weight: 650;
   }
 
+  /* Shared marker (attn-vt4): the picker distinguishes workspaces with an
+     active review link — rust dot + quiet label, the ShareChip vocabulary. */
+  .sidebar-project-shared {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-inline-start: auto;
+    padding-inline-start: 10px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--primary);
+  }
+  .sidebar-project-shared-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 9999px;
+    background: var(--primary);
+  }
+
   /* Workspace actions appended below the project list (hosted picker):
      same type as the project rows, indented past the check gutter. */
   .sidebar-project-menu-action {

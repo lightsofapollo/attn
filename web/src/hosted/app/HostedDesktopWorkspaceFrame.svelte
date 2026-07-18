@@ -21,8 +21,9 @@
     workspaceId: string;
     workspaceName: string;
     entries: WorkspaceEntry[];
-    /** All workspaces on this desk — the sidebar project row switches between them. */
-    workspaces?: { id: string; name: string }[];
+    /** All workspaces on this desk — the sidebar project row switches between
+     *  them; `sharing` marks the ones with an active review link. */
+    workspaces?: { id: string; name: string; sharing?: 'local-only' | 'shared' | 'backed-up' }[];
     onSwitchWorkspace?: (workspaceId: string) => void;
     onCreateWorkspace?: () => void;
     onRenameWorkspace?: () => void;
@@ -102,6 +103,18 @@
       workspaces.map((workspace) => [workspaceVirtualRoot(workspace.id), workspace.name]),
     ),
   );
+  // Shared vs local-only in the picker (attn-vt4). Storage summaries carry
+  // the durable sharing state; the live store covers the workspace whose
+  // share was created THIS session before the summaries refresh.
+  const sharedProjects = $derived.by(() => {
+    const shared = new Set<string>();
+    for (const workspace of workspaces) {
+      if (workspace.sharing === 'shared') shared.add(workspaceVirtualRoot(workspace.id));
+    }
+    const roomId = reviewStore.currentRoomId;
+    if (roomId !== null && reviewStore.rooms[roomId]?.role === 'owner') shared.add(rootPath);
+    return shared;
+  });
 
   function switchProject(projectRoot: string): void {
     const target = workspaces.find(
@@ -151,6 +164,7 @@
     projectLabels={switcherLabels}
     onProjectSwitch={switchProject}
     {projectMenuActions}
+    {sharedProjects}
     showOutline={false}
     showWindowDragRegion={false}
     {sharedPaths}

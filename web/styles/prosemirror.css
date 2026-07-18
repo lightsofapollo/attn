@@ -72,9 +72,11 @@
   outline-offset: 1px;
 }
 
-/* Editor surface: left-set, one shared content column — prose and wide
-   blocks (code, tables, mermaid) cap at the same --content-measure edge;
-   oversized tables scroll within it (Shared-Column Rule, 2026-07-13). */
+/* Editor surface: two-tier content column (attn-vt4, supersedes the
+   Shared-Column Rule). Prose caps at the readable --content-measure; wide
+   blocks (code, tables, mermaid) break out to --content-measure-wide so
+   technical documents get the room the viewport has. Both tiers share a
+   center line, and oversized blocks still scroll within their cap. */
 .ProseMirror {
   max-width: none;
   margin: 0;
@@ -97,8 +99,13 @@
   outline: none !important;
 }
 
-.ProseMirror > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container) {
+.ProseMirror > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote) {
   max-width: var(--content-measure);
+  margin-inline: auto;
+}
+
+.ProseMirror > :is(pre, table, .mermaid-container) {
+  max-width: min(100%, var(--content-measure-wide));
   margin-inline: auto;
 }
 
@@ -113,7 +120,7 @@
 /* Shared horizontal scroll treatment for wide prose blocks (code/tables). */
 .ProseMirror .prose-scroll-x {
   position: relative;
-  max-width: min(100%, var(--content-measure));
+  max-width: min(100%, var(--content-measure-wide));
   margin-inline: auto;
   overflow-x: auto;
   overflow-y: hidden;

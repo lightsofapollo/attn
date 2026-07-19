@@ -38,6 +38,11 @@ assertEq(
   true,
   'production connect-src',
 );
+assertEq(
+  buildContentSecurityPolicy('https://relay.attn.sh', "'self'").includes("frame-ancestors 'self'"),
+  true,
+  'landing demo supports same-origin framing',
+);
 
 assertThrows(() => buildContentSecurityPolicy('http://relay.attn.sh'), 'rejects http');
 assertThrows(() => buildContentSecurityPolicy('https://relay.attn.sh/path'), 'rejects path');

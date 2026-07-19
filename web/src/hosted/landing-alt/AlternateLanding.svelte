@@ -68,12 +68,12 @@
     <section class="try-section" id="try-review">
       <div class="try-heading">
         <div>
-          <p class="try-instruction"><span>Try it</span> Accept the agent’s suggestion—or reject it.</p>
-          <h2>A review you can understand in ten seconds.</h2>
+          <p class="try-instruction"><span>Try it</span> Select a sentence. Leave a real comment.</p>
+          <h2>The agents started the review. Add your voice.</h2>
         </div>
         <p>
-          This is the whole loop in miniature. People and agents leave the same kinds of marks;
-          you decide what becomes part of the file.
+          Claude and Codex are already in the margin. Their feedback uses the same review loop
+          you do—and you still decide what reaches the file.
         </p>
       </div>
       <ReviewDemo />

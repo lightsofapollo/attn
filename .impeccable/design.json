@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-12T18:00:00Z",
+  "generatedAt": "2026-07-19T14:38:00Z",
   "title": "Design System: attn",
   "extensions": {
     "colorMeta": {
@@ -250,7 +250,7 @@
       },
       "The Truth Rule: pixels always equal state \u2014 no visible fact may depend on an animation completing or a debounce flushing; closed overlays are display:none in plain CSS; theme flips are atomic.",
       "The Topmost-Escape Rule: Escape closes exactly one layer (palette \u2192 composer \u2192 dialog \u2192 popover \u2192 drawer) and never destroys a draft; overlays store focus on open and restore it on close.",
-      "The Wide-Sheet Rule: the reading surface is full-width and left-set; wide content (mermaid, tables, code) spans the pane while running prose caps at ~72ch."
+      "The Wide-Sheet Rule: the reading surface is full-width and left-set; document prose and wide content share one column capped by the 1100px content-measure token, and oversized blocks scroll inside it."
     ],
     "dos": [
       "Do keep the terracotta/steel accent to action, selection, and focus only \u2014 the One Pencil Rule.",

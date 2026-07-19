@@ -23,6 +23,18 @@ async function bootstrap(): Promise<void> {
   const target = document.getElementById('app');
   if (!target) throw new Error('missing app mount element');
 
+  const surface = new URLSearchParams(window.location.search).get('surface');
+  if (surface === 'landing-review-demo') {
+    const [{ default: LandingReviewDemo }] = await Promise.all([
+      import('../../src/hosted/app/LandingReviewDemo.svelte'),
+      import('../../src/hosted/app/desktop-editor-styles'),
+    ]);
+    mount(LandingReviewDemo, { target });
+    document.body.dataset.surface = 'landing-review-demo';
+    document.body.dataset.hydrated = 'true';
+    return;
+  }
+
   const scenario = shellScenarioFromSearch(window.location.search);
   let service: WorkspaceAppService;
   if (scenario === 'real') {

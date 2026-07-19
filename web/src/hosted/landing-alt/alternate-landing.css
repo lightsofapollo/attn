@@ -340,6 +340,53 @@
   font-family: var(--sans);
 }
 
+.real-demo-frame {
+  position: relative;
+  height: min(72vh, 720px);
+  min-height: 620px;
+  isolation: isolate;
+}
+
+.real-demo-frame iframe {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border: 0;
+  background: var(--paper);
+  opacity: 0;
+  transition: opacity 220ms ease-out;
+}
+
+.real-demo-frame[data-loaded='true'] iframe {
+  opacity: 1;
+}
+
+.demo-loading {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  display: grid;
+  place-content: center;
+  gap: 0.8rem;
+  color: var(--hosted-muted);
+  text-align: center;
+  font: 0.8rem var(--mono);
+}
+
+.demo-loading span {
+  width: 28px;
+  height: 28px;
+  justify-self: center;
+  border: 2px solid var(--rule);
+  border-top-color: var(--rust);
+  border-radius: 50%;
+  animation: demo-loading-spin 700ms linear infinite;
+}
+
+@keyframes demo-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
 .proof-toolbar {
   min-height: 64px;
   display: flex;
@@ -1240,6 +1287,11 @@
     border-radius: 8px;
   }
 
+  .real-demo-frame {
+    height: 1420px;
+    min-height: 0;
+  }
+
   .proof-toolbar {
     align-items: flex-start;
     flex-direction: column;
@@ -1356,6 +1408,17 @@
 
   .alt-footer > div a:first-child {
     display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .real-demo-frame iframe {
+    transition: none;
+  }
+
+  .demo-loading span {
+    animation: none;
+    border-top-color: var(--rule);
   }
 }
 

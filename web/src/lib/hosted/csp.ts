@@ -7,7 +7,10 @@
 
 const HTTPS_ORIGIN = /^https:\/\/[a-z0-9.-]+$/u;
 
-export function buildContentSecurityPolicy(relayOrigin: string): string {
+export function buildContentSecurityPolicy(
+  relayOrigin: string,
+  frameAncestors: "'none'" | "'self'" = "'none'",
+): string {
   if (!HTTPS_ORIGIN.test(relayOrigin)) {
     throw new Error(`relay origin must be a bare https origin: ${relayOrigin}`);
   }
@@ -18,7 +21,7 @@ export function buildContentSecurityPolicy(relayOrigin: string): string {
     `connect-src 'self' ${relayOrigin} ${relayWs}`,
     "font-src 'self' data:",
     "form-action 'none'",
-    "frame-ancestors 'none'",
+    `frame-ancestors ${frameAncestors}`,
     "frame-src 'self' blob: data:",
     "img-src 'self' blob: data:",
     "manifest-src 'self'",

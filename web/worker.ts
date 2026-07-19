@@ -38,17 +38,24 @@ export default {
     const apexTarget = apexRedirectTarget(new URL(request.url));
     if (apexTarget) return Response.redirect(apexTarget, 308);
 
+    const requestUrl = new URL(request.url);
+    const landingReviewDemo =
+      requestUrl.pathname === '/app'
+      && requestUrl.searchParams.get('surface') === 'landing-review-demo';
     const response = await env.ASSETS.fetch(rewriteToEntryDocument(request));
     const headers = new Headers(response.headers);
 
-    headers.set('Content-Security-Policy', buildContentSecurityPolicy(env.RELAY_ORIGIN));
+    headers.set(
+      'Content-Security-Policy',
+      buildContentSecurityPolicy(env.RELAY_ORIGIN, landingReviewDemo ? "'self'" : "'none'"),
+    );
     headers.set('Cross-Origin-Opener-Policy', 'same-origin');
     headers.set('Cross-Origin-Resource-Policy', 'same-origin');
     headers.set('Permissions-Policy', 'camera=(), geolocation=(), microphone=(), payment=(), usb=()');
     headers.set('Referrer-Policy', 'no-referrer');
     headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     headers.set('X-Content-Type-Options', 'nosniff');
-    headers.set('X-Frame-Options', 'DENY');
+    headers.set('X-Frame-Options', landingReviewDemo ? 'SAMEORIGIN' : 'DENY');
 
     const pathname = new URL(request.url).pathname;
     if (pathname === '/sw.js') {

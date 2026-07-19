@@ -4,6 +4,7 @@
   import type { EditorView } from 'prosemirror-view';
   import Editor from '../../lib/Editor.svelte';
   import CommentComposer from '../../lib/CommentComposer.svelte';
+  import GuidedDemoCursor from './GuidedDemoCursor.svelte';
   import ReviewMargin from '../../lib/ReviewMargin.svelte';
   import SelectionToolbar from '../../lib/SelectionToolbar.svelte';
   import { hasTextSelection } from '../../lib/review/popover-anchor';
@@ -32,6 +33,7 @@
   const CLAUDE_ID = 'landing-demo-claude';
   const CODEX_ID = 'landing-demo-codex';
   const VISITOR_ID = 'landing-demo-visitor';
+  const GUIDED_REPLY = 'Exactly — the owner still makes the final call.';
 
   const MARKDOWN = `# Launch direction
 
@@ -97,9 +99,16 @@ Human notes and agent suggestions arrive in the same encrypted margin. The owner
   let toolbarSelection = $state<{ from: number; to: number } | null>(null);
   let commentComposer = $state<ComposerState | null>(null);
   let userHasCommented = $state(false);
+  let demoDriving = $state(false);
+  let demoCompleted = $state(false);
+  let guidedReplyEventId: string | null = null;
+  let guidedCursor = $state<{ replay: () => void } | undefined>(undefined);
   let seeded = false;
   let storeReady = false;
   let eventSequence = 0;
+  const guidedDemoEnabled = typeof location === 'undefined'
+    ? false
+    : new URLSearchParams(location.search).get('autoplay') !== '0';
 
   function event(
     authorId: string,
@@ -286,7 +295,27 @@ Human notes and agent suggestions arrive in the same encrypted margin. The owner
   async function replyToComment(anchor: Anchor, body: string, threadId: string): Promise<void> {
     const reviewEvent = event(VISITOR_ID, { type: 'comment_created', threadId, anchor, body }, Date.now());
     reviewStore.applyEvent(reviewEvent);
-    userHasCommented = true;
+    if (demoDriving) guidedReplyEventId = reviewEvent.meta.eventId;
+    else userHasCommented = true;
+  }
+
+  function prepareGuidedDemo(): void {
+    demoDriving = true;
+    demoCompleted = false;
+    if (!guidedReplyEventId) return;
+    reviewStore.events = reviewStore.events.filter((reviewEvent) => (
+      reviewEvent.meta.eventId !== guidedReplyEventId
+    ));
+    guidedReplyEventId = null;
+  }
+
+  function completeGuidedDemo(): void {
+    demoDriving = false;
+    demoCompleted = true;
+  }
+
+  function cancelGuidedDemo(): void {
+    demoDriving = false;
   }
 
   function decideSuggestion(_thread: Thread): { status: 'applied' } {
@@ -408,7 +437,11 @@ Human notes and agent suggestions arrive in the same encrypted margin. The owner
   });
 </script>
 
-<main class="landing-review-demo" data-user-commented={userHasCommented ? 'true' : 'false'}>
+<main
+  class="landing-review-demo"
+  data-user-commented={userHasCommented ? 'true' : 'false'}
+  data-demo-state={demoDriving ? 'playing' : demoCompleted ? 'complete' : 'ready'}
+>
   <header class="demo-toolbar">
     <div class="demo-file">
       <span class="demo-mark" aria-hidden="true">M↓</span>
@@ -426,9 +459,16 @@ Human notes and agent suggestions arrive in the same encrypted margin. The owner
     {#if userHasCommented}
       <span class="prompt-check" aria-hidden="true">✓</span>
       <strong>You joined the review.</strong> Your note now sits beside the agents’ feedback.
+    {:else if demoDriving}
+      <span class="prompt-kicker">Demo</span>
+      <strong>Watch the real thread.</strong> The cursor is replying to Codex now.
+    {:else if demoCompleted}
+      <span class="prompt-check" aria-hidden="true">✓</span>
+      <strong>That was the real review thread.</strong> Reply, accept, or select text to take over.
+      <button class="prompt-replay" type="button" onclick={() => guidedCursor?.replay()}>Replay demo</button>
     {:else}
-      <span class="prompt-kicker">Your turn</span>
-      <strong>Select any sentence</strong> in the document, then choose Comment.
+      <span class="prompt-kicker">Live demo</span>
+      <strong>Watch the reply — or take over.</strong> Every control below is real.
     {/if}
   </div>
 
@@ -465,6 +505,17 @@ Human notes and agent suggestions arrive in the same encrypted margin. The owner
     <span>Your source file stays clean until you accept.</span>
   </footer>
 </main>
+
+{#if pmView}
+  <GuidedDemoCursor
+    bind:this={guidedCursor}
+    enabled={guidedDemoEnabled}
+    replyText={GUIDED_REPLY}
+    onstart={prepareGuidedDemo}
+    oncomplete={completeGuidedDemo}
+    oncancel={cancelGuidedDemo}
+  />
+{/if}
 
 {#if toolbarSelection && pmView && !commentComposer}
   <SelectionToolbar
@@ -611,6 +662,18 @@ Human notes and agent suggestions arrive in the same encrypted margin. The owner
     text-transform: uppercase;
   }
   .prompt-check { color: var(--green); font-weight: 800; }
+  .prompt-replay {
+    margin-left: 0.3rem;
+    padding: 0.22rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    background: var(--background);
+    color: var(--foreground);
+    font: 700 0.7rem var(--font-sans, sans-serif);
+    cursor: pointer;
+  }
+  .prompt-replay:hover { border-color: var(--foreground); }
+  .prompt-replay:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 
   .demo-workspace {
     min-height: 0;
@@ -688,9 +751,11 @@ Human notes and agent suggestions arrive in the same encrypted margin. The owner
     .demo-live { font-size: 0; margin-left: 0.45rem; }
     .demo-live i { width: 8px; height: 8px; }
     .demo-prompt { align-items: flex-start; justify-content: flex-start; flex-wrap: wrap; line-height: 1.35; }
+    .prompt-replay { min-height: 44px; padding-inline: 0.7rem; }
     .demo-workspace { display: block; }
     .demo-document { min-height: 470px; padding: 2.3rem 1.15rem 3.2rem; overflow: visible; }
     .demo-margin { min-height: 420px; border-top: 1px solid var(--border); border-left: 0; overflow: visible; }
+    .demo-margin :global(.rmc-btn) { min-height: 44px; padding-inline: 0.75rem; }
     .demo-status { min-height: 54px; align-items: flex-start; flex-direction: column; justify-content: center; gap: 0.2rem; }
   }
 

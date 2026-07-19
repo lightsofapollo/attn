@@ -1,6 +1,8 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page } from '@playwright/test';
 
+const GUIDED_REPLY = 'Exactly — the owner still makes the final call.';
+
 async function selectDemoText(page: Page, text: string): Promise<void> {
   await page.evaluate((targetText) => {
     const target = window as unknown as {
@@ -32,7 +34,7 @@ async function selectDemoText(page: Page, text: string): Promise<void> {
 }
 
 test('landing demo shows agent feedback and lets the visitor join the review', async ({ page }) => {
-  await page.goto('/app?surface=landing-review-demo');
+  await page.goto('/app?surface=landing-review-demo&autoplay=0');
   await expect(page.locator('body')).toHaveAttribute('data-surface', 'landing-review-demo');
   await expect(page.locator('.ProseMirror')).toContainText('Launch direction');
 
@@ -71,6 +73,50 @@ test('alternate homepage embeds the production review surface', async ({ page })
   const frame = page.frameLocator('iframe[title^="Interactive attn Markdown review"]');
   await expect(frame.locator('.ProseMirror')).toContainText('Launch direction');
   await expect(frame.getByTestId('review-margin-card')).toHaveCount(3);
+  await expect(frame.getByText(GUIDED_REPLY, { exact: true })).toBeVisible();
+  await expect(frame.locator('.landing-review-demo')).toHaveAttribute('data-demo-state', 'complete');
+  const replay = frame.getByRole('button', { name: 'Replay demo' });
+  await expect(replay).toBeVisible();
+  await replay.click();
+  await expect(frame.getByText(GUIDED_REPLY, { exact: true })).toHaveCount(0);
+  await expect(frame.getByText(GUIDED_REPLY, { exact: true })).toBeVisible();
+  await expect(frame.getByText(GUIDED_REPLY, { exact: true })).toHaveCount(1);
+});
+
+test('visitor input cancels the guided reply and leaves the real composer ready', async ({ page }) => {
+  await page.goto('/app?surface=landing-review-demo');
+
+  const cursor = page.locator('[data-slot="guided-demo-cursor"]');
+  await expect(cursor).toHaveAttribute('data-phase', 'typing');
+  const textarea = page.locator(
+    '[data-thread-id="landing-demo-codex-thread"] [data-slot="review-reply-composer"] textarea',
+  );
+  await textarea.click();
+
+  await expect(cursor).toHaveAttribute('data-phase', 'cancelled');
+  await expect(textarea).toHaveValue('');
+  await page.waitForTimeout(1_000);
+  await expect(page.getByText(GUIDED_REPLY, { exact: true })).toHaveCount(0);
+  await expect(textarea).toBeFocused();
+});
+
+test('reduced motion completes the real reply without showing a moving pointer', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/app?surface=landing-review-demo');
+
+  await expect(page.getByText(GUIDED_REPLY, { exact: true })).toBeVisible();
+  await expect(page.locator('.landing-review-demo')).toHaveAttribute('data-demo-state', 'complete');
+  await expect(page.locator('[data-slot="guided-demo-cursor"]')).not.toHaveClass(/is-visible/u);
+});
+
+test('phone demo uses a visible tap target instead of a desktop cursor', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app?surface=landing-review-demo');
+
+  const cursor = page.locator('[data-slot="guided-demo-cursor"]');
+  await expect(cursor).toHaveAttribute('data-phase', 'reply');
+  await expect(cursor).toHaveAttribute('data-pointer', 'tap');
+  await expect(cursor).toHaveClass(/is-visible/u);
 });
 
 test('only the landing demo surface permits same-origin framing', async ({ request }) => {
@@ -85,7 +131,7 @@ test('only the landing demo surface permits same-origin framing', async ({ reque
 
 test('landing demo remains contained at phone width', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 900 });
-  await page.goto('/app?surface=landing-review-demo');
+  await page.goto('/app?surface=landing-review-demo&autoplay=0');
   await expect(page.locator('.ProseMirror')).toBeVisible();
   await expect(page.getByTestId('review-margin-card')).toHaveCount(3);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);

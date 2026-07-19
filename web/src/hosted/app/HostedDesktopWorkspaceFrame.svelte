@@ -231,8 +231,8 @@
            always has room to breathe (user ruling: not flush-left, not
            centered; a stable anchored margin). Comments hug the document's
            right edge. -->
-      <div aria-hidden="true" style="flex: 0 0 clamp(2rem, 6vw, 8rem);"></div>
-      <div class="min-w-0 flex-1" style="max-width: calc(var(--content-measure) + 4.5rem);">
+      <div aria-hidden="true" style="flex: 0 0 clamp(0.75rem, 3vw, 3.5rem);"></div>
+      <div class="flex-1" style="max-width: calc(var(--content-measure) + 4.5rem); min-width: min(100%, 44rem);">
         {@render content()}
       </div>
       {#if reviewStore.railMode !== 'hidden'}
@@ -243,8 +243,8 @@
              open). The inner column narrows to the gutter width when
              collapsed; the spare width is plain paper. -->
         <aside
-          class="right-rail sticky top-0 flex shrink-0 flex-col self-start overflow-hidden"
-          style={`width: ${RAIL_WIDTH_PX.expanded}px; height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
+          class="right-rail sticky top-0 flex flex-col self-start overflow-hidden"
+          style={`flex: 0 1 ${RAIL_WIDTH_PX.expanded}px; min-width: ${reviewStore.railMode === 'collapsed' ? '48px' : '15rem'}; height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={reviewStore.railMode}
           data-slot="right-rail"
@@ -256,7 +256,7 @@
           <div class="h-10 shrink-0" aria-hidden="true"></div>
           <div
             class="relative mb-2 min-h-0 flex-1 overflow-hidden"
-            style={`width: ${RAIL_WIDTH_PX[reviewStore.railMode]}px;`}
+            style={`width: ${reviewStore.railMode === 'collapsed' ? '48px' : '100%'};`}
           >
             {@render rail()}
           </div>

@@ -131,6 +131,9 @@
     ...(onOpenDesk ? [{ id: 'all-workspaces', label: 'All workspaces', run: onOpenDesk }] : []),
   ]);
   let viewport = $state<HTMLElement | null>(null);
+  // Live width of the ReviewBar dock — the breadcrumb's right inset tracks
+  // it so the save chip seats flush beside the Sharing cluster.
+  let reviewDockWidth = $state(0);
   // The sticky margin column must be exactly one viewport tall so the
   // bottom-fit pass inside ReviewMargin sees the real visible height.
   let railViewportHeight = $state(0);
@@ -195,6 +198,7 @@
     isOwner={true}
     onShareClick={onShare}
     railToggle={true}
+    onDockWidth={(px) => (reviewDockWidth = px)}
   />
 {/snippet}
 
@@ -210,7 +214,7 @@
       {actions}
       onShare={reviewStore.currentRoomId === null && !shareOpen ? onShare : undefined}
       shareEnabled={true}
-      rightInsetPx={reviewStore.currentRoomId !== null || shareOpen ? 328 : 16}
+      rightInsetPx={reviewDockWidth > 0 ? reviewDockWidth + 28 : 16}
     />
   </div>
   <ScrollArea

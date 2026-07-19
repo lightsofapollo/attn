@@ -71,6 +71,13 @@
     /** CSS right offset in px. Negative values let the parent span side rails. */
     rightOffsetPx?: number;
     /**
+     * Reports the dock's rendered width so the header can seat neighboring
+     * chips flush against it instead of reserving a fixed worst-case inset
+     * (the fixed 328px reservation left a gulf between the save chip and
+     * the Sharing cluster — user report).
+     */
+    onDockWidth?: (px: number) => void;
+    /**
      * The local participant's id, surfaced from the daemon's identity
      * bootstrap. Passed through to PeerStrip so the matching chip carries
      * a `(you)` label. `null` until the bridge populates it.
@@ -94,7 +101,21 @@
     rightOffsetPx = 16,
     localParticipantId = null,
     railToggle = false,
+    onDockWidth,
   }: Props = $props();
+
+  let dockEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const el = dockEl;
+    if (!el || !onDockWidth || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => onDockWidth(el.offsetWidth));
+    observer.observe(el);
+    onDockWidth(el.offsetWidth);
+    return () => {
+      observer.disconnect();
+      onDockWidth(0);
+    };
+  });
 
   // SnapshotBadge needs the local participant's kind to flip between owner
   // and reviewer perspectives. We map `isOwner` 1-to-1 because the parent
@@ -144,6 +165,7 @@
     data-state={reviewStore.currentRoomId !== null ? 'active' : 'pending'}
   >
     <div
+      bind:this={dockEl}
       class="review-bar-dock pointer-events-auto inline-flex h-8 max-w-[calc(100vw-1rem)] shrink-0 items-center justify-end gap-1.5 overflow-visible px-0"
       data-slot="review-bar-dock"
     >

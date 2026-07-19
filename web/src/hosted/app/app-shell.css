@@ -296,7 +296,10 @@ a.workspace-row:hover {
 }
 
 .editor-top .share-action {
-  text-align: right;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 /* Once a review is live the button is a status you can reopen, not a

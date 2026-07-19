@@ -2260,12 +2260,12 @@
           <strong class="masthead-doc" aria-hidden="true">{docTitle}</strong>
         </span>
       {/if}
-      <!-- Same precedence as the desktop chip: a live share outranks the
-           local save state, so mobile doesn't claim "Saved on this device"
-           while the document is shared. -->
-      <span class="save-state save-chip" data-save-state={saveState} data-commits={commitCount}>{ownerRoomStatus ?? saveState}</span>
     </div>
     <div class="share-action">
+      <!-- Chips cluster on the RIGHT together (user ruling: no stranded
+           chip on the left with a gulf before Sharing). Same precedence as
+           the desktop chip: a live share outranks the local save state. -->
+      <span class="save-state save-chip" data-save-state={saveState} data-commits={commitCount}>{ownerRoomStatus ?? saveState}</span>
       <!-- State-aware: once a review room is live the button carries the
            share status (dot + "Sharing") and reopens the sheet to manage. -->
       <button

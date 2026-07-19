@@ -1015,7 +1015,12 @@
                [document + margin] centers as ONE unit, so comments sit
                adjacent to the text instead of pinned to the far window edge
                with dead paper between (Docs adjacency). -->
-          <div class="flex min-h-full flex-row justify-center">
+          <div class="flex min-h-full flex-row">
+            <!-- Fixed left gutter: the document anchors here in EVERY state —
+                 comments or not, rail or not — so its left edge never moves
+                 and always has room to breathe (user ruling: not flush-left,
+                 not centered; a stable anchored margin). -->
+            <div aria-hidden="true" style="flex: 0 0 clamp(2rem, 6vw, 8rem);"></div>
             <div class="min-w-0 flex-1" style="max-width: calc(var(--content-measure) + 4.5rem);">
               {#if displayedDocType === 'html'}
                 <!-- Read-only HTML doc: render received bytes in a sandboxed iframe.
@@ -1039,10 +1044,11 @@
                 />
               {/if}
             </div>
-            {#if displayedDocType !== 'html' && desktopLayout && currentThreadCount > 0}
-              <!-- Reserved for the whole life of the thread set: closing the
-                   rail only unmounts the cards, so the document column never
-                   reflows on toggle (Docs rule — the page doesn't move). -->
+            {#if displayedDocType !== 'html' && desktopLayout}
+              <!-- Reserved for the whole life of the SURFACE, not the thread
+                   set: the review page is always commentable, so the first
+                   comment must not shift the document left (Docs rule — the
+                   page never moves). Empty margin is just paper. -->
               <aside
                 class="browser-review-margin sticky top-0 w-[320px] shrink-0 self-start overflow-hidden"
                 style="height: calc(100dvh - 2.75rem);"

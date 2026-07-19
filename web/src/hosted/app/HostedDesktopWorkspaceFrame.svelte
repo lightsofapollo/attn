@@ -225,10 +225,13 @@
          exactly one viewport tall; its top spacer clears the floating
          ReviewBar, and its header carries the collapse toggle that used to
          live on the outer frame aside. -->
-    <div class="flex min-h-full flex-row justify-center">
-      <!-- Document column caps at the content measure so [document + margin]
-           center together — comments adjacent to the text, not the window
-           edge (Docs adjacency; the native frame's hug-rail equivalent). -->
+    <div class="flex min-h-full flex-row">
+      <!-- Fixed left gutter: the document anchors here in EVERY state —
+           sharing or not, rail or not — so its left edge never moves and
+           always has room to breathe (user ruling: not flush-left, not
+           centered; a stable anchored margin). Comments hug the document's
+           right edge. -->
+      <div aria-hidden="true" style="flex: 0 0 clamp(2rem, 6vw, 8rem);"></div>
       <div class="min-w-0 flex-1" style="max-width: calc(var(--content-measure) + 4.5rem);">
         {@render content()}
       </div>

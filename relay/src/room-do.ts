@@ -191,6 +191,10 @@ const META = {
   bytesUsedR2: "meta:bytes_used_r2",
   envelopeCount: "meta:envelope_count",
   oldestRetainedSeq: "meta:oldest_retained_seq",
+  /** Highest serverSeq below which kind=signal envelopes have been compacted
+   *  away (event-log-compaction.md): every owner snapshot supersedes the
+   *  collab steps before it, so they are pruned and the cap self-heals. */
+  signalCompactedThrough: "meta:signal_compacted_through",
   /** Active generation reservation, retained for the full room lifetime. */
   quotaLease: "meta:quota_lease",
   /** Cleanup tombstone retained only while a quota release is retrying. */
@@ -1600,6 +1604,10 @@ export class RoomDO extends DurableObject<Env> {
     const antiAbuseFailure = await applyWriteAntiAbuse();
     if (antiAbuseFailure !== undefined) return antiAbuseFailure;
 
+    // Owner-authored snapshot envelopes in this batch (device tier check in
+    // the validation loop below). Fresh ones set the compaction floor.
+    const ownerSnapshotIds = new Set<string>();
+
     // 4. Per-envelope validation. We collect everything first and bail on the
     //    first error so the whole batch is rejected atomically (spec wording
     //    says "reject the *whole batch*" for cap overflow; per-envelope shape
@@ -1644,6 +1652,13 @@ export class RoomDO extends DurableObject<Env> {
           "ATTN_DEVICE_UNREGISTERED",
           "envelope author device is not registered",
         );
+      }
+
+      // Owner devices are the ones registered without a reviewer grant tier.
+      // Their snapshots supersede every collab signal before them — record
+      // them so the post-commit sweep can compact (event-log-compaction.md).
+      if (env.kind === "snapshot_blob" && deviceRecord.grantTier === undefined) {
+        ownerSnapshotIds.add(env.envelopeId);
       }
 
       const hasSignalProof = env.signalGeneration !== undefined || env.deviceSignature !== undefined;
@@ -1782,6 +1797,7 @@ export class RoomDO extends DurableObject<Env> {
     const now = Date.now();
     const writeMap: Record<string, unknown> = {};
     let nextSeq = runningSeq;
+    let ownerSnapshotFloor = 0;
 
     // Only fresh signals select a target index for reconciliation; persisted
     // duplicates stay O(1) idempotency lookups rather than granting a caller a
@@ -1801,6 +1817,9 @@ export class RoomDO extends DurableObject<Env> {
       writeMap[payloadKey] = record;
       freshPayloads.push({ payloadKey, payloadKeys: [payloadKey], record });
       writeMap[envIndexKey(env.envelopeId)] = paddedSeq;
+      if (ownerSnapshotIds.has(env.envelopeId)) {
+        ownerSnapshotFloor = Math.max(ownerSnapshotFloor, nextSeq);
+      }
       if (env.kind === "signal" && env.target?.deviceId !== undefined) {
         const byTargetKey = envByTargetKey(env.target.deviceId, paddedSeq, env.envelopeId);
         writeMap[byTargetKey] = "";
@@ -1928,6 +1947,19 @@ export class RoomDO extends DurableObject<Env> {
           await txn.delete(keysToDelete.slice(i, i + STORAGE_BATCH_SIZE));
         }
       });
+    }
+
+    // 7b. Signal compaction (event-log-compaction.md): an owner snapshot
+    //     supersedes every collab signal before it. Sweep them post-commit —
+    //     best-effort and idempotent; a crash mid-sweep just leaves work for
+    //     the next snapshot. This is how a room recovers headroom against
+    //     policy.maxEvents in long live-editing sessions.
+    if (ownerSnapshotFloor > 0) {
+      try {
+        await this.compactSignalsBelow(ownerSnapshotFloor, finalServerSeq);
+      } catch {
+        // Never fail an accepted batch over compaction.
+      }
     }
 
     // 8. Reschedule alarm if anything was accepted (idle window advances).
@@ -3172,6 +3204,111 @@ export class RoomDO extends DurableObject<Env> {
   }
 
   /** Validate current + fresh payload keys and compute the logical post-state floor. */
+  /**
+   * Delete every kind=signal envelope with serverSeq < floorSeq
+   * (event-log-compaction.md). Owner snapshots carry the full merged
+   * document, so the collab signals before them are pure replay waste: they
+   * eat the room's event cap and make late joins replay dead steps. Durable
+   * review events are untouched. env_idx tombstones are kept (same rule as
+   * FIFO eviction) so re-posts of a compacted envelope stay idempotent.
+   * Room clients tolerate the resulting seq gaps: the WS cursor is
+   * max-seen, and prefix movement is what `cursor_too_old` exists for.
+   */
+  private async compactSignalsBelow(floorSeq: number, finalServerSeq: number): Promise<void> {
+    if (!isNonnegativeSafeInteger(floorSeq) || floorSeq === 0) return;
+    const compactedThrough =
+      (await this.ctx.storage.get<number>(META.signalCompactedThrough)) ?? 0;
+    if (floorSeq <= compactedThrough) return;
+
+    const collect = async (prefix: string): Promise<Map<string, EnvelopeRecord>> => {
+      const found = new Map<string, EnvelopeRecord>();
+      const listed = await this.ctx.storage.list<EnvelopeRecord>({
+        start: `${prefix}${padServerSeq(compactedThrough)}`,
+        end: `${prefix}${padServerSeq(floorSeq)}`,
+      });
+      for (const [key, record] of listed) found.set(key, record);
+      return found;
+    };
+    const [versioned, legacy] = await Promise.all([
+      collect(ENV_PREFIX),
+      collect(LEGACY_ENV_PREFIX),
+    ]);
+
+    const payloadKeysToDelete = new Set<string>();
+    const logicalDeletes = new Set<string>();
+    const auxKeysToDelete: string[] = [];
+    let deletedCount = 0;
+    let deletedBytes = 0;
+    const seenLogical = new Set<string>();
+    for (const source of [versioned, legacy]) {
+      for (const [key, record] of source) {
+        if (record?.kind !== "signal") continue;
+        if (!isNonnegativeSafeInteger(record.serverSeq) || record.serverSeq >= floorSeq) continue;
+        const paddedSeq = padServerSeq(record.serverSeq);
+        const logical = `${paddedSeq}:${encodeOpaqueSegment(record.envelopeId)}`;
+        payloadKeysToDelete.add(key);
+        logicalDeletes.add(logical);
+        // The same logical envelope may exist under both storage prefixes;
+        // charge count/bytes once.
+        if (!seenLogical.has(logical)) {
+          seenLogical.add(logical);
+          deletedCount += 1;
+          deletedBytes += record.ciphertextBytes;
+        }
+        const targetDeviceId = record.target?.deviceId;
+        if (targetDeviceId !== undefined) {
+          auxKeysToDelete.push(
+            envByTargetKey(targetDeviceId, paddedSeq, record.envelopeId),
+            v2EnvByTargetKey(targetDeviceId, paddedSeq, record.envelopeId),
+          );
+          if (!targetDeviceId.includes(":")) {
+            auxKeysToDelete.push(legacyEnvByTargetKey(targetDeviceId, paddedSeq, record.envelopeId));
+          }
+        }
+      }
+    }
+
+    if (deletedCount === 0) {
+      await this.ctx.storage.put(META.signalCompactedThrough, floorSeq);
+      return;
+    }
+
+    const [curCount, curBytes, curOldestRetained] = await Promise.all([
+      this.ctx.storage.get<number>(META.envelopeCount),
+      this.ctx.storage.get<number>(META.bytesUsed),
+      this.ctx.storage.get<number>(META.oldestRetainedSeq),
+    ]);
+    if (
+      !isNonnegativeSafeInteger(curCount) ||
+      !isNonnegativeSafeInteger(curBytes) ||
+      !isNonnegativeSafeInteger(curOldestRetained) ||
+      curCount < deletedCount ||
+      curBytes < deletedBytes
+    ) {
+      return; // accounting looks off — leave the log alone rather than corrupt it
+    }
+    const newOldest = await this.findOldestRetainedSeqAfterMutation({
+      stagedPayloadDeletes: payloadKeysToDelete,
+      stagedLogicalDeletes: logicalDeletes,
+      freshPayloads: [],
+      finalServerSeq,
+    });
+    if (newOldest === undefined || newOldest < curOldestRetained) return;
+
+    const keysToDelete = [...payloadKeysToDelete, ...auxKeysToDelete];
+    await this.ctx.storage.transaction(async (txn) => {
+      await txn.put<unknown>({
+        [META.envelopeCount]: curCount - deletedCount,
+        [META.bytesUsed]: curBytes - deletedBytes,
+        [META.oldestRetainedSeq]: newOldest,
+        [META.signalCompactedThrough]: floorSeq,
+      });
+      for (let i = 0; i < keysToDelete.length; i += STORAGE_BATCH_SIZE) {
+        await txn.delete(keysToDelete.slice(i, i + STORAGE_BATCH_SIZE));
+      }
+    });
+  }
+
   private async findOldestRetainedSeqAfterMutation(opts: {
     stagedPayloadDeletes: ReadonlySet<string>;
     stagedLogicalDeletes: ReadonlySet<string>;

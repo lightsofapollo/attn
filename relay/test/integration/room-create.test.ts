@@ -484,7 +484,7 @@ describe("POST /v2/rooms/:roomId — clamping", () => {
     const json = (await res.json()) as RoomCreateResponse;
     expect(json.policy.maxSnapshotBytes).toBe(5_242_880);
     expect(json.policy.maxEventBytes).toBe(262_144);
-    expect(json.policy.maxEvents).toBe(500);
+    expect(json.policy.maxEvents).toBe(2_000);
   });
 
   it("clamps expiresAt to createdAt + 24h by default", async () => {

@@ -25,6 +25,14 @@ declare module "cloudflare:test" {
 
 const URL_BASE = "https://relay.example";
 
+/** Per-room source IP so this file's requests never drain the shared
+ *  per-IP edge bucket other test files depend on (mirrors delete-room). */
+function roomTestIp(roomId: string): string {
+  let hash = 0;
+  for (const byte of new TextEncoder().encode(roomId)) hash = (hash * 33 + byte) >>> 0;
+  return `203.0.${(hash >>> 8) & 0xff}.${(hash & 0xfe) + 1}`;
+}
+
 function targetIndexPrefix(deviceId: string): string {
   return `env_by_target_v3:${encodeOpaqueSegment(deviceId)}:`;
 }
@@ -123,6 +131,7 @@ async function createRoom(opts: {
       "Content-Type": "application/json",
       "Attn-Owner-Signature": ownerSig,
       "Attn-PoW": await createPowHeader(opts.roomId, opts.ownerKp.publicKeyBytes),
+      "CF-Connecting-IP": roomTestIp(opts.roomId),
     },
     body,
   });
@@ -266,6 +275,7 @@ async function registerDevice(opts: {
       "Content-Type": "application/json",
       "Attn-Admission": adm,
       "Attn-PoW": pow,
+      "CF-Connecting-IP": roomTestIp(opts.roomId),
     },
     body,
   });
@@ -368,7 +378,10 @@ async function postEnvelopes(opts: {
 }): Promise<Response> {
   const url = `${URL_BASE}/v2/rooms/${opts.roomId}/envelopes`;
   const body = JSON.stringify({ envelopes: opts.envelopes });
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "CF-Connecting-IP": roomTestIp(opts.roomId),
+  };
   if (!opts.omitAdmission) {
     headers["Attn-Admission"] = await admissionHeaderFor({
       method: "POST",
@@ -1532,5 +1545,259 @@ describe("POST /v2/rooms/:roomId/envelopes — signal routing + sub-cap", () => 
       payloadCount: 64,
       indexCount: 68,
     });
+  });
+});
+
+describe("signal compaction on owner snapshots (event-log-compaction.md)", () => {
+  async function injectReviewerDevice(
+    roomId: string,
+    participantId: string,
+    deviceId: string,
+  ): Promise<void> {
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.put(`device:${participantId}:${deviceId}`, {
+        deviceId,
+        participantId,
+        publicSigningKey: base64UrlEncode(new Uint8Array(32).fill(0x51)),
+        publicEncryptionKey: base64UrlEncode(new Uint8Array(32).fill(0x52)),
+        client: "attn-browser",
+        kind: "reviewer",
+        grantTier: "suggest",
+        grantSignature: base64UrlEncode(new Uint8Array(64).fill(0x53)),
+        selfSignature: base64UrlEncode(new Uint8Array(64).fill(0x54)),
+        registeredAt: Date.now(),
+      });
+    });
+  }
+
+  async function getCompactionState(roomId: string): Promise<{
+    envelopeCount: number;
+    bytesUsed: number;
+    oldestRetainedSeq: number;
+    signalCompactedThrough: number;
+    payloadKeys: string[];
+    indexCount: number;
+  }> {
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    return runInDurableObject(stub, async (_inst, state) => {
+      const [envelopeCount, bytesUsed, oldestRetainedSeq, compactedThrough, payloads, indexes] =
+        await Promise.all([
+          state.storage.get<number>("meta:envelope_count"),
+          state.storage.get<number>("meta:bytes_used"),
+          state.storage.get<number>("meta:oldest_retained_seq"),
+          state.storage.get<number>("meta:signal_compacted_through"),
+          state.storage.list({ prefix: "env_v2:" }),
+          state.storage.list({ prefix: "env_idx_v2:" }),
+        ]);
+      return {
+        envelopeCount: envelopeCount ?? 0,
+        bytesUsed: bytesUsed ?? 0,
+        oldestRetainedSeq: oldestRetainedSeq ?? 0,
+        signalCompactedThrough: compactedThrough ?? 0,
+        payloadKeys: [...payloads.keys()],
+        indexCount: indexes.size,
+      };
+    });
+  }
+
+  it("compacts untargeted signals below an owner snapshot; durable events survive", async () => {
+    const roomId = uniqueRoomId("compact-basic");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-owner",
+      participantId: "owner",
+    });
+
+    // 3 collab-style signals (untargeted), 2 durable events, then an owner
+    // snapshot. Everything posts from the tier-less (owner-class) device.
+    const seed = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [
+        ...[0, 1, 2].map((i) => buildEnvelope({
+          envelopeId: `sig-${i}`,
+          authorId: "owner",
+          deviceId: "dev-owner",
+          kind: "signal",
+          ciphertextBytes: 64,
+        })),
+        ...[0, 1].map((i) => buildEnvelope({
+          envelopeId: `evt-${i}`,
+          authorId: "owner",
+          deviceId: "dev-owner",
+          kind: "event",
+          ciphertextBytes: 100,
+        })),
+      ],
+    });
+    expect(seed.status).toBe(201);
+    const before = await getCompactionState(roomId);
+    expect(before.envelopeCount).toBe(5);
+
+    const snap = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [buildEnvelope({
+        envelopeId: "snap-1",
+        authorId: "owner",
+        deviceId: "dev-owner",
+        kind: "snapshot_blob",
+        ciphertextBytes: 512,
+      })],
+    });
+    expect(snap.status).toBe(201);
+
+    const after = await getCompactionState(roomId);
+    // 2 events + 1 snapshot remain; 3 signals compacted.
+    expect(after.envelopeCount).toBe(3);
+    expect(after.bytesUsed).toBe(before.bytesUsed - 3 * 64 + 512);
+    expect(after.signalCompactedThrough).toBe(6);
+    // Signal payloads gone, event + snapshot payloads retained.
+    for (let i = 0; i < 3; i++) {
+      expect(after.payloadKeys.includes(payloadKey(i + 1, `sig-${i}`))).toBe(false);
+    }
+    expect(after.payloadKeys.includes(payloadKey(4, "evt-0"))).toBe(true);
+    expect(after.payloadKeys.includes(payloadKey(5, "evt-1"))).toBe(true);
+    expect(after.payloadKeys.includes(payloadKey(6, "snap-1"))).toBe(true);
+    // env_idx tombstones are kept so re-posts stay idempotent.
+    expect(after.indexCount).toBe(6);
+    // Oldest retained is now the first durable event (seq 4).
+    expect(after.oldestRetainedSeq).toBe(4);
+
+    // Idempotent re-post of a compacted signal does not resurrect it.
+    const dup = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [buildEnvelope({
+        envelopeId: "sig-0",
+        authorId: "owner",
+        deviceId: "dev-owner",
+        kind: "signal",
+        ciphertextBytes: 64,
+      })],
+    });
+    expect(dup.status).toBe(201);
+    const afterDup = await getCompactionState(roomId);
+    expect(afterDup.envelopeCount).toBe(3);
+  });
+
+  it("reviewer-tier snapshots do not trigger compaction", async () => {
+    const roomId = uniqueRoomId("compact-reviewer");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-owner",
+      participantId: "owner",
+    });
+    await injectReviewerDevice(roomId, "rev", "dev-rev");
+
+    const sig = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [buildEnvelope({
+        envelopeId: "sig-a",
+        authorId: "owner",
+        deviceId: "dev-owner",
+        kind: "signal",
+        ciphertextBytes: 64,
+      })],
+    });
+    expect(sig.status).toBe(201);
+
+    const snap = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [buildEnvelope({
+        envelopeId: "rev-snap",
+        authorId: "rev",
+        deviceId: "dev-rev",
+        kind: "snapshot_blob",
+        ciphertextBytes: 256,
+      })],
+    });
+    expect(snap.status).toBe(201);
+
+    const state = await getCompactionState(roomId);
+    expect(state.envelopeCount).toBe(2);
+    expect(state.signalCompactedThrough).toBe(0);
+    expect(state.payloadKeys.includes(payloadKey(1, "sig-a"))).toBe(true);
+  });
+
+  it("cap self-heals: a full room accepts new envelopes after an owner snapshot", async () => {
+    const roomId = uniqueRoomId("compact-heal");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({
+      roomId,
+      ownerKp: owner,
+      policy: { maxEvents: 6 },
+    });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-owner",
+      participantId: "owner",
+    });
+
+    const fill = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [0, 1, 2, 3, 4].map((i) => buildEnvelope({
+        envelopeId: `fill-${i}`,
+        authorId: "owner",
+        deviceId: "dev-owner",
+        kind: "signal",
+        ciphertextBytes: 48,
+      })),
+    });
+    expect(fill.status).toBe(201);
+    // Room is at 5/6; a 2-envelope batch would blow the cap.
+    const blocked = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [0, 1].map((i) => buildEnvelope({
+        envelopeId: `blocked-${i}`,
+        authorId: "owner",
+        deviceId: "dev-owner",
+        kind: "event",
+        ciphertextBytes: 48,
+      })),
+    });
+    expect(blocked.status).toBe(507);
+
+    // The owner snapshot itself fits (6/6) and compacts the 5 signals away.
+    const snap = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [buildEnvelope({
+        envelopeId: "heal-snap",
+        authorId: "owner",
+        deviceId: "dev-owner",
+        kind: "snapshot_blob",
+        ciphertextBytes: 256,
+      })],
+    });
+    expect(snap.status).toBe(201);
+    const healed = await getCompactionState(roomId);
+    expect(healed.envelopeCount).toBe(1);
+
+    // Headroom is back: the previously blocked batch now lands.
+    const retry = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [0, 1].map((i) => buildEnvelope({
+        envelopeId: `retry-${i}`,
+        authorId: "owner",
+        deviceId: "dev-owner",
+        kind: "event",
+        ciphertextBytes: 48,
+      })),
+    });
+    expect(retry.status).toBe(201);
   });
 });

@@ -696,7 +696,7 @@
   padding: 0.55rem 0.65rem;
   border-radius: 2px;
   background: color-mix(in oklch, var(--review-card-comment-accent) 14%, transparent);
-  color: var(--hosted-muted);
+  color: var(--ink);
   font: 0.78rem/1.4 var(--serif);
 }
 

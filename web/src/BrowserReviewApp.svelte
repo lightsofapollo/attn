@@ -418,6 +418,21 @@
   // file that is actually selected; otherwise show the loading state until
   // the selected file's snapshot hydrates.
   const selectedFileId = $derived(reviewStore.currentFileId ?? sessionState.fileId);
+
+  // Latch the selection the moment the FIRST file is known. Until
+  // currentFileId is pinned, the fallback above follows sessionState.fileId
+  // — which tracks each ARRIVING snapshot during a multi-file share load —
+  // and that was the visible file-cycling on slow networks (every browser,
+  // worst on Safari). One pin ends the chase; the sidebar switches files
+  // explicitly from there.
+  $effect(() => {
+    const fid = sessionState.fileId;
+    if (fid !== null && reviewStore.currentRoomId !== null && reviewStore.currentFileId === null) {
+      untrack(() => {
+        reviewStore.currentFileId = fid;
+      });
+    }
+  });
   const displayedContent = $derived.by(() => {
     if (displayedSnapshot) return displayedSnapshot.content;
     return sessionState.fileId === selectedFileId ? sessionState.snapshotContent : null;
@@ -1031,9 +1046,9 @@
                  comments or not, rail or not — so its left edge never moves
                  and always has room to breathe (user ruling: not flush-left,
                  not centered; a stable anchored margin). -->
-            {#if desktopLayout}
-              <div aria-hidden="true" style="flex: 0 0 clamp(0.75rem, 3vw, 3.5rem);"></div>
-            {/if}
+            <!-- No gutter spacer here (user annotation: "remove this
+                 entirely so the margin lines up") — the ProseMirror's own
+                 padding is the reviewer page's left margin. -->
             <!-- The 44rem reading floor and measure cap are desktop concepts;
                  on phones the column is simply the full width — a fixed
                  min-width there overflowed the row by the gutter's width and

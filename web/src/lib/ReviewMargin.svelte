@@ -159,7 +159,10 @@
   // App.svelte's aside width and our rendering agree. `collapsed` is the
   // 48px gutter: author-avatar chips for unresolved threads, ✓ chips for
   // resolved ones (attn-42y).
-  const collapsed = $derived(reviewStore.railMode === 'collapsed');
+  // The stacked bottom sheet (mobile) always shows full cards — Reading's
+  // collapsed marker gutter is a desktop-margin concept; a sheet the user
+  // explicitly opened must never render bare avatar chips (user report).
+  const collapsed = $derived(layout !== 'stacked' && reviewStore.railMode === 'collapsed');
 
   // The one resolved thread currently expanded to a full read-only card
   // (attn-d7y). Store-owned; expanding also expands the rail.

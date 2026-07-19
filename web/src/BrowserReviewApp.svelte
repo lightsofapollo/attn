@@ -1018,8 +1018,19 @@
                  comments or not, rail or not — so its left edge never moves
                  and always has room to breathe (user ruling: not flush-left,
                  not centered; a stable anchored margin). -->
-            <div aria-hidden="true" style="flex: 0 0 clamp(0.75rem, 3vw, 3.5rem);"></div>
-            <div class="flex-1" style="max-width: calc(var(--content-measure) + 4.5rem); min-width: min(100%, 44rem);">
+            {#if desktopLayout}
+              <div aria-hidden="true" style="flex: 0 0 clamp(0.75rem, 3vw, 3.5rem);"></div>
+            {/if}
+            <!-- The 44rem reading floor and measure cap are desktop concepts;
+                 on phones the column is simply the full width — a fixed
+                 min-width there overflowed the row by the gutter's width and
+                 caused a sideways scroll (user report). -->
+            <div
+              class="flex-1"
+              style={desktopLayout
+                ? 'max-width: calc(var(--content-measure) + 4.5rem); min-width: min(100%, 44rem);'
+                : 'min-width: 0; max-width: 100%;'}
+            >
               {#if displayedDocType === 'html'}
                 <!-- Read-only HTML doc: render received bytes in a sandboxed iframe.
                      No editor, no collab, no comment margin (yet). -->

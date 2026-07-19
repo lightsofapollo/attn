@@ -792,17 +792,11 @@
   // owner's rail sat in its collapsed 48px gutter and a reviewer's incoming
   // comment landed as a barely-visible avatar chip — feedback effectively
   // arrived invisibly. One-shot per room so a deliberate collapse sticks.
-  let reviewRailAutoOpenedRoom: string | null = null;
-  $effect(() => {
-    const store = reviewStoreRef;
-    if (!store) return;
-    const roomId = store.currentRoomId;
-    if (roomId === null) return;
-    if (store.marginActiveThreadCount > 0 && reviewRailAutoOpenedRoom !== roomId) {
-      reviewRailAutoOpenedRoom = roomId;
-      if (!store.panelOpen) store.panelOpen = true;
-    }
-  });
+  // Reading is the DEFAULT mode (comment-layout-alternatives.md): threads
+  // arriving surface as anchored marker chips in the collapsed gutter plus
+  // the unread badge — they never auto-expand the band. Review mode is
+  // entered by choice: the dock toggle, ⌘J, clicking a marker/highlight,
+  // or opening an arrival toast.
 
   // Rebuild the inline decorations whenever resolutions, events, or the
   // focused thread change (mirrors the reviewer page's trigger).

@@ -242,9 +242,13 @@
              recenters (Docs rule — the page doesn't move when comments
              open). The inner column narrows to the gutter width when
              collapsed; the spare width is plain paper. -->
+        <!-- Reading mode reserves only the 48px marker gutter — the document
+             gets the width; Review mode opens the full responsive band. The
+             width change on toggle is user-initiated (the chosen-reflow
+             carve-out in the stability ruling). -->
         <aside
           class="right-rail sticky top-0 flex flex-col self-start overflow-hidden"
-          style={`flex: 0 1 ${RAIL_WIDTH_PX.expanded}px; min-width: ${reviewStore.railMode === 'collapsed' ? '48px' : '15rem'}; height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
+          style={`${reviewStore.railMode === 'collapsed' ? `flex: 0 0 ${RAIL_WIDTH_PX.collapsed}px;` : 'flex: 0 1 320px; min-width: 15rem;'} height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={reviewStore.railMode}
           data-slot="right-rail"
@@ -256,7 +260,7 @@
           <div class="h-10 shrink-0" aria-hidden="true"></div>
           <div
             class="relative mb-2 min-h-0 flex-1 overflow-hidden"
-            style={`width: ${reviewStore.railMode === 'collapsed' ? '48px' : '100%'};`}
+            style="width: 100%;"
           >
             {@render rail()}
           </div>

@@ -187,10 +187,10 @@
   const pushCapable = 'getPushConsentState' in session && 'setPushConsentObserver' in session &&
     'enablePushFromUserGesture' in session && 'disablePushFromUserGesture' in session;
   let pushConsent = $state<BrowserPushConsentState>({ status: pushCapable ? 'checking' : 'unsupported', message: null, enabled: false });
-  // The margin always renders in its expanded/card mode here — the reviewer
-  // rail is either open (320px of cards) or unmounted entirely; the native
-  // app's collapsed 48px avatar-gutter mode never applies.
-  reviewStore.panelOpen = true;
+  // Reading is the default mode (comment-layout-alternatives.md): the
+  // margin boots as the 48px marker gutter; Review (the full card band) is
+  // entered by choice — 💬/⌘J, clicking a marker or highlight, composing.
+  reviewStore.panelOpen = false;
 
   // Phones get the document full-width; threads move behind a thumb control
   // that opens the same margin as a bottom sheet (attn-qez). Same 901px
@@ -209,28 +209,24 @@
   // Cmd+J. A deliberate collapse sticks for the room.
   // ---------------------------------------------------------------------------
 
-  let railOpen = $state(false);
+  // Reading/Review mode lives on the shared review store (panelOpen /
+  // railMode) so ReviewMargin's collapsed marker-gutter UI and the owner
+  // surface share one grammar (comment-layout-alternatives.md).
   let railAutoOpenedRoom = $state<string | null>(null);
   const currentThreadCount = $derived(reviewStore.threadsForCurrentFile.length);
   const activeThreadCount = $derived(reviewStore.marginActiveThreadCount);
-  const railVisible = $derived(railOpen && currentThreadCount > 0);
+  const railVisible = $derived(reviewStore.railMode === 'expanded');
 
-  $effect(() => {
-    const roomId = reviewStore.currentRoomId;
-    if (roomId === null) return;
-    if (activeThreadCount > 0 && railAutoOpenedRoom !== roomId) {
-      railAutoOpenedRoom = roomId;
-      railOpen = true;
-    }
-  });
+  // Threads arriving do NOT auto-open the band (Reading default): they
+  // surface as marker chips in the gutter plus the header count.
 
   // Clicking a highlight in the document focuses its thread — surface it.
   $effect(() => {
-    if (reviewStore.focusEventId !== null && currentThreadCount > 0) railOpen = true;
+    if (reviewStore.focusEventId !== null && currentThreadCount > 0) reviewStore.panelOpen = true;
   });
 
   function toggleRail(): void {
-    railOpen = !railOpen;
+    reviewStore.togglePanel();
   }
 
   function handleRailShortcut(event: KeyboardEvent): void {
@@ -754,6 +750,8 @@
   });
 
   function openComposer(kind: 'comment' | 'suggestion'): void {
+    // Composing is an explicit request to see the card — enter Review mode.
+    reviewStore.panelOpen = true;
     if (sessionState.grantTier === 'view') return;
     if (kind === 'suggestion' && sessionState.grantTier !== 'suggest') return;
     const view = pmViewForReview;
@@ -983,14 +981,14 @@
               onTogglePush={() => { void togglePushConsent(); }}
               onRetryOutbox={() => { void session.retryOutbox(); }}
             />
-            {#if desktopLayout && displayedDocType !== 'html' && currentThreadCount > 0}
+            {#if desktopLayout && displayedDocType !== 'html'}
               <button
                 type="button"
                 class="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                 data-slot="browser-review-rail-toggle"
-                aria-pressed={railOpen}
-                aria-label={railOpen ? 'Hide comments' : 'Show comments'}
-                title="{railOpen ? 'Hide comments' : 'Show comments'} (⌘J)"
+                aria-pressed={reviewStore.panelOpen}
+                aria-label={reviewStore.panelOpen ? 'Reading mode' : 'Review mode'}
+                title="{reviewStore.panelOpen ? 'Reading mode — hide the comment band' : 'Review mode — show all comments'} (⌘J)"
                 onclick={toggleRail}
               >
                 <MessageSquareText class="size-3.5" aria-hidden="true" />
@@ -1049,24 +1047,24 @@
                    set: the review page is always commentable, so the first
                    comment must not shift the document left (Docs rule — the
                    page never moves). Empty margin is just paper. -->
-              <!-- Responsive band: full 320 when the pane affords it; gives
-                   way down to 240 (Docs-width cards) before squeezing the
-                   document below its 44rem reading floor. -->
+              <!-- Reading mode: a 48px marker gutter (avatar chips at anchor
+                   height) — the document gets the width. Review mode: the
+                   full responsive band (320, giving way to 240 before the
+                   document squeezes below its 44rem floor). The width change
+                   is user-initiated — the chosen-reflow carve-out. -->
               <aside
                 class="browser-review-margin sticky top-0 self-start overflow-hidden"
-                style="height: calc(100dvh - 2.75rem); flex: 0 1 320px; min-width: 15rem;"
+                style={`height: calc(100dvh - 2.75rem); ${railVisible ? 'flex: 0 1 320px; min-width: 15rem;' : 'flex: 0 0 48px;'}`}
                 data-slot="browser-review-margin"
                 data-open={railVisible}
               >
-                {#if railVisible}
-                  <ReviewMargin
-                    view={pmViewForReview}
-                    readOnly={true}
-                    reviewerAuthoring={reviewerAvailability.reviewAuthoring}
-                    onResolveComment={resolveBrowserComment}
-                    onReplyComment={replyBrowserComment}
-                  />
-                {/if}
+                <ReviewMargin
+                  view={pmViewForReview}
+                  readOnly={true}
+                  reviewerAuthoring={reviewerAvailability.reviewAuthoring}
+                  onResolveComment={resolveBrowserComment}
+                  onReplyComment={replyBrowserComment}
+                />
               </aside>
             {/if}
           </div>

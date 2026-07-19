@@ -1747,11 +1747,11 @@ export class RoomDO extends DurableObject<Env> {
     ) {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", "invalid envelope accounting metadata");
     }
-    const runningCount = curCount;
-    const runningBytes = curBytes;
+    let runningCount = curCount;
+    let runningBytes = curBytes;
     const runningBytesR2 = curBytesR2;
     const runningSeq = curServerSeq;
-    const runningOldestRetained = curOldestRetained;
+    let runningOldestRetained = curOldestRetained;
 
     const addedCount = fresh.length;
     let addedBytes = 0;
@@ -1759,6 +1759,37 @@ export class RoomDO extends DurableObject<Env> {
       addedBytes += env.ciphertextBytes;
       if (!Number.isSafeInteger(addedBytes)) {
         return errorResponse(500, "ATTN_ROOM_CORRUPT", "envelope byte addition overflow");
+      }
+    }
+
+    // A room sitting AT the cap must still be able to accept the very
+    // snapshot that heals it: the healing sweep runs BEFORE the cap check
+    // when this batch carries an owner snapshot (every existing signal is
+    // below the incoming snapshot's future seq by construction). Without
+    // this, a capped room deadlocks — the cap rejects the snapshot and the
+    // snapshot is the only thing that frees the cap.
+    if (
+      runningCount + addedCount > policy.maxEvents &&
+      fresh.some((env) => ownerSnapshotIds.has(env.envelopeId))
+    ) {
+      try {
+        await this.compactSignalsBelow(runningSeq + 1, runningSeq);
+        const [freedCount, freedBytes, freedOldest] = await Promise.all([
+          this.ctx.storage.get<number>(META.envelopeCount),
+          this.ctx.storage.get<number>(META.bytesUsed),
+          this.ctx.storage.get<number>(META.oldestRetainedSeq),
+        ]);
+        if (
+          isNonnegativeSafeInteger(freedCount) &&
+          isNonnegativeSafeInteger(freedBytes) &&
+          isNonnegativeSafeInteger(freedOldest)
+        ) {
+          runningCount = freedCount;
+          runningBytes = freedBytes;
+          runningOldestRetained = freedOldest;
+        }
+      } catch {
+        // Best-effort: the normal cap check below still rules.
       }
     }
 

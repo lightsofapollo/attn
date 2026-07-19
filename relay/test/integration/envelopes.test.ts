@@ -1729,6 +1729,50 @@ describe("signal compaction on owner snapshots (event-log-compaction.md)", () =>
     expect(state.payloadKeys.includes(payloadKey(1, "sig-a"))).toBe(true);
   });
 
+  it("a room AT the cap still accepts the owner snapshot that heals it", async () => {
+    const roomId = uniqueRoomId("compact-deadlock");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({
+      roomId,
+      ownerKp: owner,
+      policy: { maxEvents: 5 },
+    });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-owner",
+      participantId: "owner",
+    });
+    const fill = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [0, 1, 2, 3, 4].map((i) => buildEnvelope({
+        envelopeId: `wedge-${i}`,
+        authorId: "owner",
+        deviceId: "dev-owner",
+        kind: "signal",
+        ciphertextBytes: 48,
+      })),
+    });
+    expect(fill.status).toBe(201);
+    // Room is at 5/5 — without pre-compaction the healing snapshot itself
+    // would be rejected and the room could never recover.
+    const snap = await postEnvelopes({
+      roomId,
+      admissionKey,
+      envelopes: [buildEnvelope({
+        envelopeId: "unwedge-snap",
+        authorId: "owner",
+        deviceId: "dev-owner",
+        kind: "snapshot_blob",
+        ciphertextBytes: 256,
+      })],
+    });
+    expect(snap.status).toBe(201);
+    const healed = await getCompactionState(roomId);
+    expect(healed.envelopeCount).toBe(1);
+  });
+
   it("cap self-heals: a full room accepts new envelopes after an owner snapshot", async () => {
     const roomId = uniqueRoomId("compact-heal");
     const owner = await generateEd25519Keypair();

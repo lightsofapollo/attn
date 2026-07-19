@@ -744,6 +744,11 @@ a.workspace-row:hover {
    line at one size instead of two mismatched pills (user feedback). */
 .hosted-save-state.save-chip {
   height: 1.75rem;
+  /* Stable footprint: the text swaps between "Saving…" and "Saved on this
+     device" on every autosave cycle — without a floor the pill resized and
+     the whole right-hand chip cluster shuffled per keystroke. */
+  min-width: 9.25rem;
+  justify-content: center;
   /* Seats the chip on the shared header line: the breadcrumb action
      buttons (share / open-in-browser) and the ReviewBar chips both center
      at ~25px; the chip's own container sits 1.7px higher, hence the

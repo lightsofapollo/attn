@@ -68,8 +68,35 @@
 
   let popoverOpen = $state(false);
 
-  // Pending count — sole gate for the indicator's visibility.
+  // Raw pending count from the store.
   const pending: number = $derived(reviewStore.outboxCount);
+
+  // Visibility is DEBOUNCED, not instantaneous (user report: every
+  // keystroke enqueues an envelope that flushes within ~100ms, so the pill
+  // mounted and unmounted per character — a flicker that also shifted the
+  // whole chip cluster). The pill appears only when envelopes have been
+  // stuck for a beat (delivery is actually slow/offline — the one case the
+  // user needs to know about), and once shown it lingers briefly so it
+  // never blinks out mid-glance.
+  const SHOW_AFTER_MS = 2_000;
+  const LINGER_MS = 1_000;
+  let showPill = $state(false);
+  $effect(() => {
+    const hasPending = pending > 0;
+    if (hasPending && !showPill) {
+      const timer = setTimeout(() => {
+        showPill = true;
+      }, SHOW_AFTER_MS);
+      return () => clearTimeout(timer);
+    }
+    if (!hasPending && showPill) {
+      const timer = setTimeout(() => {
+        showPill = false;
+        popoverOpen = false;
+      }, LINGER_MS);
+      return () => clearTimeout(timer);
+    }
+  });
 
   // Treat the buffer as `OutboxEntryShape[]` for display. The store types
   // `pendingOutbox` as `unknown[]` because the Rust-side outbox-entry shape
@@ -96,13 +123,13 @@
    * one queued envelope. The owner can never see themselves offline.
    */
   const showOwnerOfflineNotice: boolean = $derived(
-    !isOwner && pending > 0 && !ownerPresent,
+    !isOwner && showPill && !ownerPresent,
   );
 
   // Visibility — collapse entirely when nothing is queued. Slot collapse,
   // not visibility hide (matches the convention used in the rest of the
   // review-bar chrome).
-  const visible: boolean = $derived(pending > 0);
+  const visible: boolean = $derived(showPill);
 
   // Pill copy. Singular/plural matters because "1 pendings" looks broken.
   const pillLabel: string = $derived(

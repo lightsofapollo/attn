@@ -13,7 +13,20 @@ import { initTheme } from '../src/hosted/theme.svelte';
 initTheme();
 const target = document.getElementById('app');
 if (!target) throw new Error('missing landing mount element');
-mount(Landing, { target });
+
+// Keep the shipped homepage intact while /homepage-alt carries the interactive
+// positioning study. The alternate stays in a lazy chunk so ordinary landing
+// visits do not pay for the demo state or its presentation CSS.
+const alternateHomepage = /^\/homepage-alt\/?$/u.test(window.location.pathname);
+if (alternateHomepage) {
+  document.body.dataset.route = 'landing-alt';
+  const { default: AlternateLanding } = await import(
+    '../src/hosted/landing-alt/AlternateLanding.svelte'
+  );
+  mount(AlternateLanding, { target });
+} else {
+  mount(Landing, { target });
+}
 document.body.dataset.hydrated = 'true';
 
 // Install the app-shell service worker (attn-7xl.6.2); registration is

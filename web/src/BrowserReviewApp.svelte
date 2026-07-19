@@ -411,10 +411,23 @@
     return latest;
   });
 
-  const displayedContent = $derived(displayedSnapshot?.content ?? sessionState.snapshotContent);
-  const displayedDocType = $derived(
-    displayedSnapshot?.docType ?? sessionState.snapshotDocType,
-  );
+  // The session-state fallback updates PER ARRIVING SNAPSHOT during a
+  // multi-file share load — falling back to it unconditionally rendered
+  // each file for a beat before settling (visible on Safari, whose slower
+  // hydration kept the store lookup missing). It may only stand in for the
+  // file that is actually selected; otherwise show the loading state until
+  // the selected file's snapshot hydrates.
+  const selectedFileId = $derived(reviewStore.currentFileId ?? sessionState.fileId);
+  const displayedContent = $derived.by(() => {
+    if (displayedSnapshot) return displayedSnapshot.content;
+    return sessionState.fileId === selectedFileId ? sessionState.snapshotContent : null;
+  });
+  const displayedDocType = $derived.by(() => {
+    if (displayedSnapshot) return displayedSnapshot.docType;
+    return sessionState.fileId === selectedFileId
+      ? sessionState.snapshotDocType
+      : 'markdown';
+  });
 
   $effect(() => {
     void sessionState.roomId;

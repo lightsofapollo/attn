@@ -19,6 +19,12 @@ import { isRenderableReviewSnapshot } from './snapshot-kind';
 export interface ReviewFileEntry {
   fileId: FileId;
   name: string;
+  /**
+   * Basename of the owner's display path (e.g. `code-plan.md`). The
+   * sidebar leads with this — filenames are the stable identity; the
+   * heading-derived `name` is a title, shown when there's room.
+   */
+  fileName?: string;
   /** Folder containing the file, relative to the shared root ('' = root). */
   dir?: string;
 }
@@ -106,11 +112,14 @@ export function deriveFileEntries(
       name = headingName(snap.content) ?? `Document ${++headinglessCount}`;
     }
     let dir = '';
+    let fileName: string | undefined;
     if (typeof snap.ownerDisplayPath === 'string' && snap.ownerDisplayPath.length > 0) {
       const rel = relativeToRoot(snap.ownerDisplayPath, root);
-      dir = rel.replace(/\\/g, '/').split('/').slice(0, -1).join('/');
+      const parts = rel.replace(/\\/g, '/').split('/');
+      dir = parts.slice(0, -1).join('/');
+      fileName = parts[parts.length - 1] || undefined;
     }
-    entries.push({ fileId, name, dir });
+    entries.push({ fileId, name, ...(fileName === undefined ? {} : { fileName }), dir });
   }
 
   entries.sort((a, b) => a.name.localeCompare(b.name));

@@ -52,14 +52,23 @@
               class:active={f.fileId === reviewStore.currentFileId}
               data-file-id={f.fileId}
               aria-current={f.fileId === reviewStore.currentFileId ? 'true' : undefined}
-              title={f.dir ? `${f.dir}/${f.name}` : f.name}
+              title={`${f.dir ? `${f.dir}/` : ''}${f.fileName ?? f.name}${f.fileName && f.name !== f.fileName ? ` — ${f.name}` : ''}`}
               onclick={() => selectFile(f.fileId)}
             >
               <FileText class="size-3.5 shrink-0 opacity-60" aria-hidden="true" />
-              <span class="min-w-0 flex-1 truncate">
-                {#if f.dir}
-                  <span class="text-muted-foreground/60">{f.dir}/</span>
-                {/if}{f.name}
+              <!-- Filename is the identity and never truncates away; the
+                   heading title tags along and gives way first when the rail
+                   is tight (user ruling: file name + title when there is
+                   room, just file name when there is not). -->
+              <span class="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span class="shrink-0 truncate" style="max-width: 100%;">
+                  {#if f.dir}
+                    <span class="text-muted-foreground/60">{f.dir}/</span>
+                  {/if}{f.fileName ?? f.name}
+                </span>
+                {#if f.fileName && f.name !== f.fileName}
+                  <span class="min-w-0 truncate text-[11px] text-muted-foreground/70">{f.name}</span>
+                {/if}
               </span>
             </button>
           </li>

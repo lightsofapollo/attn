@@ -1427,6 +1427,25 @@
     readyCollabEpoch = collabEpoch;
   }
 
+  // Automation/diagnosis probe (mirrors __attnReviewCollab): the collab
+  // bind handshake state, readable from tests to localize attn-x1k-class
+  // races without guessing.
+  $effect(() => {
+    (window as unknown as { __attnCollabDebug?: object }).__attnCollabDebug = {
+      boundCollabKey,
+      readyCollabEpoch,
+      collabEpoch,
+      loadedCollabGenerationKey,
+      seedEpoch: collabSeed?.epoch ?? null,
+      seedChars: collabSeed?.markdown?.length ?? null,
+      writable: ownerState?.writable ?? null,
+      liveEditing: ownerState?.liveEditingAvailable ?? null,
+      generation: ownerState?.controllerGeneration ?? null,
+      editing,
+      joinStatus: joinState?.status ?? null,
+    };
+  });
+
   function activeCollabController() {
     if (session) {
       return ownerState?.liveEditingAvailable ? session.getController() : null;

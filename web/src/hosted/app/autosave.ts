@@ -58,7 +58,13 @@ export class AutosaveController {
   noteChange(text: string | (() => string)): void {
     if (this.disposed) return;
     this.pendingProvider = typeof text === 'function' ? text : () => text;
-    if (this.dirtySince === null) this.dirtySince = this.now();
+    if (this.dirtySince === null) {
+      this.dirtySince = this.now();
+      // Pending text is REPORTED immediately (gate: the chip must never
+      // claim "Saved" while unsaved keystrokes exist — that is what makes
+      // an immediate reload guard honest).
+      this.onState('Saving…');
+    }
     this.cancelTimer?.();
     const pendingFor = this.now() - this.dirtySince;
     const wait = Math.max(0, Math.min(this.debounceMs, this.maxPendingMs - pendingFor));

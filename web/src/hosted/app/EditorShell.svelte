@@ -586,6 +586,10 @@
   async function exportZip(): Promise<void> {
     railError = null;
     try {
+      // Drain pending keystrokes first — the export must contain what the
+      // user SEES, not the last debounced commit (gate: export drains
+      // pending text before reading workspace bytes).
+      await autosave?.flush();
       const files = await service.exportWorkspace(workspace.id);
       const manifest = buildManifest(workspace.name, files, Date.now());
       const zip = await buildWorkspaceZip(files, manifest);
@@ -1514,11 +1518,21 @@
       // only exits the editor surface; it intentionally keeps route authority.
       void session?.release();
     };
+    // While keystrokes are pending, an immediate reload/close must warn:
+    // the pagehide flush is async IndexedDB work that an instant unload
+    // kills mid-flight — the native dialog is what buys it time (gate:
+    // "pending text guards an immediate reload").
+    const onBeforeUnload = (event: BeforeUnloadEvent): void => {
+      if (!autosave?.dirty) return;
+      event.preventDefault();
+    };
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('beforeunload', onBeforeUnload);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('beforeunload', onBeforeUnload);
       flush();
       void session?.release();
     };
@@ -2109,10 +2123,22 @@
         }}
       />
     {:else if confirmingEntryDelete && activeEntry}
-      <div class="hosted-delete-confirm" role="alertdialog" aria-label={`Delete ${activeEntry.path}?`}>
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="hosted-delete-confirm"
+        role="alertdialog"
+        aria-label={`Delete ${activeEntry.path}?`}
+        onkeydown={(event) => {
+          if (event.key !== 'Escape') return;
+          event.stopPropagation();
+          confirmingEntryDelete = false;
+          focusSidebarAnchor('[data-path][data-active="true"]');
+        }}
+      >
         <span>Delete {activeEntry.path}?</span>
         <div>
-          <button type="button" onclick={() => (confirmingEntryDelete = false)}>Cancel</button>
+          <!-- Safe action takes initial focus: Enter must never destroy. -->
+          <button use:autofocus type="button" onclick={() => (confirmingEntryDelete = false)}>Cancel</button>
           <button class="danger" type="button" onclick={() => void deleteActiveEntry()}>Delete file</button>
         </div>
       </div>

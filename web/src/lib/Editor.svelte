@@ -43,6 +43,8 @@
   interface Props {
     markdown: string;
     editable?: boolean;
+    /** Accessible name announced for the ProseMirror editing surface. */
+    ariaLabel?: string;
     /** Hint shown over a truly-empty document (gate-35). */
     placeholder?: string;
     onSave?: () => void;
@@ -124,6 +126,7 @@
   let {
     markdown,
     editable = false,
+    ariaLabel = 'Document editor',
     placeholder = 'Start typing — # for a heading, ⌘K for commands',
     onSave,
     onCancel,
@@ -382,6 +385,8 @@
         'Mod-z': undo,
         'Mod-y': redo,
         'Mod-Shift-z': redo,
+        'Mod-b': toggleMark(schema.marks.strong),
+        'Mod-i': toggleMark(schema.marks.em),
         'Mod-f': () => {
           void openFindPanel();
           return true;
@@ -800,6 +805,12 @@
       view = new EditorView(el, {
         state,
         editable: () => editable,
+        attributes: () => ({
+          role: 'textbox',
+          'aria-label': ariaLabel,
+          'aria-multiline': 'true',
+          'aria-readonly': String(!editable),
+        }),
         handleDOMEvents: {
           click: (_view, event) => handleEditorClick(event as MouseEvent),
           keydown: (editorView, event) => handleEditorKeydown(editorView, event as KeyboardEvent),

@@ -158,12 +158,12 @@ test('workspace picker is bounded and provides switch, create, rename, and desk 
   await expect(page.locator('.workspace-row')).toHaveCount(2);
 });
 
-test('desktop Markdown formatting is visible, keyboard-correct, and supports input rules', async ({ page }) => {
+test('desktop Markdown formatting is keyboard-correct and supports input rules', async ({ page }) => {
+  // The desktop editor converged with the native grammar: no persistent
+  // formatting toolbar — keyboard shortcuts and Markdown input rules are
+  // the formatting surface (mobile keeps its thumb-reachable edit bar).
   await page.goto('/app#new');
   const editor = documentEditor(page);
-  const toolbar = page.getByRole('toolbar', { name: 'Markdown formatting' });
-  await expect(toolbar).toBeVisible();
-  await expect(toolbar.getByRole('button', { name: 'Bold' })).toBeEnabled();
 
   await editor.click();
   await page.keyboard.type('Keyboard formatting');
@@ -176,42 +176,29 @@ test('desktop Markdown formatting is visible, keyboard-correct, and supports inp
   await expect(editor.locator('strong')).toContainText('Keyboard formatting');
   await expect(sidebar).toHaveAttribute('data-state', 'expanded');
 
-  await toolbar.getByRole('button', { name: 'Heading 2' }).click();
-  await expect(editor.locator('h2')).toContainText('Keyboard formatting');
-
   await editor.click();
   await page.keyboard.press('ControlOrMeta+End');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('## ');
+  await page.keyboard.type('Second heading');
+  await expect(editor.locator('h2')).toContainText('Second heading');
+
   await page.keyboard.press('Enter');
   await page.keyboard.type('# ');
   await page.keyboard.type('Heading from Markdown');
   await expect(editor.locator('h1')).toContainText('Heading from Markdown');
 });
 
-test('dragging Markdown onto the desk imports it and the workspace drop target adds files', async ({ page }) => {
-  await page.goto('/app');
-  const importTarget = page.locator('.quick-drop-target');
-  await expect(importTarget).toContainText('Drop Markdown');
-
-  await page.evaluate(() => {
-    const target = document.querySelector<HTMLElement>('.desk');
-    if (!target) throw new Error('desk drop target missing');
-    const transfer = new DataTransfer();
-    transfer.items.add(new File(['# Dropped document\n\nBody'], 'dropped.md', { type: 'text/markdown' }));
-    target.dispatchEvent(new DragEvent('dragenter', { bubbles: true, dataTransfer: transfer }));
-  });
-  await expect(importTarget).toHaveAttribute('data-drop-active', 'true');
-  await page.evaluate(() => {
-    const target = document.querySelector<HTMLElement>('.desk');
-    if (!target) throw new Error('desk drop target missing');
-    const transfer = new DataTransfer();
-    transfer.items.add(new File(['# Dropped document\n\nBody'], 'dropped.md', { type: 'text/markdown' }));
-    target.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
-  });
-  await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/dropped\.md$/u);
-  await expect(documentEditor(page)).toContainText('Dropped document');
+test('the workspace drop target adds dropped Markdown files', async ({ page }) => {
+  // The desk redesign removed page-level drag-import (files come in via the
+  // Import workspace picker or the in-workspace dropzone). This gate covers
+  // the surviving contract: dropping Markdown on the workspace dropzone
+  // lands the file in the tree.
+  await page.goto('/app#new');
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 
   const workspaceDrop = page.locator('.hosted-sidebar-dropzone');
-  await expect(workspaceDrop).toContainText('Drop files here');
+  await expect(workspaceDrop).toContainText('Drop files anywhere');
   await workspaceDrop.evaluate((target) => {
     const transfer = new DataTransfer();
     transfer.items.add(new File(['## Added note'], 'added.md', { type: 'text/markdown' }));
@@ -436,29 +423,59 @@ test('workspace rename stays mounted and keeps the same tab writable', async ({ 
   );
 });
 
-test('a duplicated tab gets a distinct identity and stays read-only while one tab edits', async ({ page, context }) => {
+test('a duplicated tab gets a distinct identity and takes the pen seamlessly', async ({ page, context }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   const url = page.url();
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 
   // Opening from the writer copies sessionStorage in real browsers. The new
-  // tab must detect that copied tab ID before requesting the writer lease.
+  // tab must still derive a DISTINCT identity — and under the seamless
+  // handoff contract (attn-7xl.7.10) the tab the user just opened rings the
+  // holder, which flushes and yields. No "Another tab is editing" wall.
   const secondPromise = context.waitForEvent('page');
   await page.evaluate((target) => window.open(target, '_blank'), url);
   const second = await secondPromise;
   await second.waitForLoadState('domcontentloaded');
   await expect(second.locator('[data-app-view="workspace"]')).toBeVisible();
-  await expect(second.locator('[data-degraded="lease-denied"]')).toContainText(
-    'Another tab is editing this workspace.',
-  );
-  await expect(documentEditor(second)).toHaveAttribute('contenteditable', 'false');
+  await expect(documentEditor(second)).toHaveAttribute('contenteditable', 'true', {
+    timeout: 20_000,
+  });
 
-  // The route owns the lease even while its editor is closed. Closing the
-  // first tab releases route authority; an explicit retry then acquires it.
-  await page.close();
-  await second.getByRole('button', { name: 'Retry edit', exact: true }).click();
-  await expect(documentEditor(second)).toHaveAttribute('contenteditable', 'true');
+  // Shipping contract: the yielded tab becomes a live READ-ONLY mirror —
+  // the owner's keystrokes stream into it in realtime — and any
+  // interaction pulls the pen back seamlessly. Editing follows intent;
+  // the storage fence never splits and nothing is lost in either
+  // direction (attn-7xl.7.10).
+  await documentEditor(second).click();
+  await second.keyboard.press('ControlOrMeta+End');
+  await second.keyboard.type(' from-second-tab');
+  await expect(documentEditor(page)).toContainText('from-second-tab', { timeout: 20_000 });
+
+  // Interacting with the first tab reclaims the pen; its edit lands and
+  // streams back into the (now mirroring) second tab.
+  await page.bringToFront();
+  await documentEditor(page).click();
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true', {
+    timeout: 20_000,
+  });
+  await documentEditor(page).click();
+  await page.keyboard.press('ControlOrMeta+End');
+  await page.keyboard.type(' from-first-tab');
+  for (const candidate of [page, second]) {
+    await expect(documentEditor(candidate)).toContainText('from-first-tab', { timeout: 20_000 });
+    await expect(documentEditor(candidate)).toContainText('from-second-tab', { timeout: 20_000 });
+  }
+
+  // Closing a tab frees its lease; the survivor keeps sole, durable
+  // authorship — no manual retry — and the converged text survives reload.
+  await second.close();
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true', {
+    timeout: 25_000,
+  });
+  await page.reload();
+  await expect(documentEditor(page)).toContainText('from-first-tab');
+  await expect(documentEditor(page)).toContainText('from-second-tab');
 });
 
 test('mobile reader does not claim the writer lease until Edit is requested', async ({ page, context }) => {
@@ -473,11 +490,13 @@ test('mobile reader does not claim the writer lease until Edit is requested', as
   await desktop.goto(url);
   await expect(documentEditor(desktop)).toHaveAttribute('contenteditable', 'true');
 
+  // Tapping Edit is explicit intent: the seamless handoff pulls the pen
+  // from the desktop tab instead of showing a wall (attn-7xl.7.10).
   await page.locator('.thumb-dock').getByRole('button', { name: 'Edit' }).click();
-  await expect(page.locator('[data-degraded="lease-denied"]')).toContainText(
-    'Another tab is editing this workspace.',
-  );
-  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'false');
+  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true', {
+    timeout: 20_000,
+  });
+  await expect(documentEditor(desktop)).toHaveAttribute('contenteditable', 'false');
 });
 
 test('multi-file workspace: create, add, context-rename, context-delete, and export', async ({ page }) => {

@@ -401,13 +401,15 @@
           {#if onRename || onDelete}
             <ContextMenuSeparator />
             {#if onRename}
+              <!-- Ellipsis = opens a follow-up input (macOS menu convention);
+                   the hosted a11y/authoring gates assert these exact labels. -->
               <ContextMenuItem onSelect={() => onRename?.(node.path)}>
-                Rename
+                Rename…
               </ContextMenuItem>
             {/if}
             {#if onDelete}
               <ContextMenuItem class="text-destructive" onSelect={() => onDelete?.(node.path)}>
-                Delete
+                Delete…
               </ContextMenuItem>
             {/if}
           {/if}

@@ -639,7 +639,10 @@ a.workspace-row:hover {
   display: flex;
   flex-direction: column;
   min-height: 100%;
-  padding: 0.35rem 0 4rem;
+  /* Bottom breathing lives INSIDE the ProseMirror (below) so the whole
+     visible canvas is a click-to-edit target — wrapper padding left a
+     ~64px dead strip above the viewport bottom (attn-7xl.7.3.1 gate). */
+  padding: 0.35rem 0 0;
   color: var(--foreground);
   background: var(--background);
 }
@@ -660,6 +663,7 @@ a.workspace-row:hover {
 
 .hosted-native-document .prosemirror-mount > .ProseMirror {
   flex: 1 1 auto;
+  padding-bottom: 4rem;
 }
 
 .hosted-native-document > .hosted-editor-surface {
@@ -1125,9 +1129,29 @@ a.workspace-row:hover {
   }
 
   .writing-sheet {
+    display: flex;
+    flex-direction: column;
     border: 0;
     box-shadow: none;
     min-height: calc(100dvh - 58px);
+  }
+
+  /* Full-height tap target (attn-7xl.7.3.1, restored — a later restyle
+     dropped this flex chain and left ~270px of dead, unclickable canvas
+     between the last line and the thumb dock): the editor surface chain
+     stretches so the ProseMirror IS the whole visible writing canvas. */
+  .writing-sheet > .hosted-editor-surface,
+  .writing-sheet .editor-container,
+  .writing-sheet .prosemirror-mount {
+    display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+  }
+
+  .writing-sheet .ProseMirror {
+    min-height: 100%;
+    flex: 1;
   }
 
   .writing-sheet p,

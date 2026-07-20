@@ -44,7 +44,7 @@
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
   import SelectionToolbar from './lib/SelectionToolbar.svelte';
-  import { deriveFileEntries } from './lib/review/file-nav';
+  import { deriveFileEntries, latestRenderableSnapshotId } from './lib/review/file-nav';
   import { reviewerStatusPresentation } from './lib/review/reviewer-status-model';
   import { reviewStore } from './lib/review/store.svelte';
   import {
@@ -432,6 +432,60 @@
         reviewStore.currentFileId = fid;
       });
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // File selection survives refresh: mirror the selected file into the URL
+  // (`?f=<fileId>`, hash — and therefore #key= — untouched) and honor it on
+  // the next load. The requested file upgrades any programmatic pin (first
+  // arrival, durable restore) the moment its snapshot lands, but never
+  // overrides a file the user picked by hand this session.
+  // ---------------------------------------------------------------------------
+
+  const requestedFileId: FileId | null =
+    typeof window === 'undefined'
+      ? null
+      : (new URL(window.location.href).searchParams.get('f') as FileId | null);
+
+  // Enforce the requested file CONTINUOUSLY, not one-shot: the /s/ boot
+  // hands off from the durable facade to the live session, and that close
+  // clears the store's selection (leaveRoom → forgetRoom) after any single
+  // early application — the first-arrival latch would then re-pin the wrong
+  // file. Only a real user pick ends the enforcement. Renderability gate:
+  // setCurrentFile refuses a file whose snapshots are all content-less
+  // pointer placeholders, so wait for a hydrated one.
+  $effect(() => {
+    if (requestedFileId === null || reviewStore.userSelectedFile) return;
+    const roomId = reviewStore.currentRoomId;
+    if (roomId === null || reviewStore.currentFileId === requestedFileId) return;
+    const snapshotId = latestRenderableSnapshotId(
+      reviewStore.snapshots,
+      roomId,
+      requestedFileId,
+    );
+    if (snapshotId === null) return;
+    untrack(() => {
+      reviewStore.setCurrentFile(requestedFileId);
+      reviewStore.setCurrentSnapshot(snapshotId);
+    });
+  });
+
+  // The URL request counts as settled once honored (or once the user takes
+  // over). Until then never rewrite ?f= — the interim auto-pin would
+  // overwrite the request and the next refresh would restore the wrong file.
+  const urlPinSettled = $derived(
+    requestedFileId === null ||
+      reviewStore.userSelectedFile ||
+      reviewStore.currentFileId === requestedFileId,
+  );
+
+  $effect(() => {
+    const fid = reviewStore.currentFileId;
+    if (fid === null || !urlPinSettled || typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get('f') === fid) return;
+    url.searchParams.set('f', fid);
+    history.replaceState(history.state, '', url);
   });
   const displayedContent = $derived.by(() => {
     if (displayedSnapshot) return displayedSnapshot.content;

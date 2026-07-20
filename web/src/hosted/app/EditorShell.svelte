@@ -700,6 +700,25 @@
     });
   });
 
+  // Scope the review store to the file on screen. Without this the store's
+  // currentFileId latches once to the FIRST published snapshot (applyEvent's
+  // auto-focus) and never moves, so in a multi-file share every thread
+  // anchored to any other file was invisible to the owner — no cards, no
+  // markers, no badge — on every file, including the one it belonged to.
+  // The runtime bindings map workspace path → published share fileId.
+  $effect(() => {
+    const store = reviewStoreRef;
+    const state = ownerState;
+    const path = activeEntry?.path;
+    if (!store || !state?.roomId || !path) return;
+    if (store.currentRoomId !== state.roomId) return;
+    const binding = state.bindings.find((item) => item.path === path);
+    if (!binding) return;
+    untrack(() => {
+      if (store.currentFileId !== binding.fileId) store.setCurrentFile(binding.fileId);
+    });
+  });
+
   // Keep the shared connection badge honest on the hosted owner. The store's
   // transport field is daemon-fed on native and nothing set it here, so the
   // ReviewBar chip sat on "Offline" while the header pill said Shared · Direct.
@@ -1473,6 +1492,16 @@
       generation: ownerState?.controllerGeneration ?? null,
       editing,
       joinStatus: joinState?.status ?? null,
+      review: {
+        activePath: activeEntry?.path ?? null,
+        ownerRoomId: ownerState?.roomId ?? null,
+        bindings: (ownerState?.bindings ?? []).map((b) => ({ path: b.path, fileId: b.fileId })),
+        storeRoomId: reviewStoreRef?.currentRoomId ?? null,
+        storeFileId: reviewStoreRef?.currentFileId ?? null,
+        threads: reviewStoreRef?.threads.length ?? null,
+        threadFiles: (reviewStoreRef?.threads ?? []).map((t) => t.anchor?.fileId ?? null),
+        threadsForCurrentFile: reviewStoreRef?.threadsForCurrentFile.length ?? null,
+      },
     };
     const holder = window as unknown as {
       __attnCollabDebug?: object;
@@ -1794,6 +1823,8 @@
     id: string;
     text: string;
     eventId: string;
+    /** Share fileId the thread is anchored to; null when it's the open file. */
+    fileId: string | null;
   }
   let arrivalToasts = $state<ArrivalToast[]>([]);
   const seenReviewEventIds = new Set<string>();
@@ -1804,14 +1835,20 @@
     arrivalToasts = arrivalToasts.filter((t) => t.id !== id);
   }
 
-  function pushToast(text: string, eventId: string): void {
+  function pushToast(text: string, eventId: string, fileId: string | null): void {
     const id = `toast-${toastSeq++}`;
-    arrivalToasts = [...arrivalToasts, { id, text, eventId }];
+    arrivalToasts = [...arrivalToasts, { id, text, eventId, fileId }];
     setTimeout(() => dismissToast(id), 5200);
   }
 
   function openReviewFromToast(toast: ArrivalToast): void {
     dismissToast(toast.id);
+    // A thread on another shared file: switch to that file first — the
+    // active-file scoping effect re-points the store, then focus follows.
+    if (toast.fileId !== null) {
+      const binding = ownerState?.bindings.find((item) => item.fileId === toast.fileId);
+      if (binding) onSelectEntry?.(binding.path);
+    }
     reviewStoreRef?.setFocusEventId(toast.eventId);
     if (desktopLayout) {
       if (reviewStoreRef) reviewStoreRef.panelOpen = true;
@@ -1826,18 +1863,21 @@
   // the local owner and surface a toast. Seeding walks EVERY file's threads
   // (store.threads), not just the open file's: priming against the current
   // file only would replay another file's whole history as "new" arrivals the
-  // first time the user navigates to it. Toasts stay scoped to the open file.
+  // first time the user navigates to it. Arrivals on OTHER shared files toast
+  // too — with the filename, and tapping navigates there — otherwise a
+  // multi-file share receives feedback in total silence.
   $effect(() => {
     const store = reviewStoreRef;
     if (!store) return;
-    const currentEventIds = new Set<string>();
-    for (const thread of store.threadsForCurrentFile) {
-      for (const event of [thread.rootEvent, ...thread.replies]) {
-        currentEventIds.add(event.meta.eventId);
-      }
-    }
+    const currentFileId = store.currentFileId;
+    void store.threads;
     const ownerId = store.ownerParticipantId;
-    const arrivals: { authorId: string; kind: 'comment' | 'suggestion'; eventId: string }[] = [];
+    const arrivals: {
+      authorId: string;
+      kind: 'comment' | 'suggestion';
+      eventId: string;
+      fileId: string | null;
+    }[] = [];
     for (const thread of store.threads) {
       for (const event of [thread.rootEvent, ...thread.replies]) {
         const eventId = event.meta.eventId;
@@ -1845,15 +1885,25 @@
         seenReviewEventIds.add(eventId);
         if (!toastsPrimed) continue;
         if (event.meta.authorId === ownerId) continue;
-        if (!currentEventIds.has(eventId)) continue;
+        const anchorFileId = thread.anchor?.fileId ?? null;
         const kind = event.body.type === 'suggestion_created' ? 'suggestion' : 'comment';
-        arrivals.push({ authorId: event.meta.authorId, kind, eventId });
+        arrivals.push({
+          authorId: event.meta.authorId,
+          kind,
+          eventId,
+          fileId: anchorFileId !== null && anchorFileId !== currentFileId ? anchorFileId : null,
+        });
       }
     }
     toastsPrimed = true;
     for (const arrival of arrivals) {
       const name = store.displayNameFor(arrival.authorId);
-      pushToast(`${name} ${arrival.kind === 'suggestion' ? 'suggested an edit' : 'commented'}`, arrival.eventId);
+      const verb = arrival.kind === 'suggestion' ? 'suggested an edit' : 'commented';
+      const binding = arrival.fileId !== null
+        ? ownerState?.bindings.find((item) => item.fileId === arrival.fileId)
+        : undefined;
+      const suffix = binding ? ` · ${binding.path.split('/').at(-1)}` : '';
+      pushToast(`${name} ${verb}${suffix}`, arrival.eventId, arrival.fileId);
     }
   });
 

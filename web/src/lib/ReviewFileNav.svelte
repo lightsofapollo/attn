@@ -21,7 +21,7 @@
   const files = $derived(deriveFileEntries(reviewStore.snapshots, reviewStore.currentRoomId));
 
   function selectFile(fileId: (typeof files)[number]['fileId']): void {
-    reviewStore.setCurrentFile(fileId);
+    reviewStore.selectFileAsUser(fileId);
     reviewStore.setCurrentSnapshot(
       latestRenderableSnapshotId(reviewStore.snapshots, reviewStore.currentRoomId, fileId),
     );

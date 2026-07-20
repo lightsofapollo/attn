@@ -403,7 +403,15 @@ export class DurableShareBrowserSessionFacade {
     const value = reviewSnapshotFromDurable(snapshot, roomId);
     const { reviewStore } = await import('./store.svelte.js');
     reviewStore.currentRoomId = value.roomId; reviewStore.applySnapshot(value);
-    reviewStore.setCurrentFile(value.fileId); reviewStore.setCurrentSnapshot(value.snapshotId);
+    // Never steal an existing selection: this runs once per restored snapshot,
+    // so unconditionally selecting made the LAST restored file win on every
+    // reload (and clobbered the URL-requested file). Claim only an empty
+    // selection; refresh the snapshot pick when the restored file IS selected.
+    if (reviewStore.currentFileId === null) {
+      reviewStore.setCurrentFile(value.fileId); reviewStore.setCurrentSnapshot(value.snapshotId);
+    } else if (reviewStore.currentFileId === value.fileId) {
+      reviewStore.setCurrentSnapshot(value.snapshotId);
+    }
   }
 }
 
@@ -439,7 +447,9 @@ export class RememberedPushShareSessionFacade {
       const store = this.options.store ?? (await import('./store.svelte.js')).reviewStore;
       store.currentRoomId = binding.roomId;
       for (const snapshot of snapshots) store.applySnapshot(reviewSnapshotFromDurable(snapshot, binding.roomId));
-      if (first) { store.setCurrentFile(first.fileId); store.setCurrentSnapshot(first.snapshotId); }
+      if (first && store.currentFileId === null) {
+        store.setCurrentFile(first.fileId); store.setCurrentSnapshot(first.snapshotId);
+      }
       await consumePendingPushEvents(binding.bindingId, event => store.applyEvent(event), {
         indexedDB: this.options.indexedDB,
       });

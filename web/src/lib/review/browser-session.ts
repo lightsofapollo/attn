@@ -283,6 +283,8 @@ export interface ReviewStoreSink {
   leaveRoom?(roomId: RoomId): void;
   /** Plain field write — runes proxy intercepts this in production. */
   currentRoomId: RoomId | null;
+  /** Read by restore paths so they never steal a selection that exists. */
+  currentFileId: FileId | null;
   /** Sealed browser envelopes awaiting relay acknowledgement. */
   pendingOutbox?: unknown[];
 }

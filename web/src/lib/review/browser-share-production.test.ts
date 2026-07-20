@@ -46,7 +46,7 @@ const inviteUrl = `https://attn.sh/s/${shareId}#key=${base64UrlEncode(secret)}`;
       publicSigningKey: ownerKey, client: 'attn-native', kind: 'owner', selfSignature: base64UrlEncode(new Uint8Array(64).fill(27)) }] },
   { indexedDB: fakeIndexedDB });
   const facade = new RememberedPushShareSessionFacade({ relayUrl: 'https://relay.example', bindingId, indexedDB: fakeIndexedDB,
-    store: { currentRoomId: null, applyEvent: () => undefined, applySnapshot: () => undefined,
+    store: { currentRoomId: null, currentFileId: null, applyEvent: () => undefined, applySnapshot: () => undefined,
       setCurrentFile: () => undefined, setCurrentSnapshot: () => undefined },
     fetchImpl: async (input) => String(input).includes('/snapshots/')
       ? new Response(sealed, { headers: { 'Attn-Share-Bundle': bundleId, 'Attn-Snapshot-Id': snapshotId } })

@@ -1010,6 +1010,7 @@
     let disposed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let forceTimer: ReturnType<typeof setTimeout> | null = null;
+    const deniedSince = Date.now();
 
     const attempt = async (): Promise<void> => {
       // Just yielded to another tab: stay out of its way — but retry the
@@ -1028,6 +1029,25 @@
       }
       const granted = await untrack(() => ensureOwnerSession());
       if (disposed || granted) return;
+      // Live co-editing through the holder's hub is the PREFERRED
+      // multi-tab mode: one fenced authority, both tabs typing, zero
+      // ownership churn (attn-7xl.7.10's acceptance, and it sidesteps
+      // the claim-time bind window of attn-x1k). While the join is live
+      // — or still connecting within its grace — never ring for the pen.
+      if (joinLive) {
+        armExpiryTimer();
+        return;
+      }
+      const joinSettling = joinState === null || joinState.status === 'connecting';
+      if (joinSettling && Date.now() - deniedSince < 4_000) {
+        if (timer === null) {
+          timer = setTimeout(() => {
+            timer = null;
+            void attempt();
+          }, 1_000);
+        }
+        return;
+      }
       // Visibility, not focus: focus reporting is ambiguous across
       // browser windows (and absent for a just-opened tab), and the
       // holder-side intent veto is what prevents thrash now. A hidden

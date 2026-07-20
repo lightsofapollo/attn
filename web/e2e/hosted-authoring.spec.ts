@@ -430,9 +430,9 @@ test('a duplicated tab gets a distinct identity and takes the pen seamlessly', a
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 
   // Opening from the writer copies sessionStorage in real browsers. The new
-  // tab must still derive a DISTINCT identity — and under the seamless
-  // handoff contract (attn-7xl.7.10) the tab the user just opened rings the
-  // holder, which flushes and yields. No "Another tab is editing" wall.
+  // tab must still derive a DISTINCT identity — and under the join-first
+  // multi-tab contract (attn-7xl.7.10) it becomes a live co-editor through
+  // the opener's fenced authority. No "Another tab is editing" wall.
   const secondPromise = context.waitForEvent('page');
   await page.evaluate((target) => window.open(target, '_blank'), url);
   const second = await secondPromise;
@@ -442,18 +442,15 @@ test('a duplicated tab gets a distinct identity and takes the pen seamlessly', a
     timeout: 20_000,
   });
 
-  // Shipping contract: the yielded tab becomes a live READ-ONLY mirror —
-  // the owner's keystrokes stream into it in realtime — and any
-  // interaction pulls the pen back seamlessly. Editing follows intent;
-  // the storage fence never splits and nothing is lost in either
-  // direction (attn-7xl.7.10).
+  // Both tabs edit through ONE fenced authority; keystrokes stream both
+  // ways and nothing is lost in either direction (attn-7xl.7.10).
   await documentEditor(second).click();
   await second.keyboard.press('ControlOrMeta+End');
   await second.keyboard.type(' from-second-tab');
   await expect(documentEditor(page)).toContainText('from-second-tab', { timeout: 20_000 });
 
-  // Interacting with the first tab reclaims the pen; its edit lands and
-  // streams back into the (now mirroring) second tab.
+  // The first tab keeps working seamlessly; its edit lands and streams
+  // into the second.
   await page.bringToFront();
   await documentEditor(page).click();
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true', {
@@ -490,13 +487,16 @@ test('mobile reader does not claim the writer lease until Edit is requested', as
   await desktop.goto(url);
   await expect(documentEditor(desktop)).toHaveAttribute('contenteditable', 'true');
 
-  // Tapping Edit is explicit intent: the seamless handoff pulls the pen
-  // from the desktop tab instead of showing a wall (attn-7xl.7.10).
+  // Tapping Edit is explicit intent: the mobile tab joins the desktop's
+  // live authority as a co-editor — both surfaces editable, one fenced
+  // authority, edits converge (attn-7xl.7.10). No wall, no pen churn.
   await page.locator('.thumb-dock').getByRole('button', { name: 'Edit' }).click();
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true', {
     timeout: 20_000,
   });
-  await expect(documentEditor(desktop)).toHaveAttribute('contenteditable', 'false');
+  await documentEditor(page).click();
+  await page.keyboard.type('from-mobile ');
+  await expect(documentEditor(desktop)).toContainText('from-mobile', { timeout: 20_000 });
 });
 
 test('multi-file workspace: create, add, context-rename, context-delete, and export', async ({ page }) => {

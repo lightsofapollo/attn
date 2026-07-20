@@ -905,6 +905,23 @@
   function noteInteraction(): void {
     lastInteractionAt = Date.now();
   }
+  /** Pointer/keyboard only — never focus. Drives handoff INTENT (a tab
+   *  whose user actually clicked/typed always wins the pen) and the
+   *  holder-side veto (an actively-typing holder refuses focus-only
+   *  rings, which kills pen thrash under ambiguous focus). */
+  let lastRealInteractionAt = 0;
+  $effect(() => {
+    const note = (): void => {
+      lastRealInteractionAt = Date.now();
+      lastInteractionAt = lastRealInteractionAt;
+    };
+    window.addEventListener('pointerdown', note, { capture: true, passive: true });
+    window.addEventListener('keydown', note, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', note, { capture: true });
+      window.removeEventListener('keydown', note, { capture: true });
+    };
+  });
   // Timestamp of the last 'released' broadcast for this workspace. A recent
   // release means the previous owner yielded GRACEFULLY (flushed its
   // autosave before releasing) — storage is authoritative and the takeover
@@ -954,11 +971,14 @@
       const message = event.data as { workspaceId?: string; event?: string } | null;
       if (message?.workspaceId !== wsId) return;
       if (message.event === 'handoff-request') {
-        // Another tab wants to edit: yield gracefully if we hold the pen,
-        // acking first so the requester keeps waiting instead of forcing a
-        // takeover mid-flush.
         untrack(() => {
           if (!session) return;
+          // A focus-only ring never takes the pen from a user who is
+          // actively working here — only a real click/keystroke in the
+          // other tab does. Silence is the refusal; the requester's
+          // backoff keeps it read-only until real intent shows.
+          const intent = (message as { intent?: string }).intent;
+          if (intent === 'focus' && Date.now() - lastRealInteractionAt < 3_000) return;
           void service.acknowledgeWriterHandoff(wsId);
           void yieldOwnerSession();
         });
@@ -992,22 +1012,35 @@
     let forceTimer: ReturnType<typeof setTimeout> | null = null;
 
     const attempt = async (): Promise<void> => {
-      // Just yielded to another tab: stay out of its way; the expiry timer
-      // keeps this tab's recovery armed for when the requester finishes.
-      if (Date.now() - lastYieldAt < YIELD_GUARD_MS) {
-        if (!disposed) armExpiryTimer();
+      // Just yielded to another tab: stay out of its way — but retry the
+      // MOMENT the guard ends. Punting to the other tab's lease expiry
+      // (up to 15s) made a claim attempted inside the guard window appear
+      // silently dead: switch to a tab, click once, nothing happens.
+      const sinceYield = Date.now() - lastYieldAt;
+      if (sinceYield < YIELD_GUARD_MS) {
+        if (!disposed && timer === null) {
+          timer = setTimeout(() => {
+            timer = null;
+            void attempt();
+          }, YIELD_GUARD_MS - sinceYield + 50);
+        }
         return;
       }
       const granted = await untrack(() => ensureOwnerSession());
       if (disposed || granted) return;
-      if (document.hasFocus() && lastInteractionAt >= lastYieldAt) {
-        // The user is actually working in this tab (interacted since it
-        // last yielded): ring the handoff doorbell — a live holder flushes
-        // + releases and the 'released' broadcast wins us the lease; a
-        // dead holder never answers, so take it by force after a short
-        // grace instead of waiting out the 15s expiry.
-        void service.requestWriterHandoff(wsId);
-        armForceTimer();
+      // Visibility, not focus: focus reporting is ambiguous across
+      // browser windows (and absent for a just-opened tab), and the
+      // holder-side intent veto is what prevents thrash now. A hidden
+      // tab never rings.
+      if (document.visibilityState !== 'hidden' && lastInteractionAt >= lastYieldAt) {
+        // Ring the handoff doorbell with graded intent: a real
+        // click/keystroke in this tab always wins; mere focus can be
+        // refused by a holder that is actively typing. A live holder
+        // flushes + releases; a dead one never answers, so the force
+        // timer takes over after an ack-guarded grace.
+        const intent = lastRealInteractionAt >= lastYieldAt ? 'interaction' : 'focus';
+        void service.requestWriterHandoff(wsId, intent);
+        if (intent === 'interaction') armForceTimer();
       }
       armExpiryTimer();
     };
@@ -1015,7 +1048,7 @@
       if (forceTimer !== null) return;
       forceTimer = setTimeout(() => {
         forceTimer = null;
-        if (disposed || !document.hasFocus()) return;
+        if (disposed || document.visibilityState === 'hidden') return;
         if (Date.now() - lastHandoffAckAt < 10_000) {
           // A live holder acked and is flushing — re-check instead of
           // fencing off its final commit.

@@ -46,6 +46,14 @@ export interface LeaseChannelMessage {
   event: 'acquired' | 'released' | 'handoff-request' | 'handoff-ack';
   holderId: string;
   fencingToken: number;
+  /**
+   * handoff-request only: how strong the requester's claim is.
+   * 'interaction' = the user clicked/typed in that tab (always honored);
+   * 'focus' = the tab merely gained focus — a holder whose user is
+   * actively typing may refuse it, which is what stops the pen from
+   * thrashing when two windows are visible or focus reports ambiguously.
+   */
+  intent?: 'interaction' | 'focus';
 }
 
 /** Minimal BroadcastChannel surface, injectable for tests and absent APIs. */
@@ -113,10 +121,14 @@ export class WorkspaceLeaseManager {
   }
 
   /** Ask the current holder (if any live tab) to flush + release. */
-  requestHandoff(workspaceId: string, holderId: string): void {
+  requestHandoff(
+    workspaceId: string,
+    holderId: string,
+    intent: 'interaction' | 'focus' = 'interaction',
+  ): void {
     requireId(workspaceId, 'workspaceId');
     requireId(holderId, 'holderId');
-    this.notify({ workspaceId, event: 'handoff-request', holderId, fencingToken: 0 });
+    this.notify({ workspaceId, event: 'handoff-request', holderId, fencingToken: 0, intent });
   }
 
   /**

@@ -302,9 +302,12 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     await this.service.yieldOwnerRuntime(workspaceId);
   }
 
-  async requestWriterHandoff(workspaceId: string): Promise<void> {
+  async requestWriterHandoff(
+    workspaceId: string,
+    intent: 'interaction' | 'focus' = 'interaction',
+  ): Promise<void> {
     const holderId = await browserTabHolderId();
-    this.service.leases.requestHandoff(workspaceId, holderId);
+    this.service.leases.requestHandoff(workspaceId, holderId, intent);
   }
 
   async acknowledgeWriterHandoff(workspaceId: string): Promise<void> {

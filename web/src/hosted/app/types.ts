@@ -243,7 +243,7 @@ export interface WorkspaceAppService {
    * lease to flush + release it. Advisory (BroadcastChannel); pair with
    * `forceWriterLease` after a grace period for dead holders.
    */
-  requestWriterHandoff(workspaceId: string): Promise<void>;
+  requestWriterHandoff(workspaceId: string, intent?: 'interaction' | 'focus'): Promise<void>;
   /**
    * Holder-side answer to a handoff request: flush and close this tab's
    * owner runtime so the lease frees for the requesting tab. No-op when

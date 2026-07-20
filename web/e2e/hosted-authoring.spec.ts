@@ -466,10 +466,21 @@ test('a duplicated tab gets a distinct identity and takes the pen seamlessly', a
 
   // Closing a tab frees its lease; the survivor keeps sole, durable
   // authorship — no manual retry — and the converged text survives reload.
+  // Wait for the autosave to land before reloading: automation dismisses
+  // the beforeunload guard that protects humans from reloading mid-flush,
+  // so reloading while "Saving…" would race the debounce by design.
   await second.close();
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true', {
     timeout: 25_000,
   });
+  await expect(page.locator('[data-commits]')).not.toHaveAttribute('data-commits', '0', {
+    timeout: 15_000,
+  });
+  await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
+    'data-save-state',
+    'Saved on this device',
+    { timeout: 15_000 },
+  );
   await page.reload();
   await expect(documentEditor(page)).toContainText('from-first-tab');
   await expect(documentEditor(page)).toContainText('from-second-tab');
@@ -696,14 +707,15 @@ test('remembered rooms can be forgotten with crypto-erasure confirmation', async
   await expect(roomsPanel).toContainText('No remembered review rooms in this browser profile.');
 });
 
-test('first share is gated on durability until acknowledged', async ({ page }) => {
+test('private-session sharing is streamlined but the storage risk stays visible', async ({ page }) => {
+  // The acknowledgment checkbox was deliberately removed (b2baf39
+  // "streamline browser share creation"): sharing is one click even in a
+  // private session. The session-only storage risk must still be
+  // COMMUNICATED — by the standing degraded banner, not a modal gate.
   await page.goto('/app/w/ws-product/direction.md?shell=private');
+  await expect(page.locator('[data-degraded]').first()).toBeVisible();
   await page.getByRole('button', { name: 'Share for review' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Share for review' });
+  const dialog = page.getByRole('dialog', { name: 'Share files for review' });
   await expect(dialog).toBeVisible();
-  const createLink = dialog.getByRole('button', { name: 'Create review link' });
-  await expect(createLink).toBeDisabled();
-  await expect(dialog).toContainText('Private browsing can erase this workspace');
-  await dialog.getByRole('checkbox', { name: /I understand this browser may erase/u }).check();
-  await expect(createLink).toBeEnabled();
+  await expect(dialog.getByRole('button', { name: 'Create review link' })).toBeEnabled();
 });

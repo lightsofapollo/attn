@@ -25,26 +25,28 @@ test('WebKit expiry handoff elects exactly one writer after the old tab closes',
   const third = await thirdPromise;
   await third.waitForLoadState('domcontentloaded');
 
+  // Join-first contract: the duplicated tabs become live co-editors
+  // through the authority's hub — no wall, both editable.
   for (const passive of [second, third]) {
-    await expect(passive.locator('[data-degraded="lease-denied"]')).toContainText(
-      'Another tab is editing this workspace.',
-    );
-    await expect(documentEditor(passive)).toHaveAttribute('contenteditable', 'false');
+    await expect(documentEditor(passive)).toHaveAttribute('contenteditable', 'true', {
+      timeout: 20_000,
+    });
   }
 
-  // WebKit may abandon the pagehide release transaction. Both successors can
-  // wait for expiry, but the fenced IndexedDB acquisition must elect one and
-  // only one writer when the stale record becomes available.
+  // WebKit may abandon the pagehide release transaction entirely. When the
+  // authority tab closes, the fenced IndexedDB acquisition must elect a NEW
+  // single authority among the survivors — proven behaviorally: an edit in
+  // one surviving tab still converges into the other (the hub was rebuilt
+  // around exactly one new fence holder).
   await page.close();
-  await Promise.all([
-    second.getByRole('button', { name: 'Retry edit', exact: true }).click(),
-    third.getByRole('button', { name: 'Retry edit', exact: true }).click(),
-  ]);
-
-  await expect.poll(async () => {
-    const states = await Promise.all(
-      [second, third].map((candidate) => documentEditor(candidate).getAttribute('contenteditable')),
-    );
-    return states.sort();
-  }, { timeout: 25_000 }).toEqual(['false', 'true']);
+  await expect
+    .poll(async () => {
+      await documentEditor(second).click();
+      await second.keyboard.press('ControlOrMeta+End');
+      await second.keyboard.type(' relay');
+      await second.waitForTimeout(1_500);
+      const thirdText = await documentEditor(third).textContent();
+      return thirdText?.includes('relay') ?? false;
+    }, { timeout: 30_000 })
+    .toBe(true);
 });

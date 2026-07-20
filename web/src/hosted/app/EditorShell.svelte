@@ -1351,7 +1351,17 @@
           editing = true;
           return;
         }
+        // Arm the denied machinery (join-first: it will connect to the
+        // holder's hub), then absorb the connection so the FIRST Edit tap
+        // starts editing instead of silently requiring a second tap once
+        // the join happens to be live.
         editDenied = true;
+        for (let attempt = 0; attempt < 20 && !joinLive && !session; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 200));
+        }
+        if (joinLive || (session && ownerState?.writable)) {
+          editing = true;
+        }
         return;
       }
       if (!granted.getOwnerState().writable) {
@@ -1451,7 +1461,7 @@
   // bind handshake state, readable from tests to localize attn-x1k-class
   // races without guessing.
   $effect(() => {
-    (window as unknown as { __attnCollabDebug?: object }).__attnCollabDebug = {
+    const snapshot = {
       boundCollabKey,
       readyCollabEpoch,
       collabEpoch,
@@ -1464,6 +1474,17 @@
       editing,
       joinStatus: joinState?.status ?? null,
     };
+    const holder = window as unknown as {
+      __attnCollabDebug?: object;
+      __attnCollabLog?: Array<object>;
+    };
+    holder.__attnCollabDebug = snapshot;
+    const log = (holder.__attnCollabLog ??= []);
+    const last = log[log.length - 1] as { collabEpoch?: number; seedChars?: number | null } | undefined;
+    if (!last || last.collabEpoch !== snapshot.collabEpoch || last.seedChars !== snapshot.seedChars) {
+      log.push({ t: Date.now() % 1000000, ...snapshot });
+      if (log.length > 40) log.shift();
+    }
   });
 
   function activeCollabController() {

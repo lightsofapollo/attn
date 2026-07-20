@@ -5,10 +5,27 @@
   // Returning users lead with their desk (attn-cjn); first-timers keep the
   // zero-friction create. Read once at mount — the count only changes in /app.
   const deskCount = readDeskCount();
+  import ResponsiveScreenshot from './ResponsiveScreenshot.svelte';
   import collabLight from './assets/collab-light.png';
   import collabDark from './assets/collab-dark.png';
+  import collabLight768 from './assets/collab-light-768.avif';
+  import collabLight1280 from './assets/collab-light-1280.avif';
+  import collabLight1920 from './assets/collab-light-1920.avif';
+  import collabDark768 from './assets/collab-dark-768.avif';
+  import collabDark1280 from './assets/collab-dark-1280.avif';
+  import collabDark1920 from './assets/collab-dark-1920.avif';
 
-  const collabShot = $derived(getTheme() === 'dark' ? collabDark : collabLight);
+  const collabShots = {
+    light: {
+      fallback: collabLight,
+      avifSrcset: `${collabLight768} 768w, ${collabLight1280} 1280w, ${collabLight1920} 1920w`,
+    },
+    dark: {
+      fallback: collabDark,
+      avifSrcset: `${collabDark768} 768w, ${collabDark1280} 1280w, ${collabDark1920} 1920w`,
+    },
+  } as const;
+  const collabShot = $derived(collabShots[getTheme() === 'dark' ? 'dark' : 'light']);
 </script>
 
 <section class="hero">
@@ -42,7 +59,17 @@
 
   <div class="product-stage" aria-label="A real attn review with local and shared state labels">
     <div class="window">
-      <img src={collabShot} alt="A real attn document with an inline review comment and suggestion" />
+      <!-- Responsive AVIF with PNG fallback + intrinsic dimensions — the
+           hero is the largest paint on the page, and the landing perf gate
+           asserts both the CLS box and the AVIF payload. -->
+      <ResponsiveScreenshot
+        fallback={collabShot.fallback}
+        avifSrcset={collabShot.avifSrcset}
+        sizes="(max-width: 680px) calc(100vw - 2rem), (max-width: 1180px) 72vw, 920px"
+        alt="A real attn document with an inline review comment and suggestion"
+        loading="eager"
+        fetchpriority="high"
+      />
     </div>
     <aside class="stage-label local">
       <strong>Source · local</strong><small>Saved on this device</small>

@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>attn — agents speak in your margin; in theirs, they whisper to you</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400..900;1,8..60,400..700&family=Source+Sans+3:wght@400..700&family=Source+Code+Pro:wght@400..600&display=swap');
+
+  :root {
+    --paper: oklch(0.905 0.010 78);
+    --paper-raised: oklch(0.935 0.010 76);
+    --paper-deep: oklch(0.88 0.012 76);
+    --ink: oklch(0.14 0.008 55);
+    --muted: oklch(0.34 0.012 65);
+    --faint: oklch(0.50 0.012 65);
+    --rust: oklch(0.42 0.15 28);
+    --rust-soft: oklch(0.42 0.15 28 / 10%);
+    --rust-wash: oklch(0.42 0.15 28 / 14%);
+    --ink-wash: oklch(0.14 0.008 55 / 10%);
+    --rule: oklch(0.14 0.008 55 / 14%);
+    --rule-soft: oklch(0.14 0.008 55 / 8%);
+    --serif: "Source Serif 4", Georgia, serif;
+    --sans: "Source Sans 3", -apple-system, system-ui, sans-serif;
+    --mono: "Source Code Pro", "SF Mono", Consolas, monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: var(--serif); font-size: 16px; line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 999; opacity: 0.05;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='240' height='240' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  .page { max-width: 1180px; margin: 0 auto; padding: 0 40px 110px; }
+
+  header { padding: 56px 0 0; }
+  .kicker {
+    font-family: var(--sans); font-size: 0.72rem; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--rust);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .kicker::before { content: ""; width: 34px; height: 2px; background: var(--rust); }
+  .kicker .date { color: var(--faint); font-weight: 400; letter-spacing: 0.08em; margin-left: auto; }
+  h1 { font-size: clamp(2rem, 4.4vw, 3rem); font-weight: 800; line-height: 1.08; letter-spacing: -0.015em; margin: 22px 0 14px; max-width: 24ch; }
+  h1 em { color: var(--rust); font-style: italic; }
+  header .sub { font-size: 1.05rem; color: var(--muted); max-width: 74ch; }
+  header .sub b { color: var(--ink); }
+
+  /* three-line model */
+  .model { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1px; background: var(--rule-soft); border: 1px solid var(--rule-soft); margin-top: 36px; }
+  .model > div { background: var(--paper); padding: 20px 22px 22px; }
+  .model .m-tag { font-family: var(--mono); font-size: 0.7rem; color: var(--rust); display: block; margin-bottom: 8px; }
+  .model p { font-family: var(--sans); font-size: 0.9rem; color: var(--muted); line-height: 1.55; }
+  .model p b { color: var(--ink); }
+
+  .sect-label {
+    font-family: var(--sans); font-size: 0.7rem; font-weight: 600;
+    letter-spacing: 0.15em; text-transform: uppercase; color: var(--faint);
+    margin: 58px 0 20px;
+  }
+
+  code {
+    font-family: var(--mono); font-size: 0.82em;
+    background: oklch(0.14 0.008 55 / 6%);
+    padding: 1px 5px; border-radius: 3px;
+  }
+  .ref { font-family: var(--mono); font-size: 0.72rem; color: var(--faint); }
+
+  /* ============ THE FLOW ============ */
+  .flow { display: grid; grid-template-columns: 360px 1fr; gap: 44px; align-items: start; }
+
+  .steps { display: grid; }
+  .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; padding: 16px 0 18px; position: relative; }
+  .step + .step { border-top: 1px solid var(--rule-soft); }
+  .step .n {
+    font-family: var(--mono); font-size: 0.78rem; font-weight: 600; color: var(--paper);
+    background: var(--ink); width: 24px; height: 24px; border-radius: 50%;
+    display: grid; place-items: center; margin-top: 2px;
+  }
+  .step.agent .n { background: var(--rust); }
+  .actor {
+    font-family: var(--sans); font-size: 0.62rem; font-weight: 700;
+    letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint);
+    display: block; margin-bottom: 4px;
+  }
+  .step.agent .actor { color: var(--rust); }
+  .step p { font-family: var(--sans); font-size: 0.88rem; color: var(--muted); line-height: 1.5; }
+  .step p b { color: var(--ink); }
+  .step .say {
+    display: inline-block; margin-top: 6px; font-family: var(--mono); font-size: 0.78rem;
+    background: var(--ink-wash); padding: 4px 10px; border-radius: 3px; color: var(--ink);
+  }
+  .e2e-note {
+    margin-top: 22px; font-family: var(--sans); font-size: 0.82rem; color: var(--muted);
+    border-top: 2px solid var(--rust); padding-top: 10px;
+  }
+  .e2e-note b { color: var(--ink); }
+
+  /* ---- doc mock ---- */
+  .mock {
+    border: 1px solid var(--rule);
+    background: var(--paper-raised);
+    box-shadow: 0 8px 30px oklch(0.14 0.008 55 / 10%);
+  }
+  .mock-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 18px; border-bottom: 1px solid var(--rule);
+    font-family: var(--mono); font-size: 0.76rem; color: var(--muted);
+  }
+  .mock-bar .fname { font-weight: 600; color: var(--ink); }
+  .mock-bar .peers { margin-left: auto; display: flex; gap: 5px; align-items: center; }
+  .avatar {
+    width: 20px; height: 20px; border-radius: 50%;
+    display: grid; place-items: center;
+    font-family: var(--sans); font-size: 0.56rem; font-weight: 700; color: var(--paper);
+    background: var(--ink);
+  }
+  .avatar.mk { background: oklch(0.45 0.09 230); }
+  .avatar.ag { background: var(--paper); color: var(--rust); border: 1.5px dashed var(--rust); }
+
+  .mock-body { display: grid; grid-template-columns: 1.35fr 1fr; gap: 0; }
+  .mock-doc { padding: 26px 26px 30px 30px; border-right: 1px solid var(--rule-soft); }
+  .mock-doc .crumb { font-family: var(--sans); font-size: 0.62rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); margin-bottom: 8px; }
+  .mock-doc h3 { font-size: 1.45rem; font-weight: 800; margin-bottom: 12px; }
+  .mock-doc p { font-size: 0.85rem; line-height: 1.65; color: var(--muted); margin-bottom: 12px; }
+  .mock-doc p.dim { color: var(--faint); }
+  .hl-private { background: var(--rust-wash); box-decoration-break: clone; -webkit-box-decoration-break: clone; padding: 1px 3px; color: var(--ink); border-bottom: 1.5px dashed var(--rust); }
+  .hl-public { background: var(--ink-wash); box-decoration-break: clone; -webkit-box-decoration-break: clone; padding: 1px 3px; color: var(--ink); }
+
+  .mock-margin { padding: 22px 20px 26px; display: grid; gap: 12px; align-content: start; background: oklch(0.92 0.010 77); }
+  .mcard {
+    background: var(--paper); border: 1px solid var(--rule);
+    padding: 12px 14px 13px;
+    font-family: var(--sans); font-size: 0.8rem; line-height: 1.5; color: var(--muted);
+    box-shadow: 0 1px 3px oklch(0.14 0.008 55 / 6%);
+  }
+  .mcard .who { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .mcard .who .nm { font-weight: 700; color: var(--ink); font-size: 0.78rem; }
+  .mcard .who .badge {
+    margin-left: auto; font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.08em;
+    text-transform: uppercase; padding: 2px 7px; border-radius: 99px;
+  }
+  .mcard.private { border: 1.5px dashed var(--rust); background: oklch(0.93 0.012 60); }
+  .mcard.private .badge { color: var(--rust); border: 1px solid var(--rust); }
+  .mcard.private .who .nm::before { content: "⊳ "; color: var(--rust); }
+  .mcard .ref { display: block; margin-top: 5px; }
+  .mcard.draft { border: 1.5px dashed var(--faint); }
+  .mcard.draft .badge { color: var(--faint); border: 1px solid var(--faint); }
+  .mcard.draft .actions { display: flex; gap: 8px; margin-top: 10px; }
+  .mcard.draft .actions span {
+    font-family: var(--sans); font-size: 0.7rem; font-weight: 600;
+    padding: 4px 12px 5px; border-radius: 3px; cursor: default;
+  }
+  .mcard.draft .actions .post { background: var(--ink); color: var(--paper); }
+  .mcard.draft .actions .discard { border: 1px solid var(--rule); color: var(--muted); }
+  .mcard.public .badge { color: var(--paper); background: var(--ink); }
+  .mock-cap {
+    padding: 12px 18px 14px; border-top: 1px solid var(--rule);
+    font-family: var(--sans); font-size: 0.78rem; color: var(--faint); font-style: italic;
+  }
+  .mock-cap b { color: var(--rust); font-style: normal; }
+
+  /* bridge — copy prompt */
+  .bridge { display: grid; grid-template-columns: 1fr 1.2fr; gap: 44px; align-items: start; }
+  .bridge-why h3 { font-size: 1.35rem; font-weight: 800; margin-bottom: 10px; }
+  .bridge-why > p { font-family: var(--sans); font-size: 0.9rem; color: var(--muted); line-height: 1.6; margin-bottom: 12px; }
+  .bridge-why > p b { color: var(--ink); }
+  .tiers { display: grid; gap: 12px; margin-top: 20px; }
+  .tier { border: 1px solid var(--rule); background: var(--paper-raised); padding: 14px 16px 15px; }
+  .tier .t-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 5px; }
+  .tier .t-head .lvl { font-family: var(--mono); font-size: 0.66rem; color: var(--rust); }
+  .tier .t-head h4 { font-size: 0.95rem; font-weight: 700; }
+  .tier p { font-family: var(--sans); font-size: 0.83rem; color: var(--muted); line-height: 1.55; }
+  .keynote { margin-top: 18px; font-family: var(--sans); font-size: 0.82rem; color: var(--muted); border-top: 2px solid var(--rust); padding-top: 10px; }
+  .keynote b { color: var(--ink); }
+
+  .prompt-card { border: 1px solid var(--rule); background: var(--paper-raised); box-shadow: 0 8px 30px oklch(0.14 0.008 55 / 10%); }
+  .prompt-bar { display: flex; align-items: center; gap: 10px; padding: 11px 16px; border-bottom: 1px solid var(--rule); }
+  .prompt-bar .where { font-family: var(--mono); font-size: 0.72rem; color: var(--faint); }
+  .copy-btn {
+    margin-left: auto; font-family: var(--sans); font-size: 0.74rem; font-weight: 600;
+    background: var(--ink); color: var(--paper); padding: 6px 14px 7px; border-radius: 3px; cursor: default;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .copy-btn::before { content: "⧉"; font-size: 0.85rem; }
+  .prompt-body { padding: 18px 20px 22px; font-family: var(--mono); font-size: 0.76rem; line-height: 1.6; color: var(--ink); white-space: pre-wrap; overflow-x: auto; }
+  .prompt-body .pc { color: var(--faint); }
+  .prompt-body .ph { color: var(--rust); }
+  .prompt-cap { padding: 11px 16px 13px; border-top: 1px solid var(--rule); font-family: var(--sans); font-size: 0.78rem; color: var(--faint); font-style: italic; }
+  .prompt-cap b { color: var(--rust); font-style: normal; }
+
+  /* native/web split */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--rule-soft); border: 1px solid var(--rule-soft); }
+  .split > div { background: var(--paper); padding: 28px 30px 32px; }
+  .split .s-tag { font-family: var(--mono); font-size: 0.72rem; color: var(--rust); }
+  .split h3 { font-size: 1.35rem; font-weight: 800; margin: 8px 0 10px; }
+  .split p { font-family: var(--sans); font-size: 0.88rem; color: var(--muted); line-height: 1.6; }
+  .split p b { color: var(--ink); }
+  .split ul { list-style: none; margin-top: 12px; display: grid; gap: 6px; }
+  .split li { font-family: var(--sans); font-size: 0.85rem; color: var(--muted); padding-left: 16px; position: relative; }
+  .split li::before { content: "—"; position: absolute; left: 0; color: var(--rust); }
+  .split .tag-line { margin-top: 16px; font-family: var(--serif); font-style: italic; color: var(--ink); font-size: 0.98rem; border-top: 2px solid var(--rust); padding-top: 10px; }
+
+  /* gaps */
+  .loop { margin-top: 46px; }
+  .loop-head { display: flex; align-items: baseline; gap: 16px; border-bottom: 2px solid var(--ink); padding-bottom: 10px; }
+  .loop-head h2 { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.01em; }
+  .loop-head .payoff { font-style: italic; color: var(--muted); font-size: 0.95rem; margin-left: auto; text-align: right; max-width: 42ch; }
+  .gap { display: grid; grid-template-columns: 220px 1fr 1fr 1fr; border-bottom: 1px solid var(--rule); }
+  .gap > div { padding: 20px 18px 24px; }
+  .gap > div + div { border-left: 1px solid var(--rule-soft); }
+  .gap-id { padding-left: 0 !important; }
+  .gap-id .num { font-family: var(--mono); font-size: 0.72rem; color: var(--rust); }
+  .gap-id h3 { font-size: 1.12rem; font-weight: 700; line-height: 1.25; margin: 4px 0 8px; }
+  .size {
+    display: inline-block; font-family: var(--mono); font-size: 0.68rem;
+    border: 1px solid var(--rule); border-radius: 99px; padding: 1px 9px 2px; color: var(--muted);
+    background: var(--paper-raised);
+  }
+  .cell-tag {
+    font-family: var(--sans); font-size: 0.64rem; font-weight: 700;
+    letter-spacing: 0.13em; text-transform: uppercase; color: var(--faint);
+    display: block; margin-bottom: 8px;
+  }
+  .cell-tag.add { color: var(--rust); }
+  .gap p { font-family: var(--sans); font-size: 0.86rem; color: var(--muted); line-height: 1.55; }
+  .gap p b { color: var(--ink); }
+  .gap .impact p { color: var(--ink); }
+  .gap .impact p .so { color: var(--faint); font-style: italic; }
+
+  /* not building */
+  .nope { margin-top: 64px; border: 1.5px solid var(--rust); background: var(--rust-soft); padding: 30px 36px 34px; }
+  .nope h2 { font-size: 1.3rem; font-weight: 800; margin-bottom: 6px; }
+  .nope h2 span { color: var(--rust); }
+  .nope .nope-why { font-family: var(--sans); font-size: 0.85rem; color: var(--muted); max-width: 78ch; }
+  .nope-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 26px; margin-top: 18px; }
+  .nope-grid h4 { font-size: 1rem; font-weight: 700; margin-bottom: 6px; }
+  .nope-grid h4::before { content: "✗ "; color: var(--rust); }
+  .nope-grid p { font-family: var(--sans); font-size: 0.84rem; color: var(--muted); line-height: 1.55; }
+
+  .seq { margin-top: 56px; border: 1px solid var(--rule); background: var(--paper-raised); padding: 30px 36px 34px; }
+  .seq h2 { font-size: 1.3rem; font-weight: 800; margin-bottom: 14px; }
+  .seq ol { font-family: var(--sans); font-size: 0.9rem; color: var(--muted); padding-left: 20px; display: grid; gap: 7px; }
+  .seq ol b { color: var(--ink); }
+  .seq .why { margin-top: 14px; font-style: italic; font-family: var(--serif); color: var(--muted); font-size: 0.95rem; }
+
+  footer {
+    margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--rule);
+    display: flex; justify-content: space-between;
+    font-family: var(--mono); font-size: 0.72rem; color: var(--faint);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    header, section { opacity: 0; transform: translateY(12px); animation: rise 0.6s cubic-bezier(0.2,0.7,0.2,1) forwards; }
+    section:nth-of-type(1) { animation-delay: 0.08s; }
+    section:nth-of-type(2) { animation-delay: 0.14s; }
+    section:nth-of-type(3) { animation-delay: 0.2s; }
+    section:nth-of-type(4) { animation-delay: 0.26s; }
+    section:nth-of-type(5) { animation-delay: 0.3s; }
+    section:nth-of-type(6) { animation-delay: 0.34s; }
+    @keyframes rise { to { opacity: 1; transform: none; } }
+  }
+
+  @media (max-width: 980px) {
+    .page { padding: 0 20px 80px; }
+    .model, .split, .nope-grid { grid-template-columns: 1fr; }
+    .flow { grid-template-columns: 1fr; }
+    .mock-body { grid-template-columns: 1fr; }
+    .mock-doc { border-right: none; border-bottom: 1px solid var(--rule-soft); }
+    .gap { grid-template-columns: 1fr; }
+    .gap > div + div { border-left: none; border-top: 1px dashed var(--rule-soft); }
+    .gap > div { padding: 14px 0 16px; }
+    .loop-head { flex-direction: column; gap: 4px; }
+    .loop-head .payoff { margin-left: 0; text-align: left; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header>
+  <div class="kicker">attn · agent loop, v8 <span class="date">james · july 2026</span></div>
+  <h1>Agents speak in <em>your</em> margin. In theirs, they <em>whisper to you</em>.</h1>
+  <p class="sub">Commenting on someone's doc is a social act — your name on a mark means <b>you vouch</b>.
+    An agent's advantage points the other way: it doesn't have the author's context, it has <b>yours</b>.
+    So agents are full participants on your own docs, and on received docs they become a
+    <b>private reading aid</b> — briefing you in a margin only you can see, through your membership,
+    on your machine. No remote agent principals exist anywhere.</p>
+
+  <div class="model">
+    <div>
+      <span class="m-tag">YOUR DOCS</span>
+      <p>Agents <b>read, comment, reply, edit</b> — full participants with the ⊳ chip. The kernel loop: "address my attn comments."</p>
+    </div>
+    <div>
+      <span class="m-tag">RECEIVED DOCS</span>
+      <p>Agents <b>read through your membership</b> and brief you in a <b>private margin</b> — never transmitted. Only humans speak publicly.</p>
+    </div>
+    <div>
+      <span class="m-tag">UNATTENDED TEAM AGENTS</span>
+      <p>CI reviewers, collaborators' bots — <b>parked</b>. A different product for a different customer; tokens and remote protocol wait for a named use case.</p>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="sect-label">The trunk — humans read and speak here; everything else is a branch</div>
+  <div class="split">
+    <div>
+      <span class="s-tag">WHY THE HUMAN MARGIN COMES FIRST</span>
+      <h3>One margin, three consumers</h3>
+      <p>Every agent feature on this page is secretly a human-margin feature. <b>Copy-my-marks</b> is only
+         worth pressing if leaving marks is effortless — the select→comment gesture is the input device of
+         the whole agent loop. <b>Paste-notes</b> renders into the same cards humans read. The
+         <b>private layer</b> is the same components with a dashed border.</p>
+      <p>Public human comments · the agent's private layer · unsent drafts — <b>same anchors, same cards,
+         same threads</b>. The human consumer justifies the system even if no agent ever shows up.</p>
+      <p class="tag-line">The Docs-familiar interface is also the growth loop: a colleague on a phone
+         reviews with zero onboarding because the UI is already in their fingers. An "agent-native"
+         review UI would break the one loop that brings new humans in.</p>
+    </div>
+    <div>
+      <span class="s-tag">WHAT "DOCS-GRADE" MEANS — ACCEPTANCE CRITERIA</span>
+      <h3>Reading comments like it's 2010</h3>
+      <p>Continuous workstream, not a gap row — every item below is judged against
+         "would a Google Docs user need this explained?"</p>
+      <ul>
+        <li>select text → comment in one gesture, mouse or keyboard</li>
+        <li>highlight in text ↔ card in margin — click either, both light up</li>
+        <li>threads: reply, resolve, reopen; resolved collapse out of the way</li>
+        <li>unresolved counter with next / prev navigation</li>
+        <li>suggestion slips the owner accepts / rejects inline</li>
+        <li>reader mode that stays beautiful on a phone — the recipient's view</li>
+      </ul>
+      <p class="tag-line">Warm surface for humans, sharp behavior for agents — in that order.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="sect-label">The rule — when your agent edits, and when it marks</div>
+  <div class="split">
+    <div>
+      <span class="s-tag">DIRECT EDIT · decisions already made</span>
+      <h3>Execution goes in the file</h3>
+      <p>On your own docs the agent already holds write — use it. Wrapping mechanical work in
+         suggestion slips is ceremony: you'd accept them all anyway, and git diff + the file
+         watcher are the audit trail.</p>
+      <ul>
+        <li>typos, formatting, link fixes, structure cleanup</li>
+        <li>"apply what we agreed" — executing a decision you already made</li>
+        <li>"rewrite section 2 the way I said" — instructed changes</li>
+        <li>anything you'd rubber-stamp: don't make yourself a merge bottleneck</li>
+      </ul>
+      <p class="tag-line">Edits execute decisions already made.</p>
+    </div>
+    <div>
+      <span class="s-tag">THE MARGIN · decisions still yours</span>
+      <h3>Judgment waits in the margin</h3>
+      <p>The margin is a <b>queue of pending human judgment</b> — never an agent output channel.
+         Four marks earn their place:</p>
+      <ul>
+        <li><b>open questions</b> — "this date contradicts the client email"; an edit would silently pick an answer that isn't the agent's to pick</li>
+        <li><b>pre-read triage</b> — marks on a doc you haven't read yet: "the real decision is here." You open attn and the margin is your agenda</li>
+        <li><b>voice-sensitive slips</b> — launch copy, external memos: suggestions you cherry-pick one at a time, keeping your voice</li>
+        <li><b>thread-closing replies</b> — "done, cut the compat section — r7": verify per-thread instead of re-reading the doc</li>
+      </ul>
+      <p class="tag-line">Comments surface decisions still yours to make; marks aim your next reading pass.</p>
+    </div>
+  </div>
+  <p style="margin-top:16px;font-family:var(--sans);font-size:0.84rem;color:var(--muted)">
+    The prompt convention falls straight out: <span class="say" style="display:inline">edit what you're sure of and what's mechanical · comment what needs my judgment · reply in-thread when you've addressed a mark</span> — confidence does the routing. This is why agent→margin writing stays narrow on your own docs (replies, questions, triage, opt-in slips) while its main home is the received-doc private margin.</p>
+</section>
+
+<section>
+  <div class="sect-label">The flow — a link arrives in Slack; your agent gives you a read</div>
+  <div class="flow">
+    <div class="steps">
+      <div class="step">
+        <div class="n">1</div>
+        <div><span class="actor">Slack · from Maya</span>
+          <p>A share link lands: <b>"can you look at the cutover plan?"</b> <span class="say">attn.sh/s/8fk2…#key=…</span></p></div>
+      </div>
+      <div class="step">
+        <div class="n">2</div>
+        <div><span class="actor">You</span>
+          <p>Click it — or <code>attn review join &lt;url&gt;</code>. Your daemon joins <b>as you, the human</b>. The window flips to Maya's doc. Nothing new here — this path exists.</p></div>
+      </div>
+      <div class="step">
+        <div class="n">3</div>
+        <div><span class="actor">You → your agent</span>
+          <p>In the terminal:</p>
+          <p><span class="say">"give me a read on this against our relay work"</span></p></div>
+      </div>
+      <div class="step agent">
+        <div class="n">4</div>
+        <div><span class="actor">Agent · on your machine</span>
+          <p>Reads the doc <b>through your daemon</b> (already decrypted, because you're a member) and reads <b>your repo</b>. Writes anchored notes into your <b>private margin</b> — a local room overlaid on her doc, never transmitted.</p></div>
+      </div>
+      <div class="step">
+        <div class="n">5</div>
+        <div><span class="actor">You · in attn</span>
+          <p>Read Maya's doc with the briefing pinned <b>paragraph by paragraph</b> — highlights where it touches your world, conflicts called out with file:line receipts.</p></div>
+      </div>
+      <div class="step">
+        <div class="n">6</div>
+        <div><span class="actor">You · publicly</span>
+          <p>Where you want to speak, <b>you comment</b> — your words, your signature. Or promote an agent draft you've edited; <b>posting is a deliberate human act</b>. Maya sees only you.</p></div>
+      </div>
+      <p class="e2e-note"><b>The E2E story stays airtight:</b> content decrypts only on your machine, and your
+        agent reads it there — the same trust domain as your own eyes. Nothing about the agent touches the relay.</p>
+    </div>
+
+    <figure class="mock">
+      <div class="mock-bar">
+        <span class="fname">cutover-plan.md</span> <span>shared by Maya · joined as you</span>
+        <span class="peers"><span class="avatar mk">MK</span><span class="avatar">JL</span><span class="avatar ag">⊳</span></span>
+      </div>
+      <div class="mock-body">
+        <div class="mock-doc">
+          <div class="crumb">relay / plans / cutover-plan.md</div>
+          <h3>Mailbox cutover plan</h3>
+          <p class="dim">We propose moving all share traffic to the v4 mailbox contract in one release. Clients
+             on the old contract will be dropped rather than bridged…</p>
+          <p><span class="hl-private">Cutover date is August 1, with the v3 schema removed the same day.</span>
+             Consumers should pin the new schema before then. The relay will reject unversioned
+             submissions after the flag flips.</p>
+          <p class="dim">Push subscriptions and watch sockets are unaffected. Snapshot manifests keep their
+             current shape through the transition…</p>
+          <p><span class="hl-public">We are asking each consumer team to confirm their migration window by Friday.</span></p>
+        </div>
+        <div class="mock-margin">
+          <div class="mcard private">
+            <div class="who"><span class="nm">claude</span><span class="badge">private · only you</span></div>
+            Conflicts with your v3 mailbox schema — you shipped sealed verdict items against it.
+            Removing v3 on Aug 1 breaks your outbox retry path.
+            <span class="ref">relay/src/schema.ts:214 · share-do.ts:912</span>
+          </div>
+          <div class="mcard private">
+            <div class="who"><span class="nm">claude</span><span class="badge">private · only you</span></div>
+            The last paragraph is the actual ask — everything above is context. They need your
+            window by Friday.
+          </div>
+          <div class="mcard draft">
+            <div class="who"><span class="nm">draft reply</span><span class="badge">unsent</span></div>
+            "We can commit to Aug 1 only if v3 reads stay live one release longer — our verdict
+            items still write against it. Proposing Aug 15 for removal."
+            <div class="actions"><span class="post">Post as James</span><span class="discard">Discard</span></div>
+          </div>
+          <div class="mcard public">
+            <div class="who"><span class="avatar" style="width:16px;height:16px;font-size:0.5rem">JL</span><span class="nm">James</span><span class="badge">public</span></div>
+            Confirming our window Friday — one flag on the removal date, see thread.
+          </div>
+        </div>
+      </div>
+      <figcaption class="mock-cap">Two margins, one doc: <b>dashed rust = private layer</b> (your agent, local room,
+        never leaves your machine) · solid ink = the public review Maya sees. The draft posts only when you say so.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <div class="sect-label">The bridge — one copy from the web share, no CLI, no install</div>
+  <div class="bridge">
+    <div class="bridge-why">
+      <h3>"Copy prompt for your agent"</h3>
+      <p>A button in the browser share view. The browser <b>already holds the decrypted document</b> —
+         so the prompt carries the content inline, and one paste into Claude Code or Codex delivers
+         the whole "give me a read on this against my project" flow with <b>zero attn dependency</b>.
+         This is agentation's copy-paste tier, applied to docs — and it ships as a frontend-only
+         change, before any of the kernel exists.</p>
+      <p>It's also the conversion path: the prompt's last line teaches the agent (and its owner)
+         that the upgraded experience exists. The web stays the human surface — this button is the
+         <b>handoff point</b> where a received doc meets your local context.</p>
+      <div class="tiers">
+        <div class="tier">
+          <div class="t-head"><span class="lvl">TIER 0 · today, nothing installed</span><h4>Briefing in chat</h4></div>
+          <p>Agent reads the inline doc + your repo (it's in cwd), answers with a quote-anchored
+             briefing: the ask, what touches your work with file:line receipts, what to push back on.</p>
+        </div>
+        <div class="tier">
+          <div class="t-head"><span class="lvl">TIER 1 · attn + mcp installed</span><h4>Briefing in the margin</h4></div>
+          <p>Same prompt — the agent detects the <code>attn_*</code> tools and writes the briefing as
+             <b>private-margin notes</b> instead of chat. The paste doesn't change; the destination upgrades.</p>
+        </div>
+      </div>
+      <p class="keynote"><b>Key hygiene:</b> content travels inline, so the <code>#key</code> fragment never
+         enters the transcript — the prompt cites the share by its bare URL. Consistent with the
+         bearer-leak concern: agent transcripts are the leakiest channel there is.</p>
+    </div>
+
+    <figure class="prompt-card">
+      <div class="prompt-bar">
+        <span class="where">attn.sh/s/8fk2… · review sheet</span>
+        <span class="copy-btn">Copy prompt for your agent</span>
+      </div>
+      <div class="prompt-body"><span class="pc"># Pasted into Claude Code / Codex, in your project directory</span>
+
+Review a document I received, in the context of this project.
+
+<span class="ph">&lt;doc title="cutover-plan.md" from="Maya" via="attn.sh/s/8fk2…"&gt;</span>
+# Mailbox cutover plan
+
+We propose moving all share traffic to the v4 mailbox
+contract in one release. Clients on the old contract will
+be dropped rather than bridged…
+
+Cutover date is August 1, with the v3 schema removed the
+same day. …
+
+We are asking each consumer team to confirm their
+migration window by Friday.
+<span class="ph">&lt;/doc&gt;</span>
+
+<span class="ph">&lt;thread&gt;</span>
+Maya · owner: "confirm your migration window by Friday"
+<span class="ph">&lt;/thread&gt;</span>
+
+1. Skim this repo enough to know what the doc touches.
+2. Brief me: the actual ask · what affects my work, with
+   file:line receipts from MY repo · conflicts and risks ·
+   what I should push back on.
+3. Anchor every point to an exact quote from the doc.
+
+If attn MCP tools are available (attn_docs, attn_note),
+write the briefing as private notes on this doc instead
+of chat. <span class="pc">— prompt by attn · attn.sh</span></div>
+      <figcaption class="prompt-cap">The doc travels <b>inline, already decrypted by your browser</b> —
+        the agent needs no key, no install, no network. Quote-anchoring survives the trip.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <div class="sect-label">What this does to the product — native is the power tool, web is the reach</div>
+  <div class="split">
+    <div>
+      <span class="s-tag">NATIVE · where your agents live</span>
+      <h3>The daemon is the agent hub</h3>
+      <p>The native app stops being "a nicer viewer" and becomes the thing the browser can't be:
+         the place where <b>your files, your memberships, and your agents share one trust domain</b>.</p>
+      <ul>
+        <li>machine-scope MCP: every session, every project, one registration</li>
+        <li>local rooms: mark up anything, shared or not</li>
+        <li>private margins on received docs — your context, applied by your agent</li>
+        <li>the repo is <i>right there</i>: briefings come with file:line receipts</li>
+      </ul>
+      <p class="tag-line">You install attn because of what your agents can do with it.</p>
+    </div>
+    <div>
+      <span class="s-tag">WEB · where other humans meet your doc</span>
+      <h3>The share stays human-simple</h3>
+      <p>The browser build keeps exactly one job and stays great at it:
+         <b>zero-install reading and human review</b>. No agent surface to secure, no tokens to leak —
+         a link someone can open on a phone in Slack and immediately comment on.</p>
+      <ul>
+        <li>view / comment / suggest links, unchanged</li>
+        <li>great on phones — the coffee-shop reviewer is a human</li>
+        <li><b>"Copy prompt for your agent"</b> — the one-paste bridge to Claude/Codex</li>
+        <li>every link sent is a product tour that ends at the native install</li>
+      </ul>
+      <p class="tag-line">You send a share because any human can open it.</p>
+    </div>
+  </div>
+</section>
+
+<section class="loop">
+  <div class="loop-head">
+    <h2>The kernel — the whole v1 loop is clipboard-shaped</h2>
+    <p class="payoff">Copy out, paste in. The clipboard format <i>is</i> the API schema — MCP later just removes the two manual steps.</p>
+  </div>
+
+  <div class="gap">
+    <div class="gap-id"><span class="num">GAP 01</span><h3>Marks require a share</h3><span class="size">size S</span></div>
+    <div><span class="cell-tag">Today</span>
+      <p><code>CreateComment</code> demands a <code>room_id</code> (<span class="ref">manager.rs:959</span>); rooms are only minted by sharing.</p></div>
+    <div><span class="cell-tag add">Add</span>
+      <p>Implicit <b>local room</b> when a doc opens — same <code>events.jsonl</code>, no relay, no invite. Bindable to a <b>joined</b> doc too: that binding is the private margin.</p></div>
+    <div class="impact"><span class="cell-tag">You feel</span>
+      <p>Mark up any doc immediately — yours or received. <span class="so">The only non-UI work in v1.</span></p></div>
+  </div>
+
+  <div class="gap">
+    <div class="gap-id"><span class="num">GAP 02</span><h3>Copy out — "Copy my marks"</h3><span class="size">size S</span></div>
+    <div><span class="cell-tag">Today</span>
+      <p>Your review evaporates: anchors store quote, block, position (<span class="ref">model.rs:893</span>) but nothing serializes them for an agent. You re-type feedback into chat.</p></div>
+    <div><span class="cell-tag add">Add</span>
+      <p>A button on your own docs: marks → a quote-anchored prompt. <i>"Here are my margin comments on plan.md — address them."</i> Sibling of the received-doc bridge button above — same move, other loop.</p></div>
+    <div class="impact"><span class="cell-tag">You feel</span>
+      <p>"Address my attn comments" works <b>with no MCP, no CLI, no IPC</b> — the agent is doc-local, so editing the file is already free. Paste, watch the doc reload.</p></div>
+  </div>
+
+  <div class="gap">
+    <div class="gap-id"><span class="num">GAP 03</span><h3>Paste in — "Paste agent notes"</h3><span class="size">size M</span></div>
+    <div><span class="cell-tag">Today</span>
+      <p>Agent output has nowhere to land — briefings and replies live in chat scrollback, unanchored, unpinned.</p></div>
+    <div><span class="cell-tag add">Add</span>
+      <p>One paste target parsing a trivial convention — blockquote = anchor quote, following text = note:</p>
+      <p><span class="say" style="display:block;white-space:pre-wrap">&gt; "Cutover date is August 1, with the
+&gt;  v3 schema removed the same day."
+Conflicts with your v3 verdict items —
+relay/src/schema.ts:214</span></p>
+      <p>Quotes resolve to positions via the existing anchor machinery. Notes → private margin; replies → under threads; suggested comments → drafts you post.</p></div>
+    <div class="impact"><span class="cell-tag">You feel</span>
+      <p>Briefings pinned beside their paragraphs, answers pinned under your marks — <b>from a paste</b>. Human-readable format: it degrades to a legible doc anywhere else.</p></div>
+  </div>
+
+  <div class="gap">
+    <div class="gap-id"><span class="num">GAP 04</span><h3>Phase 2 — MCP automates the clipboard</h3><span class="size">size M · gated</span></div>
+    <div><span class="cell-tag">Today</span>
+      <p>"No MCP server" is a written non-goal (<span class="ref">goals.md:69</span>). Fine — in v1 the clipboard is the transport, so nothing needs reversing yet.</p></div>
+    <div><span class="cell-tag add">Add</span>
+      <p><code>attn mcp</code> carrying the <b>same two formats</b> over the daemon socket — copy-out becomes <code>attn_comments</code>, paste-in becomes <code>attn_note</code>/<code>attn_reply</code> — plus <code>attn_wait</code> for liveness. Machine scope, lazy connect.</p></div>
+    <div class="impact"><span class="cell-tag">You feel</span>
+      <p>The two manual steps disappear; marks stream in live. <span class="so">Built only after the clipboard loop proves daily use — the format ships frozen by then, tested by your own hands.</span></p></div>
+  </div>
+</section>
+
+<section class="nope">
+  <h2>Deliberately <span>not</span> building</h2>
+  <p class="nope-why">The remote agent surface didn't get smaller — it got <b>deleted</b>. The agent piggybacks
+     your membership locally, so no remote agent principal exists to credential, transport, or verdict.</p>
+  <div class="nope-grid">
+    <div>
+      <h4>Agent tokens &amp; agent ShareTransport</h4>
+      <p>No remote principal, nothing to tokenize. Returns only if an <i>unattended team agent</i> gets a named use case — and the trigger will be bearer-leak risk, not tiering.</p>
+    </div>
+    <div>
+      <h4>Remote write / local "edit tier"</h4>
+      <p>No doc-remote principal ever writes — the owner's daemon is the sole writer; accept is the only write path. Locally, the OS already granted write; REMAP already keeps marks alive across edits.</p>
+    </div>
+    <div>
+      <h4>Agents speaking on others' docs</h4>
+      <p>Public marks carry a human signature or they carry nothing. Agent drafts exist — but posting is a deliberate human act, every time.</p>
+    </div>
+  </div>
+</section>
+
+<section class="seq">
+  <h2>Order of work</h2>
+  <ol>
+    <li><b>00 copy-prompt bridge</b> (received docs, web) — frontend-only, ships first; works with nothing installed.</li>
+    <li><b>01 local rooms</b> — the one non-UI piece: marks on any doc, bindable to joined docs (= the private margin).</li>
+    <li><b>02 copy-marks + 03 paste-notes</b> — the loop closes, both directions, both surfaces. This is v1 complete: <b>three buttons and a room</b>.</li>
+    <li><b>04 attn mcp</b> — gated on the clipboard loop proving daily use; same formats, minus the manual steps, plus liveness.</li>
+  </ol>
+  <p class="why">v1 has no MCP, no CLI verbs, no protocol changes, no new trust surface — and because the clipboard is just text,
+     the loop works identically on browser-authored and native docs, both directions: the "works on both" requirement is met at
+     tier 0 for free. What v1 gives up is only liveness (marks streaming in while you watch) — that's the launch-video magic,
+     not the daily value, and it arrives with MCP once the habit is proven. And none of this is a pivot away from human review:
+     the Docs-grade margin is the trunk, worked continuously — every agent feature above renders through the same components
+     humans read and write with.</p>
+</section>
+
+<footer>
+  <span>planning/collab/agent-loop-roadmap.html · v8</span>
+  <span>warm surface · sharp behavior</span>
+</footer>
+
+</div>
+</body>
+</html>

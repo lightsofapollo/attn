@@ -17,6 +17,7 @@ export default defineConfig({
     'hosted-authoring.spec.ts',
     'hosted-offline.spec.ts',
     'hosted-share-sheet.spec.ts',
+    'hosted-recovery.spec.ts',
     'landing-review-demo.spec.ts',
   ],
   timeout: 60_000,

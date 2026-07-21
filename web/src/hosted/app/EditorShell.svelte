@@ -1981,7 +1981,32 @@
       if (shareOpen || filesSheetOpen || reviewSheetOpen || lightboxOpen) return;
       event.preventDefault();
       paletteOpen = !paletteOpen;
+      return;
     }
+    // Escape steps back from a click-opened thread (collapse expanded
+    // resolved card → clear focus → re-hide click-revealed cards). Never
+    // while a modal or a text field owns the keyboard, and never while
+    // EDITING the document (Escape there belongs to the editor).
+    if (
+      event.key === 'Escape' &&
+      !shareOpen && !filesSheetOpen && !reviewSheetOpen && !lightboxOpen &&
+      !paletteOpen && !namePromptOpen && !ownerCommentComposer
+    ) {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest('input, textarea, [role="dialog"]')) return;
+      if (reviewStoreRef?.dismissFocusStep()) event.preventDefault();
+    }
+  }
+
+  // Click-away: a click on plain document text (not a highlight mark, not a
+  // card) steps back exactly like Escape.
+  function onGlobalClick(event: MouseEvent): void {
+    const store = reviewStoreRef;
+    const target = event.target;
+    if (!store || !(target instanceof HTMLElement)) return;
+    if (!pmViewForReview?.dom.contains(target)) return;
+    if (target.closest('[data-event-id]')) return;
+    store.dismissFocusStep();
   }
 
   // ————— arrival toasts (incoming review events) —————
@@ -2226,7 +2251,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onGlobalKeydown} />
+<svelte:window onkeydown={onGlobalKeydown} onclick={onGlobalClick} />
 
 <CommandPalette bind:open={paletteOpen} commands={paletteCommands} />
 

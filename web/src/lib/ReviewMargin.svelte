@@ -951,7 +951,7 @@
    * the thread's card (cursor + scroll + pulse via focusEventId).
    */
   async function expandToThread(t: Thread): Promise<void> {
-    reviewStore.panelOpen = true;
+    reviewStore.openPanelForFocus(t.rootEvent.meta.eventId);
     activateThread(t);
     await tick();
     const card = containerEl?.querySelector<HTMLElement>(

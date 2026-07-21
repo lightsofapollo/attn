@@ -225,9 +225,13 @@
   // Threads arriving do NOT auto-open the band (Reading default): they
   // surface as marker chips in the gutter plus the header count.
 
-  // Clicking a highlight in the document focuses its thread — surface it.
+  // Clicking a highlight in the document focuses its thread — surface it
+  // (tracked as click-revealed so Escape / click-away can put it back).
   $effect(() => {
-    if (reviewStore.focusEventId !== null && currentThreadCount > 0) reviewStore.panelOpen = true;
+    if (reviewStore.focusEventId !== null && currentThreadCount > 0 && !reviewStore.panelOpen) {
+      reviewStore.panelOpen = true;
+      reviewStore.panelOpenedByFocus = true;
+    }
   });
 
   function toggleRail(): void {
@@ -239,7 +243,25 @@
       if (currentThreadCount === 0) return;
       event.preventDefault();
       toggleRail();
+      return;
     }
+    // Escape steps back from a click-opened thread — but never while a
+    // composer, prompt, or text field owns the keyboard.
+    if (event.key === 'Escape' && !commentComposer && !suggestionComposer && !namePromptOpen) {
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest('input, textarea, [role="dialog"]')) return;
+      if (reviewStore.dismissFocusStep()) event.preventDefault();
+    }
+  }
+
+  // Click-away: a click on plain document text (not a highlight mark, not a
+  // card) steps back exactly like Escape.
+  function handleDocumentClickAway(event: MouseEvent): void {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (!pmViewForReview?.dom.contains(target)) return;
+    if (target.closest('[data-event-id]')) return;
+    reviewStore.dismissFocusStep();
   }
 
   // ---------------------------------------------------------------------------
@@ -1022,7 +1044,7 @@
   }
 </script>
 
-<svelte:window onkeydown={handleRailShortcut} />
+<svelte:window onkeydown={handleRailShortcut} onclick={handleDocumentClickAway} />
 
 <main
   class="browser-review-shell flex h-screen flex-col overflow-hidden bg-background text-foreground"

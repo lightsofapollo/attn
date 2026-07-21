@@ -545,12 +545,11 @@ function handleClick(view: EditorView, event: Event): boolean {
     });
     return false;
   }
-  reviewStore.setFocusEventId(eventId);
-  // Clicking a mark is explicit intent to view its thread — expand the
-  // rail if it is collapsed to the chip gutter (attn-42y), mirroring the
-  // chip-side expandToThread. ReviewMargin's focus effect then finds the
-  // freshly rendered card and scrolls/pulses it.
-  reviewStore.panelOpen = true;
+  // Clicking a mark is explicit intent to view its thread — reveal the
+  // cards if hidden (tracked so Escape / click-away can hide them again),
+  // mirroring the chip-side expandToThread. ReviewMargin's focus effect
+  // then finds the freshly rendered card and scrolls/pulses it.
+  reviewStore.openPanelForFocus(eventId);
   recordReviewSelectionDebug('mark-click-activated', {
     eventId: eventId.slice(0, 8),
     pmFrom: view.state.selection.from,

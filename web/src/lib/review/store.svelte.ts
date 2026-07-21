@@ -903,7 +903,49 @@ export class ReviewStore {
   }
 
   /** Toggle the right-rail review panel open/closed. */
+  /**
+   * True when the last panel OPEN came from clicking a mark or chip while
+   * the cards were hidden. Escape / click-away then restores the hidden
+   * state instead of leaving the person hunting for the dock toggle.
+   */
+  panelOpenedByFocus = $state(false);
+
+  /** Focus a thread from a click, revealing the cards if they are hidden. */
+  openPanelForFocus(eventId: EventId): void {
+    this.setFocusEventId(eventId);
+    if (!this.panelOpen) {
+      this.panelOpen = true;
+      this.panelOpenedByFocus = true;
+    }
+  }
+
+  /**
+   * One step back from a click-opened review surface (Escape or a click on
+   * plain document text). Order: collapse an expanded resolved card → clear
+   * the focused thread (re-hiding the cards if a click revealed them) →
+   * re-hide click-revealed cards. Returns true when a step consumed the
+   * gesture so callers can stop propagation.
+   */
+  dismissFocusStep(): boolean {
+    if (this.expandedResolvedThreadId !== null) {
+      this.expandedResolvedThreadId = null;
+      return true;
+    }
+    const hadFocus = this.focusEventId !== null;
+    const hadTransientPanel = this.panelOpenedByFocus;
+    if (!hadFocus && !hadTransientPanel) return false;
+    if (hadFocus) this.setFocusEventId(null);
+    if (hadTransientPanel) {
+      this.panelOpen = false;
+      this.panelOpenedByFocus = false;
+    }
+    return true;
+  }
+
   togglePanel(): void {
+    // A deliberate toggle takes ownership of the panel state; the
+    // click-revealed latch must not re-hide it later.
+    this.panelOpenedByFocus = false;
     this.panelOpen = !this.panelOpen;
     if (!this.panelOpen) {
       // Collapsing the rail returns any expanded resolved card to its chip

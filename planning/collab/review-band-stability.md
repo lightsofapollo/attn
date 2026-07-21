@@ -1,6 +1,10 @@
 # Review band open/close: killing the width reshuffle
 
-Status: options for discussion (2026-07-20). Follow-up to
+Status: option A approved by James and shipped (2026-07-20, attn-wac5) —
+the aside keeps a permanent 48px gutter and Review mode renders as an
+elevated overlay panel (`.review-rail-panel`, styles/base.css) on both
+the owner frame and the /s/ page. Originally: options for discussion.
+Follow-up to
 `comment-layout-alternatives.md` — the Reading/Review mode shipped, but
 James's verdict on the remaining seam: *"when open it reshuffles the
 layout width and again when closed which makes it look awkward."*

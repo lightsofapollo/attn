@@ -240,19 +240,16 @@
         {@render content()}
       </div>
       {#if reviewStore.railMode !== 'hidden'}
-        <!-- The aside reserves the FULL margin width for the whole life of
-             the review context: toggling collapsed↔expanded only changes
-             what renders inside, so the document column never reflows or
-             recenters (Docs rule — the page doesn't move when comments
-             open). The inner column narrows to the gutter width when
-             collapsed; the spare width is plain paper. -->
-        <!-- Reading mode reserves only the 48px marker gutter — the document
-             gets the width; Review mode opens the full responsive band. The
-             width change on toggle is user-initiated (the chosen-reflow
-             carve-out in the stability ruling). -->
+        <!-- The aside reserves ONLY the 48px marker gutter, permanently.
+             Review mode never widens it in flow: the card column renders as
+             an elevated overlay panel anchored to this aside's right edge
+             (.review-rail-panel in styles/base.css), sliding over the paper.
+             Document geometry is a pure function of the viewport — toggling
+             the rail never re-wraps a line of text
+             (planning/collab/review-band-stability.md, option A). -->
         <aside
-          class="right-rail sticky top-0 flex flex-col self-start overflow-hidden"
-          style={`${reviewStore.railMode === 'collapsed' ? `flex: 0 0 ${RAIL_WIDTH_PX.collapsed}px;` : 'flex: 0 1 320px; min-width: 15rem;'} height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
+          class="right-rail sticky top-0 flex flex-col self-start"
+          style={`flex: 0 0 ${RAIL_WIDTH_PX.collapsed}px; height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={reviewStore.railMode}
           data-slot="right-rail"
@@ -260,11 +257,14 @@
         >
           <!-- Show/hide now lives in the ReviewBar dock (the reviewer-header
                grammar the user prefers); this spacer just clears the floating
-               bar so the first card never slides under it. -->
+               bar so the first card never slides under it. The overlay panel
+               clears it via --review-overlay-top instead (absolute leaves
+               the flow). -->
           <div class="h-10 shrink-0" aria-hidden="true"></div>
           <div
-            class="relative mb-2 min-h-0 flex-1 overflow-hidden"
-            style="width: 100%;"
+            class="review-rail-panel mb-2 flex-1"
+            style="--review-overlay-top: 2.5rem; --review-overlay-bottom: 0.5rem;"
+            data-expanded={reviewStore.railMode === 'expanded'}
           >
             {@render rail()}
           </div>

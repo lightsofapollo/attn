@@ -1140,24 +1140,27 @@
                    set: the review page is always commentable, so the first
                    comment must not shift the document left (Docs rule — the
                    page never moves). Empty margin is just paper. -->
-              <!-- Reading mode: a 48px marker gutter (avatar chips at anchor
-                   height) — the document gets the width. Review mode: the
-                   full responsive band (320, giving way to 240 before the
-                   document squeezes below its 44rem floor). The width change
-                   is user-initiated — the chosen-reflow carve-out. -->
+              <!-- The aside reserves ONLY the 48px marker gutter, permanently.
+                   Review mode renders the card column as an elevated overlay
+                   panel anchored to this aside's right edge
+                   (.review-rail-panel in styles/base.css) — the document
+                   never re-wraps on toggle
+                   (planning/collab/review-band-stability.md, option A). -->
               <aside
-                class="browser-review-margin sticky top-0 self-start overflow-hidden"
-                style={`height: calc(100dvh - 2.75rem); ${railVisible ? 'flex: 0 1 320px; min-width: 15rem;' : 'flex: 0 0 48px;'}`}
+                class="browser-review-margin sticky top-0 self-start"
+                style="height: calc(100dvh - 2.75rem); flex: 0 0 48px;"
                 data-slot="browser-review-margin"
                 data-open={railVisible}
               >
-                <ReviewMargin
-                  view={pmViewForReview}
-                  readOnly={true}
-                  reviewerAuthoring={reviewerAvailability.reviewAuthoring}
-                  onResolveComment={resolveBrowserComment}
-                  onReplyComment={replyBrowserComment}
-                />
+                <div class="review-rail-panel" data-expanded={railVisible}>
+                  <ReviewMargin
+                    view={pmViewForReview}
+                    readOnly={true}
+                    reviewerAuthoring={reviewerAvailability.reviewAuthoring}
+                    onResolveComment={resolveBrowserComment}
+                    onReplyComment={replyBrowserComment}
+                  />
+                </div>
               </aside>
             {/if}
           </div>

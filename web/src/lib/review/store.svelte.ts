@@ -919,6 +919,20 @@ export class ReviewStore {
   }
 
   /**
+   * True once the person explicitly picked a file this session (sidebar /
+   * file-nav click). Programmatic pins — first-arrival latch, durable-share
+   * restore, URL restore — leave it false, so restore logic knows whether a
+   * selection is safe to upgrade or belongs to the user.
+   */
+  userSelectedFile = $state(false);
+
+  /** File switch initiated by the person (not a restore/latch). */
+  selectFileAsUser(fileId: FileId): void {
+    this.userSelectedFile = true;
+    this.setCurrentFile(fileId);
+  }
+
+  /**
    * Optimistically hide a thread's margin card (Resolve clicked, or
    * UI-only Reject). The thread stays in the event log; this only drives
    * `isThreadActive` filtering and the `railMode` derivation.

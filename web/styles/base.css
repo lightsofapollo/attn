@@ -387,3 +387,47 @@ img {
 .attn-chrome :is(ul, ol) > li::marker {
   content: none;
 }
+
+/* ---------------------------------------------------------------------------
+   Review rail overlay (planning/collab/review-band-stability.md, option A).
+
+   The host aside keeps a permanent 48px marker gutter in flow; entering
+   Review mode floats the card column over the paper as an elevated panel
+   anchored to the aside's right edge. Document geometry stays a pure
+   function of the viewport — never of review state, so toggling the rail
+   never re-wraps a line of text. */
+.review-rail-panel {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+}
+
+.review-rail-panel[data-expanded='true'] {
+  position: absolute;
+  top: var(--review-overlay-top, 0px);
+  bottom: var(--review-overlay-bottom, 0px);
+  right: 0;
+  height: auto;
+  width: min(320px, calc(100vw - 4rem));
+  z-index: 30;
+  background: var(--background);
+  border-left: 1px solid var(--border);
+  box-shadow: -16px 0 36px -20px rgb(0 0 0 / 0.4);
+  animation: review-rail-slide-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes review-rail-slide-in {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes review-rail-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .review-rail-panel[data-expanded='true'] {
+    animation: review-rail-fade-in 150ms ease-out;
+  }
+}

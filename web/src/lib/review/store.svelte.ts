@@ -111,7 +111,7 @@ export interface ReviewRoomSummary {
  */
 export class ReviewStore {
   /** Whether the right-rail review panel is open. Driven by Cmd+J / toggle. */
-  panelOpen = $state(false);
+  panelOpen = $state(true);
 
   /** Currently-focused review room, if any. */
   currentRoomId = $state<RoomId | null>(null);

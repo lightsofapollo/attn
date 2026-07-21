@@ -389,13 +389,16 @@ img {
 }
 
 /* ---------------------------------------------------------------------------
-   Review rail overlay (planning/collab/review-band-stability.md, option A).
+   Floating review margin (Docs grammar, superseding the opaque overlay of
+   review-band-stability.md option A — user verdict: the sheet hid the
+   document behind mostly-empty paper).
 
-   The host aside keeps a permanent 48px marker gutter in flow; entering
-   Review mode floats the card column over the paper as an elevated panel
-   anchored to the aside's right edge. Document geometry stays a pure
-   function of the viewport — never of review state, so toggling the rail
-   never re-wraps a line of text. */
+   The host aside keeps a permanent 48px gutter in flow; the card column is
+   a TRANSPARENT positioning layer anchored to the aside's right edge. Each
+   card carries its own surface + shadow and floats at its anchor height;
+   the document stays visible between cards and never re-wraps. The layer
+   itself never intercepts pointer events — only the cards do — so text
+   under empty margin stays selectable. */
 .review-rail-panel {
   position: relative;
   height: 100%;
@@ -410,15 +413,14 @@ img {
   height: auto;
   width: min(320px, calc(100vw - 4rem));
   z-index: 30;
-  background: var(--background);
-  border-left: 1px solid var(--border);
-  box-shadow: -16px 0 36px -20px rgb(0 0 0 / 0.4);
-  animation: review-rail-slide-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+  animation: review-rail-fade-in 160ms ease-out;
 }
 
-@keyframes review-rail-slide-in {
-  from { opacity: 0; transform: translateX(20px); }
-  to { opacity: 1; transform: translateX(0); }
+/* Cards, chips, trays re-enable interaction; the empty space between them
+   stays click-through to the document. */
+.review-rail-panel[data-expanded='true'] .review-margin > * {
+  pointer-events: auto;
 }
 
 @keyframes review-rail-fade-in {
@@ -428,6 +430,6 @@ img {
 
 @media (prefers-reduced-motion: reduce) {
   .review-rail-panel[data-expanded='true'] {
-    animation: review-rail-fade-in 150ms ease-out;
+    animation: none;
   }
 }

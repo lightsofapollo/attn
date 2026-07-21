@@ -35,14 +35,17 @@ function assert(cond: boolean, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
 }
 
-defineCase('expanded whenever the panel is open, in or out of a room', () => {
+defineCase('expanded only inside a review room (panelOpen now defaults open)', () => {
   assert(
     computeRailMode({ inReviewRoom: true, panelOpen: true }) === 'expanded',
     'review room + open → expanded',
   );
+  // panelOpen defaults to TRUE (floating cards are the resting state), so a
+  // roomless file must stay rail-free no matter what the flag says —
+  // otherwise every local document renders an empty phantom rail.
   assert(
-    computeRailMode({ inReviewRoom: false, panelOpen: true }) === 'expanded',
-    'local file + open (Cmd+J) → expanded',
+    computeRailMode({ inReviewRoom: false, panelOpen: true }) === 'hidden',
+    'local file + open → hidden (no room, no rail)',
   );
 });
 

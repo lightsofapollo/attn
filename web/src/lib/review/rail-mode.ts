@@ -37,6 +37,9 @@ export function computeRailMode(input: {
   /** User-controlled open/collapsed state (ReviewBar toggle / Cmd+J). */
   panelOpen: boolean;
 }): RailMode {
-  if (input.panelOpen) return 'expanded';
-  return input.inReviewRoom ? 'collapsed' : 'hidden';
+  // No room, no rail — panelOpen is meaningless outside a review context
+  // (it now DEFAULTS to open, so this gate is what keeps roomless
+  // workspaces rail-free).
+  if (!input.inReviewRoom) return 'hidden';
+  return input.panelOpen ? 'expanded' : 'collapsed';
 }

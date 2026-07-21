@@ -190,7 +190,9 @@
   // Reading is the default mode (comment-layout-alternatives.md): the
   // margin boots as the 48px marker gutter; Review (the full card band) is
   // entered by choice — 💬/⌘J, clicking a marker or highlight, composing.
-  reviewStore.panelOpen = false;
+  // Comments are visible by default (floating margin cards — Docs grammar).
+  // The dock toggle still hides them for a clean reading pass.
+  reviewStore.panelOpen = true;
 
   // Phones get the document full-width; threads move behind a thumb control
   // that opens the same margin as a bottom sheet (attn-qez). Same 901px

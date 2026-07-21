@@ -271,6 +271,43 @@ pub fn authenticate_signal_envelope_v3(
     Ok(envelope)
 }
 
+/// Upgrade an assembled `kind: "snapshot_blob"` envelope to the protocol-v3
+/// owner-authenticated wire form. The relay honors signal compaction only for
+/// snapshots whose `deviceSignature` verifies under the owner device's
+/// registered signing key, using the SAME signal-proof canonicalization with
+/// `targetDeviceId = null` and `generation` pinned to the envelope's
+/// `createdAt` (a snapshot has no monotonic signal generation of its own).
+/// Matches `relay/src/room-do.ts` and the web
+/// `assembleSnapshotBlobEnvelope` byte-for-byte. Note: only
+/// `deviceSignature` is set — `signalGeneration` stays absent on snapshots.
+pub fn authenticate_snapshot_blob_envelope_v3(
+    mut envelope: MailboxEnvelope,
+    signing_key: &crate::review::crypto::signing::DeviceSigningKey,
+) -> Result<MailboxEnvelope, EnvelopeError> {
+    if envelope.kind != EnvelopeKind::SnapshotBlob {
+        return Err(EnvelopeError::InvalidPlaintext(
+            "device proof requires kind=snapshot_blob".into(),
+        ));
+    }
+    let signature = crate::review::crypto::device_proof::sign_device_signal_proof_v3(
+        signing_key,
+        envelope.room_id.as_str(),
+        &envelope.envelope_id,
+        &id_to_string(&envelope.author_id),
+        &id_to_string(&envelope.device_id),
+        None,
+        envelope.created_at,
+        envelope.created_at,
+        envelope.expires_at,
+        &envelope.nonce,
+        &envelope.ciphertext,
+        envelope.ciphertext_bytes,
+    )
+    .map_err(canon_to_envelope_err)?;
+    envelope.device_signature = Some(signature);
+    Ok(envelope)
+}
+
 /// Open a `kind: "signal"` envelope sealed by `assemble_signal_envelope`.
 ///
 /// Reconstructs the AAD from the envelope's cleartext header, AEAD-opens
@@ -881,5 +918,92 @@ mod tests {
             }
             other => panic!("expected InvalidPlaintext, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // 12. Owner snapshot proof: authenticate_snapshot_blob_envelope_v3
+    //     must sign under the SAME canonicalization the relay verifies —
+    //     target null, generation pinned to createdAt — set only
+    //     deviceSignature (signalGeneration stays absent, matching the
+    //     web assembler), and reject non-snapshot kinds.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn snapshot_blob_proof_pins_generation_to_created_at_and_omits_signal_generation() {
+        use crate::review::crypto::device_proof::verify_device_signal_proof_v3;
+        use crate::review::crypto::signing::DeviceSigningKey;
+        use crate::review::envelope::assemble_snapshot_blob_envelope;
+
+        let (room, author, dev, _target) = fixture_ids();
+        let snapshot_key = *derive_room_keys(&TEST_ROOM_SECRET).snapshot_key.as_bytes();
+        let unsigned = assemble_snapshot_blob_envelope(
+            br##"{"content":"# hello"}"##,
+            &snapshot_key,
+            &room,
+            &author,
+            &dev,
+            &[0x5Cu8; 16],
+            FIXED_TS_MS,
+            EXPIRES_MS,
+        )
+        .unwrap();
+
+        let sk = DeviceSigningKey::from_bytes(&[0x42u8; 32]).unwrap();
+        let signed = authenticate_snapshot_blob_envelope_v3(unsigned.clone(), &sk).unwrap();
+
+        assert_eq!(
+            signed.signal_generation, None,
+            "snapshots must not carry signalGeneration (web/relay contract)"
+        );
+        let signature = signed
+            .device_signature
+            .as_deref()
+            .expect("deviceSignature set");
+        verify_device_signal_proof_v3(
+            &sk.verifying_key(),
+            signature,
+            room.as_str(),
+            &signed.envelope_id,
+            &id_to_string(&signed.author_id),
+            &id_to_string(&signed.device_id),
+            None,
+            signed.created_at, // generation == createdAt
+            signed.created_at,
+            signed.expires_at,
+            &signed.nonce,
+            &signed.ciphertext,
+            signed.ciphertext_bytes,
+        )
+        .expect("relay-shape verification succeeds");
+
+        // Any other generation must fail — proves the pin is load-bearing.
+        verify_device_signal_proof_v3(
+            &sk.verifying_key(),
+            signature,
+            room.as_str(),
+            &signed.envelope_id,
+            &id_to_string(&signed.author_id),
+            &id_to_string(&signed.device_id),
+            None,
+            signed.created_at + 1,
+            signed.created_at,
+            signed.expires_at,
+            &signed.nonce,
+            &signed.ciphertext,
+            signed.ciphertext_bytes,
+        )
+        .expect_err("wrong generation must not verify");
+
+        // Everything except the signature is untouched.
+        assert_eq!(signed.envelope_id, unsigned.envelope_id);
+        assert_eq!(signed.ciphertext, unsigned.ciphertext);
+        assert_eq!(signed.nonce, unsigned.nonce);
+
+        // Non-snapshot kinds are rejected upfront.
+        let mut wrong_kind = unsigned;
+        wrong_kind.kind = EnvelopeKind::Event;
+        let err = authenticate_snapshot_blob_envelope_v3(wrong_kind, &sk)
+            .expect_err("event kind must reject");
+        assert!(matches!(err, EnvelopeError::InvalidPlaintext(_)));
     }
 }

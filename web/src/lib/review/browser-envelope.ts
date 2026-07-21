@@ -10,6 +10,7 @@ import {
   type EnvelopeAad,
   type SignableMetaShape,
 } from './browser-crypto';
+import { signDeviceSignalProofV3 } from './device-proof';
 import type { MailboxEnvelope } from './browser-ws';
 import type {
   EventId,
@@ -50,11 +51,23 @@ export interface AssembleSnapshotBlobEnvelopeInput {
   clientNonce: Uint8Array;
   createdAt: number;
   expiresAt: number;
+  /**
+   * Registered device signing secret (32 bytes). When present on a v3 owner
+   * publish, the snapshot carries a device-proof signature so the relay can
+   * authenticate it as an owner snapshot before honoring signal compaction.
+   * Reviewers may omit it — an unsigned snapshot is still valid, it just never
+   * drives compaction.
+   */
+  signingSecret?: Uint8Array;
   /** Deterministic AEAD nonce override. Production callers must omit this. */
   nonce?: Uint8Array;
 }
 
-/** Assemble native `kind: snapshot_blob` bytes without an embedded signature. */
+/**
+ * Assemble native `kind: snapshot_blob` bytes. On a v3 owner publish (when
+ * `signingSecret` is supplied) the envelope carries a device-proof signature
+ * over its own envelopeId + ciphertext so the relay can authenticate the owner.
+ */
 export function assembleSnapshotBlobEnvelope(
   input: AssembleSnapshotBlobEnvelopeInput,
 ): MailboxEnvelope {
@@ -72,7 +85,8 @@ export function assembleSnapshotBlobEnvelope(
   const nonce = input.nonce ? new Uint8Array(input.nonce) : randomAeadNonce();
   try {
     const ciphertext = aeadSeal(input.snapshotKey, nonce, input.plaintext, aad);
-    return {
+    const ciphertextB64 = base64UrlEncode(ciphertext);
+    const envelope: MailboxEnvelope = {
       v: 2,
       roomId: input.roomId,
       envelopeId,
@@ -82,9 +96,30 @@ export function assembleSnapshotBlobEnvelope(
       expiresAt: input.expiresAt,
       kind: 'snapshot_blob',
       nonce: base64UrlEncode(nonce),
-      ciphertext: base64UrlEncode(ciphertext),
+      ciphertext: ciphertextB64,
       ciphertextBytes: ciphertext.length,
     };
+    if (input.signingSecret !== undefined) {
+      envelope.deviceSignature = signDeviceSignalProofV3(
+        {
+          roomId: input.roomId,
+          envelopeId,
+          authorId: input.authorId,
+          deviceId: input.deviceId,
+          targetDeviceId: null,
+          // The relay pins the snapshot proof generation to createdAt (a
+          // snapshot has no monotonic signal generation of its own).
+          generation: input.createdAt,
+          createdAt: input.createdAt,
+          expiresAt: input.expiresAt,
+          nonce: envelope.nonce,
+          ciphertext: ciphertextB64,
+          ciphertextBytes: ciphertext.length,
+        },
+        input.signingSecret,
+      );
+    }
+    return envelope;
   } finally {
     nonce.fill(0);
   }

@@ -3190,6 +3190,21 @@ impl Bootstrapper {
             expires_at as i64,
         )
         .map_err(|e| BootstrapError::Crypto(format!("assemble snapshot blob: {e}")))?;
+        // v3 owner-authenticated snapshot: the relay honors signal compaction
+        // only for snapshot_blob envelopes carrying a valid device-proof
+        // signature from the owner device (generation pinned to createdAt,
+        // target null). v2 routes forbid proof fields on snapshots, so this is
+        // strictly v3. Signed BEFORE outbox append / R2 seal so every surface
+        // carries the identical envelope.
+        let blob_envelope = if protocol_version == 3 {
+            crate::review::transport::signaling::authenticate_snapshot_blob_envelope_v3(
+                blob_envelope,
+                &identity.signing_key()?,
+            )
+            .map_err(|e| BootstrapError::Crypto(format!("sign snapshot blob: {e}")))?
+        } else {
+            blob_envelope
+        };
 
         // ---- Route by size: the relay stores inline envelopes in DO
         //      storage only up to its 1 MiB spillover threshold; above
@@ -3226,6 +3241,18 @@ impl Bootstrapper {
                 expires_at as i64,
             )
             .map_err(|e| BootstrapError::Crypto(format!("assemble blob wrapper: {e}")))?;
+            // Same v3 owner device proof as the inline lane — signed before
+            // BOTH the R2 body seal and the outbox append so the relay POST
+            // and the sealed AAD reference the identical wrapper.
+            let wrapper = if protocol_version == 3 {
+                crate::review::transport::signaling::authenticate_snapshot_blob_envelope_v3(
+                    wrapper,
+                    &identity.signing_key()?,
+                )
+                .map_err(|e| BootstrapError::Crypto(format!("sign blob wrapper: {e}")))?
+            } else {
+                wrapper
+            };
             let sealed_body = seal_snapshot_r2_body(&snapshot_key, &blob_bytes, &wrapper)
                 .map_err(|e| BootstrapError::Crypto(format!("seal R2 body: {e}")))?;
 

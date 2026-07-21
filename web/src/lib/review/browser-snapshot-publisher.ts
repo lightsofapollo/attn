@@ -352,6 +352,7 @@ async function prepareSnapshot(
       clientNonce,
       createdAt,
       expiresAt: options.policy.expiresAt,
+      signingSecret: options.identity.signingSecret,
     });
     let wrapper = candidate;
     let storage: 'mailbox' | 'r2' = 'mailbox';
@@ -372,6 +373,7 @@ async function prepareSnapshot(
           clientNonce,
           createdAt,
           expiresAt: options.policy.expiresAt,
+          signingSecret: options.identity.signingSecret,
         });
       } finally {
         refBytes.fill(0);

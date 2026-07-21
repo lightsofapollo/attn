@@ -193,6 +193,8 @@ export interface DecodedEnvelope {
 // ---------------------------------------------------------------------------
 
 export interface BrowserWsCallbacks {
+  /** Room instance rotated: purge stale local history before the resubscribe. */
+  onSeqRegression?: () => void | Promise<void>;
   /** Called once per successful connect on the `hello` frame. */
   onHello?: (
     frame: Extract<ServerFrame, { type: 'hello' }>,
@@ -486,6 +488,28 @@ export class BrowserWsClient {
   private routeFrame(frame: ServerFrame): void {
     switch (frame.type) {
       case 'hello':
+        // Server sequences never regress within one room instance. A hello
+        // whose serverSeq is BELOW our replay cursor proves the room was
+        // rebuilt under the same roomId (stop/re-share reuses ids; relay
+        // eviction rebuilds) — our cursor points into the DEAD instance, so
+        // we would silently subscribe past everything the new instance holds
+        // and never hear another event. Reset to a full replay; the consumer
+        // purges its stale local history via onSeqRegression, then the
+        // reconnect resubscribes from 0.
+        if (this.afterSeq > 0 && frame.serverSeq < this.afterSeq) {
+          this.callbacks.onError?.(
+            'ATTN_ROOM_INSTANCE_ROTATED',
+            `room serverSeq ${frame.serverSeq} < local cursor ${this.afterSeq}; resyncing from 0`,
+          );
+          this.afterSeq = 0;
+          void Promise.resolve(this.callbacks.onSeqRegression?.()).catch(() => undefined);
+          try {
+            this.socket?.close(1011, 'room instance rotated');
+          } catch {
+            // reconnect path handles it
+          }
+          return;
+        }
         this.ingestDevices(frame.devices);
         this.callbacks.onHello?.(frame, this.devices);
         return;

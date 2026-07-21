@@ -406,6 +406,41 @@ defineCase('atomically stores inbound envelopes and keeps each device cursor mon
   }
 });
 
+defineCase('resetRoomInboundHistory heals a rotated room instance (stale seq bindings)', async () => {
+  const { factory, name } = testDatabase();
+  const storage = await BrowserStorage.open({
+    indexedDB: factory,
+    databaseName: name,
+    createIfMissing: true,
+  });
+  try {
+    // Old instance: envelopes bound at seqs 3 and 5, cursor at 5.
+    await storage.commitInbound('room-rotated', 'receiver-a', envelope('room-rotated', 'env-old-3', 3), 3);
+    await storage.commitInbound('room-rotated', 'receiver-a', envelope('room-rotated', 'env-old-5', 5), 5);
+    // New instance restarts seqs — same seq, different envelope: conflict.
+    await assertRejects(
+      () => storage.commitInbound('room-rotated', 'receiver-a', envelope('room-rotated', 'env-new-3', 3), 3),
+      (error) => error instanceof StorageConflictError,
+      'rotation presents as a sequence-binding conflict',
+    );
+    await storage.resetRoomInboundHistory('room-rotated');
+    assertEqual(await storage.getCursor('room-rotated', 'receiver-a'), 0, 'cursor resets to full replay');
+    assertDeepEqual(await storage.replayInbound('room-rotated'), [], 'stale inbound log purged');
+    // The new instance's envelopes now commit cleanly at the reused seqs.
+    assertEqual(
+      await storage.commitInbound('room-rotated', 'receiver-a', envelope('room-rotated', 'env-new-3', 3), 3),
+      true,
+      'post-reset commit succeeds',
+    );
+    // Other rooms' history is untouched.
+    await storage.commitInbound('room-untouched', 'receiver-a', envelope('room-untouched', 'env-x', 1), 1);
+    await storage.resetRoomInboundHistory('room-rotated');
+    assertEqual(await storage.getCursor('room-untouched', 'receiver-a'), 1, 'reset is room-scoped');
+  } finally {
+    storage.close();
+  }
+});
+
 defineCase('recovers exact outbox bytes and atomically moves acknowledgements to history', async () => {
   const { factory, name } = testDatabase();
   const storage = await BrowserStorage.open({

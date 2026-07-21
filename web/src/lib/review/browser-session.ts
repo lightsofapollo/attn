@@ -67,6 +67,7 @@ import {
   type BrowserStorageRoom,
   type StoredInboundEnvelope,
 } from './browser-storage';
+import { StorageConflictError } from './browser-storage-errors';
 import {
   parseAndStripInviteFromUrl,
   parseInviteUrl,
@@ -2270,6 +2271,22 @@ export class BrowserSession {
       reconnectInitialMs: this.opts.reconnectInitialMs,
       reconnectMaxMs: this.opts.reconnectMaxMs,
       callbacks: {
+        onSeqRegression: async () => {
+          // The room instance rotated under this roomId; our persisted
+          // cursor and cached inbound log belong to the dead instance.
+          const holder = globalThis as {
+            __attnInboundErrors?: { at: number; code: string; message: string }[];
+          };
+          (holder.__attnInboundErrors ??= []).push({
+            at: Date.now(),
+            code: 'ATTN_ROOM_INSTANCE_ROTATED',
+            message: 'room rebuilt under the same id; purging stale local history and resyncing',
+          });
+          this.persistedCursor = 0;
+          if (this.storage && this.storageWritesEnabled) {
+            await this.storage.resetRoomInboundHistory(roomId).catch(() => undefined);
+          }
+        },
         onHello: (frame, verifiedDevices) => {
           const devices = [...verifiedDevices.values()];
           let policy: RoomPolicy;
@@ -2513,12 +2530,41 @@ export class BrowserSession {
     const { envelope, plaintext } = decoded;
     if (decoded.source === 'network') {
       if (this.storage && this.identity && this.storageWritesEnabled) {
-        await this.storage.commitInbound(
-          this.state.roomId!,
-          this.identity.deviceId,
-          envelope,
-          decoded.serverSeq,
-        );
+        try {
+          await this.storage.commitInbound(
+            this.state.roomId!,
+            this.identity.deviceId,
+            envelope,
+            decoded.serverSeq,
+          );
+        } catch (error) {
+          if (!(error instanceof StorageConflictError)) throw error;
+          // The relay room INSTANCE rotated under this roomId (stop/re-share
+          // reuses ids; relay idle/expiry eviction rebuilds rooms): the new
+          // instance restarts serverSeqs, so the stale local history binds
+          // these sequences to the dead instance's envelopes. Left alone this
+          // is a permanent deaf loop — commit fails before dispatch, the
+          // socket recycles, the same frame conflicts again, and the client
+          // never hears another event. Local history is a CACHE of the relay
+          // log: purge it, rebind to the current instance, and let the
+          // in-flight replay continue (UI dedup by eventId keeps this safe).
+          const holder = globalThis as {
+            __attnInboundErrors?: { at: number; code: string; message: string }[];
+          };
+          (holder.__attnInboundErrors ??= []).push({
+            at: Date.now(),
+            code: 'ATTN_ROOM_INSTANCE_ROTATED',
+            message: 'stale local room history purged; resyncing from the current room instance',
+          });
+          await this.storage.resetRoomInboundHistory(this.state.roomId!);
+          this.persistedCursor = 0;
+          await this.storage.commitInbound(
+            this.state.roomId!,
+            this.identity.deviceId,
+            envelope,
+            decoded.serverSeq,
+          );
+        }
         this.persistedCursor = Math.max(this.persistedCursor, decoded.serverSeq);
       } else {
         this.volatileInbound.set(envelope.envelopeId, {

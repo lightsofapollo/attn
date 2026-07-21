@@ -1033,6 +1033,23 @@ export class BrowserStorage implements
    * Crypto-erasure is committed first. Cleanup happens only after the opaque
    * root key is gone, so interrupted cleanup cannot recover private content.
    */
+  /**
+   * Purge only the cached inbound log + replay cursors for a room, keeping
+   * identity, keys, devices, and the outbox. Used when the relay room
+   * INSTANCE rotated under a stable roomId (stop/re-share reuses ids; relay
+   * eviction rebuilds rooms): the stale local (roomId, serverSeq) bindings
+   * then belong to the dead instance and every fresh envelope fails its
+   * durable commit before dispatch — the client goes permanently deaf in a
+   * reconnect loop. Local history is a cache of the relay log; dropping it
+   * and replaying from seq 0 is always safe.
+   */
+  async resetRoomInboundHistory(roomId: string): Promise<void> {
+    requireId(roomId, 'roomId');
+    for (const storeName of [STORE_INBOX, STORE_CURSORS] as const) {
+      await deleteRoomRecords(this.db, storeName, roomId);
+    }
+  }
+
   async forgetRoom(roomId: string): Promise<void> {
     requireId(roomId, 'roomId');
     const keyTx = this.db.transaction(STORE_ROOM_KEYS, 'readwrite');

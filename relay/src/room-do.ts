@@ -659,6 +659,19 @@ export class RoomDO extends DurableObject<Env> {
    * headers post-construction; the DO already builds the 101 response with
    * the right header via `withAllowBrowserHeader` so this branch is a no-op.
    */
+  /** Tag a pre-persist CREATE failure with the REQUESTED policy's browser
+   *  flag so quota denials reach browser callers as readable errors. */
+  private tagCreateDenial(response: Response, policy: RoomPolicy): Response {
+    if (!policy.allowBrowser || response.status === 101) return response;
+    const headers = new Headers(response.headers);
+    headers.set("X-Attn-Allow-Browser", "true");
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
+
   private async tagAllowBrowserOnResponse(
     request: Request,
     response: Response,
@@ -1024,9 +1037,13 @@ export class RoomDO extends DurableObject<Env> {
         }
       }
       if (code === "ATTN_QUOTA_LEASE_CONFLICT") {
-        return quotaUnavailableResponse("room quota generation conflict");
+        return this.tagCreateDenial(quotaUnavailableResponse("room quota generation conflict"), clamped.policy);
       }
-      return quotaResponse;
+      // A denied CREATE never persisted META.policy, so the generic
+      // response tagger cannot mark it browser-eligible — without the tag
+      // the Worker attaches no CORS headers and the browser surfaces the
+      // denial as an opaque "Failed to fetch" instead of the quota message.
+      return this.tagCreateDenial(quotaResponse, clamped.policy);
     }
     quotaLease = { ...quotaLease, confirmed: true };
 

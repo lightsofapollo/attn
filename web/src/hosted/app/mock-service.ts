@@ -370,6 +370,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
         throw new Error('Mock owner review actions are unavailable.');
       },
       createComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
+      announceProfile: async () => {},
       replyToComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
       resolveComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
       retryReviewOutbox: async () => undefined,

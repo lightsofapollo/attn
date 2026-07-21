@@ -32,6 +32,18 @@ import type {
   WorkspaceRecord,
 } from '../../lib/review/browser-workspace-schema';
 import type { PersistenceMode, WorkspaceSummary } from './types';
+// Runes module: loaded lazily so node-side tests can import this file
+// (top-level $state would throw outside Svelte compilation). The getter
+// falls back to undefined until the module resolves — announce paths then
+// use their role-label fallback, and the rename re-announce always runs
+// long after load.
+let profileModule: typeof import('../../lib/profile.svelte') | null = null;
+void import('../../lib/profile.svelte')
+  .then((m) => {
+    profileModule = m;
+  })
+  .catch(() => {});
+
 import {
   BrowserOwnerWorkspaceRuntime,
   type BrowserOwnerWorkspaceRuntimeOptions,
@@ -161,7 +173,12 @@ export class BrowserWorkspaceService {
         selfLabel: 'Owner',
         selfColor: '#8a63b8',
       },
-      ...(options.sessionOptions === undefined ? {} : { sessionOptions: options.sessionOptions }),
+      // The announce path reads the LIVE profile name (rename re-announce),
+      // so the getter must always be present; explicit options still win.
+      sessionOptions: {
+        getDisplayName: () => profileModule?.userProfile.effectiveName,
+        ...(options.sessionOptions ?? {}),
+      },
       ...(options.heartbeatIntervalMs === undefined
         ? {}
         : { heartbeatIntervalMs: options.heartbeatIntervalMs }),

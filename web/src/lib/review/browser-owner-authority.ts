@@ -90,6 +90,7 @@ export interface BrowserOwnerSession {
   prepareTerminalEvent(body: ReviewEventBody): AssembledBrowserEvent;
   adoptDurableEnvelope(envelope: MailboxEnvelope): Promise<void>;
   createComment(anchor: Anchor, body: string): Promise<ReviewEvent>;
+  announceProfile(): Promise<void>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
   retryOutbox(): Promise<void>;
@@ -336,6 +337,12 @@ export class BrowserOwnerAuthorityService {
   async createComment(anchor: Anchor, body: string): Promise<ReviewEvent> {
     const session = this.requireDurableReviewSession();
     return session.createComment(anchor, body);
+  }
+
+  /** Re-announce the owner with the CURRENT profile name (attn-sur). */
+  async announceProfile(): Promise<void> {
+    const session = this.requireDurableReviewSession();
+    await session.announceProfile();
   }
 
   async replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent> {

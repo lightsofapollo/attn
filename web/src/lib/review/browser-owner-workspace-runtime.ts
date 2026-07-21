@@ -139,6 +139,7 @@ export interface BrowserOwnerWorkspaceAuthority extends BrowserReviewTerminalPor
     phases: BrowserPublishedEpochTransitionPhases,
   ): Promise<readonly BrowserOwnerAuthorityFile[]>;
   createComment(anchor: Anchor, body: string): Promise<ReviewEvent>;
+  announceProfile(): Promise<void>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
   retryOutbox(): Promise<void>;
@@ -583,6 +584,10 @@ export class BrowserOwnerWorkspaceRuntime {
 
   async createComment(anchor: Anchor, body: string): Promise<ReviewEvent> {
     return this.requireDurableReviewAuthority().createComment(anchor, body);
+  }
+
+  async announceProfile(): Promise<void> {
+    await this.requireDurableReviewAuthority().announceProfile();
   }
 
   async replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent> {

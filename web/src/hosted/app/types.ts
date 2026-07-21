@@ -166,6 +166,8 @@ export interface EditingSession {
   applySuggestion(input: BrowserOwnerWorkspaceApplyInput): Promise<CommittedBrowserSuggestionResult>;
   rejectSuggestion(input: BrowserOwnerWorkspaceRejectInput): Promise<RejectBrowserSuggestionResult>;
   createComment(anchor: Anchor, body: string): Promise<ReviewEvent>;
+  /** Re-announce this owner with the current profile name (rename flow). */
+  announceProfile(): Promise<void>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
   retryReviewOutbox(): Promise<void>;

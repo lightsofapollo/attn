@@ -1854,12 +1854,25 @@ export class BrowserSession {
     if (!outbox || !identity || !keys || !policy || !roomId) return;
     if (!this.state.authoringReady || this.state.grantTier === 'view') return;
     const createdAt = this.nextCreatedAt();
-    const capabilities: Capability[] = [
-      'read_snapshot',
-      'write_comment',
-      'resolve_comment',
-    ];
-    if (this.state.grantTier === 'suggest') capabilities.push('write_suggestion');
+    // Receivers verify the announced capability list EXACTLY against the
+    // registered device kind (validParticipantAttestation). Announcing the
+    // reviewer set from an owner made every receiving client silently drop
+    // the re-announce as unauthorized — the rename then existed only in the
+    // author's local echo and reverted on any replay.
+    const capabilities: Capability[] =
+      this.principal === 'owner'
+        ? [
+            'room_admin',
+            'read_snapshot',
+            'write_comment',
+            'write_suggestion',
+            'resolve_comment',
+            'accept_suggestion',
+            'publish_snapshot',
+          ]
+        : this.state.grantTier === 'suggest'
+          ? ['read_snapshot', 'write_comment', 'resolve_comment', 'write_suggestion']
+          : ['read_snapshot', 'write_comment', 'resolve_comment'];
     const joined: ReviewEventBody = {
       type: 'participant_joined',
       participant: {

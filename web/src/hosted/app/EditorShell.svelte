@@ -2195,7 +2195,13 @@
   bind:open={namePromptOpen}
   suggestion={userProfile.suggestion}
   mode={namePromptMode}
-  onConfirm={(name) => userProfile.save(name)}
+  onConfirm={(name) => {
+    userProfile.save(name);
+    // Broadcast the rename: displayNameFor prefers the latest
+    // ParticipantJoined announcement, so without a re-announce every
+    // existing card (yours and reviewers') keeps the old name forever.
+    void session?.announceProfile().catch(() => {});
+  }}
 />
 
 {#if ownerToolbarSelection && pmViewForReview && SelectionToolbarComponent && !ownerCommentComposer}

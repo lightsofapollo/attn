@@ -341,6 +341,7 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
   async createComment(_anchor: Anchor, _body: string): Promise<ReviewEvent> {
     throw new Error('not used');
   }
+  async announceProfile(): Promise<void> {}
   async replyToComment(_anchor: Anchor, _body: string, _threadId: string): Promise<ReviewEvent> {
     throw new Error('not used');
   }

@@ -183,6 +183,9 @@ class FakeSession implements BrowserOwnerSession {
     this.durableReviewCalls.push('create');
     return {} as ReviewEvent;
   }
+  async announceProfile(): Promise<void> {
+    this.durableReviewCalls.push('announce');
+  }
   async replyToComment(_anchor: Anchor, _body: string, threadId: string): Promise<ReviewEvent> {
     this.durableReviewCalls.push(`reply:${threadId}`);
     return {} as ReviewEvent;

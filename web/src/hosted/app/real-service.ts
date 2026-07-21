@@ -404,6 +404,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
       },
       rejectSuggestion: (input) => runtime.reject(input),
       createComment: (anchor, body) => runtime.createComment(anchor, body),
+      announceProfile: () => runtime.announceProfile(),
       replyToComment: (anchor, body, threadId) => runtime.replyToComment(anchor, body, threadId),
       resolveComment: (threadId) => runtime.resolveComment(threadId),
       retryReviewOutbox: () => runtime.retryOutbox(),

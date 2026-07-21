@@ -296,6 +296,29 @@
       grantTier: sessionState.grantTier,
     }),
   );
+  // Diagnosis probe (mirrors the owner's __attnCollabDebug.review): which
+  // room this reviewer tab is actually bound to, whether its comments are
+  // delivering, and what it dropped. Room drift — a remembered tab wedged on
+  // a rotated/expired room — presents as the author seeing their comments
+  // while the owner (hosting the CURRENT room) never receives them.
+  $effect(() => {
+    (window as unknown as { __attnReviewDebug?: object }).__attnReviewDebug = {
+      roomId: sessionState.roomId,
+      storeRoomId: reviewStore.currentRoomId,
+      storeFileId: reviewStore.currentFileId,
+      connection: sessionState.connection,
+      ownerOnline: sessionState.ownerOnline,
+      authoringReady: sessionState.authoringReady,
+      authoringError: sessionState.authoringError,
+      outboxPending: sessionState.outboxPending,
+      grantTier: sessionState.grantTier,
+      persistence: sessionState.persistence,
+      threads: reviewStore.threads.length,
+      events: reviewStore.events.length,
+      inboundErrors: ((globalThis as { __attnInboundErrors?: object[] }).__attnInboundErrors ?? []).slice(-5),
+    };
+  });
+
   $effect(() => {
     const query = window.matchMedia('(min-width: 901px)');
     const update = (): void => {

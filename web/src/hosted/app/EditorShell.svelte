@@ -1632,6 +1632,12 @@
         threads: reviewStoreRef?.threads.length ?? null,
         threadFiles: (reviewStoreRef?.threads ?? []).map((t) => t.anchor?.fileId ?? null),
         threadsForCurrentFile: reviewStoreRef?.threadsForCurrentFile.length ?? null,
+        events: reviewStoreRef?.events.length ?? null,
+        participants: (reviewStoreRef?.events ?? [])
+          .filter((e) => e.body.type === 'participant_joined')
+          .map((e) => (e.body.type === 'participant_joined' ? e.body.participant.displayName : ''))
+          .slice(-8),
+        connection: reviewStoreRef?.connection ?? null,
         inboundErrors: ((globalThis as { __attnInboundErrors?: object[] }).__attnInboundErrors ?? []).slice(-5),
       },
     };

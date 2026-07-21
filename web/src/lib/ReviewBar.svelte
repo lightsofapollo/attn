@@ -89,6 +89,12 @@
      * native frame keeps its rail-local toggle, so this defaults off.
      */
     railToggle?: boolean;
+    /**
+     * Render in normal flow (inside a header bar) instead of the floating
+     * absolute dock. The hosted owner header matches the reviewer page's
+     * bar, so its chips sit in flex flow rather than floating over paper.
+     */
+    inline?: boolean;
   }
 
   let {
@@ -101,6 +107,7 @@
     rightOffsetPx = 16,
     localParticipantId = null,
     railToggle = false,
+    inline = false,
     onDockWidth,
   }: Props = $props();
 
@@ -159,8 +166,10 @@
 
 {#if visible}
   <div
-    class="review-bar pointer-events-none absolute top-1.5 z-40 flex h-10 min-w-0 items-center justify-end overflow-visible text-xs"
-    style={`right: ${rightOffsetPx}px;`}
+    class={inline
+      ? 'review-bar pointer-events-none relative flex h-full min-w-0 items-center justify-end overflow-visible text-xs'
+      : 'review-bar pointer-events-none absolute top-1.5 z-40 flex h-10 min-w-0 items-center justify-end overflow-visible text-xs'}
+    style={inline ? '' : `right: ${rightOffsetPx}px;`}
     data-slot="review-bar"
     data-state={reviewStore.currentRoomId !== null ? 'active' : 'pending'}
   >

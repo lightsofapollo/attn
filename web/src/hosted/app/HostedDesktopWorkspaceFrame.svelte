@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
-  import PathBreadcrumb from '../../lib/PathBreadcrumb.svelte';
+  import Share2 from '@lucide/svelte/icons/share-2';
   import ReviewBar from '../../lib/ReviewBar.svelte';
   import Sidebar from '../../lib/Sidebar.svelte';
   import WorkspaceEditorFrame from '../../lib/WorkspaceEditorFrame.svelte';
@@ -157,9 +157,6 @@
     ...(onOpenDesk ? [{ id: 'all-workspaces', label: 'All workspaces', run: onOpenDesk }] : []),
   ]);
   let viewport = $state<HTMLElement | null>(null);
-  // Live width of the ReviewBar dock — the breadcrumb's right inset tracks
-  // it so the save chip seats flush beside the Sharing cluster.
-  let reviewDockWidth = $state(0);
   // The sticky margin column must be exactly one viewport tall so the
   // bottom-fit pass inside ReviewMargin sees the real visible height.
   let railViewportHeight = $state(0);
@@ -218,31 +215,50 @@
   />
 {/snippet}
 
-{#snippet chrome()}
-  <ReviewBar
-    {shareOpen}
-    isOwner={true}
-    onShareClick={onShare}
-    railToggle={true}
-    onDockWidth={(px) => (reviewDockWidth = px)}
-  />
-{/snippet}
-
 {#snippet mainContent()}
-  <div class="relative shrink-0">
-    <!-- Pre-share the breadcrumb's quiet icon is the only Share entry point.
-         Once a room is active (or the sheet is up) the ReviewBar's ShareChip
-         owns share status + management, so the icon hides — same gate as the
-         native App.svelte header. -->
-    <PathBreadcrumb
-      path={activePath}
-      {rootPath}
-      {actions}
-      onShare={reviewStore.currentRoomId === null && !shareOpen ? onShare : undefined}
-      shareEnabled={true}
-      rightInsetPx={reviewDockWidth > 0 ? reviewDockWidth + 28 : 16}
-    />
-  </div>
+  <!-- One header bar, matching the reviewer page's grammar (user ruling:
+       'make owner match the review'): brand · divider · document name on
+       the left, save state + share/review chips inline on the right. This
+       replaces the breadcrumb row and the floating ReviewBar dock. -->
+  <header
+    class="attn-chrome relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background px-3"
+    data-slot="owner-header"
+  >
+    <span
+      class="select-none font-serif text-sm font-bold leading-none text-foreground"
+      data-slot="owner-brand"
+      aria-label="attn"
+    >attn</span>
+    <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
+    <span
+      class="min-w-0 truncate font-sans text-[13px] font-medium text-foreground"
+      data-slot="owner-doc-name"
+    >{activeEntryPath ? activeEntryPath.split('/').at(-1) : workspaceName}</span>
+    {#if reviewStore.currentRoomId === null && !shareOpen && onShare}
+      <!-- Pre-share the quiet icon is the only Share entry point; once a
+           room is active the ReviewBar's ShareChip owns share status. -->
+      <button
+        type="button"
+        class="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        data-slot="owner-header-share"
+        aria-label="Share for review"
+        title="Share for review"
+        onclick={(event) => onShare(event.currentTarget)}
+      >
+        <Share2 class="size-3.5" aria-hidden="true" />
+      </button>
+    {/if}
+    <div class="ml-auto flex h-full min-w-0 shrink-0 items-center gap-1.5">
+      {@render actions()}
+      <ReviewBar
+        {shareOpen}
+        isOwner={true}
+        onShareClick={onShare}
+        railToggle={true}
+        inline={true}
+      />
+    </div>
+  </header>
   <ScrollArea
     class="attn-content-viewport hosted-content-viewport min-h-0 flex-1"
     orientation="vertical"
@@ -281,15 +297,12 @@
           data-slot="right-rail"
           aria-label="Review margin"
         >
-          <!-- Show/hide now lives in the ReviewBar dock (the reviewer-header
-               grammar the user prefers); this spacer just clears the floating
-               bar so the first card never slides under it. The overlay panel
-               clears it via --review-overlay-top instead (absolute leaves
-               the flow). -->
-          <div class="h-10 shrink-0" aria-hidden="true"></div>
+          <!-- The header bar is in flow above this scroller now, so the
+               card layer needs only breathing room, not bar clearance. -->
+          <div class="h-2 shrink-0" aria-hidden="true"></div>
           <div
             class="review-rail-panel mb-2 flex-1"
-            style="--review-overlay-top: 2.5rem; --review-overlay-bottom: 0.5rem;"
+            style="--review-overlay-top: 0.5rem; --review-overlay-bottom: 0.5rem;"
             data-expanded={reviewStore.railMode === 'expanded'}
           >
             {@render rail()}
@@ -305,7 +318,6 @@
 <WorkspaceEditorFrame
   class="hosted-workspace-frame"
   {sidebar}
-  {chrome}
   content={mainContent}
   rail={emptyRail}
   railMode="hidden"

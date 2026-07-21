@@ -179,6 +179,10 @@ class FakeSession implements BrowserOwnerSession {
   async adoptDurableEnvelope(envelope: MailboxEnvelope): Promise<void> {
     this.adopted.push(envelope);
   }
+  async createComment(_anchor: Anchor, _body: string): Promise<ReviewEvent> {
+    this.durableReviewCalls.push('create');
+    return {} as ReviewEvent;
+  }
   async replyToComment(_anchor: Anchor, _body: string, threadId: string): Promise<ReviewEvent> {
     this.durableReviewCalls.push(`reply:${threadId}`);
     return {} as ReviewEvent;

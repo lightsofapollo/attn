@@ -338,6 +338,9 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
   async adoptDurableEnvelope(_envelope: MailboxEnvelope): Promise<void> {
     this.events.push('terminal-adopt');
   }
+  async createComment(_anchor: Anchor, _body: string): Promise<ReviewEvent> {
+    throw new Error('not used');
+  }
   async replyToComment(_anchor: Anchor, _body: string, _threadId: string): Promise<ReviewEvent> {
     throw new Error('not used');
   }

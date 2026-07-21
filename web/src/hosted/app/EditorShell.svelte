@@ -32,7 +32,8 @@
   import type { EditorBridge } from '../../lib/prosemirror/collab-session';
   import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
   import { LEASE_CHANNEL_NAME, openBroadcastChannel } from '../../lib/tab-channels';
-  import type { DeviceId, ParticipantId, RequiresThreeWayVerdict, Thread } from '../../lib/types';
+  import type { Anchor as ReviewAnchor, DeviceId, ParticipantId, RequiresThreeWayVerdict, RoomId, Thread } from '../../lib/types';
+  import type { ConstructAnchorContext } from '../../lib/review/anchors';
 
   interface Props {
     service: WorkspaceAppService;
@@ -154,6 +155,10 @@
     typeof import('../../lib/prosemirror/review-decorations').requestReviewDecorationsRebuild | null
   >(null);
   let ReviewApplyExpandComponent = $state<typeof ReviewApplyExpandComponentType | null>(null);
+  let SelectionToolbarComponent = $state<typeof import('../../lib/SelectionToolbar.svelte').default | null>(null);
+  let CommentComposerComponent = $state<typeof import('../../lib/CommentComposer.svelte').default | null>(null);
+  let hasTextSelectionFn = $state<typeof import('../../lib/review/popover-anchor').hasTextSelection | null>(null);
+  let TextSelectionRef = $state<typeof import('prosemirror-state').TextSelection | null>(null);
   let editorRef = $state<EditorExports | undefined>();
   let pmViewForReview = $state<EditorView | undefined>();
   // Watches every document change (onDirtyChange only fires on transitions).
@@ -654,6 +659,17 @@
         resolveAnchorFn = resolverModule.resolveAnchor;
         reviewStoreRef = mod.reviewStore;
       }));
+      imports.push(Promise.all([
+        import('../../lib/SelectionToolbar.svelte'),
+        import('../../lib/CommentComposer.svelte'),
+        import('../../lib/review/popover-anchor'),
+        import('prosemirror-state'),
+      ]).then(([toolbarModule, composerModule, anchorModule, pmState]) => {
+        SelectionToolbarComponent = toolbarModule.default;
+        CommentComposerComponent = composerModule.default;
+        hasTextSelectionFn = anchorModule.hasTextSelection;
+        TextSelectionRef = pmState.TextSelection;
+      }));
     }
     await Promise.all(imports);
   }
@@ -718,6 +734,117 @@
       if (store.currentFileId !== binding.fileId) store.setCurrentFile(binding.fileId);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Owner comment authoring (attn-r7xi). The hosted owner had NO way to start
+  // a thread — SelectionToolbar/CommentComposer existed only on the /s/ page.
+  // Mirror of the reviewer flow: select text → toolbar → composer → the
+  // authority session's createComment. No Suggest on the owner: the owner
+  // edits the document directly.
+  // ---------------------------------------------------------------------------
+
+  interface OwnerComposerState {
+    view: EditorView;
+    from: number;
+    to: number;
+    roomId: RoomId;
+    anchorContext: ConstructAnchorContext;
+  }
+
+  let ownerToolbarSelection = $state<{ from: number; to: number } | null>(null);
+  let ownerCommentComposer = $state<OwnerComposerState | null>(null);
+
+  function ownerComposeSnapshot() {
+    const store = reviewStoreRef;
+    const roomId = store?.currentRoomId ?? null;
+    const fileId = store?.currentFileId ?? null;
+    if (!store || roomId === null || fileId === null) return null;
+    const snaps = store.snapshots.filter(
+      (s) => s.roomId === roomId && s.fileId === fileId && s.anchorIndex,
+    );
+    if (snaps.length === 0) return null;
+    return snaps.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
+  }
+
+  function refreshOwnerSelectionToolbar(): void {
+    const view = pmViewForReview;
+    const hasSel = hasTextSelectionFn;
+    if (
+      !view ||
+      !hasSel ||
+      !durableReviewAvailable ||
+      ownerCommentComposer !== null ||
+      !hasSel(view) ||
+      !ownerComposeSnapshot()
+    ) {
+      ownerToolbarSelection = null;
+      return;
+    }
+    const { from, to } = view.state.selection;
+    if (ownerToolbarSelection?.from === from && ownerToolbarSelection.to === to) return;
+    ownerToolbarSelection = { from, to };
+  }
+
+  $effect(() => {
+    if (!durableReviewAvailable) return;
+    let raf = 0;
+    const schedule = (): void => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        refreshOwnerSelectionToolbar();
+      });
+    };
+    document.addEventListener('selectionchange', schedule);
+    return () => {
+      document.removeEventListener('selectionchange', schedule);
+      if (raf) cancelAnimationFrame(raf);
+      ownerToolbarSelection = null;
+    };
+  });
+
+  function openOwnerCommentComposer(): void {
+    const store = reviewStoreRef;
+    const view = pmViewForReview;
+    const snapshot = ownerComposeSnapshot();
+    const roomId = store?.currentRoomId ?? null;
+    if (!store || !view || !snapshot?.anchorIndex || roomId === null) return;
+    // Composing is an explicit request to see the card — enter Review mode.
+    store.panelOpen = true;
+    ownerCommentComposer = {
+      view,
+      from: view.state.selection.from,
+      to: view.state.selection.to,
+      roomId,
+      anchorContext: {
+        index: snapshot.anchorIndex,
+        fileId: snapshot.fileId,
+        snapshotId: snapshot.snapshotId,
+        baseHash: snapshot.baseHash,
+      },
+    };
+    ownerToolbarSelection = null;
+  }
+
+  async function createOwnerComment(anchor: ReviewAnchor, body: string): Promise<void> {
+    const granted = session;
+    if (!granted) throw new Error('The editing session is unavailable.');
+    await granted.createComment(anchor, body);
+  }
+
+  function collapseOwnerComposeSelection(): void {
+    ownerToolbarSelection = null;
+    const view = pmViewForReview;
+    const TextSelection = TextSelectionRef;
+    if (!view || !TextSelection) return;
+    try {
+      view.dispatch(
+        view.state.tr.setSelection(TextSelection.create(view.state.doc, view.state.selection.to)),
+      );
+    } catch {
+      // The selection disappears with a view that is being replaced.
+    }
+  }
 
   // Keep the shared connection badge honest on the hosted owner. The store's
   // transport field is daemon-fed on native and nothing set it here, so the
@@ -2070,6 +2197,32 @@
   mode={namePromptMode}
   onConfirm={(name) => userProfile.save(name)}
 />
+
+{#if ownerToolbarSelection && pmViewForReview && SelectionToolbarComponent && !ownerCommentComposer}
+  <SelectionToolbarComponent
+    view={pmViewForReview}
+    from={ownerToolbarSelection.from}
+    to={ownerToolbarSelection.to}
+    onComment={openOwnerCommentComposer}
+    onSuggest={() => {}}
+    canSuggest={false}
+  />
+{/if}
+
+{#if ownerCommentComposer && CommentComposerComponent}
+  <CommentComposerComponent
+    view={ownerCommentComposer.view}
+    from={ownerCommentComposer.from}
+    to={ownerCommentComposer.to}
+    anchorContext={ownerCommentComposer.anchorContext}
+    roomId={ownerCommentComposer.roomId}
+    onCreateComment={createOwnerComment}
+    onClose={() => {
+      ownerCommentComposer = null;
+    }}
+    onSubmitted={collapseOwnerComposeSelection}
+  />
+{/if}
 
 {#if arrivalToasts.length > 0}
   <div class="arrival-toasts" aria-live="polite">

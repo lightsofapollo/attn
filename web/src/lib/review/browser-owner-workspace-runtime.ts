@@ -138,6 +138,7 @@ export interface BrowserOwnerWorkspaceAuthority extends BrowserReviewTerminalPor
     fileId: string,
     phases: BrowserPublishedEpochTransitionPhases,
   ): Promise<readonly BrowserOwnerAuthorityFile[]>;
+  createComment(anchor: Anchor, body: string): Promise<ReviewEvent>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
   retryOutbox(): Promise<void>;
@@ -578,6 +579,10 @@ export class BrowserOwnerWorkspaceRuntime {
         terminalPort: authority,
       });
     });
+  }
+
+  async createComment(anchor: Anchor, body: string): Promise<ReviewEvent> {
+    return this.requireDurableReviewAuthority().createComment(anchor, body);
   }
 
   async replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent> {

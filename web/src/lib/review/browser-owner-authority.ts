@@ -89,6 +89,7 @@ export interface BrowserOwnerSession {
   getState(): BrowserSessionState;
   prepareTerminalEvent(body: ReviewEventBody): AssembledBrowserEvent;
   adoptDurableEnvelope(envelope: MailboxEnvelope): Promise<void>;
+  createComment(anchor: Anchor, body: string): Promise<ReviewEvent>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
   retryOutbox(): Promise<void>;
@@ -332,6 +333,11 @@ export class BrowserOwnerAuthorityService {
   }
 
   /** Durable owner review remains distinct from live collab availability. */
+  async createComment(anchor: Anchor, body: string): Promise<ReviewEvent> {
+    const session = this.requireDurableReviewSession();
+    return session.createComment(anchor, body);
+  }
+
   async replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent> {
     const session = this.requireDurableReviewSession();
     return session.replyToComment(anchor, body, threadId);

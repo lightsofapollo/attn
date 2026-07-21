@@ -165,6 +165,7 @@ export interface EditingSession {
   acceptSuggestion(input: BrowserOwnerWorkspaceAcceptInput): Promise<AcceptBrowserSuggestionResult>;
   applySuggestion(input: BrowserOwnerWorkspaceApplyInput): Promise<CommittedBrowserSuggestionResult>;
   rejectSuggestion(input: BrowserOwnerWorkspaceRejectInput): Promise<RejectBrowserSuggestionResult>;
+  createComment(anchor: Anchor, body: string): Promise<ReviewEvent>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
   retryReviewOutbox(): Promise<void>;

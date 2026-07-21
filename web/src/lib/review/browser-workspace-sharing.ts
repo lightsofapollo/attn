@@ -234,8 +234,10 @@ export class BrowserWorkspaceSharingCoordinator {
         capability.durableShare.lifecycle === 'revoke_pending'
         || (capability.durableShare.expiresAt ?? Number.MAX_SAFE_INTEGER) <= this.timestamp()
       ) {
-        await this.deleteRemote();
-        await this.eraseLocal(record);
+        // Best-effort teardown: an unreachable remote must not wedge the
+        // re-share — any orphaned remote resource expires with its TTL.
+        const { record: tombstoned } = await this.deleteRemote();
+        await this.eraseLocal(tombstoned);
         record = null;
       }
     }
@@ -371,7 +373,17 @@ export class BrowserWorkspaceSharingCoordinator {
     }
   }
 
-  async deleteRemote(): Promise<ShareRecordView> {
+  /**
+   * Revoke the remote share. The revoke INTENT is persisted durably (the
+   * revoke_pending tombstone) BEFORE any network call; the remote teardown
+   * itself is best-effort. `teardownComplete: false` means some remote
+   * resource may live until its TTL — the tombstone is retried by the next
+   * ensurePublished. Throwing here used to wedge Stop forever whenever the
+   * share was only partially created (a quota-denied publish leaves no
+   * remote room/share, and tearing down nonexistent resources returns
+   * CORS-untagged 404s the browser reads as network failure).
+   */
+  async deleteRemote(): Promise<{ record: ShareRecordView; teardownComplete: boolean }> {
     let record = await this.inspectRecord();
     if (!record) throw new BrowserStorageError('workspace has no active share');
     const rootKey = await this.requireRootKey();
@@ -386,7 +398,7 @@ export class BrowserWorkspaceSharingCoordinator {
           admissionKey: legacy.keys.admissionKey,
         });
         if (!stopped) throw new Error('The review room could not be stopped.');
-        return record;
+        return { record, teardownComplete: true };
       } finally {
         zeroCredentials(legacy);
       }
@@ -397,16 +409,20 @@ export class BrowserWorkspaceSharingCoordinator {
       record = await this.storage.shares.updateDurableShareFenced(
         rootKey, this.workspaceId, record.capId, pending, this.fence,
       );
-      const client = this.makeShareRelay(record.relayUrl, credentials);
-      await client.revoke();
-      const stopped = await (this.dependencies.deleteRoom ?? deleteOwnedRoomV3)({
-        relayUrl: record.relayUrl,
-        roomId: record.roomId,
-        identity: credentials.identity,
-        writeAdmissionKey: credentials.keys.admissionKey,
-      });
-      if (!stopped) throw new Error('The stable link is revoked, but the epoch room teardown must be retried.');
-      return record;
+      let teardownComplete = false;
+      try {
+        const client = this.makeShareRelay(record.relayUrl, credentials);
+        await client.revoke();
+        teardownComplete = await (this.dependencies.deleteRoom ?? deleteOwnedRoomV3)({
+          relayUrl: record.relayUrl,
+          roomId: record.roomId,
+          identity: credentials.identity,
+          writeAdmissionKey: credentials.keys.admissionKey,
+        });
+      } catch {
+        teardownComplete = false;
+      }
+      return { record, teardownComplete };
     } finally {
       zeroCredentialsV3(credentials);
     }

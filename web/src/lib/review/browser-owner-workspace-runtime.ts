@@ -410,10 +410,14 @@ export class BrowserOwnerWorkspaceRuntime {
         throw new StorageConflictError('browser owner workspace is not writable');
       }
       const coordinator = this.sharingCoordinator();
-      // Do not claim a stop until the owner-signed relay deletion succeeds.
-      const record = await coordinator.deleteRemote();
+      // The revoke INTENT is durable before any network call. When the
+      // remote teardown cannot be confirmed (partially-created share,
+      // relay unreachable), keep the revoke_pending tombstone — the next
+      // ensureShare retries it — but NEVER wedge the user's Stop: local
+      // state clears either way and the link dies with its TTL at worst.
+      const { record, teardownComplete } = await coordinator.deleteRemote();
       await this.deactivateAuthority();
-      await coordinator.eraseLocal(record);
+      if (teardownComplete) await coordinator.eraseLocal(record);
       this.startLocalHeartbeat();
       const localCollab = this.startLocalCollab();
       this.patchState({

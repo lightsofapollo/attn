@@ -500,7 +500,8 @@ test('stop journals revoke, kills stable share and epoch room, then crypto-erase
       shareRelayFactory: options => (relay ??= new MemoryShareRelay(options.shareId)),
     });
     const first = await coordinator.ensurePublished(request('file', ['notes/main.md']));
-    const stopped = await coordinator.deleteRemote();
+    const { record: stopped, teardownComplete } = await coordinator.deleteRemote();
+    assert(teardownComplete, 'reachable relay teardown completes');
     assert(required<MemoryShareRelay>(relay, 'share relay').revoked && roomDeletes === 1, 'stable pointer and cached epoch both revoked');
     const rootKey = await storage.getWorkspaceRootKey(workspaceId); assert(rootKey, 'root key');
     const sealed = await storage.shares.openShare(rootKey, workspaceId, stopped.capId);
@@ -510,6 +511,45 @@ test('stop journals revoke, kills stable share and epoch room, then crypto-erase
     relay = null;
     const recreated = await coordinator.ensurePublished(request('file', ['notes/main.md']));
     assert(recreated.shareId !== first.shareId && recreated.roomId !== first.roomId, 'recreate mints fresh ownership');
+  } finally { storage.close(); }
+});
+
+test('unreachable teardown never wedges stop: tombstone retained, re-share retries', async () => {
+  const storage = await openStorage();
+  try {
+    const workspaceId = 'ws-v3-wedge'; await seedWorkspace(storage, workspaceId);
+    const fence = await acquireFence(storage, workspaceId);
+    const relays = new Map<string, MemoryShareRelay>();
+    let deleteFails = true; let roomDeletes = 0;
+    const coordinator = new BrowserWorkspaceSharingCoordinator(storage, workspaceId, fence, {
+      now: () => NOW, randomBytes: deterministicRandom(), createRoom: async options => bootstrapFromOptions(options),
+      deleteRoom: async () => {
+        roomDeletes += 1;
+        if (deleteFails) throw new TypeError('Failed to fetch');
+        return true;
+      },
+      publish: options => publishBrowserSnapshots({ ...options, indexBuilder }),
+      indexBuilder,
+      outboxFactory: ({ storage: db, credentials }) => new AckingOutbox(db, credentials.roomId),
+      shareRelayFactory: options => {
+        const existing = relays.get(options.shareId) ?? new MemoryShareRelay(options.shareId);
+        relays.set(options.shareId, existing);
+        return existing;
+      },
+    });
+    await coordinator.ensurePublished(request('file', ['notes/main.md']));
+    // Teardown unreachable (the CORS-untagged 404 presents as a fetch
+    // TypeError): stop must still complete, keeping the durable tombstone.
+    const { record, teardownComplete } = await coordinator.deleteRemote();
+    assert(!teardownComplete, 'unreachable teardown reports incomplete');
+    const rootKey = await storage.getWorkspaceRootKey(workspaceId); assert(rootKey, 'root key');
+    const sealed = await storage.shares.openShare(rootKey, workspaceId, record.capId);
+    assert(sealed.durableShare?.lifecycle === 'revoke_pending', 'tombstone survives the failed teardown');
+    // Next share attempt retries the teardown (now reachable) and recreates.
+    deleteFails = false;
+    const recreated = await coordinator.ensurePublished(request('file', ['notes/main.md']));
+    assert(roomDeletes >= 2, 'retry actually re-attempted the room delete');
+    assert(recreated.publication === 'published', 're-share succeeds after the wedge');
   } finally { storage.close(); }
 });
 

@@ -228,7 +228,7 @@
 
   const reviewCount = $derived(
     ownerState?.roomId && reviewStoreRef
-      ? reviewStoreRef.threadsForCurrentFile.length
+      ? reviewStoreRef.roomActiveThreadCount
       : workspace.reviewCards.length,
   );
   let badgePop = $state(false);
@@ -2648,7 +2648,7 @@
 
 {#if reviewSheetOpen}
   <BottomSheet
-    title={ownerState?.roomId && reviewStoreRef ? `Review · ${reviewStoreRef.threadsForCurrentFile.length}` : `Review · ${workspace.reviewCards.length}`}
+    title={ownerState?.roomId && reviewStoreRef ? `Review · ${reviewStoreRef.roomActiveThreadCount}` : `Review · ${workspace.reviewCards.length}`}
     onclose={closeReviewSheet}
   >
     {#if ownerState?.roomId && ReviewMarginComponent}

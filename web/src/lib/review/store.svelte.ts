@@ -324,6 +324,23 @@ export class ReviewStore {
     this.threadsForCurrentFile.filter((t) => isThreadActive(t, this.locallyDismissed)).length,
   );
 
+  /**
+   * Active threads across EVERY file of the current room. The dock badge
+   * shows this, not the per-file count: in a multi-file share a comment on
+   * another file must leave a persistent trace — a per-file badge reads 0
+   * everywhere except the one file, so feedback arrived invisibly once the
+   * arrival toast expired.
+   */
+  roomActiveThreadCount: number = $derived(
+    this.currentRoomId === null
+      ? 0
+      : this.threads.filter(
+          (t) =>
+            t.rootEvent.meta.roomId === this.currentRoomId &&
+            isThreadActive(t, this.locallyDismissed),
+        ).length,
+  );
+
   /** Resolved threads in the margin (rendered as chips). */
   marginResolvedThreadCount: number = $derived(
     this.threadsForCurrentFile.filter((t) => t.resolved).length,
@@ -1137,6 +1154,17 @@ export class ReviewStore {
     if (this.manualReanchorState?.eventId === eventId) {
       this.manualReanchorState = null;
     }
+  }
+
+  /**
+   * Record which side of a room this client is. The native daemon sets the
+   * role via ShareReady payloads; hosted sessions call this directly —
+   * without it hosted rooms sat at 'unknown' and every role-gated owner
+   * surface (sidebar shared badges, per-file unread counts) silently
+   * no-oped.
+   */
+  noteRoomRole(roomId: RoomId, role: 'owner' | 'reviewer'): void {
+    this.upsertRoom(roomId, { role });
   }
 
   private upsertRoom(

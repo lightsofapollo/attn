@@ -7,6 +7,7 @@
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import { reviewStore } from '../../lib/review/store.svelte';
   import { ownerUnreadByPath } from '../../lib/review/room-ui';
+  import { isThreadActive } from '../../lib/review/thread-visibility';
   import { RAIL_WIDTH_PX } from '../../lib/review/rail-mode';
   import type { WorkspaceEntry } from './types';
   import {
@@ -83,14 +84,39 @@
     return paths;
   });
   const unreadByPath = $derived.by(() => {
+    const counts: Record<string, number> = {};
+    // Native path: the daemon feeds per-room unread counts.
     const raw = ownerUnreadByPath({
       rooms: reviewStore.roomsList,
       snapshots: reviewStore.snapshots,
       unreadByRoom: reviewStore.unreadByRoom,
     });
-    return Object.fromEntries(
-      Object.entries(raw).map(([path, count]) => [toWorkspacePath(path), count]),
-    );
+    for (const [path, count] of Object.entries(raw)) {
+      const wp = toWorkspacePath(path);
+      counts[wp] = (counts[wp] ?? 0) + count;
+    }
+    // Hosted path: nothing feeds unreadByRoom, so derive a persistent
+    // per-file open-thread count from the store itself. Without this, a
+    // comment on a non-active file of a multi-file share left NO durable
+    // trace in the sidebar once the arrival toast expired.
+    const roomId = reviewStore.currentRoomId;
+    if (roomId !== null && reviewStore.rooms[roomId]?.role === 'owner') {
+      const pathByFileId = new Map<string, string>();
+      for (const snapshot of reviewStore.snapshots) {
+        if (snapshot.roomId === roomId && snapshot.ownerDisplayPath) {
+          pathByFileId.set(snapshot.fileId, snapshot.ownerDisplayPath);
+        }
+      }
+      for (const thread of reviewStore.threads) {
+        if (thread.rootEvent.meta.roomId !== roomId) continue;
+        if (!isThreadActive(thread, reviewStore.locallyDismissed)) continue;
+        const path = thread.anchor ? pathByFileId.get(thread.anchor.fileId) : undefined;
+        if (!path) continue;
+        const wp = toWorkspacePath(path);
+        counts[wp] = (counts[wp] ?? 0) + 1;
+      }
+    }
+    return counts;
   });
   // Project switcher: every workspace on the desk, addressed by virtual root.
   const switcherProjects = $derived(

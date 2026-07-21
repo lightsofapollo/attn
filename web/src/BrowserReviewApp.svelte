@@ -214,7 +214,10 @@
   // surface share one grammar (comment-layout-alternatives.md).
   let railAutoOpenedRoom = $state<string | null>(null);
   const currentThreadCount = $derived(reviewStore.threadsForCurrentFile.length);
-  const activeThreadCount = $derived(reviewStore.marginActiveThreadCount);
+  // Room-wide, not per-file: in a multi-file share the header toggle is the
+  // one persistent signal that feedback exists somewhere after the arrival
+  // toast expires.
+  const activeThreadCount = $derived(reviewStore.roomActiveThreadCount);
   const railVisible = $derived(reviewStore.railMode === 'expanded');
 
   // Threads arriving do NOT auto-open the band (Reading default): they

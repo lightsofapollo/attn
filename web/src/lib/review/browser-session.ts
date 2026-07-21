@@ -285,6 +285,8 @@ export interface ReviewStoreSink {
   currentRoomId: RoomId | null;
   /** Read by restore paths so they never steal a selection that exists. */
   currentFileId: FileId | null;
+  /** Mark which side of the room this client is (role-gated owner UI). */
+  noteRoomRole?(roomId: RoomId, role: 'owner' | 'reviewer'): void;
   /** Sealed browser envelopes awaiting relay acknowledgement. */
   pendingOutbox?: unknown[];
 }
@@ -1047,6 +1049,7 @@ export class BrowserSession {
     });
     const store = await this.ensureStore();
     store.currentRoomId = roomId as RoomId;
+    store.noteRoomRole?.(roomId as RoomId, 'reviewer');
 
     const client = this.buildWsClient(roomId, keys);
     const [inbound, history, pending] = await Promise.all([
@@ -1482,6 +1485,7 @@ export class BrowserSession {
     this.setState({ roomId: invite.roomId });
     const store = await this.ensureStore();
     store.currentRoomId = invite.roomId;
+    store.noteRoomRole?.(invite.roomId, 'reviewer');
 
     // 3. View bearers never create a registered identity. Writable sessions
     // use an ephemeral identity unless the user explicitly remembers v2.
@@ -1543,6 +1547,7 @@ export class BrowserSession {
     });
     const store = await this.ensureStore();
     store.currentRoomId = credentials.roomId as RoomId;
+    store.noteRoomRole?.(credentials.roomId as RoomId, 'owner');
     try {
       const bootstrap = await this.fetchRoomBootstrap(credentials.roomId, activeKeys);
       assertRegisteredBrowserOwner(bootstrap.devices, credentials.identity);

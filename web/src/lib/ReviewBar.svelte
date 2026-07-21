@@ -268,8 +268,8 @@
             onclick={() => reviewStore.togglePanel()}
           >
             <MessageSquareText class="size-3.5" aria-hidden="true" />
-            {#if reviewStore.marginActiveThreadCount > 0}
-              <span class="rail-toggle-count tabular-nums">{reviewStore.marginActiveThreadCount}</span>
+            {#if reviewStore.roomActiveThreadCount > 0}
+              <span class="rail-toggle-count tabular-nums">{reviewStore.roomActiveThreadCount}</span>
             {/if}
             <UnreadBadge
               count={reviewStore.currentRoomUnread}

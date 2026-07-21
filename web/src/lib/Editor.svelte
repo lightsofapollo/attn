@@ -109,7 +109,7 @@
     /** Fired after every local doc-changing transaction during a collab session. */
     onCollabDocChange?: () => void;
     /** Fired when the local selection (caret) moves during a collab session. */
-    onCollabSelectionChange?: (head: number) => void;
+    onCollabSelectionChange?: (head: number, anchor: number) => void;
     /**
      * Inline suggesting mode (attn-07i.2). When true, local edits are captured
      * as tracked-change suggestions (insertion/deletion marks) instead of
@@ -350,7 +350,7 @@
                 onCollabDocChange?.();
               }
               if (!v.state.selection.eq(prev.selection)) {
-                onCollabSelectionChange?.(v.state.selection.head);
+                onCollabSelectionChange?.(v.state.selection.head, v.state.selection.anchor);
               }
             },
           }),

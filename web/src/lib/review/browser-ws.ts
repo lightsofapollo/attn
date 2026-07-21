@@ -794,16 +794,21 @@ export class BrowserWsClient {
     }
     let device = this.devices.get(auth.signingKeyId);
     if (!device) {
-      this.callbacks.onError?.(
-        'ATTN_INBOUND',
-        `unknown signer for ${envelopeId} (signingKeyId=${auth.signingKeyId})`,
-      );
+      // Refresh the directory first; a signer that appears after refresh is
+      // the normal join race, not an error. Only a refresh that STILL lacks
+      // the signer is a genuine drop worth surfacing.
       await this.callbacks.onUnknownSigner?.(envelope, serverSeq, auth.signingKeyId);
       device = this.devices.get(auth.signingKeyId);
       // A successful authenticated refresh that still omits the signer proves
       // the envelope invalid. A transient refresh must reject so the ordered
       // queue reconnects without advancing beyond this sequence.
-      if (!device) return false;
+      if (!device) {
+        this.callbacks.onError?.(
+          'ATTN_INBOUND',
+          `unknown signer for ${envelopeId} (signingKeyId=${auth.signingKeyId}) — dropped after directory refresh`,
+        );
+        return false;
+      }
     }
     if (device.deviceId !== meta.deviceId || device.participantId !== meta.authorId) {
       this.callbacks.onError?.('ATTN_INBOUND', `event signer identity binding failed (${envelopeId})`);

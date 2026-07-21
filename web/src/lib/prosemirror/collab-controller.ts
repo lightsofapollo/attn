@@ -42,6 +42,12 @@ export interface RemoteCursor {
   clientID: string;
   /** Caret position in document coordinates. */
   head: number;
+  /**
+   * Selection anchor when the peer has a non-empty selection; omitted for a
+   * bare caret. Lets every other participant SEE what a reviewer is
+   * highlighting, not just where their caret sits.
+   */
+  anchor?: number;
   /** Human label shown next to the caret (e.g. "Owner"). */
   label: string;
   /** CSS color for the caret + label chip. */
@@ -123,7 +129,10 @@ export class CollabController {
   /** Last caret head broadcast, so a label change can re-announce the
    *  caret in place instead of waiting for the next caret move. */
   private lastCursorHead: number | null = null;
+  private lastCursorAnchor: number | null = null;
   private readonly onRemoteCursors: ((cursors: RemoteCursor[]) => void) | null;
+  /** Late-bound cursor listener for hosts that get their view after start. */
+  private remoteCursorSink: ((cursors: RemoteCursor[]) => void) | null = null;
   private readonly getLocation: (() => CollabPeerLocation | null) | null;
   private readonly onPeerLocation:
     | ((deviceId: string, location: CollabPeerLocation) => void)
@@ -379,14 +388,33 @@ export class CollabController {
    * not document mutations. Every participant (owner + reviewers) both sends
    * and receives these.
    */
-  broadcastCursor(head: number): void {
+  private emitRemoteCursors(): void {
+    const cursors = [...this.remoteCursors.values()];
+    this.onRemoteCursors?.(cursors);
+    this.remoteCursorSink?.(cursors);
+  }
+
+  /**
+   * Attach (or clear) a cursor listener after construction. The hosted owner
+   * shell mounts its editor long after the runtime built this controller, so
+   * the construction-time callback can't reach the view — without this sink
+   * the owner received every reviewer cursor and rendered none of them.
+   */
+  setRemoteCursorSink(sink: ((cursors: RemoteCursor[]) => void) | null): void {
+    this.remoteCursorSink = sink;
+    if (sink) sink([...this.remoteCursors.values()]);
+  }
+
+  broadcastCursor(head: number, anchor?: number): void {
     this.lastCursorHead = head;
+    this.lastCursorAnchor = anchor ?? null;
     const location = this.getLocation?.() ?? undefined;
     void this.sendWire({
       kind: 'cursor',
       cursor: {
         clientID: this.selfClientId,
         head,
+        ...(anchor !== undefined && anchor !== head ? { anchor } : {}),
         label: this.selfLabel,
         color: this.selfColor,
         ...(location ? { location } : {}),
@@ -407,7 +435,7 @@ export class CollabController {
     if (trimmed.length === 0 || trimmed === this.selfLabel) return;
     this.selfLabel = trimmed;
     if (this.lastCursorHead !== null) {
-      this.broadcastCursor(this.lastCursorHead);
+      this.broadcastCursor(this.lastCursorHead, this.lastCursorAnchor ?? undefined);
     }
   }
 
@@ -437,7 +465,7 @@ export class CollabController {
       if (msg.cursor.location !== undefined) {
         this.onPeerLocation?.(fromDeviceId, msg.cursor.location);
       }
-      this.onRemoteCursors?.([...this.remoteCursors.values()]);
+      this.emitRemoteCursors();
       return;
     }
     if (this.isOwner) {
@@ -528,7 +556,7 @@ export class CollabController {
   removeCursor(clientID: string): void {
     this.cursorDevice.delete(clientID);
     if (this.remoteCursors.delete(clientID)) {
-      this.onRemoteCursors?.([...this.remoteCursors.values()]);
+      this.emitRemoteCursors();
     }
   }
 
@@ -722,12 +750,13 @@ function parseCursor(value: Record<string, unknown>): CollabWireMessage | null {
   if (!hasExactKeys(value, ['kind', 'cursor']) || !isRecord(value.cursor))
     return null;
   const cursor = value.cursor;
-  if (!hasOnlyKeys(cursor, ['clientID', 'head', 'label', 'color', 'location']))
+  if (!hasOnlyKeys(cursor, ['clientID', 'head', 'anchor', 'label', 'color', 'location']))
     return null;
   if (
     typeof cursor.clientID !== 'string' ||
     !wireId(cursor.clientID) ||
     !nonNegativeInteger(cursor.head) ||
+    (cursor.anchor !== undefined && !nonNegativeInteger(cursor.anchor)) ||
     !boundedString(cursor.label, 256, true) ||
     !boundedString(cursor.color, 64, false)
   )
@@ -739,6 +768,7 @@ function parseCursor(value: Record<string, unknown>): CollabWireMessage | null {
     cursor: {
       clientID: cursor.clientID,
       head: cursor.head,
+      ...(cursor.anchor !== undefined ? { anchor: cursor.anchor } : {}),
       label: cursor.label,
       color: cursor.color,
       ...(location ? { location } : {}),

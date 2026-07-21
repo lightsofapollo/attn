@@ -933,6 +933,13 @@
 
 /* Live co-typing remote carets (remote-cursors.ts). A thin colored bar at the
    peer's caret with a floating name chip. Color is set inline per peer. */
+/* A peer's live selection: translucent band in their color. color-mix keeps
+   the underlying text fully readable in both themes. */
+.attn-remote-selection {
+  background: color-mix(in srgb, var(--remote-selection-color, #8a63b8) 22%, transparent);
+  border-radius: 2px;
+}
+
 .attn-remote-caret {
   position: relative;
   display: inline-block;

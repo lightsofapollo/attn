@@ -2340,8 +2340,18 @@ export class BrowserSession {
           }
         },
         onTerminal: (err) => this.handleTerminal(err),
-        onError: (_code, _msg) => {
-          // Non-fatal — keep status as-is. Could surface as a toast later.
+        onError: (code, message) => {
+          // Non-fatal for the connection — but never invisible. A dropped
+          // inbound envelope (failed signature, capability authorization,
+          // unknown signer) is exactly how "their comment never showed up"
+          // presents, so keep a bounded diagnostic ring readable from the
+          // console / the __attnCollabDebug probe.
+          const holder = globalThis as {
+            __attnInboundErrors?: { at: number; code: string; message: string }[];
+          };
+          const log = (holder.__attnInboundErrors ??= []);
+          log.push({ at: Date.now(), code, message });
+          if (log.length > 50) log.shift();
         },
         onPolicyChanged: (policy) => {
           let validated: RoomPolicy;

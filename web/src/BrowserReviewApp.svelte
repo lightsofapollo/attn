@@ -745,9 +745,9 @@
     traceReviewSelection('collab-doc-change');
   }
 
-  function handleReviewerCollabSelectionChange(head: number): void {
+  function handleReviewerCollabSelectionChange(head: number, anchor: number): void {
     traceReviewSelection('prosemirror-selection', { head });
-    if (reviewerAvailability.collabReady) reviewerCollabController?.broadcastCursor(head);
+    if (reviewerAvailability.collabReady) reviewerCollabController?.broadcastCursor(head, anchor);
   }
 
   // Resolve arrived and locally-authored anchors against the active snapshot.

@@ -48,7 +48,11 @@ export function remoteCursorsPlugin(): Plugin {
         // content instead of drifting when this user types (the head positions
         // are document offsets — without this they point at shifted text).
         if (!tr.docChanged || prev.length === 0) return prev;
-        return prev.map((cursor) => ({ ...cursor, head: tr.mapping.map(cursor.head) }));
+        return prev.map((cursor) => ({
+          ...cursor,
+          head: tr.mapping.map(cursor.head),
+          ...(cursor.anchor === undefined ? {} : { anchor: tr.mapping.map(cursor.anchor) }),
+        }));
       },
     },
     props: {
@@ -56,16 +60,37 @@ export function remoteCursorsPlugin(): Plugin {
         const cursors = remoteCursorsKey.getState(state) ?? [];
         if (cursors.length === 0) return DecorationSet.empty;
         const max = state.doc.content.size;
-        const decos = cursors.map((cursor) => {
+        const decos = cursors.flatMap((cursor) => {
           const pos = Math.min(Math.max(cursor.head, 0), max);
-          return Decoration.widget(pos, () => buildCaretWidget(cursor), {
-            // side:1 keeps the caret stable to the right of the position so it
-            // doesn't get swallowed by adjacent text insertions.
-            side: 1,
-            // Ignore for ProseMirror's own position mapping/selection.
-            ignoreSelection: true,
-            key: `remote-caret-${cursor.clientID}-${pos}`,
-          });
+          const out = [
+            Decoration.widget(pos, () => buildCaretWidget(cursor), {
+              // side:1 keeps the caret stable to the right of the position so it
+              // doesn't get swallowed by adjacent text insertions.
+              side: 1,
+              // Ignore for ProseMirror's own position mapping/selection.
+              ignoreSelection: true,
+              key: `remote-caret-${cursor.clientID}-${pos}`,
+            }),
+          ];
+          // A peer's live SELECTION renders as a translucent band in their
+          // color — you can see what a reviewer is highlighting before any
+          // comment lands (and while they compose one).
+          if (cursor.anchor !== undefined) {
+            const anchorPos = Math.min(Math.max(cursor.anchor, 0), max);
+            const from = Math.min(anchorPos, pos);
+            const to = Math.max(anchorPos, pos);
+            if (from < to) {
+              out.push(
+                Decoration.inline(from, to, {
+                  class: 'attn-remote-selection',
+                  style: `--remote-selection-color: ${cursor.color};`,
+                }, {
+                  key: `remote-selection-${cursor.clientID}-${from}-${to}`,
+                }),
+              );
+            }
+          }
+          return out;
         });
         return DecorationSet.create(state.doc, decos);
       },

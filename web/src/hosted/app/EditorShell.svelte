@@ -159,6 +159,7 @@
   let CommentComposerComponent = $state<typeof import('../../lib/CommentComposer.svelte').default | null>(null);
   let hasTextSelectionFn = $state<typeof import('../../lib/review/popover-anchor').hasTextSelection | null>(null);
   let TextSelectionRef = $state<typeof import('prosemirror-state').TextSelection | null>(null);
+  let remoteCursorsKeyRef = $state<typeof import('../../lib/prosemirror/remote-cursors').remoteCursorsKey | null>(null);
   let editorRef = $state<EditorExports | undefined>();
   let pmViewForReview = $state<EditorView | undefined>();
   // Watches every document change (onDirtyChange only fires on transitions).
@@ -669,6 +670,9 @@
         CommentComposerComponent = composerModule.default;
         hasTextSelectionFn = anchorModule.hasTextSelection;
         TextSelectionRef = pmState.TextSelection;
+      }));
+      imports.push(import('../../lib/prosemirror/remote-cursors').then((mod) => {
+        remoteCursorsKeyRef = mod.remoteCursorsKey;
       }));
     }
     await Promise.all(imports);
@@ -1628,6 +1632,7 @@
         threads: reviewStoreRef?.threads.length ?? null,
         threadFiles: (reviewStoreRef?.threads ?? []).map((t) => t.anchor?.fileId ?? null),
         threadsForCurrentFile: reviewStoreRef?.threadsForCurrentFile.length ?? null,
+        inboundErrors: ((globalThis as { __attnInboundErrors?: object[] }).__attnInboundErrors ?? []).slice(-5),
       },
     };
     const holder = window as unknown as {
@@ -1655,9 +1660,37 @@
     onEditorChanged();
   }
 
-  function handleCollabSelectionChange(head: number): void {
-    activeCollabController()?.broadcastCursor(head);
+  function handleCollabSelectionChange(head: number, anchor: number): void {
+    activeCollabController()?.broadcastCursor(head, anchor);
   }
+
+  // Render incoming peer cursors/selections in the owner's editor. The
+  // runtime constructed the controller long before this shell mounted its
+  // view, so nothing ever consumed the cursor stream on the owner — every
+  // reviewer caret/highlight arrived and rendered nowhere. Cursors from
+  // other files of the share are filtered out (their offsets belong to a
+  // different document).
+  $effect(() => {
+    const cursorsKey = remoteCursorsKeyRef;
+    const view = pmViewForReview;
+    void ownerState?.controllerGeneration;
+    void joinState?.status;
+    void collabEpoch;
+    const controller = activeCollabController();
+    if (!cursorsKey || !view || !controller) return;
+    controller.setRemoteCursorSink((cursors) => {
+      const v = pmViewForReview;
+      if (!v) return;
+      const activeFileId = ownerState?.bindings.find(
+        (binding) => binding.path === activeEntry?.path,
+      )?.fileId;
+      const scoped = cursors.filter(
+        (cursor) => !cursor.location?.fileId || cursor.location.fileId === activeFileId,
+      );
+      v.dispatch(v.state.tr.setMeta(cursorsKey, scoped));
+    });
+    return () => controller.setRemoteCursorSink(null);
+  });
 
   async function acceptSuggestion(thread: Thread): Promise<unknown> {
     const currentSession = session;

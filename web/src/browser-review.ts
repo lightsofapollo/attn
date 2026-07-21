@@ -86,9 +86,25 @@ async function bootstrapDurableShare(): Promise<void> {
     const pathId = window.location.pathname.match(/^\/s\/([A-Za-z0-9_-]+)\/?$/u)?.[1];
     if (!pathId) throw new Error('invalid durable share path');
     // Fragment present → normal join (stashes the key in history.state).
-    // Fragmentless → first try the key this tab stashed before a reload,
-    // then the fragmentless push-notification binding as the last resort.
+    // Fragmentless → the key this tab stashed before a reload, then the
+    // bearer secret auto-remembered on a previous keyed join (boots the
+    // COMPLETE live session, resolving the share's current epoch fresh),
+    // then the secretless push-notification binding as the last resort
+    // (degraded: durable snapshots only).
     const recovered = window.location.hash.length > 1 ? null : recoverStrippedShareInvite(window);
+    let rememberedInvite: ParsedShareInvite | null = null;
+    if (window.location.hash.length <= 1 && !recovered) {
+      try {
+        const worker = await import('./lib/review/browser-push-worker');
+        const record = await worker.getPushBinding(pathId);
+        const secret = record?.kind === 'share' ? record.shareLinkSecretBytes : undefined;
+        if (secret instanceof Uint8Array && secret.length === 32) {
+          rememberedInvite = { shareId: pathId, linkSecret: new Uint8Array(secret) };
+        }
+      } catch {
+        // Missing/blocked IndexedDB falls through to the degraded path.
+      }
+    }
     // Resolved lazily so a name confirmed via the in-app prompt applies to
     // the very first ParticipantJoined this session announces (attn-sur).
     const getDisplayName = (): string | undefined =>
@@ -97,7 +113,9 @@ async function bootstrapDurableShare(): Promise<void> {
       ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, invite: (invite = parseAndStripShareInvite(window)) })
       : recovered
         ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, invite: (invite = recovered) })
-        : new production.RememberedPushShareSessionFacade({ relayUrl, bindingId: pathId });
+        : rememberedInvite
+          ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, invite: (invite = rememberedInvite) })
+          : new production.RememberedPushShareSessionFacade({ relayUrl, bindingId: pathId });
     svelte.mount(appModule.default, { target, props: { session } });
   } catch (error) {
     invite?.linkSecret.fill(0);

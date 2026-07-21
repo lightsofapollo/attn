@@ -312,7 +312,12 @@ export class DurableShareBrowserSessionFacade {
     roomId: null, snapshotContent: null, snapshotDocType: 'markdown', snapshotId: null, fileId: null, error: null,
     authoringReady: false, grantTier: 'view', outboxPending: 0, authoringError: null, persistence: 'ephemeral',
     storagePersisted: null, canRemember: false };
-  constructor(private readonly options: Omit<ProductionDurableShareSessionOptions, 'tier'>) {}
+  /** Captured before ANY consumer can zero the invite's copy — the resolver
+   *  and tier discovery both hygiene-zero the secret they are handed. */
+  private readonly linkSecretForRemember: Uint8Array;
+  constructor(private readonly options: Omit<ProductionDurableShareSessionOptions, 'tier'>) {
+    this.linkSecretForRemember = new Uint8Array(options.invite.linkSecret);
+  }
   setStateObserver(observer: (state: import('./browser-session').BrowserSessionState) => void): void { this.observer = observer; observer(this.state); }
   /** Live collab deliveries (owner step broadcasts, cursors) from the room session. */
   setCollabObserver(observer: (delivery: import('./browser-session').BrowserCollabDelivery) => void | Promise<void>): void { this.collabObserver = observer; }
@@ -356,7 +361,8 @@ export class DurableShareBrowserSessionFacade {
     }
   }
   close(): void { if (this.closed) return; this.closed = true; ++this.generation; this.startAbort?.abort(); this.startAbort = null;
-    this.options.invite.linkSecret.fill(0); this.session?.pushConsent.close(); this.session?.close(); this.session = null; }
+    this.options.invite.linkSecret.fill(0); this.linkSecretForRemember.fill(0);
+    this.session?.pushConsent.close(); this.session?.close(); this.session = null; }
   async createComment(anchor: Anchor, body: string, threadId?: string): Promise<ReviewEvent> {
     const event = await this.requireSession().createComment(anchor, body, threadId);
     if (!event) throw new Error('comment was queued without an optimistic event');
@@ -380,6 +386,12 @@ export class DurableShareBrowserSessionFacade {
     this.pushState = controller.getState(); this.pushObserver?.(this.pushState);
   }
   private async rememberForReload(candidate: ProductionBrowserShareSession, generation: number): Promise<void> {
+    // The constructor captured the bearer secret before the resolver/tier
+    // discovery hygiene-zeroed the invite's copy. With it stored, a
+    // fragmentless reopen reconstructs the FULL invite (complete live
+    // session, fresh epoch resolution) instead of the degraded
+    // snapshot-only remembered path.
+    const shareLinkSecretBytes = new Uint8Array(this.linkSecretForRemember);
     try {
       if (this.closed || generation !== this.generation) return;
       const context = await candidate.getBindingContext();
@@ -404,11 +416,15 @@ export class DurableShareBrowserSessionFacade {
         deepLinkPath: `/s/${encodeURIComponent(shareId)}`,
         ownerSigningKey: context.ownerSigningKey,
         devices: context.devices,
+        shareLinkSecretBytes,
       }, {});
       context.deviceSigningSecretBytes.fill(0);
     } catch {
       // Best-effort continuity cache — a failed write leaves exactly the
       // status quo (reopen requires the full link).
+    } finally {
+      shareLinkSecretBytes.fill(0);
+      this.linkSecretForRemember.fill(0);
     }
   }
 

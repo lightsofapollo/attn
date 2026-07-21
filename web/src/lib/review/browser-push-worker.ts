@@ -56,6 +56,14 @@ export interface RememberPushBindingInput {
   /** Owner key pinned by the authenticated invite/capability bundle. */
   ownerSigningKey: string;
   devices: Device[];
+  /**
+   * The share link's bearer secret (the #key= payload). Stored so a
+   * fragmentless /s/ reopen can reconstruct the FULL invite and boot the
+   * complete live session — same at-rest posture as the history.state key
+   * stash and the explicit remember-room key store. Optional: push-consent
+   * bindings predating this field reopen via the degraded remembered path.
+   */
+  shareLinkSecretBytes?: Uint8Array;
 }
 
 export interface PushBindingRecord {
@@ -80,6 +88,8 @@ export interface PushBindingRecord {
   deepLinkPath: string;
   ownerSigningKey: string;
   devices: Device[];
+  /** See RememberPushBindingInput.shareLinkSecretBytes. */
+  shareLinkSecretBytes?: Uint8Array;
   attestedSigningKeyIds: string[];
   cursor: number;
   updatedAt: number;
@@ -179,6 +189,9 @@ async function storePushBinding(
       deepLinkPath: input.deepLinkPath,
       ownerSigningKey: input.ownerSigningKey,
       devices: structuredClone(input.devices),
+      ...(input.shareLinkSecretBytes === undefined
+        ? {}
+        : { shareLinkSecretBytes: new Uint8Array(input.shareLinkSecretBytes) }),
       attestedSigningKeyIds: [],
       cursor: 0,
       updatedAt: (dependencies.now ?? Date.now)(),
@@ -193,6 +206,7 @@ async function storePushBinding(
     input.roomReadCapabilityBytes.fill(0);
     input.readAdmissionKeyBytes.fill(0);
     input.writeAdmissionKeyBytes?.fill(0);
+    input.shareLinkSecretBytes?.fill(0);
     db?.close();
   }
 }

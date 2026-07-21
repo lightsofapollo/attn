@@ -57,6 +57,7 @@ import {
   derivePushBindingSnapshotKey,
   getPushBinding,
   pushBindingAdmissionHeader,
+  replacePushBinding,
   type PushBindingRecord,
 } from './browser-push-worker';
 import type { Anchor, Capability, ReviewEvent, ReviewEventBody, ReviewSnapshot, SuggestionDraft } from '../types';
@@ -141,7 +142,10 @@ export interface ProductionDurableShareSessionOptions extends BrowserDurableShar
   onPushConsentState?: (state: BrowserPushConsentState) => void;
 }
 
-type ProductionBrowserShareSession = BrowserShareSession & { readonly pushConsent: BrowserPushConsentController };
+type ProductionBrowserShareSession = BrowserShareSession & {
+  readonly pushConsent: BrowserPushConsentController;
+  readonly getBindingContext: (signal?: AbortSignal) => Promise<BrowserPushBindingContext>;
+};
 
 /** Complete production durable-share session using one identity for offline and live paths. */
 export async function createProductionDurableShareSession(options: ProductionDurableShareSessionOptions): Promise<ProductionBrowserShareSession> {
@@ -289,7 +293,7 @@ export async function createProductionDurableShareSession(options: ProductionDur
     },
     onState: options.onPushConsentState,
   });
-  return Object.assign(session, { pushConsent });
+  return Object.assign(session, { pushConsent, getBindingContext });
 }
 
 /** BrowserReviewApp-compatible facade over the durable resolver/session. */
@@ -338,6 +342,14 @@ export class DurableShareBrowserSessionFacade {
       this.session = candidate;
       await candidate.start();
       await candidate.pushConsent.initialize();
+      // Persist this share's binding under the LINK's path id, so a
+      // fragmentless load — Safari session restore, a reload whose
+      // history-state key stash was dropped, the URL reopened without its
+      // #key — comes back through the remembered path instead of dead-ending
+      // on "open the complete share link". Same non-extractable key material
+      // the push-consent flow stores; best-effort (private browsing has no
+      // usable IndexedDB, view tiers have no write capability to bind).
+      void this.rememberForReload(candidate, generation);
     } finally {
       this.options.invite.linkSecret.fill(0);
       if (this.startAbort === abort) this.startAbort = null;
@@ -367,6 +379,39 @@ export class DurableShareBrowserSessionFacade {
     await controller.disableFromUserGesture();
     this.pushState = controller.getState(); this.pushObserver?.(this.pushState);
   }
+  private async rememberForReload(candidate: ProductionBrowserShareSession, generation: number): Promise<void> {
+    try {
+      if (this.closed || generation !== this.generation) return;
+      const context = await candidate.getBindingContext();
+      if (this.closed || generation !== this.generation) return;
+      const shareId = this.options.invite.shareId;
+      await replacePushBinding({
+        bindingId: shareId,
+        kind: 'share',
+        resourceId: shareId,
+        roomId: context.roomId,
+        deviceId: context.deviceId,
+        relayUrl: context.relayUrl,
+        protocolVersion: 3,
+        roomReadCapabilityBytes: context.roomReadCapabilityBytes,
+        readAdmissionKeyBytes: context.readAdmissionKeyBytes,
+        writeAdmissionKeyBytes: context.writeAdmissionKeyBytes,
+        bundleId: context.bundleId,
+        epoch: context.epoch,
+        ...(context.revision === undefined ? {} : { revision: context.revision }),
+        ...(context.manifestDigest === undefined ? {} : { manifestDigest: context.manifestDigest }),
+        fileName: context.fileName,
+        deepLinkPath: `/s/${encodeURIComponent(shareId)}`,
+        ownerSigningKey: context.ownerSigningKey,
+        devices: context.devices,
+      }, {});
+      context.deviceSigningSecretBytes.fill(0);
+    } catch {
+      // Best-effort continuity cache — a failed write leaves exactly the
+      // status quo (reopen requires the full link).
+    }
+  }
+
   async rememberRoom(): Promise<void> { throw new Error('durable share state is already scoped to this browser'); }
   async forgetRoom(): Promise<void> { throw new Error('use the share link to reopen this review'); }
   private requireSession(): ProductionBrowserShareSession { if (!this.session) throw new Error('durable share is not ready'); return this.session; }

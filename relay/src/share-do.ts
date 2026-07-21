@@ -40,6 +40,15 @@ const MAX_SNAPSHOT_FILES = 64;
 const MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024;
 const MAX_SHARE_SNAPSHOT_BYTES = 25 * 1024 * 1024;
 const PUSH_SUBSCRIPTION_BODY_MAX_BYTES = 4096;
+// Ingress body ceilings. These bound how much a route materializes BEFORE it
+// authenticates (admission HMAC / owner signature) or parses — an attacker with
+// a wrong HMAC must not be able to force the isolate to buffer an oversized body
+// while the signature is still being computed. Sized well above real traffic:
+// the upsert manifest cap is 256 KiB, owner-only DELETEs are effectively
+// bodyless, and a mailbox batch is 32 chat-sized review submissions.
+const SHARE_UPSERT_MAX_BODY_BYTES = 512 * 1024;
+const SHARE_OWNER_CONTROL_MAX_BODY_BYTES = 64 * 1024;
+const SHARE_MAILBOX_MAX_BODY_BYTES = 8 * 1024 * 1024;
 const CLEANUP_RETRY_MS = 60 * 1000;
 const WATCH_PING_INTERVAL_MS = 30 * 1000;
 const WATCH_IDLE_TIMEOUT_MS = 90 * 1000;
@@ -343,6 +352,9 @@ export class ShareDO extends DurableObject<Env> {
   }
 
   private async upsert(request: Request, path: string, shareId: string): Promise<Response> {
+    const bounded = await this.bufferBoundedRequest(request, SHARE_UPSERT_MAX_BODY_BYTES);
+    if (bounded instanceof Response) return bounded;
+    request = bounded;
     const body = await request.clone().json() as ShareMutationBody;
     const allowed = new Set(["v", "ownerSigningKey", "readAdmissionKey", "writeAdmissionKey", "bundles", "epoch", "revision", "currentRoomId", "snapshots", "placeholders", "deviceId"]);
     if (body.v !== 3 || Object.keys(body).some(key => !allowed.has(key))) {
@@ -783,6 +795,53 @@ export class ShareDO extends DurableObject<Env> {
     return body;
   }
 
+  /**
+   * Re-materialize a request behind a streaming byte bound so every downstream
+   * `request.clone().json()` / `canonicalRequest` reads an in-memory bounded
+   * body instead of racing the socket. Cancels the moment the running total
+   * crosses `maxBytes` — a chunked or understated Content-Length can never force
+   * the isolate to buffer past the route limit before authentication.
+   */
+  private async bufferBoundedRequest(request: Request, maxBytes: number): Promise<Request | Response> {
+    const declared = request.headers.get("Content-Length");
+    if (declared !== null) {
+      const declaredBytes = Number(declared);
+      if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+        return jsonError(413, "ATTN_BODY_TOO_LARGE", `request body exceeds ${maxBytes} bytes`);
+      }
+    }
+    if (request.body === null) return request;
+    const reader = request.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value === undefined) continue;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel();
+          return jsonError(413, "ATTN_BODY_TOO_LARGE", `request body exceeds ${maxBytes} bytes`);
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      return jsonError(400, "ATTN_BODY_INVALID", `request body read failed: ${(error as Error).message}`);
+    }
+    const body = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new Request(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: body.byteLength === 0 ? null : body,
+    });
+  }
+
   private async readSnapshot(
     request: Request,
     path: string,
@@ -839,6 +898,9 @@ export class ShareDO extends DurableObject<Env> {
   private async revoke(request: Request, path: string, shareId: string): Promise<Response> {
     const record = await this.record();
     if (!record) return jsonError(404, "ATTN_SHARE_NOT_FOUND", "share not found");
+    const bounded = await this.bufferBoundedRequest(request, SHARE_OWNER_CONTROL_MAX_BODY_BYTES);
+    if (bounded instanceof Response) return bounded;
+    request = bounded;
     await this.verifyOwner(request, path, record);
     await this.verifyWritePow(request, shareId, request.headers.get("Attn-Device-Id") ?? shareId);
     await this.beginShareCleanup(record, "revoked");
@@ -912,6 +974,14 @@ export class ShareDO extends DurableObject<Env> {
   private async handleMailbox(request: Request, path: string, shareId: string): Promise<Response> {
     const record = await this.record();
     if (!record || record.expiresAt <= Date.now()) return jsonError(404, "ATTN_SHARE_NOT_FOUND", "share not found");
+    // Bound before admission/owner-sig read the body. POST carries a review
+    // batch; GET/DELETE are effectively bodyless (owner-only control ops).
+    const bounded = await this.bufferBoundedRequest(
+      request,
+      request.method === "POST" ? SHARE_MAILBOX_MAX_BODY_BYTES : SHARE_OWNER_CONTROL_MAX_BODY_BYTES,
+    );
+    if (bounded instanceof Response) return bounded;
+    request = bounded;
     if (request.method === "GET") {
       const selected = await this.verifyBundleAdmission(request, path, record, "read");
       if (selected instanceof Response) return selected;

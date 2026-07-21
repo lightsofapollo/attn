@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { base64UrlEncode, canonicalRequest } from "../../src/admission";
@@ -614,5 +614,90 @@ describe("v3 anonymous viewer WebSocket", () => {
     const staleResponse = await postEnvelopeResponse(room, [stale]);
     expect(staleResponse.status).toBe(409);
     expect(await staleResponse.json()).toMatchObject({ error: { code: "ATTN_SIGNAL_GENERATION_STALE" } });
+  });
+});
+
+describe("v3 owner snapshot compaction requires an owner device signature", () => {
+  async function signalCompactedThrough(roomId: string): Promise<number> {
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(roomId));
+    return runInDurableObject(stub, async (_inst, state) =>
+      (await state.storage.get<number>("meta:signal_compacted_through")) ?? 0);
+  }
+
+  async function ownerSnapshot(
+    room: V3Room,
+    id: string,
+    opts: { signature: "valid" | "none" | "invalid" },
+  ): Promise<EnvelopeInput> {
+    const value: EnvelopeInput = {
+      envelopeId: id,
+      authorId: "owner-participant",
+      deviceId: "owner-device",
+      kind: "snapshot_blob",
+      target: null,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3_600_000,
+      nonce: base64UrlEncode(new Uint8Array(24).fill(0x55)),
+      ciphertext: base64UrlEncode(new Uint8Array(48).fill(0x88)),
+      ciphertextBytes: 48,
+    };
+    if (opts.signature === "invalid") {
+      value.deviceSignature = base64UrlEncode(new Uint8Array(64).fill(0x01));
+    } else if (opts.signature === "valid") {
+      // The relay pins the snapshot proof to targetDeviceId=null and
+      // generation=createdAt (see room-do.ts owner-snapshot branch).
+      value.deviceSignature = base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+        { name: "Ed25519" },
+        room.owner.privateKey,
+        canonicalDeviceSignalProofV3({
+          roomId: room.roomId,
+          envelopeId: value.envelopeId,
+          authorId: value.authorId,
+          deviceId: value.deviceId,
+          targetDeviceId: null,
+          generation: value.createdAt,
+          createdAt: value.createdAt,
+          expiresAt: value.expiresAt,
+          nonce: value.nonce,
+          ciphertext: value.ciphertext,
+          ciphertextBytes: value.ciphertextBytes,
+        }),
+      )));
+    }
+    return value;
+  }
+
+  it("compacts prior signals when the owner snapshot carries a valid owner signature", async () => {
+    const room = await createRoom();
+    await registerOwner(room);
+    await postEnvelopes(room, [
+      await envelope(room, "sig-c-1", "signal"),
+      await envelope(room, "sig-c-2", "signal"),
+    ]);
+    expect(await signalCompactedThrough(room.roomId)).toBe(0);
+
+    await postEnvelopes(room, [await ownerSnapshot(room, "owner-snap-signed", { signature: "valid" })]);
+    expect(await signalCompactedThrough(room.roomId)).toBeGreaterThan(0);
+  });
+
+  it("does NOT compact when the owner snapshot is unsigned (unauthenticated routing identity)", async () => {
+    const room = await createRoom();
+    await registerOwner(room);
+    await postEnvelopes(room, [
+      await envelope(room, "sig-u-1", "signal"),
+      await envelope(room, "sig-u-2", "signal"),
+    ]);
+
+    await postEnvelopes(room, [await ownerSnapshot(room, "owner-snap-unsigned", { signature: "none" })]);
+    expect(await signalCompactedThrough(room.roomId)).toBe(0);
+  });
+
+  it("does NOT compact when the owner snapshot signature is invalid (forgery attempt)", async () => {
+    const room = await createRoom();
+    await registerOwner(room);
+    await postEnvelopes(room, [await envelope(room, "sig-b-1", "signal")]);
+
+    await postEnvelopes(room, [await ownerSnapshot(room, "owner-snap-badsig", { signature: "invalid" })]);
+    expect(await signalCompactedThrough(room.roomId)).toBe(0);
   });
 });

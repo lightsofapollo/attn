@@ -259,6 +259,36 @@ describe("POST /v2/rooms/:roomId — body-size guard (abuse hardening)", () => {
     const err = (await res.json()) as RoomErrorResponse;
     expect(err.error.code).toBe("ATTN_BODY_TOO_LARGE");
   });
+
+  it("rejects an oversized CHUNKED create body (no Content-Length) via the streaming bound", async () => {
+    const roomId = uniqueRoomId("toobig-chunked");
+    const url = `${URL_BASE}/v2/rooms/${roomId}`;
+    // A streamed body carries no Content-Length, so the size guard cannot rely
+    // on the declared header — the streaming reader must cancel once the running
+    // total crosses ROOM_CREATE_MAX_BODY_BYTES (4096). Emit 8 KiB in 1 KiB
+    // chunks. No Attn-Owner-Signature: the guard must fire before auth (413).
+    const chunk = new TextEncoder().encode("x".repeat(1024));
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= 8192) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk);
+        sent += chunk.byteLength;
+      },
+    });
+    const res = await SELF.fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    expect(res.status).toBe(413);
+    const err = (await res.json()) as RoomErrorResponse;
+    expect(err.error.code).toBe("ATTN_BODY_TOO_LARGE");
+  });
 });
 
 describe("POST /v2/rooms/:roomId — H1 first-create owner signature", () => {

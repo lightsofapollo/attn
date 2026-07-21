@@ -1086,6 +1086,7 @@ export class RoomDO extends DurableObject<Env> {
       hardMaxAt: clamped.hardMaxAt,
       lastEventAt: createdAt,
       idleTimeoutMs: clamped.idleTimeoutMs,
+      expiresAt: clamped.policy.expiresAt,
       probationAt: createdAt + ROOM_PROBATION_MS,
     });
 
@@ -1671,16 +1672,66 @@ export class RoomDO extends DurableObject<Env> {
         );
       }
 
-      // Owner devices are the ones registered without a reviewer grant tier.
-      // Their snapshots supersede every collab signal before them — record
-      // them so the post-commit sweep can compact (event-log-compaction.md).
-      if (env.kind === "snapshot_blob" && deviceRecord.grantTier === undefined) {
+      // Owner identity is crypto-bound: a device registers with kind="owner"
+      // only if its publicSigningKey equals the room ownerSigningKey (constant-
+      // time checked at registration), so reviewers/agents can never qualify.
+      // This alone fixes the v2 case where every tier-less device was treated
+      // as an owner.
+      const isOwnerDevice = deviceRecord.kind === "owner";
+
+      // An owner snapshot supersedes every collab signal before it, so it drives
+      // signal compaction (event-log-compaction.md). The authority to compact is
+      // owner-only, so it must never rest on the previous heuristic (any device
+      // that merely lacked a reviewer grant tier), which classified every v2
+      // reviewer as an owner.
+      //
+      // v2 has no per-envelope device proof, so the best available check is the
+      // registration-bound device kind: a device registers kind="owner" only if
+      // its signing key equals the room ownerSigningKey (constant-time checked),
+      // so reviewers/agents can never qualify.
+      if (routeVersion !== 3 && env.kind === "snapshot_blob" && isOwnerDevice) {
         ownerSnapshotIds.add(env.envelopeId);
+      }
+
+      // v3 additionally proves authorship: a snapshot_blob's routing identity is
+      // otherwise unauthenticated, so a write-admitted reviewer could forge one
+      // under the owner's PUBLIC device id and force deletion of other peers'
+      // signals. Grant compaction authority ONLY to a snapshot carrying a valid
+      // v3 owner device signature over its own envelopeId+ciphertext — a
+      // signature the reviewer cannot produce. Fail SAFE: an absent or invalid
+      // signature simply doesn't compact (the snapshot is still stored), never a
+      // publish-blocking hard error.
+      if (routeVersion === 3 && env.kind === "snapshot_blob" && isOwnerDevice &&
+        env.deviceSignature !== undefined) {
+        const ownerProofOk = await verifyDeviceProofSignature(
+          deviceRecord.publicSigningKey,
+          env.deviceSignature,
+          canonicalDeviceSignalProofV3({
+            roomId,
+            envelopeId: env.envelopeId,
+            authorId: env.authorId,
+            deviceId: env.deviceId,
+            targetDeviceId: null,
+            generation: env.createdAt,
+            createdAt: env.createdAt,
+            expiresAt: env.expiresAt,
+            nonce: env.nonce,
+            ciphertext: env.ciphertext,
+            ciphertextBytes: env.ciphertextBytes,
+          }),
+        ).then(() => true).catch((error: unknown) => {
+          if (error instanceof DeviceProofError) return false;
+          throw error;
+        });
+        if (ownerProofOk) ownerSnapshotIds.add(env.envelopeId);
       }
 
       const hasSignalProof = env.signalGeneration !== undefined || env.deviceSignature !== undefined;
       if (routeVersion !== 3 || env.kind !== "signal") {
-        if (hasSignalProof) {
+        // Proof fields are consumed above for v3 owner snapshots; they remain
+        // forbidden on events and on v2 envelopes.
+        const snapshotProofAllowed = routeVersion === 3 && env.kind === "snapshot_blob";
+        if (hasSignalProof && !snapshotProofAllowed) {
           return errorResponse(400, "ATTN_DEVICE_PROOF_INVALID", "device proof fields are v3 signal-only");
         }
         continue;
@@ -2019,6 +2070,7 @@ export class RoomDO extends DurableObject<Env> {
           hardMaxAt,
           lastEventAt: now,
           idleTimeoutMs: policy.idleTimeoutMs ?? limits.defaultIdleTimeoutMs,
+          expiresAt: policy.expiresAt,
         });
       }
     }
@@ -3748,6 +3800,25 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(500, "ATTN_ROOM_CORRUPT", `room ${roomId} missing policy`);
     }
 
+    // Total device-socket and per-device caps. `maxPeers` only bounds UNIQUE
+    // SUBSCRIBED presence identities, so it is trivially bypassed by opening
+    // many pre-subscribe sockets or many tabs for one device. Bound the raw
+    // socket count here so connection exhaustion and broadcast amplification
+    // cannot outrun presence accounting. Counted separately from viewer sockets.
+    const maxDeviceSockets = readHardLimits(this.env).maxViewerSockets;
+    const maxSocketsPerDevice = policy.maxPeers;
+    let deviceSocketCount = 0;
+    let perDeviceSocketCount = 0;
+    for (const socket of this.ctx.getWebSockets()) {
+      const attachment = readAttachment(socket);
+      if (attachment?.kind !== "device") continue;
+      deviceSocketCount += 1;
+      if (attachment.deviceId === deviceId) perDeviceSocketCount += 1;
+    }
+    if (deviceSocketCount >= maxDeviceSockets || perDeviceSocketCount >= maxSocketsPerDevice) {
+      return errorResponse(429, "ATTN_SOCKET_LIMIT", "device socket limit reached");
+    }
+
     // Build the upgrade response.
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -3795,25 +3866,53 @@ export class RoomDO extends DurableObject<Env> {
       sendError(ws, "ATTN_FRAME_INVALID", "binary frames are reserved");
       return;
     }
+    // Byte-cap the frame BEFORE JSON.parse — a control frame is tiny, so an
+    // oversized one is only a CPU/memory amplification attempt.
+    if (msg.length > WS_MAX_CLIENT_FRAME_CHARS) {
+      sendError(ws, "ATTN_FRAME_TOO_LARGE", `frame exceeds ${WS_MAX_CLIENT_FRAME_CHARS} chars`);
+      return;
+    }
+    // Per-socket message-rate budget (fixed window token bucket on the
+    // hibernatable attachment). A peer that floods frames is closed rather than
+    // allowed to spin the isolate parsing/validating each one.
+    const rateNow = Date.now();
+    const windowStart = att.msgWindowStart ?? 0;
+    const inWindow = rateNow - windowStart < WS_RATE_WINDOW_MS;
+    const msgCount = inWindow ? (att.msgCount ?? 0) + 1 : 1;
+    if (inWindow && msgCount > WS_RATE_MAX_PER_WINDOW) {
+      try {
+        ws.close(CLOSE_RATE_LIMIT, "message rate exceeded");
+      } catch {
+        // best-effort close
+      }
+      return;
+    }
+    const ratedAtt: WSAttachment = {
+      ...att,
+      msgWindowStart: inWindow ? windowStart : rateNow,
+      msgCount,
+    };
     let parsed: unknown;
     try {
       parsed = JSON.parse(msg);
     } catch (err) {
+      writeAttachment(ws, ratedAtt);
       sendError(ws, "ATTN_FRAME_INVALID", `frame is not valid JSON: ${(err as Error).message}`);
       return;
     }
     const frame = clientFrameSchema.safeParse(parsed);
     if (!frame.success) {
+      writeAttachment(ws, ratedAtt);
       sendError(ws, "ATTN_FRAME_INVALID", formatZodError(frame.error));
       return;
     }
     const body = frame.data;
     if (body.type === "subscribe") {
-      await this.handleSubscribe(ws, att, body.after);
+      await this.handleSubscribe(ws, ratedAtt, body.after);
       return;
     }
     if (body.type === "pong") {
-      writeAttachment(ws, { ...att, lastPongTs: Date.now() });
+      writeAttachment(ws, { ...ratedAtt, lastPongTs: Date.now() });
       return;
     }
   }
@@ -4500,9 +4599,16 @@ export class RoomDO extends DurableObject<Env> {
     const limits = readHardLimits(this.env);
     const idleTimeoutMs = policy.idleTimeoutMs ?? limits.defaultIdleTimeoutMs;
     const idleDeadline = lastEventAt + idleTimeoutMs;
+    // A room can request a policy expiresAt EARLIER than its hard-max TTL. That
+    // deadline is real capability/retention state, not response-only metadata:
+    // an actively-used room (lastEventAt keeps advancing) would otherwise keep
+    // serving ciphertext and admission keys until hard-max. Treat it as a wipe
+    // deadline equal to hard-max/idle.
+    const policyExpiresAt = policy.expiresAt;
 
-    // Expiry check first — hard-max OR idle past due → wipe the room.
-    if (now >= hardMaxAt || now >= idleDeadline) {
+    // Expiry check first — hard-max OR idle OR policy expiry past due → wipe.
+    if (now >= hardMaxAt || now >= idleDeadline ||
+      (Number.isFinite(policyExpiresAt) && now >= policyExpiresAt)) {
       await this.expireRoom();
       return;
     }
@@ -4527,6 +4633,7 @@ export class RoomDO extends DurableObject<Env> {
       hardMaxAt,
       lastEventAt,
       idleTimeoutMs,
+      expiresAt: policyExpiresAt,
       probationAt: activated || createdAt === undefined ? undefined : createdAt + ROOM_PROBATION_MS,
     });
   }
@@ -4542,6 +4649,12 @@ export class RoomDO extends DurableObject<Env> {
     lastEventAt: number;
     idleTimeoutMs: number;
     /**
+     * Policy expiry deadline. Included in the earliest-deadline calculation so
+     * a room that requested a short expiresAt is wiped on time even while it is
+     * actively edited (idle never fires). Omitted only where unavailable.
+     */
+    expiresAt?: number;
+    /**
      * When the room is still UN-ACTIVATED (no events yet), the time by which it
      * must be evicted as abandoned create-spam. Omitted once the room has any
      * event, so activated rooms follow only the idle/hard-max schedule.
@@ -4551,6 +4664,9 @@ export class RoomDO extends DurableObject<Env> {
     const idleAt = opts.lastEventAt + opts.idleTimeoutMs;
     const powPruneAt = opts.now + POW_PRUNE_INTERVAL_MS;
     const candidates = [opts.hardMaxAt, idleAt, powPruneAt];
+    if (opts.expiresAt !== undefined && Number.isFinite(opts.expiresAt)) {
+      candidates.push(opts.expiresAt);
+    }
     if (opts.probationAt !== undefined) candidates.push(opts.probationAt);
     await this.ctx.storage.setAlarm(Math.min(...candidates));
   }
@@ -5137,6 +5253,9 @@ function bufferedRequest(original: Request, bodyBytes: Uint8Array): Request {
 }
 
 async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array | Response> {
+  // Fast reject on an honest Content-Length. A chunked or understated header
+  // still has to be caught by the streaming bound below — the declared length
+  // is an optimization, never the enforcement point.
   const declared = request.headers.get("Content-Length");
   if (declared !== null) {
     const declaredBytes = Number(declared);
@@ -5144,15 +5263,34 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint
       return errorResponse(413, "ATTN_BODY_TOO_LARGE", `request body exceeds ${maxBytes} bytes`);
     }
   }
+  if (request.body === null) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
   try {
-    const bytes = new Uint8Array(await request.arrayBuffer());
-    if (bytes.byteLength > maxBytes) {
-      return errorResponse(413, "ATTN_BODY_TOO_LARGE", `request body exceeds ${maxBytes} bytes`);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      total += value.byteLength;
+      // Cancel as soon as the running total crosses the bound — the rest of an
+      // oversized body is never materialized.
+      if (total > maxBytes) {
+        await reader.cancel();
+        return errorResponse(413, "ATTN_BODY_TOO_LARGE", `request body exceeds ${maxBytes} bytes`);
+      }
+      chunks.push(value);
     }
-    return bytes;
   } catch (error) {
     return errorResponse(400, "ATTN_BODY_INVALID", `request body read failed: ${(error as Error).message}`);
   }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }
 
 // --- self-signature verification ----------------------------------------
@@ -5260,7 +5398,21 @@ interface WSAttachmentBase {
   subscribed: boolean;
   /** Last seen pong timestamp (ms). 0 until the first pong. */
   lastPongTs: number;
+  /** Start of the current per-socket message-rate window (ms). */
+  msgWindowStart?: number;
+  /** Frames counted in the current rate window. */
+  msgCount?: number;
 }
+
+/**
+ * Client control frames (`subscribe`, `pong`) are a few dozen bytes. Anything
+ * larger is rejected BEFORE JSON.parse so a peer cannot force the isolate to
+ * parse a multi-megabyte frame. Generous headroom for future frame shapes.
+ */
+const WS_MAX_CLIENT_FRAME_CHARS = 4096;
+/** Per-socket message-rate budget: at most N frames per fixed window. */
+const WS_RATE_WINDOW_MS = 1000;
+const WS_RATE_MAX_PER_WINDOW = 120;
 
 /** Registered participant socket. Legacy attachments deserialize into this branch. */
 interface DeviceWSAttachment extends WSAttachmentBase {
@@ -5431,6 +5583,8 @@ function readAttachment(ws: WebSocket): WSAttachment | undefined {
   const r = raw as Record<string, unknown>;
   const subscribed = r.subscribed === true;
   const lastPongTs = typeof r.lastPongTs === "number" ? r.lastPongTs : 0;
+  const msgWindowStart = typeof r.msgWindowStart === "number" ? r.msgWindowStart : undefined;
+  const msgCount = typeof r.msgCount === "number" ? r.msgCount : undefined;
   if (r.kind === "viewer") {
     if (typeof r.viewerId !== "string" || !isViewerId(r.viewerId)) return undefined;
     return {
@@ -5438,6 +5592,8 @@ function readAttachment(ws: WebSocket): WSAttachment | undefined {
       viewerId: r.viewerId,
       subscribed,
       lastPongTs,
+      msgWindowStart,
+      msgCount,
     };
   }
   // Attachments created before the tagged union did not carry `kind`.
@@ -5452,6 +5608,8 @@ function readAttachment(ws: WebSocket): WSAttachment | undefined {
     presenceAnnounced: r.presenceAnnounced === true,
     subscribed,
     lastPongTs,
+    msgWindowStart,
+    msgCount,
   };
 }
 

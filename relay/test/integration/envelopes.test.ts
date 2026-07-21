@@ -250,8 +250,11 @@ async function registerDevice(opts: {
   deviceId: string;
   participantId: string;
   kind?: "owner" | "reviewer" | "agent";
+  /** Use this keypair instead of a fresh one — required for kind="owner", whose
+   *  signing key must equal the room ownerSigningKey. */
+  keypair?: SubtleKeypair;
 }): Promise<SubtleKeypair> {
-  const kp = await generateEd25519Keypair();
+  const kp = opts.keypair ?? await generateEd25519Keypair();
   const body = await buildSignedDeviceBody(
     {
       deviceId: opts.deviceId,
@@ -1610,6 +1613,8 @@ describe("signal compaction on owner snapshots (event-log-compaction.md)", () =>
       admissionKey,
       deviceId: "dev-owner",
       participantId: "owner",
+      kind: "owner",
+      keypair: owner,
     });
 
     // 3 collab-style signals (untargeted), 2 durable events, then an owner
@@ -1694,6 +1699,8 @@ describe("signal compaction on owner snapshots (event-log-compaction.md)", () =>
       admissionKey,
       deviceId: "dev-owner",
       participantId: "owner",
+      kind: "owner",
+      keypair: owner,
     });
     await injectReviewerDevice(roomId, "rev", "dev-rev");
 
@@ -1742,6 +1749,8 @@ describe("signal compaction on owner snapshots (event-log-compaction.md)", () =>
       admissionKey,
       deviceId: "dev-owner",
       participantId: "owner",
+      kind: "owner",
+      keypair: owner,
     });
     const fill = await postEnvelopes({
       roomId,
@@ -1786,6 +1795,8 @@ describe("signal compaction on owner snapshots (event-log-compaction.md)", () =>
       admissionKey,
       deviceId: "dev-owner",
       participantId: "owner",
+      kind: "owner",
+      keypair: owner,
     });
 
     const fill = await postEnvelopes({

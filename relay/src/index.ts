@@ -706,14 +706,17 @@ async function handleBlobPut(
     return blobErrorResponse(401, "ATTN_BLOB_CAP_INVALID", "invalid or expired blob cap");
   }
 
-  // Read body. We materialize in-memory because the cap has the byte size
-  // pinned; bounded by `policy.maxSnapshotBytes` (5 MiB default) so this is safe.
-  let bodyBytes: Uint8Array;
-  try {
-    bodyBytes = new Uint8Array(await request.arrayBuffer());
-  } catch (err) {
-    return blobErrorResponse(400, "ATTN_BODY_INVALID", `body read failed: ${(err as Error).message}`);
-  }
+  // Read body under a streaming bound. The cap pins the exact ciphertext size,
+  // so the read is capped at that (plus a hard snapshot ceiling as a fallback
+  // when the cap omits it) and cancels the moment an oversized body crosses the
+  // bound — an isolate never buffers more than one legitimate snapshot.
+  const maxBlobBytes =
+    typeof verified.ciphertextBytes === "number"
+      ? verified.ciphertextBytes
+      : parseSnapshotCeiling(env);
+  const bodyRead = await readBoundedBlobBody(request, maxBlobBytes);
+  if (bodyRead instanceof Response) return bodyRead;
+  const bodyBytes = bodyRead;
   if (
     typeof verified.ciphertextBytes === "number" &&
     bodyBytes.byteLength !== verified.ciphertextBytes
@@ -837,4 +840,53 @@ async function withBlobObjectCors(
 
 function blobErrorResponse(status: number, code: string, message: string): Response {
   return Response.json({ error: { code, message } }, { status });
+}
+
+const DEFAULT_SNAPSHOT_CEILING_BYTES = 5 * 1024 * 1024;
+
+/** Hard snapshot ceiling used when a blob cap omits its pinned ciphertext size. */
+function parseSnapshotCeiling(env: Env): number {
+  const parsed = Number(env.HARD_MAX_SNAPSHOT_BYTES);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SNAPSHOT_CEILING_BYTES;
+}
+
+/**
+ * Stream a blob PUT body under a hard byte bound, cancelling as soon as the
+ * running total crosses it. Mirrors room-do's `readBoundedBody`: a chunked or
+ * understated Content-Length can never force the isolate to buffer past the cap.
+ */
+async function readBoundedBlobBody(request: Request, maxBytes: number): Promise<Uint8Array | Response> {
+  const declared = request.headers.get("Content-Length");
+  if (declared !== null) {
+    const declaredBytes = Number(declared);
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+      return blobErrorResponse(413, "ATTN_BLOB_TOO_LARGE", `blob body exceeds ${maxBytes} bytes`);
+    }
+  }
+  if (request.body === null) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        return blobErrorResponse(413, "ATTN_BLOB_TOO_LARGE", `blob body exceeds ${maxBytes} bytes`);
+      }
+      chunks.push(value);
+    }
+  } catch (err) {
+    return blobErrorResponse(400, "ATTN_BODY_INVALID", `body read failed: ${(err as Error).message}`);
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }

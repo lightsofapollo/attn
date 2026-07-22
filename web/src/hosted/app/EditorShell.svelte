@@ -918,7 +918,11 @@
     // deletes leavers from the roster). The session's device directory keeps
     // every registration ever made — ephemeral /s/ joiners mint a new device
     // per visit — so feeding it unfiltered piled up dead "away" rows.
-    const sessionPeers = (ownerState?.authority?.session?.peers ?? []).filter((p) => p.online);
+    // Leader: live session roster. Follower: the hub's mirrored presence
+    // broadcasts (attn-90qq) — same shape, same online-only rule.
+    const sessionPeers = (
+      ownerState?.authority?.session?.peers ?? joinState?.peers ?? []
+    ).filter((p) => p.online);
     void store.events; // re-resolve names when a ParticipantJoined arrives
     untrack(() => {
       const mapped = sessionPeers.map((peer) => {

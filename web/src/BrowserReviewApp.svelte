@@ -40,6 +40,7 @@
   import NamePrompt from './lib/NamePrompt.svelte';
   import ReviewFileSidebar from './lib/ReviewFileSidebar.svelte';
   import ReviewerStatusChip from './lib/ReviewerStatusChip.svelte';
+  import PeerStrip from './lib/PeerStrip.svelte';
   import { userProfile } from './lib/profile.svelte';
   import { resolveParticipantColor } from './lib/participant-color';
   import CommentComposer from './lib/CommentComposer.svelte';
@@ -308,6 +309,51 @@
       namePromptMode = 'edit';
       namePromptOpen = true;
     }
+  });
+
+  // Feed the peer roster (attn-90qq): the /s/ page never pushed session
+  // presence into the review store, so the header had no chips to render.
+  // Same mapping + fingerprint guard as the owner shell: presence frames
+  // carry only ids/kind; ParticipantJoined events own display names.
+  let lastPeerFingerprint = '';
+  $effect(() => {
+    const peers = sessionState.peers.filter((p) => p.online);
+    void reviewStore.events;
+    untrack(() => {
+      const mapped = peers.map((peer) => {
+        const resolved = reviewStore.displayNameFor(peer.participantId);
+        const displayName =
+          resolved === peer.participantId
+            ? peer.kind === 'agent'
+              ? 'Agent'
+              : peer.kind === 'owner'
+                ? 'Owner'
+                : 'Reviewer'
+            : resolved;
+        return {
+          participantId: peer.participantId as import('./lib/types').ParticipantId,
+          deviceId: peer.deviceId as import('./lib/types').DeviceId,
+          displayName,
+          kind: peer.kind,
+          online: peer.online,
+        };
+      });
+      const fingerprint = mapped
+        .map((p) => `${p.deviceId}:${p.online}:${p.displayName}:${p.kind}`)
+        .join('|');
+      if (fingerprint === lastPeerFingerprint) return;
+      lastPeerFingerprint = fingerprint;
+      reviewStore.peers = mapped;
+    });
+  });
+
+  // The local participant id (attn-90qq): tags "(you)" in the strip and is
+  // stable once the session has minted/loaded its identity.
+  const localParticipantId = $derived.by(() => {
+    void sessionState.status;
+    return 'getParticipantId' in session && typeof session.getParticipantId === 'function'
+      ? (session.getParticipantId() as import('./lib/types').ParticipantId | null)
+      : null;
   });
 
   // Header identity: the current file's display name (first heading, same
@@ -1127,6 +1173,7 @@
             {currentFileName}
           </span>
           <div class="ml-auto flex shrink-0 items-center gap-1.5">
+            <PeerStrip {localParticipantId} />
             <ReviewerStatusChip
               presentation={statusPresentation}
               tier={sessionState.grantTier}

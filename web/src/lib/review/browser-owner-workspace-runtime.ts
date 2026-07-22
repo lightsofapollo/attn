@@ -1164,7 +1164,12 @@ export class BrowserOwnerWorkspaceRuntime {
     if (leaseLost) {
       this.localCollabSyncGeneration += 1;
       void this.stopLocalCollab();
-    } else this.syncPublishedLocalCollab();
+    } else {
+      this.syncPublishedLocalCollab();
+      // Roster mirror (attn-90qq): follower tabs have no session, so the
+      // leader re-broadcasts its presence roster on every authority tick.
+      this.localHub?.broadcastPresence(authorityState.session?.peers ?? []);
+    }
   }
 
   /** Keep the same-browser channel attached when the room authority replaces

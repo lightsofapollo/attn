@@ -189,6 +189,13 @@ export interface LocalCollabJoinState {
   status: 'connecting' | 'live';
   generation: string | null;
   ownerHolderId: string | null;
+  /** Room roster mirrored from the leader's presence broadcasts (attn-90qq). */
+  peers: Array<{
+    participantId: string;
+    deviceId: string;
+    kind: 'owner' | 'reviewer' | 'agent';
+    online: boolean;
+  }>;
 }
 
 export interface LocalCollabSeedView {

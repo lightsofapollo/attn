@@ -51,7 +51,18 @@ type LocalCollabBody =
       markdown: string;
     }
   | { kind: 'goodbye'; generation: string }
-  | { kind: 'collab'; generation: string; payload: string };
+  | { kind: 'collab'; generation: string; payload: string }
+  | { kind: 'presence'; generation: string; peers: LocalCollabPresencePeer[] };
+
+/** Room presence snapshot mirrored to follower tabs (attn-90qq): the leader
+ * is the only tab holding a live session, so followers render the roster
+ * from these broadcasts. Shape mirrors BrowserPeerPresence. */
+export interface LocalCollabPresencePeer {
+  participantId: string;
+  deviceId: string;
+  kind: 'owner' | 'reviewer' | 'agent';
+  online: boolean;
+}
 
 interface LocalCollabEnvelope {
   v: 1;
@@ -147,6 +158,19 @@ function parseEnvelope(data: unknown, workspaceId: string): LocalCollabEnvelope 
         ? (envelope as LocalCollabEnvelope)
         : null;
     }
+    case 'presence': {
+      const presence = body as { generation?: unknown; peers?: unknown };
+      if (typeof presence.generation !== 'string' || !Array.isArray(presence.peers)) return null;
+      if (presence.peers.length > 64) return null;
+      const valid = presence.peers.every((peer) => {
+        const p = peer as Partial<LocalCollabPresencePeer>;
+        return typeof p.participantId === 'string' && p.participantId.length > 0 && p.participantId.length <= 256
+          && typeof p.deviceId === 'string' && p.deviceId.length > 0 && p.deviceId.length <= 256
+          && (p.kind === 'owner' || p.kind === 'reviewer' || p.kind === 'agent')
+          && typeof p.online === 'boolean';
+      });
+      return valid ? (envelope as LocalCollabEnvelope) : null;
+    }
     default:
       return null;
   }
@@ -204,6 +228,9 @@ export class LocalCollabHub {
   private readonly options: LocalCollabHubOptions;
   private readonly channel: LocalCollabChannel | null;
   private readonly seeds = new Map<FileId, { markdown: string; doc: PmNode }>();
+  /** Last room-presence snapshot broadcast to followers (attn-90qq); re-sent
+   *  on every hello so late-joining tabs start with the current roster. */
+  private lastPresence: LocalCollabPresencePeer[] = [];
   private readonly pendingCommits = new Map<FileId, unknown>();
   private readonly inflightCommits = new Set<Promise<void>>();
   private readonly seedRequests = new Map<string, Promise<LocalCollabSeed | null>>();
@@ -349,6 +376,9 @@ export class LocalCollabHub {
     const body = envelope.body;
     if (body.kind === 'hello-request') {
       this.post({ kind: 'hello', generation: this.generation });
+      if (this.lastPresence.length > 0) {
+        this.post({ kind: 'presence', generation: this.generation, peers: this.lastPresence });
+      }
       return;
     }
     if (body.kind === 'seed-request') {
@@ -381,6 +411,17 @@ export class LocalCollabHub {
   }
 
   /**
+   * Room-presence mirror (attn-90qq): the leader's session roster, re-posted
+   * to follower tabs whenever it changes. Followers feed their PeerStrip
+   * from these snapshots — they have no session of their own.
+   */
+  broadcastPresence(peers: readonly LocalCollabPresencePeer[]): void {
+    if (this.closed) return;
+    this.lastPresence = peers.slice(0, 64).map((peer) => ({ ...peer }));
+    this.post({ kind: 'presence', generation: this.generation, peers: this.lastPresence });
+  }
+
+  /**
    * Relay→tabs presence mirror (attn-37f9): re-post a relay-borne cursor
    * payload onto the tab channel so follower tabs render room peers' carets.
    * Follower controllers dedupe by clientID, so re-delivery is idempotent.
@@ -410,6 +451,8 @@ export interface LocalCollabJoinState {
   status: 'connecting' | 'live';
   generation: string | null;
   ownerHolderId: string | null;
+  /** Room roster mirrored from the hub's presence broadcasts (attn-90qq). */
+  peers: LocalCollabPresencePeer[];
 }
 
 export interface LocalCollabJoinOptions extends TimerOptions {
@@ -437,6 +480,7 @@ export class LocalCollabJoin {
     status: 'connecting',
     generation: null,
     ownerHolderId: null,
+    peers: [],
   };
   private controllerValue: CollabController | null = null;
   private seedWaiters = new Map<string, Array<(seed: LocalCollabSeed | null) => void>>();
@@ -534,13 +578,13 @@ export class LocalCollabJoin {
       // Only the hub whose generation we joined may linearize steps.
       isAuthorityDevice: (deviceId) => deviceId === ownerHolderId,
     });
-    this.patchState({ status: 'live', generation, ownerHolderId });
+    this.patchState({ status: 'live', generation, ownerHolderId, peers: [] });
   }
 
   private becomeDisconnected(): void {
     this.controllerValue = null;
     this.dropAllSeedWaiters();
-    this.patchState({ status: 'connecting', generation: null, ownerHolderId: null });
+    this.patchState({ status: 'connecting', generation: null, ownerHolderId: null, peers: [] });
     this.helloDelayMs = HELLO_RETRY_MIN_MS;
     if (this.helloTimer === null) this.requestHello();
   }
@@ -576,6 +620,11 @@ export class LocalCollabJoin {
       case 'collab': {
         if (body.generation !== this.stateValue.generation) return;
         this.controllerValue?.onInbound(body.payload, envelope.senderId);
+        return;
+      }
+      case 'presence': {
+        if (body.generation !== this.stateValue.generation) return;
+        this.patchState({ peers: body.peers });
         return;
       }
       default:

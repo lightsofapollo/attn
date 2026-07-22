@@ -922,36 +922,52 @@ export class BrowserOwnerWorkspaceRuntime {
     try {
       const bindings = await authority.transitionPublishedEpoch(binding.fileId, {
         publish: async ({ publicationOutbox }) => {
-          if (discovered.pendingPublication) {
+          // Bounded convergence (attn-3wgd): this startup publication races
+          // live co-editing — a second tab's routed commits or a takeover
+          // commit can advance the workspace head between (re)staging and
+          // promotion, and the stage/commit gates in
+          // browser-workspace-share.ts then correctly reject the stale
+          // source revision. A single discard+republish used to wedge the
+          // authority in a paused banner; instead each retry below reads
+          // the CURRENT head, so it converges unless commits land
+          // continuously — the final failure keeps today's pause.
+          let resumePending = discovered.pendingPublication;
+          for (let attempt = 1; ; attempt += 1) {
             try {
-              await resumeBrowserSnapshotPublication(publicationOutbox, {
-                sink: this.options.storage.shares.publicationSink(discovered.rootKey),
-                workspaceId: this.options.workspaceId,
-                capId: discovered.share.capId,
-                fence: this.requireFence(),
-                revisionSource: this.options.storage.workspaces,
-              });
-            } catch (error) {
-              if (
-                !(error instanceof StorageConflictError) ||
-                !(await this.pendingPublicationSourceMoved(
-                  discovered.rootKey,
-                  discovered.share.capId,
-                ))
-              ) {
-                throw error;
+              if (resumePending) {
+                await resumeBrowserSnapshotPublication(publicationOutbox, {
+                  sink: this.options.storage.shares.publicationSink(discovered.rootKey),
+                  workspaceId: this.options.workspaceId,
+                  capId: discovered.share.capId,
+                  fence: this.requireFence(),
+                  revisionSource: this.options.storage.workspaces,
+                });
+              } else {
+                await this.publishCurrentGeneration(publicationOutbox);
               }
-              await this.options.storage.shares.discardPendingPublication(
+              return;
+            } catch (error) {
+              if (!(error instanceof StorageConflictError)) throw error;
+              const staleSource = await this.pendingPublicationSourceMoved(
                 discovered.rootKey,
-                this.options.workspaceId,
                 discovered.share.capId,
-                this.requireFence(),
               );
-              this.share = { ...discovered.share, publication: 'published' };
-              await this.publishCurrentGeneration(publicationOutbox);
+              // Only a provably head-moved conflict is retryable. Every
+              // other conflict (unacked envelopes, cross-tab share record
+              // changes) keeps its existing hard-failure semantics.
+              if (!staleSource && !isPublicationHeadMovedConflict(error)) throw error;
+              if (attempt >= STARTUP_PUBLICATION_ATTEMPTS) throw error;
+              if (staleSource) {
+                await this.options.storage.shares.discardPendingPublication(
+                  discovered.rootKey,
+                  this.options.workspaceId,
+                  discovered.share.capId,
+                  this.requireFence(),
+                );
+                this.share = { ...discovered.share, publication: 'published' };
+              }
+              resumePending = false;
             }
-          } else {
-            await this.publishCurrentGeneration(publicationOutbox);
           }
         },
       });
@@ -1408,6 +1424,35 @@ function zeroOwnerCredentials(credentials: BrowserOwnerCredentials | null): void
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Head-moved retry budget for the startup publication (attn-3wgd). Relay
+ * flushes are slow enough for a co-editing tab to land another commit
+ * mid-flight; three fresh-head attempts absorb a refresh during live
+ * co-editing without ever weakening the consistency gates, while continuous
+ * commits still pause the authority instead of looping.
+ */
+const STARTUP_PUBLICATION_ATTEMPTS = 3;
+
+/**
+ * The stage/commit consistency gates in browser-workspace-share.ts that mean
+ * "the live workspace head advanced past the staged source revision"
+ * (attn-3wgd). The gates stay authoritative — this classification only
+ * decides whether the runtime may re-stage from a fresher head.
+ */
+const PUBLICATION_HEAD_MOVED_CONFLICTS: ReadonlySet<string> = new Set([
+  // commitPublication
+  'published source revision moved before promotion',
+  'published source revision is no longer a live workspace head',
+  // stagePublication
+  'published source revision is not a live workspace head',
+  'published source revision moved or mismatches content',
+]);
+
+function isPublicationHeadMovedConflict(error: unknown): boolean {
+  return error instanceof StorageConflictError
+    && PUBLICATION_HEAD_MOVED_CONFLICTS.has(error.message);
 }
 
 function reviewedKey(path: string, suggestionId: string): string {

@@ -28,6 +28,7 @@ import { generateBrowserIdentity } from './browser-session';
 import {
   publishBrowserSnapshots,
   type PublishBrowserSnapshotsOptions,
+  type SnapshotPublicationOutbox,
 } from './browser-snapshot-publisher';
 import { inviteCapabilityFrom } from './browser-workspace-share';
 import {
@@ -896,6 +897,117 @@ defineCase('owner commits republish the durable share so /s/ reviewers refresh',
   await runtime.commit({ path: 'notes.md', body: new TextEncoder().encode('final content') });
   await runtime.close();
   await waitFor(() => uploaded.length > publishedUploads);
+  storage.close();
+});
+
+// attn-3wgd helpers: force the exact race the promotion gates guard against —
+// a co-editing tab commits a fresh head between the publication's staging and
+// its promotion (the outbox flush sits exactly between those two steps).
+interface HeadMover { remaining: number; commits: number }
+
+function headMovingPublisher(
+  storage: BrowserStorage,
+  mover: HeadMover,
+): (options: PublishBrowserSnapshotsOptions) => Promise<unknown> {
+  return (options) => {
+    const publication = options.publication;
+    assert(publication, 'runtime publication context is always present');
+    const inner = options.outbox;
+    const outbox: SnapshotPublicationOutbox = {
+      enqueueBatchDurably: (envelopes) => inner.enqueueBatchDurably(envelopes),
+      flushNow: async () => {
+        if (mover.remaining !== 0) {
+          mover.remaining -= 1;
+          mover.commits += 1;
+          await storage.workspaces.commitRevision({
+            workspaceId: publication.workspaceId,
+            path: 'notes.md',
+            body: new TextEncoder().encode(`co-editing commit ${mover.commits}`),
+            fence: publication.fence,
+          });
+        }
+        await inner.flushNow();
+      },
+    };
+    return snapshotPublisher({ ...options, outbox });
+  };
+}
+
+async function moveHeadBeforeStartup(storage: BrowserStorage, workspaceId: string): Promise<void> {
+  const leases = storage.leases({ channel: null });
+  const fence = await leases.acquire(workspaceId, 'refresh-mover');
+  assert(fence, 'pre-startup mover fence');
+  await storage.workspaces.commitRevision({
+    workspaceId,
+    path: 'notes.md',
+    body: new TextEncoder().encode('moved before the owner tab came back'),
+    fence,
+  });
+  await leases.release(fence);
+  leases.close();
+}
+
+defineCase('startup republish converges when heads move between staging and promotion (attn-3wgd)', async () => {
+  const now = 1_700_000_000_000;
+  const storage = await openStorage(() => now);
+  const seeded = await seedPublished(storage, now);
+  // The owner refreshed after commits landed: startup must republish.
+  await moveHeadBeforeStartup(storage, seeded.workspaceId);
+  // One more commit lands mid-flight — after staging, before promotion.
+  const mover: HeadMover = { remaining: 1, commits: 0 };
+  let publishCalls = 0;
+  const publisher = headMovingPublisher(storage, mover);
+  const runtime = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, seeded.workspaceId, {
+    now: () => now,
+    authorityFactory: (options) => new FakeAuthority(options, storage, []),
+    publisher: (options) => {
+      publishCalls += 1;
+      return publisher(options);
+    },
+  }));
+  await runtime.start();
+  equal(runtime.getState().status, 'active', 'runtime converges to active despite the mid-flight head move');
+  equal(runtime.getState().liveEditingAvailable, true, 'live authority available after retry');
+  equal(runtime.getState().reason, null, 'no paused banner reason');
+  equal(publishCalls, 2, 'exactly one head-moved retry re-stages from the fresh head');
+  const rootKey = await storage.getWorkspaceRootKey(seeded.workspaceId);
+  assert(rootKey, 'workspace root key');
+  const promoted = await storage.shares.loadPromotedManifest(rootKey, seeded.workspaceId, seeded.capId);
+  const entry = await storage.workspaces.getEntry(seeded.workspaceId, 'notes.md');
+  assert(promoted && entry, 'promoted manifest and live entry exist');
+  equal(promoted.entries[0]?.revisionId, entry.headRevisionId, 'promoted manifest reflects the NEW head');
+  await runtime.close();
+  storage.close();
+});
+
+defineCase('continuously moving heads exhaust the bounded retries and pause as before (attn-3wgd)', async () => {
+  const now = 1_700_000_000_000;
+  const storage = await openStorage(() => now);
+  const seeded = await seedPublished(storage, now);
+  await moveHeadBeforeStartup(storage, seeded.workspaceId);
+  // remaining < 0 never reaches zero: a commit lands on EVERY flush.
+  const mover: HeadMover = { remaining: -1, commits: 0 };
+  let publishCalls = 0;
+  const publisher = headMovingPublisher(storage, mover);
+  const runtime = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, seeded.workspaceId, {
+    now: () => now,
+    authorityFactory: (options) => new FakeAuthority(options, storage, []),
+    publisher: (options) => {
+      publishCalls += 1;
+      return publisher(options);
+    },
+  }));
+  await runtime.start();
+  equal(runtime.getState().status, 'paused', 'continuous movement still pauses the authority');
+  equal(publishCalls, 3, 'retries are bounded — no infinite republish loop');
+  equal(mover.commits, 3, 'each bounded attempt observed exactly one mid-flight commit');
+  assert(
+    runtime.getState().reason?.includes('published source revision moved before promotion'),
+    'pause keeps the promotion gate’s reason',
+  );
+  equal(runtime.getState().writable, true, 'local editing stays writable while paused');
+  equal(runtime.getState().liveEditingAvailable, false, 'live authority stays unavailable while paused');
+  await runtime.close();
   storage.close();
 });
 

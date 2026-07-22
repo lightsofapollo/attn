@@ -1779,9 +1779,15 @@
     controller.setRemoteCursorSink((cursors) => {
       const v = pmViewForReview;
       if (!v) return;
-      const activeFileId = ownerState?.bindings.find(
-        (binding) => binding.path === activeEntry?.path,
-      )?.fileId;
+      // Leader tabs read the authority bindings; follower tabs have none
+      // (attn-37f9) — they fall back to the promoted-manifest map from the
+      // review-log watcher. Without the fallback, every reviewer cursor
+      // (which always carries location.fileId) was filtered out right here
+      // and the bridge's deliveries rendered nowhere.
+      const path = activeEntry?.path;
+      const activeFileId =
+        ownerState?.bindings.find((binding) => binding.path === path)?.fileId
+        ?? reviewLogBindings.find((binding) => binding.path === path)?.fileId;
       const scoped = cursors.filter(
         (cursor) => !cursor.location?.fileId || cursor.location.fileId === activeFileId,
       );

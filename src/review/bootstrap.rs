@@ -94,9 +94,9 @@ pub(crate) const BOOTSTRAP_POW_TTL_MS: u64 = crate::review::crypto::pow::DEFAULT
 /// so the constants MUST stay in lock-step.
 const RELAY_BLOB_SPILLOVER_THRESHOLD_BYTES: u64 = 1024 * 1024;
 
-/// Hosted review entry used when `ATTN_BROWSER_REVIEW_URL` is unset. Runtime
-/// overrides are useful for staging/local builds, but production must not
-/// silently default to the staging origin.
+/// Hosted review entry used when neither the runtime nor build-time setting is
+/// present. Release builds use this production fallback; staging-native builds
+/// bake `ATTN_DEFAULT_BROWSER_REVIEW_URL` alongside their staging relay.
 const DEFAULT_BROWSER_REVIEW_URL: &str = "https://attn.sh/review";
 
 /// Default `RoomPolicy` for newly shared rooms.
@@ -797,7 +797,23 @@ pub fn build_browser_invite_url(
 
 fn browser_review_base_url() -> Result<reqwest::Url, BootstrapError> {
     let configured = std::env::var("ATTN_BROWSER_REVIEW_URL").ok();
-    parse_browser_review_base_url(configured.as_deref())
+    resolve_browser_review_base_url(
+        configured.as_deref(),
+        option_env!("ATTN_DEFAULT_BROWSER_REVIEW_URL"),
+    )
+}
+
+fn resolve_browser_review_base_url(
+    configured: Option<&str>,
+    baked: Option<&str>,
+) -> Result<reqwest::Url, BootstrapError> {
+    if let Some(value) = configured.map(str::trim).filter(|value| !value.is_empty()) {
+        return parse_browser_review_base_url(Some(value));
+    }
+    if let Some(value) = baked.map(str::trim).filter(|value| !value.is_empty()) {
+        return parse_browser_review_base_url(Some(value));
+    }
+    parse_browser_review_base_url(None)
 }
 
 fn parse_browser_review_base_url(configured: Option<&str>) -> Result<reqwest::Url, BootstrapError> {
@@ -5336,6 +5352,21 @@ mod tests {
     fn browser_invite_base_defaults_to_production_review() {
         let base = parse_browser_review_base_url(None).expect("default base");
         assert_eq!(base.as_str(), DEFAULT_BROWSER_REVIEW_URL);
+    }
+
+    #[test]
+    fn browser_invite_base_prefers_runtime_then_baked_build_origin() {
+        let runtime = resolve_browser_review_base_url(
+            Some("https://review.example.test/review"),
+            Some("https://staging.attn.sh/review"),
+        )
+        .expect("runtime review base");
+        assert_eq!(runtime.as_str(), "https://review.example.test/review");
+
+        let staging =
+            resolve_browser_review_base_url(Some("  "), Some("https://staging.attn.sh/review"))
+                .expect("baked staging review base");
+        assert_eq!(staging.as_str(), "https://staging.attn.sh/review");
     }
 
     #[test]

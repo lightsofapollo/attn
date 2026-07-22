@@ -19,8 +19,9 @@ fn main() {
     // edits, but the dist copy short-circuits Vite when a bundle already
     // exists, so the built artifact must be a rerun trigger in its own right.)
     // The client bakes this in via option_env! — recompile when it changes so
-    // a release build picks up a new relay URL without a clean.
+    // a release build picks up a new relay/review-origin pair without a clean.
     println!("cargo:rerun-if-env-changed=ATTN_DEFAULT_RELAY_URL");
+    println!("cargo:rerun-if-env-changed=ATTN_DEFAULT_BROWSER_REVIEW_URL");
     println!("cargo:rerun-if-changed=web/dist/index.html");
     println!("cargo:rerun-if-changed=web/index.html");
     println!("cargo:rerun-if-changed=web/package.json");

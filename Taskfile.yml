@@ -15,7 +15,8 @@ tasks:
         DEV_HOST="{{.DEV_HOST_VALUE}}"
         DEV_PORT="{{.DEV_PORT_VALUE}}"
         ATTN_PATH="{{.ATTN_PATH_VALUE}}"
-        : "${ATTN_RELAY_URL:=https://relay.attn.sh}"
+        : "${ATTN_RELAY_URL:=https://relay-staging.attn.sh}"
+        : "${ATTN_BROWSER_REVIEW_URL:=https://staging.attn.sh/review}"
 
         choose_dev_port() {
           local start_port=5173
@@ -80,8 +81,8 @@ tasks:
           sleep 0.2
         done
 
-        echo "Launching attn with HMR enabled (path: ${ATTN_PATH}, relay: ${ATTN_RELAY_URL})"
-        ATTN_DEV_SERVER_URL="${ATTN_DEV_SERVER_URL}" ATTN_RELAY_URL="${ATTN_RELAY_URL}" cargo run --bin attn -- --no-fork "${ATTN_PATH}"
+        echo "Launching attn with HMR enabled (path: ${ATTN_PATH}, relay: ${ATTN_RELAY_URL}, reviews: ${ATTN_BROWSER_REVIEW_URL})"
+        ATTN_DEV_SERVER_URL="${ATTN_DEV_SERVER_URL}" ATTN_RELAY_URL="${ATTN_RELAY_URL}" ATTN_BROWSER_REVIEW_URL="${ATTN_BROWSER_REVIEW_URL}" cargo run --bin attn -- --no-fork "${ATTN_PATH}"
         '
 
   dev:collab:

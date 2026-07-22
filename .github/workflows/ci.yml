@@ -141,6 +141,7 @@ jobs:
       - name: Build release
         env:
           ATTN_DEFAULT_RELAY_URL: https://relay.attn.sh
+          ATTN_DEFAULT_BROWSER_REVIEW_URL: https://attn.sh/review
         run: cargo build --release --locked
 
       - name: Check binary size (30 MiB budget)

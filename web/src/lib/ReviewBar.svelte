@@ -85,8 +85,8 @@
     localParticipantId?: ParticipantId | null;
     /**
      * Show the comments show/hide button in the dock (hosted owner surface).
-     * The reviewer page carries the same affordance in its own header; the
-     * native frame keeps its rail-local toggle, so this defaults off.
+     * The reviewer page carries the same affordance in its own header. Native
+     * and hosted owner headers opt in so every surface uses the same control.
      */
     railToggle?: boolean;
     /**

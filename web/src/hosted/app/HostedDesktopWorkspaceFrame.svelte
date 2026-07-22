@@ -234,22 +234,22 @@
       class="min-w-0 truncate font-sans text-[13px] font-medium text-foreground"
       data-slot="owner-doc-name"
     >{activeEntryPath ? activeEntryPath.split('/').at(-1) : workspaceName}</span>
-    {#if reviewStore.currentRoomId === null && !shareOpen && onShare}
-      <!-- Pre-share the quiet icon is the only Share entry point; once a
-           room is active the ReviewBar's ShareChip owns share status. -->
-      <button
-        type="button"
-        class="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-        data-slot="owner-header-share"
-        aria-label="Share for review"
-        title="Share for review"
-        onclick={(event) => onShare(event.currentTarget)}
-      >
-        <Share2 class="size-3.5" aria-hidden="true" />
-      </button>
-    {/if}
     <div class="ml-auto flex h-full min-w-0 shrink-0 items-center gap-1.5">
       {@render actions()}
+      {#if reviewStore.currentRoomId === null && !shareOpen && onShare}
+        <!-- Keep local status + Share together, matching the mobile masthead.
+             Once a room is active the ReviewBar's ShareChip owns the slot. -->
+        <button
+          type="button"
+          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          data-slot="owner-header-share"
+          aria-label="Share for review"
+          title="Share for review"
+          onclick={(event) => onShare(event.currentTarget)}
+        >
+          <Share2 class="size-3.5" aria-hidden="true" />
+        </button>
+      {/if}
       <ReviewBar
         {shareOpen}
         isOwner={true}

@@ -54,6 +54,7 @@ jobs:
         working-directory: .
         env:
           ATTN_DEFAULT_RELAY_URL: https://relay-staging.attn.sh
+          ATTN_DEFAULT_BROWSER_REVIEW_URL: https://staging.attn.sh/review
         run: |
           npm --prefix web run build
           cargo build --locked

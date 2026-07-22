@@ -57,6 +57,7 @@
   import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
   import PenLineIcon from '@lucide/svelte/icons/pen-line';
   import Share2Icon from '@lucide/svelte/icons/share-2';
+  import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
   import PanelRightIcon from '@lucide/svelte/icons/panel-right';
   import SunMoonIcon from '@lucide/svelte/icons/sun-moon';
   import KeyboardIcon from '@lucide/svelte/icons/keyboard';
@@ -75,6 +76,7 @@
   import ShareDialog from './lib/ShareDialog.svelte';
   import NamePrompt from './lib/NamePrompt.svelte';
   import { userProfile } from './lib/profile.svelte';
+  import { resolveParticipantColor } from './lib/participant-color';
   import Users from '@lucide/svelte/icons/users';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
@@ -90,14 +92,12 @@
   import { toast } from 'svelte-sonner';
   import { Toaster } from '$lib/components/ui/sonner';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
-  import PathBreadcrumb from './lib/PathBreadcrumb.svelte';
   import {
     detectFileType,
     extractStructureFromMarkdown,
     loadMarkdownFromPath,
     markdownSourceUrl,
   } from './lib/markdown-layer';
-  import { RAIL_WIDTH_PX } from './lib/review/rail-mode';
   import { reviewStore } from './lib/review/store.svelte';
   import { consumePendingRoomFocus } from './lib/review/pending-room-focus';
   import ReviewMargin from './lib/ReviewMargin.svelte';
@@ -242,9 +242,19 @@
       ? reviewStore.activeRoom.role !== 'reviewer'
       : !hasReviewerRooms,
   );
-  let showReviewChrome = $derived(
-    reviewStore.currentRoomId !== null || hasReviewerRooms || shareDialogOpen,
-  );
+  let headerDocumentName = $derived.by(() => {
+    if (isReviewerInRoom && reviewStore.currentRoomId !== null) {
+      const sharedFile = reviewStore.snapshots.find(
+        (snapshot) =>
+          snapshot.roomId === reviewStore.currentRoomId &&
+          snapshot.fileId === reviewStore.currentFileId &&
+          Boolean(snapshot.ownerDisplayPath),
+      );
+      const sharedPath = sharedFile?.ownerDisplayPath;
+      if (sharedPath) return sharedPath.split('/').filter(Boolean).at(-1) ?? sharedPath;
+    }
+    return activeTab?.label ?? activePath.split('/').filter(Boolean).at(-1) ?? 'No file selected';
+  });
 
   let autoSelectedRoomId = $state<string | null>(null);
   $effect(() => {
@@ -670,8 +680,8 @@
     }
   });
 
-  function handleNameConfirm(name: string): void {
-    userProfile.save(name);
+  function handleNameConfirm(name: string, color: string | null): void {
+    userProfile.save(name, color);
     resumePendingShare();
   }
 
@@ -688,6 +698,16 @@
     pendingSharePath = null;
     pendingShareIsDir = false;
     if (path) openShareDialogForPath(path, isDir);
+  }
+
+  // The local user's identity color (attn-3gdd): picked color first, else
+  // the hash of our stable participant id. Prefers the store's owner id on
+  // the owner window (it is the same identity, and it's available even for
+  // rooms shared before the init payload carried participantId).
+  function selfIdentityColor(isOwner: boolean): string {
+    const pid =
+      (isOwner ? reviewStore.ownerParticipantId : null) ?? userProfile.participantId ?? '';
+    return resolveParticipantColor(pid, userProfile.color, isOwner ? 'owner' : 'reviewer');
   }
 
   function maybeStartCollab(): void {
@@ -708,8 +728,10 @@
       // Caret label is the user's chosen/resolved display name (falls back to
       // the kind only if somehow empty), so peers see a real name not "Reviewer".
       selfLabel: userProfile.effectiveName || (isOwner ? 'Owner' : 'Reviewer'),
-      // Caret colors mirror the presence chips: owner warm, reviewer cool.
-      selfColor: isOwner ? '#b05b41' : '#4a7fa5',
+      // Caret color IS the personal identity color (attn-3gdd): the same
+      // resolution as the peer chip, so a person's caret and chip always
+      // match. The setSelfColor effect below keeps it live on repicks.
+      selfColor: selfIdentityColor(isOwner),
       // Owner only: seed an authority for a file a reviewer reaches before the
       // owner has opened it, from that file's base snapshot.
       getSeedDoc: isOwner ? collabSeedDocFor : undefined,
@@ -745,6 +767,14 @@
     collabController?.setSelfLabel(
       name || (collabRole === 'owner' ? 'Owner' : 'Reviewer'),
     );
+  });
+
+  // Same live-sync for the identity color (attn-3gdd): a repick in the
+  // NamePrompt re-broadcasts the caret so peers' caret tint flips without
+  // waiting for the next caret move. Reads `userProfile.color` +
+  // `ownerParticipantId` reactively.
+  $effect(() => {
+    collabController?.setSelfColor(selfIdentityColor(collabRole === 'owner'));
   });
 
   // Base (earliest) snapshot markdown for a file in the current room. This is
@@ -2725,26 +2755,6 @@
       onClose={closeTab}
     />
   {/if}
-  <div class="relative shrink-0">
-    <PathBreadcrumb
-      path={activePath}
-      {rootPath}
-      avoidWindowControls={!hasSidebar}
-      fixed={!hasSidebar}
-      topOffsetPx={34}
-      rightInsetPx={showReviewChrome && reviewStore.railMode !== 'expanded'
-        ? 328 - (hasSidebar ? RAIL_WIDTH_PX[reviewStore.railMode] : 0)
-        : 16}
-      onNavigate={(dir) => openPath(dir, inferFileTypeFromTree(dir))}
-      onShare={showBreadcrumbShare ? openShareDialog : undefined}
-      shareEnabled={showBreadcrumbShare}
-      saveState={mode === 'edit' && activeFileType === 'markdown' ? (editorDirty ? 'dirty' : 'saved') : null}
-      onOpenInBrowser={activeFileType === 'html' ? () => openExternal(activePath) : undefined}
-    />
-  </div>
-  {#if !hasSidebar}
-    <div class="h-[40px] shrink-0"></div>
-  {/if}
 
   <ScrollArea
     class="attn-content-viewport min-h-0 flex-1 {isReviewerViewingSnapshot ? 'shared-doc-viewport' : ''}"
@@ -2881,13 +2891,76 @@
   <ReviewMargin view={pmViewForReview} />
 {/snippet}
 
-{#snippet reviewChrome()}
-  <ReviewBar
-    shareOpen={shareDialogOpen}
-    isOwner={reviewBarIsOwner}
-    onShareClick={openShareDialog}
-    onLeaveRoom={handleLeaveRoom}
-  />
+{#snippet nativeHeader()}
+  <!-- One header grammar on native, hosted desktop, and mobile: identity +
+       document on the left; local state, sharing, people, and comments on the
+       right. The whole quiet surface remains a native window drag target. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <header
+    class={`attn-chrome relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background pr-3 ${hasSidebar ? 'pl-3' : 'pl-[6.5rem]'}`}
+    data-slot="native-header"
+    onmousedown={dragWindow}
+  >
+    <span
+      class="select-none font-serif text-sm font-bold leading-none text-foreground"
+      data-slot="native-brand"
+      aria-label="attn"
+    >attn</span>
+    <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
+    <span
+      class="min-w-0 truncate font-sans text-[13px] font-medium text-foreground"
+      data-slot="native-doc-name"
+      title={activePath}
+    >{headerDocumentName}</span>
+    <div class="ml-auto flex h-full min-w-0 shrink-0 items-center gap-1.5">
+      {#if !isReviewerViewingSnapshot && mode === 'edit' && activeFileType === 'markdown'}
+        <span
+          class="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-border/50 bg-background/55 px-2.5 font-sans text-xs text-muted-foreground"
+          data-slot="native-save-chip"
+          data-state={editorDirty ? 'dirty' : 'saved'}
+          role="status"
+        >
+          <span
+            class="size-1.5 rounded-full"
+            style={`background: ${editorDirty ? 'var(--amber-deep)' : 'var(--review-card-suggestion-accent)'};`}
+            aria-hidden="true"
+          ></span>
+          {editorDirty ? 'Unsaved changes' : 'Saved on this device'}
+        </span>
+      {/if}
+      {#if showBreadcrumbShare}
+        <button
+          type="button"
+          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          data-slot="native-header-share"
+          aria-label="Share for review"
+          title="Share for review"
+          onclick={openShareDialog}
+        >
+          <Share2Icon class="size-3.5" aria-hidden="true" />
+        </button>
+      {/if}
+      {#if !isReviewerViewingSnapshot && activeFileType === 'html'}
+        <button
+          type="button"
+          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          aria-label="Open in browser"
+          title="Open in browser"
+          onclick={() => openExternal(activePath)}
+        >
+          <ExternalLinkIcon class="size-3.5" aria-hidden="true" />
+        </button>
+      {/if}
+      <ReviewBar
+        shareOpen={shareDialogOpen}
+        isOwner={reviewBarIsOwner}
+        onShareClick={openShareDialog}
+        onLeaveRoom={handleLeaveRoom}
+        railToggle={true}
+        inline={true}
+      />
+    </div>
+  </header>
 {/snippet}
 
 {#snippet workspaceSidebar()}
@@ -2986,28 +3059,21 @@
   <WorkspaceEditorFrame
     sidebar={workspaceSidebar}
     banner={sharedDocBanner}
-    chrome={reviewChrome}
+    chrome={nativeHeader}
     content={mainContent}
     rail={workspaceRail}
     railMode={reviewStore.railMode}
     panelOpen={reviewStore.panelOpen}
     unreadCount={reviewStore.currentRoomUnread}
     onToggleRail={() => reviewStore.togglePanel()}
+    railToggleInHeader={true}
     onRailWheel={(deltaY) => {
       if (contentViewport) contentViewport.scrollTop += deltaY;
     }}
   />
 {:else}
   <main class="relative flex h-screen flex-col overflow-hidden">
-    {@render reviewChrome()}
-    <div
-      class="h-[34px] shrink-0"
-      style="-webkit-user-select: none"
-      role="button"
-      aria-label="Drag window"
-      tabindex="-1"
-      onmousedown={dragWindow}
-    ></div>
+    {@render nativeHeader()}
     {@render mainContent()}
   </main>
 {/if}
@@ -3050,6 +3116,7 @@
 <NamePrompt
   bind:open={namePromptOpen}
   suggestion={userProfile.suggestion}
+  initialColor={userProfile.color}
   mode={namePromptMode}
   onConfirm={handleNameConfirm}
   onSkip={handleNameSkip}

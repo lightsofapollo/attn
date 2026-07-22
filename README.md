@@ -217,6 +217,7 @@ Builds:
 
 ```bash
 scripts/build.sh            # debug build
+scripts/build.sh staging    # release-profile build against staging services
 scripts/build.sh release    # release build with devtools/screenshots
 scripts/build.sh prod       # production release build
 ```

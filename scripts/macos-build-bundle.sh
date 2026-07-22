@@ -8,9 +8,22 @@ cd "$PROJECT_DIR"
 MODE="${1:-prod}"
 TARGET="${2:-aarch64-apple-darwin}"
 
-# Release/prod bundles must collaborate out of the box. A runtime
-# ATTN_RELAY_URL still overrides this baked default.
-: "${ATTN_DEFAULT_RELAY_URL:=https://relay.attn.sh}"
+# Keep the relay and hosted review entry on the same environment. Runtime URL
+# overrides remain available for local/self-hosted deployments.
+case "$MODE" in
+  debug|staging)
+    : "${ATTN_DEFAULT_RELAY_URL:=https://relay-staging.attn.sh}"
+    : "${ATTN_DEFAULT_BROWSER_REVIEW_URL:=https://staging.attn.sh/review}"
+    ;;
+  release|prod|production)
+    : "${ATTN_DEFAULT_RELAY_URL:=https://relay.attn.sh}"
+    : "${ATTN_DEFAULT_BROWSER_REVIEW_URL:=https://attn.sh/review}"
+    ;;
+  *)
+    echo "Usage: $0 [debug|staging|release|prod] [target]" >&2
+    exit 1
+    ;;
+esac
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "ERROR: macos-build-bundle.sh must run on macOS" >&2
@@ -30,25 +43,31 @@ fi
 
 case "$MODE" in
   debug)
-    echo "==> Building debug app bundle for $TARGET"
-    cargo bundle --target "$TARGET"
+    echo "==> Building debug app bundle for $TARGET (staging services)"
+    echo "    ATTN_DEFAULT_RELAY_URL=$ATTN_DEFAULT_RELAY_URL"
+    echo "    ATTN_DEFAULT_BROWSER_REVIEW_URL=$ATTN_DEFAULT_BROWSER_REVIEW_URL"
+    ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" \
+      ATTN_DEFAULT_BROWSER_REVIEW_URL="$ATTN_DEFAULT_BROWSER_REVIEW_URL" \
+      cargo bundle --target "$TARGET"
     ARTIFACT_DIR="target/$TARGET/debug/bundle/osx"
     ;;
-  release)
-    echo "==> Building release app bundle for $TARGET"
+  staging|release)
+    echo "==> Building $MODE app bundle for $TARGET"
     echo "    ATTN_DEFAULT_RELAY_URL=$ATTN_DEFAULT_RELAY_URL"
-    ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" cargo bundle --release --target "$TARGET"
+    echo "    ATTN_DEFAULT_BROWSER_REVIEW_URL=$ATTN_DEFAULT_BROWSER_REVIEW_URL"
+    ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" \
+      ATTN_DEFAULT_BROWSER_REVIEW_URL="$ATTN_DEFAULT_BROWSER_REVIEW_URL" \
+      cargo bundle --release --target "$TARGET"
     ARTIFACT_DIR="target/$TARGET/release/bundle/osx"
     ;;
   prod|production)
     echo "==> Building production app bundle for $TARGET"
     echo "    ATTN_DEFAULT_RELAY_URL=$ATTN_DEFAULT_RELAY_URL"
-    ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" cargo bundle --release --target "$TARGET"
+    echo "    ATTN_DEFAULT_BROWSER_REVIEW_URL=$ATTN_DEFAULT_BROWSER_REVIEW_URL"
+    ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" \
+      ATTN_DEFAULT_BROWSER_REVIEW_URL="$ATTN_DEFAULT_BROWSER_REVIEW_URL" \
+      cargo bundle --release --target "$TARGET"
     ARTIFACT_DIR="target/$TARGET/release/bundle/osx"
-    ;;
-  *)
-    echo "Usage: $0 [debug|release|prod] [target]" >&2
-    exit 1
     ;;
 esac
 

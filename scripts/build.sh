@@ -7,11 +7,23 @@ cd "$PROJECT_DIR"
 
 MODE="${1:-debug}"
 
-# Production relay baked into release/prod builds via the client's
-# option_env!("ATTN_DEFAULT_RELAY_URL") fallback — so a shipped app talks to
-# relay.attn.sh out of the box (a runtime ATTN_RELAY_URL still overrides).
-# Override for a different target: ATTN_DEFAULT_RELAY_URL=... scripts/build.sh prod
-: "${ATTN_DEFAULT_RELAY_URL:=https://relay.attn.sh}"
+# Relay and hosted-review origins are one environment pair. Debug/staging
+# builds use staging end to end; release/prod builds use production. Runtime
+# ATTN_RELAY_URL / ATTN_BROWSER_REVIEW_URL still win for local/self-hosted use.
+case "$MODE" in
+    debug|staging)
+        : "${ATTN_DEFAULT_RELAY_URL:=https://relay-staging.attn.sh}"
+        : "${ATTN_DEFAULT_BROWSER_REVIEW_URL:=https://staging.attn.sh/review}"
+        ;;
+    release|prod|production)
+        : "${ATTN_DEFAULT_RELAY_URL:=https://relay.attn.sh}"
+        : "${ATTN_DEFAULT_BROWSER_REVIEW_URL:=https://attn.sh/review}"
+        ;;
+    *)
+        echo "Usage: $0 [debug|staging|release|prod]"
+        exit 1
+        ;;
+esac
 
 # Install npm deps if missing
 if [ ! -d "web/node_modules" ]; then
@@ -26,24 +38,39 @@ echo "==> Building Svelte frontend..."
 # Build Rust binary
 case "$MODE" in
     debug)
-        echo "==> Building Rust (debug)..."
-        cargo build
+        echo "==> Building Rust (debug, staging services)..."
+        echo "    ATTN_DEFAULT_RELAY_URL=$ATTN_DEFAULT_RELAY_URL"
+        echo "    ATTN_DEFAULT_BROWSER_REVIEW_URL=$ATTN_DEFAULT_BROWSER_REVIEW_URL"
+        ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" \
+            ATTN_DEFAULT_BROWSER_REVIEW_URL="$ATTN_DEFAULT_BROWSER_REVIEW_URL" \
+            cargo build
         echo "==> Built: target/debug/attn"
+        ;;
+    staging)
+        echo "==> Building Rust (release profile, staging services)..."
+        echo "    ATTN_DEFAULT_RELAY_URL=$ATTN_DEFAULT_RELAY_URL"
+        echo "    ATTN_DEFAULT_BROWSER_REVIEW_URL=$ATTN_DEFAULT_BROWSER_REVIEW_URL"
+        ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" \
+            ATTN_DEFAULT_BROWSER_REVIEW_URL="$ATTN_DEFAULT_BROWSER_REVIEW_URL" \
+            cargo build --release
+        echo "==> Built: target/release/attn"
         ;;
     release)
         echo "==> Building Rust (release, devtools+screenshots enabled)..."
         echo "    ATTN_DEFAULT_RELAY_URL=$ATTN_DEFAULT_RELAY_URL"
-        ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" cargo build --release
+        echo "    ATTN_DEFAULT_BROWSER_REVIEW_URL=$ATTN_DEFAULT_BROWSER_REVIEW_URL"
+        ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" \
+            ATTN_DEFAULT_BROWSER_REVIEW_URL="$ATTN_DEFAULT_BROWSER_REVIEW_URL" \
+            cargo build --release
         echo "==> Built: target/release/attn"
         ;;
     prod|production)
         echo "==> Building Rust (production release)..."
         echo "    ATTN_DEFAULT_RELAY_URL=$ATTN_DEFAULT_RELAY_URL"
-        ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" cargo build --release
+        echo "    ATTN_DEFAULT_BROWSER_REVIEW_URL=$ATTN_DEFAULT_BROWSER_REVIEW_URL"
+        ATTN_DEFAULT_RELAY_URL="$ATTN_DEFAULT_RELAY_URL" \
+            ATTN_DEFAULT_BROWSER_REVIEW_URL="$ATTN_DEFAULT_BROWSER_REVIEW_URL" \
+            cargo build --release
         echo "==> Built: target/release/attn"
-        ;;
-    *)
-        echo "Usage: $0 [debug|release|prod]"
-        exit 1
         ;;
 esac

@@ -315,6 +315,27 @@ fn run() -> Result<()> {
     run_daemon(cli, requested_path, resident_mode)
 }
 
+const STAGING_RELAY_URL: &str = "https://relay-staging.attn.sh";
+const PRODUCTION_RELAY_URL: &str = "https://relay.attn.sh";
+
+fn native_profile_relay_url() -> &'static str {
+    if cfg!(debug_assertions) {
+        STAGING_RELAY_URL
+    } else {
+        PRODUCTION_RELAY_URL
+    }
+}
+
+fn resolve_native_relay_url(runtime: Option<&str>, baked: Option<&str>) -> String {
+    if let Some(value) = runtime.map(str::trim).filter(|value| !value.is_empty()) {
+        return value.to_string();
+    }
+    if let Some(value) = baked.map(str::trim).filter(|value| !value.is_empty()) {
+        return value.to_string();
+    }
+    native_profile_relay_url().to_string()
+}
+
 fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
     // Install the tracing subscriber as the first thing the daemon does, after
     // the fork has redirected stderr into attn.log. Every `info!`/`warn!`/… from
@@ -351,13 +372,18 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
     // set yet (so the UI knows to prompt on first share/join). Load-only — we do
     // NOT mint a crypto identity at startup for users who never collaborate.
     let review_default_name = crate::review::bootstrap::resolve_default_display_name();
-    let review_display_name = crate::review::bootstrap::load_identity()
-        .ok()
-        .flatten()
-        .and_then(|id| id.display_name)
+    let review_identity = crate::review::bootstrap::load_identity().ok().flatten();
+    let review_display_name = review_identity
+        .as_ref()
+        .and_then(|id| id.display_name.as_deref())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let review_display_name_set = review_display_name.is_some();
+    // Picked identity color + stable participant id (attn-3gdd). The id lets
+    // the UI resolve its OWN hash color for carets before any room exists;
+    // null until a collab identity has been minted (we stay load-only here).
+    let review_color = review_identity.as_ref().and_then(|id| id.effective_color());
+    let review_participant_id = review_identity.as_ref().map(|id| id.participant_id.clone());
 
     // Per-session IPC capability token. Injected only into the main app frame's
     // payload below (never into an embedded HtmlViewer iframe) and required by
@@ -392,6 +418,8 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
             "displayName": review_display_name,
             "defaultDisplayName": review_default_name,
             "displayNameSet": review_display_name_set,
+            "color": review_color,
+            "participantId": review_participant_id,
         },
         "ipcToken": &ipc_token,
         // Debug builds only: lets the frontend expose the session IPC token
@@ -491,8 +519,7 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
         let update_tx: crate::review::manager::UpdateSink = Arc::new(move |update| {
             let _ = proxy.send_event(UserEvent::Review(update));
         });
-        let working_copy =
-            Arc::new(crate::review::working_copy::WorkingCopyService::new());
+        let working_copy = Arc::new(crate::review::working_copy::WorkingCopyService::new());
         let notification_sink = platform::review_notification_sink(event_loop.create_proxy());
         let base = ReviewManager::new(Arc::clone(store), working_copy, update_tx)
             .with_notification_sink(Arc::clone(&notification_sink));
@@ -505,19 +532,16 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
         // self-hosting). Otherwise fall back to ATTN_DEFAULT_RELAY_URL baked in
         // at build time — release builds set it to the production relay so a
         // downloaded app collaborates out of the box without any env var.
-        // Neither set (e.g. a bare `cargo build`) keeps the stub so local dev
-        // is unchanged.
-        let relay_url = std::env::var("ATTN_RELAY_URL")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| option_env!("ATTN_DEFAULT_RELAY_URL").map(str::to_string))
-            .unwrap_or_default();
-        if relay_url.is_empty() {
-            tracing::warn!(
-                "no relay configured (set ATTN_RELAY_URL, or bake ATTN_DEFAULT_RELAY_URL at build time) — Share/Join will use the scaffold stub"
-            );
-            return Arc::new(base);
-        }
+        // A bare debug build is a staging client; a bare release build is a
+        // production client. This keeps the native app functional even when
+        // it was built outside the wrapper scripts, while the runtime env var
+        // remains the explicit self-hosting/test escape hatch.
+        let runtime_relay_url = std::env::var("ATTN_RELAY_URL").ok();
+        let relay_url = resolve_native_relay_url(
+            runtime_relay_url.as_deref(),
+            option_env!("ATTN_DEFAULT_RELAY_URL"),
+        );
+        tracing::info!("native review relay selected (relay={})", relay_url);
         let verifying_keys: crate::review::transport::inbound::VerifyingKeyCache =
             Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         match base.with_bootstrap(relay_url.clone(), None, verifying_keys) {
@@ -529,18 +553,16 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                 tracing::warn!(
                     "failed to attach review bootstrap (relay={}): {} — \
                      falling back to stub",
-                    relay_url, err
+                    relay_url,
+                    err
                 );
                 // Rebuild a fresh manager because `with_bootstrap` consumed
                 // the previous one on error.
                 let proxy = event_loop.create_proxy();
-                let update_tx: crate::review::manager::UpdateSink =
-                    Arc::new(move |update| {
-                        let _ = proxy.send_event(UserEvent::Review(update));
-                    });
-                let working_copy = Arc::new(
-                    crate::review::working_copy::WorkingCopyService::new(),
-                );
+                let update_tx: crate::review::manager::UpdateSink = Arc::new(move |update| {
+                    let _ = proxy.send_event(UserEvent::Review(update));
+                });
+                let working_copy = Arc::new(crate::review::working_copy::WorkingCopyService::new());
                 Arc::new(
                     ReviewManager::new(Arc::clone(store), working_copy, update_tx)
                         .with_notification_sink(notification_sink),
@@ -2055,6 +2077,25 @@ fn build_page_html(init_payload_json: &str, theme: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_relay_resolution_prefers_runtime_then_baked_then_profile() {
+        assert_eq!(
+            resolve_native_relay_url(
+                Some("https://relay.example.test"),
+                Some("https://baked.example.test"),
+            ),
+            "https://relay.example.test"
+        );
+        assert_eq!(
+            resolve_native_relay_url(Some("  "), Some("https://baked.example.test")),
+            "https://baked.example.test"
+        );
+        assert_eq!(
+            resolve_native_relay_url(None, None),
+            native_profile_relay_url()
+        );
+    }
 
     #[test]
     fn daemon_resident_args_accept_global_no_fork_after_subcommand() {

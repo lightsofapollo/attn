@@ -18,6 +18,8 @@
     unreadCount?: number;
     onToggleRail?: () => void;
     onRailWheel?: (deltaY: number) => void;
+    /** The shared top header already owns the comments toggle. */
+    railToggleInHeader?: boolean;
     class?: string;
   }
 
@@ -32,6 +34,7 @@
     unreadCount = 0,
     onToggleRail,
     onRailWheel,
+    railToggleInHeader = false,
     class: className = '',
   }: Props = $props();
 
@@ -141,9 +144,9 @@
 <SidebarProvider class={`h-svh overflow-hidden ${className}`}>
   {@render sidebar()}
   <SidebarInset class="overflow-hidden">
+    {@render chrome?.()}
     {@render banner?.()}
     <div class="relative flex min-h-0 flex-1 flex-row overflow-hidden">
-      {@render chrome?.()}
       <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
         {@render content()}
       </div>
@@ -152,7 +155,7 @@
            edges. The rail still never scrolls; wheel forwards to the doc. -->
       <aside
         bind:this={railEl}
-        class="right-rail relative mt-12 flex shrink-0 flex-col overflow-hidden bg-background transition-transform duration-200"
+        class="right-rail relative flex shrink-0 flex-col overflow-hidden bg-background transition-transform duration-200"
         style={`width: ${RAIL_WIDTH_PX[railMode]}px; transition-timing-function: var(--ease);`}
         data-state={panelOpen ? 'open' : 'closed'}
         data-mode={railMode}
@@ -162,32 +165,36 @@
         onwheel={(event) => onRailWheel?.(event.deltaY)}
       >
         {#if railMode !== 'hidden'}
-          <div
-            class={`flex h-10 shrink-0 items-center ${panelOpen ? 'justify-end pr-2' : 'justify-center'}`}
-            data-slot="rail-header"
-          >
-            <button
-              type="button"
-              class="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-              data-slot="rail-toggle"
-              data-state={panelOpen ? 'expanded' : 'collapsed'}
-              aria-label={panelOpen ? 'Collapse comments rail' : 'Expand comments rail'}
-              title={`${panelOpen ? 'Collapse' : 'Expand'} comments (⌘J)`}
-              aria-expanded={panelOpen}
-              onclick={() => onToggleRail?.()}
+          {#if railToggleInHeader}
+            <div class="h-2 shrink-0" aria-hidden="true"></div>
+          {:else}
+            <div
+              class={`flex h-10 shrink-0 items-center ${panelOpen ? 'justify-end pr-2' : 'justify-center'}`}
+              data-slot="rail-header"
             >
-              {#if panelOpen}
-                <PanelRightClose class="size-4" aria-hidden="true" />
-              {:else}
-                <PanelRightOpen class="size-4" aria-hidden="true" />
-              {/if}
-              <UnreadBadge
-                count={unreadCount}
-                label="unread review updates"
-                class="absolute -right-1.5 -top-1.5"
-              />
-            </button>
-          </div>
+              <button
+                type="button"
+                class="relative inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                data-slot="rail-toggle"
+                data-state={panelOpen ? 'expanded' : 'collapsed'}
+                aria-label={panelOpen ? 'Collapse comments rail' : 'Expand comments rail'}
+                title={`${panelOpen ? 'Collapse' : 'Expand'} comments (⌘J)`}
+                aria-expanded={panelOpen}
+                onclick={() => onToggleRail?.()}
+              >
+                {#if panelOpen}
+                  <PanelRightClose class="size-4" aria-hidden="true" />
+                {:else}
+                  <PanelRightOpen class="size-4" aria-hidden="true" />
+                {/if}
+                <UnreadBadge
+                  count={unreadCount}
+                  label="unread review updates"
+                  class="absolute -right-1.5 -top-1.5"
+                />
+              </button>
+            </div>
+          {/if}
           <div class="relative mb-2 min-h-0 flex-1 overflow-hidden">
             {@render rail()}
           </div>

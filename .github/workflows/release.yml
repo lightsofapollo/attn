@@ -80,6 +80,7 @@ jobs:
       - name: Build app bundle
         env:
           ATTN_DEFAULT_RELAY_URL: https://relay.attn.sh
+          ATTN_DEFAULT_BROWSER_REVIEW_URL: https://attn.sh/review
         run: |
           scripts/macos-build-bundle.sh prod aarch64-apple-darwin
 
@@ -231,6 +232,7 @@ jobs:
       - name: Build release binary
         env:
           ATTN_DEFAULT_RELAY_URL: https://relay.attn.sh
+          ATTN_DEFAULT_BROWSER_REVIEW_URL: https://attn.sh/review
         run: cargo build --release --target x86_64-unknown-linux-gnu
 
       - name: Prepare binary assets

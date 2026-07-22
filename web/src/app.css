@@ -940,6 +940,18 @@
   border-radius: 2px;
 }
 
+/* Two peers on the SAME text (attn-5xgz): the plugin emits one decoration
+   per shared segment with both tints — a diagonal weave, so both identities
+   stay visible instead of stacking into mud or one color silently winning.
+   Stripes stay translucent (same 22%-ish mix) so the text remains readable. */
+.attn-remote-selection-shared {
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--remote-selection-color, #8a63b8) 24%, transparent) 0 7px,
+    color-mix(in srgb, var(--remote-selection-color-2, #8a63b8) 24%, transparent) 7px 14px
+  );
+}
+
 .attn-remote-caret {
   position: relative;
   display: inline-block;
@@ -955,7 +967,11 @@
 
 .attn-remote-caret-label {
   position: absolute;
-  top: -1.15em;
+  /* Stack slot 0 is the classic spot; carets sharing a head position climb
+     one label-height per slot (attn-5xgz) so names never occlude each other.
+     The em here is the label's own 10px type: 1.6em = 16px per slot clears
+     the 14px chip with a 2px gutter. */
+  top: calc(-1.15em - var(--attn-caret-stack, 0) * 1.6em);
   left: -2px;
   padding: 1px 4px;
   border-radius: 3px;

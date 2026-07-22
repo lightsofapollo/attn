@@ -11,6 +11,7 @@
 //   * planning/collab/ui/presence-identity.md (10.5) — chip taxonomy,
 //     monogram rule, agent glyph, "you" affordance, identity card content.
 
+import { resolveParticipantColor } from './participant-color';
 import type { ParticipantId, ReviewStatusPeer } from './types';
 
 /**
@@ -69,10 +70,13 @@ export interface ChipVisual {
   shape: ChipShape;
   content: ChipContent;
   /**
-   * CSS var name (without the leading `--`) for the chip background.
-   * Reuses `--peer-avatar-bg-{owner,reviewer,agent}` per §7.
+   * Concrete CSS color for the chip background (attn-3gdd): the
+   * participant's personal identity color resolved through
+   * `participant-color.ts` — declared pick first, deterministic hash
+   * fallback; agents always violet. Replaces the old per-ROLE
+   * `--peer-avatar-bg-*` var so two reviewers are never the same blue.
    */
-  bgVar: 'peer-avatar-bg-owner' | 'peer-avatar-bg-reviewer' | 'peer-avatar-bg-agent';
+  bg: string;
 }
 
 /**
@@ -100,58 +104,54 @@ export function chipShapeFor(kind: PeerKind): ChipShape {
 }
 
 /**
- * Pick the chip background CSS var for a peer kind. Reuses the three
- * existing tokens; do not invent new ones (presence-identity.md §2,
- * "No new tokens.").
- */
-export function chipBgVarFor(kind: PeerKind): ChipVisual['bgVar'] {
-  switch (kind) {
-    case 'owner':
-      return 'peer-avatar-bg-owner';
-    case 'reviewer':
-      return 'peer-avatar-bg-reviewer';
-    case 'agent':
-      return 'peer-avatar-bg-agent';
-  }
-}
-
-/**
- * Compute the monogram for a human peer. The rule (presence-identity.md
- * §2):
+ * Compute the monogram for a human peer (attn-3gdd — two letters so
+ * same-first-letter names stop colliding):
  *
- *   * Take the first grapheme cluster of `displayName`.
- *   * Uppercase it.
- *   * Empty `displayName` → `?` fallback.
+ *   * Multi-word name → first grapheme of the first word + first grapheme
+ *     of the last word ("James Lal" → "JL").
+ *   * Single word → its first two graphemes ("James" → "JA").
+ *   * Single grapheme → just that one; empty `displayName` → `?` fallback.
  *
- * We approximate "grapheme cluster" with `Array.from(name)[0]` which
- * walks code points (close enough for the latin / cyrillic / asian
- * subset that the daemon's display-name generator emits; the harness
- * doesn't have `Intl.Segmenter` everywhere).
+ * We approximate "grapheme cluster" with `Array.from(name)` which walks
+ * code points (close enough for the latin / cyrillic / asian subset that
+ * the daemon's display-name generator emits; the harness doesn't have
+ * `Intl.Segmenter` everywhere).
  */
 export function monogramFor(displayName: string): string {
-  const trimmed = displayName.trim();
-  if (trimmed.length === 0) return '?';
-  const first = Array.from(trimmed)[0] ?? '?';
-  return first.toLocaleUpperCase();
+  const words = displayName.trim().split(/\s+/).filter((w) => w.length > 0);
+  if (words.length === 0) return '?';
+  const graphemes =
+    words.length === 1
+      ? Array.from(words[0]).slice(0, 2)
+      : [Array.from(words[0])[0], Array.from(words[words.length - 1])[0]];
+  return graphemes.filter((g): g is string => g !== undefined).join('').toLocaleUpperCase() || '?';
 }
 
 /**
  * Full visual descriptor for a peer chip. Agents always render the
  * `⊳` glyph (never a monogram) per §2's "Agents never carry a monogram"
  * rule.
+ *
+ * `declaredColor` is the participant's announced identity color when the
+ * caller has one (the review store's `colorFor` covers ParticipantJoined +
+ * the local profile); omitted → deterministic hash fallback. Either way the
+ * value lands as `ChipVisual.bg` after validation.
  */
-export function chipVisualFor(peer: ReviewStatusPeer): ChipVisual {
+export function chipVisualFor(
+  peer: ReviewStatusPeer,
+  declaredColor?: string | null,
+): ChipVisual {
   if (peer.kind === 'agent') {
     return {
       shape: 'hex',
       content: { kind: 'glyph', glyph: AGENT_GLYPH },
-      bgVar: 'peer-avatar-bg-agent',
+      bg: resolveParticipantColor(peer.participantId, null, 'agent'),
     };
   }
   return {
     shape: 'round',
     content: { kind: 'monogram', letter: monogramFor(peer.displayName) },
-    bgVar: chipBgVarFor(peer.kind),
+    bg: resolveParticipantColor(peer.participantId, declaredColor, peer.kind),
   };
 }
 

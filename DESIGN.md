@@ -18,6 +18,15 @@ colors:
   peer-owner: "oklch(0.58 0.14 32)"
   peer-reviewer: "oklch(0.56 0.11 235)"
   peer-agent: "oklch(0.57 0.13 295)"
+  participant-clay: "oklch(0.58 0.14 32)"
+  participant-amber: "oklch(0.60 0.12 70)"
+  participant-olive: "oklch(0.58 0.11 110)"
+  participant-green: "oklch(0.56 0.12 150)"
+  participant-teal: "oklch(0.56 0.11 185)"
+  participant-steel: "oklch(0.56 0.11 218)"
+  participant-blue: "oklch(0.56 0.11 250)"
+  participant-plum: "oklch(0.57 0.13 325)"
+  participant-berry: "oklch(0.58 0.14 358)"
 typography:
   display:
     fontFamily: "Source Serif 4 Variable, Source Serif 4, Georgia, serif"
@@ -129,10 +138,15 @@ A warm parchment field carrying near-black ink and a single terracotta accent; c
 - **Margin Amber** (`oklch(0.62 0.13 82)`): comment. The comment-highlight tint behind anchored text and the comment accent on review cards. Reads as *a note in the margin*, distinct from a proposed edit.
 
 ### Tertiary — Peer identity
-Three deliberately separated hues so the three roles are never confused, each tuned so white monogram text clears WCAG AA 4.5:1:
-- **Owner Clay** (`oklch(0.58 0.14 32)`): the document owner — shares the primary's warm family.
-- **Reviewer Steel** (`oklch(0.56 0.11 235)`): an invited human reviewer.
-- **Agent Violet** (`oklch(0.57 0.13 295)`): an agent participant — visibly non-human, never second-class.
+Human participants each carry a **personal color** so two reviewers are never the same blue; agents keep a fixed violet. All hues share one envelope — L 0.56–0.60, C 0.11–0.14 — so white monogram text clears WCAG AA 4.5:1 on every swatch in both themes.
+
+**The participant palette** (nine hues, ~35° apart, deliberately skipping the 280–310 violet band reserved for agents). A participant's color is their picked swatch if they chose one, else a deterministic hash of their participant id into this ramp — identical on every client, and identical across chips, carets, selections, and comment-card accents:
+- **Clay** `oklch(0.58 0.14 32)` (also the legacy owner hue) · **Amber** `oklch(0.60 0.12 70)` · **Olive** `oklch(0.58 0.11 110)` · **Green** `oklch(0.56 0.12 150)` · **Teal** `oklch(0.56 0.11 185)` · **Steel** `oklch(0.56 0.11 218)` · **Blue** `oklch(0.56 0.11 250)` · **Plum** `oklch(0.57 0.13 325)` · **Berry** `oklch(0.58 0.14 358)`
+
+Role is no longer a color channel for humans — shape carries it (round = human, hex = agent), and the self chip keeps its ring. Legacy role tokens remain for non-roster surfaces:
+- **Owner Clay** (`oklch(0.58 0.14 32)`): legacy owner token (landing demos, sidebar badges).
+- **Reviewer Steel** (`oklch(0.56 0.11 235)`): legacy reviewer token (generic "someone is here" badges, not personal identity).
+- **Agent Violet** (`oklch(0.57 0.13 295)`): an agent participant — visibly non-human, never second-class. Never used for humans.
 
 ### Neutral
 - **Paper** (`oklch(0.905 0.010 78)`): the body ground. Faintly warm, chroma held at 0.010 so it reads as paper, not cream.

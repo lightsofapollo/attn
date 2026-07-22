@@ -149,12 +149,13 @@
     return `snapshot ${peer.onSnapshotId.slice(0, 8)}`;
   }
 
-  // Inline-style binding for the chip's background. The CSS var is stored
-  // on the visual descriptor; the template injects it as
-  // `background-color: var(--<bgVar>)`. We keep the lookup pure (read from
-  // the descriptor) so the test harness can assert the same string.
+  // Inline-style binding for the chip's background. The resolved personal
+  // color (attn-3gdd) is stored on the visual descriptor; `visual.bg` only
+  // ever holds palette values or a sanitized declared color, so it is safe
+  // as an inline style value. Kept as a pure lookup so the test harness can
+  // assert the same string.
   function chipStyle(visual: ChipVisual): string {
-    return `background-color: var(--${visual.bgVar});`;
+    return `background-color: ${visual.bg};`;
   }
 </script>
 
@@ -180,7 +181,7 @@
   >
     <UnreadBadge count={unreadCount} label="unread updates in this room" />
     {#each split.inline as peer (peer.participantId + ':' + peer.deviceId)}
-      {@const visual = chipVisualFor(peer)}
+      {@const visual = chipVisualFor(peer, reviewStore.colorFor(peer.participantId))}
       {@const youHere = isYou(peer, localParticipantId)}
       <div
         class="peer-strip-chip-wrapper relative inline-flex flex-col items-center"
@@ -289,7 +290,7 @@
         </header>
         <ul class="flex flex-col gap-1" data-slot="peer-strip-overflow-list">
           {#each peers as peer (peer.participantId + ':' + peer.deviceId)}
-            {@const visual = chipVisualFor(peer)}
+            {@const visual = chipVisualFor(peer, reviewStore.colorFor(peer.participantId))}
             {@const youHere = isYou(peer, localParticipantId)}
             <li class="flex items-center gap-2" data-slot="peer-strip-overflow-row">
               <span
@@ -325,7 +326,7 @@
 
     {#if openIdentityFor !== null}
       {@const peer = openIdentityFor}
-      {@const visual = chipVisualFor(peer)}
+      {@const visual = chipVisualFor(peer, reviewStore.colorFor(peer.participantId))}
       {@const fp = fingerprintCache[peer.participantId] ?? '—— —— ——'}
       <!-- Click-shield for the identity card. -->
       <button

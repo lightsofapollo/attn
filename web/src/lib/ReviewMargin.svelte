@@ -865,6 +865,13 @@
     return reviewStore.participantKindFor(t.rootEvent.meta.authorId);
   }
 
+  /** The author's personal identity color (attn-3gdd) — declared pick or
+   *  deterministic hash, agents always violet. One color across the gutter
+   *  chip, card accent, peer chip, and caret. */
+  function authorColorFor(t: Thread): string {
+    return reviewStore.colorFor(t.rootEvent.meta.authorId);
+  }
+
   /** Avatar glyph for the collapsed-gutter chip: monogram for humans, the
    *  agent glyph for agents (peer-strip rule — agents never get a letter). */
   function avatarGlyphFor(t: Thread): string {
@@ -980,7 +987,7 @@
           data-testid="review-margin-avatar-chip"
           data-thread-id={t.id}
           data-author-kind={authorKindFor(t)}
-          style="top: {p.top}px; background-color: var(--peer-avatar-bg-{authorKindFor(t)});"
+          style="top: {p.top}px; background-color: {authorColorFor(t)};"
           aria-label={`Unresolved ${kindFor(t)} by ${authorNameFor(t)} — open comments`}
           title={`${authorNameFor(t)} — ${kindFor(t)}`}
           onclick={() => { void expandToThread(t); }}
@@ -994,7 +1001,7 @@
           data-testid="review-margin-resolved-chip"
           data-variant="icon"
           data-thread-id={t.id}
-          style="top: {p.top}px; --chip-author-color: var(--peer-avatar-bg-{authorKindFor(t)});"
+          style="top: {p.top}px; --chip-author-color: {authorColorFor(t)};"
           aria-label={`Resolved ${kindFor(t)} by ${authorNameFor(t)} — view details`}
           aria-expanded="false"
           onclick={() => { void expandResolved(t); }}
@@ -1027,6 +1034,7 @@
               hovered={hoveredEventId === t.rootEvent.meta.eventId}
               offset={false}
               authorName={authorNameFor(t)}
+              authorId={t.rootEvent.meta.authorId}
               authorKind={authorKindFor(t)}
               quotePreview={quotePreviewFor(t)}
               onActivate={() => activateThread(t)}
@@ -1064,6 +1072,7 @@
               hovered={hoveredEventId === t.rootEvent.meta.eventId}
               offset={false}
               authorName={authorNameFor(t)}
+              authorId={t.rootEvent.meta.authorId}
               authorKind={authorKindFor(t)}
               quotePreview={quotePreviewFor(t)}
               onActivate={() => activateThread(t)}
@@ -1084,6 +1093,7 @@
               hovered={hoveredEventId === t.rootEvent.meta.eventId}
               offset={false}
               authorName={authorNameFor(t)}
+              authorId={t.rootEvent.meta.authorId}
               authorKind={authorKindFor(t)}
               quotePreview={quotePreviewFor(t)}
               onActivate={() => { void collapseResolved(t); }}
@@ -1095,14 +1105,14 @@
               data-testid="review-margin-resolved-chip"
               data-variant="label"
               data-thread-id={t.id}
-              style="border-color: var(--peer-avatar-bg-{authorKindFor(t)});"
+              style="border-color: {authorColorFor(t)};"
               aria-label={`Resolved ${kindFor(t)} by ${authorNameFor(t)} — view details`}
               aria-expanded="false"
               onclick={() => { void expandResolved(t); }}
             >
               <span
                 class="rmrc-avatar"
-                style="background-color: var(--peer-avatar-bg-{authorKindFor(t)});"
+                style="background-color: {authorColorFor(t)};"
                 aria-hidden="true"
               >{avatarGlyphFor(t)}</span>
               ✓ {authorNameFor(t)} · resolved
@@ -1161,6 +1171,7 @@
           hovered={hoveredEventId === t.rootEvent.meta.eventId}
           offset={p.offset}
           authorName={authorNameFor(t)}
+              authorId={t.rootEvent.meta.authorId}
           authorKind={authorKindFor(t)}
           quotePreview={quotePreviewFor(t)}
           onActivate={() => activateThread(t)}
@@ -1187,6 +1198,7 @@
           hovered={hoveredEventId === t.rootEvent.meta.eventId}
           offset={p.offset}
           authorName={authorNameFor(t)}
+              authorId={t.rootEvent.meta.authorId}
           authorKind={authorKindFor(t)}
           quotePreview={quotePreviewFor(t)}
           onActivate={() => { void collapseResolved(t); }}
@@ -1203,14 +1215,14 @@
         data-testid="review-margin-resolved-chip"
         data-variant="label"
         data-thread-id={t.id}
-        style="top: {p.top}px; border-color: var(--peer-avatar-bg-{authorKindFor(t)});"
+        style="top: {p.top}px; border-color: {authorColorFor(t)};"
         aria-label={`Resolved ${kindFor(t)} by ${authorNameFor(t)} — view details`}
         aria-expanded="false"
         onclick={() => { void expandResolved(t); }}
       >
         <span
           class="rmrc-avatar"
-          style="background-color: var(--peer-avatar-bg-{authorKindFor(t)});"
+          style="background-color: {authorColorFor(t)};"
           aria-hidden="true"
         >{avatarGlyphFor(t)}</span>
         ✓ {authorNameFor(t)} · resolved

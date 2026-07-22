@@ -50,6 +50,9 @@
     offset: boolean;
     /** Author display name (fallback to participantId). */
     authorName: string;
+    /** Author participant id — resolves the personal identity color
+     *  (attn-3gdd) so the card accent matches the author's chip + caret. */
+    authorId: string;
     /** Anchor-quote preview text (single line, ellipsis). */
     quotePreview: string;
     /** Click target: editor focuses this card's anchor. */
@@ -102,6 +105,7 @@
     hovered,
     offset,
     authorName,
+    authorId,
     quotePreview,
     onActivate,
     onAccept,
@@ -335,12 +339,13 @@
     onActivate();
   }
 
-  // Author identity visuals (attn-42y): the card's accent strip and the
-  // header avatar carry the initiating author's presence color. Stale /
-  // ambiguous keep their state-colored strip (set by the CSS state rules
-  // when no inline value is emitted) — those are alerts, not identity
+  // Author identity visuals (attn-42y, personal colors attn-3gdd): the
+  // card's accent strip and the header avatar carry the initiating author's
+  // personal identity color — same resolution as peer chips and carets.
+  // Stale / ambiguous keep their state-colored strip (set by the CSS state
+  // rules when no inline value is emitted) — those are alerts, not identity
   // surfaces.
-  const authorColor = $derived(`var(--peer-avatar-bg-${authorKind})`);
+  const authorColor = $derived(reviewStore.colorFor(authorId));
   const authorAccent = $derived(
     cardState === 'stale' || cardState === 'ambiguous' ? undefined : authorColor,
   );

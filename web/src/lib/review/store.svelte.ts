@@ -28,6 +28,10 @@ import {
   type PeerSplit,
   type StaleAnchorEntry,
 } from './selectors';
+import {
+  resolveParticipantColor,
+  sanitizeParticipantColor,
+} from '../participant-color';
 import { userProfile } from '../profile.svelte';
 import { computeRailMode, type RailMode } from './rail-mode';
 import { shouldActivateRoomStatus, shouldForgetRoomStatus } from './room-ui';
@@ -462,6 +466,48 @@ export class ReviewStore {
     }
     return names;
   });
+
+  /**
+   * participantId → self-declared identity color, harvested from
+   * `ParticipantJoined` events (room-scoped, latest-authored wins — same
+   * rules as `participantNames` above, and for the same reconnect-replay
+   * reason). Validated at harvest so a malicious declared color can never
+   * reach an inline style; invalid declarations fall through to the hash.
+   */
+  participantColors: Record<string, string> = $derived.by(() => {
+    const colors: Record<string, string> = {};
+    const coloredAt: Record<string, number> = {};
+    for (const ev of this.events) {
+      if (this.currentRoomId !== null && ev.meta.roomId !== this.currentRoomId) continue;
+      if (ev.body.type === 'participant_joined') {
+        const p = ev.body.participant;
+        const color = sanitizeParticipantColor(p.color);
+        if (color && (coloredAt[p.participantId] ?? -1) <= ev.meta.createdAt) {
+          colors[p.participantId] = color;
+          coloredAt[p.participantId] = ev.meta.createdAt;
+        }
+      }
+    }
+    return colors;
+  });
+
+  /**
+   * The one identity color every surface renders for a participant (chips,
+   * carets, comment-card accents — attn-3gdd): their declared color from
+   * `ParticipantJoined`, then — on the owner's own window — the local
+   * profile's picked color (mirrors the `displayNameFor` owner-local
+   * fallback), else the deterministic palette hash. Agents are always
+   * violet (`resolveParticipantColor` short-circuits on kind).
+   */
+  colorFor(participantId: string): string {
+    const kind = this.participantKindFor(participantId);
+    const declared =
+      this.participantColors[participantId] ??
+      (participantId === this.ownerParticipantId && this.activeRoom?.role === 'owner'
+        ? userProfile.color
+        : null);
+    return resolveParticipantColor(participantId, declared, kind);
+  }
 
   /**
    * participantId → kind, harvested from `ParticipantJoined` events

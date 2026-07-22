@@ -125,7 +125,9 @@ export class CollabController {
   /** Mutable: the NamePrompt can rename the user AFTER collab starts —
    *  see `setSelfLabel`. */
   private selfLabel: string;
-  private readonly selfColor: string;
+  /** Mutable: the NamePrompt can repick the identity color AFTER collab
+   *  starts — see `setSelfColor`. */
+  private selfColor: string;
   /** Last caret head broadcast, so a label change can re-announce the
    *  caret in place instead of waiting for the next caret move. */
   private lastCursorHead: number | null = null;
@@ -434,6 +436,20 @@ export class CollabController {
     const trimmed = label.trim();
     if (trimmed.length === 0 || trimmed === this.selfLabel) return;
     this.selfLabel = trimmed;
+    if (this.lastCursorHead !== null) {
+      this.broadcastCursor(this.lastCursorHead, this.lastCursorAnchor ?? undefined);
+    }
+  }
+
+  /**
+   * Same contract as `setSelfLabel`, for the identity color (attn-3gdd):
+   * the NamePrompt can repick the color mid-session, and peers' caret +
+   * selection tint should flip immediately, not on the next caret move.
+   */
+  setSelfColor(color: string): void {
+    const trimmed = color.trim();
+    if (trimmed.length === 0 || trimmed === this.selfColor) return;
+    this.selfColor = trimmed;
     if (this.lastCursorHead !== null) {
       this.broadcastCursor(this.lastCursorHead, this.lastCursorAnchor ?? undefined);
     }

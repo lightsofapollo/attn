@@ -32,6 +32,8 @@ import type {
   WorkspaceRecord,
 } from '../../lib/review/browser-workspace-schema';
 import type { PersistenceMode, WorkspaceSummary } from './types';
+import { readStoredColor } from '../../lib/browser-profile';
+import { resolveParticipantColor } from '../../lib/participant-color';
 // Runes module: loaded lazily so node-side tests can import this file
 // (top-level $state would throw outside Svelte compilation). The getter
 // falls back to undefined until the module resolves — announce paths then
@@ -48,6 +50,7 @@ import {
   BrowserOwnerWorkspaceRuntime,
   type BrowserOwnerWorkspaceRuntimeOptions,
 } from '../../lib/review/browser-owner-workspace-runtime';
+import { watchWorkspaceReviewLog } from '../../lib/review/browser-review-log';
 
 export type WorkspaceErrorKind = 'conflict' | 'quota' | 'unavailable' | 'storage';
 
@@ -171,12 +174,17 @@ export class BrowserWorkspaceService {
         // Broadcast to peers — remote carets render this label, so it must
         // name this participant from THEIR perspective, never "You".
         selfLabel: 'Owner',
-        selfColor: '#8a63b8',
+        // Personal identity color (attn-3gdd): picked color first. The
+        // participant id isn't known until credentials exist, so the hash
+        // fallback here is provisional — EditorShell re-syncs the live
+        // controller via setSelfColor once the room's owner id is known.
+        selfColor: resolveParticipantColor('', readStoredColor(), 'owner'),
       },
-      // The announce path reads the LIVE profile name (rename re-announce),
-      // so the getter must always be present; explicit options still win.
+      // The announce path reads the LIVE profile (rename/repick re-announce),
+      // so the getters must always be present; explicit options still win.
       sessionOptions: {
         getDisplayName: () => profileModule?.userProfile.effectiveName,
+        getColor: () => profileModule?.userProfile.color ?? readStoredColor(),
         ...(options.sessionOptions ?? {}),
       },
       ...(options.heartbeatIntervalMs === undefined
@@ -201,6 +209,19 @@ export class BrowserWorkspaceService {
     if (!runtime || runtime.getState().status === 'closed') return;
     if (runtime.getState().leaseRole !== 'owner') return;
     await runtime.close();
+  }
+
+  /**
+   * Hydrate this tab's review store from the workspace's durable inbound
+   * log and keep it fresh on the cross-tab review doorbell, so every tab
+   * shows the same comment threads regardless of which tab holds the
+   * writer lease (attn-dgya). No-ops (still returning a disposer) when
+   * the workspace has no active published share. Reads only — safe for
+   * passive tabs that never acquire the lease.
+   */
+  async watchReviewLog(workspaceId: string): Promise<() => void> {
+    const watcher = await watchWorkspaceReviewLog({ storage: this.storage, workspaceId });
+    return () => watcher.close();
   }
 
   // ————— capabilities —————

@@ -17,6 +17,7 @@ import {
   deriveShareEpochRoomSecret,
   verifyEventSignature,
 } from './browser-crypto';
+import { sanitizeParticipantColor } from '../participant-color';
 import { assembleBrowserEvent } from './browser-envelope';
 import {
   createOwnedRoomV3,
@@ -95,6 +96,9 @@ export interface BrowserWorkspaceShareRequest {
   mode?: BrowserWorkspaceShareMode;
   ttlMs?: BrowserWorkspaceShareTtlMs;
   ownerDisplayName?: string;
+  /** Owner's picked identity color (attn-3gdd), announced on the genesis
+   *  ParticipantJoined next to the display name. Omitted → hash fallback. */
+  ownerColor?: string | null;
 }
 
 export interface BrowserWorkspaceShareView {
@@ -342,7 +346,12 @@ export class BrowserWorkspaceSharingCoordinator {
             identity: credentials.identity,
             policy: credentials.policy,
             entries: sources,
-            prefixEnvelopes: ownerGenesisEnvelopes(credentials, request.ownerDisplayName, genesisAt),
+            prefixEnvelopes: ownerGenesisEnvelopes(
+              credentials,
+              request.ownerDisplayName,
+              request.ownerColor ?? null,
+              genesisAt,
+            ),
             scope: record.scopeKind,
             outbox,
             publication: {
@@ -815,7 +824,12 @@ export class BrowserWorkspaceSharingCoordinator {
   }
 }
 
-function ownerGenesisEnvelopes(credentials: BrowserOwnerCredentials, displayName: string | undefined, createdAt: number) {
+function ownerGenesisEnvelopes(
+  credentials: BrowserOwnerCredentials,
+  displayName: string | undefined,
+  color: string | null,
+  createdAt: number,
+) {
   const common = {
     eventKey: credentials.keys.eventKey,
     signingSecret: credentials.identity.signingSecret,
@@ -825,6 +839,7 @@ function ownerGenesisEnvelopes(credentials: BrowserOwnerCredentials, displayName
     deviceId: credentials.identity.deviceId,
     expiresAt: credentials.policy.expiresAt,
   } as const;
+  const ownerColor = sanitizeParticipantColor(color);
   const roomCreated = assembleBrowserEvent({ ...common, createdAt, body: {
     type: 'room_created', roomId: credentials.roomId, policy: credentials.policy,
     createdBy: credentials.identity.participantId,
@@ -836,6 +851,9 @@ function ownerGenesisEnvelopes(credentials: BrowserOwnerCredentials, displayName
       displayName: displayName?.trim() || 'Browser owner',
       kind: 'owner', publicSigningKey: base64UrlEncode(credentials.identity.signingPublic),
       capabilities: [...OWNER_CAPABILITIES],
+      // Validated at the seam (attn-3gdd): only palette-shaped values ride
+      // the genesis announce; junk degrades to the hash color everywhere.
+      ...(ownerColor !== null ? { color: ownerColor } : {}),
     },
     device: {
       deviceId: credentials.identity.deviceId,

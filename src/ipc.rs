@@ -144,6 +144,13 @@ pub enum IpcMessage {
     #[serde(rename = "review_set_display_name", rename_all = "camelCase")]
     ReviewSetDisplayName { name: String },
 
+    /// Persist the user's picked identity color (attn-3gdd). Same lifecycle
+    /// as the display name: written to the device identity, announced to
+    /// peers via `ParticipantJoined`. Empty clears back to the automatic
+    /// hash color.
+    #[serde(rename = "review_set_color", rename_all = "camelCase")]
+    ReviewSetColor { color: String },
+
     #[serde(rename = "review_collab_send", rename_all = "camelCase")]
     ReviewCollabSend {
         room_id: RoomId,
@@ -524,6 +531,18 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                         submit_review_command(state, ReviewCommand::ReannounceIdentity);
                     }
                     Err(e) => tracing::warn!("failed to set display name: {e}"),
+                }
+            }
+            IpcMessage::ReviewSetColor { color } => {
+                // Same write-then-reannounce shape as the display name above:
+                // the picked color must reach rooms that are already live, not
+                // just the next Share/Join.
+                match crate::review::bootstrap::set_color(&color) {
+                    Ok(_) => {
+                        tracing::info!("review identity color updated");
+                        submit_review_command(state, ReviewCommand::ReannounceIdentity);
+                    }
+                    Err(e) => tracing::warn!("failed to set identity color: {e}"),
                 }
             }
         },

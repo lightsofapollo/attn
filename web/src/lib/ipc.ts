@@ -210,6 +210,13 @@ export function reviewSetDisplayName(name: string): Promise<void> {
   return Promise.resolve();
 }
 
+/** Persist the picked identity color (attn-3gdd) onto the device identity.
+ * Empty string clears back to the automatic hash color. */
+export function reviewSetColor(color: string): Promise<void> {
+  send({ type: 'review_set_color', color });
+  return Promise.resolve();
+}
+
 export function reviewStop(roomId?: RoomId): Promise<void> {
   send({ type: 'review_stop', ...(roomId !== undefined ? { roomId } : {}) });
   return Promise.resolve();

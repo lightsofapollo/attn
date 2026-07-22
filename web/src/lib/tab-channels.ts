@@ -12,6 +12,15 @@ export const LEASE_CHANNEL_NAME = 'attn-workspace-lease';
 export const LOCAL_COLLAB_CHANNEL_PREFIX = 'attn:local-collab:v1:';
 
 /**
+ * Review inbound-log doorbell, suffixed with the roomId. The workspace
+ * lease holder's live session rings it after each durable review-event
+ * commit; sibling tabs of the same profile replay the shared IndexedDB
+ * log on ring (attn-dgya: a second/reopened tab showed doc content but no
+ * comment threads). Advisory only — storage stays the source of truth.
+ */
+export const REVIEW_INBOUND_CHANNEL_PREFIX = 'attn:review-inbound:v1:';
+
+/**
  * Construct a BroadcastChannel, treating an unavailable and a
  * policy-restricted API identically: the constructor itself can throw (e.g.
  * under third-party storage partitioning) even when the global exists.

@@ -41,6 +41,7 @@
   import ReviewFileSidebar from './lib/ReviewFileSidebar.svelte';
   import ReviewerStatusChip from './lib/ReviewerStatusChip.svelte';
   import { userProfile } from './lib/profile.svelte';
+  import { resolveParticipantColor } from './lib/participant-color';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
   import SelectionToolbar from './lib/SelectionToolbar.svelte';
@@ -177,6 +178,7 @@
       inviteError: initialInviteError,
       rememberedRoomId: initialRememberedRoomId,
       getDisplayName: () => userProfile.displayName ?? undefined,
+      getColor: () => userProfile.color,
       onState: handleSessionState,
       onCollab: handleSessionCollab,
     });
@@ -184,6 +186,17 @@
 
   const session = buildSession();
   const collabCapable = 'sendCollab' in session && typeof session.sendCollab === 'function';
+
+  // The local reviewer's identity color (attn-3gdd): picked color first, else
+  // the hash of the session's announced participant id. '' before the session
+  // mints an identity — the setSelfColor effect below corrects it live.
+  function reviewerSelfColor(): string {
+    const pid =
+      'getParticipantId' in session && typeof session.getParticipantId === 'function'
+        ? (session.getParticipantId() ?? '')
+        : '';
+    return resolveParticipantColor(pid, userProfile.color, 'reviewer');
+  }
   const pushCapable = 'getPushConsentState' in session && 'setPushConsentObserver' in session &&
     'enablePushFromUserGesture' in session && 'disablePushFromUserGesture' in session;
   let pushConsent = $state<BrowserPushConsentState>({ status: pushCapable ? 'checking' : 'unsupported', message: null, enabled: false });
@@ -724,7 +737,10 @@
       },
       selfClientId: clientId,
       selfLabel: userProfile.displayName ?? 'Reviewer',
-      selfColor: '#4a7fa5',
+      // Caret color IS the personal identity color (attn-3gdd): picked color
+      // first, else the hash of this session's announced participant id — so
+      // the caret matches the chip every peer renders for us.
+      selfColor: reviewerSelfColor(),
       isAuthorityDevice: (deviceId) => authenticatedOwnerDeviceIds.has(deviceId),
       getLocation: () => ({
         fileId: seed.fileId,
@@ -736,6 +752,17 @@
         if (view) view.dispatch(view.state.tr.setMeta(remoteCursorsKey, cursors));
       },
     });
+  });
+
+  // Live label + color sync (attn-3gdd): the NamePrompt can confirm a name
+  // or repick a color after the controller exists — re-broadcast so peers'
+  // caret chips update immediately.
+  $effect(() => {
+    reviewerCollabController?.setSelfLabel(userProfile.displayName ?? 'Reviewer');
+  });
+  $effect(() => {
+    void userProfile.color;
+    reviewerCollabController?.setSelfColor(reviewerSelfColor());
   });
 
   $effect(() => {
@@ -1282,9 +1309,10 @@
 <NamePrompt
   bind:open={namePromptOpen}
   suggestion={userProfile.suggestion}
+  initialColor={userProfile.color}
   mode={namePromptMode}
-  onConfirm={(name) => {
-    userProfile.save(name);
+  onConfirm={(name, color) => {
+    userProfile.save(name, color);
     // The session may have already announced the default name during
     // authoring init — re-announce so peers see this comment author
     // correctly from the very first thread.

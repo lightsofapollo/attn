@@ -109,12 +109,14 @@ async function bootstrapDurableShare(): Promise<void> {
     // the very first ParticipantJoined this session announces (attn-sur).
     const getDisplayName = (): string | undefined =>
       profile.readStoredDisplayName() ?? undefined;
+    // Same lazy contract for the identity color (attn-3gdd).
+    const getColor = (): string | null => profile.readStoredColor();
     const session = window.location.hash.length > 1
-      ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, invite: (invite = parseAndStripShareInvite(window)) })
+      ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, getColor, invite: (invite = parseAndStripShareInvite(window)) })
       : recovered
-        ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, invite: (invite = recovered) })
+        ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, getColor, invite: (invite = recovered) })
         : rememberedInvite
-          ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, invite: (invite = rememberedInvite) })
+          ? new production.DurableShareBrowserSessionFacade({ relayUrl, getDisplayName, getColor, invite: (invite = rememberedInvite) })
           : new production.RememberedPushShareSessionFacade({ relayUrl, bindingId: pathId });
     svelte.mount(appModule.default, { target, props: { session } });
   } catch (error) {

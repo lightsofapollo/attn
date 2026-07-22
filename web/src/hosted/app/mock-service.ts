@@ -336,6 +336,10 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return () => undefined;
   }
 
+  async watchReviewLog(): Promise<() => void> {
+    return () => undefined;
+  }
+
   async beginEditing(workspaceId: string): Promise<EditingSession | null> {
     const ownerState: BrowserOwnerWorkspaceRuntimeState = {
       status: 'active',

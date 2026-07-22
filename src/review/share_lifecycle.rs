@@ -3647,6 +3647,7 @@ mod tests {
                     Capability::WriteComment,
                     Capability::ResolveComment,
                 ],
+                color: None,
             };
             let device = Device {
                 device_id: identity.typed_device_id(),

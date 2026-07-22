@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-19T14:38:00Z",
+  "generatedAt": "2026-07-22T00:20:42.662708+00:00",
   "title": "Design System: attn",
   "extensions": {
     "colorMeta": {
@@ -95,6 +95,60 @@
         "role": "tertiary",
         "displayName": "Agent Violet",
         "canonical": "oklch(0.57 0.13 295)",
+        "tonalRamp": []
+      },
+      "participant-clay": {
+        "role": "tertiary",
+        "displayName": "Participant Clay",
+        "canonical": "oklch(0.58 0.14 32)",
+        "tonalRamp": []
+      },
+      "participant-amber": {
+        "role": "tertiary",
+        "displayName": "Participant Amber",
+        "canonical": "oklch(0.60 0.12 70)",
+        "tonalRamp": []
+      },
+      "participant-olive": {
+        "role": "tertiary",
+        "displayName": "Participant Olive",
+        "canonical": "oklch(0.58 0.11 110)",
+        "tonalRamp": []
+      },
+      "participant-green": {
+        "role": "tertiary",
+        "displayName": "Participant Green",
+        "canonical": "oklch(0.56 0.12 150)",
+        "tonalRamp": []
+      },
+      "participant-teal": {
+        "role": "tertiary",
+        "displayName": "Participant Teal",
+        "canonical": "oklch(0.56 0.11 185)",
+        "tonalRamp": []
+      },
+      "participant-steel": {
+        "role": "tertiary",
+        "displayName": "Participant Steel",
+        "canonical": "oklch(0.56 0.11 218)",
+        "tonalRamp": []
+      },
+      "participant-blue": {
+        "role": "tertiary",
+        "displayName": "Participant Blue",
+        "canonical": "oklch(0.56 0.11 250)",
+        "tonalRamp": []
+      },
+      "participant-plum": {
+        "role": "tertiary",
+        "displayName": "Participant Plum",
+        "canonical": "oklch(0.57 0.13 325)",
+        "tonalRamp": []
+      },
+      "participant-berry": {
+        "role": "tertiary",
+        "displayName": "Participant Berry",
+        "canonical": "oklch(0.58 0.14 358)",
         "tonalRamp": []
       }
     },

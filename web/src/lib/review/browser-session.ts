@@ -30,6 +30,7 @@
 //
 //   cd web && npx tsx src/lib/review/browser-session.test.ts
 
+import { sanitizeParticipantColor } from '../participant-color';
 import { decompressSnapshotIfNeeded } from './snapshot-compression';
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import {
@@ -99,6 +100,7 @@ import {
   type BrowserDirectState,
 } from './browser-webrtc';
 import { createDeviceWebSocketProofV3 } from './device-proof';
+import { REVIEW_INBOUND_CHANNEL_PREFIX, openBroadcastChannel } from '../tab-channels';
 import type { InviteCapability } from './browser-workspace-share';
 import {
   parseCollabWireMessage,
@@ -342,6 +344,12 @@ export interface BrowserSessionOptions {
    * after construction but before authoring init).
    */
   getDisplayName?: () => string | undefined;
+  /**
+   * Picked identity color for ParticipantJoined (attn-3gdd), resolved at
+   * announce time like the display name. Null/invalid → omitted (peers
+   * derive the deterministic hash color from the participant id).
+   */
+  getColor?: () => string | null;
   /** Inject a pre-built identity (tests want deterministic keys). */
   identity?: BrowserDeviceIdentity;
   /** Optional state observer — called on every state mutation. */
@@ -960,6 +968,8 @@ export class BrowserSession {
   private readonly pagehideHandler = (): void => this.close();
   private transportGeneration = 0;
   private readonly viewerId = randomOpaqueId();
+  /** Cross-tab review doorbell (attn-dgya); opened lazily on first commit. */
+  private reviewInboundDoorbell: BroadcastChannel | null = null;
 
   constructor(opts: BrowserSessionOptions = {}) {
     this.opts = opts;
@@ -1053,10 +1063,31 @@ export class BrowserSession {
     store.noteRoomRole?.(roomId as RoomId, 'reviewer');
 
     const client = this.buildWsClient(roomId, keys);
+    await this.replayDurableLog(client, storage, roomId, identity.deviceId);
+
+    await this.initializeAuthoring(room.policy, this.localAttestationRestored, true);
+    this.setState({ status: this.state.snapshotContent === null ? 'connecting' : 'connected' });
+    client.start();
+    return true;
+  }
+
+  /**
+   * Replay the durable local log for `roomId` through the verified inbound
+   * pipeline (decrypt + signature + capability authorization) so UI state
+   * rebuilds before the socket subscribes. Relay-sequenced items replay in
+   * serverSeq order ahead of unacknowledged outbox items. Shared by the
+   * reviewer resume path and the owner reopen path (attn-dgya).
+   */
+  private async replayDurableLog(
+    client: BrowserWsClient,
+    storage: BrowserStorage,
+    roomId: string,
+    deviceId: string,
+  ): Promise<void> {
     const [inbound, history, pending] = await Promise.all([
       storage.replayInbound(roomId),
       storage.listHistory(roomId),
-      storage.listOutbox(roomId, identity.deviceId),
+      storage.listOutbox(roomId, deviceId),
     ]);
     const replayById = new Map<string, { envelope: MailboxEnvelope; serverSeq: number }>();
     for (const item of [...inbound, ...history]) {
@@ -1076,11 +1107,6 @@ export class BrowserSession {
       return a.envelope.createdAt - b.envelope.createdAt;
     });
     for (const item of replay) await client.replayEnvelope(item.envelope, item.serverSeq);
-
-    await this.initializeAuthoring(room.policy, this.localAttestationRestored, true);
-    this.setState({ status: this.state.snapshotContent === null ? 'connecting' : 'connected' });
-    client.start();
-    return true;
   }
 
   /** Current state snapshot — UI binds against this. */
@@ -1563,13 +1589,44 @@ export class BrowserSession {
       return;
     }
     if (this.isTerminated()) return;
-    this.openWs(credentials.roomId, activeKeys);
+    // attn-dgya: a REOPENED owner tab used to come up with an empty
+    // reviewStore and subscribe from seq 0 — existing comment threads only
+    // reappeared if the relay still retained them (deleteEventsAfterOwnerAck
+    // rooms retain nothing). Mirror resumeRememberedRoom instead: seed the
+    // cursor from the shared durable store and replay the sealed local log
+    // through the verified pipeline before the socket subscribes. applyEvent
+    // dedups by (roomId, eventId), so live echoes stay idempotent.
+    let replayClient: BrowserWsClient | null = null;
+    try {
+      const storage = this.storage ?? await this.openStorage(false);
+      if (storage) {
+        this.persistedCursor = await storage.getCursor(
+          credentials.roomId,
+          credentials.identity.deviceId,
+        );
+        replayClient = this.buildWsClient(credentials.roomId, activeKeys);
+        await this.replayDurableLog(
+          replayClient,
+          storage,
+          credentials.roomId,
+          credentials.identity.deviceId,
+        );
+      }
+    } catch {
+      // The durable log is a local cache of the relay history; a failed
+      // replay must never block the owner from connecting live.
+    }
+    if (this.isTerminated()) return;
+    if (replayClient) replayClient.start();
+    else this.openWs(credentials.roomId, activeKeys);
   }
 
   /** Tear down transports and clobber in-memory keys. Safe to call repeatedly. */
   close(): void {
     this.detachPagehide();
     this.stopTransport();
+    this.reviewInboundDoorbell?.close();
+    this.reviewInboundDoorbell = null;
     this.storage?.close();
     this.storage = null;
     this.releaseSensitiveState();
@@ -1804,6 +1861,7 @@ export class BrowserSession {
         kind: 'reviewer',
         publicSigningKey: base64UrlEncode(identity.signingPublic),
         capabilities,
+        ...this.declaredColorEntry(),
       },
       device: {
         deviceId: identity.deviceId,
@@ -1846,6 +1904,20 @@ export class BrowserSession {
    * the user confirms a name after the session already introduced itself.
    * Safe no-op before authoring is ready (the init announce reads the getter).
    */
+  /** Spread-ready `{ color }` entry for ParticipantJoined bodies (attn-3gdd):
+   *  the picked color when valid, else nothing (hash fallback on receivers). */
+  private declaredColorEntry(): { color: string } | Record<string, never> {
+    const declared = sanitizeParticipantColor(this.opts.getColor?.() ?? null);
+    return declared !== null ? { color: declared } : {};
+  }
+
+  /** The session identity's participant id (attn-3gdd), or null before the
+   *  session has minted/loaded one. Seeds the local caret/chip hash color —
+   *  the same id every ParticipantJoined above announces. */
+  getParticipantId(): string | null {
+    return this.identity?.participantId ?? null;
+  }
+
   async announceProfile(): Promise<void> {
     const outbox = this.outbox;
     const identity = this.identity;
@@ -1883,6 +1955,7 @@ export class BrowserSession {
         kind: this.principal,
         publicSigningKey: base64UrlEncode(identity.signingPublic),
         capabilities,
+        ...this.declaredColorEntry(),
       },
       device: {
         deviceId: identity.deviceId,
@@ -2566,6 +2639,11 @@ export class BrowserSession {
           );
         }
         this.persistedCursor = Math.max(this.persistedCursor, decoded.serverSeq);
+        // attn-dgya doorbell: tell sibling tabs reading the same IndexedDB
+        // that the durable review log advanced. Signals are transport
+        // plumbing and snapshot blobs pair with their pointer events, so
+        // only review events ring — anything else would just be noise.
+        if (envelope.kind === 'event') this.ringReviewInboundDoorbell(this.state.roomId!);
       } else {
         this.volatileInbound.set(envelope.envelopeId, {
           envelope: structuredClone(envelope),
@@ -2780,6 +2858,21 @@ export class BrowserSession {
       if (this.collabDispatches.get(delivery.envelopeId) === pending) {
         this.collabDispatches.delete(delivery.envelopeId);
       }
+    }
+  }
+
+  /**
+   * Advisory cross-tab ring after a durable review-event commit: sibling
+   * workspace tabs replay the shared IndexedDB log on ring (attn-dgya —
+   * see browser-review-log.ts). A lost ring only delays them until the
+   * next commit; storage stays the source of truth.
+   */
+  private ringReviewInboundDoorbell(roomId: string): void {
+    this.reviewInboundDoorbell ??= openBroadcastChannel(REVIEW_INBOUND_CHANNEL_PREFIX + roomId);
+    try {
+      this.reviewInboundDoorbell?.postMessage({ roomId });
+    } catch {
+      // Channel closed or partitioned mid-post — advisory only.
     }
   }
 

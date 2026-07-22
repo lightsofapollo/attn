@@ -1,3 +1,4 @@
+import { sanitizeParticipantColor } from '../participant-color';
 import { decompressSnapshotIfNeeded } from './snapshot-compression';
 import { boundFetch } from './bound-fetch';
 import { compareManifestPathsUtf8 } from './browser-workspace-manifest';
@@ -133,6 +134,9 @@ export interface ProductionDurableShareSessionOptions extends BrowserDurableShar
   disableWebRtc?: boolean;
   /** Reviewer display name for ParticipantJoined, resolved at announce time. */
   getDisplayName?: () => string | undefined;
+  /** Reviewer identity color for ParticipantJoined (attn-3gdd), resolved at
+   *  announce time. Null/invalid → omitted (peers hash the participant id). */
+  getColor?: () => string | null;
   /** PoW execution seam for non-Window production-boundary harnesses. */
   mailboxMintPow?: (input: { shareId: string; deviceId: string; path: string; signal?: AbortSignal }) => Promise<string>;
   registrationMintPow?: BrowserSessionOptions['registrationMintPow'];
@@ -145,6 +149,9 @@ export interface ProductionDurableShareSessionOptions extends BrowserDurableShar
 type ProductionBrowserShareSession = BrowserShareSession & {
   readonly pushConsent: BrowserPushConsentController;
   readonly getBindingContext: (signal?: AbortSignal) => Promise<BrowserPushBindingContext>;
+  /** Ephemeral browser identity's participant id (attn-3gdd) — the id the
+   *  session announces on ParticipantJoined; seeds the local hash color. */
+  readonly participantId: string;
 };
 
 /** Complete production durable-share session using one identity for offline and live paths. */
@@ -173,11 +180,13 @@ export async function createProductionDurableShareSession(options: ProductionDur
         const capabilities: Capability[] = ['read_snapshot', 'write_comment', 'resolve_comment'];
         if (resolution.bundle.tier === 'suggest') capabilities.push('write_suggestion');
         const createdAt = nextCreatedAt();
+        const declaredColor = sanitizeParticipantColor(options.getColor?.() ?? null);
         const body: ReviewEventBody = { type: 'participant_joined', participant: {
           participantId: identity.participantId,
           displayName: options.getDisplayName?.()?.trim() || 'Browser reviewer',
           kind: 'reviewer',
           publicSigningKey: base64UrlEncode(identity.signingPublic), capabilities,
+          ...(declaredColor !== null ? { color: declaredColor } : {}),
         }, device: { deviceId: identity.deviceId, participantId: identity.participantId,
           publicEncryptionKey: base64UrlEncode(identity.publicEncryptionKey), publicSigningKey: base64UrlEncode(identity.signingPublic),
           client: 'attn-browser', createdAt } };
@@ -209,6 +218,7 @@ export async function createProductionDurableShareSession(options: ProductionDur
         onState: options.onLiveState, onCollab: options.onCollab,
         store: options.liveStore, disableWebRtc: options.disableWebRtc,
         getDisplayName: options.getDisplayName,
+        getColor: options.getColor,
         ...(options.registrationMintPow === undefined ? {} : { registrationMintPow: options.registrationMintPow }),
         ...(options.outboxMintPow === undefined ? {} : { outboxMintPow: options.outboxMintPow }),
         parsedInvite: { version: 3,
@@ -293,7 +303,10 @@ export async function createProductionDurableShareSession(options: ProductionDur
     },
     onState: options.onPushConsentState,
   });
-  return Object.assign(session, { pushConsent, getBindingContext });
+  // `participantId` is the session's ephemeral browser identity (attn-3gdd):
+  // the UI resolves its own caret/chip hash color from it, and it matches the
+  // id every announce above stamps on ParticipantJoined.
+  return Object.assign(session, { pushConsent, getBindingContext, participantId: identity.participantId });
 }
 
 /** BrowserReviewApp-compatible facade over the durable resolver/session. */
@@ -323,6 +336,9 @@ export class DurableShareBrowserSessionFacade {
   setCollabObserver(observer: (delivery: import('./browser-session').BrowserCollabDelivery) => void | Promise<void>): void { this.collabObserver = observer; }
   setPushConsentObserver(observer: (state: BrowserPushConsentState) => void): void { this.pushObserver = observer; observer(this.pushState); }
   getPushConsentState(): BrowserPushConsentState { return { ...this.pushState }; }
+  /** The live session's participant id (attn-3gdd), or null before start()
+   *  resolves. Seeds the local user's caret/chip hash color. */
+  getParticipantId(): string | null { return this.session?.participantId ?? null; }
   getState(): import('./browser-session').BrowserSessionState { return this.state; }
   async start(): Promise<void> {
     if (this.closed || this.session) return;

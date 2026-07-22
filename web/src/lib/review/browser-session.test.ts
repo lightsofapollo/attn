@@ -2788,6 +2788,171 @@ defineCase('inbound markdown verifies a present anchor index against the lazy ca
 });
 
 // ---------------------------------------------------------------------------
+// attn-dgya: a reopened owner tab replays the durable review log.
+// ---------------------------------------------------------------------------
+
+function mintBrowserOwnerCommentEnvelope(
+  credentials: BrowserOwnerCredentials,
+  envelopeId: string,
+  createdAt: number,
+  commentBody: string,
+  threadId: string,
+): MailboxEnvelope {
+  const meta: SignableMetaShape = {
+    v: 2,
+    eventId: '',
+    roomId: ROOM_ID,
+    authorId: credentials.identity.participantId,
+    deviceId: credentials.identity.deviceId,
+    createdAt,
+    parentEventIds: [],
+  };
+  const body = {
+    type: 'comment_created',
+    threadId,
+    anchor: {
+      v: 2,
+      fileId: 'file-dgya',
+      snapshotId: 'snap-dgya',
+      baseHash: 'hash-dgya',
+      position: { byteRange: [0, 5], lineRange: [1, 1], pmRange: [1, 6] },
+    },
+    body: commentBody,
+  };
+  meta.eventId = deriveEventId(meta, body);
+  const parents = (meta.parentEventIds ?? []).slice().sort();
+  const signableMeta: Record<string, unknown> = {
+    v: meta.v,
+    roomId: meta.roomId,
+    authorId: meta.authorId,
+    deviceId: meta.deviceId,
+    createdAt: meta.createdAt,
+    parentEventIds: parents,
+  };
+  const signed = toCanonicalBytes({ body, meta: signableMeta });
+  const auth = {
+    signature: base64UrlEncode(ed25519.sign(signed, credentials.identity.signingSecret)),
+    signingKeyId: base64UrlEncode(sha256(credentials.identity.signingPublic)),
+  };
+  const plaintextBytes = toCanonicalBytes({ auth, body, meta: { ...meta } });
+  const nonce = new Uint8Array(24);
+  for (let i = 0; i < nonce.length; i++) nonce[i] = 0x2a + i;
+  const aad: EnvelopeAad = {
+    v: 2,
+    roomId: ROOM_ID,
+    envelopeId,
+    kind: 'event',
+    authorId: credentials.identity.participantId,
+    deviceId: credentials.identity.deviceId,
+    createdAt,
+  };
+  const ct = aeadSeal(KEYS.eventKey, nonce, plaintextBytes, aad);
+  return {
+    v: 2,
+    roomId: ROOM_ID,
+    envelopeId,
+    authorId: credentials.identity.participantId,
+    deviceId: credentials.identity.deviceId,
+    createdAt,
+    expiresAt: createdAt + 7 * 24 * 60 * 60 * 1000,
+    kind: 'event',
+    nonce: base64UrlEncode(nonce),
+    ciphertext: base64UrlEncode(ct),
+    ciphertextBytes: ct.length,
+  };
+}
+
+defineCase('reopened owner replays the durable review log and resubscribes from its cursor (attn-dgya)', async () => {
+  const databaseName = `${BROWSER_STORAGE_DB_NAME}-dgya-${Date.now()}`;
+  const openStorage = (createIfMissing: boolean) => BrowserStorage.open({
+    createIfMissing,
+    databaseName,
+    indexedDB,
+    filesystem: null,
+    navigator: { storage: { persist: async () => true, estimate: async () => ({}) } },
+  });
+  const credentials = browserOwnerCredentials();
+  const device = browserOwnerDevice(credentials);
+  const envelope = mintBrowserOwnerCommentEnvelope(
+    credentials,
+    'env-dgya-comment',
+    1_700_002_000_000,
+    'DGYA-REOPENED-THREAD',
+    'thread-dgya',
+  );
+  // Previous page lifetime durably committed the inbound comment at seq 7.
+  const seeded = await openStorage(true);
+  await seeded.commitInbound(ROOM_ID, credentials.identity.deviceId, envelope, 7);
+  seeded.close();
+
+  const server = await startMockServer();
+  const subscribeAfter: number[] = [];
+  try {
+    server.onClient((ws) => {
+      ws.on('message', (raw) => {
+        const frame = JSON.parse(String(raw));
+        if (frame.type !== 'subscribe') return;
+        subscribeAfter.push(frame.after as number);
+        ws.send(JSON.stringify({
+          type: 'hello',
+          serverSeq: 7,
+          policy: POLICY,
+          devices: [device],
+          onlineDeviceIds: [device.deviceId],
+          missedSignalEnvelopeIds: [],
+        }));
+        // A relay may re-broadcast an already-committed envelope after a
+        // reconnect: the reopened owner must keep exactly one copy.
+        ws.send(JSON.stringify({ type: 'envelope', envelope, serverSeq: 7 }));
+      });
+    });
+    const store = makeStubStore();
+    const session = new BrowserSession({
+      owner: credentials,
+      relayUrl: `http://127.0.0.1:${server.port}`,
+      disableWebRtc: true,
+      store,
+      storageFactory: openStorage,
+      powToken: 'unused-owner-pow',
+      fetchImpl: async (_url, init) => {
+        if (init.method !== 'GET') throw new Error('owner reopen attempted a POST');
+        return { status: 200, text: async () => JSON.stringify({ policy: POLICY, devices: [device] }) };
+      },
+      webSocketFactory: nodeFactory,
+      reconnectInitialMs: 50,
+      reconnectMaxMs: 200,
+    });
+    await session.start();
+    // Replay completes before the socket subscribes — the thread must be
+    // visible even if the relay retained nothing.
+    assert(
+      store.events.some(
+        (event) => event.body.type === 'comment_created' && event.body.body === 'DGYA-REOPENED-THREAD',
+      ),
+      'durable comment thread rehydrated from the local log at startOwner',
+    );
+    for (let i = 0; i < 80 && subscribeAfter.length === 0; i += 1) await delay(20);
+    assertEq(subscribeAfter[0], 7, 'owner resubscribes from the persisted cursor, not 0');
+    // Let the echoed serverSeq-7 envelope drain through the inbound queue.
+    await delay(200);
+    assertEq(
+      store.events.filter((event) => event.body.type === 'comment_created').length,
+      1,
+      'live re-delivery of a replayed envelope stays deduplicated',
+    );
+    session.close();
+  } finally {
+    await server.close();
+    await new Promise<void>((resolve) => {
+      const request = indexedDB.deleteDatabase(databaseName);
+      request.onsuccess = () => resolve();
+      request.onerror = () => resolve();
+      request.onblocked = () => resolve();
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Test fixtures
 // ---------------------------------------------------------------------------
 

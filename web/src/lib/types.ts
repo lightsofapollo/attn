@@ -149,6 +149,7 @@ export type IpcMessageType =
   | 'review_resolve_anchor'
   | 'review_resolve_comment'
   | 'review_set_display_name'
+  | 'review_set_color'
   | 'review_stop'
   | 'review_collab_send'
   | 'review_view_state'
@@ -308,6 +309,12 @@ export interface ReviewSetDisplayNameMessage {
   name: string;
 }
 
+export interface ReviewSetColorMessage {
+  type: 'review_set_color';
+  /** Picked identity color (attn-3gdd); empty clears to the hash color. */
+  color: string;
+}
+
 export interface ReviewStopMessage {
   type: 'review_stop';
   roomId?: RoomId;
@@ -357,6 +364,7 @@ export type IpcMessage =
   | ReviewResolveAnchorMessage
   | ReviewResolveCommentMessage
   | ReviewSetDisplayNameMessage
+  | ReviewSetColorMessage
   | ReviewStopMessage
   | ReviewCollabSendMessage
   | ReviewViewStateMessage
@@ -415,6 +423,11 @@ export interface ReviewProfileInit {
   displayName: string | null;
   defaultDisplayName: string;
   displayNameSet: boolean;
+  /** Picked identity color (attn-3gdd), or null for the automatic hash color. */
+  color: string | null;
+  /** The device identity's stable participant id, or null when no collab
+   *  identity has been minted yet. Lets the UI resolve its own hash color. */
+  participantId: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +505,14 @@ export interface Participant {
   kind: 'owner' | 'reviewer' | 'agent';
   publicSigningKey: string;
   capabilities: Capability[];
+  /**
+   * Self-declared identity color (attn-3gdd) — a CSS color string from the
+   * curated participant palette. Optional: absent for participants who never
+   * picked one (every surface falls back to the deterministic hash color).
+   * Always pass through `sanitizeParticipantColor` before rendering — this
+   * arrives from other participants.
+   */
+  color?: string;
 }
 
 /**

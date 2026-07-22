@@ -31,7 +31,6 @@ import {
   AGENT_GLYPH,
   MAX_VISIBLE_CHIPS,
   OVERFLOW_THRESHOLD,
-  chipBgVarFor,
   chipShapeFor,
   chipVisualFor,
   isYou,
@@ -40,6 +39,7 @@ import {
   splitForStrip,
   tail6,
 } from './peer-strip-format';
+import { AGENT_COLOR, hashParticipantColor } from './participant-color';
 import type { ParticipantId, ReviewStatusPeer } from './types';
 
 // ---------------------------------------------------------------------------
@@ -117,21 +117,27 @@ defineCase('3 humans + 1 agent → 4 chips with correct shapes', () => {
   assert(split.overflowCount === 0, `expected no overflow, got ${split.overflowCount}`);
 
   // First 3 are round humans, last is a hex agent.
-  const visuals = split.inline.map(chipVisualFor);
+  const visuals = split.inline.map((p) => chipVisualFor(p));
   assert(visuals[0].shape === 'round', `owner chip should be round, got ${visuals[0].shape}`);
   assert(visuals[1].shape === 'round', `reviewer chip should be round, got ${visuals[1].shape}`);
   assert(visuals[2].shape === 'round', `reviewer chip should be round, got ${visuals[2].shape}`);
   assert(visuals[3].shape === 'hex', `agent chip should be hex, got ${visuals[3].shape}`);
 
-  // Owner uses the warm color var; the second human uses the cool var.
-  assert(visuals[0].bgVar === 'peer-avatar-bg-owner', `owner bg var wrong: ${visuals[0].bgVar}`);
-  assert(visuals[1].bgVar === 'peer-avatar-bg-reviewer', `reviewer bg var wrong: ${visuals[1].bgVar}`);
-  assert(visuals[3].bgVar === 'peer-avatar-bg-agent', `agent bg var wrong: ${visuals[3].bgVar}`);
+  // Personal colors (attn-3gdd): humans resolve deterministically from
+  // their participantId (no declared color here); the agent is always
+  // violet. Every bg is a concrete oklch value, not a var reference.
+  assert(visuals[0].bg === hashParticipantColor(peers[0].participantId),
+    `owner bg should be the participant hash color, got ${visuals[0].bg}`);
+  assert(visuals[1].bg === hashParticipantColor(peers[1].participantId),
+    `reviewer bg should be the participant hash color, got ${visuals[1].bg}`);
+  assert(visuals[3].bg === AGENT_COLOR, `agent bg must stay violet, got ${visuals[3].bg}`);
+  assert(visuals.every((v) => v.bg.startsWith('oklch(')),
+    'every chip bg must be a concrete oklch value');
 
   // Humans carry monograms; the agent carries the glyph (never a letter).
   assert(visuals[0].content.kind === 'monogram', 'owner should carry a monogram');
   if (visuals[0].content.kind === 'monogram') {
-    assert(visuals[0].content.letter === 'J', `expected J, got "${visuals[0].content.letter}"`);
+    assert(visuals[0].content.letter === 'JA', `expected JA, got "${visuals[0].content.letter}"`);
   }
   assert(visuals[3].content.kind === 'glyph', 'agent should carry the glyph');
   if (visuals[3].content.kind === 'glyph') {
@@ -178,8 +184,10 @@ defineCase('Agent shape distinguishable at 20px (hex + agent bg var)', () => {
   assert(chipShapeFor('reviewer') === 'round', 'chipShapeFor("reviewer") must return round');
   // The glyph keeps the chip recognizable when shape is masked by tiny size.
   assert(visual.content.kind === 'glyph', 'agent must carry a glyph (not a letter)');
-  // Color falls back to the violet token.
-  assert(chipBgVarFor('agent') === 'peer-avatar-bg-agent', 'agent must use agent bg var');
+  // Color is pinned to the agent violet — even a declared color is ignored
+  // (the violet family is the agent brand; attn-3gdd).
+  assert(chipVisualFor(makePeer({ displayName: 'rufus', kind: 'agent' }), '#ff0000').bg === AGENT_COLOR,
+    'agent must ignore declared colors and stay violet');
 });
 
 // (6) "(you)" predicate tags the matching local participant.
@@ -191,13 +199,27 @@ defineCase('isYou tags the chip whose participantId matches the local id', () =>
   assert(isYou(me, null) === false, 'null local id must never tag (you)');
 });
 
-// (7) Monogram rule — first char of displayName, uppercased; "?" fallback.
-defineCase('Monogram: first char uppercased; empty → "?"', () => {
-  assert(monogramFor('alex') === 'A', `expected A, got "${monogramFor('alex')}"`);
-  assert(monogramFor('James') === 'J', `expected J, got "${monogramFor('James')}"`);
-  assert(monogramFor('  zoe ') === 'Z', `expected trim+uppercase, got "${monogramFor('  zoe ')}"`);
+// (7) Monogram rule (attn-3gdd, two letters): first+last initials for
+// multi-word names, first two graphemes for single words, "?" fallback.
+defineCase('Monogram: two-letter rule; empty → "?"', () => {
+  assert(monogramFor('alex') === 'AL', `expected AL, got "${monogramFor('alex')}"`);
+  assert(monogramFor('James Lal') === 'JL', `expected JL, got "${monogramFor('James Lal')}"`);
+  assert(monogramFor('Sam K. Smith') === 'SS', `expected SS (first+last), got "${monogramFor('Sam K. Smith')}"`);
+  assert(monogramFor('  zoe ') === 'ZO', `expected trim+uppercase ZO, got "${monogramFor('  zoe ')}"`);
+  assert(monogramFor('走') === '走', `single grapheme passes through, got "${monogramFor('走')}"`);
   assert(monogramFor('') === '?', `expected ? fallback for empty, got "${monogramFor('')}"`);
   assert(monogramFor('  ') === '?', `expected ? fallback for whitespace, got "${monogramFor('  ')}"`);
+});
+
+// Personal-color resolution (attn-3gdd): declared beats hash, junk falls
+// back, agents pinned.
+defineCase('Declared color wins for humans; junk falls back to hash', () => {
+  const peer = makePeer({ displayName: 'Alex', kind: 'reviewer' });
+  const declared = 'oklch(0.58 0.14 32)';
+  assert(chipVisualFor(peer, declared).bg === declared, 'valid declared color must win');
+  assert(chipVisualFor(peer, 'red; position: fixed').bg === hashParticipantColor(peer.participantId),
+    'css-injection-shaped declarations must fall back to the hash color');
+  assert(chipVisualFor(peer).bg === chipVisualFor(peer).bg, 'hash must be deterministic');
 });
 
 // (8) Hover presence detail — simulate the component's hovered-peer state

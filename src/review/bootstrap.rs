@@ -210,6 +210,11 @@ pub struct DeviceIdentity {
     /// so identity.json files written before this field still load.
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Picked identity color (attn-3gdd): a CSS color string from the curated
+    /// participant palette, or `None` for the automatic hash color. Announced
+    /// to peers on `ParticipantJoined` alongside the display name.
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 impl DeviceIdentity {
@@ -243,6 +248,7 @@ impl DeviceIdentity {
             public_encryption_key: public_signing_key,
             // Decoupled from the crypto identity; set via the onboarding prompt.
             display_name: None,
+            color: None,
         })
     }
 
@@ -253,6 +259,18 @@ impl DeviceIdentity {
             Some(name) if !name.is_empty() => name.to_string(),
             _ => resolve_default_display_name(),
         }
+    }
+
+    /// The identity color to announce on `ParticipantJoined` (attn-3gdd):
+    /// the picked color when set and still well-formed, else `None` (peers
+    /// derive the automatic hash color). Re-validated on read so a
+    /// hand-edited identity.json can't push an arbitrary string to peers.
+    pub fn effective_color(&self) -> Option<String> {
+        self.color
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| is_valid_identity_color(c))
+            .map(str::to_string)
     }
 
     /// Reconstruct the live `DeviceSigningKey` from the persisted seed.
@@ -328,6 +346,65 @@ pub fn resolve_default_display_name() -> String {
 /// Persist a user-chosen display name onto the identity at `dir`, creating the
 /// identity first if it doesn't exist. An empty/whitespace name clears it back
 /// to the resolved default. Returns the effective name now in force.
+/// Validate an identity color string (attn-3gdd). Mirrors the frontend's
+/// `sanitizeParticipantColor` grammar exactly: 6-digit hex (`#rrggbb`) or a
+/// bare numeric `oklch(L C H)` triple, max 64 chars. Anything else is
+/// rejected — this value is announced to every peer and lands in inline
+/// styles on their machines.
+pub fn is_valid_identity_color(raw: &str) -> bool {
+    if raw.is_empty() || raw.len() > 64 {
+        return false;
+    }
+    if let Some(hex) = raw.strip_prefix('#') {
+        return hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    let Some(inner) = raw
+        .strip_prefix("oklch(")
+        .and_then(|r| r.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let parts: Vec<&str> = inner.split_whitespace().collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    // L and C are 0-1-ish decimals, H is 0-360-ish; a plain f64 parse plus
+    // range check matches the frontend regex closely enough (both sides
+    // re-validate independently, so drift fails safe to the hash color).
+    let in_range = |s: &str, max: f64| -> bool {
+        s.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && s.parse::<f64>().is_ok_and(|v| (0.0..=max).contains(&v))
+    };
+    in_range(parts[0], 1.0) && in_range(parts[1], 1.0) && in_range(parts[2], 360.0)
+}
+
+/// Persist a picked identity color (attn-3gdd) onto the identity at `dir`,
+/// creating the identity first if needed. Empty clears back to the automatic
+/// hash color; an invalid color is an error (the UI only sends palette
+/// values, so anything else is a bug or tampering).
+pub fn set_color_in(dir: &std::path::Path, color: &str) -> Result<Option<String>, BootstrapError> {
+    let mut identity = load_or_create_identity_in(dir)?;
+    let trimmed = color.trim();
+    identity.color = if trimmed.is_empty() {
+        None
+    } else if is_valid_identity_color(trimmed) {
+        Some(trimmed.to_string())
+    } else {
+        return Err(BootstrapError::Identity(format!(
+            "invalid identity color: {trimmed:?}"
+        )));
+    };
+    save_identity_to(dir, &identity)?;
+    Ok(identity.color)
+}
+
+/// Persist a picked identity color at `runtime_dir()`. Thin wrapper over
+/// [`set_color_in`] for the daemon IPC handler.
+pub fn set_color(color: &str) -> Result<Option<String>, BootstrapError> {
+    let dir = runtime_dir().map_err(|e| BootstrapError::Identity(format!("runtime_dir: {e}")))?;
+    set_color_in(&dir, color)
+}
+
 pub fn set_display_name_in(dir: &std::path::Path, name: &str) -> Result<String, BootstrapError> {
     let mut identity = load_or_create_identity_in(dir)?;
     let trimmed = name.trim();
@@ -1544,6 +1621,7 @@ impl Bootstrapper {
             kind,
             public_signing_key: identity.public_signing_key.clone(),
             capabilities: agent_capabilities(kind),
+            color: identity.effective_color(),
         };
         let device = Device {
             device_id: device_id.clone(),
@@ -2522,6 +2600,7 @@ impl Bootstrapper {
             kind,
             public_signing_key: identity.public_signing_key.clone(),
             capabilities: agent_capabilities(kind),
+            color: identity.effective_color(),
         };
         let _ = vk; // verifying key materialization sanity-checked the seed.
         let device_payload = Device {
@@ -2679,6 +2758,7 @@ impl Bootstrapper {
                 kind,
                 public_signing_key: identity.public_signing_key.clone(),
                 capabilities,
+                color: identity.effective_color(),
             },
             device: Device {
                 device_id: device_id.clone(),
@@ -5471,6 +5551,76 @@ mod tests {
     }
 
     #[test]
+    fn is_valid_identity_color_grammar() {
+        // Accepted: 6-digit hex and bare numeric oklch triples (attn-3gdd).
+        assert!(is_valid_identity_color("#a1b2c3"));
+        assert!(is_valid_identity_color("oklch(0.58 0.14 32)"));
+        assert!(is_valid_identity_color("oklch(0.56 0.11 250)"));
+        // Rejected: everything that could smuggle CSS past the inline-style
+        // seam or that simply isn't a palette-shaped value.
+        for bad in [
+            "",
+            "red",
+            "#fff",
+            "#a1b2c3d4",
+            "var(--primary)",
+            "oklch(0.58 0.14 32 / 50%)",
+            "oklch(0.58, 0.14, 32)",
+            "oklch(0.58 0.14 400)",
+            "#a1b2c3; position: fixed",
+            "url(javascript:alert(1))",
+        ] {
+            assert!(!is_valid_identity_color(bad), "should reject {bad:?}");
+        }
+        // Over the 64-char bound (otherwise grammar-valid).
+        let long = format!("oklch(0.5{} 0.1 30)", "0".repeat(70));
+        assert!(!is_valid_identity_color(&long));
+    }
+
+    #[test]
+    fn set_color_in_persists_clears_and_rejects_junk() {
+        let dir = TempDir::new().expect("home dir");
+        // Set — creates the identity and persists the color.
+        let stored = set_color_in(dir.path(), " oklch(0.58 0.14 32) ").expect("set");
+        assert_eq!(stored.as_deref(), Some("oklch(0.58 0.14 32)")); // trimmed
+        let reloaded = load_identity_from(dir.path())
+            .expect("load")
+            .expect("present");
+        assert_eq!(reloaded.color.as_deref(), Some("oklch(0.58 0.14 32)"));
+        assert_eq!(
+            reloaded.effective_color().as_deref(),
+            Some("oklch(0.58 0.14 32)")
+        );
+
+        // Junk is an error and must NOT clobber the stored color.
+        assert!(set_color_in(dir.path(), "red; position: fixed").is_err());
+        let reloaded = load_identity_from(dir.path())
+            .expect("load")
+            .expect("present");
+        assert_eq!(reloaded.color.as_deref(), Some("oklch(0.58 0.14 32)"));
+
+        // Empty clears back to the automatic hash color.
+        let cleared = set_color_in(dir.path(), "").expect("clear");
+        assert!(cleared.is_none());
+        let reloaded = load_identity_from(dir.path())
+            .expect("load")
+            .expect("present");
+        assert!(reloaded.color.is_none());
+        assert!(reloaded.effective_color().is_none());
+    }
+
+    #[test]
+    fn effective_color_revalidates_hand_edited_identity() {
+        // A hand-edited identity.json with a hostile color string must not
+        // reach peers: effective_color() re-validates on read.
+        let mut id = DeviceIdentity::generate().expect("generate");
+        id.color = Some("red; position: fixed".to_string());
+        assert!(id.effective_color().is_none());
+        id.color = Some("#a1b2c3".to_string());
+        assert_eq!(id.effective_color().as_deref(), Some("#a1b2c3"));
+    }
+
+    #[test]
     fn identity_json_without_display_name_field_still_loads() {
         // Pre-onboarding identity.json had no displayName field — serde(default)
         // must keep it loadable (None) rather than failing to deserialize.
@@ -6557,6 +6707,7 @@ mod tests {
                     kind: ParticipantKind::Reviewer,
                     public_signing_key: identity.public_signing_key.clone(),
                     capabilities: agent_capabilities(ParticipantKind::Reviewer),
+                    color: None,
                 },
                 device: Device {
                     device_id: device_id.clone(),

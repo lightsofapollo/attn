@@ -25,7 +25,8 @@ import {
   type BrowserWorkspaceServiceOptions,
 } from './workspace-service';
 import { quotaPressure } from '../../lib/review/browser-storage-probe';
-import { readStoredDisplayName } from '../../lib/browser-profile';
+import { readStoredColor, readStoredDisplayName } from '../../lib/browser-profile';
+import { resolveParticipantColor } from '../../lib/participant-color';
 import { resolveBrowserRelayUrl } from '../../lib/review/browser-relay-url';
 import { resolveBrowserReviewBase } from './share-environment';
 import type { WorkspaceEntryRecord } from '../../lib/review/browser-workspace-schema';
@@ -177,6 +178,11 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     return () => channel.removeEventListener('message', onMessage);
   }
 
+  /** attn-dgya: durable review-log hydration + doorbell, any lease role. */
+  async watchReviewLog(workspaceId: string): Promise<() => void> {
+    return this.service.watchReviewLog(workspaceId);
+  }
+
   static async open(options: BrowserWorkspaceServiceOptions = {}): Promise<RealWorkspaceAppService> {
     // Establish the browsing-context identity while the shell opens, not only
     // on the first edit. That lets an idle desk tab answer a later duplicate's
@@ -282,7 +288,9 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
       workspaceId,
       holderId,
       selfLabel: 'Another tab',
-      selfColor: '#8a63b8',
+      // Same user, same identity color (attn-3gdd) — a passive tab's caret
+      // should not read as a different person than the leader tab's.
+      selfColor: resolveParticipantColor('', readStoredColor(), 'owner'),
     });
     if (!join.available) {
       join.close();
@@ -432,6 +440,8 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
           // Owner genesis announces this name to every reviewer; without it
           // the room's ParticipantJoined fell back to "Browser owner".
           ownerDisplayName: readStoredDisplayName() ?? undefined,
+          // Picked identity color rides the same genesis announce (attn-3gdd).
+          ownerColor: readStoredColor(),
         });
       },
       stopShare: () => runtime.stopShare(),

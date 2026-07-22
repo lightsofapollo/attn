@@ -107,6 +107,12 @@ pub struct Participant {
     pub kind: ParticipantKind,
     pub public_signing_key: String,
     pub capabilities: Vec<Capability>,
+    /// Self-declared identity color (attn-3gdd): a CSS color string from the
+    /// curated participant palette, or `None` when the user never picked one
+    /// (clients fall back to a deterministic hash of `participant_id`).
+    /// Untrusted on receive — the UI validates before rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Participant kind.

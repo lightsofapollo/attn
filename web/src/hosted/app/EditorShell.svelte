@@ -6,6 +6,7 @@
   import NamePrompt from '../../lib/NamePrompt.svelte';
   import ShareSheet from './ShareSheet.svelte';
   import { userProfile } from '../../lib/profile.svelte';
+  import { resolveParticipantColor } from '../../lib/participant-color';
   import CommandPalette, { type HostedCommand } from './CommandPalette.svelte';
   import { AutosaveController } from './autosave';
   import type { reviewStore as ReviewStoreInstance } from '../../lib/review/store.svelte';
@@ -908,6 +909,22 @@
     });
   });
 
+  // Live caret color sync (attn-3gdd). The runtime's controller is built
+  // before the room's owner participant id is known, so its construction-time
+  // selfColor uses a provisional hash. Once the store resolves the owner id
+  // (snapshot/announce landed) — or the user repicks a color — re-broadcast
+  // the caret with the definitive personal color so reviewers' view of the
+  // owner's caret always matches the owner's chip.
+  $effect(() => {
+    const store = reviewStoreRef;
+    const controller = session?.getController() ?? null;
+    if (!store || !controller) return;
+    const pid = store.ownerParticipantId;
+    void userProfile.color;
+    if (!pid) return;
+    controller.setSelfColor(store.colorFor(pid));
+  });
+
   // ---------------------------------------------------------------------------
   // Owner display name (attn-sur). The genesis ParticipantJoined announces
   // this name to every reviewer, so confirm it when a room first exists —
@@ -1108,6 +1125,29 @@
     localJoin = null;
     joinState = null;
   }
+
+  // attn-dgya: hydrate review threads from the durable inbound log in EVERY
+  // tab of this workspace — lease holder or follower — and re-replay when
+  // the holder's session durably commits new review events (the review
+  // doorbell). Without this, a reopened or concurrent tab synced document
+  // content but rendered an empty review surface: reviewStore.events is
+  // per-tab memory and only the leader's live session ever fed it.
+  $effect(() => {
+    const wsId = workspace.id;
+    let dispose: (() => void) | null = null;
+    let cancelled = false;
+    service.watchReviewLog(wsId).then((stop) => {
+      if (cancelled) {
+        stop();
+        return;
+      }
+      dispose = stop;
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
+  });
 
   // Multi-tab auto-recovery: the passive (read-only) tab listens for the
   // owning tab releasing the workspace lease and re-attempts ownership, so the
@@ -2258,9 +2298,10 @@
 <NamePrompt
   bind:open={namePromptOpen}
   suggestion={userProfile.suggestion}
+  initialColor={userProfile.color}
   mode={namePromptMode}
-  onConfirm={(name) => {
-    userProfile.save(name);
+  onConfirm={(name, color) => {
+    userProfile.save(name, color);
     // Broadcast the rename: displayNameFor prefers the latest
     // ParticipantJoined announcement, so without a re-announce every
     // existing card (yours and reviewers') keeps the old name forever.

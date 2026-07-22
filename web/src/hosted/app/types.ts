@@ -267,6 +267,14 @@ export interface WorkspaceAppService {
    * storage on delivery; the message itself carries no document content.
    */
   subscribeWorkspaceChanges(listener: (change: WorkspaceChange) => void): () => void;
+  /**
+   * Hydrate this tab's review store from the workspace's durable review
+   * log, and re-replay whenever the lease-holding tab durably commits a
+   * new inbound review event (attn-dgya). Runs in every tab regardless of
+   * lease role; returns a disposer. A workspace with no active published
+   * share resolves to a no-op disposer.
+   */
+  watchReviewLog(workspaceId: string): Promise<() => void>;
   // ————— multi-file/asset operations (attn-7xl.3.4) —————
   createMarkdownEntry(workspaceId: string, path: string): Promise<void>;
   addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void>;

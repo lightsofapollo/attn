@@ -6,8 +6,14 @@
 // reactive view the UI binds to. `save()` persists via IPC and optimistically
 // updates local state so the badge / prompt react immediately.
 
-import { reviewSetDisplayName } from './ipc';
-import { readStoredDisplayName, writeStoredDisplayName } from './browser-profile';
+import { reviewSetColor, reviewSetDisplayName } from './ipc';
+import {
+  readStoredColor,
+  readStoredDisplayName,
+  writeStoredColor,
+  writeStoredDisplayName,
+} from './browser-profile';
+import { sanitizeParticipantColor } from './participant-color';
 import type { ReviewProfileInit } from './types';
 
 /** True when running hosted in a plain browser (no wry IPC bridge). */
@@ -22,6 +28,18 @@ class UserProfile {
   defaultDisplayName = $state<string>('Anonymous');
   /** Whether the user has explicitly set a name (drives the first-time prompt). */
   isSet = $state<boolean>(false);
+  /**
+   * Picked identity color (attn-3gdd), or `null` for "Auto" — the
+   * deterministic hash of the participant id. Validated on every write so a
+   * corrupted stored value can never reach an inline style or the wire.
+   */
+  color = $state<string | null>(null);
+  /**
+   * The local device identity's stable participant id (native init payload
+   * only — hosted surfaces mint per-session ids). Used to resolve the local
+   * user's own hash color for carets before any roster exists.
+   */
+  participantId = $state<string | null>(null);
 
   /**
    * Set by any "Edit name" affordance (e.g. the connection badge) to ask the
@@ -49,17 +67,26 @@ class UserProfile {
     this.displayName = init.displayName;
     this.defaultDisplayName = init.defaultDisplayName || 'Anonymous';
     this.isSet = init.displayNameSet;
+    this.color = sanitizeParticipantColor(init.color);
+    this.participantId = init.participantId;
   }
 
   /**
-   * Persist a chosen name. Empty/whitespace clears the override back to the
-   * resolved default. Optimistically updates local state; the daemon write is
+   * Persist a chosen name + identity color. Empty/whitespace name clears the
+   * override back to the resolved default; `null` color clears back to the
+   * automatic hash. Optimistically updates local state; the daemon writes are
    * fire-and-forget (the next Share/Join reads the updated identity).
    */
-  save(name: string): void {
+  save(name: string, color: string | null = this.color): void {
     const trimmed = name.trim();
+    const validColor = sanitizeParticipantColor(color);
     void reviewSetDisplayName(trimmed);
-    if (isBrowserHosted()) writeStoredDisplayName(trimmed || null);
+    void reviewSetColor(validColor ?? '');
+    if (isBrowserHosted()) {
+      writeStoredDisplayName(trimmed || null);
+      writeStoredColor(validColor);
+    }
+    this.color = validColor;
     if (trimmed) {
       this.displayName = trimmed;
       this.isSet = true;
@@ -81,4 +108,5 @@ if (isBrowserHosted()) {
     userProfile.displayName = stored;
     userProfile.isSet = true;
   }
+  userProfile.color = sanitizeParticipantColor(readStoredColor());
 }

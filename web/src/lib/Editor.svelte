@@ -708,6 +708,11 @@
   export function resetToMarkdown(nextMarkdown: string): void {
     if (!view) return;
     const bookmark = view.state.selection.getBookmark();
+    // A full state swap re-lays-out the whole document; without restoring
+    // the scroll container a follow-mode tab visibly jumps on every leader
+    // commit (attn-lzee). Selection is restored the same way below.
+    const scroller = nearestScrollableAncestor(view.dom);
+    const scrollTop = scroller?.scrollTop ?? null;
     const updateDoc = parseMarkdownDoc(nextMarkdown, 'update');
     let state = EditorState.create({
       doc: updateDoc,
@@ -720,6 +725,7 @@
       // If previous selection can't be restored, keep default selection.
     }
     view.updateState(state);
+    if (scroller && scrollTop !== null) scroller.scrollTop = scrollTop;
     if (findOpen && findQuery) {
       updateSearchQuery();
     }

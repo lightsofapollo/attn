@@ -1361,18 +1361,22 @@
     };
   });
 
-  // Local multi-tab co-editing (attn-47r), follower role: while another tab
-  // holds the writer lease, join its authorities as a live CollabClient
-  // instead of settling for the read-only mirror. The handle reconnects on
-  // its own; becoming the owner (ensureOwnerSession) closes it.
+  // Local multi-tab co-editing (attn-47r), follower role: join whichever
+  // tab hosts the workspace's authorities as a live CollabClient. This is
+  // NOT gated on a denied edit any more (attn-lzee): a purely-reading tab
+  // used to follow the writer via whole-document resetToMarkdown on every
+  // autosave commit — a visible full re-render — while hub followers get
+  // incremental steps. The handle reconnects on its own and idles in
+  // 'connecting' when no other tab hosts; becoming the owner
+  // (ensureOwnerSession → installOwnerSession) closes it.
   $effect(() => {
     const wsId = workspace.id;
-    if (!editDenied || session) return;
+    if (session) return;
     untrack(() => {
       if (localJoin) return;
       void service.joinLocalCollab(wsId).then((handle) => {
         if (!handle) return;
-        // The deny may have resolved (owner takeover) while we connected.
+        // The lease may have resolved (owner takeover) while we connected.
         if (session || localJoin || workspace.id !== wsId) {
           handle.close();
           return;

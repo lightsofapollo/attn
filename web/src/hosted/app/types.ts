@@ -271,10 +271,17 @@ export interface WorkspaceAppService {
    * Hydrate this tab's review store from the workspace's durable review
    * log, and re-replay whenever the lease-holding tab durably commits a
    * new inbound review event (attn-dgya). Runs in every tab regardless of
-   * lease role; returns a disposer. A workspace with no active published
-   * share resolves to a no-op disposer.
+   * lease role. `roomId` is the discovered active share's room (null for an
+   * unshared workspace — the watcher is then a no-op) so follower tabs can
+   * load the review surface without waiting for a lease they never take.
    */
-  watchReviewLog(workspaceId: string): Promise<() => void>;
+  watchReviewLog(workspaceId: string): Promise<{
+    roomId: string | null;
+    /** Promoted-manifest path → fileId map — follower tabs use it to scope
+     *  the review margin to the active file without authority bindings. */
+    bindings: ReadonlyArray<{ path: string; fileId: string }>;
+    close(): void;
+  }>;
   // ————— multi-file/asset operations (attn-7xl.3.4) —————
   createMarkdownEntry(workspaceId: string, path: string): Promise<void>;
   addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void>;

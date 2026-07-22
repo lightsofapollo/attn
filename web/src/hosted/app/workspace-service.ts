@@ -219,9 +219,11 @@ export class BrowserWorkspaceService {
    * the workspace has no active published share. Reads only — safe for
    * passive tabs that never acquire the lease.
    */
-  async watchReviewLog(workspaceId: string): Promise<() => void> {
+  async watchReviewLog(
+    workspaceId: string,
+  ): Promise<{ roomId: string | null; bindings: ReadonlyArray<{ path: string; fileId: string }>; close(): void }> {
     const watcher = await watchWorkspaceReviewLog({ storage: this.storage, workspaceId });
-    return () => watcher.close();
+    return { roomId: watcher.roomId, bindings: watcher.bindings, close: () => watcher.close() };
   }
 
   // ————— capabilities —————

@@ -336,8 +336,8 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return () => undefined;
   }
 
-  async watchReviewLog(): Promise<() => void> {
-    return () => undefined;
+  async watchReviewLog(): Promise<{ roomId: string | null; bindings: ReadonlyArray<{ path: string; fileId: string }>; close(): void }> {
+    return { roomId: null, bindings: [], close: () => undefined };
   }
 
   async beginEditing(workspaceId: string): Promise<EditingSession | null> {

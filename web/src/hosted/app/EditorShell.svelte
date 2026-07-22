@@ -207,6 +207,20 @@
   const sharingActive = $derived(
     ownerState?.roomId !== null && ownerState?.roomId !== undefined,
   );
+  // Review surfaces render in EVERY tab of a shared workspace, not just the
+  // lease holder: follower tabs have no authority session but the durable
+  // review-log watcher (attn-dgya) hydrates the store and stamps the room.
+  const reviewRoomActive = $derived(
+    Boolean(ownerState?.roomId ?? reviewStoreRef?.currentRoomId),
+  );
+  // A follower tab showing hydrated threads: reply/resolve stay available —
+  // the handlers promote this tab through the normal lease handoff on use.
+  const reviewFollowerTab = $derived(
+    !ownerState?.roomId && Boolean(reviewStoreRef?.currentRoomId),
+  );
+  // Promoted-manifest path → fileId map from the review-log watcher: the
+  // follower's substitute for the leader-only authority bindings.
+  let reviewLogBindings = $state<Array<{ path: string; fileId: string }>>([]);
 
   // ————— multi-file rail state (attn-7xl.3.4) —————
   let addingMarkdown = $state(false);
@@ -234,7 +248,7 @@
   let showDocTitle = $state(false);
 
   const reviewCount = $derived(
-    ownerState?.roomId && reviewStoreRef
+    reviewRoomActive && reviewStoreRef
       ? reviewStoreRef.roomActiveThreadCount
       : workspace.reviewCards.length,
   );
@@ -731,12 +745,33 @@
     const store = reviewStoreRef;
     const state = ownerState;
     const path = activeEntry?.path;
-    if (!store || !state?.roomId || !path) return;
-    if (store.currentRoomId !== state.roomId) return;
-    const binding = state.bindings.find((item) => item.path === path);
+    if (!store || !path) return;
+    // Leader: authority bindings. Follower (no session): the promoted
+    // manifest's bindings from the review-log watcher — same map, read
+    // from storage instead of the live authority (attn-dgya follow-up).
+    const bindings = state?.roomId
+      ? store.currentRoomId === state.roomId
+        ? state.bindings
+        : null
+      : store.currentRoomId !== null
+        ? reviewLogBindings
+        : null;
+    if (!bindings) return;
+    const binding = bindings.find((item) => item.path === path);
     if (!binding) return;
     untrack(() => {
-      if (store.currentFileId !== binding.fileId) store.setCurrentFile(binding.fileId);
+      if (store.currentFileId === binding.fileId) return;
+      if (state?.roomId) {
+        store.setCurrentFile(binding.fileId);
+      } else {
+        // Follower tabs replay content-less snapshot POINTERS (blob
+        // hydration stays with the live session), so setCurrentFile's
+        // renderability guard would refuse this pin — but the document
+        // body here comes from the local workspace, not the snapshot.
+        // Pin directly, mirroring the guard-free parts of setCurrentFile.
+        store.currentFileId = binding.fileId;
+        store.currentSnapshotId = null;
+      }
     });
   });
 
@@ -858,8 +893,12 @@
     const store = reviewStoreRef;
     if (!store) return;
     const state = ownerState;
+    // Follower tabs (attn-dgya hydration, no authority session) are NOT
+    // offline — another tab of this browser holds the live connection and
+    // this one mirrors via the durable log + doorbell. Say so.
+    const followingRoom = store.currentRoomId !== null;
     const connection = state?.authority?.session?.connection
-      ?? (state?.roomId ? 'mailbox' : 'offline');
+      ?? (state?.roomId ? 'mailbox' : followingRoom ? 'local_tab' : 'offline');
     untrack(() => {
       store.connection = connection;
     });
@@ -1136,12 +1175,21 @@
     const wsId = workspace.id;
     let dispose: (() => void) | null = null;
     let cancelled = false;
-    service.watchReviewLog(wsId).then((stop) => {
+    service.watchReviewLog(wsId).then((watcher) => {
       if (cancelled) {
-        stop();
+        watcher.close();
         return;
       }
-      dispose = stop;
+      dispose = () => watcher.close();
+      // A room was discovered: load the review surface NOW, even in a tab
+      // that never takes the lease — the session-gated ensureEditorGraph
+      // path would otherwise leave the hydrated threads with no component
+      // (and no reviewStoreRef) to render into. The manifest bindings let
+      // the follower scope the margin to the active file below.
+      if (watcher.roomId !== null) {
+        reviewLogBindings = [...watcher.bindings];
+        void ensureEditorGraph(true);
+      }
     }).catch(() => undefined);
     return () => {
       cancelled = true;
@@ -1789,13 +1837,15 @@
   }
 
   async function replyToReview(anchor: import('../../lib/types').Anchor, body: string, threadId: string): Promise<void> {
-    const currentSession = session;
+    // Follower tabs have no session until the user acts here — acting IS the
+    // intent to take over, so promote through the normal lease handoff.
+    const currentSession = session ?? (await ensureOwnerSession());
     if (!currentSession) throw new Error('Review authoring is unavailable.');
     await currentSession.replyToComment(anchor, body, threadId);
   }
 
   async function resolveReview(threadId: string): Promise<void> {
-    const currentSession = session;
+    const currentSession = session ?? (await ensureOwnerSession());
     if (!currentSession) throw new Error('Review authoring is unavailable.');
     await currentSession.resolveComment(threadId);
   }
@@ -2592,7 +2642,7 @@
 {/snippet}
 
 {#snippet desktopRail()}
-  {#if ownerState?.roomId && ReviewMarginComponent}
+  {#if reviewRoomActive && ReviewMarginComponent}
     {#if reviewTransportError}
       <div class="review-delivery-status" role="alert" data-slot="review-transport-error">
         <span>{reviewTransportError}</span>
@@ -2601,7 +2651,7 @@
         </button>
       </div>
     {/if}
-    {#if ownerState.authority?.session?.authoringError}
+    {#if ownerState?.authority?.session?.authoringError}
       <div class="review-delivery-status" role="status">
         <span>{ownerState.authority.session.authoringError}</span>
         <button class="row-action" type="button" onclick={() => void retryReviewDelivery()}>Retry</button>
@@ -2609,9 +2659,9 @@
     {/if}
     <ReviewMarginComponent
       view={pmViewForReview}
-      readOnly={!ownerState.liveEditingAvailable}
-      reviewerAuthoring={durableReviewAvailable}
-      suggestionActions={ownerState.liveEditingAvailable
+      readOnly={reviewFollowerTab ? false : !ownerState?.liveEditingAvailable}
+      reviewerAuthoring={durableReviewAvailable || reviewFollowerTab}
+      suggestionActions={ownerState?.liveEditingAvailable
         ? { accept: acceptSuggestion, reject: rejectSuggestion }
         : {}}
       onResolveComment={resolveReview}
@@ -2915,7 +2965,7 @@
     title={ownerState?.roomId && reviewStoreRef ? `Review · ${reviewStoreRef.roomActiveThreadCount}` : `Review · ${workspace.reviewCards.length}`}
     onclose={closeReviewSheet}
   >
-    {#if ownerState?.roomId && ReviewMarginComponent}
+    {#if reviewRoomActive && ReviewMarginComponent}
       {#if reviewTransportError}
         <div class="review-delivery-status" role="alert" data-slot="review-transport-error">
           <span>{reviewTransportError}</span>
@@ -2928,9 +2978,9 @@
         <ReviewMarginComponent
           view={pmViewForReview}
           layout="stacked"
-          readOnly={!ownerState.liveEditingAvailable}
-          reviewerAuthoring={durableReviewAvailable}
-          suggestionActions={ownerState.liveEditingAvailable
+          readOnly={reviewFollowerTab ? false : !ownerState?.liveEditingAvailable}
+          reviewerAuthoring={durableReviewAvailable || reviewFollowerTab}
+          suggestionActions={ownerState?.liveEditingAvailable
             ? { accept: acceptSuggestion, reject: rejectSuggestion }
             : {}}
           onResolveComment={resolveReview}

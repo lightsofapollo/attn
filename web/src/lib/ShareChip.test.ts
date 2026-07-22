@@ -148,10 +148,17 @@ defineCase('peer presence label is here/away — never transport jargon', () => 
 // 10: label distinctness
 // ---------------------------------------------------------------------------
 
-defineCase('exactly three distinct user-facing labels (Connected shared by design)', () => {
+defineCase('exactly four distinct user-facing labels (Connected shared by design)', () => {
   const labels = new Set(Object.values(SHARE_CHIP_DESCRIPTORS).map((d) => d.label));
-  assert(labels.size === 3, `expected 3 distinct labels, got ${labels.size}`);
-  assert(labels.has('Live') && labels.has('Connected') && labels.has('Offline'), 'label set');
+  assert(labels.size === 4, `expected 4 distinct labels, got ${labels.size}`);
+  assert(
+    labels.has('Live') && labels.has('Connected') && labels.has('Offline')
+      // Browser-only follower state (attn-dgya): a tab mirroring the live
+      // tab on this device is neither Offline (a lie) nor plain Live
+      // (overclaims a direct connection of its own).
+      && labels.has('Live · another tab'),
+    'label set',
+  );
 });
 
 // ---------------------------------------------------------------------------

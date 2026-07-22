@@ -317,6 +317,7 @@ function roomKeysFixture(identity: BrowserDeviceIdentity): ReviewLogRoomKeys {
     eventKey: new Uint8Array(KEYS.eventKey),
     snapshotKey: new Uint8Array(KEYS.snapshotKey),
     signalingKey: new Uint8Array(KEYS.signalingKey),
+    bindings: [],
   };
 }
 

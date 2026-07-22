@@ -58,6 +58,14 @@ export const SHARE_CHIP_DESCRIPTORS: Record<ConnectionState, ShareChipDescriptor
     icon: 'offline',
     canTryFaster: false,
   },
+  local_tab: {
+    label: 'Live · another tab',
+    detail:
+      'Another tab on this device holds the live connection. Comments and edits mirror here automatically.',
+    tone: 'live',
+    icon: 'live',
+    canTryFaster: false,
+  },
 };
 
 /** Safe default when no status has arrived yet. */

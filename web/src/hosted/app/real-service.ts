@@ -179,7 +179,9 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   }
 
   /** attn-dgya: durable review-log hydration + doorbell, any lease role. */
-  async watchReviewLog(workspaceId: string): Promise<() => void> {
+  async watchReviewLog(
+    workspaceId: string,
+  ): Promise<{ roomId: string | null; bindings: ReadonlyArray<{ path: string; fileId: string }>; close(): void }> {
     return this.service.watchReviewLog(workspaceId);
   }
 

@@ -1024,7 +1024,13 @@ export interface ReviewStatus {
   roomId: RoomId;
   status?: string;
   mode: RoomPolicy['mode'];
-  connection: 'live_direct' | 'mailbox' | 'offline' | 'direct_failed';
+  /**
+   * `local_tab` is browser-only (never emitted by the Rust daemon): this tab
+   * follows another tab of the same browser that owns the live session —
+   * review state is mirrored via the durable log + tab doorbell (attn-dgya),
+   * so "Offline" would be a lie and "Live" would overclaim.
+   */
+  connection: 'live_direct' | 'mailbox' | 'offline' | 'direct_failed' | 'local_tab';
   peers: ReviewStatusPeer[];
   outboxPending: number;
   pendingCount?: number;

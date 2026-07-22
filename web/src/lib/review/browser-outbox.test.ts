@@ -525,6 +525,57 @@ test('targeted signal is relay-acked before the opportunistic accepted hook', as
   }
 });
 
+test('terminal relay rejection re-probes on capped backoff and heals (attn-c38z)', async () => {
+  // Regression: a 400 (e.g. an out-of-date relay rejecting a batch shape it
+  // did not understand yet) latched the outbox terminal FOREVER. The paused
+  // session kept the writer lease, so no other tab could heal delivery, and
+  // late-joining reviewers missed every envelope authored after the latch.
+  // Terminal now schedules one capped re-probe; once the relay accepts
+  // again (upgraded mid-session), the backlog drains without manual Retry.
+  let rejecting = true;
+  let terminalSignals = 0;
+  const outbox = new BrowserOutbox({
+    relayUrl: 'https://relay.example.test',
+    roomId: ROOM,
+    deviceId: DEVICE,
+    admissionKey: new Uint8Array(32).fill(0x42),
+    powBits: 12,
+    maxEventBytes: 1024,
+    now: () => NOW,
+    fetchImpl: async (_url, init) => {
+      if (rejecting) {
+        return response(400, {
+          error: { code: 'ATTN_DEVICE_PROOF_INVALID', message: 'device proof fields are v3 signal-only' },
+        });
+      }
+      return acceptedFromBody(String(init.body));
+    },
+    mintPow: async () => 'pow-terminal-reprobe',
+    backoffInitialMs: 60_000,
+    backoffMaxMs: 60_000,
+    terminalReprobeInitialMs: 40,
+    onTerminal: () => {
+      terminalSignals += 1;
+    },
+  });
+  try {
+    assert(outbox.enqueue(envelope('reprobe-1')), 'enqueue');
+    await outbox.flushNow().catch(() => undefined);
+    equal(outbox.getState().terminal, true, 'first rejection latches terminal');
+    equal(terminalSignals, 1, 'terminal surfaced to the session once');
+    equal(outbox.getState().pendingCount, 1, 'envelope stays queued, never dropped');
+
+    // Relay "upgrades" while the session is idle; the re-probe must drain
+    // the backlog with no manual retry.
+    rejecting = false;
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    equal(outbox.getState().pendingCount, 0, 're-probe drained the backlog');
+    equal(outbox.getState().terminal, false, 'terminal latch cleared after success');
+  } finally {
+    outbox.close();
+  }
+});
+
 for (const item of cases) {
   try {
     await item.run();

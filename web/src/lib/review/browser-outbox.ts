@@ -4,6 +4,10 @@ import type { MailboxEnvelope } from './browser-ws';
 
 export const BROWSER_OUTBOX_BATCH_SIZE = 32;
 export const BROWSER_OUTBOX_BACKOFF_INITIAL_MS = 1_000;
+/** Terminal-error re-probe cadence (attn-c38z): first retry after 30s,
+ *  doubling to a 5-minute ceiling. */
+export const BROWSER_OUTBOX_TERMINAL_REPROBE_INITIAL_MS = 30_000;
+export const BROWSER_OUTBOX_TERMINAL_REPROBE_MAX_MS = 300_000;
 export const BROWSER_OUTBOX_BACKOFF_MAX_MS = 60_000;
 
 export interface BrowserOutboxState {
@@ -49,6 +53,8 @@ export interface BrowserOutboxOptions {
   now?: () => number;
   onState?: (state: BrowserOutboxState) => void;
   onTerminal?: (error: BrowserOutboxError) => void;
+  /** Test seam: initial delay for the terminal-error re-probe (attn-c38z). */
+  terminalReprobeInitialMs?: number;
   /** Best-effort hook after relay acknowledgement and durable queue removal. */
   onAccepted?: (batch: readonly MailboxEnvelope[]) => void;
   onlineTarget?: BrowserOutboxOnlineTarget;
@@ -96,6 +102,14 @@ export class BrowserOutbox {
   private persistenceTransition: Promise<void> | null = null;
   private requestAbort: AbortController | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Re-probe timer for TERMINAL errors (attn-c38z): "terminal" can be
+   *  environmental — a relay upgraded mid-session started accepting the
+   *  same batch it rejected minutes earlier, but the paused outbox held
+   *  the writer lease hostage until a manual Retry or a full reload of
+   *  exactly the leader tab. One capped probe (30s → 5min) breaks that
+   *  dead end; genuinely-dead rooms just fail the probe again. */
+  private terminalRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private terminalBackoffMs: number;
   private backoffMs: number;
   private readonly maxBackoffMs: number;
   private persistence: BrowserOutboxPersistence | null;
@@ -129,6 +143,7 @@ export class BrowserOutbox {
     this.maxEventBytes = opts.maxEventBytes;
     this.maxSnapshotBytes = opts.maxSnapshotBytes ?? opts.maxEventBytes;
     this.backoffMs = opts.backoffInitialMs ?? BROWSER_OUTBOX_BACKOFF_INITIAL_MS;
+    this.terminalBackoffMs = opts.terminalReprobeInitialMs ?? BROWSER_OUTBOX_TERMINAL_REPROBE_INITIAL_MS;
     this.maxBackoffMs = opts.backoffMaxMs ?? BROWSER_OUTBOX_BACKOFF_MAX_MS;
     this.persistence = opts.persistence ?? null;
     opts.onlineTarget?.addEventListener?.('online', this.onlineHandler);
@@ -301,6 +316,7 @@ export class BrowserOutbox {
         this.publish({ lastError: classified.message, terminal: classified.terminal });
         if (classified.terminal) {
           this.opts.onTerminal?.(classified);
+          this.scheduleTerminalReprobe();
         } else if (!this.closed) {
           this.scheduleRetry(classified.retryAfterMs);
         }
@@ -319,6 +335,10 @@ export class BrowserOutbox {
     this.closed = true;
     this.opts.onlineTarget?.removeEventListener?.('online', this.onlineHandler);
     this.clearRetry();
+    if (this.terminalRetryTimer !== null) {
+      clearTimeout(this.terminalRetryTimer);
+      this.terminalRetryTimer = null;
+    }
     this.requestAbort?.abort();
     this.requestAbort = null;
     this.queue.length = 0;
@@ -338,6 +358,8 @@ export class BrowserOutbox {
         // Direct transport is opportunistic; mailbox acknowledgement wins.
       }
       this.backoffMs = this.opts.backoffInitialMs ?? BROWSER_OUTBOX_BACKOFF_INITIAL_MS;
+      this.terminalBackoffMs =
+        this.opts.terminalReprobeInitialMs ?? BROWSER_OUTBOX_TERMINAL_REPROBE_INITIAL_MS;
       this.publish({ pendingCount: this.queue.length, lastError: null, terminal: false });
     }
   }
@@ -488,6 +510,24 @@ export class BrowserOutbox {
     if (this.retryTimer === null) return;
     clearTimeout(this.retryTimer);
     this.retryTimer = null;
+  }
+
+  private scheduleTerminalReprobe(): void {
+    if (this.terminalRetryTimer || this.closed || this.queue.length === 0) return;
+    const wait = this.terminalBackoffMs;
+    this.terminalBackoffMs = Math.min(
+      this.terminalBackoffMs * 2,
+      BROWSER_OUTBOX_TERMINAL_REPROBE_MAX_MS,
+    );
+    this.terminalRetryTimer = setTimeout(() => {
+      this.terminalRetryTimer = null;
+      if (this.closed) return;
+      // Lift the terminal latch for ONE attempt; a repeat terminal failure
+      // re-enters through the flush catch and reschedules with the doubled
+      // backoff. The lastError stays visible until a batch actually lands.
+      this.publish({ terminal: false });
+      void this.flushNow().catch(() => undefined);
+    }, wait);
   }
 
   private publish(patch: Partial<BrowserOutboxState>): void {

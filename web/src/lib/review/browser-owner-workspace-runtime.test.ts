@@ -349,6 +349,12 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
   async resolveComment(_threadId: string): Promise<ReviewEvent> { throw new Error('not used'); }
   async retryOutbox(): Promise<void> {}
 
+  /** Presence bridge seam (attn-37f9) — recorded for cursor-tee assertions. */
+  readonly mirroredCursorPayloads: string[] = [];
+  mirrorCursorToRoom(payload: string): void {
+    this.mirroredCursorPayloads.push(payload);
+  }
+
   async transitionPublishedEpoch(
     fileId: string,
     phases: BrowserPublishedEpochTransitionPhases,

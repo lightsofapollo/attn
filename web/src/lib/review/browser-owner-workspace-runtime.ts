@@ -143,6 +143,9 @@ export interface BrowserOwnerWorkspaceAuthority extends BrowserReviewTerminalPor
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
   retryOutbox(): Promise<void>;
+  /** Presence bridge, tabs → room (attn-37f9): best-effort forward of a
+   *  follower tab's cursor payload over this leader's live session. */
+  mirrorCursorToRoom(payload: string): void;
 }
 
 export type BrowserOwnerWorkspaceRuntimeSubscriber = (
@@ -760,6 +763,10 @@ export class BrowserOwnerWorkspaceRuntime {
           this.options.storage.openSibling(createIfMissing),
       },
       collab: this.options.collab,
+      // Presence bridge, room → tabs (attn-37f9): reviewer cursors arriving
+      // over the relay re-post onto the local tab channel so follower tabs
+      // render them too (they dedupe by clientID).
+      onCursorDelivery: (payload) => this.localHub?.mirrorCursorPayload(payload),
       rollover: {
         onRequired: (input) => this.commitRolloverAndPublish(
           input.fileId,
@@ -1286,6 +1293,9 @@ export class BrowserOwnerWorkspaceRuntime {
             controller: publishedController,
             seedForPath: (path: string) => this.getPublishedCollabSeed(path),
             pathForFileId: (fileId: string) => this.getBinding(fileId)?.path ?? null,
+            // Presence bridge, tabs → room (attn-37f9): follower cursors ride
+            // this leader's live session out to reviewers.
+            forwardCursor: (payload: string) => this.authority?.mirrorCursorToRoom(payload),
           }
         : {}),
     });

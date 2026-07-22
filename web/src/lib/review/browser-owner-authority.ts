@@ -157,6 +157,13 @@ export interface BrowserOwnerAuthorityOptions {
   sessionOptions?: Omit<BrowserSessionOptions, 'owner' | 'onCollab' | 'onState'> & {
     onState?: (state: BrowserSessionState) => void;
   };
+  /**
+   * Cursor presence mirror (attn-37f9): the leader is the only node on both
+   * the relay wire and the local tab channel, so relay-borne cursor payloads
+   * are handed here for the runtime to re-post onto the tab channel. Without
+   * it a reviewer's caret/selection rendered only in the leader tab.
+   */
+  onCursorDelivery?: (payload: string) => void;
   collab: {
     selfClientId: string;
     selfLabel: string;
@@ -909,6 +916,16 @@ export class BrowserOwnerAuthorityService {
       debug[message.kind] = (debug[message.kind] ?? 0) + 1;
     }
     if (!message || (message.kind !== 'resync' && message.kind !== 'cursor')) return;
+    // Presence tee (attn-37f9): mirror relay cursors to follower tabs before
+    // any transition barrier — presence must not queue behind an epoch swap,
+    // and a dropped cursor frame self-heals on the next caret move.
+    if (message.kind === 'cursor') {
+      try {
+        this.options.onCursorDelivery?.(delivery.payload);
+      } catch {
+        // Presence is best-effort by definition.
+      }
+    }
     const barrier = this.transitionCollabBarrier;
     if (barrier) {
       if (barrier.waiters >= MAX_TRANSITION_COLLAB_WAITERS) {
@@ -979,6 +996,18 @@ export class BrowserOwnerAuthorityService {
     if (!barrier) return;
     this.transitionCollabBarrier = null;
     barrier.reject(reason instanceof Error ? reason : new Error(String(reason)));
+  }
+
+  /**
+   * Best-effort presence relay for the local tab hub (attn-37f9): a follower
+   * tab's cursor arrives over the BroadcastChannel and must reach room peers
+   * through this leader's session. Fire-and-forget — no generation guard, no
+   * barrier: a lost cursor frame is repainted by the next caret move.
+   */
+  mirrorCursorToRoom(payload: string): void {
+    const session = this.sessionValue;
+    if (!session || this.getState().status !== 'active') return;
+    void session.sendCollab(payload).catch(() => undefined);
   }
 
   private async runAuthoritySend(

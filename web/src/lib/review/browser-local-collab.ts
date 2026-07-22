@@ -164,6 +164,12 @@ export interface LocalCollabHubOptions extends TimerOptions {
   readHeadMarkdown(path: string): Promise<string | null>;
   /** Durable fenced commit through the owner runtime's mutation queue. */
   commitMarkdown(path: string, markdown: string): Promise<void>;
+  /**
+   * Presence relay to room peers (attn-37f9): called with a follower tab's
+   * raw cursor payload so the leader forwards it over its live session.
+   * Absent for the legacy (unshared) hub — presence stays tab-local there.
+   */
+  forwardCursor?: (payload: string) => void;
   /** Active published-room controller. When present, local tabs join the same
    * authenticated authority instead of creating a parallel legacy authority. */
   controller?: CollabController;
@@ -183,6 +189,15 @@ export interface LocalCollabHubOptions extends TimerOptions {
  * reached first all read the same cached markdown, so every participant
  * seeds from an identical base.
  */
+/** Cheap kind probe — full validation happens in the receiving controller. */
+function isCursorPayload(payload: string): boolean {
+  try {
+    return (JSON.parse(payload) as { kind?: unknown }).kind === 'cursor';
+  } catch {
+    return false;
+  }
+}
+
 export class LocalCollabHub {
   readonly generation = randomGeneration();
   readonly controller: CollabController;
@@ -352,7 +367,27 @@ export class LocalCollabHub {
     }
     if (body.kind === 'collab' && body.generation === this.generation) {
       this.controller.onInbound(body.payload, envelope.senderId);
+      // Cursor tee (attn-37f9): a follower's presence must also reach room
+      // peers through the leader's session — without this a second tab's
+      // caret rendered only inside this device's tabs.
+      if (this.options.forwardCursor && isCursorPayload(body.payload)) {
+        try {
+          this.options.forwardCursor(body.payload);
+        } catch {
+          // Presence is best-effort.
+        }
+      }
     }
+  }
+
+  /**
+   * Relay→tabs presence mirror (attn-37f9): re-post a relay-borne cursor
+   * payload onto the tab channel so follower tabs render room peers' carets.
+   * Follower controllers dedupe by clientID, so re-delivery is idempotent.
+   */
+  mirrorCursorPayload(payload: string): void {
+    if (this.closed || !isCursorPayload(payload)) return;
+    this.post({ kind: 'collab', generation: this.generation, payload });
   }
 
   private post(body: LocalCollabBody): void {

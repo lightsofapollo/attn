@@ -10,6 +10,7 @@ import {
 import {
   BrowserShareSession,
   type BrowserShareSessionOptions,
+  ShareRoomGoneError,
   StaleShareEpochError,
   type DurableLiveSession,
   type DurableShareOutboxStore,
@@ -76,13 +77,16 @@ function resolverFor(options: {
   floor?: Floor;
   manifestDigest?: () => string;
   onResolve?: () => void;
+  isRoomLive?: () => boolean | Promise<boolean>;
   digestCiphertext?: () => string;
   decryptSnapshot?: (ref: { fileId: string; snapshotId: string }) => { fileId: string; snapshotId: string; docType: 'markdown' | 'html'; content: string };
   disposeSnapshot?: (snapshot: { content: string }) => void;
 }): BrowserShareResolver<unknown> {
+  const isRoomLive = options.isRoomLive;
   return new BrowserShareResolver({
     shareId: SHARE_ID, capability: { opaque: true }, rollbackFloor: options.floor ?? new Floor(),
     fetchRecord: async () => { options.onResolve?.(); return options.getRecord(); },
+    ...(isRoomLive === undefined ? {} : { isRoomLive: () => isRoomLive() }),
     decodeBundle: () => options.getBundle(), digestManifest: () => options.manifestDigest?.() ?? MANIFEST_A,
     fetchSnapshot: async () => ({ ciphertext: new Uint8Array([1, 2, 3]), ciphertextSha256: SNAPSHOT_DIGEST }),
     digestCiphertext: () => options.digestCiphertext?.() ?? SNAPSHOT_DIGEST,
@@ -355,6 +359,52 @@ test('view tier rejects every mutation including resolve and retries', async () 
   await rejects(() => session.resolveComment('thread'), 'view');
   await rejects(() => session.retryOutbox(), 'view');
   await rejects(() => session.retryStaleDraft('draft-1'), 'view');
+});
+
+test('room-gone live bootstrap degrades to durable snapshots with mailbox authoring (attn-hh9r)', async () => {
+  // The resolver's liveness probe races the room's 24h hard TTL: first pass
+  // says `room`, the live bootstrap then finds it wiped, and the queued
+  // re-resolve observes the dead room. No hard error — the reviewer keeps
+  // the snapshot presentation with the owner shown offline.
+  let roomLiveCalls = 0;
+  const store = new MemoryOutbox();
+  const session = new BrowserShareSession(sessionOptions({
+    resolver: resolverFor({ getRecord: () => record(2, 1, ROOM_ID), getBundle: () => bundle(),
+      isRoomLive: () => { roomLiveCalls += 1; return roomLiveCalls === 1; } }),
+    store,
+    live: () => fakeLive([], () => { throw new ShareRoomGoneError(); }),
+  }));
+  await session.start();
+  const state = session.getState();
+  assert(state.status === 'ready', `room-gone bootstrap surfaced ${state.status}: ${state.error}`);
+  assert(state.source === 'share_snapshot' && !state.ownerOnline, 'room-gone bootstrap did not degrade to snapshots');
+  assert(state.snapshots.length === 1, 'degraded session lost its durable snapshots');
+  assert(state.canComment, 'degraded session lost mailbox authoring');
+  const event = await session.createComment(ANCHOR, 'delivered through the mailbox');
+  assert(event === EVENT && session.getState().pendingComments === 0, 'mailbox comment did not flush after degrade');
+  session.close();
+});
+
+test('room-gone bootstrap retries are bounded; genuine live failures still error (attn-hh9r)', async () => {
+  // A room that flaps alive-at-probe/dead-at-bootstrap must not loop forever.
+  let starts = 0;
+  const flapping = new BrowserShareSession(sessionOptions({
+    resolver: resolverFor({ getRecord: () => record(2, 1, ROOM_ID), getBundle: () => bundle(), isRoomLive: () => true }),
+    live: () => fakeLive([], () => { starts += 1; throw new ShareRoomGoneError(); }),
+  }));
+  await flapping.start();
+  assert(flapping.getState().status === 'error', 'unbounded room-gone bootstrap retries');
+  assert(starts === 4, `expected 1 + 3 bounded bootstrap attempts, saw ${starts}`);
+  flapping.close();
+  // A genuinely unreachable relay keeps the terminal error presentation.
+  const network = new BrowserShareSession(sessionOptions({
+    resolver: resolverFor({ getRecord: () => record(2, 1, ROOM_ID), getBundle: () => bundle(), isRoomLive: () => true }),
+    live: () => fakeLive([], () => { throw new Error('relay unreachable'); }),
+  }));
+  await network.start();
+  const failed = network.getState();
+  assert(failed.status === 'error' && failed.error === 'relay unreachable', 'genuine network failure was masked');
+  network.close();
 });
 
 test('live start failure closes candidate/subscription and close wins generation race', async () => {

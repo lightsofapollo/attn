@@ -10,7 +10,9 @@ import type { Node as PmNode } from 'prosemirror-model';
 
 import { markdownSerializer } from '../schema';
 import type { Anchor, ResolvedAnchor, ReviewEvent, SuggestionOperation } from '../types';
+import { boundFetch } from './bound-fetch';
 import { contentHash } from './browser-crypto';
+import { BrowserShareOwnerRelayError } from './browser-share-owner';
 import {
   BrowserOwnerAuthorityService,
   type BrowserOwnerAuthorityFile,
@@ -121,6 +123,10 @@ export interface BrowserOwnerWorkspaceRuntimeOptions {
   publisher?: (options: PublishBrowserSnapshotsOptions) => Promise<unknown>;
   /** Initial share/stop seams; production uses the canonical coordinator. */
   sharing?: BrowserWorkspaceSharingDependencies;
+  /** Test seam for the room-gone check (attn-hh9r). Production probes the
+   * relay's room and share routes directly; resolves true only when the room
+   * is gone while the relay itself stays reachable. */
+  roomGoneProbe?: (input: { relayUrl: string; roomId: string; shareId: string }) => Promise<boolean>;
   schedule?: (callback: () => void, delayMs: number) => unknown;
   cancelScheduled?: (handle: unknown) => void;
   pagehideTarget?: {
@@ -179,6 +185,8 @@ export class BrowserOwnerWorkspaceRuntime {
   private released = false;
   private lastPublicationAt = 0;
   private republishHandle: unknown = null;
+  private roomRecovery: Promise<void> | null = null;
+  private roomRecoveryStreak = 0;
   private readonly reviewedSuggestions = new Map<string, BrowserReviewedSuggestion>();
   private localHeartbeatTimer: unknown = null;
   private readonly schedule: (callback: () => void, delayMs: number) => unknown;
@@ -1169,6 +1177,92 @@ export class BrowserOwnerWorkspaceRuntime {
       // Roster mirror (attn-90qq): follower tabs have no session, so the
       // leader re-broadcasts its presence roster on every authority tick.
       this.localHub?.broadcastPresence(authorityState.session?.peers ?? []);
+      if (status === 'active') this.roomRecoveryStreak = 0;
+      else if (status === 'paused') this.maybeRecoverExpiredRoom(authorityState);
+    }
+  }
+
+  /**
+   * Durable shares outlive their 24h ordinary room (HARD_MAX_TTL, attn-hh9r):
+   * when the live authority pauses because the room behind an active share
+   * died, re-provision a fresh room under the SAME share record and link keys
+   * instead of leaving the share dead until the next full page load.
+   *
+   * Signals: `room_expired` is the relay's own verdict (WS close 4002, or the
+   * authenticated policy-expiry check at bootstrap). `device_register` /
+   * `network` are ambiguous — a wiped room's 404 carries no stored policy, so
+   * cross-origin it is CORS-untagged and reads as a network failure — and the
+   * probe decides. `room_deleted` (4001) is a deliberate teardown elsewhere
+   * and is never rebuilt here.
+   */
+  private maybeRecoverExpiredRoom(authorityState: BrowserOwnerAuthorityState): void {
+    if (this.roomRecovery || this.closing || !this.share || !this.lease) return;
+    if (authorityState.pauseKind !== 'transport_failed') return;
+    const sessionError = authorityState.session?.error ?? null;
+    if (!sessionError) return;
+    const certain = sessionError.kind === 'room_expired';
+    const ambiguous = sessionError.kind === 'device_register' || sessionError.kind === 'network';
+    if (!certain && !ambiguous) return;
+    if (this.roomRecoveryStreak >= MAX_ROOM_RECOVERIES) return;
+    const share = this.share;
+    this.roomRecovery = (async () => {
+      if (!certain) {
+        const probe = this.options.roomGoneProbe ?? defaultRoomGoneProbe;
+        const gone = await probe({
+          relayUrl: share.relayUrl,
+          roomId: share.roomId,
+          shareId: share.capId,
+        }).catch(() => false);
+        // A genuine transport failure keeps today's paused presentation.
+        if (!gone) return;
+      }
+      this.roomRecoveryStreak += 1;
+      await this.enqueueInternal(() => this.reprovisionExpiredRoom());
+    })().finally(() => {
+      this.roomRecovery = null;
+    });
+  }
+
+  private async reprovisionExpiredRoom(): Promise<void> {
+    if (this.closing || !this.share || !this.lease) return;
+    this.patchState({
+      status: 'transitioning',
+      reason: 'The live review room expired — re-provisioning it under the same share link…',
+    });
+    try {
+      await this.deactivateAuthority();
+      const coordinator = this.sharingCoordinator();
+      try {
+        // reconcileActive recreates the missing epoch room, republishes the
+        // current snapshots + genesis into it, and upserts the share record
+        // (routing/manifest changes land at revision current + 1).
+        await coordinator.reconcileActive();
+      } catch (error) {
+        // The one 409 worth a second pass: reviewer mail landed in the
+        // durable mailbox between the drain and the routing upsert.
+        // reconcileActive drains before it publishes, so a single retry
+        // consumes the new mail and re-attempts the upsert.
+        if (!(error instanceof BrowserShareOwnerRelayError) || error.code !== 'ATTN_SHARE_MAIL_PENDING') {
+          throw error;
+        }
+        await coordinator.reconcileActive();
+      }
+      const discovered = await this.discoverPublishedShare();
+      if (!discovered) throw new StorageConflictError('re-provisioned share could not be reopened');
+      // The publication portion inside activation keeps its attn-3wgd
+      // bounded head-moved retries; a final failure lands in the honest
+      // paused state below instead of a generic error.
+      await this.activatePublishedShare(discovered, this.requireFence());
+    } catch (error) {
+      this.startLocalHeartbeat();
+      this.patchState({
+        status: 'paused',
+        leaseRole: 'owner',
+        writable: true,
+        liveEditingAvailable: false,
+        reason: `The review room expired and could not be re-provisioned: ${errorMessage(error)}`,
+        authority: this.authority?.getState() ?? null,
+      });
     }
   }
 
@@ -1449,6 +1543,46 @@ function errorMessage(error: unknown): string {
  * commits still pause the authority instead of looping.
  */
 const STARTUP_PUBLICATION_ATTEMPTS = 3;
+
+/**
+ * Consecutive room re-provision attempts without an intervening healthy
+ * authority (attn-hh9r). Each attempt is a full deactivate → reconcile →
+ * re-activate cycle, so a relay that keeps wiping or rejecting the rebuilt
+ * room parks in the honest paused state instead of looping.
+ */
+const MAX_ROOM_RECOVERIES = 3;
+
+/**
+ * True only when the share's room is gone while the relay itself stays
+ * reachable (attn-hh9r). Both requests are header-free simple GETs (no CORS
+ * preflight). A live room answers the unauthenticated devices probe with a
+ * policy-tagged 401; a TTL-wiped room answers 404 with no stored policy, so
+ * cross-origin the response is CORS-untagged and the fetch rejects opaquely —
+ * only the always-tagged share record route separates that from a dead relay.
+ */
+async function defaultRoomGoneProbe(input: {
+  relayUrl: string;
+  roomId: string;
+  shareId: string;
+}): Promise<boolean> {
+  const relay = new URL(input.relayUrl);
+  let roomGone: boolean;
+  try {
+    const response = await boundFetch(
+      new URL(`/v3/rooms/${encodeURIComponent(input.roomId)}/devices`, relay).href,
+    );
+    roomGone = response.status === 404 || response.status === 410;
+  } catch {
+    roomGone = true;
+  }
+  if (!roomGone) return false;
+  try {
+    await boundFetch(new URL(`/v3/shares/${encodeURIComponent(input.shareId)}`, relay).href);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The stage/commit consistency gates in browser-workspace-share.ts that mean

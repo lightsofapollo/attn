@@ -24,7 +24,7 @@ import type {
   BrowserPublishedEpochTransitionPhases,
 } from './browser-owner-authority';
 import { BrowserStorage } from './browser-storage';
-import { generateBrowserIdentity } from './browser-session';
+import { generateBrowserIdentity, type BrowserSessionState } from './browser-session';
 import {
   publishBrowserSnapshots,
   type PublishBrowserSnapshotsOptions,
@@ -355,6 +355,18 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
     this.mirroredCursorPayloads.push(payload);
   }
 
+  /** Simulate the live transport dying under the authority (attn-hh9r):
+   * pauseTransport('transport_failed') with the session's terminal error. */
+  emitTransportPause(kind: 'room_expired' | 'room_deleted' | 'device_register' | 'network'): void {
+    this.state = {
+      ...authorityState('paused', this.options.attachedLease ?? null),
+      pauseKind: 'transport_failed',
+      pauseReason: 'room transport failed',
+      session: erroredSession(kind),
+    };
+    this.options.onState?.(this.state);
+  }
+
   async transitionPublishedEpoch(
     fileId: string,
     phases: BrowserPublishedEpochTransitionPhases,
@@ -406,6 +418,19 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
       throw error;
     }
   }
+}
+
+function erroredSession(
+  kind: 'room_expired' | 'room_deleted' | 'device_register' | 'network',
+): BrowserSessionState {
+  return {
+    principal: 'owner', ownerOnline: false, peers: [], liveEditingAvailable: false,
+    status: 'error', connection: 'offline', directError: null, roomId: null,
+    snapshotContent: null, snapshotDocType: 'markdown', snapshotId: null, fileId: null,
+    error: { kind, message: 'room transport failed' }, authoringReady: false,
+    grantTier: 'suggest', outboxPending: 0, authoringError: null,
+    persistence: 'ephemeral', storagePersisted: null, canRemember: false,
+  };
 }
 
 function authorityState(
@@ -1015,6 +1040,156 @@ defineCase('continuously moving heads exhaust the bounded retries and pause as b
   equal(runtime.getState().liveEditingAvailable, false, 'live authority stays unavailable while paused');
   await runtime.close();
   storage.close();
+});
+
+// attn-hh9r: shared harness for the room-expiry recovery cases — a real
+// coordinator/relay/publisher stack with a FakeAuthority whose transport can
+// be killed on demand, plus a "wipe" seam (clearing createdRooms makes the
+// next createRoom report created:true, exactly like a HARD_MAX_TTL-wiped DO).
+interface RoomExpiryHarness {
+  runtime: BrowserOwnerWorkspaceRuntime;
+  storage: BrowserStorage;
+  authorities: FakeAuthority[];
+  upserts: Array<{ revision: number; currentRoomId: string | null | undefined }>;
+  createdRooms: Set<string>;
+  failures: { mailPendingUpserts: number; relayDown: boolean };
+  probe: { result: boolean; calls: number };
+}
+
+async function openRoomExpiryHarness(workspaceId: string): Promise<RoomExpiryHarness> {
+  // Ticking clock: the recovery republishes genesis + snapshots into the
+  // recreated room, and envelope ids derive from createdAt — a frozen clock
+  // would collide the second publication with the first one's durable
+  // ciphertext, which real wall-clock time never does.
+  let tick = 1_720_000_000_000;
+  const now = (): number => (tick += 1);
+  const storage = await openStorage(now);
+  await seedLocal(storage, workspaceId);
+  const events: string[] = [];
+  const authorities: FakeAuthority[] = [];
+  const upserts: RoomExpiryHarness['upserts'] = [];
+  const createdRooms = new Set<string>();
+  const failures = { mailPendingUpserts: 0, relayDown: false };
+  const probe = { result: false, calls: 0 };
+  let relay: MemoryShareRelay | null = null;
+  const runtime = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, workspaceId, {
+    now,
+    roomGoneProbe: async () => { probe.calls += 1; return probe.result; },
+    authorityFactory: (options) => {
+      const authority = new FakeAuthority(options, storage, events);
+      authorities.push(authority);
+      return authority;
+    },
+    sharing: {
+      now,
+      randomBytes: deterministicRandom(),
+      createRoom: async (options) => {
+        const bootstrap = bootstrapFromOptions(options);
+        const created = !createdRooms.has(bootstrap.roomId);
+        createdRooms.add(bootstrap.roomId);
+        return { ...bootstrap, created };
+      },
+      publish: snapshotPublisher,
+      indexBuilder: testIndexBuilder,
+      shareRelayFactory: (options) => {
+        if (!relay) {
+          relay = new MemoryShareRelay(options.shareId);
+          const originalUpsert = relay.upsert.bind(relay);
+          relay.upsert = async (request) => {
+            if (failures.relayDown) throw new BrowserShareOwnerRelayError(503, 'durable share request');
+            if (failures.mailPendingUpserts > 0) {
+              failures.mailPendingUpserts -= 1;
+              throw new BrowserShareOwnerRelayError(409, 'durable share request', 'ATTN_SHARE_MAIL_PENDING');
+            }
+            upserts.push({ revision: request.revision, currentRoomId: request.currentRoomId });
+            return originalUpsert(request);
+          };
+          const originalFetch = relay.fetchWithViewCapability.bind(relay);
+          relay.fetchWithViewCapability = async () => {
+            if (failures.relayDown) throw new BrowserShareOwnerRelayError(503, 'durable share request');
+            return originalFetch();
+          };
+        }
+        return relay;
+      },
+      outboxFactory: ({ storage: outboxStorage, credentials }) =>
+        new AckingShareOutbox(outboxStorage, credentials.roomId, events),
+    },
+  }));
+  await runtime.start();
+  return { runtime, storage, authorities, upserts, createdRooms, failures, probe };
+}
+
+defineCase('mid-life room expiry re-provisions a fresh room under the same durable share (attn-hh9r)', async () => {
+  const harness = await openRoomExpiryHarness('share-room-expiry-reprovision');
+  const view = await harness.runtime.ensureShare(shareRequest());
+  equal(harness.authorities.length, 1, 'initial share starts one authority');
+  const committedRevision = harness.upserts.at(-1)!.revision;
+
+  // The relay hard-wipes the 24h room out from under the live authority
+  // (HARD_MAX_TTL): the session dies with the relay's own 4002 verdict.
+  harness.createdRooms.clear();
+  harness.authorities[0]!.emitTransportPause('room_expired');
+  await waitFor(() => harness.authorities.length === 2 && harness.runtime.getState().status === 'active', 3000);
+  equal(harness.probe.calls, 0, 'room_expired is certain — no probe needed');
+  equal(harness.runtime.getState().roomId, view.roomId, 're-provision keeps the share-derived room identity');
+  equal(harness.runtime.getState().liveEditingAvailable, true, 're-provisioned authority is live');
+  equal(harness.runtime.getState().reason, null, 'recovered runtime carries no paused reason');
+  const final = harness.upserts.at(-1)!;
+  assert(final.revision === committedRevision + 1, 're-provision must land at revision current + 1');
+  equal(final.currentRoomId, view.roomId, 're-provision re-points the share record at its room');
+  await harness.runtime.close();
+  harness.storage.close();
+});
+
+defineCase('room re-provision drains and retries once on ATTN_SHARE_MAIL_PENDING (attn-hh9r)', async () => {
+  const harness = await openRoomExpiryHarness('share-room-expiry-mail-pending');
+  await harness.runtime.ensureShare(shareRequest());
+  const committedRevision = harness.upserts.at(-1)!.revision;
+
+  // Reviewer mail lands between the recovery's drain and its routing upsert:
+  // the relay answers 409 ATTN_SHARE_MAIL_PENDING exactly once, and one full
+  // reconcile retry (which drains first) must converge.
+  harness.createdRooms.clear();
+  harness.failures.mailPendingUpserts = 1;
+  harness.authorities[0]!.emitTransportPause('room_expired');
+  await waitFor(() => harness.authorities.length === 2 && harness.runtime.getState().status === 'active', 3000);
+  equal(harness.failures.mailPendingUpserts, 0, 'mail-pending rejection was consumed');
+  assert(harness.upserts.at(-1)!.revision > committedRevision, 'retried re-provision advanced the share revision');
+  await harness.runtime.close();
+  harness.storage.close();
+});
+
+defineCase('ambiguous failures are probe-gated and total failure pauses with the room-expired reason (attn-hh9r)', async () => {
+  const harness = await openRoomExpiryHarness('share-room-expiry-honest-pause');
+  await harness.runtime.ensureShare(shareRequest());
+
+  // A genuine network failure (probe: relay unreachable or room alive) keeps
+  // today's paused presentation and never tears the authority down.
+  harness.probe.result = false;
+  harness.authorities[0]!.emitTransportPause('network');
+  await waitFor(() => harness.probe.calls === 1, 3000);
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  equal(harness.authorities.length, 1, 'relay-down pause must not re-provision');
+  equal(harness.runtime.getState().status, 'paused', 'relay-down pause is preserved');
+  equal(harness.runtime.getState().reason, 'room transport failed', 'relay-down pause keeps its transport reason');
+
+  // The probe now proves the room gone while the relay stays reachable, but
+  // the re-provision itself fails end-to-end: the pause must say the room
+  // expired instead of a generic transport error.
+  harness.probe.result = true;
+  harness.failures.relayDown = true;
+  harness.createdRooms.clear();
+  harness.authorities[0]!.emitTransportPause('device_register');
+  await waitFor(() => (harness.runtime.getState().reason ?? '').includes('could not be re-provisioned'), 3000);
+  equal(harness.runtime.getState().status, 'paused', 'failed re-provision parks in a paused state');
+  assert(
+    (harness.runtime.getState().reason ?? '').startsWith('The review room expired'),
+    `pause reason must name the expired room: ${harness.runtime.getState().reason}`,
+  );
+  equal(harness.runtime.getState().writable, true, 'local editing stays writable after a failed re-provision');
+  await harness.runtime.close();
+  harness.storage.close();
 });
 
 async function waitFor(predicate: () => boolean, attempts = 100): Promise<void> {

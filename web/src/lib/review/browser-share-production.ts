@@ -36,13 +36,14 @@ import {
   type DurableShareSnapshot,
 } from './browser-share-resolver';
 import type {
+  DurableLiveSession,
   DurableShareOutboxStore,
   DurableShareOutboxTransition,
   PersistedShareOutboxEntry,
   ShareMailboxReceipt,
   ShareMailboxTransport,
 } from './browser-share-session';
-import { BrowserShareSession, StaleShareEpochError, type BrowserShareSessionOptions,
+import { BrowserShareSession, ShareRoomGoneError, StaleShareEpochError, type BrowserShareSessionOptions,
   type BrowserShareSessionState } from './browser-share-session';
 import { BROWSER_POW_DIFFICULTY, mintBrowserPowInWorker } from './browser-pow';
 import {
@@ -159,6 +160,25 @@ export async function createProductionDurableShareSession(options: ProductionDur
   const { resolver, linkKeys, persistence } = await createBrowserDurableShareResolver(options);
   const identity = generateBrowserIdentity();
   const joinedByBundle = new Map<string, ReturnType<typeof assembleBrowserEvent>>();
+  // Forward reference for the live-session wrapper below: a post-bootstrap
+  // room death re-resolves through the committed session (attn-hh9r).
+  let sessionRef: BrowserShareSession | null = null;
+  // No admission headers: a bare GET is a simple request (no CORS preflight)
+  // and every ShareDO response is browser-tagged, so ANY resolved response —
+  // including the 401 this unauthenticated probe earns — proves the relay is
+  // reachable. A wiped ROOM, by contrast, has no stored policy: its 404 comes
+  // back CORS-untagged and a cross-origin fetch rejects opaquely (attn-hh9r).
+  const shareRelayReachable = async (): Promise<boolean> => {
+    try {
+      await (options.fetchImpl ?? boundFetch)(
+        new URL(`/v3/shares/${encodeURIComponent(options.invite.shareId)}`, options.relayUrl).href,
+        options.signal === undefined ? {} : { signal: options.signal },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
   let lastCreatedAt = 0;
   const nextCreatedAt = (): number => (lastCreatedAt = Math.max(Date.now(), lastCreatedAt + 1));
   const fingerprint = (resolution: Awaited<ReturnType<typeof resolver.resolve>>): string => {
@@ -212,10 +232,24 @@ export async function createProductionDurableShareSession(options: ProductionDur
     },
     createLiveSession: ({ resolution }) => {
       const capability = resolution.bundle.roomCapability as DurableShareCapability;
-      return new BrowserSession({ relayUrl: options.relayUrl, identity: { ...identity,
+      let bootstrapped = false;
+      const live = new BrowserSession({ relayUrl: options.relayUrl, identity: { ...identity,
         signingSecret: new Uint8Array(identity.signingSecret), signingPublic: new Uint8Array(identity.signingPublic),
         encryptionSecret: new Uint8Array(identity.encryptionSecret), publicEncryptionKey: new Uint8Array(identity.publicEncryptionKey) },
-        onState: options.onLiveState, onCollab: options.onCollab,
+        onState: state => {
+          // A live room that dies mid-session (24h HARD_MAX_TTL — WS close
+          // 4002, or 4001 after an owner-side teardown) must fall back to the
+          // durable snapshot presentation, not dead-end on an error screen
+          // (attn-hh9r). Swallow the terminal state and re-resolve: the
+          // resolver observes the dead room and demotes to snapshots.
+          if (bootstrapped && state.status === 'error'
+            && (state.error?.kind === 'room_expired' || state.error?.kind === 'room_deleted')) {
+            void sessionRef?.refreshNow().catch(() => undefined);
+            return;
+          }
+          options.onLiveState?.(state);
+        },
+        onCollab: options.onCollab,
         store: options.liveStore, disableWebRtc: options.disableWebRtc,
         getDisplayName: options.getDisplayName,
         getColor: options.getColor,
@@ -226,6 +260,40 @@ export async function createProductionDurableShareSession(options: ProductionDur
         readCapabilityKey: new Uint8Array(capability.readCapabilityKey),
         ...(capability.writeAdmissionKey === undefined ? {} : { writeAdmissionKey: new Uint8Array(capability.writeAdmissionKey) }),
         ...(capability.grantSignature === undefined ? {} : { grantSignature: capability.grantSignature }) } });
+      // BrowserSession.start never throws — it parks failures in its state.
+      // The durable-share pipeline needs bootstrap failures typed: a room the
+      // relay wiped at its hard TTL is `ShareRoomGoneError` (degrade to
+      // snapshots), while a genuinely unreachable relay keeps erroring with
+      // today's presentation (attn-hh9r).
+      const startWithRoomGoneDetection = async (): Promise<void> => {
+        await live.start();
+        const state = live.getState();
+        if (state.status !== 'error' && state.status !== 'terminated') {
+          bootstrapped = true;
+          return;
+        }
+        const kind = state.error?.kind;
+        if (kind === 'room_expired' || kind === 'room_deleted') throw new ShareRoomGoneError();
+        // A TTL-wiped room's 404 is CORS-untagged (the DO has no policy left
+        // to authorize the browser), so it reaches us as an opaque
+        // network-class failure. Only the share record's reachability
+        // distinguishes it from the relay being down.
+        if ((kind === 'device_register' || kind === 'network') && await shareRelayReachable()) {
+          throw new ShareRoomGoneError();
+        }
+        throw new Error(state.error?.message ?? 'live share session failed to start');
+      };
+      return {
+        start: startWithRoomGoneDetection,
+        close: () => live.close(),
+        createComment: (anchor, body, threadId) => live.createComment(anchor, body, threadId),
+        replyToComment: (anchor, body, threadId) => live.replyToComment(anchor, body, threadId),
+        resolveComment: threadId => live.resolveComment(threadId),
+        createSuggestion: draft => live.createSuggestion(draft),
+        retryOutbox: () => live.retryOutbox(),
+        announceProfile: () => live.announceProfile(),
+        sendCollab: payload => live.sendCollab(payload),
+      } satisfies DurableLiveSession;
     },
     subscribeToChanges: ({ onChange, onError }) => subscribeToDurableShareChanges({ relayUrl: options.relayUrl,
       shareId: options.invite.shareId, linkKeys, onChange, onError, webSocketFactory: options.webSocketFactory }),
@@ -242,6 +310,7 @@ export async function createProductionDurableShareSession(options: ProductionDur
     },
   };
   const session = new BrowserShareSession(sessionOptions);
+  sessionRef = session;
   const getBindingContext = async (signal?: AbortSignal): Promise<BrowserPushBindingContext> => {
     const resolution = session.currentResolutionForIntegration();
     if (!resolution || resolution.bundle.tier === 'view') throw new Error('view-only shares cannot enable notifications');
@@ -721,10 +790,29 @@ export async function createBrowserDurableShareResolver(options: BrowserDurableS
     isRoomLive: async ({ bundle, signal }) => {
       const capability = bundle.roomCapability as DurableShareCapability;
       const path = `/v3/rooms/${encodeURIComponent(bundle.roomId)}/devices`;
-      const response = await fetchImpl(new URL(path, relay).href, { signal, headers: {
-        'Attn-Admission': buildAdmissionHeaderV3(capability.roomKeys.readAdmissionKey, 'read', 'GET', path, new Uint8Array()),
-      } });
-      if (response.status === 404) return false;
+      let response: Response;
+      try {
+        response = await fetchImpl(new URL(path, relay).href, { signal, headers: {
+          'Attn-Admission': buildAdmissionHeaderV3(capability.roomKeys.readAdmissionKey, 'read', 'GET', path, new Uint8Array()),
+        } });
+      } catch (error) {
+        // A room the relay wiped at its 24h hard TTL answers 404 with no
+        // stored policy, so the edge cannot attach CORS headers and a
+        // cross-origin browser fetch rejects opaquely instead of delivering
+        // the status (attn-hh9r). Distinguish that from a genuinely
+        // unreachable relay via the always-browser-tagged share record route:
+        // reachable relay + failing room route = the room is gone (degrade to
+        // durable snapshots); unreachable relay keeps today's network error.
+        if (signal?.aborted) throw error;
+        try {
+          const probe = await fetchImpl(shareUrl, { headers: headers('GET', sharePath), signal });
+          if (probe.ok) return false;
+        } catch {
+          // The relay itself is unreachable — surface the original failure.
+        }
+        throw error;
+      }
+      if (response.status === 404 || response.status === 410) return false;
       if (!response.ok) throw new Error(`share room liveness fetch failed (${response.status})`);
       return true;
     },

@@ -1,5 +1,6 @@
-import { base64UrlEncode, expandShareLinkKeys } from './browser-crypto';
+import { base64UrlEncode, deriveShareLinkKeys, expandShareLinkKeys } from './browser-crypto';
 import { deriveReadKeysV3, toCanonicalBytes } from './browser-crypto';
+import { buildShareBundleMutations, EMPTY_SHARE_MANIFEST_DIGEST } from './browser-share-owner';
 import { parseAndStripShareInvite } from './browser-share';
 import { createBrowserDurableShareResolver, createShareMailboxTransport, decryptDurableShareSnapshot,
   DurableShareBrowserSessionFacade, reviewSnapshotFromDurable, subscribeToDurableShareChanges,
@@ -144,6 +145,54 @@ const inviteUrl = `https://attn.sh/s/${shareId}#key=${base64UrlEncode(secret)}`;
   await createBrowserDurableShareResolver({ relayUrl: 'https://relay.example', invite, tier: 'view', persistence });
   assert(invite.linkSecret.every(byte => byte === 0), 'original parsed link secret survived successful expansion');
   console.log('PASS resolver zeroes original parsed link secret after expansion');
+}
+
+{
+  // attn-hh9r: a TTL-wiped room's 404 carries no stored policy, so cross-origin
+  // it is CORS-untagged and the browser fetch rejects opaquely. The resolver
+  // must read that as room-gone (degrade to the durable snapshots) whenever the
+  // always-tagged share record route proves the relay reachable — and keep the
+  // genuine network failure when it does not.
+  const shareSecret = new Uint8Array(32).fill(50);
+  const viewKeys = deriveShareLinkKeys(shareSecret, 'view');
+  const roomId = base64UrlEncode(new Uint8Array(16).fill(56));
+  const mutation = buildShareBundleMutations({
+    shareId, shareSecret, epoch: 0, revision: 0, manifestDigest: EMPTY_SHARE_MANIFEST_DIGEST, roomId,
+    ownerSigningKey: base64UrlEncode(new Uint8Array(32).fill(51)),
+    readCapabilityKey: new Uint8Array(32).fill(52), writeAdmissionKey: new Uint8Array(32).fill(53),
+    commentGrantSignature: base64UrlEncode(new Uint8Array(64).fill(54)),
+    suggestGrantSignature: base64UrlEncode(new Uint8Array(64).fill(55)),
+  }).find(candidate => candidate.tier === 'view')!;
+  assert(mutation.bundleId === viewKeys.bundleId, 'sealed view bearer does not match the derived link keys');
+  const recordJson = { v: 3, shareId, epoch: 0, revision: 0, currentRoomId: roomId, snapshots: [],
+    manifestDigest: EMPTY_SHARE_MANIFEST_DIGEST,
+    bundle: { bundleId: mutation.bundleId, tier: 'view', sealedBundle: mutation.sealedBundle },
+    updatedAt: 1, expiresAt: 2 };
+  const persistence = { atomicMax: async ({ candidate }: { candidate: { epoch: number; revision: number; manifestDigest: string } }) => candidate,
+    hydrate: async () => [], transition: async () => undefined, dispose: () => undefined } as unknown as BrowserDurableSharePersistence;
+  const probeCounts = { share: 0, room: 0 };
+  const reachable = await createBrowserDurableShareResolver({ relayUrl: 'https://relay.example',
+    invite: { shareId, linkSecret: new Uint8Array(viewKeys.linkSecret) }, tier: 'view', persistence,
+    fetchImpl: async url => {
+      if (url.includes('/v3/rooms/')) { probeCounts.room += 1; throw new TypeError('Failed to fetch'); }
+      probeCounts.share += 1;
+      return Response.json(recordJson);
+    } });
+  const resolution = await reachable.resolver.resolve();
+  assert(resolution.source === 'share_snapshot' && probeCounts.room === 1 && probeCounts.share >= 2,
+    'CORS-untagged room failure with a reachable relay did not degrade to snapshots');
+  let fetches = 0;
+  const unreachable = await createBrowserDurableShareResolver({ relayUrl: 'https://relay.example',
+    invite: { shareId, linkSecret: new Uint8Array(viewKeys.linkSecret) }, tier: 'view', persistence,
+    fetchImpl: async url => {
+      fetches += 1;
+      if (fetches === 1 && !url.includes('/v3/rooms/')) return Response.json(recordJson);
+      throw new TypeError('Failed to fetch');
+    } });
+  let surfaced: unknown = null;
+  try { await unreachable.resolver.resolve(); } catch (error) { surfaced = error; }
+  assert(surfaced instanceof TypeError, 'genuinely unreachable relay did not keep its network failure');
+  console.log('PASS room liveness probe separates CORS-untagged room-gone from a dead relay (attn-hh9r)');
 }
 
 {

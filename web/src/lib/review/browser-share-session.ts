@@ -135,6 +135,28 @@ export class StaleShareEpochError extends Error {
   }
 }
 
+/**
+ * The share record still routes to a room the relay no longer knows — the
+ * ordinary 24h room was TTL-wiped under a durable share (attn-hh9r). This is
+ * NOT a terminal error: the durable bundle stays resolvable, so the session
+ * re-resolves and degrades to the snapshot presentation (owner offline,
+ * mailbox authoring) instead of dead-ending on a relay error screen.
+ */
+export class ShareRoomGoneError extends Error {
+  constructor() {
+    super('the live review room behind this share has expired');
+    this.name = 'ShareRoomGoneError';
+  }
+}
+
+/**
+ * A live bootstrap can race the room's hard TTL: the resolver's liveness
+ * probe said `room`, then the bootstrap found it wiped. Each retry re-resolves
+ * (the resolver then observes the dead room and demotes to snapshots), so a
+ * small bound only guards against a room that flaps alive/dead on every pass.
+ */
+const MAX_ROOM_GONE_BOOTSTRAPS = 3;
+
 export interface DurableLiveSession {
   start(): void | Promise<void>;
   close(): void;
@@ -233,6 +255,7 @@ export class BrowserShareSession {
   private readonly hydratedBundles = new Set<string>();
   private refreshInFlight: Promise<void> | null = null;
   private refreshQueued = false;
+  private roomGoneBootstraps = 0;
   private generation = 0;
 
   constructor(options: BrowserShareSessionOptions) { this.options = options; }
@@ -514,8 +537,23 @@ export class BrowserShareSession {
       let nextLive = this.live;
       if (next.source === 'room' && (!this.live || this.resolution?.bundle.roomId !== next.bundle.roomId)) {
         this.patch({ status: 'upgrading' });
-        candidate = await this.options.createLiveSession({ resolution: next });
-        await candidate.start();
+        try {
+          candidate = await this.options.createLiveSession({ resolution: next });
+          await candidate.start();
+        } catch (error) {
+          // The room died between the resolver's liveness probe and this
+          // bootstrap (24h HARD_MAX_TTL, attn-hh9r). Queue another fenced
+          // resolve instead of surfacing an error: the next pass observes
+          // the dead room and commits `source: 'share_snapshot'` — the
+          // owner-offline presentation with mailbox authoring intact.
+          if (error instanceof ShareRoomGoneError
+            && this.roomGoneBootstraps < MAX_ROOM_GONE_BOOTSTRAPS && this.isCurrent(generation)) {
+            this.roomGoneBootstraps += 1;
+            this.refreshQueued = true;
+            return;
+          }
+          throw error;
+        }
         if (!this.isCurrent(generation)) return;
         nextLive = candidate;
       }
@@ -524,6 +562,7 @@ export class BrowserShareSession {
       this.live = next.source === 'room' ? nextLive : null;
       this.resolution = next;
       committed = true;
+      this.roomGoneBootstraps = 0;
       candidate = null;
       if (oldLive && oldLive !== this.live) oldLive.close();
       if (oldResolution && oldResolution !== next) this.disposeResolution(oldResolution);

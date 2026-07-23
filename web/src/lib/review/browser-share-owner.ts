@@ -283,8 +283,11 @@ export interface BrowserShareOwnerRelayOptions {
 }
 
 export class BrowserShareOwnerRelayError extends Error {
-  constructor(readonly status: number, operation: string) {
-    super(`${operation} failed (${status})`);
+  /** `code` is the relay's machine-readable error (e.g. ATTN_SHARE_MAIL_PENDING),
+   * surfaced so callers can react to specific 409s — the owner runtime drains
+   * the durable mailbox and retries a room re-provision on it (attn-hh9r). */
+  constructor(readonly status: number, operation: string, readonly code?: string) {
+    super(`${operation} failed (${status}${code === undefined ? '' : ` ${code}`})`);
     this.name = 'BrowserShareOwnerRelayError';
   }
 }
@@ -479,7 +482,9 @@ export class BrowserShareOwnerRelayClient {
 }
 
 async function decodeRecord(response: Response, expectedShareId: string): Promise<BrowserShareRelayRecord> {
-  if (!response.ok) throw new BrowserShareOwnerRelayError(response.status, 'durable share request');
+  if (!response.ok) {
+    throw new BrowserShareOwnerRelayError(response.status, 'durable share request', await relayErrorCode(response));
+  }
   const value = await response.json() as Partial<BrowserShareRelayRecord>;
   if (
     value.v !== 3 || value.shareId !== expectedShareId || typeof value.ownerSigningKey !== 'string'
@@ -500,6 +505,16 @@ async function decodeRecord(response: Response, expectedShareId: string): Promis
   // instead of pausing publication forever.
   const manifestDigestValid = digestShareSnapshotManifest(snapshots) === value.manifestDigest;
   return { ...(value as Omit<BrowserShareRelayRecord, 'manifestDigestValid'>), snapshots, manifestDigestValid };
+}
+
+/** Best-effort machine-readable relay error code from a non-OK JSON body. */
+async function relayErrorCode(response: Response): Promise<string | undefined> {
+  try {
+    const value = await response.json() as { error?: { code?: unknown } };
+    return typeof value.error?.code === 'string' ? value.error.code : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function isMailboxSummary(value: unknown): value is BrowserShareRelayRecord['mailbox'] {

@@ -31,7 +31,7 @@ import type {
   WorkspaceEntryRecord,
   WorkspaceRecord,
 } from '../../lib/review/browser-workspace-schema';
-import type { PersistenceMode, WorkspaceSummary } from './types';
+import type { PersistenceMode, ReviewProjectionHandle, WorkspaceSummary } from './types';
 import { readStoredColor } from '../../lib/browser-profile';
 import { resolveParticipantColor } from '../../lib/participant-color';
 // Runes module: loaded lazily so node-side tests can import this file
@@ -50,7 +50,7 @@ import {
   BrowserOwnerWorkspaceRuntime,
   type BrowserOwnerWorkspaceRuntimeOptions,
 } from '../../lib/review/browser-owner-workspace-runtime';
-import { watchWorkspaceReviewLog } from '../../lib/review/browser-review-log';
+import { openWorkspaceReviewProjection } from '../../lib/review/browser-review-log';
 
 export type WorkspaceErrorKind = 'conflict' | 'quota' | 'unavailable' | 'storage';
 
@@ -228,11 +228,8 @@ export class BrowserWorkspaceService {
    * the workspace has no active published share. Reads only — safe for
    * passive tabs that never acquire the lease.
    */
-  async watchReviewLog(
-    workspaceId: string,
-  ): Promise<{ roomId: string | null; bindings: ReadonlyArray<{ path: string; fileId: string }>; close(): void }> {
-    const watcher = await watchWorkspaceReviewLog({ storage: this.storage, workspaceId });
-    return { roomId: watcher.roomId, bindings: watcher.bindings, close: () => watcher.close() };
+  async openReviewProjection(workspaceId: string): Promise<ReviewProjectionHandle> {
+    return openWorkspaceReviewProjection({ storage: this.storage, workspaceId });
   }
 
   // ————— capabilities —————

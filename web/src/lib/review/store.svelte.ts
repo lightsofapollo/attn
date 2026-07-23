@@ -1255,6 +1255,24 @@ export class ReviewStore {
     this.upsertRoom(roomId, { role });
   }
 
+  /**
+   * Undismiss + role-stamp + select a room in one step (attn-kobw). The
+   * workspace review projection calls this to adopt (or re-adopt) the active
+   * room: `leaveRoom` marks a room dismissed so its threads vanish, and a
+   * room rotation (attn-hh9r re-provisioning, stop/re-share) can bring us
+   * back to a roomId that a prior projection generation dismissed —
+   * `upsertRoom`/`noteRoomRole` alone would no-op on the dismissed set.
+   */
+  adoptRoom(roomId: RoomId, role: 'owner' | 'reviewer'): void {
+    if (this.dismissedRoomIds.has(roomId)) {
+      const dismissed = new Set(this.dismissedRoomIds);
+      dismissed.delete(roomId);
+      this.dismissedRoomIds = dismissed;
+    }
+    this.upsertRoom(roomId, { role });
+    if (this.currentRoomId !== roomId) this.currentRoomId = roomId;
+  }
+
   private upsertRoom(
     roomId: RoomId,
     patch: Partial<Omit<ReviewRoomSummary, 'roomId' | 'updatedAt'>>,

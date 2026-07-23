@@ -1,25 +1,34 @@
-// Durable review-log hydration for hosted workspace tabs (attn-dgya).
+// WorkspaceReviewProjection — the ONE hosted read path for review state
+// (attn-kobw, part 1 of the single-projection architecture attn-whdh).
 //
-// `reviewStore.events` is a per-tab in-memory buffer fed by the workspace
-// lease holder's live BrowserSession. Every other tab of the same browser
-// profile — a follower that lost the writer lease, or a tab whose own
-// session has not started yet — previously left it empty even though each
-// inbound envelope IS durably committed to the shared IndexedDB
-// (BrowserSession.handleEnvelopeAsync → storage.commitInbound). This module
-// replays that durable log through the exact verified inbound pipeline
-// (BrowserWsClient decrypt + signature + capability authorization) into the
-// review store, and keeps followers fresh by re-running the replay whenever
-// the leader's session rings the REVIEW_INBOUND doorbell after a commit.
+// The durable IndexedDB log + share records are the single source of truth
+// for a hosted workspace's review state, but tabs used to materialize it
+// through role-dependent paths: the lease-holding leader fed reviewStore
+// straight from its live BrowserSession while followers replayed the durable
+// log ad hoc (attn-dgya). Any two tabs could therefore disagree — the family
+// of divergence bugs attn-dgya/nezn/90qq/37f9/lzee. This module is the cure:
+// every hosted workspace tab, leader included (attn-ij9y), materializes the
+// review store exclusively through this projection, which
 //
-// Scope: review events, plus MINIMAL snapshot hydration for inline
-// markdown/html blobs — anchor resolution (and therefore every margin card
-// position) needs the latest snapshot's content + anchorIndex, so a
-// follower with only content-less pointers rendered an empty margin.
-// Content is pinned to the signed pointer's baseHash before it enters the
-// store; R2-spilled blobs and the anchor-index REBUILD check stay with the
-// live session (the leader hard-verifies each blob on live receipt, and a
-// wrong-but-hash-valid index can only misplace a card into the orphan
-// tray, never alter content).
+//   1. discovers the active share record from storage (roomId, promoted
+//      path → fileId bindings);
+//   2. replays the durable event log through the exact verified inbound
+//      pipeline (BrowserWsClient decrypt + signature + capability checks),
+//      including inline snapshot-blob hydration — anchor resolution (and
+//      therefore every margin card position) needs snapshot content;
+//   3. re-replays on the REVIEW_INBOUND doorbell rung after every durable
+//      commit (inbound network commit or the leader's own outbound enqueue);
+//   4. re-discovers on the SHARE_RECORDS doorbell: room re-provisioning
+//      (attn-hh9r) and stop/re-share can rotate the record's roomId at share
+//      revision+1, and a tab that kept following the stale room was exactly
+//      the two-tab divergence this epic exists to kill. On rotation the old
+//      room's materialized state is dropped and the new room replayed.
+//
+// R2-spilled snapshot blobs and the anchor-index REBUILD check stay with the
+// live session (the leader hard-verifies each blob on live receipt and feeds
+// it through the hosted-owner sink's applySnapshot pass-through; a
+// wrong-but-hash-valid index can only misplace a card into the orphan tray,
+// never alter content).
 
 import { BrowserWsClient, type DecodedEnvelope, type MailboxEnvelope } from './browser-ws';
 import type { BrowserStorage } from './browser-storage';
@@ -32,7 +41,12 @@ import {
 } from './browser-session';
 import { contentHash } from './browser-crypto';
 import { decompressSnapshotIfNeeded } from './snapshot-compression';
-import { REVIEW_INBOUND_CHANNEL_PREFIX, openBroadcastChannel } from '../tab-channels';
+import {
+  REVIEW_INBOUND_CHANNEL_PREFIX,
+  SHARE_RECORDS_CHANNEL_PREFIX,
+  openBroadcastChannel,
+  subscribeLocalDoorbell,
+} from '../tab-channels';
 import type {
   EventMeta,
   ReviewEvent,
@@ -52,22 +66,28 @@ export interface ReviewLogRoomKeys {
   snapshotKey: Uint8Array;
   signalingKey: Uint8Array;
   /**
-   * Promoted-manifest path → fileId map. Follower tabs have no authority
-   * bindings, so this is how they scope the review margin to the active
-   * file (store.setCurrentFile) — without it every thread is invisible.
+   * Promoted-manifest path → fileId map. This is how EVERY hosted tab scopes
+   * the review margin to the active file (attn-9ek7) — the authority's
+   * runtime bindings are no longer a review-state read path.
    */
   bindings: Array<{ path: string; fileId: string }>;
 }
 
-export interface ReviewLogWatcher {
+/** One typed snapshot of the projection: roomId, bindings, replay status. */
+export interface WorkspaceReviewProjectionState {
   /** Null when the workspace has no active published share to hydrate from. */
-  readonly roomId: string | null;
+  roomId: string | null;
   /** Promoted-manifest path → fileId map ([] when no active share). */
-  readonly bindings: ReadonlyArray<{ path: string; fileId: string }>;
-  close(): void;
+  bindings: ReadonlyArray<{ path: string; fileId: string }>;
+  /**
+   * 'idle' — no active share; 'ready' — the durable log for the current
+   * room has been replayed; 'failed' — the last replay threw (the next
+   * doorbell ring retries).
+   */
+  replay: 'idle' | 'ready' | 'failed';
 }
 
-export interface WatchWorkspaceReviewLogOptions {
+export interface WorkspaceReviewProjectionOptions {
   storage: BrowserStorage;
   workspaceId: string;
   /** Test seam; production resolves the runes reviewStore singleton lazily. */
@@ -80,7 +100,10 @@ export interface WatchWorkspaceReviewLogOptions {
  * Locate the workspace's single active published share and derive exactly
  * the material a replay needs. Best-effort by design: no share, no workspace
  * key, or an ambiguous share set (which runtime startup surfaces as its own
- * error) hydrates nothing rather than failing workspace open.
+ * error) hydrates nothing rather than failing workspace open. A durable
+ * share whose lifecycle left 'active' (revoke_pending tombstone awaiting
+ * remote teardown, expiry) is NOT discoverable — Stop sharing must clear the
+ * review surface even when the relay was unreachable (attn-9ek7).
  */
 export async function discoverReviewLogRoom(
   storage: BrowserStorage,
@@ -92,7 +115,9 @@ export async function discoverReviewLogRoom(
   for (const share of await storage.shares.listShares(workspaceId)) {
     if (share.publication === 'stopped') continue;
     const capability = await storage.shares.openShare(rootKey, workspaceId, share.capId);
-    if (capability.publishedManifest) candidates.push({ roomId: share.roomId, capId: share.capId });
+    if (!capability.publishedManifest) continue;
+    if (capability.durableShare && capability.durableShare.lifecycle !== 'active') continue;
+    candidates.push({ roomId: share.roomId, capId: share.capId });
   }
   if (candidates.length !== 1) return null;
   const { roomId, capId } = candidates[0]!;
@@ -119,21 +144,29 @@ export async function discoverReviewLogRoom(
 /**
  * One idempotent pass: replay every durably committed review event for
  * `room` into the store. ReviewStore.applyEvent dedups by (roomId, eventId),
- * so live delivery in the leader tab and repeated doorbell replays here
- * never duplicate a thread.
+ * so optimistic local echoes and repeated doorbell replays never duplicate
+ * a thread. Pending outbox envelopes are included — the leader's own
+ * comment is durably enqueued before its doorbell ring, so this replay is
+ * what renders it (attn-ij9y).
  */
 export async function replayReviewLogIntoStore(options: {
   storage: BrowserStorage;
   room: ReviewLogRoomKeys;
   store: ReviewStoreSink;
-  /** Snapshot ids already hydrated by an earlier pass of THIS watcher —
+  /** Snapshot ids already hydrated by an earlier pass of THIS projection —
    *  skips re-decompressing unchanged blobs on every doorbell ring. */
   hydratedSnapshots?: Set<string>;
 }): Promise<void> {
   const { storage, room, store } = options;
   const hydrated = options.hydratedSnapshots ?? new Set<string>();
-  if (store.currentRoomId !== room.roomId) store.currentRoomId = room.roomId as RoomId;
-  store.noteRoomRole?.(room.roomId as RoomId, 'owner');
+  // Adopt the room: undismiss (a rotation may return to a previously-left
+  // roomId), stamp the owner role, and select it for thread scoping.
+  if (store.adoptRoom) {
+    store.adoptRoom(room.roomId as RoomId, 'owner');
+  } else {
+    if (store.currentRoomId !== room.roomId) store.currentRoomId = room.roomId as RoomId;
+    store.noteRoomRole?.(room.roomId as RoomId, 'owner');
+  }
   const devices = await storage.listDevices(room.roomId);
   // Snapshot pointers harvested during the event pass (blobId → pointer),
   // and the decrypted blob payloads the pipeline hands back — hydrated
@@ -197,8 +230,8 @@ export async function replayReviewLogIntoStore(options: {
       if (b.serverSeq > 0) return 1;
       return a.envelope.createdAt - b.envelope.createdAt;
     });
-    // Debug-level breadcrumb: an unexpectedly empty review surface in a
-    // follower tab is diagnosable from these counts alone.
+    // Debug-level breadcrumb: an unexpectedly empty review surface in any
+    // tab is diagnosable from these counts alone.
     console.debug('attn: review-log replay', {
       roomId: room.roomId,
       inbound: inbound.length,
@@ -237,8 +270,8 @@ type SnapshotPointer = {
  * Verify + apply one replayed inline snapshot blob. Content is pinned to
  * the signed pointer's baseHash; markdown/html only (assets and workspace
  * manifests have no bearing on margin anchoring, and R2 wrappers parse to
- * null and are skipped — those threads stay in the orphan tray until this
- * tab is promoted and the live session recovers the spill).
+ * null and are skipped — those threads stay in the orphan tray until the
+ * live session recovers the spill).
  */
 async function hydrateReplayedSnapshot(
   store: ReviewStoreSink,
@@ -288,65 +321,287 @@ async function hydrateReplayedSnapshot(
 }
 
 /**
- * Hydrate the review store from the workspace's durable log NOW, then keep
- * it fresh: every REVIEW_INBOUND doorbell ring from the lease holder's live
- * session re-runs the replay. Rings arriving mid-replay coalesce into one
- * trailing pass instead of stacking. Returns after the initial hydration so
- * callers observe a populated store deterministically.
+ * The single role-agnostic review-state materializer for one hosted
+ * workspace tab (attn-kobw). Construct via `openWorkspaceReviewProjection`;
+ * the returned handle is `getState()/subscribe()/refresh()/close()`.
  */
-export async function watchWorkspaceReviewLog(
-  options: WatchWorkspaceReviewLogOptions,
-): Promise<ReviewLogWatcher> {
-  const discover = options.discover ?? discoverReviewLogRoom;
-  let room: ReviewLogRoomKeys | null = null;
-  try {
-    room = await discover(options.storage, options.workspaceId);
-  } catch {
-    room = null;
-  }
-  if (!room) return { roomId: null, bindings: [], close: () => undefined };
-  const active = room;
-  const store = options.store ?? (await resolveReviewStore());
-  const hydratedSnapshots = new Set<string>();
+export class WorkspaceReviewProjection {
+  private readonly storage: BrowserStorage;
+  private readonly workspaceId: string;
+  private readonly discover: (
+    storage: BrowserStorage,
+    workspaceId: string,
+  ) => Promise<ReviewLogRoomKeys | null>;
+  private store: ReviewStoreSink | null;
 
-  let closed = false;
-  let replaying = false;
-  let rerunWanted = false;
-  const replay = async (): Promise<void> => {
-    if (closed || replaying) {
-      rerunWanted = rerunWanted || replaying;
+  private stateValue: WorkspaceReviewProjectionState = {
+    roomId: null,
+    bindings: [],
+    replay: 'idle',
+  };
+  private readonly subscribers = new Set<(state: WorkspaceReviewProjectionState) => void>();
+
+  private room: ReviewLogRoomKeys | null = null;
+  private hydratedSnapshots = new Set<string>();
+  private closed = false;
+
+  // Serialized work queue: discovery passes and replay passes never overlap,
+  // so a rotation can never race a replay of the room it is retiring.
+  private tail: Promise<void> = Promise.resolve();
+  private replayQueued = false;
+  private discoverQueued = false;
+
+  private roomChannel: BroadcastChannel | null = null;
+  private unsubscribeRoomLocal: (() => void) | null = null;
+  private shareChannel: BroadcastChannel | null = null;
+  private unsubscribeShareLocal: (() => void) | null = null;
+
+  constructor(options: WorkspaceReviewProjectionOptions) {
+    this.storage = options.storage;
+    this.workspaceId = options.workspaceId;
+    this.discover = options.discover ?? discoverReviewLogRoom;
+    this.store = options.store ?? null;
+  }
+
+  getState(): WorkspaceReviewProjectionState {
+    return { ...this.stateValue, bindings: [...this.stateValue.bindings] };
+  }
+
+  /** Delivers the current state immediately, then every change. */
+  subscribe(subscriber: (state: WorkspaceReviewProjectionState) => void): () => void {
+    this.subscribers.add(subscriber);
+    subscriber(this.getState());
+    return () => this.subscribers.delete(subscriber);
+  }
+
+  /** Coalescing durable-log re-replay — the review-doorbell target. */
+  refresh(): Promise<void> {
+    if (this.closed || this.replayQueued) return Promise.resolve();
+    this.replayQueued = true;
+    return this.enqueue(async () => {
+      this.replayQueued = false;
+      await this.replayPass();
+    });
+  }
+
+  /** Coalescing share-record re-discovery — the share-doorbell target. */
+  refreshShareRecord(): Promise<void> {
+    if (this.closed || this.discoverQueued) return Promise.resolve();
+    this.discoverQueued = true;
+    return this.enqueue(async () => {
+      this.discoverQueued = false;
+      await this.discoverPass();
+    });
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.detachRoomDoorbell();
+    this.unsubscribeShareLocal?.();
+    this.unsubscribeShareLocal = null;
+    this.shareChannel?.close();
+    this.shareChannel = null;
+    if (this.room) {
+      zeroRoomKeys(this.room);
+      this.room = null;
+    }
+    this.subscribers.clear();
+  }
+
+  /** Resolve the store, subscribe the share doorbell, hydrate NOW. Returns
+   *  after the initial discovery + replay so callers observe a populated
+   *  store deterministically. */
+  async open(): Promise<void> {
+    this.store ??= await resolveReviewStore();
+    if (this.closed) return;
+    const shareChannelName = SHARE_RECORDS_CHANNEL_PREFIX + this.workspaceId;
+    this.shareChannel = openBroadcastChannel(shareChannelName);
+    if (this.shareChannel) this.shareChannel.onmessage = () => void this.refreshShareRecord();
+    this.unsubscribeShareLocal = subscribeLocalDoorbell(
+      shareChannelName,
+      () => void this.refreshShareRecord(),
+    );
+    await this.enqueue(() => this.discoverPass());
+  }
+
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    const run = this.tail.then(operation, operation);
+    this.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** Re-read the share record; follow a room rotation by resetting +
+   *  re-replaying (attn-hh9r divergence). Runs only on the queue. */
+  private async discoverPass(): Promise<void> {
+    if (this.closed) return;
+    let next: ReviewLogRoomKeys | null = null;
+    try {
+      next = await this.discover(this.storage, this.workspaceId);
+    } catch {
+      next = null;
+    }
+    if (this.closed) {
+      if (next) zeroRoomKeys(next);
       return;
     }
-    replaying = true;
+    const previous = this.room;
+    if (previous && next?.roomId !== previous.roomId) {
+      // Rotation or share stopped: the old room's materialized threads are
+      // dead state now — leaveRoom drops its events/snapshots/resolutions
+      // and clears the selection if it pointed there.
+      this.store?.leaveRoom?.(previous.roomId as RoomId);
+      zeroRoomKeys(previous);
+      this.room = null;
+      this.hydratedSnapshots = new Set<string>();
+      this.detachRoomDoorbell();
+    }
+    if (next && this.room?.roomId === next.roomId && this.room !== next) {
+      // Same room, refreshed record (manifest/bindings may have changed).
+      zeroRoomKeys(this.room);
+      this.room = next;
+    } else if (next && !this.room) {
+      this.room = next;
+      this.attachRoomDoorbell(next.roomId);
+    }
+    this.patchState({
+      roomId: this.room?.roomId ?? null,
+      bindings: this.room ? [...this.room.bindings] : [],
+      ...(this.room ? {} : { replay: 'idle' as const }),
+    });
+    if (this.room) await this.replayPass();
+  }
+
+  /** One replay of the current room's durable log. Runs only on the queue. */
+  private async replayPass(): Promise<void> {
+    const room = this.room;
+    const store = this.store;
+    if (this.closed || !room || !store) return;
     try {
-      await replayReviewLogIntoStore({ storage: options.storage, room: active, store, hydratedSnapshots });
+      await replayReviewLogIntoStore({
+        storage: this.storage,
+        room,
+        store,
+        hydratedSnapshots: this.hydratedSnapshots,
+      });
+      this.patchState({ replay: 'ready' });
     } catch (error) {
       // Best-effort: the next ring (or the next workspace open) retries —
-      // but say so, or a follower tab silently renders an empty review
-      // surface with no trace of why.
+      // but say so, or a tab silently renders an empty review surface with
+      // no trace of why.
       console.warn('attn: review-log replay failed', error);
-    } finally {
-      replaying = false;
+      this.patchState({ replay: 'failed' });
     }
-    if (rerunWanted && !closed) {
-      rerunWanted = false;
-      void replay();
-    }
-  };
-  await replay();
+  }
 
-  const channel = openBroadcastChannel(REVIEW_INBOUND_CHANNEL_PREFIX + active.roomId);
-  if (channel) channel.onmessage = () => void replay();
+  private attachRoomDoorbell(roomId: string): void {
+    const name = REVIEW_INBOUND_CHANNEL_PREFIX + roomId;
+    this.roomChannel = openBroadcastChannel(name);
+    if (this.roomChannel) this.roomChannel.onmessage = () => void this.refresh();
+    // Same-tab delivery: the leader's own session rings after each durable
+    // commit, and BroadcastChannel never loops back to the posting context —
+    // without this the LEADER tab would be the one lagging (attn-ij9y).
+    this.unsubscribeRoomLocal = subscribeLocalDoorbell(name, () => void this.refresh());
+  }
+
+  private detachRoomDoorbell(): void {
+    this.unsubscribeRoomLocal?.();
+    this.unsubscribeRoomLocal = null;
+    this.roomChannel?.close();
+    this.roomChannel = null;
+  }
+
+  private patchState(patch: Partial<WorkspaceReviewProjectionState>): void {
+    const next: WorkspaceReviewProjectionState = { ...this.stateValue, ...patch };
+    const bindingsChanged =
+      next.bindings.length !== this.stateValue.bindings.length ||
+      next.bindings.some(
+        (binding, index) =>
+          binding.path !== this.stateValue.bindings[index]?.path ||
+          binding.fileId !== this.stateValue.bindings[index]?.fileId,
+      );
+    if (
+      !bindingsChanged &&
+      next.roomId === this.stateValue.roomId &&
+      next.replay === this.stateValue.replay
+    ) {
+      return;
+    }
+    this.stateValue = next;
+    const snapshot = this.getState();
+    for (const subscriber of [...this.subscribers]) subscriber(snapshot);
+  }
+}
+
+/**
+ * Open the projection for a workspace and hydrate the review store NOW.
+ * Every hosted workspace tab — leader or follower — holds exactly one of
+ * these for the route lifetime (EditorShell's watcher effect).
+ */
+export async function openWorkspaceReviewProjection(
+  options: WorkspaceReviewProjectionOptions,
+): Promise<WorkspaceReviewProjection> {
+  const projection = new WorkspaceReviewProjection(options);
+  await projection.open();
+  return projection;
+}
+
+/**
+ * The hosted owner session's store sink (attn-ij9y). The leader's live
+ * BrowserSession no longer materializes review EVENTS into the runes store —
+ * inbound envelopes commit durably and ring the doorbell, outbound envelopes
+ * enqueue durably and ring, and the projection replays both into the store
+ * exactly as it does in follower tabs. If the projection ever misses an
+ * event, the leader sees the bug too: divergence impossible by construction.
+ *
+ * What still passes through:
+ *   - applySnapshot: snapshot hydration is idempotent (content-addressed by
+ *     snapshotId, placeholder-upgrade only) and the R2-spill recovery path
+ *     exists ONLY in the live session — dropping it would strip anchor
+ *     resolution from large documents in the leader tab.
+ *   - pendingOutbox: the ReviewBar's OutboxIndicator ("N pending · Retry")
+ *     reflects the live outbox, which only the session knows.
+ * Everything else (room selection, file scoping, room lifecycle) belongs to
+ * the projection + EditorShell, so those writes land on inert local fields.
+ */
+export function createHostedOwnerSessionStoreSink(): ReviewStoreSink {
+  let target: ReviewStoreSink | null = null;
+  let loading: Promise<void> | null = null;
+  const withStore = (apply: (store: ReviewStoreSink) => void): void => {
+    if (target) {
+      apply(target);
+      return;
+    }
+    loading ??= resolveReviewStore().then((store) => {
+      target = store;
+    });
+    void loading.then(() => {
+      if (target) apply(target);
+    }).catch(() => undefined);
+  };
   return {
-    roomId: active.roomId,
-    bindings: active.bindings,
-    close: (): void => {
-      if (closed) return;
-      closed = true;
-      channel?.close();
-      active.eventKey.fill(0);
-      active.snapshotKey.fill(0);
-      active.signalingKey.fill(0);
+    // Projection-owned: the durable commit + doorbell that precede this call
+    // are the real write path. Deliberately NOT forwarded.
+    applyEvent: () => undefined,
+    applySnapshot: (snapshot) => withStore((store) => store.applySnapshot(snapshot)),
+    setCurrentFile: () => undefined,
+    setCurrentSnapshot: () => undefined,
+    // Plain inert fields — the session stamps/clears them on start/close,
+    // but the projection owns the real store's room selection. leaveRoom is
+    // intentionally absent: a transport failure in the leader must not wipe
+    // the projection-materialized threads (storage still has them).
+    currentRoomId: null,
+    currentFileId: null,
+    get pendingOutbox(): unknown[] {
+      return target?.pendingOutbox ?? [];
+    },
+    set pendingOutbox(value: unknown[]) {
+      withStore((store) => {
+        store.pendingOutbox = value;
+      });
     },
   };
 }
@@ -389,6 +644,12 @@ function applyReplayedReviewEvent(
   if (body.type === 'snapshot_created' && body.encryptedBlobRef !== undefined) {
     pointers.set(body.encryptedBlobRef.blobId, { meta, body });
   }
+}
+
+function zeroRoomKeys(room: ReviewLogRoomKeys): void {
+  room.eventKey.fill(0);
+  room.snapshotKey.fill(0);
+  room.signalingKey.fill(0);
 }
 
 /** Replay only ever copies the three AEAD keys out; clobber the rest. */

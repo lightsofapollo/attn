@@ -12,6 +12,7 @@
 import type {
   EditingSession,
   ImportFileInput,
+  ReviewProjectionHandle,
   ShareScope,
   StorageHealth,
   WorkspaceAppService,
@@ -336,8 +337,19 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return () => undefined;
   }
 
-  async watchReviewLog(): Promise<{ roomId: string | null; bindings: ReadonlyArray<{ path: string; fileId: string }>; close(): void }> {
-    return { roomId: null, bindings: [], close: () => undefined };
+  async openReviewProjection(): Promise<ReviewProjectionHandle> {
+    // The mock never has a real share; an inert projection keeps EditorShell's
+    // lifecycle host uniform (attn-whdh).
+    return {
+      getState: () => ({ roomId: null, bindings: [], replay: 'idle' as const }),
+      subscribe: (subscriber) => {
+        subscriber({ roomId: null, bindings: [], replay: 'idle' as const });
+        return () => undefined;
+      },
+      refresh: async () => undefined,
+      refreshShareRecord: async () => undefined,
+      close: () => undefined,
+    };
   }
 
   async beginEditing(workspaceId: string): Promise<EditingSession | null> {

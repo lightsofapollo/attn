@@ -103,6 +103,21 @@ import type {
   RejectBrowserSuggestionResult,
 } from '../../lib/review/browser-review-actions';
 import type { Anchor, ReviewEvent } from '../../lib/types';
+import type { WorkspaceReviewProjectionState } from '../../lib/review/browser-review-log';
+
+/**
+ * The lifecycle handle for a workspace review projection (attn-whdh). The
+ * real `WorkspaceReviewProjection` class satisfies this structurally; the
+ * mock returns an inert stub. EditorShell subscribes for `roomId`/`bindings`
+ * changes (rotation-aware) and disposes on route teardown.
+ */
+export interface ReviewProjectionHandle {
+  getState(): WorkspaceReviewProjectionState;
+  subscribe(subscriber: (state: WorkspaceReviewProjectionState) => void): () => void;
+  refresh(): Promise<void>;
+  refreshShareRecord(): Promise<void>;
+  close(): void;
+}
 export type WorkspaceShareMode = 'live' | 'async' | 'hybrid';
 export type WorkspaceShareTtlMs = 3_600_000 | 86_400_000 | 604_800_000;
 
@@ -275,20 +290,14 @@ export interface WorkspaceAppService {
    */
   subscribeWorkspaceChanges(listener: (change: WorkspaceChange) => void): () => void;
   /**
-   * Hydrate this tab's review store from the workspace's durable review
-   * log, and re-replay whenever the lease-holding tab durably commits a
-   * new inbound review event (attn-dgya). Runs in every tab regardless of
-   * lease role. `roomId` is the discovered active share's room (null for an
-   * unshared workspace — the watcher is then a no-op) so follower tabs can
-   * load the review surface without waiting for a lease they never take.
+   * Open the workspace review projection (attn-whdh): the ONE read path
+   * every hosted tab — leader or follower — uses to materialize review
+   * state. It discovers the active share record, replays the durable event
+   * log into the review store, and re-hydrates on the review doorbell and
+   * on share-record rotation (attn-hh9r re-provisioning). Runs in every tab
+   * regardless of lease role; the handle is subscribe/refresh/close.
    */
-  watchReviewLog(workspaceId: string): Promise<{
-    roomId: string | null;
-    /** Promoted-manifest path → fileId map — follower tabs use it to scope
-     *  the review margin to the active file without authority bindings. */
-    bindings: ReadonlyArray<{ path: string; fileId: string }>;
-    close(): void;
-  }>;
+  openReviewProjection(workspaceId: string): Promise<ReviewProjectionHandle>;
   // ————— multi-file/asset operations (attn-7xl.3.4) —————
   createMarkdownEntry(workspaceId: string, path: string): Promise<void>;
   addAssetFiles(workspaceId: string, files: ImportFileInput[]): Promise<void>;

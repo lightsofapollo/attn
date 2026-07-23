@@ -100,7 +100,7 @@ import {
   type BrowserDirectState,
 } from './browser-webrtc';
 import { createDeviceWebSocketProofV3 } from './device-proof';
-import { REVIEW_INBOUND_CHANNEL_PREFIX, openBroadcastChannel } from '../tab-channels';
+import { REVIEW_INBOUND_CHANNEL_PREFIX, openBroadcastChannel, ringLocalDoorbell } from '../tab-channels';
 import type { InviteCapability } from './browser-workspace-share';
 import {
   parseCollabWireMessage,
@@ -290,6 +290,10 @@ export interface ReviewStoreSink {
   currentFileId: FileId | null;
   /** Mark which side of the room this client is (role-gated owner UI). */
   noteRoomRole?(roomId: RoomId, role: 'owner' | 'reviewer'): void;
+  /** Undismiss + role-stamp + select a room in one step (attn-kobw). The
+   *  projection uses it when following a room rotation back onto a roomId
+   *  that leaveRoom previously dismissed. */
+  adoptRoom?(roomId: RoomId, role: 'owner' | 'reviewer'): void;
   /** Sealed browser envelopes awaiting relay acknowledgement. */
   pendingOutbox?: unknown[];
 }
@@ -1741,7 +1745,14 @@ export class BrowserSession {
     else outbox.enqueue(assembled.envelope);
     if (this.storage) await this.persistDirectoryAndRoom(this.bootstrapDevices, policy);
     const store = await this.ensureStore();
+    // Optimistic echo. On the hosted OWNER the store sink no-ops this
+    // (attn-ij9y): the leader's OWN comment renders through the projection,
+    // which replays pending outbox envelopes on the doorbell ring below —
+    // so the leader materializes it via the same path as every follower.
+    // On the /s/ reviewer + native paths this echo is the live feed and the
+    // ring is a harmless no-op (they run no projection).
     store.applyEvent(assembled.event);
+    if (this.storage) this.ringReviewInboundDoorbell(roomId);
     void outbox.flushNow().catch(() => undefined);
     return assembled.event;
   }
@@ -2868,7 +2879,13 @@ export class BrowserSession {
    * next commit; storage stays the source of truth.
    */
   private ringReviewInboundDoorbell(roomId: string): void {
-    this.reviewInboundDoorbell ??= openBroadcastChannel(REVIEW_INBOUND_CHANNEL_PREFIX + roomId);
+    const name = REVIEW_INBOUND_CHANNEL_PREFIX + roomId;
+    // Same-tab first (attn-ij9y): BroadcastChannel never loops back to the
+    // posting context, so the LEADER tab's own projection — which now owns
+    // the store even for this tab — would never replay this commit without
+    // an in-process ring. Followers get the cross-tab post below.
+    ringLocalDoorbell(name);
+    this.reviewInboundDoorbell ??= openBroadcastChannel(name);
     try {
       this.reviewInboundDoorbell?.postMessage({ roomId });
     } catch {

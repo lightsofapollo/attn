@@ -18,6 +18,7 @@
     EditingSession,
     LocalCollabJoinHandle,
     LocalCollabJoinState,
+    ReviewProjectionHandle,
     SaveState,
     StorageHealth,
     WorkspaceAppService,
@@ -1189,27 +1190,30 @@
   // per-tab memory and only the leader's live session ever fed it.
   $effect(() => {
     const wsId = workspace.id;
-    let dispose: (() => void) | null = null;
+    let projection: ReviewProjectionHandle | null = null;
+    let unsubscribe: (() => void) | null = null;
     let cancelled = false;
-    service.watchReviewLog(wsId).then((watcher) => {
+    service.openReviewProjection(wsId).then((handle) => {
       if (cancelled) {
-        watcher.close();
+        handle.close();
         return;
       }
-      dispose = () => watcher.close();
-      // A room was discovered: load the review surface NOW, even in a tab
-      // that never takes the lease — the session-gated ensureEditorGraph
-      // path would otherwise leave the hydrated threads with no component
-      // (and no reviewStoreRef) to render into. The manifest bindings let
-      // the follower scope the margin to the active file below.
-      if (watcher.roomId !== null) {
-        reviewLogBindings = [...watcher.bindings];
-        void ensureEditorGraph(true);
-      }
+      projection = handle;
+      // Subscribe for roomId/bindings changes: the projection follows room
+      // rotation (attn-hh9r re-provision, stop/re-share) by re-discovering
+      // and re-replaying, so bindings here stay current for the file-scoping
+      // reads below (attn-whdh). A discovered room loads the review surface
+      // NOW even in a never-lease tab — otherwise the projection-hydrated
+      // threads have no component to render into.
+      unsubscribe = handle.subscribe((state) => {
+        reviewLogBindings = [...state.bindings];
+        if (state.roomId !== null) void ensureEditorGraph(true);
+      });
     }).catch(() => undefined);
     return () => {
       cancelled = true;
-      dispose?.();
+      unsubscribe?.();
+      projection?.close();
     };
   });
 

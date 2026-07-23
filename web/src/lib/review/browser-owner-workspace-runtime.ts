@@ -51,6 +51,8 @@ import type { LeaseHandle, WorkspaceLeaseManagerOptions } from './browser-worksp
 import type { CollabController } from '../prosemirror/collab-controller';
 import type { BrowserReviewTerminalPort } from './browser-review-actions';
 import { LocalCollabHub } from './browser-local-collab';
+import { createHostedOwnerSessionStoreSink } from './browser-review-log';
+import { SHARE_RECORDS_CHANNEL_PREFIX, ringDoorbell } from '../tab-channels';
 import {
   BrowserWorkspaceSharingCoordinator,
   type BrowserWorkspaceShareRequest,
@@ -411,6 +413,9 @@ export class BrowserOwnerWorkspaceRuntime {
           });
         }
       }
+      // The share record now exists (or its manifest advanced): wake every
+      // tab's projection so the leader materializes the room it just created.
+      this.ringShareRecordsDoorbell();
       return view;
     });
   }
@@ -442,6 +447,8 @@ export class BrowserOwnerWorkspaceRuntime {
         bindings: [],
         authority: null,
       });
+      // Share stopped: every tab's projection must drop the room's threads.
+      this.ringShareRecordsDoorbell();
     });
   }
 
@@ -676,6 +683,19 @@ export class BrowserOwnerWorkspaceRuntime {
    * debounce: continuous typing keeps pushing the flush out, so the epoch
    * transition (which reseeds the editor binding) only lands in idle gaps.
    */
+  /**
+   * Ring the share-records doorbell (attn-kobw): the runtime is the only
+   * writer of this workspace's share record in a hosted owner tab, so after
+   * any mutation that can change `currentRoomId` — publish, re-provision
+   * (attn-hh9r), stop — every tab's WorkspaceReviewProjection (this one via
+   * the same-tab ring, siblings via the broadcast) must re-discover from
+   * storage. Without it a freshly-shared leader tab, having removed its
+   * direct session feed (attn-ij9y), would render an empty review surface.
+   */
+  private ringShareRecordsDoorbell(): void {
+    ringDoorbell(SHARE_RECORDS_CHANNEL_PREFIX + this.options.workspaceId);
+  }
+
   private scheduleShareRepublish(): void {
     if (this.closing || !this.share) return;
     if (this.republishHandle !== null) this.cancelScheduled(this.republishHandle);
@@ -769,6 +789,13 @@ export class BrowserOwnerWorkspaceRuntime {
         // Never hand it the app service's shared BrowserStorage handle.
         storageFactory: (createIfMissing) =>
           this.options.storage.openSibling(createIfMissing),
+        // Leader symmetry (attn-ij9y): the hosted owner's live session feeds
+        // ONLY the durable log — inbound envelopes commit + ring, outbound
+        // events enqueue + ring — and the WorkspaceReviewProjection replays
+        // both into the runes store exactly as it does in follower tabs. If
+        // the projection ever misses an event, the LEADER sees the bug too:
+        // cross-tab divergence becomes impossible by construction (attn-whdh).
+        store: createHostedOwnerSessionStoreSink(),
       },
       collab: this.options.collab,
       // Presence bridge, room → tabs (attn-37f9): reviewer cursors arriving
@@ -1253,6 +1280,9 @@ export class BrowserOwnerWorkspaceRuntime {
       // bounded head-moved retries; a final failure lands in the honest
       // paused state below instead of a generic error.
       await this.activatePublishedShare(discovered, this.requireFence());
+      // Room rotated (attn-hh9r): every tab's projection must follow the new
+      // currentRoomId — this is exactly the two-tab divergence attn-whdh kills.
+      this.ringShareRecordsDoorbell();
     } catch (error) {
       this.startLocalHeartbeat();
       this.patchState({

@@ -18,8 +18,8 @@ import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import {
   discoverReviewLogRoom,
+  openWorkspaceReviewProjection,
   replayReviewLogIntoStore,
-  watchWorkspaceReviewLog,
   type ReviewLogRoomKeys,
 } from './browser-review-log';
 import { BrowserStorage } from './browser-storage';
@@ -253,6 +253,15 @@ function makeStubStore(): StubStore {
     noteRoomRole(roomId: RoomId, role: 'owner' | 'reviewer') {
       s.roles = [...s.roles, { roomId, role }];
     },
+    leaveRoom(roomId: RoomId) {
+      s.events = s.events.filter((event) => event.meta.roomId !== roomId);
+      s.snapshots = s.snapshots.filter((snapshot) => snapshot.roomId !== roomId);
+      if (s.currentRoomId === roomId) s.currentRoomId = null;
+    },
+    adoptRoom(roomId: RoomId, role: 'owner' | 'reviewer') {
+      s.roles = [...s.roles, { roomId, role }];
+      s.currentRoomId = roomId;
+    },
   };
   return s;
 }
@@ -361,10 +370,10 @@ defineCase('replay populates the store from the durable log, idempotently', asyn
   }
 });
 
-defineCase('watchWorkspaceReviewLog discovers the published share and follows the doorbell', async () => {
+defineCase('WorkspaceReviewProjection discovers the published share and follows the doorbell', async () => {
   const storage = await openStorage();
   const ring = new BroadcastChannel(REVIEW_INBOUND_CHANNEL_PREFIX + ROOM_ID);
-  let watcherClose: (() => void) | null = null;
+  let projectionClose: (() => void) | null = null;
   try {
     const identity = ownerIdentity();
     const workspaceId = await seedSharedWorkspace(storage, identity);
@@ -381,12 +390,12 @@ defineCase('watchWorkspaceReviewLog discovers the published share and follows th
     assertEq(discovered?.roomId, ROOM_ID, 'share record resolves the room');
 
     const store = makeStubStore();
-    const watcher = await watchWorkspaceReviewLog({ storage, workspaceId, store });
-    watcherClose = () => watcher.close();
-    assertEq(watcher.roomId, ROOM_ID, 'watcher bound to the discovered room');
-    assertEq(store.events.length, 1, 'initial hydration completed before resolve');
+    const projection = await openWorkspaceReviewProjection({ storage, workspaceId, store });
+    projectionClose = () => projection.close();
+    assertEq(projection.getState().roomId, ROOM_ID, 'projection bound to the discovered room');
+    assertEq(store.events.length, 1, 'initial hydration completed before open() resolved');
 
-    // Leader commits a new inbound event, then rings — the follower replays.
+    // Leader commits a new inbound event, then rings — every tab replays.
     await storage.commitInbound(
       ROOM_ID,
       identity.deviceId,
@@ -402,9 +411,9 @@ defineCase('watchWorkspaceReviewLog discovers the published share and follows th
     await delay(100);
     assertEq(store.events.length, 2, 'redundant ring never duplicates threads');
 
-    // After close the watcher must stop reacting.
-    watcher.close();
-    watcherClose = null;
+    // After close the projection must stop reacting.
+    projection.close();
+    projectionClose = null;
     await storage.commitInbound(
       ROOM_ID,
       identity.deviceId,
@@ -413,10 +422,62 @@ defineCase('watchWorkspaceReviewLog discovers the published share and follows th
     );
     ring.postMessage({ roomId: ROOM_ID });
     await delay(150);
-    assertEq(store.events.length, 2, 'closed watcher ignores rings');
+    assertEq(store.events.length, 2, 'closed projection ignores rings');
   } finally {
-    watcherClose?.();
+    projectionClose?.();
     ring.close();
+    storage.close();
+  }
+});
+
+defineCase('projection follows a room rotation: drops the old room, replays the new (attn-kobw)', async () => {
+  const storage = await openStorage();
+  try {
+    const identity = ownerIdentity();
+    const workspaceId = await seedSharedWorkspace(storage, identity);
+    await storage.putDevice(ROOM_ID, ownerDevice(identity));
+    await storage.commitInbound(
+      ROOM_ID,
+      identity.deviceId,
+      mintCommentEnvelope(identity, 'env-rot-1', 1_700_000_100_000, 'BEFORE-ROTATION', 'thread-rot'),
+      1,
+    );
+
+    // A room-B room-keys record sharing A's AEAD keys (B has no committed
+    // envelopes, so its replay is empty — the test asserts the ROTATION
+    // mechanics: leave A, adopt+replay B).
+    const ROOM_B = 'room-b-reprovisioned';
+    const roomKeys = (roomId: string): ReviewLogRoomKeys => ({
+      roomId,
+      deviceId: identity.deviceId,
+      protocolVersion: 2,
+      eventKey: new Uint8Array(KEYS.eventKey),
+      snapshotKey: new Uint8Array(KEYS.snapshotKey),
+      signalingKey: new Uint8Array(KEYS.signalingKey),
+      bindings: [],
+    });
+    let currentRoom = ROOM_ID;
+    const discover = async (): Promise<ReviewLogRoomKeys> => roomKeys(currentRoom);
+
+    const store = makeStubStore();
+    const projection = await openWorkspaceReviewProjection({ storage, workspaceId, store, discover });
+    try {
+      assertEq(projection.getState().roomId, ROOM_ID, 'projection starts on room A');
+      assertEq(store.events.length, 1, 'room A event hydrated');
+      assertEq(store.currentRoomId, ROOM_ID, 'store selected room A');
+
+      // The share record rotates its roomId (re-provisioning). The share
+      // doorbell fires refreshShareRecord; the projection must drop A and
+      // replay B.
+      currentRoom = ROOM_B;
+      await projection.refreshShareRecord();
+      assertEq(projection.getState().roomId, ROOM_B, 'projection followed to room B');
+      assertEq(store.events.length, 0, "room A's threads dropped on rotation");
+      assertEq(store.currentRoomId, ROOM_B, 'store selected room B');
+    } finally {
+      projection.close();
+    }
+  } finally {
     storage.close();
   }
 });
@@ -430,15 +491,15 @@ defineCase('a workspace without an active published share no-ops', async () => {
       entry: { path: 'untitled.md', kind: 'markdown', body: new Uint8Array(0) },
     });
     const store = makeStubStore();
-    const watcher = await watchWorkspaceReviewLog({
+    const projection = await openWorkspaceReviewProjection({
       storage,
       workspaceId: created.workspace.workspaceId,
       store,
     });
-    assertEq(watcher.roomId, null, 'nothing to hydrate from');
+    assertEq(projection.getState().roomId, null, 'nothing to hydrate from');
     assertEq(store.events.length, 0, 'store untouched');
-    watcher.close();
-    watcher.close(); // close is safe to repeat
+    projection.close();
+    projection.close(); // close is safe to repeat
   } finally {
     storage.close();
   }

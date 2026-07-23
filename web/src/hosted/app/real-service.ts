@@ -11,6 +11,7 @@ import type {
   ImportFileInput,
   LocalCollabJoinHandle,
   PersistenceMode,
+  ReviewProjectionHandle,
   ShareScope,
   StorageHealth,
   WorkspaceAppService,
@@ -178,11 +179,9 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     return () => channel.removeEventListener('message', onMessage);
   }
 
-  /** attn-dgya: durable review-log hydration + doorbell, any lease role. */
-  async watchReviewLog(
-    workspaceId: string,
-  ): Promise<{ roomId: string | null; bindings: ReadonlyArray<{ path: string; fileId: string }>; close(): void }> {
-    return this.service.watchReviewLog(workspaceId);
+  /** attn-whdh: the single review projection, any lease role. */
+  async openReviewProjection(workspaceId: string): Promise<ReviewProjectionHandle> {
+    return this.service.openReviewProjection(workspaceId);
   }
 
   static async open(options: BrowserWorkspaceServiceOptions = {}): Promise<RealWorkspaceAppService> {

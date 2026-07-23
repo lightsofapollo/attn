@@ -1053,6 +1053,8 @@ export interface ReviewStatusPeer {
   locationFileId?: FileId;
   locationSnapshotId?: SnapshotId;
   locationPath?: string;
+  /** Peer's live caret head — the jump target for a chip click (attn-qs03). */
+  locationCaretHead?: number;
   lastLocationAt?: number;
 }
 

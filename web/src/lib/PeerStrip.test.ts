@@ -35,6 +35,7 @@ import {
   chipVisualFor,
   isYou,
   monogramFor,
+  peerIsJumpable,
   shortenParticipantId,
   splitForStrip,
   tail6,
@@ -197,6 +198,36 @@ defineCase('isYou tags the chip whose participantId matches the local id', () =>
   assert(isYou(me, me.participantId) === true, '(you) should fire for matching id');
   assert(isYou(other, me.participantId) === false, 'other peers must NOT be (you)');
   assert(isYou(me, null) === false, 'null local id must never tag (you)');
+});
+
+// (attn-qs03) Jumpable predicate: online, not-you, has a location, handler wired.
+defineCase('peerIsJumpable requires handler + online + not-you + a known location', () => {
+  const me = makePeer({ displayName: 'James' });
+  const located = makePeer({
+    displayName: 'Alex',
+    locationFileId: ('F1' as ReviewStatusPeer['locationFileId']),
+    locationCaretHead: 12,
+  });
+  // Happy path: a remote, online peer with a location and a handler jumps.
+  assert(peerIsJumpable(located, me.participantId, true) === true, 'located online peer should be jumpable');
+  // No handler wired → never jumpable (nowhere to go).
+  assert(peerIsJumpable(located, me.participantId, false) === false, 'no handler must disable jump');
+  // Offline peer → dead end, not jumpable.
+  assert(
+    peerIsJumpable({ ...located, online: false }, me.participantId, true) === false,
+    'offline peer must not be jumpable',
+  );
+  // No known location → not jumpable even if online.
+  const noLoc = makePeer({ displayName: 'Robin' });
+  assert(peerIsJumpable(noLoc, me.participantId, true) === false, 'peer without a location is not jumpable');
+  // "You" is never jumpable — you're already there.
+  assert(peerIsJumpable(located, located.participantId, true) === false, 'self must not be jumpable');
+  // caretHead is optional: file-only location still jumps (scrolls to top).
+  const fileOnly = makePeer({
+    displayName: 'Sam',
+    locationFileId: ('F2' as ReviewStatusPeer['locationFileId']),
+  });
+  assert(peerIsJumpable(fileOnly, me.participantId, true) === true, 'file-only location should still be jumpable');
 });
 
 // (7) Monogram rule (attn-3gdd, two letters): first+last initials for

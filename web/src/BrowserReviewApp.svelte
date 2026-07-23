@@ -81,7 +81,8 @@
   } from './lib/review/selection-debug';
   import { resolveAnchor } from './lib/review/resolver';
   import type { ConstructAnchorContext } from './lib/review/anchors';
-  import type { Anchor, FileId, RoomId, SuggestionDraft } from './lib/types';
+  import type { Anchor, FileId, RoomId, ReviewStatusPeer, SuggestionDraft } from './lib/types';
+  import { scrollViewToPos } from './lib/scroll-viewport';
 
   interface Props {
     /**
@@ -793,6 +794,12 @@
         snapshotId: seed.snapshotId,
         path: displayedSnapshot?.ownerDisplayPath,
       }),
+      // Record where every OTHER participant is (which file + caret) so a chip
+      // click can jump there (attn-qs03). Only the owner path recorded this
+      // before; the reviewer needs it too to jump to the owner / other peers.
+      onPeerLocation: (deviceId, location) => {
+        reviewStore.notePeerLocation(deviceId, location);
+      },
       onRemoteCursors: (cursors) => {
         const view = pmViewForReview;
         if (view) view.dispatch(view.state.tr.setMeta(remoteCursorsKey, cursors));
@@ -869,6 +876,38 @@
     traceReviewSelection('prosemirror-selection', { head });
     if (reviewerAvailability.collabReady) reviewerCollabController?.broadcastCursor(head, anchor);
   }
+
+  // Jump-to-peer (attn-qs03): a chip click navigates to where that participant
+  // is. Same file → scroll the caret into view now. Different file → switch,
+  // then a pending target is consumed once the new file's editor is bound (the
+  // switch re-seeds + remounts the view asynchronously). The reviewer file
+  // model is fileId-based (selectFileAsUser).
+  let pendingJump = $state<{ fileId: FileId; pos: number } | null>(null);
+
+  function handleJumpToPeer(peer: ReviewStatusPeer): void {
+    const targetFileId = peer.locationFileId;
+    if (!targetFileId) return;
+    const pos = peer.locationCaretHead ?? 0;
+    if (targetFileId === reviewStore.currentFileId) {
+      const view = pmViewForReview;
+      if (view) scrollViewToPos(view, pos);
+      return;
+    }
+    pendingJump = { fileId: targetFileId, pos };
+    reviewStore.selectFileAsUser(targetFileId);
+  }
+
+  // Consume a pending cross-file jump once the target file's view is live.
+  $effect(() => {
+    const jump = pendingJump;
+    const view = pmViewForReview;
+    const fid = reviewStore.currentFileId;
+    if (!jump || !view || fid !== jump.fileId) return;
+    if (!viewHasCollab(view)) return;
+    pendingJump = null;
+    // Let the freshly-bound doc lay out before measuring coordsAtPos.
+    requestAnimationFrame(() => scrollViewToPos(view, jump.pos));
+  });
 
   // Resolve arrived and locally-authored anchors against the active snapshot.
   $effect(() => {
@@ -1173,7 +1212,7 @@
             {currentFileName}
           </span>
           <div class="ml-auto flex shrink-0 items-center gap-1.5">
-            <PeerStrip {localParticipantId} />
+            <PeerStrip {localParticipantId} onJumpTo={handleJumpToPeer} />
             <ReviewerStatusChip
               presentation={statusPresentation}
               tier={sessionState.grantTier}

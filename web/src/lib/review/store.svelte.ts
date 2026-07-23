@@ -78,6 +78,8 @@ interface PeerLocation {
   locationFileId?: FileId;
   locationSnapshotId?: SnapshotId;
   locationPath?: string;
+  /** Peer's caret head, so a chip click can jump to their exact spot (attn-qs03). */
+  locationCaretHead?: number;
   lastLocationAt: number;
 }
 
@@ -909,6 +911,7 @@ export class ReviewStore {
       fileId?: FileId;
       snapshotId?: SnapshotId;
       path?: string;
+      caretHead?: number;
     },
   ): void {
     if (!deviceId) return;
@@ -919,6 +922,7 @@ export class ReviewStore {
         locationFileId: location.fileId,
         locationSnapshotId: location.snapshotId,
         locationPath: path && path.length > 0 ? path : undefined,
+        locationCaretHead: location.caretHead,
         lastLocationAt: Date.now(),
       },
     };
@@ -932,6 +936,7 @@ export class ReviewStore {
       locationFileId: location.locationFileId,
       locationSnapshotId: location.locationSnapshotId,
       locationPath: location.locationPath,
+      locationCaretHead: location.locationCaretHead,
       lastLocationAt: location.lastLocationAt,
       onSnapshotId: location.locationSnapshotId ?? peer.onSnapshotId,
     };

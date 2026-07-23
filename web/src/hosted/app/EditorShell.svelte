@@ -34,8 +34,9 @@
   import type { EditorBridge } from '../../lib/prosemirror/collab-session';
   import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
   import { LEASE_CHANNEL_NAME, openBroadcastChannel } from '../../lib/tab-channels';
-  import type { Anchor as ReviewAnchor, DeviceId, ParticipantId, RequiresThreeWayVerdict, RoomId, Thread } from '../../lib/types';
+  import type { Anchor as ReviewAnchor, DeviceId, FileId, ParticipantId, RequiresThreeWayVerdict, ReviewStatusPeer, RoomId, Thread } from '../../lib/types';
   import type { ConstructAnchorContext } from '../../lib/review/anchors';
+  import { scrollViewToPos } from '../../lib/scroll-viewport';
 
   interface Props {
     service: WorkspaceAppService;
@@ -1845,7 +1846,27 @@
       );
       v.dispatch(v.state.tr.setMeta(cursorsKey, scoped));
     });
-    return () => controller.setRemoteCursorSink(null);
+    // Record where each reviewer is so the owner can jump to them (attn-qs03):
+    // the runtime built this controller with a null construction-time
+    // onPeerLocation (it predates the shell's store handle), so we sink it here.
+    controller.setPeerLocationSink((deviceId, location) => {
+      reviewStoreRef?.notePeerLocation(deviceId, location);
+    });
+    // Broadcast the owner's own file + caret so reviewers can jump back to us.
+    // The active file only becomes knowable after mount, hence a live source.
+    controller.setLocationSource(() => {
+      const fileId = activeOwnerFileId();
+      if (!fileId) return null;
+      return {
+        fileId,
+        ...(activeEntry?.path ? { path: activeEntry.path } : {}),
+      };
+    });
+    return () => {
+      controller.setRemoteCursorSink(null);
+      controller.setPeerLocationSink(null);
+      controller.setLocationSource(null);
+    };
   });
 
   async function acceptSuggestion(thread: Thread): Promise<unknown> {
@@ -2003,6 +2024,56 @@
   function navigateDesktopTree(relativePath: string): void {
     void switchTo(relativePath);
   }
+
+  // path ↔ fileId across the leader authority bindings and the follower-tab
+  // review-log bindings (same union the cursor-scope filter uses).
+  function activeOwnerFileId(): FileId | null {
+    const path = activeEntry?.path;
+    if (!path) return null;
+    return (
+      (ownerState?.bindings.find((b) => b.path === path)?.fileId
+        ?? reviewLogBindings.find((b) => b.path === path)?.fileId
+        ?? null) as FileId | null
+    );
+  }
+
+  function pathForFileId(fileId: FileId): string | null {
+    return (
+      ownerState?.bindings.find((b) => b.fileId === fileId)?.path
+      ?? reviewLogBindings.find((b) => b.fileId === fileId)?.path
+      ?? null
+    );
+  }
+
+  // Jump-to-peer (attn-qs03): navigate the owner to a participant's file +
+  // caret. Owner file nav is path-based (switchTo), so resolve the target path
+  // from the peer's location, then consume a pending caret once the new file's
+  // editor is bound (the switch remounts the view asynchronously).
+  let pendingJump = $state<{ fileId: FileId; pos: number } | null>(null);
+
+  function handleJumpToPeer(peer: ReviewStatusPeer): void {
+    const fileId = peer.locationFileId;
+    if (!fileId) return;
+    const pos = peer.locationCaretHead ?? 0;
+    const targetPath = peer.locationPath ?? pathForFileId(fileId) ?? undefined;
+    if (targetPath && targetPath === activeEntry?.path) {
+      const view = pmViewForReview;
+      if (view) scrollViewToPos(view, pos);
+      return;
+    }
+    pendingJump = { fileId, pos };
+    if (targetPath) void switchTo(targetPath);
+  }
+
+  // Consume a pending cross-file jump once the target file's editor is live.
+  $effect(() => {
+    const jump = pendingJump;
+    const view = pmViewForReview;
+    if (!jump || !view) return;
+    if (activeOwnerFileId() !== jump.fileId) return;
+    pendingJump = null;
+    requestAnimationFrame(() => scrollViewToPos(view, jump.pos));
+  });
 
   // Tree context-menu Rename/Delete: switch to the target file (in place), then
   // open the existing footer rename input / delete confirm once it's active.
@@ -2764,6 +2835,7 @@
         onRename={requestTreeRename}
         onDelete={requestTreeDelete}
         onViewport={(viewport) => (canvasEl = viewport ?? undefined)}
+        onJumpTo={handleJumpToPeer}
       />
     {:else}
       <div class="hosted-shell-loading" role="status">Opening workspace…</div>

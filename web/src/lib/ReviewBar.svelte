@@ -44,7 +44,7 @@
   } from '$lib/components/ui/dropdown-menu';
   import { roomDisplayName, shortRoomId } from './review/room-ui';
   import { reviewStore } from './review/store.svelte';
-  import type { ParticipantId, RoomId } from './types';
+  import type { ParticipantId, ReviewStatusPeer, RoomId } from './types';
   import UnreadBadge from './UnreadBadge.svelte';
 
   interface Props {
@@ -84,6 +84,13 @@
      */
     localParticipantId?: ParticipantId | null;
     /**
+     * Jump the local user to a peer's location (attn-qs03), threaded through to
+     * PeerStrip. When provided, an online peer's chip navigates to their file +
+     * caret instead of opening the identity card. Owner surfaces wire this to
+     * their file-switch + scroll path.
+     */
+    onJumpTo?: (peer: ReviewStatusPeer) => void;
+    /**
      * Show the comments show/hide button in the dock (hosted owner surface).
      * The reviewer page carries the same affordance in its own header. Native
      * and hosted owner headers opt in so every surface uses the same control.
@@ -106,6 +113,7 @@
     onOutboxRetry,
     rightOffsetPx = 16,
     localParticipantId = null,
+    onJumpTo,
     railToggle = false,
     inline = false,
     onDockWidth,
@@ -246,7 +254,7 @@
           class="review-bar-peers min-w-0 shrink"
           data-slot="review-bar-peers"
         >
-          <PeerStrip {localParticipantId} />
+          <PeerStrip {localParticipantId} {onJumpTo} />
         </div>
 
         <div

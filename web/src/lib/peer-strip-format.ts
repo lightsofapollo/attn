@@ -198,6 +198,32 @@ export function isYou(
 }
 
 /**
+ * Whether clicking a peer's chip should JUMP the local user to that peer's
+ * location instead of opening the identity card (attn-qs03). A peer is
+ * jumpable only when:
+ *   * a jump handler is wired (`hasHandler`) — otherwise there's nowhere to go;
+ *   * the peer is `online` — a stale location for a departed peer is a dead end;
+ *   * the peer is not "you" — you're already where you are; and
+ *   * a live location is known (`locationFileId` set) — the destination file.
+ *
+ * The caret position (`locationCaretHead`) is optional: with no caret we still
+ * jump to the file and scroll to the top. Kept pure so the strip and the tests
+ * agree on the exact rule.
+ */
+export function peerIsJumpable(
+  peer: ReviewStatusPeer,
+  localParticipantId: ParticipantId | null,
+  hasHandler: boolean,
+): boolean {
+  return (
+    hasHandler &&
+    peer.online &&
+    !isYou(peer, localParticipantId) &&
+    peer.locationFileId !== undefined
+  );
+}
+
+/**
  * Last-6-hex disambiguator for the chip-hover tooltip (per §3 "tail-6").
  * Cheap disambig for two reviewers who both call themselves "alex".
  *

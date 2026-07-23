@@ -37,6 +37,7 @@
     AGENT_GLYPH,
     chipVisualFor,
     isYou,
+    peerIsJumpable,
     shortenParticipantId,
     splitForStrip,
     tail6,
@@ -64,12 +65,21 @@
      * same minimal helper the connection badge uses.
      */
     formatLastSeen?: (timestampMs: number, nowMs: number) => string;
+    /**
+     * Jump the local user to a peer's location (attn-qs03). When provided, an
+     * online peer with a known location has its chip's PRIMARY click navigate
+     * there (file + caret) instead of opening the identity card. Omitted →
+     * every chip keeps the identity-card behavior. The identity card stays
+     * reachable for jumpable peers via the overflow roster rows.
+     */
+    onJumpTo?: (peer: ReviewStatusPeer) => void;
   }
 
   let {
     localParticipantId = null,
     now = () => Date.now(),
     formatLastSeen = defaultFormatLastSeen,
+    onJumpTo,
   }: Props = $props();
 
   // Identity-card popover state. `null` = nothing open; otherwise the
@@ -183,6 +193,7 @@
     {#each split.inline as peer (peer.participantId + ':' + peer.deviceId)}
       {@const visual = chipVisualFor(peer, reviewStore.colorFor(peer.participantId))}
       {@const youHere = isYou(peer, localParticipantId)}
+      {@const jumpable = peerIsJumpable(peer, localParticipantId, onJumpTo !== undefined)}
       <div
         class="peer-strip-chip-wrapper relative inline-flex flex-col items-center"
         data-slot="peer-strip-chip-wrapper"
@@ -201,10 +212,15 @@
           data-kind={peer.kind}
           data-shape={visual.shape}
           data-online={peer.online ? 'true' : 'false'}
+          data-jumpable={jumpable ? 'true' : 'false'}
           style={chipStyle(visual)}
-          aria-label={`${peer.displayName}${youHere ? ' (you)' : ''} — ${peer.kind}`}
-          title={`${peer.displayName} · ${peer.kind} · ${presenceLabel(peer, now())}`}
-          onclick={() => openCardFor(peer)}
+          aria-label={jumpable
+            ? `Jump to ${peer.displayName}'s location`
+            : `${peer.displayName}${youHere ? ' (you)' : ''} — ${peer.kind}`}
+          title={jumpable
+            ? `Jump to ${peer.displayName}'s location`
+            : `${peer.displayName} · ${peer.kind} · ${presenceLabel(peer, now())}`}
+          onclick={() => (jumpable ? onJumpTo?.(peer) : openCardFor(peer))}
         >
           {#if visual.content.kind === 'monogram'}
             <span aria-hidden="true">{visual.content.letter}</span>

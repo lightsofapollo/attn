@@ -10,6 +10,7 @@
   import { isThreadActive } from '../../lib/review/thread-visibility';
   import { RAIL_WIDTH_PX } from '../../lib/review/rail-mode';
   import type { WorkspaceEntry } from './types';
+  import type { ReviewStatusPeer } from '../../lib/types';
   import {
     workspaceEntriesToTree,
     workspaceRelativePath,
@@ -40,6 +41,8 @@
     onRename?: (path: string) => void;
     onDelete?: (path: string) => void;
     onViewport?: (viewport: HTMLElement | null) => void;
+    /** Jump the owner to a peer's file + caret (attn-qs03); threaded to ReviewBar. */
+    onJumpTo?: (peer: ReviewStatusPeer) => void;
   }
 
   let {
@@ -62,6 +65,7 @@
     onRename,
     onDelete,
     onViewport,
+    onJumpTo,
   }: Props = $props();
 
   const rootPath = $derived(workspaceVirtualRoot(workspaceId));
@@ -254,6 +258,7 @@
         {shareOpen}
         isOwner={true}
         onShareClick={onShare}
+        {onJumpTo}
         railToggle={true}
         inline={true}
       />

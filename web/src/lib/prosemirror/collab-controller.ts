@@ -27,6 +27,15 @@ export interface CollabPeerLocation {
   fileId?: FileId;
   snapshotId?: SnapshotId;
   path?: string;
+  /**
+   * Caret head (document position) at the moment this presence frame was
+   * sent, so a peer clicking this participant's chip can jump not just to
+   * their FILE but to their exact scroll/caret position (attn-qs03). Rides
+   * the cursor presence frame alongside `head` — it IS `head`, copied into
+   * the location so the caret position travels the same
+   * onPeerLocation(deviceId, location) plumbing as the file location.
+   */
+  caretHead?: number;
 }
 
 export interface CollabAuthoritySeed {
@@ -139,6 +148,22 @@ export class CollabController {
   private readonly onPeerLocation:
     | ((deviceId: string, location: CollabPeerLocation) => void)
     | null;
+  /**
+   * Late-bound peer-location sink (attn-qs03), the presence-location twin of
+   * {@link remoteCursorSink}. The hosted owner's controller is built by the
+   * workspace runtime long before EditorShell mounts and can reach the review
+   * store, so its construction-time `onPeerLocation` is null; the shell wires
+   * this sink instead to record where each reviewer is (which file + caret).
+   */
+  private peerLocationSink:
+    | ((deviceId: string, location: CollabPeerLocation) => void)
+    | null = null;
+  /**
+   * Late-bound location source (attn-qs03): overrides `getLocation` when the
+   * owner's active file only becomes knowable after mount. Lets the hosted
+   * owner BROADCAST its own location so reviewers can jump to it in turn.
+   */
+  private locationSource: (() => CollabPeerLocation | null) | null = null;
   private readonly remoteCursors = new Map<string, RemoteCursor>();
   // clientID → sender deviceId, so a peer's caret can be cleared on leave
   // (presence frames identify peers by deviceId, cursors by collab clientID).
@@ -407,10 +432,35 @@ export class CollabController {
     if (sink) sink([...this.remoteCursors.values()]);
   }
 
+  /**
+   * Attach (or clear) a peer-location sink after construction (attn-qs03).
+   * Same rationale as {@link setRemoteCursorSink}: the hosted owner shell only
+   * gains a handle to the review store after the runtime built this controller.
+   */
+  setPeerLocationSink(
+    sink: ((deviceId: string, location: CollabPeerLocation) => void) | null,
+  ): void {
+    this.peerLocationSink = sink;
+  }
+
+  /**
+   * Attach (or clear) a live location source after construction (attn-qs03),
+   * so the hosted owner can announce which file + caret it is on once the
+   * shell knows its active file. Takes precedence over `getLocation`.
+   */
+  setLocationSource(source: (() => CollabPeerLocation | null) | null): void {
+    this.locationSource = source;
+  }
+
   broadcastCursor(head: number, anchor?: number): void {
     this.lastCursorHead = head;
     this.lastCursorAnchor = anchor ?? null;
-    const location = this.getLocation?.() ?? undefined;
+    // Stamp the caret head onto the location so peers can jump straight to
+    // this participant's position, not just their file (attn-qs03). Only when
+    // there IS a location (a shared file) — a bare caretHead has no meaning
+    // without the file it indexes into.
+    const base = (this.locationSource ?? this.getLocation)?.() ?? undefined;
+    const location = base ? { ...base, caretHead: head } : undefined;
     void this.sendWire({
       kind: 'cursor',
       cursor: {
@@ -480,6 +530,7 @@ export class CollabController {
       this.cursorDevice.set(msg.cursor.clientID, fromDeviceId);
       if (msg.cursor.location !== undefined) {
         this.onPeerLocation?.(fromDeviceId, msg.cursor.location);
+        this.peerLocationSink?.(fromDeviceId, msg.cursor.location);
       }
       this.emitRemoteCursors();
       return;
@@ -794,11 +845,16 @@ function parseCursor(value: Record<string, unknown>): CollabWireMessage | null {
 
 function parseLocation(value: unknown): CollabPeerLocation | null | undefined {
   if (value === undefined) return undefined;
-  if (!isRecord(value) || !hasOnlyKeys(value, ['fileId', 'snapshotId', 'path']))
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['fileId', 'snapshotId', 'path', 'caretHead'])
+  )
     return null;
   if (value.fileId !== undefined && !wireId(value.fileId)) return null;
   if (value.snapshotId !== undefined && !wireId(value.snapshotId)) return null;
   if (value.path !== undefined && !boundedString(value.path, 1_024, true))
+    return null;
+  if (value.caretHead !== undefined && !nonNegativeInteger(value.caretHead))
     return null;
   return {
     ...(value.fileId === undefined ? {} : { fileId: value.fileId as FileId }),
@@ -806,6 +862,7 @@ function parseLocation(value: unknown): CollabPeerLocation | null | undefined {
       ? {}
       : { snapshotId: value.snapshotId as SnapshotId }),
     ...(value.path === undefined ? {} : { path: value.path }),
+    ...(value.caretHead === undefined ? {} : { caretHead: value.caretHead }),
   };
 }
 

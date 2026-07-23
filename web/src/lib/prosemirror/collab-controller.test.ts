@@ -687,5 +687,117 @@ defineCase('legacy wire without epoch is accepted only by an explicit legacy con
   assert(modern.version === 0, 'snapshot epoch controller consumed legacy traffic');
 });
 
+// --- attn-qs03: caret head rides the presence-location plumbing ------------
+
+defineCase(
+  'broadcastCursor stamps caretHead onto the location and it reaches the peer with the sender deviceId',
+  () => {
+    const toOwner: string[] = [];
+    const seen: Array<{ deviceId: string; location: unknown }> = [];
+    const reviewer = new CollabController({
+      isOwner: false,
+      send: (p) => toOwner.push(p),
+      selfClientId: 'reviewer',
+      selfLabel: 'Reviewer',
+      selfColor: '#000',
+      isAuthorityDevice: () => true,
+      getLocation: () => ({ fileId: 'F1' as FileId, path: 'notes/plan.md' }),
+    });
+    const owner = new CollabController({
+      isOwner: true,
+      send: () => undefined,
+      selfClientId: 'owner',
+      selfLabel: 'Owner',
+      selfColor: '#000',
+      getSeedDoc: () => docWithText('hello'),
+      onPeerLocation: (deviceId, location) => seen.push({ deviceId, location }),
+    });
+    reviewer.broadcastCursor(7);
+    assert(toOwner.length === 1, 'reviewer did not emit a cursor frame');
+    owner.onInbound(toOwner[0], 'reviewer-device');
+    assert(seen.length === 1, 'owner did not record the peer location');
+    assert(seen[0].deviceId === 'reviewer-device', 'wrong sender deviceId on the join');
+    const loc = seen[0].location as {
+      fileId?: string;
+      path?: string;
+      caretHead?: number;
+    };
+    assert(loc.fileId === 'F1', `wrong fileId: ${loc.fileId}`);
+    assert(loc.path === 'notes/plan.md', `wrong path: ${loc.path}`);
+    assert(loc.caretHead === 7, `caretHead did not ride the location: ${loc.caretHead}`);
+  },
+);
+
+defineCase(
+  'no shared-file location means no caretHead is fabricated',
+  () => {
+    const toOwner: string[] = [];
+    const seen: unknown[] = [];
+    const reviewer = new CollabController({
+      isOwner: false,
+      send: (p) => toOwner.push(p),
+      selfClientId: 'reviewer',
+      selfLabel: 'Reviewer',
+      selfColor: '#000',
+      isAuthorityDevice: () => true,
+      getLocation: () => null,
+    });
+    const owner = new CollabController({
+      isOwner: true,
+      send: () => undefined,
+      selfClientId: 'owner',
+      selfLabel: 'Owner',
+      selfColor: '#000',
+      getSeedDoc: () => docWithText('hello'),
+      onPeerLocation: (_d, location) => seen.push(location),
+    });
+    reviewer.broadcastCursor(4);
+    owner.onInbound(toOwner[0], 'reviewer-device');
+    assert(seen.length === 0, 'a bare caret produced a location join');
+    const parsed = parseCollabWireMessage(toOwner[0]);
+    assert(
+      parsed?.kind === 'cursor' && parsed.cursor.location === undefined,
+      'a location was sent without a shared file',
+    );
+  },
+);
+
+defineCase(
+  'strict parser round-trips caretHead and rejects a negative one',
+  () => {
+    const ok = parseCollabWireMessage(
+      JSON.stringify({
+        kind: 'cursor',
+        cursor: {
+          clientID: 'x',
+          head: 9,
+          label: 'A',
+          color: '#000',
+          location: { fileId: 'F', caretHead: 9 },
+        },
+      }),
+    );
+    assert(
+      ok?.kind === 'cursor' && ok.cursor.location?.caretHead === 9,
+      'caretHead did not survive the strict parser',
+    );
+    assert(
+      parseCollabWireMessage(
+        JSON.stringify({
+          kind: 'cursor',
+          cursor: {
+            clientID: 'x',
+            head: 0,
+            label: 'A',
+            color: '#000',
+            location: { fileId: 'F', caretHead: -1 },
+          },
+        }),
+      ) === null,
+      'negative caretHead accepted',
+    );
+  },
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

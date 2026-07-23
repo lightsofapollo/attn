@@ -7,6 +7,8 @@
 // silently no-ops on the reviewer page (frozen margin cards, dead find-bar
 // scrolling). Walk the real computed styles instead.
 
+import type { EditorView } from 'prosemirror-view';
+
 export function nearestScrollableAncestor(el: Element): HTMLElement | null {
   let node = el.parentElement;
   while (node && node !== document.body && node !== document.documentElement) {
@@ -15,4 +17,37 @@ export function nearestScrollableAncestor(el: Element): HTMLElement | null {
     node = node.parentElement;
   }
   return null;
+}
+
+/**
+ * Centre a document position in the editor's scroll viewport (attn-qs03) — the
+ * jump-to-peer primitive. Shares the viewport-resolution and coordsAtPos math
+ * with Editor.svelte's `ensureSelectionVisible`, but targets an ARBITRARY pos
+ * (a peer's caret head) rather than the local selection.
+ *
+ * Pure side effect on the DOM: it does NOT move the local selection (so it
+ * won't rebroadcast the local caret or disturb a read-only reviewer view). The
+ * position is clamped to the doc so a caret head from a slightly different
+ * revision never throws — worst case it lands a line or two off.
+ */
+export function scrollViewToPos(view: EditorView, pos: number): void {
+  const clamped = Math.max(0, Math.min(pos, view.state.doc.content.size));
+  const viewport = ((
+    view.dom.closest('[data-slot="scroll-area-viewport"]')
+    ?? view.dom.closest('.attn-content-viewport')
+  ) as HTMLElement | null)
+    ?? nearestScrollableAncestor(view.dom);
+  if (!viewport) return;
+
+  let coords: { top: number; bottom: number };
+  try {
+    coords = view.coordsAtPos(clamped, 1);
+  } catch {
+    // A torn-down or not-yet-laid-out view can't resolve coords; skip.
+    return;
+  }
+  const viewportRect = viewport.getBoundingClientRect();
+  const yInContent = coords.top - viewportRect.top + viewport.scrollTop;
+  const centeredTop = Math.max(0, yInContent - viewport.clientHeight / 2);
+  viewport.scrollTo({ top: centeredTop, behavior: 'smooth' });
 }

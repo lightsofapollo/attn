@@ -34,6 +34,7 @@
   import type { EditorBridge } from '../../lib/prosemirror/collab-session';
   import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
   import { LEASE_CHANNEL_NAME, openBroadcastChannel } from '../../lib/tab-channels';
+  import { startReviewDriftMonitor } from '../../lib/review/review-drift-check';
   import type { Anchor as ReviewAnchor, DeviceId, ParticipantId, RequiresThreeWayVerdict, RoomId, Thread } from '../../lib/types';
   import type { ConstructAnchorContext } from '../../lib/review/anchors';
 
@@ -1215,6 +1216,26 @@
       unsubscribe?.();
       projection?.close();
     };
+  });
+
+  // Dev-only drift guard (attn-73xq): every hosted tab broadcasts a
+  // fingerprint of its review store for the active room; a sibling tab that
+  // claims the same room but a different thread set logs a loud console
+  // error. If a future change ever reintroduces a role-dependent read path,
+  // two tabs disagree and this fires the first time — no user report needed.
+  $effect(() => {
+    const wsId = workspace.id;
+    const stop = startReviewDriftMonitor({
+      workspaceId: wsId,
+      read: () => {
+        const store = reviewStoreRef;
+        return {
+          currentRoomId: store?.currentRoomId ?? null,
+          events: store?.events ?? [],
+        };
+      },
+    });
+    return stop;
   });
 
   // Multi-tab auto-recovery: the passive (read-only) tab listens for the

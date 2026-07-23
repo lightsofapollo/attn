@@ -1065,7 +1065,19 @@
   }
 
   async function ensureOwnerSession(): Promise<EditingSession | null> {
-    if (session) return session;
+    if (session) {
+      if (session.getOwnerState().writable) return session;
+      // The lease expired while this tab was leader (attn-d6ai): the dead
+      // session used to short-circuit every retry here, so "Retry edit"
+      // could never re-acquire. Drop the husk and fall through to a fresh
+      // beginEditing — the service closes the lease-lost runtime and
+      // rebuilds one that actually re-attempts the lease.
+      const stale = session;
+      session = null;
+      unsubscribeOwner?.();
+      unsubscribeOwner = null;
+      void stale.release().catch(() => undefined);
+    }
     if (ownerSessionOpening) return ownerSessionOpening;
     ownerSessionOpening = service.beginEditing(workspace.id).then(async (granted) => {
       if (!granted) {

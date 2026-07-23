@@ -159,7 +159,16 @@ export class BrowserWorkspaceService {
   ): Promise<BrowserOwnerWorkspaceRuntime> {
     const existing = this.ownerRuntimes.get(workspaceId);
     if (existing && existing.getState().status !== 'closed' && !existing.isClosing()) {
-      return existing;
+      const state = existing.getState();
+      // A cached runtime whose lease expired (or that errored) is a husk —
+      // it never re-acquires on its own, and returning it made every
+      // "Retry edit" a no-op (attn-d6ai). Close it and build one that
+      // actually re-attempts the lease. Healthy owner runtimes (including
+      // paused-but-lease-holding rollover states) are returned untouched.
+      if (state.leaseRole === 'owner' && state.status !== 'error') {
+        return existing;
+      }
+      await existing.close();
     }
     // A runtime mid-close (seamless lease yield) must finish tearing down
     // before a fresh one claims — otherwise the caller gets a zombie whose

@@ -34,7 +34,6 @@
   import type { EditorBridge } from '../../lib/prosemirror/collab-session';
   import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
   import { LEASE_CHANNEL_NAME, openBroadcastChannel } from '../../lib/tab-channels';
-  import { startReviewDriftMonitor } from '../../lib/review/review-drift-check';
   import type { Anchor as ReviewAnchor, DeviceId, ParticipantId, RequiresThreeWayVerdict, RoomId, Thread } from '../../lib/types';
   import type { ConstructAnchorContext } from '../../lib/review/anchors';
 
@@ -1223,19 +1222,31 @@
   // claims the same room but a different thread set logs a loud console
   // error. If a future change ever reintroduces a role-dependent read path,
   // two tabs disagree and this fires the first time — no user report needed.
+  // Dynamically imported behind the DEV gate so the module never enters the
+  // production bundle (route-bundle boundary: no src/lib/review in the app
+  // entry graph).
   $effect(() => {
+    if (!import.meta.env.DEV) return;
     const wsId = workspace.id;
-    const stop = startReviewDriftMonitor({
-      workspaceId: wsId,
-      read: () => {
-        const store = reviewStoreRef;
-        return {
-          currentRoomId: store?.currentRoomId ?? null,
-          events: store?.events ?? [],
-        };
-      },
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    void import('../../lib/review/review-drift-check').then(({ startReviewDriftMonitor }) => {
+      if (cancelled) return;
+      stop = startReviewDriftMonitor({
+        workspaceId: wsId,
+        read: () => {
+          const store = reviewStoreRef;
+          return {
+            currentRoomId: store?.currentRoomId ?? null,
+            events: store?.events ?? [],
+          };
+        },
+      });
     });
-    return stop;
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
   });
 
   // Multi-tab auto-recovery: the passive (read-only) tab listens for the

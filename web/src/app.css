@@ -985,6 +985,37 @@
   /* background-color set inline per participant */
 }
 
+/* Viewport presence lives just outside the block's text edge. The zero-width
+   widget overlays the margin, so showing who is reading a paragraph never
+   changes the document measure or line wrapping. */
+.attn-remote-view-marker {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 0;
+  vertical-align: baseline;
+  pointer-events: none;
+}
+
+.attn-remote-view-chip {
+  position: absolute;
+  right: calc(8px + var(--attn-view-marker-stack, 0) * 16px);
+  top: -1.05em;
+  display: inline-flex;
+  width: 13px;
+  height: 13px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: white;
+  font-family: var(--font-sans, "Source Sans 3 Variable", "Source Sans 3", sans-serif);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 0 0 1.5px var(--background);
+  user-select: none;
+}
+
 /* Inline suggesting mode (track changes, attn-07i.2). Reviewer suggestions
    render as colored, attributed inline marks: green insertions, red
    strikethrough deletions. The owner accepts/rejects; the file stays clean. */

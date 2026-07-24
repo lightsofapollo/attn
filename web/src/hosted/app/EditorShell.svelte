@@ -37,6 +37,7 @@
   import type { Anchor as ReviewAnchor, DeviceId, FileId, ParticipantId, RequiresThreeWayVerdict, ReviewStatusPeer, RoomId, Thread } from '../../lib/types';
   import type { ConstructAnchorContext } from '../../lib/review/anchors';
   import { scrollViewToPos } from '../../lib/scroll-viewport';
+  import { peerJumpPosition } from '../../lib/peer-strip-format';
 
   interface Props {
     service: WorkspaceAppService;
@@ -1815,6 +1816,10 @@
     activeCollabController()?.broadcastCursor(head, anchor);
   }
 
+  function handleCollabViewportChange(pos: number): void {
+    activeCollabController()?.broadcastViewport(pos);
+  }
+
   // Render incoming peer cursors/selections in the owner's editor. The
   // runtime constructed the controller long before this shell mounted its
   // view, so nothing ever consumed the cursor stream on the owner — every
@@ -2054,7 +2059,7 @@
   function handleJumpToPeer(peer: ReviewStatusPeer): void {
     const fileId = peer.locationFileId;
     if (!fileId) return;
-    const pos = peer.locationCaretHead ?? 0;
+    const pos = peerJumpPosition(peer);
     const targetPath = peer.locationPath ?? pathForFileId(fileId) ?? undefined;
     if (targetPath && targetPath === activeEntry?.path) {
       const view = pmViewForReview;
@@ -2602,6 +2607,7 @@
             {collabEpoch}
             onCollabDocChange={handleCollabDocChange}
             onCollabSelectionChange={handleCollabSelectionChange}
+            onCollabViewportChange={handleCollabViewportChange}
           />
         {/key}
       </div>

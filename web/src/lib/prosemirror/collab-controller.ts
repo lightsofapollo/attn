@@ -36,6 +36,8 @@ export interface CollabPeerLocation {
    * onPeerLocation(deviceId, location) plumbing as the file location.
    */
   caretHead?: number;
+  /** First meaningfully-visible document position, independent of the caret. */
+  viewHead?: number;
 }
 
 export interface CollabAuthoritySeed {
@@ -141,6 +143,7 @@ export class CollabController {
    *  caret in place instead of waiting for the next caret move. */
   private lastCursorHead: number | null = null;
   private lastCursorAnchor: number | null = null;
+  private lastViewHead: number | null = null;
   private readonly onRemoteCursors: ((cursors: RemoteCursor[]) => void) | null;
   /** Late-bound cursor listener for hosts that get their view after start. */
   private remoteCursorSink: ((cursors: RemoteCursor[]) => void) | null = null;
@@ -309,6 +312,7 @@ export class CollabController {
    * and requests a resync so the owner replays the file's full log to it.
    */
   setActiveFile(fileId: FileId, bridge: EditorBridge, epoch?: string): void {
+    const fileChanged = this.activeFileId !== fileId;
     const nextEpoch = this.resolveEpoch(fileId, epoch);
     if (this.isOwner) {
       if (!isLegacyEpoch(fileId, nextEpoch)) {
@@ -344,6 +348,11 @@ export class CollabController {
       this.activeClient = client;
       this.resyncOut(fileId);
     }
+    // A file switch is itself a presence change. Announce immediately even if
+    // the user never moves their caret in the newly-mounted document.
+    if (fileChanged) this.lastViewHead = null;
+    this.broadcastCursor(bridge.getState().selection.head, bridge.getState().selection.anchor);
+    this.emitRemoteCursors();
   }
 
   /** Owner: the host for `fileId`, created from `seed()` (the v0 doc) if new. */
@@ -441,6 +450,14 @@ export class CollabController {
     sink: ((deviceId: string, location: CollabPeerLocation) => void) | null,
   ): void {
     this.peerLocationSink = sink;
+    if (!sink) return;
+    // The controller may receive cursors before a late-mounted shell attaches
+    // its store sink. Replay those retained locations instead of waiting for
+    // every remote participant to move again.
+    for (const [clientId, cursor] of this.remoteCursors) {
+      const deviceId = this.cursorDevice.get(clientId);
+      if (deviceId && cursor.location) sink(deviceId, cursor.location);
+    }
   }
 
   /**
@@ -450,23 +467,38 @@ export class CollabController {
    */
   setLocationSource(source: (() => CollabPeerLocation | null) | null): void {
     this.locationSource = source;
+    if (source && this.activeFileId !== null) this.sendCursorPresence();
   }
 
   broadcastCursor(head: number, anchor?: number): void {
     this.lastCursorHead = head;
     this.lastCursorAnchor = anchor ?? null;
-    // Stamp the caret head onto the location so peers can jump straight to
-    // this participant's position, not just their file (attn-qs03). Only when
-    // there IS a location (a shared file) — a bare caretHead has no meaning
-    // without the file it indexes into.
+    this.sendCursorPresence();
+  }
+
+  /** Announce the block currently being read without moving the live caret. */
+  broadcastViewport(viewHead: number): void {
+    if (!Number.isSafeInteger(viewHead) || viewHead < 0) return;
+    this.lastViewHead = viewHead;
+    this.sendCursorPresence();
+  }
+
+  private sendCursorPresence(): void {
     const base = (this.locationSource ?? this.getLocation)?.() ?? undefined;
-    const location = base ? { ...base, caretHead: head } : undefined;
+    const head = this.lastCursorHead ?? this.lastViewHead ?? 0;
+    const location = base ? {
+      ...base,
+      caretHead: head,
+      ...(this.lastViewHead === null ? {} : { viewHead: this.lastViewHead }),
+    } : undefined;
     void this.sendWire({
       kind: 'cursor',
       cursor: {
         clientID: this.selfClientId,
         head,
-        ...(anchor !== undefined && anchor !== head ? { anchor } : {}),
+        ...(this.lastCursorAnchor !== null && this.lastCursorAnchor !== head
+          ? { anchor: this.lastCursorAnchor }
+          : {}),
         label: this.selfLabel,
         color: this.selfColor,
         ...(location ? { location } : {}),
@@ -847,7 +879,7 @@ function parseLocation(value: unknown): CollabPeerLocation | null | undefined {
   if (value === undefined) return undefined;
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ['fileId', 'snapshotId', 'path', 'caretHead'])
+    !hasOnlyKeys(value, ['fileId', 'snapshotId', 'path', 'caretHead', 'viewHead'])
   )
     return null;
   if (value.fileId !== undefined && !wireId(value.fileId)) return null;
@@ -856,6 +888,8 @@ function parseLocation(value: unknown): CollabPeerLocation | null | undefined {
     return null;
   if (value.caretHead !== undefined && !nonNegativeInteger(value.caretHead))
     return null;
+  if (value.viewHead !== undefined && !nonNegativeInteger(value.viewHead))
+    return null;
   return {
     ...(value.fileId === undefined ? {} : { fileId: value.fileId as FileId }),
     ...(value.snapshotId === undefined
@@ -863,6 +897,7 @@ function parseLocation(value: unknown): CollabPeerLocation | null | undefined {
       : { snapshotId: value.snapshotId as SnapshotId }),
     ...(value.path === undefined ? {} : { path: value.path }),
     ...(value.caretHead === undefined ? {} : { caretHead: value.caretHead }),
+    ...(value.viewHead === undefined ? {} : { viewHead: value.viewHead }),
   };
 }
 

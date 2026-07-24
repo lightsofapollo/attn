@@ -45,7 +45,8 @@
   import { markdownParser } from './lib/schema';
   import type { Node as PmNode } from 'prosemirror-model';
   import { getVersion } from 'prosemirror-collab';
-  import type { FileId } from './lib/types';
+  import type { FileId, ReviewStatusPeer } from './lib/types';
+  import { scrollViewToPos } from './lib/scroll-viewport';
   import {
     decreaseFontScale as decreaseGlobalFontScale,
     increaseFontScale as increaseGlobalFontScale,
@@ -77,6 +78,7 @@
   import NamePrompt from './lib/NamePrompt.svelte';
   import { userProfile } from './lib/profile.svelte';
   import { resolveParticipantColor } from './lib/participant-color';
+  import { peerJumpPosition } from './lib/peer-strip-format';
   import Users from '@lucide/svelte/icons/users';
   import CommentComposer from './lib/CommentComposer.svelte';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
@@ -751,7 +753,11 @@
         // Read the live view (a file switch re-creates it — a captured view
         // would be destroyed).
         const v = pmViewForReview;
-        if (v) v.dispatch(v.state.tr.setMeta(remoteCursorsKey, cursors));
+        const fileId = reviewStore.currentFileId;
+        const scoped = cursors.filter(
+          (cursor) => !cursor.location?.fileId || cursor.location.fileId === fileId,
+        );
+        if (v) v.dispatch(v.state.tr.setMeta(remoteCursorsKey, scoped));
       },
     });
   }
@@ -856,6 +862,10 @@
     collabController?.broadcastCursor(head);
   }
 
+  function handleCollabViewportChange(pos: number): void {
+    collabController?.broadcastViewport(pos);
+  }
+
   function latestSnapshotForCurrentFile(): ReviewSnapshot | null {
     const roomId = reviewStore.currentRoomId;
     const fileId = reviewStore.currentFileId;
@@ -896,6 +906,48 @@
       ...(path ? { path } : {}),
     };
   }
+
+  function reviewPathForFile(fileId: FileId): string | null {
+    const roomId = reviewStore.currentRoomId;
+    if (!roomId) return null;
+    return reviewStore.snapshots.find(
+      (snapshot) => snapshot.roomId === roomId
+        && snapshot.fileId === fileId
+        && Boolean(snapshot.ownerDisplayPath),
+    )?.ownerDisplayPath ?? null;
+  }
+
+  let pendingPeerJump = $state<{ fileId: FileId; pos: number } | null>(null);
+
+  function handleJumpToPeer(peer: ReviewStatusPeer): void {
+    const fileId = peer.locationFileId;
+    if (!fileId) return;
+    const pos = peerJumpPosition(peer);
+    if (fileId === reviewStore.currentFileId) {
+      if (pmViewForReview) scrollViewToPos(pmViewForReview, pos);
+      return;
+    }
+    pendingPeerJump = { fileId, pos };
+    if (collabRole === 'owner') {
+      const path = peer.locationPath ?? reviewPathForFile(fileId);
+      if (!path) {
+        pendingPeerJump = null;
+        return;
+      }
+      openPath(path, 'markdown');
+    } else {
+      reviewStore.selectFileAsUser(fileId);
+    }
+  }
+
+  $effect(() => {
+    const jump = pendingPeerJump;
+    const view = pmViewForReview;
+    if (!jump || !view || reviewStore.currentFileId !== jump.fileId) return;
+    if (!viewHasCollab(view)) return;
+    pendingPeerJump = null;
+    requestAnimationFrame(() => scrollViewToPos(view, jump.pos));
+  });
 
   let collabSaveTimer: ReturnType<typeof setTimeout> | null = null;
   function handleCollabDocChange(): void {
@@ -2802,6 +2854,7 @@
         {collabEpoch}
         onCollabDocChange={handleCollabDocChange}
         onCollabSelectionChange={handleCollabSelectionChange}
+        onCollabViewportChange={handleCollabViewportChange}
         suggesting={false}
         suggestionAuthor={userProfile.effectiveName}
       />
@@ -2830,6 +2883,7 @@
         {collabEpoch}
         onCollabDocChange={handleCollabDocChange}
         onCollabSelectionChange={handleCollabSelectionChange}
+        onCollabViewportChange={handleCollabViewportChange}
         suggesting={false}
         suggestionAuthor={userProfile.effectiveName}
       />
@@ -2956,6 +3010,10 @@
         isOwner={reviewBarIsOwner}
         onShareClick={openShareDialog}
         onLeaveRoom={handleLeaveRoom}
+        localParticipantId={collabRole === 'owner'
+          ? (reviewStore.ownerParticipantId ?? userProfile.participantId)
+          : userProfile.participantId}
+        onJumpTo={handleJumpToPeer}
         railToggle={true}
         inline={true}
       />

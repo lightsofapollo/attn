@@ -46,6 +46,33 @@ function buildCaretWidget(cursor: RemoteCursor, stack: number): HTMLElement {
   return wrap;
 }
 
+/** Start of the nearest block containing a viewport presence position. */
+export function viewingBlockStart(doc: Parameters<typeof DecorationSet.create>[0], pos: number): number {
+  const resolved = doc.resolve(clampPos(pos, doc.content.size));
+  for (let depth = resolved.depth; depth > 0; depth -= 1) {
+    if (resolved.node(depth).isBlock) return resolved.start(depth);
+  }
+  return 0;
+}
+
+function buildViewMarker(cursor: RemoteCursor, stack: number): HTMLElement {
+  const color = safeColor(cursor);
+  const wrap = document.createElement('span');
+  wrap.className = 'attn-remote-view-marker';
+  wrap.style.setProperty('--attn-view-marker-stack', String(stack));
+  wrap.setAttribute('data-client-id', cursor.clientID);
+  wrap.setAttribute('role', 'img');
+  wrap.setAttribute('aria-label', `${cursor.label} is viewing this block`);
+
+  const chip = document.createElement('span');
+  chip.className = 'attn-remote-view-chip';
+  chip.style.backgroundColor = color;
+  chip.title = `${cursor.label} is viewing here`;
+  chip.textContent = Array.from(cursor.label.trim())[0]?.toLocaleUpperCase() ?? '?';
+  wrap.appendChild(chip);
+  return wrap;
+}
+
 /**
  * Plugin that renders remote carets. Its state is the cursor array, replaced
  * whenever a transaction carries a `remoteCursorsKey` meta payload.
@@ -87,6 +114,23 @@ export function remoteCursorsPlugin(): Plugin {
             key: `remote-caret-${cursor.clientID}-${pos}-${stack}`,
           });
         });
+        const viewMarkerCounts = new Map<number, number>();
+        for (const cursor of cursors) {
+          const viewHead = cursor.location?.viewHead;
+          if (viewHead === undefined) continue;
+          const blockStart = viewingBlockStart(state.doc, viewHead);
+          const stack = viewMarkerCounts.get(blockStart) ?? 0;
+          viewMarkerCounts.set(blockStart, stack + 1);
+          decos.push(Decoration.widget(
+            blockStart,
+            () => buildViewMarker(cursor, stack),
+            {
+              side: -1,
+              ignoreSelection: true,
+              key: `remote-view-${cursor.clientID}-${blockStart}-${stack}`,
+            },
+          ));
+        }
         // Peers' live SELECTIONS render as translucent bands in their colors —
         // you can see what a reviewer is highlighting before any comment lands.
         // Overlaps are resolved HERE, not by span nesting (attn-5xgz): the

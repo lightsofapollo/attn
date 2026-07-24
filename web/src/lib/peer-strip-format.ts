@@ -223,6 +223,11 @@ export function peerIsJumpable(
   );
 }
 
+/** Prefer what the peer is reading over where their possibly-stale caret sits. */
+export function peerJumpPosition(peer: ReviewStatusPeer): number {
+  return peer.locationViewHead ?? peer.locationCaretHead ?? 0;
+}
+
 /**
  * Last-6-hex disambiguator for the chip-hover tooltip (per §3 "tail-6").
  * Cheap disambig for two reviewers who both call themselves "alex".

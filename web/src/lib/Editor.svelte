@@ -13,7 +13,7 @@
   } from 'prosemirror-search';
   import { tick, untrack } from 'svelte';
   import { keymap } from 'prosemirror-keymap';
-  import { nearestScrollableAncestor } from './scroll-viewport';
+  import { nearestScrollableAncestor, viewPositionAtViewport } from './scroll-viewport';
   import { baseKeymap, chainCommands, selectAll, setBlockType, toggleMark } from 'prosemirror-commands';
   import { wrapInList, liftListItem, sinkListItem, splitListItem } from 'prosemirror-schema-list';
   import { history, redo, undo } from 'prosemirror-history';
@@ -111,6 +111,8 @@
     onCollabDocChange?: () => void;
     /** Fired when the local selection (caret) moves during a collab session. */
     onCollabSelectionChange?: (head: number, anchor: number) => void;
+    /** Fired when scrolling changes the first meaningfully-visible document block. */
+    onCollabViewportChange?: (pos: number) => void;
     /**
      * Inline suggesting mode (attn-07i.2). When true, local edits are captured
      * as tracked-change suggestions (insertion/deletion marks) instead of
@@ -143,6 +145,7 @@
     collabContinuityKey,
     onCollabDocChange,
     onCollabSelectionChange,
+    onCollabViewportChange,
     suggesting = false,
     suggestionAuthor,
   }: Props = $props();
@@ -345,16 +348,42 @@
       plugins.push(remoteCursorsPlugin());
       plugins.push(
         new Plugin({
-          view: () => ({
-            update: (v, prev) => {
-              if (!v.state.doc.eq(prev.doc)) {
-                onCollabDocChange?.();
-              }
-              if (!v.state.selection.eq(prev.selection)) {
-                onCollabSelectionChange?.(v.state.selection.head, v.state.selection.anchor);
-              }
-            },
-          }),
+          view: (editorView) => {
+            const viewport = ((
+              editorView.dom.closest('[data-slot="scroll-area-viewport"]')
+              ?? editorView.dom.closest('.attn-content-viewport')
+            ) as HTMLElement | null) ?? nearestScrollableAncestor(editorView.dom);
+            let timer: ReturnType<typeof setTimeout> | null = null;
+            let lastViewPos: number | null = null;
+            const announceViewport = () => {
+              timer = null;
+              const pos = viewPositionAtViewport(editorView);
+              if (pos === null || pos === lastViewPos) return;
+              lastViewPos = pos;
+              onCollabViewportChange?.(pos);
+            };
+            const scheduleViewport = () => {
+              if (timer !== null) clearTimeout(timer);
+              timer = setTimeout(announceViewport, 100);
+            };
+            viewport?.addEventListener('scroll', scheduleViewport, { passive: true });
+            requestAnimationFrame(announceViewport);
+            return {
+              update: (v, prev) => {
+                if (!v.state.doc.eq(prev.doc)) {
+                  onCollabDocChange?.();
+                  scheduleViewport();
+                }
+                if (!v.state.selection.eq(prev.selection)) {
+                  onCollabSelectionChange?.(v.state.selection.head, v.state.selection.anchor);
+                }
+              },
+              destroy: () => {
+                viewport?.removeEventListener('scroll', scheduleViewport);
+                if (timer !== null) clearTimeout(timer);
+              },
+            };
+          },
         }),
       );
     }

@@ -1055,6 +1055,8 @@ export interface ReviewStatusPeer {
   locationPath?: string;
   /** Peer's live caret head — the jump target for a chip click (attn-qs03). */
   locationCaretHead?: number;
+  /** First meaningfully-visible position in the peer's viewport. */
+  locationViewHead?: number;
   lastLocationAt?: number;
 }
 

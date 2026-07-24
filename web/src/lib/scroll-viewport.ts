@@ -51,3 +51,29 @@ export function scrollViewToPos(view: EditorView, pos: number): void {
   const centeredTop = Math.max(0, yInContent - viewport.clientHeight / 2);
   viewport.scrollTo({ top: centeredTop, behavior: 'smooth' });
 }
+
+/**
+ * Resolve the document position at the top of the reader's meaningful viewing
+ * band. This is deliberately separate from the selection: a person can read
+ * paragraph 40 while their caret remains back in paragraph 2.
+ */
+export function viewPositionAtViewport(view: EditorView): number | null {
+  const viewport = ((
+    view.dom.closest('[data-slot="scroll-area-viewport"]')
+    ?? view.dom.closest('.attn-content-viewport')
+  ) as HTMLElement | null)
+    ?? nearestScrollableAncestor(view.dom);
+  if (!viewport) return null;
+
+  const viewportRect = viewport.getBoundingClientRect();
+  const editorRect = view.dom.getBoundingClientRect();
+  const top = Math.min(viewportRect.bottom - 1, viewportRect.top + 80);
+  const left = Math.min(editorRect.right - 1, editorRect.left + 12);
+  const found = view.posAtCoords({ left, top });
+  if (found) return found.pos;
+
+  // Narrow tables and other indented blocks may not occupy the editor's left
+  // edge. A centre-column retry still identifies the first visible block.
+  const retry = view.posAtCoords({ left: editorRect.left + editorRect.width / 2, top });
+  return retry?.pos ?? null;
+}

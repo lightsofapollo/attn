@@ -35,7 +35,8 @@ import {
   chipVisualFor,
   isYou,
   monogramFor,
-  peerIsJumpable,
+    peerIsJumpable,
+    peerJumpPosition,
   shortenParticipantId,
   splitForStrip,
   tail6,
@@ -228,6 +229,18 @@ defineCase('peerIsJumpable requires handler + online + not-you + a known locatio
     locationFileId: ('F2' as ReviewStatusPeer['locationFileId']),
   });
   assert(peerIsJumpable(fileOnly, me.participantId, true) === true, 'file-only location should still be jumpable');
+});
+
+defineCase('peerJumpPosition follows the viewed block before the caret', () => {
+  const peer = makePeer({
+    locationCaretHead: 12,
+    locationViewHead: 48,
+  });
+  assert(peerJumpPosition(peer) === 48, 'viewed block must win over the caret');
+  assert(
+    peerJumpPosition({ ...peer, locationViewHead: undefined }) === 12,
+    'caret is the compatibility fallback',
+  );
 });
 
 // (7) Monogram rule (attn-3gdd, two letters): first+last initials for

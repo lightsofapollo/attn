@@ -83,6 +83,7 @@
   import type { ConstructAnchorContext } from './lib/review/anchors';
   import type { Anchor, FileId, RoomId, ReviewStatusPeer, SuggestionDraft } from './lib/types';
   import { scrollViewToPos } from './lib/scroll-viewport';
+  import { peerJumpPosition } from './lib/peer-strip-format';
 
   interface Props {
     /**
@@ -802,7 +803,11 @@
       },
       onRemoteCursors: (cursors) => {
         const view = pmViewForReview;
-        if (view) view.dispatch(view.state.tr.setMeta(remoteCursorsKey, cursors));
+        const fileId = reviewStore.currentFileId;
+        const scoped = cursors.filter(
+          (cursor) => !cursor.location?.fileId || cursor.location.fileId === fileId,
+        );
+        if (view) view.dispatch(view.state.tr.setMeta(remoteCursorsKey, scoped));
       },
     });
   });
@@ -877,6 +882,10 @@
     if (reviewerAvailability.collabReady) reviewerCollabController?.broadcastCursor(head, anchor);
   }
 
+  function handleReviewerCollabViewportChange(pos: number): void {
+    if (reviewerAvailability.collabReady) reviewerCollabController?.broadcastViewport(pos);
+  }
+
   // Jump-to-peer (attn-qs03): a chip click navigates to where that participant
   // is. Same file → scroll the caret into view now. Different file → switch,
   // then a pending target is consumed once the new file's editor is bound (the
@@ -887,7 +896,7 @@
   function handleJumpToPeer(peer: ReviewStatusPeer): void {
     const targetFileId = peer.locationFileId;
     if (!targetFileId) return;
-    const pos = peer.locationCaretHead ?? 0;
+    const pos = peerJumpPosition(peer);
     if (targetFileId === reviewStore.currentFileId) {
       const view = pmViewForReview;
       if (view) scrollViewToPos(view, pos);
@@ -1293,6 +1302,7 @@
                   collabContinuityKey={reviewerCollabSeed?.fileId}
                   onCollabDocChange={handleReviewerCollabDocChange}
                   onCollabSelectionChange={handleReviewerCollabSelectionChange}
+                  onCollabViewportChange={handleReviewerCollabViewportChange}
                   suggesting={false}
                   suggestionAuthor="Reviewer"
                 />

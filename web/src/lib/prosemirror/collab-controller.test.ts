@@ -320,7 +320,7 @@ defineCase('cursor broadcast reaches the other peer, not self', () => {
     'owner should have recorded the reviewer caret',
   );
   assert(
-    s.reviewerCursors.length === 0,
+    (s.reviewerCursors.at(-1) ?? []).every((cursor) => cursor.clientID !== 'reviewer'),
     'reviewer must not record its own cursor',
   );
 });
@@ -659,13 +659,17 @@ defineCase('legacy wire without epoch is accepted only by an explicit legacy con
     isAuthorityDevice: () => true,
   });
   legacy.setActiveFile('A' as FileId, makeEditor('legacy', 'hello').bridge);
+  const initialLegacyFrames = legacySent.length;
   const oldWire = JSON.stringify({
     kind: 'broadcast',
     fileId: 'A',
     broadcast: { startVersion: 0, steps: [], clientIDs: [] },
   });
   legacy.onInbound(oldWire, 'owner-device');
-  assert(legacySent.length === 1, 'legacy controller should retain its initial resync only');
+  assert(
+    legacySent.length === initialLegacyFrames,
+    'legacy inbound should not add traffic beyond initial resync + presence',
+  );
   assert(parseCollabWireMessage(oldWire) === null, 'strict parser accepted legacy without context');
 
   const modernSent: string[] = [];
@@ -798,6 +802,55 @@ defineCase(
     );
   },
 );
+
+defineCase('viewport presence round-trips separately from the caret', () => {
+  const sent: string[] = [];
+  const controller = new CollabController({
+    isOwner: false,
+    send: (payload) => sent.push(payload),
+    selfClientId: 'reviewer',
+    selfLabel: 'Reviewer',
+    selfColor: '#000',
+    isAuthorityDevice: () => true,
+    getLocation: () => ({ fileId: 'F' as FileId }),
+  });
+  controller.broadcastCursor(4);
+  controller.broadcastViewport(19);
+  const parsed = parseCollabWireMessage(sent.at(-1) ?? '');
+  assert(parsed?.kind === 'cursor', 'viewport update did not emit cursor presence');
+  if (parsed?.kind !== 'cursor') return;
+  assert(parsed.cursor.head === 4, 'viewport update moved the remote caret');
+  assert(parsed.cursor.location?.caretHead === 4, 'caret location changed');
+  assert(parsed.cursor.location?.viewHead === 19, 'viewHead did not round-trip');
+});
+
+defineCase('late peer-location sink replays retained cursor locations', () => {
+  const controller = new CollabController({
+    isOwner: true,
+    send: () => undefined,
+    selfClientId: 'owner',
+    selfLabel: 'Owner',
+    selfColor: '#000',
+    getSeedDoc: () => docWithText('hello'),
+  });
+  controller.onInbound(JSON.stringify({
+    kind: 'cursor',
+    cursor: {
+      clientID: 'reviewer',
+      head: 3,
+      label: 'Reviewer',
+      color: '#123456',
+      location: { fileId: 'F', caretHead: 3, viewHead: 11 },
+    },
+  }), 'reviewer-device');
+  const replayed: Array<{ deviceId: string; viewHead?: number }> = [];
+  controller.setPeerLocationSink((deviceId, location) => {
+    replayed.push({ deviceId, viewHead: location.viewHead });
+  });
+  assert(replayed.length === 1, 'retained location was not replayed');
+  assert(replayed[0].deviceId === 'reviewer-device', 'replay used wrong device');
+  assert(replayed[0].viewHead === 11, 'replay lost viewHead');
+});
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

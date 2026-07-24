@@ -5,6 +5,8 @@
 
 import { caretStacks, selectionSegments } from './remote-cursor-overlap';
 import type { RemoteCursor } from './collab-controller';
+import { viewingBlockStart } from './remote-cursors';
+import { schema } from '../schema';
 
 let failures = 0;
 function assert(cond: boolean, detail: string): void {
@@ -12,6 +14,20 @@ function assert(cond: boolean, detail: string): void {
     failures += 1;
     console.log(`  FAIL ${detail}`);
   }
+}
+
+// --- viewport block markers -------------------------------------------------
+{
+  const doc = schema.node('doc', null, [
+    schema.node('paragraph', null, [schema.text('first')]),
+    schema.node('heading', { level: 2 }, [schema.text('second')]),
+  ]);
+  assert(viewingBlockStart(doc, 4) === 1, 'paragraph view position maps to its content start');
+  const headingStart = doc.child(0).nodeSize + 1;
+  assert(
+    viewingBlockStart(doc, headingStart + 3) === headingStart,
+    'heading view position maps to the heading content start',
+  );
 }
 
 function cursor(

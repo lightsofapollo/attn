@@ -23,6 +23,7 @@
   import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
   import { frontmatterNodeView } from './prosemirror/frontmatter-nodeview';
   import { markdownInputRules } from './prosemirror/markdown-input-rules';
+  import { markdownPastePlugin } from './prosemirror/markdown-paste';
   import { placeholderPlugin } from './prosemirror/placeholder';
   import { mathNodeView } from './prosemirror/math';
   import { mermaidNodeView } from './prosemirror/mermaid-nodeview';
@@ -363,6 +364,10 @@
     // Live markdown authoring (attn-vea): typed `# `, `- `, `**b**`, ``` etc.
     // become real nodes/marks, so the editor never shows literal syntax.
     plugins.push(markdownInputRules(schema));
+    // Pasted markdown source (attn-o7sq): route it through the same parser as a
+    // loaded document so it renders as real nodes and saves as clean markdown,
+    // instead of arriving as literal syntax or DOM-parsed "copy style".
+    plugins.push(markdownPastePlugin(markdownParser));
     plugins.push(placeholderPlugin(placeholder));
     plugins.push(...tablePlugins());
     // List structure keys, ahead of baseKeymap so Enter reaches

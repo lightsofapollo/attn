@@ -71,7 +71,7 @@ class FakePeerConnection {
 
 const tests: Array<[string, () => void | Promise<void>]> = [];
 function test(name: string, fn: () => void | Promise<void>): void { tests.push([name, fn]); }
-function assert(condition: unknown, message: string): asserts condition {
+function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }
 

@@ -32,7 +32,7 @@
 -->
 
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { tick } from 'svelte';
   import { Selection } from 'prosemirror-state';
   import type { EditorView } from 'prosemirror-view';
   import ReviewMarginCard from './ReviewMarginCard.svelte';
@@ -51,6 +51,7 @@
     RESOLVED_CHIP_HEIGHT,
   } from './review/rail-mode';
   import { reviewStore } from './review/store.svelte';
+  import { createFrameInvalidator } from './review/frame-invalidator';
   import { nearestScrollableAncestor } from './scroll-viewport';
   import {
     selectSuggestionActionPort,
@@ -298,22 +299,26 @@
   // whenever the editor view, doc, or store changes. Threads we can't
   // position fall back to 0 so they still appear (rather than vanish).
   //
-  // The recomputation is bumped by an effect below that runs on doc-change
-  // and store-change. `_recalcTick` exists to give that effect a synchronous
-  // dependency it can mutate without infinite-looping.
+  // The recomputation is bumped by effects below that run on doc, store, and
+  // measured-height changes. `_recalcTick` is the explicit invalidation signal;
+  // writes to it are frame-separated below so they cannot recurse in one flush.
 
   let _recalcTick = $state(0);
 
-  // Bump the recompute tick. `untrack` the read of `_recalcTick` so that
-  // callers running inside an $effect (the store-change recalc, the measured-
-  // height pass, and the scroll/resize effect that invokes its handler
-  // synchronously) do NOT take a reactive dependency on the very signal they
-  // write — that read+write-same-state pattern is an infinite loop
-  // (effect_update_depth_exceeded), which Svelte then disables, leaving anchor
-  // positions (and thus inline comment/suggestion marks) un-rendered.
+  // The height-measurement effect depends on placements, and placements depend
+  // on this tick. A synchronous write here therefore forms an INDIRECT
+  // effect -> derived -> effect loop when file-switch remount heights oscillate.
+  // Cross a frame boundary so all geometry callbacks coalesce and no
+  // invalidation can recurse inside the current Svelte flush (attn-db2a).
+  const recalcInvalidator = createFrameInvalidator(() => {
+    _recalcTick += 1;
+  });
+
   function bumpRecalc(): void {
-    _recalcTick = untrack(() => _recalcTick) + 1;
+    recalcInvalidator.request();
   }
+
+  $effect(() => () => recalcInvalidator.cancel());
 
   // Last-seen container top in viewport coords. Plain (non-reactive) on
   // purpose: refreshed by the `anchorYs` derived (which every placement

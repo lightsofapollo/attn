@@ -38,6 +38,7 @@
   import type { ConstructAnchorContext } from '../../lib/review/anchors';
   import { scrollViewToPos } from '../../lib/scroll-viewport';
   import { peerJumpPosition } from '../../lib/peer-strip-format';
+  import { attachCollabPresenceSinks } from '../../lib/prosemirror/collab-presence-sinks';
 
   interface Props {
     service: WorkspaceAppService;
@@ -1834,48 +1835,44 @@
     void collabEpoch;
     const controller = activeCollabController();
     if (!cursorsKey || !view || !controller) return;
-    controller.setRemoteCursorSink((cursors) => {
-      const v = pmViewForReview;
-      if (!v) return;
-      // Leader tabs read the authority bindings; follower tabs have none
-      // (attn-37f9) — they fall back to the promoted-manifest map from the
-      // review-log watcher. Without the fallback, every reviewer cursor
-      // (which always carries location.fileId) was filtered out right here
-      // and the bridge's deliveries rendered nowhere.
-      const path = activeEntry?.path;
-      const activeFileId =
-        ownerState?.bindings.find((binding) => binding.path === path)?.fileId
-        ?? reviewLogBindings.find((binding) => binding.path === path)?.fileId;
-      const scoped = cursors.filter(
-        (cursor) => !cursor.location?.fileId || cursor.location.fileId === activeFileId,
-      );
-      v.dispatch(v.state.tr.setMeta(cursorsKey, scoped));
+    return attachCollabPresenceSinks(controller, {
+      onRemoteCursors: (cursors) => {
+        const v = pmViewForReview;
+        if (!v) return;
+        // Leader tabs read the authority bindings; follower tabs have none
+        // (attn-37f9) — they fall back to the promoted-manifest map from the
+        // review-log watcher. Without the fallback, every reviewer cursor
+        // (which always carries location.fileId) was filtered out right here
+        // and the bridge's deliveries rendered nowhere.
+        const path = activeEntry?.path;
+        const activeFileId =
+          ownerState?.bindings.find((binding) => binding.path === path)?.fileId
+          ?? reviewLogBindings.find((binding) => binding.path === path)?.fileId;
+        const scoped = cursors.filter(
+          (cursor) => !cursor.location?.fileId || cursor.location.fileId === activeFileId,
+        );
+        v.dispatch(v.state.tr.setMeta(cursorsKey, scoped));
+      },
+      // Record where each reviewer is so the owner can jump to them (attn-qs03):
+      // the runtime built this controller with a null construction-time
+      // onPeerLocation (it predates the shell's store handle), so we sink it here.
+      onPeerLocation: (deviceId, location) => {
+        reviewStoreRef?.notePeerLocation(deviceId, location);
+      },
+      onPeerLocationExpired: (deviceId) => {
+        reviewStoreRef?.clearPeerLocation(deviceId);
+      },
+      // Broadcast the owner's own file + caret so reviewers can jump back to us.
+      // The active file only becomes knowable after mount, hence a live source.
+      getLocation: () => {
+        const fileId = activeOwnerFileId();
+        if (!fileId) return null;
+        return {
+          fileId,
+          ...(activeEntry?.path ? { path: activeEntry.path } : {}),
+        };
+      },
     });
-    // Record where each reviewer is so the owner can jump to them (attn-qs03):
-    // the runtime built this controller with a null construction-time
-    // onPeerLocation (it predates the shell's store handle), so we sink it here.
-    controller.setPeerLocationSink((deviceId, location) => {
-      reviewStoreRef?.notePeerLocation(deviceId, location);
-    });
-    controller.setPeerLocationExpirySink((deviceId) => {
-      reviewStoreRef?.clearPeerLocation(deviceId);
-    });
-    // Broadcast the owner's own file + caret so reviewers can jump back to us.
-    // The active file only becomes knowable after mount, hence a live source.
-    controller.setLocationSource(() => {
-      const fileId = activeOwnerFileId();
-      if (!fileId) return null;
-      return {
-        fileId,
-        ...(activeEntry?.path ? { path: activeEntry.path } : {}),
-      };
-    });
-    return () => {
-      controller.setRemoteCursorSink(null);
-      controller.setPeerLocationSink(null);
-      controller.setPeerLocationExpirySink(null);
-      controller.setLocationSource(null);
-    };
   });
 
   async function acceptSuggestion(thread: Thread): Promise<unknown> {

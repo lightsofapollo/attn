@@ -1021,6 +1021,7 @@ defineCase('owner cursor presence is WebRTC-only while document collab remains d
   let socket: WebSocket | null = null;
   const direct: MailboxEnvelope[] = [];
   const posted: Array<Record<string, unknown>> = [];
+  let stateNotifications = 0;
   let failRelay = false;
   const server = await startMockServer();
   try {
@@ -1061,6 +1062,7 @@ defineCase('owner cursor presence is WebRTC-only while document collab remains d
         };
       },
       webSocketFactory: nodeFactory,
+      onState: () => { stateNotifications += 1; },
       reconnectInitialMs: 50,
       reconnectMaxMs: 200,
     });
@@ -1091,6 +1093,7 @@ defineCase('owner cursor presence is WebRTC-only while document collab remains d
     for (const field of ['envelopeId', 'nonce', 'ciphertext', 'ciphertextBytes'] as const) {
       assertEq(posted[0]![field], direct[0]![field], `direct/relay ${field}`);
     }
+    const stateNotificationsBeforeCursor = stateNotifications;
     await session.sendCollab(JSON.stringify({
       kind: 'cursor',
       cursor: { clientID: 'owner-client', head: 0, label: 'Owner', color: 'currentColor' },
@@ -1099,6 +1102,11 @@ defineCase('owner cursor presence is WebRTC-only while document collab remains d
     assertEq(posted.length, 1, 'cursor presence leaked into the relay outbox');
     assertEq(direct[0]!.signalClass, undefined, 'document broadcast became replaceable');
     assertEq(session.getState().outboxPending, 0, 'cursor presence entered durable browser state');
+    assertEq(
+      stateNotifications,
+      stateNotificationsBeforeCursor,
+      'cursor presence republished unchanged session state',
+    );
 
     failRelay = true;
     let relayFailureSurfaced = false;

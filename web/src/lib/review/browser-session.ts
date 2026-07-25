@@ -1273,10 +1273,12 @@ export class BrowserSession {
       );
     }
     // Re-evaluate wall-clock expiry even if no presence/policy frame has
-    // caused a state transition since the last render. Owner document
-    // broadcasts require the live authority; reviewer cursor/resync traffic
-    // only requires an authenticated writable connection.
-    this.setState({});
+    // caused a state transition since the last render. Cursor presence is
+    // already expiry-checked by nextCreatedAt below and must not publish a
+    // fresh, semantically identical session state on every caret movement:
+    // that state propagates through authority/runtime subscribers and causes
+    // the shell to tear down and reattach all presence sinks.
+    if (message.kind !== 'cursor') this.setState({});
     if (
       this.state.status !== 'connected'
       || this.state.connection === 'offline'

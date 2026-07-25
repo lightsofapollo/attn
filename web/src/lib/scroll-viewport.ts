@@ -19,11 +19,18 @@ export function nearestScrollableAncestor(el: Element): HTMLElement | null {
   return null;
 }
 
+const VIEWPORT_READING_INSET_PX = 80;
+
+/** Convert a content-space anchor into the matching reader viewport offset. */
+export function scrollTopForViewportAnchor(yInContent: number): number {
+  return Math.max(0, yInContent - VIEWPORT_READING_INSET_PX);
+}
+
 /**
- * Centre a document position in the editor's scroll viewport (attn-qs03) — the
- * jump-to-peer primitive. Shares the viewport-resolution and coordsAtPos math
+ * Align a document position with the editor's reading-band top (attn-qs03) —
+ * the jump-to-peer primitive. Shares the viewport-resolution and coordsAtPos math
  * with Editor.svelte's `ensureSelectionVisible`, but targets an ARBITRARY pos
- * (a peer's caret head) rather than the local selection.
+ * (a peer's viewport anchor) rather than the local selection.
  *
  * Pure side effect on the DOM: it does NOT move the local selection (so it
  * won't rebroadcast the local caret or disturb a read-only reviewer view). The
@@ -48,8 +55,7 @@ export function scrollViewToPos(view: EditorView, pos: number): void {
   }
   const viewportRect = viewport.getBoundingClientRect();
   const yInContent = coords.top - viewportRect.top + viewport.scrollTop;
-  const centeredTop = Math.max(0, yInContent - viewport.clientHeight / 2);
-  viewport.scrollTo({ top: centeredTop, behavior: 'smooth' });
+  viewport.scrollTo({ top: scrollTopForViewportAnchor(yInContent), behavior: 'smooth' });
 }
 
 /**
@@ -67,7 +73,7 @@ export function viewPositionAtViewport(view: EditorView): number | null {
 
   const viewportRect = viewport.getBoundingClientRect();
   const editorRect = view.dom.getBoundingClientRect();
-  const top = Math.min(viewportRect.bottom - 1, viewportRect.top + 80);
+  const top = Math.min(viewportRect.bottom - 1, viewportRect.top + VIEWPORT_READING_INSET_PX);
   const left = Math.min(editorRect.right - 1, editorRect.left + 12);
   const found = view.posAtCoords({ left, top });
   if (found) return found.pos;

@@ -1220,6 +1220,58 @@ defineCase('buildWsUrl + scheme translation', () => {
   );
 });
 
+defineCase('v3 first offer waits for the authenticated device-directory refresh', async () => {
+  const lateKeys = ed25519.keygen(new Uint8Array(32).fill(0x6a));
+  const lateDevice = signedDevice({
+    deviceId: 'd-late-signal',
+    participantId: 'p-late-signal',
+    publicEncryptionKey: 'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC',
+    publicSigningKey: base64UrlEncode(lateKeys.publicKey),
+    client: 'attn-browser',
+    kind: 'owner',
+    registeredAt: 1_700_000_000_100,
+  }, lateKeys.secretKey);
+  const inbound: DecodedEnvelope[] = [];
+  let refreshes = 0;
+  let client!: BrowserWsClient;
+  client = new BrowserWsClient({
+    ...clientOptions(0),
+    protocolVersion: 3,
+    subprotocol: 'attn.v3, read.test',
+    callbacks: {
+      onEnvelope: (decoded) => { inbound.push(decoded); },
+      onUnknownSigner: async () => {
+        refreshes += 1;
+        client.mergeDevices([lateDevice]);
+      },
+    },
+  });
+  const payload = { kind: 'offer' as const, sdp: 'v=0\r\n', from: lateDevice.deviceId };
+  const envelope = assembleBrowserSignal({
+    signalingKey: KEYS.signalingKey,
+    roomId: 'room-test',
+    authorId: lateDevice.participantId,
+    deviceId: lateDevice.deviceId,
+    targetDeviceId: 'd-test',
+    createdAt: 1_700_000_000_100,
+    expiresAt: 1_700_086_400_000,
+    payload,
+    protocolVersion: 3,
+    signalGeneration: 1_700_000_000_100,
+    signingSecret: lateKeys.secretKey,
+    clientNonce: new Uint8Array(16).fill(0x61),
+    aeadNonce: new Uint8Array(24).fill(0x62),
+  });
+
+  await client.replayEnvelope(envelope, 1);
+
+  assertEq(refreshes, 1, 'unknown signaling sender did not refresh once');
+  assertEq(inbound.length, 1, 'first offer was dropped before its directory refresh completed');
+  assertEq(inbound[0]!.envelope.deviceId, lateDevice.deviceId, 'wrong signal dispatched');
+  inbound[0]!.plaintext.fill(0);
+  client.close();
+});
+
 defineCase('signal target is rejected before ciphertext decode and matching target dispatches', async () => {
   const errors: string[] = [];
   const inbound: DecodedEnvelope[] = [];

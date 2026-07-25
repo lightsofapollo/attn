@@ -1162,6 +1162,85 @@ defineCase('owner cursor presence is WebRTC-only while document collab remains d
   }
 });
 
+defineCase('verified first offer admits a newly joined reviewer before directory refresh completes', async () => {
+  const credentials = browserOwnerCredentials();
+  const owner = browserOwnerDevice(credentials);
+  const reviewer = browserReviewerDevice(0x79);
+  const payload = {
+    kind: 'offer' as const,
+    sdp: 'v=0\r\n',
+    from: reviewer.identity.deviceId,
+  };
+  const envelope = assembleBrowserSignal({
+    signalingKey: credentials.keys.signalingKey,
+    roomId: credentials.roomId,
+    authorId: reviewer.identity.participantId,
+    deviceId: reviewer.identity.deviceId,
+    targetDeviceId: credentials.identity.deviceId,
+    createdAt: 1_700_000_600_000,
+    expiresAt: POLICY.expiresAt,
+    payload,
+    clientNonce: new Uint8Array(16).fill(0x31),
+    aeadNonce: new Uint8Array(24).fill(0x32),
+  });
+  const synced: Device[][] = [];
+  const handled: typeof payload[] = [];
+  const session = new BrowserSession({ store: makeStubStore() });
+  const internals = session as unknown as {
+    identity: BrowserDeviceIdentity;
+    bootstrapDevices: Device[];
+    onlineDeviceIds: Set<string>;
+    wsClient: {
+      getDevices(): ReadonlyMap<string, Device>;
+      close(): void;
+    };
+    peerMesh: {
+      syncDevices(devices: Iterable<Device>): void;
+      handleSignal(signal: typeof payload): Promise<void>;
+      close(): void;
+    } | null;
+    handleEnvelopeAsync(decoded: {
+      envelope: MailboxEnvelope;
+      serverSeq: number;
+      source: 'network';
+      plaintext: Uint8Array;
+    }): Promise<void>;
+  };
+  internals.identity = credentials.identity;
+  internals.bootstrapDevices = [owner];
+  internals.onlineDeviceIds.add(owner.deviceId);
+  internals.wsClient = {
+    // The WebSocket verifier has authenticated the offer's registration, but
+    // the session roster still represents the preceding hello frame.
+    getDevices: () => new Map([['verified-reviewer', reviewer.device]]),
+    close: () => undefined,
+  };
+  internals.peerMesh = {
+    syncDevices: (devices) => synced.push([...devices]),
+    handleSignal: async (signal) => { handled.push(signal); },
+    close: () => undefined,
+  };
+
+  await internals.handleEnvelopeAsync({
+    envelope,
+    serverSeq: 1,
+    source: 'network',
+    plaintext: toCanonicalBytes(payload),
+  });
+
+  assertEq(handled.length, 1, 'first offer was discarded during the join refresh race');
+  assert(
+    synced.some((devices) => devices.some((device) => device.deviceId === reviewer.device.deviceId)),
+    'reviewer was not installed in the peer mesh before its first offer',
+  );
+  assertEq(
+    session.getState().peers.find((peer) => peer.deviceId === reviewer.device.deviceId)?.online,
+    true,
+    'verified signaling did not update reviewer liveness',
+  );
+  session.close();
+});
+
 defineCase('view comment and suggest browser reviewers cannot emit ProseMirror submits', async () => {
   const submit = JSON.stringify({
     kind: 'submit', fileId: 'file-reviewer', epoch: 'snapshot-reviewer',

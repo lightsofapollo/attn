@@ -992,10 +992,18 @@
   position: relative;
 }
 
+/* The prose surface normally clips horizontal overflow to contain wide
+   document content. Presence labels intentionally cross that boundary into
+   the reserved gutter, so let only marker-bearing documents paint there. */
+.ProseMirror:has(.attn-remote-view-marker) {
+  overflow-x: visible;
+}
+
 .attn-remote-view-marker {
   --attn-view-marker-offset: 1.4rem;
   --attn-view-marker-color: var(--muted-foreground);
   position: absolute;
+  z-index: 3;
   inset-inline-start: calc(-1 * (var(--attn-view-marker-offset) + var(--attn-view-marker-stack, 0) * 7px));
   top: 0.18em;
   display: block;
@@ -1005,6 +1013,11 @@
   pointer-events: auto;
   cursor: default;
   outline: none;
+}
+
+.attn-remote-view-marker:hover,
+.attn-remote-view-marker:focus-visible {
+  z-index: 10;
 }
 
 .ProseMirror li .attn-remote-view-marker {

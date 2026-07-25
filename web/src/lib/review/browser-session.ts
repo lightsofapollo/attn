@@ -2096,6 +2096,43 @@ export class BrowserSession {
     return this.bootstrapDevices.filter((device) => this.onlineDeviceIds.has(device.deviceId));
   }
 
+  /**
+   * Resolve a signal author from registrations already authenticated by the
+   * WebSocket client. A presence join and its first WebRTC offer are separate
+   * relay frames; the offer can win the race with the async directory refresh
+   * kicked off by that join. The verified signer cache already contains the
+   * immutable registration used to authorize the envelope, so it is safe to
+   * use here without trusting any identity data from the signaling payload.
+   */
+  private authenticatedSignalSender(deviceId: string, participantId: string): Device | undefined {
+    const registered = this.bootstrapDevices.find((device) => device.deviceId === deviceId);
+    if (registered) {
+      return registered.participantId === participantId ? registered : undefined;
+    }
+    return [...(this.wsClient?.getDevices().values() ?? [])].find(
+      (device) => device.deviceId === deviceId && device.participantId === participantId,
+    );
+  }
+
+  /** Ensure an authenticated live signal has a peer before it is dispatched. */
+  private admitDirectSignalSender(sender: Device): void {
+    let changed = false;
+    if (!this.bootstrapDevices.some((device) => device.deviceId === sender.deviceId)) {
+      this.bootstrapDevices = [...this.bootstrapDevices, sender];
+      changed = true;
+    }
+    // A targeted signal arrived on the current authenticated socket, which is
+    // stronger liveness evidence than waiting for the asynchronous join-frame
+    // directory refresh to finish.
+    if (!this.onlineDeviceIds.has(sender.deviceId)) {
+      this.onlineDeviceIds.add(sender.deviceId);
+      changed = true;
+    }
+    if (!changed) return;
+    this.peerMesh?.syncDevices(this.activeWebRtcDevices());
+    this.setState({});
+  }
+
   private localDeviceRecord(identity: BrowserDeviceIdentity): Device {
     const registration = buildRegisterDeviceBody(identity, this.principal);
     return {
@@ -2838,7 +2875,7 @@ export class BrowserSession {
       ) {
         return;
       }
-      const sender = this.bootstrapDevices.find((device) => device.deviceId === envelope.deviceId);
+      const sender = this.authenticatedSignalSender(envelope.deviceId, envelope.authorId);
       if (!sender || sender.participantId !== envelope.authorId) return;
       if (sender.client !== 'attn-native' && sender.client !== 'attn-browser') return;
       if (payload.kind === 'collab') {
@@ -2854,6 +2891,7 @@ export class BrowserSession {
         });
         return;
       }
+      this.admitDirectSignalSender(sender);
       if (!this.peerMesh) {
         if (this.pendingSignals.length < 64) {
           this.pendingSignals.push(payload);

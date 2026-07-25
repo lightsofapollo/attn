@@ -695,8 +695,18 @@ export class BrowserWsClient {
       return;
     }
     if (envelope.kind === 'signal' && (this.opts.protocolVersion ?? 2) === 3) {
-      const keyId = this.deviceKeyIds.get(envelope.deviceId);
-      const device = keyId === undefined ? undefined : this.devices.get(keyId);
+      let keyId = this.deviceKeyIds.get(envelope.deviceId);
+      let device = keyId === undefined ? undefined : this.devices.get(keyId);
+      if (!device || device.participantId !== envelope.authorId) {
+        // Presence and signaling are independent frames. A new peer's first
+        // offer can arrive while the session is still refreshing the signed
+        // device directory in response to its join. Refresh inline before
+        // deciding that the authenticated signaling sender is unknown; the
+        // ordered inbound queue keeps later ICE/answer frames behind it.
+        await this.callbacks.onUnknownSigner?.(envelope, serverSeq, envelope.deviceId);
+        keyId = this.deviceKeyIds.get(envelope.deviceId);
+        device = keyId === undefined ? undefined : this.devices.get(keyId);
+      }
       if (!device || device.participantId !== envelope.authorId) {
         this.callbacks.onError?.('ATTN_INBOUND', 'signal signer is absent from authenticated directory');
         return;

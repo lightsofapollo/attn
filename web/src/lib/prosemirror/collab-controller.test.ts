@@ -824,6 +824,44 @@ defineCase('viewport presence round-trips separately from the caret', () => {
   assert(parsed.cursor.location?.viewHead === 19, 'viewHead did not round-trip');
 });
 
+defineCase('identical viewport presence is emitted once', () => {
+  const sent: string[] = [];
+  const controller = new CollabController({
+    isOwner: false,
+    send: (payload) => sent.push(payload),
+    selfClientId: 'reviewer',
+    selfLabel: 'Reviewer',
+    selfColor: '#000',
+    isAuthorityDevice: () => true,
+    getLocation: () => ({ fileId: 'F' as FileId }),
+  });
+  controller.broadcastViewport(19);
+  controller.broadcastViewport(19);
+  assert(sent.length === 1, `duplicate viewport presence emitted ${sent.length} frames`);
+});
+
+defineCase('reattaching an unchanged location source cannot resend presence', () => {
+  const sent: string[] = [];
+  const editor = makeEditor('owner', 'hello');
+  const controller = new CollabController({
+    isOwner: true,
+    send: (payload) => sent.push(payload),
+    selfClientId: 'owner',
+    selfLabel: 'Owner',
+    selfColor: '#000',
+    getSeedDoc: () => docWithText('hello'),
+  });
+  controller.setActiveFile('F' as FileId, editor.bridge);
+  controller.setLocationSource(() => ({ fileId: 'F' as FileId, path: 'notes.md' }));
+  const afterFirstAttach = sent.length;
+  controller.setLocationSource(null);
+  controller.setLocationSource(() => ({ fileId: 'F' as FileId, path: 'notes.md' }));
+  assert(
+    sent.length === afterFirstAttach,
+    `unchanged source reattachment emitted ${sent.length - afterFirstAttach} extra frame(s)`,
+  );
+});
+
 defineCase('late peer-location sink replays retained cursor locations', () => {
   const controller = new CollabController({
     isOwner: true,

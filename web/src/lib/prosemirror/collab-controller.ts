@@ -144,6 +144,10 @@ export class CollabController {
   private lastCursorHead: number | null = null;
   private lastCursorAnchor: number | null = null;
   private lastViewHead: number | null = null;
+  /** Exact last cursor payload sent. Lifecycle methods run inside Svelte
+   * effects in the hosted shell; suppressing identical presence frames keeps
+   * a synchronous session-state update from becoming an effect/send loop. */
+  private lastSentCursorFingerprint: string | null = null;
   private readonly onRemoteCursors: ((cursors: RemoteCursor[]) => void) | null;
   /** Late-bound cursor listener for hosts that get their view after start. */
   private remoteCursorSink: ((cursors: RemoteCursor[]) => void) | null = null;
@@ -479,6 +483,7 @@ export class CollabController {
   /** Announce the block currently being read without moving the live caret. */
   broadcastViewport(viewHead: number): void {
     if (!Number.isSafeInteger(viewHead) || viewHead < 0) return;
+    if (this.lastViewHead === viewHead) return;
     this.lastViewHead = viewHead;
     this.sendCursorPresence();
   }
@@ -491,19 +496,28 @@ export class CollabController {
       caretHead: head,
       ...(this.lastViewHead === null ? {} : { viewHead: this.lastViewHead }),
     } : undefined;
-    void this.sendWire({
-      kind: 'cursor',
-      cursor: {
-        clientID: this.selfClientId,
-        head,
-        ...(this.lastCursorAnchor !== null && this.lastCursorAnchor !== head
-          ? { anchor: this.lastCursorAnchor }
-          : {}),
-        label: this.selfLabel,
-        color: this.selfColor,
-        ...(location ? { location } : {}),
-      },
-    }).catch(() => undefined);
+    const cursor: RemoteCursor = {
+      clientID: this.selfClientId,
+      head,
+      ...(this.lastCursorAnchor !== null && this.lastCursorAnchor !== head
+        ? { anchor: this.lastCursorAnchor }
+        : {}),
+      label: this.selfLabel,
+      color: this.selfColor,
+      ...(location ? { location } : {}),
+    };
+    const fingerprint = JSON.stringify(cursor);
+    if (fingerprint === this.lastSentCursorFingerprint) return;
+    // Set before calling the transport: browser sendCollab updates session
+    // state synchronously, so an effect may re-enter this method immediately.
+    this.lastSentCursorFingerprint = fingerprint;
+    void this.sendWire({ kind: 'cursor', cursor }).catch(() => {
+      // Permit the same presence frame to retry after a real transport error,
+      // without erasing a newer successfully-enqueued location.
+      if (this.lastSentCursorFingerprint === fingerprint) {
+        this.lastSentCursorFingerprint = null;
+      }
+    });
   }
 
   /**

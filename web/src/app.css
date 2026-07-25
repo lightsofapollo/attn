@@ -985,22 +985,30 @@
   /* background-color set inline per participant */
 }
 
-/* Viewport presence lives just outside the block's text edge. The zero-width
-   widget overlays the margin, so showing who is reading a paragraph never
-   changes the document measure or line wrapping. */
-.attn-remote-view-marker {
+/* Viewport presence lives just outside the block's text edge. The widget
+   itself is absolute (not merely zero-width): it never enters the line box,
+   changes a block's height, shifts a list bullet, or alters text wrapping. */
+.ProseMirror :is(p, h1, h2, h3, h4, h5, h6, blockquote, pre, code, li):has(> .attn-remote-view-marker) {
   position: relative;
-  display: inline-block;
-  width: 0;
-  height: 0;
-  vertical-align: baseline;
+}
+
+.attn-remote-view-marker {
+  --attn-view-marker-offset: 1.4rem;
+  position: absolute;
+  inset-inline-start: calc(-1 * (var(--attn-view-marker-offset) + var(--attn-view-marker-stack, 0) * 16px));
+  top: 0.4em;
+  display: block;
+  width: 13px;
+  height: 13px;
   pointer-events: none;
 }
 
+.ProseMirror li .attn-remote-view-marker {
+  /* Clear both the synthetic unordered-list dot and ordered-list numerals. */
+  --attn-view-marker-offset: 3rem;
+}
+
 .attn-remote-view-chip {
-  position: absolute;
-  right: calc(8px + var(--attn-view-marker-stack, 0) * 16px);
-  top: -1.05em;
   display: inline-flex;
   width: 13px;
   height: 13px;
@@ -1014,6 +1022,17 @@
   line-height: 1;
   box-shadow: 0 0 0 1.5px var(--background);
   user-select: none;
+}
+
+@media (max-width: 768px) {
+  .attn-remote-view-marker {
+    /* Fit the chip inside the editor's 1rem mobile page gutter. */
+    --attn-view-marker-offset: 1rem;
+  }
+
+  .ProseMirror li .attn-remote-view-marker {
+    --attn-view-marker-offset: 2.5rem;
+  }
 }
 
 /* Inline suggesting mode (track changes, attn-07i.2). Reviewer suggestions

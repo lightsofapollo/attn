@@ -50,7 +50,26 @@ function buildCaretWidget(cursor: RemoteCursor, stack: number): HTMLElement {
 export function viewingBlockStart(doc: Parameters<typeof DecorationSet.create>[0], pos: number): number {
   const resolved = doc.resolve(clampPos(pos, doc.content.size));
   for (let depth = resolved.depth; depth > 0; depth -= 1) {
-    if (resolved.node(depth).isBlock) return resolved.start(depth);
+    // Widgets must land inside a textblock. A position exactly on a list-item
+    // boundary resolves to the list_item (also a block); inserting there puts
+    // an inline span beside the paragraph, where it creates its own line.
+    if (resolved.node(depth).isTextblock) return resolved.start(depth);
+  }
+
+  // `posAtCoords` can return the boundary immediately before the visible
+  // paragraph/heading. Walk the node after that boundary to its first
+  // textblock so the marker remains an inline decoration inside that block.
+  const firstTextblockStart = (node: typeof doc, nodePos: number): number | null => {
+    if (node.isTextblock) return nodePos + 1;
+    let found: number | null = null;
+    node.forEach((child, offset) => {
+      if (found === null) found = firstTextblockStart(child, nodePos + 1 + offset);
+    });
+    return found;
+  };
+  if (resolved.nodeAfter) {
+    const next = firstTextblockStart(resolved.nodeAfter, resolved.pos);
+    if (next !== null) return next;
   }
   return 0;
 }

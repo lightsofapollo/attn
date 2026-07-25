@@ -30,6 +30,23 @@ function assert(cond: boolean, detail: string): void {
   );
 }
 
+{
+  const doc = schema.node('doc', null, [
+    schema.node('bullet_list', null, [
+      schema.node('list_item', null, [
+        schema.node('paragraph', null, [schema.text('listed')]),
+      ]),
+    ]),
+  ]);
+  // doc(0) → bullet_list(0) → list_item(1) → paragraph(2) → text(3).
+  // The boundary before the paragraph resolves to list_item; the marker must
+  // still be placed at 3 INSIDE the paragraph, never as a sibling above it.
+  assert(
+    viewingBlockStart(doc, 2) === 3,
+    'list-item boundary maps inside its paragraph instead of creating a line',
+  );
+}
+
 function cursor(
   clientID: string,
   head: number,

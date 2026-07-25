@@ -26,6 +26,7 @@ export interface DeviceSignalProofV3 {
   authorId: string;
   deviceId: string;
   targetDeviceId: string | null;
+  signalClass?: "presence";
   generation: number;
   createdAt: number;
   expiresAt: number;
@@ -84,6 +85,7 @@ export function canonicalDeviceSignalProofV3(
     nonce: input.nonce,
     purpose: DEVICE_SIGNAL_PROOF_PURPOSE_V3,
     roomId: input.roomId,
+    ...(input.signalClass === undefined ? {} : { signalClass: input.signalClass }),
     targetDeviceId: input.targetDeviceId,
     v: 3,
   }));

@@ -139,5 +139,42 @@ test('assembler rejects targeted collab and broadcast negotiation', () => {
   assert(broadcastOfferRejected, 'broadcast offer signal accepted');
 });
 
+test('v3 presence is classified and signed while v2 rejects the retention header', () => {
+  const envelope = assembleBrowserSignal({
+    signalingKey: key,
+    roomId: 'room-a',
+    authorId: 'participant-a',
+    deviceId: 'device-a',
+    createdAt: 1_700_000_000_000,
+    expiresAt: 1_700_086_400_000,
+    payload: { kind: 'collab', from: 'device-a', payload: '{"kind":"cursor"}' },
+    protocolVersion: 3,
+    signalGeneration: 7,
+    signalClass: 'presence',
+    signingSecret: new Uint8Array(32).fill(17),
+    clientNonce,
+    aeadNonce,
+  });
+  assert(envelope.signalClass === 'presence', 'presence class missing from envelope');
+  assert(typeof envelope.deviceSignature === 'string', 'presence class was not device-signed');
+
+  let v2Rejected = false;
+  try {
+    assembleBrowserSignal({
+      signalingKey: key,
+      roomId: 'room-a',
+      authorId: 'participant-a',
+      deviceId: 'device-a',
+      createdAt: 1_700_000_000_000,
+      expiresAt: 1_700_086_400_000,
+      payload: { kind: 'collab', from: 'device-a', payload: '{"kind":"cursor"}' },
+      signalClass: 'presence',
+      clientNonce,
+      aeadNonce,
+    });
+  } catch { v2Rejected = true; }
+  assert(v2Rejected, 'v2 signal accepted replaceable presence class');
+});
+
 console.log(`browser-signaling: ${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) process.exit(1);

@@ -49,6 +49,7 @@ import { verifyDeviceSignalProofV3 } from './device-proof';
 // ---------------------------------------------------------------------------
 
 export type EnvelopeKind = 'event' | 'snapshot_blob' | 'signal';
+export type SignalClass = 'presence';
 
 export interface MailboxEnvelope {
   /**
@@ -74,6 +75,8 @@ export interface MailboxEnvelope {
   ciphertextBytes: number;
   /** Required on protocol-v3 signal envelopes. */
   signalGeneration?: number;
+  /** V3 signal-only retention class. Presence replaces prior state per device. */
+  signalClass?: SignalClass;
   /** Ed25519 signature over the complete v3 signal routing/ciphertext header. */
   deviceSignature?: string;
 }

@@ -946,6 +946,28 @@ describe("POST /v2/rooms/:roomId/envelopes — per-envelope validation", () => {
     const err = (await res.json()) as ErrorResponse;
     expect(err.error.code).toBe("ATTN_DEVICE_UNREGISTERED");
   });
+
+  it("rejects replaceable presence on the legacy v2 envelope route", async () => {
+    const roomId = uniqueRoomId("env-v2-presence");
+    const owner = await generateEd25519Keypair();
+    const admissionKey = await createRoom({ roomId, ownerKp: owner });
+    await registerDevice({
+      roomId,
+      admissionKey,
+      deviceId: "dev-v2-presence",
+      participantId: "legacy",
+    });
+    const presence = buildEnvelope({
+      envelopeId: "v2-presence",
+      authorId: "legacy",
+      deviceId: "dev-v2-presence",
+      kind: "signal",
+    });
+    presence.signalClass = "presence";
+    const response = await postEnvelopes({ roomId, admissionKey, envelopes: [presence] });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "ATTN_DEVICE_PROOF_INVALID" } });
+  });
 });
 
 describe("POST /v2/rooms/:roomId/envelopes — room caps", () => {

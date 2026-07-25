@@ -1298,6 +1298,7 @@ export class BrowserSession {
       protocolVersion: keys.version,
       ...(keys.version === 3 ? {
         signalGeneration: createdAt,
+        ...(message.kind === 'cursor' ? { signalClass: 'presence' as const } : {}),
         signingSecret: identity.signingSecret,
       } : {}),
     });
@@ -1382,6 +1383,7 @@ export class BrowserSession {
       for (const stored of [...this.volatileInbound.values()].sort(
         (a, b) => a.serverSeq - b.serverSeq,
       )) {
+        if (stored.envelope.signalClass === 'presence') continue;
         await storage.commitInbound(roomId, identity.deviceId, stored.envelope, stored.serverSeq);
       }
       this.persistedCursor = await storage.getCursor(roomId, identity.deviceId);
@@ -2612,7 +2614,11 @@ export class BrowserSession {
 
   private async handleEnvelopeAsync(decoded: DecodedEnvelope): Promise<void> {
     const { envelope, plaintext } = decoded;
-    if (decoded.source === 'network') {
+    // Cursor/view presence is replaceable transport state. Persisting every
+    // update here would recreate an unbounded event log in IndexedDB even
+    // though the relay retains only the newest value per device.
+    const replaceablePresence = envelope.kind === 'signal' && envelope.signalClass === 'presence';
+    if (decoded.source === 'network' && !replaceablePresence) {
       if (this.storage && this.identity && this.storageWritesEnabled) {
         try {
           await this.storage.commitInbound(

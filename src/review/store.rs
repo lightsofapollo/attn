@@ -1180,6 +1180,7 @@ mod tests {
             ciphertext: "ct".to_string(),
             ciphertext_bytes: 16,
             signal_generation: None,
+            signal_class: None,
             device_signature: None,
         }
     }

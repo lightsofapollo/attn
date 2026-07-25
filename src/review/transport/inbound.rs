@@ -601,6 +601,9 @@ impl InboundPipeline {
             .target
             .as_ref()
             .map(|target| id_to_string(&target.device_id));
+        let signal_class = envelope.signal_class.map(|class| match class {
+            crate::review::model::SignalClass::Presence => "presence",
+        });
         crate::review::crypto::device_proof::verify_device_signal_proof_v3(
             &key,
             signature,
@@ -609,6 +612,7 @@ impl InboundPipeline {
             &id_to_string(&envelope.author_id),
             &id_to_string(&envelope.device_id),
             target.as_deref(),
+            signal_class,
             generation,
             envelope.created_at,
             envelope.expires_at,
@@ -996,6 +1000,7 @@ mod tests {
             ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
             ciphertext_bytes: ciphertext.len() as u64,
             signal_generation: None,
+            signal_class: None,
             device_signature: None,
         }
     }

@@ -6,7 +6,7 @@ import {
   toCanonicalBytes,
   type EnvelopeAad,
 } from './browser-crypto';
-import type { MailboxEnvelope } from './browser-ws';
+import type { MailboxEnvelope, SignalClass } from './browser-ws';
 import { signDeviceSignalProofV3, signalProofInputFromEnvelope } from './device-proof';
 
 const MAX_SDP_BYTES = 1_048_576;
@@ -34,6 +34,8 @@ export interface AssembleBrowserSignalInput {
   /** Clean protocol cutover: v3 signals must carry a registered-device proof. */
   protocolVersion?: 2 | 3;
   signalGeneration?: number;
+  /** V3-only relay retention class, signed by the registered device key. */
+  signalClass?: SignalClass;
   signingSecret?: Uint8Array;
   /** Stable logical-message nonce used only for envelope-id derivation. */
   clientNonce?: Uint8Array;
@@ -80,6 +82,7 @@ export function assembleBrowserSignal(input: AssembleBrowserSignalInput): Mailbo
         throw new Error('v3 signal requires generation and device signing secret');
       }
       envelope.signalGeneration = input.signalGeneration;
+      if (input.signalClass !== undefined) envelope.signalClass = input.signalClass;
       envelope.deviceSignature = signDeviceSignalProofV3(
         signalProofInputFromEnvelope(envelope, input.roomId),
         input.signingSecret,
@@ -212,8 +215,15 @@ function validateAssembleInput(input: AssembleBrowserSignalInput): void {
       throw new Error('v3 signalGeneration must be a non-negative safe integer');
     }
     if (input.signingSecret?.length !== 32) throw new Error('v3 signingSecret must be 32 bytes');
-  } else if (input.signalGeneration !== undefined || input.signingSecret !== undefined) {
+  } else if (
+    input.signalGeneration !== undefined || input.signalClass !== undefined ||
+    input.signingSecret !== undefined
+  ) {
     throw new Error('v2 signal must not carry v3 device proof inputs');
+  }
+  if (input.signalClass === 'presence' &&
+    (input.payload.kind !== 'collab' || input.targetDeviceId !== undefined)) {
+    throw new Error('presence signal must be a broadcast collab payload');
   }
   // Reuse the strict parser for outbound bounds and exact shape.
   const bytes = toCanonicalBytes(input.payload);

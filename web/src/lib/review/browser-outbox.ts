@@ -549,6 +549,7 @@ function toRelayEnvelope(envelope: MailboxEnvelope): Record<string, unknown> {
     ciphertext: envelope.ciphertext,
     ciphertextBytes: envelope.ciphertextBytes,
     ...(envelope.signalGeneration === undefined ? {} : { signalGeneration: envelope.signalGeneration }),
+    ...(envelope.signalClass === undefined ? {} : { signalClass: envelope.signalClass }),
     ...(envelope.deviceSignature === undefined ? {} : { deviceSignature: envelope.deviceSignature }),
   };
 }

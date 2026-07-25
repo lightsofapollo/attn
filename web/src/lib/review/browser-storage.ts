@@ -2032,6 +2032,10 @@ function validateEnvelope(roomId: string, envelope: MailboxEnvelope): void {
   if (envelope.target !== undefined && envelope.target !== null) {
     requireId(envelope.target.deviceId, 'target.deviceId');
   }
+  if (envelope.signalClass !== undefined &&
+    (envelope.signalClass !== 'presence' || envelope.kind !== 'signal' || envelope.target !== null)) {
+    throw new BrowserStorageError('envelope signalClass is invalid');
+  }
   decodeLength(envelope.nonce, 24, 'envelope nonce').fill(0);
   const ciphertext = decodeAtLeast(envelope.ciphertext, 16, 'envelope ciphertext');
   try {

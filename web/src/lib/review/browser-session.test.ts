@@ -44,6 +44,8 @@ import {
   contentHash,
   deriveEventId,
   deriveRoomId,
+  deriveRoomIdV3,
+  deriveRoomKeyTreeV3,
   deriveRoomKeys,
   signingKeyId,
   toCanonicalBytes,
@@ -256,6 +258,25 @@ function browserOwnerCredentials(): BrowserOwnerCredentials {
       publicEncryptionKey: x25519.getPublicKey(encryptionSecret),
     },
     policy: structuredClone(POLICY),
+  };
+}
+
+function browserOwnerCredentialsV3(): BrowserOwnerCredentials {
+  const v2 = browserOwnerCredentials();
+  const tree = deriveRoomKeyTreeV3(v2.roomSecret);
+  return {
+    ...v2,
+    protocolVersion: 3,
+    roomId: deriveRoomIdV3(v2.roomSecret),
+    keys: {
+      rootKey: tree.rootKey,
+      eventKey: tree.readKeys.eventKey,
+      snapshotKey: tree.readKeys.snapshotKey,
+      signalingKey: tree.readKeys.signalingKey,
+      admissionKey: tree.writeAdmissionKey,
+    },
+    readAdmissionKey: tree.readKeys.readAdmissionKey,
+    readCapabilityKey: tree.readKeys.readCapabilityKey,
   };
 }
 
@@ -995,7 +1016,7 @@ defineCase('owner policy changes are fully validated and revoke live authority f
 });
 
 defineCase('owner presence gates only live editing and collab uses one target-null envelope direct-first plus relay', async () => {
-  const credentials = browserOwnerCredentials();
+  const credentials = browserOwnerCredentialsV3();
   const device = browserOwnerDevice(credentials);
   let socket: WebSocket | null = null;
   const direct: MailboxEnvelope[] = [];
@@ -1068,6 +1089,21 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
     for (const field of ['envelopeId', 'nonce', 'ciphertext', 'ciphertextBytes'] as const) {
       assertEq(posted[0]![field], direct[0]![field], `direct/relay ${field}`);
     }
+    await session.sendCollab(JSON.stringify({
+      kind: 'cursor',
+      cursor: { clientID: 'owner-client', head: 0, label: 'Owner', color: 'currentColor' },
+    }));
+    assertEq(direct[1]!.signalClass, 'presence', 'direct cursor was not replaceable presence');
+    assertEq(posted[1]!.signalClass, 'presence', 'relay cursor was not replaceable presence');
+    assertEq(direct[0]!.signalClass, undefined, 'document broadcast became replaceable');
+    socket!.send(JSON.stringify({ type: 'envelope', envelope: direct[1], serverSeq: 2 }));
+    await delay(40);
+    assertEq(
+      (session as unknown as { volatileInbound: Map<string, unknown> })
+        .volatileInbound.has(direct[1]!.envelopeId),
+      false,
+      'replaceable presence was retained in browser inbound history',
+    );
 
     failRelay = true;
     let relayFailureSurfaced = false;
@@ -1079,7 +1115,7 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
     }
     catch { relayFailureSurfaced = true; }
     assert(relayFailureSurfaced, 'relay failure did not reject sendCollab');
-    assertEq(direct.length, 2, 'failed relay still used direct transport once');
+    assertEq(direct.length, 3, 'failed relay still used direct transport once');
     assertEq(session.getState().outboxPending, 1, 'failed relay retained the exact envelope');
 
     socket!.send(JSON.stringify({

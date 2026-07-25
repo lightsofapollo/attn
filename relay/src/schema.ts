@@ -212,6 +212,7 @@ export const envelopeTargetSchema = z.object({
 });
 
 export const envelopeKindSchema = z.enum(["event", "snapshot_blob", "signal"]);
+export const signalClassSchema = z.enum(["presence"]);
 
 export const envelopeSchema = z.object({
   envelopeId: z.string().min(1).max(ENVELOPE_ID_MAX_CHARS),
@@ -228,6 +229,8 @@ export const envelopeSchema = z.object({
   ciphertextBytes: z.number().int().positive(),
   /** V3 signal-only monotonic negotiation/collaboration generation. */
   signalGeneration: z.number().int().nonnegative().optional(),
+  /** V3 signal-only retention class. Presence is replaceable per device. */
+  signalClass: signalClassSchema.optional(),
   /** Ed25519 signature by the immutable registered device key. */
   deviceSignature: b64url.max(86).optional(),
 });
@@ -241,6 +244,7 @@ export const envelopeBatchSchema = z.object({
 export type EnvelopeInput = z.infer<typeof envelopeSchema>;
 export type EnvelopeBatchInput = z.infer<typeof envelopeBatchSchema>;
 export type EnvelopeKind = z.infer<typeof envelopeKindSchema>;
+export type SignalClass = z.infer<typeof signalClassSchema>;
 
 // --- POST /v3/shares/:shareId/mailbox ------------------------------------
 

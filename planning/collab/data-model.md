@@ -752,6 +752,10 @@ type MailboxEnvelope = {
   createdAt: number;
   expiresAt: number;
   kind: "event" | "snapshot_blob" | "signal";
+  target?: null | { deviceId: DeviceId };
+  signalClass?: "presence";
+  signalGeneration?: number;
+  deviceSignature?: string;
   nonce: string;
   ciphertext: string;
   ciphertextBytes: number;
@@ -759,6 +763,12 @@ type MailboxEnvelope = {
 ```
 
 `serverSeq` is only a delivery cursor. It is not event causality. Event causality lives in `ReviewEvent.meta.parentEventIds`.
+
+For V3 cursor/view messages, `signalClass: "presence"` is signed cleartext
+routing metadata. The encrypted payload remains opaque. The relay keeps only
+the latest value per author device and replays that latest value to registered
+subscribers while the device is online; these envelopes are excluded from the
+durable event and byte caps. Other signals remain durable.
 
 ## Sync Cursors And ACKs
 

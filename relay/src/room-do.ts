@@ -205,6 +205,7 @@ const META = {
 const POW_SEEN_PREFIX = "pow_seen:";
 const DEVICE_WS_PROOF_SEEN_PREFIX = "device_ws_proof_seen_v3:";
 const SIGNAL_GENERATION_PREFIX = "signal_generation_v3:";
+const LATEST_PRESENCE_PREFIX = "latest_presence_v3:";
 
 function powSeenKey(hash: string): string {
   return `${POW_SEEN_PREFIX}${hash}`;
@@ -242,6 +243,8 @@ const DELETE_BODY_MAX_BYTES = 4096;
 const ENVELOPE_BODY_OVERHEAD_BYTES = 256 * 1024;
 /** Durable device-record cap; intentionally separate from concurrent WS peers. */
 const MAX_REGISTERED_DEVICES = 32;
+/** Presence is replaceable state, but each retained ciphertext is still bounded. */
+const MAX_REPLACEABLE_PRESENCE_BYTES = 16 * 1024;
 
 /**
  * Probation window for an UN-ACTIVATED room (abuse hardening). A legitimate
@@ -1549,6 +1552,8 @@ export class RoomDO extends DurableObject<Env> {
     // before caller-selected rate or PoW replay keys can mutate. Unsafe IDs
     // are accepted only for an exact retry proven by a stored payload.
     const preexistingById = new Map<string, EnvelopeLookup>();
+    const preexistingPresenceById = new Map<string, EnvelopeRecord>();
+    const latestPresenceByKey = new Map<string, EnvelopeRecord | undefined>();
     for (const envelope of envelopes) {
       const lookup = await this.resolveEnvelopeExact(envelope.envelopeId);
       if (lookup instanceof Response) return lookup;
@@ -1557,7 +1562,30 @@ export class RoomDO extends DurableObject<Env> {
         !sameEnvelopeInput(lookup.record, envelope) && conflictingEnvelopeId === undefined) {
         conflictingEnvelopeId = envelope.envelopeId;
       }
-      if (lookup === undefined && (
+      if (isReplaceablePresence(envelope)) {
+        const presenceKey = latestPresenceKey(envelope.authorId, envelope.deviceId);
+        let priorPresence = latestPresenceByKey.get(presenceKey);
+        if (!latestPresenceByKey.has(presenceKey)) {
+          const stored = await this.ctx.storage.get<unknown>(presenceKey);
+          if (stored !== undefined && (!isStoredEnvelopeRecord(stored) ||
+            !isReplaceablePresence(stored) || stored.target !== null ||
+            stored.signalGeneration === undefined || stored.deviceSignature === undefined ||
+            stored.ciphertextBytes > MAX_REPLACEABLE_PRESENCE_BYTES ||
+            presenceKey !== latestPresenceKey(stored.authorId, stored.deviceId))) {
+            return corruptRoomResponse();
+          }
+          priorPresence = stored as EnvelopeRecord | undefined;
+          latestPresenceByKey.set(presenceKey, priorPresence);
+        }
+        if (priorPresence?.envelopeId === envelope.envelopeId) {
+          if (!sameEnvelopeInput(priorPresence, envelope) && conflictingEnvelopeId === undefined) {
+            conflictingEnvelopeId = envelope.envelopeId;
+          } else {
+            preexistingPresenceById.set(envelope.envelopeId, priorPresence);
+          }
+        }
+      }
+      if (lookup === undefined && !preexistingPresenceById.has(envelope.envelopeId) && (
         !isProtocolId(envelope.envelopeId, ENVELOPE_ID_MAX_CHARS) ||
         !isProtocolId(envelope.authorId, PARTICIPANT_ID_MAX_CHARS) ||
         !isProtocolId(envelope.deviceId, DEVICE_ID_MAX_CHARS) ||
@@ -1631,6 +1659,7 @@ export class RoomDO extends DurableObject<Env> {
     //    says "reject the *whole batch*" for cap overflow; per-envelope shape
     //    errors mirror that for symmetry — partial accepts are footguns).
     const stagedSignalGenerations = new Map<string, number>();
+    const stagedPresenceGenerations = new Map<string, number>();
     for (const env of envelopes) {
       let decodedLen: number;
       try {
@@ -1726,7 +1755,8 @@ export class RoomDO extends DurableObject<Env> {
         if (ownerProofOk) ownerSnapshotIds.add(env.envelopeId);
       }
 
-      const hasSignalProof = env.signalGeneration !== undefined || env.deviceSignature !== undefined;
+      const hasSignalProof = env.signalGeneration !== undefined ||
+        env.signalClass !== undefined || env.deviceSignature !== undefined;
       if (routeVersion !== 3 || env.kind !== "signal") {
         // Proof fields are consumed above for v3 owner snapshots; they remain
         // forbidden on events and on v2 envelopes.
@@ -1739,6 +1769,16 @@ export class RoomDO extends DurableObject<Env> {
       if (env.signalGeneration === undefined || env.deviceSignature === undefined) {
         return errorResponse(401, "ATTN_DEVICE_PROOF_INVALID", "v3 signal omitted registered-device proof");
       }
+      if (env.signalClass === "presence" &&
+        (env.target !== null || env.ciphertextBytes > MAX_REPLACEABLE_PRESENCE_BYTES)) {
+        return errorResponse(
+          env.target !== null ? 400 : 413,
+          env.target !== null ? "ATTN_PRESENCE_TARGET_INVALID" : "ATTN_ENVELOPE_TOO_LARGE",
+          env.target !== null
+            ? "replaceable presence must be broadcast"
+            : `presence ciphertextBytes=${env.ciphertextBytes} > cap ${MAX_REPLACEABLE_PRESENCE_BYTES}`,
+        );
+      }
       try {
         await verifyDeviceProofSignature(
           deviceRecord.publicSigningKey,
@@ -1749,6 +1789,7 @@ export class RoomDO extends DurableObject<Env> {
             authorId: env.authorId,
             deviceId: env.deviceId,
             targetDeviceId: env.target?.deviceId ?? null,
+            ...(env.signalClass === undefined ? {} : { signalClass: env.signalClass }),
             generation: env.signalGeneration,
             createdAt: env.createdAt,
             expiresAt: env.expiresAt,
@@ -1767,8 +1808,23 @@ export class RoomDO extends DurableObject<Env> {
       const priorGeneration = stagedSignalGenerations.get(generationKey)
         ?? await this.ctx.storage.get<number>(generationKey)
         ?? -1;
-      const exactRetry = preexistingById.has(env.envelopeId);
-      if (!exactRetry && env.signalGeneration < priorGeneration) {
+      const exactRetry = preexistingById.has(env.envelopeId) ||
+        preexistingPresenceById.has(env.envelopeId);
+      let presenceGenerationIsStale = false;
+      if (env.signalClass === "presence") {
+        const presenceKey = latestPresenceKey(env.authorId, env.deviceId);
+        const priorPresenceGeneration = stagedPresenceGenerations.get(presenceKey)
+          ?? latestPresenceByKey.get(presenceKey)?.signalGeneration
+          ?? -1;
+        presenceGenerationIsStale = env.signalGeneration <= priorPresenceGeneration;
+        stagedPresenceGenerations.set(
+          presenceKey,
+          Math.max(priorPresenceGeneration, env.signalGeneration),
+        );
+      }
+      const generationIsStale = env.signalGeneration < priorGeneration ||
+        presenceGenerationIsStale;
+      if (!exactRetry && generationIsStale) {
         return errorResponse(409, "ATTN_SIGNAL_GENERATION_STALE", "signal generation is older than the accepted generation");
       }
       stagedSignalGenerations.set(generationKey, Math.max(priorGeneration, env.signalGeneration));
@@ -1793,6 +1849,11 @@ export class RoomDO extends DurableObject<Env> {
           );
         }
         accepted.push({ envelopeId: env.envelopeId, serverSeq: prevSeq });
+      } else if (preexistingPresenceById.has(env.envelopeId)) {
+        accepted.push({
+          envelopeId: env.envelopeId,
+          serverSeq: preexistingPresenceById.get(env.envelopeId)!.serverSeq,
+        });
       } else {
         fresh.push(env);
       }
@@ -1821,9 +1882,10 @@ export class RoomDO extends DurableObject<Env> {
     const runningSeq = curServerSeq;
     let runningOldestRetained = curOldestRetained;
 
-    const addedCount = fresh.length;
+    const durableFresh = fresh.filter((env) => !isReplaceablePresence(env));
+    const addedCount = durableFresh.length;
     let addedBytes = 0;
-    for (const env of fresh) {
+    for (const env of durableFresh) {
       addedBytes += env.ciphertextBytes;
       if (!Number.isSafeInteger(addedBytes)) {
         return errorResponse(500, "ATTN_ROOM_CORRUPT", "envelope byte addition overflow");
@@ -1863,7 +1925,9 @@ export class RoomDO extends DurableObject<Env> {
 
     const nextCount = runningCount + addedCount;
     const nextInlineBytes = runningBytes + addedBytes;
-    const finalServerSeq = runningSeq + addedCount;
+    // Replaceable presence participates in live ordering but not retained-log
+    // accounting, so serverSeq advances across every fresh envelope.
+    const finalServerSeq = runningSeq + fresh.length;
     const combinedBytes = nextInlineBytes + runningBytesR2;
     if (
       !Number.isSafeInteger(nextCount) ||
@@ -1913,13 +1977,17 @@ export class RoomDO extends DurableObject<Env> {
         serverSeq: nextSeq,
       };
       const payloadKey = envStorageKey(paddedSeq, env.envelopeId);
-      writeMap[payloadKey] = record;
-      freshPayloads.push({ payloadKey, payloadKeys: [payloadKey], record });
-      writeMap[envIndexKey(env.envelopeId)] = paddedSeq;
+      if (isReplaceablePresence(env)) {
+        writeMap[latestPresenceKey(env.authorId, env.deviceId)] = record;
+      } else {
+        writeMap[payloadKey] = record;
+        freshPayloads.push({ payloadKey, payloadKeys: [payloadKey], record });
+        writeMap[envIndexKey(env.envelopeId)] = paddedSeq;
+      }
       if (ownerSnapshotIds.has(env.envelopeId)) {
         ownerSnapshotFloor = Math.max(ownerSnapshotFloor, nextSeq);
       }
-      if (env.kind === "signal" && env.target?.deviceId !== undefined) {
+      if (!isReplaceablePresence(env) && env.kind === "signal" && env.target?.deviceId !== undefined) {
         const byTargetKey = envByTargetKey(env.target.deviceId, paddedSeq, env.envelopeId);
         writeMap[byTargetKey] = "";
         const candidates = freshSignalsByTarget.get(env.target.deviceId) ?? [];
@@ -2082,7 +2150,9 @@ export class RoomDO extends DurableObject<Env> {
     // filtering: kind=signal envelopes only deliver to target.deviceId.
     if (fresh.length > 0) {
       this.broadcastFreshEnvelopes(fresh, nextSeq);
-      await this.notifyOfflineRoomSubscribers(fresh);
+      await this.notifyOfflineRoomSubscribers(
+        fresh.filter((envelope) => !isReplaceablePresence(envelope)),
+      );
     }
 
     // Sort accepted by serverSeq so clients see a stable order matching
@@ -3994,6 +4064,7 @@ export class RoomDO extends DurableObject<Env> {
     let devices: DeviceRecord[] = [];
     let missedSignalEnvelopeIds: string[] = [];
     let orderedReplay: EnvelopeRecord[] = [];
+    let latestPresence: EnvelopeRecord[] = [];
     for (;;) {
       const initialFence = await this.readSubscribeFence();
       if (initialFence === undefined) {
@@ -4040,7 +4111,10 @@ export class RoomDO extends DurableObject<Env> {
         return;
       }
 
-      const replayCandidate = await this.loadValidatedEnvelopePayloads(initialFence.serverSeq);
+      const [replayCandidate, presenceCandidate] = await Promise.all([
+        this.loadValidatedEnvelopePayloads(initialFence.serverSeq),
+        this.loadLatestPresence(initialFence.serverSeq),
+      ]);
       // This is the final await. Once both metadata values equal the snapshot
       // fence, hello, replay, attachment transition, and join are synchronous.
       const finalFence = await this.readSubscribeFence();
@@ -4058,11 +4132,16 @@ export class RoomDO extends DurableObject<Env> {
         failSocketCorrupt(ws);
         return;
       }
+      if (presenceCandidate instanceof Response) {
+        failSocketCorrupt(ws);
+        return;
+      }
 
       replayServerSeq = finalFence.serverSeq;
       devices = deviceCandidate;
       missedSignalEnvelopeIds = missedCandidate;
       orderedReplay = replayCandidate;
+      latestPresence = presenceCandidate;
       break;
     }
 
@@ -4118,6 +4197,18 @@ export class RoomDO extends DurableObject<Env> {
       if (!deliverableTo(record, att)) continue;
       const frame: ServerFrame = { type: "envelope", envelope: record, serverSeq: record.serverSeq };
       sendJson(ws, frame);
+    }
+
+    // Replaceable presence is state, not history: replay at most the newest
+    // encrypted value for each currently-online device, independent of the
+    // durable cursor. It never participates in env:* replay or ACKs.
+    if (att.kind === "device") {
+      const online = new Set(onlineDeviceIds);
+      online.add(att.deviceId);
+      for (const record of latestPresence) {
+        if (!online.has(record.deviceId) || !deliverableTo(record, att)) continue;
+        sendJson(ws, { type: "envelope", envelope: record, serverSeq: record.serverSeq });
+      }
     }
 
     const transitionedAttachment: WSAttachment = att.kind === "device"
@@ -4442,6 +4533,25 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
     return [...byLogical.values()].sort((a, b) => a.serverSeq - b.serverSeq);
+  }
+
+  /** Load the one replaceable encrypted presence value retained per device. */
+  private async loadLatestPresence(finalServerSeq: number): Promise<EnvelopeRecord[] | Response> {
+    if (!isNonnegativeSafeInteger(finalServerSeq)) return corruptRoomResponse();
+    const entries = await this.ctx.storage.list<unknown>({ prefix: LATEST_PRESENCE_PREFIX });
+    if (entries.size > MAX_REGISTERED_DEVICES) return corruptRoomResponse();
+    const records: EnvelopeRecord[] = [];
+    for (const [key, value] of entries) {
+      if (!isStoredEnvelopeRecord(value) || !isReplaceablePresence(value) ||
+        value.target !== null || value.serverSeq > finalServerSeq ||
+        value.signalGeneration === undefined || value.deviceSignature === undefined ||
+        value.ciphertextBytes > MAX_REPLACEABLE_PRESENCE_BYTES ||
+        key !== latestPresenceKey(value.authorId, value.deviceId)) {
+        return corruptRoomResponse();
+      }
+      records.push(value);
+    }
+    return records.sort((a, b) => a.serverSeq - b.serverSeq);
   }
 
   /**
@@ -4940,6 +5050,14 @@ function envIndexKey(envelopeId: string): string {
   return `${ENV_IDX_PREFIX}${encodeOpaqueSegment(envelopeId)}`;
 }
 
+function latestPresenceKey(authorId: string, deviceId: string): string {
+  return `${LATEST_PRESENCE_PREFIX}${encodeOpaqueSegment(authorId)}:${encodeOpaqueSegment(deviceId)}`;
+}
+
+function isReplaceablePresence(envelope: EnvelopeInput): boolean {
+  return envelope.kind === "signal" && envelope.signalClass === "presence";
+}
+
 function legacyEnvIndexKey(envelopeId: string): string {
   return `${LEGACY_ENV_IDX_PREFIX}${envelopeId}`;
 }
@@ -4990,6 +5108,7 @@ function sameEnvelopeInput(a: EnvelopeInput, b: EnvelopeInput): boolean {
     a.ciphertext === b.ciphertext &&
     a.ciphertextBytes === b.ciphertextBytes &&
     a.signalGeneration === b.signalGeneration &&
+    a.signalClass === b.signalClass &&
     a.deviceSignature === b.deviceSignature
   );
 }
@@ -5158,6 +5277,8 @@ function isStoredEnvelopeRecord(value: unknown): value is EnvelopeRecord {
     typeof record.nonce === "string" && typeof record.ciphertext === "string" &&
     Number.isSafeInteger(record.ciphertextBytes) && (record.ciphertextBytes ?? 0) > 0 &&
     (record.signalGeneration === undefined || (Number.isSafeInteger(record.signalGeneration) && (record.signalGeneration ?? -1) >= 0)) &&
+    (record.signalClass === undefined ||
+      (record.signalClass === "presence" && record.kind === "signal" && record.target === null)) &&
     (record.deviceSignature === undefined || typeof record.deviceSignature === "string") &&
     Number.isSafeInteger(record.serverSeq) && (record.serverSeq ?? 0) > 0;
 }

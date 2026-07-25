@@ -910,6 +910,7 @@ mod tests {
             ciphertext: "Y2lwaGVy".to_string(), // base64url("cipher")
             ciphertext_bytes: 6,
             signal_generation: None,
+            signal_class: None,
             device_signature: None,
         }
     }

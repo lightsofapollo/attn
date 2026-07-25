@@ -230,6 +230,7 @@ pub fn assemble_signal_envelope(
         ciphertext: URL_SAFE_NO_PAD.encode(&ciphertext),
         ciphertext_bytes: ciphertext.len() as u64,
         signal_generation: None,
+        signal_class: None,
         device_signature: None,
     })
 }
@@ -251,6 +252,9 @@ pub fn authenticate_signal_envelope_v3(
         .target
         .as_ref()
         .map(|target| id_to_string(&target.device_id));
+    let signal_class = envelope.signal_class.map(|class| match class {
+        crate::review::model::SignalClass::Presence => "presence",
+    });
     let signature = crate::review::crypto::device_proof::sign_device_signal_proof_v3(
         signing_key,
         envelope.room_id.as_str(),
@@ -258,6 +262,7 @@ pub fn authenticate_signal_envelope_v3(
         &id_to_string(&envelope.author_id),
         &id_to_string(&envelope.device_id),
         target.as_deref(),
+        signal_class,
         generation,
         envelope.created_at,
         envelope.expires_at,
@@ -295,6 +300,7 @@ pub fn authenticate_snapshot_blob_envelope_v3(
         &envelope.envelope_id,
         &id_to_string(&envelope.author_id),
         &id_to_string(&envelope.device_id),
+        None,
         None,
         envelope.created_at,
         envelope.created_at,
@@ -967,6 +973,7 @@ mod tests {
             &id_to_string(&signed.author_id),
             &id_to_string(&signed.device_id),
             None,
+            None,
             signed.created_at, // generation == createdAt
             signed.created_at,
             signed.expires_at,
@@ -984,6 +991,7 @@ mod tests {
             &signed.envelope_id,
             &id_to_string(&signed.author_id),
             &id_to_string(&signed.device_id),
+            None,
             None,
             signed.created_at + 1,
             signed.created_at,

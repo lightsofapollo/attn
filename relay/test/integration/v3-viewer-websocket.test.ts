@@ -172,6 +172,7 @@ async function signSignal(room: V3Room, value: EnvelopeInput): Promise<string> {
         authorId: value.authorId,
         deviceId: value.deviceId,
         targetDeviceId: value.target?.deviceId ?? null,
+        ...(value.signalClass === undefined ? {} : { signalClass: value.signalClass }),
         generation: value.signalGeneration,
         createdAt: value.createdAt,
         expiresAt: value.expiresAt,
@@ -614,6 +615,120 @@ describe("v3 anonymous viewer WebSocket", () => {
     const staleResponse = await postEnvelopeResponse(room, [stale]);
     expect(staleResponse.status).toBe(409);
     expect(await staleResponse.json()).toMatchObject({ error: { code: "ATTN_SIGNAL_GENERATION_STALE" } });
+  });
+
+  it("replaces signed presence per device without consuming the durable event cap", async () => {
+    const room = await createRoom({ maxEvents: 1 });
+    await registerOwner(room);
+    const opened = await openSocket(room, "?device_id=owner-device");
+    expect(opened.response.status).toBe(101);
+    const frames = new FrameQueue(opened.socket!);
+    opened.socket!.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(await frames.next()).toMatchObject({ type: "hello", serverSeq: 0 });
+    expect(await frames.next()).toMatchObject({ type: "ping" });
+
+    const presence = async (id: string, generation: number): Promise<EnvelopeInput> => {
+      const value = await envelope(room, id, "signal");
+      value.createdAt = generation;
+      value.signalGeneration = generation;
+      value.signalClass = "presence";
+      value.deviceSignature = await signSignal(room, value);
+      return value;
+    };
+    const first = await presence("presence-first", 1_700_000_000_001);
+    const second = await presence("presence-second", 1_700_000_000_002);
+    const durable = await envelope(room, "durable-at-cap", "signal");
+    durable.createdAt = first.createdAt;
+    durable.signalGeneration = first.signalGeneration;
+    durable.deviceSignature = await signSignal(room, durable);
+    await postEnvelopes(room, [durable]);
+    expect(await frames.next()).toMatchObject({
+      type: "envelope",
+      serverSeq: 1,
+      envelope: { envelopeId: "durable-at-cap" },
+    });
+    await postEnvelopes(room, [first]);
+    expect(await frames.next()).toMatchObject({
+      type: "envelope",
+      serverSeq: 2,
+      envelope: { envelopeId: "presence-first", signalClass: "presence" },
+    });
+    await postEnvelopes(room, [second]);
+    expect(await frames.next()).toMatchObject({
+      type: "envelope",
+      serverSeq: 3,
+      envelope: { envelopeId: "presence-second", signalClass: "presence" },
+    });
+
+    const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(room.roomId));
+    const accounting = await runInDurableObject(stub, async (_instance, state) => ({
+      count: await state.storage.get<number>("meta:envelope_count"),
+      bytes: await state.storage.get<number>("meta:bytes_used"),
+      durable: await state.storage.list({ prefix: "env_v2:" }),
+      presence: await state.storage.list<EnvelopeInput & { serverSeq: number }>({ prefix: "latest_presence_v3:" }),
+    }));
+    expect(accounting.count).toBe(1);
+    expect(accounting.bytes).toBe(durable.ciphertextBytes);
+    expect(accounting.durable.size).toBe(1);
+    expect([...accounting.presence.values()]).toMatchObject([
+      { envelopeId: "presence-second", signalClass: "presence", serverSeq: 3 },
+    ]);
+
+    const overflow = await postEnvelopeResponse(room, [await envelope(room, "durable-over-cap")]);
+    expect(overflow.status).toBe(507);
+    expect(await overflow.json()).toMatchObject({ error: { code: "ATTN_ROOM_EVENT_CAP" } });
+
+    opened.socket!.close(1000, "reconnect");
+    const reopened = await openSocket(room, "?device_id=owner-device");
+    expect(reopened.response.status).toBe(101);
+    const replay = new FrameQueue(reopened.socket!);
+    reopened.socket!.send(JSON.stringify({ type: "subscribe", after: 0 }));
+    expect(await replay.next()).toMatchObject({ type: "hello", serverSeq: 3 });
+    expect(await replay.next()).toMatchObject({
+      type: "envelope",
+      envelope: { envelopeId: "durable-at-cap" },
+    });
+    expect(await replay.next()).toMatchObject({
+      type: "envelope",
+      envelope: { envelopeId: "presence-second", signalClass: "presence" },
+    });
+    expect(await replay.next()).toMatchObject({ type: "ping" });
+  });
+
+  it("binds and bounds the replaceable presence class", async () => {
+    const room = await createRoom();
+    await registerOwner(room);
+    const value = await envelope(room, "presence-class-tamper", "signal");
+    value.signalClass = "presence";
+    const response = await postEnvelopeResponse(room, [value]);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ error: { code: "ATTN_DEVICE_PROOF_INVALID" } });
+
+    const targeted = await envelope(
+      room,
+      "presence-targeted",
+      "signal",
+      { deviceId: "owner-device" },
+    );
+    targeted.signalClass = "presence";
+    targeted.deviceSignature = await signSignal(room, targeted);
+    const targetedResponse = await postEnvelopeResponse(room, [targeted]);
+    expect(targetedResponse.status).toBe(400);
+    expect(await targetedResponse.json()).toMatchObject({
+      error: { code: "ATTN_PRESENCE_TARGET_INVALID" },
+    });
+
+    const oversized = await envelope(room, "presence-oversized", "signal");
+    const oversizedCiphertext = new Uint8Array(16 * 1024 + 1).fill(0x66);
+    oversized.ciphertext = base64UrlEncode(oversizedCiphertext);
+    oversized.ciphertextBytes = oversizedCiphertext.length;
+    oversized.signalClass = "presence";
+    oversized.deviceSignature = await signSignal(room, oversized);
+    const oversizedResponse = await postEnvelopeResponse(room, [oversized]);
+    expect(oversizedResponse.status).toBe(413);
+    expect(await oversizedResponse.json()).toMatchObject({
+      error: { code: "ATTN_ENVELOPE_TOO_LARGE" },
+    });
   });
 });
 

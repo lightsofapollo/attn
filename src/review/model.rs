@@ -1244,6 +1244,9 @@ pub struct MailboxEnvelope {
     /// V3 signal-only monotonic negotiation/collaboration generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal_generation: Option<u64>,
+    /// V3 signal-only retention class. Presence replaces prior state per device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_class: Option<SignalClass>,
     /// Ed25519 proof over the complete v3 signal routing/ciphertext header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_signature: Option<String>,
@@ -1275,6 +1278,12 @@ pub enum EnvelopeKind {
     Event,
     SnapshotBlob,
     Signal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalClass {
+    Presence,
 }
 
 // ---------------------------------------------------------------------------
@@ -1701,6 +1710,7 @@ mod tests {
             ciphertext: "ct-base64url".to_string(),
             ciphertext_bytes: 128,
             signal_generation: None,
+            signal_class: None,
             device_signature: None,
         };
 

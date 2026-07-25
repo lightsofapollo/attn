@@ -1,7 +1,17 @@
 # Event-log compaction: late joins without replaying the world
 
-Status: design for discussion (2026-07-19), prompted by hitting
-`ATTN_ROOM_EVENT_CAP` (500) in a live editing session.
+Status: step compaction is implemented. On 2026-07-24 cursor/view presence was
+also moved out of the durable event log into bounded latest-state retention,
+prompted by hitting `ATTN_ROOM_EVENT_CAP` (500) in a live editing session.
+
+## Implemented presence lane
+
+V3 cursor/view updates are signed `signalClass: "presence"` envelopes. The
+relay broadcasts fresh updates and retains only the latest encrypted value per
+device for reconnects; it does not charge these values to the durable event or
+byte caps. The class is bound into the device proof so a caller cannot relabel
+an arbitrary durable signal. Document steps, review events, snapshots, and
+unclassified signaling retain their existing durability and compaction rules.
 
 ## The insight: we already merge pending edits
 

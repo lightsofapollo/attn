@@ -103,4 +103,31 @@ test('browser and native pin the same complete v3 signal proof', () => {
   assert(!ed25519.verify(base64UrlDecode(signature), canonicalDeviceSignalProofV3(input), wrongKey), 'wrong key verified');
 });
 
+test('v3 signal proof binds the replaceable presence class', () => {
+  const secret = new Uint8Array(32).fill(0x21);
+  const input = {
+    roomId: 'room-presence', envelopeId: 'envelope-presence', authorId: 'author-presence',
+    deviceId: 'device-presence', targetDeviceId: null, signalClass: 'presence' as const,
+    generation: 9, createdAt: 1_700_000_000_009, expiresAt: 1_700_003_600_009,
+    nonce: 'IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIi',
+    ciphertext: 'MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM', ciphertextBytes: 32,
+  };
+  const signature = signDeviceSignalProofV3(input, secret);
+  assert(
+    signature === 'abvJIj3s-e19-N7f0ZH9B7skWw1YbrDGePpkeiOxr-aTSts2jRoiltjAmigTlV57HlLL6QGsWCGnIjuJh3TpDA',
+    'native/browser presence signature vector mismatch',
+  );
+  const publicKey = ed25519.getPublicKey(secret);
+  assert(
+    ed25519.verify(base64UrlDecode(signature), canonicalDeviceSignalProofV3(input), publicKey),
+    'presence proof did not verify',
+  );
+  const withoutClass = { ...input };
+  delete (withoutClass as { signalClass?: 'presence' }).signalClass;
+  assert(
+    !ed25519.verify(base64UrlDecode(signature), canonicalDeviceSignalProofV3(withoutClass), publicKey),
+    'presence class removal retained a valid proof',
+  );
+});
+
 if (failures > 0) process.exit(1);

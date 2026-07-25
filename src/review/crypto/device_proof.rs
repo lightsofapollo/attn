@@ -43,6 +43,8 @@ struct CanonicalDeviceSignalProofV3<'a> {
     nonce: &'a str,
     purpose: &'static str,
     room_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signal_class: Option<&'a str>,
     target_device_id: Option<&'a str>,
     v: u32,
 }
@@ -54,6 +56,7 @@ pub fn canonical_device_signal_proof_v3(
     author_id: &str,
     device_id: &str,
     target_device_id: Option<&str>,
+    signal_class: Option<&str>,
     generation: u64,
     created_at: u64,
     expires_at: u64,
@@ -73,6 +76,7 @@ pub fn canonical_device_signal_proof_v3(
         nonce,
         purpose: DEVICE_SIGNAL_PROOF_PURPOSE_V3,
         room_id,
+        signal_class,
         target_device_id,
         v: 3,
     })
@@ -86,6 +90,7 @@ pub fn sign_device_signal_proof_v3(
     author_id: &str,
     device_id: &str,
     target_device_id: Option<&str>,
+    signal_class: Option<&str>,
     generation: u64,
     created_at: u64,
     expires_at: u64,
@@ -99,6 +104,7 @@ pub fn sign_device_signal_proof_v3(
         author_id,
         device_id,
         target_device_id,
+        signal_class,
         generation,
         created_at,
         expires_at,
@@ -118,6 +124,7 @@ pub fn verify_device_signal_proof_v3(
     author_id: &str,
     device_id: &str,
     target_device_id: Option<&str>,
+    signal_class: Option<&str>,
     generation: u64,
     created_at: u64,
     expires_at: u64,
@@ -137,6 +144,7 @@ pub fn verify_device_signal_proof_v3(
         author_id,
         device_id,
         target_device_id,
+        signal_class,
         generation,
         created_at,
         expires_at,
@@ -234,6 +242,7 @@ mod tests {
             "author-vector",
             "device-vector",
             Some("target-vector"),
+            None,
             7,
             1_700_000_000_000,
             1_700_003_600_000,
@@ -255,6 +264,7 @@ mod tests {
                 "author-vector",
                 "device-vector",
                 target,
+                None,
                 7,
                 1_700_000_000_000,
                 1_700_003_600_000,
@@ -267,5 +277,66 @@ mod tests {
         assert!(verify(&key.verifying_key(), Some("rewritten")).is_err());
         let wrong = DeviceSigningKey::from_bytes(&[0x44; 32]).unwrap();
         assert!(verify(&wrong.verifying_key(), Some("target-vector")).is_err());
+    }
+
+    #[test]
+    fn signal_proof_binds_replaceable_presence_class() {
+        let key = DeviceSigningKey::from_bytes(&[0x21; 32]).unwrap();
+        let signature = sign_device_signal_proof_v3(
+            &key,
+            "room-presence",
+            "envelope-presence",
+            "author-presence",
+            "device-presence",
+            None,
+            Some("presence"),
+            9,
+            1_700_000_000_009,
+            1_700_003_600_009,
+            "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIi",
+            "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+            32,
+        )
+        .unwrap();
+        assert_eq!(
+            signature,
+            "abvJIj3s-e19-N7f0ZH9B7skWw1YbrDGePpkeiOxr-aTSts2jRoiltjAmigTlV57HlLL6QGsWCGnIjuJh3TpDA"
+        );
+        verify_device_signal_proof_v3(
+            &key.verifying_key(),
+            &signature,
+            "room-presence",
+            "envelope-presence",
+            "author-presence",
+            "device-presence",
+            None,
+            Some("presence"),
+            9,
+            1_700_000_000_009,
+            1_700_003_600_009,
+            "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIi",
+            "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+            32,
+        )
+        .unwrap();
+        assert!(
+            verify_device_signal_proof_v3(
+                &key.verifying_key(),
+                &signature,
+                "room-presence",
+                "envelope-presence",
+                "author-presence",
+                "device-presence",
+                None,
+                None,
+                9,
+                1_700_000_000_009,
+                1_700_003_600_009,
+                "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIi",
+                "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM",
+                32,
+            )
+            .is_err()
+        );
     }
 }

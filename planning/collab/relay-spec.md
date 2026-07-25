@@ -308,6 +308,9 @@ Request:
       "deviceId": "<deviceId>",
       "kind": "event" | "snapshot_blob" | "signal",
       "target": null | { "deviceId": "..." },
+      "signalClass": "presence",
+      "signalGeneration": 1736012345678,
+      "deviceSignature": "<base64url Ed25519 signature>",
       "createdAt": 1736012345678,
       "expiresAt": 1736617145678,
       "nonce": "<base64url>",
@@ -334,6 +337,19 @@ Behavior:
 - Idempotency: if `envelopeId` already exists in the room, treat as success without storing a second copy. Response `serverSeq` for the duplicate is the previously assigned value.
 - Within one request, field-identical repeats of an `envelopeId` are collapsed in first-occurrence order after normalizing omitted `target` to `null`. If the same `envelopeId` has different `authorId`, `deviceId`, `kind`, normalized `target`, `createdAt`, `expiresAt`, `nonce`, `ciphertext`, or `ciphertextBytes`, the relay still applies admission, the first unique envelope's device-rate debit, and PoW verification before returning `400 ATTN_ENVELOPE_ID_CONFLICT`; envelope payloads and accounting remain unchanged.
 - `kind == "signal"` envelopes are short-lived. They are forwarded over the WebSocket to the target device (or broadcast if `target == null`) and **also** stored if the target is offline. Signal envelopes have their own sub-cap: `maxSignalEnvelopes = 64` per `(authorId, target.deviceId)` pair, FIFO-evicted. After first-device authentication and rate/PoW verification, only targets receiving a fresh signal are scanned, once per target; persisted-duplicate retries do not select an index scan. Exact target-index entries, payload storage keys, routing fields, victim accounting fields, and victim-key uniqueness are validated before content mutation, with corrupt state returning `500 ATTN_ROOM_CORRUPT`. Fresh payload/index insertion, all planned FIFO victim deletions, final count/byte totals, and the logical post-mutation cursor floor commit in one storage transaction with ≤128-key operations. The `env_idx` entry is retained as an idempotency tombstone, so retrying an evicted signal returns its original `serverSeq` without recharging it.
+- V3 broadcast cursor/view updates use `kind == "signal"` plus
+  `signalClass == "presence"`. The class is covered by the registered-device
+  signature, is rejected on V2 and on targeted signals, and has a 16 KiB
+  ciphertext limit. The relay broadcasts every fresh update but retains only
+  the latest value per `(authorId, deviceId)` under a separate latest-state
+  key. Replaceable presence advances `serverSeq` for live ordering but does not
+  create an `env`/`env_idx` row, consume `maxEvents` or room byte accounting,
+  enter offline Web Push, or change the durable cursor floor. An exact retry is
+  idempotent only while that envelope remains the latest retained value; an
+  older replaced retry is stale. Unclassified signals, including encrypted
+  document steps and WebRTC negotiation, retain the durable behavior above.
+  Browser recipients likewise dispatch this class live without appending each
+  update to their local IndexedDB history.
 - `kind == "snapshot_blob"` with `ciphertextBytes > 1 MiB`: see R2 spillover below.
 
 Response:
@@ -527,7 +543,14 @@ type ClientFrame =
 
 1. Client opens WS, sends `subscribe { after: lastSeenServerSeq }`.
 2. Server sends `hello { serverSeq, policy, devices, onlineDeviceIds, missedSignalEnvelopeIds }`. `devices` is the immutable registered directory; `onlineDeviceIds` is the authoritative active-socket snapshot used to build the live WebRTC mesh without resurrecting departed registrations. If `after < meta:oldest_retained_seq`, instead sends `error { code: "ATTN_CURSOR_TOO_OLD", resyncFromSeq: <oldest_retained_seq> }` and closes `4005`. Client responds by discarding its cursor and either requesting a snapshot from a peer or re-subscribing from `resyncFromSeq`.
-3. Server pushes `envelope` and `presence` frames as they happen. V3 anonymous viewers receive only non-signal `envelope` frames; presence and all signaling are suppressed. Each accepted envelope upload also resets the idle alarm.
+3. Server pushes `envelope` and socket-roster `presence` frames as they happen.
+   A registered-device subscribe replays durable envelopes after its cursor and
+   then the latest encrypted `signalClass: "presence"` envelope for each
+   currently online device. These latest-state envelopes are replayed
+   independently of the durable cursor because they are replacement state, not
+   log history. V3 anonymous viewers receive only non-signal `envelope` frames;
+   roster presence and all signaling are suppressed. Each accepted envelope
+   upload also resets the idle alarm.
 4. Server sends `ping` every 30s; if no `pong` within 60s, close `1001`.
 5. The DO uses WebSocket Hibernation: when no traffic for 60s, the DO hibernates, and frames are resumed transparently on the next event.
 
@@ -585,6 +608,7 @@ env_idx_v2:<enc(envelopeId)>    -> paddedServerSeq (durable dedupe tombstone; re
 env_by_target_v3:<enc(deviceId)>:<paddedServerSeq>:<enc(envelopeId)> -> ""
 env_by_target_v2:<enc(deviceId)>:<paddedServerSeq>:<raw envelopeId> -> "" (legacy dual-read/delete)
 env_by_target:<colon-free deviceId>:<paddedServerSeq>:<envelopeId> -> "" (legacy dual-read/delete only)
+latest_presence_v3:<enc(participantId)>:<enc(deviceId)> -> latest signed V3 presence Envelope JSON
 
 ack_v2:<enc(deviceId)>:<enc(envelopeId)> -> u64 ackedAt
 ack_owner_v2:<enc(envelopeId)>  -> "" (presence indicates owner-acked)

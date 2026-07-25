@@ -1978,7 +1978,8 @@ impl ReviewManager {
             now_ms,
             now_ms + SIGNAL_TTL_MS,
         ) {
-            Ok(env) if protocol_version == 3 => {
+            Ok(mut env) if protocol_version == 3 => {
+                env.signal_class = collab_signal_class(protocol_version, kind);
                 match crate::review::transport::signaling::authenticate_signal_envelope_v3(
                     env,
                     now_ms.max(0) as u64,
@@ -4314,6 +4315,14 @@ fn collab_wire_kind(payload: &str) -> Option<CollabWireKind> {
     }
 }
 
+fn collab_signal_class(
+    protocol_version: u8,
+    kind: CollabWireKind,
+) -> Option<crate::review::model::SignalClass> {
+    (protocol_version == 3 && kind == CollabWireKind::Cursor)
+        .then_some(crate::review::model::SignalClass::Presence)
+}
+
 fn outbound_collab_allowed(is_owner: bool, kind: CollabWireKind) -> bool {
     if is_owner {
         matches!(kind, CollabWireKind::Broadcast | CollabWireKind::Cursor)
@@ -4472,6 +4481,19 @@ mod tests {
         assert!(outbound_collab_allowed(false, CollabWireKind::Cursor));
         assert!(outbound_collab_allowed(true, CollabWireKind::Broadcast));
         assert!(!outbound_collab_allowed(true, CollabWireKind::Submit));
+    }
+
+    #[test]
+    fn only_v3_cursor_collab_uses_replaceable_presence_retention() {
+        use crate::review::model::SignalClass;
+
+        assert_eq!(
+            collab_signal_class(3, CollabWireKind::Cursor),
+            Some(SignalClass::Presence)
+        );
+        assert_eq!(collab_signal_class(3, CollabWireKind::Broadcast), None);
+        assert_eq!(collab_signal_class(3, CollabWireKind::Resync), None);
+        assert_eq!(collab_signal_class(2, CollabWireKind::Cursor), None);
     }
 
     #[test]

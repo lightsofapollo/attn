@@ -1550,6 +1550,7 @@ mod tests {
             ciphertext: String::new(),
             ciphertext_bytes: 0,
             signal_generation: None,
+            signal_class: None,
             device_signature: None,
         };
         let err = transport

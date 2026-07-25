@@ -994,13 +994,17 @@
 
 .attn-remote-view-marker {
   --attn-view-marker-offset: 1.4rem;
+  --attn-view-marker-color: var(--muted-foreground);
   position: absolute;
-  inset-inline-start: calc(-1 * (var(--attn-view-marker-offset) + var(--attn-view-marker-stack, 0) * 16px));
-  top: 0.4em;
+  inset-inline-start: calc(-1 * (var(--attn-view-marker-offset) + var(--attn-view-marker-stack, 0) * 7px));
+  top: 0.18em;
   display: block;
-  width: 13px;
-  height: 13px;
-  pointer-events: none;
+  width: 7px;
+  height: 1.35em;
+  isolation: isolate;
+  pointer-events: auto;
+  cursor: default;
+  outline: none;
 }
 
 .ProseMirror li .attn-remote-view-marker {
@@ -1008,30 +1012,104 @@
   --attn-view-marker-offset: 3rem;
 }
 
-.attn-remote-view-chip {
+.attn-remote-view-flag {
+  position: absolute;
+  inset-inline-end: 0;
+  top: 50%;
+  width: 3px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--attn-view-marker-color);
+  box-shadow: 0 0 0 1px var(--background);
+  opacity: 0.82;
+  transform: translateY(-50%);
+  transition: opacity 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+.attn-remote-view-label {
+  position: absolute;
+  z-index: 2;
+  inset-inline-end: calc(100% + 5px);
+  top: 50%;
   display: inline-flex;
-  width: 13px;
-  height: 13px;
+  min-height: 22px;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 2px 3px;
+  border: 1px solid color-mix(in oklab, var(--border) 78%, transparent);
+  border-radius: 6px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  font-family: var(--font-sans, "Source Sans 3 Variable", "Source Sans 3", sans-serif);
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px color-mix(in oklab, var(--foreground) 14%, transparent);
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(4px, -50%);
+  transition:
+    opacity 150ms ease-out,
+    transform 150ms ease-out,
+    visibility 0s linear 150ms;
+  user-select: none;
+}
+
+.attn-remote-view-avatar {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
+  background: var(--attn-view-marker-color);
   color: white;
-  font-family: var(--font-sans, "Source Sans 3 Variable", "Source Sans 3", sans-serif);
   font-size: 0.7rem;
   font-weight: 700;
-  line-height: 1;
-  box-shadow: 0 0 0 1.5px var(--background);
-  user-select: none;
+}
+
+.attn-remote-view-marker:hover .attn-remote-view-flag,
+.attn-remote-view-marker:focus-visible .attn-remote-view-flag {
+  opacity: 1;
+}
+
+.attn-remote-view-marker:focus-visible .attn-remote-view-flag {
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 3px var(--attn-view-marker-color);
+}
+
+.attn-remote-view-marker:hover .attn-remote-view-label,
+.attn-remote-view-marker:focus-visible .attn-remote-view-label {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(0, -50%);
+  transition-delay: 0s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attn-remote-view-flag,
+  .attn-remote-view-label {
+    transition: none;
+  }
 }
 
 @media (max-width: 768px) {
   .attn-remote-view-marker {
-    /* Fit the chip inside the editor's 1rem mobile page gutter. */
+    /* Fit the flag inside the editor's 1rem mobile page gutter. */
     --attn-view-marker-offset: 1rem;
   }
 
   .ProseMirror li .attn-remote-view-marker {
     --attn-view-marker-offset: 2.5rem;
+  }
+
+  .attn-remote-view-label {
+    /* Reveal inward so participant names cannot be clipped by the viewport. */
+    inset-inline-start: calc(100% + 5px);
+    inset-inline-end: auto;
+    transform: translate(0, -50%);
   }
 }
 

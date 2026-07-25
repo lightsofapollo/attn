@@ -79,17 +79,47 @@ function buildViewMarker(cursor: RemoteCursor, stack: number): HTMLElement {
   const wrap = document.createElement('span');
   wrap.className = 'attn-remote-view-marker';
   wrap.style.setProperty('--attn-view-marker-stack', String(stack));
+  wrap.style.setProperty('--attn-view-marker-color', color);
   wrap.setAttribute('data-client-id', cursor.clientID);
   wrap.setAttribute('role', 'img');
   wrap.setAttribute('aria-label', `${cursor.label} is viewing this block`);
+  wrap.setAttribute('tabindex', '0');
+  wrap.setAttribute('contenteditable', 'false');
 
-  const chip = document.createElement('span');
-  chip.className = 'attn-remote-view-chip';
-  chip.style.backgroundColor = color;
-  chip.title = `${cursor.label} is viewing here`;
-  chip.textContent = Array.from(cursor.label.trim())[0]?.toLocaleUpperCase() ?? '?';
-  wrap.appendChild(chip);
+  const flag = document.createElement('span');
+  flag.className = 'attn-remote-view-flag';
+  flag.setAttribute('aria-hidden', 'true');
+  wrap.appendChild(flag);
+
+  const label = document.createElement('span');
+  label.className = 'attn-remote-view-label';
+  label.setAttribute('aria-hidden', 'true');
+
+  const avatar = document.createElement('span');
+  avatar.className = 'attn-remote-view-avatar';
+  avatar.textContent = Array.from(cursor.label.trim())[0]?.toLocaleUpperCase() ?? '?';
+  label.appendChild(avatar);
+
+  const labelText = document.createElement('span');
+  labelText.textContent = `${cursor.label} viewing`;
+  label.appendChild(labelText);
+  wrap.appendChild(label);
   return wrap;
+}
+
+/**
+ * The viewport flag is secondary presence. If the peer's stronger caret or
+ * selection signal already lands in the viewed block, rendering both makes
+ * the margin mark redundant and visually reads like an extra list bullet.
+ */
+export function viewMarkerBlockStart(
+  doc: Parameters<typeof DecorationSet.create>[0],
+  cursor: RemoteCursor,
+): number | null {
+  const viewHead = cursor.location?.viewHead;
+  if (viewHead === undefined) return null;
+  const viewBlock = viewingBlockStart(doc, viewHead);
+  return viewingBlockStart(doc, cursor.head) === viewBlock ? null : viewBlock;
 }
 
 /**
@@ -135,9 +165,8 @@ export function remoteCursorsPlugin(): Plugin {
         });
         const viewMarkerCounts = new Map<number, number>();
         for (const cursor of cursors) {
-          const viewHead = cursor.location?.viewHead;
-          if (viewHead === undefined) continue;
-          const blockStart = viewingBlockStart(state.doc, viewHead);
+          const blockStart = viewMarkerBlockStart(state.doc, cursor);
+          if (blockStart === null) continue;
           const stack = viewMarkerCounts.get(blockStart) ?? 0;
           viewMarkerCounts.set(blockStart, stack + 1);
           decos.push(Decoration.widget(

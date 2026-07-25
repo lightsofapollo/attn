@@ -5,7 +5,7 @@
 
 import { caretStacks, selectionSegments } from './remote-cursor-overlap';
 import type { RemoteCursor } from './collab-controller';
-import { viewingBlockStart } from './remote-cursors';
+import { viewingBlockStart, viewMarkerBlockStart } from './remote-cursors';
 import { schema } from '../schema';
 
 let failures = 0;
@@ -27,6 +27,32 @@ function assert(cond: boolean, detail: string): void {
   assert(
     viewingBlockStart(doc, headingStart + 3) === headingStart,
     'heading view position maps to the heading content start',
+  );
+}
+
+{
+  const doc = schema.node('doc', null, [
+    schema.node('paragraph', null, [schema.text('first')]),
+    schema.node('paragraph', null, [schema.text('second')]),
+  ]);
+  const secondStart = doc.child(0).nodeSize + 1;
+  const sameBlock = {
+    clientID: 'owner',
+    head: 3,
+    label: 'Owner',
+    color: 'oklch(0.56 0.11 218)',
+    location: { viewHead: 5 },
+  } satisfies RemoteCursor;
+  assert(
+    viewMarkerBlockStart(doc, sameBlock) === null,
+    'viewport marker is suppressed when the peer caret already identifies the viewed block',
+  );
+  assert(
+    viewMarkerBlockStart(doc, {
+      ...sameBlock,
+      location: { viewHead: secondStart + 2 },
+    }) === secondStart,
+    'viewport marker remains when the peer reads away from their caret',
   );
 }
 

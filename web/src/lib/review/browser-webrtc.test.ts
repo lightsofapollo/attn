@@ -1,5 +1,6 @@
 import {
   ATTN_DATA_CHANNEL_LABEL,
+  ATTN_PRESENCE_CHANNEL_LABEL,
   BrowserPeerMesh,
   type BrowserDirectState,
 } from './browser-webrtc';
@@ -15,7 +16,7 @@ class FakeChannel {
   onmessage: ((event: MessageEvent) => void) | null = null;
   readonly sent: Uint8Array[] = [];
 
-  constructor(label: string) { this.label = label; }
+  constructor(label: string, readonly options?: RTCDataChannelInit) { this.label = label; }
   send(data: string | Blob | ArrayBuffer | ArrayBufferView): void {
     if (typeof data === 'string') this.sent.push(new TextEncoder().encode(data));
     else if (data instanceof ArrayBuffer) this.sent.push(new Uint8Array(data));
@@ -39,6 +40,7 @@ class FakePeerConnection {
   oniceconnectionstatechange: (() => void) | null = null;
   readonly candidates: RTCIceCandidateInit[] = [];
   channel: FakeChannel | null = null;
+  presenceChannel: FakeChannel | null = null;
 
   constructor(readonly configuration: RTCConfiguration) {}
   async createOffer(): Promise<RTCSessionDescriptionInit> { return { type: 'offer', sdp: 'offer-sdp' }; }
@@ -50,14 +52,17 @@ class FakePeerConnection {
     this.remoteDescription = description as RTCSessionDescription;
   }
   async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> { this.candidates.push(candidate); }
-  createDataChannel(label: string): RTCDataChannel {
-    this.channel = new FakeChannel(label);
-    return this.channel as unknown as RTCDataChannel;
+  createDataChannel(label: string, options?: RTCDataChannelInit): RTCDataChannel {
+    const channel = new FakeChannel(label, options);
+    if (label === ATTN_PRESENCE_CHANNEL_LABEL) this.presenceChannel = channel;
+    else this.channel = channel;
+    return channel as unknown as RTCDataChannel;
   }
   close(): void { this.connectionState = 'closed'; }
   restartIce(): void {}
   emitDataChannel(channel = new FakeChannel(ATTN_DATA_CHANNEL_LABEL)): FakeChannel {
-    this.channel = channel;
+    if (channel.label === ATTN_PRESENCE_CHANNEL_LABEL) this.presenceChannel = channel;
+    else this.channel = channel;
     this.ondatachannel?.({ channel: channel as unknown as RTCDataChannel } as RTCDataChannelEvent);
     return channel;
   }
@@ -98,10 +103,11 @@ function envelope(deviceId = 'a'): MailboxEnvelope {
   };
 }
 
-test('uses STUN only, deterministic smaller-device offer, and exact channel label', async () => {
+test('uses STUN only and creates reliable review plus lossy presence channels', async () => {
   const pcs: FakePeerConnection[] = [];
   const signals: string[] = [];
   const states: BrowserDirectState[] = [];
+  const presenceReady: string[] = [];
   const mesh = new BrowserPeerMesh({
     localDeviceId: 'a',
     maxEnvelopeBytes: 16_384,
@@ -111,6 +117,7 @@ test('uses STUN only, deterministic smaller-device offer, and exact channel labe
     onSignal: async (_target, payload) => { signals.push(payload.kind); },
     onEnvelope: () => undefined,
     onState: (state) => states.push(state),
+    onPresenceReady: (deviceId) => presenceReady.push(deviceId),
     maxIceRestarts: 0,
   });
   mesh.syncDevices([device('a'), device('z'), device('agent', 'agent-cli')]);
@@ -122,11 +129,20 @@ test('uses STUN only, deterministic smaller-device offer, and exact channel labe
   ) ?? [];
   assert(urls.length > 0 && urls.every((url) => url.startsWith('stun:')), 'non-STUN server configured');
   assert(pcs[0]!.channel?.label === ATTN_DATA_CHANNEL_LABEL, 'wrong DataChannel label');
+  assert(pcs[0]!.presenceChannel?.label === ATTN_PRESENCE_CHANNEL_LABEL, 'wrong presence channel label');
+  assert(pcs[0]!.presenceChannel?.options?.ordered === false, 'presence channel must be unordered');
+  assert(pcs[0]!.presenceChannel?.options?.maxRetransmits === 0, 'presence channel must not retransmit');
   assert(signals.includes('offer'), 'lexically smaller device did not offer');
   pcs[0]!.channel!.open();
+  pcs[0]!.presenceChannel!.open();
+  assert(presenceReady.join(',') === 'z', 'presence open did not request a current-state replay');
   assert(states.at(-1) === 'live_direct', 'open channel did not publish live_direct');
   mesh.broadcastEnvelope(envelope('a'));
   assert(pcs[0]!.channel!.sent.length === 1, 'exact envelope was not fanned over the channel');
+  const presence = { ...envelope('a'), kind: 'signal', signalClass: 'presence' } as MailboxEnvelope;
+  mesh.broadcastPresenceEnvelope(presence);
+  assert(pcs[0]!.presenceChannel!.sent.length === 1, 'presence was not sent on its lossy channel');
+  assert(pcs[0]!.channel!.sent.length === 1, 'presence leaked onto the review channel');
   mesh.close();
 });
 
@@ -160,6 +176,19 @@ test('buffers ICE until offer and imports only the DTLS-bound remote device', as
   await Promise.resolve(); await Promise.resolve();
   assert(received.length === 1, 'forged remote device envelope was imported');
   assert(errors.includes('direct_message_rejected'), 'forged sender was not reported');
+  const presenceChannel = pcs[0]!.emitDataChannel(new FakeChannel(ATTN_PRESENCE_CHANNEL_LABEL));
+  presenceChannel.open();
+  const presence = new TextEncoder().encode(JSON.stringify({
+    ...envelope('a'),
+    kind: 'signal',
+    signalClass: 'presence',
+  }));
+  presenceChannel.receive(presence.buffer as ArrayBuffer);
+  await Promise.resolve();
+  assert(received.length === 2, 'presence lane did not import presence');
+  channel.receive(presence.buffer as ArrayBuffer);
+  await Promise.resolve(); await Promise.resolve();
+  assert(received.length === 2, 'presence was accepted on the reliable review lane');
   mesh.close();
 });
 

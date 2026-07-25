@@ -945,6 +945,7 @@ export class BrowserSession {
   private powAbortController: AbortController | null = null;
   private outbox: BrowserOutbox | null = null;
   private peerMesh: BrowserPeerMesh | null = null;
+  private latestPresenceEnvelope: MailboxEnvelope | null = null;
   private joinEnvelopeId: string | null = null;
   private lastCreatedAt = 0;
   private readonly authoringReadyWaiters = new Set<() => void>();
@@ -1258,7 +1259,10 @@ export class BrowserSession {
     });
   }
 
-  /** Send live collab as one broadcast envelope: direct first, relay always. */
+  /**
+   * Send live collaboration. Cursor/view presence is WebRTC-only ephemeral
+   * state; document collaboration keeps the direct-first relay safety net.
+   */
   async sendCollab(payload: string): Promise<void> {
     const message = parseCollabWireMessage(payload);
     if (!message || !this.outboundCollabAllowed(message)) {
@@ -1302,9 +1306,18 @@ export class BrowserSession {
         signingSecret: identity.signingSecret,
       } : {}),
     });
-    // Install locally before any network side effect. The DataChannel then
-    // gets the exact immutable envelope ahead of the relay POST; the later
-    // network echo is deduplicated after its durable cursor commit.
+    if (message.kind === 'cursor') {
+      // Presence is deliberately lossy: if no direct peer channel is open,
+      // drop this sample and let the next caret/view update supersede it. It
+      // must never enter the durable outbox or consume relay bandwidth/state.
+      this.latestPresenceEnvelope = envelope;
+      this.peerMesh?.broadcastPresenceEnvelope(envelope);
+      return;
+    }
+
+    // Install document collaboration locally before any network side effect.
+    // The DataChannel gets the exact immutable envelope ahead of the relay
+    // POST; the later network echo is deduplicated after its cursor commit.
     const enqueued = this.storage
       ? outbox.enqueueDurably(envelope).then(() => undefined)
       : Promise.resolve().then(() => { outbox.enqueue(envelope); });
@@ -2063,6 +2076,11 @@ export class BrowserSession {
             this.setState({ connection, ...(connection === 'live_direct' ? { directError: null } : {}) });
           }
         },
+        onPresenceReady: () => {
+          if (this.latestPresenceEnvelope) {
+            this.peerMesh?.broadcastPresenceEnvelope(this.latestPresenceEnvelope);
+          }
+        },
         onError: (message) => this.setState({ directError: message }),
       });
     }
@@ -2171,6 +2189,7 @@ export class BrowserSession {
     this.transportGeneration += 1;
     this.peerMesh?.close();
     this.peerMesh = null;
+    this.latestPresenceEnvelope = null;
     this.outbox?.close();
     this.outbox = null;
     this.joinEnvelopeId = null;

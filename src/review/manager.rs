@@ -1996,7 +1996,14 @@ impl ReviewManager {
             Err(e) => return emit_err(format!("assemble collab signal: {e}")),
         };
 
-        // Per-peer routing (attn-7qv). The old logic was all-or-nothing — a
+        // Per-peer routing (attn-7qv). Cursor/view presence is deliberately
+        // WebRTC-only: send it to every connected channel and drop it for
+        // peers without a direct path. It is replaceable UI state, so relay
+        // fallback would spend a request + fan-out on a sample that the next
+        // cursor update immediately supersedes.
+        //
+        // Document collaboration retains the hybrid routing below. The old
+        // logic was all-or-nothing — a
         // COMPLETE mesh sent over channels only (skip relay), an INCOMPLETE mesh
         // sent over the relay only (NO channels). That dropped data under a
         // partial mesh: with no TURN, a peer-pair that can't form a direct
@@ -2032,7 +2039,7 @@ impl ReviewManager {
                 .unwrap_or_default()
         };
 
-        let routing = decide_collab_routing(peer_count, channels.len());
+        let routing = decide_collab_routing(kind, peer_count, channels.len());
 
         if routing.send_over_channels
             && let Some(runtime) = self.runtime.as_ref()
@@ -3502,9 +3509,11 @@ struct CollabRouting {
     use_relay: bool,
 }
 
-/// Decide collab routing from `(peer_count, connected_count)` — the room's peer
-/// count and how many have a Connected DataChannel right now (attn-7qv).
+/// Decide collab routing from its wire kind plus `(peer_count,
+/// connected_count)` — the room's peer count and how many have a Connected
+/// DataChannel right now (attn-7qv).
 ///
+/// - Cursor/view presence uses connected DataChannels only and never relays.
 /// - Send over channels whenever at least one peer is connected.
 /// - Use the relay UNLESS the mesh is complete (every peer connected). An
 ///   incomplete mesh (including a not-yet-formed one, or one a no-TURN
@@ -3513,11 +3522,15 @@ struct CollabRouting {
 ///
 /// Double-delivery to connected peers under an incomplete mesh is intentional
 /// and safe — collab is idempotent on the receiver.
-fn decide_collab_routing(peer_count: usize, connected_count: usize) -> CollabRouting {
+fn decide_collab_routing(
+    kind: CollabWireKind,
+    peer_count: usize,
+    connected_count: usize,
+) -> CollabRouting {
     let complete_mesh = peer_count > 0 && connected_count == peer_count;
     CollabRouting {
         send_over_channels: connected_count > 0,
-        use_relay: !complete_mesh,
+        use_relay: kind != CollabWireKind::Cursor && !complete_mesh,
     }
 }
 
@@ -4499,7 +4512,7 @@ mod tests {
     #[test]
     fn collab_routing_complete_mesh_sends_channels_only_no_relay() {
         // Every peer connected → mesh covers everyone; skip the relay (cost).
-        let r = decide_collab_routing(2, 2);
+        let r = decide_collab_routing(CollabWireKind::Broadcast, 2, 2);
         assert!(r.send_over_channels);
         assert!(!r.use_relay, "complete mesh must NOT relay");
     }
@@ -4508,7 +4521,7 @@ mod tests {
     fn collab_routing_partial_mesh_sends_channels_and_relays() {
         // The attn-7qv fix: some peers connected, some not (no-TURN partial
         // mesh) → send to the connected channel(s) AND relay for the rest.
-        let r = decide_collab_routing(2, 1);
+        let r = decide_collab_routing(CollabWireKind::Broadcast, 2, 1);
         assert!(
             r.send_over_channels,
             "must still send to the connected peer"
@@ -4522,7 +4535,7 @@ mod tests {
     #[test]
     fn collab_routing_no_mesh_relays_only() {
         // No DataChannels formed yet (or none possible) → relay only.
-        let r = decide_collab_routing(3, 0);
+        let r = decide_collab_routing(CollabWireKind::Broadcast, 3, 0);
         assert!(!r.send_over_channels);
         assert!(r.use_relay);
     }
@@ -4531,9 +4544,20 @@ mod tests {
     fn collab_routing_no_peers_relays() {
         // No known peers → relay (matches the legacy fallback; harmless no-op
         // if nobody is subscribed).
-        let r = decide_collab_routing(0, 0);
+        let r = decide_collab_routing(CollabWireKind::Broadcast, 0, 0);
         assert!(!r.send_over_channels);
         assert!(r.use_relay);
+    }
+
+    #[test]
+    fn cursor_presence_never_uses_relay_even_with_partial_or_no_mesh() {
+        let partial = decide_collab_routing(CollabWireKind::Cursor, 3, 1);
+        assert!(partial.send_over_channels);
+        assert!(!partial.use_relay);
+
+        let absent = decide_collab_routing(CollabWireKind::Cursor, 3, 0);
+        assert!(!absent.send_over_channels);
+        assert!(!absent.use_relay);
     }
 
     // ----- snapshot rehydration at the IPC boundary -----------------------

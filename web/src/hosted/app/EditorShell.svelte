@@ -1857,6 +1857,9 @@
     controller.setPeerLocationSink((deviceId, location) => {
       reviewStoreRef?.notePeerLocation(deviceId, location);
     });
+    controller.setPeerLocationExpirySink((deviceId) => {
+      reviewStoreRef?.clearPeerLocation(deviceId);
+    });
     // Broadcast the owner's own file + caret so reviewers can jump back to us.
     // The active file only becomes knowable after mount, hence a live source.
     controller.setLocationSource(() => {
@@ -1870,6 +1873,7 @@
     return () => {
       controller.setRemoteCursorSink(null);
       controller.setPeerLocationSink(null);
+      controller.setPeerLocationExpirySink(null);
       controller.setLocationSource(null);
     };
   });

@@ -521,15 +521,13 @@ defineCase(
       }),
       'owner-device',
     );
+    const parsed = sent.map((payload) => parseCollabWireMessage(payload));
+    const resyncs = parsed.filter((message) => message?.kind === 'resync');
+    const cursors = parsed.filter((message) => message?.kind === 'cursor');
+    assert(resyncs.length === 2, `expected reconnect + gap resync, got ${resyncs.length}`);
+    assert(cursors.length === 1, 'direct reconnect did not re-announce cursor presence');
     assert(
-      sent.length === 2,
-      `expected reconnect + gap resync, got ${sent.length}`,
-    );
-    assert(
-      sent.every((payload) => {
-        const message = parseCollabWireMessage(payload);
-        return message?.kind === 'resync' && message.epoch === 'snapshot-1';
-      }),
+      resyncs.every((message) => message?.kind === 'resync' && message.epoch === 'snapshot-1'),
       'resync omitted active epoch',
     );
   },
@@ -877,7 +875,7 @@ defineCase('late peer-location sink replays retained cursor locations', () => {
       clientID: 'reviewer',
       head: 3,
       label: 'Reviewer',
-      color: '#123456',
+      color: 'currentColor',
       location: { fileId: 'F', caretHead: 3, viewHead: 11 },
     },
   }), 'reviewer-device');
@@ -889,6 +887,66 @@ defineCase('late peer-location sink replays retained cursor locations', () => {
   assert(replayed[0].deviceId === 'reviewer-device', 'replay used wrong device');
   assert(replayed[0].viewHead === 11, 'replay lost viewHead');
 });
+
+try {
+  const cursorSets: RemoteCursor[][] = [];
+  const expiredDevices: string[] = [];
+  const controller = new CollabController({
+    isOwner: true,
+    send: () => undefined,
+    selfClientId: 'owner',
+    selfLabel: 'Owner',
+    selfColor: '#000',
+    getSeedDoc: () => docWithText('hello'),
+    remoteCursorTtlMs: 10,
+    onRemoteCursors: (cursors) => cursorSets.push(cursors),
+    onPeerLocationExpired: (deviceId) => expiredDevices.push(deviceId),
+  });
+  controller.onInbound(JSON.stringify({
+    kind: 'cursor',
+    cursor: {
+      clientID: 'reviewer',
+      head: 3,
+      label: 'Reviewer',
+      color: 'currentColor',
+      location: { fileId: 'F', caretHead: 3 },
+    },
+  }), 'reviewer-device');
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert(cursorSets.at(-1)?.length === 0, 'stale direct cursor was not removed');
+  assert(expiredDevices.includes('reviewer-device'), 'stale peer location was not cleared');
+  passed++;
+  console.log('  ok  stale WebRTC cursor and peer location expire');
+} catch (err) {
+  failed++;
+  console.log('  FAIL stale WebRTC cursor and peer location expire');
+  console.log(`       ${(err as Error).message}`);
+}
+
+try {
+  const sent: string[] = [];
+  const controller = new CollabController({
+    isOwner: true,
+    send: (payload) => sent.push(payload),
+    selfClientId: 'owner',
+    selfLabel: 'Owner',
+    selfColor: 'currentColor',
+    getSeedDoc: () => docWithText('hello'),
+    presenceHeartbeatMs: 10,
+  });
+  controller.broadcastCursor(4);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const cursors = sent
+    .map((payload) => parseCollabWireMessage(payload))
+    .filter((message) => message?.kind === 'cursor');
+  assert(cursors.length >= 2, 'stationary direct presence did not heartbeat');
+  passed++;
+  console.log('  ok  stationary WebRTC presence heartbeats without relay state');
+} catch (err) {
+  failed++;
+  console.log('  FAIL stationary WebRTC presence heartbeats without relay state');
+  console.log(`       ${(err as Error).message}`);
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -765,10 +765,14 @@ type MailboxEnvelope = {
 `serverSeq` is only a delivery cursor. It is not event causality. Event causality lives in `ReviewEvent.meta.parentEventIds`.
 
 For V3 cursor/view messages, `signalClass: "presence"` is signed cleartext
-routing metadata. The encrypted payload remains opaque. The relay keeps only
-the latest value per author device and replays that latest value to registered
-subscribers while the device is online; these envelopes are excluded from the
-durable event and byte caps. Other signals remain durable.
+routing metadata. The encrypted payload remains opaque. Current clients send
+these envelopes only over the unordered, zero-retransmit `attn-presence`
+WebRTC DataChannel; they never enter a mailbox outbox or relay sequence. A
+missing direct path drops the sample, receivers expire it after five seconds,
+and senders refresh stationary state every two seconds. The relay still
+accepts bounded latest-state presence from older V3
+clients during the coordinated cutover. Other signals retain their documented
+durability.
 
 ## Sync Cursors And ACKs
 

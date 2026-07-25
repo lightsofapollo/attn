@@ -747,6 +747,9 @@
       onPeerLocation: (deviceId, location) => {
         reviewStore.notePeerLocation(deviceId, location);
       },
+      onPeerLocationExpired: (deviceId) => {
+        reviewStore.clearPeerLocation(deviceId);
+      },
       onRemoteCursors: (cursors) => {
         // Push the remote-caret set into the CURRENT editor as a meta
         // transaction so the remoteCursorsPlugin re-renders its decorations.
@@ -2336,8 +2339,12 @@
           payload.roomId === reviewStore.currentRoomId &&
           reviewStore.connection === 'offline' &&
           payload.connection !== 'offline';
+        const directConnected =
+          payload.roomId === reviewStore.currentRoomId &&
+          reviewStore.connection !== 'live_direct' &&
+          payload.connection === 'live_direct';
         reviewStore.applyConnection(payload);
-        if (reconnecting) collabController?.onTransportConnected();
+        if (reconnecting || directConnected) collabController?.onTransportConnected();
       },
       reviewUnread(payload: ReviewUnreadChanged) {
         reviewStore.applyUnread(payload);

@@ -801,6 +801,9 @@
       onPeerLocation: (deviceId, location) => {
         reviewStore.notePeerLocation(deviceId, location);
       },
+      onPeerLocationExpired: (deviceId) => {
+        reviewStore.clearPeerLocation(deviceId);
+      },
       onRemoteCursors: (cursors) => {
         const view = pmViewForReview;
         const fileId = reviewStore.currentFileId;

@@ -931,6 +931,12 @@ export class ReviewStore {
     };
   }
 
+  clearPeerLocation(deviceId: string): void {
+    if (!deviceId || this.peerLocations[deviceId] === undefined) return;
+    const { [deviceId]: _removed, ...rest } = this.peerLocations;
+    this.peerLocations = rest;
+  }
+
   private resolvePeerLocation(peer: ReviewStatusPeer): ReviewStatusPeer {
     const location = this.peerLocations[peer.deviceId];
     if (location === undefined) return peer;

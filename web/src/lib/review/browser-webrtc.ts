@@ -2,6 +2,7 @@ import type { BrowserSignalingPayload } from './browser-signaling';
 import type { Device, MailboxEnvelope } from './browser-ws';
 
 export const ATTN_DATA_CHANNEL_LABEL = 'attn-review';
+export const ATTN_PRESENCE_CHANNEL_LABEL = 'attn-presence';
 export const DEFAULT_STUN_SERVERS = ['stun:stun.l.google.com:19302'];
 
 export type BrowserDirectState = 'mailbox' | 'live_direct' | 'direct_failed';
@@ -14,6 +15,8 @@ export interface BrowserPeerMeshOptions {
   onSignal: (targetDeviceId: string, payload: BrowserSignalingPayload) => Promise<void>;
   onEnvelope: (envelope: MailboxEnvelope, remoteDeviceId: string) => Promise<void> | void;
   onState?: (state: BrowserDirectState) => void;
+  /** A peer's lossy presence lane opened; caller should re-send latest state. */
+  onPresenceReady?: (deviceId: string) => void;
   onError?: (message: string) => void;
   negotiationTimeoutMs?: number;
   maxIceRestarts?: number;
@@ -23,6 +26,7 @@ interface PeerState {
   device: Device;
   pc: RTCPeerConnection;
   channel: RTCDataChannel | null;
+  presenceChannel: RTCDataChannel | null;
   pendingCandidates: string[];
   failed: boolean;
   closed: boolean;
@@ -164,7 +168,7 @@ export class BrowserPeerMesh {
     this.publishState();
   }
 
-  /** Best-effort exact encrypted-envelope fan-out after mailbox acknowledgement. */
+  /** Best-effort exact encrypted-envelope fan-out alongside the mailbox path. */
   broadcastEnvelope(envelope: MailboxEnvelope): void {
     if (this.closed) return;
     const bytes = new TextEncoder().encode(JSON.stringify(envelope));
@@ -177,6 +181,29 @@ export class BrowserPeerMesh {
           channel.send(bytes);
         } catch (error) {
           this.opts.onError?.('direct_send_failed');
+        }
+      }
+    } finally {
+      bytes.fill(0);
+    }
+  }
+
+  /**
+   * Ephemeral presence never enters the mailbox. Use its own unordered,
+   * no-retransmit channel so a stale cursor packet cannot block a newer one.
+   */
+  broadcastPresenceEnvelope(envelope: MailboxEnvelope): void {
+    if (this.closed || envelope.signalClass !== 'presence') return;
+    const bytes = new TextEncoder().encode(JSON.stringify(envelope));
+    try {
+      if (bytes.length > this.opts.maxEnvelopeBytes) return;
+      for (const peer of this.peers.values()) {
+        const channel = peer.presenceChannel;
+        if (!channel || channel.readyState !== 'open') continue;
+        try {
+          channel.send(bytes);
+        } catch {
+          this.opts.onError?.('direct_presence_send_failed');
         }
       }
     } finally {
@@ -199,6 +226,7 @@ export class BrowserPeerMesh {
       device,
       pc,
       channel: null,
+      presenceChannel: null,
       pendingCandidates: [],
       failed: false,
       closed: false,
@@ -230,6 +258,10 @@ export class BrowserPeerMesh {
     };
     if (this.shouldInitiate(device)) {
       this.installChannel(peer, pc.createDataChannel(ATTN_DATA_CHANNEL_LABEL, { ordered: true }));
+      this.installChannel(peer, pc.createDataChannel(ATTN_PRESENCE_CHANNEL_LABEL, {
+        ordered: false,
+        maxRetransmits: 0,
+      }));
     }
     this.armNegotiationDeadline(peer);
     return peer;
@@ -252,40 +284,52 @@ export class BrowserPeerMesh {
   }
 
   private installChannel(peer: PeerState, channel: RTCDataChannel): void {
-    if (channel.label !== ATTN_DATA_CHANNEL_LABEL || peer.closed) {
+    const isPresence = channel.label === ATTN_PRESENCE_CHANNEL_LABEL;
+    if ((!isPresence && channel.label !== ATTN_DATA_CHANNEL_LABEL) || peer.closed) {
       channel.close();
       peer.failed = true;
       this.publishState();
       return;
     }
-    if (peer.channel && peer.channel !== channel) {
+    const active = isPresence ? peer.presenceChannel : peer.channel;
+    if (active && active !== channel) {
       channel.close();
       this.opts.onError?.('direct_duplicate_data_channel');
       return;
     }
-    peer.channel = channel;
+    if (isPresence) peer.presenceChannel = channel;
+    else peer.channel = channel;
     channel.binaryType = 'arraybuffer';
     channel.onopen = () => {
-      peer.failed = false;
-      this.clearNegotiationDeadline(peer);
+      if (!isPresence) {
+        peer.failed = false;
+        this.clearNegotiationDeadline(peer);
+      } else {
+        this.opts.onPresenceReady?.(peer.device.deviceId);
+      }
       this.publishState();
     };
     channel.onclose = () => {
-      if (!peer.closed) peer.failed = true;
+      if (!isPresence && !peer.closed) peer.failed = true;
       this.publishState();
     };
     channel.onerror = () => {
-      peer.failed = true;
-      this.opts.onError?.('direct_data_channel_failed');
+      if (!isPresence) peer.failed = true;
+      this.opts.onError?.(isPresence ? 'direct_presence_channel_failed' : 'direct_data_channel_failed');
       this.publishState();
     };
     channel.onmessage = (event) => {
-      void this.handleChannelMessage(peer, event.data).catch(() => this.reportFailure('direct_message_rejected'));
+      void this.handleChannelMessage(peer, event.data, isPresence)
+        .catch(() => this.reportFailure('direct_message_rejected'));
     };
     this.publishState();
   }
 
-  private async handleChannelMessage(peer: PeerState, data: unknown): Promise<void> {
+  private async handleChannelMessage(
+    peer: PeerState,
+    data: unknown,
+    presenceChannel: boolean,
+  ): Promise<void> {
     let bytes: Uint8Array;
     if (typeof data === 'string') bytes = new TextEncoder().encode(data);
     else if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
@@ -306,6 +350,9 @@ export class BrowserPeerMesh {
       throw new Error('DataChannel envelope is not valid JSON');
     }
     const envelope = parseDirectEnvelope(raw);
+    if ((envelope.signalClass === 'presence') !== presenceChannel) {
+      throw new Error('DataChannel envelope used the wrong transport lane');
+    }
     if (envelope.v !== 2 || envelope.roomId === undefined) {
       throw new Error('DataChannel envelope omitted bound room metadata');
     }
@@ -365,6 +412,7 @@ export class BrowserPeerMesh {
     peer.closed = true;
     this.clearNegotiationDeadline(peer);
     try { peer.channel?.close(); } catch { /* best effort */ }
+    try { peer.presenceChannel?.close(); } catch { /* best effort */ }
     try { peer.pc.close(); } catch { /* best effort */ }
   }
 

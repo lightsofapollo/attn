@@ -95,6 +95,8 @@ export type CollabWireMessage =
   | { kind: 'cursor'; cursor: RemoteCursor };
 
 export const MAX_COLLAB_WIRE_BYTES = 262_144;
+const DEFAULT_REMOTE_CURSOR_TTL_MS = 5_000;
+const DEFAULT_PRESENCE_HEARTBEAT_MS = 2_000;
 const MAX_COLLAB_STEPS = 1_024;
 const MAX_WIRE_ID_CHARS = 256;
 
@@ -155,6 +157,7 @@ export class CollabController {
   private readonly onPeerLocation:
     | ((deviceId: string, location: CollabPeerLocation) => void)
     | null;
+  private readonly onPeerLocationExpired: ((deviceId: string) => void) | null;
   /**
    * Late-bound peer-location sink (attn-qs03), the presence-location twin of
    * {@link remoteCursorSink}. The hosted owner's controller is built by the
@@ -165,6 +168,7 @@ export class CollabController {
   private peerLocationSink:
     | ((deviceId: string, location: CollabPeerLocation) => void)
     | null = null;
+  private peerLocationExpirySink: ((deviceId: string) => void) | null = null;
   /**
    * Late-bound location source (attn-qs03): overrides `getLocation` when the
    * owner's active file only becomes knowable after mount. Lets the hosted
@@ -175,6 +179,10 @@ export class CollabController {
   // clientID → sender deviceId, so a peer's caret can be cleared on leave
   // (presence frames identify peers by deviceId, cursors by collab clientID).
   private readonly cursorDevice = new Map<string, string>();
+  private readonly cursorExpiry = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly remoteCursorTtlMs: number;
+  private presenceHeartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly presenceHeartbeatMs: number;
 
   // Owner: one authority/host per shared file, grown lazily. Reviewer: unused.
   private readonly hosts = new Map<
@@ -252,6 +260,12 @@ export class CollabController {
     getLocation?: () => CollabPeerLocation | null;
     /** Notified when a remote cursor reports its current shared-file location. */
     onPeerLocation?: (deviceId: string, location: CollabPeerLocation) => void;
+    /** Clears a peer's last location when its direct cursor stream goes stale. */
+    onPeerLocationExpired?: (deviceId: string) => void;
+    /** Test seam; production defaults to five seconds. */
+    remoteCursorTtlMs?: number;
+    /** Test seam; production refreshes stationary presence every two seconds. */
+    presenceHeartbeatMs?: number;
   }) {
     this.isOwner = opts.isOwner;
     this.send = opts.send;
@@ -268,6 +282,15 @@ export class CollabController {
     this.onRemoteCursors = opts.onRemoteCursors ?? null;
     this.getLocation = opts.getLocation ?? null;
     this.onPeerLocation = opts.onPeerLocation ?? null;
+    this.onPeerLocationExpired = opts.onPeerLocationExpired ?? null;
+    this.remoteCursorTtlMs = Math.max(
+      1,
+      opts.remoteCursorTtlMs ?? DEFAULT_REMOTE_CURSOR_TTL_MS,
+    );
+    this.presenceHeartbeatMs = Math.max(
+      1,
+      opts.presenceHeartbeatMs ?? DEFAULT_PRESENCE_HEARTBEAT_MS,
+    );
   }
 
   /** The file the local editor is currently bound to (null before setActiveFile). */
@@ -420,6 +443,10 @@ export class CollabController {
   onTransportConnected(): void {
     if (!this.isOwner && this.activeFileId !== null)
       this.resyncOut(this.activeFileId);
+    // A cursor sample emitted before the lossy WebRTC lane opened was
+    // intentionally dropped. Re-announce the current state on direct connect.
+    this.lastSentCursorFingerprint = null;
+    if (this.lastCursorHead !== null) this.sendCursorPresence();
   }
 
   /**
@@ -464,6 +491,11 @@ export class CollabController {
     }
   }
 
+  /** Late-bound twin for clearing a stale peer location. */
+  setPeerLocationExpirySink(sink: ((deviceId: string) => void) | null): void {
+    this.peerLocationExpirySink = sink;
+  }
+
   /**
    * Attach (or clear) a live location source after construction (attn-qs03),
    * so the hosted owner can announce which file + caret it is on once the
@@ -488,7 +520,7 @@ export class CollabController {
     this.sendCursorPresence();
   }
 
-  private sendCursorPresence(): void {
+  private sendCursorPresence(force = false): void {
     const base = (this.locationSource ?? this.getLocation)?.() ?? undefined;
     const head = this.lastCursorHead ?? this.lastViewHead ?? 0;
     const location = base ? {
@@ -507,7 +539,7 @@ export class CollabController {
       ...(location ? { location } : {}),
     };
     const fingerprint = JSON.stringify(cursor);
-    if (fingerprint === this.lastSentCursorFingerprint) return;
+    if (!force && fingerprint === this.lastSentCursorFingerprint) return;
     // Set before calling the transport: browser sendCollab updates session
     // state synchronously, so an effect may re-enter this method immediately.
     this.lastSentCursorFingerprint = fingerprint;
@@ -518,6 +550,24 @@ export class CollabController {
         this.lastSentCursorFingerprint = null;
       }
     });
+    this.schedulePresenceHeartbeat();
+  }
+
+  private schedulePresenceHeartbeat(): void {
+    if (this.presenceHeartbeatTimer !== null) clearTimeout(this.presenceHeartbeatTimer);
+    // Keep no strong self-reference in the timer: controllers are replaced on
+    // room/file teardown and should be collectible without explicit disposal.
+    const owner = new WeakRef(this);
+    const timer = setTimeout(() => {
+      const controller = owner.deref();
+      if (!controller) return;
+      controller.presenceHeartbeatTimer = null;
+      if (controller.lastCursorHead !== null || controller.lastViewHead !== null) {
+        controller.sendCursorPresence(true);
+      }
+    }, this.presenceHeartbeatMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.presenceHeartbeatTimer = timer;
   }
 
   /**
@@ -574,6 +624,7 @@ export class CollabController {
       if (msg.cursor.clientID === this.selfClientId) return;
       this.remoteCursors.set(msg.cursor.clientID, msg.cursor);
       this.cursorDevice.set(msg.cursor.clientID, fromDeviceId);
+      this.armCursorExpiry(msg.cursor.clientID, fromDeviceId);
       if (msg.cursor.location !== undefined) {
         this.onPeerLocation?.(fromDeviceId, msg.cursor.location);
         this.peerLocationSink?.(fromDeviceId, msg.cursor.location);
@@ -667,9 +718,14 @@ export class CollabController {
 
   /** Drop a single peer's cursor by collab clientID. */
   removeCursor(clientID: string): void {
+    this.clearCursorExpiry(clientID);
+    const deviceId = this.cursorDevice.get(clientID);
     this.cursorDevice.delete(clientID);
     if (this.remoteCursors.delete(clientID)) {
       this.emitRemoteCursors();
+    }
+    if (deviceId && ![...this.cursorDevice.values()].includes(deviceId)) {
+      this.expirePeerLocation(deviceId);
     }
   }
 
@@ -681,10 +737,39 @@ export class CollabController {
     let changed = false;
     for (const [clientID, dev] of this.cursorDevice) {
       if (dev !== deviceId) continue;
+      this.clearCursorExpiry(clientID);
       this.cursorDevice.delete(clientID);
       if (this.remoteCursors.delete(clientID)) changed = true;
     }
-    if (changed) this.onRemoteCursors?.([...this.remoteCursors.values()]);
+    if (changed) this.emitRemoteCursors();
+    this.expirePeerLocation(deviceId);
+  }
+
+  private armCursorExpiry(clientID: string, deviceId: string): void {
+    this.clearCursorExpiry(clientID);
+    const timer = setTimeout(() => {
+      this.cursorExpiry.delete(clientID);
+      if (this.cursorDevice.get(clientID) !== deviceId) return;
+      this.cursorDevice.delete(clientID);
+      if (this.remoteCursors.delete(clientID)) this.emitRemoteCursors();
+      if (![...this.cursorDevice.values()].includes(deviceId)) {
+        this.expirePeerLocation(deviceId);
+      }
+    }, this.remoteCursorTtlMs);
+    // Node-based unit tests should not be kept alive by a UI expiry timer.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.cursorExpiry.set(clientID, timer);
+  }
+
+  private clearCursorExpiry(clientID: string): void {
+    const timer = this.cursorExpiry.get(clientID);
+    if (timer !== undefined) clearTimeout(timer);
+    this.cursorExpiry.delete(clientID);
+  }
+
+  private expirePeerLocation(deviceId: string): void {
+    this.onPeerLocationExpired?.(deviceId);
+    this.peerLocationExpirySink?.(deviceId);
   }
 
   private submitOut(

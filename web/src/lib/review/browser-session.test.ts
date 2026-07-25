@@ -1015,7 +1015,7 @@ defineCase('owner policy changes are fully validated and revoke live authority f
   }
 });
 
-defineCase('owner presence gates only live editing and collab uses one target-null envelope direct-first plus relay', async () => {
+defineCase('owner cursor presence is WebRTC-only while document collab remains direct-first plus relay', async () => {
   const credentials = browserOwnerCredentialsV3();
   const device = browserOwnerDevice(credentials);
   let socket: WebSocket | null = null;
@@ -1068,11 +1068,13 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
     for (let index = 0; index < 80 && !session.getState().authoringReady; index += 1) await delay(20);
     (session as unknown as { peerMesh: {
       broadcastEnvelope(envelope: MailboxEnvelope): void;
+      broadcastPresenceEnvelope(envelope: MailboxEnvelope): void;
       close(): void;
       removePeer(deviceId: string): void;
       syncDevices(devices: Iterable<Device>): void;
     } }).peerMesh = {
       broadcastEnvelope: (envelope) => direct.push(structuredClone(envelope)),
+      broadcastPresenceEnvelope: (envelope) => direct.push(structuredClone(envelope)),
       close: () => undefined,
       removePeer: () => undefined,
       syncDevices: () => undefined,
@@ -1094,16 +1096,9 @@ defineCase('owner presence gates only live editing and collab uses one target-nu
       cursor: { clientID: 'owner-client', head: 0, label: 'Owner', color: 'currentColor' },
     }));
     assertEq(direct[1]!.signalClass, 'presence', 'direct cursor was not replaceable presence');
-    assertEq(posted[1]!.signalClass, 'presence', 'relay cursor was not replaceable presence');
+    assertEq(posted.length, 1, 'cursor presence leaked into the relay outbox');
     assertEq(direct[0]!.signalClass, undefined, 'document broadcast became replaceable');
-    socket!.send(JSON.stringify({ type: 'envelope', envelope: direct[1], serverSeq: 2 }));
-    await delay(40);
-    assertEq(
-      (session as unknown as { volatileInbound: Map<string, unknown> })
-        .volatileInbound.has(direct[1]!.envelopeId),
-      false,
-      'replaceable presence was retained in browser inbound history',
-    );
+    assertEq(session.getState().outboxPending, 0, 'cursor presence entered durable browser state');
 
     failRelay = true;
     let relayFailureSurfaced = false;

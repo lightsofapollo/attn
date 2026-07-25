@@ -1,17 +1,21 @@
 # Event-log compaction: late joins without replaying the world
 
-Status: step compaction is implemented. On 2026-07-24 cursor/view presence was
-also moved out of the durable event log into bounded latest-state retention,
-prompted by hitting `ATTN_ROOM_EVENT_CAP` (500) in a live editing session.
+Status: step compaction is implemented. On 2026-07-25 cursor/view presence was
+moved off the relay data plane entirely and onto a dedicated lossy WebRTC
+DataChannel, prompted by hitting `ATTN_ROOM_EVENT_CAP` (500) in a live session.
 
 ## Implemented presence lane
 
-V3 cursor/view updates are signed `signalClass: "presence"` envelopes. The
-relay broadcasts fresh updates and retains only the latest encrypted value per
-device for reconnects; it does not charge these values to the durable event or
-byte caps. The class is bound into the device proof so a caller cannot relabel
-an arbitrary durable signal. Document steps, review events, snapshots, and
-unclassified signaling retain their existing durability and compaction rules.
+V3 cursor/view updates remain signed `signalClass: "presence"` envelopes so the
+receiving peer can authenticate their registered device, but clients send them
+only over the `attn-presence` WebRTC DataChannel. That channel is unordered and
+uses `maxRetransmits = 0`; if a peer has no direct path, the sample is dropped.
+Clients expire a remote cursor/location after five seconds without a newer
+sample and refresh stationary presence every two seconds. The relay's
+latest-state implementation remains as mixed-version
+compatibility handling, but current clients do not upload presence to it.
+Document steps, review events, snapshots, WebRTC negotiation, and roster
+membership retain their existing transport and durability rules.
 
 ## The insight: we already merge pending edits
 

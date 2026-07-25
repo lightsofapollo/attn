@@ -42,6 +42,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, watch};
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_server::RTCIceServer;
@@ -69,6 +70,7 @@ const DEFAULT_STUN_SERVER: &str = "stun:stun.l.google.com:19302";
 /// same label so the side that did NOT call `create_data_channel` can match
 /// the inbound channel by name in its `on_data_channel` handler.
 const DATA_CHANNEL_LABEL: &str = "attn-review";
+const PRESENCE_CHANNEL_LABEL: &str = "attn-presence";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -322,6 +324,9 @@ pub struct WebRtcTransport {
     /// by the `on_data_channel` callback (responder). `Mutex<Option<_>>` so
     /// both code paths can assign without recreating the transport.
     data_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
+    /// Lossy, unordered lane for cursor/view presence. Presence is never
+    /// retried or routed through the relay data plane.
+    presence_channel: Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
     events_tx: mpsc::UnboundedSender<TransportEvent>,
     /// Outbound signal envelopes (offer/answer/ICE bursts) get pushed here.
     /// The mailbox arm consumes the receive side and POSTs them via
@@ -423,6 +428,7 @@ impl WebRtcTransport {
             inbound: Arc::clone(&inbound),
             peer_connection: Arc::clone(&pc),
             data_channel: Arc::new(Mutex::new(None)),
+            presence_channel: Arc::new(Mutex::new(None)),
             events_tx: events_tx.clone(),
             signaling_tx: signaling_tx.clone(),
             clock: Arc::clone(&clock),
@@ -455,7 +461,14 @@ impl WebRtcTransport {
         // Wire `on_data_channel` for the responder side — the initiator
         // calls `create_data_channel` directly inside `create_offer`, so
         // its channel is wired separately at that call site.
-        Self::wire_on_data_channel(&pc, &inbound, &events_tx, &transport.data_channel, &config);
+        Self::wire_on_data_channel(
+            &pc,
+            &inbound,
+            &events_tx,
+            &transport.data_channel,
+            &transport.presence_channel,
+            &config,
+        );
 
         Ok(transport)
     }
@@ -538,8 +551,30 @@ impl WebRtcTransport {
             Arc::clone(&self.inbound),
             self.events_tx.clone(),
             Arc::clone(&self.config),
+            false,
         );
         *self.data_channel.lock().await = Some(Arc::clone(&dc));
+
+        let presence_dc = self
+            .peer_connection
+            .create_data_channel(
+                PRESENCE_CHANNEL_LABEL,
+                Some(RTCDataChannelInit {
+                    ordered: Some(false),
+                    max_retransmits: Some(0),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|e| TransportError::Io(format!("create presence data channel: {e}")))?;
+        wire_data_channel_handlers(
+            Arc::clone(&presence_dc),
+            Arc::clone(&self.inbound),
+            self.events_tx.clone(),
+            Arc::clone(&self.config),
+            true,
+        );
+        *self.presence_channel.lock().await = Some(presence_dc);
 
         let offer = self
             .peer_connection
@@ -677,7 +712,15 @@ impl WebRtcTransport {
     ) -> Result<EnvelopeAck, TransportError> {
         let bytes = serde_json::to_vec(&envelope)
             .map_err(|e| TransportError::Io(format!("serialize envelope: {e}")))?;
-        let dc_guard = self.data_channel.lock().await;
+        let is_presence = matches!(
+            envelope.signal_class,
+            Some(crate::review::model::SignalClass::Presence)
+        );
+        let dc_guard = if is_presence {
+            self.presence_channel.lock().await
+        } else {
+            self.data_channel.lock().await
+        };
         let dc = dc_guard
             .as_ref()
             .ok_or_else(|| TransportError::Disconnected("data channel not open".into()))?;
@@ -825,23 +868,31 @@ impl WebRtcTransport {
         inbound: &Arc<InboundPipeline>,
         events_tx: &mpsc::UnboundedSender<TransportEvent>,
         data_channel_slot: &Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
+        presence_channel_slot: &Arc<Mutex<Option<Arc<RTCDataChannel>>>>,
         config: &Arc<WebRtcConfig>,
     ) {
         let inbound = Arc::clone(inbound);
         let events_tx = events_tx.clone();
         let slot = Arc::clone(data_channel_slot);
+        let presence_slot = Arc::clone(presence_channel_slot);
         let config = Arc::clone(config);
         pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
             let inbound = Arc::clone(&inbound);
             let events_tx = events_tx.clone();
             let slot = Arc::clone(&slot);
+            let presence_slot = Arc::clone(&presence_slot);
             let config = Arc::clone(&config);
             Box::pin(async move {
-                if dc.label() != DATA_CHANNEL_LABEL {
+                let is_presence = dc.label() == PRESENCE_CHANNEL_LABEL;
+                if !is_presence && dc.label() != DATA_CHANNEL_LABEL {
                     let _ = dc.close().await;
                     return;
                 }
-                let mut guard = slot.lock().await;
+                let mut guard = if is_presence {
+                    presence_slot.lock().await
+                } else {
+                    slot.lock().await
+                };
                 if guard.is_some() {
                     let _ = dc.close().await;
                     return;
@@ -851,6 +902,7 @@ impl WebRtcTransport {
                     Arc::clone(&inbound),
                     events_tx,
                     Arc::clone(&config),
+                    is_presence,
                 );
                 *guard = Some(dc);
             })
@@ -1025,13 +1077,14 @@ fn wire_data_channel_handlers(
     inbound: Arc<InboundPipeline>,
     events_tx: mpsc::UnboundedSender<TransportEvent>,
     config: Arc<WebRtcConfig>,
+    presence_channel: bool,
 ) {
     dc.on_message(Box::new(move |msg: DataChannelMessage| {
         let inbound = Arc::clone(&inbound);
         let events_tx = events_tx.clone();
         let config = Arc::clone(&config);
         Box::pin(async move {
-            dispatch_inbound_message(msg, inbound, events_tx, config).await;
+            dispatch_inbound_message(msg, inbound, events_tx, config, presence_channel).await;
         })
     }));
 }
@@ -1048,6 +1101,7 @@ async fn dispatch_inbound_message(
     inbound: Arc<InboundPipeline>,
     events_tx: mpsc::UnboundedSender<TransportEvent>,
     config: Arc<WebRtcConfig>,
+    presence_channel: bool,
 ) {
     let envelope: MailboxEnvelope = match parse_inbound_envelope(&msg.data) {
         Ok(env) => env,
@@ -1059,6 +1113,10 @@ async fn dispatch_inbound_message(
     if envelope.v != 2
         || envelope.room_id != config.room_id
         || envelope.device_id != config.remote_device_id
+        || matches!(
+            envelope.signal_class,
+            Some(crate::review::model::SignalClass::Presence)
+        ) != presence_channel
     {
         return;
     }
@@ -1425,6 +1483,34 @@ mod tests {
         let recovered = disassemble_signal_envelope(&env, &config.signaling_key)
             .expect("disassemble routed envelope");
         assert_eq!(recovered, payload);
+    }
+
+    #[tokio::test]
+    async fn offer_creates_unordered_zero_retransmit_presence_lane() {
+        let config = fixture_config();
+        let (inbound, _tmp) = fixture_pipeline();
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let (signaling_tx, _signaling_rx) = mpsc::unbounded_channel();
+        let transport = WebRtcTransport::new(config, inbound, events_tx, signaling_tx)
+            .await
+            .expect("construct transport");
+
+        transport.create_offer().await.expect("create offer");
+
+        let review = transport.data_channel.lock().await;
+        let presence = transport.presence_channel.lock().await;
+        assert_eq!(
+            review.as_ref().map(|dc| dc.label()),
+            Some(DATA_CHANNEL_LABEL)
+        );
+        let presence = presence.as_ref().expect("presence channel");
+        assert_eq!(presence.label(), PRESENCE_CHANNEL_LABEL);
+        assert!(!presence.ordered(), "presence must be unordered");
+        assert_eq!(
+            presence.max_retransmits(),
+            0,
+            "presence must not retransmit"
+        );
     }
 
     // -----------------------------------------------------------------

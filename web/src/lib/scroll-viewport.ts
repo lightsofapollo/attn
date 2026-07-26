@@ -26,6 +26,19 @@ export function scrollTopForViewportAnchor(yInContent: number): number {
   return Math.max(0, yInContent - VIEWPORT_READING_INSET_PX);
 }
 
+/** Centre the probe in the editor portion that is actually visible. */
+export function viewportSampleX(
+  editorLeft: number,
+  editorRight: number,
+  viewportLeft: number,
+  viewportRight: number,
+): number {
+  const visibleLeft = Math.max(editorLeft, viewportLeft);
+  const visibleRight = Math.min(editorRight, viewportRight);
+  if (visibleRight <= visibleLeft) return editorLeft + (editorRight - editorLeft) / 2;
+  return visibleLeft + (visibleRight - visibleLeft) / 2;
+}
+
 /**
  * Align a document position with the editor's reading-band top (attn-qs03) —
  * the jump-to-peer primitive. Shares the viewport-resolution and coordsAtPos math
@@ -55,7 +68,10 @@ export function scrollViewToPos(view: EditorView, pos: number): void {
   }
   const viewportRect = viewport.getBoundingClientRect();
   const yInContent = coords.top - viewportRect.top + viewport.scrollTop;
-  viewport.scrollTo({ top: scrollTopForViewportAnchor(yInContent), behavior: 'smooth' });
+  // A participant jump is a navigation action, not free scrolling. Landing
+  // immediately is both more precise and avoids prolonged smooth-scroll
+  // layout work across a large decorated document.
+  viewport.scrollTo({ top: scrollTopForViewportAnchor(yInContent), behavior: 'auto' });
 }
 
 /**
@@ -74,12 +90,20 @@ export function viewPositionAtViewport(view: EditorView): number | null {
   const viewportRect = viewport.getBoundingClientRect();
   const editorRect = view.dom.getBoundingClientRect();
   const top = Math.min(viewportRect.bottom - 1, viewportRect.top + VIEWPORT_READING_INSET_PX);
-  const left = Math.min(editorRect.right - 1, editorRect.left + 12);
-  const found = view.posAtCoords({ left, top });
+  const sampleX = viewportSampleX(
+    editorRect.left,
+    editorRect.right,
+    viewportRect.left,
+    viewportRect.right,
+  );
+  const found = view.posAtCoords({ left: sampleX, top });
   if (found) return found.pos;
 
-  // Narrow tables and other indented blocks may not occupy the editor's left
-  // edge. A centre-column retry still identifies the first visible block.
-  const retry = view.posAtCoords({ left: editorRect.left + editorRect.width / 2, top });
+  // A narrow table or code block may not cross the centre column. Retry just
+  // inside the visible editor edge, but don't make the padding/gutter probe
+  // the primary anchor as it can resolve to a misleading block boundary.
+  const visibleLeft = Math.max(editorRect.left, viewportRect.left);
+  const retryX = Math.min(editorRect.right - 1, Math.max(editorRect.left + 1, visibleLeft + 12));
+  const retry = view.posAtCoords({ left: retryX, top });
   return retry?.pos ?? null;
 }

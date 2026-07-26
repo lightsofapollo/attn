@@ -198,6 +198,12 @@ function buildPreflightForNonRoomRoute(): Response {
  */
 const ROOM_ROUTE_RE = /^\/v(?:2|3)\/rooms\/([^/]+)(?:\/.*)?$/;
 
+/** Identify read-only browser transport metadata before request accounting. */
+export function roomCorsPreflightRoomId(method: string, pathname: string): string | undefined {
+  if (method !== "OPTIONS") return undefined;
+  return pathname.match(ROOM_ROUTE_RE)?.[1];
+}
+
 /** Bare room path (no subroute) — `POST` here is room creation. */
 const ROOM_CREATE_RE = /^\/v(?:2|3)\/rooms\/([^/]+)\/?$/;
 
@@ -337,12 +343,34 @@ export default {
         new Response(null, { status: 204, headers: { "X-Attn-Allow-Browser": "true" } }),
       );
     }
-    if (request.method === "OPTIONS" && !ROOM_ROUTE_RE.test(url.pathname)) {
+    const roomPreflightId = roomCorsPreflightRoomId(request.method, url.pathname);
+    if (request.method === "OPTIONS" && roomPreflightId === undefined) {
       return buildPreflightForNonRoomRoute();
     }
 
+    // Browser preflights are transport metadata, not application requests.
+    // Dispatch room-scoped OPTIONS before the per-IP application rate limit so
+    // a busy reviewer session cannot turn a hidden 429 into an opaque browser
+    // CORS failure. The RoomDO still reads the stored policy and tags the
+    // response; corsMiddleware still requires both allowBrowser=true and an
+    // explicitly allowlisted Origin, so this bypass grants no room access.
+    if (roomPreflightId !== undefined) {
+      if (earlyBlobObjectMatch?.[1]) {
+        return withBlobObjectCors(
+          request,
+          env,
+          earlyBlobObjectMatch[1],
+          new Response(null, { status: 204 }),
+        );
+      }
+      const id = env.RELAY_ROOMS.idFromName(roomPreflightId);
+      const response = await env.RELAY_ROOMS.get(id).fetch(request);
+      return corsMiddleware(request, env, response);
+    }
+
     // Edge per-IP rate limit. Applies to every route below — every request
-    // that resolves to a room contributes to the source IP's quota. We pass
+    // that resolves to a room contributes to the source IP's quota, excluding
+    // the policy-gated browser preflights handled above. We pass
     // `roomExists=true` so this initial check ONLY exercises the per-IP cap;
     // anti-enumeration is updated below after the DO has had a chance to
     // tell us whether the room actually existed (404 ATTN_ROOM_NOT_FOUND).

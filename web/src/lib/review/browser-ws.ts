@@ -514,6 +514,11 @@ export class BrowserWsClient {
           return;
         }
         this.ingestDevices(frame.devices);
+        // A valid hello proves the reconnect completed end-to-end (socket,
+        // admission, room lookup, and subscription). Future transient drops
+        // should start at the short delay again instead of inheriting a
+        // lifetime-accumulated maximum backoff.
+        this.backoffMs = this.initialMs;
         this.callbacks.onHello?.(frame, this.devices);
         return;
       case 'envelope':

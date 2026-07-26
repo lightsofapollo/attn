@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { canonicalQuotaSourceIp } from "../../src/index";
+import { canonicalQuotaSourceIp, roomCorsPreflightRoomId } from "../../src/index";
+
+describe("room CORS preflight routing", () => {
+  it("recognizes v2/v3 room OPTIONS before application request accounting", () => {
+    expect(roomCorsPreflightRoomId("OPTIONS", "/v3/rooms/room-1/devices")).toBe("room-1");
+    expect(roomCorsPreflightRoomId("OPTIONS", "/v2/rooms/room-2/envelopes")).toBe("room-2");
+    expect(roomCorsPreflightRoomId("GET", "/v3/rooms/room-1/devices")).toBeUndefined();
+    expect(roomCorsPreflightRoomId("OPTIONS", "/health")).toBeUndefined();
+  });
+});
 
 describe("durable quota source canonicalization", () => {
   it("canonicalizes IPv4 per address", () => {

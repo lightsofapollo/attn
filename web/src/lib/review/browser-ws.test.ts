@@ -1101,11 +1101,9 @@ defineCase('reconnects with backoff on close 1001 transient', async () => {
     assert(refreshes >= 2, `expected a fresh proof per connect, got ${refreshes}`);
     assert(offeredProofs[0] !== offeredProofs[1], 'reconnect reused its admission/device proof');
     assert(terminal === null, 'no terminal error on transient drop');
-    // Backoff should have doubled at least once (initial=50 → 100).
-    assert(
-      client._currentBackoffMs() >= 100,
-      `expected backoff to grow, got ${client._currentBackoffMs()}`,
-    );
+    // A complete authenticated reconnect resets the next drop to the short
+    // initial delay instead of accumulating lifetime backoff.
+    assertEq(client._currentBackoffMs(), 50, 'successful hello resets reconnect backoff');
     client.close();
   } finally {
     await server.close();

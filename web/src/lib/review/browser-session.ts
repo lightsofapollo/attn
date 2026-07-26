@@ -2491,7 +2491,17 @@ export class BrowserSession {
         },
         onEnvelope: (decoded) => this.handleEnvelopeAsync(decoded),
         onUnknownSigner: (envelope) => this.refreshSignerAndRetry(roomId, keys, envelope),
-        onClose: (code) => {
+        onClose: (code, reason) => {
+          const holder = globalThis as {
+            __attnInboundErrors?: { at: number; code: string; message: string }[];
+          };
+          const log = (holder.__attnInboundErrors ??= []);
+          log.push({
+            at: Date.now(),
+            code: 'ATTN_WS_CLOSE',
+            message: `socket closed (${code})${reason ? `: ${reason}` : ''}`,
+          });
+          if (log.length > 50) log.shift();
           if (code < 4000 && this.state.status !== 'error' && this.state.status !== 'terminated') {
             this.onlineDeviceIds.clear();
             this.setState({

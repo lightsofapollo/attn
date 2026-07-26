@@ -200,6 +200,10 @@ export class BrowserWorkspaceService {
         ? {}
         : { heartbeatIntervalMs: options.heartbeatIntervalMs }),
       ...(options.onState === undefined ? {} : { onState: options.onState }),
+      // Local documents never wait on relay room bootstrap/recovery. The
+      // runtime upgrades this fenced local session to the published authority
+      // in the background and reports failures through its existing banner.
+      backgroundShareResume: true,
     });
     this.ownerRuntimes.set(workspaceId, runtime);
     await runtime.start();

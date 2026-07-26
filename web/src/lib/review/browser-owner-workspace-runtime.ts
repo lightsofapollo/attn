@@ -129,6 +129,14 @@ export interface BrowserOwnerWorkspaceRuntimeOptions {
    * relay's room and share routes directly; resolves true only when the room
    * is gone while the relay itself stays reachable. */
   roomGoneProbe?: (input: { relayUrl: string; roomId: string; shareId: string }) => Promise<boolean>;
+  /**
+   * Let local authoring become writable as soon as this tab owns the fenced
+   * workspace lease, then resume any persisted remote share in the background.
+   * Hosted routes enable this so a slow relay can never gate the local editor.
+   * The default remains blocking for callers that require start() to mean the
+   * published authority is fully reconciled.
+   */
+  backgroundShareResume?: boolean;
   schedule?: (callback: () => void, delayMs: number) => unknown;
   cancelScheduled?: (handle: unknown) => void;
   pagehideTarget?: {
@@ -188,6 +196,7 @@ export class BrowserOwnerWorkspaceRuntime {
   private lastPublicationAt = 0;
   private republishHandle: unknown = null;
   private roomRecovery: Promise<void> | null = null;
+  private startupShareResume: Promise<void> | null = null;
   private roomRecoveryStreak = 0;
   private readonly reviewedSuggestions = new Map<string, BrowserReviewedSuggestion>();
   private localHeartbeatTimer: unknown = null;
@@ -302,6 +311,24 @@ export class BrowserOwnerWorkspaceRuntime {
       }
       this.lease = lease;
       this.pagehideTarget?.addEventListener('pagehide', this.pagehideHandler);
+      if (this.options.backgroundShareResume) {
+        this.startLocalHeartbeat();
+        const localCollab = this.startLocalCollab();
+        this.patchState({
+          status: 'active',
+          leaseRole: 'owner',
+          writable: true,
+          liveEditingAvailable: localCollab,
+          localCollab,
+          reason: null,
+        });
+        const resume = this.resumePublishedShareInBackground(lease);
+        const tracked = resume.finally(() => {
+          if (this.startupShareResume === tracked) this.startupShareResume = null;
+        });
+        this.startupShareResume = tracked;
+        return this.getState();
+      }
       let discovered: Awaited<ReturnType<BrowserOwnerWorkspaceRuntime['discoverPublishedShare']>>;
       try {
         await this.sharingCoordinator().reconcileActive();
@@ -385,6 +412,7 @@ export class BrowserOwnerWorkspaceRuntime {
   }
 
   async ensureShare(request: BrowserWorkspaceShareRequest): Promise<BrowserWorkspaceShareView> {
+    await this.startupShareResume?.catch(() => undefined);
     return this.enqueueMutation(async () => {
       if (!this.stateValue.writable || !this.lease) {
         throw new StorageConflictError('browser owner workspace is not writable');
@@ -421,6 +449,7 @@ export class BrowserOwnerWorkspaceRuntime {
   }
 
   async stopShare(): Promise<void> {
+    await this.startupShareResume?.catch(() => undefined);
     return this.enqueueMutation(async () => {
       if (!this.stateValue.writable || !this.lease) {
         throw new StorageConflictError('browser owner workspace is not writable');
@@ -636,6 +665,10 @@ export class BrowserOwnerWorkspaceRuntime {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.closePromise = (async () => {
+      // A background startup resume observes `closing` after each remote
+      // boundary and exits before activating an authority. Let it finish
+      // before closing shared storage so it cannot race teardown.
+      await this.startupShareResume?.catch(() => undefined);
       // Flush local co-editing first: its trailing commits enqueue onto the
       // mutation tail awaited below, and its goodbye lets follower tabs
       // re-handshake instead of waiting out the lease.
@@ -849,6 +882,56 @@ export class BrowserOwnerWorkspaceRuntime {
     });
     this.startLocalCollab();
     return true;
+  }
+
+  /**
+   * Hosted local-first startup: the editor already owns the lease and is
+   * writable through the local hub while this upgrades sharing in place.
+   * Remote failure changes only sharing state; it never revokes local
+   * authoring or releases the fence.
+   */
+  private async resumePublishedShareInBackground(lease: LeaseHandle): Promise<void> {
+    try {
+      await this.sharingCoordinator().reconcileActive();
+      if (this.closing || this.lease?.fencingToken !== lease.fencingToken) return;
+      const discovered = await this.discoverPublishedShare();
+      if (!discovered || this.closing || this.lease?.fencingToken !== lease.fencingToken) return;
+      // Swap the temporary local controller for the published authority. The
+      // shell follows controllerGeneration and rebinds the mounted editor.
+      this.localCollabSyncGeneration += 1;
+      await this.stopLocalCollab();
+      if (this.closing || this.lease?.fencingToken !== lease.fencingToken) {
+        zeroOwnerCredentials(discovered.credentials);
+        return;
+      }
+      await this.activatePublishedShare(discovered, lease);
+    } catch (error) {
+      if (this.closing || this.lease?.fencingToken !== lease.fencingToken) return;
+      // Activation can fail after installing a partially-started authority.
+      // Tear that husk down before restoring the local controller; otherwise
+      // startLocalCollab() correctly refuses to create a parallel authority
+      // and the editor loses its same-browser live session too.
+      const authority = this.authority;
+      this.authority = null;
+      if (authority) await authority.close().catch(() => undefined);
+      zeroOwnerCredentials(this.credentials);
+      this.credentials = null;
+      this.share = null;
+      this.refreshController();
+      this.startLocalHeartbeat();
+      const localCollab = this.startLocalCollab();
+      this.patchState({
+        status: 'error',
+        leaseRole: 'owner',
+        writable: true,
+        liveEditingAvailable: localCollab,
+        reason: errorMessage(error),
+        roomId: null,
+        capId: null,
+        bindings: [],
+        authority: null,
+      });
+    }
   }
 
   private async deactivateAuthority(): Promise<void> {

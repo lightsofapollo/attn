@@ -201,6 +201,12 @@ function deterministicRandom(): (length: number) => Uint8Array {
   return (length) => new Uint8Array(length).fill(counter++);
 }
 
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 function shareRequest(): BrowserWorkspaceShareRequest {
   return {
     relayUrl: 'https://relay.example',
@@ -502,6 +508,123 @@ defineCase('local-only runtime owns one lease, stays writable, and releases exac
   await second.close();
   storage.close();
   now += 1;
+});
+
+async function openBackgroundResumeHarness(workspaceId: string) {
+  let tick = 1_725_000_000_000;
+  const now = (): number => (tick += 1);
+  const storage = await openStorage(now);
+  const created = await seedLocal(storage, workspaceId);
+  const events: string[] = [];
+  const roomGate = deferred();
+  const createdRooms = new Set<string>();
+  let createCalls = 0;
+  let failResume = false;
+  const authorities: FakeAuthority[] = [];
+  const sharing: NonNullable<BrowserOwnerWorkspaceRuntimeOptions['sharing']> = {
+    now,
+    randomBytes: deterministicRandom(),
+    createRoom: async (options) => {
+      createCalls += 1;
+      if (createCalls === 2) {
+        await roomGate.promise;
+        if (failResume) throw new TypeError('Failed to fetch');
+      }
+      const bootstrap = bootstrapFromOptions(options);
+      const wasCreated = !createdRooms.has(bootstrap.roomId);
+      createdRooms.add(bootstrap.roomId);
+      return { ...bootstrap, created: wasCreated };
+    },
+    publish: snapshotPublisher,
+    indexBuilder: testIndexBuilder,
+    shareRelayFactory: memoryShareRelayFactory(),
+    outboxFactory: ({ storage: outboxStorage, credentials }) =>
+      new AckingShareOutbox(outboxStorage, credentials.roomId, events),
+  };
+  const first = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, workspaceId, {
+    now,
+    sharing,
+    authorityFactory: (options) => new FakeAuthority(options, storage, events),
+  }));
+  await first.start();
+  await first.ensureShare(shareRequest());
+  await first.close();
+  equal(createCalls, 1, 'initial publish prepared the shared room once');
+
+  const runtime = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, workspaceId, {
+    holderId: `${workspaceId}-background-owner`,
+    now,
+    sharing,
+    publisher: snapshotPublisher,
+    backgroundShareResume: true,
+    authorityFactory: (options) => {
+      const authority = new FakeAuthority(options, storage, events);
+      authorities.push(authority);
+      return authority;
+    },
+  }));
+  return {
+    runtime,
+    storage,
+    created,
+    roomGate,
+    authorities,
+    failNextResume: () => { failResume = true; },
+    createCalls: () => createCalls,
+  };
+}
+
+defineCase('background share resume never gates local owner editing on a stalled room POST', async () => {
+  const harness = await openBackgroundResumeHarness('background-resume-stalled');
+  await harness.runtime.start();
+  await waitFor(() => harness.createCalls() === 2);
+  equal(harness.runtime.getState().status, 'active', 'local runtime is active while room POST is pending');
+  equal(harness.runtime.getState().writable, true, 'local runtime is writable before relay settles');
+  equal(harness.runtime.getState().roomId, null, 'published authority is not claimed before resume');
+
+  const committed = await harness.runtime.commit({
+    path: 'notes.md',
+    body: new TextEncoder().encode('saved while relay POST was stalled'),
+    expectedHeadRevisionId: harness.created.revision.revisionId,
+  });
+  assert(committed.revision.revisionId !== harness.created.revision.revisionId,
+    'local commit completed independently of the stalled share resume');
+
+  harness.roomGate.resolve();
+  await waitFor(() => {
+    const state = harness.runtime.getState();
+    return harness.authorities.length === 1
+      && state.roomId !== null
+      && state.status === 'active'
+      && state.liveEditingAvailable;
+  }, 3000);
+  equal(harness.runtime.getState().writable, true, 'authority upgrade preserves local writability');
+  equal(harness.runtime.getState().status, 'active', 'successful background resume activates sharing');
+  await harness.runtime.close();
+  harness.storage.close();
+});
+
+defineCase('failed background share resume keeps local editing writable and surfaces the error', async () => {
+  const harness = await openBackgroundResumeHarness('background-resume-failed');
+  harness.failNextResume();
+  await harness.runtime.start();
+  await waitFor(() => harness.createCalls() === 2);
+
+  const committed = await harness.runtime.commit({
+    path: 'notes.md',
+    body: new TextEncoder().encode('safe local edit during quota failure'),
+    expectedHeadRevisionId: harness.created.revision.revisionId,
+  });
+  assert(committed.revision.revisionId !== harness.created.revision.revisionId,
+    'quota failure cannot hold the local commit queue');
+
+  harness.roomGate.resolve();
+  await waitFor(() => harness.runtime.getState().status === 'error', 3000);
+  equal(harness.runtime.getState().writable, true, 'failed sharing resume preserves local writes');
+  equal(harness.runtime.getState().localCollab, true, 'failed sharing resume keeps local tab collaboration');
+  assert(harness.runtime.getState().reason?.includes('Failed to fetch'), 'relay failure is visible');
+  await harness.runtime.close();
+  harness.storage.close();
 });
 
 defineCase('local heartbeat loss becomes passive and close cannot release the takeover lease', async () => {

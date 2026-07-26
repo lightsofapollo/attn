@@ -137,7 +137,29 @@ test('v3 browser tiers render and expose only their granted composers', async ({
 });
 
 async function selectEditorText(page: Page, needle: string): Promise<void> {
-  await setEditorSelection(page, needle);
+  const outcome = await page.evaluate((text) => {
+    const view = (window as unknown as { __attnPmView?: { dom: HTMLElement } }).__attnPmView;
+    if (!view) return 'no-view';
+    const walker = document.createTreeWalker(view.dom, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+      const index = node.nodeValue?.indexOf(text) ?? -1;
+      if (index >= 0) {
+        const range = document.createRange();
+        range.setStart(node, index);
+        range.setEnd(node, index + text.length);
+        const selection = window.getSelection();
+        if (!selection) return 'no-selection';
+        selection.removeAllRanges();
+        selection.addRange(range);
+        document.dispatchEvent(new Event('selectionchange'));
+        return 'selected';
+      }
+      node = walker.nextNode();
+    }
+    return 'not-found';
+  }, needle);
+  expect(outcome).toBe('selected');
   await expect(page.locator('[data-slot="selection-toolbar"]')).toBeVisible();
 }
 

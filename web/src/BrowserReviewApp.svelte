@@ -74,7 +74,7 @@
     shouldDeferReviewerCollabReseed,
   } from './lib/review/browser-review-collab';
   import type { ParsedInvite } from './lib/review/browser-invite';
-  import { hasTextSelection } from './lib/review/popover-anchor';
+  import { hasTextSelection, nativeTextSelectionRange } from './lib/review/popover-anchor';
   import {
     recordReviewSelectionDebug,
     reviewSelectionDebugEnabled,
@@ -980,7 +980,37 @@
 
   function refreshSelectionToolbar(): void {
     const view = pmViewForReview;
-    if (!reviewerAvailability.reviewAuthoring || !view || !hasTextSelection(view)) {
+    if (!reviewerAvailability.reviewAuthoring || !view) {
+      if (toolbarSelection !== null) {
+        toolbarSelection = null;
+        traceReviewSelection('toolbar-selection-cleared');
+      }
+      return;
+    }
+
+    // Chromium can maintain a visible DOM selection in an editable=false
+    // ProseMirror view without updating the editor-state selection. Promote
+    // that native range into editor state so the toolbar and anchor builder
+    // use the exact text the reviewer highlighted.
+    const nativeRange = nativeTextSelectionRange(view);
+    if (
+      nativeRange &&
+      (view.state.selection.from !== nativeRange.from || view.state.selection.to !== nativeRange.to)
+    ) {
+      try {
+        view.dispatch(view.state.tr.setSelection(
+          TextSelection.create(view.state.doc, nativeRange.from, nativeRange.to),
+        ));
+        traceReviewSelection(
+          'native-selection-promoted',
+          { from: nativeRange.from, to: nativeRange.to },
+          view,
+        );
+      } catch {
+        // The view can be replaced by a file switch during this animation frame.
+      }
+    }
+    if (!hasTextSelection(view)) {
       if (toolbarSelection !== null) {
         toolbarSelection = null;
         traceReviewSelection('toolbar-selection-cleared');

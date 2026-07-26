@@ -5,9 +5,7 @@ import type { EditorView } from 'prosemirror-view';
  * selection. Used by the comment composer, suggestion composer, and the
  * ambiguous anchor picker so they all pop in a consistent place.
  *
- * TODO(tests): the project does not currently configure a test runner.
- * Sibling file `popover-anchor.test.ts` contains pure-function specs
- * that should be wired up once vitest (or equivalent) is added.
+ * Sibling file `popover-anchor.test.ts` covers the native-selection bridge.
  */
 
 export type PopoverSide = 'above' | 'below';
@@ -161,6 +159,54 @@ export function hasTextSelection(view: EditorView): boolean {
   const selection = view.state.selection;
   if (selection.empty) return false;
   return selection.to > selection.from;
+}
+
+export interface TextSelectionRange {
+  from: number;
+  to: number;
+}
+
+type NativeSelectionLike = Pick<
+  Selection,
+  'anchorNode' | 'anchorOffset' | 'focusNode' | 'focusOffset' | 'isCollapsed'
+>;
+
+/**
+ * Translate the browser's native selection into ProseMirror positions.
+ *
+ * A read-only ProseMirror view is still selectable, but Chromium does not
+ * consistently mirror that DOM selection into `view.state.selection`. The
+ * hosted reviewer uses this bridge so a visible text highlight can still
+ * open the comment toolbar. Both endpoints must belong to this editor; a
+ * selection in the sidebar or another control is deliberately ignored.
+ */
+export function nativeTextSelectionRange(
+  view: EditorView,
+  selection: NativeSelectionLike | null = typeof window === 'undefined'
+    ? null
+    : window.getSelection(),
+): TextSelectionRange | null {
+  if (!selection || selection.isCollapsed || !selection.anchorNode || !selection.focusNode) {
+    return null;
+  }
+  if (!view.dom.contains(selection.anchorNode) || !view.dom.contains(selection.focusNode)) {
+    return null;
+  }
+
+  try {
+    // ProseMirror's own DOM-selection reader uses a positive bias for the
+    // anchor and focus. Matching it avoids off-by-one positions at inline
+    // element boundaries.
+    const anchor = view.posAtDOM(selection.anchorNode, selection.anchorOffset, 1);
+    const focus = view.posAtDOM(selection.focusNode, selection.focusOffset, 1);
+    const docSize = view.state.doc.content.size;
+    const from = Math.max(0, Math.min(docSize, Math.min(anchor, focus)));
+    const to = Math.max(0, Math.min(docSize, Math.max(anchor, focus)));
+    return to > from ? { from, to } : null;
+  } catch {
+    // The editor may have been replaced between selectionchange and rAF.
+    return null;
+  }
 }
 
 /**

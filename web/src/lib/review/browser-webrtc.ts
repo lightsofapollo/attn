@@ -189,23 +189,30 @@ export class BrowserPeerMesh {
   }
 
   /**
-   * Ephemeral presence never enters the mailbox. Use its own unordered,
-   * no-retransmit channel so a stale cursor packet cannot block a newer one.
+   * Prefer the unordered, no-retransmit lane so stale cursor packets cannot
+   * block newer ones. Returns whether every eligible peer was reached; the
+   * caller may use replaceable relay presence for incomplete STUN-only paths.
    */
-  broadcastPresenceEnvelope(envelope: MailboxEnvelope): void {
-    if (this.closed || envelope.signalClass !== 'presence') return;
+  broadcastPresenceEnvelope(envelope: MailboxEnvelope): boolean {
+    if (this.closed || envelope.signalClass !== 'presence') return false;
     const bytes = new TextEncoder().encode(JSON.stringify(envelope));
     try {
-      if (bytes.length > this.opts.maxEnvelopeBytes) return;
+      if (bytes.length > this.opts.maxEnvelopeBytes) return false;
+      let complete = this.setupFailedDevices.size === 0;
       for (const peer of this.peers.values()) {
         const channel = peer.presenceChannel;
-        if (!channel || channel.readyState !== 'open') continue;
+        if (!channel || channel.readyState !== 'open') {
+          complete = false;
+          continue;
+        }
         try {
           channel.send(bytes);
         } catch {
+          complete = false;
           this.opts.onError?.('direct_presence_send_failed');
         }
       }
+      return complete;
     } finally {
       bytes.fill(0);
     }

@@ -44,6 +44,17 @@ function envelope(id: string): MailboxEnvelope {
   };
 }
 
+function presenceEnvelope(id: string): MailboxEnvelope {
+  return {
+    ...envelope(id),
+    kind: 'signal',
+    target: null,
+    signalGeneration: NOW,
+    signalClass: 'presence',
+    deviceSignature: 'device-signature',
+  };
+}
+
 function response(status: number, body: unknown): BrowserOutboxResponse {
   return { status, text: async () => JSON.stringify(body) };
 }
@@ -127,6 +138,37 @@ test('snapshot_blob validates against maxSnapshotBytes, not the event cap', asyn
   }
   assert(eventRejected, 'events must still validate against maxEventBytes');
   outbox.close();
+});
+
+test('replaceable presence keeps only the latest sample behind an active request', async () => {
+  const posted: string[][] = [];
+  let releaseFirst!: () => void;
+  const firstPending = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const outbox = makeOutbox(async (_url, init) => {
+    const parsed = JSON.parse(init.body) as { envelopes: Array<{ envelopeId: string }> };
+    posted.push(parsed.envelopes.map((item) => item.envelopeId));
+    if (posted.length === 1) await firstPending;
+    return acceptedFromBody(init.body);
+  }, []);
+  try {
+    outbox.enqueueReplaceablePresence(presenceEnvelope('presence-1'));
+    const flushing = outbox.flushNow();
+    for (let index = 0; index < 20 && posted.length === 0; index += 1) await Promise.resolve();
+    outbox.enqueueReplaceablePresence(presenceEnvelope('presence-2'));
+    outbox.enqueueReplaceablePresence(presenceEnvelope('presence-3'));
+    equal(
+      outbox.pendingEnvelopes().map((item) => item.envelopeId),
+      ['presence-1', 'presence-3'],
+      'presence queue while first sample is active',
+    );
+    releaseFirst();
+    await flushing;
+    equal(posted, [['presence-1'], ['presence-3']], 'relay presence batches');
+    equal(outbox.pendingEnvelopes(), [], 'presence queue drained');
+  } finally {
+    releaseFirst();
+    outbox.close();
+  }
 });
 
 test('v3 outbox uses write-scoped admission and v3 route', async () => {

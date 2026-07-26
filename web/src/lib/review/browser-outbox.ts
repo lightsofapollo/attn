@@ -97,6 +97,7 @@ export class BrowserOutbox {
   private maxEventBytes: number;
   private maxSnapshotBytes: number;
   private readonly queue: MailboxEnvelope[] = [];
+  private readonly activeBatchIds = new Set<string>();
   private closed = false;
   private inFlight: Promise<void> | null = null;
   private persistenceTransition: Promise<void> | null = null;
@@ -241,6 +242,43 @@ export class BrowserOutbox {
     return this.enqueueMemory(envelope);
   }
 
+  /**
+   * Keep at most one unsent cursor/view sample behind the active request.
+   * This is intentionally memory-only: the relay replaces the sample per
+   * device and neither browser storage nor a network outage may turn it into
+   * an append-only presence history.
+   */
+  enqueueReplaceablePresence(envelope: MailboxEnvelope): boolean {
+    if (this.persistence) {
+      throw new Error('replaceable presence requires a memory-only outbox');
+    }
+    if (
+      envelope.kind !== 'signal' ||
+      envelope.signalClass !== 'presence' ||
+      envelope.target !== null
+    ) {
+      throw new Error('replaceable presence must be a broadcast presence signal');
+    }
+    if (this.closed) throw new Error('outbox is closed');
+    this.validateEnvelope(envelope);
+    const duplicate = this.queue.find((item) => item.envelopeId === envelope.envelopeId);
+    if (duplicate) return this.sameOrConflict(duplicate, envelope);
+    for (let index = this.queue.length - 1; index >= 0; index -= 1) {
+      const queued = this.queue[index]!;
+      if (
+        !this.activeBatchIds.has(queued.envelopeId) &&
+        queued.kind === 'signal' &&
+        queued.signalClass === 'presence' &&
+        queued.deviceId === envelope.deviceId
+      ) {
+        this.queue[index] = Object.freeze({ ...envelope });
+        this.publish({ lastError: null, terminal: false });
+        return true;
+      }
+    }
+    return this.enqueueMemory(envelope);
+  }
+
   /** Persist the immutable sealed envelope before optimistic UI echo. */
   async enqueueDurably(envelope: MailboxEnvelope): Promise<boolean> {
     return (await this.enqueueBatchDurably([envelope])) === 1;
@@ -348,8 +386,14 @@ export class BrowserOutbox {
   private async drain(): Promise<void> {
     while (!this.closed && this.queue.length > 0) {
       const batch = this.queue.slice(0, BROWSER_OUTBOX_BATCH_SIZE);
-      const accepted = await this.sendBatch(batch);
-      await this.persistence?.acknowledge(batch, accepted);
+      for (const envelope of batch) this.activeBatchIds.add(envelope.envelopeId);
+      let accepted: BrowserOutboxAccepted[];
+      try {
+        accepted = await this.sendBatch(batch);
+        await this.persistence?.acknowledge(batch, accepted);
+      } finally {
+        for (const envelope of batch) this.activeBatchIds.delete(envelope.envelopeId);
+      }
       const acknowledged = new Set(batch.map((item) => item.envelopeId));
       while (this.queue[0] && acknowledged.has(this.queue[0]!.envelopeId)) this.queue.shift();
       try {

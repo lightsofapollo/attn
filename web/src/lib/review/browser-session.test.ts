@@ -1015,9 +1015,10 @@ defineCase('owner policy changes are fully validated and revoke live authority f
   }
 });
 
-defineCase('owner cursor presence is WebRTC-only while document collab remains direct-first plus relay', async () => {
+defineCase('owner cursor presence relays only when direct peer coverage is incomplete', async () => {
   const credentials = browserOwnerCredentialsV3();
   const device = browserOwnerDevice(credentials);
+  const remoteDevice = browserReviewerDevice(0x73).device;
   let socket: WebSocket | null = null;
   const direct: MailboxEnvelope[] = [];
   const posted: Array<Record<string, unknown>> = [];
@@ -1031,8 +1032,8 @@ defineCase('owner cursor presence is WebRTC-only while document collab remains d
         const frame = JSON.parse(String(raw));
         if (frame.type !== 'subscribe') return;
         ws.send(JSON.stringify({
-          type: 'hello', serverSeq: 0, policy: POLICY, devices: [device],
-          onlineDeviceIds: [device.deviceId], missedSignalEnvelopeIds: [],
+          type: 'hello', serverSeq: 0, policy: POLICY, devices: [device, remoteDevice],
+          onlineDeviceIds: [device.deviceId, remoteDevice.deviceId], missedSignalEnvelopeIds: [],
         }));
       });
     });
@@ -1044,7 +1045,10 @@ defineCase('owner cursor presence is WebRTC-only while document collab remains d
       powToken: 'owner-outbox-pow',
       fetchImpl: async (_url, init) => {
         if (init.method === 'GET') {
-          return { status: 200, text: async () => JSON.stringify({ policy: POLICY, devices: [device] }) };
+          return {
+            status: 200,
+            text: async () => JSON.stringify({ policy: POLICY, devices: [device, remoteDevice] }),
+          };
         }
         const body = JSON.parse(init.body ?? '{}') as { envelopes?: Array<Record<string, unknown>> };
         posted.push(...(body.envelopes ?? []));
@@ -1068,15 +1072,19 @@ defineCase('owner cursor presence is WebRTC-only while document collab remains d
     });
     await session.start();
     for (let index = 0; index < 80 && !session.getState().authoringReady; index += 1) await delay(20);
+    let presenceCoverageComplete = true;
     (session as unknown as { peerMesh: {
       broadcastEnvelope(envelope: MailboxEnvelope): void;
-      broadcastPresenceEnvelope(envelope: MailboxEnvelope): void;
+      broadcastPresenceEnvelope(envelope: MailboxEnvelope): boolean;
       close(): void;
       removePeer(deviceId: string): void;
       syncDevices(devices: Iterable<Device>): void;
     } }).peerMesh = {
       broadcastEnvelope: (envelope) => direct.push(structuredClone(envelope)),
-      broadcastPresenceEnvelope: (envelope) => direct.push(structuredClone(envelope)),
+      broadcastPresenceEnvelope: (envelope) => {
+        direct.push(structuredClone(envelope));
+        return presenceCoverageComplete;
+      },
       close: () => undefined,
       removePeer: () => undefined,
       syncDevices: () => undefined,
@@ -1108,6 +1116,16 @@ defineCase('owner cursor presence is WebRTC-only while document collab remains d
       'cursor presence republished unchanged session state',
     );
 
+    presenceCoverageComplete = false;
+    await session.sendCollab(JSON.stringify({
+      kind: 'cursor',
+      cursor: { clientID: 'owner-client', head: 1, label: 'Owner', color: 'currentColor' },
+    }));
+    for (let index = 0; index < 80 && posted.length < 2; index += 1) await delay(20);
+    assertEq(posted.length, 2, 'incomplete direct coverage did not use relay presence fallback');
+    assertEq(posted[1]!.signalClass, 'presence', 'relay fallback was not replaceable presence');
+    assertEq(session.getState().outboxPending, 0, 'relay presence entered durable browser state');
+
     failRelay = true;
     let relayFailureSurfaced = false;
     try {
@@ -1118,7 +1136,7 @@ defineCase('owner cursor presence is WebRTC-only while document collab remains d
     }
     catch { relayFailureSurfaced = true; }
     assert(relayFailureSurfaced, 'relay failure did not reject sendCollab');
-    assertEq(direct.length, 3, 'failed relay still used direct transport once');
+    assertEq(direct.length, 4, 'failed relay still used direct transport once');
     assertEq(session.getState().outboxPending, 1, 'failed relay retained the exact envelope');
 
     socket!.send(JSON.stringify({

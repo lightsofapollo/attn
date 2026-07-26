@@ -1015,7 +1015,7 @@ defineCase('owner policy changes are fully validated and revoke live authority f
   }
 });
 
-defineCase('owner cursor presence relays only when direct peer coverage is incomplete', async () => {
+defineCase('owner cursor presence stays WebRTC-only when direct peer coverage is incomplete', async () => {
   const credentials = browserOwnerCredentialsV3();
   const device = browserOwnerDevice(credentials);
   const remoteDevice = browserReviewerDevice(0x73).device;
@@ -1072,19 +1072,15 @@ defineCase('owner cursor presence relays only when direct peer coverage is incom
     });
     await session.start();
     for (let index = 0; index < 80 && !session.getState().authoringReady; index += 1) await delay(20);
-    let presenceCoverageComplete = true;
     (session as unknown as { peerMesh: {
       broadcastEnvelope(envelope: MailboxEnvelope): void;
-      broadcastPresenceEnvelope(envelope: MailboxEnvelope): boolean;
+      broadcastPresenceEnvelope(envelope: MailboxEnvelope): void;
       close(): void;
       removePeer(deviceId: string): void;
       syncDevices(devices: Iterable<Device>): void;
     } }).peerMesh = {
       broadcastEnvelope: (envelope) => direct.push(structuredClone(envelope)),
-      broadcastPresenceEnvelope: (envelope) => {
-        direct.push(structuredClone(envelope));
-        return presenceCoverageComplete;
-      },
+      broadcastPresenceEnvelope: (envelope) => direct.push(structuredClone(envelope)),
       close: () => undefined,
       removePeer: () => undefined,
       syncDevices: () => undefined,
@@ -1116,15 +1112,14 @@ defineCase('owner cursor presence relays only when direct peer coverage is incom
       'cursor presence republished unchanged session state',
     );
 
-    presenceCoverageComplete = false;
     await session.sendCollab(JSON.stringify({
       kind: 'cursor',
       cursor: { clientID: 'owner-client', head: 1, label: 'Owner', color: 'currentColor' },
     }));
-    for (let index = 0; index < 80 && posted.length < 2; index += 1) await delay(20);
-    assertEq(posted.length, 2, 'incomplete direct coverage did not use relay presence fallback');
-    assertEq(posted[1]!.signalClass, 'presence', 'relay fallback was not replaceable presence');
-    assertEq(session.getState().outboxPending, 0, 'relay presence entered durable browser state');
+    await delay(20);
+    assertEq(posted.length, 1, 'incomplete direct coverage relayed cursor presence');
+    assertEq(direct[2]!.signalClass, 'presence', 'second cursor missed the direct presence lane');
+    assertEq(session.getState().outboxPending, 0, 'cursor presence entered durable browser state');
 
     failRelay = true;
     let relayFailureSurfaced = false;

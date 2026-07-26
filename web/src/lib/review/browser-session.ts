@@ -944,7 +944,6 @@ export class BrowserSession {
   private store: ReviewStoreSink | null;
   private powAbortController: AbortController | null = null;
   private outbox: BrowserOutbox | null = null;
-  private presenceOutbox: BrowserOutbox | null = null;
   private peerMesh: BrowserPeerMesh | null = null;
   private latestPresenceEnvelope: MailboxEnvelope | null = null;
   private joinEnvelopeId: string | null = null;
@@ -1260,7 +1259,10 @@ export class BrowserSession {
     });
   }
 
-  /** Send live collaboration with direct-first, replaceable presence fallback. */
+  /**
+   * Send live collaboration. Cursor/view presence is WebRTC-only ephemeral
+   * state; document collaboration keeps the direct-first relay safety net.
+   */
   async sendCollab(payload: string): Promise<void> {
     const message = parseCollabWireMessage(payload);
     if (!message || !this.outboundCollabAllowed(message)) {
@@ -1307,20 +1309,12 @@ export class BrowserSession {
       } : {}),
     });
     if (message.kind === 'cursor') {
-      // WebRTC is the zero-relay primary path. A STUN-only mesh can be partial
-      // across real NATs, so incomplete coverage falls back to the relay's
-      // replaceable per-device lane. That lane is memory-only here and does
-      // not consume the relay's durable room event history.
+      // Presence is deliberately lossy: if no direct peer channel is open,
+      // drop this sample and let the next caret/view update supersede it. It
+      // must never enter an HTTP outbox: even replace-in-place relay state
+      // charges Durable Object rows on every refresh.
       this.latestPresenceEnvelope = envelope;
-      const directComplete = this.peerMesh?.broadcastPresenceEnvelope(envelope) ?? false;
-      const hasRemotePeer = this.activeWebRtcDevices().some(
-        (device) => device.deviceId !== identity.deviceId,
-      );
-      const needsRelayFallback = this.peerMesh ? !directComplete : hasRemotePeer;
-      if (needsRelayFallback && envelope.signalClass === 'presence') {
-        this.presenceOutbox?.enqueueReplaceablePresence(envelope);
-        void this.presenceOutbox?.flushNow().catch(() => undefined);
-      }
+      this.peerMesh?.broadcastPresenceEnvelope(envelope);
       return;
     }
 
@@ -1798,11 +1792,6 @@ export class BrowserSession {
           maxEventBytes: policy.maxEventBytes,
           maxSnapshotBytes: policy.maxSnapshotBytes,
         });
-        this.presenceOutbox?.updatePolicy({
-          powBits: policy.powBits,
-          maxEventBytes: policy.maxEventBytes,
-          maxSnapshotBytes: policy.maxSnapshotBytes,
-        });
       } catch (error) {
         this.setState({
           authoringReady: false,
@@ -1872,24 +1861,7 @@ export class BrowserSession {
         }
       },
     });
-    const presenceOutbox = keys.version === 3
-      ? new BrowserOutbox({
-          relayUrl,
-          roomId,
-          deviceId: identity.deviceId,
-          admissionKey: keys.writeAdmissionKey,
-          protocolVersion: keys.version,
-          powBits: policy.powBits,
-          maxEventBytes: policy.maxEventBytes,
-          maxSnapshotBytes: policy.maxSnapshotBytes,
-          fetchImpl: async (url, init): Promise<BrowserOutboxResponse> =>
-            this.fetchImpl()(url, init),
-          ...(mintPow === undefined ? {} : { mintPow }),
-          onlineTarget: this.pagehideTarget ?? undefined,
-        })
-      : null;
     this.outbox = outbox;
-    this.presenceOutbox = presenceOutbox;
     await outbox.initialize();
     if (this.outbox !== outbox || this.isTerminated()) return;
 
@@ -2260,8 +2232,6 @@ export class BrowserSession {
     this.latestPresenceEnvelope = null;
     this.outbox?.close();
     this.outbox = null;
-    this.presenceOutbox?.close();
-    this.presenceOutbox = null;
     this.joinEnvelopeId = null;
     this.roomPolicy = null;
     this.bootstrapDevices = [];

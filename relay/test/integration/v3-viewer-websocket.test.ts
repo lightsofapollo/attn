@@ -617,7 +617,7 @@ describe("v3 anonymous viewer WebSocket", () => {
     expect(await staleResponse.json()).toMatchObject({ error: { code: "ATTN_SIGNAL_GENERATION_STALE" } });
   });
 
-  it("replaces signed presence per device without consuming the durable event cap", async () => {
+  it("rejects HTTP presence without writing rows while durable review events remain available", async () => {
     const room = await createRoom({ maxEvents: 1 });
     await registerOwner(room);
     const opened = await openSocket(room, "?device_id=owner-device");
@@ -637,42 +637,40 @@ describe("v3 anonymous viewer WebSocket", () => {
     };
     const first = await presence("presence-first", 1_700_000_000_001);
     const second = await presence("presence-second", 1_700_000_000_002);
-    const durable = await envelope(room, "durable-at-cap", "signal");
-    durable.createdAt = first.createdAt;
-    durable.signalGeneration = first.signalGeneration;
-    durable.deviceSignature = await signSignal(room, durable);
+    const durable = await envelope(room, "durable-comment-at-cap", "event");
     await postEnvelopes(room, [durable]);
     expect(await frames.next()).toMatchObject({
       type: "envelope",
       serverSeq: 1,
-      envelope: { envelopeId: "durable-at-cap" },
-    });
-    await postEnvelopes(room, [first]);
-    expect(await frames.next()).toMatchObject({
-      type: "envelope",
-      serverSeq: 2,
-      envelope: { envelopeId: "presence-first", signalClass: "presence" },
-    });
-    await postEnvelopes(room, [second]);
-    expect(await frames.next()).toMatchObject({
-      type: "envelope",
-      serverSeq: 3,
-      envelope: { envelopeId: "presence-second", signalClass: "presence" },
+      envelope: { envelopeId: "durable-comment-at-cap", kind: "event" },
     });
 
     const stub = env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName(room.roomId));
+    const beforePresence = await runInDurableObject(stub, async (_instance, state) =>
+      [...(await state.storage.list()).entries()]);
+    for (const sample of [first, second]) {
+      const response = await postEnvelopeResponse(room, [sample]);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { code: "ATTN_PRESENCE_DIRECT_ONLY" },
+      });
+    }
+    const afterPresence = await runInDurableObject(stub, async (_instance, state) =>
+      [...(await state.storage.list()).entries()]);
+    expect(afterPresence).toEqual(beforePresence);
+
     const accounting = await runInDurableObject(stub, async (_instance, state) => ({
       count: await state.storage.get<number>("meta:envelope_count"),
       bytes: await state.storage.get<number>("meta:bytes_used"),
+      serverSeq: await state.storage.get<number>("meta:server_seq"),
       durable: await state.storage.list({ prefix: "env_v2:" }),
       presence: await state.storage.list<EnvelopeInput & { serverSeq: number }>({ prefix: "latest_presence_v3:" }),
     }));
     expect(accounting.count).toBe(1);
     expect(accounting.bytes).toBe(durable.ciphertextBytes);
+    expect(accounting.serverSeq).toBe(1);
     expect(accounting.durable.size).toBe(1);
-    expect([...accounting.presence.values()]).toMatchObject([
-      { envelopeId: "presence-second", signalClass: "presence", serverSeq: 3 },
-    ]);
+    expect(accounting.presence.size).toBe(0);
 
     const overflow = await postEnvelopeResponse(room, [await envelope(room, "durable-over-cap")]);
     expect(overflow.status).toBe(507);
@@ -683,26 +681,22 @@ describe("v3 anonymous viewer WebSocket", () => {
     expect(reopened.response.status).toBe(101);
     const replay = new FrameQueue(reopened.socket!);
     reopened.socket!.send(JSON.stringify({ type: "subscribe", after: 0 }));
-    expect(await replay.next()).toMatchObject({ type: "hello", serverSeq: 3 });
+    expect(await replay.next()).toMatchObject({ type: "hello", serverSeq: 1 });
     expect(await replay.next()).toMatchObject({
       type: "envelope",
-      envelope: { envelopeId: "durable-at-cap" },
-    });
-    expect(await replay.next()).toMatchObject({
-      type: "envelope",
-      envelope: { envelopeId: "presence-second", signalClass: "presence" },
+      envelope: { envelopeId: "durable-comment-at-cap", kind: "event" },
     });
     expect(await replay.next()).toMatchObject({ type: "ping" });
   });
 
-  it("binds and bounds the replaceable presence class", async () => {
+  it("rejects every HTTP presence shape at the direct-only boundary", async () => {
     const room = await createRoom();
     await registerOwner(room);
     const value = await envelope(room, "presence-class-tamper", "signal");
     value.signalClass = "presence";
     const response = await postEnvelopeResponse(room, [value]);
-    expect(response.status).toBe(401);
-    expect(await response.json()).toMatchObject({ error: { code: "ATTN_DEVICE_PROOF_INVALID" } });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "ATTN_PRESENCE_DIRECT_ONLY" } });
 
     const targeted = await envelope(
       room,
@@ -715,7 +709,7 @@ describe("v3 anonymous viewer WebSocket", () => {
     const targetedResponse = await postEnvelopeResponse(room, [targeted]);
     expect(targetedResponse.status).toBe(400);
     expect(await targetedResponse.json()).toMatchObject({
-      error: { code: "ATTN_PRESENCE_TARGET_INVALID" },
+      error: { code: "ATTN_PRESENCE_DIRECT_ONLY" },
     });
 
     const oversized = await envelope(room, "presence-oversized", "signal");
@@ -725,9 +719,9 @@ describe("v3 anonymous viewer WebSocket", () => {
     oversized.signalClass = "presence";
     oversized.deviceSignature = await signSignal(room, oversized);
     const oversizedResponse = await postEnvelopeResponse(room, [oversized]);
-    expect(oversizedResponse.status).toBe(413);
+    expect(oversizedResponse.status).toBe(400);
     expect(await oversizedResponse.json()).toMatchObject({
-      error: { code: "ATTN_ENVELOPE_TOO_LARGE" },
+      error: { code: "ATTN_PRESENCE_DIRECT_ONLY" },
     });
   });
 });

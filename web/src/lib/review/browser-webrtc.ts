@@ -190,29 +190,23 @@ export class BrowserPeerMesh {
 
   /**
    * Prefer the unordered, no-retransmit lane so stale cursor packets cannot
-   * block newer ones. Returns whether every eligible peer was reached; the
-   * caller may use replaceable relay presence for incomplete STUN-only paths.
+   * block newer ones. Missing peer channels intentionally drop the sample;
+   * presence never falls back to the durable relay.
    */
-  broadcastPresenceEnvelope(envelope: MailboxEnvelope): boolean {
-    if (this.closed || envelope.signalClass !== 'presence') return false;
+  broadcastPresenceEnvelope(envelope: MailboxEnvelope): void {
+    if (this.closed || envelope.signalClass !== 'presence') return;
     const bytes = new TextEncoder().encode(JSON.stringify(envelope));
     try {
-      if (bytes.length > this.opts.maxEnvelopeBytes) return false;
-      let complete = this.setupFailedDevices.size === 0;
+      if (bytes.length > this.opts.maxEnvelopeBytes) return;
       for (const peer of this.peers.values()) {
         const channel = peer.presenceChannel;
-        if (!channel || channel.readyState !== 'open') {
-          complete = false;
-          continue;
-        }
+        if (!channel || channel.readyState !== 'open') continue;
         try {
           channel.send(bytes);
         } catch {
-          complete = false;
           this.opts.onError?.('direct_presence_send_failed');
         }
       }
-      return complete;
     } finally {
       bytes.fill(0);
     }

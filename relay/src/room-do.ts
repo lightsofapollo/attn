@@ -1533,6 +1533,21 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
 
+    // Cursor/view presence is a lossy WebRTC-only lane. Reject legacy V3
+    // uploads before the per-device rate counter, PoW replay marker, signal
+    // generation, server sequence, last-event timestamp, alarm, or latest
+    // presence row can be mutated. At a two-second presence refresh cadence,
+    // even replace-in-place storage exhausts the Workers free-tier daily row
+    // allowance. Durable review events and WebRTC negotiation signals continue
+    // through the normal mailbox path below.
+    if (routeVersion === 3 && envelopes.some(isReplaceablePresence)) {
+      return errorResponse(
+        400,
+        "ATTN_PRESENCE_DIRECT_ONLY",
+        "cursor and viewport presence must use the WebRTC presence channel",
+      );
+    }
+
     // 2. PoW — bound to (roomId, first envelope's deviceId, POST, urlPath).
     //    Every envelope in a batch should share the author/device per the
     //    crypto-spec usage pattern; we don't enforce that here (the spec is

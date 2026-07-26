@@ -242,43 +242,6 @@ export class BrowserOutbox {
     return this.enqueueMemory(envelope);
   }
 
-  /**
-   * Keep at most one unsent cursor/view sample behind the active request.
-   * This is intentionally memory-only: the relay replaces the sample per
-   * device and neither browser storage nor a network outage may turn it into
-   * an append-only presence history.
-   */
-  enqueueReplaceablePresence(envelope: MailboxEnvelope): boolean {
-    if (this.persistence) {
-      throw new Error('replaceable presence requires a memory-only outbox');
-    }
-    if (
-      envelope.kind !== 'signal' ||
-      envelope.signalClass !== 'presence' ||
-      envelope.target !== null
-    ) {
-      throw new Error('replaceable presence must be a broadcast presence signal');
-    }
-    if (this.closed) throw new Error('outbox is closed');
-    this.validateEnvelope(envelope);
-    const duplicate = this.queue.find((item) => item.envelopeId === envelope.envelopeId);
-    if (duplicate) return this.sameOrConflict(duplicate, envelope);
-    for (let index = this.queue.length - 1; index >= 0; index -= 1) {
-      const queued = this.queue[index]!;
-      if (
-        !this.activeBatchIds.has(queued.envelopeId) &&
-        queued.kind === 'signal' &&
-        queued.signalClass === 'presence' &&
-        queued.deviceId === envelope.deviceId
-      ) {
-        this.queue[index] = Object.freeze({ ...envelope });
-        this.publish({ lastError: null, terminal: false });
-        return true;
-      }
-    }
-    return this.enqueueMemory(envelope);
-  }
-
   /** Persist the immutable sealed envelope before optimistic UI echo. */
   async enqueueDurably(envelope: MailboxEnvelope): Promise<boolean> {
     return (await this.enqueueBatchDurably([envelope])) === 1;

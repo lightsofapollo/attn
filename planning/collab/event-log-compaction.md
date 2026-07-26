@@ -12,8 +12,8 @@ only over the `attn-presence` WebRTC DataChannel. That channel is unordered and
 uses `maxRetransmits = 0`; if a peer has no direct path, the sample is dropped.
 Clients expire a remote cursor/location after five seconds without a newer
 sample and refresh stationary presence every two seconds. The relay's
-latest-state implementation remains as mixed-version
-compatibility handling, but current clients do not upload presence to it.
+legacy latest-state reader remains for room-lifetime cutover, but the ingest
+route rejects presence before any Durable Object mutation.
 Document steps, review events, snapshots, WebRTC negotiation, and roster
 membership retain their existing transport and durability rules.
 

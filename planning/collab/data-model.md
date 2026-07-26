@@ -769,10 +769,9 @@ routing metadata. The encrypted payload remains opaque. Current clients send
 these envelopes only over the unordered, zero-retransmit `attn-presence`
 WebRTC DataChannel; they never enter a mailbox outbox or relay sequence. A
 missing direct path drops the sample, receivers expire it after five seconds,
-and senders refresh stationary state every two seconds. The relay still
-accepts bounded latest-state presence from older V3
-clients during the coordinated cutover. Other signals retain their documented
-durability.
+and senders refresh stationary state every two seconds. The relay rejects
+legacy V3 presence uploads before any mutable rate, replay, ordering, alarm,
+or latest-state accounting. Other signals retain their documented durability.
 
 ## Sync Cursors And ACKs
 

@@ -140,13 +140,13 @@ test('uses STUN only and creates reliable review plus lossy presence channels', 
   mesh.broadcastEnvelope(envelope('a'));
   assert(pcs[0]!.channel!.sent.length === 1, 'exact envelope was not fanned over the channel');
   const presence = { ...envelope('a'), kind: 'signal', signalClass: 'presence' } as MailboxEnvelope;
-  assert(mesh.broadcastPresenceEnvelope(presence), 'open presence mesh reported incomplete coverage');
+  mesh.broadcastPresenceEnvelope(presence);
   assert(pcs[0]!.presenceChannel!.sent.length === 1, 'presence was not sent on its lossy channel');
   assert(pcs[0]!.channel!.sent.length === 1, 'presence leaked onto the review channel');
   mesh.close();
 });
 
-test('reports incomplete presence coverage when any peer channel is unavailable', async () => {
+test('drops presence for unavailable peer channels without blocking reachable peers', async () => {
   const pcs: FakePeerConnection[] = [];
   const mesh = new BrowserPeerMesh({
     localDeviceId: 'a',
@@ -162,7 +162,7 @@ test('reports incomplete presence coverage when any peer channel is unavailable'
   await Promise.resolve(); await Promise.resolve();
   pcs[0]!.presenceChannel!.open();
   const presence = { ...envelope('a'), kind: 'signal', signalClass: 'presence' } as MailboxEnvelope;
-  assert(!mesh.broadcastPresenceEnvelope(presence), 'partial presence mesh reported complete coverage');
+  mesh.broadcastPresenceEnvelope(presence);
   assert(pcs[0]!.presenceChannel!.sent.length === 1, 'open peer did not receive direct presence');
   assert(pcs[1]!.presenceChannel!.sent.length === 0, 'closed peer unexpectedly received presence');
   mesh.close();

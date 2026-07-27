@@ -390,6 +390,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
       replyToComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
       resolveComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
       retryReviewOutbox: async () => undefined,
+      recoverReview: async () => undefined,
       inspectShare: async () => this.mockShare ? structuredClone(this.mockShare) : null,
       ensureShare: async (input) => {
         const invite = mockInvite();

@@ -171,6 +171,7 @@
   let changeWatcher = $state<unknown[]>([]);
   let session = $state<EditingSession | null>(null);
   let ownerState = $state<BrowserOwnerWorkspaceRuntimeState | null>(null);
+  let reviewRecoveryPending = $state(false);
   // Local multi-tab co-editing, follower role (attn-47r): a live wire to the
   // lease-holding tab's authorities. Non-null only while this tab is denied
   // the writer lease; becoming the owner closes it.
@@ -210,6 +211,10 @@
   });
   const sharingActive = $derived(
     ownerState?.roomId !== null && ownerState?.roomId !== undefined,
+  );
+  const expiredReviewRecoverable = $derived(
+    ownerState?.authority?.session?.error?.kind === 'room_expired'
+      || ownerState?.reason?.startsWith('The review room expired') === true,
   );
   // Review surfaces render in EVERY tab of a shared workspace, not just the
   // lease holder: follower tabs have no authority session but the durable
@@ -1939,20 +1944,6 @@
     await currentSession.resolveComment(threadId);
   }
 
-  // Surface mailbox/transport failures (attn-9ua): a dead owner session
-  // previously showed an empty rail while the 400 hid in the console. The
-  // encrypted mailbox is the product's core promise — its failures are
-  // first-class UI.
-  const reviewTransportError = $derived.by(() => {
-    const authority = ownerState?.authority;
-    if (authority?.session?.status === 'error') {
-      return authority.session.error?.message
-        ?? 'Couldn\u2019t reach your encrypted mailbox \u2014 review updates are paused.';
-    }
-    if (authority?.status === 'paused' && authority.pauseReason) return authority.pauseReason;
-    return null;
-  });
-
   async function retryReviewDelivery(): Promise<void> {
     const currentSession = session;
     if (!currentSession) return;
@@ -1961,6 +1952,20 @@
       await currentSession.retryReviewOutbox();
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function recoverExpiredReview(): Promise<void> {
+    const currentSession = session ?? (await ensureOwnerSession());
+    if (!currentSession || reviewRecoveryPending) return;
+    reviewRecoveryPending = true;
+    railError = null;
+    try {
+      await currentSession.recoverReview();
+    } catch (error) {
+      railError = error instanceof Error ? error.message : String(error);
+    } finally {
+      reviewRecoveryPending = false;
     }
   }
 
@@ -2583,9 +2588,21 @@
           <strong>Live review is paused.</strong>
           <p>{ownerState.reason ?? 'Your encrypted review remains readable while authority reconnects.'}</p>
         </div>
-        {#if ownerState.authority?.session?.authoringError}
-          <button class="button" type="button" onclick={() => void retryReviewDelivery()}>Retry delivery</button>
-        {/if}
+        <div class="actions">
+          {#if expiredReviewRecoverable}
+            <button
+              class="button"
+              type="button"
+              disabled={reviewRecoveryPending}
+              onclick={() => void recoverExpiredReview()}
+            >
+              {reviewRecoveryPending ? 'Restarting…' : 'Restart live review'}
+            </button>
+          {/if}
+          {#if ownerState.authority?.session?.authoringError}
+            <button class="button" type="button" onclick={() => void retryReviewDelivery()}>Retry delivery</button>
+          {/if}
+        </div>
       </div>
     {/if}
     {#if activeEntry?.presentation === 'editable' && EditorComponent}
@@ -2783,15 +2800,7 @@
 
 {#snippet desktopRail()}
   {#if reviewRoomActive && ReviewMarginComponent}
-    {#if reviewTransportError}
-      <div class="review-delivery-status" role="alert" data-slot="review-transport-error">
-        <span>{reviewTransportError}</span>
-        <button class="row-action" type="button" onclick={() => window.location.reload()}>
-          Reconnect
-        </button>
-      </div>
-    {/if}
-    {#if ownerState?.authority?.session?.authoringError}
+    {#if ownerState?.liveEditingAvailable && ownerState.authority?.session?.authoringError}
       <div class="review-delivery-status" role="status">
         <span>{ownerState.authority.session.authoringError}</span>
         <button class="row-action" type="button" onclick={() => void retryReviewDelivery()}>Retry</button>
@@ -3107,14 +3116,6 @@
     onclose={closeReviewSheet}
   >
     {#if reviewRoomActive && ReviewMarginComponent}
-      {#if reviewTransportError}
-        <div class="review-delivery-status" role="alert" data-slot="review-transport-error">
-          <span>{reviewTransportError}</span>
-          <button class="row-action" type="button" onclick={() => window.location.reload()}>
-            Reconnect
-          </button>
-        </div>
-      {/if}
       <div class="review-sheet-margin">
         <ReviewMarginComponent
           view={pmViewForReview}

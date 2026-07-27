@@ -417,6 +417,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
       replyToComment: (anchor, body, threadId) => runtime.replyToComment(anchor, body, threadId),
       resolveComment: (threadId) => runtime.resolveComment(threadId),
       retryReviewOutbox: () => runtime.retryOutbox(),
+      recoverReview: () => runtime.recoverReview(),
       inspectShare: () => runtime.inspectShare(browserReviewBase()),
       ensureShare: async (input) => {
         const mode = this.storageHealth().mode;

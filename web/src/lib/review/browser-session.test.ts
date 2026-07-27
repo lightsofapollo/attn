@@ -905,6 +905,37 @@ defineCase('owner startup rejects a mismatched or downgraded directory registrat
   }
 });
 
+defineCase('owner bootstrap classifies an authenticated expired policy as room_expired', async () => {
+  const credentials = browserOwnerCredentials();
+  const device = browserOwnerDevice(credentials);
+  let socketOpened = false;
+  const session = new BrowserSession({
+    owner: credentials,
+    relayUrl: 'http://127.0.0.1:9',
+    store: makeStubStore(),
+    fetchImpl: async () => ({
+      status: 200,
+      text: async () => JSON.stringify({
+        policy: { ...POLICY, expiresAt: Date.now() - 1 },
+        devices: [device],
+      }),
+    }),
+    webSocketFactory: () => {
+      socketOpened = true;
+      throw new Error('expired owner must not open WS');
+    },
+  });
+  await session.start();
+  assertEq(session.getState().status, 'error', 'expired bootstrap is terminal');
+  assertEq(session.getState().error?.kind, 'room_expired', 'expiry keeps its recovery signal');
+  assert(
+    session.getState().error?.message.includes('expired'),
+    'expiry message names the actual condition',
+  );
+  assertEq(socketOpened, false, 'expired bootstrap stayed off the socket path');
+  session.close();
+});
+
 defineCase('owner hello fully validates policy and reasserts its authoritative registration', async () => {
   const scenarios: Array<{
     name: string;

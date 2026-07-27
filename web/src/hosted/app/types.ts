@@ -186,6 +186,8 @@ export interface EditingSession {
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
   retryReviewOutbox(): Promise<void>;
+  /** Recreate a definitively expired live room under the stable share. */
+  recoverReview(): Promise<void>;
   inspectShare(): Promise<WorkspaceShareView | null>;
   ensureShare(input: WorkspaceShareRequest): Promise<WorkspaceShareView>;
   stopShare(): Promise<void>;

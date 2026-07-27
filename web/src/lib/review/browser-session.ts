@@ -1600,11 +1600,15 @@ export class BrowserSession {
     try {
       const bootstrap = await this.fetchRoomBootstrap(credentials.roomId, activeKeys);
       assertRegisteredBrowserOwner(bootstrap.devices, credentials.identity);
-      if (!bootstrap.policy.allowBrowser || bootstrap.policy.expiresAt <= Date.now()) {
+      if (!bootstrap.policy.allowBrowser) {
         throw new Error('authenticated room policy does not permit browser owner authority');
       }
       this.roomPolicy = bootstrap.policy;
       this.bootstrapDevices = bootstrap.devices;
+      if (bootstrap.policy.expiresAt <= Date.now()) {
+        this.fail('room_expired', 'The live review room has expired.');
+        return;
+      }
     } catch (error) {
       if (this.isTerminated()) return;
       this.fail('device_register', error instanceof Error ? error.message : String(error));

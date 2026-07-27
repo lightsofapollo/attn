@@ -1177,6 +1177,7 @@ interface RoomExpiryHarness {
   createdRooms: Set<string>;
   failures: { mailPendingUpserts: number; relayDown: boolean };
   probe: { result: boolean; calls: number };
+  deletes: { calls: number };
 }
 
 async function openRoomExpiryHarness(workspaceId: string): Promise<RoomExpiryHarness> {
@@ -1194,6 +1195,7 @@ async function openRoomExpiryHarness(workspaceId: string): Promise<RoomExpiryHar
   const createdRooms = new Set<string>();
   const failures = { mailPendingUpserts: 0, relayDown: false };
   const probe = { result: false, calls: 0 };
+  const deletes = { calls: 0 };
   let relay: MemoryShareRelay | null = null;
   const runtime = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, workspaceId, {
     now,
@@ -1211,6 +1213,11 @@ async function openRoomExpiryHarness(workspaceId: string): Promise<RoomExpiryHar
         const created = !createdRooms.has(bootstrap.roomId);
         createdRooms.add(bootstrap.roomId);
         return { ...bootstrap, created };
+      },
+      deleteRoom: async ({ roomId }) => {
+        deletes.calls += 1;
+        createdRooms.delete(roomId);
+        return true;
       },
       publish: snapshotPublisher,
       indexBuilder: testIndexBuilder,
@@ -1240,8 +1247,29 @@ async function openRoomExpiryHarness(workspaceId: string): Promise<RoomExpiryHar
     },
   }));
   await runtime.start();
-  return { runtime, storage, authorities, upserts, createdRooms, failures, probe };
+  return { runtime, storage, authorities, upserts, createdRooms, failures, probe, deletes };
 }
+
+defineCase('authenticated expiry retires stale room metadata before same-epoch recovery', async () => {
+  const harness = await openRoomExpiryHarness('share-room-expiry-stale-metadata');
+  const view = await harness.runtime.ensureShare(shareRequest());
+  const committedRevision = harness.upserts.at(-1)!.revision;
+
+  // The hard deadline passed but the alarm could not clear Durable Object
+  // metadata. The room still answers authenticated bootstrap with an expired
+  // policy, so a plain idempotent create would return that policy forever.
+  assert(harness.createdRooms.has(view.roomId), 'stale expired room still exists');
+  harness.authorities[0]!.emitTransportPause('room_expired');
+  await waitFor(() => harness.authorities.length === 2 && harness.runtime.getState().status === 'active', 3000);
+
+  equal(harness.deletes.calls, 1, 'owner retires the stale expired generation exactly once');
+  assert(harness.createdRooms.has(view.roomId), 'same epoch-derived room identity was recreated');
+  equal(harness.runtime.getState().roomId, view.roomId, 'stable room identity survives generation reset');
+  equal(harness.runtime.getState().liveEditingAvailable, true, 'fresh authority becomes live');
+  assert(harness.upserts.at(-1)!.revision > committedRevision, 'stable share projection advances');
+  await harness.runtime.close();
+  harness.storage.close();
+});
 
 defineCase('mid-life room expiry re-provisions a fresh room under the same durable share (attn-hh9r)', async () => {
   const harness = await openRoomExpiryHarness('share-room-expiry-reprovision');
@@ -1252,9 +1280,11 @@ defineCase('mid-life room expiry re-provisions a fresh room under the same durab
   // The relay hard-wipes the 24h room out from under the live authority
   // (HARD_MAX_TTL): the session dies with the relay's own 4002 verdict.
   harness.createdRooms.clear();
+  harness.probe.result = true;
   harness.authorities[0]!.emitTransportPause('room_expired');
   await waitFor(() => harness.authorities.length === 2 && harness.runtime.getState().status === 'active', 3000);
-  equal(harness.probe.calls, 0, 'room_expired is certain — no probe needed');
+  equal(harness.probe.calls, 1, 'expired recovery distinguishes wiped from stale metadata');
+  equal(harness.deletes.calls, 0, 'an already-wiped room is recreated without an opaque DELETE');
   equal(harness.runtime.getState().roomId, view.roomId, 're-provision keeps the share-derived room identity');
   equal(harness.runtime.getState().liveEditingAvailable, true, 're-provisioned authority is live');
   equal(harness.runtime.getState().reason, null, 'recovered runtime carries no paused reason');
@@ -1274,6 +1304,7 @@ defineCase('room re-provision drains and retries once on ATTN_SHARE_MAIL_PENDING
   // the relay answers 409 ATTN_SHARE_MAIL_PENDING exactly once, and one full
   // reconcile retry (which drains first) must converge.
   harness.createdRooms.clear();
+  harness.probe.result = true;
   harness.failures.mailPendingUpserts = 1;
   harness.authorities[0]!.emitTransportPause('room_expired');
   await waitFor(() => harness.authorities.length === 2 && harness.runtime.getState().status === 'active', 3000);
@@ -1311,6 +1342,14 @@ defineCase('ambiguous failures are probe-gated and total failure pauses with the
     `pause reason must name the expired room: ${harness.runtime.getState().reason}`,
   );
   equal(harness.runtime.getState().writable, true, 'local editing stays writable after a failed re-provision');
+
+  // The single banner's explicit recovery action retries in place; it does
+  // not reload the document or mint a different public share.
+  harness.failures.relayDown = false;
+  await harness.runtime.recoverReview();
+  await waitFor(() => harness.runtime.getState().status === 'active', 3000);
+  equal(harness.runtime.getState().liveEditingAvailable, true, 'manual retry restores live review');
+  equal(harness.deletes.calls, 0, 'already-gone recovery never depends on an opaque DELETE');
   await harness.runtime.close();
   harness.storage.close();
 });

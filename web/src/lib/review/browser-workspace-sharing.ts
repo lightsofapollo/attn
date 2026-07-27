@@ -191,6 +191,35 @@ export class BrowserWorkspaceSharingCoordinator {
     });
   }
 
+  /**
+   * Retire the current ordinary-room generation before recovering an
+   * authenticated expiry. The stable share, epoch-derived room secret, and
+   * reviewer grants deliberately remain unchanged: recreating the same room
+   * identity lets queued ShareDO mailbox ciphertext flow into the fresh
+   * generation without re-encryption or capability churn.
+   */
+  async retireCurrentRoomForRecovery(): Promise<void> {
+    const record = await this.inspectRecord();
+    if (!record) throw new BrowserStorageError('active share is unavailable for room recovery');
+    const rootKey = await this.requireRootKey();
+    const capability = await this.storage.shares.openShare(rootKey, this.workspaceId, record.capId);
+    if (!capability.durableShare || capability.durableShare.lifecycle !== 'active') {
+      throw new StorageConflictError('durable share is unavailable for room recovery');
+    }
+    const credentials = ownerCredentialsV3FromInviteCapability(capability, record.roomId);
+    try {
+      const retired = await (this.dependencies.deleteRoom ?? deleteOwnedRoomV3)({
+        relayUrl: record.relayUrl,
+        roomId: record.roomId,
+        identity: credentials.identity,
+        writeAdmissionKey: credentials.keys.admissionKey,
+      });
+      if (!retired) throw new BrowserStorageError('expired room generation could not be retired');
+    } finally {
+      zeroCredentialsV3(credentials);
+    }
+  }
+
   async ensurePublished(request: BrowserWorkspaceShareRequest): Promise<BrowserWorkspaceShareView> {
     validateRequest(request);
     const relayUrl = validateBrowserRelayUrl(request.relayUrl);

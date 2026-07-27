@@ -196,6 +196,7 @@ export class BrowserOwnerWorkspaceRuntime {
   private lastPublicationAt = 0;
   private republishHandle: unknown = null;
   private roomRecovery: Promise<void> | null = null;
+  private roomRecoveryRetireExisting = false;
   private startupShareResume: Promise<void> | null = null;
   private roomRecoveryStreak = 0;
   private readonly reviewedSuggestions = new Map<string, BrowserReviewedSuggestion>();
@@ -479,6 +480,30 @@ export class BrowserOwnerWorkspaceRuntime {
       // Share stopped: every tab's projection must drop the room's threads.
       this.ringShareRecordsDoorbell();
     });
+  }
+
+  /** User-requested retry for a definitively expired ordinary room. */
+  async recoverReview(): Promise<void> {
+    await this.startupShareResume?.catch(() => undefined);
+    if (this.roomRecovery) {
+      await this.roomRecovery;
+      return;
+    }
+    const state = this.stateValue;
+    const expired = state.authority?.session?.error?.kind === 'room_expired'
+      || state.reason?.startsWith('The review room expired') === true;
+    if (!expired || !this.lease || state.leaseRole !== 'owner') {
+      throw new StorageConflictError('expired review recovery is unavailable');
+    }
+    this.roomRecoveryStreak = 0;
+    const recovery = this.enqueueInternal(() => this.reprovisionExpiredRoom(
+      this.roomRecoveryRetireExisting,
+    ));
+    const tracked = recovery.finally(() => {
+      if (this.roomRecovery === tracked) this.roomRecovery = null;
+    });
+    this.roomRecovery = tracked;
+    await tracked;
   }
 
   async accept(input: BrowserOwnerWorkspaceAcceptInput): Promise<AcceptBrowserSuggestionResult> {
@@ -1299,11 +1324,12 @@ export class BrowserOwnerWorkspaceRuntime {
    * instead of leaving the share dead until the next full page load.
    *
    * Signals: `room_expired` is the relay's own verdict (WS close 4002, or the
-   * authenticated policy-expiry check at bootstrap). `device_register` /
-   * `network` are ambiguous — a wiped room's 404 carries no stored policy, so
-   * cross-origin it is CORS-untagged and reads as a network failure — and the
-   * probe decides. `room_deleted` (4001) is a deliberate teardown elsewhere
-   * and is never rebuilt here.
+   * authenticated policy-expiry check at bootstrap). Its probe distinguishes
+   * an already-wiped room from stale expired metadata that must be retired.
+   * `device_register` / `network` are ambiguous — a wiped room's 404 carries
+   * no stored policy, so cross-origin it is CORS-untagged and reads as a
+   * network failure — and only a proven-gone room is rebuilt. `room_deleted`
+   * (4001) is a deliberate teardown elsewhere and is never rebuilt here.
    */
   private maybeRecoverExpiredRoom(authorityState: BrowserOwnerAuthorityState): void {
     if (this.roomRecovery || this.closing || !this.share || !this.lease) return;
@@ -1316,25 +1342,28 @@ export class BrowserOwnerWorkspaceRuntime {
     if (this.roomRecoveryStreak >= MAX_ROOM_RECOVERIES) return;
     const share = this.share;
     this.roomRecovery = (async () => {
-      if (!certain) {
-        const probe = this.options.roomGoneProbe ?? defaultRoomGoneProbe;
-        const gone = await probe({
-          relayUrl: share.relayUrl,
-          roomId: share.roomId,
-          shareId: share.capId,
-        }).catch(() => false);
-        // A genuine transport failure keeps today's paused presentation.
-        if (!gone) return;
-      }
+      const probe = this.options.roomGoneProbe ?? defaultRoomGoneProbe;
+      const gone = await probe({
+        relayUrl: share.relayUrl,
+        roomId: share.roomId,
+        shareId: share.capId,
+      }).catch(() => false);
+      // Ambiguous transport failures recover only when the room is proven
+      // gone. A definitive authenticated expiry also recovers while stale
+      // metadata remains, but must retire that old generation first.
+      if (!certain && !gone) return;
+      this.roomRecoveryRetireExisting = certain && !gone;
       this.roomRecoveryStreak += 1;
-      await this.enqueueInternal(() => this.reprovisionExpiredRoom());
+      await this.enqueueInternal(() => this.reprovisionExpiredRoom(
+        this.roomRecoveryRetireExisting,
+      ));
     })().finally(() => {
       this.roomRecovery = null;
     });
   }
 
-  private async reprovisionExpiredRoom(): Promise<void> {
-    if (this.closing || !this.share || !this.lease) return;
+  private async reprovisionExpiredRoom(retireExisting: boolean): Promise<void> {
+    if (this.closing || !this.lease) return;
     this.patchState({
       status: 'transitioning',
       reason: 'The live review room expired — re-provisioning it under the same share link…',
@@ -1342,6 +1371,12 @@ export class BrowserOwnerWorkspaceRuntime {
     try {
       await this.deactivateAuthority();
       const coordinator = this.sharingCoordinator();
+      // An alarm normally wipes the expired RoomDO before recovery. If stale
+      // metadata survived (for example while the account was write-capped),
+      // an idempotent create only returns that expired policy. Owner-retire
+      // the old generation first so the same epoch-derived room can be
+      // created afresh and queued mailbox ciphertext remains valid.
+      if (retireExisting) await coordinator.retireCurrentRoomForRecovery();
       try {
         // reconcileActive recreates the missing epoch room, republishes the
         // current snapshots + genesis into it, and upserts the share record
@@ -1363,16 +1398,19 @@ export class BrowserOwnerWorkspaceRuntime {
       // bounded head-moved retries; a final failure lands in the honest
       // paused state below instead of a generic error.
       await this.activatePublishedShare(discovered, this.requireFence());
+      this.roomRecoveryRetireExisting = false;
       // Room rotated (attn-hh9r): every tab's projection must follow the new
       // currentRoomId — this is exactly the two-tab divergence attn-whdh kills.
       this.ringShareRecordsDoorbell();
     } catch (error) {
       this.startLocalHeartbeat();
+      const localCollab = this.startLocalCollab();
       this.patchState({
         status: 'paused',
         leaseRole: 'owner',
         writable: true,
         liveEditingAvailable: false,
+        localCollab,
         reason: `The review room expired and could not be re-provisioned: ${errorMessage(error)}`,
         authority: this.authority?.getState() ?? null,
       });

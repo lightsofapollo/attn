@@ -1758,7 +1758,6 @@ mod tests {
     use crate::review::ids::RoomId;
     use crate::review::store::ReviewStore;
     use crate::review::working_copy::WorkingCopyService;
-    use serde::{Deserialize, Serialize};
     use std::sync::Arc;
     use tempfile::TempDir;
 

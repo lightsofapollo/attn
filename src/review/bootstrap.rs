@@ -3219,6 +3219,11 @@ impl Bootstrapper {
         Ok(published)
     }
 
+    // The identity of a published snapshot IS this argument list — room, file,
+    // snapshot id, owner-facing path, base hash, payload, and mint time are all
+    // independent inputs the caller must state explicitly. Bundling them into a
+    // struct would only move the same list one level away from the call site.
+    #[allow(clippy::too_many_arguments)]
     async fn publish_snapshot_plaintext(
         &self,
         room_id: &RoomId,

@@ -688,16 +688,16 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
             // Only act on the final drop; Enter/Over/Leave keep default so the
             // OS still shows the copy cursor. A dropped directory switches the
             // project root; a dropped file opens it directly.
-            if let wry::DragDropEvent::Drop { paths, .. } = event {
-                if let Some(path) = paths.into_iter().next() {
-                    let user_event = if path.is_dir() {
-                        UserEvent::SwitchProject(path)
-                    } else {
-                        UserEvent::OpenPath(path)
-                    };
-                    let _ = drag_drop_proxy.send_event(user_event);
-                    return true;
-                }
+            if let wry::DragDropEvent::Drop { paths, .. } = event
+                && let Some(path) = paths.into_iter().next()
+            {
+                let user_event = if path.is_dir() {
+                    UserEvent::SwitchProject(path)
+                } else {
+                    UserEvent::OpenPath(path)
+                };
+                let _ = drag_drop_proxy.send_event(user_event);
+                return true;
             }
             false
         })

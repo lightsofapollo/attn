@@ -6,13 +6,38 @@
   import * as Dialog from './components/ui/dialog';
   import { getEffectiveTheme, getThemePreference, setThemePreference } from './theme';
   import { TYPESETS, getTypeset, setTypeset } from './typeset';
-  import type { ThemePreference, TypesetName } from './types';
+  import { reviewNotificationMute, setResidentLaunchAtLogin } from './ipc';
+  import type { RoomId, ThemePreference, TypesetName } from './types';
 
   interface Props {
     open: boolean;
+    /** Background-service state, owned by App so it survives this dialog closing. */
+    residentSupported?: boolean;
+    residentActive?: boolean;
+    residentInstalled?: boolean;
+    residentLoaded?: boolean;
+    residentDegraded?: boolean;
+    residentError?: string | null;
+    residentBusy?: boolean;
+    onResidentToggle?: (enabled: boolean) => void;
+    /** Present only while a review is on screen, so it can be muted from here. */
+    roomId?: RoomId | null;
+    notificationMuted?: boolean;
   }
 
-  let { open = $bindable() }: Props = $props();
+  let {
+    open = $bindable(),
+    residentSupported = false,
+    residentActive = false,
+    residentInstalled = false,
+    residentLoaded = false,
+    residentDegraded = false,
+    residentError = null,
+    residentBusy = false,
+    onResidentToggle,
+    roomId = null,
+    notificationMuted = false,
+  }: Props = $props();
 
   // The DOM attributes are the source of truth (Rust seeds them, the theme
   // module owns them), so this local mirror is refreshed whenever the sheet
@@ -44,6 +69,20 @@
     typeset = next;
     setTypeset(next);
   }
+
+  function toggleLaunchAtLogin(): void {
+    if (residentBusy) return;
+    onResidentToggle?.(!residentInstalled);
+    setResidentLaunchAtLogin(!residentInstalled);
+  }
+
+  const residentStatusLabel = $derived(
+    residentDegraded
+      ? `Needs attention · ${residentLoaded ? 'loaded' : 'not loaded'}`
+      : residentInstalled && residentLoaded
+        ? 'Installed and running'
+        : 'Not installed',
+  );
 </script>
 
 <Dialog.Root bind:open>
@@ -131,5 +170,55 @@
         {/each}
       </div>
     </section>
+
+    {#if residentSupported || roomId !== null}
+      <section class="flex flex-col gap-2 border-t border-border/60 pt-4" aria-labelledby="settings-background-heading">
+        <div>
+          <h3 id="settings-background-heading" class="text-sm font-semibold text-foreground">Background</h3>
+          <p class="mt-0.5 text-xs text-muted-foreground">
+            {residentActive
+              ? 'attn stays available after its window closes.'
+              : 'Start attn automatically, ready for shared links and documents.'}
+          </p>
+        </div>
+
+        {#if residentSupported}
+          <label class="flex cursor-pointer items-center justify-between gap-4 rounded-md px-1 py-1.5">
+            <span class="min-w-0">
+              <span class="block text-sm text-foreground">Launch at login</span>
+              <span class="block text-[11px] text-muted-foreground">{residentStatusLabel}</span>
+            </span>
+            <input
+              type="checkbox"
+              class="size-4 shrink-0 accent-primary"
+              data-slot="settings-launch-at-login"
+              checked={residentInstalled}
+              disabled={residentBusy}
+              onchange={toggleLaunchAtLogin}
+            />
+          </label>
+        {/if}
+
+        {#if roomId !== null}
+          <label class="flex cursor-pointer items-center justify-between gap-4 rounded-md px-1 py-1.5">
+            <span class="min-w-0">
+              <span class="block text-sm text-foreground">Mute this review</span>
+              <span class="block text-[11px] text-muted-foreground">Unread badges stay available.</span>
+            </span>
+            <input
+              type="checkbox"
+              class="size-4 shrink-0 accent-primary"
+              data-slot="settings-mute-review"
+              checked={notificationMuted}
+              onchange={(event) => reviewNotificationMute(roomId, event.currentTarget.checked)}
+            />
+          </label>
+        {/if}
+
+        {#if residentError}
+          <p class="text-xs text-destructive" role="alert">{residentError}</p>
+        {/if}
+      </section>
+    {/if}
   </Dialog.Content>
 </Dialog.Root>

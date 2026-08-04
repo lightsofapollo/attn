@@ -715,7 +715,10 @@
     border: 1px dashed color-mix(in oklch, var(--foreground) 16%, transparent);
     border-radius: 10px;
     padding: 12px;
-    margin: 0;
+    /* Inset to the same 10px gutter `.sidebar-outline-wrap` gives its rows, so
+       the card lines up with the filter and the file list instead of running
+       edge to edge. */
+    margin: 0 10px 12px;
     background: color-mix(in oklch, var(--background) 75%, white 25%);
   }
 

@@ -132,6 +132,46 @@
   margin-inline: auto;
 }
 
+/* prosemirror-tables' columnResizing installs its own TableView, so a table
+   renders inside `.tableWrapper` and the schema's `.prose-scroll-x` wrapper
+   never applies to it. This stylesheet is hand-rolled (prosemirror-tables'
+   CSS is deliberately not imported), so that wrapper arrives with NO styles:
+   unbounded width, no scrolling, no frame. Give it what every other wide
+   block gets. */
+.ProseMirror .tableWrapper {
+  position: relative;
+  max-width: min(100%, var(--content-measure));
+  margin-inline: auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-radius: 0.6rem;
+  outline: 1px solid color-mix(in oklch, var(--ring) 45%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--ring) 10%, transparent);
+}
+
+.ProseMirror .tableWrapper > table {
+  width: max-content;
+  min-width: 100%;
+  margin-bottom: 0;
+}
+
+/* Wide blocks are bordered cards, not running prose, so they need more air
+   than a paragraph's tail — the `pre` inside carries margin:0 and the frame
+   had none, which left code and tables sandwiched against the heading above
+   and the paragraph below. Adjacent margins collapse, so a heading's own
+   smaller bottom margin does not add to this. */
+.ProseMirror .code-block,
+.ProseMirror > .prose-scroll-x,
+.ProseMirror .tableWrapper {
+  margin-block: 1.5rem;
+}
+
+.ProseMirror > :first-child.code-block,
+.ProseMirror > :first-child.prose-scroll-x,
+.ProseMirror > :first-child.tableWrapper {
+  margin-top: 0;
+}
+
 .ProseMirror .code-block > .prose-scroll-x {
   max-width: 100%;
 }
@@ -733,11 +773,13 @@
  * So these blocks hide the bar and scroll by trackpad/shift-wheel, the same
  * treatment the breadcrumb overflow already uses. Nothing is reserved, so
  * revealing content causes no layout shift. */
-.ProseMirror .prose-scroll-x {
+.ProseMirror .prose-scroll-x,
+.ProseMirror .tableWrapper {
   scrollbar-width: none;
   -ms-overflow-style: none;
 }
 
-.ProseMirror .prose-scroll-x::-webkit-scrollbar {
+.ProseMirror .prose-scroll-x::-webkit-scrollbar,
+.ProseMirror .tableWrapper::-webkit-scrollbar {
   display: none;
 }

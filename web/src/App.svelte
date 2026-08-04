@@ -131,7 +131,6 @@
   import type { EditorView } from 'prosemirror-view';
   import type { Plugin as PMPlugin } from 'prosemirror-state';
   import { TextSelection } from 'prosemirror-state';
-  import ResidentSettings from './lib/ResidentSettings.svelte';
   import WorkspaceEditorFrame from './lib/WorkspaceEditorFrame.svelte';
 
   interface Props {
@@ -185,6 +184,33 @@
     error: null as string | null,
     supported: false,
   });
+  let residentSettingsBusy = $state(false);
+  // The daemon pushes launch-at-login results by dispatching this event into
+  // the webview (src/main.rs). It has to be received HERE rather than inside
+  // the settings surface: that surface is a dialog now, and a closed dialog is
+  // unmounted, so a listener living there would drop every result the user
+  // isn't watching and reopen showing startup state.
+  $effect(() => {
+    const receive = (event: Event): void => {
+      const detail = (event as CustomEvent<{
+        installed: boolean;
+        loaded: boolean;
+        degraded: boolean;
+        error?: string | null;
+      }>).detail;
+      residentSettings = {
+        ...residentSettings,
+        installed: detail.installed,
+        loaded: detail.loaded,
+        degraded: detail.degraded,
+        error: detail.error ?? null,
+      };
+      residentSettingsBusy = false;
+    };
+    window.addEventListener('attn-resident-status', receive);
+    return () => window.removeEventListener('attn-resident-status', receive);
+  });
+
   let editorRef: ReturnType<typeof Editor> | undefined = $state(undefined);
 
   // Tab state
@@ -3163,6 +3189,16 @@
         railToggle={true}
         inline={true}
       />
+      <button
+        type="button"
+        class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        data-slot="native-header-settings"
+        aria-label="Settings"
+        title="Settings — appearance, typeset, background"
+        onclick={() => (settingsOpen = true)}
+      >
+        <SettingsIcon class="size-3.5" aria-hidden="true" />
+      </button>
     </div>
   </header>
 {/snippet}
@@ -3319,7 +3355,19 @@
   shareErrorMessage={reviewStore.lastError?.message ?? ''}
   onClearError={() => reviewStore.clearLastError()}
 />
-<SettingsDialog bind:open={settingsOpen} />
+<SettingsDialog
+  bind:open={settingsOpen}
+  residentSupported={residentSettings.supported}
+  residentActive={residentSettings.active}
+  residentInstalled={residentSettings.installed}
+  residentLoaded={residentSettings.loaded}
+  residentDegraded={residentSettings.degraded}
+  residentError={residentSettings.error}
+  residentBusy={residentSettingsBusy}
+  onResidentToggle={() => { residentSettingsBusy = true; }}
+  roomId={reviewStore.currentRoomId}
+  notificationMuted={reviewStore.currentRoomNotificationMuted}
+/>
 <ReviewExitConfirm
   open={reviewExitConfirmOpen}
   documentName={headerDocumentName}
@@ -3389,13 +3437,4 @@
 <!-- closeButton: every toast (update nudge, file-changed, etc.) gets a
      dismiss ✕ instead of forcing the user to wait out the timeout. -->
 <Toaster closeButton />
-<ResidentSettings
-  active={residentSettings.active}
-  installed={residentSettings.installed}
-  loaded={residentSettings.loaded}
-  degraded={residentSettings.degraded}
-  statusError={residentSettings.error}
-  supported={residentSettings.supported}
-  roomId={reviewStore.currentRoomId}
-  notificationMuted={reviewStore.currentRoomNotificationMuted}
-/>
+

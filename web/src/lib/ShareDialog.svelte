@@ -388,7 +388,7 @@
 
     {#if isConfiguring}
       <section class="flex min-h-0 flex-col gap-3" aria-labelledby="native-share-files-heading">
-        <div class="flex items-end justify-between gap-3">
+        <div class="flex shrink-0 items-end justify-between gap-3">
           <div>
             <h3 id="native-share-files-heading" class="text-sm font-semibold text-foreground">Select files</h3>
             <p class="mt-0.5 text-xs text-muted-foreground">The current file starts selected. Nothing is shared until you create the link.</p>
@@ -401,13 +401,22 @@
 
         <input
           type="search"
-          class="h-9 w-full rounded-md border border-border bg-background px-3 font-sans text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+          class="h-9 w-full shrink-0 rounded-md border border-border bg-background px-3 font-sans text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
           placeholder="Filter project files…"
           aria-label="Filter files to share"
           bind:value={fileQuery}
         />
 
-        <ScrollArea viewportClasses="max-h-72" class="rounded-md border border-border bg-background" data-slot="share-file-picker">
+        <!-- Cap the picker against the WINDOW, not a fixed row count: a fixed
+             max-h-72 plus the surrounding chrome overflowed the dialog's 85vh
+             ceiling, so the whole modal scrolled and the create button sat
+             below the fold. Sized so list + chrome always fits, which keeps
+             every control visible without scrolling the dialog itself. -->
+        <ScrollArea
+          viewportClasses="max-h-[min(20rem,34vh)]"
+          class="rounded-md border border-border bg-background"
+          data-slot="share-file-picker"
+        >
           {#if filesLoading}
             <div class="flex items-center gap-2 px-3 py-8 text-sm text-muted-foreground" role="status">
               <span class="inline-block size-3 animate-pulse rounded-full bg-primary/60" aria-hidden="true"></span>
@@ -435,7 +444,7 @@
           {/if}
         </ScrollArea>
 
-        <div class="flex items-center justify-between gap-3 text-xs" aria-live="polite">
+        <div class="flex shrink-0 items-center justify-between gap-3 text-xs" aria-live="polite">
           <strong class="font-medium text-foreground">{selectionSummary}</strong>
           <span class="truncate font-mono text-muted-foreground">{projectRoot}</span>
         </div>

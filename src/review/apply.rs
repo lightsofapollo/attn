@@ -24,8 +24,8 @@ use crate::review::model::{
     ReviewEventBody, RevisionSource, SuggestionOperation,
 };
 use crate::review::store::ReviewStore;
-use serde::{Deserialize, Serialize};
 use crate::review::working_copy::{SaveRequest, SaveSource, WorkingCopyError, WorkingCopyService};
+use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
 // ---------------------------------------------------------------------------
@@ -518,9 +518,7 @@ pub fn revert_accepted_suggestion(
     let start = splice.start;
     let inserted = splice.inserted.as_bytes();
     let end = start.saturating_add(inserted.len());
-    if end > current_markdown_bytes.len()
-        || &current_markdown_bytes[start..end] != inserted
-    {
+    if end > current_markdown_bytes.len() || &current_markdown_bytes[start..end] != inserted {
         return Err(ApplyError::RevertUnavailable {
             reason: "recorded splice no longer matches the file content".to_string(),
         });
@@ -1759,8 +1757,8 @@ mod tests {
 
     use crate::review::ids::RoomId;
     use crate::review::store::ReviewStore;
-use serde::{Deserialize, Serialize};
     use crate::review::working_copy::WorkingCopyService;
+    use serde::{Deserialize, Serialize};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -2009,9 +2007,14 @@ use serde::{Deserialize, Serialize};
         let outcome = apply_ready_verdict(&verdict, &ctx, initial).expect("apply succeeds");
 
         // The accept revision carries the recorded splice.
-        let splice: AcceptSplice =
-            serde_json::from_str(outcome.revision.patch_text.as_deref().expect("splice recorded"))
-                .expect("splice parses");
+        let splice: AcceptSplice = serde_json::from_str(
+            outcome
+                .revision
+                .patch_text
+                .as_deref()
+                .expect("splice recorded"),
+        )
+        .expect("splice parses");
         assert_eq!(splice.removed, "brown");
         assert_eq!(splice.inserted, "auburn");
         assert_eq!(splice.start, 10);

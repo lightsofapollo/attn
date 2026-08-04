@@ -358,10 +358,7 @@ pub fn is_valid_identity_color(raw: &str) -> bool {
     if let Some(hex) = raw.strip_prefix('#') {
         return hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit());
     }
-    let Some(inner) = raw
-        .strip_prefix("oklch(")
-        .and_then(|r| r.strip_suffix(')'))
-    else {
+    let Some(inner) = raw.strip_prefix("oklch(").and_then(|r| r.strip_suffix(')')) else {
         return false;
     };
     let parts: Vec<&str> = inner.split_whitespace().collect();

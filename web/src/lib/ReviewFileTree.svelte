@@ -62,7 +62,7 @@
         data-slot="shared-file-tree-file"
         data-file-id={node.fileId}
         title={node.relPath}
-        onclick={() => reviewStore.setCurrentFile(node.fileId)}
+        onclick={() => reviewStore.selectFileAsUser(node.fileId)}
       >
         <FileText class="size-3.5 shrink-0 opacity-70" aria-hidden="true" />
         <span class="min-w-0 flex-1 truncate">{node.name}</span>

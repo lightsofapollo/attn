@@ -38,11 +38,17 @@ pub enum IpcMessage {
     #[serde(rename = "theme_change")]
     ThemeChange { theme: String },
 
+    #[serde(rename = "typeset_change")]
+    TypesetChange { typeset: String },
+
     #[serde(rename = "open_external")]
     OpenExternal { path: String },
 
     #[serde(rename = "drag_window")]
     DragWindow,
+
+    #[serde(rename = "zoom_window")]
+    ZoomWindow,
 
     #[serde(rename = "open_devtools")]
     OpenDevtools,
@@ -350,7 +356,19 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 }
             }
             IpcMessage::ThemeChange { theme } => {
-                tracing::info!("theme change: {}", theme);
+                // Persist the PREFERENCE (light/dark/system), not the resolved
+                // appearance — so a `system` user keeps following the OS across
+                // restarts instead of freezing at whatever it was that night.
+                tracing::info!("theme preference: {}", theme);
+                if let Err(err) = crate::prefs::set_theme(&theme) {
+                    tracing::warn!("could not persist theme preference: {}", err);
+                }
+            }
+            IpcMessage::TypesetChange { typeset } => {
+                tracing::info!("typeset preference: {}", typeset);
+                if let Err(err) = crate::prefs::set_typeset(&typeset) {
+                    tracing::warn!("could not persist typeset preference: {}", err);
+                }
             }
             IpcMessage::OpenExternal { path } => {
                 if !path.is_empty()
@@ -361,6 +379,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             }
             IpcMessage::DragWindow => {
                 let _ = proxy.send_event(UserEvent::DragWindow);
+            }
+            IpcMessage::ZoomWindow => {
+                let _ = proxy.send_event(UserEvent::ZoomWindow);
             }
             IpcMessage::OpenDevtools => {
                 let _ = proxy.send_event(UserEvent::OpenDevtools);

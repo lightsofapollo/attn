@@ -379,11 +379,6 @@ a.workspace-row:hover {
 
 /* Grouped files sheet (iOS parity): Markdown / Assets sections, badge + name +
    capability subtitle + size rows, and an in-sheet add affordance. */
-/* Suppress the global prose bullet (base.css `ul > li::before`) leaking into
-   the sheet's file list — these rows are chrome, not markdown. */
-.bottom-sheet .file-list > li::before {
-  content: none;
-}
 .file-group {
   padding: 0.45rem 0 0.6rem;
 }

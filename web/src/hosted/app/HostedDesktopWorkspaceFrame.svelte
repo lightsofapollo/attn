@@ -225,7 +225,7 @@
        the left, save state + share/review chips inline on the right. This
        replaces the breadcrumb row and the floating ReviewBar dock. -->
   <header
-    class="attn-chrome relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background px-3"
+    class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background px-3"
     data-slot="owner-header"
   >
     <span

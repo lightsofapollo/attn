@@ -3,7 +3,7 @@
   import type { SearchResultItem, TreeNode } from './types';
   import FileTree from './FileTree.svelte';
   import ReviewFileTree from './ReviewFileTree.svelte';
-  import { dragWindow } from './ipc';
+  import { dragWindow, zoomWindow } from './ipc';
   import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
   import Check from '@lucide/svelte/icons/check';
   import Search from '@lucide/svelte/icons/search';
@@ -316,6 +316,7 @@
       aria-label="Drag window"
       tabindex="-1"
       onmousedown={dragWindow}
+      ondblclick={zoomWindow}
     ></div>
   {/if}
 
@@ -342,7 +343,10 @@
               {#if showProjectFilter}
                 <Command.Input placeholder="Search projects..." />
               {/if}
-              <Command.List class="max-h-[300px]">
+              <!-- The scroll cap lives on the ScrollArea viewport so the list
+                   gets the themed thumb instead of a native gutter. -->
+              <ScrollArea viewportClasses="max-h-[300px]">
+                <Command.List class="max-h-none overflow-visible">
                 <Command.Empty class="px-3 py-5 text-xs text-muted-foreground">
                   No projects found.
                 </Command.Empty>
@@ -380,6 +384,7 @@
                   {/each}
                 </Command.Group>
               </Command.List>
+              </ScrollArea>
             </Command.Root>
             {#if projectMenuActions.length > 0}
               <DropdownMenuSeparator />

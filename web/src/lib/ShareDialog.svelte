@@ -30,6 +30,7 @@
   import Terminal from '@lucide/svelte/icons/terminal';
   import * as Dialog from './components/ui/dialog';
   import { Button } from './components/ui/button';
+  import { ScrollArea } from './components/ui/scroll-area';
   import { reviewShare } from './ipc';
   import { ownerKeyFingerprint } from './review/fingerprint';
   import type { RoomId, SearchResultItem } from './types';
@@ -406,7 +407,7 @@
           bind:value={fileQuery}
         />
 
-        <div class="max-h-72 overflow-y-auto rounded-md border border-border bg-background" data-slot="share-file-picker">
+        <ScrollArea viewportClasses="max-h-72" class="rounded-md border border-border bg-background" data-slot="share-file-picker">
           {#if filesLoading}
             <div class="flex items-center gap-2 px-3 py-8 text-sm text-muted-foreground" role="status">
               <span class="inline-block size-3 animate-pulse rounded-full bg-primary/60" aria-hidden="true"></span>
@@ -432,7 +433,7 @@
               </label>
             {/each}
           {/if}
-        </div>
+        </ScrollArea>
 
         <div class="flex items-center justify-between gap-3 text-xs" aria-live="polite">
           <strong class="font-medium text-foreground">{selectionSummary}</strong>
@@ -446,11 +447,11 @@
           <strong id="native-shared-files-heading" class="font-medium text-foreground">Reviewers receive</strong>
           <span class="text-muted-foreground">{selectionSummary}</span>
         </div>
-        <div class="max-h-24 overflow-y-auto font-mono text-xs leading-5 text-muted-foreground">
+        <ScrollArea viewportClasses="max-h-24" class="font-mono text-xs leading-5 text-muted-foreground">
           {#each selectedPaths as path (path)}
             <div class="truncate" title={relativePath(path)}>{relativePath(path)}</div>
           {/each}
-        </div>
+        </ScrollArea>
       </section>
     {/if}
     <!-- ============================================================

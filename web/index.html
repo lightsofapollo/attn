@@ -1,9 +1,36 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="light" data-typeset="editorial">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>attn</title>
+  <script>
+    /* Resolve the seeded appearance BEFORE any content paints.
+
+       Rust stamps the stored PREFERENCE into data-theme (light | dark |
+       system); `system` still has to become a concrete light/dark, and the
+       .dark class has to exist for Tailwind's dark: variants. Doing that here
+       — inline, synchronous, ahead of the module bundle — is what keeps a
+       dark-mode user from seeing a frame of paper white on every launch.
+       web/src/lib/theme.ts takes ownership from here and tracks later OS
+       appearance changes. */
+    (function () {
+      try {
+        var root = document.documentElement;
+        var preference = root.getAttribute('data-theme') || 'system';
+        if (preference !== 'light' && preference !== 'dark') preference = 'system';
+        var dark = preference === 'dark'
+          || (preference === 'system'
+              && typeof window.matchMedia === 'function'
+              && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        root.setAttribute('data-theme-preference', preference);
+        root.setAttribute('data-theme', dark ? 'dark' : 'light');
+        root.classList.toggle('dark', dark);
+      } catch (e) {
+        /* Never let appearance resolution block the app from booting. */
+      }
+    })();
+  </script>
 </head>
 <body>
   <div id="app" style="display:none"></div>

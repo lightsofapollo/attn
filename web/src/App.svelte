@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import type {
     AppMode,
@@ -26,6 +26,7 @@
   import { netRemovedPaths } from './lib/tree-ops';
   import {
     dragWindow,
+    zoomWindow,
     editSave,
     loadChildren,
     navigate,
@@ -54,6 +55,7 @@
     resetFontScale as resetGlobalFontScale,
   } from './lib/font-scale';
   import { cycleTheme, initTheme } from './lib/theme';
+  import { initTypeset } from './lib/typeset';
   import type { PaletteCommand } from './lib/CommandPalette.svelte';
   import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
   import PenLineIcon from '@lucide/svelte/icons/pen-line';
@@ -61,6 +63,7 @@
   import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
   import PanelRightIcon from '@lucide/svelte/icons/panel-right';
   import SunMoonIcon from '@lucide/svelte/icons/sun-moon';
+  import SettingsIcon from '@lucide/svelte/icons/settings';
   import KeyboardIcon from '@lucide/svelte/icons/keyboard';
   import { createTab, findTabByPath, type Tab } from './lib/tabs';
   import Editor from './lib/Editor.svelte';
@@ -75,6 +78,8 @@
   import ReviewApplyExpand from './lib/ReviewApplyExpand.svelte';
   import ReviewBar from './lib/ReviewBar.svelte';
   import ShareDialog from './lib/ShareDialog.svelte';
+  import ReviewExitConfirm from './lib/ReviewExitConfirm.svelte';
+  import SettingsDialog from './lib/SettingsDialog.svelte';
   import NamePrompt from './lib/NamePrompt.svelte';
   import { userProfile } from './lib/profile.svelte';
   import { resolveParticipantColor } from './lib/participant-color';
@@ -111,6 +116,7 @@
     collabRoleFor,
     collabSeedReady,
     ownerRoomForPath,
+    roomPublishesPath,
     ownerUnreadByPath,
     shareTargetMatches,
   } from './lib/review/room-ui';
@@ -142,6 +148,7 @@
   let mode: AppMode = $state('edit');
   let commandPaletteOpen = $state(false);
   let shortcutsOpen = $state(false);
+  let settingsOpen = $state(false);
   // Share-for-review dialog (attn-nnj.4.10). Owner-only modal opened via
   // the ReviewBar's [Share] button or the Cmd+Shift+S keybinding.
   let shareDialogOpen = $state(false);
@@ -387,7 +394,29 @@
     if (activeRoom?.role === 'reviewer') return;
 
     if (roomId !== null) {
-      if (roomId !== reviewStore.currentRoomId) reviewStore.selectRoom(roomId);
+      // `ownerRoomForPath` resolves through the share ROOT, which for a
+      // multi-file share is the whole project — so it answers "this file is in
+      // a shared project", not "this file is in the review". Selecting on that
+      // alone put the rail, chip and margin on files that were never shared
+      // (and undid an explicit exit-review). Membership is the published file
+      // set; the root answer only stands while a freshly minted room has yet
+      // to publish anything.
+      const roomHasPublishedFiles = reviewStore.snapshots.some(
+        (snapshot) => snapshot.roomId === roomId && Boolean(snapshot.ownerDisplayPath),
+      );
+      const publishesActivePath = roomPublishesPath({
+        path: activePath,
+        roomId,
+        snapshots: reviewStore.snapshots,
+        rootPath,
+      });
+      if (!roomHasPublishedFiles || publishesActivePath) {
+        if (roomId !== reviewStore.currentRoomId) reviewStore.selectRoom(roomId);
+        return;
+      }
+      // In a shared project, but not in the review — same as any unshared
+      // file: collaboration chrome off, durable room data untouched.
+      if (reviewStore.currentRoomId !== null) reviewStore.clearRoomSelection();
       return;
     }
 
@@ -1722,7 +1751,80 @@
     });
   }
 
+  // --------------------------------------------------------------------
+  // Review-exit guard (attn-rd3j.2)
+  //
+  // An engaged review session owns the whole surface — margin cards, rail,
+  // presence, snapshot rendering. Letting a file switch yank that away
+  // mid-flight both surprises the reviewer and looks broken: the room
+  // auto-follow effect tears down collaboration state in the same frame the
+  // editor swaps documents. So a switch that LEAVES the session asks first,
+  // and on confirm the teardown runs to completion before navigation starts.
+  //
+  // Moves that stay inside the session (another file in a shared folder,
+  // re-selecting the current file) are not exits and never prompt.
+  // --------------------------------------------------------------------
+  let reviewExitConfirmOpen = $state(false);
+  let pendingReviewExitNavigation: (() => void) | null = null;
+
+  /** Would navigating to `path` leave the review session on screen? */
+  function navigationLeavesReview(path: string): boolean {
+    const roomId = reviewStore.currentRoomId;
+    if (roomId === null) return false;
+    // A reviewer's room is not path-derived: any local-file navigation
+    // abandons the shared document.
+    if (isReviewerInRoom) return true;
+    // Owner: membership is the room's PUBLISHED file set, not the share root.
+    // A multi-file share roots at the project directory, so a root-based test
+    // would call every file in the project "still in review".
+    const inReview = (candidate: string): boolean =>
+      roomPublishesPath({
+        path: candidate,
+        roomId,
+        snapshots: reviewStore.snapshots,
+        rootPath,
+      });
+    // Nothing to exit unless the document on screen is itself under review.
+    if (!inReview(activePath)) return false;
+    return !inReview(path);
+  }
+
+  /** Run a navigation now, or park it behind the exit-review confirmation. */
+  function guardReviewExit(targetPath: string, navigate: () => void): void {
+    if (!navigationLeavesReview(targetPath)) {
+      navigate();
+      return;
+    }
+    pendingReviewExitNavigation = navigate;
+    reviewExitConfirmOpen = true;
+  }
+
+  async function confirmReviewExit(): Promise<void> {
+    const navigate = pendingReviewExitNavigation;
+    pendingReviewExitNavigation = null;
+    reviewExitConfirmOpen = false;
+    const exitingRoomId = reviewStore.currentRoomId;
+    // Claim the auto-select latch for the room being left: a reviewer with a
+    // single room and no local tab would otherwise be pulled straight back in
+    // by the only-room effect before the navigation lands.
+    if (exitingRoomId !== null) autoSelectedRoomId = exitingRoomId;
+    reviewStore.clearRoomSelection();
+    // Let the rail and margin cards actually unmount before the document
+    // swaps — the ordering IS the fix for the glitchy switch.
+    await tick();
+    navigate?.();
+  }
+
+  function cancelReviewExit(): void {
+    pendingReviewExitNavigation = null;
+    reviewExitConfirmOpen = false;
+  }
+
   function openPath(path: string, fileType?: FileType, newTab = false): void {
+    guardReviewExit(path, () => openPathNow(path, fileType, newTab));
+  }
+
+  function openPathNow(path: string, fileType?: FileType, newTab = false): void {
     const ft = fileType ?? detectFileType(path);
 
     // For directories, always (re-)load children so DirectoryOverview shows the full listing.
@@ -1736,7 +1838,7 @@
       // Reuse existing tab for this path, or navigate the active tab
       const existing = findTabByPath(tabs, path);
       if (existing) {
-        switchTab(existing.id);
+        switchTabNow(existing.id);
         return;
       }
     }
@@ -1774,6 +1876,12 @@
 
   function switchTab(id: string): void {
     if (id === activeTabId) return;
+    const target = tabs.find((t) => t.id === id);
+    guardReviewExit(target?.path ?? '', () => switchTabNow(id));
+  }
+
+  function switchTabNow(id: string): void {
+    if (id === activeTabId) return;
     saveScrollPosition();
     activeTabId = id;
     const tab = tabs.find((t) => t.id === id);
@@ -1791,6 +1899,21 @@
   function closeTab(id: string): void {
     const idx = tabs.findIndex((t) => t.id === id);
     if (idx === -1) return;
+    // Closing a background tab never changes the rendered document.
+    if (id !== activeTabId) {
+      closeTabNow(id, idx);
+      return;
+    }
+    // Closing the reviewed tab leaves review exactly as switching does — and
+    // when it was the last tab there is no document to land on at all.
+    const remaining = tabs.filter((t) => t.id !== id);
+    const nextPath = remaining.length > 0
+      ? remaining[Math.min(idx, remaining.length - 1)].path
+      : '';
+    guardReviewExit(nextPath, () => closeTabNow(id, idx));
+  }
+
+  function closeTabNow(id: string, idx: number): void {
     tabs = tabs.filter((t) => t.id !== id);
     if (tabs.length === 0) {
       activeTabId = '';
@@ -1799,7 +1922,7 @@
     if (id === activeTabId) {
       // Activate adjacent tab
       const newIdx = Math.min(idx, tabs.length - 1);
-      switchTab(tabs[newIdx].id);
+      switchTabNow(tabs[newIdx].id);
     }
   }
 
@@ -2015,8 +2138,12 @@
         }
       }
     }
-    document.documentElement.dataset.theme = init.theme;
+    // `init.theme` is the stored PREFERENCE (may be `system`); initTheme
+    // resolves it to a painted appearance and starts following the OS.
+    document.documentElement.dataset.themePreference = init.theme;
+    document.documentElement.dataset.typeset = init.typeset ?? 'editorial';
     initTheme();
+    initTypeset();
 
     // Show Svelte app
     const appEl = document.getElementById('app');
@@ -2536,11 +2663,20 @@
     },
     {
       id: 'theme',
-      label: 'Switch theme (Paper / Ink)',
+      label: 'Switch theme (Paper / Ink / System)',
       hint: ['T'],
-      keywords: 'theme dark light paper ink appearance',
+      keywords: 'theme dark light paper ink appearance system auto',
       icon: SunMoonIcon,
       run: () => cycleTheme(),
+    },
+    {
+      id: 'settings',
+      label: 'Settings',
+      keywords: 'settings preferences appearance theme typeset typography font',
+      icon: SettingsIcon,
+      run: () => {
+        settingsOpen = true;
+      },
     },
     {
       id: 'shortcuts',
@@ -2633,8 +2769,10 @@
     }
     // Navigate to a single file so the owner sees what they're sharing; a
     // folder isn't a document, so leave the owner on their current file.
+    // Unguarded: "share this other file" already states the intent, and the
+    // exit-review prompt would land on top of the share sheet.
     if (!isDir && (path !== activePath || activeFileType !== 'markdown')) {
-      openPath(path, ft, false);
+      openPathNow(path, ft, false);
     }
     shareDialogOpen = true;
   }
@@ -2958,9 +3096,10 @@
        right. The whole quiet surface remains a native window drag target. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header
-    class={`attn-chrome relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background pr-3 ${hasSidebar ? 'pl-3' : 'pl-[6.5rem]'}`}
+    class={`relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background pr-3 ${hasSidebar ? 'pl-3' : 'pl-[6.5rem]'}`}
     data-slot="native-header"
     onmousedown={dragWindow}
+    ondblclick={zoomWindow}
   >
     <span
       class="select-none font-serif text-sm font-bold leading-none text-foreground"
@@ -3105,6 +3244,7 @@
       aria-label="Drag window"
       tabindex="-1"
       onmousedown={dragWindow}
+      ondblclick={zoomWindow}
     ></div>
     {@render minimalDiagnosticContent()}
   </main>
@@ -3117,6 +3257,7 @@
       aria-label="Drag window"
       tabindex="-1"
       onmousedown={dragWindow}
+      ondblclick={zoomWindow}
     ></div>
     {@render editorOnlyContent()}
   </main>
@@ -3177,6 +3318,13 @@
   existingRoomId={shareTargetIsCurrent ? (reviewStore.currentShare?.roomId ?? null) : null}
   shareErrorMessage={reviewStore.lastError?.message ?? ''}
   onClearError={() => reviewStore.clearLastError()}
+/>
+<SettingsDialog bind:open={settingsOpen} />
+<ReviewExitConfirm
+  open={reviewExitConfirmOpen}
+  documentName={headerDocumentName}
+  onConfirm={confirmReviewExit}
+  onCancel={cancelReviewExit}
 />
 <NamePrompt
   bind:open={namePromptOpen}

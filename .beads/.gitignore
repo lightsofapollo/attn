@@ -1,6 +1,10 @@
 # Dolt database (managed by Dolt, not git)
 dolt/
+embeddeddolt/
 dolt-access.lock
+
+# Transient auto-import staging file
+.auto-import-issues.jsonl
 
 # Runtime files
 bd.sock

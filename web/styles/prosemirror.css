@@ -124,6 +124,18 @@
   transition: color 0.18s ease, box-shadow 0.18s ease, outline-color 0.18s ease;
 }
 
+/* Code block frame: the positioning context for pinned chrome (copy button,
+   language label). The scroller inside moves; the frame never does. */
+.ProseMirror .code-block {
+  position: relative;
+  max-width: min(100%, var(--content-measure));
+  margin-inline: auto;
+}
+
+.ProseMirror .code-block > .prose-scroll-x {
+  max-width: 100%;
+}
+
 /* Copy button on code blocks */
 .code-copy-btn {
   position: absolute;
@@ -146,7 +158,8 @@
   transition: opacity 0.15s ease, background 0.14s ease, color 0.14s ease;
 }
 
-.prose-scroll-x:hover > .code-copy-btn {
+.prose-scroll-x:hover > .code-copy-btn,
+.code-block:hover > .code-copy-btn {
   opacity: 1;
 }
 
@@ -180,32 +193,6 @@
   margin-bottom: 0;
 }
 
-
-/* Style bits-ui horizontal scrollbars in code block scroll areas. */
-.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-scrollbar"][data-orientation="horizontal"] {
-  height: 12px;
-  padding: 0 2px 2px;
-  opacity: 1;
-  transition: opacity 0.18s ease;
-}
-
-.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-scrollbar"][data-state="hidden"] {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-viewport"] {
-  overflow-y: hidden;
-}
-
-.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-thumb"] {
-  background: var(--border);
-  transition: background-color 0.14s ease;
-}
-
-.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-thumb"]:hover {
-  background: var(--muted-foreground);
-}
 
 /* Hide cursor in read-only mode */
 .ProseMirror:not([contenteditable="true"]) {
@@ -336,7 +323,10 @@
   border-bottom-width: 2px;
 }
 
-/* Code block language label */
+/* Code block language label. Inside the .code-block frame it pins to the
+   frame's top-left (matching the pinned copy button) so it can't slide away
+   with horizontal scroll; the in-flow pre::before form remains for code
+   rendered without the NodeView frame. */
 .ProseMirror pre[data-params]::before {
   content: attr(data-params);
   display: block;
@@ -351,6 +341,43 @@
 
 .ProseMirror pre[data-params=""]::before {
   display: none;
+}
+
+.ProseMirror .code-block[data-params]:not([data-params=""])::before,
+.ProseMirror .code-block[data-detected]::before {
+  content: attr(data-params);
+  position: absolute;
+  top: 1rem;
+  left: 1.125rem;
+  z-index: 10;
+  pointer-events: none;
+  font-size: 0.7rem;
+  line-height: 1.2;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+  color: var(--muted-foreground);
+  font-family: var(--sans);
+}
+
+/* Detected (not author-declared) languages read as a guess: lowercase
+   italic, quieter. */
+.ProseMirror .code-block[data-detected]::before {
+  content: attr(data-detected);
+  text-transform: lowercase;
+  font-style: italic;
+  opacity: 0.45;
+}
+
+.ProseMirror .code-block > .prose-scroll-x > pre[data-params]::before {
+  content: none;
+}
+
+/* The pinned label needs its lane back: restore the vertical space the
+   in-flow label used to occupy at the top of the pre. */
+.ProseMirror .code-block > .prose-scroll-x > pre[data-params]:not([data-params=""]),
+.ProseMirror .code-block[data-detected] > .prose-scroll-x > pre {
+  padding-top: 2.35rem;
 }
 
 /* Editable indicator — subtle top accent when in edit mode */
@@ -691,4 +718,26 @@
    painting the editor's native selection the moment focus leaves it). */
 .ProseMirror .pending-anchor-highlight {
   background: var(--selection);
+}
+
+/* No native scroll rail inside prose blocks.
+ *
+ * base.css styles `::-webkit-scrollbar` globally, and in WKWebView styling it
+ * at all switches that element from macOS OVERLAY scrollbars to CLASSIC ones —
+ * which reserve layout space permanently. Measured on an overflowing table:
+ * 13px of the block's height carved out for an always-painted grey rail
+ * sitting under the last row, inside the block's own border. That gutter IS
+ * the "weird rail" (attn-rd3j.8); `scrollbar-width: auto` makes it 17px and
+ * there is no value that restores overlay behavior.
+ *
+ * So these blocks hide the bar and scroll by trackpad/shift-wheel, the same
+ * treatment the breadcrumb overflow already uses. Nothing is reserved, so
+ * revealing content causes no layout shift. */
+.ProseMirror .prose-scroll-x {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.ProseMirror .prose-scroll-x::-webkit-scrollbar {
+  display: none;
 }

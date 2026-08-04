@@ -975,7 +975,7 @@
 
 <div
   bind:this={containerEl}
-  class="review-margin attn-chrome"
+  class="review-margin"
   data-slot="review-margin"
   data-rail-mode={collapsed ? 'collapsed' : 'expanded'}
 >

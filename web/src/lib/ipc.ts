@@ -77,6 +77,10 @@ export function themeChange(theme: string): void {
   send({ type: 'theme_change', theme });
 }
 
+export function typesetChange(typeset: string): void {
+  send({ type: 'typeset_change', typeset });
+}
+
 export function openExternal(path: string): void {
   send({ type: 'open_external', path });
 }
@@ -94,6 +98,14 @@ export function dragWindow(e: MouseEvent): void {
   const target = e.target as HTMLElement;
   if (target.closest('a, button, input, select, textarea')) return;
   send({ type: 'drag_window' });
+}
+
+/** Double-click handler for drag regions — native titlebar zoom/restore,
+ *  with the same interactive-element exclusion as dragWindow. */
+export function zoomWindow(e: MouseEvent): void {
+  const target = e.target as HTMLElement;
+  if (target.closest('a, button, input, select, textarea')) return;
+  send({ type: 'zoom_window' });
 }
 
 // ---------------------------------------------------------------------------

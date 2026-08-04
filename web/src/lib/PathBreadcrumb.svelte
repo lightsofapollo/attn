@@ -8,7 +8,7 @@
     BreadcrumbPage,
     BreadcrumbSeparator,
   } from '$lib/components/ui/breadcrumb';
-  import { dragWindow } from './ipc';
+  import { dragWindow, zoomWindow } from './ipc';
   import Share2 from '@lucide/svelte/icons/share-2';
   import ExternalLink from '@lucide/svelte/icons/external-link';
 
@@ -97,6 +97,9 @@
   style={`-webkit-user-select: none; padding-left: ${avoidWindowControls ? '6.5rem' : '1rem'}; padding-right: ${rightInsetPx}px; ${fixed ? `top: ${topOffsetPx}px;` : ''}`}
   onmousedown={(event) => {
     if (event.target === event.currentTarget) dragWindow(event);
+  }}
+  ondblclick={(event) => {
+    if (event.target === event.currentTarget) zoomWindow(event);
   }}
 >
   {#if segments.length > 1}

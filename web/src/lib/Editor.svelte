@@ -1024,5 +1024,5 @@
       <button type="button" class="pm-find-btn" aria-label="Close find" onclick={() => closeFindPanel()}>✕</button>
     </form>
   {/if}
-  <div bind:this={editorEl} class="prosemirror-mount"></div>
+  <div bind:this={editorEl} class="prosemirror-mount attn-doc"></div>
 </div>

@@ -130,6 +130,8 @@ This system explicitly rejects three neighbors. It is **not a cloud-SaaS review 
 
 A warm parchment field carrying near-black ink and a single terracotta accent; cool review hues (green, amber, blue, violet) are quarantined to the collaboration layer so they never dilute the editorial ground. All values are canonical **OKLCH** — attn is OKLCH-native and the frontmatter carries OKLCH directly.
 
+**Paper / Ink / System.** Appearance is a three-state preference (Settings → Appearance), defaulting to **System** — the app follows the OS appearance and tracks changes to it live. The preference is durable (`prefs.json`, next to the project registry) and is stamped into the page before the bundle loads, so launching never shows a frame of the wrong theme. `light`/`dark` are explicit overrides that ignore the OS.
+
 ### Primary
 - **Terracotta Pencil** (`oklch(0.48 0.14 28)`, INK theme `oklch(0.72 0.10 220)` steel blue): the one accent. Primary buttons, current selection, checked checkboxes, focus rings, the "shared for review" marker. Warm red-clay on paper; it becomes a cool steel blue in dark mode because a saturated red-clay glows unpleasantly against a near-black ground.
 
@@ -179,8 +181,19 @@ Role is no longer a color channel for humans — shape carries it (round = human
 - **Label** (600, `0.7rem`, `0.06em`, UPPERCASE): table headers, meta chips, sidebar section markers. Sans.
 - **Mono** (400, `0.85rem`, 1.55): code blocks and inline code.
 
+### Typeset presets
+The three cuts above are the **Editorial** preset — the default, and the shape every rule in this section describes. Settings offers two alternates (shadcn's typeset model: a preset is a complete reading system, never a pile of independent font knobs):
+
+- **Editorial** — the default described above. Declares no overrides, so it cannot drift from the canonical tokens.
+- **Modern** — sans for reading as well as chrome, with display sizes pulled in and tracking tightened (serif display scale reads oversized in sans). For readers who want a code-review tool rather than a manuscript.
+- **Compact** — Editorial's fonts at a denser scale and leading, on a narrower measure. For dense ops docs.
+
+Presets live in `web/styles/typeset.css`, keyed off `data-typeset` on `<html>`, and only ever redefine existing tokens. They are orthogonal to light/dark (which owns color) and to the ⌘+/⌘- font scale (which multiplies `--attn-base-font-size`) — all three compose.
+
 ### Named Rules
-**The Read/Do Rule.** If the user is reading it, it's serif. If the user is operating it, it's sans. There is no third case; a button never uses the serif, a heading in the document never uses the sans.
+**The Read/Do Rule.** If the user is reading it, it's serif. If the user is operating it, it's sans. There is no third case; a button never uses the serif, a heading in the document never uses the sans. (A preset may change *which* face reads as the serif — Modern makes it a sans — but never which role gets the reading face.)
+
+**The Scoped-Document Rule** (2026-08-04). Document typography is scoped to `.attn-doc` — the class the editor mount and the viewer article carry. Bare `p` / `h1` / `ul` / `li` selectors are never global: chrome rendered in the same tree used to inherit 2rem heading gaps and absolutely-positioned list bullets that escaped their card, and each leak got patched individually until an opt-out class existed purely to undo the defaults. Type the document, not the page.
 
 **The Fixed-Scale Rule.** Product register: headings are fixed rem, not `clamp()`. Users view at consistent DPI inside panes and windows; a fluid h1 that shrinks in a sidebar looks worse, not better.
 

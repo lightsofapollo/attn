@@ -1,0 +1,63 @@
+/* ============================================================
+   Typeset presets (attn-rd3j.7).
+
+   Each preset is a complete reading system — font pairing plus type scale —
+   selected in Settings and stamped on <html> as `data-typeset` (seeded by
+   Rust before first paint, see src/prefs.rs). Presets only ever REDEFINE
+   tokens that already exist in tokens.css; no component reads a preset name.
+
+   `editorial` is the default and deliberately declares nothing: the tokens in
+   tokens.css ARE the editorial preset, so the default path has zero override
+   and cannot drift from the app's historical rendering.
+
+   Composition: presets are orthogonal to light/dark (which owns color) and to
+   the Cmd +/- font scale (which multiplies --attn-base-font-size).
+   ============================================================ */
+
+/* --- Modern: sans-serif throughout ------------------------------------ */
+[data-typeset='modern'] {
+  --serif: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+  --attn-base-font-size: 15px;
+}
+
+[data-typeset='modern'] body {
+  line-height: 1.68;
+  letter-spacing: 0;
+}
+
+/* Sans headings carry weight rather than size, so pull the display sizes in
+   and tighten tracking — serif display scale reads oversized in sans. */
+[data-typeset='modern'] .attn-doc h1,
+[data-typeset='modern'] .ProseMirror h1 { font-size: 1.8rem; letter-spacing: -0.025em; }
+[data-typeset='modern'] .attn-doc h2,
+[data-typeset='modern'] .ProseMirror h2 { font-size: 1.4rem; letter-spacing: -0.02em; }
+[data-typeset='modern'] .attn-doc h3,
+[data-typeset='modern'] .ProseMirror h3 { font-size: 1.18rem; }
+[data-typeset='modern'] .attn-doc h6,
+[data-typeset='modern'] .ProseMirror h6 { font-style: normal; font-weight: 600; }
+
+/* --- Compact: denser scale, more document per screen ------------------ */
+[data-typeset='compact'] {
+  --attn-base-font-size: 14.5px;
+  --content-measure: 880px;
+}
+
+[data-typeset='compact'] body {
+  line-height: 1.58;
+}
+
+[data-typeset='compact'] .attn-doc :is(p, ul, ol, blockquote, table),
+[data-typeset='compact'] .ProseMirror :is(p, ul, ol, blockquote, table) {
+  margin-bottom: 0.7rem;
+}
+
+[data-typeset='compact'] .attn-doc h1,
+[data-typeset='compact'] .ProseMirror h1 { font-size: 1.7rem; margin-top: 1.8rem; margin-bottom: 0.5rem; }
+[data-typeset='compact'] .attn-doc h2,
+[data-typeset='compact'] .ProseMirror h2 { font-size: 1.32rem; margin-top: 1.6rem; margin-bottom: 0.35rem; }
+[data-typeset='compact'] .attn-doc h3,
+[data-typeset='compact'] .ProseMirror h3 { font-size: 1.14rem; margin-top: 1.35rem; }
+[data-typeset='compact'] .attn-doc h4,
+[data-typeset='compact'] .ProseMirror h4 { font-size: 1.04rem; margin-top: 1.2rem; }
+[data-typeset='compact'] .attn-doc li,
+[data-typeset='compact'] .ProseMirror li { margin-bottom: 0.12rem; }

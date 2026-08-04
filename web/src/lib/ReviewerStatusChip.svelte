@@ -110,7 +110,7 @@
     ></button>
 
     <div
-      class="attn-chrome absolute right-0 top-full z-[60] mt-1 w-80 rounded-lg border border-border bg-popover text-popover-foreground shadow-md"
+      class="absolute right-0 top-full z-[60] mt-1 w-80 rounded-lg border border-border bg-popover text-popover-foreground shadow-md"
       data-slot="reviewer-status-popover"
       role="dialog"
       aria-label="Review session details"

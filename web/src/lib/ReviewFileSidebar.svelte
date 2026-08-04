@@ -32,7 +32,7 @@
 
 {#if files.length >= 2}
   <aside
-    class="review-file-sidebar attn-chrome flex w-56 shrink-0 flex-col overflow-hidden border-r border-border bg-muted/20"
+    class="review-file-sidebar flex w-56 shrink-0 flex-col overflow-hidden border-r border-border bg-muted/20"
     data-slot="review-file-sidebar"
     aria-label="Shared files"
   >

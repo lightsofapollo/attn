@@ -10,6 +10,7 @@ import {
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript';
 import { bundledThemes } from 'shiki/themes';
 import { bundledLanguages } from 'shiki/langs';
+import { detectLanguage } from './detect-language';
 
 type ParserFn = (options: {
   content: string;
@@ -18,14 +19,44 @@ type ParserFn = (options: {
   size: number;
 }) => Decoration[] | Promise<void>;
 
-const LANGS: (keyof typeof bundledLanguages)[] = [
+/** Preloaded at highlighter creation so the common cases paint on the first
+ *  decoration pass; anything else in shiki's bundle loads on demand. */
+const PRELOAD_LANGS: (keyof typeof bundledLanguages)[] = [
   'javascript', 'typescript', 'python', 'bash', 'rust', 'go',
   'json', 'yaml', 'html', 'css', 'c', 'cpp', 'java', 'ruby',
   'sql', 'xml', 'toml', 'diff', 'markdown', 'svelte',
 ];
 
+/** Fences that must stay unhighlighted: plain-text spellings shiki has no
+ *  grammar for, plus languages owned by specialized NodeViews. */
+const SKIP_LANGS = new Set(['plaintext', 'plain', 'text', 'txt', 'log', 'output', 'mermaid', 'math', 'latex']);
+
+/** Spellings seen in real docs that shiki's alias table doesn't cover. */
+const EXTRA_ALIASES: Record<string, string> = {
+  'shell-session': 'shellsession',
+  term: 'shellsession',
+  terminal: 'shellsession',
+  node: 'javascript',
+  golang: 'go',
+  yarn: 'bash',
+  npm: 'bash',
+};
+
+/** Resolve a fence tag to a loadable shiki language id, or undefined for
+ *  plain text. shiki's own bundle already maps common aliases (js, ts, py,
+ *  sh, yml, …) so most spellings resolve directly. */
+function normalizeLang(raw: string): string | undefined {
+  if (!raw || SKIP_LANGS.has(raw)) return undefined;
+  if (raw in bundledLanguages) return raw;
+  const aliased = EXTRA_ALIASES[raw];
+  if (aliased && aliased in bundledLanguages) return aliased;
+  return undefined;
+}
+
 let highlighterPromise: Promise<HighlighterCore> | undefined;
+let resolvedHighlighter: HighlighterCore | undefined;
 let resolvedParser: ParserFn | undefined;
+const langLoads = new Map<string, Promise<void>>();
 
 function getHighlighter(): Promise<HighlighterCore> {
   if (!highlighterPromise) {
@@ -35,50 +66,71 @@ function getHighlighter(): Promise<HighlighterCore> {
         bundledThemes['vitesse-light'],
         bundledThemes['github-dark'],
       ],
-      langs: LANGS.map((id) => bundledLanguages[id]),
+      langs: PRELOAD_LANGS.map((id) => bundledLanguages[id]),
+    }).then((highlighter) => {
+      resolvedHighlighter = highlighter;
+      resolvedParser = createParser(highlighter, {
+        themes: {
+          // vitesse-light: darker, muted tokens that clear WCAG AA on the warm
+          // paper code ground (github-light's keyword was 3.23:1) and read
+          // warmer, on-brand (gate-35).
+          light: 'vitesse-light',
+          dark: 'github-dark',
+        },
+      });
+      return highlighter;
     });
   }
   return highlighterPromise;
 }
 
-/** Lazy parser: returns Promise<void> while highlighter loads, then delegates to shiki parser.
- *  Skips blocks without a language tag and catches per-block errors so one
- *  unrecognised language doesn't kill highlighting for the entire document. */
+/** Load a not-yet-loaded language into the live highlighter exactly once.
+ *  Returns a promise so the plugin re-dispatches when the grammar lands. */
+function ensureLangLoaded(highlighter: HighlighterCore, lang: string): Promise<void> {
+  let load = langLoads.get(lang);
+  if (!load) {
+    load = highlighter
+      .loadLanguage(bundledLanguages[lang as keyof typeof bundledLanguages])
+      .catch(() => {
+        /* grammar failed to load — block stays plain text */
+      });
+    langLoads.set(lang, load);
+  }
+  return load;
+}
+
+/** Lazy parser: returns Promise<void> while the highlighter (or a grammar)
+ *  loads, then delegates to the shiki parser. Catches per-block errors so one
+ *  broken block doesn't kill highlighting for the entire document. */
 function lazyParser(options: {
   content: string;
   pos: number;
   language?: string;
   size: number;
 }): Decoration[] | Promise<void> {
-  // No language tag → render as plain text (no highlighting)
-  if (!options.language) return [];
+  const lang = options.language;
+  // No declared language and nothing confidently detected → plain text.
+  if (!lang) return [];
 
-  if (resolvedParser) {
-    try {
-      return resolvedParser(options);
-    } catch {
-      // Language not loaded or parse error — skip this block
-      return [];
-    }
+  if (!resolvedParser || !resolvedHighlighter) {
+    return getHighlighter().then(() => undefined);
   }
-  return getHighlighter().then((highlighter) => {
-    resolvedParser = createParser(highlighter, {
-      themes: {
-        // vitesse-light: darker, muted tokens that clear WCAG AA on the warm
-        // paper code ground (github-light's keyword was 3.23:1) and read
-        // warmer, on-brand (gate-35).
-        light: 'vitesse-light',
-        dark: 'github-dark',
-      },
-    });
-    // Return void — plugin will re-dispatch to pick up decorations
-  });
+  if (!resolvedHighlighter.getLoadedLanguages().includes(lang)) {
+    return ensureLangLoaded(resolvedHighlighter, lang);
+  }
+  try {
+    return resolvedParser(options);
+  } catch {
+    return [];
+  }
 }
 
 function languageExtractor(node: PmNode): string | undefined {
   const params = (node.attrs.params as string) || '';
-  const lang = params.split(/\s+/)[0].toLowerCase();
-  return lang || undefined;
+  const declared = params.split(/\s+/)[0].toLowerCase();
+  if (declared) return normalizeLang(declared);
+  // Untagged fence: fall back to conservative content-based detection.
+  return detectLanguage(node.textContent);
 }
 
 export function codeHighlightPlugin(): Plugin {

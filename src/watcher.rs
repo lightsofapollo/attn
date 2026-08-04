@@ -69,6 +69,8 @@ pub enum UserEvent {
     OpenDevtools,
     /// The user started dragging a custom title bar region.
     DragWindow,
+    /// The user double-clicked a title bar region — toggle native zoom.
+    ZoomWindow,
     /// Explicitly toggle the macOS resident daemon LaunchAgent.
     ResidentLaunchAtLogin { enabled: bool },
     /// Show and focus the main window.

@@ -69,7 +69,9 @@ fn registry_path() -> PathBuf {
     storage_dir().join("projects.json")
 }
 
-fn storage_dir() -> PathBuf {
+/// The daemon's runtime namespace — shared by the project registry and
+/// durable UI preferences (`src/prefs.rs`).
+pub fn storage_dir() -> PathBuf {
     // ATTN_HOME wins over XDG_STATE_HOME so the project registry shares the
     // daemon's runtime namespace (see src/daemon.rs::runtime_dir).
     if let Ok(value) = std::env::var("ATTN_HOME") {

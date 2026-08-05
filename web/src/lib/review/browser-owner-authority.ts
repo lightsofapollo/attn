@@ -7,7 +7,6 @@
 // are loaded before the BrowserSession can receive collaboration traffic.
 
 import type { Node as PmNode } from 'prosemirror-model';
-import { markdownParser } from '../schema';
 
 import {
   CollabController,
@@ -712,6 +711,9 @@ export class BrowserOwnerAuthorityService {
         throw new Error('authority revision bytes do not match the published content hash');
       }
       const markdown = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      // Imported at the call site so the desk route does not pull the parser
+      // (attn-n01r.41); this method is already async.
+      const { markdownParser } = await import('../schema');
       doc = markdownParser.parse(markdown);
     } finally {
       bytes.fill(0);

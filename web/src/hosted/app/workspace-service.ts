@@ -46,9 +46,16 @@ void import('../../lib/profile.svelte')
   })
   .catch(() => {});
 
-import {
+/* Type-only (attn-n01r.41). A value import of BrowserOwnerWorkspaceRuntime made
+   the whole editor runtime — ProseMirror, markdown-it, the collab authority —
+   a static dependency of this module, and therefore of the desk, which needs
+   only listWorkspaces / storageHealth / getWorkspace. The class is loaded at
+   its single construction site in beginOwnerRuntime(), which is already async
+   and only runs when an owner actually begins editing. `import type` is erased,
+   so the Map and the signatures below cost nothing at runtime. */
+import type {
   BrowserOwnerWorkspaceRuntime,
-  type BrowserOwnerWorkspaceRuntimeOptions,
+  BrowserOwnerWorkspaceRuntimeOptions,
 } from '../../lib/review/browser-owner-workspace-runtime';
 import { openWorkspaceReviewProjection } from '../../lib/review/browser-review-log';
 
@@ -174,6 +181,9 @@ export class BrowserWorkspaceService {
     // before a fresh one claims — otherwise the caller gets a zombie whose
     // lease is being released out from under it.
     if (existing && existing.isClosing()) await existing.close();
+    const { BrowserOwnerWorkspaceRuntime } = await import(
+      '../../lib/review/browser-owner-workspace-runtime'
+    );
     const runtime = new BrowserOwnerWorkspaceRuntime({
       storage: this.storage,
       workspaceId,

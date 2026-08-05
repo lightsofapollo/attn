@@ -16,7 +16,6 @@
 
 import type { Node as PmNode } from 'prosemirror-model';
 
-import { markdownParser, markdownSerializer } from '../schema';
 import { CollabController } from '../prosemirror/collab-controller';
 import { LOCAL_COLLAB_CHANNEL_PREFIX, openBroadcastChannel } from '../tab-channels';
 import type { FileId } from '../types';
@@ -305,6 +304,7 @@ export class LocalCollabHub {
     if (existing) {
       return { fileId, epoch: localEpochFor(fileId), markdown: existing.markdown };
     }
+    const { markdownParser } = await import('../schema');
     const doc = markdownParser.parse(markdown);
     if (!doc) return null;
     this.seeds.set(fileId, { markdown, doc });
@@ -360,8 +360,18 @@ export class LocalCollabHub {
     if (!doc) return;
     const path = this.options.pathForFileId?.(fileId) ?? fileId;
     if (!path) return;
-    const markdown = markdownSerializer.serialize(doc);
-    const commit = this.options.commitMarkdown(path, markdown).catch(() => {
+    /* The serializer is imported here rather than at module scope so the desk
+       route does not drag ProseMirror + markdown-it (attn-n01r.41).
+
+       The ordering guarantee close() depends on is unchanged: it awaits
+       `inflightCommits`, so what matters is that this promise is REGISTERED
+       synchronously, not that serialization completes synchronously. `doc` is
+       captured before the await, so the commit serializes the document as it
+       was at call time — a later edit cannot race ahead of it. */
+    const commit = (async () => {
+      const { markdownSerializer } = await import('../schema');
+      await this.options.commitMarkdown(path, markdownSerializer.serialize(doc));
+    })().catch(() => {
       // Lease loss / close races: the follower that takes over re-commits
       // its live doc, so a failed trailing commit here is not data loss.
     });

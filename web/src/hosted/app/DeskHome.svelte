@@ -402,6 +402,12 @@
             {workspace.markdownCount + workspace.assetCount === 1 ? 'file' : 'files'}
           </span>
           <span class="detail">{workspace.lastEditedLabel}</span>
+          <!-- sizeLabel is computed in toSummary and was never rendered
+               (attn-n01r.6). Showing it makes an empty workspace legibly empty
+               — "0 B" rather than a name that looks like it holds something.
+               This does not decide what New workspace should create; it stops
+               the desk from hiding the answer. -->
+          <span class="detail detail-size">{workspace.sizeLabel}</span>
           <span class="row-tail">
             {#if workspace.sharing === 'shared'}
               <span class="local-badge" title="The relay stores encrypted envelopes only; the key stays in the link fragment."><span class="dot" aria-hidden="true"></span> Shared · relay sees only ciphertext</span>

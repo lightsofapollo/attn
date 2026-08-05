@@ -301,7 +301,7 @@
      repeated action in the product. */
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.65fr) minmax(0, 0.65fr) auto;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.5fr) minmax(0, 0.55fr) minmax(0, 0.4fr) auto;
   align-items: center;
   gap: 1rem;
   padding: 1.25rem 0.6rem;

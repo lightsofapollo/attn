@@ -179,7 +179,7 @@ p {
   height: 6px;
   margin-top: 0.23rem;
   border-radius: 99px;
-  background: var(--green);
+  background: var(--hosted-muted);
 }
 
 .product-stage {
@@ -486,12 +486,20 @@ p {
   letter-spacing: 0.1em;
 }
 
+/* Muted, not ledger green (attn-n01r.18). The Quarantine Rule reserves green
+   for the collaboration layer — suggestion and insertion — and this is a
+   category label on base chrome with no such meaning. */
 .surface.browser .surface-label {
-  color: var(--green);
+  color: var(--hosted-muted);
 }
 
+/* The panel inversion carries the browser/native distinction; the label does
+   not need a hue of its own (attn-n01r.37). --native-panel-label was
+   oklch(0.72 0.08 32) in PAPER and oklch(0.75 0.08 32) in INK — warm salmon in
+   both, the only warm hue anywhere in the dark theme, and an orphan next to the
+   accent. */
 .surface.native .surface-label {
-  color: var(--native-panel-label);
+  color: var(--native-panel-muted);
 }
 
 .surface h3 {

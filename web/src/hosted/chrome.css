@@ -16,7 +16,12 @@
   --ink: var(--foreground);
   --hosted-muted: var(--muted-foreground);
   --rule: var(--border);
-  --rule-strong: var(--foreground);
+  /* A hairline, not a solid line (attn-n01r.37). DESIGN.md: "Border: hairline
+     dividers — ink at low alpha, never a solid gray line." Aliased straight to
+     --foreground, this rendered .step's top rule at full opacity — oklch(0.87)
+     in INK, the loudest line in the dark theme against 16% hairlines
+     everywhere else. */
+  --rule-strong: color-mix(in oklch, var(--foreground) 45%, transparent);
   --rust: var(--primary);
   --rust-deep: var(--primary-hover);
   --rust-contrast: var(--primary-foreground);
@@ -51,7 +56,6 @@
   --native-panel: var(--foreground);
   --native-panel-ink: var(--background);
   --native-panel-muted: color-mix(in oklch, var(--background) 75%, var(--foreground) 25%);
-  --native-panel-label: oklch(0.72 0.08 32);
 }
 
 .dark {
@@ -64,7 +68,6 @@
   --native-panel: oklch(0.10 0.010 256);
   --native-panel-ink: var(--foreground);
   --native-panel-muted: var(--muted-foreground);
-  --native-panel-label: oklch(0.75 0.08 32);
 }
 
 * {
@@ -198,14 +201,31 @@ a {
   color: var(--ink);
 }
 
+/* Collapse timing, do not erase it (attn-n01r.26).
+   `* { transition: none !important }` worked on today's page — the only
+   transition is .button's 0.18s and its :hover end state still applies
+   instantly — but it is a trap for what comes next: !important on * outranks
+   component CSS, so any FUTURE transition carrying meaning (an opacity fade
+   signalling save state, a colour change signalling validity) is flattened with
+   no per-component escape. It also never touched `animation`, so any keyframe
+   added later would run unsuppressed under `reduce`.
+   PRODUCT.md asks for motion reduced, not globally erased. Near-zero durations
+   preserve end states and cover animation too. Note chrome.css is shared by the
+   landing AND the desk, so this governs both hosted surfaces. */
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
   html {
     scroll-behavior: auto;
   }
 
-  * {
-    transition: none !important;
-  }
 }
 
 

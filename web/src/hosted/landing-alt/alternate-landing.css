@@ -975,7 +975,7 @@
 
 .private-kicker {
   margin: 0 0 1.3rem;
-  color: var(--native-panel-label);
+  color: var(--native-panel-muted);
   font: 700 0.88rem var(--sans);
 }
 
@@ -1054,7 +1054,7 @@
   grid-template-columns: 1fr auto;
   align-items: center;
   gap: 0.35rem 1rem;
-  color: var(--native-panel-label);
+  color: var(--native-panel-muted);
 }
 
 .privacy-transit > span {

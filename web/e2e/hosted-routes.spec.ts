@@ -6,6 +6,35 @@ import { expect, test, type Page } from '@playwright/test';
 
 const FORBIDDEN_ON_LANDING = /prosemirror|mermaid|katex|noble|BrowserReviewApp|\/assets\/(?:review|app)-/iu;
 
+/* The desk lists workspace names. It must not fetch the editor, the markdown
+   parser, or the crypto suite to do it (attn-n01r.41).
+   Chunk names are content-hashed but the vendor stems are stable, which is what
+   these match on. */
+const FORBIDDEN_ON_DESK = /prosemirror|mermaid|katex|schema-|BrowserReviewApp/iu;
+
+/* Runtime script-byte budgets per route, in KB.
+   check-route-bundles.mjs walks the Vite manifest's static `imports` and reports
+   green while an awaited dynamic import pulls the same graph over the wire —
+   that is how ~600 KB shipped to the desk under a passing gate. A static-manifest
+   gate structurally cannot see this; only measuring what the browser actually
+   fetches can. Headroom over the measured values is deliberate but small: these
+   should fail on a regression, not absorb one. */
+const SCRIPT_BUDGET_KB: Record<string, number> = {
+  '/': 110,      // measured ~72 KB
+  '/app': 500,   // measured ~414 KB
+};
+
+async function measureScriptKb(page: Page, path: string): Promise<number> {
+  let bytes = 0;
+  page.on('response', (response) => {
+    if (response.request().resourceType() !== 'script') return;
+    const length = Number(response.headers()['content-length'] ?? 0);
+    if (Number.isFinite(length)) bytes += length;
+  });
+  await page.goto(path, { waitUntil: 'networkidle' });
+  return bytes / 1024;
+}
+
 function captureAssetRequests(page: Page): string[] {
   const urls: string[] = [];
   page.on('request', (request) => {
@@ -193,3 +222,20 @@ test('review entry serves durable share paths without redirecting', async ({ pag
   await expect(page).toHaveTitle('Attn review');
   expect(new URL(page.url()).pathname).toBe('/s/AAAAAAAAAAAAAAAAAAAAAA');
 });
+
+test('the desk never fetches the editor or crypto graph', async ({ page }) => {
+  const requests = captureAssetRequests(page);
+  await page.goto('/app', { waitUntil: 'networkidle' });
+  const forbidden = requests.filter((url) => FORBIDDEN_ON_DESK.test(new URL(url).pathname));
+  expect(forbidden, `desk fetched forbidden chunks: ${forbidden.join(', ')}`).toEqual([]);
+});
+
+for (const [route, budgetKb] of Object.entries(SCRIPT_BUDGET_KB)) {
+  test(`${route} stays inside its script budget (${budgetKb} KB)`, async ({ page }) => {
+    const actual = await measureScriptKb(page, route);
+    expect(
+      actual,
+      `${route} shipped ${actual.toFixed(1)} KB of script against a ${budgetKb} KB budget`,
+    ).toBeLessThan(budgetKb);
+  });
+}

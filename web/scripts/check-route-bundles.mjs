@@ -84,7 +84,16 @@ if (failures > 0) {
   console.error(`route bundle boundaries violated (${failures} finding${failures === 1 ? '' : 's'})`);
   process.exit(1);
 }
-console.log('route bundle boundaries hold: landing/app never preload editor or crypto chunks');
+/* Say only what was actually checked (attn-n01r.41). This previously claimed
+   'route bundle boundaries hold', which read as a guarantee about what ships.
+   It is not: this walks chunk.imports, and Vite records a dynamic import's graph
+   under chunk.dynamicImports. An awaited import() in an entry pulls that graph
+   over the wire during bootstrap while this gate stays green — which is exactly
+   how ~600 KB of ProseMirror and crypto reached the desk under a passing build.
+   The wire is verified by the per-route script budgets in
+   e2e/hosted-routes.spec.ts; this checks the static graph only. */
+console.log('static route graphs clean: no editor or crypto chunks statically reachable');
+console.log('  note: dynamic-import graphs are NOT checked here — see the script budgets in e2e/hosted-routes.spec.ts');
 
 /**
  * Collect files reachable from a manifest key through static imports only.

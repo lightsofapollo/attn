@@ -415,6 +415,40 @@
 
   let lightboxClose = $state<HTMLButtonElement | undefined>();
 
+  /* Publish the dock's REAL height as --dock-h (attn-n01r.3).
+     It was a hard-coded `calc(64px + env(safe-area-inset-bottom))` while the
+     rendered dock measured 61px at inset 0 — and the edit bar positions off the
+     token, not off the dock, so the two disagree by whatever the constant is
+     wrong by. On a device with a non-zero safe-area inset that error is
+     compounded, which is the reported gap between the formatting bar and the
+     dock.
+
+     Measuring removes the assumption rather than correcting the guess: it is
+     right at inset 0 and at inset 34, with the keyboard open or closed, and it
+     stays right if the dock's contents ever change height. */
+  function measureDock(node: HTMLElement): { destroy(): void } {
+    const publish = (): void => {
+      const height = node.getBoundingClientRect().height;
+      if (height > 0) {
+        document.documentElement.style.setProperty('--dock-h', `${height}px`);
+      }
+    };
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(node);
+    // The inset itself can change (rotation, split view), and that resizes the
+    // dock, so the observer covers it — but orientation changes can land a frame
+    // early on iOS.
+    window.addEventListener('orientationchange', publish);
+    return {
+      destroy(): void {
+        observer.disconnect();
+        window.removeEventListener('orientationchange', publish);
+        document.documentElement.style.removeProperty('--dock-h');
+      },
+    };
+  }
+
   // ————— iOS editing (attn-7xl.3.5) —————
   // The formatting bar rides directly above the visual keyboard using
   // visualViewport, never a guessed keyboard height.
@@ -2961,7 +2995,8 @@
     {/if}
     {@render documentSurface()}
   </main>
-  <nav class="thumb-dock" aria-label="Document actions">
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <nav class="thumb-dock" aria-label="Document actions" use:measureDock>
     <button
       type="button"
       aria-haspopup="dialog"

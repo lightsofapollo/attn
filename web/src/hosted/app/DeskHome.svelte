@@ -408,6 +408,27 @@
                This does not decide what New workspace should create; it stops
                the desk from hiding the answer. -->
           <span class="detail detail-size">{workspace.sizeLabel}</span>
+          <!-- Review work outranks file facts on a reviewer's desk
+               (attn-n01r.34): "3 suggestions waiting" is why you would open
+               this workspace; "6 files" is not. Rendered only when the
+               workspace actually has a review log, so a local-only row shows
+               nothing rather than a zero. -->
+          {#if workspace.review && (workspace.review.pendingSuggestions > 0 || workspace.review.openComments > 0)}
+            <span class="detail review-pill" data-slot="review-counts">
+              {#if workspace.review.pendingSuggestions > 0}
+                <span class="review-suggestions">
+                  {workspace.review.pendingSuggestions}
+                  {workspace.review.pendingSuggestions === 1 ? 'suggestion' : 'suggestions'}
+                </span>
+              {/if}
+              {#if workspace.review.openComments > 0}
+                <span class="review-comments">
+                  {workspace.review.openComments}
+                  {workspace.review.openComments === 1 ? 'comment' : 'comments'}
+                </span>
+              {/if}
+            </span>
+          {/if}
           <span class="row-tail">
             {#if workspace.sharing === 'shared'}
               <span class="local-badge" title="The relay stores encrypted envelopes only; the key stays in the link fragment."><span class="dot" aria-hidden="true"></span> Shared · relay sees only ciphertext</span>

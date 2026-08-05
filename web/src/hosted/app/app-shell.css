@@ -301,7 +301,9 @@
      repeated action in the product. */
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.5fr) minmax(0, 0.55fr) minmax(0, 0.4fr) auto;
+  /* name · files · edited · size · review · tail (attn-n01r.34) */
+  grid-template-columns:
+    minmax(0, 1.15fr) minmax(0, 0.4fr) minmax(0, 0.5fr) minmax(0, 0.35fr) minmax(0, 0.75fr) auto;
   align-items: center;
   gap: 1rem;
   padding: 1.25rem 0.6rem;
@@ -2604,7 +2606,8 @@
   /* Each detail is its own grid item, so they blockify onto their own lines —
      a leading separator would be stranded. Two quiet lines under the name reads
      fine and keeps both facts. */
-  .workspace-row .detail {
+  .workspace-row .detail,
+  .workspace-row .review-pill {
     grid-column: 1;
     color: var(--hosted-muted);
     font-size: 0.78rem;
@@ -3085,4 +3088,51 @@
 
 .mobile-title-rename:hover {
   color: var(--ink);
+}
+
+/* Review counts on the desk row (attn-n01r.34). The collaboration hues are
+   legitimate here — this IS the collaboration layer, which is the one place
+   DESIGN.md's Quarantine Rule allows them: green for suggestions (insertion),
+   amber for comments (a note in the margin), exactly as the review cards use
+   them. Shape carries the distinction too, so it does not rest on colour. */
+.review-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.78rem;
+}
+
+.review-suggestions,
+.review-comments {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
+.review-suggestions::before,
+.review-comments::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+}
+
+.review-suggestions {
+  color: var(--green);
+}
+
+.review-suggestions::before {
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.review-comments {
+  color: var(--comment-amber, var(--hosted-muted));
+}
+
+/* Square, not round: comments and suggestions differ in shape as well as hue. */
+.review-comments::before {
+  border-radius: 2px;
+  background: currentColor;
 }

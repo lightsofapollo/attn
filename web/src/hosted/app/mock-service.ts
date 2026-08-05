@@ -64,6 +64,15 @@ const PRODUCT_DIRECTION: WorkspaceDetail = {
   assetCount: 2,
   lastEditedLabel: 'Edited 8 min ago',
   sharing: 'shared',
+  // Only the shared fixture carries review state: a local-only workspace has no
+  // review log at all, which is why the row shows nothing rather than a zero
+  // (attn-n01r.34).
+  review: {
+    openComments: 2,
+    pendingSuggestions: 3,
+    lastAuthorId: 'agent-7',
+    lastActivityAt: Date.now() - 4 * 60_000,
+  },
   sizeLabel: '2.4 MB',
   backupLabel: 'Backed up today',
   saveState: 'Saved on this device',

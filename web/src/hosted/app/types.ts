@@ -34,6 +34,8 @@ export type SaveState =
 
 export type SharingState = 'local-only' | 'shared' | 'backed-up';
 
+import type { WorkspaceReviewCounts } from '../../lib/review/review-counts';
+
 export interface WorkspaceSummary {
   id: string;
   name: string;
@@ -45,6 +47,10 @@ export interface WorkspaceSummary {
   backupLabel: string;
   /** Entry to open when the workspace is selected from the desk. */
   openPath: string;
+  /** Review work waiting on the owner (attn-n01r.34). Absent for local-only
+   *  workspaces, which have no review log — the desk shows nothing rather than
+   *  a zero, because "no review" and "nothing waiting" are different states. */
+  review?: WorkspaceReviewCounts;
 }
 
 export interface ReviewCard {

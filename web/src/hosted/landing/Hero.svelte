@@ -30,12 +30,27 @@
 
 <section class="hero">
   <div class="hero-copy">
-    <p class="eyebrow">No account · local by default</p>
-    <h1><span>A private desk</span> <span>for working documents.</span></h1>
+    <!-- The eyebrow is gone (attn-n01r.9): a tracked-caps kicker above an
+         oversized headline is the default AI-SaaS hero shape, and PRODUCT.md
+         lists cloud-SaaS as an anti-reference. Its claim ("no account, local by
+         default") was also restated two lines later, so folding it into the
+         lede loses nothing and drops a whole element from the fold.
+
+         The headline now argues the product's stated positioning rather than a
+         category anyone occupies (attn-n01r.10). PRODUCT.md: "The reviewer for
+         agent-authored docs: the one place where you and your agents review the
+         same document together, human comments and AI suggestions in a single
+         end-to-end-encrypted thread, over files that never leave your machine."
+         The page previously said "agent" and "AI" zero times — it sold a
+         private Markdown editor, which is a category with a dozen occupants,
+         while the one thing that makes attn a new product went unmentioned.
+         Wording is drawn from PRODUCT.md, not invented here; the voice it asks
+         for is "it states, it doesn't sell". -->
+    <h1><span>Review it together.</span> <span>Even when they aren’t human.</span></h1>
     <p class="hero-lede">
-      Write in the browser or open local Markdown in native attn — one file or many, with images
-      and project assets. It stays on this device until you deliberately share an
-      end-to-end-encrypted review room. No account, and no server can read the words.
+      Your comments and your agents’ suggestions land in the same margin, under the same rules —
+      distinguished by who wrote them, not by hierarchy. No account, local by default, and
+      end-to-end encrypted the moment you share. The file never leaves your machine.
     </p>
     <div class="hero-actions">
       {#if deskCount > 0}
@@ -51,9 +66,9 @@
       {/if}
     </div>
     <div class="local-note">
-      <span>Creates untitled.md immediately</span>
+      <span>Humans and agents in one thread</span>
       <span>Encrypted when shared</span>
-      <span>Peer-to-peer when reachable</span>
+      <span>Files stay on your machine</span>
     </div>
   </div>
 

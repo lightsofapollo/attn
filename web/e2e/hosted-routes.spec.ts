@@ -81,7 +81,11 @@ test('landing serves at / without editor, crypto, or other-entry chunks', async 
   expect(response?.status()).toBe(200);
   expect(response?.headers()['content-security-policy']).toContain("script-src 'self'");
   await expect(page.locator('body[data-route="landing"]')).toBeVisible();
-  await expect(page.locator('h1')).toHaveText('A private desk for working documents.');
+  await expect(page.locator('h1')).toHaveText('Review it together. Even when they aren\u2019t human.');
+  // The page must actually argue the product's positioning (attn-n01r.10):
+  // PRODUCT.md calls attn "the reviewer for agent-authored docs", and the
+  // landing previously said "agent" and "AI" zero times.
+  await expect(page.locator('body')).toContainText(/agent/iu);
   await expect(page.locator('body')).toHaveAttribute('data-hydrated', 'true');
   expect(requests.some((url) => /\/assets\/landing-/u.test(url))).toBe(true);
   const forbidden = requests.filter((url) => FORBIDDEN_ON_LANDING.test(new URL(url).pathname));

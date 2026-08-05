@@ -13,7 +13,16 @@
     {#if deskCount === 0}<a class="nav-link" href="/app">Your desk</a>{/if}
     <a class="nav-link" href="#native">Native app</a>
     <a class="nav-link" href="https://github.com/lightsofapollo/attn">GitHub</a>
-    <button class="icon-button" onclick={toggleTheme} aria-label="Toggle theme">
+    <!-- aria-pressed + an action label (attn-n01r.25). The label was static
+         across both states and both icons are aria-hidden, so nothing conveyed
+         the current theme (WCAG 4.1.2 — value/state not exposed). -->
+    <button
+      class="icon-button"
+      type="button"
+      onclick={toggleTheme}
+      aria-pressed={getTheme() === 'dark'}
+      aria-label={getTheme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+    >
       {#if getTheme() === 'dark'}
         <svg
           class="theme-icon"

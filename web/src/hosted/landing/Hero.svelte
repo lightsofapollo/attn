@@ -57,7 +57,12 @@
     </div>
   </div>
 
-  <div class="product-stage" aria-label="A real attn review with local and shared state labels">
+  <!-- No aria-label here (attn-n01r.25): `aria-label` is only honoured on
+       elements whose role supports naming, and a bare div maps to `generic`, so
+       the string was discarded — verified absent from the AX tree. Worse than
+       no label, because it read as coverage. The inner <img> alt and the two
+       <aside> labels already carry the meaning. -->
+  <div class="product-stage">
     <div class="window">
       <!-- Responsive AVIF with PNG fallback + intrinsic dimensions — the
            hero is the largest paint on the page, and the landing perf gate

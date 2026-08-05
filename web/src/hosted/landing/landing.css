@@ -11,10 +11,17 @@ html {
   position: sticky;
   top: 0;
   z-index: 20;
-  height: 70px;
+  /* min-height: a fixed height clipped the nav's own contents at 200% text
+     (box 70 vs content 79), and the sticky+backdrop-filter nav then painted
+     the overflowing CTA over the hero (attn-n01r.23). */
+  min-height: 70px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* Wrap rather than force the page wider than the viewport: at 200% text the
+     brand + links + CTA row exceeds a 768px viewport, and a taller nav is the
+     correct outcome (attn-n01r.23). */
+  flex-wrap: wrap;
   padding: 0 clamp(1rem, 4vw, 4.5rem);
   border-bottom: 1px solid var(--rule);
   background: var(--nav-veil);
@@ -40,6 +47,8 @@ html {
 .nav-right {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 1.35rem;
 }
 
@@ -69,6 +78,11 @@ h2,
 h3,
 p {
   text-wrap: balance;
+  /* Display type is set in clamp()ed rem, so at 200% text a single long word
+     ("documents.") can exceed the column and neither balance nor normal
+     wrapping will break it. Breaking a word is worse typography than a page
+     that scrolls sideways is a usability failure (attn-n01r.23, WCAG 1.4.4). */
+  overflow-wrap: break-word;
 }
 
 .hero h1 {
@@ -233,7 +247,10 @@ p {
   max-width: 1300px;
   margin: 0 auto 8rem;
   display: grid;
-  grid-template-columns: 1.25fr 1fr 1fr;
+  /* minmax(0,…) so tracks can shrink below their content's min-content width.
+     Bare `1fr` floors at min-content, which is what pushed 200% text to 574px
+     inside a 390px viewport (attn-n01r.23). */
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 1fr);
   border: 1px solid var(--rule);
   background: var(--rule);
   gap: 1px;
@@ -287,7 +304,7 @@ p {
 
 .chapter-head {
   display: grid;
-  grid-template-columns: 0.75fr 1.25fr;
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
   gap: 4rem;
   align-items: start;
 }
@@ -315,7 +332,7 @@ p {
 .steps {
   margin-top: 5rem;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .step {
@@ -387,7 +404,7 @@ p {
 .surfaces {
   margin-top: 4.5rem;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   border: 1px solid var(--rule);
 }
 
@@ -454,7 +471,7 @@ p {
 
 .native-grid {
   display: grid;
-  grid-template-columns: 0.8fr 1.2fr;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
   gap: 5rem;
   align-items: center;
 }
@@ -475,6 +492,11 @@ p {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  /* The install command is one unbreakable token, so at 200% text it widened
+     the page rather than the block. DESIGN.md's Wide-Sheet Rule is explicit
+     that oversized code scrolls inside its container — the copy button stays
+     put and only the command scrolls (attn-n01r.23). */
+  min-width: 0;
   gap: 1rem;
   margin-top: 0.65rem;
   padding: 1rem;
@@ -482,6 +504,17 @@ p {
   border-radius: 8px;
   background: var(--sheet);
   font: 0.79rem var(--mono);
+}
+
+/* Only the command scrolls; the copy button holds its place. */
+.code > span {
+  min-width: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.code-copy {
+  flex: 0 0 auto;
 }
 
 .code-copy {
@@ -531,6 +564,7 @@ footer {
 
 .footer-links {
   display: flex;
+  flex-wrap: wrap;
   gap: 1.3rem;
 }
 
@@ -541,7 +575,7 @@ footer {
 @media (max-width: 1180px) {
   .hero {
     min-height: auto;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     padding-top: 4.5rem;
   }
 
@@ -563,7 +597,7 @@ footer {
 
   .chapter-head,
   .native-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 2rem;
   }
 
@@ -574,7 +608,7 @@ footer {
 
 @media (max-width: 680px) {
   .site-nav {
-    height: 64px;
+    min-height: 64px;
   }
 
   .nav-link {
@@ -612,7 +646,7 @@ footer {
   }
 
   .local-note {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.45rem;
   }
 
@@ -641,7 +675,7 @@ footer {
   }
 
   .entry-strip {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     margin: 0 1rem 5rem;
   }
 
@@ -662,7 +696,7 @@ footer {
   }
 
   .steps {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     margin-top: 3.5rem;
   }
 
@@ -673,7 +707,7 @@ footer {
   }
 
   .share-proof {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 2rem;
   }
 
@@ -682,7 +716,7 @@ footer {
   }
 
   .surfaces {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .surface {

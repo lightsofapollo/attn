@@ -622,6 +622,39 @@ p {
   height: auto;
 }
 
+/* The closing offer (attn-n01r.20). Weighted like a section head, not like the
+   hero — this is the last word, not a second masthead. Sits on the second
+   neutral layer so it reads as a distinct band rather than more page. */
+.closer {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: clamp(4.5rem, 8vw, 7rem) 1.4rem clamp(4rem, 7vw, 6rem);
+  border-top: 1px solid var(--rule);
+  text-align: left;
+}
+
+.closer h2 {
+  margin: 0;
+  max-width: 20ch;
+  font-size: clamp(2.6rem, 4.4vw, 4.6rem);
+  line-height: 0.98;
+  letter-spacing: -0.045em;
+}
+
+.closer p {
+  max-width: 54ch;
+  margin: 1.2rem 0 0;
+  color: var(--hosted-muted);
+  font: 1.05rem/1.65 var(--sans);
+}
+
+.closer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 2.2rem;
+}
+
 footer {
   border-top: 1px solid var(--rule);
 }

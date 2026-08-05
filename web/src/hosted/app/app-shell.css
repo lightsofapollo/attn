@@ -381,7 +381,16 @@
 }
 
 .empty-desk {
-  margin-top: 2.5rem;
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: var(--ink);
+  /* 2.5rem pushed the card's bottom to 916px against a 900px viewport, so the
+     closing line and its caret — the payoff of the whole composition — sat
+     below the fold (attn-n01r.35). */
+  margin-top: 1.5rem;
   max-width: 560px;
   /* The mono meta line ("UNTITLED.MD · NOT CREATED YET") carries 0.1em
      tracking and cannot shrink; at 200% text it drove 87px past the card.
@@ -395,19 +404,22 @@
 }
 
 .empty-desk .meta {
+  display: block;
   font: 0.72rem var(--mono);
   color: var(--hosted-muted);
   border-bottom: 1px solid var(--rule);
   padding-bottom: 0.9rem;
 }
 
-.empty-desk h2 {
+.empty-desk-title {
+  display: block;
   margin: 2rem 0 0.9rem;
   font-size: 2.2rem;
   letter-spacing: -0.03em;
 }
 
-.empty-desk p {
+.empty-desk-body {
+  display: block;
   margin: 0;
   font-size: 1.05rem;
   line-height: 1.7;
@@ -2553,16 +2565,55 @@
 /* ————— small screens ————— */
 
 @media (max-width: 900px) {
+  /* Three 155px tiles stacked pushed the first workspace to y=813 in an 844px
+     viewport — the payload was entirely below the fold, roughly 1.7 viewport
+     heights of chrome before a document (attn-n01r.33). Compact them: the
+     labels stay, the empty vertical space goes. */
   .quick-actions {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .workspace-row {
-    grid-template-columns: minmax(0, 1fr) auto;
+  .quick {
+    min-height: 0;
+    padding: 1rem 1.1rem;
   }
 
+  .quick-label {
+    font-size: 1.15rem;
+  }
+
+  .quick-note {
+    margin-top: 0.2rem;
+    font-size: 0.8rem;
+  }
+
+  /* Name on its own line with the metadata beneath it, rather than a 1fr/auto
+     split that left the name 118px of a 358px row while the admin controls took
+     the rest. */
+  .workspace-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.35rem 1rem;
+    padding-block: 0.9rem;
+  }
+
+  /* Reflowed onto a second line, NOT hidden. Dropping file count and
+     last-edited turned three workspaces into byte-identical rows on exactly the
+     device where the name is least likely to be unique — and the list is
+     titled "Recently on this device", so recency was the one thing it could not
+     afford to lose. */
+  /* Each detail is its own grid item, so they blockify onto their own lines —
+     a leading separator would be stranded. Two quiet lines under the name reads
+     fine and keeps both facts. */
   .workspace-row .detail {
-    display: none;
+    grid-column: 1;
+    color: var(--hosted-muted);
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+
+  .workspace-row .row-tail {
+    grid-row: 1 / span 2;
+    grid-column: 2;
   }
 
   .storage-grid {

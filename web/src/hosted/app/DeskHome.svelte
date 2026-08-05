@@ -481,15 +481,28 @@
       {/each}
       </ul>
     {:else if !storageUnavailable}
-      <div class="folio-label">Your first sheet</div>
-      <article class="empty-desk" aria-label="A half-written Markdown sheet, waiting">
-        <div class="meta">UNTITLED.MD · NOT CREATED YET</div>
-        <h2>What deserves your attention?</h2>
-        <p>
+      <h2 class="folio-label">Your first sheet</h2>
+      <!-- A button, not an <article> (attn-n01r.35). This is the largest,
+           warmest, most document-like object on the first-run screen and it had
+           no click handler at all — every first-time user clicks it. It is also
+           the same offer as the tile above, so it now performs that offer
+           rather than restating it.
+           The old aria-label ("A half-written Markdown sheet, waiting") named
+           the region with art direction that explained nothing about what to do
+           and contradicted its own content; the button's text is its name. -->
+      <button
+        class="empty-desk"
+        type="button"
+        disabled={storageUnavailable}
+        onclick={onCreate}
+      >
+        <span class="meta">UNTITLED.MD · NOT CREATED YET</span>
+        <span class="empty-desk-title">What deserves your attention?</span>
+        <span class="empty-desk-body">
           Start with one blank Markdown file. It stays on this device — no account, no upload,
           <span class="cursor-line">no naming step.&nbsp;<span class="caret" aria-hidden="true"></span></span>
-        </p>
-      </article>
+        </span>
+      </button>
     {/if}
   </main>
 </div>

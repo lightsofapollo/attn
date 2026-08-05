@@ -55,6 +55,15 @@ export default {
     headers.set('Referrer-Policy', 'no-referrer');
     headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     headers.set('X-Content-Type-Options', 'nosniff');
+    /* The alternate homepage is a positioning study, not a shipping surface
+       (attn-n01r.38). It carries <meta name="robots" content="noindex"> in
+       svelte:head, but that is rendered client-side, so a crawler that does not
+       execute JS never sees it — and routes.ts's fallback means the path is
+       served to anyone who guesses it. An origin header does not depend on the
+       bundle running. */
+    if (requestUrl.pathname === '/homepage-alt' || requestUrl.pathname === '/homepage-alt/') {
+      headers.set('X-Robots-Tag', 'noindex, nofollow');
+    }
     headers.set('X-Frame-Options', landingReviewDemo ? 'SAMEORIGIN' : 'DENY');
 
     const pathname = new URL(request.url).pathname;

@@ -59,9 +59,32 @@
 
   let joinTrigger = $state<HTMLAnchorElement | undefined>();
 
-  /** Escape closes the topmost layer: the delete confirm, then the join panel. */
+  /** Escape closes the topmost layer; "/" focuses the filter; arrows move. */
   function onDeskKeydown(event: KeyboardEvent): void {
+    if (event.key === '/' && !typingInField(event.target) && workspaces.length > 0) {
+      event.preventDefault();
+      filterInput?.focus();
+      return;
+    }
+    if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && !confirmingDeleteId) {
+      if (!typingInField(event.target) || event.target === filterInput) {
+        event.preventDefault();
+        moveSelection(event.key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+    }
+    if (event.key === 'Enter' && event.target === filterInput && selectedIndex >= 0) {
+      event.preventDefault();
+      openWorkspace(visibleWorkspaces[selectedIndex]);
+      return;
+    }
     if (event.key !== 'Escape') return;
+    if (filterQuery && event.target === filterInput) {
+      event.stopPropagation();
+      filterQuery = '';
+      selectedIndex = -1;
+      return;
+    }
     if (confirmingDeleteId !== null) {
       event.stopPropagation();
       cancelDelete();
@@ -106,6 +129,51 @@
   let renamingId = $state<string | null>(null);
   let renameValue = $state('');
   let confirmingDeleteId = $state<string | null>(null);
+
+  /* Keyboard model (attn-n01r.29). The desk scored 0/4 on Flexibility and
+     Efficiency — the sole keyboard handler in this file was Enter/Escape inside
+     the rename input — on the surface PRODUCT.md's primary user opens most, for
+     a product whose stated principle is that every action is keyboard-reachable.
+
+     Three things, which is what the finding asked for: a "/" filter that
+     narrows the list live, Up/Down to move a selection through it, and Enter to
+     open. Selection hangs off the workspace id the rows already carry. */
+  let filterQuery = $state('');
+  let filterInput = $state<HTMLInputElement | undefined>();
+  let selectedIndex = $state(-1);
+
+  const visibleWorkspaces = $derived.by(() => {
+    const q = filterQuery.trim().toLowerCase();
+    if (!q) return workspaces;
+    return workspaces.filter((w) => w.name.toLowerCase().includes(q));
+  });
+
+  // Keep the selection inside the filtered list as it narrows.
+  $effect(() => {
+    if (selectedIndex >= visibleWorkspaces.length) selectedIndex = visibleWorkspaces.length - 1;
+  });
+
+  function openWorkspace(workspace: WorkspaceSummary): void {
+    window.location.assign(`/app/w/${workspace.id}/${workspace.openPath}`);
+  }
+
+  function moveSelection(delta: number): void {
+    if (visibleWorkspaces.length === 0) return;
+    const next = selectedIndex < 0
+      ? (delta > 0 ? 0 : visibleWorkspaces.length - 1)
+      : Math.min(Math.max(selectedIndex + delta, 0), visibleWorkspaces.length - 1);
+    selectedIndex = next;
+    document
+      .querySelector<HTMLElement>(`[data-workspace-id="${visibleWorkspaces[next].id}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }
+
+  /** True while a control that owns its own key handling has focus. */
+  function typingInField(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el) return false;
+    return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable;
+  }
   let importError = $state<string | null>(null);
 
   /** Label for the non-shared states. The 'shared' case is handled in the
@@ -157,8 +225,9 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="app-shell" data-app-view="home" onkeydown={onDeskKeydown}>
+<svelte:window onkeydown={onDeskKeydown} />
+
+<div class="app-shell" data-app-view="home">
   <AppHeader mode={health.mode}>
     {#snippet actions()}
       <a class="button" href="/app/storage">Storage</a>
@@ -283,11 +352,33 @@
            had an <h2> and the populated state had none, and the rows were a
            flat run of divs with no list semantics — no "list, N items", no item
            position, no way to jump to it. -->
-      <h2 class="folio-label" id="recent-workspaces">Recently on this device</h2>
+      <div class="folio-head">
+        <h2 class="folio-label" id="recent-workspaces">Recently on this device</h2>
+        <div class="folio-filter">
+          <label class="visually-hidden" for="workspace-filter">Filter workspaces</label>
+          <input
+            id="workspace-filter"
+            bind:this={filterInput}
+            bind:value={filterQuery}
+            type="search"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Filter…"
+          />
+          <kbd aria-hidden="true">/</kbd>
+        </div>
+      </div>
+      <p class="visually-hidden" role="status" aria-live="polite">
+        {filterQuery ? `${visibleWorkspaces.length} of ${workspaces.length} workspaces match` : ''}
+      </p>
       <ul class="workspace-list" aria-labelledby="recent-workspaces">
-      {#each workspaces as workspace (workspace.id)}
+      {#each visibleWorkspaces as workspace, index (workspace.id)}
         <li>
-        <div class="workspace-row" data-workspace-id={workspace.id}>
+        <div
+          class="workspace-row"
+          data-workspace-id={workspace.id}
+          data-selected={index === selectedIndex ? 'true' : undefined}
+        >
           {#if renamingId === workspace.id}
             <input
               use:autofocus

@@ -236,7 +236,6 @@
    has to live on that element, or the next thing inserted here breaks it
    again. */
 .folio-label {
-  margin-block-start: 2.5rem;
   font: 600 0.7rem var(--sans);
   color: var(--hosted-muted);
   text-transform: uppercase;
@@ -245,6 +244,50 @@
 
 /* The rows are a list now (attn-n01r.30); strip the default list presentation
    without stripping the semantics. */
+/* Filter sits with the section label, not above the list, so the heading and
+   the control that narrows it read as one unit (attn-n01r.29). */
+.folio-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-block-start: 2.5rem;
+}
+
+.folio-filter {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.folio-filter input {
+  min-height: 34px;
+  width: 13rem;
+  max-width: 40vw;
+  padding: 0.3rem 2rem 0.3rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--paper) 84%, transparent);
+  color: var(--ink);
+  font: 0.85rem var(--sans);
+}
+
+.folio-filter kbd {
+  position: absolute;
+  right: 0.55rem;
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  color: var(--hosted-muted);
+  font: 0.7rem var(--mono);
+  pointer-events: none;
+}
+
+.folio-filter input:focus-visible + kbd {
+  opacity: 0;
+}
+
 .workspace-list {
   margin: 0;
   padding: 0;
@@ -252,18 +295,70 @@
 }
 
 .workspace-row {
+  /* position: relative so .row-open can stretch a hit area over the whole row
+     (attn-n01r.32). The open target used to be the name text alone — about
+     200x28px of an 80,000px² row, a Fitts's-law failure on the single most
+     repeated action in the product. */
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.65fr) minmax(0, 0.65fr) auto;
   align-items: center;
   gap: 1rem;
-  padding: 1.25rem 0.25rem;
+  padding: 1.25rem 0.6rem;
+  border-radius: 8px;
   border-bottom: 1px solid var(--rule);
   font-family: var(--sans);
   color: var(--ink);
 }
 
-a.workspace-row:hover {
-  background: color-mix(in srgb, var(--sheet) 55%, transparent);
+/* The hover rule used to be `a.workspace-row:hover` — the element is a <div>,
+   so it never matched and the row had no hover state at all. Selected state
+   comes from the keyboard model (attn-n01r.29). */
+.workspace-row:hover,
+.workspace-row:focus-within,
+.workspace-row[data-selected='true'] {
+  background: color-mix(in oklch, var(--sheet) 70%, transparent);
+}
+
+.workspace-row[data-selected='true'] {
+  box-shadow: inset 2px 0 0 var(--rust);
+}
+
+/* Stretch the open link across the row, then raise the actions above it so they
+   stay independently clickable. */
+.row-open::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.row-tail {
+  position: relative;
+  z-index: 1;
+}
+
+/* Row admin is not resident chrome (attn-n01r.32). At a realistic workspace
+   count the three most-repeated words on the desk were "Rename, Delete,
+   Rename, Delete…". Revealed on hover or keyboard focus; always available to
+   assistive tech and never hidden from the tab order. */
+.row-action {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.workspace-row:hover .row-action,
+.workspace-row:focus-within .row-action,
+.workspace-row[data-selected='true'] .row-action,
+.row-action:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  /* No hover on touch: the controls must simply be there. */
+  .row-action {
+    opacity: 1;
+  }
 }
 
 .workspace-row strong {

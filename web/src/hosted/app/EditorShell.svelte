@@ -2875,15 +2875,31 @@
           onblur={() => void commitTitleRename()}
         />
       {:else if editing}
+        <!-- The title is a label; the pencil is the affordance (attn-n01r.4).
+             It used to be a bare button that dropped straight into a text input
+             on a single tap — directly above the document, in the thumb's
+             travel path, for an act performed maybe once per workspace. The
+             name is now inert and rename takes a deliberate, separately-sized
+             target beside it. -->
+        <span class="mobile-workspace-title" data-slot="mobile-workspace-name">
+          {workspace.name}
+        </span>
         <button
-          class="mobile-workspace-title"
+          class="mobile-title-rename"
           type="button"
-          aria-label="Rename workspace"
+          title="Rename workspace"
+          aria-label={`Rename ${workspace.name}`}
           onclick={() => {
             titleValue = workspace.name;
             renamingTitle = true;
           }}
-        >{workspace.name}</button>
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+               stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 20h9" />
+            <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+          </svg>
+        </button>
       {:else}
         <!-- Crossfade stack: the workspace name at rest; the document's own
              h1 once its heading has scrolled under the chrome. Screen readers
@@ -3012,7 +3028,38 @@
     <button type="button" aria-label="Bullet list" onclick={() => editorRef?.toggleBulletList()}>••</button>
     <button type="button" aria-label="Undo" onclick={() => editorRef?.undoStep()}>↺</button>
     <button type="button" aria-label="Redo" onclick={() => editorRef?.redoStep()}>↻</button>
-    <span class="edit-bar-state" data-save-state={saveState}>{saveState}</span>
+    <!-- Icon, not the sentence (attn-n01r.5). The masthead chip already shows
+         the save state in full; this second copy was capped at 26vw with an
+         ellipsis, so it rendered as "Saved on th…" — a truncated duplicate
+         taking room from the formatting controls. The glyph differs per state,
+         not just the colour (PRODUCT.md: never rely on colour alone), the full
+         wording is on `title` for hover and long-press, and the accessible name
+         still carries the whole sentence. -->
+    <span
+      class="edit-bar-state"
+      data-save-state={saveState}
+      title={saveState}
+      role="status"
+      aria-label={saveState}
+    >
+      {#if saveState === 'Saving…'}
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" />
+        </svg>
+      {:else if saveState === 'Saved on this device'}
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      {:else}
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 8v5M12 16.5v.5" />
+          <circle cx="12" cy="12" r="9" />
+        </svg>
+      {/if}
+    </span>
   </div>
 {/if}
 

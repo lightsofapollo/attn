@@ -2743,15 +2743,15 @@ a.workspace-row:hover {
   background: color-mix(in srgb, var(--sheet) 70%, transparent);
 }
 
+/* An icon now, so the width cap and ellipsis that produced "Saved on th…" are
+   gone (attn-n01r.5). */
 .edit-bar-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   margin-left: auto;
   color: var(--hosted-muted);
-  font: 0.7rem var(--mono);
   padding-right: 0.4rem;
-  max-width: 26vw;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .title-button {
@@ -2870,4 +2870,24 @@ a.workspace-row:hover {
   margin: 8px 0 0;
   font: 500 0.85rem/1.5 var(--sans);
   color: var(--hosted-muted);
+}
+
+/* Rename affordance beside the mobile title (attn-n01r.4). Sized to the touch
+   minimum and visually distinct from the name it acts on, so the name can go
+   back to being a name. */
+.mobile-title-rename {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--hosted-muted);
+}
+
+.mobile-title-rename:hover {
+  color: var(--ink);
 }

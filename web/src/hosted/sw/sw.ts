@@ -114,6 +114,21 @@ self.addEventListener('fetch', (event: FetchEvent) => {
         ) {
           await cache.put(decision.shellPath, response.clone());
         }
+        /* A 404 on a navigation means the host is not rewriting deep paths to
+           the SPA shell, not that the route does not exist (attn-n01r.45).
+           This block used to fall back only when fetch THREW, so a 404 — a
+           successful HTTP response — was passed straight through: /app/storage
+           and every /app/w/<id>/<file> reload rendered the host's error page,
+           losing the workspace. Serving the cached shell lets the client router
+           resolve the path it already knows how to handle.
+
+           Deliberately narrow: only 404/410 on a navigation, only when a shell
+           is actually cached. Anything else (500s, redirects, the offline case)
+           keeps its existing behaviour, so this cannot mask a real outage. */
+        if ((response.status === 404 || response.status === 410) && decision.shellPath) {
+          const shell = await cache.match(decision.shellPath);
+          if (shell) return shell;
+        }
         return response;
       } catch {
         const fallback = await cache.match(decision.shellPath);

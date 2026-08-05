@@ -2558,7 +2558,15 @@ a.workspace-row:hover {
   justify-content: flex-end;
 }
 
+/* Icon buttons now: square, centred, and at the touch minimum. The label moved
+   into title/aria-label (attn-n01r.2), and the 27.6px-tall text targets these
+   replace sat well under any target-size floor next to an irreversible action. */
 .row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
   border: 0;
   background: transparent;
   color: var(--hosted-muted);

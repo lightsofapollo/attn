@@ -290,21 +290,40 @@
             {:else}
               <span>{sharingLabel(workspace.sharing)}</span>
             {/if}
+            <!-- Icons, not words (attn-n01r.2). These repeat on every row, so at
+                 James's realistic workspace count the three most-repeated words
+                 on the desk were "Rename, Delete, Rename, Delete…". Pencil and
+                 trash are conventional enough to read without the word; both
+                 keep a title for hover and an aria-label naming the workspace,
+                 so nothing is lost to assistive tech or to a first-timer who
+                 hovers. -->
             <button
               class="row-action"
               type="button"
+              title="Rename"
               aria-label={`Rename ${workspace.name}`}
               onclick={() => startRename(workspace)}
             >
-              Rename
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                   stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
             </button>
             <button
               class="row-action danger"
               type="button"
+              title="Delete"
               aria-label={`Delete ${workspace.name}`}
               onclick={(event) => openDeleteConfirm(workspace.id, event.currentTarget)}
             >
-              Delete
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                   stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 6h18" />
+                <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+                <path d="M19 6v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6" />
+                <path d="M10 11v6M14 11v6" />
+              </svg>
             </button>
           </span>
         </div>

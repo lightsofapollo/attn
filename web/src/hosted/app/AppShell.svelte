@@ -38,7 +38,8 @@
     try {
       health = service.storageHealth();
       if (newIntent) {
-        await createAndOpen();
+        // The URL intent keeps its idempotency (attn-cjn).
+        await createAndOpen(true);
         return;
       }
       if (route?.view === 'workspace') {
@@ -63,11 +64,21 @@
     }
   }
 
-  async function createAndOpen(): Promise<void> {
+  /**
+   * @param reuseEmpty  Reuse an existing untouched workspace rather than
+   *   minting one. True only for the `/app#new` URL intent (attn-n01r.50).
+   */
+  async function createAndOpen(reuseEmpty: boolean): Promise<void> {
     // #new is idempotent (attn-cjn): reuse the most recent empty, untouched
     // Untitled workspace instead of minting another — a bookmarked /app#new
     // or a back-button revisit must not grow the desk.
-    const existing = await service.listWorkspaces();
+    //
+    // That guard is scoped to the URL intent it was written for. It used to run
+    // for the desk's "New workspace" button too, so a control with that label
+    // sometimes reopened an old workspace and said nothing: clicking it three
+    // times returned the same id and left the desk count unchanged. A button
+    // that names an action has to perform it.
+    const existing = reuseEmpty ? await service.listWorkspaces() : [];
     for (const candidate of existing) {
       if (candidate.name !== 'Untitled') continue;
       if (candidate.assetCount > 0 || candidate.markdownCount > 1) continue;
@@ -99,7 +110,8 @@
   async function onCreate(): Promise<void> {
     phase = 'loading';
     try {
-      await createAndOpen();
+      // The desk button always creates (attn-n01r.50).
+      await createAndOpen(false);
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : String(error);
       phase = 'error';

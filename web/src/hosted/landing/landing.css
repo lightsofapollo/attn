@@ -163,7 +163,7 @@ p {
   max-width: 620px;
   margin-top: 1.35rem;
   color: var(--hosted-muted);
-  font: 0.75rem/1.4 var(--mono);
+  font: 0.75rem/1.5 var(--sans);
 }
 
 .local-note span {
@@ -206,14 +206,19 @@ p {
   background: linear-gradient(var(--window-chrome-top), var(--window-chrome-bottom));
 }
 
+/* Painted, not typed (attn-n01r.25). These were text in a pseudo-element —
+   measured 1.72:1 in PAPER and 1.63:1 in INK — so the decorative-content
+   exemption in WCAG 1.4.3 was arguable rather than airtight, and any scanner
+   would flag them. As background circles they are neither text nor exposed. */
 .window::after {
-  content: '●  ●  ●';
+  content: '';
   position: absolute;
-  top: 8px;
+  top: 11px;
   left: 12px;
-  color: var(--window-dots);
-  font: 0.55rem var(--mono);
-  letter-spacing: 0.2em;
+  width: 38px;
+  height: 7px;
+  background:
+    radial-gradient(circle 3.5px at 3.5px 50%, var(--window-dots) 98%, transparent) 0 0 / 15.5px 100% repeat-x;
 }
 
 .window picture {
@@ -249,7 +254,7 @@ p {
   display: block;
   margin-top: 0.25rem;
   color: var(--hosted-muted);
-  font: 0.75rem/1.4 var(--mono);
+  font: 0.75rem/1.5 var(--sans);
 }
 
 .stage-label.local {
@@ -323,7 +328,7 @@ p {
 .entry-flag {
   flex: 0 0 auto;
   color: var(--rust);
-  font: 700 0.75rem var(--mono);
+  font: 700 0.75rem var(--sans);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -361,7 +366,9 @@ p {
 
 .chapter-index {
   color: var(--hosted-muted);
-  font: 0.75rem var(--mono);
+  font: 600 0.7rem var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .chapter h2 {
@@ -405,7 +412,8 @@ p {
 
 .step-num {
   color: var(--hosted-muted);
-  font: 0.75rem var(--mono);
+  font: 600 0.7rem var(--sans);
+  letter-spacing: 0.06em;
 }
 
 .step h3 {
@@ -481,7 +489,7 @@ p {
 }
 
 .surface-label {
-  font: 700 0.75rem var(--mono);
+  font: 700 0.7rem var(--sans);
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
@@ -522,7 +530,7 @@ p {
   margin: 2rem 0 0;
   padding: 0;
   list-style: none;
-  font: 0.84rem/1.8 var(--mono);
+  font: 0.86rem/1.75 var(--sans);
 }
 
 .native-section {

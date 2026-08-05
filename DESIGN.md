@@ -197,6 +197,8 @@ Presets live in `web/styles/typeset.css`, keyed off `data-typeset` on `<html>`, 
 
 **The Fixed-Scale Rule.** Product register: headings are fixed rem, not `clamp()`. Users view at consistent DPI inside panes and windows; a fluid h1 that shrinks in a sidebar looks worse, not better.
 
+*Marketing carve-out* (added 2026-08-05, attn-n01r.18). The rule's rationale is panes and sidebars, which the hosted **landing** does not have — it is a full-bleed Persuade surface viewed at whatever width the visitor brings. Display headings there may `clamp()`, in two tiers only: the hero `h1` at `clamp(3.2rem, 5.2vw, 6rem)` and every section head at `clamp(2.6rem, 4.4vw, 4.6rem)`. Two tiers, not per-section values — a third coefficient is how the `h1` ended up rendering *smaller* than two `h2`s at 1440px. Everything else, including the desk and the app shell, stays on the fixed ramp. The landing had already forked this by 3x with nothing written down; this records the fork rather than pretending it isn't there.
+
 **The Wide-Sheet Rule** (decided 2026-07-12). The reading surface is full-width and left-set, never a centered narrow column: all content — running prose *and* wide blocks (mermaid diagrams, tables, code) — shares one column capped at the `--content-measure` token (1100px); oversized tables/code scroll inside it. (Revised 2026-07-13 from the original split layout — 72ch prose beside full-pane blocks — which read as ragged whenever a wide block was on screen.) The `micro` (2px) radius is the mark family for inline review marks, focus rings, and accent bars.
 
 ## 4. Elevation

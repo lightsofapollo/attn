@@ -99,6 +99,30 @@ export interface BrowserWorkspaceServiceOptions {
 }
 
 const UNTITLED_PATH = 'untitled.md';
+const DEFAULT_WORKSPACE_NAME = 'Untitled';
+
+/**
+ * First ATX heading in a Markdown body, trimmed and length-capped, or null.
+ * Ignores headings inside fenced code so a shell comment cannot name a
+ * workspace.
+ */
+function firstMarkdownHeading(text: string): string | null {
+  let inFence = false;
+  for (const raw of text.split('\n', 400)) {
+    const line = raw.trimEnd();
+    if (/^\s*(?:```|~~~)/u.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const match = /^\s{0,3}#{1,3}\s+(.+?)\s*#*\s*$/u.exec(line);
+    if (!match) continue;
+    const title = match[1].replace(/[*_`]/gu, '').trim();
+    if (title.length === 0) continue;
+    return title.length > 80 ? `${title.slice(0, 79)}\u2026` : title;
+  }
+  return null;
+}
 
 export class BrowserWorkspaceService {
   private readonly storage: BrowserStorage;
@@ -320,7 +344,7 @@ export class BrowserWorkspaceService {
   // ————— mutations —————
 
   /** One-click create: `untitled.md`, no dialog, zero network requests. */
-  async createWorkspace(name = 'Untitled'): Promise<CommittedRevision> {
+  async createWorkspace(name = DEFAULT_WORKSPACE_NAME): Promise<CommittedRevision> {
     return run(() =>
       this.storage.workspaces.createWorkspace({
         name,
@@ -377,7 +401,7 @@ export class BrowserWorkspaceService {
     text: string,
     options: { expectedHeadRevisionId?: string; fence?: WorkspaceFence } = {},
   ): Promise<CommittedRevision> {
-    return run(() =>
+    const committed = await run(() =>
       this.storage.workspaces.commitRevision({
         workspaceId,
         path,
@@ -385,6 +409,53 @@ export class BrowserWorkspaceService {
         ...options,
       }),
     );
+    await this.promoteDerivedName(workspaceId, text, options.fence);
+    return committed;
+  }
+
+  /* Workspaces the derived-name pass is done with: either promoted once, or
+     found to carry a name the user chose. Keeps the extra read off the hot
+     commit path after the first resolution. */
+  private readonly namedWorkspaces = new Set<string>();
+
+  /**
+   * Give a still-default workspace the document's own first heading
+   * (attn-n01r.6).
+   *
+   * The reported complaint was that a new workspace shows an `untitled.md` that
+   * feels like it does not exist. The audit showed the copy is literally
+   * accurate — the file is created — and the real defect is that the NAME never
+   * catches up: type "Alpha notes" into a workspace, return to the desk, and the
+   * row still reads "Untitled". Three workspaces render pixel-identically.
+   *
+   * Deliberately narrow, so this needs no schema change and cannot go stale:
+   * - writes the existing `name` field, not a new derived column
+   * - fires only while the name is still the default, so an explicit rename is
+   *   permanent and is never overwritten
+   * - promotes once per workspace, then the id is remembered and skipped
+   * - failure is swallowed: a naming nicety must never fail a commit
+   */
+  private async promoteDerivedName(
+    workspaceId: string,
+    text: string,
+    fence?: WorkspaceFence,
+  ): Promise<void> {
+    if (this.namedWorkspaces.has(workspaceId)) return;
+    const heading = firstMarkdownHeading(text);
+    if (!heading) return;
+    try {
+      const records = await this.storage.workspaces.listWorkspaces();
+      const record = records.find((entry) => entry.workspaceId === workspaceId);
+      if (!record) return;
+      if (record.name !== DEFAULT_WORKSPACE_NAME) {
+        this.namedWorkspaces.add(workspaceId);
+        return;
+      }
+      await this.renameWorkspace(workspaceId, heading, fence);
+      this.namedWorkspaces.add(workspaceId);
+    } catch {
+      // Naming is a courtesy; never let it surface as a failed commit.
+    }
   }
 
   async createMarkdown(

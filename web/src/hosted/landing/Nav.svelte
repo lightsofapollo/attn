@@ -4,11 +4,44 @@
 
   const deskCount = readDeskCount();
   import { getTheme, toggleTheme } from '../theme.svelte';
+
+  /* Mobile navigation (attn-n01r.17). Below 680px `.nav-link { display: none }`
+     removed "How it works", "Your desk", "Native app" and GitHub with no
+     replacement — the two in-page anchors and the only off-site route in the
+     header — leaving a mobile visitor 6,100px of scroll and no way to move
+     through it. Desktop offered 7 header stops; mobile offered 2.
+     A disclosure rather than a bottom bar: it restores the links without
+     changing the page's interaction model, and it carries the aria-expanded /
+     aria-controls the finding also asked for. */
+  let menuOpen = $state(false);
 </script>
+
+<svelte:window
+  onkeydown={(event) => {
+    if (event.key === 'Escape' && menuOpen) menuOpen = false;
+  }}
+/>
 
 <nav class="site-nav" aria-label="Main navigation">
   <a class="brand" href="/"><BrandMark class="mark" />attn</a>
-  <div class="nav-right">
+  <button
+    class="nav-toggle"
+    type="button"
+    aria-expanded={menuOpen}
+    aria-controls="site-nav-links"
+    aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+    onclick={() => (menuOpen = !menuOpen)}
+  >
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+         stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+      {#if menuOpen}
+        <path d="M18 6 6 18M6 6l12 12" />
+      {:else}
+        <path d="M4 7h16M4 12h16M4 17h16" />
+      {/if}
+    </svg>
+  </button>
+  <div class="nav-right" id="site-nav-links" data-open={menuOpen}>
     <a class="nav-link" href="#how">How it works</a>
     {#if deskCount === 0}<a class="nav-link" href="/app">Your desk</a>{/if}
     <a class="nav-link" href="#native">Native app</a>

@@ -87,6 +87,22 @@ html {
    every miss was a control outside that class — nav links, the brand, the copy
    buttons, the footer links. Padding rather than min-height so the visual
    rhythm of the nav is unchanged; the target grows, the type does not move. */
+/* Disclosure trigger — desktop shows the links inline, so it is hidden there
+   and revealed by the <=680px block below (attn-n01r.17). */
+.nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  margin-left: auto;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
 .nav-link {
   display: inline-flex;
   align-items: center;
@@ -776,8 +792,31 @@ footer {
     --nav-h: 64px;
   }
 
-  .nav-link {
+  /* The links move into the disclosure rather than disappearing. */
+  .nav-toggle {
+    display: inline-flex;
+  }
+
+  .site-nav {
+    flex-wrap: wrap;
+  }
+
+  .nav-right {
+    order: 3;
+    width: 100%;
     display: none;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.25rem;
+    padding-bottom: 1rem;
+  }
+
+  .nav-right[data-open='true'] {
+    display: flex;
+  }
+
+  .nav-right .nav-link {
+    padding-block: 0.35rem;
   }
 
   .nav-right {

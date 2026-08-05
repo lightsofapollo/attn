@@ -193,6 +193,12 @@ Presets live in `web/styles/typeset.css`, keyed off `data-typeset` on `<html>`, 
 ### Named Rules
 **The Read/Do Rule.** If the user is reading it, it's serif. If the user is operating it, it's sans. There is no third case; a button never uses the serif, a heading in the document never uses the sans. (A preset may change *which* face reads as the serif — Modern makes it a sans — but never which role gets the reading face.)
 
+*Product-chrome steps* (added 2026-08-05, attn-n01r.8). The six steps above describe the **document**. The app shell needs four more between `label` and `title`, and pretending otherwise is why `app-shell.css` had drifted to 33 distinct sizes with no rhythm — every new component invented a value because no existing one fit. The full chrome ramp is:
+
+`0.7` label · `0.78` meta · `0.85` mono/caption · `0.95` control · `1` body · `1.15` control-lg · `1.25` title · `1.5` headline · `2` display
+
+Nine steps, and nothing between them. This is an *extension* of the ramp, not an exemption from it: a size outside this list is still a defect, and the hosted app shell now uses exactly these nine.
+
 **The Scoped-Document Rule** (2026-08-04). Document typography is scoped to `.attn-doc` — the class the editor mount and the viewer article carry. Bare `p` / `h1` / `ul` / `li` selectors are never global: chrome rendered in the same tree used to inherit 2rem heading gaps and absolutely-positioned list bullets that escaped their card, and each leak got patched individually until an opt-out class existed purely to undo the defaults. Type the document, not the page.
 
 **The Fixed-Scale Rule.** Product register: headings are fixed rem, not `clamp()`. Users view at consistent DPI inside panes and windows; a fluid h1 that shrinks in a sidebar looks worse, not better.

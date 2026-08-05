@@ -5,7 +5,7 @@
 // workspace transactions (attn-7xl.2.x), plus capability probing and writer
 // leases. Everything here is plain TypeScript so the whole surface runs under
 // tsx in unit tests; the Svelte 5 reactive wrapper lives in
-// workspace-state.svelte.ts and stays deliberately thin.
+// AppShell's own $state fields and stays deliberately thin.
 //
 // Local-first invariant: nothing in this module performs a network request.
 // Rooms, relays, and Share belong to attn-7xl.4.

@@ -108,10 +108,11 @@
   let confirmingDeleteId = $state<string | null>(null);
   let importError = $state<string | null>(null);
 
-  function sharingLabel(sharing: SharingState): string {
+  /** Label for the non-shared states. The 'shared' case is handled in the
+   *  template, which needs the explanatory title attribute alongside it — this
+   *  used to carry an unreachable duplicate of that string (attn-n01r.44). */
+  function sharingLabel(sharing: Exclude<SharingState, 'shared'>): string {
     switch (sharing) {
-      case 'shared':
-        return 'Shared · relay sees only ciphertext';
       case 'backed-up':
         return 'Backed up';
       case 'local-only':

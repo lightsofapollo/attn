@@ -194,6 +194,14 @@
   letter-spacing: 0.1em;
 }
 
+/* The rows are a list now (attn-n01r.30); strip the default list presentation
+   without stripping the semantics. */
+.workspace-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .workspace-row {
   display: grid;
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.65fr) minmax(0, 0.65fr) auto;

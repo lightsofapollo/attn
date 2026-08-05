@@ -45,6 +45,45 @@
     joinOpen = false;
     joinError = null;
     if (window.location.hash === '#join') history.replaceState(null, '', '/app');
+    // Return focus to the control that opened the panel (attn-n01r.30).
+    // DESIGN.md's Topmost-Escape Rule: "Every overlay stores focus on open and
+    // restores it on close." The open half was already right — the panel
+    // focuses its input — but closing dropped focus to the document.
+    joinTrigger?.focus();
+  }
+
+  let joinTrigger = $state<HTMLAnchorElement | undefined>();
+
+  /** Escape closes the topmost layer: the delete confirm, then the join panel. */
+  function onDeskKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return;
+    if (confirmingDeleteId !== null) {
+      event.stopPropagation();
+      cancelDelete();
+      return;
+    }
+    if (joinOpen) {
+      event.stopPropagation();
+      closeJoin();
+    }
+  }
+
+  /* The delete confirm announces role="alertdialog" but never behaved like one:
+     focus was never moved into it, was not trapped, and Escape did not dismiss
+     it, so a screen-reader user was told a dialog opened and then found focus
+     still on the Delete button behind it (attn-n01r.30). These remember the
+     invoking button so focus can go back where it came from. */
+  let deleteTrigger: HTMLButtonElement | undefined;
+
+  function openDeleteConfirm(workspaceId: string, trigger: HTMLButtonElement): void {
+    deleteTrigger = trigger;
+    confirmingDeleteId = workspaceId;
+  }
+
+  function cancelDelete(): void {
+    confirmingDeleteId = null;
+    deleteTrigger?.focus();
+    deleteTrigger = undefined;
   }
 
   function submitJoin(event: SubmitEvent): void {
@@ -112,7 +151,8 @@
   }
 </script>
 
-<div class="app-shell" data-app-view="home">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="app-shell" data-app-view="home" onkeydown={onDeskKeydown}>
   <AppHeader mode={health.mode}>
     {#snippet actions()}
       <a class="button" href="/app/storage">Storage</a>
@@ -149,13 +189,22 @@
         <span>Markdown, images, folders, or zip</span>
         <big>↥ Import workspace</big>
       </button>
-      <a class="quick" href="/app#join" data-action="join-review" onclick={openJoin}>
+      <a
+        class="quick"
+        href="/app#join"
+        data-action="join-review"
+        bind:this={joinTrigger}
+        aria-expanded={joinOpen}
+        aria-controls="join-panel"
+        onclick={openJoin}
+      >
         <span>Browser or native link</span>
         <big>↗ Join a review</big>
       </a>
     </div>
     {#if joinOpen}
       <form
+        id="join-panel"
         class="join-panel"
         data-slot="join-panel"
         onsubmit={submitJoin}
@@ -202,8 +251,15 @@
     {/if}
 
     {#if workspaces.length > 0}
-      <div class="folio-label">Recently on this device</div>
+      <!-- A real heading, and a real list (attn-n01r.30). The populated desk
+           previously exposed LESS structure than the empty one: the empty state
+           had an <h2> and the populated state had none, and the rows were a
+           flat run of divs with no list semantics — no "list, N items", no item
+           position, no way to jump to it. -->
+      <h2 class="folio-label" id="recent-workspaces">Recently on this device</h2>
+      <ul class="workspace-list" aria-labelledby="recent-workspaces">
       {#each workspaces as workspace (workspace.id)}
+        <li>
         <div class="workspace-row" data-workspace-id={workspace.id}>
           {#if renamingId === workspace.id}
             <input
@@ -234,26 +290,40 @@
             {:else}
               <span>{sharingLabel(workspace.sharing)}</span>
             {/if}
-            <button class="row-action" type="button" onclick={() => startRename(workspace)}>
+            <button
+              class="row-action"
+              type="button"
+              aria-label={`Rename ${workspace.name}`}
+              onclick={() => startRename(workspace)}
+            >
               Rename
             </button>
             <button
               class="row-action danger"
               type="button"
-              onclick={() => (confirmingDeleteId = workspace.id)}
+              aria-label={`Delete ${workspace.name}`}
+              onclick={(event) => openDeleteConfirm(workspace.id, event.currentTarget)}
             >
               Delete
             </button>
           </span>
         </div>
         {#if confirmingDeleteId === workspace.id}
-          <div class="confirm-clear" role="alertdialog" aria-label={`Delete ${workspace.name}?`}>
+          <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+          <div
+            class="confirm-clear"
+            role="alertdialog"
+            aria-modal="true"
+            tabindex="-1"
+            use:autofocus
+            aria-label={`Delete ${workspace.name}?`}
+          >
             <strong>Delete “{workspace.name}” from this device?</strong>
             <p style="margin: 0.3rem 0 0; color: var(--hosted-muted);">
               This cannot be undone. Export it first if you need a copy.
             </p>
             <div class="actions">
-              <button class="button" type="button" onclick={() => (confirmingDeleteId = null)}>
+              <button class="button" type="button" onclick={cancelDelete}>
                 Cancel
               </button>
               <button
@@ -262,6 +332,7 @@
                 onclick={async () => {
                   await onDelete(workspace.id);
                   confirmingDeleteId = null;
+                  deleteTrigger = undefined;
                 }}
               >
                 Delete workspace
@@ -269,7 +340,9 @@
             </div>
           </div>
         {/if}
+        </li>
       {/each}
+      </ul>
     {:else if !storageUnavailable}
       <div class="folio-label">Your first sheet</div>
       <article class="empty-desk" aria-label="A half-written Markdown sheet, waiting">

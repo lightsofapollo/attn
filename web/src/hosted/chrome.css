@@ -121,8 +121,13 @@ a {
   outline-offset: 2px;
 }
 
+/* Muted, not accent (attn-n01r.18/.36). The One Pencil Rule: the accent marks
+   action, selection and focus — "if two things on a screen are terracotta, one
+   of them is wrong". The eyebrow is a static label nobody clicks, and it was
+   taking the pencil while the buttons it sits above went unmarked. Nine of the
+   landing's twelve terracotta marks were decoration of this kind. */
 .eyebrow {
-  color: var(--rust-deep);
+  color: var(--hosted-muted);
   font: 750 0.72rem/1 var(--sans);
   letter-spacing: 0.14em;
   text-transform: uppercase;

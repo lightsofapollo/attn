@@ -176,8 +176,8 @@
         disabled={storageUnavailable}
         onclick={onCreate}
       >
-        <span>One click · starts with untitled.md</span>
-        <big>＋ New workspace</big>
+        <strong class="quick-label">New workspace</strong>
+        <span class="quick-note">One click · starts with untitled.md</span>
       </button>
       <button
         class="quick"
@@ -186,8 +186,8 @@
         disabled={storageUnavailable}
         onclick={() => fileInput?.click()}
       >
-        <span>Markdown, images, folders, or zip</span>
-        <big>↥ Import workspace</big>
+        <strong class="quick-label">Import workspace</strong>
+        <span class="quick-note">Markdown, images, folders, or zip</span>
       </button>
       <a
         class="quick"
@@ -198,8 +198,8 @@
         aria-controls="join-panel"
         onclick={openJoin}
       >
-        <span>Browser or native link</span>
-        <big>↗ Join a review</big>
+        <strong class="quick-label">Join a review</strong>
+        <span class="quick-note">Browser or native link</span>
       </a>
     </div>
     {#if joinOpen}

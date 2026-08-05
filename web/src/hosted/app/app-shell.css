@@ -63,8 +63,15 @@
   color: var(--green);
 }
 
-.local-badge.warn {
-  color: var(--rust-deep);
+/* Caution is its own tier: neither the collaboration green nor the destructive
+   red (attn-n01r.31). Muted ink carries "look at this" without claiming either
+   "you're fine" or "something failed". */
+.local-badge[data-tone='caution'] {
+  color: var(--hosted-muted);
+}
+
+.local-badge[data-tone='warn'] {
+  color: var(--danger-ink);
 }
 
 .local-badge .dot {
@@ -72,6 +79,13 @@
   height: 7px;
   border-radius: 50%;
   background: currentColor;
+}
+
+/* Shape carries the state as well as colour, per PRODUCT.md's "do not rely on
+   color alone": filled for healthy, hollow for caution, filled for failure. */
+.local-badge[data-tone='caution'] .dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
 }
 
 .degraded-banner {
@@ -149,6 +163,13 @@
 }
 
 .quick {
+  /* Explicit grid so the box model does not depend on the tag. Two tiles are
+     <button> and one is <a>; Chrome centres a button's anonymous content block
+     and top-aligns an anchor's, which put the third tile 9.5px out of line at
+     every breakpoint (attn-n01r.36). */
+  display: grid;
+  align-content: end;
+  justify-items: start;
   min-height: 155px;
   border: 0;
   padding: 1.4rem;
@@ -156,21 +177,41 @@
   background: var(--sheet);
   color: var(--ink);
   cursor: pointer;
-  display: block;
 }
 
 .quick:hover {
   background: var(--sheet-raised);
 }
 
-.quick big {
+/* Sans, not serif (attn-n01r.36). DESIGN.md's Read/Do Rule is explicit — "a
+   button never uses the serif" — and these rendered at 400 weight, so the
+   desk's primary actions carried no operative authority either. Label first,
+   note second: <big> was obsolete and put the caption ahead of the label in the
+   accessible name. */
+.quick-label {
   display: block;
-  font-family: var(--serif);
-  font-size: 1.55rem;
-  margin-top: 2.2rem;
+  font-family: var(--sans);
+  font-size: 1.5rem;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
   /* Long action labels must break rather than push the card wider than the
      viewport at large text sizes (attn-n01r.43). */
   overflow-wrap: break-word;
+}
+
+.quick-note {
+  display: block;
+  margin-top: 0.5rem;
+  color: var(--hosted-muted);
+  font: 0.85rem/1.45 var(--sans);
+}
+
+/* The accent belongs on the primary action (attn-n01r.36). The One Pencil Rule
+   was inverted: terracotta marked a static "LOCAL WORKSPACES" eyebrow nobody
+   clicks while the button it should mark carried none. */
+.quick[data-action='new-workspace'] .quick-label {
+  color: var(--rust);
 }
 
 .quick span {

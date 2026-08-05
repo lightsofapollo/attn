@@ -102,10 +102,16 @@ import {
 import { createDeviceWebSocketProofV3 } from './device-proof';
 import { REVIEW_INBOUND_CHANNEL_PREFIX, openBroadcastChannel, ringLocalDoorbell } from '../tab-channels';
 import type { InviteCapability } from './browser-workspace-share';
-import {
-  parseCollabWireMessage,
-  type CollabWireMessage,
-} from '../prosemirror/collab-controller';
+/* Type-only (attn-n01r.41). The value import of parseCollabWireMessage was the
+   single edge dragging 307 KB of ProseMirror onto the desk route:
+     real-service -> browser-session -> collab-controller -> collab-authority -> schema
+   The parser itself needs none of it — it is pure JSON validation (byteLength
+   guard, JSON.parse, shape checks) and touches neither `schema` nor `Step`. It
+   arrives via collab-controller's own use of CollabAuthority, which that module
+   genuinely instantiates, so the edge has to be cut here rather than there.
+   Both call sites below are already async, so importing at point of use costs a
+   microtask and changes no ordering. */
+import type { CollabWireMessage } from '../prosemirror/collab-controller';
 import type {
   Anchor,
   AnchorIndex,
@@ -1264,6 +1270,7 @@ export class BrowserSession {
    * state; document collaboration keeps the direct-first relay safety net.
    */
   async sendCollab(payload: string): Promise<void> {
+    const { parseCollabWireMessage } = await import('../prosemirror/collab-controller');
     const message = parseCollabWireMessage(payload);
     if (!message || !this.outboundCollabAllowed(message)) {
       throw new Error(
@@ -2896,6 +2903,7 @@ export class BrowserSession {
       if (payload.kind === 'collab') {
         if (envelope.target !== null && envelope.target !== undefined) return;
         if (sender.deviceId === this.identity?.deviceId) return;
+        const { parseCollabWireMessage } = await import('../prosemirror/collab-controller');
         const message = parseCollabWireMessage(payload.payload);
         if (!message || !this.inboundCollabAllowed(message, sender)) return;
         await this.dispatchCollabOnce({

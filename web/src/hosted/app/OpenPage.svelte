@@ -72,7 +72,7 @@
         onchange={onFilesPicked}
       />
       {#if importError}
-        <p role="alert" style="color: var(--rust-deep); font: 0.9rem/1.5 var(--sans);">
+        <p class="form-error" role="alert">
           Import failed: {importError}
         </p>
       {/if}

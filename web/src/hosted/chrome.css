@@ -20,6 +20,18 @@
   --rust: var(--primary);
   --rust-deep: var(--primary-hover);
   --rust-contrast: var(--primary-foreground);
+  /* Radii the hosted routes consume but never received (attn-n01r.42).
+     --radius-md/--radius-lg are declared in src/app.css inside a Tailwind
+     `@theme inline` block, which the hosted entries do not import — so
+     .file-row, .file-add-row, .viewing-safely and .arrival-toast were
+     rendering square against a design that specifies 8px/10px. Undefined
+     custom properties fail silently: no error, no lint, no visual alarm.
+     Derived from the same --radius as app.css so the two cannot drift. */
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  /* Hover wash for selection controls. Consumed by .share-selection-actions
+     and defined nowhere, so that hover had no background at all. */
+  --wash: var(--accent);
   /* Text-safe ledger green + danger ink: the accent-tier hues fail AA at
      small sizes (11px badges measured 3.0-3.3:1). */
   --green: oklch(0.40 0.12 150);
@@ -137,8 +149,14 @@ a {
   border-color: var(--rust-deep);
 }
 
+/* Destructive text uses the danger token, not the accent (attn-n01r.42).
+   --rust-deep aliases --primary-hover, so in INK every delete/error surface
+   rendered the same steel blue as the primary Join button — the dark desk had
+   no red anywhere in its destructive vocabulary. --danger-ink is the text-safe
+   tier (the accent tier measures 3.0-3.3:1 on small labels) and it already
+   flips correctly. */
 .button.danger {
-  color: var(--rust-deep);
+  color: var(--danger-ink);
 }
 
 .icon-button {

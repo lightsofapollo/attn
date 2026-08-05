@@ -115,7 +115,11 @@
   justify-content: space-between;
   align-items: end;
   gap: 1rem;
-  border-bottom: 1px solid var(--ink);
+  /* --rule, not solid --ink (attn-n01r.42). DESIGN.md: hairlines are
+     "ink at low alpha, never a solid gray line". At full opacity this
+     rendered oklch(0.87) in INK — the brightest element on the dark page,
+     brighter than the h1 it underlines. */
+  border-bottom: 1px solid var(--rule);
   padding-bottom: 1.3rem;
 }
 
@@ -213,6 +217,15 @@ a.workspace-row:hover {
 .workspace-row span {
   color: var(--hosted-muted);
   font-size: 0.82rem;
+}
+
+/* Re-assert the badge's own colour inside a row (attn-n01r.42). `.workspace-row
+   span` (0,1,1) outranked `.local-badge` (0,1,0), so the same class rendered
+   green in the header and muted grey in the row — "Shared · relay sees only
+   ciphertext" became visually identical to "Local only", and the dot followed
+   because it is painted with currentColor. */
+.workspace-row .local-badge {
+  color: var(--green);
 }
 
 .empty-desk {
@@ -2257,7 +2270,7 @@ a.workspace-row:hover {
 }
 
 .storage-panel {
-  border-top: 1px solid var(--ink);
+  border-top: 1px solid var(--rule);
   padding-top: 1rem;
 }
 
@@ -2553,7 +2566,7 @@ a.workspace-row:hover {
 }
 
 .row-action.danger:hover {
-  color: var(--rust-deep);
+  color: var(--danger-ink);
 }
 
 .rename-input {
@@ -2822,10 +2835,19 @@ a.workspace-row:hover {
   border-color: var(--rust-deep);
 }
 
+/* The error text three components had copy-pasted inline (attn-n01r.42/.44).
+   Same declaration in DeskHome, OpenPage and StoragePage — a class that was
+   copied instead of created. Uses --danger-ink so it stays red in INK. */
+.form-error {
+  margin-top: 0.75rem;
+  font: 0.9rem/1.5 var(--sans);
+  color: var(--danger-ink);
+}
+
 .join-error {
   margin: 8px 0 0;
   font: 500 0.85rem/1.5 var(--sans);
-  color: var(--rust-deep);
+  color: var(--danger-ink);
 }
 
 .join-hint {

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import BrandMark from '../../lib/BrandMark.svelte';
   import type { PersistenceMode } from './types';
 
   interface Props {
@@ -27,7 +28,7 @@
 </script>
 
 <header class="app-header">
-  <a class="brand" href="/"><span class="mark" aria-hidden="true">a.</span>attn</a>
+  <a class="brand" href="/"><BrandMark class="mark" />attn</a>
   <div class="right">
     <span class="local-badge" class:warn={badge.warn} data-storage-mode={mode}>
       <span class="dot" aria-hidden="true"></span>

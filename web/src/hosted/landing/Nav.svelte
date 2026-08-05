@@ -1,4 +1,5 @@
 <script lang="ts">
+  import BrandMark from '../../lib/BrandMark.svelte';
   import { readDeskCount } from '../desk-count';
 
   const deskCount = readDeskCount();
@@ -6,7 +7,7 @@
 </script>
 
 <nav class="site-nav" aria-label="Main navigation">
-  <a class="brand" href="/"><span class="mark" aria-hidden="true">a.</span>attn</a>
+  <a class="brand" href="/"><BrandMark class="mark" />attn</a>
   <div class="nav-right">
     <a class="nav-link" href="#how">How it works</a>
     {#if deskCount === 0}<a class="nav-link" href="/app">Your desk</a>{/if}

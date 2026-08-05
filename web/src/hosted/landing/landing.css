@@ -30,15 +30,11 @@ html {
   font: 750 1.28rem var(--serif);
 }
 
+/* The mark carries its own tile, radius, and fixed palette (BrandMark.svelte):
+   it is the desktop app icon, so nothing here may repaint it per theme. */
 .mark {
   width: 29px;
   height: 29px;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--ink);
-  color: var(--sheet);
-  font: 700 0.75rem var(--mono);
 }
 
 .nav-right {

@@ -95,7 +95,7 @@
     if (node.isDir) {
       return resolveFolderIcon(node.name, false);
     }
-    return resolveFileIcon(node.name, { includeMarkdown: true });
+    return resolveFileIcon(node.name);
   }
 </script>
 

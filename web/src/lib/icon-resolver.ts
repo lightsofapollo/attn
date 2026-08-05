@@ -1,8 +1,6 @@
 import { ICON_PACKS } from './vscode-icon-map.generated';
 import { getIconPack } from './icon-pack';
 
-const MARKDOWN_NO_ICON = new Set(['md']);
-
 function extensionCandidates(fileName: string): string[] {
   const lower = fileName.toLowerCase();
   const parts = lower.split('.');
@@ -19,19 +17,24 @@ function activePackIcons() {
   return ICON_PACKS[getIconPack()];
 }
 
-export function resolveFileIcon(fileName: string, opts?: { includeMarkdown?: boolean }): string | null {
+/**
+ * Every file gets an icon, Markdown included (attn-n01r.7).
+ *
+ * This used to suppress `.md` behind an `includeMarkdown` opt-in, on the theory
+ * that a column of identical Markdown glyphs is noise in a product whose
+ * workspaces are almost all Markdown. In practice it read as broken: the
+ * filename lookup below runs first, so README.md kept its icon and every other
+ * `.md` lost one, and the two call sites disagreed about whether to opt in.
+ * Suppression is now gone rather than defaulted — if the density turns out to
+ * be the real problem, the answer is a better Markdown glyph, not a missing one.
+ */
+export function resolveFileIcon(fileName: string): string | null {
   const lower = fileName.toLowerCase();
   const extCandidates = extensionCandidates(lower);
   const icons = activePackIcons();
 
   const byName = icons.FILE_NAME_ICONS[lower];
   if (byName) return byName;
-
-  const isMarkdown =
-    extCandidates.length > 0 && MARKDOWN_NO_ICON.has(extCandidates[extCandidates.length - 1]);
-  if (isMarkdown && !opts?.includeMarkdown) {
-    return null;
-  }
 
   for (const ext of extCandidates) {
     const byExt = icons.FILE_EXTENSION_ICONS[ext];

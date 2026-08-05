@@ -4,6 +4,7 @@ import { defineConfig, type Connect, type Plugin } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
 import { entryHtmlPath, hostedEntryForPath } from './src/lib/hosted/routes';
+import { THEME_PREFLIGHT_SCRIPT } from './src/lib/hosted/theme-preflight';
 
 const webRoot = fileURLToPath(new URL('.', import.meta.url));
 const hostedRoot = path.join(webRoot, 'hosted');
@@ -71,6 +72,31 @@ function agentationDevToolbar(): Plugin {
   };
 }
 
+// Stamp the theme onto <html> before the first paint (attn-n01r.22). The
+// hosted entries carry blocking stylesheets, so CSS paints the PAPER ground
+// well before the deferred module bundle runs initTheme() — a dark-mode
+// visitor measured ~1.2 s of full-page paper-white on a slow link. This is the
+// same mechanism the native app uses in web/index.html; it needs a CSP source
+// hash here, which lives beside the script in src/lib/hosted/theme-preflight.ts.
+// Injected at build AND serve so dev matches production.
+function injectThemePreflight(): Plugin {
+  return {
+    name: 'attn-theme-preflight',
+    transformIndexHtml: {
+      order: 'pre',
+      handler() {
+        return [
+          {
+            tag: 'script',
+            children: THEME_PREFLIGHT_SCRIPT,
+            injectTo: 'head-prepend',
+          },
+        ];
+      },
+    },
+  };
+}
+
 // Record which modules land in each emitted chunk so the route bundle gate
 // (scripts/check-route-bundles.mjs) can match forbidden *code* precisely —
 // page copy is allowed to say "ProseMirror" without tripping the gate.
@@ -100,7 +126,14 @@ export default defineConfig({
   envDir: webRoot,
   publicDir: path.join(hostedRoot, 'public'),
   appType: 'mpa',
-  plugins: [hostedEntryRewrites(), agentationDevToolbar(), chunkModulesManifest(), svelte(), tailwindcss()],
+  plugins: [
+    hostedEntryRewrites(),
+    injectThemePreflight(),
+    agentationDevToolbar(),
+    chunkModulesManifest(),
+    svelte(),
+    tailwindcss(),
+  ],
   resolve: {
     alias: {
       $lib: path.join(webRoot, 'src/lib'),

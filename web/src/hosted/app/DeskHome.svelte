@@ -33,6 +33,11 @@
     event.preventDefault();
     joinOpen = true;
     joinError = null;
+    // Push the hash the close path already assumes exists (attn-n01r.40).
+    // /app#join opened the panel on a real load, but clicking the tile only set
+    // local state, so a reload lost it — while closeJoin() unconditionally
+    // replaced the URL as though the hash were present. The two paths now agree.
+    if (window.location.hash !== '#join') history.pushState(null, '', '/app#join');
   }
 
   // Focus the paste field whichever way the panel opened (#join intent or
@@ -168,13 +173,28 @@
       <p>No account · {health.quotaLabel === 'unavailable' ? 'storage unavailable' : `${health.quotaLabel} available`}</p>
     </div>
 
+    {#if storageUnavailable}
+      <!-- The reason the primary actions cannot be used (attn-n01r.46). They
+           previously used the `disabled` attribute, which removes them from the
+           tab order entirely — a keyboard user never encountered them at all
+           and was never told why. aria-disabled keeps them reachable and
+           announced; this element supplies the explanation they point at. -->
+      <p id="storage-blocked-reason" class="form-error" role="alert">
+        This browser profile cannot store workspaces, so creating and importing are unavailable.
+        Check private-browsing or site-data settings, then reload.
+      </p>
+    {/if}
     <div class="quick-actions">
       <button
         class="quick"
         type="button"
         data-action="new-workspace"
-        disabled={storageUnavailable}
-        onclick={onCreate}
+        aria-disabled={storageUnavailable}
+        aria-describedby={storageUnavailable ? 'storage-blocked-reason' : undefined}
+        onclick={() => {
+          if (storageUnavailable) return;
+          onCreate();
+        }}
       >
         <strong class="quick-label">New workspace</strong>
         <span class="quick-note">One click · starts with untitled.md</span>
@@ -183,8 +203,12 @@
         class="quick"
         type="button"
         data-action="import-workspace"
-        disabled={storageUnavailable}
-        onclick={() => fileInput?.click()}
+        aria-disabled={storageUnavailable}
+        aria-describedby={storageUnavailable ? 'storage-blocked-reason' : undefined}
+        onclick={() => {
+          if (storageUnavailable) return;
+          fileInput?.click();
+        }}
       >
         <strong class="quick-label">Import workspace</strong>
         <span class="quick-note">Markdown, images, folders, or zip</span>
@@ -220,15 +244,17 @@
             type="text"
             spellcheck="false"
             autocomplete="off"
+            aria-invalid={joinError ? 'true' : undefined}
+            aria-describedby={joinError ? 'join-error' : 'join-hint'}
             placeholder="https://attn.sh/s/… or attn://review/…"
           />
           <button class="join-go" type="submit">Join</button>
           <button class="join-cancel" type="button" onclick={closeJoin}>Cancel</button>
         </div>
         {#if joinError}
-          <p class="join-error" role="alert">{joinError}</p>
+          <p id="join-error" class="join-error" role="alert">{joinError}</p>
         {:else}
-          <p class="join-hint">
+          <p id="join-hint" class="join-hint">
             The part after <code>#</code> is the room key — it never reaches the relay.
           </p>
         {/if}

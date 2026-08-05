@@ -179,6 +179,14 @@
   cursor: pointer;
 }
 
+/* aria-disabled rather than the disabled attribute (attn-n01r.46), so the
+   control keeps its place in the tab order and can carry a reason. Styled to
+   read as unavailable without disappearing. */
+.quick[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .quick:hover {
   background: var(--sheet-raised);
 }

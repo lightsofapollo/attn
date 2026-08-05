@@ -143,7 +143,10 @@ p {
 }
 
 .hero-lede {
-  max-width: 610px;
+  /* ch against the column, not a fixed px cap (attn-n01r.47). At 1024 the hero
+     column is 922px and a 610px cap stopped the lede 312px short of the h1's
+     edge — a ragged right margin beside a large empty half. */
+  max-width: 62ch;
   margin: 0;
   color: var(--hosted-muted);
   font: 1.18rem/1.6 var(--sans);
@@ -350,7 +353,7 @@ p {
   display: block;
   margin: 2.7rem 0 0.35rem;
   font-family: var(--serif);
-  font-size: 1.7rem;
+  font-size: clamp(1.35rem, 2.1vw, 1.7rem);
   font-weight: 600;
   line-height: 1.1;
 }
@@ -524,8 +527,11 @@ p {
 }
 
 .surface h3 {
+  /* clamp, like the h1 and the section heads (attn-n01r.47). A flat 41.6px in a
+     290px content box at 768 broke 'Your private desk' to two lines while its
+     neighbour stayed on one. */
   margin: 4rem 0 0.8rem;
-  font-size: 2.6rem;
+  font-size: clamp(1.9rem, 3.2vw, 2.6rem);
   letter-spacing: -0.025em;
 }
 
@@ -739,6 +745,28 @@ footer {
 
   .chapter-index {
     margin-bottom: 1rem;
+  }
+}
+
+/* Mid-range tier (attn-n01r.47). landing.css had exactly two breakpoints, 1180
+   and 680, so between them every grid held its desktop track count while the
+   container shed up to 500px: .entry-strip tracks fell to 278/223/223 at 768 and
+   'Import workspace' wrapped while its neighbours did not. */
+@media (max-width: 980px) {
+  .entry-strip {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .steps {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .surfaces {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .share-proof {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

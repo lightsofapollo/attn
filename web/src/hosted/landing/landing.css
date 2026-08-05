@@ -942,3 +942,122 @@ footer {
     flex-direction: column;
   }
 }
+
+/* The relay-visibility ledger (attn-n01r.16). Two columns because the claim IS
+   the contrast: a reader checking an E2EE promise wants the "cannot" list beside
+   the "can" list, not a paragraph. Set in the reading face — this is prose to be
+   read, not chrome to be operated. */
+.relay-ledger {
+  max-width: 1180px;
+  margin: 4rem auto 0;
+  padding: clamp(2rem, 4vw, 3rem);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--sheet);
+}
+
+.relay-ledger h3 {
+  margin: 0;
+  font-size: clamp(1.5rem, 2.6vw, 2rem);
+  letter-spacing: -0.02em;
+}
+
+.relay-ledger-intro {
+  max-width: 60ch;
+  margin: 0.7rem 0 0;
+  color: var(--hosted-muted);
+  font: 1rem/1.6 var(--sans);
+}
+
+.relay-ledger-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: clamp(1.5rem, 4vw, 3rem);
+  margin-top: 2rem;
+}
+
+.relay-col h4 {
+  margin: 0 0 0.8rem;
+  font: 600 0.7rem var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--hosted-muted);
+}
+
+.relay-col ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.relay-col li {
+  padding-left: 1.4rem;
+  position: relative;
+  font: 0.95rem/1.5 var(--sans);
+}
+
+/* Shape carries the distinction, not just position: a mark for what is
+   observed, a struck circle for what is not. */
+.relay-col[data-tone='sees'] li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.52em;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--hosted-muted);
+}
+
+.relay-col[data-tone='blind'] li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.42em;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--green);
+}
+
+.relay-col[data-tone='blind'] li::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.86em;
+  width: 9px;
+  height: 1.5px;
+  background: var(--green);
+  transform: rotate(-45deg);
+  transform-origin: center;
+}
+
+.relay-ledger-note {
+  max-width: 70ch;
+  margin: 2rem 0 0;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--rule);
+  color: var(--hosted-muted);
+  font: 0.9rem/1.6 var(--sans);
+}
+
+.relay-ledger-note a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.relay-ledger code {
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: var(--paper-deep);
+  font: 0.9em var(--mono);
+}
+
+@media (max-width: 680px) {
+  .relay-ledger-cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -64,6 +64,55 @@
     </article>
   </div>
 
+  <!--
+    Show the guarantee instead of asserting it a fourth time (attn-n01r.16).
+    The page stated "no server can read the words" in four places and
+    demonstrated it nowhere, which is exactly the claim a local-first tool's
+    audience checks first — and they found nothing to check.
+
+    Every line below is taken from the project's own documented threat model in
+    planning/collab/relay-spec.md §Threat Model ("The server is honest-but-
+    curious. It may: … The server must not: …"), not written for marketing. If
+    that spec changes, this changes with it.
+  -->
+  <div class="relay-ledger">
+    <h3 id="relay-ledger-heading">What the relay can see</h3>
+    <p class="relay-ledger-intro">
+      attn's server is <strong>honest-but-curious</strong>: it routes ciphertext and never holds a
+      key. This is the whole of what it observes.
+    </p>
+    <div class="relay-ledger-cols">
+      <div class="relay-col" data-tone="sees">
+        <h4>It sees</h4>
+        <ul>
+          <li>Room, peer, device and envelope ids</li>
+          <li>Envelope sizes, counts and timing</li>
+          <li>Your IP address</li>
+          <li>That a connection was negotiated — never the negotiation's contents</li>
+        </ul>
+      </div>
+      <div class="relay-col" data-tone="blind">
+        <h4>It cannot see</h4>
+        <ul>
+          <li>The document, at any version</li>
+          <li>Comment and suggestion text</li>
+          <li>File and folder names</li>
+          <li>Who you are, beyond an id you generate</li>
+          <li>The room key — it lives after the <code>#</code> in your invite link, and browsers
+            never send that part to a server</li>
+        </ul>
+      </div>
+    </div>
+    <p class="relay-ledger-note">
+      Identities are derived on your machine from the room secret; the relay issues none. The
+      threat model is written down in
+      <a href="https://github.com/lightsofapollo/attn/blob/main/planning/collab/relay-spec.md">
+        relay-spec.md</a>, and the review that tested it against the implementation is in
+      <a href="https://github.com/lightsofapollo/attn/blob/main/planning/collab/security-review.md">
+        security-review.md</a>.
+    </p>
+  </div>
+
   <div class="share-proof">
     <div class="capture">
       <ResponsiveScreenshot

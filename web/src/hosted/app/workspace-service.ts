@@ -57,7 +57,15 @@ import type {
   BrowserOwnerWorkspaceRuntime,
   BrowserOwnerWorkspaceRuntimeOptions,
 } from '../../lib/review/browser-owner-workspace-runtime';
-import { openWorkspaceReviewProjection } from '../../lib/review/browser-review-log';
+import {
+  discoverReviewLogRoom,
+  openWorkspaceReviewProjection,
+  replayReviewLogIntoStore,
+} from '../../lib/review/browser-review-log';
+import {
+  createReviewCountingSink,
+  type WorkspaceReviewCounts,
+} from '../../lib/review/review-counts';
 
 export type WorkspaceErrorKind = 'conflict' | 'quota' | 'unavailable' | 'storage';
 
@@ -268,6 +276,28 @@ export class BrowserWorkspaceService {
    */
   async openReviewProjection(workspaceId: string): Promise<ReviewProjectionHandle> {
     return openWorkspaceReviewProjection({ storage: this.storage, workspaceId });
+  }
+
+  /**
+   * Review work waiting in a workspace, or null when it has no review log
+   * (attn-n01r.34).
+   *
+   * Replays the durable log into a tallying sink rather than the runes store.
+   * There is no cheap durable count: events live in inbox/outbox as encrypted
+   * envelopes keyed by room, not workspace, so counting means decrypting and
+   * projecting — which is what this replay already does.
+   *
+   * Callers must gate this on sharing state. discoverReviewLogRoom returns null
+   * for an unshared workspace, so it is safe either way, but paying a replay
+   * per desk row would make listing scale with the desk instead of with the
+   * work actually waiting.
+   */
+  async reviewCountsFor(workspaceId: string): Promise<WorkspaceReviewCounts | null> {
+    const room = await discoverReviewLogRoom(this.storage, workspaceId);
+    if (!room) return null;
+    const sink = createReviewCountingSink();
+    await replayReviewLogIntoStore({ storage: this.storage, room, store: sink });
+    return sink.counts();
   }
 
   // ————— capabilities —————

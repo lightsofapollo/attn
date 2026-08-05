@@ -53,6 +53,8 @@ export const EMPTY_REVIEW_COUNTS: WorkspaceReviewCounts = {
 export function createReviewCountingSink(): {
   counts: () => WorkspaceReviewCounts;
   currentRoomId: RoomId | null;
+  currentFileId: FileId | null;
+  currentSnapshotId: SnapshotId | null;
   applyEvent(event: ReviewEvent): void;
   applySnapshot(snapshot: ReviewSnapshot): void;
   setCurrentFile(fileId: FileId | null): void;
@@ -67,6 +69,8 @@ export function createReviewCountingSink(): {
 
   return {
     currentRoomId: null,
+    currentFileId: null,
+    currentSnapshotId: null,
 
     counts(): WorkspaceReviewCounts {
       return {

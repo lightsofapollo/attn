@@ -163,6 +163,10 @@ a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* 44x44 (attn-n01r.12). Measured 32.8x32.8 — 75% of the target on both axes,
+     and this is one of only two controls that survive in the mobile header. */
+  min-width: 44px;
+  min-height: 44px;
   padding: 0.4rem;
   border: 0;
   border-radius: 8px;

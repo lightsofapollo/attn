@@ -3503,6 +3503,7 @@ mod tests {
                 media_type: None,
                 encoding: None,
                 manifest: None,
+                annotation: None,
             },
         };
         let key = [0x55; 32];
@@ -3576,6 +3577,7 @@ mod tests {
                     scope: crate::review::model::WorkspaceManifestScope::Workspace,
                     entries: Vec::new(),
                 }),
+                annotation: None,
             },
         };
         let error = seal_managed_snapshot(SHARE_ID, 4, &snapshot, &[0x55; 32])
@@ -3689,6 +3691,7 @@ mod tests {
                         block: None,
                         context: None,
                         structure: None,
+                        html: None,
                     },
                     body: "valid comment after poison".into(),
                 },

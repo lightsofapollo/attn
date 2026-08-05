@@ -2,6 +2,11 @@
   import { onMount } from 'svelte';
   import { markdownSourceUrl } from './markdown-layer';
   import { htmlViewerSandbox } from './html-viewer-sandbox';
+  import {
+    HtmlAnnotationBridge,
+    injectDocRuntime,
+  } from './review/html-annotation-bridge';
+  import type { AnnotationBridgeEvents } from './review/html-annotation-bridge';
 
   interface Props {
     /**
@@ -25,11 +30,32 @@
     mtime?: number;
     /** Native/local pages retain script support; hosted snapshots disable it. */
     allowScripts?: boolean;
+    /**
+     * Turn on commenting. Requires `content` — annotation injects a runtime
+     * into the document source, which is only possible when the shell holds
+     * the bytes. That is always true for a shared document, and annotation is
+     * only meaningful for one.
+     */
+    annotate?: boolean;
+    /** Wired up once the frame exists, so a parent can drive the rail. */
+    annotationEvents?: AnnotationBridgeEvents;
+    /** Handed the live bridge so the parent can push anchors and focus. */
+    onBridge?: (bridge: HtmlAnnotationBridge | null) => void;
   }
 
-  let { path, content, mtime, allowScripts = true }: Props = $props();
+  let {
+    path,
+    content,
+    mtime,
+    allowScripts = true,
+    annotate = false,
+    annotationEvents,
+    onBridge,
+  }: Props = $props();
 
   let loading = $state(true);
+  let frameEl = $state<HTMLIFrameElement | null>(null);
+  let bridge: HtmlAnnotationBridge | null = null;
 
   // The iframe is a cross-origin, opaque-origin sandbox, so we can neither
   // style its internal scrollbar nor scroll it from attn's ScrollArea (its
@@ -56,8 +82,21 @@
   // "Open in browser" button) is shared app chrome rendered by App.svelte.
   // `content` (reviewer/srcdoc) wins when provided; otherwise load the local
   // file via the attn:// protocol (owner/path mode).
+  // Annotation implies content mode: the runtime has to be spliced into the
+  // document source, which the shell can only do to bytes it holds.
+  let annotating = $derived(annotate && content !== undefined);
   let isContentMode = $derived(content !== undefined);
-  let sandbox = $derived(htmlViewerSandbox(allowScripts));
+  // The injected runtime needs `allow-scripts`, so annotating a snapshot turns
+  // scripts on even where the hosted reviewer would otherwise disable them.
+  // The frame stays on an opaque origin either way — no allow-same-origin — so
+  // this grants the document no reach into the app, the user's files, or
+  // storage. The document's own scripts are assumed hostile regardless, which
+  // is why the trust boundary sits in the shell and not in the frame.
+  // @see planning/collab/html-annotation.md §3, §4
+  let sandbox = $derived(htmlViewerSandbox(allowScripts || annotating));
+  let renderedContent = $derived(
+    annotating && content !== undefined ? injectDocRuntime(content) : content,
+  );
   let src = $derived(
     !isContentMode && path !== undefined
       ? mtime !== undefined
@@ -75,6 +114,35 @@
     void src;
     void content;
     loading = true;
+  });
+
+  // The bridge is torn down and rebuilt whenever the frame or the document
+  // changes: a reload destroys the frame's runtime, so the old port is dead and
+  // the handshake has to run again.
+  $effect(() => {
+    const frame = frameEl;
+    const shouldAnnotate = annotating;
+    void renderedContent;
+
+    if (!frame || !shouldAnnotate) {
+      bridge?.dispose();
+      bridge = null;
+      onBridge?.(null);
+      return;
+    }
+
+    const next = new HtmlAnnotationBridge(frame, annotationEvents ?? {});
+    next.connect();
+    bridge = next;
+    onBridge?.(next);
+
+    return () => {
+      next.dispose();
+      if (bridge === next) {
+        bridge = null;
+        onBridge?.(null);
+      }
+    };
   });
 </script>
 
@@ -98,7 +166,8 @@
          empty sandbox token list. Native callers retain the historical
          allow-scripts opaque-origin behavior by default. -->
     <iframe
-      srcdoc={content}
+      bind:this={frameEl}
+      srcdoc={renderedContent}
       title={fileName}
       class="block h-full border-0 bg-white"
       style="width: calc(100% + {scrollbarWidth}px);"

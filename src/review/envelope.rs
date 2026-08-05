@@ -667,6 +667,7 @@ mod tests {
                     block: None,
                     context: None,
                     structure: None,
+                    html: None,
                 },
                 body: "hello".to_string(),
             },
@@ -707,6 +708,7 @@ mod tests {
                     block: None,
                     context: None,
                     structure: None,
+                    html: None,
                 },
                 operation: SuggestionOperation::Replace {
                     expected_text: "foo".to_string(),

@@ -1128,6 +1128,7 @@ mod tests {
                 block: None,
                 context: None,
                 structure: None,
+                html: None,
             },
             operation: crate::review::model::SuggestionOperation::InsertAfter {
                 text: "new".to_string(),
@@ -1160,6 +1161,7 @@ mod tests {
                 media_type: None,
                 encoding: None,
                 manifest: None,
+                annotation: None,
             }),
         }
     }
@@ -1731,6 +1733,7 @@ mod tests {
             media_type: Some("application/octet-stream".to_string()),
             encoding: Some(crate::review::model::SnapshotAssetEncoding::Base64url),
             manifest: None,
+            annotation: None,
         });
 
         assert!(store.save_snapshot(&room_id, &snap).is_err());

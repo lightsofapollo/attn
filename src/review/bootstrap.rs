@@ -56,6 +56,7 @@ use crate::review::model::SnapshotPlaintext;
 use crate::review::model::{
     Capability, Device, DeviceClient, EnvelopeKind, EventMeta, MailboxEnvelope, Participant,
     ParticipantKind, ReviewEvent, ReviewEventBody, ReviewRoom, RoomMode, RoomPolicy,
+    SnapshotAnnotation,
 };
 use crate::review::store::ReviewStore;
 use crate::review::transport::inbound::{
@@ -3174,15 +3175,21 @@ impl Bootstrapper {
 
         let content = String::from_utf8(doc_bytes)
             .map_err(|_| BootstrapError::Crypto("snapshot document must be utf-8".into()))?;
-        // HTML docs are shared read-only — no comment anchors (yet), so they
-        // carry no anchor index. Markdown docs anchor against rendered
-        // structure for comments/suggestions.
-        let (doc_type, anchor_index) = if is_html_path(path) {
-            (DocType::Html, None)
+        // Markdown anchors against a Rust-built index over its source. HTML has
+        // no Rust-side index — that would need a headless HTML parser in the
+        // binary — so it declares a client-side annotation capability instead,
+        // and its anchors resolve in the document frame.
+        // @see planning/collab/html-annotation.md §2, §7
+        let (doc_type, anchor_index, annotation) = if is_html_path(path) {
+            (
+                DocType::Html,
+                None,
+                Some(SnapshotAnnotation::HtmlSelectorsV1),
+            )
         } else {
             let index = build_anchor_index(content.as_bytes(), &snapshot_id)
                 .map_err(|e| BootstrapError::Crypto(format!("anchor index: {e}")))?;
-            (DocType::Markdown, Some(index))
+            (DocType::Markdown, Some(index), None)
         };
         let plaintext = SnapshotPlaintext {
             doc_type,
@@ -3191,6 +3198,7 @@ impl Bootstrapper {
             media_type: None,
             encoding: None,
             manifest: None,
+            annotation,
         };
 
         let published = self
@@ -3461,6 +3469,7 @@ impl Bootstrapper {
             media_type: None,
             encoding: None,
             manifest: Some(manifest),
+            annotation: None,
         };
         plaintext
             .validate()

@@ -585,6 +585,7 @@ fn mint_reviewer_comment_envelope(harness: &E2eHarness, body_text: &str) -> Mail
                 block: None,
                 context: None,
                 structure: None,
+                html: None,
             },
             body: body_text.to_string(),
         },

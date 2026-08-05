@@ -965,6 +965,23 @@ impl ReviewManager {
                 Some(bootstrapper),
                 Some(_runtime),
             ) => {
+                // An HTML anchor is authored inside a document frame that shares
+                // a JS context with untrusted page scripts, so it is bounded here
+                // before it can be persisted or synced to peers. Rust cannot
+                // check that the selectors address anything — that needs a DOM —
+                // but it can refuse a malformed or oversized payload.
+                // @see planning/collab/html-annotation.md §3
+                if let Some(html) = anchor.html.as_ref()
+                    && let Err(err) = html.validate()
+                {
+                    self.emit_event_outcome(
+                        room_id.clone(),
+                        Err(crate::review::bootstrap::BootstrapError::Crypto(format!(
+                            "invalid html anchor: {err}"
+                        ))),
+                    );
+                    return;
+                }
                 // A reply reuses the parent's thread id; a new comment mints one.
                 let thread_id = parent_thread_id.clone().unwrap_or_else(mint_thread_id);
                 let event_body = crate::review::model::ReviewEventBody::CommentCreated {
@@ -4584,6 +4601,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: None,
+            annotation: None,
         };
         let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
             .expect("canonical snapshot");
@@ -4855,6 +4873,7 @@ mod tests {
             media_type: Some("application/octet-stream".to_string()),
             encoding: Some(SnapshotAssetEncoding::Base64url),
             manifest: None,
+            annotation: None,
         };
         let markdown_raw = b"# Nested\n\nHello workspace.\n";
         let markdown_payload = SnapshotPlaintext {
@@ -4870,6 +4889,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: None,
+            annotation: None,
         };
 
         let mut asset_event = persist_snapshot_event(
@@ -4972,6 +4992,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: Some(manifest),
+            annotation: None,
         };
         let mut manifest_event = persist_snapshot_event(
             &store,
@@ -5058,6 +5079,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: None,
+            annotation: None,
         };
         let mut event = persist_snapshot_event(
             &store,
@@ -5109,6 +5131,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: None,
+            annotation: None,
         };
         let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
             .expect("canonical snapshot");
@@ -6032,6 +6055,7 @@ mod tests {
             block: None,
             context: None,
             structure: None,
+            html: None,
         }
     }
 
@@ -7422,6 +7446,7 @@ mod request_snapshot_tests {
                 media_type: None,
                 encoding: None,
                 manifest: None,
+                annotation: None,
             }),
         }
     }

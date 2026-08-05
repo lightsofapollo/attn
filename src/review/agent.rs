@@ -295,5 +295,6 @@ fn placeholder_anchor() -> Anchor {
         block: None,
         context: None,
         structure: None,
+        html: None,
     }
 }

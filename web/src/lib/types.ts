@@ -50,10 +50,20 @@ export interface WorkspaceSnapshotManifest {
   entries: WorkspaceManifestEntry[];
 }
 
+/**
+ * How a snapshot's comments are anchored. Markdown uses the Rust-built
+ * `anchorIndex`; HTML has no Rust-side index (that would need a headless HTML
+ * parser in the binary) and declares this capability instead, resolving its
+ * anchors client-side in the document frame.
+ * @see planning/collab/html-annotation.md §6
+ */
+export type SnapshotAnnotation = 'html_selectors_v1';
+
 /** Canonical decrypted bytes carried by a snapshot_blob envelope. */
 export type SnapshotPlaintext =
   | { docType: 'markdown'; content: string; anchorIndex?: AnchorIndex }
-  | { docType: 'html'; content: string }
+  /** `annotation` absent means read-only — an older peer, or a legacy snapshot. */
+  | { docType: 'html'; content: string; annotation?: SnapshotAnnotation }
   | { docType: 'asset'; content: string; mediaType: string; encoding: 'base64url' }
   | { docType: 'workspace_manifest'; manifest: WorkspaceSnapshotManifest };
 
@@ -707,12 +717,76 @@ export interface StructureAnchor {
   ordinalInParent: number;
 }
 
+/** What an HTML anchor is attached to. */
+export type HtmlAnchorTarget = 'text_range' | 'element';
+
+/**
+ * W3C `TextPositionSelector`: UTF-8 byte offsets into the document's canonical
+ * rendered text (`textContent`).
+ * @see planning/collab/html-annotation.md §6
+ */
+export interface HtmlTextPosition {
+  start: number;
+  end: number;
+}
+
+/**
+ * W3C `RangeSelector`: start/end containers addressed by CSS selector plus a
+ * UTF-8 byte offset into each container's text.
+ * @see planning/collab/html-annotation.md §6
+ */
+export interface HtmlRangeSelector {
+  startSelector: string;
+  startOffset: number;
+  endSelector: string;
+  endOffset: number;
+}
+
+/**
+ * Agent-legible description of what an HTML anchor covers, captured at anchor
+ * time so a coding agent receiving the comment knows what it was attached to.
+ * @see planning/collab/html-annotation.md §2
+ */
+export interface HtmlAnchorContext {
+  tagName: string;
+  role?: string;
+  /** e.g. `row 3 · Fuzzy quote · edit-distance match` */
+  scopePreview: string;
+  /** Ancestor chain, outermost first, e.g. `['table', 'tbody', 'tr']`. */
+  domPath?: string[];
+}
+
+/**
+ * W3C Web Annotation selector set for an anchor authored against a *rendered
+ * HTML document*. Mirrors the Rust `HtmlAnchor` (src/review/model.rs).
+ *
+ * Opaque to Rust — persisted and synced verbatim, resolved client-side in the
+ * document frame, which is the only place a DOM exists.
+ * @see planning/collab/html-annotation.md §2, §6
+ */
+export interface HtmlAnchor {
+  v: 1;
+  target: HtmlAnchorTarget;
+  /** Primary CSS selector: the element itself, or a text range's ancestor. */
+  cssSelector: string;
+  /** Ranked alternates, most specific first, tried when `cssSelector` misses. */
+  fallbackSelectors?: string[];
+  textPosition?: HtmlTextPosition;
+  /** Present when the selection crosses element boundaries. */
+  range?: HtmlRangeSelector;
+  context: HtmlAnchorContext;
+}
+
 /**
  * Layered anchor describing where a review event was authored.
  *
  * The resolver uses the strongest available layer and falls back with
  * decreasing confidence.
- * @see planning/collab/data-model.md §Anchors
+ *
+ * Markdown anchors populate `position` (source offsets) plus any of
+ * `quote`/`block`/`context`/`structure`. HTML anchors populate `html`, and
+ * reuse `position`/`quote`/`context` with rendered-text semantics.
+ * @see planning/collab/data-model.md §Anchors, planning/collab/html-annotation.md §6
  */
 export interface Anchor {
   v: 2;
@@ -724,6 +798,8 @@ export interface Anchor {
   block?: BlockAnchor;
   context?: ContextAnchor;
   structure?: StructureAnchor;
+  /** Present only for anchors authored against a rendered HTML document. */
+  html?: HtmlAnchor;
 }
 
 /**

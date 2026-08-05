@@ -915,6 +915,7 @@ mod tests {
                     block: None,
                     context: None,
                     structure: None,
+                    html: None,
                 },
                 body: "hello".to_string(),
             },
@@ -1086,6 +1087,7 @@ mod tests {
                     block: None,
                     context: None,
                     structure: None,
+                    html: None,
                 },
                 operation: crate::review::model::SuggestionOperation::Replace {
                     expected_text: "old".to_string(),

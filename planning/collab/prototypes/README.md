@@ -58,11 +58,17 @@ python3 -m http.server 7843
 | Text range anchor | existing `quote`/`position` layers (TextQuote/TextPosition) |
 | Rail cards | reuse `ReviewMargin` / `ReviewMarginCard` unchanged |
 | Composer popover | `CommentComposer.svelte` |
-| localhost origin tag | doc served from a distinct origin; shell ⇄ doc via `postMessage` |
+| localhost origin tag | runtime injected into the doc frame; shell ⇄ doc via a `MessageChannel` port |
 
 The four currently-missing production pieces this previews: an HTML anchor substrate
-(`bootstrap.rs:1467` is `None` today), selection bridging across the doc origin,
-mounting `ReviewMargin` for HTML (hidden at `BrowserReviewApp.svelte:286`), and HTML
-collab seeding (gated on `anchorIndex` presence).
+(`bootstrap.rs` publishes `(DocType::Html, None)` today), selection bridging out of the
+doc frame, mounting `ReviewMargin` for HTML (hidden in `BrowserReviewApp.svelte` /
+`App.svelte`), and HTML collab seeding (gated on `anchorIndex` presence).
+
+> **Note (2026-08-04):** this prototype serves itself over `http.server` on a distinct
+> port, which mirrored the since-superseded "Design B". Production keeps the *opaque-origin
+> sandbox* instead and injects the runtime into the document — see
+> [`../html-annotation.md`](../html-annotation.md) §1 and `amendments.md` decision #19.
+> The UX this prototype demonstrates is unaffected; only the frame hosting differs.
 
 > Prototype only — vanilla JS/CSS, no build, not wired to the Rust backend or collab layer.

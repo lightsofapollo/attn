@@ -750,6 +750,9 @@ fn build_anchor(
             heading_path: block.heading_path.clone(),
             ordinal_in_parent: block.ordinal_in_parent,
         }),
+        // Diff-derived suggestions are markdown-only; HTML has no suggestion
+        // authoring path (`html-annotation.md` §7).
+        html: None,
     })
 }
 
@@ -844,6 +847,7 @@ mod tests {
                 media_type: None,
                 encoding: None,
                 manifest: None,
+                annotation: None,
             }),
         }
     }

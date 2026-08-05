@@ -325,7 +325,7 @@ p {
   /* minmax(0,…) so tracks can shrink below their content's min-content width.
      Bare `1fr` floors at min-content, which is what pushed 200% text to 574px
      inside a 390px viewport (attn-n01r.23). */
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   border: 1px solid var(--rule);
   background: var(--rule);
   gap: 1px;
@@ -769,10 +769,6 @@ footer {
    container shed up to 500px: .entry-strip tracks fell to 278/223/223 at 768 and
    'Import workspace' wrapped while its neighbours did not. */
 @media (max-width: 980px) {
-  .entry-strip {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
-
   .steps {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }

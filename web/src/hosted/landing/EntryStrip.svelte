@@ -14,24 +14,13 @@
   opens the editor. START HERE"). The <p> is still read in document order.
 -->
 <section class="entry-strip" aria-label="Ways to begin">
-  <a
-    class="entry primary-entry"
-    href="/app#new"
-    data-action="new-workspace"
-    aria-labelledby="entry-new-label"
-  >
-    <span class="entry-head">
-      <small>One click · no naming step</small>
-      <!-- In flow, not ::after (attn-n01r.19/.24): as generated content it was
-           skipped by machine translation and in-page search, landed last in a
-           100-character accessible name, and — being absolutely positioned —
-           reserved no space, so it sat on top of the eyebrow between 681 and
-           730px. -->
-      <span class="entry-flag">Start here</span>
-    </span>
-    <strong class="entry-title" id="entry-new-label">New workspace</strong>
-    <p>Creates untitled.md locally and opens the editor.</p>
-  </a>
+  <!--
+    The hero owns the "begin" decision (attn-n01r.14). /app#new used to be
+    offered three times before the first section break — nav, hero, and here —
+    and the hero button pair and this strip were the same decision rendered in
+    two vocabularies 500px apart. The strip is now the OTHER two routes, so each
+    affordance points somewhere different.
+  -->
   <a class="entry" href="/open" aria-labelledby="entry-import-label">
     <span class="entry-head"><small>Files, folders, or zip</small></span>
     <strong class="entry-title" id="entry-import-label">Import workspace</strong>
@@ -40,6 +29,6 @@
   <a class="entry" href="/app#join" aria-labelledby="entry-join-label">
     <span class="entry-head"><small>Have a link?</small></span>
     <strong class="entry-title" id="entry-join-label">Join a review</strong>
-    <p>Open the same encrypted multi-file room as native attn.</p>
+    <p>Open the same encrypted review as native attn, across every file in it.</p>
   </a>
 </section>

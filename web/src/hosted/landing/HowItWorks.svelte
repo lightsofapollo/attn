@@ -28,10 +28,10 @@
   <div class="chapter-head">
     <div><span class="chapter-index">01 / THE MODEL</span></div>
     <div>
-      <h2>A document first. A room only when you share.</h2>
+      <h2>A document first. A review only when you share.</h2>
       <p class="chapter-intro">
         Everything starts as a private document on your device. Sharing does not turn it into a
-        cloud file — it publishes an encrypted revision around which review can happen.
+        cloud file — it publishes an encrypted copy of that version for others to review.
       </p>
     </div>
   </div>
@@ -48,16 +48,18 @@
       <span class="step-num">02</span>
       <h3>Share deliberately</h3>
       <p>
-        A room exists only after Share. It carries a secret-bearing link, and attn’s services
-        store ciphertext — never a readable cloud copy.
+        A review exists only after Share. The link you send carries the decryption key in its
+        <code>#</code> fragment — the part browsers never send to a server — so attn stores
+        ciphertext and cannot read a word of it.
       </p>
     </article>
     <article class="step">
       <span class="step-num">03</span>
       <h3>Work anywhere</h3>
       <p>
-        Browser or native, the same comments, suggestions, and live edits — direct when reachable,
-        encrypted mailbox otherwise.
+        Browser or native, the same comments, suggestions, and live edits — sent directly between
+        you when your networks allow, and held encrypted until the other side reconnects when they
+        don’t.
       </p>
     </article>
   </div>
@@ -73,7 +75,7 @@
     </div>
     <div class="proof-copy">
       <p class="eyebrow">The moment local becomes shared</p>
-      <blockquote>“A room exists only after you press Share.”</blockquote>
+      <blockquote>“A review exists only after you press Share.”</blockquote>
       <p>
         The secret lives in the link’s fragment, so it never reaches attn’s servers. Anyone you
         share with can review from the browser or native attn.

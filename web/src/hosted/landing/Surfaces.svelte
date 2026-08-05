@@ -30,9 +30,9 @@
     </article>
     <article class="surface native">
       <span class="surface-label">Native · local folders</span>
-      <h3>The whole workspace</h3>
+      <h3>The whole folder</h3>
       <p>
-        Open repositories and folders from the terminal. Keep live reload, tabs, Mermaid, math,
+        Open a repository or folder straight from the terminal. Keep live reload, tabs, Mermaid, math,
         media, search, and the same encrypted review protocol.
       </p>
       <ul>

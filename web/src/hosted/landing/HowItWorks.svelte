@@ -1,8 +1,8 @@
 <script lang="ts">
   import { getTheme } from '../theme.svelte';
   import ResponsiveScreenshot from './ResponsiveScreenshot.svelte';
-  import shareLight from './assets/share-light.png';
-  import shareDark from './assets/share-dark.png';
+  import shareLight from './assets/share-light-fallback.webp';
+  import shareDark from './assets/share-dark-fallback.webp';
   import shareLight768 from './assets/share-light-768.avif';
   import shareLight1280 from './assets/share-light-1280.avif';
   import shareLight1920 from './assets/share-light-1920.avif';

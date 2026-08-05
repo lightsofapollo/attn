@@ -187,9 +187,20 @@ p {
   min-height: 600px;
 }
 
+/* Sized by the asset's real aspect, not by whatever the stage has left over
+   (attn-n01r.13). Anchored top-left and given 4/3 + the 28px chrome bar, so the
+   frame matches the capture and `contain` has nothing to crop. Previously the
+   inset-driven box measured 1.025 against a 1.333 source and `cover` discarded
+   about 13% off each horizontal edge — the file tree read "-cap-…", "er files",
+   "lan.md" and the review cards were sliced mid-sentence with their badges cut
+   to "CO" and "S". Those cards are the product's whole thesis. */
 .window {
   position: absolute;
-  inset: 24px 0 20px 30px;
+  top: 24px;
+  left: 30px;
+  right: 0;
+  aspect-ratio: 4 / 3;
+  max-height: calc(100% - 44px);
   overflow: hidden;
   border: 1px solid var(--rule);
   border-radius: 12px;
@@ -230,7 +241,9 @@ p {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* contain, not cover: the frame now shares the source's ratio, so this only
+     guards against sub-pixel rounding rather than cropping anything. */
+  object-fit: contain;
   object-position: center top;
 }
 

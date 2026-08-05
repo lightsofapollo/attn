@@ -6,8 +6,8 @@
   // zero-friction create. Read once at mount — the count only changes in /app.
   const deskCount = readDeskCount();
   import ResponsiveScreenshot from './ResponsiveScreenshot.svelte';
-  import collabLight from './assets/collab-light.png';
-  import collabDark from './assets/collab-dark.png';
+  import collabLight from './assets/collab-light-fallback.webp';
+  import collabDark from './assets/collab-dark-fallback.webp';
   import collabLight768 from './assets/collab-light-768.avif';
   import collabLight1280 from './assets/collab-light-1280.avif';
   import collabLight1920 from './assets/collab-light-1920.avif';
@@ -70,7 +70,7 @@
       <ResponsiveScreenshot
         fallback={collabShot.fallback}
         avifSrcset={collabShot.avifSrcset}
-        sizes="(max-width: 680px) calc(100vw - 2rem), (max-width: 1180px) 72vw, 920px"
+        sizes="(max-width: 680px) calc(100vw - 2rem), (max-width: 1180px) calc(100vw - 5rem), 620px"
         alt="A real attn document with an inline review comment and suggestion"
         loading="eager"
         fetchpriority="high"

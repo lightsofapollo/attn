@@ -249,7 +249,7 @@ test('desk rename and delete are real and confirmed in-app', async ({ page }) =>
   await page.goto('/app');
   await expect(page.locator('.workspace-row')).toHaveCount(1);
 
-  await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await page.locator('.workspace-row').getByRole('button', { name: /^Rename /u }).click();
   const input = page.getByRole('textbox', { name: 'Workspace name' });
   await input.fill('Product direction');
   await input.press('Enter');
@@ -259,7 +259,7 @@ test('desk rename and delete are real and confirmed in-app', async ({ page }) =>
   await page.reload();
   await expect(page.locator('.workspace-row').first()).toContainText('Product direction');
 
-  await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await page.locator('.workspace-row').getByRole('button', { name: /^Delete /u }).click();
   const confirm = page.getByRole('alertdialog');
   await expect(confirm).toContainText('Delete “Product direction” from this device?');
   await confirm.getByRole('button', { name: 'Delete workspace' }).click();

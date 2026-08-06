@@ -147,7 +147,7 @@ test('landing theme toggle flips palette, swaps captures, and persists', async (
     ),
   ).toBe(true);
   expect(await heroShot.evaluate((image) => (image as HTMLImageElement).currentSrc)).toMatch(/\.avif$/u);
-  await page.getByRole('button', { name: 'Toggle theme' }).click();
+  await page.getByRole('button', { name: /^Switch to (dark|light) theme$/u }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await expect(heroShot).toHaveAttribute('src', /collab-dark/u);
   await waitForLandingCaptureImages(page, 'dark');
@@ -172,12 +172,16 @@ test('capture landing screenshots for design review', async ({ page }) => {
   await expect(page.locator('body')).toHaveAttribute('data-hydrated', 'true');
   await waitForLandingCaptureImages(page, 'light');
   await page.screenshot({ path: 'test-results/landing-desktop-light.png', fullPage: true });
-  await page.getByRole('button', { name: 'Toggle theme' }).click();
+  await page.getByRole('button', { name: /^Switch to (dark|light) theme$/u }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await waitForLandingCaptureImages(page, 'dark');
   await page.screenshot({ path: 'test-results/landing-desktop-dark.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole('button', { name: 'Toggle theme' }).click();
+  // The nav collapses to a hamburger below the mid tier, so the theme control
+  // lives inside the disclosure. This test asserted it was clickable at 390
+  // without opening the menu and had been failing on main for that reason.
+  await page.getByRole('button', { name: 'Open menu' }).click();
+  await page.getByRole('button', { name: /^Switch to (dark|light) theme$/u }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await waitForLandingCaptureImages(page, 'light');
   await page.screenshot({ path: 'test-results/landing-iphone-light.png', fullPage: true });

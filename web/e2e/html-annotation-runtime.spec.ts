@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { build } from 'esbuild';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -380,5 +381,151 @@ test.describe('HTML annotation runtime', () => {
       (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('anchorsResolved'),
     );
     expect((await resolved.jsonValue()) as { results: unknown[] }).toMatchObject({ results: [] });
+  });
+});
+
+/**
+ * The suite above drives the protocol with an inline harness, which proves the
+ * document side but says nothing about the code the app ships. These run
+ * against the real `HtmlAnnotationBridge` and `injectDocRuntime`.
+ */
+test.describe('HtmlAnnotationBridge (shell side)', () => {
+  let harnessBundle: string;
+
+  test.beforeAll(async () => {
+    const result = await build({
+      entryPoints: [resolve(here, 'fixtures/bridge-harness.ts')],
+      bundle: true,
+      format: 'iife',
+      target: 'es2022',
+      platform: 'browser',
+      write: false,
+    });
+    harnessBundle = result.outputFiles[0].text;
+  });
+
+  async function bootBridge(page: import('@playwright/test').Page, doc = DOC) {
+    await page.goto('about:blank');
+    await page.addScriptTag({ content: harnessBundle });
+    await page.evaluate((docHtml) => {
+      (window as unknown as { __boot: (d: string) => void }).__boot(docHtml);
+    }, doc);
+    await page.waitForFunction(() => (window as unknown as { __ready: boolean }).__ready, {
+      timeout: 15_000,
+    });
+  }
+
+  test('handshakes with a real frame using the shipped injector', async ({ page }) => {
+    await bootBridge(page);
+    expect(await page.evaluate(() => (window as unknown as { __ready: boolean }).__ready)).toBe(
+      true,
+    );
+  });
+
+  test('converts frame rects into shell coordinates', async ({ page }) => {
+    await bootBridge(page);
+    // Offset the frame so the two coordinate spaces cannot coincide by accident.
+    await page.evaluate(() => {
+      const frame = document.getElementById('doc') as HTMLIFrameElement;
+      frame.style.position = 'absolute';
+      frame.style.top = '150px';
+      frame.style.left = '75px';
+    });
+
+    await selectText(page, 'quick brown fox');
+    const proposal = await page.waitForFunction(() => {
+      const list = (window as unknown as { __proposals: unknown[] }).__proposals;
+      return list.length > 0 ? list[list.length - 1] : null;
+    });
+    const payload = (await proposal.jsonValue()) as { html: unknown; quote: string };
+
+    await page.evaluate((p) => {
+      (window as unknown as { __render: (a: unknown[]) => void }).__render([
+        { anchorId: 'a1', html: p.html, state: 'default', quote: p.quote },
+      ]);
+    }, payload);
+
+    const geometry = await page.waitForFunction(() => {
+      const g = (window as unknown as { __geometry: unknown[] }).__geometry;
+      return g.length > 0 ? g : null;
+    });
+    const results = (await geometry.jsonValue()) as { anchorId: string; rects: { y: number }[] }[];
+    expect(results[0].anchorId).toBe('a1');
+    // The frame sits 150px down the page, so a shell-space top must clear it.
+    expect(results[0].rects[0].y).toBeGreaterThan(150);
+  });
+
+  /**
+   * The channel is bound on `event.source`, because an opaque frame's origin is
+   * the useless string "null". A forged hello from the page itself — or from
+   * any window that is not this frame — must not claim the channel.
+   */
+  test('ignores a hello that did not come from its own frame', async ({ page }) => {
+    await bootBridge(page);
+    const before = await page.evaluate(
+      () => (window as unknown as { __resolutions: unknown[] }).__resolutions.length,
+    );
+
+    await page.evaluate(() => {
+      const w = window as unknown as { __rawPost: (p: unknown) => void };
+      w.__rawPost({ type: 'attn:doc:hello', v: 1 });
+      w.__rawPost({ type: 'attn:doc:hello', v: 99 });
+      w.__rawPost({ type: 'attn:shell:init', v: 1 });
+    });
+    await page.waitForTimeout(200);
+
+    // The real frame's channel still works after the forgeries.
+    await page.evaluate(() => {
+      (window as unknown as { __render: (a: unknown[]) => void }).__render([]);
+    });
+    const after = await page.waitForFunction(
+      (prev) => {
+        const w = window as unknown as { __resolutions: unknown[] };
+        return w.__resolutions.length >= prev ? w.__resolutions : null;
+      },
+      before,
+    );
+    expect(await after.jsonValue()).toEqual([]);
+  });
+
+  /**
+   * Anchors queued before the handshake completes must not be dropped — the
+   * shell renders threads as soon as it has them, which is routinely earlier
+   * than the frame finishes booting.
+   */
+  test('flushes anchors queued before the port exists', async ({ page }) => {
+    await page.goto('about:blank');
+    await page.addScriptTag({ content: harnessBundle });
+    await page.evaluate((docHtml) => {
+      const w = window as unknown as {
+        __boot: (d: string) => void;
+        __render: (a: unknown[]) => void;
+      };
+      w.__boot(docHtml);
+      // Immediately — before `ready` could possibly have arrived.
+      w.__render([
+        {
+          anchorId: 'early',
+          html: {
+            v: 1,
+            target: 'element',
+            cssSelector: '#title',
+            context: { tagName: 'h1', scopePreview: 'Quarterly report' },
+          },
+          state: 'default',
+        },
+      ]);
+    }, DOC);
+
+    const resolutions = await page.waitForFunction(
+      () => {
+        const list = (window as unknown as { __resolutions: { anchorId: string }[] }).__resolutions;
+        return list.length > 0 ? list : null;
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+    const results = (await resolutions.jsonValue()) as { anchorId: string; status: string }[];
+    expect(results[0]).toMatchObject({ anchorId: 'early', status: 'exact' });
   });
 });

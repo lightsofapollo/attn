@@ -1983,7 +1983,9 @@ impl ReviewManager {
                         continue;
                     }
                     file_id = match &ev.body {
-                        crate::review::model::ReviewEventBody::CommentCreated { anchor, .. }
+                        crate::review::model::ReviewEventBody::CommentCreated {
+                            anchor, ..
+                        }
                         | crate::review::model::ReviewEventBody::SuggestionCreated {
                             anchor, ..
                         } => Some(anchor.file_id.clone()),

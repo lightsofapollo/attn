@@ -130,6 +130,17 @@ tasks:
     cmds:
       - scripts/test-html-share-e2e.sh
 
+  test:html-annotation:
+    desc: "Headless E2E for HTML doc annotation (attn-61t) — relay + owner shares .html + reviewer receives the annotation capability, injects the runtime, and mounts the comment margin. Honors ATTN_SKIP_HTML_ANNOTATION_E2E=1."
+    cmds:
+      - scripts/test-html-annotation-e2e.sh
+
+  test:html-annotation:runtime:
+    desc: "Real-browser tests for the injected annotation runtime + shell bridge (attn-ges/attn-08r). Needs Chromium via `npx playwright install chromium`."
+    dir: web
+    cmds:
+      - npm run test:e2e:html-annotation
+
   test:webrtc:
     desc: "Run the WebRTC end-to-end test (Rust transport + bash daemon shape). Honors ATTN_SKIP_WEBRTC_E2E=1 on flaky CI."
     cmds:

@@ -852,6 +852,8 @@ export class ReviewStore {
         docType: inline?.docType,
         content: document?.content,
         anchorIndex: document?.docType === 'markdown' ? document.anchorIndex : undefined,
+        // HTML's annotation substrate is a declared capability, not an index.
+        annotation: document?.docType === 'html' ? document.annotation : undefined,
         mediaType: inline?.docType === 'asset' ? inline.mediaType : undefined,
         workspaceManifest:
           inline?.docType === 'workspace_manifest' ? inline.manifest : undefined,

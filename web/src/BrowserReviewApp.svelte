@@ -35,6 +35,17 @@
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import Editor from './lib/Editor.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
+  import HtmlCommentComposer from './lib/HtmlCommentComposer.svelte';
+  import type {
+    HtmlAnnotationBridge,
+    AnnotationBridgeEvents,
+  } from './lib/review/html-annotation-bridge';
+  import type {
+    AnchorProposal,
+    AnchorResolution,
+    RenderableAnchor,
+  } from './lib/review/doc-protocol';
+  import { reviewReportHtmlAnchorResolution } from './lib/ipc';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import BrandMark from './lib/BrandMark.svelte';
   import BottomSheet from './hosted/app/BottomSheet.svelte';
@@ -974,6 +985,129 @@
   let suggestionComposer = $state<ComposerState | null>(null);
   let toolbarSelection = $state<{ from: number; to: number } | null>(null);
 
+  // -------------------------------------------------------------------------
+  // HTML annotation (attn-08r).
+  //
+  // An HTML document renders in a cross-origin frame, so the shell owns none
+  // of its geometry: the frame reports anchor rects and proposals over a
+  // MessagePort and this state mirrors what it said. Every value here is
+  // untrusted input, already shape-validated by the bridge's parser.
+  //
+  // @see planning/collab/html-annotation.md §3, §5
+  // -------------------------------------------------------------------------
+  let htmlBridge = $state<HtmlAnnotationBridge | null>(null);
+  /** Viewport-relative card tops keyed by thread id; fed to ReviewMargin. */
+  let htmlAnchorTops = $state<Record<string, number>>({});
+  let htmlComposer = $state<{
+    proposal: AnchorProposal;
+    position: { top: number; left: number };
+  } | null>(null);
+
+  /** HTML snapshots carry no anchorIndex — they declare a capability instead. */
+  const htmlAnnotatable = $derived(
+    displayedDocType === 'html' &&
+      reviewerAvailability.reviewAuthoring &&
+      displayedSnapshot?.annotation === 'html_selectors_v1',
+  );
+
+  /** Threads become renderable anchors; the thread id doubles as the anchorId. */
+  const htmlRenderableAnchors = $derived.by(() => {
+    if (displayedDocType !== 'html') return [];
+    const out: RenderableAnchor[] = [];
+    for (const thread of reviewStore.threadsForCurrentFile) {
+      const anchor = thread.anchor;
+      if (!anchor?.html) continue;
+      out.push({
+        anchorId: thread.id,
+        html: anchor.html,
+        state: thread.resolved ? 'resolved' : 'default',
+        quote: anchor.quote?.exact,
+        prefix: anchor.context?.prefix,
+        suffix: anchor.context?.suffix,
+        label: String(1 + thread.replies.length),
+      });
+    }
+    return out;
+  });
+
+  // Push the desired anchor set whenever it changes. renderAnchors is
+  // full-state by design, so the frame needs no incremental protocol and
+  // recovers from a reload by simply being sent the set again.
+  $effect(() => {
+    const bridge = htmlBridge;
+    const anchors = htmlRenderableAnchors;
+    if (!bridge) return;
+    bridge.renderAnchors(anchors);
+  });
+
+  function applyHtmlGeometry(results: { anchorId: string; rects: { y: number }[] }[]): void {
+    const next: Record<string, number> = {};
+    for (const result of results) {
+      const first = result.rects[0];
+      if (first) next[result.anchorId] = first.y;
+    }
+    // Replaced wholesale rather than mutated so the ReviewMargin prop is
+    // seen as changed (a mutated object would not re-trigger the derived).
+    htmlAnchorTops = next;
+  }
+
+  const htmlAnnotationEvents: AnnotationBridgeEvents = {
+    onProposal: (proposal, rects, caret) => {
+      if (!htmlAnnotatable) return;
+      const near = caret ?? rects[rects.length - 1];
+      htmlComposer = {
+        proposal,
+        position: {
+          top: (near?.y ?? 0) + (near?.height ?? 0) + 8,
+          left: near?.x ?? 0,
+        },
+      };
+      reviewStore.panelOpen = true;
+    },
+    onProposalCleared: () => {
+      // Deliberately does NOT close an open composer. Focusing the shell's
+      // textarea can collapse the frame's selection, so treating that as
+      // "cancel" would tear the composer down the instant the user clicked
+      // into it. Closing is the user's call: Cancel, Escape, or submit.
+    },
+    onResolved: (results, toShellRects) => {
+      applyHtmlGeometry(
+        results.map((r) => ({ anchorId: r.anchorId, rects: toShellRects(r.rects) })),
+      );
+      reportHtmlResolutions(results);
+    },
+    onGeometry: (results) => applyHtmlGeometry(results),
+    onAnchorActivated: (anchorId) => {
+      const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === anchorId);
+      if (thread) reviewStore.setFocusEventId(thread.rootEvent.meta.eventId);
+    },
+  };
+
+
+  /**
+   * Forward each client-side verdict to the daemon so the rail can show
+   * confidence and staleness. Local-only — the daemon mints nothing and tells
+   * no peer, because this verdict describes *this* client's DOM.
+   */
+  function reportHtmlResolutions(results: AnchorResolution[]): void {
+    const roomId = sessionState.roomId;
+    if (!roomId) return;
+    for (const result of results) {
+      const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === result.anchorId);
+      const eventId = thread?.rootEvent.meta.eventId;
+      if (!eventId) continue;
+      void reviewReportHtmlAnchorResolution(
+        roomId,
+        eventId,
+        result.status,
+        result.confidence ?? 0,
+        result.status === 'exact' || result.status === 'remapped'
+          ? { byteRange: [0, 0], lineRange: [0, 0] }
+          : undefined,
+      );
+    }
+  }
+
   function activeSnapshotForCompose() {
     const snapshot = displayedSnapshot;
     if (!snapshot?.anchorIndex) return null;
@@ -1278,7 +1412,7 @@
               onTogglePush={() => { void togglePushConsent(); }}
               onRetryOutbox={() => { void session.retryOutbox(); }}
             />
-            {#if desktopLayout && displayedDocType !== 'html'}
+            {#if desktopLayout && (displayedDocType !== 'html' || htmlAnnotatable)}
               <!-- Same glyph vocabulary and active treatment as the native
                    and hosted owner headers (attn-o17v): panel-right open/close
                    says "this opens and shuts a panel" where the old speech
@@ -1286,6 +1420,7 @@
                    ghost to the shared accent pill. The LABELS stay this
                    surface's own — a reviewer flips between reading and review
                    modes, which is more than show/hide. -->
+
               <button
                 type="button"
                 class="inline-flex h-7 items-center gap-1 rounded-md border px-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {reviewStore.panelOpen
@@ -1343,9 +1478,19 @@
                 : 'min-width: 0; max-width: 100%;'}
             >
               {#if displayedDocType === 'html'}
-                <!-- Read-only HTML doc: render received bytes in a sandboxed iframe.
-                     No editor, no collab, no comment margin (yet). -->
-                <HtmlViewer content={displayedContent ?? ''} allowScripts={false} />
+                <!-- Shared HTML doc: received bytes render in a sandboxed,
+                     opaque-origin iframe. When the snapshot declares the
+                     annotation capability the runtime is injected and the
+                     comment margin mounts alongside; otherwise this stays the
+                     read-only, script-free viewer it has always been.
+                     @see planning/collab/html-annotation.md §1, §4 -->
+                <HtmlViewer
+                  content={displayedContent ?? ''}
+                  allowScripts={false}
+                  annotate={htmlAnnotatable}
+                  annotationEvents={htmlAnnotationEvents}
+                  onBridge={(bridge) => (htmlBridge = bridge)}
+                />
               {:else}
                 <Editor
                   markdown={reviewerCollabSeed?.markdown ?? displayedContent ?? ''}
@@ -1365,7 +1510,7 @@
                 />
               {/if}
             </div>
-            {#if displayedDocType !== 'html' && desktopLayout}
+            {#if (displayedDocType !== 'html' || htmlAnnotatable) && desktopLayout}
               <!-- Reserved for the whole life of the SURFACE, not the thread
                    set: the review page is always commentable, so the first
                    comment must not shift the document left (Docs rule — the
@@ -1384,7 +1529,8 @@
               >
                 <div class="review-rail-panel" data-expanded={railVisible}>
                   <ReviewMargin
-                    view={pmViewForReview}
+                    view={displayedDocType === 'html' ? undefined : pmViewForReview}
+                    anchorTops={htmlAnchorTops}
                     readOnly={true}
                     reviewerAuthoring={reviewerAvailability.reviewAuthoring}
                     onResolveComment={resolveBrowserComment}
@@ -1397,7 +1543,7 @@
         </div>
       </div>
     </div>
-    {#if displayedDocType !== 'html' && !desktopLayout}
+    {#if (displayedDocType !== 'html' || htmlAnnotatable) && !desktopLayout}
       <button
         type="button"
         class="fixed bottom-4 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full border border-border bg-surface-raised px-4 py-2.5 text-sm font-semibold text-foreground shadow-lg"
@@ -1421,7 +1567,8 @@
         >
           <div class="review-sheet-margin">
             <ReviewMargin
-              view={pmViewForReview}
+              view={displayedDocType === 'html' ? undefined : pmViewForReview}
+              anchorTops={htmlAnchorTops}
               layout="stacked"
               readOnly={true}
               reviewerAuthoring={reviewerAvailability.reviewAuthoring}
@@ -1456,6 +1603,24 @@
     onCreateComment={createBrowserComment}
     onClose={() => { commentComposer = null; }}
     onSubmitted={collapseComposeSelection}
+  />
+{/if}
+
+<!-- HTML documents get their own composer: the anchor arrives prebuilt from
+     the document frame rather than being derived from a ProseMirror
+     selection. @see planning/collab/html-annotation.md §3 -->
+{#if htmlComposer && displayedSnapshot && sessionState.roomId}
+  <HtmlCommentComposer
+    proposal={htmlComposer.proposal}
+    position={htmlComposer.position}
+    fileId={displayedSnapshot.fileId}
+    snapshotId={displayedSnapshot.snapshotId}
+    baseHash={displayedSnapshot.baseHash}
+    onCreateComment={createBrowserComment}
+    onClose={() => {
+      htmlComposer = null;
+      htmlBridge?.dismissSelection();
+    }}
   />
 {/if}
 

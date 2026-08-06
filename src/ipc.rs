@@ -1,5 +1,5 @@
 use crate::review::ids::{EventId, FileId, RoomId};
-use crate::review::manager::{ReviewCommand, ReviewManager};
+use crate::review::manager::{HtmlResolutionStatus, ReviewCommand, ReviewManager};
 use crate::review::model::{Anchor, PositionAnchor, SuggestionDraft};
 use crate::review::store::ReviewStore;
 use crate::review::watcher_state::SelfWriteTracker;
@@ -140,6 +140,18 @@ pub enum IpcMessage {
         room_id: RoomId,
         event_id: EventId,
         range: PositionAnchor,
+    },
+
+    /// The document frame resolved an HTML anchor against its own DOM.
+    /// Local-only — see `ReviewCommand::ReportHtmlAnchorResolution`.
+    #[serde(rename = "review_html_anchor_resolution", rename_all = "camelCase")]
+    ReviewHtmlAnchorResolution {
+        room_id: RoomId,
+        event_id: EventId,
+        status: HtmlResolutionStatus,
+        confidence: f64,
+        #[serde(default)]
+        range: Option<PositionAnchor>,
     },
 
     #[serde(rename = "review_resolve_comment", rename_all = "camelCase")]
@@ -534,6 +546,24 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                     ReviewCommand::ResolveAnchor {
                         room_id,
                         event_id,
+                        range,
+                    },
+                );
+            }
+            IpcMessage::ReviewHtmlAnchorResolution {
+                room_id,
+                event_id,
+                status,
+                confidence,
+                range,
+            } => {
+                submit_review_command(
+                    state,
+                    ReviewCommand::ReportHtmlAnchorResolution {
+                        room_id,
+                        event_id,
+                        status,
+                        confidence,
                         range,
                     },
                 );
@@ -1152,6 +1182,19 @@ mod tests {
             } => ReviewCommand::ResolveAnchor {
                 room_id,
                 event_id,
+                range,
+            },
+            IpcMessage::ReviewHtmlAnchorResolution {
+                room_id,
+                event_id,
+                status,
+                confidence,
+                range,
+            } => ReviewCommand::ReportHtmlAnchorResolution {
+                room_id,
+                event_id,
+                status,
+                confidence,
                 range,
             },
             IpcMessage::ReviewResolveComment { room_id, thread_id } => {

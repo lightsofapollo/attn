@@ -159,6 +159,7 @@ export type IpcMessageType =
   | 'review_accept_suggestion'
   | 'review_reject_suggestion'
   | 'review_resolve_anchor'
+  | 'review_html_anchor_resolution'
   | 'review_resolve_comment'
   | 'review_set_display_name'
   | 'review_set_color'
@@ -318,6 +319,21 @@ export interface ReviewResolveAnchorMessage {
   range: PositionAnchor;
 }
 
+/**
+ * The document frame's client-side verdict on an HTML anchor. Local-only —
+ * the daemon mints nothing and tells no peer, because this describes *this*
+ * client's rendered DOM.
+ * @see planning/collab/html-annotation.md §5, §7
+ */
+export interface ReviewHtmlAnchorResolutionMessage {
+  type: 'review_html_anchor_resolution';
+  roomId: RoomId;
+  eventId: EventId;
+  status: 'exact' | 'remapped' | 'ambiguous' | 'stale';
+  confidence: number;
+  range?: PositionAnchor;
+}
+
 export interface ReviewResolveCommentMessage {
   type: 'review_resolve_comment';
   roomId: RoomId;
@@ -385,6 +401,7 @@ export type IpcMessage =
   | ReviewAcceptSuggestionMessage
   | ReviewRejectSuggestionMessage
   | ReviewResolveAnchorMessage
+  | ReviewHtmlAnchorResolutionMessage
   | ReviewResolveCommentMessage
   | ReviewSetDisplayNameMessage
   | ReviewSetColorMessage
@@ -1229,6 +1246,12 @@ export interface ReviewSnapshot {
   /** Validated, inert workspace topology. It contains no entry bodies. */
   workspaceManifest?: WorkspaceSnapshotManifest;
   anchorIndex?: AnchorIndex;
+  /**
+   * HTML only: declares that this snapshot can be annotated client-side.
+   * Absent means read-only — an older peer, or a legacy snapshot.
+   * @see planning/collab/html-annotation.md §6
+   */
+  annotation?: SnapshotAnnotation;
   encryptedBlobRef?: BlobRef;
 }
 

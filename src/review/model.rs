@@ -1252,6 +1252,12 @@ pub enum ResolvedAnchor {
 pub enum ExactReason {
     BaseHashMatch,
     MappedThroughLocalSteps,
+    /// The document frame found an HTML anchor exactly where it was authored.
+    /// Distinct from `base_hash_match`, which asserts the *document* is
+    /// unchanged — an HTML page can reflow around an anchor that still holds.
+    ///
+    /// Spec: `html-annotation.md` §7.
+    ClientResolved,
 }
 
 /// Reason a resolution earned a `remapped` status (which fallback hit).
@@ -1267,6 +1273,12 @@ pub enum RemappedReason {
     StructureQuoteMatch,
     ContextMatch,
     FuzzyQuoteMatch,
+    /// The document frame resolved an HTML anchor against its own DOM and
+    /// reported the outcome. The daemon cannot reproduce or check this — the
+    /// other reasons name a step *this* resolver ran, and none of them did.
+    ///
+    /// Spec: `html-annotation.md` §7.
+    ClientResolved,
 }
 
 /// One candidate range for an ambiguous anchor resolution.

@@ -315,6 +315,11 @@ async function hydrateReplayedSnapshot(
     ...(parsed.docType === 'markdown' && parsed.anchorIndex !== undefined
       ? { anchorIndex: parsed.anchorIndex }
       : {}),
+    // HTML's annotation substrate is a declared capability, not an index —
+    // dropping it here leaves the reviewer with a read-only document.
+    ...(parsed.docType === 'html' && parsed.annotation !== undefined
+      ? { annotation: parsed.annotation }
+      : {}),
   };
   store.applySnapshot(snapshot);
   hydrated.add(body.snapshotId);

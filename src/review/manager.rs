@@ -62,6 +62,15 @@ fn device_supports_webrtc(client: DeviceClient) -> bool {
 /// - `CreateComment` / `CreateSuggestion` → envelope assembly + outbox (3a)
 /// - `AcceptSuggestion` → guarded apply (Phase 5)
 /// - `ResolveAnchor` → anchor engine override (3.4)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HtmlResolutionStatus {
+    Exact,
+    Remapped,
+    Ambiguous,
+    Stale,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReviewCommand {
     /// Share the current path as a new review room.
@@ -129,6 +138,24 @@ pub enum ReviewCommand {
         room_id: RoomId,
         event_id: EventId,
         range: PositionAnchor,
+    },
+    /// The document frame resolved an HTML anchor against its own DOM and is
+    /// reporting the outcome so the rail can show position and confidence.
+    ///
+    /// Deliberately **local-only**: unlike [`Self::ResolveAnchor`] this mints
+    /// no durable event. An HTML anchor resolves against *this* client's
+    /// rendered DOM, so the verdict is a local observation rather than a
+    /// shared fact — two peers can legitimately disagree, and propagating one
+    /// peer's view would overwrite the other's correct one.
+    ///
+    /// Spec: `html-annotation.md` §5, §7.
+    ReportHtmlAnchorResolution {
+        room_id: RoomId,
+        event_id: EventId,
+        status: HtmlResolutionStatus,
+        confidence: f64,
+        /// Resolved rendered-text offsets. Absent when nothing was found.
+        range: Option<PositionAnchor>,
     },
     /// Mark a comment thread resolved. Mints a durable `CommentResolved`
     /// event so the resolution persists and propagates to every peer (a
@@ -1047,6 +1074,26 @@ impl ReviewManager {
                 return;
             }
             (
+                ReviewCommand::ReportHtmlAnchorResolution {
+                    room_id,
+                    event_id,
+                    status,
+                    confidence,
+                    range,
+                },
+                Some(_bootstrapper),
+                Some(_runtime),
+            ) => {
+                self.report_html_anchor_resolution(
+                    room_id,
+                    event_id,
+                    *status,
+                    *confidence,
+                    range.as_ref(),
+                );
+                return;
+            }
+            (
                 ReviewCommand::ResolveComment { room_id, thread_id },
                 Some(bootstrapper),
                 Some(_runtime),
@@ -1910,6 +1957,94 @@ impl ReviewManager {
             event_id.as_str(),
             room_id.as_str()
         );
+    }
+
+    /// Record a client-side HTML anchor resolution and push it to the rail.
+    ///
+    /// Nothing durable is minted and nothing is sent to peers — see
+    /// [`ReviewCommand::ReportHtmlAnchorResolution`]. The daemon's only jobs
+    /// are to find the event's `fileId` (the frame does not know it) and to
+    /// translate the frame's verdict into the `ResolvedAnchor` vocabulary the
+    /// store already renders.
+    fn report_html_anchor_resolution(
+        &self,
+        room_id: &RoomId,
+        event_id: &EventId,
+        status: HtmlResolutionStatus,
+        confidence: f64,
+        range: Option<&crate::review::model::PositionAnchor>,
+    ) {
+        let want = event_id.as_str();
+        let mut file_id: Option<FileId> = None;
+        match self.store.iter_events(room_id) {
+            Ok(iter) => {
+                for ev in iter.flatten() {
+                    if ev.meta.event_id.as_str() != want {
+                        continue;
+                    }
+                    file_id = match &ev.body {
+                        crate::review::model::ReviewEventBody::CommentCreated { anchor, .. }
+                        | crate::review::model::ReviewEventBody::SuggestionCreated {
+                            anchor, ..
+                        } => Some(anchor.file_id.clone()),
+                        _ => None,
+                    };
+                    break;
+                }
+            }
+            Err(e) => {
+                (self.update_tx)(ReviewUpdate::Error {
+                    room_id: Some(room_id.clone()),
+                    code: "ATTN_HTML_ANCHOR_RESOLUTION".to_string(),
+                    message: format!("read events: {e}"),
+                });
+                return;
+            }
+        }
+        let Some(file_id) = file_id else {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: "ATTN_HTML_ANCHOR_RESOLUTION".to_string(),
+                message: format!("event {want} not found or carries no anchor"),
+            });
+            return;
+        };
+
+        // The frame is untrusted, so clamp rather than trust its confidence.
+        let confidence = confidence.clamp(0.0, 1.0);
+        let resolved = match (status, range) {
+            (HtmlResolutionStatus::Exact, Some(range)) => ResolvedAnchor::Exact {
+                confidence,
+                current_range: range.clone(),
+                reason: crate::review::model::ExactReason::ClientResolved,
+            },
+            (HtmlResolutionStatus::Remapped, Some(range)) => ResolvedAnchor::Remapped {
+                confidence,
+                current_range: range.clone(),
+                reason: crate::review::model::RemappedReason::ClientResolved,
+            },
+            (HtmlResolutionStatus::Ambiguous, _) => ResolvedAnchor::Ambiguous {
+                candidates: Vec::new(),
+                reason: "document frame found more than one equally good match".to_string(),
+            },
+            (HtmlResolutionStatus::Stale, _) => ResolvedAnchor::Stale {
+                reason: "document frame could not find the anchored content".to_string(),
+            },
+            // A positive verdict with no range is incoherent; treat it as
+            // stale rather than inventing a position for the rail to point at.
+            (HtmlResolutionStatus::Exact | HtmlResolutionStatus::Remapped, None) => {
+                ResolvedAnchor::Stale {
+                    reason: "document frame reported a match without a range".to_string(),
+                }
+            }
+        };
+
+        (self.update_tx)(ReviewUpdate::AnchorResolutionChanged {
+            room_id: room_id.clone(),
+            event_id: event_id.clone(),
+            file_id,
+            resolved,
+        });
     }
 
     /// Send a live co-typing payload over the encrypted `signal` channel.
@@ -3567,6 +3702,7 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::AcceptSuggestion { .. } => "AcceptSuggestion",
         ReviewCommand::RejectSuggestion { .. } => "RejectSuggestion",
         ReviewCommand::ResolveAnchor { .. } => "ResolveAnchor",
+        ReviewCommand::ReportHtmlAnchorResolution { .. } => "ReportHtmlAnchorResolution",
         ReviewCommand::ResolveComment { .. } => "ResolveComment",
         ReviewCommand::SendCollab { .. } => "SendCollab",
         ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
@@ -3706,6 +3842,39 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
                 confidence: 1.0,
                 current_range: range.clone(),
                 reason: crate::review::model::RemappedReason::QuoteMatch,
+            },
+        },
+        // Client-reported HTML resolution needs no bootstrapper (it mints
+        // nothing), but it does need the store to find the event's fileId, so
+        // without one the stub echoes the verdict against a placeholder file.
+        ReviewCommand::ReportHtmlAnchorResolution {
+            room_id,
+            event_id,
+            status,
+            confidence,
+            range,
+        } => ReviewUpdate::AnchorResolutionChanged {
+            room_id: room_id.clone(),
+            event_id: event_id.clone(),
+            file_id: stub_file_id(),
+            resolved: match (status, range) {
+                (HtmlResolutionStatus::Exact, Some(range)) => ResolvedAnchor::Exact {
+                    confidence: confidence.clamp(0.0, 1.0),
+                    current_range: range.clone(),
+                    reason: crate::review::model::ExactReason::ClientResolved,
+                },
+                (HtmlResolutionStatus::Remapped, Some(range)) => ResolvedAnchor::Remapped {
+                    confidence: confidence.clamp(0.0, 1.0),
+                    current_range: range.clone(),
+                    reason: crate::review::model::RemappedReason::ClientResolved,
+                },
+                (HtmlResolutionStatus::Ambiguous, _) => ResolvedAnchor::Ambiguous {
+                    candidates: Vec::new(),
+                    reason: "document frame found more than one equally good match".to_string(),
+                },
+                _ => ResolvedAnchor::Stale {
+                    reason: "document frame could not find the anchored content".to_string(),
+                },
             },
         },
         // ResolveComment goes through the real bootstrap path in `submit`

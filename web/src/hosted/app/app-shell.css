@@ -139,8 +139,8 @@
 
 .desk-title h1 {
   margin: 0;
-  font-size: clamp(2.8rem, 5vw, 5rem);
-  letter-spacing: -0.045em;
+  font-size: 2rem;
+  letter-spacing: -0.02em;
 }
 
 .desk-title p {
@@ -278,7 +278,7 @@
   right: 0.55rem;
   padding: 0.05rem 0.3rem;
   border: 1px solid var(--rule);
-  border-radius: 4px;
+  border-radius: 6px;
   color: var(--hosted-muted);
   font: 0.7rem var(--mono);
   pointer-events: none;
@@ -563,7 +563,7 @@
   background: transparent;
   color: var(--ink);
   padding: 0.55rem 0.65rem;
-  border-radius: 5px;
+  border-radius: 6px;
   font-size: 0.85rem;
   margin-bottom: 0.2rem;
   cursor: pointer;
@@ -704,9 +704,9 @@
 }
 
 .writing-sheet h1 {
-  font-size: clamp(2.4rem, 5vw, 3.4rem);
-  line-height: 1;
-  letter-spacing: -0.035em;
+  font-size: 2rem;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
   margin: 1.2rem 0 1.4rem;
 }
 
@@ -1519,7 +1519,7 @@
 
 .share-head h2 {
   margin: 0;
-  font-size: clamp(1.85rem, 6vw, 2.3rem);
+  font-size: 1.5rem;
 }
 
 .share-body {

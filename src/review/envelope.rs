@@ -771,6 +771,82 @@ mod tests {
         assert!(envelope.ciphertext_bytes >= 16);
     }
 
+    /// An HTML-anchored comment must survive the real sign → seal → open →
+    /// verify pipeline with its selector set byte-identical.
+    ///
+    /// This is the convergence-critical path: the anchor is opaque to Rust, so
+    /// nothing downstream would notice a dropped or reordered field — the
+    /// comment would simply land somewhere else on the peer's screen, or
+    /// nowhere at all.
+    #[test]
+    fn round_trip_preserves_an_html_anchor_exactly() {
+        use crate::review::model::{
+            HtmlAnchor, HtmlAnchorContext, HtmlAnchorTarget, HtmlRangeSelector, HtmlTextPosition,
+        };
+
+        let keys = derive_room_keys(&TEST_ROOM_SECRET);
+        let event_key = *keys.event_key.as_bytes();
+        let sk = DeviceSigningKey::from_bytes(&TEST_SIGNING_SEED).unwrap();
+
+        let html = HtmlAnchor {
+            v: HtmlAnchor::VERSION,
+            target: HtmlAnchorTarget::Element,
+            css_selector: "table.results > tbody > tr:nth-of-type(2)".into(),
+            fallback_selectors: vec![
+                "body > table > tbody > tr:nth-of-type(2)".into(),
+                "table.results".into(),
+            ],
+            text_position: Some(HtmlTextPosition {
+                start: 1024,
+                end: 1090,
+            }),
+            range: Some(HtmlRangeSelector {
+                start_selector: "tr:nth-of-type(2) > td:nth-of-type(1)".into(),
+                start_offset: 0,
+                end_selector: "tr:nth-of-type(2) > td:nth-of-type(2)".into(),
+                end_offset: 9,
+            }),
+            context: HtmlAnchorContext {
+                tag_name: "tr".into(),
+                role: Some("row".into()),
+                scope_preview: "row 2 · Fuzzy quote · 0.50-0.75".into(),
+                dom_path: vec!["table".into(), "tbody".into(), "tr".into()],
+            },
+        };
+
+        let mut input = assemble_input_comment(event_key, sk, EnvelopeKind::Event, None);
+        let ReviewEventBody::CommentCreated { anchor, .. } = &mut input.body else {
+            panic!("fixture is a CommentCreated");
+        };
+        anchor.html = Some(html.clone());
+        let expected_body = input.body.clone();
+
+        let envelope = assemble_event_envelope(input).expect("assemble");
+        let vks = verifying_keys_for(&TEST_SIGNING_SEED);
+        let recovered = disassemble_event_envelope(DisassembleInput {
+            envelope: &envelope,
+            event_key,
+            verifying_keys: &vks,
+        })
+        .expect("disassemble");
+
+        assert_eq!(recovered.body, expected_body);
+        let ReviewEventBody::CommentCreated { anchor, .. } = &recovered.body else {
+            panic!("expected CommentCreated");
+        };
+        let recovered_html = anchor.html.as_ref().expect("html layer survived");
+        assert_eq!(recovered_html, &html);
+        // Fallbacks are a ranked list; a reordering would silently change
+        // which selector wins on the peer.
+        assert_eq!(
+            recovered_html.fallback_selectors,
+            vec![
+                "body > table > tbody > tr:nth-of-type(2)".to_string(),
+                "table.results".to_string()
+            ]
+        );
+    }
+
     // -----------------------------------------------------------------
     // 2. Happy-path round-trip with SuggestionCreated
     // -----------------------------------------------------------------

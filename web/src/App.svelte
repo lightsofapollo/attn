@@ -33,6 +33,8 @@
     openExternal,
     reviewAcceptSuggestion,
     reviewCollabSend,
+    reviewCreateComment,
+    reviewReportHtmlAnchorResolution,
     reviewListShareableFiles,
     reviewViewState,
     reviewStop,
@@ -86,6 +88,16 @@
   import { peerJumpPosition } from './lib/peer-strip-format';
   import Users from '@lucide/svelte/icons/users';
   import CommentComposer from './lib/CommentComposer.svelte';
+  import HtmlCommentComposer from './lib/HtmlCommentComposer.svelte';
+  import type {
+    HtmlAnnotationBridge,
+    AnnotationBridgeEvents,
+  } from './lib/review/html-annotation-bridge';
+  import type {
+    AnchorProposal,
+    AnchorResolution,
+    RenderableAnchor,
+  } from './lib/review/doc-protocol';
   import SuggestionComposer from './lib/SuggestionComposer.svelte';
   import SelectionToolbar from './lib/SelectionToolbar.svelte';
   import SuggestionPopover from './lib/SuggestionPopover.svelte';
@@ -382,6 +394,115 @@
   });
   let reviewSnapshotContent = $derived(reviewSnapshot?.content ?? null);
   let reviewSnapshotDocType = $derived(reviewSnapshot?.docType ?? 'markdown');
+
+  // -------------------------------------------------------------------------
+  // HTML annotation (attn-08r).
+  //
+  // The shared HTML doc renders in a cross-origin frame, so the shell owns
+  // none of its geometry: the frame reports anchor rects and proposals over a
+  // MessagePort and this state mirrors what it said. Every value is untrusted
+  // input, already shape-validated by the bridge's parser.
+  //
+  // @see planning/collab/html-annotation.md §3, §5
+  // -------------------------------------------------------------------------
+  let htmlBridge = $state<HtmlAnnotationBridge | null>(null);
+  let htmlAnchorTops = $state<Record<string, number>>({});
+  let htmlComposer = $state<{
+    proposal: AnchorProposal;
+    position: { top: number; left: number };
+  } | null>(null);
+
+  /** HTML snapshots carry no anchorIndex — they declare a capability instead. */
+  let htmlAnnotatable = $derived(
+    reviewSnapshotDocType === 'html' &&
+      reviewSnapshot?.annotation === 'html_selectors_v1' &&
+      reviewStore.currentRoomId !== null,
+  );
+
+  let htmlRenderableAnchors = $derived.by(() => {
+    if (reviewSnapshotDocType !== 'html') return [] as RenderableAnchor[];
+    const out: RenderableAnchor[] = [];
+    for (const thread of reviewStore.threadsForCurrentFile) {
+      const anchor = thread.anchor;
+      if (!anchor?.html) continue;
+      out.push({
+        anchorId: thread.id,
+        html: anchor.html,
+        state: thread.resolved ? 'resolved' : 'default',
+        quote: anchor.quote?.exact,
+        prefix: anchor.context?.prefix,
+        suffix: anchor.context?.suffix,
+        label: String(1 + thread.replies.length),
+      });
+    }
+    return out;
+  });
+
+  $effect(() => {
+    const bridge = htmlBridge;
+    const anchors = htmlRenderableAnchors;
+    if (!bridge) return;
+    bridge.renderAnchors(anchors);
+  });
+
+  function applyHtmlGeometry(results: { anchorId: string; rects: { y: number }[] }[]): void {
+    const next: Record<string, number> = {};
+    for (const result of results) {
+      const first = result.rects[0];
+      if (first) next[result.anchorId] = first.y;
+    }
+    // Replaced wholesale, not mutated — a mutated object would not re-trigger
+    // ReviewMargin's derived.
+    htmlAnchorTops = next;
+  }
+
+  function reportHtmlResolutions(results: AnchorResolution[]): void {
+    const roomId = reviewStore.currentRoomId;
+    if (!roomId) return;
+    for (const result of results) {
+      const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === result.anchorId);
+      const eventId = thread?.rootEvent.meta.eventId;
+      if (!eventId) continue;
+      void reviewReportHtmlAnchorResolution(
+        roomId,
+        eventId,
+        result.status,
+        result.confidence ?? 0,
+        result.status === 'exact' || result.status === 'remapped'
+          ? { byteRange: [0, 0], lineRange: [0, 0] }
+          : undefined,
+      );
+    }
+  }
+
+  const htmlAnnotationEvents: AnnotationBridgeEvents = {
+    onProposal: (proposal, rects, caret) => {
+      if (!htmlAnnotatable) return;
+      const near = caret ?? rects[rects.length - 1];
+      htmlComposer = {
+        proposal,
+        position: { top: (near?.y ?? 0) + (near?.height ?? 0) + 8, left: near?.x ?? 0 },
+      };
+      reviewStore.panelOpen = true;
+    },
+    onProposalCleared: () => {
+      // Deliberately does NOT close an open composer: focusing the shell's
+      // textarea can collapse the frame's selection, and treating that as
+      // "cancel" would tear the composer down as the user clicked into it.
+    },
+    onResolved: (results, toShellRects) => {
+      applyHtmlGeometry(
+        results.map((r) => ({ anchorId: r.anchorId, rects: toShellRects(r.rects) })),
+      );
+      reportHtmlResolutions(results);
+    },
+    onGeometry: (results) => applyHtmlGeometry(results),
+    onAnchorActivated: (anchorId) => {
+      const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === anchorId);
+      if (thread) reviewStore.setFocusEventId(thread.rootEvent.meta.eventId);
+    },
+  };
+
   // Markdown snapshots seed the prosemirror editor (anchors/collab). HTML
   // snapshots are read-only and render in HtmlViewer — never the editor — so
   // markdown-only consumers (collab seed, anchor remap, effectiveMarkdown) key
@@ -3305,7 +3426,12 @@
            read-only in a sandboxed iframe (srcdoc — the reviewer has no local
            file on disk). No editor, no collab, no comment anchors yet. -->
       <ReviewFileNav />
-      <HtmlViewer content={reviewSnapshotContent ?? ''} />
+      <HtmlViewer
+        content={reviewSnapshotContent ?? ''}
+        annotate={htmlAnnotatable}
+        annotationEvents={htmlAnnotationEvents}
+        onBridge={(bridge) => (htmlBridge = bridge)}
+      />
     {:else if isReviewerViewingSnapshot}
       <!-- Reviewer mode: render the owner's shared snapshot. Read-only
            normally; during a live session collab makes it editable so the
@@ -3423,7 +3549,10 @@
     Callers that pass an explicit `rightRail` snippet prop override this
     (used by tests or alternative shells).
   -->
-  <ReviewMargin view={pmViewForReview} />
+  <ReviewMargin
+    view={reviewSnapshotDocType === 'html' ? undefined : pmViewForReview}
+    anchorTops={htmlAnchorTops}
+  />
 {/snippet}
 
 {#snippet nativeHeader()}
@@ -3833,6 +3962,25 @@
     roomId={commentComposer.roomId}
     onClose={closeCommentComposer}
     onSubmitted={collapseComposeSelection}
+  />
+{/if}
+
+<!-- HTML documents get their own composer: the anchor arrives prebuilt from
+     the document frame rather than being derived from a ProseMirror
+     selection. @see planning/collab/html-annotation.md §3 -->
+{#if htmlComposer && reviewSnapshot && reviewStore.currentRoomId}
+  {@const htmlRoomId = reviewStore.currentRoomId}
+  <HtmlCommentComposer
+    proposal={htmlComposer.proposal}
+    position={htmlComposer.position}
+    fileId={reviewSnapshot.fileId}
+    snapshotId={reviewSnapshot.snapshotId}
+    baseHash={reviewSnapshot.baseHash}
+    onCreateComment={(anchor, body) => reviewCreateComment(htmlRoomId, anchor, body)}
+    onClose={() => {
+      htmlComposer = null;
+      htmlBridge?.dismissSelection();
+    }}
   />
 {/if}
 

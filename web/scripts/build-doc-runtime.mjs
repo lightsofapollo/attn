@@ -54,7 +54,28 @@ const banner = `/**
  * @see planning/collab/html-annotation.md §1
  */`;
 
-const contents = `${banner}\nexport const DOC_RUNTIME_SOURCE = ${JSON.stringify(output.text)};\n`;
+// The bundle is spliced into arbitrary HTML as an inline <script> element.
+// The HTML parser ends script data at the first `</script` regardless of JS
+// string context, and a `<!--` can open an escaped state that swallows a
+// later `</script>` — either sequence in the minified output would truncate
+// the injected element and corrupt the host document. Escape them inside the
+// JS source: both only ever appear within string/regex literals (they are
+// syntax errors in code position), where `\/` and `\!` are identity escapes.
+const scriptSafe = output.text
+  .replaceAll('</script', '<\\/script')
+  .replaceAll('<!--', '<\\!--');
+try {
+  // eslint-disable-next-line no-new-func -- build-time syntax check of the escaped bundle
+  new Function(scriptSafe);
+} catch (error) {
+  console.error(
+    'build-doc-runtime: escaped bundle no longer parses — an escaped sequence sat outside a string literal',
+    error,
+  );
+  process.exit(1);
+}
+
+const contents = `${banner}\nexport const DOC_RUNTIME_SOURCE = ${JSON.stringify(scriptSafe)};\n`;
 
 if (checkOnly) {
   let current = '';

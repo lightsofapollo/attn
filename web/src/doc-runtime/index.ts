@@ -33,6 +33,7 @@ import {
 import {
   anchorForElement,
   anchorForRange,
+  clampText,
   documentText,
   resolveAnchor,
   textOffsetOf,
@@ -182,9 +183,22 @@ function contextAround(range: Range): { prefix: string; suffix: string } {
   after.selectNodeContents(root);
   after.setStart(range.endContainer, range.endOffset);
 
+  // Code-unit slices can split a surrogate pair at the cut, leaving a lone
+  // half that round-trips as U+FFFD and never matches the document again.
+  // Trim to a generous code-unit window first (a spread of the whole document
+  // text would be O(doc) per selection), then cut by code points.
+  const beforeText = before.toString();
+  const prefixCps = [...beforeText.slice(-CONTEXT_CHARS * 2)].slice(-CONTEXT_CHARS);
+  const suffixCps = [...after.toString().slice(0, CONTEXT_CHARS * 2)].slice(0, CONTEXT_CHARS);
+  if (prefixCps.length > 0 && beforeText.length > CONTEXT_CHARS * 2) {
+    // The code-unit pre-cut itself may have split a pair at the window's
+    // leading edge; a lone low surrogate there is noise, not context.
+    const first = prefixCps[0].charCodeAt(0);
+    if (first >= 0xdc00 && first <= 0xdfff) prefixCps.shift();
+  }
   return {
-    prefix: before.toString().slice(-CONTEXT_CHARS),
-    suffix: after.toString().slice(0, CONTEXT_CHARS),
+    prefix: prefixCps.join(''),
+    suffix: suffixCps.join(''),
   };
 }
 
@@ -195,7 +209,8 @@ function proposalForRange(range: Range): AnchorProposal {
   const { prefix, suffix } = contextAround(range);
   return {
     html: anchorForRange(root, range),
-    quote: quote.slice(0, 4000),
+    // Parser + Rust cap: 4096 BYTES; a character slice overruns it 4× on CJK.
+    quote: clampText(quote, 4000, 4096),
     prefix,
     suffix,
     textStart: startOffset,
@@ -206,7 +221,7 @@ function proposalForRange(range: Range): AnchorProposal {
 function proposalForElement(el: Element): AnchorProposal {
   const preview = scopePreview(el) ?? scopeTitle(el);
   const html = anchorForElement(root, el, preview);
-  const quote = (el.textContent ?? '').trim().slice(0, 4000);
+  const quote = clampText((el.textContent ?? '').trim(), 4000, 4096);
   return {
     html,
     quote,
@@ -303,10 +318,13 @@ function publishScopeHover(chain: Element[]): void {
   const candidates: ScopeCandidate[] = chain.slice(0, 8).map((el) => {
     const scopeId = `scope-${(scopeSeq += 1)}`;
     scopeElements.set(scopeId, el);
+    const preview = scopePreview(el);
     return {
       scopeId,
       title: scopeTitle(el),
-      preview: scopePreview(el),
+      // The row/cell branches assemble from full cell text; the parser drops
+      // any candidate whose preview exceeds 256 BYTES, so bound at the wire.
+      preview: preview === null ? null : clampText(preview, 200, 256),
       selector: anchorForElement(root, el, '').cssSelector,
       commentCount: commentsOn(el),
       rects: rectsOf(el),
@@ -633,11 +651,20 @@ function attachPort(candidate: MessagePort): void {
     type: 'ready',
     v: DOC_PROTOCOL_VERSION,
     textLength: documentText(root).length,
-    title: document.title.slice(0, 200),
+    title: clampText(document.title, 200, 512),
   });
 }
 
 function boot(): void {
+  // A document saved after injection ("Save page as…" of a reviewed doc,
+  // then re-shared) already carries a copy of this runtime. Two instances
+  // would both answer the handshake and fight over the port — the loser's
+  // empty geometry reports would flap the shell's rail every scroll. Both
+  // copies share this window, so a global is a reliable mutex.
+  const guard = window as Window & { __attnDocRuntime?: boolean };
+  if (guard.__attnDocRuntime) return;
+  guard.__attnDocRuntime = true;
+
   root = document.body;
   mountChrome();
 

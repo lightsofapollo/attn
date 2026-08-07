@@ -1026,6 +1026,22 @@ impl ReviewManager {
                 Some(bootstrapper),
                 Some(_runtime),
             ) => {
+                // Suggestions on HTML documents are a v1 non-goal
+                // (html-annotation.md §8): the apply pipeline cannot resolve
+                // an HTML anchor against source bytes, so an html-anchored
+                // suggestion would sync to every peer and then fail at accept
+                // time forever. Refuse it at the same trust boundary where
+                // CreateComment bounds its anchor — IPC input is
+                // attacker-adjacent.
+                if draft.anchor.html.is_some() {
+                    self.emit_event_outcome(
+                        room_id.clone(),
+                        Err(crate::review::bootstrap::BootstrapError::Crypto(
+                            "suggestions on HTML documents are not supported".to_string(),
+                        )),
+                    );
+                    return;
+                }
                 let suggestion_id = mint_thread_id();
                 let event_body = crate::review::model::ReviewEventBody::SuggestionCreated {
                     suggestion_id,

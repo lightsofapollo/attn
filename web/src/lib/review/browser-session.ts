@@ -3085,6 +3085,11 @@ export class BrowserSession {
       raw.fill(0);
       snapshot.content = inline.content;
       if (inline.docType === 'markdown') snapshot.anchorIndex = inline.anchorIndex;
+      // The annotation capability is what makes an HTML doc commentable
+      // (html_selectors_v1). Dropping it here silently downgrades a
+      // live-joining reviewer to the read-only viewer — and the log-replay
+      // path that DOES carry it cannot repair an already-hydrated entry.
+      if (inline.docType === 'html') snapshot.annotation = inline.annotation;
       this.setState({
         snapshotContent: inline.content,
         snapshotDocType: inline.docType,

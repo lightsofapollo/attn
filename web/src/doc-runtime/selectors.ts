@@ -29,6 +29,30 @@ function byteLength(value: string): number {
   return encoder.encode(value).length;
 }
 
+/**
+ * Truncate to at most `maxChars` code points AND `maxBytes` UTF-8 bytes.
+ *
+ * Every string the runtime emits is re-validated by the shell's parser in
+ * BYTES (doc-protocol.ts), so a producer that slices by characters silently
+ * over-runs the cap by up to 4× on CJK/emoji text — and the parser then drops
+ * the whole message, which reads as "commenting doesn't work on this
+ * document". Walking code points (never code units) also guarantees a
+ * surrogate pair is never split into a lone half.
+ */
+export function clampText(value: string, maxChars: number, maxBytes: number): string {
+  let bytes = 0;
+  let chars = 0;
+  let unitEnd = 0;
+  for (const cp of value) {
+    const cpBytes = byteLength(cp);
+    if (chars + 1 > maxChars || bytes + cpBytes > maxBytes) break;
+    bytes += cpBytes;
+    chars += 1;
+    unitEnd += cp.length;
+  }
+  return unitEnd === value.length ? value : value.slice(0, unitEnd);
+}
+
 // ---------------------------------------------------------------------------
 // Text coordinates
 // ---------------------------------------------------------------------------
@@ -70,12 +94,17 @@ function positionAt(root: Element, target: number): { node: Text; offset: number
     const value = current.nodeValue ?? '';
     const bytes = byteLength(value);
     if (seen + bytes >= target) {
-      // Walk code points until the byte budget is met — string indices and
-      // byte offsets diverge for any non-ASCII text.
+      // Walk CODE POINTS (not code units) until the byte budget is met —
+      // string indices and byte offsets diverge for any non-ASCII text, and
+      // indexing an astral character per code unit would count each lone
+      // surrogate half as a 3-byte U+FFFD (6 bytes for an emoji instead of 4),
+      // skewing every offset to the right of it.
       let consumed = 0;
-      for (let i = 0; i < value.length; i += 1) {
-        if (seen + consumed >= target) return { node: current, offset: i };
-        consumed += byteLength(value[i]);
+      let unitIndex = 0;
+      for (const cp of value) {
+        if (seen + consumed >= target) return { node: current, offset: unitIndex };
+        consumed += byteLength(cp);
+        unitIndex += cp.length;
       }
       return { node: current, offset: value.length };
     }
@@ -255,7 +284,8 @@ export function contextFor(el: Element, scopePreview: string): HtmlAnchorContext
   const role = el.getAttribute('role') ?? ROLE_BY_TAG[el.tagName];
   const context: HtmlAnchorContext = {
     tagName: el.tagName.toLowerCase(),
-    scopePreview: scopePreview.slice(0, 200),
+    // Parser + Rust cap: 256 BYTES (MAX_HTML_SCOPE_PREVIEW_BYTES).
+    scopePreview: clampText(scopePreview, 200, 256),
     domPath,
   };
   if (role) context.role = role;
@@ -298,7 +328,7 @@ export function anchorForRange(root: Element, range: Range): HtmlAnchor {
     cssSelector: cssSelectorFor(common),
     fallbackSelectors: fallbackSelectorsFor(common),
     textPosition: { start, end },
-    context: contextFor(common, range.toString().slice(0, 120)),
+    context: contextFor(common, clampText(range.toString(), 120, 256)),
   };
   const rangeSelector = rangeSelectorFor(root, range);
   if (rangeSelector) anchor.range = rangeSelector;
@@ -348,6 +378,51 @@ export function normalizeText(value: string): string {
     .replace(/[–—]/g, '-')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * {@link normalizeText}, plus per-character maps back to raw code-unit
+ * coordinates: `starts[i]`/`ends[i]` bound the raw text that normalized
+ * character `i` stands for (a collapsed space stands for its whole run).
+ *
+ * The normalized tier exists precisely because the raw text differs from the
+ * quote, so a raw-text `indexOf` probe of the normalized quote fails exactly
+ * when the tier should succeed (the cosmetic edit sits inside the probe). The
+ * maps make the match location exact in raw coordinates instead of guessed.
+ */
+export function normalizeTextWithMap(value: string): {
+  normalized: string;
+  starts: number[];
+  ends: number[];
+} {
+  const out: string[] = [];
+  const starts: number[] = [];
+  const ends: number[] = [];
+  let runStart = -1;
+  for (let i = 0; i < value.length; i += 1) {
+    let ch = value[i];
+    if (/\s/.test(ch)) {
+      // Collapse the run; remember where it began. A leading run is dropped
+      // entirely (trim), which `runStart` handles by only flushing when
+      // something precedes it.
+      if (runStart === -1) runStart = i;
+      continue;
+    }
+    if (ch === '‘' || ch === '’') ch = "'";
+    else if (ch === '“' || ch === '”') ch = '"';
+    else if (ch === '–' || ch === '—') ch = '-';
+    if (runStart !== -1 && out.length > 0) {
+      out.push(' ');
+      starts.push(runStart);
+      ends.push(i);
+    }
+    runStart = -1;
+    out.push(ch);
+    starts.push(i);
+    ends.push(i + 1);
+  }
+  // A trailing run is trimmed: never flushed.
+  return { normalized: out.join(''), starts, ends };
 }
 
 function querySafe(root: Element, selector: string): Element | null {
@@ -475,21 +550,22 @@ export function resolveAnchor(root: Element, input: ResolveInput): ResolutionRes
   // 3. Normalized quote — tolerates whitespace and smart-punctuation edits.
   if (quote) {
     const normalizedQuote = normalizeText(quote);
-    const normalizedText = normalizeText(text);
+    const { normalized: normalizedText, starts, ends } = normalizeTextWithMap(text);
     if (normalizedQuote.length > 0) {
       const matches = allIndexesOf(normalizedText, normalizedQuote);
       if (matches.length === 1) {
-        // Map back by searching the raw text for the first token run; exactness
-        // is already lost at this tier, so an approximate landing is honest.
-        const probe = normalizedQuote.slice(0, 24);
-        const at = text.indexOf(probe);
-        if (at !== -1) {
-          const byteStart = byteLength(text.slice(0, at));
-          const range = rangeFromTextOffsets(
-            root,
-            byteStart,
-            byteStart + byteLength(normalizedQuote),
-          );
+        // Map the normalized match back to raw coordinates via the index maps —
+        // a raw-text probe would fail exactly when the cosmetic edit this tier
+        // exists for falls inside the probe, and applying the normalized
+        // length to raw text would mis-size the range across every collapsed
+        // whitespace run.
+        const at = matches[0];
+        const rawStart = starts[at];
+        const rawEnd = ends[at + normalizedQuote.length - 1];
+        if (rawStart !== undefined && rawEnd !== undefined) {
+          const byteStart = byteLength(text.slice(0, rawStart));
+          const byteEnd = byteLength(text.slice(0, rawEnd));
+          const range = rangeFromTextOffsets(root, byteStart, byteEnd);
           if (range) {
             return { range, element: null, status: 'remapped', confidence: 0.6 };
           }

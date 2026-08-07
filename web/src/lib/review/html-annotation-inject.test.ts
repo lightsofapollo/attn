@@ -10,6 +10,7 @@
 // "insert before </body>" would corrupt the document or silently no-op.
 
 import { injectDocRuntime } from './html-annotation-bridge';
+import { DOC_RUNTIME_SOURCE } from './doc-runtime.generated';
 
 interface CaseResult {
   name: string;
@@ -82,6 +83,43 @@ defineCase('does not disturb content that merely mentions body', () => {
   const out = injectDocRuntime(source);
   assert(out.startsWith(source), 'escaped text must be untouched');
   assert(scriptCount(out) === 1, 'expected exactly one runtime script');
+});
+
+defineCase('ignores a </body> inside an HTML comment', () => {
+  // Splicing at the FIRST textual </body> would bury the runtime in the
+  // comment, where it never executes — annotation silently dead.
+  const out = injectDocRuntime('<body><!-- </body> --><p>hi</p></body></html>');
+  assert(scriptCount(out) === 1, 'expected exactly one runtime script');
+  const commentEnd = out.indexOf('-->');
+  assert(out.indexOf(MARKER) > commentEnd, 'runtime must land after the comment');
+  assert(out.indexOf(MARKER) < out.indexOf('</html>'), 'runtime must land inside the document');
+});
+
+defineCase('ignores a </body> inside a script string', () => {
+  // Worse than the comment case: splicing here corrupts the page's own script.
+  const source = '<body><script>var t = "</body>";</' + 'script><p>hi</p></body>';
+  const out = injectDocRuntime(source);
+  assert(scriptCount(out) === 1, 'expected exactly one runtime script');
+  assert(out.includes('var t = "</body>";'), 'the page script must be untouched');
+  assert(
+    out.indexOf(MARKER) > out.indexOf('<p>hi</p>'),
+    'runtime must land at the real closing tag, after the content',
+  );
+});
+
+defineCase('skips a document that already carries the runtime', () => {
+  const once = injectDocRuntime('<body><p>hi</p></body>');
+  const twice = injectDocRuntime(once);
+  assert(twice === once, 'a second injection must be a no-op');
+  assert(scriptCount(twice) === 1, 'expected exactly one runtime script');
+});
+
+defineCase('splices the bundle verbatim (no replacement-pattern mangling)', () => {
+  // String.replace with a string argument treats $&, $', $` as patterns; a
+  // bundle containing them would splice document text into the script. The
+  // concat-based splice must reproduce the bundle byte-for-byte.
+  const out = injectDocRuntime('<body><p>tail after body</p></body>');
+  assert(out.includes(DOC_RUNTIME_SOURCE), 'bundle must appear verbatim in the output');
 });
 
 defineCase('carries a non-trivial bundle', () => {

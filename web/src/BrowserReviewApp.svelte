@@ -45,7 +45,6 @@
     AnchorResolution,
     RenderableAnchor,
   } from './lib/review/doc-protocol';
-  import { reviewReportHtmlAnchorResolution } from './lib/ipc';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import BrandMark from './lib/BrandMark.svelte';
   import BottomSheet from './hosted/app/BottomSheet.svelte';
@@ -94,7 +93,15 @@
   } from './lib/review/selection-debug';
   import { resolveAnchor } from './lib/review/resolver';
   import type { ConstructAnchorContext } from './lib/review/anchors';
-  import type { Anchor, FileId, RoomId, ReviewStatusPeer, SuggestionDraft } from './lib/types';
+  import type {
+    Anchor,
+    FileId,
+    PositionAnchor,
+    ResolvedAnchor,
+    ReviewStatusPeer,
+    RoomId,
+    SuggestionDraft,
+  } from './lib/types';
   import { scrollViewToPos } from './lib/scroll-viewport';
   import { peerJumpPosition } from './lib/peer-strip-format';
 
@@ -1001,6 +1008,12 @@
   let htmlComposer = $state<{
     proposal: AnchorProposal;
     position: { top: number; left: number };
+    // Snapshot identity captured at open time: the proposal's offsets/quote
+    // were measured against the document as it was THEN, so a republish while
+    // the composer is open must not restamp them onto the new snapshot.
+    fileId: string;
+    snapshotId: string;
+    baseHash: string;
   } | null>(null);
 
   /** HTML snapshots carry no anchorIndex — they declare a capability instead. */
@@ -1009,6 +1022,17 @@
       reviewerAvailability.reviewAuthoring &&
       displayedSnapshot?.annotation === 'html_selectors_v1',
   );
+
+  // A snapshot republish or file switch invalidates an open composer: its
+  // proposal no longer describes the displayed document. Close rather than
+  // silently mint a drifted-from-birth comment.
+  $effect(() => {
+    const current = displayedSnapshot?.snapshotId;
+    if (htmlComposer && htmlComposer.snapshotId !== current) {
+      htmlComposer = null;
+      htmlBridge?.dismissSelection();
+    }
+  });
 
   /** Threads become renderable anchors; the thread id doubles as the anchorId. */
   const htmlRenderableAnchors = $derived.by(() => {
@@ -1054,6 +1078,8 @@
   const htmlAnnotationEvents: AnnotationBridgeEvents = {
     onProposal: (proposal, rects, caret) => {
       if (!htmlAnnotatable) return;
+      const snapshot = displayedSnapshot;
+      if (!snapshot) return;
       const near = caret ?? rects[rects.length - 1];
       htmlComposer = {
         proposal,
@@ -1061,6 +1087,9 @@
           top: (near?.y ?? 0) + (near?.height ?? 0) + 8,
           left: near?.x ?? 0,
         },
+        fileId: snapshot.fileId,
+        snapshotId: snapshot.snapshotId,
+        baseHash: snapshot.baseHash,
       };
       reviewStore.panelOpen = true;
     },
@@ -1085,26 +1114,33 @@
 
 
   /**
-   * Forward each client-side verdict to the daemon so the rail can show
-   * confidence and staleness. Local-only — the daemon mints nothing and tells
-   * no peer, because this verdict describes *this* client's DOM.
+   * Record each client-side verdict so the rail can show confidence and
+   * staleness (orphan tray, ambiguous chips). Local-only by design — the
+   * verdict describes *this* client's DOM, so it mints no event and reaches
+   * no peer. The hosted app has no daemon, so it applies verdicts straight to
+   * the store; the native shell routes the same data through IPC instead.
    */
   function reportHtmlResolutions(results: AnchorResolution[]): void {
     const roomId = sessionState.roomId;
-    if (!roomId) return;
+    const fileId = displayedSnapshot?.fileId;
+    if (!roomId || !fileId) return;
+    // Placeholder range: HTML verdicts carry frame geometry, not byte offsets
+    // into source — mirrors the native daemon's mapping exactly.
+    const placeholder: PositionAnchor = { byteRange: [0, 0], lineRange: [0, 0] };
     for (const result of results) {
       const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === result.anchorId);
       const eventId = thread?.rootEvent.meta.eventId;
       if (!eventId) continue;
-      void reviewReportHtmlAnchorResolution(
-        roomId,
-        eventId,
-        result.status,
-        result.confidence ?? 0,
-        result.status === 'exact' || result.status === 'remapped'
-          ? { byteRange: [0, 0], lineRange: [0, 0] }
-          : undefined,
-      );
+      const confidence = Math.min(1, Math.max(0, result.confidence ?? 0));
+      const resolved: ResolvedAnchor =
+        result.status === 'exact'
+          ? { status: 'exact', confidence: 1.0, currentRange: placeholder, reason: 'client_resolved' }
+          : result.status === 'remapped'
+            ? { status: 'remapped', confidence, currentRange: placeholder, reason: 'client_resolved' }
+            : result.status === 'ambiguous'
+              ? { status: 'ambiguous', candidates: [], reason: 'client_resolved' }
+              : { status: 'stale', reason: 'client_resolved' };
+      reviewStore.applyAnchorResolution({ roomId, fileId, eventId, resolved });
     }
   }
 
@@ -1609,13 +1645,13 @@
 <!-- HTML documents get their own composer: the anchor arrives prebuilt from
      the document frame rather than being derived from a ProseMirror
      selection. @see planning/collab/html-annotation.md §3 -->
-{#if htmlComposer && displayedSnapshot && sessionState.roomId}
+{#if htmlComposer && sessionState.roomId}
   <HtmlCommentComposer
     proposal={htmlComposer.proposal}
     position={htmlComposer.position}
-    fileId={displayedSnapshot.fileId}
-    snapshotId={displayedSnapshot.snapshotId}
-    baseHash={displayedSnapshot.baseHash}
+    fileId={htmlComposer.fileId}
+    snapshotId={htmlComposer.snapshotId}
+    baseHash={htmlComposer.baseHash}
     onCreateComment={createBrowserComment}
     onClose={() => {
       htmlComposer = null;

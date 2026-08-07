@@ -112,11 +112,28 @@ export function validateSnapshotPlaintext(value: unknown): SnapshotPlaintext {
         ...(value.anchorIndex === undefined ? {} : { anchorIndex: value.anchorIndex }),
       };
     }
-    case 'html':
-      if (!isRecordWithKeys(value, ['docType', 'content']) || typeof value.content !== 'string') {
+    case 'html': {
+      // `annotation` is the client-side capability declaration that makes an
+      // HTML doc commentable (html-annotation.md §6). Only the html arm may
+      // carry it, only with a known value, and it must survive validation —
+      // stripping it here silently downgrades every hosted reviewer to the
+      // read-only viewer. Mirrors SnapshotPlaintext::validate() in
+      // src/review/model.rs.
+      if (
+        !hasOnlyKeys(value, ['docType', 'content', 'annotation']) ||
+        typeof value.content !== 'string'
+      ) {
         throw new Error('HTML snapshot has an invalid schema');
       }
-      return { docType: 'html', content: value.content };
+      if (value.annotation !== undefined && value.annotation !== 'html_selectors_v1') {
+        throw new Error('HTML snapshot annotation is unsupported');
+      }
+      return {
+        docType: 'html',
+        content: value.content,
+        ...(value.annotation === undefined ? {} : { annotation: value.annotation }),
+      };
+    }
     case 'asset': {
       if (
         !isRecordWithKeys(value, ['docType', 'content', 'mediaType', 'encoding']) ||

@@ -38,9 +38,26 @@ import { DOC_RUNTIME_SOURCE } from './doc-runtime.generated';
  * which is exactly the ordering the runtime needs.
  */
 export function injectDocRuntime(html: string): string {
+  // A document that already carries the runtime (saved after a previous
+  // injection, then re-shared) must not get a second copy: two instances
+  // would race the handshake and the loser's empty geometry would flap the
+  // rail. The runtime also guards itself with a window global, but skipping
+  // here avoids doubling the payload at all.
+  if (html.includes('data-attn-runtime')) return html;
   const script = `\n<script data-attn-runtime>${DOC_RUNTIME_SOURCE}</script>\n`;
-  const closing = /<\/body\s*>/i;
-  return closing.test(html) ? html.replace(closing, `${script}</body>`) : html + script;
+  // Splice before the LAST `</body>`: the first occurrence may sit inside a
+  // comment, a script string, or an attribute value, where the runtime would
+  // never execute — and in the script/attribute cases would corrupt the
+  // document. The real closing tag is the last one in any document that has
+  // one at all.
+  const closing = /<\/body\s*>/gi;
+  let lastMatch: RegExpExecArray | null = null;
+  for (let m = closing.exec(html); m !== null; m = closing.exec(html)) lastMatch = m;
+  if (!lastMatch) return html + script;
+  // String concatenation, never String.replace with a string argument — the
+  // runtime source is an arbitrary payload where `$'`-style replacement
+  // patterns would splice document text into the script.
+  return html.slice(0, lastMatch.index) + script + html.slice(lastMatch.index);
 }
 
 /** A rectangle in the *shell's* coordinate space. */

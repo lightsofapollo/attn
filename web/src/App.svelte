@@ -410,6 +410,12 @@
   let htmlComposer = $state<{
     proposal: AnchorProposal;
     position: { top: number; left: number };
+    // Snapshot identity captured at open time: the proposal's offsets/quote
+    // were measured against the document as it was THEN, so a republish while
+    // the composer is open must not restamp them onto the new snapshot.
+    fileId: string;
+    snapshotId: string;
+    baseHash: string;
   } | null>(null);
 
   /** HTML snapshots carry no anchorIndex — they declare a capability instead. */
@@ -418,6 +424,17 @@
       reviewSnapshot?.annotation === 'html_selectors_v1' &&
       reviewStore.currentRoomId !== null,
   );
+
+  // A snapshot republish or file switch invalidates an open composer: its
+  // proposal no longer describes the displayed document. Close rather than
+  // silently mint a drifted-from-birth comment.
+  $effect(() => {
+    const current = reviewSnapshot?.snapshotId;
+    if (htmlComposer && htmlComposer.snapshotId !== current) {
+      htmlComposer = null;
+      htmlBridge?.dismissSelection();
+    }
+  });
 
   let htmlRenderableAnchors = $derived.by(() => {
     if (reviewSnapshotDocType !== 'html') return [] as RenderableAnchor[];
@@ -478,10 +495,15 @@
   const htmlAnnotationEvents: AnnotationBridgeEvents = {
     onProposal: (proposal, rects, caret) => {
       if (!htmlAnnotatable) return;
+      const snapshot = reviewSnapshot;
+      if (!snapshot) return;
       const near = caret ?? rects[rects.length - 1];
       htmlComposer = {
         proposal,
         position: { top: (near?.y ?? 0) + (near?.height ?? 0) + 8, left: near?.x ?? 0 },
+        fileId: snapshot.fileId,
+        snapshotId: snapshot.snapshotId,
+        baseHash: snapshot.baseHash,
       };
       reviewStore.panelOpen = true;
     },
@@ -3968,14 +3990,14 @@
 <!-- HTML documents get their own composer: the anchor arrives prebuilt from
      the document frame rather than being derived from a ProseMirror
      selection. @see planning/collab/html-annotation.md §3 -->
-{#if htmlComposer && reviewSnapshot && reviewStore.currentRoomId}
+{#if htmlComposer && reviewStore.currentRoomId}
   {@const htmlRoomId = reviewStore.currentRoomId}
   <HtmlCommentComposer
     proposal={htmlComposer.proposal}
     position={htmlComposer.position}
-    fileId={reviewSnapshot.fileId}
-    snapshotId={reviewSnapshot.snapshotId}
-    baseHash={reviewSnapshot.baseHash}
+    fileId={htmlComposer.fileId}
+    snapshotId={htmlComposer.snapshotId}
+    baseHash={htmlComposer.baseHash}
     onCreateComment={(anchor, body) => reviewCreateComment(htmlRoomId, anchor, body)}
     onClose={() => {
       htmlComposer = null;

@@ -467,7 +467,7 @@ function mintSnapshotEnvelope(
       : {
           inlineSnapshot:
             docType === 'html'
-              ? { docType, content }
+              ? { docType, content, annotation: 'html_selectors_v1' }
               : { docType, content },
         }),
   };
@@ -2352,6 +2352,14 @@ defineCase('HTML SnapshotCreated populates content + docType=html (read-only)', 
     assertEq(session.getState().snapshotContent, html, 'html content populated');
     assertEq(session.getState().snapshotDocType, 'html', 'docType is html');
     assertEq(store.snapshots[0]!.docType, 'html', 'snapshot mirror records html docType');
+    // Live-hydration is the path hosted reviewers actually take — if it drops
+    // the annotation capability the reviewer is silently read-only until a
+    // refresh replays the log. Regression test for exactly that drop.
+    assertEq(
+      store.snapshots[0]!.annotation,
+      'html_selectors_v1',
+      'annotation capability survives hydration',
+    );
     session.close();
   } finally {
     await server.close();

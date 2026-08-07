@@ -71,6 +71,16 @@ rejects(() => assertManifestEntryMatchesBytes(asset, raw, 'image/png'), 'media m
 rejects(() => validateSnapshotPlaintext({ docType: 'asset', content: 'AA==', encoding: 'base64url', mediaType: 'x/y' }), 'padded asset');
 rejects(() => validateSnapshotPlaintext({ docType: 'asset', content: 'AA', encoding: 'base64url', mediaType: 'text/plain; charset=utf-8' }), 'parameterized media');
 rejects(() => validateSnapshotPlaintext({ docType: 'html', content: '<b>x</b>', anchorIndex: {} }), 'active/extra HTML field');
+// The annotation capability must SURVIVE validation on html (dropping it
+// silently downgrades hosted reviewers to read-only), be limited to known
+// values, and stay off every other docType — mirrors model.rs validate().
+equal(
+  (validateSnapshotPlaintext({ docType: 'html', content: '<b>x</b>', annotation: 'html_selectors_v1' }) as { annotation?: string }).annotation,
+  'html_selectors_v1',
+  'html annotation capability survives validation',
+);
+rejects(() => validateSnapshotPlaintext({ docType: 'html', content: '<b>x</b>', annotation: 'html_selectors_v2' }), 'unknown annotation value');
+rejects(() => validateSnapshotPlaintext({ docType: 'markdown', content: 'x', annotation: 'html_selectors_v1' }), 'annotation on markdown');
 rejects(() => validateWorkspaceManifest({ ...built, entries: [built.entries[0], built.entries[0]] }), 'duplicate paths/ids');
 rejects(() => validateWorkspaceManifest({ ...built, entries: [...built.entries].reverse() }), 'unsorted paths');
 rejects(() => validateWorkspaceManifest({ ...built, scope: 'file' }), 'file scope with many entries');

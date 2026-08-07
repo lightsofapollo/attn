@@ -839,7 +839,9 @@ export type ResolvedAnchor =
       status: 'exact';
       confidence: 1.0;
       currentRange: PositionAnchor;
-      reason: 'base_hash_match' | 'mapped_through_local_steps';
+      // `client_resolved`: an HTML anchor resolved by the document frame
+      // against its own DOM — no local resolver step ran (html-annotation.md §7).
+      reason: 'base_hash_match' | 'mapped_through_local_steps' | 'client_resolved';
     }
   | {
       status: 'remapped';
@@ -850,7 +852,8 @@ export type ResolvedAnchor =
         | 'block_fingerprint_match'
         | 'structure_quote_match'
         | 'context_match'
-        | 'fuzzy_quote_match';
+        | 'fuzzy_quote_match'
+        | 'client_resolved';
     }
   | {
       status: 'ambiguous';
